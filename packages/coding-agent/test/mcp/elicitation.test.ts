@@ -8,8 +8,8 @@ import type {
 import { ELICIT_BACK, ELICIT_CANCEL, ELICIT_DECLINE, elicitHandler } from "@oh-my-pi/pi-coding-agent/mcp/elicitation";
 import type { MCPElicitRequest, MCPElicitResult } from "@oh-my-pi/pi-coding-agent/mcp/protocol";
 import type { MCPElicitHandler } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { defaultFormData, type HtmlFormData, textValue } from "@oh-my-pi/pi-tui/html-form/data";
-import { type ChoiceField, parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
+import { defaultFormData, type HtmlFormData, textValue } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
+import { type ChoiceField, parseHtmlForm } from "@oh-my-pi/pi-coding-agent/tools/html-form/parse";
 
 type FormDialog = (
 	html: string,

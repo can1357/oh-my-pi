@@ -1,4 +1,4 @@
-import { isReadableUrlPath, type ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath, type ReadToolDetails } from "./details/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
@@ -39,7 +39,7 @@ import { writeResourceBackingFile } from "../internal-urls/filesystem-resource";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
 import { elicitHandler } from "../mcp/elicitation";
-import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
+import { isMarkdownPath } from "../utils/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -52,7 +52,7 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 	truncateLine,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+} from "./streaming-output";
 import {
 	buildLineEntriesWithBlockContext,
 	lineEntriesToPlainText,
@@ -73,7 +73,7 @@ import {
 	InvalidImageDataError,
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
-} from "@oh-my-pi/pi-tui/chat/image-loading";
+} from "../utils/image-input";
 import { askImageQuestion, resolveImageQuestionModel } from "../utils/image-question";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
@@ -107,8 +107,8 @@ import {
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
-import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { type LineRange } from "./line-ranges";
+import { splitPathAndSel } from "./details/read";
 import { readArchive, resolveArchiveReadPath } from "./read-archive";
 import {
 	appendReadNotice,
@@ -162,7 +162,7 @@ import {
 	type VideoMetadata,
 	type VideoPng,
 } from "../utils/video";
-import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { isVideoPath } from "../utils/video-preview";
 import {
 	isMultiRange,
 	isRawSelector,
@@ -172,8 +172,8 @@ import {
 	resolveTailSelector,
 	selToOffsetLimit,
 } from "./read-selector";
-import { splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import { formatSingleLine } from "@oh-my-pi/pi-tui/tools/read";
+import { splitAddressableFileLines } from "./hashline-format";
+import { formatSingleLine } from "./details/read";
 import {
 	nativeShapingOff,
 	type ShapePart,
@@ -196,10 +196,11 @@ import {
 	trySummarize,
 } from "./read-summary";
 import { isSqliteFile, parseSqlitePathCandidates } from "./sqlite-reader";
-import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { getToolConversationState, ToolConversationState } from "./tool-state";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 import {

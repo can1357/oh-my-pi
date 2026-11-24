@@ -10,13 +10,8 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import {
-	truncateHead,
-	truncateHeadBytes,
-	truncateTail,
-	truncateTailBytes,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import type { DaemonReadySpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../tools/streaming-output";
+import type { DaemonReadySpec } from "./daemon-types";
 import { isEnoent, logger, sanitizeText, withTimeout } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";

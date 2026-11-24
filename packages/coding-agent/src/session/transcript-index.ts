@@ -16,7 +16,7 @@ import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { textContent } from "./transcript/transcript-entry";
 import {
 	getSessionsDir,
 	getTranscriptIndexDbPath,

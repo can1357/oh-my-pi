@@ -4,7 +4,7 @@ import {
 	formatWallTimeNotice,
 	formatExitCodeNotice,
 	WALL_TIME_NOTICE_MIN_MS,
-} from "@oh-my-pi/pi-tui/tools/bash";
+} from "./details/bash";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,7 +18,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { PipeStreams, type ShellCommands, shellBuiltins } from "@oh-my-pi/pi-natives";
+import { PipeStreams, repairHeredocContinuations, type ShellCommands, shellBuiltins } from "@oh-my-pi/pi-natives";
 import { $which, isEnoent, logger, prompt, spillUrl } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
@@ -50,7 +50,7 @@ import type {
 	ClientBridgeTerminalHandle,
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
-import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "./streaming-output";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
@@ -67,8 +67,8 @@ import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
 import { isFindEnabled } from "./jfind";
-import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatArtifactErrorNotice } from "./output-meta-format";
+import { formatOutputNotice } from "./output-meta-format";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
@@ -83,7 +83,7 @@ import {
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 import type { ToolCommandDispatch } from "./tool-commands";
@@ -117,7 +117,7 @@ import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { sessionShellSpeech } from "../tts/shell-speech";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
-import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightDetails } from "./details/spotlight";
 
 const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
@@ -1928,6 +1928,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				const patched = await applyPatch.execute(toolCallId, { input: shellPatch }, signal, undefined, ctx);
 				return { content: patched.content, isError: patched.isError, details: {} };
 			}
+		}
+
+		const repaired = repairHeredocContinuations(command);
+		if (repaired !== null) {
+			pendingNotices.push(
+				"Ran without the `\\` after `<<EOF &&`: a line continuation there makes the next line a command and starts the heredoc body after it. End such lines with the operator alone.",
+			);
+			command = repaired;
 		}
 
 		if (cfgWorktreeClone.get(this.session.settings)) {

@@ -4,7 +4,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -20,9 +19,10 @@ import type { DroppedPrompt } from "@oh-my-pi/pi-coding-agent/session/agent-sess
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { parseQueueShorthand } from "@oh-my-pi/pi-tui/prompt/queue-input";
+import { parseQueueShorthand } from "@oh-my-pi/pi-coding-agent/modes/view-model/prompt/queue-input";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { Composer } from "../src/ui/composer/composer";
 
 const QUEUE_LIST = "=>\n1. ITEM ONE\n2. ITEM TWO\n3. ITEM THREE";
 
@@ -92,23 +92,7 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 		const dropped: DroppedPrompt[] = [];
 		live.setPromptDropped(prompt => dropped.push(prompt));
 
-		let text = "";
-		const editor = {
-			pendingImages: [] as ImageContent[],
-			pendingImageLinks: [] as (string | undefined)[],
-			imageLinks: undefined as (string | undefined)[] | undefined,
-			getText: () => text,
-			getExpandedText: () => text,
-			setText: (next: string) => {
-				text = next;
-			},
-			clearDraft() {
-				text = "";
-				this.pendingImages = [];
-				this.pendingImageLinks = [];
-				this.imageLinks = undefined;
-			},
-		};
+		const editor = new Composer();
 		const showError = vi.fn();
 		const mode = {
 			markPendingSubmissionStarted: (input: SubmittedUserInput) => {
@@ -126,13 +110,12 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 		};
 		let pending: SubmittedUserInput | undefined;
 		const ctx = {
-			editor,
+			composer: editor,
 			session: live,
 			sessionManager: live.sessionManager,
 			collabGuest: undefined,
 			yieldCompaction: undefined,
 			compactionQueuedMessages: [],
-			ui: { requestRender: () => {} },
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
 			showError,

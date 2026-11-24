@@ -4,8 +4,8 @@ import type {
 	MCPImageContent,
 	MCPResourceContent,
 	MCPTextContent,
-} from "@oh-my-pi/pi-tui/tools/mcp";
-import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
+} from "../tools/details/mcp";
+import type { MCPProgress } from "../tools/mcp-progress";
 /**
  * MCP (Model Context Protocol) type definitions.
  *
@@ -264,9 +264,9 @@ export interface MCPToolCallParams {
 	arguments?: Record<string, unknown>;
 }
 
-/** Structured authentication challenge returned in a tool result. */
+/** Authentication challenge a tool call was refused with. */
 export interface MCPAuthChallenge {
-	/** Values from `_meta["mcp/www_authenticate"]`. */
+	/** Values from the result's `_meta["mcp/www_authenticate"]`, or the HTTP refusal's `WWW-Authenticate` header. */
 	readonly wwwAuthenticate: readonly string[];
 }
 

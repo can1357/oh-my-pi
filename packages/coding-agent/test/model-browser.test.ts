@@ -1,28 +1,31 @@
-import { createModelBrowserSource } from "../src/modes/model-browser-source";
-import { beforeAll, describe, expect, setSystemTime, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import {
-	buildBrowserItems,
-	buildSearchAffinity,
-	rankModelItems,
-	ModelBrowser,
-	type RoleAssignments,
-	resolveRoleAssignments,
-	sortModelItems,
-} from "@oh-my-pi/pi-tui/overlays/model-browser";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	createModelMentionSource,
 	getModelMentionSuggestions,
-} from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
+} from "@oh-my-pi/pi-coding-agent/autocomplete/model-mention";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	buildBrowserItems,
+	buildSearchAffinity,
+	type RoleAssignments,
+	rankModelItems,
+	resolveRoleAssignments,
+	sortModelItems,
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/model-browser";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
+import { ModelBrowser, modelPreview } from "../src/ui/overlays/pickers/model-browser";
+import { isSeparator, ModelBrowserState } from "../src/ui/overlays/pickers/model-browser-state";
+import { printRows } from "../src/ui/print-rows";
+import { mountLayer } from "./helpers/layer-terminal";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps"> &
@@ -44,13 +47,40 @@ function makeModel(provider: string, id: string, metadata?: NativeMetadata): Mod
 	});
 }
 
+/** The browser's painted rows at `width`, trailing blank rows dropped. */
+function renderLines(browser: ModelBrowserState, width: number): string[] {
+	const term = mountLayer(() => ModelBrowser({ browser }), {
+		columns: width,
+		rows: 24,
+	});
+	try {
+		const lines = term.lines();
+		while (lines.length > 0 && lines.at(-1) === "") lines.pop();
+		return lines;
+	} finally {
+		term.dispose();
+	}
+}
+
+/** Model rows the browser shows (separators excluded). */
+function visibleCount(browser: ModelBrowserState): number {
+	return browser.visible.filter(row => !isSeparator(row)).length;
+}
+
+/** The compact preview of the selected model, as text. */
+function previewText(browser: ModelBrowserState): string {
+	const item = browser.selected();
+	if (!item) return "";
+	return Bun.stripANSI(printRows(() => modelPreview(browser, item, "compact", undefined), 160).join("\n"));
+}
+
 /** Browser preloaded with `models`, MRU-sorted like the hub does on sync. */
 function makeBrowser(
 	models: Model[],
 	mruOrder: string[],
 	options: { roles?: RoleAssignments; providerOrder?: string[] } = {},
-): ModelBrowser {
-	const browser = new ModelBrowser(
+): ModelBrowserState {
+	const browser = new ModelBrowserState(
 		createModelBrowserSource(Settings.isolated({ modelProviderOrder: options.providerOrder ?? [] })),
 	);
 	const items = buildBrowserItems(models);
@@ -126,7 +156,9 @@ describe("createModelMentionSource", () => {
 		const a = makeModel("a", "example-2");
 		const b = makeModel("b", "example-2");
 		const available = [a, b];
-		const settings = Settings.isolated({ modelRoles: { default: "b/example-2" } });
+		const settings = Settings.isolated({
+			modelRoles: { default: "b/example-2" },
+		});
 		const candidates = createModelMentionSource({
 			source: createModelBrowserSource(settings),
 			registry: {
@@ -149,7 +181,6 @@ describe("createModelMentionSource", () => {
 	});
 
 	test("hides an effort row whose selector names an available model outside the picker scope", async () => {
-		await initTheme();
 		const glm = buildModel({
 			id: "glm",
 			name: "GLM",
@@ -157,7 +188,10 @@ describe("createModelMentionSource", () => {
 			provider: "a",
 			baseUrl: "https://example.com",
 			reasoning: true,
-			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High, Effort.Max] },
+			thinking: {
+				mode: "budget",
+				efforts: [Effort.Low, Effort.High, Effort.Max],
+			},
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 128_000,
@@ -199,8 +233,8 @@ describe("ModelBrowser search ranking", () => {
 			affinity: buildSearchAffinity(providerOrder, roles, mruOrder),
 		});
 		expect(ranked.map(item => item.selector)).toEqual(["b/example-2", "a/example-2"]);
-		expect(browser.getSelected()?.selector).toBe(ranked[0].selector);
-		expect(ranked.length).toBe(browser.visibleCount);
+		expect(browser.selected()?.selector).toBe(ranked[0].selector);
+		expect(ranked.length).toBe(visibleCount(browser));
 	});
 
 	test("orders same-provider -latest models alphabetically regardless of input order", () => {
@@ -209,7 +243,11 @@ describe("ModelBrowser search ranking", () => {
 		const alpha = makeModel("demo", "alpha-latest");
 		const beta = makeModel("demo", "beta-latest");
 		const roles: RoleAssignments = {};
-		const options = { roles, mruOrder: [], affinity: buildSearchAffinity([], roles, []) };
+		const options = {
+			roles,
+			mruOrder: [],
+			affinity: buildSearchAffinity([], roles, []),
+		};
 		for (const models of [
 			[alpha, beta],
 			[beta, alpha],
@@ -237,7 +275,7 @@ describe("ModelBrowser search ranking", () => {
 
 		browser.setQuery("gpt-5.5");
 
-		expect(browser.getSelected()?.selector).toBe("openai-codex/gpt-5.5");
+		expect(browser.selected()?.selector).toBe("openai-codex/gpt-5.5");
 	});
 
 	test("MRU breaks ties between equally good matches", () => {
@@ -247,7 +285,7 @@ describe("ModelBrowser search ranking", () => {
 
 		browser.setQuery("gpt-5.5");
 
-		expect(browser.getSelected()?.selector).toBe("zenmux/gpt-5.5");
+		expect(browser.selected()?.selector).toBe("zenmux/gpt-5.5");
 	});
 
 	describe("provider/model queries", () => {
@@ -307,7 +345,7 @@ describe("ModelBrowser search ranking", () => {
 
 		browser.setQuery("lfm");
 
-		expect(browser.getSelected()?.selector).toBe("ollama/lfm2:2.6b");
+		expect(browser.selected()?.selector).toBe("ollama/lfm2:2.6b");
 	});
 
 	test("recent use establishes provider affinity across models", () => {
@@ -318,7 +356,7 @@ describe("ModelBrowser search ranking", () => {
 
 		browser.setQuery("lfm");
 
-		expect(browser.getSelected()?.selector).toBe("ollama/lfm2:2.6b");
+		expect(browser.selected()?.selector).toBe("ollama/lfm2:2.6b");
 	});
 
 	test("explicit provider order takes precedence over inferred affinity", () => {
@@ -330,7 +368,7 @@ describe("ModelBrowser search ranking", () => {
 
 		browser.setQuery("lfm");
 
-		expect(browser.getSelected()?.selector).toBe("ollama/lfm2:2.6b");
+		expect(browser.selected()?.selector).toBe("ollama/lfm2:2.6b");
 	});
 
 	test("a recently used model outranks a peer from a role-assigned provider", () => {
@@ -340,12 +378,20 @@ describe("ModelBrowser search ranking", () => {
 		const browser = makeBrowser(
 			[glm, makeModel("fireworks", "muse-glimmer-30b"), makeModel("meta", "muse-spark-1.3-contributor")],
 			["meta/muse-spark-1.3-contributor"],
-			{ roles: { glm: { model: glm, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false } } },
+			{
+				roles: {
+					glm: {
+						model: glm,
+						thinkingLevel: ThinkingLevel.Inherit,
+						autoSelected: false,
+					},
+				},
+			},
 		);
 
 		browser.setQuery("muse");
 
-		expect(browser.getSelected()?.selector).toBe("meta/muse-spark-1.3-contributor");
+		expect(browser.selected()?.selector).toBe("meta/muse-spark-1.3-contributor");
 	});
 
 	test("a role-assigned model outranks a recently used model", () => {
@@ -353,12 +399,20 @@ describe("ModelBrowser search ranking", () => {
 		const browser = makeBrowser(
 			[assigned, makeModel("meta", "muse-spark-1.3-contributor")],
 			["meta/muse-spark-1.3-contributor"],
-			{ roles: { fast: { model: assigned, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false } } },
+			{
+				roles: {
+					fast: {
+						model: assigned,
+						thinkingLevel: ThinkingLevel.Inherit,
+						autoSelected: false,
+					},
+				},
+			},
 		);
 
 		browser.setQuery("muse");
 
-		expect(browser.getSelected()?.selector).toBe("fireworks/muse-glimmer-30b");
+		expect(browser.selected()?.selector).toBe("fireworks/muse-glimmer-30b");
 	});
 
 	test("typing free finds a zero-cost model whose id never says free", () => {
@@ -378,8 +432,8 @@ describe("ModelBrowser search ranking", () => {
 
 		browser.setQuery("free");
 
-		expect(browser.visibleCount).toBe(1);
-		expect(browser.getSelected()?.selector).toBe("nvidia/nemotron-3-nano");
+		expect(visibleCount(browser)).toBe(1);
+		expect(browser.selected()?.selector).toBe("nvidia/nemotron-3-nano");
 	});
 
 	test("an id that literally says free outranks a model that is merely free", () => {
@@ -392,8 +446,8 @@ describe("ModelBrowser search ranking", () => {
 
 		browser.setQuery("free");
 
-		expect(browser.visibleCount).toBe(2);
-		expect(browser.getSelected()?.selector).toBe("kilo/liquid/lfm-2.5-2.6b:free");
+		expect(visibleCount(browser)).toBe(2);
+		expect(browser.selected()?.selector).toBe("kilo/liquid/lfm-2.5-2.6b:free");
 	});
 
 	test("the cost keyword composes with multi-token search", () => {
@@ -411,27 +465,20 @@ describe("ModelBrowser search ranking", () => {
 
 		browser.setQuery("kimi k3 free");
 
-		expect(browser.visibleCount).toBe(1);
-		expect(browser.getSelected()?.selector).toBe("nvidia/moonshotai/kimi-k3");
+		expect(visibleCount(browser)).toBe(1);
+		expect(browser.selected()?.selector).toBe("nvidia/moonshotai/kimi-k3");
 	});
 });
 
 describe("ModelBrowser perf display", () => {
-	beforeAll(async () => {
-		// render() reads the global theme singleton.
-		await initTheme(false);
-	});
-
-	function makePerfBrowser(): ModelBrowser {
-		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+	function makePerfBrowser(): ModelBrowserState {
+		const browser = new ModelBrowserState(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 		browser.setPerfStats(new Map([["openai/gpt-5", { samples: 12, tps: 118.4, ttftMs: 930 }]]));
 		return browser;
 	}
 
-	function renderPlain(browser: ModelBrowser, width: number): string[] {
-		return browser.render(width).map(line => Bun.stripANSI(line));
-	}
+	const renderPlain = renderLines;
 
 	test("row perf column scales with width: off, TPS-only, TTFT+TPS", () => {
 		const browser = makePerfBrowser();
@@ -447,7 +494,7 @@ describe("ModelBrowser perf display", () => {
 		model.cost.input = 100;
 		model.contextWindow = 128_000;
 		model.cost.output = 0.001;
-		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+		const browser = new ModelBrowserState(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([model]));
 
 		const wide = renderPlain(browser, 100)[2];
@@ -469,21 +516,21 @@ describe("ModelBrowser perf display", () => {
 		const browser = makePerfBrowser();
 
 		const lines = renderPlain(browser, 70);
-		expect(lines[lines.length - 2]).toContain("~118t/s · 0.9s ttft");
+		expect(lines[lines.length - 1]).toContain("~118t/s · 0.9s ttft");
 	});
 
 	test("catalog metrics render an intelligence tab and estimated TPS when unmeasured", () => {
-		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+		const browser = new ModelBrowserState(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
 
 		const lines = renderPlain(browser, 120);
-		expect(lines[2]).toContain(`${theme.symbol("icon.intelligence")} 45`);
+		expect(lines[2]).toContain(`${currentTheme().symbols.symbol("icon.intelligence")} 45`);
 		expect(lines[2]).toContain("~83t/s");
-		expect(lines[lines.length - 2]).toContain(`${theme.symbol("icon.intelligence")} 45 · ~83t/s`);
+		expect(lines[lines.length - 1]).toContain(`${currentTheme().symbols.symbol("icon.intelligence")} 45 · ~83t/s`);
 	});
 
 	test("measured TPS takes precedence over the catalog estimate", () => {
-		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+		const browser = new ModelBrowserState(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
 		browser.setPerfStats(new Map([["openai/gpt-5", { samples: 12, tps: 118.4, ttftMs: 930 }]]));
 
@@ -493,25 +540,21 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	test("models without measurements or catalog metrics render no metric cells", () => {
-		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+		const browser = new ModelBrowserState(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
 		const row = renderPlain(browser, 120)[2];
 		expect(row).not.toContain("t/s");
-		expect(row).not.toContain(theme.symbol("icon.intelligence"));
+		expect(row).not.toContain(currentTheme().symbols.symbol("icon.intelligence"));
 	});
 });
 
 describe("ModelBrowser native model metadata", () => {
-	beforeAll(async () => {
-		await initTheme(false);
-	});
-
 	function renderDetail(model: Model): string {
-		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
+		const browser = new ModelBrowserState(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([model]));
-		const lines = browser.render(160).map(line => Bun.stripANSI(line));
-		return lines[lines.length - 2] as string;
+		const lines = renderLines(browser, 160);
+		return lines[lines.length - 1] as string;
 	}
 
 	test("detail line badges upstream flags and appends the provider blurb", () => {
@@ -550,14 +593,16 @@ describe("ModelBrowser native model metadata", () => {
 			" · pricing unknown",
 		);
 
-		const variable = makeModel("cursor", "default", { pricingStatus: "variable" });
+		const variable = makeModel("cursor", "default", {
+			pricingStatus: "variable",
+		});
 		const browser = makeBrowser([variable], []);
-		const lines = browser.render(160).map(line => Bun.stripANSI(line));
+		const lines = renderLines(browser, 160);
 		expect(lines[2]).toContain("varies");
-		expect(lines[lines.length - 2]).toContain("price varies");
+		expect(lines[lines.length - 1]).toContain("price varies");
 		// A router priced per request is not free, so the `free` filter skips it.
 		browser.setQuery("free");
-		expect(browser.visibleCount).toBe(0);
+		expect(visibleCount(browser)).toBe(0);
 	});
 
 	test("shows the rate card in force, not the one current when the row was built", () => {
@@ -572,7 +617,13 @@ describe("ModelBrowser native model metadata", () => {
 					offPeakMultiplier: 1,
 					peakWindows: [],
 					effectiveRates: [
-						{ effectiveFrom: -8_640_000_000_000_000, input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+						{
+							effectiveFrom: -8_640_000_000_000_000,
+							input: 2,
+							output: 10,
+							cacheRead: 0.1,
+							cacheWrite: 0,
+						},
 						{
 							effectiveFrom: Date.parse("2026-01-01T00:00:00Z"),
 							input: 4,
@@ -601,7 +652,7 @@ describe("ModelBrowser native model metadata", () => {
 		invalid.cost.input = -1;
 		invalid.cost.output = Number.POSITIVE_INFINITY;
 		const browser = makeBrowser([zero, missing, partial, negativeZero, invalid], []);
-		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		const rows = renderLines(browser, 100);
 		expect(rows.find(line => line.includes("fixture/zero"))).toContain("free");
 		expect(rows.find(line => line.includes("fixture/missing"))).toContain("free");
 		expect(rows.find(line => line.includes("fixture/partial"))).toContain("$?/2");
@@ -609,7 +660,7 @@ describe("ModelBrowser native model metadata", () => {
 		expect(rows.find(line => line.includes("fixture/invalid"))).toContain("$?/?");
 
 		browser.setQuery("free");
-		const freeRows = browser.render(100).map(line => Bun.stripANSI(line));
+		const freeRows = renderLines(browser, 100);
 		expect(freeRows.some(line => line.includes("fixture/zero"))).toBe(true);
 		expect(freeRows.some(line => line.includes("fixture/negative-zero"))).toBe(false);
 	});
@@ -622,11 +673,11 @@ describe("ModelBrowser native model metadata", () => {
 		model.cost.input = input;
 		model.cost.output = output;
 		const browser = makeBrowser([model], []);
-		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		const rows = renderLines(browser, 100);
 		expect(rows.find(line => line.includes("demo/invalid-rate"))).toContain(expected);
 		expect(renderDetail(model)).toContain(`${expected} per M`);
 		browser.setQuery("free");
-		expect(browser.visibleCount).toBe(0);
+		expect(visibleCount(browser)).toBe(0);
 	});
 
 	test("price formatting preserves integer zeros and positive sub-cent rates", () => {
@@ -637,7 +688,7 @@ describe("ModelBrowser native model metadata", () => {
 		tiny.cost.input = 0.0000001;
 		tiny.cost.output = 0.001;
 		const browser = makeBrowser([priced, tiny], []);
-		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		const rows = renderLines(browser, 100);
 		const listRow = rows.find(line => line.includes("fixture/priced"));
 		const detailRow = rows.find(line => line.includes("$100/0.001 per M"));
 		const tinyRow = rows.find(line => line.includes("fixture/tiny"));
@@ -649,10 +700,6 @@ describe("ModelBrowser native model metadata", () => {
 });
 
 describe("Factory Droid credits badge", () => {
-	beforeAll(async () => {
-		await initTheme(false);
-	});
-
 	/** A Factory Droid row: upstream list price as `cost`, the base Standard Credits rate as the badge. */
 	function makeDroidModel(id: string, credits: number): Model {
 		return {
@@ -667,7 +714,7 @@ describe("Factory Droid credits badge", () => {
 		const paid = makeDroidModel("preview-credit-model", 2);
 		paid.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		const browser = makeBrowser([priced, paid], []);
-		const rows = browser.render(120).map(line => Bun.stripANSI(line));
+		const rows = renderLines(browser, 120);
 		const pricedRow = rows.find(row => row.includes("claude-opus-5"));
 		const paidRow = rows.find(row => row.includes("preview-credit-model"));
 
@@ -675,7 +722,7 @@ describe("Factory Droid credits badge", () => {
 		expect(paidRow).toContain("2×");
 		expect(paidRow).not.toContain("free");
 		browser.setQuery("free");
-		expect(browser.visibleCount).toBe(0);
+		expect(visibleCount(browser)).toBe(0);
 	});
 
 	test("classifies a credit-only row as free by the credit rate due now, not the base", () => {
@@ -683,14 +730,11 @@ describe("Factory Droid credits badge", () => {
 		charged.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		charged.factoryDroidCreditCards = [{ effectiveFrom: Date.now() - 86_400_000, input: 0.5 }];
 		const browser = makeBrowser([charged], []);
-		const row = browser
-			.render(120)
-			.map(line => Bun.stripANSI(line))
-			.find(line => line.includes("preview-credit-model"));
+		const row = renderLines(browser, 120).find(line => line.includes("preview-credit-model"));
 		expect(row).toContain("0.5×");
 		expect(row).not.toContain("free");
 		browser.setQuery("free");
-		expect(browser.visibleCount).toBe(0);
+		expect(visibleCount(browser)).toBe(0);
 	});
 
 	test("shows the dated credit rate due now and names the next one in the detail, never cutting other facts", () => {
@@ -704,17 +748,13 @@ describe("Factory Droid credits badge", () => {
 			],
 		};
 		for (const width of [80, 120]) {
-			const rows = makeBrowser([promoted], [])
-				.render(width)
-				.map(line => Bun.stripANSI(line));
+			const rows = renderLines(makeBrowser([promoted], []), width);
 			const row = rows.find(line => line.includes("gpt-5.6-sol"));
 			expect(row).toContain("$1.25/10 1.6×");
 			expect(row).not.toContain("from 2099-11-22");
 			expect(rows.some(line => line.includes("reasoning · vision"))).toBe(true);
 		}
-		const wide = makeBrowser([promoted], [])
-			.render(160)
-			.map(line => Bun.stripANSI(line));
+		const wide = renderLines(makeBrowser([promoted], []), 160);
 		expect(wide.some(line => line.includes("· 2× from 2099-11-22"))).toBe(true);
 		const ended = {
 			...promoted,
@@ -723,19 +763,13 @@ describe("Factory Droid credits badge", () => {
 				{ effectiveFrom: Date.now() - 1, input: 2 },
 			],
 		};
-		const endedRows = makeBrowser([ended], [])
-			.render(160)
-			.map(line => Bun.stripANSI(line));
+		const endedRows = renderLines(makeBrowser([ended], []), 160);
 		expect(endedRows.find(line => line.includes("gpt-5.6-sol"))).toContain("$1.25/10 2×");
 		expect(endedRows.some(line => line.includes("× from "))).toBe(false);
 	});
 });
 
 describe("Factory Droid dated credit rates over time", () => {
-	beforeAll(async () => {
-		await initTheme(false);
-	});
-
 	const startsAt = Date.parse("2026-08-22T00:00:00Z");
 	const endsAt = Date.parse("2026-11-22T00:00:00Z");
 	const promoted: Model = {
@@ -754,22 +788,18 @@ describe("Factory Droid dated credit rates over time", () => {
 			setSystemTime(new Date(endsAt - 1000));
 			const browser = makeBrowser([promoted], []);
 			const catalogue = buildBrowserItems([promoted]);
-			const row = () =>
-				browser
-					.render(120)
-					.map(line => Bun.stripANSI(line))
-					.find(line => line.includes("gpt-5.6-sol"));
+			const row = () => renderLines(browser, 120).find(line => line.includes("gpt-5.6-sol"));
 			expect(row()).toContain("1.6×");
-			expect(text(browser.describe())).toContain("1.6×");
+			expect(text(browser.view())).toContain("1.6×");
 			expect(text(browser.pickerItems(catalogue))).toContain("1.6×");
-			expect(text(browser.pickerPreview("compact"))).toContain("2× from 2026-11-22");
+			expect(previewText(browser)).toContain("2× from 2026-11-22");
 
 			setSystemTime(new Date(endsAt));
 			// A refresh that re-tracks the same items first must not swallow the passed card date.
 			expect(text(browser.pickerItems([...catalogue]))).not.toContain("1.6×");
 			expect(row()).toContain("$1.25/10 2×");
-			expect(text(browser.describe())).not.toContain("1.6×");
-			expect(text(browser.pickerPreview("compact"))).not.toContain("× from ");
+			expect(text(browser.view())).not.toContain("1.6×");
+			expect(previewText(browser)).not.toContain("× from ");
 		} finally {
 			setSystemTime();
 		}
@@ -778,23 +808,26 @@ describe("Factory Droid dated credit rates over time", () => {
 	test("a row hidden while its discounted card takes effect shows the discount when it comes back", () => {
 		try {
 			setSystemTime(new Date(startsAt - 1000));
-			const other: Model = { ...makeModel("factory-droid", "claude-opus-5"), factoryDroidCredits: 2 };
+			const other: Model = {
+				...makeModel("factory-droid", "claude-opus-5"),
+				factoryDroidCredits: 2,
+			};
 			const browser = makeBrowser([], []);
 			const items = buildBrowserItems([promoted, other]);
 			const without = items.filter(item => item.model !== promoted);
 			browser.setItems(items);
-			expect(Bun.stripANSI(browser.render(120).join("\n"))).toContain("$1.25/10 2×");
-			expect(text(browser.describe())).toContain("$1.25/10 2×");
+			expect(renderLines(browser, 120).join("\n")).toContain("$1.25/10 2×");
+			expect(text(browser.view())).toContain("$1.25/10 2×");
 			expect(text(browser.pickerItems(items))).toContain("$1.25·10 2×");
 
 			// `@role` mode and scope hops hide the row, then restore the same item objects.
 			browser.setItems(without);
-			expect(text(browser.describe())).not.toContain("gpt-5.6-sol");
+			expect(text(browser.view())).not.toContain("gpt-5.6-sol");
 			browser.pickerItems(without);
 			setSystemTime(new Date(startsAt));
 			browser.setItems(items);
-			expect(Bun.stripANSI(browser.render(120).join("\n"))).toContain("$1.25/10 1.6×");
-			expect(text(browser.describe())).toContain("1.6×");
+			expect(renderLines(browser, 120).join("\n")).toContain("$1.25/10 1.6×");
+			expect(text(browser.view())).toContain("1.6×");
 			expect(text(browser.pickerItems(items))).toContain("1.6×");
 		} finally {
 			setSystemTime();
@@ -818,7 +851,7 @@ describe("Factory Droid dated credit rates over time", () => {
 		const search = (models: Model[]) => {
 			const browser = makeBrowser(models, []);
 			browser.setQuery("free");
-			return () => Bun.stripANSI(browser.render(120).join("\n"));
+			return () => renderLines(browser, 120).join("\n");
 		};
 		try {
 			setSystemTime(new Date(startsAt - 1000));
@@ -843,10 +876,6 @@ describe("Factory Droid dated credit rates over time", () => {
 });
 
 describe("serviceTierFor", () => {
-	beforeAll(async () => {
-		await initTheme(false);
-	});
-
 	test("labels the live session tier rather than the configured setting", async () => {
 		// The setting asks for ultrafast, but `/fast ultra` and `/slow` act on the
 		// session's per-family map; the browser must follow the session.
@@ -855,13 +884,20 @@ describe("serviceTierFor", () => {
 		const auth = await AuthStorage.create(":memory:");
 		try {
 			const session = new AgentSession({
-				agent: new Agent({ initialState: { model: astra, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				agent: new Agent({
+					initialState: {
+						model: astra,
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+					},
+				}),
 				sessionManager: SessionManager.inMemory(),
 				modelRegistry: new ModelRegistry(auth),
 				settings,
 			});
 			try {
-				const browser = new ModelBrowser(
+				const browser = new ModelBrowserState(
 					createModelBrowserSource(settings, model => session.effectiveServiceTier(model)),
 				);
 				browser.setItems(buildBrowserItems([astra]));
@@ -871,7 +907,7 @@ describe("serviceTierFor", () => {
 						["openai/gpt-6-astra@ultrafast", { samples: 2, tps: 300, ttftMs: null }],
 					]),
 				);
-				const row = () => Bun.stripANSI(browser.render(120)[2] ?? "");
+				const row = () => renderLines(browser, 120)[2] ?? "";
 
 				expect(row()).toContain("25t/s");
 				expect(row()).not.toContain("ultrafast");

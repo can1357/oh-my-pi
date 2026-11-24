@@ -11,8 +11,8 @@
  * problem stated in it.
  */
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import { fieldError, type HtmlFormData, type HtmlFormValue } from "@oh-my-pi/pi-tui/html-form/data";
-import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
+import { fieldError, type HtmlFormData, type HtmlFormValue } from "../tools/html-form/data";
+import { parseHtmlForm } from "../tools/html-form/parse";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
 import type {

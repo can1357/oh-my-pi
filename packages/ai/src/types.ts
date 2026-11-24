@@ -1436,6 +1436,11 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
+	 * True when the agent loop ended the turn with this error itself (for example, after the model
+	 * kept missing a soft tool requirement), so no provider request failed.
+	 */
+	errorFromAgentLoop?: boolean;
+	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
 	 * triggered an in-provider fallback retry that succeeded without the

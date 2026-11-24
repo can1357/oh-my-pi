@@ -29,20 +29,20 @@ import {
 } from "../config/model-resolver";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
-import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
-import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import { containsMagicKeyword } from "./magic-keywords";
+import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
 import type { MagicKeywordId } from "../modes/magic-keywords";
 import {
 	AUTO_THINKING,
 	automaticThinkingLevel,
-	type ConfiguredThinkingLevel,
 	clampAutoThinkingEffort,
 	clampThinkingLevelToCeiling,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
@@ -708,8 +708,11 @@ export class ModelControls {
 			}
 		}
 
-		// Drop the result if the turn was aborted/superseded while classifying.
-		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
+		// Drop the result if the turn was aborted/superseded while classifying, or if another model was
+		// selected meanwhile: the classifier chose from this model's levels.
+		if (this.#host.promptGeneration() !== generation || !this.#autoThinking || !modelsAreEqual(this.#model, model)) {
+			return;
+		}
 
 		const effort = clampThinkingLevelToCeiling(
 			model,

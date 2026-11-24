@@ -4,7 +4,7 @@ import {
 	splitThinkingSuffix,
 	parseModelString,
 	splitUpstreamRouting,
-} from "@oh-my-pi/pi-tui/overlays/model-selector";
+} from "./model-selector";
 /**
  * Model resolution, scoping, and initial selection.
  *
@@ -23,7 +23,7 @@ import {
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -43,16 +43,16 @@ import {
 } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
-import { fuzzyMatch } from "@oh-my-pi/pi-tui";
+import { fuzzyMatch } from "../utils/fuzzy";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
@@ -610,7 +610,8 @@ export interface ModelMatchPreferences {
 }
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
-type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "hasProvider">>;
+type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable"> &
+	Partial<Pick<ModelRegistry, "hasProvider" | "getProviderModels">>;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
 
@@ -2418,12 +2419,22 @@ export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult
 		return { model: undefined, selector: undefined, warning: undefined, error: undefined };
 	}
 
+	const disabled = disabledProviderIds(settings);
+
+	// Fast path: an explicit `provider/model` (or `--provider` + `model`) lookup
+	// can resolve directly from that single provider's chat catalog without
+	// materializing the full ~5k-model snapshot via `getAll()` / `getAvailable()`.
+	// Any miss, ambiguity, or non-exact selector falls through to the full path.
+	if (modelRegistry.getProviderModels) {
+		const fastResult = tryResolveExplicitProviderCliModel(cliProvider, cliModel, modelRegistry, disabled);
+		if (fastResult) return fastResult;
+	}
+
 	const scoped = { ...options, cliModel };
 	const scope: CliModelScope = {
 		all: modelRegistry.getAll(),
 		available: preferredModels ?? modelRegistry.getAvailable(),
 	};
-	const disabled = disabledProviderIds(settings);
 	if (disabled.size === 0) return resolveCliModelInScope(scoped, scope);
 
 	const enabled = resolveCliModelInScope(scoped, {
@@ -2447,6 +2458,109 @@ export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult
 		error: `Provider "${blocked}" is disabled. Remove "${blocked}" from disabledProviders to use "${cliModel.trim()}".`,
 		disabledProvider: blocked,
 	};
+}
+
+/**
+ * Single-provider fast path for {@link resolveCliModel}. Resolves an exact
+ * `provider/id` (with optional `:thinking` suffix) or `--provider P --model id`
+ * against only `P`'s chat models so startup avoids composing the full catalog.
+ * Returns `undefined` whenever full-catalog semantics (roles, fuzzy match,
+ * aggregator flat ids, unknown provider errors) are needed.
+ */
+function tryResolveExplicitProviderCliModel(
+	cliProvider: string | undefined,
+	cliModel: string,
+	modelRegistry: CliModelRegistry,
+	disabled: ReadonlySet<string>,
+): ResolveCliModelResult | undefined {
+	const getProviderModels = modelRegistry.getProviderModels;
+	if (!getProviderModels) return undefined;
+	const trimmedModel = cliModel.trim();
+	if (!trimmedModel) return undefined;
+
+	if (cliProvider) {
+		const rawProvider = cliProvider.trim();
+		if (!rawProvider) return undefined;
+		const providerModels = getProviderModels.call(modelRegistry, rawProvider).filter(m => modelKind(m) === "chat");
+		if (providerModels.length === 0) return undefined;
+		const canonicalProvider = providerModels[0].provider;
+		if (disabled.has(canonicalProvider)) {
+			return {
+				model: undefined,
+				selector: undefined,
+				thinkingLevel: undefined,
+				warning: undefined,
+				error: `Provider "${canonicalProvider}" is disabled. Remove "${canonicalProvider}" from disabledProviders to use "${trimmedModel}".`,
+				disabledProvider: canonicalProvider,
+			};
+		}
+		let pattern = trimmedModel;
+		const prefix = `${canonicalProvider}/`;
+		if (cliModel.toLowerCase().startsWith(prefix.toLowerCase())) {
+			pattern = cliModel.substring(prefix.length);
+		}
+		const exact = resolveProviderModelReference(canonicalProvider, pattern, providerModels);
+		if (!exact) return undefined;
+		return {
+			model: exact,
+			selector: formatModelString(exact),
+			warning: undefined,
+			thinkingLevel: undefined,
+			error: undefined,
+		};
+	}
+
+	const slashIndex = trimmedModel.indexOf("/");
+	if (slashIndex <= 0) return undefined;
+	const maybeProvider = trimmedModel.substring(0, slashIndex).trim();
+	const maybeModelId = trimmedModel.substring(slashIndex + 1).trim();
+	if (!maybeProvider || !maybeModelId) return undefined;
+
+	const providerModels = getProviderModels.call(modelRegistry, maybeProvider).filter(m => modelKind(m) === "chat");
+	if (providerModels.length === 0) return undefined;
+
+	const exact = resolveProviderModelReference(maybeProvider, maybeModelId, providerModels);
+	if (exact) {
+		if (disabled.has(exact.provider)) {
+			// Fall back to full resolution: an unqualified/cross-provider flat id might
+			// still match an enabled provider, or else the full path reports the disabled provider.
+			return undefined;
+		}
+		return {
+			model: exact,
+			selector: formatModelString(exact),
+			warning: undefined,
+			thinkingLevel: undefined,
+			error: undefined,
+		};
+	}
+
+	const { base: exactBase, level: exactThinkingLevel } = splitThinkingSuffix(
+		trimmedModel,
+		-1,
+		MAX_THINKING_SUFFIX_OPTIONS,
+	);
+	if (exactThinkingLevel) {
+		const baseSlash = exactBase.indexOf("/");
+		if (baseSlash > 0) {
+			const baseProvider = exactBase.substring(0, baseSlash).trim();
+			const baseModelId = exactBase.substring(baseSlash + 1).trim();
+			if (baseProvider.toLowerCase() === maybeProvider.toLowerCase() && baseModelId) {
+				const suffixed = resolveProviderModelReference(baseProvider, baseModelId, providerModels);
+				if (suffixed && !disabled.has(suffixed.provider)) {
+					return {
+						model: suffixed,
+						selector: formatModelString(suffixed),
+						warning: undefined,
+						thinkingLevel: exactThinkingLevel,
+						error: undefined,
+					};
+				}
+			}
+		}
+	}
+
+	return undefined;
 }
 
 function resolveCliModelInScope(

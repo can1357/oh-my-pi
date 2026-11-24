@@ -1,8 +1,12 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { decodeKey } from "@oh-my-pi/pi-tui/driver/input/keys";
+import { mountTreeSelector } from "../../helpers/tree-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 // Issue #8821 — a terminal that delivers Shift+Enter as a bare LF (iTerm2
 // legacy mapping, e.g. Claude Code's /terminal-setup) must not have the key
@@ -43,47 +47,51 @@ interface SelectRecord {
 	options: { summarize: boolean };
 }
 
-function selectorWithOnSelect(
-	entries: SessionEntry[],
-	records: SelectRecord[],
-): { selector: TreeSelectorComponent; onSelect: (id: string, o: { summarize: boolean }) => void } {
-	const onSelect = (entryId: string, options: { summarize: boolean }) => {
-		records.push({ entryId, options });
-	};
-	const selector = new TreeSelectorComponent([chain(entries)], entries.at(-1)?.id ?? null, 40, onSelect, () => {});
-	return { selector, onSelect };
+/** Feed `raw` (one key, as the terminal sends it) to the tree over `entries`; the selections it made. */
+function selectionsAfter(entries: SessionEntry[], raw: string): SelectRecord[] {
+	const records: SelectRecord[] = [];
+	const term = mountTreeSelector(
+		{
+			roots: [chain(entries)],
+			currentLeafId: entries.at(-1)?.id ?? null,
+			onSelect: (entryId, options) => records.push({ entryId, options }),
+		},
+		{ rows: 40 },
+	);
+	try {
+		// Decoded the way the driver decodes it (legacy terminals: no kitty keyboard protocol).
+		const key = decodeKey(raw, { kitty: false, backspaceIsCtrl: false });
+		if (!key) throw new Error(`undecodable key ${JSON.stringify(raw)}`);
+		// The raw bytes ride along: a bare LF and a CR both decode to `enter`.
+		term.press(key.id, { text: key.raw });
+	} finally {
+		term.dispose();
+	}
+	return records;
 }
 
 describe("tree selector Shift+Enter fallback (issue #8821)", () => {
-	beforeAll(async () => {
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	});
-
 	it("treats a bare LF as Shift+Enter (summarize-and-switch)", () => {
-		const records: SelectRecord[] = [];
-		const { selector } = selectorWithOnSelect([userEntry, responseEntry], records);
-		selector.handleInput("\n");
-		expect(records).toEqual([{ entryId: responseEntry.id, options: { summarize: true } }]);
+		expect(selectionsAfter([userEntry, responseEntry], "\n")).toEqual([
+			{ entryId: responseEntry.id, options: { summarize: true } },
+		]);
 	});
 
 	it("keeps plain CR as plain Enter (plain switch, no summary)", () => {
-		const records: SelectRecord[] = [];
-		const { selector } = selectorWithOnSelect([userEntry, responseEntry], records);
-		selector.handleInput("\r");
-		expect(records).toEqual([{ entryId: responseEntry.id, options: { summarize: false } }]);
+		expect(selectionsAfter([userEntry, responseEntry], "\r")).toEqual([
+			{ entryId: responseEntry.id, options: { summarize: false } },
+		]);
 	});
 
 	it("still recognizes the kitty CSI-u Shift+Enter encoding", () => {
-		const records: SelectRecord[] = [];
-		const { selector } = selectorWithOnSelect([userEntry, responseEntry], records);
-		selector.handleInput("\u001b[13;2u");
-		expect(records).toEqual([{ entryId: responseEntry.id, options: { summarize: true } }]);
+		expect(selectionsAfter([userEntry, responseEntry], "\u001b[13;2u")).toEqual([
+			{ entryId: responseEntry.id, options: { summarize: true } },
+		]);
 	});
 
 	it("treats the legacy CSI ~ form as Shift+Enter (summarize-and-switch), matching the composer", () => {
-		const records: SelectRecord[] = [];
-		const { selector } = selectorWithOnSelect([userEntry, responseEntry], records);
-		selector.handleInput("\u001b[13;2~");
-		expect(records).toEqual([{ entryId: responseEntry.id, options: { summarize: true } }]);
+		expect(selectionsAfter([userEntry, responseEntry], "\u001b[13;2~")).toEqual([
+			{ entryId: responseEntry.id, options: { summarize: true } },
+		]);
 	});
 });
