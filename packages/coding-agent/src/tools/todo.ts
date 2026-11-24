@@ -705,7 +705,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		params: TodoParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
-		context?: AgentToolContext,
+		_context?: AgentToolContext,
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
 		const storage = this.session.getSessionFile() ? "session" : "memory";
@@ -728,10 +728,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		let refused = false;
 		if (op !== "view" && errors.length === 0) {
 			const commit = () => this.session.setTodoPhases?.(updated);
-			// Programmatic callers (eval, shell bridge) are not put to the backend.
-			const asked = context?.programmatic
-				? undefined
-				: this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);
+			const asked = this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);
 			if (!asked) commit();
 			else {
 				// A decider that commits does so before returning, so awaiting a plain result adds no delay to the commit.

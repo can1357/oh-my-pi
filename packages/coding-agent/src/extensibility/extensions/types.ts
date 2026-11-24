@@ -1913,15 +1913,15 @@ export interface TodoBackendDefinition {
 	 */
 	replace(phases: TodoPhase[], ctx: ExtensionContext): void | Promise<void>;
 	/**
-	 * Optional veto, asked before a `todo` tool call made by the model in the main session commits:
-	 * throw to refuse. omp commits `next` only if this resolves within `min(10s, the extension
-	 * handler timeout)` and omp's list is still `previous` (same session, call not aborted). Check
-	 * only, do not write: a committed change then reaches `replace` like any other commit, which
-	 * corrects a backend that wrote here. A refusal, a timeout, a late answer, or a list, session or
-	 * backend that changed meanwhile fails the call with omp's list unchanged, and the selected
-	 * backend is sent omp's whole list once, also on exit if that resend is still due. A todo call
-	 * made, or still deciding, once the session is closing fails. Changes that do not come from the
-	 * model's `todo` call (`/todo`, RPC `set_todos`, eval, resets, subagents) are not asked: they
+	 * Optional veto, asked before the main session's model commits a change with a `todo` call,
+	 * from an eval cell too: throw to refuse. omp commits `next` only if this resolves within
+	 * `min(10s, the extension handler timeout)` and omp's list is still `previous` (same session,
+	 * call not aborted). Writes here are tolerated: omp resyncs through `replace` after every
+	 * outcome. A committed change reaches it like any other commit. A refusal, a timeout, a late
+	 * answer, or a list, session or backend that changed meanwhile fails the call with omp's list
+	 * unchanged, and the selected backend is sent omp's whole list once, also on exit if that
+	 * resend is still due. A todo call made, or still deciding, once the session is closing fails.
+	 * Other changes (`/todo`, RPC `set_todos`, resets, a subagent's calls) are not asked: they
 	 * reach `replace`.
 	 */
 	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;

@@ -811,10 +811,12 @@ describe("todo backend", () => {
 			}
 		});
 
-		it("a subagent's call and a programmatic call ask no backend", async () => {
+		it("a subagent's call asks no backend; a call from an eval cell is asked like the model's own", async () => {
 			const backend = tracker("tracker", true);
+			backend.refusal = new Error("no");
 			const sub = await open([backend.extension], "tracker", { parentTaskPrefix: "0-Task" });
 			const main = await open([backend.extension], "tracker");
+			// What the eval and shell bridges pass.
 			const context: AgentToolContext = {
 				sessionManager: main.session.sessionManager,
 				modelRegistry: main.session.modelRegistry,
@@ -826,9 +828,10 @@ describe("todo backend", () => {
 			};
 
 			await call(sub.session, { op: "init", items: ["a"] });
-			await call(main.session, { op: "init", items: ["b"] }, undefined, context);
+			const result = await call(main.session, { op: "init", items: ["b"] }, undefined, context);
 
-			expect([contents(sub.session), contents(main.session), backend.asked]).toEqual([["a"], ["b"], []]);
+			expect(result.details?.refused).toBe(true);
+			expect([contents(sub.session), contents(main.session), backend.asked.length]).toEqual([["a"], [], 1]);
 		});
 
 		it("a todo call made while the session closes fails unasked and keeps the list", async () => {
