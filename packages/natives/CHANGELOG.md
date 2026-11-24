@@ -8,6 +8,7 @@
 - Fixed the shell's `open` command on Linux starting a private D-Bus thread pool, one thread per CPU, the first time it reached the session bus ([#20278](https://github.com/can1357/oh-my-pi/pull/20278) by [@iliaal](https://github.com/iliaal))
 - Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed standalone binaries failing to start when the natives directory is read-only (or owned by another user) even though it already holds this build's extracted addon ([#20266](https://github.com/can1357/oh-my-pi/issues/20266))
+- Fixed standalone binaries failing to load `pi_natives` when another build of the same version (for example a rebuild while older sessions are running) starts at the same time and deletes its extracted addon ([#20438](https://github.com/can1357/oh-my-pi/issues/20438))
 ### Added
 
 - Added `truncateToTokens(input, maxTokens)`: the UTF-16 length of the longest prefix of `input` within `maxTokens` `Jev` tokens, never ending on half a surrogate pair; pieces after the one that crosses the budget are not merged ([#20384](https://github.com/can1357/oh-my-pi/pull/20384) by [@iliaal](https://github.com/iliaal))
