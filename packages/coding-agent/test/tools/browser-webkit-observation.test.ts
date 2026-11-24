@@ -10,7 +10,7 @@ import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { buildHarEntry } from "@oh-my-pi/pi-coding-agent/tools/browser/network";
 import { getTab, releaseTab, type WebKitTabSession } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { createFakeHost, type FakeHost } from "./webkit-fake-host";
 
 // Ambient browser env of the developer's shell (and of an omp running the suite) must not pick the backend.

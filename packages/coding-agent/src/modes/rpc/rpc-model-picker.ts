@@ -7,7 +7,7 @@
  */
 import type { Model } from "@oh-my-pi/pi-ai";
 import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { fuzzyRank } from "@oh-my-pi/pi-tui/fuzzy";
+import { fuzzyRank } from "../../utils/fuzzy";
 import {
 	buildSearchAffinity,
 	heldRoles,
@@ -19,9 +19,9 @@ import {
 	roleChipLabel,
 	type SessionModelScope,
 	SessionModelScopeCache,
-} from "@oh-my-pi/pi-tui/overlays/model-browser";
-import { thinkingSlider } from "@oh-my-pi/pi-tui/overlays/model-picker";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+} from "../view-model/overlays/model-browser";
+import { thinkingSlider } from "../view-model/overlays/model-picker";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
 import { cfgCycleOrder } from "../../config/model-settings";
 import type { AgentSession } from "../../session/agent-session";
 import { createModelBrowserSource } from "../model-browser-source";

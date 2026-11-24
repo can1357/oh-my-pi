@@ -1,134 +1,84 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
-import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
-import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
-import { Reconciler } from "@oh-my-pi/pi-tui/native/reconcile";
-import type { TspNode } from "@oh-my-pi/pi-wire";
-import { getProjectAgentDir, removeWithRetries } from "@oh-my-pi/pi-utils";
-
-import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { cfgContextFilesExtra } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { getProjectAgentDir, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { mountSettingsWindow, settingsScreen } from "../../helpers/settings-window";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await initTheme();
-});
-
-let geometryStub: { restore(): void } | undefined;
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	geometryStub = stubStdoutGeometry(120);
 });
 
 afterEach(() => {
 	resetSettingsForTest();
-	geometryStub?.restore();
-	geometryStub = undefined;
 });
 
-function stubStdoutGeometry(cols: number): { restore(): void } {
-	const rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
-	const colsDesc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
-	const rows = 40;
-	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows, set: () => {} });
-	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols, set: () => {} });
-	const restoreOne = (key: "rows" | "columns", desc: PropertyDescriptor | undefined) => {
-		if (desc) Object.defineProperty(process.stdout, key, desc);
-	};
-	return {
-		restore() {
-			restoreOne("rows", rowsDesc);
-			restoreOne("columns", colsDesc);
-		},
-	};
-}
-
-function createSelector(): SettingsSelectorComponent {
-	return new SettingsSelectorComponent(
-		{
-			availableThinkingLevels: [],
-			thinkingLevel: undefined,
-			availableThemes: ["dark"],
-			providers: [],
-			settings: createSettingsHost(),
-			plugins: createPluginSettingsHost(process.cwd()),
-		},
-		{
-			onChange: () => {},
-			onCancel: () => {},
-		},
-	);
-}
-
-function optionRow(component: SettingsSelectorComponent, label: string): number {
-	const lines = Bun.stripANSI(component.render(120).join("\n")).split("\n");
-	const row = lines.findIndex(line => line.includes(label));
-	if (row === -1) throw new Error(`Missing settings option: ${label}`);
-	return row + 1;
-}
-
-function sendMouse(component: SettingsSelectorComponent, button: number, row: number, suffix: "M" | "m"): void {
-	component.handleInput(`\x1b[<${button};3;${row}${suffix}`);
-}
-
-function clickOption(component: SettingsSelectorComponent, label: string): void {
-	const row = optionRow(component, label);
-	sendMouse(component, 0, row, "M");
-	sendMouse(component, 0, row, "m");
+/** Left press and release on the first cell row showing `label`. */
+function clickLabel(term: TestTerminal, label: string): void {
+	const rows = settingsScreen(term).split("\n");
+	const row = rows.findIndex(line => line.includes(label));
+	if (row === -1) throw new Error(`Missing settings label: ${label}`);
+	const col = rows[row]!.indexOf(label) + 1;
+	term.mouse({ row, col, button: "left", action: "press", mods: [] });
+	term.mouse({ row, col, button: "left", action: "release", mods: [] });
 }
 
 describe("settings section sidebar", () => {
 	it("does not toggle the selected section's first setting", () => {
-		const comp = createSelector();
-		for (let i = 0; i < 7; i++) comp.handleInput("\x1b[C");
-		expect(cfgDevAutoqa.get(settings)).toBe(true);
-
-		clickOption(comp, "Developer");
-		expect(cfgDevAutoqa.get(settings)).toBe(true);
-
-		clickOption(comp, "Developer");
-		expect(cfgDevAutoqa.get(settings)).toBe(true);
+		const term = mountSettingsWindow();
+		try {
+			for (let i = 0; i < 7; i++) term.press("right");
+			expect(cfgDevAutoqa.get(settings)).toBe(true);
+			clickLabel(term, "Developer");
+			expect(cfgDevAutoqa.get(settings)).toBe(true);
+			clickLabel(term, "Developer");
+			expect(cfgDevAutoqa.get(settings)).toBe(true);
+		} finally {
+			term.dispose();
+		}
 	});
 });
 
-function openExtraContextFiles(): SettingsSelectorComponent {
-	const component = createSelector();
-	component.handleNativeEvent({ type: "action", key: "", act: "page", value: "context", mods: [] });
-	component.handleNativeEvent({ type: "activate", key: "", item: "contextFiles.extra" });
-	return component;
+/** The window with the extra-context-files text editor open. */
+function openExtraContextFiles(): TestTerminal {
+	const term = mountSettingsWindow();
+	term.type("extra context files");
+	term.press("enter");
+	return term;
 }
 
-async function submitText(component: SettingsSelectorComponent, value: string): Promise<void> {
-	component.handleInput("\x01");
-	component.handleInput("\x0b");
-	for (const character of value) component.handleInput(character);
-	component.handleInput("\r");
+/** Replace the open editor's text with `value` and submit it. */
+async function submitText(term: TestTerminal, value: string): Promise<void> {
+	term.press("ctrl+a");
+	term.press("ctrl+k");
+	term.type(value);
+	term.press("enter");
 	await Promise.resolve();
-}
-
-function nativeErrorText(node: TspNode): string {
-	const text = node.k === "text" ? (node.p?.spans ?? []).filter(span => span.s === "error").map(span => span.t) : [];
-	for (const child of node.c ?? []) text.push(nativeErrorText(child));
-	return text.join("\n");
 }
 
 describe("extra context filenames editor", () => {
 	it("saves multiple filenames as an array and lets users disable extras", async () => {
-		const component = openExtraContextFiles();
-		await submitText(component, '["AGENTS.local.md","TEAM.md"]');
-		expect(cfgContextFilesExtra.get(settings)).toEqual(["AGENTS.local.md", "TEAM.md"]);
+		const term = openExtraContextFiles();
+		try {
+			await submitText(term, '["AGENTS.local.md","TEAM.md"]');
+			expect(cfgContextFilesExtra.get(settings)).toEqual(["AGENTS.local.md", "TEAM.md"]);
 
-		component.handleInput("\r");
-		await submitText(component, "[]");
-		expect(cfgContextFilesExtra.get(settings)).toEqual([]);
+			term.press("enter");
+			await submitText(term, "[]");
+			expect(cfgContextFilesExtra.get(settings)).toEqual([]);
+		} finally {
+			term.dispose();
+		}
 	});
 
 	it.each([
@@ -137,18 +87,14 @@ describe("extra context filenames editor", () => {
 		['["../TEAM.md"]', /file names, not paths/],
 	])("keeps the saved filenames when input %s is rejected", async (input, error) => {
 		cfgContextFilesExtra.set(settings, ["TEAM.md"]);
-		const component = openExtraContextFiles();
-		await submitText(component, input);
-		expect(cfgContextFilesExtra.get(settings)).toEqual(["TEAM.md"]);
-		expect(Bun.stripANSI(component.render(120).join("\n"))).toMatch(error);
-		const document = new TspDocument("settings");
-		const reconciler = new Reconciler("settings");
-		const ops = reconciler.reconcile(
-			{ main: [], dock: [], layer: [component] },
-			{ cols: 120, reduceMotion: false, dark: true, supports: () => true, feature: () => true },
-		);
-		expect(document.applyFrame({ sf: "settings", s: 1, ops })).toEqual([]);
-		expect(nativeErrorText(document.snapshot())).toMatch(error);
+		const term = openExtraContextFiles();
+		try {
+			await submitText(term, input);
+			expect(cfgContextFilesExtra.get(settings)).toEqual(["TEAM.md"]);
+			expect(settingsScreen(term)).toMatch(error);
+		} finally {
+			term.dispose();
+		}
 	});
 
 	it("is not offered when the project config sets the list, so it cannot be copied to global", async () => {
@@ -161,11 +107,14 @@ describe("extra context filenames editor", () => {
 			resetSettingsForTest();
 			await Settings.init({ cwd, agentDir });
 
-			const component = openExtraContextFiles();
-			component.handleInput("\r");
-			await settings.flush();
-
-			expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("Extra Context Files");
+			const term = openExtraContextFiles();
+			try {
+				term.press("enter");
+				await settings.flush();
+				expect(settingsScreen(term)).not.toContain("Extra Context Files");
+			} finally {
+				term.dispose();
+			}
 			const globalConfig = Bun.file(path.join(agentDir, "config.yml"));
 			expect((await globalConfig.exists()) ? await globalConfig.text() : "").not.toContain("TEAM.md");
 		} finally {

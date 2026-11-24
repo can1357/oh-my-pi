@@ -1,5 +1,5 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import type { Page } from "puppeteer-core";
 
 /** Result returned after enabling React introspection and reloading the page. */

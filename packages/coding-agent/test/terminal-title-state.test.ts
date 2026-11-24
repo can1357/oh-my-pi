@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as os from "node:os";
-import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
+import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-coding-agent/config/spinner-interval";
 import {
 	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
