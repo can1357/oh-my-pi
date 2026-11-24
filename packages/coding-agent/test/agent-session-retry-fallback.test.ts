@@ -9577,12 +9577,8 @@ describe("AgentSession retry fallback", () => {
 				: { state: "healthy", accounts: [] },
 		);
 
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -9602,6 +9598,18 @@ describe("AgentSession retry fallback", () => {
 			thinkingLevel: undefined,
 			isFallback: true,
 			contextWindow: fallbackModel.contextWindow,
+		});
+		// #13240: the transcript alone attributes the switch, with what the live event carried.
+		const fallbackChange = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "model_change" && entry.resolvedModelIsFallback === true);
+		expect(fallbackChange).toMatchObject({
+			model: `${fallbackModel.provider}/${fallbackModel.id}`,
+			fallback: {
+				from: `${primaryModel.provider}/${primaryModel.id}`,
+				trigger: "usage-preflight",
+				reason: fallbackEvents[0].reason,
+			},
 		});
 	});
 
