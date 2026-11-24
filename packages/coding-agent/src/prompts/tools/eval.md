@@ -64,7 +64,7 @@ await sh(command, { cwd?, timeout? })  await sh`cmd ${arg}` — embedded bash en
 {{else}}
 <namespaces>
 More globals; `read` the linked docs before first use:
-- `judge`, `{{#if py}}judge_batch{{else}}judgeBatch{{/if}}`, `completion`: classification, bulk judgment, model calls → help://eval/judge
+- `judge`, {{#ifAll py js}}`judge_batch` (Python), `judgeBatch` (JS){{else}}{{#if py}}`judge_batch`{{else}}`judgeBatch`{{/if}}{{/ifAll}}, `completion`: classification, bulk judgment, model calls → help://eval/judge
 - `%load`{{#if py}}, `%pip`{{/if}}{{#if js}}, `%bun add`{{/if}}, `budget`{{#if evalTools}}, `@tool`/`tool(fn)`{{/if}}: setup, installs, utilities → help://eval/helpers
 {{#if spawns}}
 - `agent`, `workpool`: background subagents, DAG waves → help://eval/agents
