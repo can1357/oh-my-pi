@@ -605,7 +605,7 @@ pub struct InstalledSandboxProfile {
 }
 
 /// Typed rejection from the policy owner or native sandbox runtime.
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[derive(Debug, Error)]
 pub enum PolicyControlFailure {
 	/// The authenticated connection was replaced.
 	#[error("the policy authority belongs to a stale connection generation")]
@@ -621,13 +621,25 @@ pub enum PolicyControlFailure {
 	Phase,
 	/// An argument or profile is malformed.
 	#[error("policy request is malformed: {0}")]
-	Invalid(Str),
+	Invalid(#[source] serde_json::Error),
+	/// The approval decision names a source the authority does not recognize.
+	#[error("policy request is malformed: unknown approval source")]
+	UnknownApprovalSource,
 	/// A contribution would loosen installed confinement.
 	#[error("sandbox profile would widen installed confinement")]
 	ProfileWidened,
-	/// No backend can satisfy the requested profile.
-	#[error("sandbox enforcement is unavailable: {0}")]
-	EnforcementUnavailable(Str),
+	/// No required sandbox backend is installed on this host.
+	#[error("sandbox enforcement is unavailable: required sandbox backend {backend} is unavailable")]
+	BackendUnavailable {
+		/// Backend named by the profile and missing from host capabilities.
+		backend: Str,
+	},
+	/// Active sandbox facilities cannot enforce the requested profile.
+	#[error(
+		"sandbox enforcement is unavailable: active sandbox facilities cannot enforce the requested \
+		 profile"
+	)]
+	EnforcementFacilitiesMismatch,
 	/// A runtime-owned profile handle does not exist for this authority.
 	#[error("sandbox profile handle was not found")]
 	UnknownHandle,
@@ -647,12 +659,6 @@ pub enum PolicyControlFailure {
 }
 
 impl PolicyControlFailure {
-	/// Constructs a malformed-request failure, rendering the cause once at
-	/// this model-facing fault boundary.
-	fn invalid(cause: impl std::fmt::Display) -> Self {
-		Self::Invalid(sf!("{cause}"))
-	}
-
 	/// Constructs an audit failure, rendering the cause once at this
 	/// model-facing fault boundary.
 	pub(crate) fn audit(cause: impl std::fmt::Display) -> Self {
@@ -664,9 +670,11 @@ impl PolicyControlFailure {
 			Self::StaleGeneration => "StaleGeneration",
 			Self::Capability { .. } => "PermissionDenied",
 			Self::Phase => "InvalidPhase",
-			Self::Invalid(_) => "ProfileRejected",
+			Self::Invalid(_) | Self::UnknownApprovalSource => "ProfileRejected",
 			Self::ProfileWidened => "ProfileWidened",
-			Self::EnforcementUnavailable(_) => "EnforcementUnavailable",
+			Self::BackendUnavailable { .. } | Self::EnforcementFacilitiesMismatch => {
+				"EnforcementUnavailable"
+			},
 			Self::UnknownHandle => "UnknownProfileHandle",
 			Self::UnknownTicket => "UnknownApprovalTicket",
 			Self::DecisionConflict => "ApprovalDecisionConflict",
@@ -813,9 +821,9 @@ impl PolicyControlOwner {
 			audited:    bool,
 		}
 		let decision: Decision =
-			serde_json::from_value(value).map_err(PolicyControlFailure::invalid)?;
+			serde_json::from_value(value).map_err(PolicyControlFailure::Invalid)?;
 		let source = ApprovalSource::from_str(decision.source.as_str())
-			.map_err(|_| PolicyControlFailure::Invalid(Str::new_static("unknown approval source")))?;
+			.map_err(|_| PolicyControlFailure::UnknownApprovalSource)?;
 		let scope = match decision.scope {
 			PolicyScope::Once => Str::new_static("once"),
 			PolicyScope::Call => Str::new_static("call"),
@@ -2058,5 +2066,47 @@ mod tests {
 			lsp_tier_capability(lsp_notification_tier("workspace/didRenameFiles")),
 			"env.doc.write"
 		);
+	}
+
+	#[test]
+	fn policy_control_failure_display_keeps_legacy_text() {
+		let json =
+			serde_json::from_value::<u32>(serde_json::Value::Null).expect_err("null is not u32");
+		assert_eq!(
+			PolicyControlFailure::Invalid(json).to_string(),
+			"policy request is malformed: invalid type: null, expected u32"
+		);
+		assert_eq!(
+			PolicyControlFailure::UnknownApprovalSource.to_string(),
+			"policy request is malformed: unknown approval source"
+		);
+		assert_eq!(
+			PolicyControlFailure::BackendUnavailable { backend: Str::new_static("landlock") }
+				.to_string(),
+			"sandbox enforcement is unavailable: required sandbox backend landlock is unavailable"
+		);
+		assert_eq!(
+			PolicyControlFailure::EnforcementFacilitiesMismatch.to_string(),
+			"sandbox enforcement is unavailable: active sandbox facilities cannot enforce the \
+			 requested profile"
+		);
+	}
+
+	#[test]
+	fn policy_control_failure_keeps_wire_codes() {
+		let json =
+			serde_json::from_value::<u32>(serde_json::Value::Null).expect_err("null is not u32");
+		let cases = [
+			(PolicyControlFailure::Invalid(json), "ProfileRejected"),
+			(PolicyControlFailure::UnknownApprovalSource, "ProfileRejected"),
+			(
+				PolicyControlFailure::BackendUnavailable { backend: Str::new_static("landlock") },
+				"EnforcementUnavailable",
+			),
+			(PolicyControlFailure::EnforcementFacilitiesMismatch, "EnforcementUnavailable"),
+		];
+		for (failure, code) in cases {
+			assert_eq!(failure.protocol().code.as_str(), code, "{failure}");
+		}
 	}
 }
