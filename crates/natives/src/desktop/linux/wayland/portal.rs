@@ -1,16 +1,18 @@
 use std::{
 	fs,
 	path::{Path, PathBuf},
-	sync::LazyLock,
 	time::Duration,
 };
 
 use ashpd::desktop::remote_desktop::RemoteDesktop;
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::Runtime;
 
-use crate::desktop::{
-	control,
-	error::{CoreResult, DesktopError},
+use crate::{
+	dbus_rt,
+	desktop::{
+		control,
+		error::{CoreResult, DesktopError},
+	},
 };
 
 /// How long the input probe waits for the portal frontend to answer.
@@ -21,23 +23,13 @@ const INPUT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const CONSENT_MARGIN: Duration =
 	crate::desktop::CLOSE_TIMEOUT.saturating_add(Duration::from_millis(500));
 
-/// Process-wide Tokio runtime shared by every xdg-desktop-portal call.
+/// Borrow the runtime shared by every xdg-desktop-portal call.
 ///
 /// `ashpd` caches a process-global D-Bus connection whose I/O tasks are bound
-/// to the runtime that first creates it. A long-lived multi-thread runtime
+/// to the runtime that first creates it. The long-lived shared D-Bus runtime
 /// keeps that connection alive and drives it while portal callers block.
-static PORTAL_RUNTIME: LazyLock<Result<Runtime, String>> = LazyLock::new(|| {
-	Builder::new_multi_thread()
-		.worker_threads(1)
-		.enable_all()
-		.build()
-		.map_err(|err| err.to_string())
-});
-
-/// Borrow the shared portal runtime, surfacing a one-time build failure.
 pub(super) fn portal_runtime() -> CoreResult<&'static Runtime> {
-	PORTAL_RUNTIME
-		.as_ref()
+	dbus_rt::runtime()
 		.map_err(|err| DesktopError::internal(format!("xdg-desktop-portal runtime: {err}")))
 }
 

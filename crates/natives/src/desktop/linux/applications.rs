@@ -23,12 +23,13 @@ use x11rb::{
 	protocol::xproto::{Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, Window},
 	rust_connection::RustConnection,
 };
-use zbus::blocking::Connection as BusConnection;
+use zbus::Connection as BusConnection;
 
 use super::{
 	super::error::{CoreResult, DesktopError},
 	Application,
 };
+use crate::dbus_rt;
 
 struct Entry {
 	id:                String,
@@ -440,30 +441,30 @@ impl Entry {
 		let (name, _) = self.dbus_address().ok()?;
 		// Resolve a unique owner first: neither query activates the application,
 		// and a replacement well-known owner cannot redirect the PID query.
-		let owner: String = connection
-			.call_method(
-				Some("org.freedesktop.DBus"),
-				"/org/freedesktop/DBus",
-				Some("org.freedesktop.DBus"),
-				"GetNameOwner",
-				&(name,),
-			)
-			.ok()?
-			.body()
-			.deserialize()
-			.ok()?;
-		let pid: u32 = connection
-			.call_method(
-				Some("org.freedesktop.DBus"),
-				"/org/freedesktop/DBus",
-				Some("org.freedesktop.DBus"),
-				"GetConnectionUnixProcessID",
-				&(owner,),
-			)
-			.ok()?
-			.body()
-			.deserialize()
-			.ok()?;
+		let owner: String = dbus_rt::block_on(connection.call_method(
+			Some("org.freedesktop.DBus"),
+			"/org/freedesktop/DBus",
+			Some("org.freedesktop.DBus"),
+			"GetNameOwner",
+			&(name,),
+		))
+		.ok()?
+		.ok()?
+		.body()
+		.deserialize()
+		.ok()?;
+		let pid: u32 = dbus_rt::block_on(connection.call_method(
+			Some("org.freedesktop.DBus"),
+			"/org/freedesktop/DBus",
+			Some("org.freedesktop.DBus"),
+			"GetConnectionUnixProcessID",
+			&(owner,),
+		))
+		.ok()?
+		.ok()?
+		.body()
+		.deserialize()
+		.ok()?;
 		(pid != 0).then_some(pid)
 	}
 
@@ -476,15 +477,15 @@ impl Entry {
 		}
 		// Never forward an unrelated inherited Wayland activation token. The
 		// timestamp-zero hint is advisory, including for D-Bus Activate.
-		match connection.call_method(
+		match dbus_rt::block_on(connection.call_method(
 			Some(name),
 			path.as_str(),
 			Some("org.freedesktop.Application"),
 			"Activate",
 			&(platform,),
-		) {
-			Ok(_) => Ok(true),
-			Err(zbus::Error::MethodError(error, ..))
+		)) {
+			Ok(Ok(_)) => Ok(true),
+			Ok(Err(zbus::Error::MethodError(error, ..)))
 				if self.exec.is_some()
 					&& matches!(
 						error.as_str(),
@@ -499,9 +500,12 @@ impl Entry {
 			},
 			// Do not double-launch on ambiguous timeouts or transport failures:
 			// the application might already have processed Activate.
-			Err(error) => {
+			Ok(Err(error)) => {
 				Err(DesktopError::unsupported(format!("D-Bus activation of {name} failed: {error}")))
 			},
+			Err(error) => Err(DesktopError::unsupported(format!(
+				"D-Bus activation of {name} failed (runtime unavailable): {error}"
+			))),
 		}
 	}
 
@@ -547,10 +551,18 @@ fn processes() -> HashMap<PathBuf, Vec<u32>> {
 	processes
 }
 
+fn session_bus() -> Result<BusConnection, String> {
+	match dbus_rt::block_on(BusConnection::session()) {
+		Ok(Ok(bus)) => Ok(bus),
+		Ok(Err(error)) => Err(error.to_string()),
+		Err(error) => Err(error.to_owned()),
+	}
+}
+
 #[allow(clippy::unnecessary_wraps, reason = "matches the fallible macOS and Windows signatures")]
 pub(super) fn list() -> CoreResult<Vec<Application>> {
 	let processes = processes();
-	let bus = BusConnection::session().ok();
+	let bus = session_bus().ok();
 	let mut seen = HashSet::new();
 	let mut applications = Vec::new();
 	for root in data_roots() {
@@ -578,7 +590,7 @@ pub(super) fn from_path(path: &Path) -> CoreResult<Application> {
 		.iter()
 		.find(|root| path.starts_with(root))
 		.map_or_else(|| path.to_string_lossy().into_owned(), |root| desktop_id(root, path));
-	let bus = BusConnection::session().ok();
+	let bus = session_bus().ok();
 	Ok(read_entry(path, id)?.application(&processes(), bus.as_ref()))
 }
 
@@ -587,7 +599,7 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<Application> 
 	// Preflight before launching: XWayland cannot activate arbitrary native
 	// Wayland windows, and Wayland tokens require an originating user gesture.
 	let activation = activate.then(Activation::connect).transpose()?;
-	let bus = BusConnection::session();
+	let bus = session_bus();
 	let current = entry.application(&processes(), bus.as_ref().ok());
 	let executable = entry.executable();
 	if current.running {
