@@ -444,6 +444,12 @@ export interface ScanSkillsFromDirOptions {
 	 */
 	includeSelf?: boolean;
 	/**
+	 * Containment check for a candidate `SKILL.md`, run before the file is read. A plugin caller passes
+	 * its plugin-root check, so a skill that resolves outside the root is skipped with a warning. Unset,
+	 * every existing candidate loads.
+	 */
+	isWithinRoot?: (skillPath: string) => Promise<boolean>;
+	/**
 	 * Registry/CLI origin of the plugin root supplying these skills, forwarded
 	 * to {@link SourceMeta.origin} so user-scope gating can tell omp's own
 	 * installs (`omp`, `plugin-dir`) from the foreign Claude tree (`claude`).
@@ -518,10 +524,18 @@ export async function scanSkillsFromDir(
 		}
 	};
 
+	const isLoadableSkillFile = async (skillPath: string): Promise<boolean> => {
+		if (options.isWithinRoot && !(await options.isWithinRoot(skillPath))) {
+			warnings.push(`Skipping skill at ${skillPath}: SKILL.md resolves outside plugin root`);
+			return false;
+		}
+		return fs.existsSync(skillPath);
+	};
+
 	const work: Promise<void>[] = [];
 	if (options.includeSelf) {
 		const selfSkillPath = path.join(dir, "SKILL.md");
-		if (fs.existsSync(selfSkillPath)) {
+		if (await isLoadableSkillFile(selfSkillPath)) {
 			work.push(loadSkill(selfSkillPath));
 		}
 	}
@@ -529,7 +543,7 @@ export async function scanSkillsFromDir(
 		if (entry.name.startsWith(".")) continue;
 		if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 		const skillPath = path.join(dir, entry.name, "SKILL.md");
-		if (fs.existsSync(skillPath)) {
+		if (await isLoadableSkillFile(skillPath)) {
 			work.push(loadSkill(skillPath));
 		}
 	}

@@ -254,6 +254,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						providerId: PROVIDER_ID,
 						level: root.scope,
 						includeSelf: true,
+						isWithinRoot: skillPath => isWithinPluginRoot(root.path, skillPath),
 						origin: root.origin,
 						pluginName: root.plugin,
 					}),
@@ -504,7 +505,7 @@ function extractServerMap(obj: Record<string, unknown>): Record<string, unknown>
  * The field may be an inline object (the server map itself) or a string path to
  * a config file within the plugin root; a path escaping the root is rejected
  * with a warning. When no manifest declares the field, `<root>/.mcp.json` is the
- * fallback source.
+ * fallback source, refused with a warning when it resolves outside the root.
  */
 async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedMCPConfig> {
 	const fallback = path.join(root.path, ".mcp.json");
@@ -563,6 +564,16 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 		}
 	}
 
+	if (!(await isWithinPluginRoot(root.path, fallback))) {
+		return {
+			path: null,
+			inlineServers: null,
+			sourcePath: fallback,
+			baseDir: root.path,
+			declared: false,
+			warnings: [`[claude-plugins] Ignoring .mcp.json outside plugin root for ${root.id}`],
+		};
+	}
 	return {
 		path: fallback,
 		inlineServers: null,

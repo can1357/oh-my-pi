@@ -912,10 +912,7 @@ describe("listClaudePluginRoots", () => {
 		);
 		await fs.symlink(path.join(outsidePath, "escaped"), path.join(pluginPath, "skills", "escaped"));
 		await Promise.all([
-			fs.writeFile(
-				path.join(pluginPath, ".claude-plugin", "plugin.json"),
-				JSON.stringify({ skills: "./skills" }),
-			),
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "./skills" })),
 			fs.writeFile(
 				registryPath,
 				JSON.stringify({
