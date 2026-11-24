@@ -35,7 +35,7 @@ import { toolCommandCallName, toolCommandDispatches } from "./tool-commands";
  * the result as an already-applied change.
  */
 export const PREVIEW_PENDING_NOTICE =
-	"Staged as a proposal — files NOT modified yet. To apply: `resolve <one-sentence reason>`. To discard: `reject <one-sentence reason>`. Send that call alone; every other call in the same response is refused.";
+	"Staged as a proposal — files NOT modified yet. To apply: `resolve <one-sentence reason>`. To discard: `reject <one-sentence reason>`. Send that call alone in its own response; with other calls in the response, all of them are refused, this call included.";
 
 /** Handler installed by plan mode; `propose` hands the plan title to it. */
 export type PlanProposalHandler = (title: string) => Promise<AgentToolResult<unknown>>;
