@@ -203,4 +203,108 @@ describe("session.compacting preserveData", () => {
 			vi.restoreAllMocks();
 		}
 	});
+
+	it("keeps an earlier handler prompt and context when a later handler returns them as undefined", async () => {
+		const tempDir = TempDir.createSync("@pi-compacting-undefined-");
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const modelRegistry = new ModelRegistry(authStorage);
+			const sessionManager = SessionManager.inMemory(tempDir.path());
+			const extensionA = await loadExtensionFromFactory(
+				pi => {
+					pi.on("session.compacting", async () => ({
+						prompt: "first prompt",
+						context: ["first context"],
+						preserveData: { extA: "a" },
+					}));
+				},
+				tempDir.path(),
+				new EventBus(),
+				new ExtensionRuntime(),
+				"compacting-undefined-a",
+			);
+			const extensionB = await loadExtensionFromFactory(
+				pi => {
+					pi.on("session.compacting", async () => ({
+						prompt: undefined,
+						context: undefined,
+						preserveData: { extB: "b" },
+					}));
+				},
+				tempDir.path(),
+				new EventBus(),
+				new ExtensionRuntime(),
+				"compacting-undefined-b",
+			);
+			const extensionRunner = new ExtensionRunner(
+				[extensionA, extensionB],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const result = await extensionRunner.emit({
+				type: "session.compacting",
+				sessionId: "s",
+				messages: [],
+			});
+
+			expect(result?.prompt).toBe("first prompt");
+			expect(result?.context).toEqual(["first context"]);
+			expect(result?.preserveData).toEqual({ extA: "a", extB: "b" });
+		} finally {
+			authStorage.close();
+			await tempDir.remove();
+		}
+	});
+
+	it("lets a later handler explicit empty context array replace an earlier context", async () => {
+		const tempDir = TempDir.createSync("@pi-compacting-empty-context-");
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const modelRegistry = new ModelRegistry(authStorage);
+			const sessionManager = SessionManager.inMemory(tempDir.path());
+			const extensionA = await loadExtensionFromFactory(
+				pi => {
+					pi.on("session.compacting", async () => ({
+						context: ["first context"],
+					}));
+				},
+				tempDir.path(),
+				new EventBus(),
+				new ExtensionRuntime(),
+				"compacting-empty-context-a",
+			);
+			const extensionB = await loadExtensionFromFactory(
+				pi => {
+					pi.on("session.compacting", async () => ({
+						context: [],
+					}));
+				},
+				tempDir.path(),
+				new EventBus(),
+				new ExtensionRuntime(),
+				"compacting-empty-context-b",
+			);
+			const extensionRunner = new ExtensionRunner(
+				[extensionA, extensionB],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const result = await extensionRunner.emit({
+				type: "session.compacting",
+				sessionId: "s",
+				messages: [],
+			});
+
+			expect(result?.context).toEqual([]);
+		} finally {
+			authStorage.close();
+			await tempDir.remove();
+		}
+	});
 });
