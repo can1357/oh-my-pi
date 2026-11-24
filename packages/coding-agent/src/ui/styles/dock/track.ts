@@ -1,6 +1,6 @@
 /**
  * Terminal look of the role-cycle track (`row` `omp.track`): a blank row,
- * then one cell in, the labels in their colors joined by a thin `┆`
+ * then the inset labels in their colors joined by a thin `┆`
  * (`statusLineSep`); the active one (`omp.track.active`) is a powerline chip:
  * caps in its color around ` label ` filled with it, the label bold in black
  * or white by the fill's luma. Two spaces part the chip from its neighbours.
@@ -10,6 +10,7 @@ import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-t
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { terminalPaddingX } from "../terminal-padding";
 import { propsOf } from "../messages/fill";
 
 /** `text` on a fill of foreground color `color`, in black or white by the fill's luma (Rec. 601). */
@@ -44,7 +45,8 @@ function paintTrack(node: UiNode, cx: PaintContext): Block {
 		const chip = chipFill(theme, item.color, theme.style("strong", ` ${item.label} `));
 		track += `${theme.fg(item.color, symbols.symbol("sep.powerlineRight"))}${chip}${theme.fg(item.color, symbols.symbol("sep.powerlineLeft"))}`;
 	});
-	return { rows: ["", ` ${truncate(track, Math.max(1, cx.width - 2))}`] };
+	const paddingX = terminalPaddingX();
+	return { rows: ["", " ".repeat(paddingX) + truncate(track, Math.max(1, cx.width - 2 * paddingX))] };
 }
 
 defineRolePainter("row", "omp.track", paintTrack);

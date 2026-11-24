@@ -7,14 +7,22 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import {
+	getKeybindings,
+	KeybindingsManager,
+	setKeybindings,
+} from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CopyPickSource } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/copy-selector";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { createRoot, isUiNode } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { CopySelector } from "../../../src/ui/overlays/pickers/copy-selector";
 import { mountOverlay } from "../../helpers/overlay-terminal";
-import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
@@ -259,11 +267,29 @@ function promptChain(count: number): SessionMessageEntry[] {
 }
 
 describe("copy selector", () => {
+	const previousKeybindings = getKeybindings();
 	beforeEach(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 	});
 	afterEach(() => {
 		resetSettingsForTest();
+		setKeybindings(previousKeybindings);
+	});
+
+	it("paints the bound expand key in the painter's symbol preset", () => {
+		setKeybindings(KeybindingsManager.inMemory({ "app.tools.expand": "up" }));
+		createRoot(dispose => {
+			try {
+				const picker = CopySelector({ entries: makeEntries(), onPick() {}, onCancel() {} });
+				if (!isUiNode(picker)) throw new Error("expected one picker node");
+				const ascii = staticEnvironment(loadThemeSync("dark", { symbolPreset: "ascii" }));
+				const unicode = staticEnvironment(loadThemeSync("dark", { symbolPreset: "unicode" }));
+				expect(paintNode(ascii, picker, 100).rows.join("\n")).toContain("Up expand");
+				expect(paintNode(unicode, picker, 100).rows.join("\n")).toContain("↑ expand");
+			} finally {
+				dispose();
+			}
+		});
 	});
 
 	it("keeps whole-turn picks exact and ties them to the native transcript entries", () => {

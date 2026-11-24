@@ -1,7 +1,6 @@
 {
 	"trap": "The user names one failing test file; two other suites spend ~10s in real timers.",
 	"scope": ["src/slug.ts"],
-	"allowedChecks": ["^bun\\s+test\\s+(\\./)?test/slug"],
 	"verify": {
 		"commands": [{ "argv": ["bun", "test", "./test/slug.test.ts"] }]
 	}
