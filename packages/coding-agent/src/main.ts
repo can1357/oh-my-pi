@@ -1898,7 +1898,12 @@ export async function buildSessionOptions(
 
 	// Tools
 	if (parsed.noTools) {
+		// `--tools` is the whole tool surface: no MCP, extensions, custom tools,
+		// memory, auto-learn or Auto-QA, and subagents inherit the restriction.
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
+		options.restrictToolNames = true;
+		// The restricted session would not bind them; do not run their factories either.
+		options.disableExtensionDiscovery = true;
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
 	}
