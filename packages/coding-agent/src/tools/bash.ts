@@ -214,7 +214,7 @@ const CRITICAL_RM_TEXT_PATTERNS = [
 /** Bash syntax the simple-command reading does not follow: a substitution, a parameter, a backtick, a redirect, a comment or a continuation. */
 const UNREAD_BASH_SYNTAX = /[`$<>#]|\\\n/;
 
-/** Commands that print, read, move or test text and never run an argument as a command line. `rg` and `git grep` are left out: `--pre` and `-O` run one. */
+/** Commands that print, read, move or test text and never run an argument as a command line. `rg` and `git grep` are left out: `--pre` and `-O` run one. `printf` is left out: `printf -v` assigns a string that a later command can run (a zsh function, a bash hash entry). */
 const TEXT_ONLY_COMMANDS = new Set([
 	"cat",
 	"cd",
@@ -228,7 +228,6 @@ const TEXT_ONLY_COMMANDS = new Set([
 	"head",
 	"ls",
 	"mkdir",
-	"printf",
 	"pwd",
 	"sleep",
 	"tail",
