@@ -280,4 +280,24 @@ return "done";`,
 		);
 		expect(next).toEqual({ source: "fixture" });
 	});
+
+	test("keeps Authorization values out of the tool result for listed and detailed requests", async () => {
+		const invoke = createHost();
+		const token = "synthetic-19582-token";
+		await invoke({ action: "open", name: "auth", url: `${baseUrl}/` });
+		await invoke({ action: "call", name: "auth", chain: [{ method: "clearRequests", args: [] }] });
+		await invoke({
+			action: "run",
+			name: "auth",
+			code: `await tab.evaluate(async url => { await fetch(url, { headers: { Authorization: ${JSON.stringify(token)} } }); }, ${JSON.stringify(`${baseUrl}/api`)});`,
+		});
+		const listing = await invoke({ action: "call", name: "auth", chain: [{ method: "requests", args: [] }] });
+		expect(JSON.stringify(listing)).not.toContain(token);
+		const record = (valueOf(listing) as Array<{ id: string; url: string }>).find(request =>
+			request.url.endsWith("/api"),
+		);
+		expect(record).toBeDefined();
+		const detail = await invoke({ action: "call", name: "auth", chain: [{ method: "request", args: [record!.id] }] });
+		expect(JSON.stringify(detail)).not.toContain(token);
+	});
 });
