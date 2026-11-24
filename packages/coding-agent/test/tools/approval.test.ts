@@ -454,10 +454,10 @@ describe("tool-owned dynamic approval declarations", () => {
 			"sudo rm -rf /",
 			"cd /tmp && rm -rf /",
 			"bash -c 'rm -rf /'",
-			"echo \"rm -rf /\" | sh",
+			'echo "rm -rf /" | sh',
 			"echo $(rm -rf /)",
 			"xargs sh -c 'rm -rf /'",
-			"ssh build.example \"rm -rf /\"",
+			'ssh build.example "rm -rf /"',
 		]) {
 			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}
