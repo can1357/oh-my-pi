@@ -5101,7 +5101,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} else if (event.type === "message_update" && event.message.role === "assistant") {
 			const delta = event.assistantMessageEvent;
 			if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
-				this.tokenRate.push(delta.delta);
+				this.tokenRate.push(delta.delta, delta.type);
 			}
 		} else if (event.type === "message_end" && event.message.role === "assistant") {
 			const assistant = event.message as AssistantMessage;
