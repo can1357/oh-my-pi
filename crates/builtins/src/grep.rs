@@ -812,22 +812,10 @@ fn build_matcher(
 		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);
 	}
 
-	// A `{` that opens no interval is a literal to GNU and BSD grep, but the
-	// `regex` crate refuses the whole pattern, so `grep -E '{a}'` failed on
-	// patterns real grep matches. An attempted-but-unterminated interval
-	// stays an error in both.
-	let patterns: Vec<std::borrow::Cow<'_, str>> =
-		patterns.iter().map(|p| bre::ere_literalize_braces(p)).collect();
-
-	// `regex` accepts `^+` and compiles it as `(?:^)+`, which matches at every
-	// line start. GNU and BSD grep both reject the pattern, so returning every
-	// line with exit 0 would be a wrong answer reported as success.
-	if let Some(bad) = patterns
+	let patterns = patterns
 		.iter()
-		.find(|pattern| bre::ere_repetition_operand_missing(pattern))
-	{
-		return Err(format!("repetition-operator operand invalid: {bad}"));
-	}
+		.map(|pattern| bre::ere_to_rust(pattern, true).map_err(|err| format!("{}: {pattern}", err.message())))
+		.collect::<Result<Vec<_>, _>>()?;
 
 	builder
 		.build_many(&patterns)
@@ -2729,6 +2717,17 @@ mod tests {
 		// A `$` that ends neither is still a literal dollar sign.
 		let (_, out, err) = run(&["-c", "a$b"], "a$b\nab\n").await;
 		assert_eq!(out, "1\n", "{err}");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn posix_brackets_match_literal_square_brackets() {
+		for (mode, pattern, stdin, expected) in [
+			("-oE", r"[][\.^$*+?(){}|\\]", "a.b[c]\n", ".\n[\n]\n"),
+			("-o", "[.[]", "a[b\n", "[\n"),
+		] {
+			let (code, out, err) = run(&[mode, pattern], stdin).await;
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{mode} {pattern}");
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

@@ -56,15 +56,9 @@ import {
 	type Takeaway,
 	tableLadders,
 	tableTakeaways,
-} from "@oh-my-pi/pi-tui/charts/chart-plan";
-import {
-	isMonotonic,
-	isNumber,
-	type TableAnalysis,
-	type TableColumn,
-	withMeasures,
-} from "@oh-my-pi/pi-tui/charts/table-data";
-import type { TableChartRequest } from "@oh-my-pi/pi-tui/chat/table-chart";
+} from "./chart-plan";
+import { isMonotonic, isNumber, type TableAnalysis, type TableColumn, withMeasures } from "./table-data";
+import type { TableChartRequest } from "../session/transcript/table-chart";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { ChainJudge } from "../judgment";
 import questionFile from "../prompts/judge/auto-graph.json" with { type: "json" };

@@ -1,11 +1,17 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { inflateSync } from "node:zlib";
+import type * as Zlib from "node:zlib";
+
+let zlibCache: typeof Zlib | undefined;
+function inflateSync(buf: Zlib.InputType): Buffer {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache.inflateSync(buf);
+}
 
 import { deliveredImageSize, fitLongEdge, type ImageSize } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { logger, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { shortenPath } from "../../utils/render-utils";
+import { ToolError } from "../tool-errors";
 import type { CDPSession, ElementHandle, ElementScreenshotOptions, Page } from "puppeteer-core";
 import {
 	DEFAULT_MIN_DIMENSION,

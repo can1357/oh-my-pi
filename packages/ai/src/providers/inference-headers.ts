@@ -28,6 +28,13 @@ export interface InferenceHeaderOptions {
 	 * protocol-native session headers and every other backend keep `sessionId`.
 	 */
 	cacheAffinity?: string;
+	/**
+	 * Conversation a side request branches from (`parentSessionId`). OpenCode's
+	 * `x-opencode-session` routes by it so the side request lands on the
+	 * worker holding the parent's prompt cache; every other session header
+	 * keeps {@link sessionId}. {@link cacheAffinity} still wins on Go.
+	 */
+	parentSessionId?: string;
 }
 
 /**
@@ -125,8 +132,10 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
 		// Go's session header doubles as the gateway's cache-affinity handle:
 		// opted-in sibling lanes (see resolveOpenCodeGoCacheAffinity) share one
-		// task cache key there; every other lane keeps the conversation id.
-		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? sessionId) : sessionId;
+		// task cache key there; side requests ride their parent conversation's
+		// id; every other lane keeps the conversation id.
+		const conversation = options.parentSessionId ?? sessionId;
+		const goSession = backend === "opencode-go" ? (options.cacheAffinity ?? conversation) : conversation;
 		if (goSession) setHeader(headers, "x-opencode-session", goSession);
 	}
 }

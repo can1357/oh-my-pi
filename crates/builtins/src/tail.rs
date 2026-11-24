@@ -87,6 +87,19 @@ mod args {
 						return Err(TailError::message(format!("invalid number of bytes: {e}")));
 					},
 				}
+			} else if let Some(arg) = matches.get_one::<String>(options::BLOCKS) {
+				// BSD `-b N`: 512-byte blocks. `+N` starts at block N, i.e. skips
+				// N-1 whole blocks, so it maps to byte `+((N-1)*512+1)`.
+				match parse_num(arg) {
+					Ok(Signum::Negative(n)) => Self::Bytes(Signum::Negative(n.saturating_mul(512))),
+					Ok(Signum::Positive(n)) => Self::Bytes(Signum::Positive(
+						(n - 1).saturating_mul(512).saturating_add(1),
+					)),
+					Ok(zero) => Self::Bytes(zero),
+					Err(e) => {
+						return Err(TailError::message(format!("invalid number of blocks: {e}")));
+					},
+				}
 			} else if let Some(arg) = matches.get_one::<String>(options::LINES) {
 				match parse_num(arg) {
 					Ok(signum) => {
@@ -384,7 +397,7 @@ mod args {
 					.short('c')
 					.long(options::BYTES)
 					.allow_hyphen_values(true)
-					.overrides_with_all([options::BYTES, options::LINES])
+					.overrides_with_all([options::BYTES, options::LINES, options::BLOCKS])
 					.help("Number of bytes to print"),
 			)
 			.arg(
@@ -403,7 +416,7 @@ mod args {
 					.short('n')
 					.long(options::LINES)
 					.allow_hyphen_values(true)
-					.overrides_with_all([options::BYTES, options::LINES])
+					.overrides_with_all([options::BYTES, options::LINES, options::BLOCKS])
 					.help("Number of lines to print"),
 			)
 			.arg(
@@ -500,8 +513,9 @@ mod args {
 			.arg(
 				Arg::new(options::BLOCKS)
 					.short('b')
-					.hide(true)
-					.action(ArgAction::SetTrue),
+					.allow_hyphen_values(true)
+					.overrides_with_all([options::BYTES, options::LINES, options::BLOCKS])
+					.hide(true),
 			)
 			.arg(
 				Arg::new(options::ARG_FILES)
@@ -3064,10 +3078,10 @@ fn consumes_separate_value(token: &str) -> bool {
 	let mut chars = cluster.chars();
 	while let Some(c) = chars.next() {
 		match c {
-			// Value-taking shorts: a trailing `-n`/`-c`/`-s` consumes the next
+			// Value-taking shorts: a trailing `-n`/`-c`/`-s`/`-b` consumes the next
 			// token; anything after them in the cluster is an attached value.
-			'n' | 'c' | 's' => return chars.next().is_none(),
-			'q' | 'v' | 'z' | 'f' | 'F' | 'r' | 'b' => {},
+			'n' | 'c' | 's' | 'b' => return chars.next().is_none(),
+			'q' | 'v' | 'z' | 'f' | 'F' | 'r' => {},
 			_ => return false,
 		}
 	}
@@ -3184,17 +3198,16 @@ impl Utility for Tail {
 	}
 }
 
-/// BSD `tail -r`: print lines in reverse order. With `-n N` the count selects
-/// how many lines to show (last N, or from line N for `+N`) before reversing.
+/// BSD `tail -r`: print lines in reverse order. A count selects how many lines
+/// (`-n`), bytes (`-c`), or 512-byte blocks (`-b`) from the end to show before
+/// reversing by line; `+N` counts N-1 units from the end.
 fn run_reverse(matches: &ArgMatches, host: &mut Host) -> i32 {
-	if matches.contains_id(args::options::BYTES)
-		|| matches.get_flag(args::options::BLOCKS)
-		|| matches.contains_id(args::options::FOLLOW)
-		|| matches.get_flag(args::options::FOLLOW_RETRY)
+	// BSD rejects `-r` with following as a usage error.
+	if matches.contains_id(args::options::FOLLOW) || matches.get_flag(args::options::FOLLOW_RETRY)
 	{
 		let _ = writeln!(
 			host.stderr,
-			"tail: -r with -c, -b, or -f is not supported by this builtin; pipe through tac"
+			"usage: tail [-F | -f | -r] [-q] [-b # | -c # | -n #] [file ...]"
 		);
 		return 1;
 	}
@@ -3207,9 +3220,11 @@ fn run_reverse(matches: &ArgMatches, host: &mut Host) -> i32 {
 		},
 	};
 
-	// Without `-n`, `-r` reverses whole inputs; when no headers are wanted
+	// Without a count, `-r` reverses whole inputs; when no headers are wanted
 	// that is exactly `tac`, so keep delegating.
-	let all_lines = !matches.contains_id(args::options::LINES);
+	let all_lines = !matches.contains_id(args::options::LINES)
+		&& !matches.contains_id(args::options::BYTES)
+		&& !matches.contains_id(args::options::BLOCKS);
 	if all_lines && !settings.verbose {
 		let mut argv = vec![OsString::from("tac"), OsString::from("--")];
 		if let Some(files) = matches.get_many::<OsString>(args::options::ARG_FILES) {
@@ -3218,8 +3233,9 @@ fn run_reverse(matches: &ArgMatches, host: &mut Host) -> i32 {
 		return crate::tac::run_argv(argv, host);
 	}
 	settings.resolve_paths(host);
+	let sep = if matches.get_flag(args::options::ZERO_TERM) { 0 } else { b'\n' };
 
-	match reverse_main(&settings, all_lines, host) {
+	match reverse_main(&settings, sep, all_lines, host) {
 		Ok(()) => host.exit_code(),
 		Err(error) => {
 			let _ = writeln!(host.stderr, "tail: {error}");
@@ -3228,11 +3244,7 @@ fn run_reverse(matches: &ArgMatches, host: &mut Host) -> i32 {
 	}
 }
 
-fn reverse_main(settings: &Settings, all_lines: bool, host: &mut Host) -> TailResult<()> {
-	let FilterMode::Lines(signum, sep) = &settings.mode else {
-		unreachable!("-r with -c is rejected before dispatch");
-	};
-	let (signum, sep) = (*signum, *sep);
+fn reverse_main(settings: &Settings, sep: u8, all_lines: bool, host: &mut Host) -> TailResult<()> {
 	let mut stdout = host.stdout_writer();
 	let mut printer = HeaderPrinter::new(settings.verbose, true);
 	for input in &settings.inputs {
@@ -3282,7 +3294,7 @@ fn reverse_main(settings: &Settings, all_lines: bool, host: &mut Host) -> TailRe
 			printer.print_input(input, &mut stdout);
 			host.stdin.read_to_end(&mut data)?;
 		}
-		write_reversed_lines(&data, signum, sep, all_lines, &mut stdout)?;
+		write_reversed_lines(&data, &settings.mode, sep, all_lines, &mut stdout)?;
 	}
 	stdout.flush()?;
 	Ok(())
@@ -3293,11 +3305,25 @@ fn reverse_main(settings: &Settings, all_lines: bool, host: &mut Host) -> TailRe
 /// the output without one (matching `tac`).
 fn write_reversed_lines(
 	data: &[u8],
-	signum: Signum,
+	mode: &FilterMode,
 	sep: u8,
 	all_lines: bool,
 	writer: &mut impl Write,
 ) -> io::Result<()> {
+	// BSD converts forward counts to backward ones under `-r`: `+N` means
+	// N-1 units from the end, and `+0`/`-0` select nothing.
+	let from_end = |signum: Signum| match signum {
+		Signum::Negative(n) => usize::try_from(n).unwrap_or(usize::MAX),
+		Signum::Positive(n) => usize::try_from(n - 1).unwrap_or(usize::MAX),
+		Signum::PlusZero | Signum::MinusZero => 0,
+	};
+	let (data, line_count) = match *mode {
+		_ if all_lines => (data, usize::MAX),
+		FilterMode::Bytes(signum) => {
+			(&data[data.len().saturating_sub(from_end(signum))..], usize::MAX)
+		},
+		FilterMode::Lines(signum, _) => (data, from_end(signum)),
+	};
 	let mut segments: Vec<&[u8]> = Vec::new();
 	let mut start = 0;
 	for end in memchr_iter(sep, data) {
@@ -3307,23 +3333,7 @@ fn write_reversed_lines(
 	if start < data.len() {
 		segments.push(&data[start..]);
 	}
-	let keep: &[&[u8]] = if all_lines {
-		&segments[..]
-	} else {
-		match signum {
-			Signum::Negative(count) => {
-				let count = usize::try_from(count).unwrap_or(usize::MAX);
-				&segments[segments.len().saturating_sub(count)..]
-			},
-			Signum::MinusZero => &[],
-			Signum::PlusZero => &segments[..],
-			Signum::Positive(count) => {
-				// GNU-style 1-based origin: `+1` (like `+0`) selects everything.
-				let skip = usize::try_from(count.saturating_sub(1)).unwrap_or(usize::MAX);
-				&segments[skip.min(segments.len())..]
-			},
-		}
-	};
+	let keep = &segments[segments.len().saturating_sub(line_count)..];
 	for segment in keep.iter().rev() {
 		writer.write_all(segment)?;
 	}
@@ -4006,17 +4016,71 @@ mod tests {
 		assert_eq!(capture.err(), "");
 	}
 
-	// `-r` with byte/block counts stays an explicit error rather than
-	// silently diverging from BSD semantics.
+	// Failure mode: `-r -c N` was rejected; BSD takes the last N bytes and
+	// reverses them by line, an unterminated fragment leading without a newline.
 	#[test]
-	fn reverse_with_byte_count_keeps_clear_error() {
-		let (code, capture) = run_util::<Tail>(&["-r", "-c", "5"], "", "/");
-		assert_eq!(code, 1);
-		assert_eq!(capture.out(), "");
-		assert_eq!(
-			capture.err(),
-			"tail: -r with -c, -b, or -f is not supported by this builtin; pipe through tac\n"
-		);
+	fn reverse_with_byte_count_reverses_trailing_bytes() {
+		let cases: &[(&[&str], &str, &str)] = &[
+			(&["-r", "-c", "3"], "a\nbb\nccc\ndddd\n", "dd\n"),
+			(&["-r", "-c", "6"], "a\nbb\nccc\ndddd\n", "dddd\n\n"),
+			(&["-r", "-c", "13"], "a\nbb\nccc\ndddd\n", "dddd\nccc\nbb\n\n"),
+			(&["-r", "-c", "-100"], "a\nbb\nccc\ndddd\n", "dddd\nccc\nbb\na\n"),
+			(&["-r", "-c", "0"], "a\nbb\nccc\ndddd\n", ""),
+			(&["-r", "-c", "3"], "a\nbb\nccc\ndddd", "ddd"),
+			(&["-r", "-c", "6"], "a\nbb\nccc\ndddd", "ddddc\n"),
+		];
+		for (args, input, expected) in cases {
+			let (code, capture) = run_util::<Tail>(args, input, "/");
+			assert_eq!(code, 0, "{args:?}");
+			assert_eq!(capture.out(), *expected, "{args:?}");
+			assert_eq!(capture.err(), "", "{args:?}");
+		}
+	}
+
+	// Failure mode: BSD turns `+N` under `-r` into N-1 units from the end;
+	// treating it as "from unit N" printed far more than `/usr/bin/tail`.
+	#[test]
+	fn reverse_plus_count_counts_from_end() {
+		let cases: &[(&[&str], &str)] = &[
+			(&["-r", "-c", "+3"], "d\n"),
+			(&["-r", "-n", "+2"], "dddd\n"),
+			(&["-r", "-n", "+1"], ""),
+			(&["-r", "-c", "+1"], ""),
+			(&["-r", "-n", "+0"], ""),
+			(&["-r", "-n", "+100"], "dddd\nccc\nbb\na\n"),
+		];
+		for (args, expected) in cases {
+			let (code, capture) = run_util::<Tail>(args, "a\nbb\nccc\ndddd\n", "/");
+			assert_eq!(code, 0, "{args:?}");
+			assert_eq!(capture.out(), *expected, "{args:?}");
+		}
+	}
+
+	// Failure mode: `-r -b N` was rejected; per BSD it selects the last
+	// N 512-byte blocks.
+	#[test]
+	fn reverse_with_blocks_uses_512_byte_units() {
+		let input = format!("{}\nend\n", "x".repeat(1000));
+		let (code, capture) = run_util::<Tail>(&["-r", "-b", "1"], &input, "/");
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), format!("end\n{}\n", "x".repeat(507)));
+		let (code, capture) = run_util::<Tail>(&["-r", "-b", "+2"], &input, "/");
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), format!("end\n{}\n", "x".repeat(507)));
+	}
+
+	// Failure mode: `-r` with following must be BSD's usage error.
+	#[test]
+	fn reverse_with_follow_is_usage_error() {
+		for flag in ["-f", "-F", "--follow=name"] {
+			let (code, capture) = run_util::<Tail>(&["-r", flag], "", "/");
+			assert_eq!(code, 1, "{flag}");
+			assert_eq!(capture.out(), "");
+			assert_eq!(
+				capture.err(),
+				"usage: tail [-F | -f | -r] [-q] [-b # | -c # | -n #] [file ...]\n"
+			);
+		}
 	}
 
 	#[test]

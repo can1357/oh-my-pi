@@ -6,7 +6,7 @@ import {
 	type TodoCompletionTransition,
 	type TodoToolDetails,
 	todoTaskTargets,
-} from "@oh-my-pi/pi-tui/tools/todo";
+} from "./details/todo";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 
