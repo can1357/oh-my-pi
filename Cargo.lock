@@ -8645,6 +8645,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-exec-ssh"
+version = "2.0.0"
+dependencies = [
+ "bytes",
+ "flume",
+ "omp-adw",
+ "omp-core",
+ "omp-exec",
+ "omp-ssh",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "omp-ext"
 version = "2.0.0"
 dependencies = [
