@@ -1,4 +1,5 @@
 import { classifyModel } from "./compat/taxonomy";
+import { modelMatchesHost } from "./hosts";
 import { getCatalogProvider, getCatalogProviders, openModelCatalog } from "./model-catalog-format";
 import { resolveTeamsTokenRatePerMillion } from "./cursor-teams-token-rate";
 import modelsData from "./models.json" with { type: "json" };
@@ -302,4 +303,35 @@ export function modelsAreEqual<TApi extends Api>(
 ): boolean {
 	if (!a || !b) return false;
 	return a.id === b.id && a.provider === b.provider;
+}
+
+function singleRoutingOnly(routing: unknown): string | undefined {
+	if (!routing || typeof routing !== "object" || !("only" in routing) || !Array.isArray(routing.only)) {
+		return undefined;
+	}
+	if (routing.only.length !== 1) return undefined;
+	const upstream = routing.only[0];
+	return typeof upstream === "string" && upstream ? upstream : undefined;
+}
+
+/**
+ * The single upstream an aggregator model (OpenRouter, Vercel AI Gateway) is pinned to.
+ * Undefined when the model is unpinned or routed across several upstreams.
+ */
+export function getUpstreamPin(model: Model<Api>): string | undefined {
+	const compat = model.compat;
+	if (!compat || typeof compat !== "object") return undefined;
+	if (modelMatchesHost(model, "vercelAIGateway") && "vercelGatewayRouting" in compat) {
+		return singleRoutingOnly(compat.vercelGatewayRouting);
+	}
+	if (modelMatchesHost(model, "openrouter") && "openRouterRouting" in compat) {
+		return singleRoutingOnly(compat.openRouterRouting);
+	}
+	return undefined;
+}
+
+/** {@link modelsAreEqual} that also tells apart one model pinned to different upstreams. */
+export function routedModelsAreEqual(a: Model<Api> | null | undefined, b: Model<Api> | null | undefined): boolean {
+	if (!a || !b) return false;
+	return a === b || (modelsAreEqual(a, b) && getUpstreamPin(a) === getUpstreamPin(b));
 }

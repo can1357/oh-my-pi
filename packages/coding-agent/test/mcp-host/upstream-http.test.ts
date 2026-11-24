@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
-import type { McpRemoteSpec } from "@oh-my-pi/pi-coding-agent/mcp/host/contract";
+import { type McpRemoteSpec, mcpIdentity, mcpPublicIdentity } from "@oh-my-pi/pi-coding-agent/mcp/host/contract";
 import { encodeMcpHeaderValue, HttpUpstream } from "@oh-my-pi/pi-coding-agent/mcp/host/http-upstream";
+import { LocalMcpHost } from "@oh-my-pi/pi-coding-agent/mcp/host/local";
 import type { McpPeer } from "@oh-my-pi/pi-coding-agent/mcp/host/peer";
 import { mcpUpstreams } from "@oh-my-pi/pi-coding-agent/mcp/host/peers";
+import { McpStore } from "@oh-my-pi/pi-coding-agent/mcp/host/store";
+import { HostLink } from "@oh-my-pi/pi-coding-agent/mcp/link";
 import { analyzeAuthError } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import {
 	MCP_LEGACY_PROTOCOL_VERSION,
@@ -11,7 +18,7 @@ import {
 	MCPMeta,
 	requestMeta,
 } from "@oh-my-pi/pi-coding-agent/mcp/protocol";
-import { postmortem, withTimeout } from "@oh-my-pi/pi-utils";
+import { postmortem, removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 import { rejectionOf, trackUnhandled } from "../helpers/rejection";
 import { httpSpec, realDeps } from "./upstream-support";
 
@@ -494,6 +501,10 @@ describe("x-mcp-header on Streamable HTTP", () => {
 	});
 });
 
+function hostLink(host: LocalMcpHost, spec: McpRemoteSpec, instance = "first"): HostLink {
+	return new HostLink({ name: "fixture", spec, instance, roots: () => [], idleMs: 0, access: host });
+}
+
 describe("era probe of a remote server", () => {
 	it("takes a discover result as modern", async () => {
 		const { url, seen } = serve(({ body }) =>
@@ -512,15 +523,82 @@ describe("era probe of a remote server", () => {
 		expect(seen[0].headers.get("Mcp-Method")).toBe("server/discover");
 	});
 
-	it("takes a modern-only error body under 400 as modern, without falling back to initialize", async () => {
+	it("falls back to the handshake when discover lists only a handshake-era revision", async () => {
+		// Dagu 2.27.0 answers server/discover, but only advertises 2025-11-25, and refuses every 2026-07-28 request in plain text.
+		const { url, seen } = serveLegacy(({ body }) => {
+			if (body.method === "server/discover") {
+				return json(body.id, {
+					supportedVersions: [MCP_LEGACY_PROTOCOL_VERSION],
+					capabilities: { tools: {} },
+					ttlMs: 1000,
+					cacheScope: "public",
+				});
+			}
+			return new Response('Bad Request: protocol version "2026-07-28" is only supported on stateless HTTP servers', {
+				status: 400,
+			});
+		});
+
+		const result = await mcpUpstreams.probe(httpSpec(url), realDeps());
+
+		expect(result.era).toBe("legacy");
+		const initialize = seen.find(entry => entry.body.method === "initialize");
+		expect(initialize && paramsOf(initialize).protocolVersion).toBe(MCP_LEGACY_PROTOCOL_VERSION);
+	});
+
+	it("takes a 32022 that lists this revision as modern, without falling back to initialize", async () => {
 		const { url, seen } = serve(({ body }) =>
-			rpcError(400, body.id, -32022, "Unsupported protocol version", { supported: ["2027-01-01"] }),
+			rpcError(400, body.id, -32022, "Unsupported protocol version", { supported: [MCP_PROTOCOL_VERSION] }),
 		);
 
 		const result = await mcpUpstreams.probe(httpSpec(url), realDeps());
 
 		expect(result).toEqual({ era: "modern" });
 		expect(seen.map(entry => entry.body.method)).toEqual(["server/discover"]);
+	});
+
+	it.each([
+		["future", { supported: ["2027-01-01"] }],
+		["unknown older", { supported: ["2025-07-09"] }],
+		["malformed", { supported: "2025-06-18" }],
+		["malformed list", { supported: ["2025-06-18", 1] }],
+		["missing", undefined],
+	] as const)("takes a 32022 with %s revision data as modern, without initialize", async (_label, data) => {
+		const { url, seen } = serve(({ body }) => rpcError(400, body.id, -32022, "Unsupported protocol version", data));
+
+		expect(await mcpUpstreams.probe(httpSpec(url), realDeps())).toEqual({ era: "modern" });
+		expect(seen.map(entry => entry.body.method)).toEqual(["server/discover"]);
+	});
+
+	it("falls back to initialize when a 32022 lists a compatible legacy revision, whatever status carries it", async () => {
+		const { url, seen } = serve(({ method, body }) => {
+			if (method !== "POST") return new Response(null, { status: 405 });
+			if (body.method === "initialize") {
+				return Response.json(
+					{
+						jsonrpc: "2.0",
+						id: body.id,
+						result: {
+							protocolVersion: "2025-06-18",
+							capabilities: { prompts: {} },
+							serverInfo: { name: "old-http", version: "0.9" },
+						},
+					},
+					{ headers: { "Mcp-Session-Id": "session-1" } },
+				);
+			}
+			if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+			// Not one of the statuses a handshake-era endpoint gives an unknown POST: the advertised revision decides.
+			return rpcError(422, body.id, -32022, "Unsupported protocol version", { supported: ["2025-06-18"] });
+		});
+
+		const result = await mcpUpstreams.probe(httpSpec(url), realDeps());
+
+		expect(result.era).toBe("legacy");
+		expect(seen.map(entry => entry.body.method ?? entry.method).slice(0, 2)).toEqual([
+			"server/discover",
+			"initialize",
+		]);
 	});
 
 	it("falls back to initialize on a plain 400 and reports a legacy server", async () => {
@@ -573,6 +651,143 @@ describe("era probe of a remote server", () => {
 		expect(failure.code).toBe(401);
 		expect(failure.message).toBe("HTTP 401: denied [WWW-Authenticate: Bearer]");
 		expect(seen).toHaveLength(1);
+	});
+});
+
+describe("era cache through the local HTTP host", () => {
+	it("reprobes a v1 era on upgrade while preserving cached results and the newly learned era", async () => {
+		const { url, seen } = serveLegacy(({ body }) =>
+			rpcError(400, body.id, -32022, "Unsupported protocol version", { supported: [MCP_LEGACY_PROTOCOL_VERSION] }),
+		);
+		const spec = httpSpec(url);
+		const eraKey = mcpPublicIdentity(spec);
+		const resultKey = mcpIdentity(spec);
+		const result = { resultType: "complete", tools: [{ name: "cached", inputSchema: { type: "object" } }] };
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-era-"));
+		const store = McpStore.open(dir);
+		const host = new LocalMcpHost({ store, upstreams: mcpUpstreams });
+		const link = hostLink(host, spec);
+		try {
+			const db = new Database(path.join(dir, "cache.db"));
+			try {
+				db.exec(`
+					CREATE TABLE eras (key TEXT PRIMARY KEY, era TEXT NOT NULL, probed_at INTEGER NOT NULL);
+					CREATE TABLE results (
+						key TEXT NOT NULL, method TEXT NOT NULL, params TEXT NOT NULL, result TEXT NOT NULL,
+						received_at INTEGER NOT NULL, ttl_ms INTEGER NOT NULL, used_at INTEGER NOT NULL,
+						PRIMARY KEY (key, method, params)
+					);
+					PRAGMA user_version = 1;
+				`);
+				const now = Date.now();
+				db.run("INSERT INTO eras VALUES (?, 'modern', ?), ('another', 'legacy', ?)", [eraKey, now, now]);
+				db.run("INSERT INTO results VALUES (?, 'tools/list', '{}', ?, ?, 60000, ?)", [
+					resultKey,
+					JSON.stringify(result),
+					now,
+					now,
+				]);
+			} finally {
+				db.close();
+			}
+
+			await link.connect();
+			expect(seen.slice(0, 2).map(entry => entry.body.method)).toEqual(["server/discover", "initialize"]);
+			expect(await link.request<typeof result>("tools/list")).toEqual(result);
+			expect(seen.some(entry => entry.body.method === "tools/list")).toBe(false);
+			expect(store.era("another")).toBeUndefined();
+			store.close();
+			expect(store.era(eraKey)?.era).toBe("legacy");
+		} finally {
+			await link.close();
+			await host.dispose();
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("returns a cached modern link's original rejection, then uses legacy without replaying the call", async () => {
+		const error = {
+			code: -32022,
+			message: "Please initialize a legacy session",
+			data: { requested: MCP_PROTOCOL_VERSION, supported: [MCP_LEGACY_PROTOCOL_VERSION] },
+		};
+		const backgroundDiscover = Promise.withResolvers<void>();
+		const { url, seen } = serveLegacy(async ({ body, headers }) => {
+			if (body.method === "server/discover") backgroundDiscover.resolve();
+			if (body.method === "tools/list") return json(body.id, { tools: [{ name: "echo" }] });
+			if (body.method === "tools/call" && headers.get("Mcp-Protocol-Version") === MCP_LEGACY_PROTOCOL_VERSION) {
+				return json(body.id, { content: [{ type: "text", text: "legacy" }] });
+			}
+			if (body.method === "tools/call") await backgroundDiscover.promise;
+			return rpcError(400, body.id, error.code, error.message, error.data);
+		});
+		const spec = httpSpec(url);
+		const store = McpStore.memory();
+		store.setEra(mcpPublicIdentity(spec), "modern");
+		const host = new LocalMcpHost({ store, upstreams: mcpUpstreams });
+		const link = hostLink(host, spec);
+		const next = hostLink(host, spec, "second");
+		const call = (target: HostLink, message: string) =>
+			target.request("tools/call", { name: "echo", arguments: { message } });
+		try {
+			await link.connect();
+			expect(seen).toHaveLength(0);
+			await expect(call(link, "failed call")).rejects.toMatchObject({ rpc: error });
+			expect(await call(link, "next call")).toMatchObject({ content: [{ text: "legacy" }] });
+			await next.connect();
+			expect(await call(next, "new link")).toMatchObject({ content: [{ text: "legacy" }] });
+
+			const calls = seen.filter(entry => entry.body.method === "tools/call");
+			expect(calls.map(entry => paramsOf(entry).arguments)).toEqual([
+				{ message: "failed call" },
+				{ message: "next call" },
+				{ message: "new link" },
+			]);
+			expect(seen.filter(entry => entry.body.method === "server/discover")).toHaveLength(2);
+			expect(seen.filter(entry => entry.body.method === "initialize")).toHaveLength(3);
+		} finally {
+			await link.close();
+			await next.close();
+			await host.dispose();
+		}
+	});
+
+	it.each(["remains modern", "fails"] as const)("keeps the original attachment when a re-probe %s", async outcome => {
+		const error = { code: -32022, message: "Original failure", data: { supported: ["2027-01-01"] } };
+		const backgroundDiscover = Promise.withResolvers<void>();
+		let discoveries = 0;
+		const { url, seen } = serve(async ({ body }) => {
+			if (body.method === "ping") {
+				await backgroundDiscover.promise;
+				return rpcError(400, body.id, error.code, error.message, error.data);
+			}
+			if (body.method === "server/discover" && ++discoveries === 1) {
+				backgroundDiscover.resolve();
+				return json(body.id, { supportedVersions: [MCP_PROTOCOL_VERSION], capabilities: {} });
+			}
+			return outcome === "fails"
+				? new Response(null, { status: 500 })
+				: rpcError(400, body.id, -32022, "Probe rejected", error.data);
+		});
+		const spec = httpSpec(url);
+		const store = McpStore.memory();
+		store.setEra(mcpPublicIdentity(spec), "modern");
+		const host = new LocalMcpHost({ store, upstreams: mcpUpstreams });
+		const link = hostLink(host, spec);
+		let reattachments = 0;
+		link.onReattach = () => {
+			reattachments++;
+		};
+		try {
+			await link.connect();
+			await expect(link.request("ping")).rejects.toMatchObject({ rpc: error });
+			expect(seen.map(entry => entry.body.method).sort()).toEqual(["ping", "server/discover", "server/discover"]);
+			expect(link.connected).toBe(true);
+			expect(reattachments).toBe(0);
+		} finally {
+			await link.close();
+			await host.dispose();
+		}
 	});
 });
 

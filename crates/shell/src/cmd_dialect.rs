@@ -130,6 +130,11 @@ impl Program {
 	}
 }
 
+/// Whether Windows ships an incompatible program under this extra's name.
+pub(crate) fn shadows_windows_program(name: &[u8]) -> bool {
+	PROGRAMS.iter().any(|program| program.name.as_bytes() == name)
+}
+
 /// Whether `args` (the arguments after the command name) are written for the
 /// Windows program `name` shadows: see the module documentation.
 pub fn speaks_shadowed_program(name: &[u8], args: &[impl AsRef<[u8]>]) -> bool {

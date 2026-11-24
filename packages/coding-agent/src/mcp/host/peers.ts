@@ -9,6 +9,7 @@ import type { ManagedChild, ManagedChildState } from "../../daemon/module";
 import { type MCPTransportKind, MCPTransportError, normalizeMCPTransportError } from "../errors";
 import {
 	isModernErrorCode,
+	MCP_LEGACY_PROTOCOL_VERSION,
 	MCP_PROTOCOL_VERSION,
 	MCP_SUBSCRIPTION_ACKNOWLEDGED,
 	type MCPDiscoverResult,
@@ -125,11 +126,12 @@ function legacyDiscover(session: MCPInitializeResult): MCPDiscoverResult {
 
 function discoverResultOf(value: unknown): MCPDiscoverResult | undefined {
 	if (!isRecord(value) || !Array.isArray(value.supportedVersions) || !isRecord(value.capabilities)) return undefined;
-	return {
-		...value,
-		supportedVersions: value.supportedVersions.filter((version): version is string => typeof version === "string"),
-		capabilities: value.capabilities,
-	};
+	const supportedVersions = value.supportedVersions.filter(
+		(version): version is string => typeof version === "string",
+	);
+	// A server that does not speak this revision is handshake-era, whatever else its discover answer says.
+	if (!supportedVersions.includes(MCP_PROTOCOL_VERSION)) return undefined;
+	return { ...value, supportedVersions, capabilities: value.capabilities };
 }
 
 /** The server requests a handshake-era upstream may send: liveness and the session's roots. */
@@ -866,9 +868,26 @@ function outcomeOf(request: Promise<unknown>): Promise<Outcome> {
 	);
 }
 
-/** Whether a failed `server/discover` proves a modern server: only one answers with a 2026-07-28 error. */
-function isModernError(error: unknown): boolean {
-	return error instanceof MCPTransportError && error.rpc !== undefined && isModernErrorCode(error.rpc.code);
+const LEGACY_PROTOCOL_VERSIONS = new Set([MCP_LEGACY_PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"]);
+
+/**
+ * The era a failed `server/discover` names by itself: `modern` for an error
+ * only a 2026-07-28 server emits, `legacy` when the server rejects this
+ * revision while listing a handshake-era one it does speak. Undefined when the
+ * failure says nothing either way.
+ */
+function eraOfDiscoverError(error: unknown): McpEra | undefined {
+	if (!(error instanceof MCPTransportError) || error.rpc === undefined) return undefined;
+	if (error.rpc.code !== MCPErrorCode.UnsupportedProtocolVersion) {
+		return isModernErrorCode(error.rpc.code) ? "modern" : undefined;
+	}
+	// Only an explicit compatible revision warrants trying the legacy handshake.
+	const supported = isRecord(error.rpc.data) ? error.rpc.data.supported : undefined;
+	const handshake =
+		Array.isArray(supported) &&
+		supported.every(version => typeof version === "string") &&
+		supported.some(version => LEGACY_PROTOCOL_VERSIONS.has(version));
+	return handshake ? "legacy" : "modern";
 }
 
 /**
@@ -892,7 +911,7 @@ async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: Ab
 	]);
 	if (discovered) {
 		if ("error" in discovered) {
-			if (isModernError(discovered.error)) return { era: "modern" };
+			if (eraOfDiscoverError(discovered.error) === "modern") return { era: "modern" };
 		} else {
 			const result = discoverResultOf(discovered.value);
 			if (result) return { era: "modern", discover: result };
@@ -920,14 +939,19 @@ async function probeHttp(spec: McpServerSpec, deps: McpPeerDeps, signal: AbortSi
 		const result = discoverResultOf(await modern.request("server/discover", { _meta: requestMeta() }, { signal }));
 		if (result) return { era: "modern", discover: result };
 	} catch (error) {
-		if (isModernError(error)) return { era: "modern" };
+		const era = eraOfDiscoverError(error);
+		if (era === "modern") return { era };
 		// Anything but a server's own answer or one of the statuses a
 		// handshake-era endpoint gives an unknown POST is the caller's to see:
 		// an auth challenge, an outage.
 		if (!(error instanceof MCPTransportError)) throw error;
-		const status = httpStatusOf(error);
-		const refused = status === undefined ? error.failure === "json_rpc" : Object.hasOwn(LEGACY_HTTP_STATUS, status);
-		if (!refused) throw error;
+		// A server that lists a handshake-era revision asked for the handshake, whatever status carried that.
+		if (era !== "legacy") {
+			const status = httpStatusOf(error);
+			const refused =
+				status === undefined ? error.failure === "json_rpc" : Object.hasOwn(LEGACY_HTTP_STATUS, status);
+			if (!refused) throw error;
+		}
 	} finally {
 		await modern.close();
 	}

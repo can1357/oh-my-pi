@@ -52,8 +52,10 @@ import {
 	modelsDevCatalogFallback,
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
+	piNativeModelManagerOptions,
 	resolveModelCacheProviderId,
 	resolveOllamaModelCacheProviderId,
+	resolvePiNativeModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { withThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability";
@@ -434,6 +436,8 @@ function selectProviderModels<T extends { provider: string }>(models: T[], provi
  */
 export interface ModelRegistryRefreshOptions {
 	refreshCommandCredentials?: boolean;
+	/** Keep the cooldowns {@link ModelRegistry.suppressSelector} recorded instead of clearing them. */
+	keepSuppressedSelectors?: boolean;
 }
 
 /** Authentication material returned to legacy extensions for one model request. */
@@ -519,6 +523,8 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	/** When the last catalog refresh that may reach the network started; undefined until one runs. */
+	#lastOnlineRefreshAt?: number;
 	#discoveryRetry?: Promise<void>;
 	#lastDiscoveryRetryAt = Number.NEGATIVE_INFINITY;
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
@@ -1012,7 +1018,8 @@ export class ModelRegistry {
 		// network for catalogs" — the unscoped model hub opens with that strategy
 		// as a background reconcile, and must not spawn `!command` helpers.
 		this.#reloadStaticModelsForRefresh(options);
-		this.#suppressedSelectors.clear();
+		if (!options?.keepSuppressedSelectors) this.#suppressedSelectors.clear();
+		if (strategy !== "offline") this.#lastOnlineRefreshAt = Date.now();
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
 
@@ -1072,6 +1079,10 @@ export class ModelRegistry {
 			this.#owner.refreshInBackground(strategy);
 			return;
 		}
+		this.#startBackgroundRefresh(strategy);
+	}
+
+	#startBackgroundRefresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): void {
 		if (this.#backgroundRefresh) {
 			return;
 		}
@@ -1079,7 +1090,7 @@ export class ModelRegistry {
 		// discovery states. Start it on a microtask so a caller can validate
 		// against the hydrated startup catalog right after kicking the refresh off.
 		const refreshPromise = Promise.resolve()
-			.then(() => this.refresh(strategy))
+			.then(() => this.refresh(strategy, options))
 			.catch(error => {
 				logger.warn("background model refresh failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1125,16 +1136,32 @@ export class ModelRegistry {
 
 	/**
 	 * Catch the catalog up for a view that just read it, rebuilding only when it
-	 * is actually stale: waits out an in-flight background refresh, then runs an
-	 * offline {@link refresh} if models.yml changed on disk since the last load.
-	 * Resolves `true` when either may have changed the catalog (the view should
-	 * re-read it), `false` without any rebuild when the in-memory catalog is
-	 * already current. Rejects when the offline rebuild fails.
+	 * is actually stale: waits out an in-flight background refresh, then
+	 * re-runs discovery once the last online refresh is older than the
+	 * built-in discovery cache TTL (keeping {@link suppressSelector}
+	 * cooldowns; providers on a longer TTL replay rows another process
+	 * refreshed), or runs an offline {@link refresh} if models.yml
+	 * changed on disk since the last load. A registry that never refreshed
+	 * online stays offline. Resolves `true` when any of these may have changed
+	 * the catalog (the view should re-read it), `false` without any rebuild
+	 * when the in-memory catalog is already current. Rejects when the offline
+	 * rebuild fails.
 	 */
 	async refreshIfStale(): Promise<boolean> {
 		if (this.#owner) return this.#owner.refreshIfStale();
 		let changed = false;
 		if (this.#backgroundRefresh) {
+			await this.#backgroundRefresh;
+			changed = true;
+		}
+		if (
+			this.#lastOnlineRefreshAt !== undefined &&
+			Date.now() - this.#lastOnlineRefreshAt >= BUILT_IN_DISCOVERY_CACHE_TTL_MS
+		) {
+			// Providers whose cache is still fresh (another process refreshed them)
+			// replay it; only expired ones fetch. Opening a picker lifts no
+			// retry-fallback cooldown.
+			this.#startBackgroundRefresh("online-if-uncached", { keepSuppressedSelectors: true });
 			await this.#backgroundRefresh;
 			changed = true;
 		}
@@ -1928,11 +1955,25 @@ export class ModelRegistry {
 	 * credential in; those load only through their model manager.
 	 */
 	#resolveStartupModelCacheProviderId(providerId: string): string {
+		const gateway = this.#piNativeGateway(providerId);
+		if (gateway) return resolvePiNativeModelCacheProviderId(providerId, gateway);
 		const baseUrl =
 			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
 			this.#providerOverrides.get(providerId)?.baseUrl ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
 		return resolveModelCacheProviderId(providerId, { baseUrl });
+	}
+
+	/**
+	 * The auth gateway `providerId` rides under `transport: "pi-native"`, with its
+	 * configured (unresolved) bearer; undefined for a provider called directly.
+	 */
+	#piNativeGateway(providerId: string): { baseUrl: string; apiKey?: string } | undefined {
+		const runtime = this.#runtimeProviderOverrides.get(providerId);
+		const config = this.#providerOverrides.get(providerId);
+		if ((runtime?.transport ?? config?.transport) !== "pi-native") return undefined;
+		const baseUrl = runtime?.baseUrl ?? config?.baseUrl;
+		return baseUrl ? { baseUrl, apiKey: runtime?.apiKey ?? config?.apiKey } : undefined;
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
@@ -2112,7 +2153,8 @@ export class ModelRegistry {
 				const models = loaded.modelsByProvider.get(providerId) ?? [];
 				if (
 					providersWithAuthoritativeProjectCatalog(models).has(providerId) ||
-					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(providerId)
+					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(providerId) ||
+					this.#piNativeGateway(providerId) !== undefined
 				) {
 					this.#cachedAuthoritativeProviders.add(providerId);
 				}
@@ -3261,6 +3303,27 @@ export class ModelRegistry {
 			options.push(this.#withRuntimeDiscovery(descriptor.createOptions(key, specialKeys[i]), key));
 		}
 
+		// A pi-native provider's roster is its gateway's: the gateway lists what it
+		// routes, including models it discovered that this install does not bundle.
+		for (const providerId of new Set([...this.#providerOverrides.keys(), ...this.#runtimeProviderOverrides.keys()])) {
+			const gateway = this.#piNativeGateway(providerId);
+			if (!gateway || disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) continue;
+			if ((providerFilter && !providerFilter.has(providerId)) || this.#runtimeModelManagers.has(providerId))
+				continue;
+			const cacheProviderId = resolvePiNativeModelCacheProviderId(providerId, gateway);
+			// The same bearer the provider's pi-native streams carry.
+			const apiKey = await this.#resolveBuiltInDiscoveryApiKey(providerId, strategy, cacheProviderId, true);
+			options.push(
+				piNativeModelManagerOptions({
+					providerId,
+					baseUrl: gateway.baseUrl,
+					apiKey: isAuthenticated(apiKey) ? apiKey : undefined,
+					cacheProviderId,
+					fetch: this.#fetch,
+				}),
+			);
+		}
+
 		// Catalog-only providers have no endpoint manager. Give their bundled
 		// slices the same shared remote layer without requiring credentials.
 		const bundledProviderIds: Record<string, true> = Object.create(null);
@@ -3268,9 +3331,7 @@ export class ModelRegistry {
 		for (const providerId of MODELS_DEV_CATALOG_PROVIDER_IDS) {
 			if (BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] === true) continue;
 			if (bundledProviderIds[providerId] !== true) continue;
-			if (disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) continue;
-			if (providerFilter && !providerFilter.has(providerId)) continue;
-			if (this.#runtimeModelManagers.has(providerId)) continue;
+			if (!discoverable(providerId) || this.#runtimeModelManagers.has(providerId)) continue;
 			const modelsDev = modelsDevCatalogFallback(providerId, this.#fetch);
 			if (!modelsDev) continue;
 			options.push({
@@ -3411,7 +3472,7 @@ export class ModelRegistry {
 		const providers = new Map(this.#discoverableProviders.map(config => [config.provider, config.discovery.type]));
 		return models.map(model => {
 			const providerType = providers.get(model.provider);
-			if (providerType === "litellm" && model.providerType !== providerType) {
+			if ((providerType === "litellm" || providerType === "openrouter") && model.providerType !== providerType) {
 				return buildDiscoveredModel(toModelSpec(model), providerType);
 			}
 			if (providerType !== "llama.cpp") return model;
@@ -4906,6 +4967,8 @@ export interface ProviderConfigInput {
 		snapcompactShape?: Model<Api>["snapcompactShape"];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
+		/** Optional larger window selected by the extended-context policy. */
+		maxContextWindow?: number;
 		maxTokens: number;
 		promptCache?: Model<Api>["promptCache"];
 		/** WebSocket preference within catalog policy; explicit false disables transport selection. */

@@ -10,7 +10,7 @@ function acpRuntime(
 		display?: string;
 		maxWidth?: number;
 		maxHeight?: number;
-		backgroundFallback?: "takeover" | "refuse";
+		takeover?: "fallback" | "foreground" | "always" | "refuse";
 	} = {},
 ) {
 	const settings = Settings.isolated({
@@ -18,7 +18,7 @@ function acpRuntime(
 		"computer.display": options.display ?? "active",
 		"computer.maxWidth": options.maxWidth ?? 1920,
 		"computer.maxHeight": options.maxHeight ?? 1200,
-		...(options.backgroundFallback ? { "computer.backgroundFallback": options.backgroundFallback } : {}),
+		...(options.takeover ? { "computer.takeover": options.takeover } : {}),
 	});
 	const getEvalPreludes = vi.fn(() =>
 		cfgComputerEnabled.get(settings) && options.available !== false ? [{ name: "computer" }] : [],
@@ -35,7 +35,7 @@ function acpRuntime(
 }
 
 const enabledStatus =
-	"Computer use: enabled · prelude: active · configured: display=active, maxWidth=1920, maxHeight=1200, backgroundFallback=takeover";
+	"Computer use: enabled · prelude: active · configured: display=active, maxWidth=1920, maxHeight=1200, takeover=fallback";
 
 describe("/computer slash command", () => {
 	it("toggles a disabled session on without persisting", async () => {
@@ -78,11 +78,11 @@ describe("/computer slash command", () => {
 			display: "display-2",
 			maxWidth: 1600,
 			maxHeight: 900,
-			backgroundFallback: "refuse",
+			takeover: "refuse",
 		});
 		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer status", h.runtime]);
 		expect(h.output).toHaveBeenCalledWith(
-			"Computer use: enabled · prelude: active · configured: display=display-2, maxWidth=1600, maxHeight=900, backgroundFallback=refuse",
+			"Computer use: enabled · prelude: active · configured: display=display-2, maxWidth=1600, maxHeight=900, takeover=refuse",
 		);
 	});
 

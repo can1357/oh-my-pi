@@ -31,6 +31,7 @@ const compat: ResolvedOpenAICompat = {
 	requiresToolResultName: false,
 	requiresAssistantAfterToolResult: false,
 	foldUserAfterToolResult: false,
+	splitToolCalls: false,
 	requiresThinkingAsText: false,
 	requiresMistralToolIds: false,
 	thinkingFormat: "openai",

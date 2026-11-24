@@ -1165,6 +1165,8 @@ pub mod options {
 	pub static INDICATOR_STYLE: &str = "indicator-style";
 	pub static TIME_STYLE: &str = "time-style";
 	pub static FULL_TIME: &str = "full-time";
+	#[cfg(target_os = "macos")]
+	pub static BSD_FULL_TIME: &str = "T";
 	pub static HIDE: &str = "hide";
 	pub static IGNORE: &str = "ignore";
 	pub static CONTEXT: &str = "context";
@@ -1692,28 +1694,12 @@ fn parse_width(width_match: Option<&String>, host: &Host, runtime: &LsRuntime) -
 	};
 
 	let calculate_term_size = || {
-		#[cfg(unix)]
-		{
-			use std::os::fd::AsRawFd;
-			if let Ok(fd) = host.stdout.try_borrow_as_fd() {
-				let mut size = uucore::libc::winsize {
-					ws_row: 0,
-					ws_col: 0,
-					ws_xpixel: 0,
-					ws_ypixel: 0,
-				};
-				// SAFETY: `size` is valid for writes and `fd` remains borrowed
-				// for the duration of the ioctl.
-				if unsafe {
-					uucore::libc::ioctl(fd.as_raw_fd(), uucore::libc::TIOCGWINSZ, &mut size)
-				} == 0
-					&& size.ws_col > 0
-				{
-					return size.ws_col;
-				}
-			}
-		}
-		DEFAULT_TERM_WIDTH
+		host
+			.stdout
+			.window_size()
+			.map(|(columns, _)| columns)
+			.filter(|&columns| columns > 0)
+			.unwrap_or(DEFAULT_TERM_WIDTH)
 	};
 
 	let ret = match width_match {
@@ -2112,6 +2098,19 @@ fn parse_time_style(
 	// TODO: Using correct locale string is not implemented.
 	const LOCALE_FORMAT: (&str, Option<&str>) = ("%b %e %H:%M", Some("%b %e  %Y"));
 
+	// Explicit timestamp options override TIME_STYLE; among them, the last wins.
+	let full_iso = options.index_of(options::FULL_TIME).filter(|_| options.get_flag(options::FULL_TIME));
+	let time_style = options.index_of(options::TIME_STYLE);
+	#[cfg(target_os = "macos")]
+	if options.get_flag(options::BSD_FULL_TIME)
+		&& options.index_of(options::BSD_FULL_TIME) > full_iso.max(time_style)
+	{
+		return ok(("%b %e %H:%M:%S %Y", None));
+	}
+	if full_iso > time_style {
+		return ok((format::FULL_ISO, None));
+	}
+
 	// Convert time_styles references to owned String/option.
 	#[expect(clippy::unnecessary_wraps, reason = "internal result helper")]
 	fn ok((recent, older): (&str, Option<&str>)) -> Result<(String, Option<String>), LsError> {
@@ -2123,51 +2122,39 @@ fn parse_time_style(
 		.map(Cow::from)
 		.or_else(|| host.var("TIME_STYLE").map(Cow::from))
 	{
-		//If both FULL_TIME and TIME_STYLE are present
-		//The one added last is dominant
-		if options.get_flag(options::FULL_TIME)
-			&& options.indices_of(options::FULL_TIME).unwrap().next_back()
-				> options.indices_of(options::TIME_STYLE).unwrap().next_back()
-		{
-			ok((format::FULL_ISO, None))
-		} else {
-			let field = if let Some(field) = field.strip_prefix("posix-") {
-				// See GNU documentation, set format to "locale" if LC_TIME="POSIX",
-				// else just strip the prefix and continue (even "posix+FORMAT" is
-				// supported).
-				// TODO: This needs to be moved to uucore and handled by icu?
-				if host.var("LC_TIME") == Some("POSIX") || host.var("LC_ALL") == Some("POSIX")
-				{
-					return ok(LOCALE_FORMAT);
-				}
-				field
-			} else {
-				&field
-			};
-
-			match field {
-				"full-iso" => ok((format::FULL_ISO, None)),
-				"long-iso" => ok((format::LONG_ISO, None)),
-				// ISO older format needs extra padding.
-				"iso" => Ok(("%m-%d %H:%M".to_string(), Some(format::ISO.to_string() + " "))),
-				"locale" => ok(LOCALE_FORMAT),
-				_ => match field.chars().next().unwrap() {
-					'+' => {
-						// recent/older formats are (optionally) separated by a newline
-						let mut it = field[1..].split('\n');
-						let recent = it.next().unwrap_or_default();
-						let older = it.next();
-						match it.next() {
-							None => ok((recent, older)),
-							Some(_) => Err(LsError::TimeStyleParseError(String::from(field))),
-						}
-					},
-					_ => Err(LsError::TimeStyleParseError(String::from(field))),
-				},
+		let field = if let Some(field) = field.strip_prefix("posix-") {
+			// See GNU documentation, set format to "locale" if LC_TIME="POSIX",
+			// else just strip the prefix and continue (even "posix+FORMAT" is
+			// supported).
+			// TODO: This needs to be moved to uucore and handled by icu?
+			if host.var("LC_TIME") == Some("POSIX") || host.var("LC_ALL") == Some("POSIX") {
+				return ok(LOCALE_FORMAT);
 			}
+			field
+		} else {
+			&field
+		};
+
+		match field {
+			"full-iso" => ok((format::FULL_ISO, None)),
+			"long-iso" => ok((format::LONG_ISO, None)),
+			// ISO older format needs extra padding.
+			"iso" => Ok(("%m-%d %H:%M".to_string(), Some(format::ISO.to_string() + " "))),
+			"locale" => ok(LOCALE_FORMAT),
+			_ => match field.chars().next().unwrap() {
+				'+' => {
+					// recent/older formats are (optionally) separated by a newline
+					let mut it = field[1..].split('\n');
+					let recent = it.next().unwrap_or_default();
+					let older = it.next();
+					match it.next() {
+						None => ok((recent, older)),
+						Some(_) => Err(LsError::TimeStyleParseError(String::from(field))),
+					}
+				},
+				_ => Err(LsError::TimeStyleParseError(String::from(field))),
+			},
 		}
-	} else if options.get_flag(options::FULL_TIME) {
-		ok((format::FULL_ISO, None))
 	} else {
 		ok(LOCALE_FORMAT)
 	}
@@ -4212,6 +4199,13 @@ impl Utility for Ls {
 
 
 pub fn uu_app() -> Command {
+	let tab_size = Arg::new(options::format::TAB_SIZE)
+		.long(options::format::TAB_SIZE)
+		.value_name("COLS")
+		.help("Assume tab stops at each COLS instead of 8");
+	#[cfg(not(target_os = "macos"))]
+	let tab_size = tab_size.short('T');
+
 	let command = Command::new("ls")
 		.version("0.8.0")
 		.override_usage(format_usage("ls [OPTION]... [FILE]..."))
@@ -4294,13 +4288,7 @@ pub fn uu_app() -> Command {
 				])
 				.action(ArgAction::SetTrue),
 		)
-		.arg(
-			Arg::new(options::format::TAB_SIZE)
-				.short('T')
-				.long(options::format::TAB_SIZE)
-				.value_name("COLS")
-				.help("Assume tab stops at each COLS instead of 8"),
-		)
+		.arg(tab_size)
 		.arg(
 			Arg::new(options::format::COMMAS)
 				.short('m')
@@ -4937,6 +4925,15 @@ pub fn uu_app() -> Command {
 			 interpreted like in date. Also the TIME_STYLE environment variable sets the default \
 			 style to use.",
 		);
+	#[cfg(target_os = "macos")]
+	let command = command.arg(
+		Arg::new(options::BSD_FULL_TIME)
+			.short('T')
+			.help("In long format, show the full local date and time, including seconds and year.")
+			.overrides_with(options::BSD_FULL_TIME)
+			.action(ArgAction::SetTrue),
+	);
+
 	// `-O` needs `st_flags` in `stat`; where a target has none the option stays
 	// unknown to clap, as it is to GNU `ls`.
 	if file_flags::SUPPORTED {
@@ -5720,8 +5717,9 @@ mod integration_tests {
 		std::fs::create_dir(dir.path().join("target")).unwrap();
 
 		for (args, size) in [
+			#[cfg(not(target_os = "macos"))]
 			(&["-laT", "target"][..], "target"),
-			(&["--color=always", "-T", "target"], "target"),
+			(&["--color=always", "--tabsize", "target"][..], "target"),
 			(&["--tabsize=-1"], "-1"),
 			(&["--tabsize=18446744073709551616"], "18446744073709551616"),
 		] {
@@ -5740,8 +5738,9 @@ mod integration_tests {
 		File::create(dir.path().join("target/TARGET_ONLY")).unwrap();
 
 		for args in [
+			#[cfg(not(target_os = "macos"))]
 			&["-T", "4", "target"][..],
-			&["--tabsize=4", "target"],
+			&["--tabsize=4", "target"][..],
 			&["--tabsize=0", "target"],
 		] {
 			let (code, capture) = run_util::<Ls>(args, "", dir.path());
@@ -5784,7 +5783,7 @@ mod integration_tests {
 			("+999999999999999999999999999999999999", "aa  bb  cc\n"),
 		] {
 			let (code, capture) =
-				run_util::<Ls>(&["-x", "-T0", "-w", width], "", dir.path());
+				run_util::<Ls>(&["-x", "--tabsize=0", "-w", width], "", dir.path());
 			assert_eq!(code, 0, "{width}: {}", capture.err());
 			assert_eq!(capture.out(), expected, "{width}");
 			assert!(capture.err().is_empty(), "{width}: {}", capture.err());
@@ -5816,6 +5815,33 @@ mod integration_tests {
 		let ls = Ls::try_parse_from(["ls"]).unwrap();
 		assert_eq!(ls.run(&mut host), 0);
 		assert!(capture.err().contains("Ignoring invalid value of environment variable"));
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn bsd_complete_timestamp_does_not_consume_its_operand_or_imply_long_format() {
+		let dir = tempfile::tempdir().unwrap();
+		let file = File::create(dir.path().join("f")).unwrap();
+		file.set_times(FileTimes::new().set_modified(UNIX_EPOCH + std::time::Duration::from_secs(93_784)))
+			.unwrap();
+		for (args, suffix) in [
+			(&["ls", "-lT", "f"][..], "Jan  2 02:03:04 1970 f\n"),
+			(&["ls", "-lT", "--time-style=long-iso", "f"], "1970-01-02 02:03 f\n"),
+			(&["ls", "--full-time", "-T", "f"], "Jan  2 02:03:04 1970 f\n"),
+			(&["ls", "-T", "f"], "f\n"),
+		] {
+			let (mut host, capture) = Host::for_test("ls", "", dir.path());
+			host.set_test_var("TZ", "UTC");
+			host.set_test_var("TIME_STYLE", "iso");
+			let ls = Ls::try_parse_from(args).unwrap();
+			assert_eq!(ls.run(&mut host), 0, "{args:?}: {}", capture.err());
+			let out = capture.out();
+			if args[1..] == ["-T", "f"] {
+				assert_eq!(out, suffix);
+			} else {
+				assert!(out.ends_with(suffix), "{args:?}: {out}");
+			}
+		}
 	}
 
 	#[test]

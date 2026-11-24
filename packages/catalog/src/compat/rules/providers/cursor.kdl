@@ -747,8 +747,8 @@ provider "cursor" {
 		}
 	}
 	// GPT-5.6 Luna: $0.20/$1.20, cache $0.02/$0.25. Long context (>272k)
-	// bills 2x input pricing; output stays at the base rate per the docs
-	// wording, while cache rates double with input.
+	// bills 2x input and cache rates and 1.5x output per each model's docs
+	// page; the same tier applies to every GPT-5.6 card below.
 	models "gpt-5.6-luna" {
 		cost-patch {
 			input 0.2
@@ -759,7 +759,7 @@ provider "cursor" {
 		long-context-cost {
 			input-threshold 272000
 			input 0.4
-			output 1.2
+			output 1.8
 			cache-read 0.04
 			cache-write 0.5
 		}
@@ -775,7 +775,7 @@ provider "cursor" {
 		long-context-cost {
 			input-threshold 272000
 			input 0.8
-			output 2.4
+			output 3.6
 			cache-read 0.08
 			cache-write 1.0
 		}
@@ -792,7 +792,7 @@ provider "cursor" {
 		long-context-cost {
 			input-threshold 272000
 			input 8.0
-			output 20.0
+			output 30.0
 			cache-read 0.8
 			cache-write 10.0
 		}
@@ -808,7 +808,7 @@ provider "cursor" {
 		long-context-cost {
 			input-threshold 272000
 			input 16.0
-			output 40.0
+			output 60.0
 			cache-read 1.6
 			cache-write 20.0
 		}
@@ -824,7 +824,7 @@ provider "cursor" {
 		long-context-cost {
 			input-threshold 272000
 			input 4.0
-			output 12.0
+			output 18.0
 			cache-read 0.4
 			cache-write 5.0
 		}
@@ -840,7 +840,7 @@ provider "cursor" {
 		long-context-cost {
 			input-threshold 272000
 			input 8.0
-			output 24.0
+			output 36.0
 			cache-read 0.8
 			cache-write 10.0
 		}
