@@ -272,6 +272,35 @@ describe("inline", () => {
 		expect(cells[text.indexOf(" (")]!.link).toBe("");
 	});
 
+	it("draws a labeled http(s) link's label alone when the terminal was detected to draw OSC 8", () => {
+		const rows = renderMarkdown("PR [#10](https://e.com/pull/10) is ready", 80, {
+			theme,
+			hyperlinks: true,
+			hyperlinksDetected: true,
+		});
+		const text = plainRows(rows)[0]!;
+		expect(text).toBe("PR #10 is ready");
+		expect(cellGrid(rows)[0]![text.indexOf("#10")]!.link).toBe("https://e.com/pull/10");
+	});
+
+	it("keeps a labeled link's URL when OSC 8 is forced rather than detected, or off", () => {
+		const source = "PR [#10](https://e.com/pull/10) is ready";
+		const expected = ["PR #10 (https://e.com/pull/10) is ready"];
+		expect(plain(source, 80, { hyperlinks: true })).toEqual(expected);
+		expect(plain(source, 80, { hyperlinksDetected: true })).toEqual(expected);
+	});
+
+	it("keeps the written href of resolved and non-web links when the terminal draws OSC 8", () => {
+		const detected = { hyperlinks: true, hyperlinksDetected: true } as const;
+		expect(
+			plain("see [x](./a.ts)", 40, {
+				...detected,
+				linkTarget: href => (href === "./a.ts" ? "file:///abs/a.ts" : undefined),
+			}),
+		).toEqual(["see x (./a.ts)"]);
+		expect(plain("see [x](artifact://42)", 40, detected)).toEqual(["see x (artifact://42)"]);
+	});
+
 	it("links through a resolved target while showing the written href", () => {
 		const rows = renderMarkdown("see [x](./a.ts)", 40, {
 			theme,

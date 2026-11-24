@@ -72,6 +72,8 @@ export interface TermBackendOptions {
 	readonly frameInterval?: Reactive<number>;
 	/** Force OSC 8 hyperlinks on or off; undefined follows the terminal's capability. */
 	readonly hyperlinks?: Accessor<boolean | undefined>;
+	/** The environment forced OSC 8 on (`PI_FORCE_HYPERLINKS=1`): the capability is then no evidence the terminal draws it. */
+	readonly hyperlinksForced?: boolean;
 	/** Allow OSC 66 sized text (Markdown H1) where the terminal draws it. Default: never. */
 	readonly textSizing?: Accessor<boolean>;
 	/**
@@ -352,6 +354,8 @@ export class TermBackend {
 		const hyperlinks: Accessor<boolean> = options.hyperlinks
 			? () => options.hyperlinks!() ?? terminalHyperlinks()
 			: terminalHyperlinks;
+		const hyperlinksDetected: Accessor<boolean> = () =>
+			options.hyperlinksForced !== true && options.hyperlinks?.() === undefined && terminalHyperlinks();
 		this.#unsettled = createRoot(() =>
 			computed(() => {
 				const main = options.surface.main();
@@ -374,6 +378,7 @@ export class TermBackend {
 			reduceMotion: this.#reduceMotion,
 			hover: this.#hover,
 			hyperlinks,
+			hyperlinksDetected,
 			...(allowTextSizing ? { textSizing: () => allowTextSizing() && terminalTextSizing() } : {}),
 			...(options.images ? { images: options.images } : {}),
 		};

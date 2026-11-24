@@ -100,6 +100,7 @@ function proseRows(
 		textStyle: props.tone ?? (cx.theme.has("assistantMessageText") ? "assistantMessageText" : undefined),
 		stream: props.stream === true,
 		hyperlinks: cx.hyperlinks,
+		hyperlinksDetected: cx.hyperlinksDetected,
 		linkTarget: links && links.size > 0 ? href => links.get(href) : undefined,
 		linkSchemes: schemes.length > 0 ? schemes : undefined,
 	});
@@ -124,6 +125,7 @@ function thinkingRows(section: UiNode, cx: PaintContext): { rows: readonly strin
 		textStyle: "thinkingText em",
 		stream: props.stream === true,
 		hyperlinks: cx.hyperlinks,
+		hyperlinksDetected: cx.hyperlinksDetected,
 	});
 }
 

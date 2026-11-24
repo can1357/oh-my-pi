@@ -428,6 +428,28 @@ describe("TermBackend main surface", () => {
 		backend.stop();
 	});
 
+	it("hides a labeled link's URL only when the terminal's own capability turned OSC 8 on", () => {
+		const shown = (options: { override?: boolean; forced?: boolean }) => {
+			const driver = new FakeDriver();
+			driver.capabilities = { ...CAPABILITIES, hyperlinks: true };
+			const surface = createSurface(() => ({ main: <md text="see [docs](https://example.com)" /> }));
+			const backend = new TermBackend({
+				surface,
+				driver,
+				theme: () => PLAIN_THEME,
+				hyperlinks: signal<boolean | undefined>(options.override),
+				...(options.forced ? { hyperlinksForced: true } : {}),
+			});
+			backend.start();
+			const urlShown = driver.frames.at(-1)!.viewport.some(row => stripEscapes(row).includes("(https://"));
+			backend.stop();
+			return urlShown;
+		};
+		expect(shown({})).toBe(false);
+		expect(shown({ override: true })).toBe(true);
+		expect(shown({ forced: true })).toBe(true);
+	});
+
 	it("applies a frame-rate cap changed at runtime", async () => {
 		const driver = new FakeDriver();
 		const interval = signal(10_000);
