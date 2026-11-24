@@ -639,7 +639,7 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 				current: session.path === props.currentSessionPath,
 				pinned: pins().has(session.id),
 				status: session.status,
-				model: session.model ? replaceTabs(session.model) : "",
+				model: session.model ?? "",
 				fork: session.parentSessionPath !== undefined,
 				// Folders show only across folders (all projects, worktrees) or when asked.
 				cwd: cwd && session.cwd ? shortenPath(session.cwd) : "",

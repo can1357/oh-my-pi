@@ -206,7 +206,10 @@ function deriveSessionTail(suffix: string): SessionTail {
 			statusFound = true;
 		}
 		if (tail.model === undefined && message.role === "assistant" && message.provider && message.model) {
-			tail.model = `${message.provider}/${message.model}`;
+			// Transcript text: it reaches the terminal row, the Tern column and the
+			// search haystack, so control characters are stripped here, once.
+			const model = sanitizeSessionName(`${message.provider}/${message.model}`);
+			if (model) tail.model = model;
 		}
 		if (statusFound && tail.model !== undefined) break;
 	}
@@ -1014,7 +1017,7 @@ async function lastActivity(session: SessionInfo, storage: SessionStorage): Prom
 		let reachedHeader = false;
 		for (let i = lines.length - 1; i >= 0 && !reachedHeader; i--) {
 			const line = lines[i];
-			// Same cheap rejection as deriveSessionStatus: blank lines and the leading partial fragment.
+			// Same cheap rejection as deriveSessionTail: blank lines and the leading partial fragment.
 			if (line.charCodeAt(0) !== 123) continue;
 			let entry: {
 				type?: unknown;

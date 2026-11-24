@@ -34,7 +34,7 @@ describe("session listing model", () => {
 				JSON.stringify({ type: "message", message: { role: "user", content: "go on" } }),
 			],
 		]);
-		// Without a provider on a reply there is nothing to name.
+		// A regression names the later model_change entry's model, or none, for a session waiting on the user.
 		expect(sessions.pending).toMatchObject({ model: "anthropic/claude-sonnet-4-5", status: "pending" });
 	});
 
@@ -57,5 +57,14 @@ describe("session listing model", () => {
 		// A regression shows a session's first model, or a model for a 0-turn stub, in `/resume`.
 		expect(sessions.switched).toMatchObject({ model: "openai/gpt-5.2", status: "error" });
 		expect(sessions.unanswered).not.toHaveProperty("model");
+	});
+
+	it("strips control characters from the model before it reaches the picker", async () => {
+		const sessions = await scan([
+			"crafted",
+			[header("crafted"), assistant("acme", "model\x1b[31mred\x1b[0m\tevil\x07")],
+		]);
+		// A regression lets a session file recolour the terminal row or set the window title.
+		expect(sessions.crafted).toMatchObject({ model: "acme/model[31mred[0mevil" });
 	});
 });
