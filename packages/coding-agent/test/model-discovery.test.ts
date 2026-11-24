@@ -2774,6 +2774,38 @@ describe("ModelRegistry runtime discovery", () => {
 			.find(m => m.provider === "openai-test" && m.id === "openai-test/no-context-model");
 		expect(fallback?.contextWindow).toBe(128000);
 	});
+	test("openai-models-list discovery reads the endpoint's min_prompt_price and min_completion_price as cost", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "openai-test/priced-model", min_prompt_price: 0.05, min_completion_price: 0.25 },
+							{ id: "openai-test/free-model", min_prompt_price: 0, min_completion_price: 0 },
+							{ id: "openai-test/unpriced-model" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const find = (id: string) => registry.getAll().find(m => m.provider === "openai-test" && m.id === id);
+		expect(find("openai-test/priced-model")?.cost).toEqual({ input: 0.05, output: 0.25, cacheRead: 0, cacheWrite: 0 });
+		expect(find("openai-test/free-model")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(find("openai-test/unpriced-model")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
 	test("openai-models-list uses top_provider.max_completion_tokens over the bundled reference", async () => {
 		writeRawModelsJson({
 			"openai-test": {
