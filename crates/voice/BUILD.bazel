@@ -11,6 +11,7 @@ exports_files(["Cargo.toml"])
 # the voice stack's monomorphization.
 rust_library(
     name = "voice",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     crate_name = "omp_voice",

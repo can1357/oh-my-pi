@@ -267,6 +267,21 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 			expect(await Bun.file(targetPath).text()).toBe("shared addon");
 		});
 
+		it("uses an addon already extracted into a version directory it cannot touch, and fails only when extraction is needed", async () => {
+			// Read-only natives dir (container image, immutable system) pre-provisioned with this build's addon.
+			testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-readonly-"));
+			const present = await embeddedFile("modern", "pi_natives.linux-x64-modern.node", "f00d", "provisioned addon");
+			const missing = await embeddedFile("baseline", "pi_natives.linux-x64-baseline.node", "beef", "baseline addon");
+			extractEmbeddedAddons({ files: [present], targetDir: testDir });
+			spyOn(nodeFs, "utimesSync").mockImplementation(() => {
+				throw Object.assign(new Error(`EROFS: read-only file system, utime '${testDir}'`), { code: "EROFS" });
+			});
+
+			expect(extractEmbeddedAddons({ files: [present], targetDir: testDir })).toEqual([]);
+			expect(() => extractEmbeddedAddons({ files: [missing], targetDir: testDir })).toThrow("EROFS");
+			expect(await fs.exists(embeddedAddonPath(testDir, missing))).toBe(false);
+		});
+
 		it("rejects a zstd frame whose size disagrees with the manifest", async () => {
 			testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-zstd-"));
 			const file = { ...(await embeddedFile("default", "pi_natives.linux-arm64.node", "e1", "addon")), size: 6 };

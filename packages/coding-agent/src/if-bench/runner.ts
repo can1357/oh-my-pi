@@ -19,12 +19,12 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BenchRuntime, BenchTarget, StreamSimpleFn } from "../cli/bench-runtime";
-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue } from "../config/model-selector";
 import { formatModelString } from "../config/model-resolver";
-import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
 import type { Action } from "./actions";
 import { applyActions, initialArray, makeActions } from "./actions";
-import type { IfBenchFailure, IfBenchObserver } from "@oh-my-pi/pi-tui/apps/if-bench-board";
+import type { IfBenchFailure, IfBenchObserver } from "../modes/view-model/apps/if-bench-board";
 import type { CatPlacement } from "./protocol";
 import { assessResponse, buildSystemPrompt, buildTurnPrompt } from "./protocol";
 

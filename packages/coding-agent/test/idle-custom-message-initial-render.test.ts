@@ -19,10 +19,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Text } from "@oh-my-pi/pi-tui";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { jsx } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 
 let tempDir: TempDir;
 let authStorage: AuthStorage;
@@ -31,7 +30,6 @@ let session: AgentSession | undefined;
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
 });
 
 afterAll(() => {
@@ -60,7 +58,10 @@ function createInteractiveTranscript() {
 		convertToLlm,
 		streamFn: () => new AssistantMessageEventStream(),
 	});
-	const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"todo.enabled": false,
+	});
 	settings.setModelRole("default", `${model.provider}/${model.id}`);
 	const created = new AgentSession({
 		agent,
@@ -84,16 +85,21 @@ function createInteractiveTranscript() {
 	ctx.eventController = controller;
 	created.subscribe(event => controller.handleEvent(event));
 	// Pre-render chat content that renderInitialMessages({ preserveExistingChat: true }) carries over.
-	ctx.chatContainer.addChild(new Text("WELCOME_BANNER", 0, 0));
+	ctx.present(() => jsx("text", { spans: [{ t: "WELCOME_BANNER" }] }));
 	return {
 		ctx,
 		session: created,
 		sendIdleDisplay: (body: string) =>
 			created.sendCustomMessage(
-				{ customType: "idle-status", content: body, display: true, attribution: "agent" },
+				{
+					customType: "idle-status",
+					content: body,
+					display: true,
+					attribution: "agent",
+				},
 				{ triggerTurn: false },
 			),
-		copiesOf: (text: string) => ctx.chatContainer.render(120).filter(line => line.includes(text)).length,
+		copiesOf: (text: string) => renderTranscript(ctx).filter(line => line.includes(text)).length,
 	};
 }
 

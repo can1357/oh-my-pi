@@ -1,81 +1,131 @@
 # TUI core renderer — explicit history and viewport contract
 
-This document describes the core renderer contract. The relevant implementation
-lives in:
+This document describes the terminal renderer contract of `@oh-my-pi/pi-tui`
+(`packages/tui`). The relevant implementation lives in:
 
-- [`packages/tui/src/tui.ts`](../packages/tui/src/tui.ts) — frame planning,
-  history emission, viewport diffing, overlays, and cursor placement.
-- [`packages/tui/src/terminal.ts`](../packages/tui/src/terminal.ts) — terminal I/O,
-  capability probes, and private-CSI reassembly.
-- [`packages/tui/src/utils.ts`](../packages/tui/src/utils.ts) — ANSI-aware width,
-  slicing, truncation, and wrapping.
-- [`packages/tui/src/kitty-graphics.ts`](../packages/tui/src/kitty-graphics.ts) and
-  [`packages/tui/src/components/image.ts`](../packages/tui/src/components/image.ts)
-  — inline images and their memory budget.
+- [`packages/tui/src/term/backend.ts`](../packages/tui/src/term/backend.ts) — the
+  terminal backend: frame composition, the commit frontier, history batches,
+  natural streaming, viewport allocation, replay and the shutdown flush.
+- [`packages/tui/src/driver/output/writer.ts`](../packages/tui/src/driver/output/writer.ts)
+  — the frame writer: history appends, viewport diffing, synchronized output,
+  resize borrow and anchor recovery, fail-stop.
+- [`packages/tui/src/driver/contract.ts`](../packages/tui/src/driver/contract.ts) —
+  `FramePlan` and `TerminalDriver`, the seam between the two.
+- [`packages/tui/src/text/markdown/render.ts`](../packages/tui/src/text/markdown/render.ts)
+  — streaming Markdown and its stable head.
+- [`packages/tui/src/host.ts`](../packages/tui/src/host.ts) — host lifecycle
+  (start, suspend, graceful stop).
 
-Application code owns transcript lifecycle. The renderer does not inspect the
-component tree to guess which rows are final.
+Application code owns transcript lifecycle. The renderer does not inspect node
+content to guess which rows are final. The model is the Elastic Speculative
+Slots protocol ([paper](https://stencil.so/blog/harness-playbook/elastic-slots.pdf));
+`packages/tui/test/term/elastic-slots.test.tsx` and
+`packages/tui/test/driver-output/elastic-slots.test.ts` check the backend and the
+writer against it.
 
 ## 1. Frame ownership
 
-A product installs a `TerminalFrameProvider` with `TUI.setFrameProvider()`. On
-each render the provider receives the current `ViewportSize` and returns a
-`TerminalFramePlan`:
+A program describes a `Surface` (`packages/tui/src/surface.ts`): `main` (the
+transcript, in order), `dock` (live chrome under it) and `layer` (overlays).
+The program decides finality with `settle(node)`; nothing else marks a block
+final. On each frame the backend paints the regions and hands the driver a
+`FramePlan`:
 
 ```ts
-interface HistoryBatch {
-	readonly id: number;
-	readonly rows: readonly string[];
-	readonly kind?: "append" | "replay";
-}
-
-interface TerminalFramePlan {
-	readonly history?: HistoryBatch;
+interface FramePlan {
+	readonly history?: { readonly id: number; readonly rows: readonly string[]; readonly kind?: "append" | "replay" };
 	readonly viewport: readonly string[];
+	readonly cursor: { readonly row: number; readonly col: number } | null;
+	readonly fullscreen?: readonly string[];
 }
 ```
 
 `viewport` is the complete mutable screen image for this frame. An `append`
-history batch contains finalized rows or a stable append-only head row. A
-`replay` batch contains the complete logical ledger, including any naturally
-emitted prefix of the active append-only head. Finality
-is therefore an application decision, never an inference from a row crossing
-the top of the terminal.
+history batch holds the rows of settled blocks retiring whole, or rows of a
+streaming block's stable head. A `replay` batch holds the complete ledger at
+the current width: every committed block, then whatever retires in the same
+frame (a streaming head's stable rows under pressure among it).
 
-A history batch has a monotonic id. The TUI writes each accepted batch exactly
-once, then acknowledges that id to the provider. The provider retains a pending
-batch until acknowledgement and does not reuse or reorder ids. This handshake
-makes retries and coalesced renders safe without requiring the renderer to
-compare a new transcript with terminal scrollback.
+A history batch has a monotonic id. `present()` returns the id once the writer
+wrote it (the acknowledgement); the backend keeps offering the same batch until
+then and never reuses or reorders ids. A batch still unwritten is never written
+later under its id once it was dropped, so the backend may drop and prepare it
+again: it does when the width changed since it was painted, when the blocks it
+writes no longer follow the commit frontier, when the display is lost again
+(`onReplay`), and at the shutdown flush.
 
-`packages/tui/src/chrome/transcript-container.ts` owns the active, settled, and
-committed block lifecycle for the coding agent. Blocks are mutable by default. Assistant/thinking producers
-explicitly opt into append-only presentation and publish only a monotonically
-extending prefix of complete stable semantic rows. Each row re-renders at the
-current width; open Markdown and the current partial suffix remain mutable. Under pressure,
-only the current logical head can emit enough stable rows to relieve overflow without finalizing. Final
-retirement writes only its un-emitted suffix.
+Block states, per `main` node:
+
+- **active** — unsettled: repainted every frame, viewport only, except for a
+  streaming node's stable head;
+- **settled** — final but still live: it repaints at the current width (so
+  resizes reflow it) until row pressure retires it. Pressure moves only the
+  rows that no longer fit: a settled block at the top of the live tail may be
+  partly in history, its other rows still live and repainted (a tool card
+  collapsing below its rows in history);
+- **committed** — acknowledged in history whole. Committed blocks are always
+  a prefix of `main` (the commit frontier), in commit order. A block inserted
+  above committed blocks (or above the block partly in history), a removal of
+  that block, or committed blocks changing places replays history, so every
+  block is written once, in order.
+
+Streaming heads: a painter may report `Block.stable`, leading rows that later
+input can no longer change (`md` with `stream`, the coding agent's assistant
+look). The guarantee is monotone: a row once reported stable never changes for
+any extension of the source. Markdown keeps it by ending the head before a
+block the text being written may still join (a list continued by a same-marker
+item after blank lines, indented code continued by an indented line), before a
+display math opener left open (`$$`, `\[`, `\begin{` at a line start), and by
+resolving each block's reference links only against the definitions before it
+(the open tail included, so rows do not depend on how much of the document is
+settled). Under row pressure only the first live block may move rows into
+history (a settled block's rows, a streaming block's stable head), and only as
+many as the pressure asks; the separator written with its first rows counts,
+and may be all that leaves.
+
+The backend remembers the rows of that block it wrote and checks every frame
+that the block still starts with them; a block that changed them anyway (a
+stable head that was not, `stream` turned off with a different final
+rendering) replays history. At another width the rows cannot match and
+nothing is replayed for it: the prefix in history (as written, at its width)
+is mapped to the rows of the new width by its letters and digits, so wrapping
+and padding do not matter (the leading rows whose content is all in history
+stay out of the viewport; back at the width it was written at, nothing is
+mapped). A block cut inside a paragraph repeats that row's words once; a cut
+between blocks maps exactly. When the driver keeps history at its old width on
+a resize (`TerminalDriver.replaysOnResize()` false: `preserve` or in-place
+resize), pressure moves whole blocks and whole stable heads only, so every cut
+is between blocks; one that still does not map (the block changed) replays.
 
 ## 2. Rendering a frame
 
-For every frame the TUI:
+For every frame the backend:
 
-1. Requests a plan from the product's frame provider.
-2. Appends an unacknowledged history batch, if any, exactly once and
-   acknowledges its id.
-3. Anchors the mutable viewport immediately below retained terminal history.
-4. Normalizes and width-fits viewport rows, composites overlays, and emits only
-   the changed viewport rows.
-5. Parks the hardware cursor at the real content position inside the
-   synchronized-output frame.
+1. Paints the dock; the rest of the screen height is the room for `main`.
+2. Retires the shortest settled prefix after the commit frontier that lets the
+   live tail fit, or moves stable rows of the first live block. Retirement
+   stops at the first active block.
+3. Allocates the room among the live blocks (section 2.1).
+4. Composites layers over the viewport and hands the plan to the driver.
 
-History and viewport have deliberately different update rules. History is an
-ordered append stream; viewport rows are replaceable and diffed against the
-previous viewport. A replay is one atomic exception: the renderer moves the
-ledger suffix that fits into leading blank viewport rows, retains the prefix as
-history remainder, prepares `remainder || finalViewport`, and performs one
-synchronous `terminal.write`. No block-at-a-time replay frames are observable.
-Ordinary renders never audit or rewrite terminal history.
+When the driver acknowledges a batch the backend commits its blocks and asks
+for another frame: whatever became eligible while the batch waited retires
+then.
+
+The writer (`FrameWriter`):
+
+1. Appends an unacknowledged history batch exactly once, right where the
+   viewport begins, then acknowledges its id. A history batch under an empty
+   viewport ends with one blank row the cursor parks on, so the next frame or
+   the shell never writes over the last history row.
+2. Anchors the mutable viewport immediately below history.
+3. Normalizes and width-fits rows, writes only changed rows with autowrap off.
+4. Parks the hardware cursor inside the synchronized-output frame.
+
+History and viewport have different update rules. History is an ordered
+append stream; viewport rows are replaceable. A replay is one write: the clear
+(for `rebuild`/display resets) fused with the replayed ledger and the viewport.
+No block-at-a-time replay frames are observable.
 
 Without synchronized output (Terminal.app ignores DEC 2026) the terminal may
 present any prefix of a frame's write, so those frames never repaint through
@@ -88,41 +138,83 @@ beside its stale copy or an erased band awaiting repaint. Frames with images or
 OSC 66 text keep the plain row-rewrite path.
 
 Visible overlays are screen-coordinate content. They composite over the
-viewport and never become history. Showing, updating, or closing an overlay
-only repaints the viewport.
+viewport and never become history.
+
+The writer is fail-stop: a sink write that throws stops it for good (no later
+write, no acknowledgement of the batch that failed) and rethrows. The process
+driver also stops on a failing or stalled stdout.
+
+### 2.1 Viewport allocation
+
+While the live tail fits it shows whole. A taller tail is allocated, newest
+first: every active block keeps at least one row, the newest blocks take the
+surplus, settled blocks only what is left. A block given fewer rows than it
+has is painted at that height (`paint(node, width, height)`: tool looks draw
+their compact presentation) and clipped to its tail when its painter ignores
+the height. When active blocks outnumber the rows, the newest `rows - 1` keep
+one row each under a summary row (`⋯ N more running`, counting the older
+active blocks that draw something; the newest of them, at least 16, are
+painted to tell, older ones count as drawing). Allocation never retires,
+settles or cancels anything.
+
+Dock rows a painter reports as `Block.covering` (the composer's completion
+popup) draw over the transcript instead of taking room from it: the room for
+`main` stays as it was, and the live rows under them are hidden, not retired.
+
+Once the viewport has reached the bottom of the screen it keeps its height
+there: when live content shrinks, blank rows between the live main rows and the
+dock keep the dock at the bottom. Those rows are not live rows: retirement and
+allocation never count them. A replay and a resize reset it; a fullscreen
+layer leaves the normal screen, and so the pinned viewport, as it was.
 
 ## 3. Reset and resize behavior
 
-Destructive display resets are gesture-driven. `resetDisplay()` and explicit
-session replacement may clear terminal history and repaint the current product
-state because the user action establishes a new display boundary. Ordinary
-renders never clear history.
+`Host.replayHistory()` (`driver.resetDisplay()`) clears terminal history and the
+screen and replays the ledger: the frame after it carries a `replay` batch under
+a fresh id. Ordinary renders never clear history; the backend asks for a replay
+itself only when history no longer matches the ledger (blocks inserted above
+history, reordered or removed, a block whose history rows changed at the same
+width), and when it starts again after a stop (`Host.suspend`: what the
+terminal holds is unknown).
 
 A resize invalidates viewport geometry and repaints the viewport at the new
-width and height. After a settled resize, `ResizeScrollbackMode` selects
-how retained history is handled (including cleanup of live rows a height
-shrink may have pushed before the resize callback ran):
+width and height. After a settled resize the writer applies the scrollback
+policy (`tui.resizeScrollback`, `PI_TUI_RESIZE_SCROLLBACK`):
 
 - `rebuild` clears native history and replays one current-width transcript;
-- `append` retains native history and appends a current-width transcript copy
-  on width changes (height-only resizes do not append a duplicate);
-- `preserve` repaints only the viewport and leaves old-width history unchanged.
+- `append` keeps native history and appends a current-width transcript on
+  width changes (height-only resizes do not append a duplicate);
+- `preserve` repaints only the viewport and leaves old-width history as it is,
+  never clearing it (see the word mapping in section 1).
 
-The raw TUI defaults to `preserve` and accepts
-`PI_TUI_RESIZE_SCROLLBACK`; the coding agent defaults to `rebuild`. Append and
-rebuild resize policies each prepare one complete bottom-first replay
-transaction; preserve prepares none. Replay consumes one fresh monotonic history
-id without rewinding logical retirement state, and acknowledgement happens only
-after the synchronous write returns.
+A height shrink can push the top rows of the screen into scrollback before the
+program hears of it. The writer works out which viewport rows the terminal
+pushed (blank rows below the cursor go first, then the top rows), checks that
+model against the cursor report of the anchor recovery, and only then does not
+write them again when the next history batch starts with them (a report
+elsewhere, or a second step in the same burst, writes them: duplicates, never
+a loss).
+
+The raw default is `preserve`; the coding agent sets `rebuild`. A replay keeps
+the commit frontier and acknowledges only after the write returned.
 
 In-place resize (Warp by default outside multiplexers/ConPTY, or forced with
-`PI_TUI_RESIZE_IN_PLACE=1`) skips resize replay entirely and repaints once the
-drag settles. `PI_TUI_RESIZE_IN_PLACE=0` forces the borrowed-buffer path.
+`PI_TUI_RESIZE_IN_PLACE=1`) skips resize replay and repaints once the drag
+settles. `PI_TUI_RESIZE_IN_PLACE=0` forces the borrowed-buffer path.
 See [runtime resize details](./tui-runtime-internals.md#resize).
 
-The renderer never probes the user's scroll position. This keeps updates safe
-while the user is reading older terminal history and avoids terminal- or
-platform-specific finality policy.
+The renderer never probes the user's scroll position.
+
+### 3.1 Shutdown
+
+`Host.stop()` flushes before it hands the terminal back
+(`TermBackend.flush()`): one last frame writes every live `main` block as it is
+now (settled or not) into history, after the ledger a pending replay still
+owes, and keeps the dock as the viewport. When the writer cannot write inline
+yet (a resize borrow, a quiet resize, an anchor probe), or the driver skips the
+frame because output is backlogged, the writer holds that frame and writes it
+from the viewport top when the driver stops. `Host.suspend()` does
+not flush: the display is replayed when the program resumes.
 
 ## 4. ANSI and width invariants
 
@@ -282,19 +374,19 @@ image environment settings.
 
 ## 7. Core invariants
 
-1. Products decide finality and submit finalized or declared append-only stable
-   rows only through ordered `HistoryBatch` values.
-2. The TUI writes a history batch exactly once and acknowledges its monotonic
-   id; it never derives history from viewport row position.
-3. Ordinary frames diff and repaint the viewport only. They never rewrite,
-   audit, clear, or replay retained history.
-4. Settled resizes follow the configured replay mode without deriving
-   history from cross-width physical row arithmetic.
-5. Only explicit display resets and `rebuild` resize mode destructively clear
-   native history.
-6. Overlays and image-budget changes remain viewport-local.
-7. Width handling uses the shared ANSI-aware helpers and clamps rather than
-   throwing in the render hot path.
-8. The renderer never probes terminal scroll position. Terminal/multiplexer
-   geometry controls resize mechanics (including the in-place no-replay path),
-   not block finality.
+1. Programs decide finality (`settle`); only settled blocks and declared stable
+   heads reach history, through ordered history batches.
+2. Each batch is written exactly once and acknowledged by id; committed blocks
+   are a prefix of `main`, and every block's rows are in history once, in
+   order (replays rewrite the whole ledger in a new epoch).
+3. A stable row never changes; a streaming head's history rows are verified
+   every frame, and any mismatch replays.
+4. Ordinary frames diff and repaint the viewport only. They never rewrite,
+   audit or clear retained history.
+5. Every active block keeps a viewport row while rows allow; overflow is
+   summarized, never retired.
+6. Only explicit display resets, `rebuild` resizes and ledger mismatches
+   destructively clear native history.
+7. A failed write stops the writer; a graceful stop flushes the transcript.
+8. Width handling uses the shared ANSI-aware helpers and clamps rather than
+   throwing in the render hot path. The renderer never probes scroll position.

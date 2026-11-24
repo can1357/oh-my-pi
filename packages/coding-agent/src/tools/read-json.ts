@@ -3,15 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Shell } from "@oh-my-pi/pi-natives";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
-import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	truncateHead,
-	truncateMiddle,
-	truncateTail,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { ReadToolDetails } from "./details/read";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead, truncateMiddle, truncateTail } from "./streaming-output";
+import { ToolError } from "./tool-errors";
 import {
 	IMAGE_METADATA_HEADER_BYTES,
 	isEnoent,

@@ -9,7 +9,7 @@
 - Key collaborators:
    - `packages/coding-agent/src/web/search/provider.ts` — lazy provider registry; availability chain.
    - `packages/coding-agent/src/web/search/types.ts` — unified `SearchResponse` / `SearchProviderError` types.
-   - `packages/tui/src/tools/web-search.ts` / `web-search-types.ts` — transcript rendering and shared response/provider types.
+   - `packages/coding-agent/src/ui/tools/web-search.tsx` / `packages/coding-agent/src/web/search/provider-types.ts` — transcript rendering and shared response/provider types.
    - `packages/coding-agent/src/web/search/providers/base.ts` — provider interface and shared params contract.
    - `packages/coding-agent/src/web/search/providers/utils.ts` — credential lookup; source normalization.
    - `packages/coding-agent/src/web/search/providers/browser-headers.ts` — shared Chromium navigation headers for scrape providers.
@@ -360,6 +360,6 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - `executeSearch()` loads provider modules lazily as the chain reaches them. Provider instances are cached per id (`packages/coding-agent/src/web/search/provider.ts`), and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
 - `recency` has native or engine-query mappings in Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Keenable, Sofya, Firecrawl, DuckDuckGo, Startpage, Google, Mojeek, Hacker News (`created_at_i` lower bound), and xAI (`x_search` `from_date` when no `after:`/`before:` bound is given). Ecosia ignores it. Public Web forwards the request to its engines.
-- `SEARCH_PROVIDER_LABELS` in `packages/tui/src/tools/web-search-types.ts` is the id→label registry for every search implementation (engines and groundings); provider ids, `SearchResponse`, and the transcript renderer all derive from it. Selection itself lives only in the `web` model role.
+- `SEARCH_PROVIDER_LABELS` in `packages/coding-agent/src/web/search/provider-types.ts` is the id→label registry for every search implementation (engines and groundings); provider ids, `SearchResponse`, and the transcript renderer all derive from it. Selection itself lives only in the `web` model role.
 - The credential-free scrapers close the auto chain: Startpage and DuckDuckGo precede the browser-backed Ecosia, Google, and Mojeek paths; `public` is listed last and never auto-selected.
 - `/login exa` stores the pasted key in AuthStorage; Exa resolves stored or environment credentials before the unauthenticated `https://mcp.exa.ai/mcp` fallback.

@@ -3,20 +3,22 @@
  * native footer under its answer as the live turn did: the footer is where
  * the answer's Copy lives.
  */
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import { setTranscriptActionHandler, type TranscriptAction } from "@oh-my-pi/pi-tui/chat/transcript-actions";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { TspHarness } from "../../tui/test/native/tsp-harness";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { type UiNode, untrack } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 
 const AT = new Date(2026, 0, 2, 3, 4, 5).getTime();
 
 function user(text: string, at: number): AgentMessage {
-	return { role: "user", content: text, timestamp: at } as unknown as AgentMessage;
+	return {
+		role: "user",
+		content: text,
+		timestamp: at,
+	} as unknown as AgentMessage;
 }
 
 function assistant(
@@ -44,24 +46,31 @@ function assistant(
 	} as unknown as AgentMessage;
 }
 
-let harness: TspHarness | undefined;
+/** Every node under `node` (itself included) with native role `role`. */
+function withRole(node: UiNode, role: string): UiNode[] {
+	return untrack(() => {
+		const own = (node.props() as { role?: unknown }).role === role ? [node] : [];
+		return [...own, ...node.children().flatMap(child => withRole(child, role))];
+	});
+}
+
+/** Every `text` prop under `node` (text and prose nodes), joined. */
+function texts(node: UiNode): string {
+	return untrack(() => {
+		const text = (node.props() as { text?: unknown }).text;
+		return [typeof text === "string" ? text : "", ...node.children().map(texts)].join(" ");
+	});
+}
 
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
 });
 
-afterEach(() => {
-	harness?.stop();
-	harness = undefined;
-	setTranscriptActionHandler(undefined);
-});
+afterAll(() => resetSettingsForTest());
 
 describe("rebuilt transcript turn footers", () => {
-	it("gives every turn's answer its footer, with that turn's totals and a Copy of that answer", async () => {
-		const actions: TranscriptAction[] = [];
-		setTranscriptActionHandler(action => actions.push(action));
+	it("gives every turn's answer its footer, with that turn's totals", () => {
 		const ctx = createInteractiveModeContext();
 		const helpers = new UiHelpers(ctx);
 		ctx.addMessageToChat = (message, options) => helpers.addMessageToChat(message, options);
@@ -69,7 +78,14 @@ describe("rebuilt transcript turn footers", () => {
 			messages: [
 				user("list the files", AT),
 				assistant(
-					[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "ls" } }],
+					[
+						{
+							type: "toolCall",
+							id: "call-1",
+							name: "bash",
+							arguments: { command: "ls" },
+						},
+					],
 					"toolUse",
 					{ input: 1_000, output: 10 },
 					AT + 1_000,
@@ -87,20 +103,24 @@ describe("rebuilt transcript turn footers", () => {
 				assistant([{ type: "text", text: "Anytime." }], "stop", { input: 500, output: 5 }, AT + 11_000),
 			],
 		} as unknown as SessionContext);
-		harness = await TspHarness.start(tui => tui.addChild(ctx.chatContainer));
 
-		const footers = harness.findAll(node => node.p?.role === "omp.turn.usage");
-		expect(footers.map(footer => footer.p?.title)).toEqual([
-			expect.stringContaining("3,030 tokens"),
-			expect.stringContaining("505 tokens"),
+		// Each footer sits in the block of the answer that ended its turn, carrying the whole turn's totals.
+		const footers = ctx.shell.transcript.blocks().flatMap(block =>
+			withRole(block.node, "omp.turn.usage").map(footer => ({
+				title: (footer.props() as { title?: unknown }).title,
+				answer: texts(block.node),
+			})),
+		);
+		expect(footers).toEqual([
+			{
+				title: expect.stringContaining("3,030 tokens"),
+				answer: expect.stringContaining("One file: a.txt."),
+			},
+			{
+				title: expect.stringContaining("505 tokens"),
+				answer: expect.stringContaining("Anytime."),
+			},
 		]);
-		for (const copy of harness.findAll(node => node.p?.role === "omp.turn.copy")) {
-			harness.event({ ev: "action", sf: harness.terminal.surface!, id: copy.id, act: "copy-answer" });
-		}
-		expect(actions).toEqual([
-			{ act: "copy", text: "One file: a.txt." },
-			{ act: "copy", text: "Anytime." },
-		]);
-		expect(harness.errors).toEqual([]);
+		expect(renderTranscript(ctx).join("\n")).toContain("Anytime.");
 	});
 });

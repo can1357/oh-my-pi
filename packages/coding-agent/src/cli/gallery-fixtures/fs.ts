@@ -1,7 +1,9 @@
 // oxlint-disable no-template-curly-in-string -- sample source-code strings intentionally contain literal placeholders.
 // Gallery fixtures for the filesystem tools (read, write, glob).
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { printRows } from "../../ui/print-rows";
+import "../../ui/styles/transcript/read-group";
+import { ReadGroup, ReadGroupBlock } from "../../ui/transcript/read-group";
 import type { GalleryFixture, GalleryFixtureState, GalleryResult } from "./types";
 
 const readSnippet = [
@@ -61,13 +63,14 @@ function textResult(text: string, details?: unknown, isError?: boolean): Gallery
 	return { content: [{ type: "text", text }], details, isError };
 }
 
-function addGroupedReadArgs(component: ReadToolGroupComponent): void {
+function addGroupedReadArgs(component: ReadGroup): void {
 	component.updateArgs({ path: groupedReadDelimitedPath }, "read-delimited");
 	component.updateArgs({ path: groupedReadRepeatedRanges }, "read-ranges");
 }
 
 function renderReadGroupFixtureState(state: GalleryFixtureState, width: number, expanded: boolean): readonly string[] {
-	const component = new ReadToolGroupComponent();
+	const component = new ReadGroup();
+	const render = (): readonly string[] => printRows(() => ReadGroupBlock({ group: component }), width);
 	component.setExpanded(expanded);
 
 	if (state === "streaming") {
@@ -80,11 +83,11 @@ function renderReadGroupFixtureState(state: GalleryFixtureState, width: number, 
 			},
 			"read-delimited",
 		);
-		return component.render(width);
+		return render();
 	}
 
 	addGroupedReadArgs(component);
-	if (state === "progress") return component.render(width);
+	if (state === "progress") return render();
 
 	component.updateResult(
 		textResult("Read three focused test ranges.", { displayReadTargets: groupedReadTargets }),
@@ -112,12 +115,12 @@ function renderReadGroupFixtureState(state: GalleryFixtureState, width: number, 
 			1900,
 			new Date(2026, 6, 28, 21, 5, 52).getTime(),
 		);
-		return component.render(width);
+		return render();
 	}
 
 	component.updateResult(textResult("Read four render.ts ranges."), false, "read-ranges");
 	component.attachUsage(["read-ranges"], GROUPED_READ_USAGE, 4700, 1900, new Date(2026, 6, 28, 21, 5, 52).getTime());
-	return component.render(width);
+	return render();
 }
 
 export const fsFixtures: Record<string, GalleryFixture> = {
