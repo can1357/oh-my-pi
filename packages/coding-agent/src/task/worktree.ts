@@ -403,11 +403,17 @@ function unchangedVanished(vanished: ReadonlySet<string>, baselinePatch: string,
 	return new Set([...vanished].filter(file => currentSections.get(file) === baselineSections.get(file)));
 }
 
-/** The `diff --git` section of `patch` for each file it touches, keyed by that path. */
+/**
+ * The `diff --git` section of `patch` for each file it touches, keyed by that path.
+ * Trailing newlines are dropped: captureUntrackedPatch joins the per-file diffs
+ * with a newline, so a section ends in one newline or two depending on whether
+ * another file follows it in that patch.
+ */
 function patchSectionsByPath(patch: string): Map<string, string> {
 	const sections = new Map<string, string>();
 	for (const section of splitPatchSections(patch)) {
-		for (const file of patchSectionPaths(section)) sections.set(file, section);
+		const body = section.replace(/\n+$/, "");
+		for (const file of patchSectionPaths(section)) sections.set(file, body);
 	}
 	return sections;
 }
