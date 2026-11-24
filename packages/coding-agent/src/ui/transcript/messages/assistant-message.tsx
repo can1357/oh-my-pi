@@ -41,12 +41,7 @@ import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { TurnUsageSummary } from "../../../modes/view-model/overlays/usage-row";
 import type { CacheInvalidation } from "../../../session/transcript/cache-invalidation-marker";
-import {
-	chartFence,
-	hasChartTable,
-	lookupTableChart,
-	splitTableCharts,
-} from "../../../session/transcript/table-chart";
+import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "../../../session/transcript/table-chart";
 import { splitReaction } from "../../../session/transcript/reaction";
 import type { ServedModelMismatch } from "../../../session/transcript/served-model-marker";
 import {
@@ -403,7 +398,14 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 					}
 					const chart = lookupTableChart(segment.table);
 					if (chart instanceof Promise) awaitChart(chart);
-					else if (chart) out.set(slot, { kind: "text", source: "", native: chartFence(chart), stream: false, links: undefined });
+					else if (chart)
+						out.set(slot, {
+							kind: "text",
+							source: "",
+							native: chartFence(chart),
+							stream: false,
+							links: undefined,
+						});
 				});
 			} else if (content.type === "thinking") {
 				// A display message's thinking (`rawThinking` set) is already formatted: formatting it again

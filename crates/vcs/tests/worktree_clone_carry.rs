@@ -101,6 +101,45 @@ fn clone_works_on(root: &Path) -> bool {
 }
 
 #[test]
+fn clone_fallback_applies_shared_and_tracked_checkout_attributes() {
+	let (temp, source, repo) = fixture();
+	write(&source, ".gitattributes", "crlf.txt text eol=crlf\n");
+	write(&source, "crlf.txt", "line\n");
+	git(&source, &["add", ".gitattributes", "crlf.txt"]);
+	git(&source, &["commit", "-qm", "tracked attributes"]);
+	write(&source, ".git/info/attributes", "a.txt filter=test-smudge\n");
+	for (key, value) in [
+		// Force the plain checkout even on a clone-capable filesystem.
+		("core.sparseCheckout", "true"),
+		("filter.test-smudge.required", "true"),
+		("filter.test-smudge.smudge", "git config --get fixture.smudged"),
+		("filter.test-smudge.clean", "git config --get fixture.clean"),
+		("fixture.smudged", "smudged contents"),
+		("fixture.clean", "tracked"),
+	] {
+		git(&source, &["config", key, value]);
+	}
+	let target = temp.path().join("target");
+	let options = WorktreeAddOptions {
+		detach:       true,
+		clone:        WorktreeClone::Auto,
+		keep_changes: false,
+	};
+	let result = repo.worktree_add(&target, "HEAD", options).unwrap();
+	assert!(result.cloned_with.is_none());
+	assert_eq!(fs::read_to_string(target.join("a.txt")).unwrap(), "smudged contents\n");
+	assert_eq!(fs::read_to_string(target.join("crlf.txt")).unwrap(), "line\r\n");
+	assert_eq!(git(&target, &["status", "--porcelain"]), "");
+
+	let registered = git(&source, &["worktree", "list", "--porcelain"]);
+	git(&source, &["config", "filter.test-smudge.smudge", "git config --get fixture.absent"]);
+	let failed = temp.path().join("failed");
+	repo.worktree_add(&failed, "HEAD", options).unwrap_err();
+	assert!(!failed.exists(), "a failed required filter must not leave a partial checkout");
+	assert_eq!(git(&source, &["worktree", "list", "--porcelain"]), registered);
+}
+
+#[test]
 fn clone_excludes_self_ignored_environments_and_nested_cmake_caches() {
 	let (temp, source, repo) = fixture();
 	if !clone_works_on(temp.path()) {

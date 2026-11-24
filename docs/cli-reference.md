@@ -341,3 +341,7 @@ commit's own ignore rules, after its tree and index have been written. Caches
 ignored by the target remain, even if the source did not ignore them. Nested
 repositories are preserved and symlinks are not followed. This target-ignore
 cleanup is skipped when keeping the source's uncommitted changes.
+
+If cloning is unavailable, the plain checkout applies Git's checkout filters,
+including rules in the repository's shared `info/attributes`. A failed required
+filter aborts the checkout.

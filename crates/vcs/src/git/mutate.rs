@@ -880,11 +880,14 @@ impl GitRepo {
 			}
 		}
 
-		fs::create_dir_all(path)?;
-		let admin = register_worktree(path, &self.info().common_dir, &head)?;
-		let linked = Self::require(path)?;
-		let linked_repo = linked.gix()?;
-		checkout_tree(&linked, &linked_repo, id, true)?;
+		let common = &self.info().common_dir;
+		let admin = register_worktree(path, common, &head)?;
+		let checkout =
+			Self::require(path).and_then(|linked| checkout_tree(&linked, &linked.gix()?, id, true));
+		if let Err(err) = checkout {
+			cleanup_worktree_add(path, common);
+			return Err(err);
+		}
 		if options.keep_changes {
 			self.seed_worktree_changes(path, &admin, id)?;
 		}
@@ -1098,10 +1101,7 @@ impl GitRepo {
 		} else {
 			let mut changed = target.clone();
 			changed.remove_entries(|_, entry_path, _| !write.contains(entry_path));
-			let mut checkout_options = linked_repo
-				.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
-				.map_err(|err| Error::backend("git worktree add", err))?;
-			checkout_options.overwrite_existing = true;
+			let checkout_options = checkout_options(&linked_repo, "git worktree add")?;
 			let progress = gix::progress::Discard;
 			let interrupt = std::sync::atomic::AtomicBool::new(false);
 			let outcome = gix::worktree::state::checkout(
@@ -1946,6 +1946,31 @@ fn resolve_checkout_target(
 	Ok((resolve_commit(repo, branch.as_deref().unwrap_or(rev))?, branch))
 }
 
+fn checkout_options(
+	repo: &gix::Repository,
+	op: &'static str,
+) -> Result<gix::worktree::state::checkout::Options> {
+	use gix::worktree::stack::{State, state::attributes::Source};
+
+	let mut options = repo
+		.checkout_options(Source::IdMapping)
+		.map_err(|err| Error::backend(op, err))?;
+	options.overwrite_existing = true;
+	if repo.git_dir() != repo.common_dir() {
+		// gix's checkout_options looks for info/attributes in the per-worktree
+		// admin dir. attributes_only uses the common dir, as Git does.
+		// Checkout builds its own .gitattributes mappings from its target index.
+		let mut stack = repo
+			.attributes_only(&gix::index::State::new(repo.object_hash()), Source::IdMapping)
+			.map_err(|err| Error::backend(op, err))?;
+		let State::AttributesStack(attributes) = stack.state_mut() else {
+			unreachable!("attributes_only builds an attributes stack");
+		};
+		options.attributes = std::mem::take(attributes);
+	}
+	Ok(options)
+}
+
 fn checkout_tree(
 	owner: &GitRepo,
 	repo: &gix::Repository,
@@ -1987,10 +2012,7 @@ fn checkout_tree(
 			}
 		}
 	}
-	let mut opts = repo
-		.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
-		.map_err(|e| Error::backend("git checkout", e))?;
-	opts.overwrite_existing = true;
+	let opts = checkout_options(repo, "git checkout")?;
 	let progress = gix::progress::Discard;
 	let interrupt = std::sync::atomic::AtomicBool::new(false);
 	gix::worktree::state::checkout(
