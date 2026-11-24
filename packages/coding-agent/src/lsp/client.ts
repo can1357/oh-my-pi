@@ -934,12 +934,22 @@ export async function unservedCheckout(client: LspClient, filePath: string): Pro
 
 /** The checkout holding `filePath` when it differs from the one holding the client's root. */
 export async function foreignCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
-	const checkout = await findRepoRoot(path.dirname(await realPathOf(filePath)));
-	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
+	return foreignCheckoutForRealPath(client.cwd, await realPathOf(filePath));
+}
+
+async function foreignCheckoutForRealPath(cwd: string, realFilePath: string): Promise<string | undefined> {
+	const checkout = await findRepoRoot(path.dirname(realFilePath));
+	if (!checkout || checkout === (await findRepoRoot(await realPathOf(cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
 	// server index everything under it.
 	if (isPathInsideWorkspace(await realPathOf(os.homedir()), checkout)) return undefined;
 	return checkout;
+}
+
+/** Match the resolved foreign workspace folder, leaving files in the session checkout as spelled. */
+export async function workspaceDocumentPath(cwd: string, filePath: string): Promise<string> {
+	const resolved = await realPathOf(filePath);
+	return resolved !== filePath && (await foreignCheckoutForRealPath(cwd, resolved)) ? resolved : filePath;
 }
 
 /**

@@ -41,6 +41,7 @@ import {
 	supportsMethod,
 	unservedCheckout,
 	waitForProjectLoaded,
+	workspaceDocumentPath,
 } from "./client";
 import { getLinterClient } from "./clients";
 import { locationsNotMentioning, missingOccurrencesNote } from "./completeness";
@@ -534,7 +535,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					continue;
 				}
 
-				const uri = fileToUri(resolved);
+				const documentPath = await workspaceDocumentPath(this.session.cwd, resolved);
+				const uri = fileToUri(documentPath);
 				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
 				const allDiagnostics: Diagnostic[] = [];
 				const failedServers: string[] = [];
@@ -567,20 +569,20 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// build status settles.
 						let rebuildStatusSeq: number | undefined;
 						if (supportsDocumentDiagnostics(client)) {
-							await reconcileFileFromDisk(client, resolved, signal);
+							await reconcileFileFromDisk(client, documentPath, signal);
 						} else if (client.buildStatus) {
 							// clangd with build status: rebuild the main file in place, keeping the
 							// headers it can reuse, rather than paying a full rebuild on reopen.
 							const sinceSeq = client.buildStatusSeq ?? 0;
-							if (await rebuildFile(client, resolved, signal)) rebuildStatusSeq = sinceSeq;
+							if (await rebuildFile(client, documentPath, signal)) rebuildStatusSeq = sinceSeq;
 						} else if (client.publishesDocumentVersions) {
 							// A push server need not republish unchanged text (clangd does not), but
 							// it does on open, and the echoed version identifies that report at once.
-							await reopenFile(client, resolved, signal);
+							await reopenFile(client, documentPath, signal);
 						} else {
 							// Without echoed versions a reopen's report cannot be told apart from the
 							// empty one its close may publish; resend the text instead.
-							await refreshFile(client, resolved, signal);
+							await refreshFile(client, documentPath, signal);
 						}
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
@@ -1175,6 +1177,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			const [chosenName, chosenConfig] = chosenServer;
+			const documentPath = resolvedTarget ? await workspaceDocumentPath(this.session.cwd, resolvedTarget) : null;
 			let requestParams: unknown;
 			if (params.payload !== undefined) {
 				try {
@@ -1186,10 +1189,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						details: { action, serverName: chosenName, success: false, request: params },
 					};
 				}
-			} else if (resolvedTarget) {
-				const uri = fileToUri(resolvedTarget);
+			} else if (documentPath) {
+				const uri = fileToUri(documentPath);
 				if (line !== undefined) {
-					const character = await resolveSymbolColumn(resolvedTarget, line, symbol);
+					const character = await resolveSymbolColumn(documentPath, line, symbol);
 					requestParams = { textDocument: { uri }, position: { line: line - 1, character } };
 				} else {
 					requestParams = { textDocument: { uri } };
@@ -1200,8 +1203,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			try {
 				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
-				if (resolvedTarget) {
-					await reconcileFileFromDisk(client, resolvedTarget, signal);
+				if (documentPath) {
+					await reconcileFileFromDisk(client, documentPath, signal);
 				}
 				const result = await sendRequest(client, method, requestParams, signal);
 				const formatted =
@@ -1462,7 +1465,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			[serverName, serverConfig] = [selected.name, selected.config];
 			const { client } = selected;
 			unsupportedNotes = selected.skipped;
-			const targetFile = resolvedFile;
+			const targetFile = resolvedFile ? await workspaceDocumentPath(client.cwd, resolvedFile) : null;
 			const isRustAnalyzerServer = isRustAnalyzerClient(client) || serverName === "rust-analyzer";
 			const needsProjectIndex =
 				targetFile !== null && PROJECT_INDEXED_ACTIONS.has(action) && isProjectAwareLspServer(serverConfig);
@@ -1891,17 +1894,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 							// Whatever still names the old symbol was not renamed.
 							const leftover = symbolName
-								? await missingOccurrencesNote(
-										symbolName,
-										client,
-										targetFile!,
-										[],
-										this.session.cwd,
-										signal,
-										{
-											where: "remain after the rename",
-										},
-									)
+								? await missingOccurrencesNote(symbolName, client, targetFile!, [], this.session.cwd, signal, {
+										where: "remain after the rename",
+									})
 								: undefined;
 							if (leftover) output += `\n${leftover}`;
 						} else {

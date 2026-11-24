@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
-import { shutdownAll } from "@oh-my-pi/pi-coding-agent/lsp/client";
-import { configCache } from "@oh-my-pi/pi-coding-agent/lsp/config";
+import { getOrCreateClient, sendRequest, shutdownAll } from "@oh-my-pi/pi-coding-agent/lsp/client";
+import { configCache, getConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
 import type { Location, WorkspaceEdit } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -16,6 +16,7 @@ const EXT = ".lsp-checkout";
 const FILE = `target${EXT}`;
 const SOURCE = "def target():\n    return 1\nvalue = target()\n";
 const FIXTURE = path.join(import.meta.dir, "..", "fixtures", "fake-lsp-server.ts");
+const SERVER_NAME = "fake-checkout-lsp";
 const FOLDER_CHANGES = { workspace: { workspaceFolders: { supported: true, changeNotifications: true } } };
 
 let dir: TempDir;
@@ -60,7 +61,7 @@ async function execute(params: LspParams, initOptions: FakeLspOptions): Promise<
 		path.join(cwd, "lsp.json"),
 		JSON.stringify({
 			servers: {
-				"fake-checkout-lsp": {
+				[SERVER_NAME]: {
 					command: process.execPath,
 					args: ["run", FIXTURE],
 					fileTypes: [EXT],
@@ -150,7 +151,7 @@ it.each(["only the queried file", "only the session checkout", "no files"] as co
 		const result =
 			scenario === "no files"
 				? []
-				: [location(path.join(scenario === "only the queried file" ? checkout : cwd, "src", FILE), 0, 4)];
+				: [location(scenario === "only the queried file" ? queriedFile : path.join(cwd, "src", FILE), 0, 4)];
 		const output = await execute(
 			{ action: "references" },
 			{ capabilities: { referencesProvider: true }, responses: { "textDocument/references": result } },
@@ -166,7 +167,9 @@ it.each(["changes", "documentChanges"] as const)(
 		const { uri, range } = location(otherFile, 0, 0);
 		const edits = [{ range, newText: "renamed" }];
 		const edit: WorkspaceEdit =
-			encoding === "changes" ? { changes: { [uri]: edits } } : { documentChanges: [{ textDocument: { uri }, edits }] };
+			encoding === "changes"
+				? { changes: { [uri]: edits } }
+				: { documentChanges: [{ textDocument: { uri }, edits }] };
 		const output = await execute(
 			{ action: "rename", new_name: "renamed", apply: false },
 			{ capabilities: { renameProvider: true }, responses: { "textDocument/rename": edit } },
@@ -175,3 +178,20 @@ it.each(["changes", "documentChanges"] as const)(
 		expect(output).not.toContain("cannot load the checkout");
 	},
 );
+
+it("opens a file reached through a symlink inside a folder the server was told about", async () => {
+	await execute(
+		{ action: "references" },
+		{
+			capabilities: { referencesProvider: true, ...FOLDER_CHANGES },
+			responses: { "textDocument/references": [] },
+		},
+	);
+	const client = await getOrCreateClient(getConfig(cwd).servers[SERVER_NAME]!, cwd);
+	const state = (await sendRequest(client, "test/state", {})) as {
+		didOpen: Record<string, number>;
+		workspaceFolders: string[];
+	};
+	expect(Object.keys(state.didOpen)).toEqual([fileToUri(path.join(checkout, "src", FILE))]);
+	expect(state.workspaceFolders).toContain(fileToUri(checkout));
+});
