@@ -15,7 +15,7 @@ import {
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import { isEnoent, logger, TempDir } from "@oh-my-pi/pi-utils";
 import type { SharedInfra } from "@oh-my-pi/typescript-edit-benchmark/in-process-client";
-import { analyzeCalls, type ToolCallRecord } from "./checks";
+import { analyzeCalls, type ToolCallRecord, verifies } from "./checks";
 import type { ScopeRun } from "./result";
 import type { ScopeTask, VerifySpec } from "./tasks";
 
@@ -39,6 +39,7 @@ export interface TrialConfig {
 
 /** Prefix of the failure line {@link score} adds; {@link rescoreRun} replaces it. */
 const SCOPE_FAILURE = "changed outside scope: ";
+const NO_CHECK_FAILURE = "ran no check";
 const VERIFY_TIMEOUT_MS = 120_000;
 /** Tool installs and harness state, not the agent's edits. */
 const IGNORED_DIRS = ["node_modules/", ".git/", ".omp/"];
@@ -131,10 +132,11 @@ function score(
 	// The agent names files relative to its cwd (`src/x.ts`, `../lib/x.ts`) or absolutely; both contain this form.
 	const asNamed = (file: string): string => path.relative(task.cwd, file).replace(/^(?:\.\.\/)+/, "");
 	const analysis = analyzeCalls(run.calls, { changed: run.changed.map(asNamed), paths: run.files.map(asNamed) });
-	const failures =
-		outOfScope.length > 0
-			? [...run.verifyFailures, `${SCOPE_FAILURE}${outOfScope.join(", ")}`]
-			: [...run.verifyFailures];
+	const failures = [...run.verifyFailures];
+	if (outOfScope.length > 0) failures.push(`${SCOPE_FAILURE}${outOfScope.join(", ")}`);
+	if (task.verify.ranCheck === true && !analysis.checks.some(check => verifies(check.kinds))) {
+		failures.push(NO_CHECK_FAILURE);
+	}
 	return {
 		pass: run.error === null && failures.length === 0,
 		failures,
@@ -165,7 +167,9 @@ export async function rescoreRun(run: ScopeRun, task: ScopeTask, jobDir: string)
 			files: [...new Set([...fixture, ...run.changed])],
 			changed: run.changed,
 			error: run.error,
-			verifyFailures: run.failures.filter(failure => !failure.startsWith(SCOPE_FAILURE)),
+			verifyFailures: run.failures.filter(
+				failure => !failure.startsWith(SCOPE_FAILURE) && failure !== NO_CHECK_FAILURE,
+			),
 		}),
 	};
 }

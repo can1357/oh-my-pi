@@ -68,6 +68,8 @@ export interface ScopeSummary {
 	checksDuringPerRun: number | null;
 	/** Seconds per run inside checks of either phase. */
 	checkSecondsPerRun: number | null;
+	/** Checks per run that took {@link SLOW_CHECK_MS} or longer: whole suites and end-to-end runs. Absent in results written before the metric existed. */
+	slowChecksPerRun?: number | null;
 	/** Share of all wall time spent inside checks. */
 	checkShare: number | null;
 	/** Share of runs that changed a file outside the task's scope. */
@@ -104,9 +106,13 @@ interface RunStats {
 	during: number | null;
 	final: number | null;
 	checkS: number | null;
+	slow: number | null;
 	postEditReads: number | null;
 	creep: number;
 }
+
+/** A check this long ran more than the code in question: a whole suite, a full benchmark, an end-to-end case. */
+export const SLOW_CHECK_MS = 5000;
 
 const sum = (values: readonly number[]): number => values.reduce((total, value) => total + value, 0);
 const ratio = (part: number, whole: number): number | null => (whole > 0 ? part / whole : null);
@@ -147,6 +153,7 @@ function stats(runs: readonly ScopeRun[]): RunStats {
 		during: phaseMean(runs, "during"),
 		final: phaseMean(runs, "final"),
 		checkS: seconds(mean(runs.map(run => sum(run.checks.map(check => check.ms))))),
+		slow: mean(runs.map(run => run.checks.filter(check => check.ms >= SLOW_CHECK_MS).length)),
 		postEditReads: mean(runs.map(run => run.postEditReads)),
 		creep: runs.filter(run => run.outOfScope.length > 0).length,
 	};
@@ -165,6 +172,7 @@ export function summarize(runs: readonly ScopeRun[]): ScopeSummary {
 		checksBeforePerRun: all.before,
 		checksDuringPerRun: all.during,
 		checkSecondsPerRun: all.checkS,
+		slowChecksPerRun: all.slow,
 		checkShare: ratio(checkMs, sum(runs.map(run => run.wallMs))),
 		scopeCreepRate: ratio(all.creep, runs.length),
 		costUsd: sum(runs.map(run => run.costUsd)),
@@ -199,14 +207,14 @@ export function renderReport(result: ScopeResult): string {
 		"",
 		`\`${config.model}\` · thinking \`${config.thinking ?? "default"}\` · append \`${config.appendSystemPrompt ?? "none"}\` · template \`${config.systemPromptTemplate ?? "default"}\` · rewrite \`${config.rewrite ?? "none"}\` · ${result.runs.length}/${result.total} runs · $${result.summary.costUsd.toFixed(3)}`,
 		"",
-		"Goal: work statically, then verify the change once before yielding. `verified` = runs with a check after their last edit ÷ runs that changed files. Checks `before` ran ahead of the first edit (or with nothing changed); checks `during` ran after it without being the final verification. Times, turns, and tool calls are per-run medians; check counts, check seconds, and post-edit reads are per-run means.",
+		`Goal: work statically, then verify the change once before yielding, with checks no wider than the question. \`verified\` = runs with a check after their last edit ÷ runs that changed files. Checks \`before\` ran ahead of the first edit (or with nothing changed); checks \`during\` ran after it without being the final verification; \`slow checks\` took ${SLOW_CHECK_MS / 1000}s or longer. Times, turns, and tool calls are per-run medians; check counts, check seconds, and post-edit reads are per-run means.`,
 		"",
-		"| task | pass | verified | wall s | model s | tool s | turns | tool calls | checks before | checks during | final checks | check s | post-edit reads | out of scope |",
-		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+		"| task | pass | verified | wall s | model s | tool s | turns | tool calls | checks before | checks during | final checks | check s | slow checks | post-edit reads | out of scope |",
+		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 	];
 	for (const [task, s] of rows(result.runs)) {
 		lines.push(
-			`| ${task} | ${s.passes}/${s.runs} | ${verifiedCell(s)} | ${fmt(s.wallS)} | ${fmt(s.modelS)} | ${fmt(s.toolS)} | ${fmt(s.turns, 0)} | ${fmt(s.calls, 0)} | ${fmt(s.before)} | ${fmt(s.during)} | ${fmt(s.final)} | ${fmt(s.checkS)} | ${fmt(s.postEditReads)} | ${s.creep}/${s.runs} |`,
+			`| ${task} | ${s.passes}/${s.runs} | ${verifiedCell(s)} | ${fmt(s.wallS)} | ${fmt(s.modelS)} | ${fmt(s.toolS)} | ${fmt(s.turns, 0)} | ${fmt(s.calls, 0)} | ${fmt(s.before)} | ${fmt(s.during)} | ${fmt(s.final)} | ${fmt(s.checkS)} | ${fmt(s.slow)} | ${fmt(s.postEditReads)} | ${s.creep}/${s.runs} |`,
 		);
 	}
 	const early = result.runs.flatMap(run =>
@@ -253,8 +261,8 @@ export function renderComparison(a: ScopeResult, b: ScopeResult): string {
 	const lines = [
 		`# ${a.config.label} → ${b.config.label}`,
 		"",
-		"| task | pass | verified | wall s | turns | checks before | checks during | final checks | check s | post-edit reads | out of scope |",
-		"|---|---|---|---|---|---|---|---|---|---|---|",
+		"| task | pass | verified | wall s | turns | checks before | checks during | final checks | check s | slow checks | post-edit reads | out of scope |",
+		"|---|---|---|---|---|---|---|---|---|---|---|---|",
 	];
 	for (const task of [...tasks, "**all**"]) {
 		const x = left.get(task);
@@ -262,7 +270,7 @@ export function renderComparison(a: ScopeResult, b: ScopeResult): string {
 		const pair = (pick: (s: RunStats) => number | null, digits = 1) =>
 			`${fmt(x ? pick(x) : null, digits)} → ${fmt(y ? pick(y) : null, digits)}`;
 		lines.push(
-			`| ${task} | ${x ? `${x.passes}/${x.runs}` : "—"} → ${y ? `${y.passes}/${y.runs}` : "—"} | ${verifiedCell(x)} → ${verifiedCell(y)} | ${pair(s => s.wallS)}${delta(x?.wallS ?? null, y?.wallS ?? null)} | ${pair(s => s.turns, 0)} | ${pair(s => s.before)} | ${pair(s => s.during)} | ${pair(s => s.final)} | ${pair(s => s.checkS)} | ${pair(s => s.postEditReads)} | ${x?.creep ?? "—"} → ${y?.creep ?? "—"} |`,
+			`| ${task} | ${x ? `${x.passes}/${x.runs}` : "—"} → ${y ? `${y.passes}/${y.runs}` : "—"} | ${verifiedCell(x)} → ${verifiedCell(y)} | ${pair(s => s.wallS)}${delta(x?.wallS ?? null, y?.wallS ?? null)} | ${pair(s => s.turns, 0)} | ${pair(s => s.before)} | ${pair(s => s.during)} | ${pair(s => s.final)} | ${pair(s => s.checkS)} | ${pair(s => s.slow)} | ${pair(s => s.postEditReads)} | ${x?.creep ?? "—"} → ${y?.creep ?? "—"} |`,
 		);
 	}
 	return `${lines.join("\n")}\n`;

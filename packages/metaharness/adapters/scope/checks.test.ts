@@ -121,6 +121,29 @@ describe("scope benchmark check accounting", () => {
 		).toBe(true);
 	});
 
+	it("keeps a change verified through docs edits that mention code paths", () => {
+		const check = bash("bun src/main.ts");
+		const readme = { name: "write", args: { path: "/ws/README.md", content: "Run `bun src/config.ts`." }, ms: 1 };
+		const inPlace = bash("perl -0pi -e 's/usage/usage: --dry-run/' README.md");
+		const changed = ["src/config.ts", "README.md"];
+		expect(phases([edit("src/config.ts"), check, readme], changed).verified).toBe(true);
+		expect(phases([edit("src/config.ts"), check, inPlace], changed).verified).toBe(true);
+		expect(phases([edit("src/config.ts"), check, bash("sd old new src/config.ts")], changed).verified).toBe(false);
+	});
+
+	it("counts a script piped to an interpreter as a program run", () => {
+		const script = bash("python3 - \"$tmp\" <<'PY'\nimport subprocess\nsubprocess.run(['bun', 'src/main.ts'])\nPY");
+		expect(phases([edit("src/config.ts"), script])).toEqual({ checks: [["run", "final"]], verified: true });
+	});
+
+	it("counts an eval cell that loads a workspace module as a program run, not one that only reads it", () => {
+		const cell = (code: string) => ({ name: "eval", args: { language: "js", code }, ms: 5 });
+		const timing = 'const { hash } = await import(process.cwd() + "/src/config.ts"); console.log(hash("key"))';
+		expect(phases([edit("src/config.ts"), cell(timing)])).toEqual({ checks: [["run", "final"]], verified: true });
+		const reading = 'import * as fs from "node:fs"; console.log(fs.readFileSync("src/config.ts", "utf8"))';
+		expect(phases([edit("src/config.ts"), cell(reading)])).toEqual({ checks: [], verified: false });
+	});
+
 	it("finds commands inside eval cells", () => {
 		expect(phases([edit("src/config.ts"), { name: "eval", args: { code: 'await sh("bun test")' }, ms: 5 }])).toEqual({
 			checks: [["test", "final"]],

@@ -16,6 +16,8 @@ export interface VerifySpec {
 	absent?: string[];
 	/** Commands that MUST exit 0 (and print `stdout`, a regex, when given). `cwd` is workspace-relative. */
 	commands?: Array<{ argv: string[]; cwd?: string; stdout?: string }>;
+	/** The run MUST execute a test, typecheck, lint, build, or program: a request to verify or measure is not met by reading. */
+	ranCheck?: boolean;
 	/** Case-insensitive regexes the final reply MUST match. */
 	answer?: string[];
 }

@@ -178,7 +178,16 @@ time (deep). Two more target stopping at the wrong signal: `partial-tests`
 (the visible suite covers 2 of 11 commands, hidden tests cover all, so
 stopping at green fails) and `ci-cascade` (a CI script that stops at its
 first failure hides 11 problems behind one another, with golden outputs that
-resist prediction by reading). The fixtures' slow, real-clock tests are deliberate bait;
+resist prediction by reading). Five tasks ask for a verification, an
+optimization, or a measurement where the obvious command is the expensive
+one: `verify-change` and `verify-package` (the relevant test file or package
+runs in milliseconds, the whole suite waits ~15s on real timers),
+`optimize-slow-case` (the named case takes ~12s and a flag scales it down),
+`optimize-function` (an end-to-end benchmark and a slow suite around a
+function that runs alone in microseconds), and `measure-choice` (a 40s
+benchmark matrix that its flags narrow to about a second). Hidden speed and
+correctness gates, and `verify.ranCheck`, keep "run nothing" from passing
+them. The fixtures' slow, real-clock tests are deliberate bait;
 `bunfig.toml` keeps them out of this package's `bun test`.
 
 ```bash
@@ -207,11 +216,13 @@ bun run bench:scope rescore ../../runs/scope/*/result.json   # after changing ta
   ran *while working*: before or between edits, in a run that changed
   nothing, or an install or scan, which verify nothing. Edits are the edit
   tools plus shell commands that write files the run left changed; throwaway
-  check scripts and scratch files are not edits. Also *post-edit reads* of
+  check scripts and scratch files are not edits. *Slow checks* took 5s or
+  longer: a whole suite, a full benchmark, an end-to-end case. Also *post-edit reads* of
   files the agent already edited, and files changed outside `scope`. A run
   passes when `verify` holds and nothing outside `scope` changed.
 - **What good looks like:** every run that changed files is verified, checks
-  while working are 0, check seconds are low, and the pass rate holds.
+  while working are 0, slow checks are 0, check seconds are low, and the pass
+  rate holds.
 - **Outputs** in `runs/scope/<label>/`: `result.json` (rewritten after every
   run), `report.md` (per-task figures, every check run while working, every
   unverified change, failures),
