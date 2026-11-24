@@ -397,7 +397,7 @@ export class ComposerPredictionController {
 			return "stale";
 		}
 		if (!choices?.length) {
-			this.#stopAutomatic("DeepSeek had no useful next prompt (NO_PREDICTION or no usable reply).");
+			this.#stopAutomatic("the model returned no useful next prompt (NO_PREDICTION or no usable reply)");
 			return "skipped";
 		}
 		if (this.#ctx.composer.text()) {

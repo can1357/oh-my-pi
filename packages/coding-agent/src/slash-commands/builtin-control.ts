@@ -159,7 +159,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			try {
 				ctx.eventController.composerPrediction.startAutomatic(limits);
 				ctx.showStatus(
-					`Auto-prompt started: up to ${limits.turns} follow-ups, ${limits.minutes} min, ${limits.tokens} tokens, and $${limits.dollars} additional spend. Use /autoprompt stop to stop it.`,
+					`Auto-prompt started: up to ${limits.turns} follow-ups, ${limits.minutes} min, ${limits.tokens} tokens, and estimated $${limits.dollars} spend. Limits are checked between turns, so an active turn may exceed them. Use /autoprompt stop to stop it.`,
 				);
 			} catch (error) {
 				ctx.showError(error instanceof Error ? error.message : String(error));

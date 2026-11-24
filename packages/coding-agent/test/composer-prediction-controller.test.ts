@@ -105,6 +105,7 @@ function harness(options: HarnessOptions = {}) {
 		getSessionStats: () => stats,
 		prompt: async (text: string) => {
 			sentPrompts.push(text);
+			return true;
 		},
 		ephemeralMaxTokensPreservesRequest: () => options.capPreservesRequest ?? true,
 		runEphemeralTurn(turnOptions: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
