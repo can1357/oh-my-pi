@@ -82,7 +82,7 @@ import {
 	formatPersistenceNotice,
 } from "../persistence-failure";
 import { initializeExtensions } from "../runtime-init";
-import { cfgSpellingAutocomplete } from "../settings";
+import { cfgRpcMaxInputRecordBytes, cfgSpellingAutocomplete } from "../settings";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
@@ -1941,7 +1941,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	};
 	// A transport error during startup must not be an unhandled rejection; the final await below still throws it.
 	// Input ending while startup still runs means no client is left to answer a dialog it awaits: reject them.
-	const inputRead = readRpcInputFrames(input, receiveFrame, message => output(error(undefined, "parse", message)));
+	const inputRead = readRpcInputFrames(
+		input,
+		receiveFrame,
+		message => output(error(undefined, "parse", message)),
+		cfgRpcMaxInputRecordBytes.get(session.settings),
+	);
 	const rejectStartupDialogs = (): void => {
 		if (heldFrames) pendingExtensionRequests.rejectAll("RPC client disconnected during startup");
 	};

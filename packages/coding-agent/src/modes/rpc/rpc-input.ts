@@ -43,7 +43,7 @@ export function claimRpcInput(): ReadableStream<Uint8Array> {
 
 /**
  * Parses newline-delimited RPC input without letting one malformed line stop
- * subsequent protocol frames. A record over MAX_RPC_REASSEMBLED_BYTES is reported once it passes
+ * subsequent protocol frames. A record over `maxRecordBytes` is reported once it passes
  * the cap, and its bytes are skipped through its newline, so the buffer never holds more than the cap.
  * A record that is not UTF-8 is reported and dropped, never repaired.
  */
@@ -51,6 +51,7 @@ export async function readRpcInputFrames(
 	input: ReadableStream<Uint8Array>,
 	onFrame: (frame: unknown) => void,
 	onParseError: (message: string) => void,
+	maxRecordBytes = MAX_RPC_REASSEMBLED_BYTES,
 ): Promise<void> {
 	const decoder = new TextDecoder("utf-8", { fatal: true });
 	const parseRecord = (bytes: Uint8Array): void => {
@@ -84,10 +85,10 @@ export async function readRpcInputFrames(
 			const end = newline === -1 ? chunk.length : newline;
 			if (!overflowed) {
 				recordBytes += end - start;
-				if (recordBytes > MAX_RPC_REASSEMBLED_BYTES) {
+				if (recordBytes > maxRecordBytes) {
 					overflowed = true;
 					record = [];
-					onParseError(`Failed to parse command: line is over the ${MAX_RPC_REASSEMBLED_BYTES}-byte cap`);
+					onParseError(`Failed to parse command: line is over the ${maxRecordBytes}-byte cap`);
 				} else if (end > start) {
 					record.push(chunk.subarray(start, end));
 				}
