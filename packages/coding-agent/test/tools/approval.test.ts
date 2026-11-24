@@ -460,6 +460,12 @@ describe("tool-owned dynamic approval declarations", () => {
 			'ssh build.example "rm -rf /"',
 			"python3 -c \"import os; os.system('rm -rf /')\"",
 			'echo "rm -rf /" | python3',
+			"echo x | rm -rf /",
+			"echo ok; rm -rf /",
+			"echo ok\nrm -rf /",
+			"rm -rf \"/\"",
+			"rm -rf '/'",
+			"pwd && rm -rf \"/\"",
 			"echo hi # it's\nrm -rf /",
 			"GIT_EXTERNAL_DIFF='rm -rf /' git diff",
 			"GIT_EDITOR='rm -rf /' git commit -m fix",
@@ -478,6 +484,8 @@ describe("tool-owned dynamic approval declarations", () => {
 		'echo "sudo rm -rf /etc"',
 		"grep -rn 'sudo rm' docs",
 		"grep -rn 'rm --no-preserve-root' docs",
+		"echo x | grep 'rm -rf /' docs",
+		"git log --grep 'rm -rf /'",
 	])("does not judge quoted text of a read-only command as a delete: %s", command => {
 		expect(bashApproval(command)).toBe("exec");
 	});
@@ -503,6 +511,7 @@ describe("tool-owned dynamic approval declarations", () => {
 			"tee /var/log/app.log",
 			"rm -rf -- ./build",
 			"rm --recursive --force ./dist",
+			"rm -rf dir",
 			"rm -v /tmp/scratch",
 			"dd if=big.mov of=/dev/null bs=4m count=100",
 			"dd if=/dev/sda of=/dev/null bs=1M count=10",
