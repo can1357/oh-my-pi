@@ -935,6 +935,33 @@ describe("AgentSession auto-prewalk", () => {
 			expect(f.session.sessionManager.getSessionLocalModelChange()).toBeUndefined();
 		});
 
+		it("hands an effort-only planner back to an unset starting effort with @initial", async () => {
+			stubJudge([PREWALK, DIRECT]);
+			const f = escalating([...cycle(), done("two")]);
+			cfgPrewalkFrom.set(f.settings, `${f.primary.provider}/${f.primary.id}:low`);
+			cfgPrewalkAutoTarget.set(f.settings, "@initial");
+			f.session.setThinkingLevel(undefined);
+
+			await f.session.prompt(TASK);
+			await f.session.prompt("task two");
+
+			expect(f.efforts).toEqual([Effort.Low, Effort.Low, undefined, undefined]);
+			expect(f.session.configuredThinkingLevel()).toBeUndefined();
+		});
+
+		it("does not arm @initial for a task escalate left where it started", async () => {
+			stubJudge([PREWALK]);
+			const f = escalating([done("one")]);
+			cfgPrewalkFrom.set(f.settings, `${f.primary.provider}/${f.primary.id}`);
+			cfgPrewalkAutoTarget.set(f.settings, "@initial");
+
+			await f.session.prompt(TASK);
+
+			expect(f.requested).toEqual([f.primary.id]);
+			expect(f.session.getPrewalkState()).toBeUndefined();
+			expect(f.notices).toEqual([]);
+		});
+
 		it.each([
 			["is the active model", "anthropic/claude-sonnet-4-5", true, 0, AUTO_PREWALK_TIMEOUT_MS],
 			["cannot be resolved", "anthropic/claude-missing-9", true, 1, AUTO_PREWALK_TIMEOUT_MS],

@@ -9803,13 +9803,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<QueuedMessagePreparation> {
 		const generation = this.#promptGeneration;
 		await this.#prewalk.beginAutoTask(message);
-		const autoParallel = message.role === "user" ? this.#autoParallel.start(prompt, signal) : undefined;
-		const autoPrewalk = await this.#prewalk.classifyAuto(
-			prompt,
-			signal,
-			message,
-			() => !signal.aborted && this.#promptGeneration === generation,
-		);
+		// Past the cap, the before-model-call gate refuses this task's first request and reports it; judging it, or
+		// moving it to an `escalate` planner, would only spend and switch for a request that is never sent.
+		const capped = this.#costGate.check() !== undefined;
+		const autoParallel = !capped && message.role === "user" ? this.#autoParallel.start(prompt, signal) : undefined;
+		const autoPrewalk = capped
+			? undefined
+			: await this.#prewalk.classifyAuto(
+					prompt,
+					signal,
+					message,
+					() => !signal.aborted && this.#promptGeneration === generation,
+				);
 		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
 		const decision = await autoPrewalk?.decision;
 		const plan = await autoParallel;
@@ -9984,6 +9989,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// When `escalate` can move the task to its planner, that settles first, so setup runs on the planner.
 			const userTask = this.#isUserTask(message);
 			if (userTask) await this.#prewalk.beginAutoTask(message);
+			// A capped session hands the prompt back rather than start a run whose first request it refuses; refusing
+			// before the judges spares their calls and keeps `escalate` from moving a task that will not run.
+			if (this.#refuseOverCostCap()) return false;
 			// Auto-parallel splits typed prompts only; a skill prompt's body is instructions, not a list of tasks.
 			const autoParallel =
 				userTask && message.role === "user" ? this.#autoParallel.start(expandedText, setupAbort.signal) : undefined;
@@ -9997,8 +10005,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				: undefined;
 			if (!(await logger.time("prompt:usagePreflight", () => this.#runUsageAwarePreflightForNextModelCall())))
 				return false;
-			// A capped session hands the prompt back rather than start a run whose first request it refuses.
-			if (this.#refuseOverCostCap()) return false;
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();
