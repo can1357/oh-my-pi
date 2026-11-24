@@ -182,20 +182,22 @@ export const cfgBashPatterns = register({
 });
 
 /**
- * The `bash.patterns` list `omp config get` reports. The bash tool enforces the operator layers' `deny`
- * and `prompt` rules whatever a project list says (`[]` resets the session list, not the operator's
- * rules), so those lead, then the session rules, each rule once. A first-match read then sees the
- * restriction the tool applies first, not a project `allow` it overrides.
+ * The `bash.patterns` list `omp config get` reports: the session list, then each operator `deny` or
+ * `prompt` rule it lacks. The bash tool enforces those operator rules whatever a project list says, and
+ * a project `[]` drops them from the session list. Order is not changed, so a project `allow` can still
+ * print before the operator rule that wins.
  */
 export function effectiveBashPatterns(settings: Settings): BashApprovalPatternRule[] {
-	const restrictions = cfgBashPatterns.get(settings.grantAuthority()).filter(rule => rule.approval !== "allow");
-	const seen = new Set<string>();
-	return [...restrictions, ...cfgBashPatterns.get(settings)].filter(rule => {
+	const effective = [...cfgBashPatterns.get(settings)];
+	const listed = new Set(effective.map(rule => JSON.stringify(rule)));
+	for (const rule of cfgBashPatterns.get(settings.grantAuthority())) {
+		if (rule.approval === "allow") continue;
 		const key = JSON.stringify(rule);
-		if (seen.has(key)) return false;
-		seen.add(key);
-		return true;
-	});
+		if (listed.has(key)) continue;
+		listed.add(key);
+		effective.push(rule);
+	}
+	return effective;
 }
 
 export const cfgBashAllowedEnvVars = register({
