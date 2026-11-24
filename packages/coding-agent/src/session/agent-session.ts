@@ -9803,16 +9803,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<QueuedMessagePreparation> {
 		const generation = this.#promptGeneration;
 		await this.#prewalk.beginAutoTask(message);
-		const autoPrewalk = this.#prewalk.classifyAuto(
+		const autoParallel = message.role === "user" ? this.#autoParallel.start(prompt, signal) : undefined;
+		const autoPrewalk = await this.#prewalk.classifyAuto(
 			prompt,
 			signal,
 			message,
 			() => !signal.aborted && this.#promptGeneration === generation,
 		);
-		const autoParallel = message.role === "user" ? this.#autoParallel.start(prompt, signal) : undefined;
-		if (autoPrewalk && this.#prewalk.routesBeforeSetup) await autoPrewalk;
 		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
-		const decision = await autoPrewalk;
+		const decision = await autoPrewalk?.decision;
 		const plan = await autoParallel;
 		return {
 			commit: () => {
@@ -9982,21 +9981,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
-			// `escalate` settles first, together with any move to the planner, so setup runs on the planner.
+			// When `escalate` can move the task to its planner, that settles first, so setup runs on the planner.
 			const userTask = this.#isUserTask(message);
 			if (userTask) await this.#prewalk.beginAutoTask(message);
+			// Auto-parallel splits typed prompts only; a skill prompt's body is instructions, not a list of tasks.
+			const autoParallel =
+				userTask && message.role === "user" ? this.#autoParallel.start(expandedText, setupAbort.signal) : undefined;
 			const autoPrewalk = userTask
-				? this.#prewalk.classifyAuto(
+				? await this.#prewalk.classifyAuto(
 						expandedText,
 						setupAbort.signal,
 						message,
 						() => this.#promptGeneration === generation,
 					)
 				: undefined;
-			// Auto-parallel splits typed prompts only; a skill prompt's body is instructions, not a list of tasks.
-			const autoParallel =
-				userTask && message.role === "user" ? this.#autoParallel.start(expandedText, setupAbort.signal) : undefined;
-			if (autoPrewalk && this.#prewalk.routesBeforeSetup) await autoPrewalk;
 			if (!(await logger.time("prompt:usagePreflight", () => this.#runUsageAwarePreflightForNextModelCall())))
 				return false;
 			// A capped session hands the prompt back rather than start a run whose first request it refuses.
@@ -10161,7 +10159,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (hint) messages.push(hint);
 			}
 			if (autoPrewalk) {
-				const decision = await autoPrewalk;
+				const decision = await autoPrewalk.decision;
 				if (this.#promptGeneration !== generation) {
 					return false;
 				}

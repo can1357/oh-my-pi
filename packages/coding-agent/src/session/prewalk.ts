@@ -139,7 +139,7 @@ interface PrewalkHandoff {
 	auto: boolean;
 	/** Where that return goes: `source`, or where the task started before `escalate` moved it to its planner. */
 	restoreTo: { model: Model; thinkingLevel: ConfiguredThinkingLevel | undefined };
-	/** `escalate`'s switch to the planner: the task and decision it was made for, kept for a retried preparation. */
+	/** Set once `escalate` moved this task to its planner: the task and decision, kept for a retried preparation. */
 	escalation?: { task: AgentMessage; decision: AutoPrewalkDecision };
 }
 
@@ -233,6 +233,7 @@ export class PrewalkCoordinator {
 	async resetForNewSession(enabled: boolean): Promise<void> {
 		const handoff = this.#handoff;
 		this.#autoSuppressed = false;
+		this.#warned.clear();
 		const restoreSource = handoff !== undefined && (enabled || handoff.auto) && this.#onHandoffTarget(handoff);
 		this.#scrubPlanNudge(undefined, true);
 		this.#clearPrewalkState();
@@ -265,7 +266,12 @@ export class PrewalkCoordinator {
 		const epoch = this.#selectionEpoch;
 		try {
 			// A selection made while the planning model loads owns the session; do not override it.
-			const restored = await this.#switch(model, thinkingLevel, () => this.#selectionEpoch === epoch, handoff.auto);
+			const restored = await this.#switch(
+				model,
+				thinkingLevel,
+				() => this.#selectionEpoch === epoch,
+				handoff.escalation !== undefined,
+			);
 			// Temporary selection treats undefined as "keep/default"; restoration must preserve
 			// the original selector, including auto or an explicitly inherited effort.
 			if (restored) this.#host.restoreThinkingLevel(thinkingLevel);
@@ -307,90 +313,97 @@ export class PrewalkCoordinator {
 		if (this.#onHandoffTarget(handoff)) await this.#restoreSource(handoff);
 	}
 
-	/** Under `escalate`, the judgment and any switch to the planner settle before setup reads the model. */
-	get routesBeforeSetup(): boolean {
-		return this.#autoMode() === "escalate";
-	}
-
 	/**
-	 * Starts judging a new user task. Undefined when auto-prewalk is off for this turn or an arm already owns it.
-	 * Never rejects: a failed judgment resolves undefined, so the turn proceeds as if auto-prewalk were off.
+	 * Starts judging a new user task; undefined when auto-prewalk is off for this turn or an arm already owns it.
+	 * Resolves once the task is routed: right away, with the judgment still running alongside setup, unless `escalate`
+	 * can move the task to its planner, which settles (with any switch) before setup reads the model. Never rejects:
+	 * a failed judgment resolves undefined, so the turn proceeds as if auto-prewalk were off.
 	 */
-	classifyAuto(
+	async classifyAuto(
 		request: string,
 		signal: AbortSignal,
 		task: AgentMessage,
 		isCurrent: () => boolean,
-	): Promise<AutoPrewalkDecision | undefined> | undefined {
+	): Promise<{ decision: Promise<AutoPrewalkDecision | undefined> } | undefined> {
 		const mode = this.#autoMode();
 		if (mode === "off" || this.#prewalk !== undefined) return undefined;
 		const escalation = this.#handoff?.escalation;
-		if (escalation?.task === task) return Promise.resolve(escalation.decision);
-		return mode === "escalate" ? this.#escalate(request, signal, task, isCurrent) : this.#judge(request, signal);
+		if (escalation?.task === task) return { decision: Promise.resolve(escalation.decision) };
+		let planner: Prewalk | undefined;
+		if (mode === "escalate") {
+			const resolved = this.#host.resolveAutoPrewalkPlanner();
+			if (typeof resolved === "string") {
+				this.#warnOnce(`Auto-prewalk: ${resolved}; planning on the active model instead.`);
+			} else if (!this.#isNoop(resolved)) {
+				planner = resolved;
+			}
+		}
+		// Without a planner to move to, `escalate` is exactly `on`: the judge runs alongside setup on its usual budget.
+		if (!planner) return { decision: this.#judge(request, signal) };
+		return { decision: Promise.resolve(await this.#escalate(request, signal, task, isCurrent, planner)) };
 	}
 
 	/**
 	 * `escalate`: a confidently front-loaded task moves to `prewalk.from` to plan, as an automatic model change the next
 	 * task returns from. Setup waits for this, so the judge gets a shorter budget and the planner's metadata and
-	 * credential load while it runs. Without a usable planner the task plans on the active model, as under `on`.
+	 * credential load while it runs. A planner that cannot be used leaves the task planning on the active model.
 	 */
 	async #escalate(
 		request: string,
 		signal: AbortSignal,
 		task: AgentMessage,
 		isCurrent: () => boolean,
+		planner: Prewalk,
 	): Promise<AutoPrewalkDecision | undefined> {
 		const baseline = this.#host.model();
-		const planner = this.#host.resolveAutoPrewalkPlanner();
-		if (typeof planner === "string")
-			this.#warnOnce(`Auto-prewalk: ${planner}; planning on the active model instead.`);
-		const plan = typeof planner !== "string" && !this.#isNoop(planner) ? planner : undefined;
-		const prepared = plan ? this.#host.prepareAutoPrewalkPlanner(plan.target) : undefined;
+		const baselineThinkingLevel = this.#host.configuredThinkingLevel();
+		const epoch = this.#selectionEpoch;
+		const prepared = this.#host.prepareAutoPrewalkPlanner(planner.target);
 		const decision = await this.#judge(request, signal, AUTO_PREWALK_ESCALATE_TIMEOUT_MS);
-		if (!baseline || !plan || !prepared || !decision?.arm) return decision;
+		if (!baseline || !decision?.arm) return decision;
 		const model = await prepared;
 		if (typeof model === "string") {
 			this.#warnOnce(`Auto-prewalk: ${model}; planning on the active model instead.`);
 			return decision;
 		}
-		// The one check that the prompt still wants routing. Once the switch starts, only a newer selection stops it:
-		// a switch that lands leaves its receipt, so an abort or a retried preparation still returns to the baseline.
-		if (!isCurrent()) return decision;
-		const restoreTo = { model: baseline, thinkingLevel: this.#host.configuredThinkingLevel() };
-		const epoch = this.#selectionEpoch;
-		const moved = await this.#switch(model, plan.thinkingLevel, () => this.#selectionEpoch === epoch, true, true);
+		// The one check before the switch: the prompt still wants routing, and no selection took the session while the
+		// judge ran. Once the switch starts, only a newer selection stops it: a switch that lands leaves its receipt, so
+		// an abort or a retried preparation still returns to the baseline.
+		if (!isCurrent() || this.#selectionEpoch !== epoch) return decision;
+		let moved = false;
+		try {
+			moved = await this.#switch(model, planner.thinkingLevel, () => this.#selectionEpoch === epoch, true, true);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.#warnOnce(`Auto-prewalk: could not switch to ${model.provider}/${model.id}: ${reason}; planning here.`);
+		}
 		if (moved) {
 			this.#handoff = {
 				source: baseline,
-				sourceThinkingLevel: restoreTo.thinkingLevel,
+				sourceThinkingLevel: baselineThinkingLevel,
 				target: model,
 				targetThinkingLevel: this.#host.configuredThinkingLevel(),
 				auto: true,
-				restoreTo,
+				restoreTo: { model: baseline, thinkingLevel: baselineThinkingLevel },
 				escalation: { task, decision },
 			};
 		}
 		return decision;
 	}
 
-	#judge(request: string, signal: AbortSignal, timeoutMs?: number): Promise<AutoPrewalkDecision | undefined> {
+	/** Asks the judge and logs how long it took; never rejects. */
+	async #judge(request: string, signal: AbortSignal, timeoutMs?: number): Promise<AutoPrewalkDecision | undefined> {
 		const started = performance.now();
-		return this.#host.classifyAutoPrewalk(request, signal, timeoutMs).then(
-			decision => {
-				logger.debug("auto-prewalk: judged", {
-					ms: Math.round(performance.now() - started),
-					route: decision?.route,
-				});
-				return decision;
-			},
-			error => {
-				logger.debug("auto-prewalk: skipped after a failure", {
-					ms: Math.round(performance.now() - started),
-					error: error instanceof Error ? error.message : String(error),
-				});
-				return undefined;
-			},
-		);
+		try {
+			return await this.#host.classifyAutoPrewalk(request, signal, timeoutMs);
+		} catch (error) {
+			logger.debug("auto-prewalk: skipped after a failure", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		} finally {
+			logger.debug("auto-prewalk: judged", { ms: Math.round(performance.now() - started) });
+		}
 	}
 
 	/**
@@ -540,11 +553,17 @@ export class PrewalkCoordinator {
 		const source = this.#host.model();
 		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		const auto = this.#autoArm === prewalk;
-		// An auto handoff returns to where its task started, which is before `escalate`'s planner switch if it made one.
-		const taskStart = auto && this.#handoff?.auto ? this.#handoff.restoreTo : undefined;
+		// The handoff of a task `escalate` moved to its planner keeps that move's receipt, so the next task returns to
+		// where the task started.
+		const escalated = auto && this.#handoff?.escalation ? this.#handoff : undefined;
 		const epoch = this.#selectionEpoch;
 		this.#switching = prewalk;
-		const switched = await this.#switch(target, prewalk.thinkingLevel, () => this.#selectionEpoch === epoch, auto);
+		const switched = await this.#switch(
+			target,
+			prewalk.thinkingLevel,
+			() => this.#selectionEpoch === epoch,
+			escalated !== undefined,
+		);
 		const disarmed = this.#switching !== prewalk;
 		this.#switching = undefined;
 		// A newer arm (a re-run `/prewalk`) survives; otherwise this switch consumes its arm.
@@ -578,7 +597,8 @@ export class PrewalkCoordinator {
 				target,
 				targetThinkingLevel: this.#host.configuredThinkingLevel(),
 				auto,
-				restoreTo: taskStart ?? { model: source, thinkingLevel: sourceThinkingLevel },
+				restoreTo: escalated?.restoreTo ?? { model: source, thinkingLevel: sourceThinkingLevel },
+				escalation: escalated?.escalation,
 			};
 		}
 		this.#host.emitNotice(
@@ -601,17 +621,18 @@ export class PrewalkCoordinator {
 	}
 
 	/**
-	 * Moves the session for prewalk. An automatic move that keeps the model only changes effort, so the provider
-	 * session survives it; any other move is a temporary model change.
+	 * Moves the session for prewalk. The moves of a task `escalate` routed (to its planner, the handoff, and the
+	 * return) only change effort when the model stays, so the provider session survives them; any other move is a
+	 * temporary model change.
 	 */
 	async #switch(
 		model: Model,
 		thinkingLevel: ConfiguredThinkingLevel | undefined,
 		isCurrent: () => boolean,
-		auto: boolean,
+		escalated: boolean,
 		metadataResolved?: boolean,
 	): Promise<boolean> {
-		if (!auto || !routedModelsAreEqual(this.#host.model(), model)) {
+		if (!escalated || !routedModelsAreEqual(this.#host.model(), model)) {
 			return this.#host.setModelTemporary(model, thinkingLevel, isCurrent, metadataResolved);
 		}
 		if (!isCurrent()) return false;

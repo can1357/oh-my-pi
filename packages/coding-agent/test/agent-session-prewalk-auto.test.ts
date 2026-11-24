@@ -901,10 +901,18 @@ describe("AgentSession auto-prewalk", () => {
 		it("judges on the starting model, plans on prewalk.from, hands off, and starts the next task where this one started", async () => {
 			const calls = stubJudge([PREWALK, DIRECT]);
 			const f = escalating([...cycle(), done("two")]);
+			cfgPrewalkFrom.set(f.settings, `${plannerSelector}:low`);
+			const published: string[] = [];
+			f.session.subscribe(event => {
+				if (event.type === "model_changed" || event.type === "thinking_level_changed") published.push(event.type);
+			});
 
 			await f.session.prompt(TASK);
 			expect(asked(calls)[0]?.model).toBe(f.primary.id);
 			expect(f.requested).toEqual([planner.id, planner.id, f.target.id]);
+			expect(f.efforts[0]).toBe(Effort.Low);
+			// The planner switch publishes like any model change: the model first, then its effort.
+			expect(published.slice(0, 2)).toEqual(["model_changed", "thinking_level_changed"]);
 			expect(f.nudges[0]).toContain("prewalk-plan");
 
 			await f.session.prompt("task two");
@@ -928,12 +936,12 @@ describe("AgentSession auto-prewalk", () => {
 		});
 
 		it.each([
-			["is the active model", "anthropic/claude-sonnet-4-5", true, 0],
-			["cannot be resolved", "anthropic/claude-missing-9", true, 1],
-			["has no credential", plannerSelector, false, 1],
+			["is the active model", "anthropic/claude-sonnet-4-5", true, 0, AUTO_PREWALK_TIMEOUT_MS],
+			["cannot be resolved", "anthropic/claude-missing-9", true, 1, AUTO_PREWALK_TIMEOUT_MS],
+			["has no credential", plannerSelector, false, 1, AUTO_PREWALK_ESCALATE_TIMEOUT_MS],
 		] as const)(
 			"plans on the active model, as under on, when prewalk.from %s",
-			async (_case, from, credential, warnings) => {
+			async (_case, from, credential, warnings, budget) => {
 				stubJudge([PREWALK, PREWALK]);
 				const f = escalating([...cycle(), ...cycle()]);
 				cfgPrewalkFrom.set(f.settings, from);
@@ -943,6 +951,14 @@ describe("AgentSession auto-prewalk", () => {
 						model.id === planner.id ? Promise.resolve(undefined) : getApiKey(model, ...rest),
 					);
 				}
+				// Only a planner `escalate` can move to holds setup on the short budget; otherwise the judge keeps `on`'s.
+				// The other budget times out, so each task arms only if its judge ran on `budget`.
+				const other =
+					budget === AUTO_PREWALK_TIMEOUT_MS ? AUTO_PREWALK_ESCALATE_TIMEOUT_MS : AUTO_PREWALK_TIMEOUT_MS;
+				const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+				vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
+					ms === other ? AbortSignal.abort(new DOMException("timed out", "TimeoutError")) : realTimeout(ms),
+				);
 
 				await f.session.prompt(TASK);
 				await f.session.prompt(SECOND_TASK);
@@ -958,25 +974,6 @@ describe("AgentSession auto-prewalk", () => {
 				expect(f.notices.filter(notice => notice.startsWith("Auto-prewalk:"))).toHaveLength(warnings);
 			},
 		);
-
-		it("gives the judge the shorter escalate budget, and a judge past it leaves the task where it is", async () => {
-			stubJudge([PREWALK]);
-			const f = escalating([done("one")]);
-			const budgets: number[] = [];
-			const realTimeout = AbortSignal.timeout.bind(AbortSignal);
-			vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
-				budgets.push(ms);
-				return ms === AUTO_PREWALK_ESCALATE_TIMEOUT_MS
-					? AbortSignal.abort(new DOMException("timed out", "TimeoutError"))
-					: realTimeout(ms);
-			});
-
-			await f.session.prompt(TASK);
-
-			expect(budgets).toContain(AUTO_PREWALK_ESCALATE_TIMEOUT_MS);
-			expect(f.requested).toEqual([f.primary.id]);
-			expect(f.session.getPrewalkState()).toBeUndefined();
-		});
 
 		it("stays on the planner after an Esc, and starts the next task where the aborted one started", async () => {
 			stubJudge([PREWALK, DIRECT]);
@@ -1007,6 +1004,22 @@ describe("AgentSession auto-prewalk", () => {
 			await f.session.prompt("task two");
 
 			expect(f.requested).toEqual([planner.id, planner.id, manual.id]);
+		});
+
+		it("keeps a thinking-level pick made while the judge runs, instead of moving the task to the planner", async () => {
+			const hold = Promise.withResolvers<void>();
+			const requested = Promise.withResolvers<void>();
+			stubJudge([PREWALK], { hold: hold.promise, requested: requested.resolve });
+			const f = escalating(cycle());
+
+			const task = f.session.prompt(TASK);
+			await requested.promise;
+			f.session.setThinkingLevel(Effort.Low);
+			hold.resolve();
+			await task;
+
+			expect(f.requested).toEqual([f.primary.id, f.primary.id, f.target.id]);
+			expect(f.efforts[0]).toBe(Effort.Low);
 		});
 
 		it("warns once and hands off to the default target when @initial is set without escalate", async () => {
