@@ -16,6 +16,7 @@
 - Fixed `antigravity-cli` quota exhaustion on agy 1.5.14+ being recorded as a normal reply instead of a rate limit, so exhausted accounts now rotate to healthy ones and honor the reported reset time ([#20247](https://github.com/can1357/oh-my-pi/issues/20247))
 - Gemini models on OpenRouter keep thinking throughout long tool loops instead of going silent after the first few steps; replayed reasoning now keeps the `id` and `format` OpenRouter needs to return Gemini's thought signatures
 - Fixed `/btw` and other side turns on OpenCode Go/Zen missing the prompt cache because `x-opencode-session` carried the side request's id instead of the parent conversation's ([#20261](https://github.com/can1357/oh-my-pi/issues/20261))
+- Fixed `antigravity-cli` requests failing with `Unknown model ID` when the signed-in account’s agy roster lacks the model: the rejection now blocks only that model on the account and rotates to a sibling login that offers it ([#20315](https://github.com/can1357/oh-my-pi/pull/20315) by [@qSHEMq](https://github.com/qSHEMq))
 
 ## [19.1.1] - 2026-11-23
 
