@@ -245,6 +245,11 @@ export interface AgentSessionConfig {
 	 * slow-verdict boundary runs in milliseconds; production never sets it.
 	 */
 	unexpectedStopJudgeTimeoutMs?: number;
+	/**
+	 * Window for the per-session automatic-retry resume spread. Test seam so
+	 * exact-clock retry tests pin continue timing; production never sets it.
+	 */
+	automaticRetryJitterWindowMs?: number;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
 	/** Keep `prewalk.auto` away from this session until `/new` (`--no-prewalk`). */
