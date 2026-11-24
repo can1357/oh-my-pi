@@ -1,0 +1,9 @@
+{
+	"trap": "Mechanical rename; the suite spends ~9s in real backoff timers and nothing asks for a test run.",
+	"scope": ["src/**", "test/**"],
+	"allowedChecks": [],
+	"verify": {
+		"files": { "src/config.ts": ["export const RETRY_LIMIT = 3"] },
+		"absent": ["MAX_RETRIES"]
+	}
+}

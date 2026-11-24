@@ -54,6 +54,7 @@ import {
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
 	generateBranchSummary,
+	getMessageFromEntry,
 	type ShakeConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
@@ -470,7 +471,6 @@ import {
 } from "./prewalk";
 import { PROVIDER_REFUSAL_CUSTOM_TYPE, providerRefusalData } from "./provider-refusal";
 import {
-	IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
 	isHiddenUserCompanion,
@@ -659,8 +659,6 @@ const AGENT_START_POLICY_MAX_ATTEMPTS = 3;
  * after, while a hung server costs at most 1.5s.
  */
 export const MCP_DISCOVERY_TURN_WAIT_MS = 1500;
-/** Vision descriptions gate admission; stay under the RPC clients' 30 s request timeout. */
-const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
 /**
@@ -1073,6 +1071,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	/** Tools are exactly the explicit list (`--no-tools`, structured children): no goal or plan mode. */
+	readonly restrictToolNames: boolean;
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
 	#costGate: CostGateApi;
@@ -1368,8 +1368,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#usageReports: UsageReport[] | undefined;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
-	/** In-flight vision descriptions that gate prompt admission; abort() cancels them. */
-	#imageDescriptionAbortControllers = new Set<AbortController>();
 	#queuedMessageDrainBlocked = false;
 	#modeExitDrainSuppressionDepth = 0;
 	#usagePreflightReadyForNextModelCall = false;
@@ -1467,7 +1465,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#abortUnwinds = new Set<Promise<void>>();
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
 	 *  yet dispatched a turn, queued, or bailed. Preprocessing (manual-compaction wait, slash
-	 *  commands, image normalization, vision description) runs before #promptInFlightCount is
+	 *  commands, image normalization) runs before #promptInFlightCount is
 	 *  incremented, so `isStreaming` alone cannot tell a host that a submission is admitted. */
 	#admittedSubmissionCount = 0;
 	#admittedSubmissionsSettled: PromiseWithResolvers<void> | undefined;
@@ -1476,7 +1474,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#activeAgentPromptGeneration = this.#promptGeneration;
 	/** Bumped by newSession()/switchSession() at the same point they clear the pending IRC/aside
 	 *  queue (restored on a rolled-back switchSession()). A message-queueing call that spans an
-	 *  await (image normalization, vision description) captures this before the await and checks
+	 *  await (image normalization) captures this before the await and checks
 	 *  it again right before enqueueing into IrcBridge, so a record started for the outgoing
 	 *  session cannot land in a different session's queue after the transition. Deliberately
 	 *  distinct from #promptGeneration, which also changes on a plain abort() — asides must still
@@ -2265,6 +2263,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.#mcpNamespaces = config.mcpNamespaces;
+		this.restrictToolNames = config.restrictToolNames === true;
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
@@ -2855,11 +2854,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
-			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
-			sessionId: () => this.sessionId,
-			costGate: () => this.#costGate,
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			imageDescriptions: config.imageDescriptions,
 			transformContext: (messages, signal) => this.#transformContext(messages, signal),
 			convertToLlm: messages => this.#convertToLlm(messages),
 			onPayload: this.#onPayload,
@@ -3005,6 +3002,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelRegistry: this.#modelRegistry,
 			yieldQueue: this.yieldQueue,
 			obfuscator: () => this.#obfuscator,
+			imageDescriptions: config.imageDescriptions,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: model => resolveWebsocketPreference(this.settings, model),
 			onPayload: this.#onPayload,
@@ -3126,7 +3124,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const message = this.#buildEvalStateContextMessage([]);
 				if (message) this.sessionManager.appendMessage(message);
 			},
-			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
+			convertToLlmForSideRequest: (messages, withImageDescriptions) =>
+				this.#convertToLlmForSideRequest(messages, withImageDescriptions),
+			imageDescriptionModel: reader => this.#providerBoundary.imageDescriptionModel(reader),
+			prepareImageDescriptions: (messages, model, signal) =>
+				this.#providerBoundary.prepareImageDescriptions(messages, model, signal),
 			buildLiveProviderContext: async (summarized, retained, signal, model) => {
 				// compact() rebuilds the previous summary message; send the live
 				// agent's own one. Conversion caches key on message identity, so a
@@ -3145,6 +3147,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const prefixLength = (await this.convertMessagesToLlm(history, signal, model)).length;
 				const live = await this.agent.buildSideRequestContext(
 					await this.convertMessagesToLlm([...history, ...retained], signal, model),
+					undefined,
+					signal,
 				);
 				// Date/cwd reminder controls are the only messages the transforms
 				// insert: count past them, and leave out any at the cut, so the kept
@@ -8473,8 +8477,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#providerBoundary.deobfuscateDelta(text);
 	}
 
-	#convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
-		return this.#providerBoundary.convertToLlmForSideRequest(messages);
+	#convertToLlmForSideRequest(messages: AgentMessage[], withImageDescriptions?: boolean): Message[] {
+		return this.#providerBoundary.convertToLlmForSideRequest(messages, withImageDescriptions);
 	}
 
 	/**
@@ -9055,33 +9059,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return notices;
 	}
 
-	/**
-	 * Every caller runs this before its message is admitted (queued or dispatched), and
-	 * RPC acknowledges `prompt` only after admission. Bound the vision call so a slow
-	 * provider cannot hold admission past the bundled clients' 30 s request timeout, and
-	 * let abort() cancel it. Either way the image stays saved and the notice says the
-	 * description is unavailable.
-	 */
-	async #buildImageDescriptionNotice(
-		normalizedImages: ImageContent[],
-		signal?: AbortSignal,
-	): Promise<CustomMessage | undefined> {
-		const controller = new AbortController();
-		this.#imageDescriptionAbortControllers.add(controller);
-		try {
-			return await this.#providerBoundary.buildImageDescriptionNotice(
-				normalizedImages,
-				AbortSignal.any([
-					controller.signal,
-					AbortSignal.timeout(IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS),
-					...(signal ? [signal] : []),
-				]),
-			);
-		} finally {
-			this.#imageDescriptionAbortControllers.delete(controller);
-		}
-	}
-
 	#normalizeAgentMessageImages<T extends AgentMessage>(message: T): Promise<T> {
 		return this.#providerBoundary.normalizeAgentMessageImages(message);
 	}
@@ -9388,9 +9365,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return true;
 		}
 
-		// Captured before the normalization/vision-description awaits below so an
-		// abort() landing during either can be told apart from a fresh submission —
-		// see the drop check right after those awaits.
+		// Captured before the image-normalization await below so an
+		// abort() landing during it can be told apart from a fresh submission —
+		// see the drop check right after that await.
 		const preflightGeneration = this.#promptGeneration;
 		// Skip eager preludes when the user has already queued a directive
 		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
@@ -9414,14 +9391,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (normalizedImages?.length) {
 			userContent.push(...normalizedImages);
 		}
-		// Text-only model + image attachment: describe via a vision model and inject the
-		// description as a hidden companion (the image stays in the visible user message).
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
 
-		// abort() bumps #promptGeneration and can land while normalization and the
-		// vision-description call above are still in flight. #promptWithMessage below
+		// abort() bumps #promptGeneration and can land while image normalization
+		// above is still in flight. #promptWithMessage below
 		// captures its own generation fresh at entry, so it cannot see this race and
 		// would dispatch a brand-new turn as if the abort never happened. Drop the
 		// prompt here instead — same contract as #promptWithMessage's own
@@ -9434,7 +9406,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		// A concurrent prompt() can start a turn during the awaits above: image
-		// normalization and the vision-description call suspend after the
+		// normalization suspends after the
 		// isStreaming check at the top, so two callers — the CLI initial message
 		// and a freshly typed submission — can both observe an idle session.
 		// Re-check before dispatch so the loser queues exactly like the early
@@ -9452,10 +9424,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
 				rawText: typedText,
-				preprocessed: {
-					images: normalizedImages,
-					descriptionNotice: imageDescriptionNotice,
-				},
+				preprocessed: { images: normalizedImages },
 				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
@@ -9513,16 +9482,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				followUpBatch: followUps,
 				images: normalizedImages,
 				prependMessages:
-					preludeMessages.length > 0 ||
-					keywordNotices.length > 0 ||
-					attachmentSourceNotices.length > 0 ||
-					imageDescriptionNotice
-						? [
-								...preludeMessages,
-								...keywordNotices,
-								...attachmentSourceNotices,
-								...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
-							]
+					preludeMessages.length > 0 || keywordNotices.length > 0 || attachmentSourceNotices.length > 0
+						? [...preludeMessages, ...keywordNotices, ...attachmentSourceNotices]
 						: undefined,
 			});
 		} catch (error) {
@@ -9702,18 +9663,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			customMessage.content.some(part => part.type === "image");
 		const preparationGeneration = this.#promptGeneration;
 		const preparedMessage = hasSkillImages ? await this.#normalizeAgentMessageImages(customMessage) : customMessage;
-		const descriptionNotice = hasSkillImages
-			? await this.#buildSkillImageDescriptionNotice(preparedMessage)
-			: undefined;
-		// Same drop as #dispatchPrompt: abort() during normalization or the vision
-		// description must not publish the skill or start a turn afterwards.
+		// Same drop as #dispatchPrompt: abort() during normalization must not publish
+		// the skill or start a turn afterwards.
 		if (hasSkillImages && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
 			outcome.sessionClaimed = false;
 			this.#reportDroppedCustomPrompt(message, options, followUps);
 			return true;
 		}
 
-		// Image normalization and the vision-description call suspend after the
+		// Image normalization suspends after the
 		// isStreaming check above, so a concurrent submission can start a turn in
 		// between. Re-check before dispatch and queue with the already-prepared
 		// content, mirroring #dispatchPrompt; no await sits between this check and
@@ -9726,7 +9684,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
-				preprocessed: { content: preparedMessage.content, descriptionNotice },
+				preprocessed: { content: preparedMessage.content },
 				prependMessages: queuedNotices,
 				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
@@ -9739,20 +9697,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
 			followUpBatch: followUps,
-			prependMessages:
-				keywordNotices.length > 0 || descriptionNotice
-					? [...keywordNotices, ...(descriptionNotice ? [descriptionNotice] : [])]
-					: undefined,
+			prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
 		});
 		if (!outcome.sessionClaimed) this.#reportDroppedCustomPrompt(message, options, followUps);
 		return outcome.sessionClaimed;
-	}
-
-	/** Describe normalized images in a user-invoked skill prompt before delivery. */
-	async #buildSkillImageDescriptionNotice(message: CustomMessage): Promise<CustomMessage | undefined> {
-		if (!isUserInvokedSkillPrompt(message) || !Array.isArray(message.content)) return undefined;
-		const images = message.content.filter((part): part is ImageContent => part.type === "image");
-		return images.length > 0 ? this.#buildImageDescriptionNotice(images) : undefined;
 	}
 
 	/** Queue ownership belongs to Agent; only actual user deliveries refresh submission policy. */
@@ -10118,13 +10066,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
-					// `@image.png` mentions are attachments too: a text-only model gets the
-					// same vision-description companion as `options.images`.
-					const mentionImages = fileMentionMessage.files.flatMap(file => (file.image ? [file.image] : []));
-					const descriptionNotice = mentionImages.length
-						? await this.#buildImageDescriptionNotice(mentionImages)
-						: undefined;
-					if (descriptionNotice) messages.push(descriptionNotice);
 				}
 			}
 
@@ -10537,7 +10478,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const expandedText =
 			options?.expandPromptTemplates === false ? text : expandPromptTemplate(text, [...this.#promptTemplates]);
 		// Stamp before image preprocessing so a queued image follow-up measures
-		// from the operator's submission, not after the vision-model description.
+		// from the operator's submission.
 		const submittedAt = Date.now();
 		if (!options?.synthetic) {
 			const queued = this.#expandQueuedMentions(expandedText, "followUp", options?.attribution);
@@ -10559,11 +10500,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
 		this.#allowQueuedMessageDrainRetry();
-		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		const directive: AgentMessage = {
 			role: "developer",
 			content,
@@ -10575,7 +10512,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			synthetic: true,
 		};
 		this.agent.followUp(directive);
-		options.onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
+		options.onPromptQueued?.([directive]);
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -10586,7 +10523,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *
 	 * The busy-check is not a TOCTOU snapshot: the message is admitted through
 	 * `#queueUserMessage`, which — for this admission — re-checks liveness after
-	 * its awaits (image normalization / vision description) and never schedules
+	 * its awaits (image normalization) and never schedules
 	 * the idle queue drain, so:
 	 *
 	 * - a run that settled mid-admission classifies as `false` (not admitted)
@@ -10621,7 +10558,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A client-owned prompt must own the run: `#clientPromptInFlightCount`
 		// is raised by `#prompt` (the session.prompt — ACP session/prompt —
 		// path) synchronously at submission, before any dispatch
-		// preprocessing (commands, normalization, vision description), and
+		// preprocessing (commands, normalization), and
 		// held across setup and the live run. Autonomous in-flight brackets
 		// (IRC wakes, idle yield injections, scheduler continuations,
 		// agent-initiated turns, auto-continues, queued-hidden drains) raise
@@ -10710,24 +10647,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			 *  it later. Defaults to `text` (the common case: no transformation ran,
 			 *  so raw and queued content are identical). */
 			rawText?: string;
-			/**
-			 * Set only when image normalization and the vision description already
-			 * ran for this prompt; its presence suppresses both here. Companions
-			 * travel in `prependMessages` so a notice-only caller cannot claim
-			 * attachments were prepared (they would be silently dropped).
-			 */
-			preprocessed?: {
-				images?: ImageContent[];
-				descriptionNotice?: CustomMessage;
-			};
+			/** Set only when image normalization already ran for this prompt; its presence suppresses it here. */
+			preprocessed?: { images?: ImageContent[] };
 			/** Called synchronously once the message is pushed onto its queue. See {@link PromptOptions.onPromptAdmitted}. */
 			onPromptAdmitted?: () => void;
 			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
 			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 			/**
 			 * `joinActiveTurn` admission: the caller treats "not admitted" as "keep
-			 * your content". A run that settled while normalization/vision
-			 * description was in flight must not strand a late message on an idle
+			 * your content". A run that settled while image normalization
+			 * was in flight must not strand a late message on an idle
 			 * queue (the idle drain is skipped via `skipIdleDrain`), so classify
 			 * as not-admitted instead. Synchronous from this check to the enqueue —
 			 * no interleaving drain can race it.
@@ -10754,8 +10683,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const preprocessed = options?.preprocessed;
 		const prependMessages = options?.prependMessages ?? [];
 		// Captured before any await below so the aside branch can detect a
-		// newSession()/switchSession() that completed while normalization/vision
-		// description was in flight and drop a record that would otherwise land in a
+		// newSession()/switchSession() that completed while image normalization
+		// was in flight and drop a record that would otherwise land in a
 		// different session's queue.
 		const sessionGeneration = this.#sessionGeneration;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
@@ -10766,22 +10695,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// branch) until the next deliberate steer/follow-up/prompt, matching the
 		// sendCustomMessage aside path (queueAside), which never touches this flag.
 		if (mode !== "aside") this.#advisors.autoResumeSuppressed = false;
-		// The pre-dispatch re-check in prompt() arrives with normalization and the
-		// vision description already done — reuse them instead of paying a second
-		// vision-model request for the same attachment.
+		// The pre-dispatch re-check in prompt() arrives with normalization already done.
 		const attachmentSourceNotices = this.#createAttachmentSourceNotices(images, timestamp ?? Date.now());
 		const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
-		// Text-only model + image attachment: describe via a vision model and enqueue the
-		// description as a hidden companion immediately before the user message.
-		const imageDescriptionNotice = preprocessed
-			? preprocessed.descriptionNotice
-			: normalizedImages?.length
-				? await this.#buildImageDescriptionNotice(normalizedImages)
-				: undefined;
 		if (options?.promptGeneration !== undefined && this.#promptGeneration !== options.promptGeneration) {
 			return false;
 		}
@@ -10804,13 +10724,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
-			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			records.push(userMessage);
 			this.#irc.queueAside(records);
 			options?.onPromptAdmitted?.();
-			// The awaits above (image normalization / vision description) can span the run's
+			// The awaits above (image normalization) can span the run's
 			// settle, so the run may already be idle by the time the record lands in the aside
 			// queue with no loop left to drain it. Resuming here is a no-op while streaming and
 			// wakes/folds correctly once idle (see #resumeStrandedIrcAsides).
@@ -10821,7 +10740,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// #expandQueuedMentions), so it arrives alongside the user message in the same turn (#14093).
 		const queued = this.#pushQueuedUserMessage(
 			mode,
-			[...prependMessages, ...attachmentSourceNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])],
+			[...prependMessages, ...attachmentSourceNotices],
 			content,
 			attribution,
 			timestamp ?? Date.now(),
@@ -11344,8 +11263,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		deliverAs: "steer" | "followUp" | "aside",
 		options?: {
 			queueChipText?: string;
-			/** Content and vision companion already prepared by the caller; skips re-normalizing and re-describing. */
-			preprocessed?: { content: CustomMessage<T>["content"]; descriptionNotice?: CustomMessage };
+			/** Content already normalized by the caller; skips re-normalizing. */
+			preprocessed?: { content: CustomMessage<T>["content"] };
 			/** Hidden notices published immediately before this message, in the same synchronous group. */
 			prependMessages?: readonly CustomMessage[];
 			/** Called synchronously once the message is pushed onto its queue. See {@link PromptOptions.onPromptAdmitted}. */
@@ -11382,19 +11301,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const normalizedAppMessage = preprocessed
 			? { ...appMessage, content: preprocessed.content }
 			: await this.#normalizeAgentMessageImages(appMessage);
-		const descriptionNotice = preprocessed
-			? preprocessed.descriptionNotice
-			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
 		if (deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
-			this.#irc.queueAside([
-				...prependMessages,
-				...(descriptionNotice ? [descriptionNotice] : []),
-				normalizedAppMessage,
-			]);
+			this.#irc.queueAside([...prependMessages, normalizedAppMessage]);
 			onPromptAdmitted?.();
 			// The image-normalization await above can span the run's settle, so the run may
 			// already be idle by the time the record lands in the aside queue with no loop
@@ -11407,14 +11319,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
 		if (deliverAs === "followUp") {
 			for (const notice of prependMessages) this.agent.followUp(notice);
-			if (descriptionNotice) this.agent.followUp(descriptionNotice);
 			this.agent.followUp(normalizedAppMessage);
 		} else {
 			for (const notice of prependMessages) this.agent.steer(notice);
-			if (descriptionNotice) this.agent.steer(descriptionNotice);
 			this.agent.steer(normalizedAppMessage);
 		}
-		onPromptQueued?.([...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage]);
+		onPromptQueued?.([...prependMessages, normalizedAppMessage]);
 		onPromptAdmitted?.();
 		this.#scheduleIdleQueueDrain();
 	}
@@ -11731,7 +11641,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template
 		// expansion. prompt() awaits manual-compaction cleanup and (on the non-streaming path)
-		// image normalization/vision description before dispatching, so a stream can start in
+		// image normalization before dispatching, so a stream can start in
 		// that gap; prompt() re-checks isStreaming at each await boundary and queues via
 		// `streamingBehavior` when it does. Passing "aside" through (instead of hard-coding
 		// "steer") keeps that race from degrading a non-interrupting aside into a
@@ -12825,7 +12735,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
-			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
 			this.abortRetry();
 			this.#promptGeneration++;
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
@@ -14359,28 +14268,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				`Model ${modelDescription} does not support tools: false for ephemeral turns because its transport requires native tools.`,
 			);
 		}
-		// Images, those of earlier side turns too, get a prompt's handling: normalized
-		// for the model, and described by a vision model for a text-only one.
+		// Images, those of earlier side turns too, get a prompt's handling: normalized for the model. The
+		// provider-context transform describes them for a text-only one.
 		const promptImages = await this.#normalizeImagesForModel(args.promptImages);
-		const imageDescriptionNotice = promptImages?.length
-			? await this.#buildImageDescriptionNotice(promptImages, args.signal)
-			: undefined;
-		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
+		const history = args.history && (await this.#prepareSideHistory(args.history));
 		assertEphemeralTurnReady();
 		const cacheSessionId = this.sessionId;
 		// Created with the snapshot so the entry sits on the leaf the turn read.
 		const usageReporter =
 			args.onUsage ?? (args.purpose ? journalCompletion(this.sessionManager, { purpose: args.purpose }) : undefined);
-		const snapshot = this.#buildEphemeralSnapshot(
-			args.promptText,
-			history,
-			promptImages,
-			imageDescriptionNotice,
-			args.conversationKey,
-		);
+		const snapshot = this.#buildEphemeralSnapshot(args.promptText, history, promptImages, args.conversationKey);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		assertEphemeralTurnReady();
-		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
+		const sideContext = await this.agent.buildSideRequestContext(llmMessages, undefined, args.signal);
 		const toolHistory = sideContext.messages.some(
 			message =>
 				message.role === "toolResult" ||
@@ -14526,32 +14426,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
-	async #prepareSideHistory(history: readonly Message[], signal?: AbortSignal): Promise<AgentMessage[]> {
-		const prepared: AgentMessage[] = [];
-		for (const message of history) {
-			const normalized = await this.#normalizeAgentMessageImages(message);
-			const images =
-				normalized.role === "user" && Array.isArray(normalized.content)
-					? normalized.content.filter((part): part is ImageContent => part.type === "image")
-					: [];
-			const notice = images.length > 0 ? await this.#buildImageDescriptionNotice(images, signal) : undefined;
-			if (notice) prepared.push(notice);
-			prepared.push(normalized);
-		}
-		return prepared;
+	#prepareSideHistory(history: readonly Message[]): Promise<AgentMessage[]> {
+		return Promise.all(history.map(message => this.#normalizeAgentMessageImages(message)));
 	}
 
 	/**
 	 * Build a message snapshot for an ephemeral side-channel turn. Includes the
 	 * in-flight streaming assistant reply, detached side history, and the current
 	 * prompt after the no-tools reminder. A keyed conversation can cache its
-	 * replayable side history up to the first regenerated vision description.
+	 * replayable side history.
 	 */
 	#buildEphemeralSnapshot(
 		promptText: string,
 		history?: readonly AgentMessage[],
 		images?: ImageContent[],
-		imageDescriptionNotice?: CustomMessage,
 		conversationKey?: string,
 	): AgentMessage[] {
 		const messages = [...this.messages];
@@ -14598,24 +14486,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 		markPerCallContextMessage(reminder);
 		messages.push(reminder);
-		// A regenerated vision description can change between keyed follow-ups.
-		// No breakpoint after it can be read by the next request.
-		let volatileSuffix = false;
 		if (history?.length) {
 			// Detach before the conversion pipeline can await or mutate caller-owned messages.
 			const detachedHistory = structuredClone(history);
-			for (const message of detachedHistory) {
-				if (message.role === "custom" && message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE) {
-					volatileSuffix = true;
-				}
-				if (!conversationKey || volatileSuffix) markPerCallContextMessage(message);
-			}
+			if (!conversationKey) for (const message of detachedHistory) markPerCallContextMessage(message);
 			messages.push(...detachedHistory);
-		}
-		if (imageDescriptionNotice) {
-			markPerCallContextMessage(imageDescriptionNotice);
-			messages.push(imageDescriptionNotice);
-			volatileSuffix = true;
 		}
 		const sidePrompt: AgentMessage = {
 			role: "user",
@@ -14623,7 +14498,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
-		if (!conversationKey || volatileSuffix) markPerCallContextMessage(sidePrompt);
+		if (!conversationKey) markPerCallContextMessage(sidePrompt);
 		messages.push(sidePrompt);
 		return messages;
 	}
@@ -15309,11 +15184,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
 
-		// The promoted question gets a prompt's image handling, description included.
+		// The promoted question gets a prompt's image handling.
 		const promotedImages = await this.#normalizeImagesForModel(images);
-		const imageDescriptionNotice = promotedImages?.length
-			? await this.#buildImageDescriptionNotice(promotedImages)
-			: undefined;
 
 		await withTimeout(
 			this.#cancelPostPromptTasks(),
@@ -15360,7 +15232,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
-			if (imageDescriptionNotice) this.sessionManager.appendMessage(imageDescriptionNotice);
 			this.sessionManager.appendMessage({
 				role: "user",
 				content: [{ type: "text", text: question }, ...(promotedImages ?? [])],
@@ -15567,6 +15438,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			// The summary is stored as a branch summary entry; only the spend needs journaling.
 			const journal = journalCompletion(this.sessionManager, { purpose: "branch-summary", usageOnly: true });
+			// The summary carries the branch as text: when its model or the session's cannot see images, their
+			// descriptions stand in for them.
+			const describeFor = this.#providerBoundary.imageDescriptionModel(model);
+			const summarySignal = this.#branchSummaryAbortController.signal;
+			if (describeFor) {
+				try {
+					await this.#providerBoundary.prepareImageDescriptions(
+						entriesToSummarize.flatMap(entry => getMessageFromEntry(entry) ?? []),
+						describeFor,
+						summarySignal,
+					);
+				} catch (error) {
+					if (summarySignal.aborted) {
+						this.#branchSummaryAbortController = undefined;
+						return { cancelled: true, aborted: true };
+					}
+					throw error;
+				}
+			}
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
 				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
@@ -15574,7 +15464,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
 				reserveTokens: cfgBranchSummaryReserveTokens.get(this.settings),
 				metadata: this.agent.metadataForProvider(model.provider),
-				convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+				convertToLlm: messages => this.#convertToLlmForSideRequest(messages, describeFor !== undefined),
 				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
 				// Same per-provider concurrency cap rationale as the compaction
 				// path above (chatgpt-codex review on #3751).
