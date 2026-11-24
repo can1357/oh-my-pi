@@ -1,12 +1,13 @@
 import { type } from "@oh-my-pi/omptype";
 import { ToolError } from "../../tools/tool-errors";
-import type { HostEvalPreludeDefinition } from "../../eval/preludes";
+import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../../eval/preludes";
 import commitDocumentation from "../../prompts/tools/commit.md" with { type: "text" };
 import commitGuidance from "../../prompts/tools/commit-guidance.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
+import { sessionIdentityEnv } from "../../tools/session-env";
 import { cfgCommitEnabled } from "../../tools/settings";
 import { commitSelection } from "./apply";
 import { createDraft, type Draft, type ScopeSpec } from "./draft";
@@ -116,7 +117,7 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 	};
 
 	const describe = (draft: Draft) => ({ id: draft.id, head: draft.head, scope: [...draft.scope] });
-	const invoke = async (params: CommitParams, signal?: AbortSignal) => {
+	const invoke = async (params: CommitParams, { signal, toolCallId }: EvalPreludeContext) => {
 		if (params.action === "draft") {
 			const cwd = params.repo === undefined ? session.cwd : resolveToCwd(params.repo, session.cwd);
 			const draft = await draftFor(context(signal, cwd), params.agents);
@@ -155,6 +156,7 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 					{
 						journal: artifactsDir ? ChangeJournal.at(artifactsDir) : null,
 						agent: { agent, parent: AgentRegistry.global().get(agent)?.parentId },
+						hookSession: sessionIdentityEnv(session, toolCallId),
 						signal,
 					},
 				);
@@ -194,7 +196,7 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 			const parsed = paramsSchema(parameters);
 			if (parsed instanceof type.errors) throw new ToolError(`commit received invalid arguments: ${parsed.summary}`);
 			try {
-				const { text, details } = await invoke(parsed, invocation.signal);
+				const { text, details } = await invoke(parsed, invocation);
 				return { content: [{ type: "text", text }], details };
 			} catch (error) {
 				if (error instanceof ToolError) throw error;

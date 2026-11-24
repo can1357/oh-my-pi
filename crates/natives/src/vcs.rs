@@ -229,6 +229,19 @@ pub struct VcsCommitOptions {
 	pub expected_head: Option<String>,
 	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
 	pub no_verify:     Option<bool>,
+	/// Session identity exported only to the commit hooks.
+	pub hook_session:  Option<VcsCommitHookSession>,
+}
+
+/// The session environment shared with shell tool calls.
+#[napi(object)]
+pub struct VcsCommitHookSession {
+	#[napi(js_name = "PI_SESSION_ID")]
+	pub session_id:   String,
+	#[napi(js_name = "PI_SESSION_FILE")]
+	pub session_file: String,
+	#[napi(js_name = "PI_TOOL_CALL_ID")]
+	pub tool_call_id: String,
 }
 
 /// Published private-index commit and any shared-index entries left staged.
@@ -422,6 +435,11 @@ impl From<VcsCommitOptions> for core::CommitOptions {
 			index_path:    v.index_path.map(PathBuf::from),
 			expected_head: v.expected_head,
 			no_verify:     v.no_verify.unwrap_or(false),
+			hook_session:  v.hook_session.map(|session| core::CommitHookSession {
+				session_id:   session.session_id,
+				session_file: session.session_file,
+				tool_call_id: session.tool_call_id,
+			}),
 		}
 	}
 }

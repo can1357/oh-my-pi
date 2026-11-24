@@ -253,6 +253,58 @@ describe("selective commit flow", () => {
 		});
 	});
 
+	it.skipIf(process.platform === "win32")("passes active session metadata to commit hooks", async () => {
+		const { root, artifacts, journal, write } = await emptyRepo();
+		const file = "sample.txt";
+		await Bun.write(path.join(root, file), "before\n");
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+		const hook = path.join(root, ".git", "hooks", "pre-commit");
+		const observed = Bun.file(path.join(root, ".git", "hook-session"));
+		await Bun.write(
+			hook,
+			[
+				"#!/bin/sh",
+				`printf '%s|%s|%s\\n' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$PI_TOOL_CALL_ID" > "$GIT_DIR/hook-session"`,
+				'[ "$PI_SESSION_ID" = "session-active" ] || { echo "wrong session: $PI_SESSION_ID" >&2; exit 37; }',
+			].join("\n") + "\n",
+		);
+		await fs.chmod(hook, 0o755);
+		await write("Main", undefined, file, "after\n");
+		await journal.flush();
+
+		let sessionId = "session-draft";
+		const persistedFile = path.join(artifacts, "draft session.jsonl");
+		let sessionFile: string | null = persistedFile;
+		const session: ToolSession = {
+			cwd: root,
+			hasUI: false,
+			getSessionFile: () => sessionFile,
+			getSessionSpawns: () => null,
+			getArtifactsDir: () => artifacts,
+			getAgentId: () => "Main",
+			getSessionId: () => sessionId,
+			settings: Settings.isolated({}),
+		};
+		const commit = createCommitPrelude(session);
+		const call = (parameters: object, toolCallId: string) => commit.invoke(parameters, { session, toolCallId });
+		const { id } = type({ id: "string" }).assert((await call({ action: "draft" }, "draft")).details);
+		const submit = (toolCallId: string) =>
+			call({ action: "commit", draft: id, subject: "test: hook session" }, toolCallId);
+
+		await expect(submit("commit-rejected")).rejects.toThrow("wrong session: session-draft");
+		expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+		expect(await observed.text()).toBe(`session-draft|${persistedFile}|commit-rejected\n`);
+
+		sessionId = "session-active";
+		sessionFile = null;
+		await submit("commit-accepted");
+		expect(await observed.text()).toBe("session-active||commit-accepted\n");
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe("after\n");
+	});
+
 	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {
 		const { root, module, journal, write, before, after } = await gitlinkWorkspace();
 		await Bun.write(path.join(root, "user.txt"), "user staged\n");
