@@ -16,6 +16,11 @@ import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
 import { parseSpinnerInterval } from "../config/spinner-interval";
 import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
 import { setColorBlindMode, setSymbolPreset, setThemeSlot } from "../ui/theme/service";
+import {
+	DEFAULT_INLINE_IMAGE_COLUMNS,
+	DEFAULT_INLINE_IMAGE_ROWS,
+	setInlineImageLimits,
+} from "../ui/transcript/messages/image";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -329,21 +334,23 @@ export const cfgImagesBlockImages = register({
 	},
 });
 
+/** The width limit for transcript images, in columns. */
 export const cfgTuiMaxInlineImageColumns = register({
 	id: "tui.maxInlineImageColumns",
 	type: "number",
-	default: 100,
-	description:
-		"Maximum width in terminal columns for inline images (default 100). Set to 0 for unlimited (bounded only by terminal width).",
+	default: DEFAULT_INLINE_IMAGE_COLUMNS,
+	description: `Maximum width in terminal columns for inline images (default ${DEFAULT_INLINE_IMAGE_COLUMNS}). Set to 0 for unlimited (bounded only by terminal width).`,
 });
 
+/** The height limit for transcript images, in rows. */
 export const cfgTuiMaxInlineImageRows = register({
 	id: "tui.maxInlineImageRows",
 	type: "number",
-	default: 20,
-	description:
-		"Maximum height in terminal rows for inline images (default 20). Set to 0 to use only the viewport-based limit (60% of terminal height).",
+	default: DEFAULT_INLINE_IMAGE_ROWS,
+	description: `Maximum height in terminal rows for inline images (default ${DEFAULT_INLINE_IMAGE_ROWS}). Set to 0 to use only the viewport-based limit (60% of terminal height).`,
 });
+
+effect(combine({ columns: cfgTuiMaxInlineImageColumns, rows: cfgTuiMaxInlineImageRows }), setInlineImageLimits);
 
 export const cfgTuiMaxInlineImages = register({
 	id: "tui.maxInlineImages",

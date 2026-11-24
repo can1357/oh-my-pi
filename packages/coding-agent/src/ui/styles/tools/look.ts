@@ -39,6 +39,8 @@ export interface ToolTerm {
 	readonly expanded?: boolean;
 	/** The call's args. */
 	readonly args?: unknown;
+	/** False when the terminal should suppress inline result pictures. */
+	readonly showImages?: false;
 	/** The result's image placeholders in order: where a look draws one, it links to its image. */
 	readonly imageLinks?: readonly {
 		readonly text: string;

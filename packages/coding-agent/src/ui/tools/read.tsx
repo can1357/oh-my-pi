@@ -12,7 +12,7 @@
  * Terminal look: `read` (`src/ui/styles/tools/read.ts`), fed by {@link ReadTerm}.
  */
 import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
-import type { JSXNode } from "@oh-my-pi/pi-tui";
+import { type JSXNode, nativeSupports } from "@oh-my-pi/pi-tui";
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { splitUrlScheme } from "../../internal-urls/url-scheme";
@@ -27,6 +27,8 @@ import { shortenPath } from "../../utils/render-utils";
 import type { ToolActivity, ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { resultText } from "./default";
 import { fileHref, pendingLinkPath } from "./file-common";
+import { READ_IMAGE_ROLE } from "../transcript/image-links";
+import { InlineMedia, inlineImageTerm } from "../transcript/messages/image";
 import { imageSize } from "../transcript/tool-block";
 import { isReadableUrlPath, readUrlPresenter } from "./read-url";
 import { registerToolPresenter } from "./registry";
@@ -338,6 +340,8 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 	const content = details?.displayContent?.text ?? stripOutputNotice(resultText(result), details?.meta);
 	const split = splitTarget(rawPath);
 	const warnings = readWarnings(details);
+	const mediaPath = details?.mediaPath;
+	const media = mediaPath && nativeSupports("media") ? <InlineMedia nodeKey="media" path={mediaPath} /> : undefined;
 	const image = result.content.find(
 		block => block.type === "image" && typeof (block as { data?: unknown }).data === "string",
 	) as { data: string; mimeType: string } | undefined;
@@ -349,13 +353,16 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 			...(suffix ? { tone: "warning" as const } : {}),
 			inline: true,
 			body: [
-				<image
-					blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
-					alt={shortenPath(suffix?.to ?? split.path) || "image"}
-					w={size?.w}
-					h={size?.h}
-					role="omp.tool.read.image"
-				/>,
+				media ?? (
+					<image
+						blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
+						alt={shortenPath(suffix?.to ?? split.path) || "image"}
+						w={size?.w}
+						h={size?.h}
+						role={READ_IMAGE_ROLE}
+						term={inlineImageTerm()}
+					/>
+				),
 				detail.length > 0 && <ansi text={detail} />,
 				foot,
 			],
@@ -377,6 +384,7 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 		head,
 		inline: true,
 		body: [
+			media,
 			markdown ? (
 				<md text={content} />
 			) : (

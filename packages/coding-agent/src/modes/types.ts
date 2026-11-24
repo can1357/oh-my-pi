@@ -76,7 +76,7 @@ import type {
 } from "../ui/shell";
 import type { StatusFacts, StatusLineSettings } from "../ui/status/facts";
 import type { ExecRun } from "../ui/transcript/exec-run";
-import type { AssistantMessageModel } from "../ui/transcript/messages/assistant-message";
+import type { AssistantMessageModel, ToolResultMedia } from "../ui/transcript/messages/assistant-message";
 import type { ReadGroup } from "../ui/transcript/read-group";
 import type { ToolCall, ToolCallResult } from "../ui/transcript/tool-block";
 import type { EventBus } from "../utils/event-bus";
@@ -252,8 +252,10 @@ export interface AssistantView {
 	readonly finalized: Signal<boolean>;
 	/** Session-resolved destinations of the reply's relative prose links. */
 	readonly linkTargets: Signal<ReadonlyMap<string, string>>;
-	/** Images grouped reads produced, by tool call id. */
-	readonly toolResultImages: Signal<ReadonlyMap<string, readonly ImageContent[]>>;
+	/** Media grouped reads produced, by tool call id. */
+	readonly toolResultMedia: Signal<ReadonlyMap<string, ToolResultMedia>>;
+	/** Record the latest media produced by a grouped read. */
+	setToolResultMedia(toolCallId: string, media: ToolResultMedia): void;
 	readonly cacheInvalidation: Signal<CacheInvalidation | undefined>;
 	readonly servedModelMismatch: Signal<ServedModelMismatch | undefined>;
 	readonly turnUsage: Signal<TurnUsageSummary | undefined>;

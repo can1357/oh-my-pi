@@ -12,8 +12,9 @@ import { visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { diagnosticOrder, type FileDiagnostics, type ParsedDiagnostic, parseDiagnostic } from "../../tools/file-common";
 import { fileUriForTerminal } from "../../../utils/file-links";
-import { imageLinkTarget, RESULT_IMAGE_ROLE } from "../../transcript/image-links";
+import { imageLinkTarget, READ_IMAGE_ROLE, RESULT_IMAGE_ROLE } from "../../transcript/image-links";
 import { expandHint } from "./frame";
+import { toolProps } from "./look";
 
 /** Diagnostics shown while collapsed. */
 const COLLAPSED_DIAGNOSTICS = 5;
@@ -52,13 +53,16 @@ export function imageLink(
 }
 
 /**
- * The result images the tool block draws as pictures under the card: those it
- * appended to `node` (present while images are on), on a terminal that draws
- * images. A look shows a placeholder only for an image not drawn.
+ * The result images a graphics-capable terminal draws under the card while
+ * images are on. A look shows a placeholder only for an image not drawn.
  */
 export function resultPictures(node: UiNode, cx: Pick<PaintContext, "images">): UiNode[] {
-	if (!cx.images) return [];
-	return node.children().filter(child => child.kind === "image" && roleOf(child) === RESULT_IMAGE_ROLE);
+	if (!cx.images || toolProps(node).term?.showImages === false) return [];
+	return node.children().filter(child => {
+		if (child.kind !== "image") return false;
+		const role = roleOf(child);
+		return role === RESULT_IMAGE_ROLE || role === READ_IMAGE_ROLE;
+	});
 }
 
 /** `text` without the placeholder lines of the first `drawn` images (`placeholders` in result order), each its last occurrence. */

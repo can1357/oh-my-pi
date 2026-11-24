@@ -51,6 +51,8 @@ export interface Picture {
 	readonly w?: number;
 	readonly h?: number;
 	readonly max?: TspImageProps["max"];
+	/** Terminal-specific bounds used when the wire node leaves them unset. */
+	readonly term?: { readonly max?: TspImageProps["max"] };
 }
 
 /**
@@ -69,12 +71,13 @@ export function pictureRows(
 	const entry = picture.blob ? getBlob(picture.blob) : undefined;
 	if (!cx.images || !entry || !picture.blob || !picture.w || !picture.h) return undefined;
 	const cell = cx.images.cell();
-	const maxColumns = Math.max(1, Math.min(cx.width, extentCells(picture.max?.w, cx.width) ?? cx.width));
+	const max = picture.max ?? picture.term?.max;
+	const maxColumns = Math.max(1, Math.min(cx.width, extentCells(max?.w, cx.width) ?? cx.width));
 	const maxRows = Math.max(
 		1,
 		Math.min(
 			cx.height ?? Number.POSITIVE_INFINITY,
-			extentCells(picture.max?.h, cx.height) ?? Number.POSITIVE_INFINITY,
+			extentCells(max?.h, cx.height) ?? Number.POSITIVE_INFINITY,
 		),
 	);
 	// Natural size when it fits; else the caps (the store scales to fit both, either way).
@@ -97,9 +100,14 @@ export function paintPicture(picture: Picture, cx: PaintContext, label: string):
 	return { rows: pictureRows(picture, cx, { label })?.rows ?? [truncate(label, cx.width)] };
 }
 
+/** How image `node` draws at this size, when the terminal can try its blob. */
+export function imageRows(node: UiNode, cx: PaintContext, label: string): ImageRows | undefined {
+	return pictureRows(node.props() as TspImageProps, cx, { label });
+}
+
 /** The rows of image `node` at the context's size (`label`: its fallback text, styled). */
 export function paintImage(node: UiNode, cx: PaintContext, label = imageLabel(node, cx)): Block {
-	return paintPicture(node.props() as TspImageProps, cx, label);
+	return { rows: imageRows(node, cx, label)?.rows ?? [truncate(label, cx.width)] };
 }
 
 definePainter("image", (node, cx) => paintImage(node, cx));

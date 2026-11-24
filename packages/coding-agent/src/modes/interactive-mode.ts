@@ -281,6 +281,7 @@ import type {
 import type { TodoItem, TodoPhase } from "../tools/details/todo";
 import type { ConversationPosition } from "./utils/conversation-position";
 import { setImageBlobWriter } from "../ui/transcript/image-links";
+import { followInlineImageLimits } from "../ui/transcript/messages/image";
 import { imageLinksForMessage, UiHelpers } from "./utils/ui-helpers";
 
 import {
@@ -1038,6 +1039,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#pendingSubmissionPreservesDraft = false;
 	/** Unregisters this mode's transcript-image blob writer (a later mode's registration survives). */
 	#disposeImageBlobWriter: (() => void) | undefined;
+	#disposeInlineImageLimits: (() => void) | undefined;
 	#optimisticUserMessageBlocks: TranscriptBlock[] = [];
 	#optimisticSkillMessageBlocks: TranscriptBlock[] = [];
 	/** True while an optimistically-rendered `/skill:` row awaits its canonical
@@ -1543,6 +1545,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeImageBlobWriter = setImageBlobWriter((data, options) =>
 			this.viewSession.sessionManager.putBlobSync(data, options),
 		);
+		this.#disposeInlineImageLimits = followInlineImageLimits(() => this.shell.size().rows);
 		this.#tray = new TrayFeed(
 			{
 				input: () =>
@@ -6880,6 +6883,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		setCfgApprovalHost(null);
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
+		this.#disposeInlineImageLimits?.();
+		this.#disposeInlineImageLimits = undefined;
 		this.#hideSessionInfo();
 		if (this.#ownsStartedUi) {
 			void this.shell.stop();
