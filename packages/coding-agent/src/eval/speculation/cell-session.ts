@@ -9,7 +9,7 @@ import type { ToolSession } from "../../tools";
 import { namespaceSessionId as namespaceJavaScriptSessionId } from "../js";
 import { shadowPlanIfPresent, snapshotVmContext } from "../js/context-manager";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
-import { shadowSnapshotDigest } from "../js/shared/runtime";
+import { shadowSnapshotDigest } from "../js/shared/shadow-snapshot";
 import type { JsStatusEvent } from "../js/shared/types";
 import { bridgeValueFromToolResult } from "../js/tool-bridge";
 import { namespaceSessionId as namespacePythonSessionId } from "../py";

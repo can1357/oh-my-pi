@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { isFilesystemSourcePath } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import { parseLineRangeChunk, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { parseLineRangeChunk, parseLineRanges } from "@oh-my-pi/pi-coding-agent/tools/line-ranges";
+import { splitPathAndSel } from "@oh-my-pi/pi-coding-agent/tools/details/read";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 describe("`..` range selector alias", () => {
 	it("treats `N..M` as the inclusive range `N-M`", () => {

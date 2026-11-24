@@ -25,7 +25,7 @@ function tuiRuntime() {
 	const showWarning = vi.fn();
 	const runtime = {
 		ctx: {
-			editor: { setText } as unknown as InteractiveModeContext["editor"],
+			composer: { setText } as unknown as InteractiveModeContext["composer"],
 			handleShakeCommand,
 			showWarning,
 		} as unknown as InteractiveModeContext,
@@ -82,8 +82,8 @@ describe("/shake dispatch (TUI)", () => {
 describe("CommandController /shake", () => {
 	it("reports thinking-only drops and rebuilds the transcript", async () => {
 		const rebuildChatFromMessages = vi.fn();
-		const invalidate = vi.fn();
-		const requestRender = vi.fn();
+		const refresh = vi.fn();
+		const replayHistory = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
 			session: {
@@ -96,8 +96,8 @@ describe("CommandController /shake", () => {
 				})),
 			},
 			rebuildChatFromMessages,
-			statusLine: { invalidate },
-			ui: { requestRender },
+			statusLine: { refresh },
+			shell: { host: { replayHistory } },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -105,15 +105,15 @@ describe("CommandController /shake", () => {
 		await new CommandController(ctx).handleShakeCommand("thinking");
 
 		expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
-		expect(invalidate).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(refresh).toHaveBeenCalledTimes(1);
+		expect(replayHistory).toHaveBeenCalledTimes(1);
 		expect(showStatus).toHaveBeenCalledWith("Dropped 2 thinking blocks from this session.");
 	});
 
 	it("reports kept thinking without rebuilding the transcript", async () => {
 		const rebuildChatFromMessages = vi.fn();
-		const invalidate = vi.fn();
-		const requestRender = vi.fn();
+		const refresh = vi.fn();
+		const replayHistory = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
 			session: {
@@ -127,8 +127,8 @@ describe("CommandController /shake", () => {
 				})),
 			},
 			rebuildChatFromMessages,
-			statusLine: { invalidate },
-			ui: { requestRender },
+			statusLine: { refresh },
+			shell: { host: { replayHistory } },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -137,8 +137,8 @@ describe("CommandController /shake", () => {
 
 		// Nothing changed on disk or on screen, so only the status line speaks.
 		expect(rebuildChatFromMessages).not.toHaveBeenCalled();
-		expect(invalidate).not.toHaveBeenCalled();
-		expect(requestRender).not.toHaveBeenCalled();
+		expect(refresh).not.toHaveBeenCalled();
+		expect(replayHistory).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledTimes(1);
 		const status = showStatus.mock.calls[0]?.[0] as string;
 		expect(status).toContain("3 thinking blocks");

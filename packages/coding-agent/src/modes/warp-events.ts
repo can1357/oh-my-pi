@@ -1,8 +1,8 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
-import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
-import { wrapTmuxPassthrough } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { hasMultiplexerSession } from "@oh-my-pi/pi-tui/driver/mux/detect";
+import { wrapTmuxPassthrough } from "@oh-my-pi/pi-tui/driver/mux/tmux";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions/types";
 import { isSilentAbort, isUserInterruptAbort, SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
@@ -67,7 +67,7 @@ export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEv
 				plugin_version: VERSION,
 			};
 			const osc = `\x1b]777;notify;${WARP_CLI_AGENT_SENTINEL};${JSON.stringify(body)}\x07`;
-			if (!hasTerminalMultiplexerSession("tmux")) {
+			if (!hasMultiplexerSession("tmux", Bun.env)) {
 				writeTerminalSequence(osc);
 				return;
 			}

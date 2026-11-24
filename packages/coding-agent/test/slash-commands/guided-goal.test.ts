@@ -11,7 +11,7 @@ function createRuntime(handler: () => Promise<boolean>) {
 		clearDraft,
 		runtime: {
 			ctx: {
-				editor: { clearDraft } as unknown as InteractiveModeContext["editor"],
+				composer: { clearDraft } as unknown as InteractiveModeContext["composer"],
 				handleGuidedGoalCommand,
 			} as unknown as InteractiveModeContext,
 		},

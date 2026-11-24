@@ -8,6 +8,9 @@ use std::{
 	path::Path,
 };
 
+#[cfg(target_os = "macos")]
+use std::fmt::Write as _;
+
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint, builder::ValueParser};
 use jiff::{Timestamp, tz::TimeZone};
 
@@ -70,7 +73,9 @@ impl Utility for Uptime {
 			if utmp.boot_time.is_none() {
 				boot_time_unknown(host);
 			}
-			let (line, complete) = uptime_line(now, &zone, utmp.boot_time, utmp.users, &load_average());
+			let mut loads = [0.0; 3];
+			let loads = load_average(&mut loads);
+			let (line, complete) = uptime_line(now, &zone, utmp.boot_time, utmp.users, loads);
 			(line, i32::from(!complete))
 		};
 		match host.stdout.write_all(text.as_bytes()).and_then(|()| host.stdout.flush()) {
@@ -125,6 +130,7 @@ fn app() -> Command {
 
 /// GNU's report line for `now`, plus whether every field was known (GNU
 /// exits 1 when the uptime is not).
+#[cfg(not(target_os = "macos"))]
 fn uptime_line(
 	now: i64,
 	zone: &TimeZone,
@@ -150,6 +156,7 @@ fn uptime_line(
 
 /// GNU's `up …,  ` field for an uptime of `seconds`: `up  3:07,  ` under a
 /// day, `up 2 days  3:07,  ` past it.
+#[cfg(not(target_os = "macos"))]
 fn up_duration(seconds: i64) -> String {
 	let days = seconds / 86400;
 	let hours = seconds % 86400 / 3600;
@@ -161,6 +168,66 @@ fn up_duration(seconds: i64) -> String {
 	}
 }
 
+#[cfg(target_os = "macos")]
+fn uptime_line(
+	now: i64,
+	zone: &TimeZone,
+	boot_time: Option<i64>,
+	users: usize,
+	loads: &[f64],
+) -> (String, bool) {
+	let clock = Timestamp::from_second(now).map(|timestamp| timestamp.to_zoned(zone.clone()));
+	let uptime = boot_time.and_then(|boot| now.checked_sub(boot)).filter(|uptime| *uptime >= 0);
+	let mut line = String::with_capacity(96);
+	if let Ok(clock) = &clock {
+		let _ = write!(line, "{:2}:{:02} ", clock.hour(), clock.minute());
+	}
+	if let Some(seconds) = uptime {
+		// Darwin's w(1) rounds uptimes over 60 seconds to the nearest minute.
+		let (total_minutes, seconds) = if seconds > 60 {
+			(seconds / 60 + i64::from(seconds % 60 >= 30), 0)
+		} else {
+			(seconds / 60, seconds % 60)
+		};
+		let days = total_minutes / 1440;
+		let hours = total_minutes / 60 % 24;
+		let minutes = total_minutes % 60;
+		let plural = |count| if count > 1 { "s" } else { "" };
+		line.push_str(" up");
+		if days > 0 {
+			let _ = write!(line, " {days} day{},", plural(days));
+		}
+		match (hours, minutes) {
+			(hours, minutes) if hours > 0 && minutes > 0 => {
+				let _ = write!(line, " {hours:2}:{minutes:02},");
+			},
+			(hours, 0) if hours > 0 => {
+				let _ = write!(line, " {hours} hr{},", plural(hours));
+			},
+			(_, minutes) if minutes > 0 => {
+				let _ = write!(line, " {minutes} min{},", plural(minutes));
+			},
+			_ => {
+				let _ = write!(line, " {seconds} sec{},", plural(seconds));
+			},
+		}
+	}
+
+	let user = if users == 1 { "user" } else { "users" };
+	let _ = write!(line, " {users} {user}");
+	if loads.is_empty() {
+		line.push_str(", no load average information available");
+	} else {
+		line.push_str(", load averages:");
+		for load in loads {
+			let _ = write!(line, " {load:.2}");
+		}
+	}
+	line.push('\n');
+	(line, clock.is_ok() && uptime.is_some())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn user_count(users: usize) -> String {
 	if users == 1 { "1 user".to_owned() } else { format!("{users} users") }
 }
@@ -168,6 +235,7 @@ fn user_count(users: usize) -> String {
 /// What follows the user count: `,  load average: a, b, c` and the newline,
 /// with as many averages as `getloadavg` produced. GNU prints only the
 /// newline when the load average is unavailable.
+#[cfg(not(target_os = "macos"))]
 fn load_suffix(loads: &[f64]) -> String {
 	let mut suffix = String::new();
 	for (index, load) in loads.iter().enumerate() {
@@ -212,7 +280,7 @@ fn since_line(boot: i64, zone: &TimeZone) -> String {
 
 /// The system load averages over 1, 5, and 15 minutes; empty when the
 /// platform has none (GNU's `getloadavg` returning -1).
-fn load_average() -> Vec<f64> {
+fn load_average(loads: &mut [f64; 3]) -> &[f64] {
 	#[cfg(any(
 		target_os = "linux",
 		target_vendor = "apple",
@@ -222,10 +290,9 @@ fn load_average() -> Vec<f64> {
 		target_os = "dragonfly",
 	))]
 	{
-		let mut loads = [0.0_f64; 3];
 		// SAFETY: `loads` has room for the three samples requested.
 		let count = unsafe { libc::getloadavg(loads.as_mut_ptr(), 3) };
-		loads[..usize::try_from(count).unwrap_or(0).min(3)].to_vec()
+		&loads[..usize::try_from(count).unwrap_or(0).min(3)]
 	}
 	#[cfg(not(any(
 		target_os = "linux",
@@ -236,7 +303,7 @@ fn load_average() -> Vec<f64> {
 		target_os = "dragonfly",
 	)))]
 	{
-		Vec::new()
+		&loads[..0]
 	}
 }
 
@@ -244,7 +311,8 @@ fn load_average() -> Vec<f64> {
 #[derive(Debug, Default)]
 struct UtmpSummary {
 	/// The last `BOOT_TIME` record's time, or the system's boot time when the
-	/// default file has none; `None` when unknown (or recorded as 0).
+	/// default file has none (on macOS, always for the default file);
+	/// `None` when unknown (or recorded as 0).
 	boot_time: Option<i64>,
 	/// `USER_PROCESS` records with a user name.
 	users:     usize,
@@ -300,7 +368,9 @@ fn read_utmp(host: &Host, name: &OsStr, check_pids: bool) -> UtmpSummary {
 			summary.boot_time = Some(seconds);
 		}
 	}
-	if is_default && first_boot {
+	// Darwin's w(1) reads the boot time from `kern.boottime`, not utmpx, whose
+	// boot record can carry a wrong time (1976 on a macOS 27.2 boot).
+	if is_default && (first_boot || cfg!(target_vendor = "apple")) {
 		summary.boot_time = system_boot_time(host);
 	}
 	summary.boot_time = summary.boot_time.filter(|&boot| boot != 0);
@@ -504,6 +574,7 @@ mod tests {
 		TimeZone::UTC
 	}
 
+	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn duration_field_matches_gnu_boundaries() {
 		assert_eq!(up_duration(0), "up  0:00,  ");
@@ -517,6 +588,7 @@ mod tests {
 		assert_eq!(up_duration(400 * 86400), "up 400 days  0:00,  ");
 	}
 
+	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn user_count_is_singular_only_for_one() {
 		assert_eq!(user_count(0), "0 users");
@@ -524,6 +596,7 @@ mod tests {
 		assert_eq!(user_count(2), "2 users");
 	}
 
+	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn load_suffix_prints_what_getloadavg_returned() {
 		assert_eq!(load_suffix(&[0.0, 1.005, 12.345]), ",  load average: 0.00, 1.00, 12.35\n");
@@ -531,6 +604,7 @@ mod tests {
 		assert_eq!(load_suffix(&[]), "\n");
 	}
 
+	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn report_line_has_gnu_spacing_and_clock() {
 		// 2026-10-12 08:07:54 UTC, booted 1 day 21:13:30 earlier.
@@ -544,6 +618,7 @@ mod tests {
 		assert_eq!(line, " 10:07:54  up 1 day 21:13,  3 users\n");
 	}
 
+	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn unknown_or_future_boot_time_prints_question_marks() {
 		let now = 1_791_792_474;
@@ -552,6 +627,30 @@ mod tests {
 			assert!(!complete);
 			assert_eq!(line, " 08:07:54  up ???? days ??:??,  0 users,  load average: 1.00, 2.00, 3.00\n");
 		}
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn report_line_matches_macos_uptime_rounding_and_spacing() {
+		let now = 1_791_792_474; // 2026-10-12 08:07:54 UTC.
+		for (seconds, duration) in [
+			(1, "1 sec"),
+			(59, "59 secs"),
+			(60, "1 min"),
+			(89, "1 min"),
+			(90, "2 mins"),
+			(3599, "1 hr"),
+			(7200, "2 hrs"),
+			(86400 + 3 * 3600 + 4 * 60, "1 day,  3:04"),
+			(2 * 86400 + 23 * 3600 + 58 * 60, "2 days, 23:58"),
+			(2 * 86400 - 1, "2 days, 0 sec"),
+		] {
+			let (line, complete) = uptime_line(now, &utc(), Some(now - seconds), 1, &[5.06, 10.68, 10.42]);
+			assert!(complete, "{seconds}");
+			assert_eq!(line, format!(" 8:07  up {duration}, 1 user, load averages: 5.06 10.68 10.42\n"));
+		}
+		let (line, _) = uptime_line(now, &TimeZone::get("Europe/Berlin").unwrap(), Some(now - 120), 3, &[]);
+		assert_eq!(line, "10:07  up 2 mins, 3 users, no load average information available\n");
 	}
 
 	#[test]
@@ -609,12 +708,21 @@ mod tests {
 		assert!(err.contains("'-x'"), "{err}");
 	}
 
+	fn assert_unknown_report(out: &str, users: usize) {
+		let user = if users == 1 { "user" } else { "users" };
+		if cfg!(target_os = "macos") {
+			assert!(!out.contains(" up ") && out.contains(&format!("  {users} {user}")), "{out}");
+		} else {
+			assert!(out.contains(&format!("  up ???? days ??:??,  {users} {user}")), "{out}");
+		}
+	}
+
 	#[test]
 	fn missing_file_reports_unknown_uptime() {
 		let (code, out, err) = run_with_env(&[("TZ", "UTC")], &["/nonexistent/utmp"]);
 		assert_eq!(code, 1);
 		assert_eq!(err, "uptime: couldn't get boot time\n");
-		assert!(out.starts_with(' ') && out.contains("  up ???? days ??:??,  0 users"), "{out}");
+		assert_unknown_report(&out, 0);
 		assert!(out.ends_with('\n'));
 	}
 
@@ -624,7 +732,7 @@ mod tests {
 		let (code, out, err) = run_with_env(&[], &[dir.path().to_str().unwrap()]);
 		assert_eq!(code, 1);
 		assert_eq!(err, "uptime: couldn't get boot time\n");
-		assert!(out.contains("up ???? days ??:??,  0 users"), "{out}");
+		assert_unknown_report(&out, 0);
 	}
 
 	#[test]
@@ -696,7 +804,8 @@ mod tests {
 
 		let (code, out, err) = run_with_env(&[("TZ", "UTC")], &[path]);
 		assert_eq!((code, err.as_str()), (0, ""));
-		assert!(out.contains("  up 2 days  3:04,  2 users"), "{out}");
+		let expected = if cfg!(target_os = "macos") { "  up 2 days,  3:04, 2 users" } else { "  up 2 days  3:04,  2 users" };
+		assert!(out.contains(expected), "{out}");
 
 		let (code, out, _) = run_with_env(&[("TZ", "UTC")], &["-s", path]);
 		assert_eq!((code, out), (0, format!("{}\n", since_line(boot, &utc()))));
@@ -713,7 +822,7 @@ mod tests {
 		let (code, out, err) = run(&[file.path().to_str().unwrap()]);
 		assert_eq!(code, 1);
 		assert_eq!(err, "uptime: couldn't get boot time\n");
-		assert!(out.contains("up ???? days ??:??,  1 user"), "{out}");
+		assert_unknown_report(&out, 1);
 	}
 
 	#[cfg(target_vendor = "apple")]
@@ -727,7 +836,7 @@ mod tests {
 		file.write_all(&bytes).unwrap();
 		let (code, out, err) = run(&[file.path().to_str().unwrap()]);
 		assert_eq!((code, err.as_str()), (1, "uptime: couldn't get boot time\n"));
-		assert!(out.contains("up ???? days ??:??,  0 users"), "{out}");
+		assert_unknown_report(&out, 0);
 	}
 
 	/// GNU blocks forever opening a FIFO operand; the builtin reads nothing
@@ -751,9 +860,12 @@ mod tests {
 		let (code, out, err) = run(&[]);
 		assert_eq!((code, err.as_str()), (0, ""));
 		let line = out.strip_suffix('\n').expect("newline-terminated");
-		let rest = line.strip_prefix(' ').expect("leading space");
-		let (clock, rest) = rest.split_at(8);
-		assert!(clock.bytes().enumerate().all(|(i, b)| if i % 3 == 2 { b == b':' } else { b.is_ascii_digit() }));
+		let (clock, rest) = if cfg!(target_os = "macos") {
+			line.split_at(5)
+		} else {
+			line.strip_prefix(' ').expect("leading space").split_at(8)
+		};
+		assert!(clock.trim_start().split(':').all(|part| part.parse::<u8>().is_ok()), "{line}");
 		assert!(rest.starts_with("  up "), "{line}");
 		assert!(rest.contains(" user"), "{line}");
 

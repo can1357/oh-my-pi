@@ -272,7 +272,6 @@ export class SessionFocusController {
 			if (generation !== this.#attachGeneration) return;
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.updateEditorBorderColor();
-			this.ctx.ui.requestRender();
 		} catch (error) {
 			if (generation === this.#attachGeneration) {
 				this.#focusedAgentId = undefined;

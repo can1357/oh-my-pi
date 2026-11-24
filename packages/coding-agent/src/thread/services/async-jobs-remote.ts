@@ -19,7 +19,7 @@
  * Its `process` / `widgetInputs` stay here too; main reads them through a
  * {@link WireJobFeed} whose pulls and final push this module answers.
  */
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../../tools/details/job-widget";
 import type {
 	AsyncJob,
 	AsyncJobDeliverySink,

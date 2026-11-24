@@ -241,6 +241,10 @@ pub struct Parser<'s> {
 	doc_nodes:      Vec<(Id<Text>, u32)>,
 	/// Here-documents waiting for the next newline.
 	pending:        Vec<PendingDoc>,
+	/// Offset of the first `\` continuing a line after `&&`, `||`, `|` or
+	/// `|&` while a here-document waited for its body
+	/// ([`crate::bash::syntax::repair_heredoc_continuations`]).
+	doc_line_cont:  Option<u32>,
 	/// The syntax of the command being parsed.
 	t:              Tree,
 	/// Open compound commands and their lines (bash `compoundcmd_lineno`).
@@ -365,6 +369,7 @@ impl<'s> Parser<'s> {
 			docs: Vec::new(),
 			doc_nodes: Vec::new(),
 			pending: Vec::new(),
+			doc_line_cont: None,
 			t: Tree::default(),
 			compound: Vec::new(),
 			warnings: Vec::new(),
@@ -501,6 +506,12 @@ impl<'s> Parser<'s> {
 				.map(|&cs| crate::bash::syntax::zsh::cmdname(cs))
 				.collect(),
 		)
+	}
+
+	/// Offset of the first line continuation read after `&&`, `||`, `|` or
+	/// `|&` while a here-document waited for its body.
+	pub(crate) const fn doc_line_cont(&self) -> Option<u32> {
+		self.doc_line_cont
 	}
 
 	/// Parse the next top-level command; `None` at end of input.

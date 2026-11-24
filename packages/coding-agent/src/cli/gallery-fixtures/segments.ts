@@ -1,173 +1,101 @@
-import { truncateToWidth } from "@oh-my-pi/pi-tui";
-import type { StatusLineSegmentId } from "@oh-my-pi/pi-tui/status-line/schema";
-import { ALL_SEGMENT_IDS, renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/types";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import type { GallerySessionOptions } from "./preview-session";
-import { createGallerySession, GALLERY_CONTEXT_WINDOW, GALLERY_PROMPT_CACHE } from "./preview-session";
+/**
+ * `omp gallery --surface segment`: every status-line segment alone on a bar,
+ * in the variants that change how it reads, over the gallery session's
+ * status facts.
+ */
+import { STATUS_LINE_SEGMENT_IDS, type StatusLineSegmentId } from "../../config/status-line-schema";
+import type { StatusLineSegmentOptions } from "../../modes/view-model/status-line/types";
+import { printRows } from "../../ui/print-rows";
+import type { StatusFacts } from "../../ui/status/facts";
+import { effectiveStatusSettings, segmentView } from "../../ui/status/segments";
+import { StatusLine } from "../../ui/status/status-line";
+import "../../ui/styles/composer";
+import "../../ui/styles/status";
+import {
+	GALLERY_BAR_PLACEMENT,
+	GALLERY_NOW,
+	GALLERY_PROMPT_CACHE,
+	galleryStatusFacts,
+	galleryStatusSettings,
+} from "./status-facts";
 import type { GalleryPreviewEntry } from "./types";
-
-const FIXED_NOW = new Date(2026, 7, 29, 14, 7, 9);
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 interface SegmentVariantSpec {
 	label: string;
-	context?: Partial<SegmentContext>;
-	session?: GallerySessionOptions;
+	facts?: Partial<StatusFacts>;
+	options?: StatusLineSegmentOptions;
 }
+
+/** Segment options of the gallery bar (variants override per segment). */
+const BASE_OPTIONS: StatusLineSegmentOptions = {
+	model: { showThinkingLevel: true },
+	path: { abbreviate: false, maxLength: 40, stripWorkPrefix: false },
+	git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true },
+	time: { format: "24h", showSeconds: true },
+};
 
 /** Production status-segment registry in display order. */
 export function getSegmentGalleryInventory(): readonly StatusLineSegmentId[] {
-	return [...ALL_SEGMENT_IDS];
+	return [...STATUS_LINE_SEGMENT_IDS];
 }
 
-/** Deterministic full context for isolated status-segment previews and tests. */
-export function createGallerySegmentContext(sessionOptions?: GallerySessionOptions): SegmentContext {
-	return {
-		session: createGallerySession(sessionOptions),
-		now: FIXED_NOW,
-		hostname: "gallery-host",
-		sessionAccent: false,
-		activeRepo: {
-			cwd: "/workspace/oh-my-pi",
-			repoRoot: "/workspace/oh-my-pi",
-			relativeRepoRoot: "oh-my-pi",
-			source: "single-direct-child-repo",
-		},
-		width: 100,
-		options: {
-			model: { showThinkingLevel: true },
-			path: { abbreviate: false, maxLength: 40, stripWorkPrefix: false },
-			git: { showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true },
-			time: { format: "24h", showSeconds: true },
-		},
-		compactThinkingLevel: false,
-		planMode: { enabled: true, paused: false },
-		prewalk: null,
-		loopMode: null,
-		goalMode: null,
-		goalStatusInFooter: true,
-		vibeMode: null,
-		vim: null,
-		collab: { role: "host", participantCount: 3 },
-		stream: null,
-		recording: false,
-		usageStats: {
-			input: 12_400,
-			output: 3_600,
-			cacheRead: 48_000,
-			cacheWrite: 1_200,
-			totalTokens: 65_200,
-			orchestrationInput: 900,
-			orchestrationOutput: 240,
-			orchestrationCacheRead: 3_000,
-			premiumRequests: sessionOptions?.premiumRequests ?? 2,
-			cost: sessionOptions?.cost ?? 0.42,
-			tokensPerSecond: 87.3,
-		},
-		contextPercent: 62,
-		contextTokens: 124_000,
-		contextWindow: GALLERY_CONTEXT_WINDOW,
-		autoCompactEnabled: true,
-		compactionSpeculation: "idle",
-		speculationBlinkOn: false,
-		subagentCount: 3,
-		activeMs: 372_000,
-		turnElapsedMs: null,
-		git: {
-			branch: "gallery/reference",
-			status: { staged: 2, unstaged: 3, untracked: 1 },
-			pr: { number: 1842, url: "https://github.com/can1357/oh-my-pi/pull/1842" },
-		},
-		worktree: null,
-		usage: {
-			tier: "Pro",
-			fiveHour: { percent: 32, resetMinutes: 71 },
-			sevenDay: { percent: 68, resetHours: 52 },
-		},
-		promptCache: sessionOptions?.promptCache,
-	};
-}
+const LOOP_LIMIT = { kind: "iterations", initial: 10, remaining: 4 } as const;
 
 function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 	switch (id) {
 		case "pi":
 			return [
-				{ label: "idle", context: { turnElapsedMs: null } },
-				{ label: "active", context: { turnElapsedMs: 92_000 } },
-				{ label: "focused subagent", context: { focusedAgentId: "Scout" } },
+				{ label: "idle" },
+				{ label: "active", facts: { turnStartedAt: GALLERY_NOW - 92_000 } },
+				{ label: "focused subagent", facts: { focusedAgentId: "Scout" } },
 			];
 		case "status":
 			return [
-				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
+				{ label: "multiple extension statuses", facts: { hooks: ["Indexer ready", "Tests passing"] } },
 				{
 					label: "coloured extension status",
-					context: {
-						hookStatuses: ["\x1b[33mbuilding\x1b[39m", "\x1b[1;38;2;255;95;135mfailed\x1b[0m", "queued"],
-					},
+					facts: { hooks: ["\x1b[33mbuilding\x1b[39m", "\x1b[1;38;2;255;95;135mfailed\x1b[0m", "queued"] },
 				},
 			];
 		case "model":
 			return [
 				{ label: "normal" },
-				{ label: "fast + advisor active", session: { fastMode: true, advisorStatus: "running" } },
-				{ label: "advisor warning", session: { advisorStatus: "quota_exhausted" } },
-				{ label: "advisor error", session: { advisorStatus: "error" } },
-				{ label: "advisor paused", session: { advisorStatus: "paused" } },
-				{ label: "advisor done (yielded)", session: { advisorStatus: "running", advisorYielded: true } },
+				{
+					label: "fast + advisor active",
+					facts: { fastMode: true, advisor: { status: "running", yielded: false } },
+				},
+				{ label: "advisor warning", facts: { advisor: { status: "quota_exhausted", yielded: false } } },
+				{ label: "advisor error", facts: { advisor: { status: "error", yielded: false } } },
+				{ label: "advisor idle", facts: { advisor: { status: "idle", yielded: false } } },
+				{ label: "advisor done (yielded)", facts: { advisor: { status: "running", yielded: true } } },
 			];
-		case "mode":
+		case "mode": {
+			const goal = (status: NonNullable<StatusFacts["goal"]>["status"], paused = false): Partial<StatusFacts> => ({
+				plan: undefined,
+				goal: { enabled: true, paused, status, tokensUsed: 12_400, tokenBudget: 50_000, showBudget: true },
+			});
 			return [
-				{ label: "active", context: { planMode: { enabled: true, paused: false } } },
-				{ label: "warning / paused", context: { planMode: { enabled: true, paused: true } } },
-				{ label: "prewalk active", context: { planMode: null, prewalk: { enabled: true } } },
-				{ label: "vibe active", context: { planMode: null, vibeMode: { enabled: true } } },
-				{
-					label: "loop active",
-					context: {
-						planMode: null,
-						loopMode: { state: "running", limit: { kind: "iterations", initial: 10, remaining: 4 } },
-					},
-				},
-				{
-					label: "loop paused",
-					context: {
-						planMode: null,
-						loopMode: { state: "paused", limit: { kind: "iterations", initial: 10, remaining: 4 } },
-					},
-				},
-				{
-					label: "goal active",
-					context: { planMode: null, goalMode: { enabled: true, paused: false } },
-					session: { goalStatus: "active" },
-				},
-				{
-					label: "goal paused",
-					context: { planMode: null, goalMode: { enabled: true, paused: true } },
-					session: { goalStatus: "paused" },
-				},
-				{
-					label: "goal complete",
-					context: { planMode: null, goalMode: { enabled: true, paused: false } },
-					session: { goalStatus: "complete" },
-				},
-				{
-					label: "goal budget warning",
-					context: { planMode: null, goalMode: { enabled: true, paused: false } },
-					session: { goalStatus: "budget-limited" },
-				},
-				{
-					label: "goal dropped",
-					context: { planMode: null, goalMode: { enabled: true, paused: false } },
-					session: { goalStatus: "dropped" },
-				},
+				{ label: "active", facts: { plan: { enabled: true, paused: false } } },
+				{ label: "warning / paused", facts: { plan: { enabled: true, paused: true } } },
+				{ label: "prewalk active", facts: { plan: undefined, prewalk: true } },
+				{ label: "vibe active", facts: { plan: undefined, vibe: true } },
+				{ label: "loop active", facts: { plan: undefined, loop: { state: "running", limit: LOOP_LIMIT } } },
+				{ label: "loop paused", facts: { plan: undefined, loop: { state: "paused", limit: LOOP_LIMIT } } },
+				{ label: "goal active", facts: goal("active") },
+				{ label: "goal paused", facts: goal("paused", true) },
+				{ label: "goal complete", facts: goal("complete") },
+				{ label: "goal budget warning", facts: goal("budget-limited") },
+				{ label: "goal dropped", facts: goal("dropped") },
 			];
+		}
 		case "path":
 			return [
 				{ label: "workspace path" },
 				{
 					label: "linked worktree",
-					context: {
-						options: { path: { stripWorkPrefix: true } },
+					options: { path: { stripWorkPrefix: true } },
+					facts: {
 						worktree: { projectName: "oh-my-pi", worktreeName: "gallery-reference" },
 						git: { branch: "gallery-reference", status: null, pr: null },
 					},
@@ -177,57 +105,63 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 			return [
 				{
 					label: "clean",
-					context: { git: { branch: "main", status: { staged: 0, unstaged: 0, untracked: 0 }, pr: null } },
+					facts: { git: { branch: "main", status: { staged: 0, unstaged: 0, untracked: 0 }, pr: null } },
 				},
 				{ label: "dirty" },
 			];
-		case "cost":
+		case "cost": {
+			const usage = galleryStatusFacts().usage;
 			return [
 				{ label: "metered + premium + advisor" },
 				{
 					label: "subscription",
-					session: { usingSubscription: true, cost: 0, premiumRequests: 0, advisorCost: 0 },
-				},
-				{
-					label: "subscription + subagents",
-					session: { usingSubscription: true, cost: 0.38, premiumRequests: 0, advisorCost: 0 },
-					context: { subagentTreeCost: 1.27 },
-				},
-				{
-					label: "premium requests",
-					session: { cost: 0, premiumRequests: 2, advisorCost: 0 },
-				},
-			];
-		case "context_pct":
-			return [
-				{ label: "normal", context: { contextPercent: 22, contextTokens: 44_000 } },
-				{ label: "warning", context: { contextPercent: 72, contextTokens: 144_000 } },
-				{ label: "error", context: { contextPercent: 96, contextTokens: 192_000 } },
-				{
-					label: "active compaction",
-					context: {
-						contextPercent: 72,
-						contextTokens: 144_000,
-						compactionSpeculation: "running",
-						speculationBlinkOn: true,
+					facts: {
+						usingSubscription: true,
+						usage: { ...usage, cost: 0, premiumRequests: 0 },
+						advisorCost: { cost: 0, usingSubscription: false },
 					},
 				},
 				{
-					label: "armed compaction",
-					context: { contextPercent: 72, contextTokens: 144_000, compactionSpeculation: "armed" },
+					label: "subscription + subagents",
+					facts: {
+						usingSubscription: true,
+						usage: { ...usage, cost: 0.38, premiumRequests: 0 },
+						advisorCost: { cost: 0, usingSubscription: false },
+						subagentTreeCost: 1.27,
+					},
+				},
+				{
+					label: "premium requests",
+					facts: {
+						usage: { ...usage, cost: 0, premiumRequests: 2 },
+						advisorCost: { cost: 0, usingSubscription: false },
+					},
 				},
 			];
+		}
+		case "context_pct": {
+			const context = (percent: number): Partial<StatusFacts> => ({
+				context: { tokens: percent * 2_000, window: 200_000, percent },
+			});
+			return [
+				{ label: "normal", facts: context(22) },
+				{ label: "warning", facts: context(72) },
+				{ label: "error", facts: context(96) },
+				{ label: "active compaction", facts: { ...context(72), speculation: "running" } },
+				{ label: "armed compaction", facts: { ...context(72), speculation: "armed" } },
+			];
+		}
 		case "time":
 			return [
 				{ label: "24-hour with seconds" },
-				{ label: "12-hour", context: { options: { time: { format: "12h", showSeconds: false } } } },
+				{ label: "12-hour", options: { time: { format: "12h", showSeconds: false } } },
 			];
 		case "usage":
 			return [
 				{
 					label: "all windows",
-					context: {
-						usage: {
+					facts: {
+						quota: {
 							tier: "Pro",
 							fiveHour: { percent: 32, resetMinutes: 71 },
 							daily: { percent: 44, resetMinutes: 310 },
@@ -236,82 +170,70 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 						},
 					},
 				},
-				{
-					label: "normal",
-					context: { usage: { tier: "Pro", fiveHour: { percent: 24, resetMinutes: 75 } } },
-				},
-				{
-					label: "warning",
-					context: { usage: { tier: "Pro", fiveHour: { percent: 65, resetMinutes: 75 } } },
-				},
-				{
-					label: "error",
-					context: { usage: { tier: "Pro", fiveHour: { percent: 92, resetMinutes: 75 } } },
-				},
+				{ label: "normal", facts: { quota: { tier: "Pro", fiveHour: { percent: 24, resetMinutes: 75 } } } },
+				{ label: "warning", facts: { quota: { tier: "Pro", fiveHour: { percent: 65, resetMinutes: 75 } } } },
+				{ label: "error", facts: { quota: { tier: "Pro", fiveHour: { percent: 92, resetMinutes: 75 } } } },
 			];
 		case "tree":
 			return [
-				{ label: "rewound", context: { treePosition: { ahead: 3 } } },
-				{ label: "on a branch", context: { treePosition: { branch: { index: 2, count: 3 }, ahead: 0 } } },
-				{ label: "rewound on a branch", context: { treePosition: { branch: { index: 1, count: 2 }, ahead: 1 } } },
+				{ label: "rewound", facts: { treePosition: { ahead: 3 } } },
+				{ label: "on a branch", facts: { treePosition: { branch: { index: 2, count: 3 }, ahead: 0 } } },
+				{ label: "rewound on a branch", facts: { treePosition: { branch: { index: 1, count: 2 }, ahead: 1 } } },
 				{ label: "hidden (tip of a single line)" },
 			];
 		case "collab":
 			return [
-				{ label: "host active", context: { collab: { role: "host", participantCount: 3 } } },
-				{ label: "guest active", context: { collab: { role: "guest", participantCount: 3 } } },
+				{ label: "host active", facts: { collab: { role: "host", participantCount: 3 } } },
+				{ label: "guest active", facts: { collab: { role: "guest", participantCount: 3 } } },
 			];
 		case "vim":
 			return [
-				{
-					label: "normal",
-					context: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "text" } },
-				},
-				{
-					label: "insert",
-					context: { vim: { mode: "insert", pending: "", selectedLines: 0, display: "text" } },
-				},
+				{ label: "normal", facts: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "text" } } },
+				{ label: "insert", facts: { vim: { mode: "insert", pending: "", selectedLines: 0, display: "text" } } },
 				{
 					label: "visual with count",
-					context: { vim: { mode: "visual-line", pending: "2d", selectedLines: 4, display: "text" } },
+					facts: { vim: { mode: "visual-line", pending: "2d", selectedLines: 4, display: "text" } },
 				},
-				{
-					label: "icon mode",
-					context: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "icon" } },
-				},
+				{ label: "icon mode", facts: { vim: { mode: "normal", pending: "", selectedLines: 0, display: "icon" } } },
 			];
 		case "cache":
 			return [
-				{ label: "cached", session: { promptCache: GALLERY_PROMPT_CACHE.warm } },
-				{ label: "likely cached (inferred)", session: { promptCache: GALLERY_PROMPT_CACHE.likelyWarm } },
-				{ label: "not cached — expired", session: { promptCache: GALLERY_PROMPT_CACHE.coldExpired } },
-				{ label: "not cached — model changed", session: { promptCache: GALLERY_PROMPT_CACHE.coldModel } },
+				{ label: "cached", facts: { promptCache: GALLERY_PROMPT_CACHE.warm } },
+				{ label: "likely cached (inferred)", facts: { promptCache: GALLERY_PROMPT_CACHE.likelyWarm } },
+				{ label: "not cached — expired", facts: { promptCache: GALLERY_PROMPT_CACHE.coldExpired } },
+				{ label: "not cached — model changed", facts: { promptCache: GALLERY_PROMPT_CACHE.coldModel } },
 				{ label: "hidden (nothing to report)" },
 			];
+		case "subagents":
+			return [{ label: "running", facts: { subagents: 3 } }];
 		default:
 			return [{ label: "canonical" }];
 	}
 }
 
+/** Segment `id` alone on a bar, or a dim note when the sample hides it. */
 function renderIsolatedSegment(id: StatusLineSegmentId, spec: SegmentVariantSpec, width: number): readonly string[] {
-	const base = createGallerySegmentContext(spec.session);
-	const override = spec.context;
-	const context: SegmentContext = {
-		...base,
-		...override,
+	const facts = galleryStatusFacts(spec.facts);
+	const segmentOptions: StatusLineSegmentOptions = { ...BASE_OPTIONS };
+	const overrides = spec.options ?? {};
+	for (const key in overrides) {
+		const name = key as keyof StatusLineSegmentOptions;
+		(segmentOptions as Record<string, unknown>)[name] = { ...BASE_OPTIONS[name], ...overrides[name] };
+	}
+	const settings = galleryStatusSettings([id], [], { segmentOptions });
+	// A running subagent count shows as the bar's badge rather than the segment.
+	const shown = segmentView(id, facts, effectiveStatusSettings(settings)) !== null || facts.subagents > 0;
+	if (!shown) return [currentTheme().fg("dim", "  (hidden for this sample)")];
+	return printRows(
+		() => StatusLine({ settings: () => settings, facts: () => facts, placement: () => GALLERY_BAR_PLACEMENT }),
 		width,
-		options: { ...base.options, ...override?.options },
-		usageStats: { ...base.usageStats, ...override?.usageStats },
-		git: { ...base.git, ...override?.git },
-	};
-	const rendered = renderSegment(id, context);
-	const content = rendered.visible ? rendered.content : theme.fg("dim", "(hidden for this sample)");
-	return [truncateToWidth(`  ${content}`, width)];
+		{ now: GALLERY_NOW },
+	);
 }
 
 /** Every registered segment rendered directly through its production implementation. */
 export function getSegmentGalleryEntries(): readonly GalleryPreviewEntry[] {
-	return ALL_SEGMENT_IDS.map(id => ({
+	return STATUS_LINE_SEGMENT_IDS.map(id => ({
 		id,
 		heading: `segment · ${id}`,
 		variants: variantsFor(id).map(spec => ({

@@ -1,5 +1,5 @@
 import { InternalUrlRouter } from "../internal-urls/router";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 
 /** Shape forwarded from the plan-proposal handler to InteractiveMode's
  *  approval popup. Populated by the `propose` tool when the agent
