@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `lfm3-1.7b` to the local memory models: LiquidAI's LFM3 ONNX export now generates on Windows and Linux ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
 - The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses
 - Tray cards now mark subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so Tern shows them apart from subagents doing work
 - The shell's `tail -r` builtin now takes `-c`, `-b`, and `+N` counts like BSD `tail`, and `tail -b N` selects 512-byte blocks; `-r` with `-f` is BSD's usage error instead of a "pipe through tac" refusal
@@ -24,6 +25,7 @@
 
 ### Changed
 
+- The MLX backend now skips a model whose pinned `mlx-lm` release cannot load its architecture and falls back to ONNX CPU for that model alone, instead of downloading the MLX weights and failing (`lfm3-1.7b` is the first such entry) ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
 - The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - With Vim editing mode on, `y` no longer copies to the system clipboard; use `"+y` / `"*y`, or turn on `tui.vimYankToClipboard` to get the old behavior ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - With Vim editing mode on, the prompt after a message you send starts in **Vim Start Mode** (Insert by default) instead of staying in the mode you sent it from ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))

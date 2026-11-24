@@ -24,6 +24,7 @@ import {
 	smokeTestInferWorker,
 } from "../daemon/modules/infer";
 import { inferenceWorkerEnv, resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS } from "../subprocess/worker-client";
+import { tinyModelBackendRefusal } from "./backend-policy";
 import { MLX_DEVICE, resolveTinyModelDevicePreference, tinyMlxSupported, tinyModelDeviceSettingToEnv } from "./device";
 import { tinyModelDtypeSettingToEnv } from "./dtype";
 import { formatTitleUserMessage } from "./message-preproc";
@@ -193,13 +194,17 @@ function onnxOpenSpec(modelKey: TinyLocalModelKey, modelEnv: Record<string, stri
 }
 
 /** Daemon open spec for the MLX worker; installs the mlx-lm runtime first (with progress). */
-async function mlxOpenSpec(
+export async function mlxOpenSpec(
 	modelKey: TinyLocalModelKey,
 	modelEnv: Record<string, string>,
 	emitProgress: (event: TinyTitleProgressEvent) => void,
 ): Promise<InferOpenSpec> {
 	const spec = getTinyLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
+	// Callers gate on this before choosing the backend; keep a loud failure here so a
+	// future caller that skips the gate cannot download weights mlx-lm cannot load.
+	const mlxRefusal = tinyModelBackendRefusal(modelKey, "mlx");
+	if (mlxRefusal) throw new Error(`${modelKey} is unavailable on MLX: ${mlxRefusal}`);
 	const python = await ensureTinyMlxRuntime(phase =>
 		emitProgress({ modelKey, status: phase, name: `mlx-lm@${MLX_LM_VERSION}` }),
 	);
@@ -285,7 +290,12 @@ export class TinyTitleClient {
 
 	async #openSpec(modelKey: TinyLocalModelKey): Promise<InferOpenSpec> {
 		const modelEnv = tinyModelEnv();
-		if (tinyWorkerUsesMlx()) {
+		// Per-model, not process-wide: a model the pinned mlx-lm cannot load falls back
+		// to ONNX without demoting every other model in this process.
+		const reason = tinyWorkerUsesMlx() ? tinyModelBackendRefusal(modelKey, "mlx") : undefined;
+		if (reason) {
+			logger.debug("tiny-title: MLX backend cannot load this model; using ONNX CPU", { modelKey, reason });
+		} else if (tinyWorkerUsesMlx()) {
 			try {
 				return await mlxOpenSpec(modelKey, modelEnv, event => this.#emitProgress(event));
 			} catch (error) {

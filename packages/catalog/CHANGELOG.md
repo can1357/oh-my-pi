@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `lfm3-1.7b` to the `local` provider's authored seeds, so `local/lfm3-1.7b` resolves as a selectable model (for example `modelRoles.memory`) ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
+- Added `unsupported "<backend>" reason="…"` to the seed-row grammar and `seedBackendRefusals(provider, modelId)` to read it, so a reviewed backend restriction on a local model is authored in `rules/providers/local.kdl` instead of per-model TypeScript ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
 - Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
 - Added `fetchOpenRouterChatModels()` and `OPENROUTER_BASE_URL` to `@oh-my-pi/pi-catalog/provider-models/openai-compat` for reading OpenRouter's tool-capable chat roster outside the `openrouter` provider.
 - `toolSchemaFlavor: "google"` rewrites OpenAI-compatible tool schemas into Gemini's dialect; GitHub Copilot Gemini models use it ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))

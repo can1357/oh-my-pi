@@ -25,8 +25,8 @@ import type { ProgressInfo } from "./transformers-types";
  */
 
 export const TRANSFORMERS_PACKAGE = "@huggingface/transformers";
-/** Exact Transformers.js version installed on first use by the speech and tiny workers. */
-export const TRANSFORMERS_VERSION = "4.3.0";
+/** Exact Transformers.js version installed on first use by the speech and tiny workers (4.3.2+ knows `lfm3`). */
+export const TRANSFORMERS_VERSION = "4.3.2";
 const ONNX_RUNTIME_NODE_PACKAGE = "onnxruntime-node";
 const ONNX_RUNTIME_CUDA_INSTALL = "cuda12";
 const ONNX_RUNTIME_CUDA_PROVIDER_FILES = [
