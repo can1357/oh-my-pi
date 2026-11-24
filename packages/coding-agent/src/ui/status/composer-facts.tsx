@@ -13,7 +13,6 @@
  * the brand (pi).
  */
 import { type Accessor, computed, For, type JSXNode, Show } from "@oh-my-pi/pi-tui";
-import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspMeterMark, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { StatusLineSegmentId } from "../../config/status-line-schema";
@@ -137,11 +136,10 @@ export function composerFacts(props: {
 		const settings = effective();
 		const state = props.facts();
 		const out: Fact[] = [];
-		const nerd = currentTheme().symbols.preset === "nerd";
 		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]) => {
 			ids.forEach((id, index) => {
 				if (HOMED[id]) return;
-				const view = segmentView(id, state, settings, nerd);
+				const view = segmentView(id, state, settings);
 				if (!view) return;
 				const order = side === "left" ? ids.length - index : index + 1;
 				const action = FACT_ACTIONS[id];
@@ -219,22 +217,18 @@ export function composerFacts(props: {
 		};
 	});
 	// The session's spend (a Nerd Font subscription marker in it travels as an `icon` span).
-	const cost = computed((): string => {
-		const nerd = currentTheme().symbols.preset === "nerd";
-		return (
-			segmentView("cost", props.facts(), effective(), nerd)
+	const cost = computed(
+		() =>
+			segmentView("cost", props.facts(), effective())
 				?.spans.map(part => part.t)
-				.join("") ?? ""
-		);
-	});
+				.join("") ?? "",
+	);
 
 	const modelView = computed(() =>
-		segmentView(
-			"model",
-			props.facts(),
-			{ ...effective(), segmentOptions: { ...effective().segmentOptions, model: { showThinkingLevel: false } } },
-			currentTheme().symbols.preset === "nerd",
-		),
+		segmentView("model", props.facts(), {
+			...effective(),
+			segmentOptions: { ...effective().segmentOptions, model: { showThinkingLevel: false } },
+		}),
 	);
 
 	return {
@@ -306,7 +300,6 @@ export function StatusBarPreview(props: {
 	return () => {
 		const settings = effectiveStatusSettings(props.settings());
 		const state = props.facts();
-		const nerd = currentTheme().symbols.preset === "nerd";
 		const faint = state.focusedAgentId !== undefined;
 		const badge = state.subagents > 0;
 		const segs: JSXNode[] = [];
@@ -338,7 +331,7 @@ export function StatusBarPreview(props: {
 		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]): void => {
 			ids.forEach((id, index) => {
 				if (badge && id === "subagents") return;
-				const view = segmentView(id, state, settings, nerd);
+				const view = segmentView(id, state, settings);
 				if (view) push(id, side, side === "left" ? ids.length - index : index + 1, view);
 			});
 		};

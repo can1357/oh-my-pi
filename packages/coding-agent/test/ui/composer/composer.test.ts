@@ -6,8 +6,9 @@ import { describe, expect, test } from "bun:test";
 import { createRoot, signal } from "@oh-my-pi/pi-tui";
 import { bubbleEvent, pathTo } from "@oh-my-pi/pi-tui/dispatch";
 import { corpusEnvironment } from "@oh-my-pi/pi-tui/testing/corpus";
-import { paintNode } from "@oh-my-pi/pi-tui/term/paint";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { plainRows } from "@oh-my-pi/pi-tui/testing/cells";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { getKeybindings, KeybindingsManager, setKeybindings } from "../../../src/config/keybindings/keybindings";
 import { Composer, type ComposerOptions, composerShape, registerComposerShape } from "../../../src/ui/composer";
 import { key, sendKey, sendPaste } from "./harness";
@@ -455,6 +456,24 @@ describe("the completion popup's items", () => {
 		await settle();
 		// A label typed whole is one marked span, with no empty rest.
 		expect(popupItems(composer)[0]).toMatchObject({ label: [{ s: "mark", t: "notes.md" }] });
+	});
+
+	test("draws the selected completion with the terminal preset's cursor", async () => {
+		const { composer, type } = make({ autocomplete });
+		type("/tmp/work/n");
+		await settle();
+		for (const preset of ["nerd", "ascii"] as const) {
+			const theme = loadThemeSync("dark", { symbolPreset: preset });
+			const popup = composer.node.children().find(node => node.kind === "overlay");
+			if (!popup) throw new Error("Expected the completion popup");
+			const [selected, unselected] = paintNode(staticEnvironment(theme), popup, 80).rows.map(row =>
+				Bun.stripANSI(row),
+			);
+			expect(selected).toStartWith(`${theme.symbols.symbol("nav.cursor")} `);
+			expect(selected).toContain("notes.md");
+			expect(unselected).toStartWith("  ");
+			expect(unselected).toContain("notes.model");
+		}
 	});
 
 	test("keep the provider's description in terminal rows", async () => {
