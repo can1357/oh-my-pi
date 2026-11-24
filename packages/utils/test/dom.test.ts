@@ -148,10 +148,31 @@ describe("DOM scraper compatibility", () => {
 		expect(document.querySelector("title")?.textContent).toBe("d</titlex>");
 	});
 
+	test("keeps a quote in an unquoted value or a bare end tag at EOF as text", () => {
+		const { document } = parseHTML(
+			"<textarea>a</textarea foo=x'y><p class=b'c>after</p><p title=\"q>r\">quoted</p><textarea>tail</textarea",
+		);
+		const [first, last] = document.querySelectorAll("textarea");
+		expect(first?.textContent).toBe("a");
+		expect(
+			document.querySelectorAll("p").map(p => [p.getAttribute("class") ?? p.getAttribute("title"), p.textContent]),
+		).toEqual([
+			["b'c", "after"],
+			["q>r", "quoted"],
+		]);
+		// `</textarea` without a delimiter is no end tag yet; at EOF it stays text.
+		expect(last?.textContent).toBe("tail</textarea");
+	});
+
 	test("drops one line break after a textarea, pre or listing start tag", () => {
-		const { document } = parseHTML("<textarea>\r\n\nkept</textarea><pre>\ncode\n</pre><listing>\nl</listing>");
-		expect(document.querySelector("textarea")?.textContent).toBe("\nkept");
-		expect(document.querySelector("pre")?.textContent).toBe("code\n");
+		const { document } = parseHTML(
+			"<textarea>\r\n\nkept</textarea><textarea>&#10;ref</textarea><textarea>\n&#10;both</textarea>" +
+				"<pre>\ncode\n</pre><pre>&#10;ref</pre><pre><b></b>\nkept</pre><listing>\nl</listing>",
+		);
+		// A source line break or the LF a character reference decodes to; only the first one.
+		expect(document.querySelectorAll("textarea").map(t => t.textContent)).toEqual(["\nkept", "ref", "\nboth"]);
+		// Only when the start tag is followed directly by text.
+		expect(document.querySelectorAll("pre").map(p => p.textContent)).toEqual(["code\n", "ref", "\nkept"]);
 		expect(document.querySelector("listing")?.textContent).toBe("l");
 	});
 

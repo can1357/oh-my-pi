@@ -52,6 +52,7 @@
 ### Fixed
 
 - The `ask` tool returns a prefilled `<textarea>` value unchanged: text such as `<name>` or `<tag attr="x">…</tag>` is no longer dropped from it ([#20299](https://github.com/can1357/oh-my-pi/issues/20299))
+- `ask` forms read a `<textarea>` or `<pre>` the way a browser does: an end tag with attributes (`</textarea foo>`) closes the field instead of taking in the rest of the form, a quote in an unquoted attribute value no longer hides the fields after it, and only the first line break after `<textarea>` or `<pre>` is dropped, so `<pre>\n\ncode` keeps its blank line and `<textarea>&#10;text</textarea>` prefills `text` ([#20361](https://github.com/can1357/oh-my-pi/pull/20361) by [@H4vC](https://github.com/H4vC))
 - Fixed context token accounting to reflect changes in system prompt sources
 - Cmd+A selects the full draft even when Tern forwards the keystroke; typing or pasting replaces the selection. Click the model name or chevron in Tern, or press Alt+P, to open the searchable `/switch` sheet without losing the draft.
 - Native composer status controls become clickable when the live session can handle them. The effort ring changes effort independently of the model name.

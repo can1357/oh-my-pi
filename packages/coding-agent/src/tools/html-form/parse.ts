@@ -184,6 +184,15 @@ function svgTitle(svg: Element): string {
 	return (title?.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * A `<pre>` block's text without trailing whitespace. The parser already drops a line break right after
+ * `<pre>`; the one opening a nested element (`<pre><code>\n…`) is dropped here for display.
+ */
+function preText(pre: Element): string {
+	const text = pre.textContent ?? "";
+	return (pre.firstChild instanceof Element ? text.replace(/^\r?\n/, "") : text).trimEnd();
+}
+
 function numberAttr(element: Element, name: string): number | undefined {
 	const raw = element.getAttribute(name);
 	if (raw === null || raw.trim() === "") return undefined;
@@ -276,7 +285,7 @@ class FormBuilder {
 				return;
 			case "pre":
 				this.#flush(false);
-				this.#section.blocks.push({ kind: "pre", text: (node.textContent ?? "").replace(/^\n/, "").trimEnd() });
+				this.#section.blocks.push({ kind: "pre", text: preText(node) });
 				return;
 			case "table":
 				this.#table(node);

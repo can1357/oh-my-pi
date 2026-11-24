@@ -4,12 +4,13 @@ import { Document, type DocumentFragment, Element, Text } from "./core";
 interface TextContentElement {
 	/** Whether entities are decoded: RCDATA (`textarea`, `title`) decodes them, raw text (`script`, `style`) keeps them. */
 	decode: boolean;
-	/** Start of the element's end tag: `</name` followed by whitespace, `/`, `>` or EOF. Callers reset `lastIndex`. */
+	/** Start of the element's end tag: `</name` followed by whitespace, `/` or `>`. Callers reset `lastIndex`. */
 	endTag: RegExp;
 }
 
 function textContentElement(name: string, decode: boolean): TextContentElement {
-	return { decode, endTag: new RegExp(`</${name}(?=[\\t\\n\\f\\r />]|$)`, "gi") };
+	// A bare `</name` at EOF is no end tag: the tokenizer emits it as text.
+	return { decode, endTag: new RegExp(`</${name}(?=[\\t\\n\\f\\r />])`, "gi") };
 }
 
 /**
@@ -229,16 +230,63 @@ function namedEntity(name: string): string | undefined {
 	return Object.hasOwn(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : undefined;
 }
 
+/** Tokenizer states {@link findTagEnd} steps through; quoted values are skipped in one step. */
+const enum TagState {
+	TagName,
+	BeforeAttributeName,
+	AttributeName,
+	AfterAttributeName,
+	UnquotedValue,
+}
+
+/** Whitespace as the HTML tokenizer sees it inside a tag (after CR normalization). */
+function isTagWhitespace(character: string | undefined): boolean {
+	return character === " " || character === "\t" || character === "\n" || character === "\f" || character === "\r";
+}
+
+/**
+ * Index of the `>` that ends the tag whose name starts at `start`, or the last index when the tag runs
+ * to EOF. Follows the HTML tokenizer's tag states, so a quote opens a value only right after `=`: in a
+ * tag or attribute name or an unquoted value (`foo=x'y`) it is a literal character.
+ */
 function findTagEnd(html: string, start: number): number {
-	let quote = "";
+	let state = TagState.TagName;
 	for (let index = start; index < html.length; index++) {
 		const character = html[index];
-		if (quote) {
-			if (character === quote) quote = "";
-		} else if (character === '"' || character === "'") {
-			quote = character;
-		} else if (character === ">") {
-			return index;
+		if (character === ">") return index;
+		const space = isTagWhitespace(character);
+		switch (state) {
+			case TagState.TagName:
+			case TagState.UnquotedValue:
+				if (space || (state === TagState.TagName && character === "/")) state = TagState.BeforeAttributeName;
+				break;
+			case TagState.BeforeAttributeName:
+				if (!space && character !== "/") state = TagState.AttributeName;
+				break;
+			case TagState.AttributeName:
+			case TagState.AfterAttributeName:
+				if (character === "=") {
+					// Before the attribute value: whitespace, then a quoted value, a `>`, or an unquoted value.
+					index++;
+					while (index < html.length && isTagWhitespace(html[index])) index++;
+					const first = html[index];
+					if (first === '"' || first === "'") {
+						const close = html.indexOf(first, index + 1);
+						if (close < 0) return html.length - 1;
+						index = close;
+						state = TagState.BeforeAttributeName;
+					} else {
+						if (first === ">") return index;
+						state = TagState.UnquotedValue;
+					}
+				} else if (character === "/") {
+					state = TagState.BeforeAttributeName;
+				} else if (space) {
+					state = TagState.AfterAttributeName;
+				} else if (state === TagState.AfterAttributeName) {
+					state = TagState.AttributeName;
+				}
+				break;
 		}
 	}
 	return html.length - 1;
@@ -313,7 +361,11 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 	const xmlLike = root instanceof Document && /^\s*(?:<\?xml[\s\S]*?\?>\s*)?<(?:feed|rss)\b/i.test(html);
 	let parent: Document | DocumentFragment | Element = root;
 	let index = 0;
+	// Set by a `<pre>`/`<listing>` start tag: the next token, if it is text, loses one leading line break.
+	let pendingNewlineDrop = false;
 	while (index < html.length) {
+		const dropNewline = pendingNewlineDrop;
+		pendingNewlineDrop = false;
 		if (html.startsWith("<!--", index)) {
 			const end = html.indexOf("-->", index + 4);
 			const contentEnd = end < 0 ? html.length : end;
@@ -324,7 +376,9 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 		if (html[index] !== "<") {
 			const next = html.indexOf("<", index);
 			const end = next < 0 ? html.length : next;
-			parent.appendChild(new Text(decodeEntities(html.slice(index, end)), document, xmlLike));
+			const raw = html.slice(index, end);
+			const text = characterText(raw, true, dropNewline);
+			if (text) parent.appendChild(new Text(text, document, xmlLike));
 			index = end;
 			continue;
 		}
@@ -384,16 +438,16 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 		// Content rules below are the HTML tokenizer's; feeds follow XML and SVG holds child elements.
 		// A self-closing `<textarea/>` stays empty instead of swallowing the rest of the document.
 		const htmlElement = !xmlLike && namespace === HTML_NAMESPACE && !parsed.selfClosing;
-		if (htmlElement && Object.hasOwn(LEADING_NEWLINE_ELEMENTS, parsed.name)) {
-			index = skipLeadingNewline(html, index);
-		}
+		const dropsNewline = htmlElement && Object.hasOwn(LEADING_NEWLINE_ELEMENTS, parsed.name);
 		if (htmlElement && Object.hasOwn(TEXT_CONTENT_ELEMENTS, parsed.name)) {
 			const content = TEXT_CONTENT_ELEMENTS[parsed.name];
-			const [text, next] = readUntilEndTag(html, index, content.endTag);
-			if (text) element.appendChild(new Text(content.decode ? decodeEntities(text) : text, document));
+			const [raw, next] = readUntilEndTag(html, index, content.endTag);
+			const text = characterText(raw, content.decode, dropsNewline);
+			if (text) element.appendChild(new Text(text, document));
 			index = next;
 			continue;
 		}
+		pendingNewlineDrop = dropsNewline;
 		// Feed documents follow XML rules: only an explicit `/>` closes immediately, so RSS `<link>url</link>`
 		// keeps its text instead of being treated as an HTML void element.
 		const isVoid = xmlLike
@@ -417,10 +471,18 @@ function readUntilEndTag(html: string, index: number, endTag: RegExp): [text: st
 	return [html.slice(index, match.index), findTagEnd(html, endTag.lastIndex) + 1];
 }
 
-/** Index past one line break (`\r\n`, `\n` or `\r`) at `index`, or `index` when none starts there. */
-function skipLeadingNewline(html: string, index: number): number {
-	if (html.startsWith("\r\n", index)) return index + 2;
-	return html[index] === "\n" || html[index] === "\r" ? index + 1 : index;
+/**
+ * The text of the source run `raw`, entities decoded when `decode` (not for raw text). `dropLeadingNewline`
+ * drops the one line feed a `<pre>`, `<listing>` or `<textarea>` start tag swallows: a source line break
+ * (`\r\n`, `\n` or `\r`, all LF after input preprocessing), else an LF a character reference such as
+ * `&#10;` decodes to.
+ */
+function characterText(raw: string, decode: boolean, dropLeadingNewline: boolean): string {
+	if (!dropLeadingNewline) return decode ? decodeEntities(raw) : raw;
+	const lineBreak = raw.startsWith("\r\n") ? 2 : raw[0] === "\n" || raw[0] === "\r" ? 1 : 0;
+	if (lineBreak > 0) return characterText(raw.slice(lineBreak), decode, false);
+	const text = decode ? decodeEntities(raw) : raw;
+	return text[0] === "\n" ? text.slice(1) : text;
 }
 
 function isDoctypeAt(html: string, index: number): boolean {
