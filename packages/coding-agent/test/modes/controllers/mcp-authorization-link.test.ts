@@ -105,6 +105,24 @@ describe("MCPAuthorizationLinkPrompt", () => {
 		expect(reassembled).toEndWith("&code_challenge_method=S256");
 	});
 
+	it("links every wrapped chunk to the full URL under one OSC 8 id so a click never opens a fragment", () => {
+		// #20192: unlinked chunks let terminal URL auto-detection open only the
+		// clicked row — an authorize request missing its trailing parameters.
+		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL).render(80);
+		const plainLines = lines.map(line => stripVTControlCharacters(line));
+		const labelRow = plainLines.indexOf(` ${COPY_URL_LABEL}`);
+		const chunks = lines.slice(labelRow + 1);
+		expect(chunks.length).toBeGreaterThan(1);
+
+		const ids = new Set<string | undefined>();
+		for (const chunk of chunks) {
+			expect(extractLinkUri(chunk)).toBe(LINEAR_AUTH_URL);
+			ids.add(chunk.match(/\x1b\]8;id=([^;]+);/)?.[1]);
+		}
+		expect(ids.size).toBe(1);
+		expect(ids.has(undefined)).toBe(false);
+	});
+
 	it("keeps the full URL as the primary copy target even when a launch shortcut is available", () => {
 		const launchUrl = "http://localhost:14570/launch";
 		const lines = new MCPAuthorizationLinkPrompt(LINEAR_AUTH_URL, launchUrl).render(80);

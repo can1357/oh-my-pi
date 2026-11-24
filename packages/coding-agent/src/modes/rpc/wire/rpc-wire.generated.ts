@@ -559,6 +559,10 @@ export interface BashResult {
 	artifactError?: Record<string, unknown>;
 	minimized?: Record<string, unknown>;
 	workingDir?: string;
+	/** The command ended in another directory than it started in; the next command starts in its own cwd. */
+	movedCwd?: boolean;
+	/** The command ended with `set -e` on; the next command starts with it off. */
+	errexit?: boolean;
 	images?: ImageContent[];
 	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
 	trace?: Record<string, unknown>;

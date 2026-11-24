@@ -56,9 +56,13 @@ const ANNOUNCEMENT_TIMEOUT_MS = 2_000;
 const HOLD_LIMIT_MS = 165_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
-// agy streams its own retry attempts as a line of agent text; anchored so prose mentioning an API error stays text.
+// agy <1.5.14 streams its own retry attempts as a line of agent text; anchored so prose mentioning an API error stays text.
 const RETRY_NOTICE = /(?:^|\n)[^\S\n]*(?:⚠\uFE0F?[^\S\n]*)?API error \(attempt \d+\):[^\S\n]*([^\n]+)/;
-const QUOTA_EXHAUSTED = /\bRESOURCE_EXHAUSTED\b|\bcode 429\b/;
+// agy ≥1.5.14 retries silently and ends a turn whose retries all failed with one "⚠ <error>" line.
+const FINAL_NOTICE = /^\s*⚠\uFE0F?[^\S\n]*([^\n]+?)\s*$/;
+// A trailing warning line, withheld until the turn either continues or ends on it.
+const TRAILING_WARNING = /(?<=^|\n)[^\S\n]*⚠[^\n]*\s*$/;
+const QUOTA_EXHAUSTED = /\bRESOURCE_EXHAUSTED\b|\bcode 429\b|\b[Qq]uota reached\b/;
 const NOTICE_MARK = /^[^\S\n]*(?:⚠\uFE0F?[^\S\n]*)?/;
 const NOTICE_HEAD = "API error (attempt ";
 const NOTICE_ATTEMPT = /^\d*$|^\d+\)(?::.*)?$/;
@@ -763,20 +767,21 @@ export class AgyHost implements ProviderSessionState {
 
 	/**
 	 * ACP may split a retry notice across chunks, so the unfinished last line is withheld
-	 * until it either reads as a quota notice or can no longer become one.
+	 * until it either reads as a quota notice or can no longer become one. A trailing
+	 * warning line is withheld until the turn continues past it or ends on it.
 	 */
 	#stream(kind: "text" | "thinking", chunk: string, writer: StepWriter | undefined): void {
 		if (this.#held?.kind !== kind) this.#releaseHeld(writer);
 		const text = (this.#held?.text ?? "") + chunk;
 		this.#held = undefined;
-		const exhausted = quotaRetryNotice(text);
+		const exhausted = quotaNotice(RETRY_NOTICE, text);
 		if (exhausted) {
 			this.#rateLimited(exhausted);
 			return;
 		}
 		const lineStart = text.lastIndexOf("\n") + 1;
-		const tail = text.slice(lineStart);
-		const visible = mayBecomeRetryNotice(tail) ? text.slice(0, lineStart) : text;
+		const retryStart = mayBecomeRetryNotice(text.slice(lineStart)) ? lineStart : text.length;
+		const visible = text.slice(0, Math.min(retryStart, TRAILING_WARNING.exec(text)?.index ?? text.length));
 		if (visible.length < text.length) this.#held = { kind, text: text.slice(visible.length) };
 		if (visible) emit(writer, kind, visible);
 	}
@@ -788,13 +793,11 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	/**
-	 * agy retries quota failures itself and only reports each attempt as message text.
+	 * agy <1.5.14 retries quota failures itself and only reports each attempt as message text.
 	 * Stop its retry loop and surface a 429 so omp can rotate credentials or fall back.
 	 */
 	#rateLimited(detail: string): void {
-		const error = new ProviderHttpError(`Antigravity CLI rate limited: ${detail}`, 429, {
-			code: "RESOURCE_EXHAUSTED",
-		});
+		const error = rateLimitError(detail);
 		const fail = () => this.#fail(error);
 		this.#cancelTurn().then(fail, fail);
 	}
@@ -812,6 +815,11 @@ export class AgyHost implements ProviderSessionState {
 			return;
 		}
 		const writer = step.writer;
+		const exhausted = this.#held && quotaNotice(FINAL_NOTICE, this.#held.text);
+		if (exhausted) {
+			this.#fail(rateLimitError(exhausted));
+			return;
+		}
 		this.#releaseHeld(writer);
 		if (
 			!writer.output.content.some(
@@ -985,10 +993,19 @@ function errorOutput(text: string): McpToolOutput {
 	return { content: [{ type: "text", text }], isError: true };
 }
 
-/** The quota detail of an agy retry notice, e.g. "⚠ API error (attempt 7): RESOURCE_EXHAUSTED (code 429): …". */
-function quotaRetryNotice(text: string): string | undefined {
-	const detail = RETRY_NOTICE.exec(text)?.[1]?.trim();
+/**
+ * The quota detail of an agy notice matched by `notice`: a RETRY_NOTICE such as
+ * "⚠ API error (attempt 7): RESOURCE_EXHAUSTED (code 429): …" or a FINAL_NOTICE such as
+ * "⚠ Individual quota reached. … Resets in 124h22m23s.".
+ */
+function quotaNotice(notice: RegExp, text: string): string | undefined {
+	const detail = notice.exec(text)?.[1]?.trim();
 	return detail && QUOTA_EXHAUSTED.test(detail) ? detail : undefined;
+}
+
+/** The 429 that lets omp rotate credentials or fall back on an exhausted agy account. */
+function rateLimitError(detail: string): ProviderHttpError {
+	return new ProviderHttpError(`Antigravity CLI rate limited: ${detail}`, 429, { code: "RESOURCE_EXHAUSTED" });
 }
 
 /** True while an unterminated line is a prefix of, or an unfinished, agy retry notice. */

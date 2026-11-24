@@ -18,7 +18,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { PipeStreams, type ShellCommands, shellBuiltins } from "@oh-my-pi/pi-natives";
+import { PipeStreams, repairHeredocContinuations, type ShellCommands, shellBuiltins } from "@oh-my-pi/pi-natives";
 import { $which, isEnoent, logger, prompt, spillUrl } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
@@ -621,6 +621,17 @@ const FORK_STATE_LOST_NOTICE = "Ran in a copy of the busy session shell; changes
 const FORK_JOBS_NOTICE =
 	"Background jobs started here run in a copy of the busy session shell; later calls' jobs, wait and %N won't see them.";
 
+/**
+ * Names what a command changed in the session shell that the next call starts without: a `cd`
+ * (calls start in `sessionCwd`) and `set -e`.
+ */
+function formatShellResetNotice(result: BashResult | BashInteractiveResult, sessionCwd: string): string | undefined {
+	const reset: string[] = [];
+	if ("movedCwd" in result && result.movedCwd) reset.push(`cwd → ${sessionCwd}`);
+	if ("errexit" in result && result.errexit) reset.push("set -e off");
+	return reset.length > 0 ? `Reset before the next call: ${reset.join(", ")}.` : undefined;
+}
+
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
 }
@@ -817,6 +828,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			if (interception.block) return interception.message ?? "Command blocked";
 		}
 		return undefined;
+	}
+
+	/**
+	 * Whether this line is pure tool-command traffic: every simple command is a mounted tool
+	 * command (or a special command), joined only by `;`, `&&`, `||`, `|` and newlines, with no
+	 * redirection, expansion, substitution or assignment — see {@link isToolCommandLine}. Such a
+	 * line runs no program: it dispatches the same session tools a top-level call would, which is
+	 * why a same-name extension replacement hands it back to this tool (#18339). Every other line
+	 * stays the override's.
+	 */
+	servesToolCommandLine(command: string): boolean {
+		return isToolCommandLine(command, new Set(toolCommandNames(this.session)));
 	}
 
 	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision => {
@@ -1299,6 +1322,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (notice) notices.push(notice);
 			}
 		}
+		const resetNotice = formatShellResetNotice(result, this.session.cwd);
+		if (resetNotice) notices.push(resetNotice);
 		const fork = "fork" in result ? result.fork : undefined;
 		if (fork && !fork.carried) notices.push(FORK_STATE_LOST_NOTICE);
 		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);
@@ -1903,6 +1928,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				const patched = await applyPatch.execute(toolCallId, { input: shellPatch }, signal, undefined, ctx);
 				return { content: patched.content, isError: patched.isError, details: {} };
 			}
+		}
+
+		const repaired = repairHeredocContinuations(command);
+		if (repaired !== null) {
+			pendingNotices.push(
+				"Ran without the `\\` after `<<EOF &&`: a line continuation there makes the next line a command and starts the heredoc body after it. End such lines with the operator alone.",
+			);
+			command = repaired;
 		}
 
 		if (cfgWorktreeClone.get(this.session.settings)) {

@@ -10,12 +10,18 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 // The exact body LithosAI answers for an account with no credit left. It is a
 // 402 `insufficient_quota`, so the retry classifier files it under UsageLimit
 // and the QUOTA_EXHAUSTED heuristic asks for a 30-minute wait.
 const OUT_OF_CREDIT =
 	"402 the organization is out of credit, add more to continue (type=insufficient_quota param=insufficient_quota)";
+
+// OpenRouter's 402 when the account's own running requests have reserved the
+// balance. Credits free as they settle, so the provider's window can clear it.
+const IN_FLIGHT_RESERVATION =
+	"402 This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits. retry-after-ms=120000";
 
 type RetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 
@@ -36,6 +42,7 @@ describe("AgentSession out-of-credit handling", () => {
 		tempDir = TempDir.createSync("@pi-out-of-credit-");
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		authStorage.keys.removeRuntime("anthropic");
+		authStorage.keys.removeRuntime("openrouter");
 		sessions = [];
 	});
 
@@ -51,21 +58,25 @@ describe("AgentSession out-of-credit handling", () => {
 	 * out long quota windows, which is what let the 30-minute quota heuristic
 	 * sleep through an empty balance.
 	 */
-	async function createSession(failure: string): Promise<{
+	async function createSession(
+		failure: string,
+		[provider, modelId] = ["anthropic", "claude-sonnet-4-5"],
+	): Promise<{
 		session: AgentSession;
 		sessionManager: SessionManager;
 		calls: () => number;
 		retryEndEvents: RetryEndEvent[];
 	}> {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
-		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		const model = getBundledModel(provider, modelId);
+		if (!model) throw new Error(`Expected bundled test model ${provider}/${modelId} to exist`);
+		const apiKey = `${provider}-test-key`;
+		authStorage.keys.setRuntime(provider, apiKey);
 
 		const mock = createMockModel({
 			responses: [{ throw: failure }, { content: ["answered after top-up"], stopReason: "stop" }],
 		});
 		const agent = new Agent({
-			getApiKey: () => "anthropic-test-key",
+			getApiKey: () => apiKey,
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: mock.stream,
 		});
@@ -121,5 +132,25 @@ describe("AgentSession out-of-credit handling", () => {
 			stopReason: "stop",
 			content: [{ type: "text", text: "answered after top-up" }],
 		});
+	});
+
+	it("waits out an in-flight credit reservation for the provider's retry-after", async () => {
+		mockSchedulerWaitWithClock();
+		const { session, calls, retryEndEvents } = await createSession(IN_FLIGHT_RESERVATION, [
+			"openrouter",
+			"z-ai/glm-4.7",
+		]);
+		const retryDelays: number[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryDelays.push(event.delayMs);
+		});
+
+		await session.prompt("hello");
+		await session.waitForIdle();
+
+		expect(retryDelays).toEqual([120_000]);
+		expect(calls()).toBe(2);
+		expect(retryEndEvents).toEqual([expect.objectContaining({ success: true })]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 });

@@ -159,7 +159,7 @@ Session/bridge context is patched before each cell through `PI_SESSION_FILE`, `P
 
 ## Tool availability and mode selection
 
-The backend settings `eval.py` / `eval.js` default to `true`. Optional boolean environment flags `PI_PY` and `PI_JS` override their corresponding setting independently. `eval.tools.enabled` also defaults to `true`; turning it off removes the `tools` spawn fields and kernel-defined-tool guidance.
+The backend settings `eval.py` / `eval.js` default to `true`. Optional boolean environment flags `PI_PY` and `PI_JS` override their corresponding setting independently. `eval.tools.enabled` defaults to `false`; turning it on adds the `tools` spawn fields and kernel-defined-tool guidance.
 
 The tool's session-scoped schema lists only enabled runtimes. If Python preflight fails while another runtime is enabled, `eval` remains available for that runtime and a `py` call reports a Python-backend availability error with enabled alternatives.
 

@@ -12,6 +12,7 @@ import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
 	AutocompleteProvider,
 	Component,
+	Editor,
 	EditorTheme,
 	KeyId,
 	LoaderMessageColorFn,
@@ -264,7 +265,7 @@ import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { wrapTreeLine } from "@oh-my-pi/pi-tui/render/hanging-wrap";
 import { WidthAwareText } from "@oh-my-pi/pi-tui/render/width-aware-text";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
-import { copyToClipboard } from "../utils/clipboard";
+import { copyToClipboard, readTextFromClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
@@ -479,6 +480,9 @@ import {
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
+	cfgTuiVimShowCommand,
+	cfgTuiVimStartMode,
+	cfgTuiVimYankToClipboard,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
@@ -519,6 +523,8 @@ const cfgLiveUiSettings = combine({
 	"composer.shape": cfgComposerShape,
 	"tui.vimMode": cfgTuiVimMode,
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
+	"tui.vimShowCommand": cfgTuiVimShowCommand,
+	"tui.vimStartMode": cfgTuiVimStartMode,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
 	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
 	"compaction.idleEnabled": cfgCompactionIdleEnabled,
@@ -748,8 +754,12 @@ export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
 /** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
 class AnchoredLiveContainer extends Container {}
 
-/** An empty HUD slot: the terminal owns spacing, so nothing is described. */
-const EMPTY_HUD: NativeNode = col([]);
+/**
+ * The activity line with nothing to show and no tray to seat: the line without its role. It stays a
+ * row, as the line is, so the host keeps one element as the line comes and goes; a kind change makes
+ * the host drop the element and draw a new one, losing what it drew into it (a tray host's dots).
+ */
+const EMPTY_STATUS: NativeNode = row([], { align: "center", gap: "sm" });
 /** The activity line with nothing in it: on a tray host it stays while the tray has cards, the host's seat for them. */
 const EMPTY_ACTIVITY: NativeNode = row([], { role: "omp.hud.activity", align: "center", gap: "sm" });
 
@@ -1764,7 +1774,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * retry and compaction loaders describe themselves as the working row;
 	 * other rows describe themselves) in an `omp.hud.status` column, then the
 	 * todo HUD, so the todo holds its place as the turn starts and ends.
-	 * Nothing to show describes the empty HUD. On a host with the tray, the
+	 * Nothing to show describes the line without its role ({@link EMPTY_STATUS}),
+	 * never another kind of node. On a host with the tray, the
 	 * row is the tray's header: while the main agent is idle its caption
 	 * stands in for the status rows, and while the tray has cards the line
 	 * stays, empty if need be, as the seat the host draws them from.
@@ -1799,7 +1810,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				? row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" })
 				: seat
 					? EMPTY_ACTIVITY
-					: EMPTY_HUD;
+					: EMPTY_STATUS;
 		this.#statusHudNative = { children: children.slice(), todo, caption, seat, node: described };
 		return described;
 	}
@@ -2546,6 +2557,10 @@ export class InteractiveMode implements InteractiveModeContext {
 					return;
 				case "status.path":
 					openPath(this.sessionManager.getCwd());
+					return;
+				// The tree position shows only for the main session, which `/tree` navigates.
+				case "status.tree":
+					this.showTreeSelector();
 					return;
 			}
 		};
@@ -4477,7 +4492,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.updateEditorBorderColor();
 		}
 		if (any("composer.shape")) this.syncComposerShape();
-		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
+		if (any("tui.vimMode", "tui.vimModeDisplay", "tui.vimShowCommand", "tui.vimStartMode")) {
+			this.#applyVimModeSetting();
+		}
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
 		if (any("display.subagentLivePreview")) {
 			this.#renderSubagentList();
@@ -6846,15 +6863,43 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** Apply the `tui.vimMode` setting to an editor and route Visual-mode yanks to the clipboard. */
+	/** Apply the `tui.vimMode` settings to the composer and route its clipboard registers. */
 	#applyVimMode(editor: CustomEditor): void {
+		editor.vimStartMode = cfgTuiVimStartMode.get(settings);
+		// Only the composer has a slash-command menu for `:` to open.
+		editor.vimSlashCommands = true;
 		editor.setVimMode(cfgTuiVimMode.get(settings));
-		editor.onYank = text => {
-			void this.#copyYankToClipboard(text);
-		};
+		this.#wireVimClipboard(editor);
 		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
 		// visible at a glance, and the border is where bash/python mode already signal themselves.
 		editor.onVimModeChange = () => this.#syncVimStatus(editor);
+		// Normal-mode `/` and `?` open the same prompt-history search as Ctrl+R.
+		editor.onHistorySearch = () => this.showHistorySearch();
+	}
+
+	/**
+	 * Clipboard routing: a yank reaches the system clipboard when it names `"+`/`"*`, or always under
+	 * `tui.vimYankToClipboard`; `"+p`/`"*p` read it back.
+	 */
+	#wireVimClipboard(editor: Editor): void {
+		editor.onYank = (text, register) => {
+			if (register === "+" || register === "*" || cfgTuiVimYankToClipboard.get(settings)) {
+				void this.#copyYankToClipboard(text);
+			}
+		};
+		editor.readClipboard = readTextFromClipboard;
+		editor.requestRender = () => this.ui.requestRender();
+	}
+
+	configureDialogEditor(editor: Editor): void {
+		this.#wireVimClipboard(editor);
+		editor.vimStartMode = cfgTuiVimStartMode.get(settings);
+		// Dialogs have no status line of their own; the cursor shape is what shows the mode. Only the
+		// editor holding the keys sets it (an editor built for a form the keys are not in must not);
+		// gaining focus re-announces the mode, so the shape follows focus.
+		editor.onVimModeChange = mode => {
+			if (editor.focused) this.ui.terminal.setCursorShape?.(mode === "insert" ? "bar" : "block");
+		};
 	}
 
 	/**
@@ -6879,7 +6924,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			editor.vimEnabled
 				? {
 						mode: editor.vimMode,
-						pending: editor.vimPending,
+						pending: cfgTuiVimShowCommand.get(settings) ? editor.vimPending : "",
 						selectedLines: editor.vimSelectedLines,
 						display: cfgTuiVimModeDisplay.get(settings),
 					}
