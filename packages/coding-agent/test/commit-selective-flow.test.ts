@@ -1237,6 +1237,41 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["log", "-1", "--format=%B"])).not.toContain("Original body");
 	});
 
+	it("runs hooks with the committing session's identity", async () => {
+		const { root, artifacts, journal, write } = await emptyRepo();
+		await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+		const hook = path.join(root, ".git", "hooks", "pre-commit");
+		await Bun.write(hook, '#!/bin/sh\necho "$PI_SESSION_ID $PI_TOOL_CALL_ID" >> "$GIT_DIR/hook-env.log"\n');
+		await fs.chmod(hook, 0o755);
+		await write("Main", undefined, "a.txt", "a\n");
+		await write("Main", undefined, "b.txt", "b\n");
+		await journal.flush();
+		const commitAs = async (sessionId: string, file: string) => {
+			const session: ToolSession = {
+				cwd: root,
+				hasUI: false,
+				getSessionId: () => sessionId,
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				getArtifactsDir: () => artifacts,
+				getAgentId: () => "Main",
+				settings: Settings.isolated({}),
+			};
+			const commit = createCommitPrelude(session);
+			const call = (parameters: object) => commit.invoke(parameters, { session, toolCallId: `call-${sessionId}` });
+			const { id } = type({ id: "string" }).assert((await call({ action: "draft" })).details);
+			await call({ action: "only", draft: id, globs: [file] });
+			await call({ action: "commit", draft: id, subject: `test: add ${file}` });
+		};
+
+		await commitAs("session-a", "a.txt");
+		await commitAs("session-b", "b.txt");
+
+		expect(await Bun.file(path.join(root, ".git", "hook-env.log")).text()).toBe(
+			"session-a call-session-a\nsession-b call-session-b\n",
+		);
+	});
+
 	it("remembers a saved commit when the caller stops while its subject is read", async () => {
 		// Stopping while the subject is read back used to happen before the session
 		// recorded the commit, so a later amend was refused. The record is already on

@@ -71,6 +71,7 @@ import { formatArtifactErrorNotice } from "./output-meta-format";
 import { formatOutputNotice } from "./output-meta-format";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
+import { sessionIdentityEnv } from "./session-env";
 import {
 	BASH_APPROVAL_SHELL_CONTROL_CHARS,
 	extractAndChainSegments,
@@ -1119,23 +1120,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	/**
-	 * Session identity for a command, read when its tool call starts, so
-	 * `/fork`, `/new`, and `/resume` take effect on the next call while a call
-	 * already under way keeps the session it began in. `PI_TOOL_CALL_ID` is the
-	 * id this call runs under: the agent's call in the transcript, or the eval
-	 * tool bridge's own id for a call made from an eval cell. Always
-	 * set every key: an empty value replaces a stale one inherited from a parent
-	 * omp process, since an env overlay cannot unset.
-	 */
-	#sessionEnv(toolCallId: string): Record<string, string> {
-		return {
-			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
-			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
-			PI_TOOL_CALL_ID: toolCallId,
-		};
-	}
-
-	/**
 	 * Where the session's persistent shell stands, read from a copy of it, for a shell process
 	 * (a service, a pty command) to start from: `env` holds what it exports (PATH included), as a
 	 * child of that shell would see in the host directory `cwd` (its direnv environment
@@ -1519,7 +1503,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		approvalTier: ToolTier;
 		/** Session the call started in; its shell, even if the session changes before the job runs. */
 		sessionId: string | undefined;
-		/** That session's identity for the command (see {@link BashTool.#sessionEnv}). */
+		/** That session's identity for the command (see {@link sessionIdentityEnv}). */
 		sessionEnv: Record<string, string>;
 		/** The model's `i` intent on the call, for the job's widget author. */
 		intent?: string;
@@ -1826,7 +1810,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// change while the call waits must not move it into the new session's
 		// shell, nor hand it the new session's identity.
 		const sessionId = this.session.getSessionId?.() ?? undefined;
-		const sessionEnv = this.#sessionEnv(toolCallId);
+		const sessionEnv = sessionIdentityEnv(this.session, toolCallId);
 
 		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into cwd when the
 		// model ignores the cwd parameter. The scanner captures only a single path

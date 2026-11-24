@@ -5060,6 +5060,11 @@ export interface VcsCommitOptions {
   expectedHead?: string
   /** Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`). */
   noVerify?: boolean
+  /**
+   * Variables set for the commit's hooks; the hook's own `GIT_DIR`,
+   * `GIT_WORK_TREE`, and alternate-index `GIT_INDEX_FILE` win.
+   */
+  hookEnv?: Record<string, string>
 }
 
 /** Detach copied Git metadata. */

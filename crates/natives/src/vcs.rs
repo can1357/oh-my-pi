@@ -1,6 +1,7 @@
 //! N-API bindings for in-process Git and Jujutsu operations.
 
 use std::{
+	collections::HashMap,
 	path::{Path, PathBuf},
 	sync::Arc,
 	time::Duration,
@@ -229,6 +230,9 @@ pub struct VcsCommitOptions {
 	pub expected_head: Option<String>,
 	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
 	pub no_verify:     Option<bool>,
+	/// Variables set for the commit's hooks; the hook's own `GIT_DIR`,
+	/// `GIT_WORK_TREE`, and alternate-index `GIT_INDEX_FILE` win.
+	pub hook_env:      Option<HashMap<String, String>>,
 }
 
 /// Published private-index commit and any shared-index entries left staged.
@@ -422,6 +426,7 @@ impl From<VcsCommitOptions> for core::CommitOptions {
 			index_path:    v.index_path.map(PathBuf::from),
 			expected_head: v.expected_head,
 			no_verify:     v.no_verify.unwrap_or(false),
+			hook_env:      v.hook_env.map_or_default(|env| env.into_iter().collect()),
 		}
 	}
 }
