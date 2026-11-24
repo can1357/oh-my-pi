@@ -1409,6 +1409,13 @@ pub trait Services: Send + Sync {
 		Err(ServiceError::Unavailable { feed: "side questions" })
 	}
 
+	/// `/seance`: consults a finished session on a read-only child and streams
+	/// the answer the same way [`Self::btw`] does. `model` overrides the model
+	/// saved in that session.
+	fn seance(&self, _selector: &str, _model: Option<&str>) -> ServiceResult<Receiver<SideEvent>> {
+		Err(ServiceError::Unavailable { feed: "seance" })
+	}
+
 	/// Agent definitions available to `task`.
 	fn agents(&self) -> ServiceResult<Vec<AgentRow>> {
 		Err(ServiceError::Unavailable { feed: "agent definitions" })

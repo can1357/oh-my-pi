@@ -1,7 +1,8 @@
-//! Session-lifecycle feeds for `/resume`, `/tree`, `/plan-review`, and
-//! `/btw`: the stored-session index operations the picker performs, the
-//! live journal read as a branch DAG, session-local artifacts, and the
-//! tool-less side kernel that answers side questions.
+//! Session-lifecycle feeds for `/resume`, `/tree`, `/plan-review`, `/btw`,
+//! and `/seance`: the stored-session index operations the picker performs,
+//! the live journal read as a branch DAG, session-local artifacts, the
+//! tool-less side kernel that answers side questions, and the read-only
+//! consult of a finished session.
 
 use std::{
 	fs,
@@ -316,4 +317,104 @@ pub(super) fn btw(
 		let _ = fs::remove_file(ephemeral);
 	});
 	Ok(rx)
+}
+
+/// Consults a finished session on a private read-only copy and streams the
+/// child's answer. The copy lives outside the sessions directory and is
+/// removed when the turn ends, including when composition fails.
+pub(super) fn seance(
+	state: &ServiceState,
+	selector: &str,
+	model: Option<&str>,
+) -> ServiceResult<flume::Receiver<SideEvent>> {
+	let (tx, rx) = flume::unbounded();
+	let data_dir = state.data_dir.clone();
+	let project = state.project.clone();
+	let sessions_dir = state.sessions_dir.clone();
+	let con = Arc::clone(&state.con);
+	let selector = Str::new(selector);
+	let model = model.map(Str::new);
+	state.runtime.spawn(async move {
+		let source = match omp_driver::consult::resolve_source(
+			&sessions_dir,
+			selector.as_str(),
+			model.as_deref(),
+		) {
+			Ok(source) => source,
+			Err(error) => {
+				let _ = tx.send(SideEvent::Error(one_line(&error)));
+				return;
+			},
+		};
+		let root = match omp_driver::consult::prepare_root(&std::env::temp_dir(), &source) {
+			Ok(root) => root,
+			Err(error) => {
+				let _ = tx.send(SideEvent::Error(one_line(&error)));
+				return;
+			},
+		};
+		let options = omp_driver::consult::child_options(&root);
+		let composed = omp_driver::headless::kernel::compose_kernel(
+			&data_dir,
+			&project,
+			source.model.as_str(),
+			con,
+			options,
+		)
+		.await;
+		let (mut kernel, mut session, _) = match composed {
+			Ok(composed) => composed,
+			Err(error) => {
+				let _ = tx.send(SideEvent::Error(one_line(&error)));
+				drop(root);
+				return;
+			},
+		};
+		let events = kernel.subscribe();
+		let deltas = tx.clone();
+		let pump = tokio::spawn(async move {
+			while let Ok(event) = events.recv_async().await {
+				if let omp_agent::KernelEvent::TextDelta(text) = event
+					&& deltas.send(SideEvent::Delta(text)).is_err()
+				{
+					break;
+				}
+			}
+		});
+		let outcome = kernel
+			.run_turn(
+				&mut session,
+				omp_agent::TurnInput {
+					text:        Str::new_static(omp_driver::consult::SEANCE_TASK),
+					attachments: Vec::new(),
+				},
+				omp_agent::RunControl::default(),
+			)
+			.await;
+		drop(kernel);
+		let _ = pump.await;
+		let _ = tx.send(match outcome {
+			Ok(_) => SideEvent::Done,
+			Err(error) => SideEvent::Error(one_line(&error)),
+		});
+		drop(session);
+		drop(root);
+	});
+	Ok(rx)
+}
+
+/// First line of a consult or composition failure. Consult errors are already
+/// one line; this keeps a multi-line cause from filling the side panel.
+fn one_line(error: &impl std::fmt::Display) -> Str {
+	let text = crate::fault(error);
+	if !text.as_str().contains('\n') && !text.as_str().is_empty() {
+		return text;
+	}
+	let line = text
+		.as_str()
+		.lines()
+		.next()
+		.filter(|line| !line.is_empty())
+		.unwrap_or("consult failed");
+	Str::new(line)
 }
