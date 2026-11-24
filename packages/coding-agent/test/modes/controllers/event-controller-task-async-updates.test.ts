@@ -427,8 +427,8 @@ describe("EventController async update finalization", () => {
 		});
 		const component = pendingTools.get("tc-wait")!;
 		sealed.push(component);
-		component.setExpanded(true);
-		const painted = () => Bun.stripANSI(component.render(100).join("\n"));
+		component.call!.setExpanded(true);
+		const painted = () => blockText(component.block, 100);
 
 		await controller.handleEvent({
 			type: "tool_execution_update",
@@ -461,7 +461,7 @@ describe("EventController async update finalization", () => {
 		});
 		expect(painted()).toContain("15m16s");
 		expect(pendingTools.has("tc-wait")).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		expect(isSettled(component.block.node)).toBe(true);
 	});
 
 	it("keeps a parked task card available across the next agent turn", async () => {
