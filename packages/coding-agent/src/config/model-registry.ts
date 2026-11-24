@@ -2865,7 +2865,9 @@ export class ModelRegistry {
 	/**
 	 * Namespace suffix for the `discovery.advertisedReasoning` opt-out. Rows built
 	 * under one mode must never satisfy the other's cache read: under the
-	 * `offline` strategy nothing else refetches them.
+	 * `offline` strategy nothing else refetches them. `contextVersion` is the
+	 * calling namespace's own version, so one namespace's bump never orphans
+	 * another's rows.
 	 */
 	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig, contextVersion: number): string {
 		const version = `context-v${contextVersion}`;
