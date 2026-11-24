@@ -297,6 +297,18 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=934464 max-tokens=65536
 		}
+		model "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=934464 max-tokens=65536
+		}
+		model "gemini-4-neon" name="Gemini 4 Neon" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=934464 max-tokens=65536
+		}
 		model "gemini-3.1-pro-preview" name="Gemini 3.1 Pro" {
 			reasoning #true
 			input "text" "image"
@@ -1048,6 +1060,44 @@ provider "factory-droid" {
 		thinking-requires-effort #true
 		thinking-default-level "medium"
 		entitlement { feature-flag "gemini_4_argon" }
+	}
+	// Shipped alongside Carbon and Argon in droid 1.19.0. Captured from the
+	// droid 1.19.0 bundle: both models are Statsig-gated (feature flags
+	// `gemini_4_hydrogen` / `gemini_4_neon`, default off) and default to `high`
+	// reasoning effort over low/medium/high/xhigh; list pricing is still
+	// "pending-official-pricing-docs" upstream, so list-price-from "google"
+	// keeps resolving against the google/gemini-4-* rows.
+	models "gemini-4-hydrogen" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates {
+			input 0.6
+			output 5
+			cache-read 0.05
+		}
+		list-price-from "google"
+		// Hydrogen and Neon add an `xhigh` level (classes/gemini.kdl).
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		// droid 1.19.0 defaults both to `high`, matching the class rule.
+		thinking-default-level "high"
+		entitlement { feature-flag "gemini_4_hydrogen" }
+	}
+	models "gemini-4-neon" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates {
+			input 1.2
+			output 5
+			cache-read 0.05
+		}
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "gemini_4_neon" }
 	}
 	models "gemini-3.1-pro-preview" {
 		routing-family "google"

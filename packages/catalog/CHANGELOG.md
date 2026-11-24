@@ -13,6 +13,8 @@
 
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
+- Added `gemini-4-hydrogen` and `gemini-4-neon` to the Factory Droid seed roster, captured from droid 1.19.0: Statsig-gated (`gemini_4_hydrogen` / `gemini_4_neon`), credit rates per the live registry, `xhigh` effort ladder defaulting to `high` ([#20353](https://github.com/can1357/oh-my-pi/issues/20353))
+
 ### Changed
 
 - Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))

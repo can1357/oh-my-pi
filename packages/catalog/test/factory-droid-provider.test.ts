@@ -625,6 +625,27 @@ describe("Factory Droid discovery gates", () => {
 		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
 	});
 
+	it("gates droid 1.19.0's Hydrogen and Neon on their live flags with the xhigh ladder at high default", async () => {
+		const hydrogen = registryModel("gemini-4-hydrogen");
+		const neon = registryModel("gemini-4-neon");
+		// Captured from the droid 1.19.0 bundle: both are Statsig-gated.
+		expect(hydrogen.policy.entitlement.featureFlag).toBe("gemini_4_hydrogen");
+		expect(neon.policy.entitlement.featureFlag).toBe("gemini_4_neon");
+		const flagsOff = await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } });
+		expect(flagsOff).not.toContain("gemini-4-hydrogen");
+		expect(flagsOff).not.toContain("gemini-4-neon");
+		const consented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true } });
+		expect(consented).toContain("gemini-4-hydrogen");
+		expect(consented).toContain("gemini-4-neon");
+		for (const model of [hydrogen, neon]) {
+			expect(buildFactoryDroidModel(model).thinking).toMatchObject({
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				requiresEffort: true,
+				defaultLevel: Effort.High,
+			});
+		}
+	});
+
 	it("serves Muse Spark 1.3 from Vertex, Global only, with images, on its own effort ladder", async () => {
 		const muse = registryModel("muse-spark-1.3");
 		expect(buildFactoryDroidModel(muse).thinking).toMatchObject({
