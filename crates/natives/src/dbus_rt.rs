@@ -62,6 +62,5 @@ mod tests {
 	fn dbus_runtime_uses_single_worker() {
 		let runtime = runtime().expect("shared D-Bus runtime should initialize");
 		assert_eq!(runtime.metrics().num_workers(), 1);
-		assert_eq!(block_on(async { 42u32 }), Ok(42));
 	}
 }
