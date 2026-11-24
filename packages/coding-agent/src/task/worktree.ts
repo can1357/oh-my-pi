@@ -369,13 +369,35 @@ export async function captureIsolationBaseline(
 	};
 }
 
+/**
+ * The baseline untracked paths that the checkout a delta lands in no longer
+ * holds. A patch cannot delete or change them there, so the delta leaves them
+ * out of both trees and carries only what the task wrote. Empty when the delta
+ * stays in the checkout it was captured from: there an absent path is the
+ * task's own deletion.
+ */
+async function parentVanishedUntracked(repoDir: string, rb: RepoBaseline): Promise<Set<string>> {
+	const vanished = new Set<string>();
+	if (repoDir === rb.repoRoot || rb.untracked.length === 0) return vanished;
+	await mapWithConcurrencyLimit([...rb.untracked], 16, async entry => {
+		try {
+			await fs.lstat(path.join(rb.repoRoot, entry));
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			vanished.add(entry);
+		}
+	});
+	return vanished;
+}
+
 async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRepoDir = repoDir): Promise<string> {
 	const repo = vcs.requireGit(repoDir);
 	const objectRepo = objectRepoDir === repoDir ? repo : vcs.requireGit(objectRepoDir);
 	const currentHead = (await repo.headSha()) ?? "";
 	const currentStaged = await repo.diffText({ binary: true, cached: true });
 	const currentUnstaged = await repo.diffText({ binary: true });
-	const currentUntracked = await repo.lsFiles(true, true);
+	const vanished = await parentVanishedUntracked(repoDir, rb);
+	const currentUntracked = (await repo.lsFiles(true, true)).filter(entry => !vanished.has(entry));
 	const currentUntrackedPatch = await captureUntrackedPatch(repoDir, currentUntracked, repo);
 	const committedPatch =
 		currentHead && currentHead !== rb.headCommit ? await diffTreeOrEmpty(repo, rb.headCommit, currentHead) : "";
@@ -383,7 +405,7 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	const baselineTree = await writeSyntheticTree(objectRepoDir, rb.headCommit, [
 		rb.staged,
 		rb.unstaged,
-		rb.untrackedPatch,
+		vanished.size === 0 ? rb.untrackedPatch : omitPatchFiles(rb.untrackedPatch, vanished),
 	]);
 	const currentTree = await writeSyntheticTree(objectRepoDir, rb.headCommit, [
 		committedPatch,
@@ -789,6 +811,13 @@ function collectWipPatches(wip: BaselineWipContext | undefined): string[] {
 function filterPatchFiles(patch: string, files: ReadonlySet<string>): string {
 	return splitPatchSections(patch)
 		.filter(section => patchSectionPaths(section).some(file => files.has(file)))
+		.join("");
+}
+
+/** Drop the `diff --git` sections of `patch` that touch one of `files`. */
+function omitPatchFiles(patch: string, files: ReadonlySet<string>): string {
+	return splitPatchSections(patch)
+		.filter(section => !patchSectionPaths(section).some(file => files.has(file)))
 		.join("");
 }
 
