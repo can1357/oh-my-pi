@@ -3421,6 +3421,38 @@ export class TurnRecovery {
 			this.#retryAbortController = undefined;
 		}
 
+		// Per-session jitter: sessions that hit the same provider 429 compute the
+		// same backoff and would resume in lockstep, flooding downstream services
+		// (providers, memory daemons) with simultaneous context recalls. The
+		// spread is 10% of the backoff, capped by the configured retry ceiling
+		// and the jitter window. It sleeps under the retry saga's abort
+		// controller (re-armed here), so abortRetry() cancels it exactly like
+		// the backoff sleep and no resume is ever pending outside this saga.
+		const retryCfg = cfgRetry.get(this.#host.settings);
+		const jitterWindow = Math.min(
+			this.#automaticRetryJitterWindowMs,
+			Math.ceil(delayMs / 10),
+			retryCfg.maxDelayMs > 0 ? retryCfg.maxDelayMs : Number.POSITIVE_INFINITY,
+		);
+		if (jitterWindow > 1) {
+			const jitterMs = automaticRetryJitterMs(this.#host.sessionId(), jitterWindow);
+			if (jitterMs > 0) {
+				this.#retryAbortController = retryAbortController;
+				try {
+					await sleepLong(jitterMs, retryAbortController.signal);
+				} catch {
+					if (this.#retryAbortController !== retryAbortController) {
+						return false;
+					}
+					// Aborted during the jitter spread - same cleanup as the backoff.
+					return this.#endCancelledRetry();
+				}
+				if (this.#retryAbortController === retryAbortController) {
+					this.#retryAbortController = undefined;
+				}
+			}
+		}
+
 		// The identity-keyed removal above can miss when a context rebuild
 		// recreated the failed turn's message object between settle and retry
 		// (fresh identity, same failed tail — issue #5382). Agent.continue()
@@ -3440,15 +3472,7 @@ export class TurnRecovery {
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
 		this.#host.scheduleAgentContinue({
 			source: "automatic-retry",
-			// Per-session jitter on top of the (identical) backoff: sessions that hit the
-			// same provider 429 resume spread across the window instead of in lockstep.
-			// The spread scales with the wait (10%, capped at the window) so long shared
-			// rate-limit waits decollate fully while short backoffs stay near-instant.
-			delayMs: 1 +
-				automaticRetryJitterMs(
-					this.#host.sessionId(),
-					Math.min(this.#automaticRetryJitterWindowMs, Math.ceil(delayMs / 10)),
-				),
+			delayMs: 1,
 			generation,
 			shouldContinue: () => this.#retryAttempt > 0,
 			onError: error =>

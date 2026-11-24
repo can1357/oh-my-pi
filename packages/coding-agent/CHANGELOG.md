@@ -4,6 +4,8 @@
 
 ### Added
 
+- Automatic retries after a provider rate-limit error now spread their resume per session: a deterministic offset (10% of the computed backoff, capped by `retry.maxDelayMs` and a 5 s window) sleeps inside the retry saga, so many sessions that hit the same 429 no longer resume in lockstep and flood downstream services with simultaneous requests. `abortRetry()` cancels the spread exactly like the backoff sleep; the behavior is per session and off the hot path unless a retry actually waits
+
 - The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses
 - Tray cards now mark subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so Tern shows them apart from subagents doing work
 - The shell's `tail -r` builtin now takes `-c`, `-b`, and `+N` counts like BSD `tail`, and `tail -b N` selects 512-byte blocks; `-r` with `-f` is BSD's usage error instead of a "pipe through tac" refusal
