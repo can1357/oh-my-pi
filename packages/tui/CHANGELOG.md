@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Corrected the theme docs: markdown code fences draw plain fence lines, not `boxRound.*` frames ([#20111](https://github.com/can1357/oh-my-pi/issues/20111), [#20399](https://github.com/can1357/oh-my-pi/pull/20399) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Corrected math environment detection to properly handle blocks starting with `\begin`
 - Cmd+A highlights the full text of editors and inputs when the terminal forwards the shortcut. Typing, deleting or pasting replaces the selected range.
 - Native overlays follow the field they are anchored to, including when the field moves or shares its local key with another field.
