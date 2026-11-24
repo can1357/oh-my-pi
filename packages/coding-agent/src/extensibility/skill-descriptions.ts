@@ -190,7 +190,8 @@ function keyFor(skill: Pick<Skill, "name" | "description">): string {
 export function previewSkillDescription(description: string): string {
 	const text = description.replace(/\s+/g, " ").trim();
 	if (text.length <= MAX_PREVIEW_CHARS) return text;
-	const boundary = text.slice(0, MAX_PREVIEW_CHARS - 1);
+	// The budget counts UTF-16 units, so it can end inside an astral character (CJK extension B, emoji).
+	const boundary = text.slice(0, MAX_PREVIEW_CHARS - 1).replace(/[\uD800-\uDBFF]$/, "");
 	const sentence = boundary.match(/^.*?[.!?](?=\s|$)/)?.[0];
 	if (sentence && sentence.length >= MIN_PREVIEW_CUT) return sentence;
 	// Space-free scripts (CJK) may hold only an early space before a Latin term.
