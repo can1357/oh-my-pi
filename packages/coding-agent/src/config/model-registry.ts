@@ -4092,15 +4092,15 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Discovery states of extension providers (`fetchDynamicModels`) whose last
-	 * discovery attempt failed. `omp models` reports them so a failed fetch is
-	 * distinguishable from a provider with no models (issue #17925).
+	 * Failed discovery attempts. Regular model listings report extension provider
+	 * errors; an explicit refresh also reports built-in and configured providers.
 	 */
-	getRuntimeDiscoveryFailures(): ProviderDiscoveryState[] {
+	getDiscoveryFailures({ runtimeOnly }: { runtimeOnly: boolean }): ProviderDiscoveryState[] {
 		const failures: ProviderDiscoveryState[] = [];
-		for (const provider of this.#runtimeModelManagers.keys()) {
-			const state = this.#providerDiscoveryStates.get(provider);
-			if (state?.error !== undefined) failures.push(state);
+		for (const state of this.#providerDiscoveryStates.values()) {
+			if (state.error !== undefined && (!runtimeOnly || this.#runtimeModelManagers.has(state.provider))) {
+				failures.push(state);
+			}
 		}
 		return failures;
 	}
