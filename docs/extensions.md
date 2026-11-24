@@ -1070,7 +1070,7 @@ to remove a widget; setting a key again replaces it in place.
 calls `done`: one root node (it takes focus, so handle keys with its `onKey`) or a
 rows object (keys and pastes arrive at its `handleInput` as raw input).
 `{ overlay: true }` draws it over the transcript, `fullscreen: true` on the
-alternate screen; `onHandle` receives `{ closed, close() }`. The factory's `ui`
+alternate screen; `onHandle` receives `{ closed, isFocused(), close() }`; `isFocused()` is true while the overlay, or a node inside it, holds keyboard focus. The factory's `ui`
 argument offers `requestRender()` (repaint rows objects), `size()` and
 `suspend(run)` (hand the terminal to an external editor while `run` settles).
 
@@ -1572,7 +1572,7 @@ Nodes are drawn by the terminal and by Tern. Rows objects are drawn by the termi
 | `tui.terminal.columns` / `rows` | `ui.size()` |
 | `tui.stop()` … `tui.start()` around an external program | `await ui.suspend(() => run())` |
 | `ctx.ui.custom(…, { overlayOptions })` | `{ overlay: true, fullscreen? }`; positioning options are gone |
-| `OverlayHandle` (`hide`, `setHidden`) | `{ closed, close() }` |
+| `OverlayHandle` (`hide`, `setHidden`) | `{ closed, isFocused(), close() }` |
 | `ctx.ui.setEditorComponent(factory)` / `CustomEditor` subclasses | `ctx.ui.composer` hooks: `addKeyHandler`, `addDecorator`, `setSubmitTransform`, `setShape` |
 | `registerComposerShape({ label, style: ComposerStyle })` | `registerComposerShape(shape: ComposerShape)` |
 | `describeCall` / `describeResult` (`NativeToolView`) | return nodes from `renderCall` / `renderResult` |

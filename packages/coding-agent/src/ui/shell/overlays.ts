@@ -23,6 +23,8 @@ export interface OverlayOptions {
 export interface OverlayHandle {
 	readonly node: UiNode;
 	readonly closed: boolean;
+	/** Whether this overlay, or a node inside it, holds keyboard focus. */
+	isFocused(): boolean;
 	/** Close it (idempotent). */
 	close(): void;
 }
@@ -64,16 +66,20 @@ export class Overlays {
 		const view = mountNode(factory, "An overlay");
 		const previous = this.#focus.focused();
 		let closed = false;
+		const holds = (): boolean => {
+			const holder = this.#focus.focused();
+			return holder !== null && (holder === view.node || within(holder, view.node));
+		};
 		const handle: OverlayHandle = {
 			node: view.node,
 			get closed() {
 				return closed;
 			},
+			isFocused: () => !closed && holds(),
 			close: () => {
 				if (closed) return;
 				closed = true;
-				const holder = this.#focus.focused();
-				const held = holder !== null && (holder === view.node || within(holder, view.node));
+				const held = holds();
 				this.#list.remove(entry);
 				if (held) this.#focus.focus(previous && !previous.disposed ? previous : this.#focus.fallback());
 				options?.onClose?.();
