@@ -491,7 +491,11 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 				id: session.path,
 				label: title || first || session.id,
 				...(detail ? { detail } : {}),
-				facts: { when: pickerAge(session.modified.getTime(), at), size: formatBytes(session.size) },
+				facts: {
+					when: pickerAge(session.modified.getTime(), at),
+					size: formatBytes(session.size),
+					...(session.model ? { model: session.model } : {}),
+				},
 				...(dot ? { dot } : {}),
 				...(pins().has(session.id) ? { icon: "pin" } : {}),
 				...(badges.length > 0 ? { badges } : {}),
@@ -572,6 +576,7 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 		facts.push({ k: [{ t: "Modified", s: "muted" }], v: pickerDate(shown.modified.getTime()) });
 		facts.push({ k: [{ t: "Size", s: "muted" }], v: formatBytes(shown.size) });
 		if (status) facts.push({ k: [{ t: "Status", s: "muted" }], v: [status] });
+		if (shown.model) facts.push({ k: [{ t: "Model", s: "muted" }], v: shown.model });
 		if (shown.parentSessionPath)
 			facts.push({ k: [{ t: "Forked from", s: "muted" }], v: parentLabel(shown.parentSessionPath) });
 		const first = shown.firstMessage.trim();
@@ -634,6 +639,7 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 				current: session.path === props.currentSessionPath,
 				pinned: pins().has(session.id),
 				status: session.status,
+				model: session.model ? replaceTabs(session.model) : "",
 				fork: session.parentSessionPath !== undefined,
 				// Folders show only across folders (all projects, worktrees) or when asked.
 				cwd: cwd && session.cwd ? shortenPath(session.cwd) : "",
@@ -744,6 +750,7 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 				columns={[
 					{ id: "when", format: "time" },
 					{ id: "size", format: "dim" },
+					{ id: "model", format: "dim" },
 				]}
 				items={items}
 				order={order}
