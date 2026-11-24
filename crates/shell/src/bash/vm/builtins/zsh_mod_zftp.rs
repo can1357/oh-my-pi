@@ -1558,12 +1558,13 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		let seq = self.seq;
 		self.seq += 1;
 		let probe = Probe::Input {
-			fd:         0,
-			delim:      Some(b'\n'),
-			lines:      1,
-			nchars:     Some(255),
-			part:       0x8000_0000 | seq,
-			timeout_ns: None,
+			fd:          0,
+			delim:       Some(b'\n'),
+			lines:       1,
+			nchars:      Some(255),
+			part:        0x8000_0000 | seq,
+			timeout_ns:  None,
+			squeeze_nul: false,
 		};
 		let mut line = match self.ctx.probe(probe)? {
 			ProbeResult::Input { data, .. } => data,

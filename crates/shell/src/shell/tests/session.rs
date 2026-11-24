@@ -457,6 +457,110 @@ fn async_utility_waiting_on_stdin_is_cancelled_by_timeout() {
 	assert_eq!((result.exit_code, output.as_str()), (Some(124), ""));
 }
 
+/// `read -t` ends at its deadline even on input that is always ready and
+/// never holds the delimiter (`/dev/zero`), where no read ever waits.
+/// bash's `read` skips NUL bytes, so nothing is assigned.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn read_timeout_ends_on_input_that_never_blocks() {
+	// The clock starts once this run holds the shell test lock.
+	let _guard = shell_test_lock().lock().await;
+	let start = std::time::Instant::now();
+	let (result, output) = time::timeout(
+		Duration::from_secs(10),
+		capture_unlocked(
+			"read -t 0.3 x < /dev/zero; echo \"st=$? len=${#x}\"",
+			None,
+			None,
+			CancelToken::default(),
+		),
+	)
+	.await
+	.expect("read -t must end at its deadline");
+	assert_eq!((result.exit_code, output.as_str()), (Some(0), "st=142 len=0\n"));
+	assert!(start.elapsed() < Duration::from_secs(2), "returned after {:?}", start.elapsed());
+}
+
+/// A cancel stops a `read` of endless input. Returning before the 2 s
+/// cancel grace shows the engine ended the read; after the grace the run
+/// is dropped while its read goes on.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_stops_an_endless_read() {
+	// The clock starts once this run holds the shell test lock.
+	let _guard = shell_test_lock().lock().await;
+	let start = std::time::Instant::now();
+	let (result, output) = time::timeout(
+		Duration::from_secs(10),
+		capture_unlocked("read x < /dev/zero", None, None, CancelToken::new(Some(300))),
+	)
+	.await
+	.expect("the cancelled run must return");
+	assert!(result.timed_out, "{result:?} output {output:?}");
+	assert!(start.elapsed() < Duration::from_millis(1500), "returned after {:?}", start.elapsed());
+}
+
+/// `read` does not keep what it takes from an endless NUL source: bash
+/// skips NUL bytes and the delimiter never comes. While the read runs,
+/// resident memory must not grow with the bytes read.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn endless_nul_input_is_not_kept() {
+	fn proc_field(file: &str, key: &str) -> u64 {
+		let text = std::fs::read_to_string(format!("/proc/self/{file}")).expect("procfs");
+		let line = text
+			.lines()
+			.find(|l| l.starts_with(key))
+			.expect("procfs field");
+		line[key.len()..]
+			.split_whitespace()
+			.next()
+			.and_then(|v| v.parse().ok())
+			.expect("procfs value")
+	}
+	let sample = || (proc_field("io", "rchar:"), proc_field("status", "VmRSS:") * 1024);
+	let samples = async {
+		time::sleep(Duration::from_millis(300)).await;
+		let first = sample();
+		time::sleep(Duration::from_millis(1000)).await;
+		(first, sample())
+	};
+	// The samples are taken while this run holds the shell test lock.
+	let _guard = shell_test_lock().lock().await;
+	let (run, ((read0, rss0), (read1, rss1))) = tokio::join!(
+		time::timeout(
+			Duration::from_secs(10),
+			capture_unlocked("read x < /dev/zero", None, None, CancelToken::new(Some(1500))),
+		),
+		samples
+	);
+	let (result, _) = run.expect("the cancelled run must return");
+	assert!(result.timed_out, "{result:?}");
+	let read = read1 - read0;
+	let grew = rss1.saturating_sub(rss0);
+	assert!(read >= 1 << 20, "the read did not run: {read} bytes read in 1 s");
+	assert!(grew < read / 4, "kept {grew} bytes of {read} read");
+}
+
+/// Keeping a NUL run as one does not change what `read` assigns from input
+/// that mixes NUL bytes with text. A `\` takes the NUL after it, as in
+/// bash, so the line does not continue.
+#[cfg(unix)]
+#[test]
+fn read_drops_nul_bytes_between_text() {
+	let (result, output) =
+		capture_on_single_worker("read -r x < <(printf 'a\\0\\0\\0b\\n'); printf '[%s]\\n' \"$x\"");
+
+	assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+	assert_eq!(output, "[ab]\n");
+
+	let (result, output) =
+		capture_on_single_worker("read x < <(printf 'a\\\\\\0\\nb\\n'); printf '[%s]\\n' \"$x\"");
+
+	assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+	assert_eq!(output, "[a]\n");
+}
+
 #[cfg(unix)]
 #[test]
 fn read_process_substitution_assigns_line() {

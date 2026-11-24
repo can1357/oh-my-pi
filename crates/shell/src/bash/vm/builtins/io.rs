@@ -565,7 +565,8 @@ fn read_line(
 			return Ok((st.finish(), Ended::Complete));
 		}
 		let want = nchars.map(|n| st.want(n));
-		let probe = Probe::Input { fd, delim, lines: 1, nchars: want, part, timeout_ns };
+		let probe =
+			Probe::Input { fd, delim, lines: 1, nchars: want, part, timeout_ns, squeeze_nul: true };
 		let answer = match ctx.probe(probe) {
 			Ok(a) => a,
 			Err(need) => {
@@ -883,8 +884,15 @@ pub fn select_next(
 		.unwrap_or_default();
 	let mut part = 0;
 	let result = loop {
-		let p =
-			Probe::Input { fd: 0, delim: Some(b'\n'), lines: 1, nchars: None, part, timeout_ns: None };
+		let p = Probe::Input {
+			fd: 0,
+			delim: Some(b'\n'),
+			lines: 1,
+			nchars: None,
+			part,
+			timeout_ns: None,
+			squeeze_nul: false,
+		};
 		// zsh pages the menu: each page moves `more` on, so a replayed
 		// part computes it again.
 		let zsh_menu = if zsh && print_menu {

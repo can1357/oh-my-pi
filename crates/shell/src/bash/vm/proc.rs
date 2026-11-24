@@ -1426,18 +1426,22 @@ pub enum Probe {
 	/// to EOF, else the read ends with the `lines`-th delimiter (1 but for
 	/// `mapfile`); `nchars` caps the count; `part` numbers successive reads
 	/// of one command (continuation lines, `select` re-prompts); `timeout_ns`
-	/// gives up after that long without complete input (`read -t`, `TMOUT`).
+	/// gives up after that long without complete input (`read -t`, `TMOUT`),
+	/// whether or not the fd ever blocks. `squeeze_nul` keeps a run of NUL
+	/// bytes as one: bash's `read` drops NULs (a `\` before a run still
+	/// takes the first), so an endless NUL source (`/dev/zero`) is not kept.
 	/// Nothing past the end is consumed: a regular file's read-ahead is given
 	/// back, other fds are read a byte at a time. `fd`
 	/// [`Probe::TERMINAL_FD`] reads the shell's terminal
 	/// ([`super::jobctl::open_key_terminal`]).
 	Input {
-		fd:         i32,
-		delim:      Option<u8>,
-		lines:      u32,
-		nchars:     Option<usize>,
-		part:       u32,
-		timeout_ns: Option<u64>,
+		fd:          i32,
+		delim:       Option<u8>,
+		lines:       u32,
+		nchars:      Option<usize>,
+		part:        u32,
+		timeout_ns:  Option<u64>,
+		squeeze_nul: bool,
 	},
 	/// Whether fd has input available, without reading it (`read -t 0`).
 	Ready { fd: i32 },

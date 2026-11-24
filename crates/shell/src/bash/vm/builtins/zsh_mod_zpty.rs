@@ -238,7 +238,15 @@ fn ready(ctx: &Ctx<'_, '_>, fd: i32) -> bool {
 
 /// The one-byte probe a parked read waits on.
 const fn probe(fd: i32, part: u32) -> Probe {
-	Probe::Input { fd, delim: None, lines: 1, nchars: Some(1), part, timeout_ns: None }
+	Probe::Input {
+		fd,
+		delim: None,
+		lines: 1,
+		nchars: Some(1),
+		part,
+		timeout_ns: None,
+		squeeze_nul: false,
+	}
 }
 
 /// Take the answer of the read `cmd` parked on: the byte becomes
@@ -666,12 +674,13 @@ fn parse_error(ctx: &mut Ctx<'_, '_>, src: &[u8]) -> Result<Option<ParseError>, 
 fn ptywrite(ctx: &mut Ctx<'_, '_>, cmd: &PtyCmd, args: &[BString], nonl: bool) -> R {
 	if args.is_empty() {
 		let input = Probe::Input {
-			fd:         0,
-			delim:      None,
-			lines:      1,
-			nchars:     None,
-			part:       0,
-			timeout_ns: None,
+			fd:          0,
+			delim:       None,
+			lines:       1,
+			nchars:      None,
+			part:        0,
+			timeout_ns:  None,
+			squeeze_nul: false,
 		};
 		if let ProbeResult::Input { data, .. } = ctx.probe(input)? {
 			ctx.out_fd(cmd.fd, &data);

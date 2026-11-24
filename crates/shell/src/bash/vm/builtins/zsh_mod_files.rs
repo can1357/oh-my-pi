@@ -123,12 +123,13 @@ impl<'a> Fsq<'a> {
 	/// from fd 0 starts with `y` or `Y` (end of input: no).
 	fn confirm(&mut self, ctx: &mut Ctx<'_, '_>, prompt: &[u8]) -> Result<bool, Need> {
 		let probe = Probe::Input {
-			fd:         0,
-			delim:      Some(b'\n'),
-			lines:      1,
-			nchars:     None,
-			part:       self.part,
-			timeout_ns: None,
+			fd:          0,
+			delim:       Some(b'\n'),
+			lines:       1,
+			nchars:      None,
+			part:        self.part,
+			timeout_ns:  None,
+			squeeze_nul: false,
 		};
 		self.part += 1;
 		match ctx.probe(probe) {

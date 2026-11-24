@@ -645,7 +645,15 @@ fn read_input(
 	let stop = delim.and_then(|d| d.last().copied());
 	loop {
 		let want = nchars.map(|n| bytes_wanted(&data, n, utf8));
-		let probe = Probe::Input { fd, delim: stop, lines: 1, nchars: want, part, timeout_ns };
+		let probe = Probe::Input {
+			fd,
+			delim: stop,
+			lines: 1,
+			nchars: want,
+			part,
+			timeout_ns,
+			squeeze_nul: false,
+		};
 		let answer = match ctx.probe(probe) {
 			Ok(a) => a,
 			Err(need) => {

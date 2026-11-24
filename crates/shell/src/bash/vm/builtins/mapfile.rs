@@ -196,12 +196,13 @@ fn read_run(ctx: &Ctx<'_, '_>, spec: &Spec<'_>, run: u64) -> Result<Batch, super
 	let mut batch = Batch { lines: Vec::new(), callback: None };
 	if spec.count == 0 && spec.callback.is_none() {
 		let probe = Probe::Input {
-			fd:         spec.fd,
-			delim:      None,
-			lines:      1,
-			nchars:     None,
-			part:       0,
-			timeout_ns: None,
+			fd:          spec.fd,
+			delim:       None,
+			lines:       1,
+			nchars:      None,
+			part:        0,
+			timeout_ns:  None,
+			squeeze_nul: false,
 		};
 		if let ProbeResult::Input { data, .. } = ctx.probe(probe)? {
 			let skip = usize::try_from(spec.skip).unwrap_or(usize::MAX);
@@ -222,6 +223,7 @@ fn read_run(ctx: &Ctx<'_, '_>, spec: &Spec<'_>, run: u64) -> Result<Batch, super
 			nchars: None,
 			part,
 			timeout_ns: None,
+			squeeze_nul: false,
 		};
 		Ok(match ctx.probe(probe)? {
 			ProbeResult::Input { data, eof, .. } => (data, eof),
