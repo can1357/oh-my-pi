@@ -104,7 +104,7 @@ export function styledPath(theme: Theme, filePath: string): string {
 /**
  * The diagnostics tree: `✘ Diagnostics (summary)`, then per file `└─ icon
  * path` with its diagnostics (`✘:11:20 message (code)`) on branches, five
- * while collapsed and a `… N more ⟦⌃O: Expand⟧` row.
+ * while collapsed and a row counting additional diagnostics with an expand hint.
  */
 export function diagnosticsRows(
 	theme: Theme,

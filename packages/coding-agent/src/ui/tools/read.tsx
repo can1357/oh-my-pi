@@ -254,7 +254,7 @@ function readWarnings(details: ReadToolDetails | undefined): { text: string; col
 	const warnings: { text: string; color: string }[] = [];
 	if (details?.resolvedPath)
 		warnings.push({
-			text: `⟦Resolved path: ${shortenPath(details.resolvedPath)}⟧`,
+			text: `Resolved path: ${shortenPath(details.resolvedPath)}`,
 			color: "dim",
 		});
 	const truncation = details?.meta?.truncation;
@@ -263,11 +263,11 @@ function readWarnings(details: ReadToolDetails | undefined): { text: string; col
 		if (fallback?.firstLineExceedsLimit) {
 			let warning = `First line exceeds ${formatBytes(fallback.outputBytes ?? fallback.totalBytes)} limit`;
 			if (truncation.artifactId) warning += `. ${formatFullOutputReference(truncation.artifactId)}`;
-			warnings.push({ text: `⟦${warning}⟧`, color: "warning" });
+			warnings.push({ text: warning, color: "warning" });
 		} else {
 			const parts = [formatTruncationMetaNotice(truncation, details?.meta?.source)];
 			if (details?.meta?.artifactError) parts.push(formatArtifactErrorNotice(details.meta.artifactError));
-			warnings.push({ text: `⟦${parts.join(". ")}⟧`, color: "warning" });
+			warnings.push({ text: parts.join(". "), color: "warning" });
 		}
 	}
 	return warnings;
