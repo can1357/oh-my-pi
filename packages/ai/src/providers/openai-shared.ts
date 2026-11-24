@@ -15,6 +15,7 @@ import type {
 	VercelGatewayRouting,
 } from "@oh-my-pi/pi-catalog/types";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { parseOtariCredential } from "@oh-my-pi/pi-catalog/wire/otari";
 import { resolveXiaomiRequestBaseUrl } from "../registry/oauth/xiaomi";
 import {
 	COREWEAVE_PROJECT_HEADER,
@@ -327,6 +328,13 @@ export function resolveOpenAIRequestSetup(
 		}
 		const credential = parseAlibabaTokenPlanCredential(rawApiKey);
 		if (!credential) throw new AIError.ConfigurationError("Invalid QwenCloud Token Plan credential");
+		apiKey = credential.token;
+		if (credential.baseUrl) baseUrl = credential.baseUrl;
+	}
+
+	if (model.provider === "otari" && options.apiKey) {
+		const credential = parseOtariCredential(rawApiKey);
+		if (!credential) throw new AIError.ConfigurationError("Invalid Otari credential");
 		apiKey = credential.token;
 		if (credential.baseUrl) baseUrl = credential.baseUrl;
 	}
