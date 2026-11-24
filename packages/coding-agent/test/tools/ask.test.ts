@@ -120,6 +120,7 @@ describe("AskTool form dialog", () => {
 		);
 
 		expect(formDialog.mock.calls[0]?.[0]).toBe(DB_FORM);
+		expect(formDialog.mock.calls[0]?.[1]?.toolCallId).toBe("call-1");
 		expect(text(result)).toBe(`User answers:\n${JSON.stringify({ store: "redis", ttl: 7 }, null, 2)}`);
 		expect(result.details).toEqual({
 			answers: [

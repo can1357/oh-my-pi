@@ -7,6 +7,8 @@ import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
 import type {
+	AskRequestedEvent,
+	AskResolveResult,
 	CompactOptions,
 	ExtensionActions,
 	ExtensionApprovalAnswer,
@@ -25,6 +27,7 @@ import type {
 	ExtensionUISelectItem,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
+	PendingAsk,
 	SendMessageHandler,
 	SendUserMessageHandler,
 	TerminalInputHandler,
@@ -42,6 +45,7 @@ import {
 	defaultFormData,
 	fieldError,
 	fieldQuestions,
+	formSubmission,
 	type HtmlFormData,
 	type HtmlFormValue,
 	type OptionNote,
@@ -49,7 +53,7 @@ import {
 } from "../../tools/html-form/data";
 import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "../../tools/html-form/parse";
 import { extensionOutput, extensionTheme, singleNode } from "../../ui/extensions/render-output";
-import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-form";
+import { formMedia, type HtmlFormCountdown, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-form";
 import { htmlFormKeyHints } from "../../ui/styles/forms/html-form";
 import { formatKeyHint, formatKeyHints } from "../../ui/keys/hints";
 import { type ApprovalChoice, ApprovalDialog } from "../../ui/overlays/panels/approval-dialog";
@@ -127,6 +131,12 @@ interface CollabWinner<T> {
 	source: "local" | "remote";
 	value: T | undefined;
 }
+interface PendingAskEntry {
+	request: Omit<AskRequestedEvent, "type">;
+	form: HtmlForm;
+	countdown?: HtmlFormCountdown;
+	settle(result: ExtensionFormDialogResult | undefined, by: "local" | "extension"): boolean;
+}
 /** Tagged result from a guest UI request, distinguishing a real answer (even
  *  one whose literal value is "unavailable"), an explicit guest cancel, and a
  *  transport-unavailable sentinel (collab teardown / abort). Replaces the old
@@ -189,6 +199,7 @@ export class ExtensionUiController {
 	// queue. See `#presentDialog`.
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
+	readonly #pendingAsks = new Map<string, PendingAskEntry>();
 	/** The local ask shown above the composer (`#mountAsk`). */
 	readonly #ask = signal<MountedAsk | undefined>(undefined);
 	/**
@@ -360,6 +371,9 @@ export class ExtensionUiController {
 			shutdown: () => this.ctx.requestShutdown(),
 			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
+			getPendingAsks: () => this.getPendingAsks(),
+			resolveAsk: (id, answer) => this.resolveAsk(id, answer),
+			resetAskTimeout: id => this.resetAskTimeout(id),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
 			keybindings: this.ctx.keybindings,
@@ -568,6 +582,9 @@ export class ExtensionUiController {
 			shutdown: () => this.ctx.requestShutdown(),
 			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
+			getPendingAsks: () => this.getPendingAsks(),
+			resolveAsk: (id, answer) => this.resolveAsk(id, answer),
+			resetAskTimeout: id => this.resetAskTimeout(id),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
 			keybindings: this.ctx.keybindings,
@@ -897,11 +914,110 @@ export class ExtensionUiController {
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionFormDialogResult | undefined> {
 		const form = parseHtmlForm(html);
-		return this.#raceGuestDialog(
-			dialogOptions,
-			options => this.#showLocalFormDialog(form, options),
-			(host, signal) => this.#runGuestForm(host, form, signal),
+		const show = (options: ExtensionUIDialogOptions | undefined, pending?: PendingAskEntry) =>
+			this.#raceGuestDialog(
+				options,
+				options => this.#showLocalFormDialog(form, options, pending),
+				(host, signal) => this.#runGuestForm(host, form, signal),
+			);
+		const toolCallId = dialogOptions?.toolCallId;
+		// An id names one pending form: a second form given the same id is shown untracked, and the first keeps it.
+		if (toolCallId === undefined || this.#pendingAsks.has(toolCallId)) return show(dialogOptions);
+
+		const { promise, resolve, reject } = Promise.withResolvers<ExtensionFormDialogResult | undefined>();
+		const requestDelivered = Promise.withResolvers<void>();
+		const extensionRunner = this.ctx.session.extensionRunner;
+		const abort = new AbortController();
+		const parentSignal = dialogOptions?.signal;
+		const signal = parentSignal ? AbortSignal.any([parentSignal, abort.signal]) : abort.signal;
+		let settled = false;
+		const onAbort = () => pending.settle(undefined, "local");
+		const pending: PendingAskEntry = {
+			request: {
+				toolCallId,
+				sessionId: this.ctx.sessionManager.getSessionId(),
+				html,
+				...(dialogOptions?.timeout !== undefined && dialogOptions.timeout > 0
+					? { timeoutMs: dialogOptions.timeout }
+					: {}),
+			},
+			form,
+			settle: (result, by) => {
+				if (settled) return false;
+				settled = true;
+				this.#pendingAsks.delete(toolCallId);
+				signal.removeEventListener("abort", onAbort);
+				// End both the mounted dialog (or its queue slot) and the guest mirror.
+				abort.abort();
+				resolve(result);
+				if (extensionRunner) {
+					const resolved = structuredClone({
+						type: "ask_resolved",
+						toolCallId,
+						sessionId: pending.request.sessionId,
+						...result,
+						by,
+					} as const);
+					void requestDelivered.promise.then(() => extensionRunner.emit(resolved));
+				}
+				return true;
+			},
+		};
+		this.#pendingAsks.set(toolCallId, pending);
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+		// Winning a race also aborts the view, but only the caller abandoning it reports partial edits.
+		const onAbandon = dialogOptions?.onAbandon;
+		void show(
+			{
+				...dialogOptions,
+				signal,
+				onAbandon:
+					onAbandon &&
+					(given => {
+						if (parentSignal?.aborted) onAbandon(given);
+					}),
+			},
+			pending,
+		).then(
+			result => pending.settle(result, "local"),
+			error => {
+				reject(error);
+				pending.settle(undefined, "local");
+			},
 		);
+		// A synchronous answer in the first handler must not overtake the remaining handlers.
+		void Promise.resolve(extensionRunner?.emit({ type: "ask_requested", ...structuredClone(pending.request) })).then(
+			() => requestDelivered.resolve(),
+			() => requestDelivered.resolve(),
+		);
+		return promise;
+	}
+
+	/** Detached snapshots of interactive ask forms, including those queued behind another dialog. */
+	getPendingAsks(): PendingAsk[] {
+		return Array.from(this.#pendingAsks.values(), ({ request, countdown }) => {
+			const deadline = countdown?.deadline();
+			return { ...request, ...(deadline !== undefined ? { deadline } : {}) };
+		});
+	}
+
+	/** Answer through the same first-wins settlement as the native form. */
+	resolveAsk(toolCallId: string, answer: { data: HtmlFormData; notes?: OptionNote[] }): AskResolveResult {
+		const pending = this.#pendingAsks.get(toolCallId);
+		if (!pending) return { ok: false, reason: "not_pending" };
+		const submission = formSubmission(pending.form, answer.data, answer.notes);
+		if ("errors" in submission) return { ok: false, reason: "invalid", errors: submission.errors };
+		pending.settle(
+			{ data: submission.data, ...(submission.notes.length ? { notes: submission.notes } : {}) },
+			"extension",
+		);
+		return { ok: true };
+	}
+
+	/** Restart only the mounted form's running countdown; queued forms have none. */
+	resetAskTimeout(toolCallId: string): boolean {
+		return this.#pendingAsks.get(toolCallId)?.countdown?.reset() ?? false;
 	}
 
 	/**
@@ -1037,19 +1153,24 @@ export class ExtensionUiController {
 	#showLocalFormDialog(
 		form: HtmlForm,
 		dialogOptions: ExtensionUIDialogOptions | undefined,
+		pending?: PendingAskEntry,
 	): Promise<ExtensionFormDialogResult | undefined> {
 		const first = form.fields.find(field => field.name);
 		const prompt = { kind: "question", msg: first && fieldQuestions(form).get(first) } as const;
 		return this.#presentDialog<ExtensionFormDialogResult>(prompt, dialogOptions?.signal, settle => {
+			const answer = (result: ExtensionFormDialogResult | undefined) => {
+				settle(result);
+				pending?.settle(result, "local");
+			};
 			const withNotes = (data: HtmlFormData, notes: OptionNote[]) => ({ data, ...(notes.length ? { notes } : {}) });
 			const model = new HtmlFormModel(
 				form,
 				{
-					onSubmit: (data, notes) => settle(withNotes(data, notes)),
-					onCancel: () => settle(undefined),
+					onSubmit: (data, notes) => answer(withNotes(data, notes)),
+					onCancel: () => answer(undefined),
 					onTimeout: (data, notes) => {
 						dialogOptions?.onTimeout?.();
-						settle({ ...withNotes(data, notes), timedOut: true });
+						answer({ ...withNotes(data, notes), timedOut: true });
 					},
 					claimKeys: () => this.focusAsk(),
 					releaseKeys: () => this.#focusComposer(),
@@ -1079,6 +1200,11 @@ export class ExtensionUiController {
 						media,
 						now,
 						timeout,
+						countdown:
+							pending &&
+							(handle => {
+								pending.countdown = handle;
+							}),
 						terminalRows: () => this.ctx.shell.size().rows,
 						skipNotice: () => this.#skipNotice(),
 					});
@@ -1113,6 +1239,7 @@ export class ExtensionUiController {
 					const given = givenFormAnswers(form, model.data(), model.notes());
 					if (given) dialogOptions.onAbandon?.(given);
 				}
+				if (pending) pending.countdown = undefined;
 				slot.unmount();
 			};
 		});
