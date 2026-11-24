@@ -81,6 +81,7 @@
 - Tight Layout (`tui.tight`) works again and applies at once: assistant prose, notices, command output, Read and search rows and the dock's rows give up their one-cell side padding, so they share one left edge; user bubbles and framed tool cards keep theirs
 - `omp gallery` draws aliased tool samples with their real tool's look, and its path and status segment samples match the status line
 - Extensions importing `@oh-my-pi/omptype` resolve to the host's copy, so they load offline and after Bun prunes the package's cached registry manifest; the bare import used to fall back to the install cache and fail the extension load
+- After plan mode is paused or disabled without approving a plan, the agent no longer refuses edits by citing plan mode's read-only rules; those rules leave the model context when plan mode ends and are not restored on resume ([#20375](https://github.com/can1357/oh-my-pi/issues/20375))
 - `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
 - Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 

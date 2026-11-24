@@ -455,6 +455,7 @@ import {
 	normalizeCustomMessagePayload,
 	operatorTitleText,
 	type PythonExecutionMessage,
+	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
 	REWIND_REPORT_MESSAGE_TYPE,
 	SILENT_ABORT_MARKER,
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -4729,8 +4730,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		if (message.role === "hookMessage" || message.role === "custom") {
 			// One-run instructions must not return from persisted history: prewalk
-			// nudges are consumed once, and Vibe context is rebuilt only while active.
-			if (!isPrewalkPlanNudge(message) && message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE) {
+			// nudges are consumed once; plan and Vibe context are rebuilt only while active.
+			if (
+				!isPrewalkPlanNudge(message) &&
+				message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE &&
+				message.customType !== PLAN_MODE_CONTEXT_MESSAGE_TYPE
+			) {
 				this.sessionManager.appendCustomMessageEntry(
 					message.customType,
 					message.content,
@@ -8612,6 +8617,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Drop any unconsumed forced decision so a post-plan execution turn
 			// does not inherit a stale `required` tool choice.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			// The read-only rules stop applying; a stale copy left in history reads as
+			// a live instruction and makes later turns refuse edits (#20375).
+			this.#dropModeContext(PLAN_MODE_CONTEXT_MESSAGE_TYPE, "plan-mode-exit");
 		}
 	}
 
@@ -8630,26 +8638,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	setVibeModeState(state: VibeModeState | undefined): void {
 		this.#vibeModeState = state;
 		if (state?.enabled) return;
+		this.#dropModeContext(VIBE_MODE_CONTEXT_MESSAGE_TYPE, "vibe-mode-exit");
+	}
 
-		const isVibeContext = (message: AgentMessage): boolean =>
-			message.role === "custom" && message.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE;
+	/**
+	 * Removes a mode's transient directive from live history, the steering and
+	 * follow-up queues, and pending next-turn messages once that mode ends. A
+	 * history rewrite resets advisors and provider sessions under `reason`.
+	 */
+	#dropModeContext(customType: string, reason: string): void {
+		const isModeContext = (message: AgentMessage): boolean =>
+			message.role === "custom" && message.customType === customType;
 		const messages = this.agent.state.messages;
-		const filtered = messages.filter(message => !isVibeContext(message));
+		const filtered = messages.filter(message => !isModeContext(message));
 		const historyChanged = filtered.length !== messages.length;
 		if (historyChanged) this.agent.replaceMessages(filtered);
 
 		const steering = this.agent.peekSteeringQueue();
 		const followUp = this.agent.peekFollowUpQueue();
-		const filteredSteering = steering.filter(message => !isVibeContext(message));
-		const filteredFollowUp = followUp.filter(message => !isVibeContext(message));
+		const filteredSteering = steering.filter(message => !isModeContext(message));
+		const filteredFollowUp = followUp.filter(message => !isModeContext(message));
 		if (filteredSteering.length !== steering.length || filteredFollowUp.length !== followUp.length) {
 			this.agent.replaceQueues(filteredSteering, filteredFollowUp);
 			this.#reconcileQueuedMessageDrain();
 		}
-		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !isVibeContext(message));
+		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !isModeContext(message));
 
 		if (!historyChanged) return;
-		this.#advisors.resetAllRuntimes("vibe-mode-exit");
+		this.#advisors.resetAllRuntimes(reason);
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 	}
 
@@ -8949,7 +8965,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		return {
 			role: "custom",
-			customType: "plan-mode-context",
+			customType: PLAN_MODE_CONTEXT_MESSAGE_TYPE,
 			content,
 			display: false,
 			attribution: "agent",
