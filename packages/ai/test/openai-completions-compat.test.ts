@@ -2754,6 +2754,52 @@ describe("GitHub Copilot Gemini tool schemas (issue #20198)", () => {
 	});
 });
 
+describe("Venice Gemini tool schemas (issue #12269)", () => {
+	// Gemini 3.8 Flash on Venice 400s on a JSON Schema `type` array:
+	// `Unknown name "type" at 'tools[0].function_declarations[6]...': Proto field is not repeating`.
+	const mcpTool: Tool = {
+		name: "mcp__grafana_update_dashboard",
+		description: "update a dashboard",
+		parameters: {
+			type: "object",
+			properties: {
+				value: { type: ["string", "number", "integer", "boolean", "object", "array", "null"] },
+				folder: { type: ["string", "null"] },
+			},
+		},
+	};
+
+	function veniceModel(id: string): Model<"openai-completions"> {
+		return buildModel({
+			...gpt4oMiniSpec,
+			provider: "venice",
+			baseUrl: "https://api.venice.ai/api/v1",
+			id,
+			name: id,
+		});
+	}
+
+	async function wireProperties(model: Model<"openai-completions">): Promise<Record<string, unknown>> {
+		const payload = await captureOpenAICompletionsPayload(model, { ...baseContext(), tools: [mcpTool] });
+		const tools = toObject(payload)?.tools;
+		if (!Array.isArray(tools)) throw new Error("payload tools missing");
+		const properties = getNestedObject(getNestedObject(tools[0], "function")?.parameters, "properties");
+		if (!properties) throw new Error("tool parameters missing");
+		return properties;
+	}
+
+	it("scalarizes type arrays for Gemini models", async () => {
+		const properties = await wireProperties(veniceModel("gemini-3.8-flash"));
+		expect(JSON.stringify(properties)).not.toContain('"type":[');
+		expect(properties.folder).toEqual({ type: "string", nullable: true });
+	});
+
+	it("keeps standard JSON Schema for non-Gemini Venice models", async () => {
+		const properties = await wireProperties(veniceModel("llama-3.3-70b"));
+		expect(properties.folder).toEqual({ type: ["string", "null"] });
+	});
+});
+
 describe("grammar tool-schema normalization (issue #5914)", () => {
 	const primitiveUnion = {
 		anyOf: [

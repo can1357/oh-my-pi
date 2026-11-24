@@ -12,6 +12,9 @@ provider "venice" {
 	thinking-mode "effort"
 	reasoning-disable-mode "venice-disable-thinking"
 	class "gemini" {
+		// Venice's Gemini route 400s on a JSON Schema `type` array (issue #12269);
+		// it takes Google's dialect, as Copilot's Gemini route does.
+		tool-schema-flavor "google"
 		revision ">=3 <3.1" {
 			thinking-requires-effort #true
 		}
