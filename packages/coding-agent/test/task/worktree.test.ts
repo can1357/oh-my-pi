@@ -1739,6 +1739,35 @@ describe("commitToBranch preserves agent commits", () => {
 	// the copy. The baseline's untracked path below it is absent from the parent
 	// (lstat reports ENOTDIR, not ENOENT), so it counts as vanished and the task's
 	// own edit is still captured.
+	// The lock is the only untracked file at baseline, so it is last there; the new
+	// file sorts after it, so it is not last in the current patch. Its position must
+	// not make an unchanged lock look modified.
+	it("leaves an unchanged root lock out when the task adds an untracked file after it", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.writeFile(path.join(isolation, "new.txt"), "task file\n");
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("+task file");
+		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
+	});
+
+	// The lock sorts before zz.txt, so it is not last at baseline; removing zz.txt
+	// makes it last. Its position must not make an unchanged lock look modified.
+	it("leaves an unchanged root lock out when the task removes an untracked file after it", async () => {
+		await fs.writeFile(path.join(isolation, ".beads.gate.lock"), "pid 2\n");
+		await fs.writeFile(path.join(isolation, "zz.txt"), "zz\n");
+		await fs.writeFile(path.join(parent, "zz.txt"), "zz\n");
+		const baseline = await captureIsolationBaseline(isolation, parent);
+
+		await fs.rm(path.join(isolation, "zz.txt"));
+		const delta = await captureDeltaPatch(isolation, baseline);
+
+		expect(delta.rootPatch).toContain("diff --git a/zz.txt b/zz.txt");
+		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
+	});
+
 	it("treats a baseline untracked path under a parent file as vanished", async () => {
 		await fs.mkdir(path.join(isolation, "sub"), { recursive: true });
 		await fs.writeFile(path.join(isolation, "sub", "lock.txt"), "pid 2\n");
