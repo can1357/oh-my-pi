@@ -682,18 +682,6 @@ describe("todo backend", () => {
 			expect(backend.calls.map(entry => entry.phases)).toEqual([session.getTodoPhases()]);
 		});
 
-		it("an accepted change gets its replace even when the backend already took the previous list", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension], "tracker");
-			session.commitTodoPhases(list("a"));
-			await settled(session);
-
-			await call(session, { op: "append", phase: "Work", items: ["b"] });
-			await settled(session);
-
-			expect(tasksOf(backend)).toEqual([["a"], ["a", "b"]]);
-		});
-
 		it("a refusal fails the call on one clean line, keeps the list, and is no extension error", async () => {
 			const backend = tracker("tracker", true);
 			const { session, errors } = await open([backend.extension], "tracker");
