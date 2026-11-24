@@ -23,6 +23,7 @@ export const SEARCH_PROVIDER_LABELS = {
 	tinyfish: "TinyFish",
 	keenable: "Keenable",
 	sofya: "Sofya",
+	specstream: "SpecStream",
 	jina: "Jina",
 	kagi: "Kagi",
 	tavily: "Tavily",
