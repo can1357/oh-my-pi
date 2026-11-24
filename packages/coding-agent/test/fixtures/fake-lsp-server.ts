@@ -1,5 +1,10 @@
 import { MessageFramer } from "../../src/jsonrpc/message-framing";
 
+export interface FakeLspOptions {
+	capabilities?: Record<string, unknown>;
+	responses?: Record<string, unknown>;
+}
+
 interface JsonRpcMessage {
 	jsonrpc: "2.0";
 	id?: string | number;
@@ -23,7 +28,7 @@ interface CloseDocumentParams {
 
 let initializeCount = 0;
 let processId: number | null = null;
-let initializationOptions: unknown = null;
+let initializationOptions: FakeLspOptions | null = null;
 const didOpen: Record<string, number> = {};
 const didChange: Record<string, number[]> = {};
 const didClose: string[] = [];
@@ -84,11 +89,13 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 	switch (message.method) {
 		case "initialize": {
 			initializeCount++;
-			const params = message.params as { processId?: number | null; initializationOptions?: unknown } | undefined;
+			const params = message.params as
+				| { processId?: number | null; initializationOptions?: FakeLspOptions }
+				| undefined;
 			processId = params?.processId ?? null;
 			initializationOptions = params?.initializationOptions ?? null;
 			respond(id, {
-				capabilities: {},
+				capabilities: initializationOptions?.capabilities ?? {},
 				serverInfo: { name: "fake-lsp", version: String(process.pid) },
 			});
 			break;
@@ -131,8 +138,14 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 		case "shutdown":
 			respond(id, null);
 			break;
-		default:
-			respond(id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
+		default: {
+			const response = initializationOptions?.responses?.[message.method];
+			if (response === undefined) {
+				respond(id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
+			} else {
+				respond(id, response);
+			}
+		}
 	}
 }
 

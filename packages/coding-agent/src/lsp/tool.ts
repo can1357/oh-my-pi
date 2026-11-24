@@ -1601,7 +1601,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					if (!result || result.length === 0) {
 						output = "No references found";
 						const missing = symbolName
-							? await missingOccurrencesNote(symbolName, client.cwd, targetFile!, [], this.session.cwd, signal)
+							? await missingOccurrencesNote(symbolName, client, targetFile!, [], this.session.cwd, signal)
 							: undefined;
 						if (missing) output += `\n${missing}`;
 						else useless = true;
@@ -1622,14 +1622,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = `Found ${result.length} reference(s):\n${lines.join("\n")}`;
 						output += await offTargetNote(result, symbolName, serverName, this.session.cwd);
 						const missing = symbolName
-							? await missingOccurrencesNote(
-									symbolName,
-									client.cwd,
-									targetFile!,
-									result,
-									this.session.cwd,
-									signal,
-								)
+							? await missingOccurrencesNote(symbolName, client, targetFile!, result, this.session.cwd, signal)
 							: undefined;
 						if (missing) output += `\n${missing}`;
 					}
@@ -1860,7 +1853,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							const leftover = symbolName
 								? await missingOccurrencesNote(
 										symbolName,
-										client.cwd,
+										client,
 										targetFile!,
 										[],
 										this.session.cwd,

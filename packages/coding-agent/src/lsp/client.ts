@@ -905,7 +905,7 @@ function countFolderLoad(client: LspClient, delta: number): void {
 }
 
 /** `filePath` with symlinks resolved, a missing tail kept; lexical when it cannot be resolved. */
-async function realPathOf(filePath: string): Promise<string> {
+export async function realPathOf(filePath: string): Promise<string> {
 	return (await resolveSyscallTarget(filePath, true)) ?? path.resolve(filePath);
 }
 
@@ -933,7 +933,7 @@ export async function unservedCheckout(client: LspClient, filePath: string): Pro
 }
 
 /** The checkout holding `filePath` when it differs from the one holding the client's root. */
-async function foreignCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
+export async function foreignCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
 	const checkout = await findRepoRoot(path.dirname(await realPathOf(filePath)));
 	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
