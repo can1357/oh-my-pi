@@ -710,7 +710,9 @@ export class GeminiProvider extends SearchProvider {
 		if (model) {
 			if (model.api === "google-gemini-cli") return authStorage.credentials.hasOAuth(model.provider);
 			if (model.api === "google-generative-ai") {
-				return authStorage.keys.source(model.provider) !== undefined || vertexApiKey(authStorage, model) !== undefined;
+				return (
+					authStorage.keys.source(model.provider) !== undefined || vertexApiKey(authStorage, model) !== undefined
+				);
 			}
 			return false;
 		}
