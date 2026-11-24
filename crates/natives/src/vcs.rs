@@ -766,7 +766,7 @@ pub struct VcsGitRepo {
 /// Initialize a non-bare Git checkout.
 #[napi]
 pub fn vcs_git_init(env: Env, dir: String) -> Result<VcsGitRepo> {
-	pi_vcs::git::GitRepo::init(Path::new(&dir))
+	omp_vcs::git::GitRepo::init(Path::new(&dir))
 		.map(|inner| VcsGitRepo { inner: Arc::new(inner) })
 		.map_err(|err| rich_error(env, err))
 }
