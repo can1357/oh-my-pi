@@ -576,6 +576,7 @@ import {
 	cfgPowerSleepPrevention,
 	cfgPrewalkAutoTarget,
 	cfgPrewalkEnabled,
+	cfgPrewalkFrom,
 	cfgPrewalkInto,
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
@@ -2331,8 +2332,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
 			restoreThinkingLevel: level => this.#models.restoreThinkingLevel(level),
 			resolveDefaultPrewalk: () => this.#resolveDefaultPrewalk(),
-			resolveAutoPrewalkTarget: () => this.#resolveAutoPrewalkTarget(),
-			classifyAutoPrewalk: (request, signal) =>
+			resolveAutoPrewalkTarget: selector => this.#resolveAutoPrewalkTarget(selector),
+			resolveAutoPrewalkPlanner: () => {
+				const selector = cfgPrewalkFrom.get(this.settings);
+				const resolved = this.#resolvePrewalkTarget(selector);
+				return typeof resolved === "string" ? `planning model "${selector}": ${resolved}` : resolved;
+			},
+			prepareAutoPrewalkPlanner: async model => {
+				const name = `${model.provider}/${model.id}`;
+				try {
+					const prepared = await this.#modelRegistry.refreshSelectedModelMetadata(model);
+					if (await this.#modelRegistry.getApiKey(prepared, this.sessionId)) return prepared;
+					return `no credential for planning model ${name}`;
+				} catch (error) {
+					return `planning model ${name}: ${error instanceof Error ? error.message : String(error)}`;
+				}
+			},
+			classifyAutoPrewalk: (request, signal, timeoutMs) =>
 				classifyAutoPrewalk(
 					{ request, history: this.agent.state.messages },
 					{
@@ -2344,10 +2360,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						onUsage: journalJudgmentUsage(this.sessionManager),
 						telemetry: this.agent.telemetry,
 					},
+					timeoutMs,
 				),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
-			setModelTemporary: (model, thinkingLevel, isCurrent) =>
-				this.#models.setModelTemporary(model, thinkingLevel, { prewalk: true }, "automatic", isCurrent),
+			setModelTemporary: (model, thinkingLevel, isCurrent, metadataResolved) =>
+				this.#models.setModelTemporary(
+					model,
+					thinkingLevel,
+					{ prewalk: true, metadataResolved },
+					"automatic",
+					isCurrent,
+				),
+			setThinkingLevel: level => this.#models.setThinkingLevel(level),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
 			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames) =>
 				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames),
@@ -3405,8 +3429,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return undefined;
 	}
 
-	#resolveAutoPrewalkTarget(): Prewalk | undefined {
-		const selector = cfgPrewalkAutoTarget.get(this.settings);
+	#resolveAutoPrewalkTarget(selector = cfgPrewalkAutoTarget.get(this.settings)): Prewalk | undefined {
 		const resolved = this.#resolvePrewalkTarget(selector);
 		if (typeof resolved !== "string") return resolved;
 		this.emitNotice("warning", `Auto-prewalk not armed: target "${selector}": ${resolved}.`, "prewalk");
@@ -9785,7 +9808,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * A queued follow-up starts a new task: leave the previous task's auto handoff, judge this one (auto-prewalk,
 	 * and auto-parallel for a typed prompt) alongside its preparation, and apply both in the synchronous commit so
-	 * their nudges are delivered with the task they belong to.
+	 * their nudges are delivered with the task they belong to. `escalate` settles first, so the preparation runs on
+	 * the planner; a retried preparation of the same message keeps that planner and its decision.
 	 */
 	async #prepareQueuedUserTask(
 		message: AgentMessage,
@@ -9794,11 +9818,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		signal: AbortSignal,
 	): Promise<QueuedMessagePreparation> {
 		const generation = this.#promptGeneration;
-		await this.#prewalk.beginAutoTask();
-		const autoPrewalk = this.#prewalk.classifyAuto(prompt, signal);
-		const autoParallel = message.role === "user" ? this.#autoParallel.start(prompt, signal) : undefined;
+		await this.#prewalk.beginAutoTask(message);
+		// Past the cap, the before-model-call gate refuses this task's first request and reports it; judging it, or
+		// moving it to an `escalate` planner, would only spend and switch for a request that is never sent.
+		const capped = this.#costGate.check() !== undefined;
+		const autoParallel = !capped && message.role === "user" ? this.#autoParallel.start(prompt, signal) : undefined;
+		const autoPrewalk = capped
+			? undefined
+			: await this.#prewalk.classifyAuto(
+					prompt,
+					signal,
+					message,
+					() => !signal.aborted && this.#promptGeneration === generation,
+				);
 		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
-		const decision = await autoPrewalk;
+		const decision = await autoPrewalk?.decision;
 		const plan = await autoParallel;
 		return {
 			commit: () => {
@@ -9968,16 +10002,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
+			// When `escalate` can move the task to its planner, that settles first, so setup runs on the planner.
 			const userTask = this.#isUserTask(message);
-			if (userTask) await this.#prewalk.beginAutoTask();
-			const autoPrewalk = userTask ? this.#prewalk.classifyAuto(expandedText, setupAbort.signal) : undefined;
+			if (userTask) await this.#prewalk.beginAutoTask(message);
+			// A capped session hands the prompt back rather than start a run whose first request it refuses; refusing
+			// before the judges spares their calls and keeps `escalate` from moving a task that will not run.
+			if (this.#refuseOverCostCap()) return false;
 			// Auto-parallel splits typed prompts only; a skill prompt's body is instructions, not a list of tasks.
 			const autoParallel =
 				userTask && message.role === "user" ? this.#autoParallel.start(expandedText, setupAbort.signal) : undefined;
+			const autoPrewalk = userTask
+				? await this.#prewalk.classifyAuto(
+						expandedText,
+						setupAbort.signal,
+						message,
+						() => this.#promptGeneration === generation,
+					)
+				: undefined;
 			if (!(await logger.time("prompt:usagePreflight", () => this.#runUsageAwarePreflightForNextModelCall())))
 				return false;
-			// A capped session hands the prompt back rather than start a run whose first request it refuses.
-			if (this.#refuseOverCostCap()) return false;
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();
@@ -10138,7 +10181,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (hint) messages.push(hint);
 			}
 			if (autoPrewalk) {
-				const decision = await autoPrewalk;
+				const decision = await autoPrewalk.decision;
 				if (this.#promptGeneration !== generation) {
 					return false;
 				}
