@@ -400,6 +400,73 @@ asyncio.run(check_identity())
 		}
 	}, 15_000);
 
+	it("counts reads the shadow cell claimed in the cell's loop guard", async () => {
+		const calls: FakeCall[] = [];
+		const readTool = makeFakeTool("read", calls, {
+			content: [{ type: "text", text: "file body" }],
+		});
+		const shadowCell = {
+			async claim() {
+				return { content: [{ type: "text", text: "file body" }] };
+			},
+		} as unknown as EvalShadowCellSession;
+		const recorded: Array<{ name: string; text: string | undefined }> = [];
+		const toolSession = {
+			getToolByName: (name: string) => (name === readTool.name ? readTool : undefined),
+			recordCellToolCall: (call: { name: string }, result: AgentToolResult | undefined) => {
+				const block = result?.content[0];
+				recorded.push({ name: call.name, text: block?.type === "text" ? block.text : undefined });
+			},
+		} as unknown as ToolSession;
+		const info = await ensurePyToolBridge();
+		const sessionId = `py-loop-guard-${crypto.randomUUID()}`;
+		const unregister = registerPyToolBridge(sessionId, "run", { toolSession, shadowCell });
+		try {
+			const prelude = PYTHON_PRELUDE.replace(
+				"from __future__ import annotations",
+				"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
+			);
+			const script = `${prelude}
+__omp_run_id__ = "run"
+async def repeat_read():
+    for _ in range(5):
+        print(await __omp_with_call_site__("py:0", tool.read, {"path": "foo.txt"}))
+asyncio.run(repeat_read())
+`;
+			const child = Bun.spawn([Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python"), "-"], {
+				stdin: new Response(script),
+				stdout: "pipe",
+				stderr: "pipe",
+				signal: AbortSignal.timeout(10_000),
+				env: {
+					...process.env,
+					PI_TOOL_BRIDGE_URL: info.url,
+					PI_TOOL_BRIDGE_TOKEN: info.token,
+					PI_TOOL_BRIDGE_SESSION: sessionId,
+				},
+			});
+			try {
+				const [exitCode, stdout, stderr] = await Promise.all([
+					child.exited,
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+				]);
+				expect({ exitCode, stdout: stdout.replaceAll("\r\n", "\n"), stderr }).toEqual({
+					exitCode: 0,
+					stdout: "file body\n".repeat(5),
+					stderr: "",
+				});
+				expect(calls).toHaveLength(0);
+				expect(recorded).toEqual(Array.from({ length: 5 }, () => ({ name: "read", text: "file body" })));
+			} finally {
+				child.kill();
+				await child.exited;
+			}
+		} finally {
+			unregister();
+		}
+	});
+
 	it("force-stops with an in-flight response without an unhandled socket rejection", async () => {
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();

@@ -1,16 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentTool, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, Context, ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const zeroUsage = {
@@ -26,6 +28,22 @@ describe("AgentSession tool-call loop guard", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
+	const lookupTool: AgentTool = {
+		name: "lookup",
+		label: "Lookup",
+		description: "Mock lookup tool that answers an unknown task with an error result",
+		parameters: type({ "op?": "string", "task?": "string" }),
+		execute: async () => ({
+			content: [{ type: "text" as const, text: 'Errors: Task "no such task" not found' }],
+			isError: true,
+		}),
+	};
+	// The tool session a cell's bridge calls run in. Its recordCellToolCall is wired to the session as sdk.ts wires it.
+	const cellSession = {
+		getToolByName: (name: string) => (name === lookupTool.name ? lookupTool : undefined),
+		recordCellToolCall: (call: ToolCall, result: AgentToolResult | undefined) =>
+			session!.recordCellToolCall(call, result),
+	} as unknown as ToolSession;
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-tool-call-loop-guard-");
@@ -126,20 +144,12 @@ describe("AgentSession tool-call loop guard", () => {
 		const cellTool: AgentTool = {
 			name: "run_cell",
 			label: "Run cell",
-			description: "Mock cell tool whose script calls todo through the eval bridge",
+			description: "Mock cell tool whose script calls lookup through the eval bridge",
 			parameters: type({ "code?": "string" }),
 			execute: async () => {
-				// A cell that loops over one failing call: each bridged call reaches the loop guard as the model's own call would.
+				// A cell that loops over one failing call. Each bridged call goes through the eval bridge, which reports it to the loop guard.
 				for (let index = 0; index < 5; index++) {
-					session!.recordCellToolCall(
-						{
-							type: "toolCall",
-							id: `cell-${index}`,
-							name: "todo",
-							arguments: { op: "done", task: "no such task" },
-						},
-						{ content: [{ type: "text", text: 'Errors: Task "no such task" not found' }] },
-					);
+					await callSessionTool("lookup", { op: "done", task: "no such task" }, { session: cellSession });
 				}
 				return { content: [{ type: "text" as const, text: "5 calls failed" }] };
 			},
@@ -203,12 +213,49 @@ describe("AgentSession tool-call loop guard", () => {
 
 		expect(contexts).toHaveLength(2);
 		expect(JSON.stringify(contexts[1]!.messages)).toContain("tool_call_loop_detected");
-		expect(JSON.stringify(contexts[1]!.messages)).toContain("todo");
+		expect(JSON.stringify(contexts[1]!.messages)).toContain("lookup");
 		const redirects = session.agent.state.messages.filter(
 			(message): message is CustomMessage =>
 				message.role === "custom" && message.customType === "tool-call-loop-redirect",
 		);
 		expect(redirects).toHaveLength(1);
+	});
+
+	it("does not redirect a repeat a cell made outside a model turn", async () => {
+		const mock = createMockModel({ provider: "openai", responses: [{ content: ["Done."] }] });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 5,
+		});
+		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map(),
+		});
+
+		// A cell that runs while the session is idle, as a user `$` cell does: no model turn is running.
+		for (let index = 0; index < 5; index++) {
+			await callSessionTool("lookup", { op: "done", task: "no such task" }, { session: cellSession });
+		}
+		await session.prompt("hello");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "tool-call-loop-redirect",
+			),
+		).toHaveLength(0);
 	});
 
 	it.each([
