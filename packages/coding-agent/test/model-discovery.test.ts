@@ -3980,6 +3980,45 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(zeroCtx?.contextWindow).toBe(128000);
 	});
 
+	test("proxy discovery offline start lists rows cached under the context-v6 key", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				auth: "none",
+				discovery: { type: "proxy" },
+			},
+		});
+		// Rows warmed before the openai-models-list cache bump are stored under context-v6.
+		writeModelCache(
+			"proxy-test:proxy-v2-context-v6",
+			Date.now(),
+			[
+				buildModel({
+					id: "cached-proxy-model",
+					name: "Cached Proxy Model",
+					api: "openai-completions",
+					provider: "proxy-test",
+					baseUrl: "http://127.0.0.1:9998/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 65536,
+					maxTokens: 8192,
+				}),
+			],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				throw new Error("Offline fetch should not be called");
+			},
+		});
+		await registry.refresh("offline");
+		expect(registry.find("proxy-test", "cached-proxy-model")).toBeDefined();
+	});
+
 	test("proxy discovery honors API-reported input modalities and output cap", async () => {
 		writeRawModelsJson({
 			"proxy-test": {
