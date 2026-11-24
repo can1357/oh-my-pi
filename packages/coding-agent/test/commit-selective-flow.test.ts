@@ -267,7 +267,7 @@ describe("selective commit flow", () => {
 			hook,
 			[
 				"#!/bin/sh",
-				`printf '%s|%s|%s\\n' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$PI_TOOL_CALL_ID" > "$GIT_DIR/hook-session"`,
+				'printf \'%s|%s|%s\\n\' "$PI_SESSION_ID" "${PI_SESSION_FILE-<unset>}" "$PI_TOOL_CALL_ID" > "$GIT_DIR/hook-session"',
 				'[ "$PI_SESSION_ID" = "session-active" ] || { echo "wrong session: $PI_SESSION_ID" >&2; exit 37; }',
 			].join("\n") + "\n",
 		);
