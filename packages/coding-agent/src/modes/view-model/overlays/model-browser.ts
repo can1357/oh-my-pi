@@ -997,14 +997,17 @@ export function formatCostDetail(model: Model): string {
 
 /**
  * When the price facts of `model` (its price, `free`, the credit badge) may
- * next change after `now`: the earliest later dated rate or credit card;
- * infinity when none is pending.
+ * next change: the earliest dated rate or credit card still ahead; infinity
+ * when none is pending. Reads the clock only for rows with dated cards.
  */
-export function nextPriceChange(model: Model, now: number): number {
+export function nextPriceChange(model: Model): number {
+	const rates = model.cost?.timeBased?.effectiveRates;
+	const credits = model.factoryDroidCreditCards;
+	if (!rates?.length && !credits?.length) return Number.POSITIVE_INFINITY;
+	const now = Date.now();
 	let next = Number.POSITIVE_INFINITY;
-	for (const card of model.cost?.timeBased?.effectiveRates ?? [])
-		if (card.effectiveFrom > now && card.effectiveFrom < next) next = card.effectiveFrom;
-	for (const card of model.factoryDroidCreditCards ?? [])
+	for (const card of rates ?? []) if (card.effectiveFrom > now && card.effectiveFrom < next) next = card.effectiveFrom;
+	for (const card of credits ?? [])
 		if (card.effectiveFrom > now && card.effectiveFrom < next) next = card.effectiveFrom;
 	return next;
 }

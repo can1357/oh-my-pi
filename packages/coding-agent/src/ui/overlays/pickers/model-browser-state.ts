@@ -128,15 +128,15 @@ interface PickerRowStore extends PickerRowKey {
  */
 let sharedPickerRows: PickerRowStore | undefined;
 
-/** Whether `store` serves `key` at `now`, its perf map aside. */
-function storeServes(store: PickerRowStore, key: PickerRowKey, now: number): boolean {
+/** Whether `store` serves `key` now, its perf map aside (the clock is read only while a price change is pending). */
+function storeServes(store: PickerRowStore, key: PickerRowKey): boolean {
 	return (
 		store.roles === key.roles &&
 		store.preferences === key.preferences &&
 		store.revision === key.revision &&
 		store.pickerProvider === key.pickerProvider &&
 		store.markOverContext === key.markOverContext &&
-		now < store.until
+		(store.until === Number.POSITIVE_INFINITY || Date.now() < store.until)
 	);
 }
 
@@ -761,11 +761,10 @@ export class ModelBrowserState {
 			pickerProvider: this.#pickerProvider(),
 			markOverContext: this.#markOverContext(),
 		};
-		const now = Date.now();
 		const current = this.#pickerRows;
-		if (current && current.perf === perf && storeServes(current.store, key, now)) return current.store;
+		if (current && current.perf === perf && storeServes(current.store, key)) return current.store;
 		let store = sharedPickerRows;
-		if (!store || !storeServes(store, key, now) || !samePerf(store.perf, perf)) {
+		if (!store || !storeServes(store, key) || !samePerf(store.perf, perf)) {
 			store = {
 				...key,
 				until: Number.POSITIVE_INFINITY,
@@ -786,7 +785,7 @@ export class ModelBrowserState {
 		const cached = store.rows.get(item);
 		if (cached && cached.tier === tier && cached.overContext === overContext) return cached.row;
 		const model = item.model;
-		store.until = Math.min(store.until, nextPriceChange(model, Date.now()));
+		store.until = Math.min(store.until, nextPriceChange(model));
 		const facts: Record<string, TspText | number> = {};
 		const int = intelligenceOf(model);
 		if (int !== undefined) facts.int = String(int);
@@ -1008,7 +1007,7 @@ export class ModelBrowserState {
 	 * on its model when still listed).
 	 */
 	#syncCreditClock(): void {
-		if (Date.now() < this.#nextCreditChange) return;
+		if (this.#nextCreditChange === Number.POSITIVE_INFINITY || Date.now() < this.#nextCreditChange) return;
 		this.#trackCreditClock();
 		// The ranker memoizes `provider/model` haystacks, `free` word included.
 		this.#ranker = undefined;
