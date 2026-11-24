@@ -4998,16 +4998,17 @@ export interface TranscriptStatsResult {
 export declare function translateWindowsAltGrSequence(data: string): string | null
 
 /**
- * UTF-16 code-unit length of a prefix of `input` within `max_tokens`.
+ * UTF-16 code-unit length of the longest prefix of `input` within
+ * `max_tokens` `Jev` tokens (as `countTokens(_, Encoding.Jev)` counts),
+ * never ending on half a surrogate pair. `Jev` only.
  *
- * Never ends on half a surrogate pair. Exact (the longest such prefix) for
- * `Jev`, which streams one pass over the input; other encodings bisect over
- * prefix counts.
+ * Merging stops at the piece that crosses the budget; the rest of the input
+ * is still read for the NFC quick-check.
  *
  * Slice the original JS string with `input.slice(0, len)` (or keep `input`
  * unchanged when `len === input.length`).
  */
-export declare function truncateToTokens(input: string, maxTokens: number, encoding?: Encoding | undefined | null): number
+export declare function truncateToTokens(input: string, maxTokens: number): number
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.

@@ -29,7 +29,7 @@
 
 mod bpe;
 mod claude;
-mod jev;
+pub(crate) mod jev;
 mod pretoken;
 mod scan;
 mod tables;
@@ -93,17 +93,6 @@ impl Encoding {
 				None
 			},
 			_ => Some(tables::bpe_for(self).encode(text.units())),
-		}
-	}
-
-	/// UTF-16 code-unit length of a prefix of `units` within `max_tokens`
-	/// content tokens, never ending on half a surrogate pair: the longest one
-	/// for `Jev`, a bisection over prefix counts otherwise.
-	pub fn truncate_u16(self, units: &[u16], max_tokens: u32) -> usize {
-		match self {
-			Self::Jev => jev::truncate_u16(units, max_tokens),
-			_ if self.count(units) <= max_tokens => units.len(),
-			_ => bpe::bisect_u16(self, units, max_tokens, units.len()),
 		}
 	}
 }
