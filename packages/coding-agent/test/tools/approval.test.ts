@@ -466,6 +466,7 @@ describe("tool-owned dynamic approval declarations", () => {
 			'rm -rf "/"',
 			"rm -rf '/'",
 			'pwd && rm -rf "/"',
+			"printf -v 'functions[ls]' %s 'rm -rf /usr'; ls",
 			"echo hi # it's\nrm -rf /",
 			"GIT_EXTERNAL_DIFF='rm -rf /' git diff",
 			"GIT_EDITOR='rm -rf /' git commit -m fix",
