@@ -6,6 +6,7 @@
 
 - Fatal interactive errors now print a concise cause and the path to the full log after terminal cleanup. Piped stderr still includes the stack trace.
 - `ptree` child processes spawned without an explicit `env` now inherit `Bun.env`, including values loaded from `.env` files after startup, on every platform rather than only under the Linux subreaper.
+- `<textarea>` and HTML `<title>` content now parses as text, as in a browser: `<…>` parts are kept instead of becoming child elements, and entities are still decoded ([#20299](https://github.com/can1357/oh-my-pi/issues/20299))
 
 ## [19.1.0] - 2026-11-21
 
