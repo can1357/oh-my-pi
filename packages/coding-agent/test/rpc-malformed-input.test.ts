@@ -83,4 +83,19 @@ describe("RPC mode malformed stdin", () => {
 		expect(parseErrors[0]).toContain("Failed to parse command: line is not valid UTF-8");
 		expect(frames).toEqual([{ type: "get_state", id: "probe" }]);
 	});
+
+	test("accepts a prompt larger than one outbound frame, since the client writes each command unchunked", async () => {
+		const prompt = { type: "prompt", id: "large", message: "x".repeat(2 * 1024 * 1024) };
+		const frames: unknown[] = [];
+		const parseErrors: string[] = [];
+
+		await readRpcInputFrames(
+			new Blob([`${JSON.stringify(prompt)}\n`]).stream(),
+			frame => frames.push(frame),
+			message => parseErrors.push(message),
+		);
+
+		expect(parseErrors).toEqual([]);
+		expect(frames).toEqual([prompt]);
+	});
 });
