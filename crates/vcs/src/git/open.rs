@@ -47,8 +47,15 @@ impl GitRepo {
 
 	/// Freshly opened handle for the commit path, with the `GIT_*` config that
 	/// [`commit_open_options`] allows. Never build pathspecs on it.
+	///
+	/// `GIT_WORK_TREE` arrives under the same permission as `GIT_CONFIG_GLOBAL`,
+	/// so the handle's work tree is pinned to the discovered checkout. The CLI
+	/// wrapper strips that variable for the same reason.
 	pub(crate) fn gix_commit(&self) -> Result<gix::Repository> {
-		self.open_fresh(commit_open_options())
+		let mut repo = self.open_fresh(commit_open_options())?;
+		repo.set_workdir(Some(self.root().to_path_buf()))
+			.map_err(|err| Error::backend("git commit open", err))?;
+		Ok(repo)
 	}
 
 	fn open_fresh(&self, options: Options) -> Result<gix::Repository> {
