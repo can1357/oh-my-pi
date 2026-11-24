@@ -1450,8 +1450,8 @@ export class SessionMaintenance {
 			// A manual pass always compacts: soft summarization runs on any model, so it ends a configured
 			// order that omits it. `/compact <mode>` keeps its pinned chain.
 			methods = modeOrder || order.includes("soft") ? order : [...order, "soft"];
-			// One handoff request by the active model, not a summary of all the history behind its native compaction.
-			const handoffForReader = !compactMode && !!readerModel && this.readsBehindNativeCompaction(readerModel);
+			// One handoff request instead of a summary of history the reader cannot hold, even outside `methodOrder`.
+			const handoffForReader = !compactMode && !!readerModel && this.overrunsNativeCompaction(readerModel);
 			if (handoffForReader) methods = ["handoff", ...methods.filter(method => method !== "handoff")];
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
 			const runsManually = (method: CompactionMethod): boolean => {
@@ -4776,10 +4776,10 @@ export class SessionMaintenance {
 		return residualTokens <= recoveryBand;
 	}
 
-	/** Whether `reader` cannot replay the native compaction that the active model reads. */
-	readsBehindNativeCompaction(reader: Model): boolean {
+	/** Whether `reader` cannot replay the native compaction that the active model reads, nor hold the history behind it. */
+	overrunsNativeCompaction(reader: Model): boolean {
 		const entry = this.#model && getReadableCompactionEntry(this.#host.sessionManager.getBranch(), this.#model);
-		return !!entry && !canReplayRemoteCompaction(entry.preserveData, reader);
+		return !!entry && !canReplayRemoteCompaction(entry.preserveData, reader) && !this.contextFitsModel(reader);
 	}
 
 	/**

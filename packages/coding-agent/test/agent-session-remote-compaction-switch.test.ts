@@ -280,10 +280,8 @@ describe("switch after an OpenAI remote compaction", () => {
 			gpt,
 			Settings.isolated({ "compaction.methodOrder": ["remote", "soft"], ...extra }),
 		);
-		// The handoff comes first; when it fails, the configured methods run.
-		const handoffSpy = vi
-			.spyOn(compactionModule, "generateHandoffFromContext")
-			.mockRejectedValue(new Error("handoff unavailable"));
+		// The history behind the compaction fits the reader, so the configured methods run.
+		const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
 			summary: `portable summary by ${model.provider}`,
 			firstKeptEntryId: preparation.firstKeptEntryId,
@@ -292,7 +290,7 @@ describe("switch after an OpenAI remote compaction", () => {
 
 		const result = await session.compact(undefined, { readerModel: claude });
 
-		expect(handoffSpy).toHaveBeenCalledTimes(1);
+		expect(handoffSpy).not.toHaveBeenCalled();
 		expect(result.summary).toBe("portable summary by openai");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		// Soft summarization re-expands the history behind the remote boundary.

@@ -15900,7 +15900,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Whether `model` reads history behind a native compaction that its window cannot hold. */
 	switchOverrunsNativeCompaction(model: Model): boolean {
-		return this.#maintenance.readsBehindNativeCompaction(model) && !this.#maintenance.contextFitsModel(model);
+		return this.#maintenance.overrunsNativeCompaction(model);
 	}
 
 	/**
