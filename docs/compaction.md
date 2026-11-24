@@ -491,6 +491,8 @@ Can return:
 - `context` (extra context lines injected into `<additional-context>`)
 - `preserveData` (stored on compaction entry)
 
+When several handlers return results, `prompt` and `context` take the latest value per field, and `preserveData` is shallow-merged across handlers.
+
 ### `session_compact`
 
 Post-compaction notification with saved `compactionEntry` and `fromExtension` flag.

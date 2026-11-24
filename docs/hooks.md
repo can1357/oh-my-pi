@@ -274,7 +274,7 @@ Conflict behavior by event type:
 - `context`: chained; each handler receives prior handler’s message output
 - `before_agent_start`: first returned message is kept; later messages ignored
 - `session_before_*`: latest returned result is tracked; `cancel: true` short-circuits immediately
-- `session.compacting`: latest returned result wins
+- `session.compacting`: `prompt` and `context` take the latest handler's value per field; `preserveData` is shallow-merged across handlers
 
 Command/renderer conflicts:
 
