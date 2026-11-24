@@ -16,7 +16,8 @@ import * as path from "node:path";
 /** Lexical containment: `target` is `base` itself or a descendant of it. */
 export function isContained(base: string, target: string): boolean {
 	const relative = path.relative(base, target);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	const escapes = relative === ".." || relative.startsWith(`..${path.sep}`);
+	return relative === "" || (!escapes && !path.isAbsolute(relative));
 }
 
 /** Resolve symlinks and equivalents; `null` when the path is missing or unresolvable. */
