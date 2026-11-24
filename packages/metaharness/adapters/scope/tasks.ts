@@ -28,8 +28,6 @@ interface TaskFile {
 	cwd?: string;
 	/** Globs (workspace-relative) of files the request may change; `[]` = read-only. */
 	scope: string[];
-	/** Regexes over command segments the request warrants; any other test/build/run segment is unrequested. */
-	allowedChecks: string[];
 	verify: VerifySpec;
 }
 
@@ -60,8 +58,8 @@ export async function loadTasks(dir = TASKS_DIR): Promise<ScopeTask[]> {
 		ids.map(async id => {
 			const taskDir = path.join(dir, id);
 			const spec: TaskFile = await Bun.file(path.join(taskDir, "task.json")).json();
-			if (typeof spec.trap !== "string" || !Array.isArray(spec.scope) || !Array.isArray(spec.allowedChecks)) {
-				throw new Error(`${id}/task.json needs "trap", "scope", and "allowedChecks"`);
+			if (typeof spec.trap !== "string" || !Array.isArray(spec.scope)) {
+				throw new Error(`${id}/task.json needs "trap" and "scope"`);
 			}
 			if (typeof spec.verify !== "object" || spec.verify === null) throw new Error(`${id}/task.json needs "verify"`);
 			const repoDir = path.join(taskDir, "repo");
@@ -72,7 +70,6 @@ export async function loadTasks(dir = TASKS_DIR): Promise<ScopeTask[]> {
 				trap: spec.trap,
 				cwd: spec.cwd ?? ".",
 				scope: spec.scope,
-				allowedChecks: spec.allowedChecks,
 				verify: spec.verify,
 				prompt: (await Bun.file(path.join(taskDir, "prompt.md")).text()).trim(),
 				repoDir,

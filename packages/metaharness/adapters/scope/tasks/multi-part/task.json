@@ -1,7 +1,6 @@
 {
-	"trap": "Counter-balance: three asks in one message; stopping after one or two fails. Trying the CLI is warranted and not charged.",
+	"trap": "Counter-balance: three asks in one message; stopping after one or two fails. Trying the CLI once all three are done is the verification.",
 	"scope": ["src/**", "test/**", "README.md"],
-	"allowedChecks": ["^bun\\s+(run\\s+)?(\\./)?src/cli\\.ts", "^bun\\s+run\\s+start\\b", "^bun\\s+test\\s+\\S*count"],
 	"verify": {
 		"files": { "README.md": ["--json", "--total"] },
 		"commands": [

@@ -1,15 +1,17 @@
 #!/usr/bin/env bun
 /**
- * Scope benchmark: how long omp takes on small, narrowly scoped requests and where the time
- * goes — model vs tools, unrequested checks (test suites, typechecks, builds, program runs
- * nobody asked for), re-reads of just-edited files, and edits outside the request.
+ * Scope benchmark: how long omp takes on narrowly scoped requests and whether it works the way
+ * we want: statically, with the change verified once before it yields. Reports model vs tool
+ * time, checks by phase (before the first edit, during the work, final), whether a check
+ * followed the last edit, check seconds, re-reads of just-edited files, and edits outside
+ * the request.
  *
  * ```sh
  * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label base
  * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label lean \
  *   --append-system-prompt adapters/scope/variants/lean-verification.md
  * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label swap \
- *   --rewrite adapters/scope/variants/rw-final-drop.json   # swap single prompt lines, no template fork
+ *   --rewrite swap.json   # [{ "find", "replace" }]: swap single prompt lines, no template fork
  * bun adapters/scope/cli.ts compare ../../runs/scope/base/result.json ../../runs/scope/lean/result.json
  * bun adapters/scope/cli.ts rescore ../../runs/scope/*\/result.json   # after editing task specs or the classifier
  * ```
@@ -40,10 +42,12 @@ function positiveInt(raw: string | undefined, flag: string, fallback: number): n
 }
 
 function progressLine(run: ScopeRun): string {
-	const unrequested = run.checks.filter(check => check.unrequested);
-	const checkSeconds = unrequested.reduce((total, check) => total + check.ms, 0) / 1000;
+	const count = (phase: ScopeRun["checks"][number]["phase"]) =>
+		run.checks.filter(check => check.phase === phase).length;
+	const checkSeconds = run.checks.reduce((total, check) => total + check.ms, 0) / 1000;
+	const verified = run.verified === null ? "no change" : run.verified ? "verified" : "UNVERIFIED";
 	const why = [run.error, ...run.failures].filter(Boolean).join("; ");
-	return `${run.pass ? "✓" : "✗"} ${run.task}#${run.attempt}  ${(run.wallMs / 1000).toFixed(1)}s  ${run.turns} turns  ${run.toolCalls} calls  ${unrequested.length} unrequested checks (${checkSeconds.toFixed(1)}s)${why ? `  ${why}` : ""}`;
+	return `${run.pass ? "✓" : "✗"} ${run.task}#${run.attempt}  ${(run.wallMs / 1000).toFixed(1)}s  ${run.turns} turns  ${run.toolCalls} calls  ${verified}  checks: ${count("before")} before, ${count("during")} during, ${count("final")} final (${checkSeconds.toFixed(1)}s)${why ? `  ${why}` : ""}`;
 }
 
 async function compare(files: string[]): Promise<void> {
@@ -74,7 +78,7 @@ async function rescore(files: string[]): Promise<void> {
 		await Bun.write(file, JSON.stringify(result, null, "\t"));
 		await Bun.write(path.join(jobDir, "report.md"), renderReport(result));
 		log(
-			`rescored ${result.config.label}: pass ${result.summary.passRate} · ${result.summary.unrequestedChecksPerRun} unrequested/run`,
+			`rescored ${result.config.label}: pass ${result.summary.passRate} · verified ${result.summary.verifiedRate} · ${result.summary.checksDuringPerRun} checks during work/run`,
 		);
 	}
 }

@@ -157,12 +157,13 @@ and `fork-sessions/` (the session as captured in the fork image).
 
 ## Scope & speed benchmark
 
-`bench:scope` measures how long omp takes on small, narrowly scoped requests
-and what the time went to. Each task in `adapters/scope/tasks/<id>/` is a
-fixture workspace (`repo/`), the user's message (`prompt.md`), and its
-expectations (`task.json`: `scope` globs the change may touch,
-`allowedChecks` regexes for commands the request warrants, `verify` outcome
-checks, and the `trap` it plants). An optional `hidden/` tree is copied over
+`bench:scope` measures whether omp works the way we want on narrowly scoped
+requests, and how long it takes: work statically (read, edit), run no checks
+while working, then verify the finished change once before yielding, with
+the cheapest check that covers it. Each task in `adapters/scope/tasks/<id>/`
+is a fixture workspace (`repo/`), the user's message (`prompt.md`), and its
+expectations (`task.json`: `scope` globs the change may touch, `verify`
+outcome checks, and the `trap` it plants). An optional `hidden/` tree is copied over
 the workspace after the agent stops, before `verify` runs: tests the agent
 never sees. Traps: real-timer suites nobody asked to
 run, a question that needs no execution, one named failing test beside slow
@@ -198,15 +199,22 @@ bun run bench:scope rescore ../../runs/scope/*/result.json   # after changing ta
   follows the template: swap one line without forking the template. A `find`
   that matches nothing fails the run.
 - **Per run:** wall, model (sum of request durations), and tool time (union
-  of tool intervals); turns; tool calls; *unrequested checks* — bash or
-  `eval` command segments that run tests, typechecks, linters, builds,
-  installs, programs, or filesystem-wide searches (`find /`, `find ~`)
-  without matching `allowedChecks` (`git status/diff/log` is never
-  charged); *post-edit reads* of files the agent
-  already edited; files changed outside `scope`. A run passes when `verify`
-  holds and nothing outside `scope` changed.
+  of tool intervals); turns; tool calls; and the checks it ran, found in
+  bash commands and `eval` cells: tests, typechecks, linters, builds,
+  program runs, installs, and filesystem-wide searches (`find /`, `find ~`).
+  Each check is placed against the run's last edit. One that starts after it
+  is the *final* verification; the run is then *verified*. Everything else
+  ran *while working*: before or between edits, in a run that changed
+  nothing, or an install or scan, which verify nothing. Edits are the edit
+  tools plus shell commands that write files the run left changed; throwaway
+  check scripts and scratch files are not edits. Also *post-edit reads* of
+  files the agent already edited, and files changed outside `scope`. A run
+  passes when `verify` holds and nothing outside `scope` changed.
+- **What good looks like:** every run that changed files is verified, checks
+  while working are 0, check seconds are low, and the pass rate holds.
 - **Outputs** in `runs/scope/<label>/`: `result.json` (rewritten after every
-  run), `report.md` (per-task medians, every unrequested check, failures),
+  run), `report.md` (per-task figures, every check run while working, every
+  unverified change, failures),
   and `traces/<task>__<n>.txt` (ndjson events; the dashboard renders them).
   The manager launches it as benchmark `scope` (`include` = task ids,
   `attempts` = runs per task).

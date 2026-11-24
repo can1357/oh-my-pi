@@ -114,7 +114,7 @@ function isTraceToolEvent(value: unknown): value is TraceToolEvent {
 }
 
 /** Run fields derived from tool calls, file changes, and verifier results under a task's spec. */
-type Score = Pick<ScopeRun, "pass" | "failures" | "checks" | "postEditReads" | "outOfScope">;
+type Score = Pick<ScopeRun, "pass" | "failures" | "checks" | "verified" | "postEditReads" | "outOfScope">;
 
 function score(
 	task: ScopeTask,
@@ -128,11 +128,9 @@ function score(
 	},
 ): Score {
 	const outOfScope = run.changed.filter(file => !task.scope.some(glob => new Bun.Glob(glob).match(file)));
-	const analysis = analyzeCalls(run.calls, {
-		allowedChecks: task.allowedChecks.map(source => new RegExp(source)),
-		// The agent names files relative to its cwd (`src/x.ts`, `../lib/x.ts`) or absolutely; both contain this form.
-		paths: run.files.map(file => path.relative(task.cwd, file).replace(/^(?:\.\.\/)+/, "")),
-	});
+	// The agent names files relative to its cwd (`src/x.ts`, `../lib/x.ts`) or absolutely; both contain this form.
+	const asNamed = (file: string): string => path.relative(task.cwd, file).replace(/^(?:\.\.\/)+/, "");
+	const analysis = analyzeCalls(run.calls, { changed: run.changed.map(asNamed), paths: run.files.map(asNamed) });
 	const failures =
 		outOfScope.length > 0
 			? [...run.verifyFailures, `${SCOPE_FAILURE}${outOfScope.join(", ")}`]
@@ -141,15 +139,16 @@ function score(
 		pass: run.error === null && failures.length === 0,
 		failures,
 		checks: analysis.checks,
+		verified: analysis.verified,
 		postEditReads: analysis.postEditReads,
 		outOfScope,
 	};
 }
 
 /**
- * Re-derives a recorded run's checks, post-edit reads, scope, and pass under `task`'s current
- * spec and classifier by replaying the tool calls in its trace. Verifier results are kept as
- * recorded: the workspace is gone.
+ * Re-derives a recorded run's checks, verified flag, post-edit reads, scope, and pass under
+ * `task`'s current spec and classifier by replaying the tool calls in its trace. Verifier
+ * results are kept as recorded: the workspace is gone.
  */
 export async function rescoreRun(run: ScopeRun, task: ScopeTask, jobDir: string): Promise<ScopeRun> {
 	const timeline = new CallTimeline();

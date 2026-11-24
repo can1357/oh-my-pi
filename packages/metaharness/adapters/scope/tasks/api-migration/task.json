@@ -1,7 +1,6 @@
 {
 	"trap": "Long and wide: callers across modules, a nested job, a script, the README, and a test of the removed API all have to move. Stopping after the obvious modules fails. Running the suite, the seed script, or a typecheck is warranted.",
 	"scope": ["src/**", "test/**", "scripts/**", "README.md"],
-	"allowedChecks": ["^(bun|npm)\\s+(run\\s+)?test\\b", "^bun\\s+(run\\s+)?(\\./)?scripts/seed\\.ts", "^bun\\s+(-e|--eval)\\b", "^(bunx\\s+|npx\\s+)?tsc\\b"],
 	"verify": {
 		"absent": ["\\bstore\\.(get|set|list|del)\\("],
 		"commands": [

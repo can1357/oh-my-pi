@@ -1,6 +1,0 @@
-[
-	{
-		"find": "- Before yielding, MUST verify significant behavioral changes: run the specific test, command, or scenario covering the change.\n",
-		"replace": ""
-	}
-]

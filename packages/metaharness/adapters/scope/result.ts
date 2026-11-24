@@ -1,7 +1,8 @@
 /**
  * The scope benchmark's `result.json` shape and the markdown views over it: a per-arm report
  * and a two-arm comparison. The metaharness manager reads {@link ScopeResult.summary} for the
- * dashboard (`src/benchmarks.ts`).
+ * dashboard (`src/benchmarks.ts`). An arm meets the goal when every change is `verified`, no
+ * check runs `during` the work, and check seconds stay low at an unchanged pass rate.
  */
 import type { CheckCall } from "./checks";
 
@@ -40,6 +41,8 @@ export interface ScopeRun {
 	turns: number;
 	toolCalls: number;
 	checks: CheckCall[];
+	/** A check ran after the last edit; `null` when the run changed no file. */
+	verified: boolean | null;
 	postEditReads: number;
 	/** Workspace-relative files the run added, changed, or deleted. */
 	changed: string[];
@@ -57,9 +60,16 @@ export interface ScopeSummary {
 	passRate: number | null;
 	medianWallS: number | null;
 	medianTurns: number | null;
-	unrequestedChecksPerRun: number | null;
-	/** Share of all wall time spent inside unrequested checks. */
-	unrequestedCheckShare: number | null;
+	/** Of the runs that changed files, the share that ran a check after their last edit. */
+	verifiedRate: number | null;
+	/** Checks per run ahead of the first edit (or with nothing changed): reproducing a reported failure. */
+	checksBeforePerRun: number | null;
+	/** Checks per run after the first edit that were not the final verification: the check-edit-check loop. */
+	checksDuringPerRun: number | null;
+	/** Seconds per run inside checks of either phase. */
+	checkSecondsPerRun: number | null;
+	/** Share of all wall time spent inside checks. */
+	checkShare: number | null;
 	/** Share of runs that changed a file outside the task's scope. */
 	scopeCreepRate: number | null;
 	costUsd: number;
@@ -87,8 +97,13 @@ interface RunStats {
 	toolS: number | null;
 	turns: number | null;
 	calls: number | null;
-	unrequested: number | null;
-	unrequestedS: number | null;
+	/** Runs that changed files, and how many of those ran a final check. */
+	changed: number;
+	verified: number;
+	before: number | null;
+	during: number | null;
+	final: number | null;
+	checkS: number | null;
 	postEditReads: number | null;
 	creep: number;
 }
@@ -108,8 +123,13 @@ function mean(values: readonly number[]): number | null {
 	return values.length === 0 ? null : sum(values) / values.length;
 }
 
-function unrequestedChecks(run: ScopeRun): CheckCall[] {
-	return run.checks.filter(check => check.unrequested);
+/** Checks that were not the final verification. */
+function earlyChecks(run: ScopeRun): CheckCall[] {
+	return run.checks.filter(check => check.phase !== "final");
+}
+
+function phaseMean(runs: readonly ScopeRun[], phase: CheckCall["phase"]): number | null {
+	return mean(runs.map(run => run.checks.filter(check => check.phase === phase).length));
 }
 
 function stats(runs: readonly ScopeRun[]): RunStats {
@@ -121,8 +141,12 @@ function stats(runs: readonly ScopeRun[]): RunStats {
 		toolS: seconds(median(runs.map(run => run.toolMs))),
 		turns: median(runs.map(run => run.turns)),
 		calls: median(runs.map(run => run.toolCalls)),
-		unrequested: mean(runs.map(run => unrequestedChecks(run).length)),
-		unrequestedS: seconds(mean(runs.map(run => sum(unrequestedChecks(run).map(check => check.ms))))),
+		changed: runs.filter(run => run.verified !== null).length,
+		verified: runs.filter(run => run.verified === true).length,
+		before: phaseMean(runs, "before"),
+		during: phaseMean(runs, "during"),
+		final: phaseMean(runs, "final"),
+		checkS: seconds(mean(runs.map(run => sum(run.checks.map(check => check.ms))))),
 		postEditReads: mean(runs.map(run => run.postEditReads)),
 		creep: runs.filter(run => run.outOfScope.length > 0).length,
 	};
@@ -131,14 +155,17 @@ function stats(runs: readonly ScopeRun[]): RunStats {
 /** Recomputes {@link ScopeResult.summary}; the CLI calls it after every run. */
 export function summarize(runs: readonly ScopeRun[]): ScopeSummary {
 	const all = stats(runs);
-	const unrequestedMs = sum(runs.flatMap(run => unrequestedChecks(run).map(check => check.ms)));
+	const checkMs = sum(runs.flatMap(run => run.checks.map(check => check.ms)));
 	return {
 		runs: runs.length,
 		passRate: ratio(all.passes, runs.length),
 		medianWallS: all.wallS,
 		medianTurns: all.turns,
-		unrequestedChecksPerRun: all.unrequested,
-		unrequestedCheckShare: ratio(unrequestedMs, sum(runs.map(run => run.wallMs))),
+		verifiedRate: ratio(all.verified, all.changed),
+		checksBeforePerRun: all.before,
+		checksDuringPerRun: all.during,
+		checkSecondsPerRun: all.checkS,
+		checkShare: ratio(checkMs, sum(runs.map(run => run.wallMs))),
 		scopeCreepRate: ratio(all.creep, runs.length),
 		costUsd: sum(runs.map(run => run.costUsd)),
 		tokIn: sum(runs.map(run => run.tokens.input)),
@@ -159,7 +186,12 @@ function rows(runs: readonly ScopeRun[]): Array<[string, RunStats]> {
 	];
 }
 
-/** Markdown report for one arm: per-task medians, then every unrequested check and failure. */
+/** `verified/changed`, or `—` when no run changed files. */
+function verifiedCell(s: RunStats | undefined): string {
+	return s && s.changed > 0 ? `${s.verified}/${s.changed}` : "—";
+}
+
+/** Markdown report for one arm: per-task figures, then every check that was not a final verification, unverified change, and failure. */
 export function renderReport(result: ScopeResult): string {
 	const { config } = result;
 	const lines = [
@@ -167,23 +199,32 @@ export function renderReport(result: ScopeResult): string {
 		"",
 		`\`${config.model}\` · thinking \`${config.thinking ?? "default"}\` · append \`${config.appendSystemPrompt ?? "none"}\` · template \`${config.systemPromptTemplate ?? "default"}\` · rewrite \`${config.rewrite ?? "none"}\` · ${result.runs.length}/${result.total} runs · $${result.summary.costUsd.toFixed(3)}`,
 		"",
-		"Times and counts are per-run medians; unrequested checks, their seconds, and post-edit reads are per-run means.",
+		"Goal: work statically, then verify the change once before yielding. `verified` = runs with a check after their last edit ÷ runs that changed files. Checks `before` ran ahead of the first edit (or with nothing changed); checks `during` ran after it without being the final verification. Times, turns, and tool calls are per-run medians; check counts, check seconds, and post-edit reads are per-run means.",
 		"",
-		"| task | pass | wall s | model s | tool s | turns | tool calls | unrequested checks | unrequested s | post-edit reads | out of scope |",
-		"|---|---|---|---|---|---|---|---|---|---|---|",
+		"| task | pass | verified | wall s | model s | tool s | turns | tool calls | checks before | checks during | final checks | check s | post-edit reads | out of scope |",
+		"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 	];
 	for (const [task, s] of rows(result.runs)) {
 		lines.push(
-			`| ${task} | ${s.passes}/${s.runs} | ${fmt(s.wallS)} | ${fmt(s.modelS)} | ${fmt(s.toolS)} | ${fmt(s.turns, 0)} | ${fmt(s.calls, 0)} | ${fmt(s.unrequested)} | ${fmt(s.unrequestedS)} | ${fmt(s.postEditReads)} | ${s.creep}/${s.runs} |`,
+			`| ${task} | ${s.passes}/${s.runs} | ${verifiedCell(s)} | ${fmt(s.wallS)} | ${fmt(s.modelS)} | ${fmt(s.toolS)} | ${fmt(s.turns, 0)} | ${fmt(s.calls, 0)} | ${fmt(s.before)} | ${fmt(s.during)} | ${fmt(s.final)} | ${fmt(s.checkS)} | ${fmt(s.postEditReads)} | ${s.creep}/${s.runs} |`,
 		);
 	}
-	const charged = result.runs.flatMap(run =>
-		unrequestedChecks(run).map(
+	const early = result.runs.flatMap(run =>
+		earlyChecks(run).map(
 			check =>
-				`- \`${run.task}#${run.attempt}\` ${(check.ms / 1000).toFixed(1)}s ${check.kinds.join("+")}: \`${check.command.replaceAll("\n", " ⏎ ")}\``,
+				`- \`${run.task}#${run.attempt}\` ${check.phase} ${(check.ms / 1000).toFixed(1)}s ${check.kinds.join("+")}: \`${check.command.replaceAll("\n", " ⏎ ")}\``,
 		),
 	);
-	if (charged.length > 0) lines.push("", "## Unrequested checks", "", ...charged);
+	if (early.length > 0) lines.push("", "## Checks before the last edit", "", ...early);
+	const unverified = result.runs.filter(run => run.verified === false);
+	if (unverified.length > 0) {
+		lines.push(
+			"",
+			"## Unverified changes",
+			"",
+			...unverified.map(run => `- \`${run.task}#${run.attempt}\`: ${run.changed.join(", ")}`),
+		);
+	}
 	const failed = result.runs.filter(run => !run.pass);
 	if (failed.length > 0) {
 		lines.push(
@@ -212,8 +253,8 @@ export function renderComparison(a: ScopeResult, b: ScopeResult): string {
 	const lines = [
 		`# ${a.config.label} → ${b.config.label}`,
 		"",
-		"| task | pass | wall s | turns | tool calls | unrequested checks | unrequested s | post-edit reads | out of scope |",
-		"|---|---|---|---|---|---|---|---|---|",
+		"| task | pass | verified | wall s | turns | checks before | checks during | final checks | check s | post-edit reads | out of scope |",
+		"|---|---|---|---|---|---|---|---|---|---|---|",
 	];
 	for (const task of [...tasks, "**all**"]) {
 		const x = left.get(task);
@@ -221,7 +262,7 @@ export function renderComparison(a: ScopeResult, b: ScopeResult): string {
 		const pair = (pick: (s: RunStats) => number | null, digits = 1) =>
 			`${fmt(x ? pick(x) : null, digits)} → ${fmt(y ? pick(y) : null, digits)}`;
 		lines.push(
-			`| ${task} | ${x ? `${x.passes}/${x.runs}` : "—"} → ${y ? `${y.passes}/${y.runs}` : "—"} | ${pair(s => s.wallS)}${delta(x?.wallS ?? null, y?.wallS ?? null)} | ${pair(s => s.turns, 0)} | ${pair(s => s.calls, 0)} | ${pair(s => s.unrequested)} | ${pair(s => s.unrequestedS)} | ${pair(s => s.postEditReads)} | ${x?.creep ?? "—"} → ${y?.creep ?? "—"} |`,
+			`| ${task} | ${x ? `${x.passes}/${x.runs}` : "—"} → ${y ? `${y.passes}/${y.runs}` : "—"} | ${verifiedCell(x)} → ${verifiedCell(y)} | ${pair(s => s.wallS)}${delta(x?.wallS ?? null, y?.wallS ?? null)} | ${pair(s => s.turns, 0)} | ${pair(s => s.before)} | ${pair(s => s.during)} | ${pair(s => s.final)} | ${pair(s => s.checkS)} | ${pair(s => s.postEditReads)} | ${x?.creep ?? "—"} → ${y?.creep ?? "—"} |`,
 		);
 	}
 	return `${lines.join("\n")}\n`;
