@@ -6,6 +6,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
 import { GeminiProvider, searchGemini } from "@oh-my-pi/pi-coding-agent/web/search/providers/gemini";
 
 const SSE_RESPONSE =
@@ -451,6 +453,30 @@ describe("searchGemini with a Google Cloud API key", () => {
 		expect(new GeminiProvider().isAvailable(authStorage, developerModel)).toBe(true);
 	});
 
+	it("prefers a Developer API key over GOOGLE_CLOUD_API_KEY", async () => {
+		authStorage.keys.setRuntime("google", "developer-test-key");
+		let requestUrl = "";
+		let requestHeaders = new Headers();
+		const fetchMock: FetchImpl = (url, init) => {
+			requestUrl = String(url);
+			requestHeaders = new Headers(init?.headers);
+			return Promise.resolve(
+				new Response(DEVELOPER_SSE_RESPONSE, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+			);
+		};
+		await searchGemini({
+			query: "developer search",
+			system_prompt: "Gemini test prompt",
+			authStorage,
+			model: developerModel,
+			modelRegistry,
+			fetch: fetchMock,
+		});
+		expect(requestUrl.startsWith("https://generativelanguage.googleapis.com/v1beta/")).toBe(true);
+		expect(requestUrl).not.toContain("aiplatform");
+		expect(requestHeaders.get("x-goog-api-key")).toBe("developer-test-key");
+	});
+
 	it("sends a Google Cloud API key to the Vertex endpoint when no Developer API key is set", async () => {
 		let requestUrl = "";
 		let requestHeaders = new Headers();
@@ -474,5 +500,52 @@ describe("searchGemini with a Google Cloud API key", () => {
 		);
 		expect(requestHeaders.get("x-goog-api-key")).toBe("vertex-test-key");
 		expect(response.answer).toBe("Developer answer");
+	});
+});
+
+describe("web_search with only GOOGLE_CLOUD_API_KEY", () => {
+	const savedVertexKey = Bun.env.GOOGLE_CLOUD_API_KEY;
+	const savedGeminiKey = Bun.env.GEMINI_API_KEY;
+	let settings: Settings;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+
+	beforeEach(async () => {
+		settings = await Settings.init({ inMemory: true });
+		delete Bun.env.GEMINI_API_KEY;
+		Bun.env.GOOGLE_CLOUD_API_KEY = "vertex-test-key";
+		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		resetSettingsForTest();
+		if (savedVertexKey === undefined) delete Bun.env.GOOGLE_CLOUD_API_KEY;
+		else Bun.env.GOOGLE_CLOUD_API_KEY = savedVertexKey;
+		if (savedGeminiKey === undefined) delete Bun.env.GEMINI_API_KEY;
+		else Bun.env.GEMINI_API_KEY = savedGeminiKey;
+		authStorage.close();
+	});
+
+	it("reaches the Vertex endpoint when web search is asked for a google model", async () => {
+		let requestUrl = "";
+		let requestHeaders = new Headers();
+		vi.spyOn(globalThis, "fetch").mockImplementation((async (url: string | URL | Request, init?: RequestInit) => {
+			requestUrl = String(url);
+			requestHeaders = new Headers(init?.headers);
+			return new Response(SSE_RESPONSE, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+		}) as typeof fetch);
+
+		const result = await runSearchQuery(
+			{ query: "test query", model: "google/gemini-2.5-flash" },
+			{ authStorage, modelRegistry },
+		);
+
+		expect(requestUrl).toBe(
+			"https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+		);
+		expect(requestHeaders.get("x-goog-api-key")).toBe("vertex-test-key");
+		expect(result.details.response.provider).toBe("gemini");
 	});
 });
