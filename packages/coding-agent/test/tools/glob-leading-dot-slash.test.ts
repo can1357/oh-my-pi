@@ -48,4 +48,10 @@ describe("glob patterns with a leading ./", () => {
 		expect(await matches("*.json")).toEqual(["package.json", "src/data.json"]);
 		expect(await matches("./*.json")).toEqual(["package.json", "src/data.json"]);
 	});
+
+	it("keeps a leading ./ before a literal directory name that starts with ~", async () => {
+		await fs.mkdir(path.join(dir, "~"));
+		await Bun.write(path.join(dir, "~", "kept.ts"), "export {};\n");
+		expect(await matches("./~/*.ts")).toEqual(["~/kept.ts"]);
+	});
 });

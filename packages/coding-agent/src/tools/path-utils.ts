@@ -1040,9 +1040,10 @@ export function parseFindPattern(pattern: string): ParsedFindPattern {
 			? { basePath: urlPath.basePath, globPattern: "**/*", hasGlob: false }
 			: globFindPattern(urlPath.basePath, urlPath.glob);
 	}
-	// A leading "./" names the search root the glob is matched from, so it is dropped: "./*.json"
-	// matches at any depth like "*.json". "./" alone and ".//x" are left as written.
-	const normalizedPattern = normalizePathSeparators(pattern).replace(/^(?:\.\/)+(?=[^/])/, "");
+	// A leading "./" in front of a glob names the search root the glob is matched from, so it is
+	// dropped: "./*.json" matches at any depth like "*.json". Anywhere else it stays a literal name,
+	// so "./~/x" and "./:/x" are not re-read as home or absolute paths.
+	const normalizedPattern = normalizePathSeparators(pattern).replace(/^(?:\.\/)+(?=[^/]*[*?[{])/, "");
 	const segments = normalizedPattern.split("/");
 	const firstGlobIndex = firstGlobSegment(segments);
 
