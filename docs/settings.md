@@ -1174,6 +1174,12 @@ The session journal (`session.jsonl`) records the experiment as `custom` entries
 
 The result's `details.spotlight` trace carries the same sizes and coins, `savedTokens`, and for a changed text `original` (the original as a session artifact, its kept runs and reasons, and its per-line heat: each line's rank among the lines Spotlight scored, `0`–`9`). A held-out result's trace adds `holdout: true`; `savedTokens` is the would-be saving, `original.kept` the would-be kept runs, and `original.shapedUrl` the session artifact holding the would-be text.
 
+### RPC
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `rpc.maxInputRecordBytes` | number | `67108864` (64 MiB) | Largest stdin record in bytes for `--mode rpc`, JSON included. A larger record is refused as a `parse` error and its bytes are skipped through its newline, so the next record still runs. Must be a whole number of at least 1. Read when RPC mode starts. See [rpc.md](rpc.md). |
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:
