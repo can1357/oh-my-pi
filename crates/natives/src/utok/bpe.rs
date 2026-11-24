@@ -33,6 +33,7 @@ use std::{
 };
 
 use crate::utok::{
+	Encoding,
 	pretoken::{self, Splitter},
 	utf::Unit,
 };
@@ -501,6 +502,134 @@ impl BpeEncoding {
 	}
 }
 
+/// Back off by one UTF-16 code unit when a truncated prefix ends on a high
+/// surrogate (`0xD800..=0xDBFF`) so `text.slice(0, len)` never splits a
+/// surrogate pair.
+#[inline]
+pub(crate) fn snap_utf16_boundary(units: &[u16], mut len: usize) -> usize {
+	if len > 0 && len < units.len() && (0xd800..=0xdbff).contains(&units[len - 1]) {
+		len -= 1;
+	}
+	len
+}
+
+/// Advance `pos` by one UTF-16 scalar boundary (2 units for a valid surrogate
+/// pair, 1 unit otherwise), clamped to `units.len()`.
+#[inline]
+pub(crate) fn next_u16_boundary(units: &[u16], pos: usize) -> usize {
+	if pos >= units.len() {
+		return units.len();
+	}
+	if (0xd800..=0xdbff).contains(&units[pos])
+		&& pos + 1 < units.len()
+		&& (0xdc00..=0xdfff).contains(&units[pos + 1])
+	{
+		pos + 2
+	} else {
+		pos + 1
+	}
+}
+
+/// Step `pos` backward by one UTF-16 scalar boundary (2 units for a valid
+/// surrogate pair, 1 unit otherwise), clamped to `0`.
+#[inline]
+pub(crate) fn prev_u16_boundary(units: &[u16], pos: usize) -> usize {
+	if pos == 0 {
+		return 0;
+	}
+	if pos >= 2
+		&& (0xdc00..=0xdfff).contains(&units[pos - 1])
+		&& (0xd800..=0xdbff).contains(&units[pos - 2])
+	{
+		pos - 2
+	} else {
+		pos - 1
+	}
+}
+
+/// Codepoint lookahead past a binary-search lower bound to catch non-monotonic
+/// whole-word or BPE merge dips (e.g. `"SELE"`=2 vs `"SELECT"`=1).
+const NON_MONOTONIC_LOOKAHEAD: usize = 64;
+
+/// UTF-16 prefix bisection within `0..=hi`, never ending on half a
+/// surrogate pair, scanning past `lo` for local non-monotonic whole-word/merge
+/// dips, and guaranteeing `enc.count(&units[..len]) <= max_tokens`.
+pub(crate) fn bisect_u16(enc: Encoding, units: &[u16], max_tokens: u32, mut hi: usize) -> usize {
+	let hi_bound = snap_utf16_boundary(units, hi.min(units.len()));
+	if enc.count(&units[..hi_bound]) <= max_tokens {
+		return hi_bound;
+	}
+	hi = hi_bound;
+	let mut lo = 0usize;
+	while hi - lo > 1 {
+		let mid = lo + ((hi - lo) >> 1);
+		if enc.count(&units[..mid]) <= max_tokens {
+			lo = mid;
+		} else {
+			hi = mid;
+		}
+	}
+	let mut len = snap_utf16_boundary(units, lo);
+	while len > 0 && enc.count(&units[..len]) > max_tokens {
+		len = prev_u16_boundary(units, len);
+	}
+	// Non-monotonic tokenizers (whole-word overrides, BPE merges, Claude ladder)
+	// can dip back under `max_tokens` a few codepoints past `lo`. Probe ahead
+	// until well over budget or the lookahead cap.
+	let mut best = len;
+	let mut probe = len;
+	for _ in 0..NON_MONOTONIC_LOOKAHEAD {
+		let next = next_u16_boundary(units, probe);
+		if next == probe || next > hi_bound {
+			break;
+		}
+		probe = next;
+		let c = enc.count(&units[..probe]);
+		if c <= max_tokens {
+			best = probe;
+		} else if c > max_tokens.saturating_add(4) {
+			break;
+		}
+	}
+	best
+}
+
+/// If a truncated prefix ends at a whitespace boundary (`"  " | " hello"`),
+/// cutting off the following word can let leading spaces of the next piece fuse
+/// into the previous whitespace piece without adding a token (`"   "` == 1).
+#[inline]
+pub(crate) fn extend_whitespace_fusion(
+	enc: Encoding,
+	units: &[u16],
+	mut candidate: usize,
+	limit: usize,
+	max_tokens: u32,
+) -> usize {
+	if candidate == 0 || candidate >= limit {
+		return candidate;
+	}
+	let (prev_ch, _) = u16::decode(units, prev_u16_boundary(units, candidate));
+	let (next_ch, _) = u16::decode(units, candidate);
+	if !prev_ch.is_whitespace() || !next_ch.is_whitespace() {
+		return candidate;
+	}
+	let mut probe = candidate;
+	while probe < limit {
+		let (ch, step) = u16::decode(units, probe);
+		if !ch.is_whitespace() {
+			break;
+		}
+		let next = probe + step;
+		if enc.count(&units[..next]) <= max_tokens {
+			candidate = next;
+		} else {
+			break;
+		}
+		probe = next;
+	}
+	candidate
+}
+
 /// Normalize/transcode as required, split with `splitter`, and feed each
 /// piece's UTF-8 bytes to `f`. Crate-visible so count-only families that
 /// price pieces differently (Jev) reuse the normalization and splitting
@@ -545,7 +674,7 @@ fn scan<U: Unit>(splitter: &Splitter, units: &[U], f: &mut impl FnMut(&[u8])) {
 
 /// UTF-8 bytes of one piece: identity for `u8`, otherwise re-encoded into
 /// `buf` (reused across pieces — one allocation per call, amortized nil).
-fn piece_bytes<'a, U: Unit>(piece: &'a [U], buf: &'a mut Vec<u8>) -> &'a [u8] {
+pub(crate) fn piece_bytes<'a, U: Unit>(piece: &'a [U], buf: &'a mut Vec<u8>) -> &'a [u8] {
 	if let Some(bytes) = U::as_utf8(piece) {
 		return bytes;
 	}
@@ -583,7 +712,7 @@ fn decode_lossy<U: Unit>(units: &[U]) -> String {
 
 /// NFC quick-check over the decoded codepoint stream, allocation-free
 /// (conservative: `false` means "may need normalization").
-fn nfc_quick<U: Unit>(units: &[U]) -> bool {
+pub(crate) fn nfc_quick<U: Unit>(units: &[U]) -> bool {
 	struct Cps<'a, U: Unit>(&'a [U], usize);
 	impl<U: Unit> Iterator for Cps<'_, U> {
 		type Item = u32;

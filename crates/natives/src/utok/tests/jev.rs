@@ -56,6 +56,20 @@ fn utf16_and_utf32_flavor_parity() {
 	}
 }
 
+/// `"SELECTING"` is one piece whose prefix counts are non-monotonic
+/// (`"SEL"`=1, `"SELE"`=2, `"SELECT"`=1, `"SELECTING"`=3): truncation must
+/// keep the whole-word `"SELECT"` that lands exactly on budget, where a
+/// bisection over prefix counts settles on `"SEL"`.
+#[test]
+fn truncate_preserves_non_monotonic_whole_word_select() {
+	let text = format!("{}SELECTING! more text follows here", "1".repeat(31_999));
+	let u16s: Vec<u16> = text.encode_utf16().collect();
+	let end = Encoding::Jev.truncate_u16(&u16s, 32_000);
+	assert_eq!(end, 32_005);
+	assert_eq!(String::from_utf16(&u16s[31_999..end]).unwrap(), "SELECT");
+	assert_eq!(Encoding::Jev.count(&u16s[..end]), 32_000);
+}
+
 #[test]
 fn encode_is_none() {
 	assert_eq!(Encoding::Jev.encode("hello"), None);

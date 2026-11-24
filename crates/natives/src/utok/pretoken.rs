@@ -7,6 +7,8 @@
 //! test-only: it is the differential oracle the scanners are validated
 //! against, and fancy-regex is a dev-dependency.
 
+use std::ops::{ControlFlow, Range};
+
 use crate::utok::{scan, utf::Unit};
 
 /// A family's piece splitter.
@@ -49,12 +51,25 @@ impl Splitter {
 	/// Feed every piece of `units` to `f`, in order, covering the input
 	/// exactly. `Regex` requires `U = u8` holding valid UTF-8.
 	pub fn for_each_piece<U: Unit>(&self, units: &[U], mut f: impl FnMut(&[U])) {
+		let _ = self.try_for_each_piece_range(units, &mut |range| {
+			f(&units[range]);
+			ControlFlow::Continue(())
+		});
+	}
+
+	/// Feed every piece index range of `units` to `f` in order, stopping early
+	/// when `f` returns [`ControlFlow::Break`].
+	pub fn try_for_each_piece_range<U: Unit>(
+		&self,
+		units: &[U],
+		f: &mut impl FnMut(Range<usize>) -> ControlFlow<()>,
+	) -> ControlFlow<()> {
 		match self {
-			Self::O200k => scan_loop(units, &mut f, scan::o200k::next_piece),
-			Self::Cl100k => scan_loop(units, &mut f, scan::cl100k::next_piece),
-			Self::DeepSeek => scan::deepseek::for_each_piece(units, &mut f),
-			Self::Kimi => scan_loop(units, &mut f, scan::kimi::next_piece),
-			Self::Qwen => scan_loop(units, &mut f, scan::qwen::next_piece),
+			Self::O200k => scan_loop_until(units, f, scan::o200k::next_piece),
+			Self::Cl100k => scan_loop_until(units, f, scan::cl100k::next_piece),
+			Self::DeepSeek => scan::deepseek::try_for_each_piece_range(units, f),
+			Self::Kimi => scan_loop_until(units, f, scan::kimi::next_piece),
+			Self::Qwen => scan_loop_until(units, f, scan::qwen::next_piece),
 			#[cfg(test)]
 			Self::Regex(_) => {
 				let bytes = U::as_utf8(units).expect("utoken: regex splitter requires UTF-8 input");
@@ -64,8 +79,9 @@ impl Splitter {
 					let range = text
 						.substr_range(piece)
 						.expect("regex piece borrows from text");
-					f(&units[range]);
+					f(range.into())?;
 				}
+				ControlFlow::Continue(())
 			},
 		}
 	}
@@ -117,19 +133,21 @@ impl Splitter {
 	}
 }
 
-/// Drive a single-stage scanner over `units`.
-pub(crate) fn scan_loop<U: Unit>(
+/// Drive a single-stage scanner over `units`, yielding piece index ranges
+/// until exhausted or `f` returns [`ControlFlow::Break`].
+pub(crate) fn scan_loop_until<U: Unit>(
 	units: &[U],
-	f: &mut impl FnMut(&[U]),
+	f: &mut impl FnMut(Range<usize>) -> ControlFlow<()>,
 	next: impl Fn(&[U], usize) -> usize,
-) {
+) -> ControlFlow<()> {
 	let mut pos = 0;
 	while pos < units.len() {
 		let end = next(units, pos);
 		debug_assert!(pos < end && end <= units.len(), "utoken: scanner must advance within bounds");
-		f(&units[pos..end]);
+		f(pos..end)?;
 		pos = end;
 	}
+	ControlFlow::Continue(())
 }
 
 /// NFC-normalize (Qwen3 input contract). Borrows when no work is needed:

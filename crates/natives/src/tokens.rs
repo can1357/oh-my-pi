@@ -124,3 +124,23 @@ pub fn count_tokens(
 		},
 	}
 }
+
+/// UTF-16 code-unit length of a prefix of `input` within `max_tokens`.
+///
+/// Never ends on half a surrogate pair. Exact (the longest such prefix) for
+/// `Jev`, which streams one pass over the input; other encodings bisect over
+/// prefix counts.
+///
+/// Slice the original JS string with `input.slice(0, len)` (or keep `input`
+/// unchanged when `len === input.length`).
+#[napi]
+pub fn truncate_to_tokens(
+	input: JsString,
+	max_tokens: u32,
+	encoding: Option<Encoding>,
+) -> napi::Result<u32> {
+	let enc = Encoding::utok(encoding);
+	let units = js::utf16(input)?;
+	let len = enc.truncate_u16(&units, max_tokens);
+	u32::try_from(len).map_err(|_| napi::Error::from_reason("truncated string length exceeds u32"))
+}
