@@ -40,7 +40,7 @@ import {
 	withBrowserPromiseCombinatorTracking,
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import {
 	type AriaSnapshotOptions,
 	assertSelectorString,

@@ -1,324 +1,321 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { chipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { createRoot } from "@oh-my-pi/pi-tui";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-
 import { cfgComposerRecallClearedDrafts } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import { Composer, type ComposerOptions, chipLabel } from "../../../src/ui/composer";
+import { KEYS, key, sendKey, sendPaste } from "../../ui/composer/harness";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
 
-beforeAll(async () => {
-	await initTheme(false);
-});
+/** A composer (in its own reactive root) and the keys it is fed, as the terminal backend routes them. */
+interface Editor {
+	readonly composer: Composer;
+	press(...raws: string[]): void;
+	paste(text: string): void;
+	/** Chips as `{ kind, n, image?, link? }`. */
+	chips(): { kind: string; n: number; image?: ImageContent; link?: string }[];
+}
 
-describe("CustomEditor draft restore", () => {
+function editor(options: ComposerOptions = {}): Editor {
+	return createRoot(() => {
+		const composer = new Composer(options);
+		return {
+			composer,
+			press(...raws) {
+				for (const raw of raws) sendKey(composer.node, composer.field, key(raw));
+			},
+			paste(text) {
+				sendPaste(composer.node, composer.field, text);
+			},
+			chips() {
+				return composer.chips().map(chip => ({
+					kind: chip.kind,
+					n: chip.n,
+					...(chip.image ? { image: chip.image as ImageContent } : {}),
+					...(composer.imageLink(chip) ? { link: composer.imageLink(chip) } : {}),
+				}));
+			},
+		};
+	});
+}
+
+/** A paste long enough to collapse into a chip. */
+const LONG_PASTE = (label: string) => Array.from({ length: 12 }, (_, i) => `${label} ${i}`).join("\n");
+
+describe("composer draft restore", () => {
 	it("collapses stored image markers into chip tokens that round-trip on expansion", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.setDraft("look at [Image #1, 800x600] please", [image]);
-		expect(editor.getText()).toBe(`look at ${chipLabel("image", 1)} please`);
+		const { composer } = editor();
+		composer.setDraft("look at [Image #1, 800x600] please", [image]);
+		expect(composer.text()).toBe(`look at ${chipLabel("image", 1)} please`);
 		// The wire format is restored at submit time via the atom table.
-		expect(editor.getExpandedText()).toBe("look at [Image #1, 800x600] please");
+		expect(composer.expandedText()).toBe("look at [Image #1, 800x600] please");
 	});
 
 	it("strips a legacy attachment URI from restored drafts", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.setDraft("see [Image #1] attachment://1 end", [image]);
-		expect(editor.getText()).toBe(`see ${chipLabel("image", 1)} end`);
+		const { composer } = editor();
+		composer.setDraft("see [Image #1] attachment://1 end", [image]);
+		expect(composer.text()).toBe(`see ${chipLabel("image", 1)} end`);
 	});
 
-	it("re-materializes image links asynchronously so restored chips are clickable", async () => {
-		const editor = new CustomEditor(getEditorTheme());
-		const { promise, resolve } = Promise.withResolvers<(string | undefined)[] | undefined>();
-		editor.draftImageLinkMaterializer = () => promise;
-		editor.setDraft("[Image #1]", [image]);
-		expect(editor.imageLinks).toBeUndefined();
+	it("resolves image links asynchronously so restored chips are clickable", async () => {
+		const ed = editor();
+		const { promise, resolve } = Promise.withResolvers<readonly (string | undefined)[]>();
+		ed.composer.setImageLinkResolver(() => promise);
+		ed.composer.setDraft("[Image #1]", [image]);
+		expect(ed.chips()).toEqual([{ kind: "image", n: 1, image }]);
 		resolve(["/tmp/blob-1.png"]);
-		// The materializer awaited this promise before we did, so its continuation
-		// (link assignment) is queued ahead of ours — awaiting it here is a
-		// deterministic happens-after, no timer needed.
 		await promise;
-		expect(editor.imageLinks).toEqual(["/tmp/blob-1.png"]);
-		expect(editor.pendingImageLinks).toEqual(["/tmp/blob-1.png"]);
+		expect(ed.chips()).toEqual([{ kind: "image", n: 1, image, link: "/tmp/blob-1.png" }]);
+		expect(ed.composer.pendingImageLinks).toEqual(["/tmp/blob-1.png"]);
 	});
 
-	it("drops stale link results when the draft was replaced mid-materialization", async () => {
-		const editor = new CustomEditor(getEditorTheme());
-		const { promise, resolve } = Promise.withResolvers<(string | undefined)[] | undefined>();
-		editor.draftImageLinkMaterializer = () => promise;
-		editor.setDraft("[Image #1]", [image]);
-		editor.clearDraft();
+	it("drops stale link results when the draft was replaced mid-resolution", async () => {
+		const ed = editor();
+		const { promise, resolve } = Promise.withResolvers<readonly (string | undefined)[]>();
+		ed.composer.setImageLinkResolver(() => promise);
+		ed.composer.setDraft("[Image #1]", [image]);
+		ed.composer.clearDraft({ recall: false });
 		resolve(["/tmp/stale.png"]);
 		await promise;
-		expect(editor.imageLinks).toBeUndefined();
-		expect(editor.pendingImageLinks).toEqual([]);
+		expect(ed.composer.pendingImageLinks).toEqual([]);
 	});
 
 	it("clearDraft resets text attachments and their numbering", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.insertTextAttachment("a\nb");
-		expect(editor.pendingTexts).toHaveLength(1);
-		editor.clearDraft();
-		expect(editor.pendingTexts).toEqual([]);
-		editor.insertTextAttachment("c");
-		expect(editor.pendingTexts[0]?.n).toBe(1);
+		const ed = editor();
+		ed.composer.insertTextAttachment("a\nb");
+		expect(ed.chips()).toHaveLength(1);
+		ed.composer.clearDraft({ recall: false });
+		expect(ed.chips()).toEqual([]);
+		ed.composer.insertTextAttachment("c");
+		expect(ed.chips()[0]?.n).toBe(1);
 	});
 
 	it("never recycles a deleted chip's number within one draft", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.insertTextAttachment("first");
-		editor.setText("");
-		editor.insertTextAttachment("second");
-		expect(editor.pendingTexts.map(t => t.n)).toEqual([1, 2]);
-		// Only the surviving token's chip is visible.
-		const chips = editor.composerChips();
-		expect(chips).toHaveLength(1);
-		expect(chips[0]).toMatchObject({ kind: "paste", n: 2 });
+		const ed = editor();
+		ed.composer.insertTextAttachment("first");
+		ed.composer.setText("");
+		ed.composer.insertTextAttachment("second");
+		// Only the surviving token's chip is visible, and it kept counting.
+		expect(ed.chips()).toEqual([{ kind: "paste", n: 2 }]);
 	});
 
-	it("reuses attachment chips until text or attachment state changes", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.setDraft("[Image #1]", [image]);
-		const initial = editor.composerChips();
-		expect(editor.composerChips()).toBe(initial);
-
-		editor.handleInput("\x7f");
-		expect(editor.composerChips()).toEqual([]);
-		editor.handleInput("\x1f");
-		expect(editor.composerChips()).toEqual([{ kind: "image", n: 1, image, link: undefined }]);
-
-		editor.pendingImageLinks = ["file:///tmp/image.png"];
-		expect(editor.composerChips()).toEqual([{ kind: "image", n: 1, image, link: "file:///tmp/image.png" }]);
+	it("deletes a chip atomically and brings it back with undo", () => {
+		const ed = editor();
+		ed.composer.setDraft("[Image #1]", [image]);
+		ed.press(KEYS.backspace!);
+		expect(ed.chips()).toEqual([]);
+		ed.press("\x1f");
+		expect(ed.chips()).toEqual([{ kind: "image", n: 1, image }]);
 	});
 });
 
 describe("cleared draft recall", () => {
 	it("recalls an image-only draft as a live, atomically deletable chip", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.addToHistory("earlier prompt");
-		editor.setDraft("[Image #1]", [image]);
-		editor.clearDraftForRecall();
-		expect(editor.pendingImages).toEqual([]);
+		const ed = editor();
+		ed.composer.addToHistory("earlier prompt");
+		ed.composer.setDraft("[Image #1]", [image]);
+		ed.composer.clearDraft();
+		expect(ed.composer.pendingImages).toEqual([]);
 
-		editor.handleInput("\x1b[A");
-		expect(editor.getExpandedText()).toBe("[Image #1]");
-		expect(editor.composerChips()).toEqual([{ kind: "image", n: 1, image, link: undefined }]);
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("earlier prompt");
-		expect(editor.pendingImages).toEqual([]);
-		editor.handleInput("\x1b[B");
-		expect(editor.getExpandedText()).toBe("[Image #1]");
-		expect(editor.pendingImages).toEqual([image]);
-		editor.handleInput("\x7f"); // Down recalls at the end, after the chip.
-		expect(editor.getExpandedText()).toBe("");
-		expect(editor.composerChips()).toEqual([]);
+		ed.press(KEYS.up!);
+		expect(ed.composer.expandedText()).toBe("[Image #1]");
+		expect(ed.chips()).toEqual([{ kind: "image", n: 1, image }]);
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe("earlier prompt");
+		expect(ed.composer.pendingImages).toEqual([]);
+		ed.press(KEYS.down!);
+		expect(ed.composer.expandedText()).toBe("[Image #1]");
+		expect(ed.composer.pendingImages).toEqual([image]);
+		ed.press(KEYS.backspace!); // Down recalls at the end, after the chip.
+		expect(ed.composer.expandedText()).toBe("");
+		expect(ed.chips()).toEqual([]);
 	});
 
 	it("keeps the saved attachment snapshot intact across repeated recall and mutation", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.insertTextAttachment("original payload");
-		editor.clearDraftForRecall();
+		const ed = editor();
+		ed.composer.insertTextAttachment("original payload");
+		ed.composer.clearDraft();
 
 		for (const addition of ["first edit", "second edit"]) {
-			editor.handleInput("\x1b[A");
-			expect(editor.getExpandedText()).toBe("original payload ");
-			editor.handleInput("\x05");
-			editor.insertTextAttachment(addition);
-			expect(editor.getExpandedText()).toBe("original payload " + addition + " ");
-			expect(editor.composerChips().map(chip => chip.n)).toEqual([1, 2]);
-			editor.clearDraft();
+			ed.press(KEYS.up!);
+			expect(ed.composer.expandedText()).toBe("original payload ");
+			ed.press(KEYS.ctrlE!);
+			ed.composer.insertTextAttachment(addition);
+			expect(ed.composer.expandedText()).toBe(`original payload ${addition} `);
+			expect(ed.chips().map(chip => chip.n)).toEqual([1, 2]);
+			ed.composer.clearDraft({ recall: false });
 		}
-		editor.handleInput("\x1b[A");
-		expect(editor.getExpandedText()).toBe("original payload ");
-		expect(editor.pendingTexts.map(text => text.content)).toEqual(["original payload"]);
+		ed.press(KEYS.up!);
+		expect(ed.composer.expandedText()).toBe("original payload ");
+		expect(ed.chips()).toEqual([{ kind: "paste", n: 1 }]);
 	});
 
 	it("recalls an unsent multiline draft without trimming it or submitting it", () => {
-		const editor = new CustomEditor(getEditorTheme());
 		const submitted: string[] = [];
-		editor.onSubmit = text => {
-			submitted.push(text);
-		};
-		editor.setText("  first line\nsecond line  ");
-		editor.clearDraftForRecall();
-		expect(editor.getText()).toBe("");
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("  first line\nsecond line  ");
+		const ed = editor({ onSubmit: text => submitted.push(text) });
+		ed.composer.setText("  first line\nsecond line  ");
+		ed.composer.clearDraft();
+		expect(ed.composer.text()).toBe("");
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe("  first line\nsecond line  ");
 		expect(submitted).toEqual([]);
 	});
 
 	it("restores image and paste payloads without leaking them into other history entries", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.setDraft("inspect [Image #1] ", [image]);
-		editor.insertTextAttachment("first\nsecond");
-		const expanded = editor.getExpandedText();
-		editor.clearDraftForRecall();
-		editor.setText("unrelated prompt");
-		editor.clearDraftForRecall();
-		editor.handleInput("\x1b[A");
-		expect(editor.getExpandedText()).toBe("unrelated prompt");
-		expect(editor.pendingImages).toEqual([]);
-		editor.handleInput("\x1b[A");
-		expect(editor.getExpandedText()).toBe(expanded);
-		expect(editor.pendingImages).toEqual([image]);
-		expect(editor.composerChips().map(chip => chip.kind)).toEqual(["image", "paste"]);
-		editor.handleInput("\x1b[B");
-		expect(editor.getText()).toBe("unrelated prompt");
-		expect(editor.pendingImages).toEqual([]);
-		expect(editor.pendingTexts).toEqual([]);
+		const ed = editor();
+		ed.composer.setDraft("inspect [Image #1] ", [image]);
+		ed.composer.insertTextAttachment("first\nsecond");
+		const expanded = ed.composer.expandedText();
+		ed.composer.clearDraft();
+		ed.composer.setText("unrelated prompt");
+		ed.composer.clearDraft();
+		ed.press(KEYS.up!);
+		expect(ed.composer.expandedText()).toBe("unrelated prompt");
+		expect(ed.composer.pendingImages).toEqual([]);
+		ed.press(KEYS.up!);
+		expect(ed.composer.expandedText()).toBe(expanded);
+		expect(ed.composer.pendingImages).toEqual([image]);
+		expect(ed.chips().map(chip => chip.kind)).toEqual(["image", "paste"]);
+		ed.press(KEYS.down!);
+		expect(ed.composer.text()).toBe("unrelated prompt");
+		expect(ed.composer.pendingImages).toEqual([]);
+		expect(ed.chips()).toEqual([]);
 	});
 
 	it("does not submit a canceled image with another history entry after editing the recalled draft", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.setDraft("canceled [Image #1]", [image]);
-		editor.clearDraftForRecall();
-		editor.addToHistory("different [Image #1]");
-		editor.handleInput("\x1b[A");
-		editor.handleInput("\x1b[A");
-		expect(editor.pendingImages).toEqual([image]);
-		editor.handleInput("\x05");
-		editor.handleInput("\x15"); // Delete the recalled text without clearing its attachment state.
-		expect(editor.getText()).toBe("");
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("different [Image #1]");
 		const submitted: { text: string; images: ImageContent[] }[] = [];
-		editor.onSubmit = text => {
-			submitted.push({ text, images: [...editor.pendingImages] });
-		};
-		editor.handleInput("\r");
+		const ed: Editor = editor({
+			onSubmit: text => submitted.push({ text, images: [...(ed?.composer.pendingImages ?? [])] }),
+		});
+		ed.composer.setDraft("canceled [Image #1]", [image]);
+		ed.composer.clearDraft();
+		ed.composer.addToHistory("different [Image #1]");
+		ed.press(KEYS.up!, KEYS.up!);
+		expect(ed.composer.pendingImages).toEqual([image]);
+		ed.press(KEYS.ctrlE!, KEYS.ctrlU!); // Delete the recalled text without clearing its attachment state.
+		expect(ed.composer.text()).toBe("");
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe("different [Image #1]");
+		ed.press(KEYS.enter!);
 		expect(submitted).toEqual([{ text: "different [Image #1]", images: [] }]);
 	});
 
 	it("does not expand another history entry with paste payloads from an edited recalled draft", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.insertTextAttachment("canceled text attachment");
-		editor.insertPaste("canceled legacy paste");
-		const otherPrompt = `different ${editor.getText()}`.trim();
-		editor.clearDraftForRecall();
-		editor.addToHistory(otherPrompt);
-		editor.handleInput("\x1b[A");
-		editor.handleInput("\x1b[A");
-		editor.handleInput("\x05");
-		editor.handleInput("\x15");
-		expect(editor.getText()).toBe("");
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe(otherPrompt);
 		const submitted: string[] = [];
-		editor.onSubmit = text => {
-			submitted.push(text);
-		};
-		editor.handleInput("\r");
+		const ed = editor({ onSubmit: text => submitted.push(text) });
+		ed.composer.insertTextAttachment("canceled text attachment");
+		ed.paste(LONG_PASTE("canceled legacy paste"));
+		const otherPrompt = `different ${ed.composer.text()}`.trim();
+		ed.composer.clearDraft();
+		ed.composer.addToHistory(otherPrompt);
+		ed.press(KEYS.up!, KEYS.up!, KEYS.ctrlE!, KEYS.ctrlU!);
+		expect(ed.composer.text()).toBe("");
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe(otherPrompt);
+		ed.press(KEYS.enter!);
 		expect(submitted).toEqual([otherPrompt]);
-		expect(editor.pendingTexts).toEqual([]);
+		expect(ed.chips()).toEqual([]);
 	});
 
 	for (const transition of ["discard", "submit", "replace"] as const) {
 		it(`preserves a fresh image during normal history recall after ${transition} of a recalled draft`, () => {
-			const editor = new CustomEditor(getEditorTheme());
-			editor.setDraft("canceled [Image #1]", [image]);
-			editor.clearDraftForRecall();
-			editor.handleInput("\x1b[A");
-			if (transition === "discard") editor.clearDraft();
-			if (transition === "submit") editor.handleInput("\r");
+			const submitted: { text: string; images: ImageContent[] }[] = [];
+			const ed: Editor = editor({
+				onSubmit: text => submitted.push({ text, images: [...(ed?.composer.pendingImages ?? [])] }),
+			});
+			ed.composer.setDraft("canceled [Image #1]", [image]);
+			ed.composer.clearDraft();
+			ed.press(KEYS.up!);
+			if (transition === "discard") ed.composer.clearDraft({ recall: false });
+			if (transition === "submit") ed.press(KEYS.enter!);
+			submitted.length = 0;
 			const freshImage: ImageContent = { ...image, data: "ZnJlc2g=" };
 			if (transition === "replace") {
-				editor.setDraft("fresh [Image #1]", [freshImage]);
+				ed.composer.setDraft("fresh [Image #1]", [freshImage]);
 			} else {
-				editor.pendingImages = [freshImage];
-				editor.setCollapsedText("fresh [Image #1]");
+				ed.composer.pendingImages.splice(0, ed.composer.pendingImages.length, freshImage);
+				ed.composer.setCollapsedText("fresh [Image #1]");
 			}
-			editor.addToHistory("submitted [Image #1]");
-			editor.handleInput("\x05");
-			editor.handleInput("\x15");
-			editor.handleInput("\x1b[A");
-			const submitted: { text: string; images: ImageContent[] }[] = [];
-			editor.onSubmit = text => {
-				submitted.push({ text, images: [...editor.pendingImages] });
-			};
-			editor.handleInput("\r");
+			ed.composer.addToHistory("submitted [Image #1]");
+			ed.press(KEYS.ctrlE!, KEYS.ctrlU!, KEYS.up!, KEYS.enter!);
 			expect(submitted).toEqual([{ text: "submitted [Image #1]", images: [freshImage] }]);
 		});
 	}
 
 	it("does not persist canceled drafts or hide prior history behind empty clears", () => {
 		const written: string[] = [];
-		const editor = new CustomEditor(getEditorTheme());
-		editor.setHistoryStorage({
-			add: async text => {
-				written.push(text);
-			},
-			getRecent: () => [{ prompt: "submitted earlier" }],
-		});
-		editor.setText("unsent private draft");
-		editor.clearDraftForRecall();
-		editor.clearDraftForRecall();
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("unsent private draft");
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("submitted earlier");
+		const ed = editor();
+		ed.composer.setHistory(["submitted earlier"], text => written.push(text));
+		ed.composer.setText("unsent private draft");
+		ed.composer.clearDraft();
+		ed.composer.clearDraft();
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe("unsent private draft");
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe("submitted earlier");
 		expect(written).toEqual([]);
 	});
 
-	it("does not retain evicted legacy pastes in newer drafts", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.insertPaste("old payload");
-		const marker = editor.getText();
-		editor.clearDraftForRecall();
+	it("does not retain evicted pastes in newer drafts", () => {
+		const ed = editor();
+		ed.paste(LONG_PASTE("old payload"));
+		const marker = ed.composer.text();
+		ed.composer.clearDraft();
 		for (let index = 0; index < 100; index++) {
-			editor.setText("draft " + index);
-			editor.clearDraftForRecall();
+			ed.composer.setText(`draft ${index}`);
+			ed.composer.clearDraft();
 		}
-		editor.handleInput("\x1b[A");
-		editor.setText(marker);
-		expect(editor.getExpandedText()).toBe(marker);
+		ed.press(KEYS.up!);
+		ed.composer.setText(marker);
+		expect(ed.composer.expandedText()).toBe(marker);
 	});
 
-	it("rematerializes missing attachment links after a canceled restore", async () => {
-		const editor = new CustomEditor(getEditorTheme());
-		const first = Promise.withResolvers<(string | undefined)[]>();
-		const second = Promise.withResolvers<(string | undefined)[]>();
+	it("resolves missing attachment links again after a canceled restore", async () => {
+		const ed = editor();
+		const first = Promise.withResolvers<readonly (string | undefined)[]>();
+		const second = Promise.withResolvers<readonly (string | undefined)[]>();
 		let calls = 0;
-		editor.draftImageLinkMaterializer = () => (++calls === 1 ? first.promise : second.promise);
-		editor.setDraft("[Image #1]", [image]);
-		editor.clearDraftForRecall();
+		ed.composer.setImageLinkResolver(() => (++calls === 1 ? first.promise : second.promise));
+		ed.composer.setDraft("[Image #1]", [image]);
+		ed.composer.clearDraft();
 		first.resolve(["file:///tmp/image.png"]);
 		await first.promise;
-		editor.handleInput("\x1b[A");
+		ed.press(KEYS.up!);
 		second.resolve(["file:///tmp/image.png"]);
 		await second.promise;
-		expect(editor.composerChips()).toEqual([{ kind: "image", n: 1, image, link: "file:///tmp/image.png" }]);
+		expect(ed.chips()).toEqual([{ kind: "image", n: 1, image, link: "file:///tmp/image.png" }]);
 	});
 });
 
 describe("cleared draft recovery preference", () => {
-	it("respects disabling and re-enabling recovery without replacing the editor", () => {
-		const editor = new CustomEditor(getEditorTheme());
+	it("respects disabling and re-enabling recovery without replacing the composer", () => {
+		const ed = editor();
 		const settings = Settings.isolated();
-		const helpers = new UiHelpers({
-			editor,
-			settings,
-			ui: { requestRender() {} },
-		} as unknown as InteractiveModeContext);
-		editor.addToHistory("submitted earlier");
-		editor.setText("recovered by default");
+		const helpers = new UiHelpers({ composer: ed.composer, settings } as unknown as InteractiveModeContext);
+		ed.composer.addToHistory("submitted earlier");
+		ed.composer.setText("recovered by default");
 		helpers.clearEditor();
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("recovered by default");
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe("recovered by default");
 		cfgComposerRecallClearedDrafts.set(settings, false);
-		editor.setDraft("discard [Image #1]", [image]);
+		ed.composer.setDraft("discard [Image #1]", [image]);
 		helpers.clearEditor();
-		expect(editor.getText()).toBe("");
-		expect(editor.pendingImages).toEqual([]);
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("recovered by default");
-		expect(editor.pendingImages).toEqual([]);
+		expect(ed.composer.text()).toBe("");
+		expect(ed.composer.pendingImages).toEqual([]);
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe("recovered by default");
+		expect(ed.composer.pendingImages).toEqual([]);
 		cfgComposerRecallClearedDrafts.set(settings, true);
-		editor.setText("recovered again");
+		ed.composer.setText("recovered again");
 		helpers.clearEditor();
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("recovered again");
+		ed.press(KEYS.up!);
+		expect(ed.composer.text()).toBe("recovered again");
 	});
 });

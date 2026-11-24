@@ -16,6 +16,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPToolCommandGuidance,
+	type SettingsGatedToolDelta,
 } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import {
 	listToolCommands,
@@ -23,6 +24,7 @@ import {
 	type ToolCommandState,
 } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { GlobTool } from "@oh-my-pi/pi-coding-agent/tools/glob";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -133,6 +135,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		skills?: Skill[];
 		/** Model binds signed thinking to its prompt prefix, so implicit rebuilds freeze once a reply exists. */
 		prefixBound?: boolean;
+		/** Tools registered and active from the start, beside `read` (and `bash` with tool commands). */
+		extraTools?: AgentTool[];
+		/** Settings-gated tool reconciler, as `sdk.ts` supplies it. */
+		reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
 	}
 
 	function newSession(
@@ -155,6 +161,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		toolRegistry.set(readTool.name, readTool);
 		toolRegistry.set(bashTool.name, bashTool);
 		toolRegistry.set(initialMcp.name, initialMcp as unknown as AgentTool);
+		const extraTools = options.extraTools ?? [];
+		for (const tool of extraTools) toolRegistry.set(tool.name, tool);
 		const mock = options.responses ? createMockModel({ responses: options.responses }) : undefined;
 		const contexts: Message[][] = [];
 		const systemPrompts: string[][] = [];
@@ -168,9 +176,12 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 						}
 					: createModel(),
 				systemPrompt: ["initial"],
-				tools: options.toolCommands
-					? [readTool, bashTool, initialMcp as unknown as AgentTool]
-					: [readTool, initialMcp as unknown as AgentTool],
+				tools: [
+					...(options.toolCommands
+						? [readTool, bashTool, initialMcp as unknown as AgentTool]
+						: [readTool, initialMcp as unknown as AgentTool]),
+					...extraTools,
+				],
 				messages: options.initialMessages ?? [],
 			},
 			convertToLlm,
@@ -190,7 +201,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			modelRegistry: { getApiKey: async () => "test-key" } as never,
 			toolRegistry,
 			createVibeTools: options.createVibeTools,
-			builtInToolNames: options.toolCommands ? ["read", "bash"] : ["read"],
+			builtInToolNames: [
+				...(options.toolCommands ? ["read", "bash"] : ["read"]),
+				...extraTools.map(tool => tool.name),
+			],
 			setActiveToolNames: names => {
 				activeToolNames.clear();
 				for (const name of names) activeToolNames.add(name);
@@ -210,6 +224,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			getMcpServerInstructions: options.getMcpServerInstructions,
 			toolCommands: options.toolCommands,
 			skills: options.skills,
+			reconcileSettingsGatedTools: options.reconcileSettingsGatedTools,
 		});
 		sessions.push(session);
 		return {
@@ -341,7 +356,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		releaseFirstRebuild.resolve();
 		await Promise.all([olderRefresh, newerRefresh]);
 		expect(rebuildCount).toBe(2);
-		expect(session.systemPrompt).toEqual(["tools:read,mcp__nucleus_search,mcp__nucleus_fetch"]);
+		expect(session.systemPrompt).toEqual(["tools:read,mcp__nucleus_fetch,mcp__nucleus_search"]);
 	});
 
 	it("serializes explicit prompt refreshes with registry mutations", async () => {
@@ -369,7 +384,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		releaseStaleRefresh.resolve();
 		await explicitRefresh;
 
-		expect(session.systemPrompt).toEqual(["tools:read,mcp__nucleus_search,late_prompt_tool"]);
+		expect(session.systemPrompt).toEqual(["tools:read,late_prompt_tool,mcp__nucleus_search"]);
 	});
 
 	it("keeps queued mutations serialized when a waiting caller aborts", async () => {
@@ -460,8 +475,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const uninstructed = createMcpCustomTool("mcp__silent_ping", "silent", "ping", "Ping silently");
 		const searchPrompt = 'mounted:"search"=mcp__nucleus_search';
 		const searchAndUninstructedPrompt = 'mounted:"search"=mcp__nucleus_search,"ping"=mcp__silent_ping';
-		const searchFetchAndUninstructedPrompt =
-			'mounted:"search"=mcp__nucleus_search,"fetch"=mcp__nucleus_fetch,"ping"=mcp__silent_ping';
+		const fetchSearchAndUninstructedPrompt =
+			'mounted:"fetch"=mcp__nucleus_fetch,"search"=mcp__nucleus_search,"ping"=mcp__silent_ping';
 
 		await session.refreshMCPTools([search]);
 		expect(rebuildCount).toBe(1);
@@ -483,17 +498,16 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 
 		await session.refreshMCPTools([equivalentSearch, fetch, uninstructed]);
 		expect(rebuildCount).toBe(3);
-		expect(session.systemPrompt).toEqual([searchFetchAndUninstructedPrompt]);
+		expect(session.systemPrompt).toEqual([fetchSearchAndUninstructedPrompt]);
 
-		const fetchSearchAndUninstructedPrompt =
-			'mounted:"fetch"=mcp__nucleus_fetch,"search"=mcp__nucleus_search,"ping"=mcp__silent_ping';
+		// Mounts present in name order, so a permuted catalog renders the same routes.
 		await session.refreshMCPTools([fetch, equivalentSearch, uninstructed]);
-		expect(rebuildCount).toBe(4);
+		expect(rebuildCount).toBe(3);
 		expect(session.systemPrompt).toEqual([fetchSearchAndUninstructedPrompt]);
 
 		const replacementSearch = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		await session.refreshMCPTools([replacementSearch, uninstructed]);
-		expect(rebuildCount).toBe(5);
+		expect(rebuildCount).toBe(4);
 		expect(session.systemPrompt).toEqual([searchAndUninstructedPrompt]);
 		const stableLabel = replacementSearch.label;
 		const reownedSearch = {
@@ -502,7 +516,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		};
 		// Ownership alone is not rendered in the global route projection.
 		await session.refreshMCPTools([reownedSearch, uninstructed]);
-		expect(rebuildCount).toBe(5);
+		expect(rebuildCount).toBe(4);
 		expect(session.systemPrompt).toEqual([searchAndUninstructedPrompt]);
 
 		const renamedOriginalSearch = {
@@ -511,7 +525,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		};
 		const renamedOriginalAndUninstructedPrompt = 'mounted:"lookup"=mcp__nucleus_search,"ping"=mcp__silent_ping';
 		await session.refreshMCPTools([renamedOriginalSearch, uninstructed]);
-		expect(rebuildCount).toBe(6);
+		expect(rebuildCount).toBe(5);
 		expect(session.systemPrompt).toEqual([renamedOriginalAndUninstructedPrompt]);
 
 		const remountedSearch = {
@@ -520,7 +534,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		};
 		const remountedAndUninstructedPrompt = 'mounted:"lookup"=mcp__archive_lookup,"ping"=mcp__silent_ping';
 		await session.refreshMCPTools([remountedSearch, uninstructed]);
-		expect(rebuildCount).toBe(7);
+		expect(rebuildCount).toBe(6);
 		expect(session.systemPrompt).toEqual([remountedAndUninstructedPrompt]);
 
 		const equivalentRemountedSearch = {
@@ -528,18 +542,17 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			label: stableLabel,
 		};
 		await session.refreshMCPTools([equivalentRemountedSearch, uninstructed]);
-		expect(rebuildCount).toBe(7);
+		expect(rebuildCount).toBe(6);
 		expect(session.systemPrompt).toEqual([remountedAndUninstructedPrompt]);
 
 		// Removing the uninstructed server's rendered route also changes guidance.
 		const remountedPrompt = 'mounted:"lookup"=mcp__archive_lookup';
 		await session.refreshMCPTools([equivalentRemountedSearch]);
-		expect(rebuildCount).toBe(8);
+		expect(rebuildCount).toBe(7);
 		expect(session.systemPrompt).toEqual([remountedPrompt]);
 		expect(renderedPrompts).toEqual([
 			searchPrompt,
 			searchAndUninstructedPrompt,
-			searchFetchAndUninstructedPrompt,
 			fetchSearchAndUninstructedPrompt,
 			searchAndUninstructedPrompt,
 			renamedOriginalAndUninstructedPrompt,
@@ -558,9 +571,11 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			},
 			{ toolCommands: toolCommandState },
 		);
-		const tools = Array.from({ length: 65 }, (_, index) =>
-			createMcpCustomTool(`mcp__archive_tool_${index}`, "archive", `tool_${index}`, "Archive tool"),
-		);
+		// Zero-padded so name order is index order and the 65th tool is the one the projection omits.
+		const tools = Array.from({ length: 65 }, (_, index) => {
+			const id = String(index).padStart(2, "0");
+			return createMcpCustomTool(`mcp__archive_tool_${id}`, "archive", `tool_${id}`, "Archive tool");
+		});
 
 		await session.refreshMCPTools(tools);
 		expect(rebuildCount).toBe(1);
@@ -833,7 +848,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(session.getSkillHintVisible()).toBe(true);
 	});
 
-	it("rebuilds when the refresh argument tool order changes", async () => {
+	it("skips rebuild when a refresh only permutes the MCP catalog", async () => {
 		let rebuildCount = 0;
 		const { session } = newSession(async toolNames => {
 			rebuildCount++;
@@ -843,13 +858,66 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const a = createMcpCustomTool("mcp__nucleus_a", "nucleus", "a", "A");
 		const b = createMcpCustomTool("mcp__nucleus_b", "nucleus", "b", "B");
 
-		// All connected MCP tools are active, so their ordering contributes to the
-		// rendered prompt and changing it must rebuild.
+		// Non-built-in tools present in name order, so arrival order cannot
+		// reach the prompt or the provider tool array.
 		await session.refreshMCPTools([a, b]);
 		expect(rebuildCount).toBe(1);
+		const prompt = session.systemPrompt;
 
 		await session.refreshMCPTools([b, a]);
-		expect(rebuildCount).toBe(2);
+		expect(rebuildCount).toBe(1);
+		expect(session.systemPrompt).toEqual(prompt);
+	});
+
+	it("presents the same tool surface whether an extension tool registers before or after MCP connects (#20327)", async () => {
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const snooze = createMcpCustomTool("mcp__reminders_snooze", "reminders", "snooze", "Snooze reminder");
+		const channel = { ...createBasicTool("session_channel", "Session Channel"), loadMode: "discoverable" as const };
+		const launch = async (steps: ReadonlyArray<"reminders" | "nucleus" | "extension">) => {
+			const { session, toolRegistry } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+				toolCommands: createTestToolCommandState(),
+				exposeToolCommandCatalog: true,
+			});
+			// Startup: no MCP server has answered yet.
+			await session.refreshMCPTools([]);
+			const connected: CustomTool[] = [];
+			for (const step of steps) {
+				if (step === "extension") {
+					// What a `registerTool` from `session_start` does once it lands.
+					toolRegistry.set(channel.name, channel);
+					await session.setActiveToolPresentation(
+						[...session.getEnabledToolNames(), channel.name],
+						[...session.getMountedToolCommandNames(), channel.name],
+					);
+				} else {
+					connected.push(step === "nucleus" ? search : snooze);
+					// The MCP manager hands over its name-sorted snapshot.
+					await session.refreshMCPTools([...connected].sort((x, y) => (x.name < y.name ? -1 : 1)));
+				}
+			}
+			// The prompt the first request after startup goes out with.
+			await session.refreshBaseSystemPrompt();
+			return {
+				evalToolNames: session.getAdvertisedEvalToolNames(),
+				mounted: session.getMountedToolCommandNames(),
+				systemPrompt: session.systemPrompt,
+				tools: session.agent.state.tools.map(tool => tool.name),
+			};
+		};
+
+		const extensionFirst = await launch(["extension", "reminders", "nucleus"]);
+		const extensionBetween = await launch(["reminders", "extension", "nucleus"]);
+		const extensionLast = await launch(["nucleus", "reminders", "extension"]);
+
+		expect(extensionFirst.evalToolNames).toEqual([
+			"read",
+			"bash",
+			"mcp__nucleus_search",
+			"mcp__reminders_snooze",
+			"session_channel",
+		]);
+		expect(extensionBetween).toEqual(extensionFirst);
+		expect(extensionLast).toEqual(extensionFirst);
 	});
 
 	it("rebuilds when an MCP tool's label changes", async () => {
@@ -1096,15 +1164,17 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		});
 		// Route guidance lists at most 64 mappings; the overflow tool has no
 		// shipped route line, so its notice line — with a capped summary — is the
-		// only inventory the model receives for it.
-		const tools = Array.from({ length: 65 }, (_, index) =>
-			createMcpCustomTool(
-				`mcp__nucleus_t${index}`,
+		// only inventory the model receives for it. Zero-padded names keep name
+		// order equal to index order.
+		const tools = Array.from({ length: 65 }, (_, index) => {
+			const id = String(index).padStart(2, "0");
+			return createMcpCustomTool(
+				`mcp__nucleus_t${id}`,
 				"nucleus",
-				`t${index}`,
+				`t${id}`,
 				`Search ${index} ${"x".repeat(TOOL_COMMAND_EXTERNAL_DESCRIPTION_CAP * 3)} TAIL`,
-			),
-		);
+			);
+		});
 		await session.refreshMCPTools(tools);
 		await session.prompt("hello");
 
@@ -1112,7 +1182,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("- `mcp__nucleus_t64` —");
 		expect(notices[0]).not.toContain("TAIL");
-		expect(notices[0]).not.toContain("- `mcp__nucleus_t0` —");
+		expect(notices[0]).not.toContain("- `mcp__nucleus_t00` —");
 		expect(notices[0]).not.toContain("- `mcp__nucleus_t63` —");
 	});
 
@@ -1408,6 +1478,58 @@ Unavailable; invocations fail:
 		expect(systemPrompts[2]).toEqual(systemPrompts[0]);
 		expect(mountNoticesIn(contexts[1]).join("\n")).toContain("mcp__nucleus_fetch");
 	});
+
+	const FIND_HINT = "Behavior search → `find`.";
+
+	for (const prefixBound of [true, false]) {
+		it(`withdraws a judge-gated find ${prefixBound ? "behind the bound prompt prefix" : "from the prompt at once"}`, async () => {
+			let findAllowed = true;
+			const { session, systemPrompts, toolRegistry, isToolActive } = newSession(
+				async toolNames => `tools:${toolNames.join(",")}`,
+				{
+					responses: [{ content: ["ok"] }, { content: ["ok"] }],
+					prefixBound,
+					extraTools: [createBasicTool("find", "Find"), createBasicTool("glob", "Glob")],
+					// What `sdk.ts` does once the judge role rejects the account under `find.enabled: auto`.
+					reconcileSettingsGatedTools: async () => {
+						if (findAllowed || !toolRegistry.delete("find")) {
+							return { added: [], removed: [], toolCommands: undefined };
+						}
+						return { added: [], removed: ["find"], toolCommands: undefined };
+					},
+				},
+			);
+			const glob = new GlobTool({
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: session.settings,
+				getSessionFile: () => null,
+				isToolActive,
+				get findHintVisible() {
+					return session.getFindHintVisible();
+				},
+			} as ToolSession);
+			toolRegistry.set("glob", glob as AgentTool);
+			await session.setActiveToolsByName(session.getActiveToolNames());
+			await session.prompt("hi");
+			const boundDescription = glob.description;
+			expect(boundDescription).toContain(FIND_HINT);
+
+			findAllowed = false;
+			await session.reconcileBuiltinTools({ refreshPrompt: false });
+			await session.prompt("again");
+
+			expect(session.getActiveToolNames()).not.toContain("find");
+			if (prefixBound) {
+				// Bound signed thinking survives only if the prefix keeps its bytes.
+				expect(systemPrompts[1]).toEqual(systemPrompts[0]);
+				expect(glob.description).toBe(boundDescription);
+			} else {
+				expect(systemPrompts[1]?.join("\n")).not.toContain("find");
+				expect(glob.description).not.toContain(FIND_HINT);
+			}
+		});
+	}
 
 	it("announces an unmount after a maintenance rebuild delivered the pending addition", async () => {
 		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {

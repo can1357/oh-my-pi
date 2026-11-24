@@ -4144,7 +4144,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					// Known by its program's OS pid if the first command it runs
 					// spawns it (bash's subshell `exec`s a lone simple command):
 					// readers of the pid wait for that decision.
-					if let Some(stage) = bang_stage(unit, info.stages[0].entry) {
+					if let Some(mut stage) = bang_stage(unit, info.stages[0].entry) {
+						if stage == BangStage::Lone {
+							stage = BangStage::SimpleJob;
+						}
 						k.bangs.push(Bang { vproc: vpid, job: vpid, stage });
 					}
 					let job = k.job_id(cx.store);

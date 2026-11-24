@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { Api, AssistantMessage, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type DescribeAttachedImagesDeps,
@@ -69,10 +70,15 @@ function makeDeps(
 	completeImpl: typeof completeSimple,
 	apiKey: string | undefined = "test-key",
 ): DescribeAttachedImagesDeps {
-	return {
+	const deps: DescribeAttachedImagesDeps = {
 		activeModel: textModel,
 		modelRegistry: {
-			getAvailable: () => available,
+			getAvailable: () => {
+				if (cfgOffline.get(deps.settings)) throw new Error("Offline mode read every provider's catalog");
+				return available;
+			},
+			getAvailableForProviders: (providers: ReadonlySet<string>) =>
+				available.filter(model => providers.has(model.provider)),
 			getApiKey: async () => apiKey,
 			resolver: () => async () => apiKey,
 		} as unknown as DescribeAttachedImagesDeps["modelRegistry"],
@@ -81,6 +87,7 @@ function makeDeps(
 		activeModelString: `${textModel.provider}/${textModel.id}`,
 		completeImpl,
 	};
+	return deps;
 }
 
 describe("describeAttachedImagesForTextModel", () => {
@@ -192,6 +199,36 @@ describe("describeAttachedImagesForTextModel", () => {
 		await describeAttachedImagesForTextModel([{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }], deps);
 
 		expect(stub.calls[0]?.[0]).toMatchObject({ id: "gpt-4o" });
+	});
+
+	it("offline mode keeps the description on the active model's provider, over the vision role", async () => {
+		const elsewhere = { ...cheaperVisionModel, provider: "elsewhere", id: "elsewhere-vision" };
+		const stub = makeCompleteStub("description");
+		const deps = makeDeps(testDir, [textModel, elsewhere, visionModel], stub.fn);
+		deps.settings = Settings.isolated({
+			"models.offline": true,
+			modelRoles: { vision: "elsewhere/elsewhere-vision" },
+		});
+		await describeAttachedImagesForTextModel([{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }], deps);
+
+		expect(stub.calls).toHaveLength(1);
+		expect(stub.calls[0]?.[0]).toMatchObject({ provider: "openai", id: "gpt-4o" });
+	});
+
+	it("offline mode describes nothing when only another provider has a vision model", async () => {
+		const elsewhere = { ...visionModel, provider: "elsewhere" };
+		const stub = makeCompleteStub("should not be used");
+		const deps = makeDeps(testDir, [textModel, elsewhere], stub.fn);
+		deps.settings = Settings.isolated({ "models.offline": true });
+		const blocks = await describeAttachedImagesForTextModel(
+			[{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+			deps,
+		);
+
+		expect(stub.calls).toHaveLength(0);
+		// The note names the provider offline mode is holding the session to.
+		expect(blocks[0]!.text).toContain("openai");
+		expect(blocks[0]!.text).toMatch(/path="local:\/\/image-/);
 	});
 
 	it("saves the image but emits a no-vision note when no vision model is available", async () => {

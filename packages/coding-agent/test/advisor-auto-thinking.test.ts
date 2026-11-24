@@ -8,7 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, toReasoningEffort } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 // `auto` is a session-level selector: the per-turn difficulty classifier runs

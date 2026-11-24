@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { customMessageEntryMessage, isUserRequestEntry } from "./transcript/transcript-entry";
 import {
 	canReplayRemoteCompaction,
 	getAnthropicCompactionPayload,

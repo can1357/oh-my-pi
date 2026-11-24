@@ -1,4 +1,4 @@
-import type { ReviewDiffFile, ReviewDiffRow } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import type { ReviewDiffFile, ReviewDiffRow } from "../annotate/annotation-types";
 import { parseGitDiffSectionPaths } from "../../../../utils/git-diff-paths";
 
 export interface ExcludedReviewFile {
