@@ -83,7 +83,7 @@
 - In the bash tool on macOS, `ls -lT` shows full timestamps instead of failing with `invalid tab size`, `uptime` prints macOS's format, and `chmod +a` and the other ACL forms run `/bin/chmod`.
 - On macOS, the bash tool's `uptime` takes the boot time from `kern.boottime` like `/usr/bin/uptime`, instead of a bad utmpx boot record ([#20323](https://github.com/can1357/oh-my-pi/pull/20323) by [@aktanazat](https://github.com/aktanazat))
 - The bash tool's `top -l` now reports load averages, user/sys/idle CPU and usernames, and `ps` shows start and elapsed times for other users' processes such as pid 1.
-- In the bash tool, `$!` after a lone `sleep`, `yes`, `nohup` or `timeout … &` is now a real pid that `ps`, `sample` and other programs can use.
+- In the bash tool, `$!` after a lone `sleep`, `yes` or `timeout … &` is now a real pid that `ps`, `sample` and other programs can use.
 - The bash tool's `sed` and `grep` now handle POSIX bracket expressions such as `[][.]` and `[.[]`, and `sed` passes invalid UTF-8 bytes through instead of failing with `stream did not contain valid UTF-8`.
 - The bash tool's `find -newermt` (and `-newerat`/`-newerct`/`-newerBt`) now accepts relative dates such as `10 minutes ago`, `-10 minutes` and `yesterday`, like `date -d`.
 - On macOS, the bash tool's `rm -rf` now removes iCloud placeholder (dataless) folders instead of failing with `Directory not empty`, and `du` reports them the way macOS `du` does.
