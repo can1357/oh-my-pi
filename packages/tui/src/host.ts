@@ -23,6 +23,7 @@ import { createTerminalDriver, type ProcessTerminalDriver, type TerminalDriverOp
 import { LoopWatchdog } from "./diag/loop-watchdog";
 import type { KeyEvent } from "./events";
 import { encodeHelloQuery, NativeSurfaces, TspConnection } from "./native";
+import { hyperlinksOverride } from "./driver/caps/env";
 import { isTernPane } from "./driver/caps/identity";
 import type { UiNode } from "./node";
 import type { Surface } from "./surface";
@@ -366,6 +367,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			...(options.separator ? { separator: options.separator } : {}),
 			...(options.frameInterval === undefined ? {} : { frameInterval: options.frameInterval }),
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
+			hyperlinksForced: hyperlinksOverride(options.driver?.env ?? Bun.env) === true,
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
 			...(options.onKey ? { onKey: options.onKey } : {}),

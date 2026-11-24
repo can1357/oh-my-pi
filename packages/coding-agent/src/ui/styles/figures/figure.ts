@@ -40,7 +40,12 @@ function figureRoom(cx: PaintContext): PaintContext {
 
 /** Markdown one cell in from both sides. */
 function paddedMarkdown(cx: PaintContext, text: string): readonly string[] {
-	return renderMarkdownFrame(text, cx.width, { theme: cx.theme, paddingX: 1, hyperlinks: cx.hyperlinks }).rows;
+	return renderMarkdownFrame(text, cx.width, {
+		theme: cx.theme,
+		paddingX: 1,
+		hyperlinks: cx.hyperlinks,
+		hyperlinksDetected: cx.hyperlinksDetected,
+	}).rows;
 }
 
 function drawable(node: UiNode, cx: PaintContext): boolean {

@@ -50,6 +50,7 @@ definePainter("md", (node, cx) => {
 		stream,
 		marks: props.marks,
 		hyperlinks: cx.hyperlinks,
+		hyperlinksDetected: cx.hyperlinksDetected,
 		textSizing: cx.textSizing,
 		colorful: look().colorful,
 		mermaid: look().mermaid,

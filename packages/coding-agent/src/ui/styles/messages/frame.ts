@@ -68,6 +68,7 @@ function paintFrameCard(node: UiNode, cx: PaintContext): Block {
 		theme,
 		textStyle: "customMessageText",
 		hyperlinks: cx.hyperlinks,
+		hyperlinksDetected: cx.hyperlinksDetected,
 	});
 	content.push(...rows);
 	if (folded) content.push("…");

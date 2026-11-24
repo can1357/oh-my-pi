@@ -87,6 +87,8 @@ export interface PaintContext {
 	readonly reduceMotion: boolean;
 	/** The terminal draws OSC 8 hyperlinks (painters may emit them). */
 	readonly hyperlinks: boolean;
+	/** OSC 8 is on because the terminal was detected to draw it, not forced by a setting or the environment. */
+	readonly hyperlinksDetected: boolean;
 	/**
 	 * Painters may draw OSC 66 sized text (the terminal draws it and the host allows it). A row with
 	 * a scale-`s` span must be followed by `s - 1` blank (whitespace-only) rows its glyphs extend into.
@@ -180,6 +182,8 @@ export interface PaintEnvironment {
 	readonly focus: Accessor<UiNode | null>;
 	readonly reduceMotion: Accessor<boolean>;
 	readonly hyperlinks: Accessor<boolean>;
+	/** Whether OSC 8 is on by detection rather than force; absent: never. */
+	readonly hyperlinksDetected?: Accessor<boolean>;
 	/** Whether painters may draw OSC 66 sized text; absent: never. */
 	readonly textSizing?: Accessor<boolean>;
 	/** Inline images the terminal draws; absent: none. */
@@ -277,6 +281,9 @@ function createContext(env: PaintEnvironment, width: number, height: number | un
 		get hyperlinks() {
 			return env.hyperlinks();
 		},
+		get hyperlinksDetected() {
+			return env.hyperlinksDetected?.() ?? false;
+		},
 		get textSizing() {
 			return env.textSizing?.() ?? false;
 		},
@@ -299,6 +306,7 @@ export function staticEnvironment(
 		focus?: UiNode | null;
 		reduceMotion?: boolean;
 		hyperlinks?: boolean;
+		hyperlinksDetected?: boolean;
 		textSizing?: boolean;
 		images?: PaintImages;
 	},
@@ -314,6 +322,7 @@ export function staticEnvironment(
 		focus,
 		reduceMotion,
 		hyperlinks,
+		...(options?.hyperlinksDetected ? { hyperlinksDetected: () => true } : {}),
 		...(options?.textSizing ? { textSizing: () => true } : {}),
 		...(options?.images ? { images: options.images } : {}),
 		setFocus: node => focus.set(node),

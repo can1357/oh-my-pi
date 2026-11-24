@@ -65,6 +65,7 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 					? renderMarkdownFrame(text, cx.width, {
 							theme,
 							hyperlinks: cx.hyperlinks,
+							hyperlinksDetected: cx.hyperlinksDetected,
 						}).rows.map(row => row.trimEnd())
 					: text.split("\n").map(line => theme.fg("muted", replaceTabs(line.trimEnd())));
 			const limit = expanded ? EXPANDED_LINES : COLLAPSED_LINES;

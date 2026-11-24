@@ -24,6 +24,11 @@ export interface InlineEnvironment {
 	readonly styles: MarkdownStyles;
 	/** Wrap links in OSC 8 hyperlinks. */
 	readonly hyperlinks: boolean;
+	/**
+	 * The terminal was detected to draw OSC 8, not forced to: a labeled http(s) link whose
+	 * target is its href then draws the label alone, since the label already carries the URL.
+	 */
+	readonly hyperlinksDetected?: boolean;
 	/** Draw ` (href)` after a link label that is not the href itself (default true). */
 	readonly linkUrls?: boolean;
 	/** The hyperlink target of an href (a resolved relative path); the href itself when undefined. */
@@ -165,8 +170,10 @@ function renderLink(env: InlineEnvironment, ctx: InlineContext, token: Tokens.Li
 	const label = styles.link(styles.underline(renderInline(env, token.tokens, ctx)));
 	const target = env.linkTarget?.(href) ?? href;
 	const bare = token.text === href || href === `mailto:${token.text}`;
+	const labelCarriesHref =
+		env.hyperlinks && env.hyperlinksDetected === true && target === href && /^https?:\/\//i.test(href);
 	let out = env.hyperlinks ? osc8(target, label) : label;
-	if (!bare && env.linkUrls !== false) {
+	if (!bare && !labelCarriesHref && env.linkUrls !== false) {
 		const url = styles.linkUrl(`(${href})`);
 		out += ` ${env.hyperlinks ? osc8(target, url) : url}`;
 	}

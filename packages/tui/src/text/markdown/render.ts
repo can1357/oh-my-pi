@@ -46,6 +46,8 @@ export interface MarkdownOptions {
 	readonly colorful?: boolean;
 	/** Wrap links in OSC 8 hyperlinks (default false). */
 	readonly hyperlinks?: boolean;
+	/** OSC 8 is on because the terminal was detected to draw it: labeled http(s) links hide their URL (default false). */
+	readonly hyperlinksDetected?: boolean;
 	/**
 	 * Draw top-level H1 headings at double size with OSC 66 text sizing, over
 	 * their row and one reserved blank row (default false: the terminal must
@@ -482,6 +484,7 @@ function createRenderer(tokens: readonly Token[], fullWidth: number, options: Ma
 		inline: {
 			styles,
 			hyperlinks: options.hyperlinks ?? false,
+			hyperlinksDetected: options.hyperlinksDetected ?? false,
 			linkTarget: options.linkTarget,
 			extensionLink: extensionLinkTest(options.linkSchemes ?? []),
 			marks: options.marks,
@@ -692,6 +695,7 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.paddingX ?? 0,
 		options.colorful ?? true,
 		options.hyperlinks ?? false,
+		options.hyperlinksDetected ?? false,
 		options.textSizing ?? false,
 		options.mermaid ?? true,
 		options.textStyle ?? "",

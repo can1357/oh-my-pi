@@ -32,6 +32,7 @@ export function detailBox(cx: PaintContext, markdown: string): string[] {
 		theme,
 		textStyle: "customMessageText",
 		hyperlinks: cx.hyperlinks,
+		hyperlinksDetected: cx.hyperlinksDetected,
 	});
 	return ["", ...rows.map(row => ` ${row}`), ""].map(row => fillRow(theme, "customMessageBg", row, cx.width));
 }

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Labeled Markdown `http(s)` links show only their clickable label when the terminal was detected to draw OSC 8, instead of repeating the URL in parentheses. A link whose target is resolved to another URI, OSC 8 forced by `tui.hyperlinks: always` or `PI_FORCE_HYPERLINKS=1`, and terminals without OSC 8 keep the `(url)` suffix ([#12966](https://github.com/can1357/oh-my-pi/pull/12966) by [@razshlomo](https://github.com/razshlomo))
 - Corrected math environment detection to properly handle blocks starting with `\begin`
 - Cmd+A highlights the full text of editors and inputs when the terminal forwards the shortcut. Typing, deleting or pasting replaces the selected range.
 - Native overlays follow the field they are anchored to, including when the field moves or shares its local key with another field.
