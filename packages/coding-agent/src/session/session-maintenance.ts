@@ -530,7 +530,12 @@ export interface SessionMaintenanceHost {
 	replaceMessagesFromSessionContext(messages: AgentMessage[]): void;
 	/** Preserve the eval runtime snapshot at the history rewrite boundary for replay. */
 	persistEvalStateContext(): void;
-	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
+	/** With `withImageDescriptions`, images are replaced by the descriptions {@link prepareImageDescriptions} made. */
+	convertToLlmForSideRequest(messages: AgentMessage[], withImageDescriptions?: boolean): Message[];
+	/** The model to describe images for when `reader` gets history as text; undefined when none is needed. */
+	imageDescriptionModel(reader: Model): Model | undefined;
+	/** Describe the images of `messages` for `model`, a model that cannot see them. */
+	prepareImageDescriptions(messages: AgentMessage[], model: Model, signal?: AbortSignal): Promise<void>;
 	/** The provider context a live turn sends for `summarized` + `retained`, cut to the `summarized` range, as `model` reads it. */
 	buildLiveProviderContext(
 		summarized: AgentMessage[],
@@ -1741,7 +1746,6 @@ export class SessionMaintenance {
 							// `before_agent_start` override included — so a provider-native
 							// compaction shares the live request's cached prefix.
 							remoteSystemPrompt: this.#host.agent.state.systemPrompt,
-							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
 						},
 						compactionCandidates,
@@ -4090,6 +4094,27 @@ export class SessionMaintenance {
 		return journalCompletion(this.#host.sessionManager, { purpose: `compaction:${method}`, usageOnly: true });
 	}
 
+	/**
+	 * History conversion for a summary request to `candidate`. A summary carries history as text, so when the
+	 * candidate or the session's model cannot see images, each summarized image is described first and its
+	 * description stands in for it.
+	 */
+	async #summaryConvertToLlm(
+		preparation: CompactionPreparation,
+		candidate: Model,
+		signal: AbortSignal,
+	): Promise<(messages: AgentMessage[]) => Message[]> {
+		const describeFor = this.#host.imageDescriptionModel(candidate);
+		if (describeFor) {
+			await this.#host.prepareImageDescriptions(
+				[...preparation.messagesToSummarize, ...preparation.turnPrefixMessages],
+				describeFor,
+				signal,
+			);
+		}
+		return messages => this.#host.convertToLlmForSideRequest(messages, describeFor !== undefined);
+	}
+
 	async #compactWithFallbackModel(
 		method: CompactionMethod,
 		preparation: CompactionPreparation,
@@ -4125,6 +4150,7 @@ export class SessionMaintenance {
 			}
 
 			try {
+				const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, signal);
 				return await compact(
 					this.#host.obfuscatePreparationForProvider(preparation),
 					candidate,
@@ -4134,7 +4160,7 @@ export class SessionMaintenance {
 					{
 						...options,
 						metadata: this.#host.agent.metadataForProvider(candidate.provider),
-						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+						convertToLlm,
 						buildProviderContext: (summarized, retained, signal, model) =>
 							this.#host.buildLiveProviderContext(summarized, retained, signal, model),
 						isUserAuthored: isUserAuthoredMessage,
@@ -6307,6 +6333,7 @@ export class SessionMaintenance {
 					let attempt = 0;
 					while (true) {
 						try {
+							const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, autoCompactionSignal);
 							compactResult = await compact(
 								this.#host.obfuscatePreparationForProvider(preparation),
 								candidate,
@@ -6320,7 +6347,7 @@ export class SessionMaintenance {
 									remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
-									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+									convertToLlm,
 									buildProviderContext: (summarized, retained, signal, model) =>
 										this.#host.buildLiveProviderContext(summarized, retained, signal, model),
 									isUserAuthored: isUserAuthoredMessage,
