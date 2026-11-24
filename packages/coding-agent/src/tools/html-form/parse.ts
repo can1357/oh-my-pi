@@ -141,9 +141,9 @@ const IGNORED_INPUTS: Record<string, true> = { button: true, file: true, image: 
 const CONTROL_SELECTOR = "input, select, textarea";
 
 /** Parse agent-written form HTML; content outside the first `<form>` is ignored when one exists. */
-export function parseHtmlForm(html: string): HtmlForm {
+export function parseHtmlForm(html: string, options?: { mediaNotices?: boolean }): HtmlForm {
 	const document = parseHTML(html).document;
-	return new FormBuilder(document.querySelector("form") ?? document).build();
+	return new FormBuilder(document.querySelector("form") ?? document, options?.mediaNotices === true).build();
 }
 
 /** Append `text` to `spans`, merging into the previous span when the style matches. */
@@ -193,6 +193,7 @@ function numberAttr(element: Element, name: string): number | undefined {
 
 class FormBuilder {
 	readonly #root: Document | Element;
+	readonly #mediaNotices: boolean;
 	readonly #sections: FormSection[] = [];
 	readonly #fields: FormField[] = [];
 	readonly #hidden: [string, string][] = [];
@@ -207,8 +208,9 @@ class FormBuilder {
 	#inline: FormSpan[] = [];
 	#fieldsetDepth = 0;
 
-	constructor(root: Document | Element) {
+	constructor(root: Document | Element, mediaNotices: boolean) {
 		this.#root = root;
+		this.#mediaNotices = mediaNotices;
 		this.#sections.push(this.#section);
 	}
 
@@ -246,6 +248,19 @@ class FormBuilder {
 		}
 		if (!(node instanceof Element)) return;
 		const tag = node.localName;
+		if (
+			this.#mediaNotices &&
+			(["video", "audio", "iframe", "object", "embed", "canvas"].includes(tag) ||
+				(tag === "img" && !node.getAttribute("src")?.trim()))
+		) {
+			this.#flush(false);
+			const label = node.getAttribute("aria-label");
+			this.#section.blocks.push({
+				kind: "text",
+				spans: [{ text: `Media not supported${label ? `: ${label}` : ""}` }],
+				heading: false,
+			});
+		}
 		if (SKIPPED[tag]) return;
 		switch (tag) {
 			case "br":

@@ -15,6 +15,8 @@
 
 ### Added
 
+- Writable Collab browser guests can answer a complete Ask form with its context. Older guests keep field-by-field prompts ([#20344](https://github.com/can1357/oh-my-pi/pull/20344) by [@andrewleech](https://github.com/andrewleech)).
+- Added the `mediaNotices` option to the HTML form parser ([#20344](https://github.com/can1357/oh-my-pi/pull/20344) by [@andrewleech](https://github.com/andrewleech)).
 - The subagents HUD mutes the status mark, and tray cards mark, subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so they stand apart from subagents doing work
 - Retry fallbacks now record why they switched models on the fallback's `model_change` entry: the model left, the trigger (`request-error`, `agent-loop`, `usage-preflight`, or `missing-credential`), and the error or condition. A fallback after the agent loop stopped a turn itself, such as a soft tool requirement the model never met, is announced as `Turn stopped: …` instead of `Request failed: …` ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
 - The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses

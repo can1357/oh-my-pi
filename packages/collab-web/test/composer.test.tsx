@@ -42,6 +42,23 @@ describe("Composer host UI requests", () => {
 		expect(html).toContain("Submit");
 	});
 
+	it("renders whole-form requests with a cancel action", () => {
+		const html = renderToStaticMarkup(
+			<Composer
+				{...props({
+					reqId: 4,
+					kind: "form",
+					title: "Questions",
+					html: '<form><label><input type="radio" name="answer" value="yes">Yes</label><label><input type="radio" name="answer" value="no">No</label></form>',
+				})}
+			/>,
+		);
+		expect(html).toContain("Questions");
+		expect(html).toContain("Other");
+		expect(html).toContain("Submit");
+		expect(html).toContain("Cancel");
+	});
+
 	it("keeps the editor submit enabled for whitespace-only drafts", () => {
 		const html = renderToStaticMarkup(
 			<Composer {...props({ reqId: 3, kind: "editor", title: "Other", prefill: "   " })} />,

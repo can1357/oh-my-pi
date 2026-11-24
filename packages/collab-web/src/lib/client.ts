@@ -70,6 +70,7 @@ export interface GuestSnapshot {
 	readOnly: boolean;
 	/** Pending host-side UI request (`ask` select/editor) this guest can answer. */
 	uiRequest: CollabUiRequest | null;
+	uiFormStatus: "idle" | "pending" | "rejected";
 	/** Capped at 50, newest last. */
 	notices: readonly Notice[];
 	/** Snapshot download progress between `welcome` and its final chunk, else null. */
@@ -119,6 +120,7 @@ interface PendingTranscript {
 export class GuestClient {
 	readonly #socket: CollabSocket;
 	readonly #name: string;
+	readonly #formSupport: boolean;
 	/** base64url write token from a full link; absent when joined via a view link. */
 	readonly #writeToken: string | undefined;
 	readonly #listeners = new Set<() => void>();
@@ -157,6 +159,7 @@ export class GuestClient {
 	#readOnly = false;
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
+	#uiFormStatus: "idle" | "pending" | "rejected" = "idle";
 	#notices: readonly Notice[] = [];
 	#snapshot: GuestSnapshot;
 	/**
@@ -171,10 +174,11 @@ export class GuestClient {
 	#cancelFrameCommit: (() => void) | null = null;
 
 	/** @throws Error when the link does not parse. */
-	constructor(link: string, displayName: string) {
+	constructor(link: string, displayName: string, options: { formSupport?: boolean } = {}) {
 		const parsed = parseCollabLink(link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		this.#name = displayName;
+		this.#formSupport = options.formSupport ?? false;
 		this.#writeToken = parsed.writeToken ? encodeBase64Url(parsed.writeToken) : undefined;
 		this.#socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: importRoomKey(parsed.key) });
 		this.#socket.onOpen = () => this.#handleOpen();
@@ -232,7 +236,8 @@ export class GuestClient {
 	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
 		this.#socket.send({ t: "ui-response", reqId, value });
 		if (this.#uiRequest?.reqId === reqId) {
-			this.#showNextUiRequest();
+			if (this.#uiRequest.kind === "form" && value !== undefined) this.#uiFormStatus = "pending";
+			else this.#showNextUiRequest();
 			this.#commit();
 		}
 	}
@@ -283,7 +288,13 @@ export class GuestClient {
 	}
 
 	#handleOpen(): void {
-		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		this.#socket.send({
+			t: "hello",
+			proto: COLLAB_PROTO,
+			name: this.#name,
+			writeToken: this.#writeToken,
+			...(this.#formSupport ? { capabilities: ["form-v2"] } : {}),
+		});
 		// Before the first welcome, connect()'s timer already covers this hello.
 		if (this.#welcomed) this.#armRejoinTimer();
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
@@ -305,7 +316,13 @@ export class GuestClient {
 		this.#pendingSnapshot = null;
 		this.#clearUiRequests();
 		this.#phase = "reconnecting";
-		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		this.#socket.send({
+			t: "hello",
+			proto: COLLAB_PROTO,
+			name: this.#name,
+			writeToken: this.#writeToken,
+			...(this.#formSupport ? { capabilities: ["form-v2"] } : {}),
+		});
 		this.#armRejoinTimer();
 		this.#commit();
 	}
@@ -504,7 +521,9 @@ export class GuestClient {
 				}
 				break;
 			case "ui-request":
-				if (this.#uiRequest) this.#uiRequestQueue = [...this.#uiRequestQueue, frame.request];
+				if (this.#uiRequest?.reqId === frame.request.reqId && this.#uiRequest.kind === "form") {
+					if (this.#uiFormStatus === "pending") this.#uiFormStatus = "rejected";
+				} else if (this.#uiRequest) this.#uiRequestQueue = [...this.#uiRequestQueue, frame.request];
 				else this.#uiRequest = frame.request;
 				break;
 			case "ui-request-end":
@@ -682,12 +701,14 @@ export class GuestClient {
 	#clearUiRequests(): void {
 		this.#uiRequest = null;
 		this.#uiRequestQueue = [];
+		this.#uiFormStatus = "idle";
 	}
 
 	#showNextUiRequest(): void {
 		const [next, ...rest] = this.#uiRequestQueue;
 		this.#uiRequest = next ?? null;
 		this.#uiRequestQueue = rest;
+		this.#uiFormStatus = "idle";
 	}
 
 	#buildSnapshot(): GuestSnapshot {
@@ -710,6 +731,7 @@ export class GuestClient {
 			working: this.#working,
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
+			uiFormStatus: this.#uiFormStatus,
 			notices: this.#notices,
 			loading: this.#pendingSnapshot && {
 				received: this.#pendingSnapshot.entries.length,

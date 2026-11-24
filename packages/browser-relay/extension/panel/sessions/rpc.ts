@@ -338,6 +338,9 @@ export class RpcPanelSession implements PanelSession {
 	answer(reqId: number, value: CollabUiResponseValue): void {
 		const pending = this.#uiRequests.find(candidate => candidate.request.reqId === reqId);
 		if (!pending) return;
+		if (value !== undefined && typeof value !== "string") {
+			throw new Error("form responses are not supported by the RPC panel");
+		}
 		this.#uiRequests = this.#uiRequests.filter(candidate => candidate !== pending);
 		this.#commit();
 		const id = pending.rpcId;

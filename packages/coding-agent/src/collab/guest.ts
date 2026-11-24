@@ -871,6 +871,7 @@ export class CollabGuestLink {
 	#presentUiRequest(request: CollabUiRequest): void {
 		// The host only targets writable peers; drop defensively on a read-only link.
 		if (this.#readOnly || this.#pendingUiRequests.has(request.reqId)) return;
+		if (request.kind === "form") return;
 		const abort = new AbortController();
 		this.#pendingUiRequests.set(request.reqId, abort);
 		const dialog =

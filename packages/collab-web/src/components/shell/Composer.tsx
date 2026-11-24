@@ -3,6 +3,7 @@ import { SendHorizontal, Square } from "lucide-react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
 import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
 import type { ConnectionPhase, GuestClient } from "../../lib/client";
+import { AskForm } from "./AskForm";
 
 export interface ComposerProps {
 	client: GuestClient;
@@ -10,6 +11,7 @@ export interface ComposerProps {
 	readOnly: boolean;
 	/** Pending host-side UI request this guest can answer. */
 	uiRequest: CollabUiRequest | null;
+	uiFormStatus?: "idle" | "pending" | "rejected";
 	/** Host agent turn in flight. */
 	working: boolean;
 	/** Prompts queued behind the running turn. */
@@ -122,6 +124,7 @@ export const Composer = memo(function Composer({
 	phase,
 	readOnly,
 	uiRequest,
+	uiFormStatus = "idle",
 	working,
 	queuedMessageCount,
 }: ComposerProps): ReactNode {
@@ -182,6 +185,15 @@ export const Composer = memo(function Composer({
 							);
 						})}
 					</div>
+				) : uiRequest.kind === "form" ? (
+					<AskForm
+						key={uiRequest.reqId}
+						reqId={uiRequest.reqId}
+						html={uiRequest.html}
+						pending={uiFormStatus === "pending"}
+						rejected={uiFormStatus === "rejected"}
+						onSubmit={value => client.sendUiResponse(uiRequest.reqId, value)}
+					/>
 				) : (
 					<AskEditor
 						key={uiRequest.reqId}

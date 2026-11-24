@@ -1,4 +1,4 @@
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { type ChoiceField, type FormBlock, type FormField, type HtmlForm, spansText, type TextField } from "./parse";
 
 /** Submitted value of one control: text, a number for `number`/`range` inputs, or a group's checked values. */

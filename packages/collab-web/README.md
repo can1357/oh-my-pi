@@ -2,6 +2,8 @@
 
 Web client for [omp collab sessions](../../docs/collab.md). Paste a `/collab` link into the browser and you get the same live session guests see in the TUI: streaming transcript, tool-call cards, subagent panel with live transcripts, and a composer that prompts (or interrupts) the host agent.
 
+Writable guests can answer whole-form Ask requests in the composer, including prefilled fields, choice groups and validation. Older guests receive field-by-field prompts, including when they share a room with guests that support whole forms. If a whole-form request exceeds the Collab frame limit, guests use field-by-field prompts instead. Images support base64 PNG, JPEG, GIF and WebP data URLs. Remote images and other media, including inline SVG, are shown as unsupported and are not loaded or executed.
+
 ## Quick start
 
 ```sh
@@ -34,4 +36,4 @@ The room key never leaves the URL fragment — it is not sent to the relay or an
 - `src/tool-render/` — per-tool React renderers shared with coding-agent HTML session exports: one view per built-in tool, common `ToolView` chrome, theme-adaptive `tv-` design tokens, and an `<omp-tool-view>` web-component wrapper. The `ToolRenderHost` seam lets hosts wire agent-id chips to a sub-session view (drawer here, sidebar navigation in exports).
 - `scripts/` — `local-relay.ts` (content-blind relay on `Bun.serve`), `mock-host.ts` + `fixture.ts` (scripted host for offline dev), `build-export-viewer.ts` (bundles the tool/trace renderers, React, export shell and styles into a content-addressed JS file under `packages/coding-agent/export-assets/`; release CI publishes it to `build.stencil.so`).
 
-The package is intentionally standalone — no dependency on `@oh-my-pi/pi-coding-agent` at runtime or type level. Wire-shape drift is prevented by consuming the same `@oh-my-pi/pi-wire` contracts as the host, with sealed-frame interop still covered by `test/codec.test.ts`.
+The browser bundle uses the coding-agent HTML form parser and form data helpers, and consumes shared protocol shapes from `@oh-my-pi/pi-wire`. Sealed-frame interop is covered by `test/codec.test.ts`.
