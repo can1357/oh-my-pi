@@ -325,7 +325,7 @@ async function runEvalMcpCall(args: unknown, options: ToolBridgeOptions): Promis
 }
 
 /** Counts a call a cell made through the bridge in the session's tool-call loop guard, as the model's own call would count. */
-function recordCellToolCall(
+export function recordCellToolCall(
 	options: ToolBridgeOptions,
 	id: string,
 	name: string,
