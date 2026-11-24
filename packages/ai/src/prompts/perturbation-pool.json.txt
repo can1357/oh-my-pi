@@ -17559,6 +17559,16 @@
 				"- NEVER run checks between edits, and NEVER yield an unverified code change: one check after the last edit, the cheapest that covers it.",
 				"- NEVER run checks between edits, and NEVER yield a code change unverified: a single check after the last edit, the cheapest that covers it."
 			]
+		},
+		{
+			"source": "- A reply to a code change MUST name the check you ran after your last edit, and its result. No such check? You are not done: run it, then reply.",
+			"origin": "system/project-prompt.md",
+			"variants": [
+				"- A response to a code change MUST name the check you ran following your last edit, plus its result. Ran none? You are not finished: run it, then respond.",
+				"- When replying to a code change you MUST identify the check executed after your most recent edit and state its result. No check run? You are not done: run it, then reply.",
+				"- A reply to a code change MUST cite the check you ran after your latest edit along with its result. If no such check exists, you are not done: run it, then reply.",
+				"- Any reply to a code change MUST name the check performed after your last edit and give its result. Did not run one? You are not done: run it, then reply."
+			]
 		}
 	]
 }

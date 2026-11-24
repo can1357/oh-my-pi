@@ -39,7 +39,7 @@
 ### Changed
 
 - Shell command previews show chained commands with their real `&&`/`||` operators instead of `and`/`or`, and `cd dir` as written instead of a `cwd dir` badge
-- The agent works statically and verifies each code change once, after its last edit, before replying: the project's static check for renames and other behavior-preserving edits, the named or narrowest test for behavior changes, and nothing for questions. It no longer runs checks between edits
+- The agent works statically and verifies each code change once, after its last edit, before replying: the project's static check for renames and other behavior-preserving edits, the named or narrowest test for behavior changes, and nothing for questions. Its reply names that check and the result. It no longer runs checks between edits
 - The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - With Vim editing mode on, `y` no longer copies to the system clipboard; use `"+y` / `"*y`, or turn on `tui.vimYankToClipboard` to get the old behavior ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - With Vim editing mode on, the prompt after a message you send starts in **Vim Start Mode** (Insert by default) instead of staying in the mode you sent it from ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
