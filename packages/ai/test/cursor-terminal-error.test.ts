@@ -456,6 +456,8 @@ async function startServer(): Promise<string> {
 					// Split inside the marker, as the transport delivers it.
 					textDeltaFrame(TOOL_CALL_MARKUP_TEXT.slice(0, 4)),
 					textDeltaFrame(TOOL_CALL_MARKUP_TEXT.slice(4)),
+					// Text that follows the marker must not be stored once it is refused.
+					textDeltaFrame(" && sleep 10"),
 					stepCompletedFrame(),
 					turnEndedFrame(),
 				]),
@@ -642,6 +644,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 			.map(block => (block as { text: string }).text)
 			.join("");
 		expect(storedText).not.toContain("<|open|>toolscall");
+		expect(storedText).not.toContain("sleep 10");
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("tool-call markup");

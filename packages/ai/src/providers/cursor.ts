@@ -1561,6 +1561,7 @@ function streamCursorWithWireMode(
 				resolvedMcpToolCallIds,
 				handedOffToolCallIds,
 				unheldExternalCalls: previousState?.unheldExternalCalls ?? (relay ? new Map() : undefined),
+				toolCallMarkupRefusal: previousState?.toolCallMarkupRefusal,
 				get firstTokenTime() {
 					return firstTokenTime;
 				},
