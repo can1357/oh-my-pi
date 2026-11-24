@@ -122,7 +122,8 @@ fn find_crossing(units: &[u16], max_tokens: u32) -> Option<Crossing> {
 		let mut anchor = (0usize, 0u32);
 		let mut found = None;
 		let _ = Splitter::Qwen.try_for_each_piece_range(units, &mut |range| {
-			let best = if newline_then_space(&units[range.clone()]) {
+			let best = if is_newline(units[range.end - 1]) && newline_then_space(&units[range.clone()])
+			{
 				let bytes = bpe::piece_bytes(&units[range.clone()], &mut buf);
 				let piece_tokens = count_jev_piece(jev, bytes, memo);
 				if tokens.saturating_add(piece_tokens) <= max_tokens {
