@@ -25,7 +25,6 @@
 
 ### Fixed
 
-- Fixed extensions crashing when they called `isFocused()` on the handle from `showOverlay`, which did not have it; the handle now reports whether its overlay holds focus ([#10664](https://github.com/can1357/oh-my-pi/issues/10664), [#19957](https://github.com/can1357/oh-my-pi/pull/19957) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Tern Plan Review annotations being dropped before they reached omp, so saved comments now enable Refine ([#20250](https://github.com/can1357/oh-my-pi/pull/20250) by [@ash-miku](https://github.com/ash-miku))
 - Fixed Ctrl+[ not leaving Vim Insert, Replace or Visual mode, or cancelling a pending operator, under the Kitty keyboard protocol or modifyOtherKeys; inside the Vim modes it now does what Escape does ([#19547](https://github.com/can1357/oh-my-pi/issues/19547), [#20209](https://github.com/can1357/oh-my-pi/pull/20209) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Truncated `ast_grep` results show the exact next offset (`use skip=N for the next page`) in the result view and the native view; results recorded without it keep the generic hint ([#20203](https://github.com/can1357/oh-my-pi/pull/20203) by [@MikeeI](https://github.com/MikeeI))
