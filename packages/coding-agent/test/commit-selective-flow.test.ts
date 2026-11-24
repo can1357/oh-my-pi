@@ -706,6 +706,15 @@ describe("selective commit flow", () => {
 		expect(draft.diff()).toContain("-line 10\n+main session\n");
 		draft.drop({ path: "a.txt" });
 		expect(draft.selection()).toEqual([]);
+		expect(() => draft.take({ path: "a.txt", grep: "other session" })).not.toThrow();
+		expect(draft.selection()).toEqual([
+			{
+				kind: "text",
+				path: "a.txt",
+				before: { text: original, mode: "100644" },
+				after: { text: outside, mode: "100644" },
+			},
+		]);
 		expect(() => draft.take({ path: "**" })).not.toThrow();
 		expect(draft.selection()).toEqual(bothSelected);
 		expect(draft.diff()).toContain("-line 1\n+other session\n");
