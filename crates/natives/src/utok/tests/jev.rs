@@ -92,6 +92,24 @@ fn truncate_keeps_whole_word_on_nfc_input() {
 	assert_eq!(Encoding::Jev.count(&u16s[..end]), 1);
 }
 
+/// NFC input whose crossing piece spans several merge windows: the cut must
+/// still be the longest fitting prefix (cuts are pruned by the complete
+/// windows they keep, then priced from the crossing piece).
+#[test]
+fn truncate_nfc_long_piece_matches_longest_fitting_prefix() {
+	let u16s: Vec<u16> = format!("go {} now", "e\u{301}".repeat(600))
+		.encode_utf16()
+		.collect();
+	let total = Encoding::Jev.count(&u16s[..]);
+	for budget in [2, total / 3, total / 2, total - 2] {
+		let longest = (0..=u16s.len())
+			.rev()
+			.find(|&k| Encoding::Jev.count(&u16s[..k]) <= budget)
+			.unwrap();
+		assert_eq!(jev::truncate_u16(&u16s, budget), longest, "budget {budget}");
+	}
+}
+
 #[test]
 fn encode_is_none() {
 	assert_eq!(Encoding::Jev.encode("hello"), None);
