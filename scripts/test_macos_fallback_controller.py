@@ -370,21 +370,62 @@ class ProtocolTests(unittest.TestCase):
 class BuildRequestTests(unittest.TestCase):
     """Test the build_request function directly."""
 
-    def test_build_request_accepts_unmerged_pr(self):
-        """An unmerged PR (parents empty) should not be rejected by build_request."""
-        import tempfile, os
+    def test_build_request_rejects_unmerged_pr(self):
+        """An unmerged PR cannot be admitted: the merge-snapshot fence is fail-closed.
+
+        Commit 868abec9d4 requires merge_commit_sha == source_sha and parents
+        [base_sha, head_sha]. The previous test, added in #709, asserted that an
+        unmerged PR with empty parents was accepted. The controller never implemented that.
+        """
+        import tempfile
+
+        import macos_fallback_common
+
+        head = "a" * 40
+        base = "b" * 40
+        tree = "c" * 40
+        worker = "d" * 40
+        source = "e" * 40
         api = unittest.mock.Mock()
-        pr = dict(number=42, head=dict(sha="h" * 40, repo=dict(full_name="blyzer/oh-my-pi")),
-                  base=dict(sha="b" * 40, ref="omp2"),
-                  state="open", merged=False)
-        commit = dict(sha="h" * 40, parents=[], tree=dict(sha="t" * 40))
-        parent_run = dict(repository=dict(id=1), actor=dict(login="blyzer"),
-                          triggering_actor=dict(login="blyzer"))
-        api.get = lambda path: (parent_run if "/actions/runs/" in path and "/git/" not in path else
-                                commit if "/git/commits/" in path else pr)
-        api.paginate = lambda path, key: [
-            dict(id=10, name="Rust workspace and acceptance proofs", status="in_progress"),
-        ]
+        pr = dict(
+            number=42,
+            head=dict(sha=head, repo=dict(full_name="blyzer/oh-my-pi")),
+            base=dict(sha=base, ref="omp2"),
+            state="open",
+            merged=False,
+            merge_commit_sha=None,
+        )
+        commit = dict(sha=source, parents=[], tree=dict(sha=tree))
+        parent_run = dict(
+            repository=dict(id=1, full_name="blyzer/oh-my-pi"),
+            actor=dict(login="blyzer"),
+            triggering_actor=dict(login="blyzer"),
+            event="pull_request",
+            path=".github/workflows/ci.yml",
+            head_repository=dict(full_name="blyzer/oh-my-pi"),
+            head_sha=head,
+            status="in_progress",
+            run_attempt=1,
+        )
+        job = dict(
+            id=10,
+            run_id=1,
+            run_attempt=1,
+            name="Rust workspace and acceptance proofs",
+            status="in_progress",
+        )
+
+        def get(path):
+            if "/actions/jobs/" in path:
+                return job
+            if "/actions/runs/" in path and "/git/" not in path:
+                return parent_run
+            if "/git/commits/" in path:
+                return commit
+            return pr
+
+        api.get = get
+        api.paginate = lambda path, key: [job]
         event_path = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
         json.dump({"number": 42}, event_path)
         event_path.close()
@@ -394,17 +435,19 @@ class BuildRequestTests(unittest.TestCase):
             "GITHUB_RUN_ATTEMPT": "1",
             "GITHUB_EVENT_PATH": event_path.name,
             "GITHUB_EVENT_NAME": "pull_request",
-            "GITHUB_SHA": "h" * 40,
-            "CI_MACOS_WORKER_SHA": "w" * 40,
+            "GITHUB_SHA": source,
+            "CI_MACOS_WORKER_SHA": worker,
             "AFFECTED_SCOPE": "full",
             "AFFECTED_ARGS": "",
             "AFFECTED_DOC_ARGS": "",
         }
         try:
             with unittest.mock.patch.dict(os.environ, env, clear=True):
-                req = controller.build_request(api, "rust")
-            self.assertEqual(req["pr_number"], 42)
-            self.assertEqual(req["head_sha"], "h" * 40)
+                with self.assertRaisesRegex(
+                    macos_fallback_common.VerificationError,
+                    "pull request source is stale or mismatched",
+                ):
+                    controller.build_request(api, "rust")
         finally:
             os.unlink(event_path.name)
 
