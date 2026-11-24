@@ -734,7 +734,8 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 				: this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);
 			if (!asked) commit();
 			else {
-				const outcome = asked instanceof Promise ? await asked : asked;
+				// A decider that commits does so before returning, so awaiting a plain result adds no delay to the commit.
+				const outcome = await asked;
 				if (outcome.kind !== "committed") {
 					errors.push(outcome.message);
 					refused = outcome.kind === "refused";

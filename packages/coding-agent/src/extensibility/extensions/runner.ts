@@ -603,6 +603,7 @@ interface TodoBackendList {
 export const TODO_APPLY_TIMEOUT_MS = 10_000;
 
 const NOTHING_SAVED_SUFFIX = "; nothing was saved.";
+const TODO_APPLY_EVENT = "todo_backend_apply";
 
 interface TodoApplyRequest {
 	backend: string;
@@ -610,7 +611,7 @@ interface TodoApplyRequest {
 	current(): TodoPhase[];
 	commit(): void;
 	resend(): void;
-	closing?: boolean;
+	closing: boolean;
 	signal?: AbortSignal;
 }
 
@@ -1831,7 +1832,7 @@ export class ExtensionRunner {
 		const answered = Promise.withResolvers<void>();
 		let asked = false;
 		const verdict = await this.#runHandlerWithTimeout<
-			{ type: "todo_backend_apply"; change: TodoBackendChange },
+			{ type: typeof TODO_APPLY_EVENT; change: TodoBackendChange },
 			| { kind: "accepted" }
 			| { kind: "refused"; message: string }
 			| { kind: "failed"; message: string }
@@ -1848,7 +1849,7 @@ export class ExtensionRunner {
 					answered.resolve();
 				}
 			},
-			{ type: "todo_backend_apply", change: structuredClone(change) },
+			{ type: TODO_APPLY_EVENT, change: structuredClone(change) },
 			this.createContext(),
 			extension,
 			timeoutMs,
@@ -2267,7 +2268,7 @@ export class ExtensionRunner {
 								ctx,
 								handlerSignal,
 								event.type === "tool_call" ||
-									event.type === "todo_backend_apply" ||
+									event.type === TODO_APPLY_EVENT ||
 									SESSION_BEFORE_EVENTS[event.type] === true
 									? budget
 									: undefined,
