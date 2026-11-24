@@ -53,6 +53,11 @@ export function describeAllAccountsPaused(providerName: string, paused: readonly
 	return `All ${providerName} accounts are paused: ${paused.map(account => account.label).join(", ")}. Resume one with /usage resume <account>.`;
 }
 
+/** What `/session pin` says when the chosen account is paused. */
+export function describePausedPin(account: SessionPinAccount, accounts: readonly SessionPinAccount[]): string {
+	return `${account.label} is paused. Resume it with /usage resume ${resumeSelector(account, accounts)} first.`;
+}
+
 /** Match a `/session pin` selector by 1-based position or exact account identity. */
 export function matchSessionPinAccounts(accounts: readonly SessionPinAccount[], selector: string): SessionPinAccount[] {
 	const wanted = selector.trim().toLowerCase();

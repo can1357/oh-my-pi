@@ -33,6 +33,7 @@ import type { ResetUsageAccount } from "../modes/view-model/overlays/reset-usage
 import { handleUsagePauseCommand } from "./helpers/account-pause";
 import {
 	describeAllAccountsPaused,
+	describePausedPin,
 	matchSessionPinAccounts,
 	resumeSelector,
 	toPausedSessionPinAccounts,
@@ -185,7 +186,7 @@ async function handleSessionPinCommand(
 		const pausedMatch = /^\d+$/.test(selector) ? undefined : matchSessionPinAccounts(paused, selector)[0];
 		await output(
 			pausedMatch
-				? `${pausedMatch.label} is paused. Resume it with /usage resume ${resumeSelector(pausedMatch, everyAccount)} first.`
+				? describePausedPin(pausedMatch, everyAccount)
 				: `No ${providerName} account matches "${selector}".`,
 		);
 		return;

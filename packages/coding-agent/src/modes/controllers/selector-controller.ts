@@ -68,6 +68,8 @@ import type { LogoutAccount } from "../view-model/overlays/logout-account-select
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import {
 	describeAllAccountsPaused,
+	describePausedPin,
+	resumeSelector,
 	toPausedSessionPinAccounts,
 	toSessionPinAccounts,
 } from "../../slash-commands/helpers/session-pin";
@@ -2432,11 +2434,14 @@ export class SelectorController {
 			);
 			return;
 		}
+		const paused = toPausedSessionPinAccounts(accountList.paused, accounts.length);
+		const everyAccount = [...accounts, ...paused];
 
 		this.#showInEditorArea(done =>
 			SessionAccountSelector({
 				provider: providerName,
 				accounts,
+				paused: paused.map(account => ({ account, resume: resumeSelector(account, everyAccount) })),
 				onSelect: account => {
 					done();
 					if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
@@ -2445,6 +2450,10 @@ export class SelectorController {
 					}
 					this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
 					this.ctx.statusLine.refresh();
+				},
+				onPausedPick: account => {
+					done();
+					this.ctx.showStatus(describePausedPin(account, everyAccount));
 				},
 				onCancel: done,
 			}),

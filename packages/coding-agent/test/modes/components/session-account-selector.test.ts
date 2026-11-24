@@ -40,4 +40,28 @@ describe("session account selector", () => {
 		ctrlC.dispose();
 		expect(cancellations).toBe(2);
 	});
+
+	it("lists paused accounts after pinnable ones and never pins them", () => {
+		const [first, second] = accounts;
+		const selected: number[] = [];
+		const pausedPicks: number[] = [];
+		const picker = mountOverlay(() =>
+			SessionAccountSelector({
+				provider: "Anthropic",
+				accounts: [second!],
+				paused: [{ account: first!, resume: "first@example.com" }],
+				onSelect: account => selected.push(account.credentialId),
+				onPausedPick: account => pausedPicks.push(account.credentialId),
+				onCancel: () => {},
+			}),
+		);
+
+		expect(picker.screen().join("\n")).toContain("paused — /usage resume first@example.com");
+		picker.press("down");
+		picker.press("enter");
+		picker.dispose();
+
+		expect(selected).toEqual([]);
+		expect(pausedPicks).toEqual([11]);
+	});
 });
