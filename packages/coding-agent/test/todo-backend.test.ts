@@ -894,7 +894,7 @@ describe("todo backend", () => {
 			expect(tasksOf(backend).at(-1)).toEqual(["b"]);
 		});
 
-		it("a commit equal to the last-sent list during a failed call's resend wait still gets its replace when the session closes", async () => {
+		it("a failed call's resend still waiting when the session closes goes out on exit", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
 			testSetSessionShutdownHandlerTimeoutMs(5);
@@ -913,13 +913,73 @@ describe("todo backend", () => {
 			await settled(session);
 			const before = backend.calls.length;
 
-			// omp's list is still the one last sent (the call failed); `list("a")` would not equal it, since `init` started `a`.
-			session.commitTodoPhases(structuredClone(session.getTodoPhases()));
 			await session.dispose();
 
 			expect(result.isError).toBe(true);
 			expect(backend.calls.length - before).toBe(1);
 			expect(backend.calls.at(-1)?.phases).toEqual(session.getTodoPhases());
+		});
+
+		it("a backend switched while apply decides fails the call, saves nothing and asks the new backend nothing", async () => {
+			const first = tracker("first", true);
+			const second = tracker("second", true);
+			second.refusal = new Error("never");
+			const { session } = await open([first.extension, second.extension], "first");
+			const gate = Promise.withResolvers<void>();
+			first.applyHold = gate.promise;
+
+			const asked = first.entered();
+			const pending = call(session, { op: "init", items: ["a"] });
+			await asked;
+			cfgTodoBackend.override(session.settings, "second");
+			gate.resolve();
+			const result = await pending;
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("The todo backend changed");
+			expect(contents(session)).toEqual([]);
+			expect(second.asked).toEqual([]);
+		});
+
+		it("an id whose owner changes while apply decides fails the call, saves nothing and asks the new owner nothing", async () => {
+			const first = tracker("tracker", true);
+			const second = tracker("tracker", true);
+			second.refusal = new Error("never");
+			const { session } = await open([first.extension, second.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			first.applyHold = gate.promise;
+
+			const asked = first.entered();
+			const pending = call(session, { op: "init", items: ["a"] });
+			await asked;
+			const holder = session.extensionRunner?.getTodoBackends().get("tracker")?.extension;
+			session.extensionRunner?.setSuspendedExtensions(extension => extension === holder);
+			gate.resolve();
+			const result = await pending;
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("The todo backend changed");
+			expect(contents(session)).toEqual([]);
+			expect(second.asked).toEqual([]);
+		});
+
+		it("a session that begins closing while apply decides fails the call and saves nothing", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
+
+			const asked = backend.entered();
+			const pending = call(session, { op: "init", items: ["a"] });
+			await asked;
+			session.beginDispose();
+			gate.resolve();
+			const result = await pending;
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("The session closed");
+			expect(contents(session)).toEqual([]);
+			await session.dispose();
 		});
 
 		it("a refused todo call that follows bash and an accepted one in a message sees the committed list, and leaves no retry reminder", async () => {

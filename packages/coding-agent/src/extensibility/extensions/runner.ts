@@ -612,7 +612,10 @@ interface TodoApplyRequest {
 	current(): TodoPhase[];
 	commit(): void;
 	resend(): void;
-	closing: boolean;
+	/** Read when the call starts and again at commit: the session began closing. */
+	closing(): boolean;
+	/** The selected todo backend id, or undefined for native. */
+	selected(): string | undefined;
 	signal?: AbortSignal;
 }
 
@@ -707,6 +710,8 @@ export class ExtensionRunner {
 	#todoClosed = false;
 	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
 	#todoGivenUp = new AbortController();
+	/** Resend callbacks of failed calls whose repair still waits for a late apply to settle. */
+	#todoRepairs = new Set<() => void>();
 	/** The selected `todo.backend` id last reported as unregistered; cleared once a selected id resolves. */
 	#reportedTodoBackend: string | undefined;
 	/** Selected todo backend ids whose shadowed registrations were already reported. */
@@ -1790,16 +1795,27 @@ export class ExtensionRunner {
 	 * host's process alive long after the session is gone.
 	 */
 	async closeTodoBackend(): Promise<void> {
+		// Repairs still waiting for a late apply are flushed now, before the closed flag drops them: a late
+		// write after this can still land, but the shutdown budget allows no longer wait.
+		const repairs = [...this.#todoRepairs];
+		this.#todoRepairs.clear();
+		for (const repair of repairs) repair();
 		this.#todoClosed = true;
 		await this.todoBackendSettled();
 		this.#todoPending = undefined;
 		this.#todoGivenUp.abort();
 	}
 
+	/** Whether `extension`'s `definition` still owns the todo backend `id`. */
+	#holdsTodoBackend(id: string, extension: Extension, definition: TodoBackendDefinition): boolean {
+		const owner = this.getTodoBackends().get(id);
+		return owner?.extension === extension && owner.definition === definition;
+	}
+
 	/**
 	 * Ask the backend `todo.backend` selects to accept a `todo` call's change. `request.commit`
 	 * runs in the same synchronous step as the checks of the answer. `apply` is not queued behind
-	 * `replace`. `closing` is read when the call starts: the dispose wrappers await before
+	 * `replace`. `closing` is read here and again at commit: the dispose wrappers await before
 	 * `closeTodoBackend`.
 	 */
 	applyTodoBackend(request: TodoApplyRequest): TodoApplyResult | Promise<TodoApplyResult> {
@@ -1808,8 +1824,8 @@ export class ExtensionRunner {
 			request.commit();
 			return { kind: "committed" };
 		}
-		// A backend that decides still decides while closing, so the call fails; nothing is resent.
-		if (this.#todoClosed || request.closing)
+		// A backend that decides still decides while closing, so the call fails; nothing is resent here.
+		if (this.#todoClosed || request.closing())
 			return {
 				kind: "stale",
 				message: `The session is closing; todo backend "${sanitizeDisplayLine(request.backend)}" was not asked${NOTHING_SAVED_SUFFIX}`,
@@ -1820,7 +1836,7 @@ export class ExtensionRunner {
 	async #askTodoBackend(
 		extension: Extension,
 		definition: TodoBackendDefinition,
-		{ backend, change, current, commit, resend, signal }: TodoApplyRequest,
+		{ backend, change, current, commit, resend, closing, selected, signal }: TodoApplyRequest,
 	): Promise<TodoApplyResult> {
 		const sessionId = this.sessionManager.getSessionId();
 		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
@@ -1855,13 +1871,15 @@ export class ExtensionRunner {
 		// Why the change can no longer commit, checked in the same synchronous step as the commit.
 		const staleCause = signal?.aborted
 			? "The call was aborted"
-			: this.#todoClosed
+			: this.#todoClosed || closing()
 				? "The session closed"
 				: this.sessionManager.getSessionId() !== sessionId
 					? "The session changed"
-					: !Bun.deepEquals(current(), change.previous)
-						? "The todo list changed"
-						: undefined;
+					: selected() !== backend || !this.#holdsTodoBackend(backend, extension, definition)
+						? "The todo backend changed"
+						: !Bun.deepEquals(current(), change.previous)
+							? "The todo list changed"
+							: undefined;
 		if (verdict?.kind === "accepted" && staleCause === undefined) {
 			commit();
 			return { kind: "committed" };
@@ -1904,16 +1922,18 @@ export class ExtensionRunner {
 	 */
 	#resendStaleTodoList(settled: Promise<void>, resend: () => void): void {
 		if (this.#todoClosed) return;
-		// A commit equal to the last-sent list may land during the wait, and the session may close before
-		// the resend runs; that commit's replace is then the backend's only correction, so it must not count as already sent.
-		this.#todoStale = true;
+		const repair = () => {
+			// Sent even when it equals the last list: the late answer may have written since.
+			this.#todoStale = true;
+			resend();
+		};
+		this.#todoRepairs.add(repair);
 		const deadline = performance.now() + extensionHandlerTimeoutMs;
 		void awaitDeliveryTurn(settled, deadline, this.#todoGivenUp.signal)
 			.then(() => {
-				if (this.#todoClosed) return;
-				// Again: a send during the wait cleared it, and the late answer may have written since.
-				this.#todoStale = true;
-				resend();
+				// Gone once closing flushed it.
+				if (!this.#todoRepairs.delete(repair)) return;
+				repair();
 			})
 			.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
 	}
