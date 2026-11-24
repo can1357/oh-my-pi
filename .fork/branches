@@ -18,3 +18,4 @@ perf/startup-audit
 feat/stash-on-esc-restore
 feat/unified-find-01a20496
 chore/fork-export-viewer-01a20496
+fix/advisor-role-fallback
