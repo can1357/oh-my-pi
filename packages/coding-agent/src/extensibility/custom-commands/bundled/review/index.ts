@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { computed, signal } from "@oh-my-pi/pi-tui";
 import { replaceTabs, truncateToWidth } from "../../../../utils/text-width";
 import { shortenPath, TRUNCATE_LENGTHS } from "../../../../utils/render-utils";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
@@ -14,6 +15,7 @@ import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-r
 import * as gh from "../../../../tools/gh";
 import * as glab from "../../../../tools/glab-mr";
 import { resolveToCwd } from "../../../../tools/path-utils";
+import { HookSelector } from "../../../../ui/overlays/pickers/hook-selector";
 import { listDirectChildRepos } from "../../../../utils/active-repo-context";
 import { github } from "../../../../utils/github";
 import { gitlab } from "../../../../utils/gitlab";
@@ -59,6 +61,7 @@ const REVIEW_CONTEXT_PR_LIMIT = 3;
 const PICK_PR_CHOICE_LABEL = "4. Review a specific PR/MR";
 /** `gh pr list` / `glab mr list` page size. 100 is the per-page maximum of both forges. */
 const PR_PICKER_LIMIT = 100;
+const PR_PICKER_DEBOUNCE_MS = 300;
 const REPO_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
 const GITHUB_REF_PATTERN = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#([1-9]\d*)$/;
 /** `#N` (GitHub PR) or `!N` (GitLab MR) in the review checkout's repository. */
@@ -376,7 +379,7 @@ interface ChangeRequestSource {
 	prefix: "#" | "!";
 	searchPrompt: string;
 	/** One page of open items, optionally narrowed by a server-side search; throws on CLI failure. */
-	fetch(search: string | undefined): Promise<PrListItem[]>;
+	fetch(search: string | undefined, signal: AbortSignal): Promise<PrListItem[]>;
 	refFor(item: PickablePr): ReviewPrRef;
 	refForNumber(number: number): ReviewPrRef;
 }
@@ -396,12 +399,13 @@ async function resolveChangeRequestSource(
 			repo,
 			plural: "pull requests",
 			prefix: "#",
-			searchPrompt: "Search open pull requests — title, author, or #123",
-			fetch: search => {
+			searchPrompt:
+				"Search by title, author:NAME, or head:BRANCH. Enter a PR number or paste a URL to open it directly.",
+			fetch: (search, signal) => {
 				const args = ["pr", "list", "--repo", repo, "--state", "open", "--limit", String(PR_PICKER_LIMIT)];
 				args.push("--json", "number,title,author,isDraft,url");
 				if (search !== undefined) args.push("--search", search);
-				return github.json<PrListItem[]>(cwd, args, undefined, { repoProvided: true });
+				return github.json<PrListItem[]>(cwd, args, signal, { repoProvided: true });
 			},
 			refFor: item => (item.url ? parseGithubPrUrl(item.url) : undefined) ?? prNumberRef(repo, item.number),
 			refForNumber: number => prNumberRef(repo, number),
@@ -419,12 +423,12 @@ async function resolveChangeRequestSource(
 			repo: project,
 			plural: "merge requests",
 			prefix: "!",
-			searchPrompt: "Search open merge requests — title, description, or !123",
-			fetch: async search => {
+			searchPrompt: "Search by title or description. Enter an MR number or paste a URL to open it directly.",
+			fetch: async (search, signal) => {
 				const args = ["mr", "list", "-R", glab.formatGitlabProjectArg(project), "-F", "json"];
 				args.push("-P", String(PR_PICKER_LIMIT));
 				if (search !== undefined) args.push("--search", search);
-				const items = await gitlab.json<GitlabMrListItem[]>(cwd, args);
+				const items = await gitlab.json<GitlabMrListItem[]>(cwd, args, signal);
 				return items.map(item => ({
 					number: item.iid,
 					title: item.title,
@@ -443,74 +447,78 @@ async function resolveChangeRequestSource(
 	}
 }
 
-/**
- * List the repository's open PRs/MRs with a server-side search row and a
- * `#123`/`!123` fast-path. Local type-to-filter only covers the fetched page;
- * the search row reaches items beyond it, and a number skips listing entirely
- * because the forge list search never matches item numbers.
- */
 async function selectPullRequestRef(cwd: string, ctx: HookCommandContext): Promise<ReviewPrRef | undefined> {
 	const source = await resolveChangeRequestSource(cwd, ctx);
 	if (!source) return undefined;
 	const { repo, plural, prefix } = source;
-	const searchEntry = `Search open ${plural}…`;
-	/** Notifies and resolves `undefined` on failure. */
-	const listOpen = async (search: string | undefined): Promise<PickablePr[] | undefined> => {
-		ctx.ui.setStatus("review", `Loading open ${plural}…`);
+	type Row = { label: string; ref: ReviewPrRef };
+	type Results = { rows: Row[]; empty: string };
+	const preload = new AbortController();
+	const initial = signal<Results>({ rows: [], empty: `Loading open ${plural}…` });
+	const search = signal<Results | undefined>(undefined);
+	const current = computed(() => search() ?? initial());
+	let query = "";
+	let pending: AbortController | undefined;
+	let timer: Timer | undefined;
+
+	const fetchRows = async (
+		text: string | undefined,
+		controller: AbortController,
+		show: (results: Results) => void,
+	): Promise<void> => {
 		try {
-			return pickablePrs(await source.fetch(search));
+			const items = await source.fetch(text, controller.signal);
+			if (controller.signal.aborted) return;
+			const rows = pickablePrs(items).map(item => ({
+				label: formatPrPickerLabel(item, prefix),
+				ref: source.refFor(item),
+			}));
+			show({ rows, empty: text === undefined ? `No open ${plural}` : `No matching ${plural}` });
 		} catch (error) {
+			if (controller.signal.aborted) return;
 			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Failed to list open ${plural} in ${repo}: ${message}`, "error");
-			return undefined;
-		} finally {
-			ctx.ui.setStatus("review", undefined);
+			show({ rows: [], empty: `Could not load ${plural}: ${pickerText(message)}` });
 		}
 	};
-	const openPrs = await listOpen(undefined);
-	if (openPrs === undefined) return undefined;
-	if (openPrs.length === 0) {
-		ctx.ui.notify(`No open ${plural} in ${repo}`, "warning");
-		return undefined;
-	}
-	let activeQuery: string | undefined;
-	let currentPrs = openPrs;
-	for (;;) {
-		const rows = currentPrs.map(item => ({ label: formatPrPickerLabel(item, prefix), item }));
-		const title =
-			activeQuery === undefined
-				? `Open ${plural} in ${repo}`
-				: `Open ${plural} in ${repo} matching "${activeQuery}"`;
-		const selected = await ctx.ui.select(title, [...rows.map(row => row.label), searchEntry]);
-		if (selected === undefined) return undefined;
-		if (selected !== searchEntry) {
-			const match = rows.find(row => row.label === selected);
-			if (!match) return undefined;
-			return source.refFor(match.item);
+
+	const onQueryChange = (input: string): void => {
+		const text = input.trim();
+		if (text === query) return;
+		query = text;
+		clearTimeout(timer);
+		pending?.abort();
+		if (!text) {
+			search.set(undefined);
+			return;
 		}
-		// The hint rides in the title: `HookInputComponent` accepts a placeholder
-		// and never renders it, so a second argument would be invisible.
-		const input = await ctx.ui.input(source.searchPrompt);
-		if (input === undefined) continue;
-		const query = input.trim();
-		if (query === "") {
-			activeQuery = undefined;
-			currentPrs = openPrs;
-			continue;
+		const number = parsePositivePrNumber(text.startsWith(prefix) ? text.slice(1) : text);
+		const ref = number === undefined ? parseReviewPrRef(text) : source.refForNumber(number);
+		if (ref) {
+			search.set({ rows: [{ label: `Review ${formatReviewRefLabel(ref)}`, ref }], empty: "" });
+			return;
 		}
-		const number = parsePositivePrNumber(query.startsWith(prefix) ? query.slice(1) : query);
-		if (number !== undefined) return source.refForNumber(number);
-		const matches = await listOpen(query);
-		// The failure was already reported; stay in the picker on the list shown before.
-		if (matches === undefined) continue;
-		if (matches.length === 0) {
-			ctx.ui.notify(`No open ${plural} matching "${query}" in ${repo}`, "warning");
-			activeQuery = undefined;
-			currentPrs = openPrs;
-			continue;
-		}
-		activeQuery = query;
-		currentPrs = matches;
+		search.set({ rows: [], empty: `Searching open ${plural}…` });
+		const controller = new AbortController();
+		pending = controller;
+		timer = setTimeout(() => void fetchRows(text, controller, search.set), PR_PICKER_DEBOUNCE_MS);
+	};
+
+	void fetchRows(undefined, preload, initial.set);
+	try {
+		return await ctx.ui.custom<ReviewPrRef | undefined>((_ui, _theme, _keys, done) =>
+			HookSelector({
+				title: `Open ${plural} in ${repo}\n${source.searchPrompt}`,
+				options: computed(() => current().rows.map(row => row.label)),
+				empty: () => current().empty,
+				onQueryChange,
+				onSelect: label => done(current().rows.find(row => row.label === label)?.ref),
+				onCancel: () => done(undefined),
+			}),
+		);
+	} finally {
+		clearTimeout(timer);
+		pending?.abort();
+		preload.abort();
 	}
 }
 

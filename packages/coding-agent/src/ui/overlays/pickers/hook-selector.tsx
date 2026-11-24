@@ -22,6 +22,7 @@ import {
 	type JSXNode,
 	type KeyEvent,
 	onCleanup,
+	type PasteEvent,
 	read,
 	type Reactive,
 	signal,
@@ -50,9 +51,11 @@ export type HookSelectorOptionInput = string | HookSelectorOption;
 export interface HookSelectorProps {
 	/** First line: the heading; further lines: details under it. */
 	readonly title: Reactive<string>;
-	readonly options: readonly HookSelectorOptionInput[];
+	readonly options: Reactive<readonly HookSelectorOptionInput[]>;
 	onSelect(label: string): void;
 	onCancel(): void;
+	readonly empty?: Reactive<string>;
+	onQueryChange?(query: string): void;
 	readonly initialIndex?: number;
 	/** Draw the options inside a rule-framed box. */
 	readonly outline?: boolean;
@@ -104,36 +107,48 @@ function hint(keys: readonly string[][], label: string): JSXNode {
 }
 
 export function HookSelector(props: HookSelectorProps): JSXNode {
-	const options = props.options.map(normalize);
+	const options = computed(() => read(props.options).map(normalize));
+	const initialOptions = options();
 	const initialTitle = read(props.title);
 	const heading = initialTitle.split(/\r?\n/, 1)[0] ?? "";
 	const details = initialTitle.split(/\r?\n/).slice(1);
 	const plainTitle = plainInlineMarkdown(heading);
 	const disabled = new Set(
-		(props.disabledIndices ?? []).filter(index => Number.isInteger(index) && index >= 0 && index < options.length),
+		(props.disabledIndices ?? []).filter(
+			index => Number.isInteger(index) && index >= 0 && index < initialOptions.length,
+		),
 	);
 	const checked = new Set(
-		(props.checkedIndices ?? []).filter(index => Number.isInteger(index) && index >= 0 && index < options.length),
+		(props.checkedIndices ?? []).filter(
+			index => Number.isInteger(index) && index >= 0 && index < initialOptions.length,
+		),
 	);
-	const markable = Math.max(0, Math.min(props.markableCount ?? options.length, options.length));
+	const markable = Math.max(0, Math.min(props.markableCount ?? initialOptions.length, initialOptions.length));
 	const maxVisible = Math.max(3, props.maxVisible ?? 12);
 	const now = (): number => props.now?.() ?? Date.now();
 	const slider = props.slider && props.slider.segments.length > 0 ? props.slider : undefined;
 	const sliderIndex = signal(slider ? Math.max(0, Math.min(slider.index, slider.segments.length - 1)) : 0);
 	// Search opens once every option with its description no longer fits the visible rows.
-	const searchable = options.reduce((rows, option) => rows + (option.description ? 2 : 1), 0) > maxVisible;
-
+	const searchable =
+		props.onQueryChange !== undefined ||
+		initialOptions.reduce((rows, option) => rows + (option.description ? 2 : 1), 0) > maxVisible;
 	const search = signal<LineState>({ text: "", cursor: 0 });
 	const visible = computed<readonly number[]>(() => {
 		const query = search().text.trim();
-		const all = options.map((_, index) => index);
-		if (!query) return all;
-		return fuzzyFilter(all, query, index => `${options[index]!.label} ${options[index]!.description ?? ""}`);
+		const current = options();
+		const all = current.map((_, index) => index);
+		if (!query || props.onQueryChange) return all;
+		return fuzzyFilter(all, query, index => `${current[index]!.label} ${current[index]!.description ?? ""}`);
 	});
 	const isDisabled = (position: number): boolean => disabled.has(visible()[position] ?? -1);
 	/** Position of the cursor in `visible`. */
-	const cursor = signal(menuCoerce(options.length, props.initialIndex ?? 0, 1, index => disabled.has(index)));
-	const selectedIndex = (): number | undefined => visible()[cursor()];
+	const cursor = signal(
+		props.onQueryChange
+			? 0
+			: menuCoerce(initialOptions.length, props.initialIndex ?? 0, 1, index => disabled.has(index)),
+	);
+	const position = (): number => (props.onQueryChange ? Math.max(0, cursor()) : cursor());
+	const selectedIndex = (): number | undefined => visible()[position()];
 
 	// The terminal heading: the title, with the countdown's seconds while one runs. A title set after
 	// opening shows whole on one line until the countdown next writes it.
@@ -160,7 +175,7 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 			clearInterval(ticker);
 			props.onTimeout?.();
 			const index = selectedIndex();
-			if (index !== undefined && !disabled.has(index)) props.onSelect(options[index]!.label);
+			if (index !== undefined && !disabled.has(index)) props.onSelect(options()[index]!.label);
 			else props.onCancel();
 		}, timeout);
 	};
@@ -180,7 +195,7 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 
 	const pick = (): void => {
 		const index = selectedIndex();
-		if (index !== undefined && !disabled.has(index)) props.onSelect(options[index]!.label);
+		if (index !== undefined && !disabled.has(index)) props.onSelect(options()[index]!.label);
 	};
 	const focus = (id: string, confirm: boolean): void => {
 		const position = visible().indexOf(Number(id));
@@ -200,7 +215,10 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 		batch(() => {
 			const changed = next.text !== search().text;
 			search.set(next);
-			if (changed) cursor.set(menuCoerce(visible().length, 0, 1, isDisabled));
+			if (changed) {
+				props.onQueryChange?.(next.text);
+				cursor.set(props.onQueryChange ? 0 : menuCoerce(visible().length, 0, 1, isDisabled));
+			}
 		});
 	const clearSearch = (): void => setQuery({ text: "", cursor: 0 });
 
@@ -211,9 +229,8 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 			props.onCancel();
 			return true;
 		}
-		// Digits pick the option numbered so (checkbox menus only move to it) until a search starts.
 		if (search().text.length === 0 && /^[1-9]$/.test(key.id)) {
-			const position = visible().findIndex(index => options[index]!.label.startsWith(`${key.id}. `));
+			const position = visible().findIndex(index => options()[index]!.label.startsWith(`${key.id}. `));
 			if (position >= 0) {
 				if (!isDisabled(position)) {
 					cursor.set(position);
@@ -233,10 +250,12 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 				pick();
 				return true;
 			case "left":
+				if (props.onQueryChange) break;
 				if (slider) moveSlider(-1);
 				else props.onLeft?.();
 				return true;
 			case "right":
+				if (props.onQueryChange) break;
 				if (slider) moveSlider(1);
 				else props.onRight?.();
 				return true;
@@ -260,6 +279,13 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 		if (next) setQuery(next);
 		return true;
 	};
+	const onPaste = (paste: PasteEvent): boolean => {
+		if (!props.onQueryChange) return false;
+		const text = paste.text.trim();
+		const line = editLine(search(), { id: "paste", kind: "press", raw: text, text });
+		if (line) setQuery(line);
+		return true;
+	};
 	const onAction = (act: string): void => {
 		resetCountdown();
 		if (act === "close" || act === "cancel") props.onCancel();
@@ -268,8 +294,9 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 	};
 
 	const term = (): HookLookTerm => {
+		const current = options();
 		const lookOptions: HookLookOption[] = visible().map(index => {
-			const option = options[index]!;
+			const option = current[index]!;
 			const marker =
 				props.selectionMarker && index < markable
 					? { kind: props.selectionMarker, checked: checked.has(index) }
@@ -283,30 +310,41 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 			slider: slider ? { caption: slider.caption, segments: slider.segments, index: sliderIndex() } : undefined,
 			outline: props.outline ?? false,
 			options: lookOptions,
-			cursor: cursor(),
-			total: options.length,
+			cursor: position(),
+			total: current.length,
 			maxVisible,
 			searchable,
 			query: search(),
 			help: props.helpText,
+			empty: read(props.empty),
 		};
 	};
 
 	const card = props.inline || slider !== undefined || timed;
 	if (!card) {
-		const items: TspPickerItem[] = options.map((option, index) => ({
-			id: String(index),
-			label: plainInlineMarkdown(option.label),
-			...(option.description ? { detail: plainInlineMarkdown(option.description) } : {}),
-			...(disabled.has(index) ? { disabled: true as const } : {}),
-		}));
+		const items = computed<TspPickerItem[]>(() =>
+			options().map((option, index) => ({
+				id: props.onQueryChange ? option.label : String(index),
+				label: plainInlineMarkdown(option.label),
+				...(option.description ? { detail: plainInlineMarkdown(option.description) } : {}),
+				...(disabled.has(index) ? { disabled: true as const } : {}),
+			})),
+		);
+		const focusItem = (id: string, confirm: boolean): void => {
+			if (!props.onQueryChange) {
+				focus(id, confirm);
+				return;
+			}
+			const index = items().findIndex(item => item.id === id);
+			if (index >= 0) focus(String(index), confirm);
+		};
 		const showSearch = (): boolean => searchable || search().text.length > 0;
 		const selected = (): string | null => {
 			const index = selectedIndex();
-			return index === undefined ? null : String(index);
+			return index === undefined ? null : (items()[index]?.id ?? null);
 		};
 		return (
-			<col onKey={onKey}>
+			<col onKey={onKey} onPaste={onPaste}>
 				<picker
 					key={PICKER_KEY}
 					title={plainTitle}
@@ -318,15 +356,15 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 					query={() => (showSearch() ? search().text : null)}
 					cursor={() => (showSearch() ? search().cursor : undefined)}
 					items={items}
-					order={() => (search().text.length > 0 ? visible().map(String) : undefined)}
+					order={() => (!props.onQueryChange && search().text.length > 0 ? visible().map(String) : undefined)}
 					selected={selected}
 					current={props.selectionMarker === "checkbox" ? [...checked].map(String) : undefined}
-					total={options.length}
-					empty="No matching options"
+					total={() => options().length}
+					empty={() => read(props.empty) ?? "No matching options"}
 					actions={[pickerAction("confirm", "Select", confirmKbd(), { primary: true }), closeAction()]}
 					term={term}
-					onSelect={id => focus(id, false)}
-					onActivate={id => focus(id, true)}
+					onSelect={id => focusItem(id, false)}
+					onActivate={id => focusItem(id, true)}
 					onAction={onAction}
 				/>
 			</col>
@@ -415,7 +453,7 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 
 	function OptionItem(itemProps: { index: number }): JSXNode {
 		const { index } = itemProps;
-		const option = options[index]!;
+		const option = options()[index]!;
 		const isDisabled = disabled.has(index);
 		const radio = props.selectionMarker === "radio" && index < markable;
 		const label = (): TspSpan[] => {

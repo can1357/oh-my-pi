@@ -351,7 +351,7 @@ describe("/annotate contracts", () => {
 
 	it("resolves a PR picked from the open pull request list in the live session repo", async () => {
 		const { ctx, pasteToEditor } = createContext({
-			selectResults: ["Code review", "4. Review a specific PR/MR", "#42  Fix login  @octocat"],
+			selectResults: ["Code review", "4. Review a specific PR/MR"],
 			cwd: "/live-worktree",
 		});
 		spyOn(vcs, "repo").mockReturnValue({} as VcsRepo);
