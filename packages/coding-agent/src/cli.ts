@@ -536,9 +536,9 @@ export async function runCli(argv: string[]): Promise<void> {
 	// with a worker selector: such a thread spawns its own worker threads (stats activity runs the
 	// stats sync worker), and undeclared there that spawn falls back to a `.ts` file beside the
 	// bundle, which npm installs do not ship (#20377). Module state is per thread, so declaring in
-	// the worker does not reach the main thread. The main thread stays undeclared: importers such
-	// as `runCli` in profile-CLI tests run there, and declaring would poison `workerHostEntry()` for
-	// the whole test process.
+	// the worker does not reach the main thread. Importers on the main thread (such as `runCli` in
+	// profile-CLI tests) stay undeclared: declaring there would poison `workerHostEntry()` for the
+	// whole test process.
 	// This must run before worker selector dispatch so that worker subprocesses
 	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
 	if (isProcessEntry || (!Bun.isMainThread && isWorkerHostSelector(resolvedArgv[0]))) declareWorkerHostEntry();
