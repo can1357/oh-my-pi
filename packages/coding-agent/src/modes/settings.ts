@@ -313,7 +313,8 @@ export const cfgImagesAutoResize = register({
 		tab: "appearance",
 		group: "Images",
 		label: "Auto-Resize Images",
-		description: "Resize large images to 2000x2000 max for better model compatibility",
+		description:
+			"Resize large images to 1568px max for model compatibility. When off, attached images keep their original size.",
 	},
 });
 

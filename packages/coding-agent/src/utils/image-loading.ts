@@ -61,13 +61,10 @@ function imageFromBase64DataUrl(imageUrl: unknown): ImageContent | undefined {
 }
 
 function modelBoundaryImageCacheKey(image: ImageContent, resize: ImageResizeOptions | undefined): string {
-	const resizeKey = JSON.stringify([
-		resize?.maxWidth,
-		resize?.maxHeight,
-		resize?.minDimension,
-		resize?.maxBytes,
-		resize?.jpegQuality,
-	]);
+	// String, not JSON: JSON.stringify turns Infinity into null, which would collide with an unset cap.
+	const resizeKey = [resize?.maxWidth, resize?.maxHeight, resize?.minDimension, resize?.maxBytes, resize?.jpegQuality]
+		.map(value => String(value))
+		.join(",");
 	return `${resizeKey}:${image.mimeType}:${image.data.length}:${image.data.slice(0, 32)}:${image.data.slice(-32)}:${String(Bun.hash(image.data))}`;
 }
 
@@ -245,6 +242,8 @@ export interface NormalizeModelContextImagesOptions {
 	/** Model the images are bound for; used to derive encoder constraints (WebP exclusion for Ollama). */
 	model?: Model;
 	resize?: ImageResizeOptions;
+	/** `images.autoResize`. When false, images keep their size except WebP for models that cannot decode it. */
+	autoResize: boolean;
 }
 
 /**
@@ -256,22 +255,31 @@ export interface NormalizeModelContextImagesOptions {
  */
 export async function normalizeModelContextImages(
 	images: ImageContent[] | undefined,
-	options?: NormalizeModelContextImagesOptions,
+	options: NormalizeModelContextImagesOptions,
 ): Promise<ImageContent[] | undefined> {
 	if (!images || images.length === 0) return undefined;
-	const excludesWebP = modelLacksWebpSupport(options?.model);
+	const excludesWebP = modelLacksWebpSupport(options.model);
 	const resize: ImageResizeOptions | undefined = excludesWebP
-		? { ...options?.resize, excludeWebP: true }
-		: options?.resize;
+		? { ...options.resize, excludeWebP: true }
+		: options.resize;
 	const normalized: ImageContent[] = [];
 	for (const image of images) {
 		try {
 			if (excludesWebP && isWebPImage(image)) {
-				const converted = await memoizedStbImageNormalization(image, options?.resize);
+				// With autoResize off the WebP conversion is still required, but carries no caps.
+				// minDimension 0 turns off the lift floor so the image keeps its size.
+				const webpResize = options.autoResize
+					? options.resize
+					: { ...options.resize, maxWidth: Infinity, maxHeight: Infinity, maxBytes: Infinity, minDimension: 0 };
+				const converted = await memoizedStbImageNormalization(image, webpResize);
 				// Mixed-content callers reassemble normalized images positionally, so
 				// preserve one output slot per input. The provider-boundary pass replaces
 				// an undecodable WebP with an omission note before dispatch.
 				normalized.push(converted ?? image);
+				continue;
+			}
+			if (!options.autoResize) {
+				normalized.push(image);
 				continue;
 			}
 			const resized = await resizeImage(image, resize);

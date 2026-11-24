@@ -3,6 +3,7 @@ import type { Api, Message, Model } from "@oh-my-pi/pi-ai";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
 import {
@@ -106,7 +107,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		expect(ollama).toBeDefined();
 		const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
 
-		const result = await normalizeModelContextImages([webp], { model: ollama });
+		const result = await normalizeModelContextImages([webp], { model: ollama, autoResize: true });
 		expect(result).toHaveLength(1);
 		const mime = result![0]!.mimeType;
 		expect(mime).not.toBe("image/webp");
@@ -118,7 +119,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		expect(anthropic).toBeDefined();
 		const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
 
-		const result = await normalizeModelContextImages([webp], { model: anthropic });
+		const result = await normalizeModelContextImages([webp], { model: anthropic, autoResize: true });
 
 		expect(result?.[0]?.mimeType).toBe("image/webp");
 	});
@@ -130,10 +131,12 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		const first = await normalizeModelContextImages([webp], {
 			model,
 			resize: { maxWidth: 120, maxHeight: 120, minDimension: 1 },
+			autoResize: true,
 		});
 		const second = await normalizeModelContextImages([webp], {
 			model,
 			resize: { maxWidth: 60, maxHeight: 60, minDimension: 1 },
+			autoResize: true,
 		});
 		const firstMetadata = await new Bun.Image(Buffer.from(first![0]!.data, "base64")).metadata();
 		const secondMetadata = await new Bun.Image(Buffer.from(second![0]!.data, "base64")).metadata();
@@ -151,6 +154,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 
 		const result = await normalizeModelContextImages([corrupt], {
 			model: buildStbVisionModel("managed-primary"),
+			autoResize: true,
 		});
 
 		expect(result).toEqual([corrupt]);
@@ -176,6 +180,7 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		};
 		const boundary = new SessionProviderBoundary({
 			model: () => buildStbVisionModel("managed-primary"),
+			settings: Settings.isolated(),
 		} as never);
 
 		const normalized = await boundary.normalizeAgentMessageImages(message);

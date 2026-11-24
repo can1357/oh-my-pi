@@ -9027,7 +9027,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
-		return normalizeModelContextImages(images, { model: this.model });
+		return normalizeModelContextImages(images, {
+			model: this.model,
+			autoResize: cfgImagesAutoResize.get(this.settings),
+		});
 	}
 
 	/**

@@ -6,6 +6,7 @@ import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOption
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
+import { cfgImagesAutoResize } from "../modes/settings";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -320,7 +321,10 @@ export class SessionProviderBoundary {
 
 	/** Normalizes image payloads for the active model. */
 	normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
-		return normalizeModelContextImages(images, { model: this.#host.model() });
+		return normalizeModelContextImages(images, {
+			model: this.#host.model(),
+			autoResize: cfgImagesAutoResize.get(this.#host.settings),
+		});
 	}
 
 	/** Normalizes every image embedded in an agent message. */
