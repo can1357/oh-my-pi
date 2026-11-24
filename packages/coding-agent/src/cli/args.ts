@@ -82,6 +82,8 @@ export interface Args {
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;
+	/** `--strict-tools`: the session gets exactly the tool list, with nothing added by settings or extensions. */
+	strictTools?: boolean;
 	noLsp?: boolean;
 	noPty?: boolean;
 	noJudge?: boolean;
@@ -110,6 +112,8 @@ export interface Args {
 	noUi?: boolean;
 	autoApprove?: boolean;
 	approvalMode?: ApprovalMode;
+	/** `--acp-ask-all`: every ACP-gated tool call asks the client, even when an allow rule matches. */
+	acpAskAll?: boolean;
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
@@ -381,6 +385,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noSession = true;
 		} else if (arg === "--no-tools") {
 			result.noTools = true;
+		} else if (arg === "--strict-tools") {
+			result.strictTools = true;
 		} else if (arg === "--no-lsp") {
 			result.noLsp = true;
 		} else if (arg === "--no-pty") {
@@ -423,6 +429,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noUi = true;
 		} else if (arg === "--auto-approve" || arg === "--yolo") {
 			result.autoApprove = true;
+		} else if (arg === "--acp-ask-all") {
+			result.acpAskAll = true;
 		} else if (arg.startsWith("@")) {
 			let filePath = arg.slice(1);
 			if (filePath.startsWith('"') && filePath.endsWith('"') && filePath.length > 1) {

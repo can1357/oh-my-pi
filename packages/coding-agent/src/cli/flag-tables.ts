@@ -358,6 +358,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--from-codex",
 	"--no-session",
 	"--no-tools",
+	"--strict-tools",
 	"--no-judge",
 	"--no-spotlight",
 	"--offline",
@@ -380,6 +381,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-ui",
 	"--auto-approve",
 	"--yolo",
+	"--acp-ask-all",
 ]);
 
 /**

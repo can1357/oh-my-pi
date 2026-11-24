@@ -76,6 +76,9 @@ export const launchHelp = {
 			description: `Comma-separated model patterns for ${formatKey("ctrl+p", { preset: "ascii", platform: keyHintPlatform() })} cycling`,
 		}),
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
+		"strict-tools": Flags.boolean({
+			description: "Use exactly the --tools/--no-tools list: settings, extensions and MCP add no tools",
+		}),
 		"no-judge": Flags.boolean({ description: "Restrict judge calls to the active model's provider" }),
 		"no-spotlight": Flags.boolean({ description: "Restrict Spotlight calls to the active model's provider" }),
 		offline: Flags.boolean({
@@ -155,6 +158,9 @@ export const launchHelp = {
 		"approval-mode": Flags.string({
 			options: ["always-ask", "always-ask-cached", "write", "yolo"],
 			description: "Override tools.approvalMode for this session (always-ask|always-ask-cached|write|yolo)",
+		}),
+		"acp-ask-all": Flags.boolean({
+			description: "ACP: ask the client before every gated tool call, even when an allow rule matches",
 		}),
 	},
 	examples: [

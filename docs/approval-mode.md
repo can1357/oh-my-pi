@@ -30,6 +30,8 @@ Configure with `tools.approvalMode`:
 
 `--approval-mode <mode>` overrides the configured mode for the session. `--auto-approve` and `--yolo` force yolo execution even when an explicit `--approval-mode` is also supplied; tool/user denies and explicit tool prompt policies still apply.
 
+In ACP mode, `bash`, `delete`, `move`, and destructive `edit` calls also ask the client, unless explicit yolo or, for `bash`, an `allow` policy or matching `bash.patterns` `allow` rule approves them first. `tools.acpAskAll: true` (or `--acp-ask-all`) removes those shortcuts so every such call asks the client; a `bash` `deny` still denies without asking.
+
 ### Ask and remember (`always-ask-cached`)
 
 Ask and remember prompts like `always-ask`, and also before a tool reads a file it has not been granted. Its prompts can remember what the call touched:
