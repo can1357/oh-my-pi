@@ -11,9 +11,9 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
-	getEffectiveTokenCost,
 	getFactoryDroidCreditRate,
 	getModelPricingStatus,
+	getModelTokenCost,
 	modelsAreEqual,
 } from "@oh-my-pi/pi-catalog/models";
 import { modelKind, type ModelKind, type ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
@@ -887,7 +887,7 @@ function declaredPricingStatus(model: Model): Exclude<ModelPricingStatus, "fixed
 function isFreeModel(model: Model): boolean {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return declared === "free";
-	const cost = model.cost ? getEffectiveTokenCost(model.cost) : undefined;
+	const cost = model.cost ? getModelTokenCost(model) : undefined;
 	const credits = getFactoryDroidCreditRate(model)?.rate;
 	return (!cost || (cost.input === 0 && cost.output === 0)) && (credits === undefined || credits === 0);
 }
@@ -918,7 +918,7 @@ function withCreditBadge(model: Model, price: string): string {
 	const credits = getFactoryDroidCreditRate(model);
 	if (credits === undefined) return price;
 	const badge = `${formatCostLeg(credits.rate)}×`;
-	const cost = getEffectiveTokenCost(model.cost);
+	const cost = getModelTokenCost(model);
 	return cost.input !== 0 || cost.output !== 0 ? `${price} ${badge}` : badge;
 }
 
@@ -934,7 +934,7 @@ function formatCostPair(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].short;
 	if (isFreeModel(model)) return "free";
-	const cost = getEffectiveTokenCost(model.cost);
+	const cost = getModelTokenCost(model);
 	return withCreditBadge(model, `$${formatCostLeg(cost.input)}/${formatCostLeg(cost.output)}`);
 }
 
@@ -957,7 +957,7 @@ function pickerPrice(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].short;
 	if (isFreeModel(model)) return "free";
-	const cost = getEffectiveTokenCost(model.cost);
+	const cost = getModelTokenCost(model);
 	return withCreditBadge(model, `$${formatCostLeg(cost.input)}·${formatCostLeg(cost.output)}`);
 }
 
@@ -965,7 +965,7 @@ function pickerPrice(model: Model): string {
 function previewPrice(model: Model): string {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return PRICING_STATUS_LABELS[declared].detail;
-	const cost = getEffectiveTokenCost(model.cost);
+	const cost = getModelTokenCost(model);
 	const parts = [`$${formatCostLeg(cost.input)} in`, `$${formatCostLeg(cost.output)} out`];
 	if (cost.cacheRead > 0) parts.push(`$${formatCostLeg(cost.cacheRead)} cache`);
 	const priced = withCreditBadge(model, parts.join(" · "));

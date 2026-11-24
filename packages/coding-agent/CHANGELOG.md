@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `providers.cursor.teamsTokenRatePerMillion` in `models.yml` (cursor provider only) to include Cursor's Teams/Enterprise token rate in session cost for priced third-party Cursor models (default off; use `0.25` to match Cursor billing); `omp models --json` reports it as `teamsTokenRatePerMillion` next to the list `cost` ([#16183](https://github.com/can1357/oh-my-pi/pull/16183) by [@joseotaviorf](https://github.com/joseotaviorf))
 - The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses
 - Tray cards now mark subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so Tern shows them apart from subagents doing work
 - The shell's `tail -r` builtin now takes `-c`, `-b`, and `+N` counts like BSD `tail`, and `tail -b N` selects 512-byte blocks; `-r` with `-f` is BSD's usage error instead of a "pipe through tac" refusal

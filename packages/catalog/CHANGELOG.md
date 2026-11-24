@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added opt-in Cursor Teams/Enterprise Cursor Token Rate pricing: set `teamsTokenRatePerMillion` on the `cursor` provider in `models.yml` to add the per-million surcharge on input, output, cache read, and cache write for priced third-party models, flat per token and outside peak/off-peak and cache-write multipliers; unpriced rows stay at zero; Grok and the Composer family stay exempt. `getModelTokenCost(model)` returns a model's displayed per-million price including the rate ([#16183](https://github.com/can1357/oh-my-pi/pull/16183) by [@joseotaviorf](https://github.com/joseotaviorf))
 - Added GLM-5.4 to the Zhipu Coding Plan with image input and 1M context, gave it the low/high/max thinking ladder on every host, and preferred it over GLM-5.3 for the `slow` role
 - Added `fetchOpenRouterChatModels()` and `OPENROUTER_BASE_URL` to `@oh-my-pi/pi-catalog/provider-models/openai-compat` for reading OpenRouter's tool-capable chat roster outside the `openrouter` provider.
 - `toolSchemaFlavor: "google"` rewrites OpenAI-compatible tool schemas into Gemini's dialect; GitHub Copilot Gemini models use it ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))

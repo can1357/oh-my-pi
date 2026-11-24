@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The frustration run's cost estimate for Cursor models now includes the Cursor Teams/Enterprise token rate when `teamsTokenRatePerMillion` is set for the `cursor` provider in `models.yml` ([#16183](https://github.com/can1357/oh-my-pi/pull/16183) by [@joseotaviorf](https://github.com/joseotaviorf))
 ## [19.1.1] - 2026-11-23
 
 ### Added

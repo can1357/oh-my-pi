@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult, ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
-import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
+import { resolveTeamsTokenRatePerMillion } from "@oh-my-pi/pi-catalog/cursor-teams-token-rate";
 import type { ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { untilAborted } from "@oh-my-pi/pi-utils";
@@ -17,6 +17,7 @@ import {
 	checkVariant,
 	gateVariant,
 	initFlow,
+	type PricedModel,
 	type PriceLookup,
 	RATCHET_STAGES,
 	RatchetError,
@@ -89,20 +90,23 @@ export function ratchetApproval(args: unknown): ToolApprovalDecision {
 
 /**
  * Catalog-backed pricing: a served id resolves only when every registry entry
- * with that id (bare or `provider/id`) carries the same non-zero rate card. A
- * zero-cost subscription entry or a conflicting provider leaves the id
- * unpriced (surfaced as a warning) rather than guessing which rate applied.
+ * with that id (bare or `provider/id`) carries the same non-zero rate card and
+ * per-token surcharge. A zero-cost subscription entry or a conflicting provider
+ * leaves the id unpriced (surfaced as a warning) rather than guessing which
+ * rate applied.
  */
 function catalogPriceLookup(session: ToolSession): PriceLookup {
-	const cache = new Map<string, ModelCost | undefined>();
+	const cache = new Map<string, PricedModel | undefined>();
 	return model => {
 		if (cache.has(model)) return cache.get(model);
 		const candidates = (session.modelRegistry?.getAll("all") ?? []).filter(
 			entry => entry.id === model || `${entry.provider}/${entry.id}` === model,
 		);
 		const allPriced = candidates.every(entry => entry.cost.input > 0 || entry.cost.output > 0);
-		const distinct = new Set(candidates.map(entry => JSON.stringify(entry.cost)));
-		const resolved = candidates.length > 0 && allPriced && distinct.size === 1 ? candidates[0]!.cost : undefined;
+		const distinct = new Set(
+			candidates.map(entry => JSON.stringify([entry.cost, resolveTeamsTokenRatePerMillion(entry)])),
+		);
+		const resolved = candidates.length > 0 && allPriced && distinct.size === 1 ? candidates[0] : undefined;
 		cache.set(model, resolved);
 		return resolved;
 	};

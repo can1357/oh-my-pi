@@ -451,6 +451,12 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 * comes from the gateway's `GET /v1/pi/models`.
 		 */
 		"transport?": '"pi-native"',
+		/**
+		 * Cursor Teams/Enterprise Cursor Token Rate in dollars per million tokens,
+		 * added to input, output, cache read, and cache write. Omit or set 0 to
+		 * keep API list pricing only (default). Typical value: 0.25.
+		 */
+		"teamsTokenRatePerMillion?": "number >= 0",
 	}).narrow((value, ctx) => {
 		if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
 			return ctx.mustBe("baseUrl a non-empty string");

@@ -638,6 +638,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		set: "catalog",
 		shape: "scalar",
 	},
+	/** Cursor Teams/Enterprise Cursor Token Rate does not apply (Grok, Composer). */
+	"cursor-token-rate-exempt": { key: "cursorTokenRateExempt", set: "catalog", shape: "scalar" },
 	"requires-tool-result-image-hoisting": {
 		key: "requiresToolResultImageHoisting",
 		set: "catalog",

@@ -130,6 +130,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	} else {
 		delete model.requiresCursorToolSchemaProjection;
 	}
+	if (catalog.cursorTokenRateExempt === true) {
+		model.cursorTokenRateExempt = true;
+	} else {
+		delete model.cursorTokenRateExempt;
+	}
 	if (catalog.toolSchemasInContext === false) {
 		model.toolSchemasInContext = false;
 	} else {

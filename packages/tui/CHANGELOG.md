@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Model browser prices for Cursor models now include the Cursor Teams/Enterprise token rate when `teamsTokenRatePerMillion` is set for the `cursor` provider in `models.yml` ([#16183](https://github.com/can1357/oh-my-pi/pull/16183) by [@joseotaviorf](https://github.com/joseotaviorf))
+
 ### Added
 
 - Added Vim `W`, `B`, and `E` motions for navigating whitespace-delimited WORDs ([#13099](https://github.com/can1357/oh-my-pi/pull/13099) by [@Scott-Simmons](https://github.com/Scott-Simmons)).

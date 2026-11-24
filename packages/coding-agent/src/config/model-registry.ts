@@ -42,6 +42,7 @@ import {
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
 } from "@oh-my-pi/pi-catalog/model-manager";
+import { applyTeamsTokenRateConfig } from "@oh-my-pi/pi-catalog/cursor-teams-token-rate";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
 	googleAntigravityModelManagerOptions,
@@ -625,7 +626,13 @@ export class ModelRegistry {
 			if (learned === models) learned = models.slice();
 			learned[index] = projected;
 		}
-		return this.#orderImplicitProvidersLast(applyCatalogMetrics(learned, this.#catalogMetrics));
+		const providerRates = new Map<string, number>();
+		for (const [provider, override] of this.#providerOverrides) {
+			const rate = override.teamsTokenRatePerMillion;
+			if (rate !== undefined && rate > 0) providerRates.set(provider, rate);
+		}
+		const withTeamsRate = applyTeamsTokenRateConfig(learned, providerRates);
+		return this.#orderImplicitProvidersLast(applyCatalogMetrics(withTeamsRate, this.#catalogMetrics));
 	}
 
 	/**
@@ -2441,7 +2448,8 @@ export class ModelRegistry {
 				providerConfig.guardrailIdentifier ||
 				providerConfig.requestMetadata ||
 				providerConfig.remoteCompaction ||
-				providerConfig.transport
+				providerConfig.transport ||
+				providerConfig.teamsTokenRatePerMillion !== undefined
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
@@ -2463,6 +2471,7 @@ export class ModelRegistry {
 					guardrailVersion: providerConfig.guardrailVersion,
 					guardrailTrace: providerConfig.guardrailTrace,
 					requestMetadata: providerConfig.requestMetadata,
+					teamsTokenRatePerMillion: providerConfig.teamsTokenRatePerMillion,
 				});
 			}
 
@@ -3486,6 +3495,7 @@ export class ModelRegistry {
 			compat: override.compat ? mergeCompat(baseOverride?.compat, override.compat) : baseOverride?.compat,
 			remoteCompaction: mergeRemoteCompactionConfig(baseOverride?.remoteCompaction, override.remoteCompaction),
 			transport: override.transport ?? baseOverride?.transport,
+			teamsTokenRatePerMillion: override.teamsTokenRatePerMillion ?? baseOverride?.teamsTokenRatePerMillion,
 		};
 	}
 	#applyProviderTransportOverride<
