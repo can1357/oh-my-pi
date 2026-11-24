@@ -8,7 +8,6 @@
 
 ### Fixed
 
-- Fixed table charts plotting day numbers from day-first dates (`9 Oct`, `3–4 paź`) as measures: such columns now read as dates, and units and nouns with non-ASCII letters (`zł`) stay whole ([#16331](https://github.com/can1357/oh-my-pi/issues/16331), [#19958](https://github.com/can1357/oh-my-pi/pull/19958) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Corrected math environment detection to properly handle blocks starting with `\begin`
 - Cmd+A highlights the full text of editors and inputs when the terminal forwards the shortcut. Typing, deleting or pasting replaces the selected range.
 - Native overlays follow the field they are anchored to, including when the field moves or shares its local key with another field.
