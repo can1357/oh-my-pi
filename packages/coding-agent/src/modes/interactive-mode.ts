@@ -1582,6 +1582,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#display.hideToolActivity.set(cfgDisplayHideToolActivity.get(settings));
 		this.#hideThinkingBlock = cfgHideThinkingBlock.get(settings);
+		// Blocks read the display signal, which the setter and first reasoning content push; the saved preference must reach it at startup too.
+		this.#display.hideThinking.set(this.#hideThinkingBlock);
 		this.#display.proseOnlyThinking.set(cfgProseOnlyThinking.get(settings));
 		this.#display.expandThinkingBlocks.set(cfgExpandThinkingBlocks.get(settings));
 		this.#syncTranscriptDisplaySettings();

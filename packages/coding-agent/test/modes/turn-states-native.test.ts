@@ -12,6 +12,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
@@ -37,6 +38,68 @@ function parentOf(node: { readonly id: string; readonly parent: string | null })
 	if (node.parent === null) throw new Error(`${node.id} has no parent`);
 	return node.parent;
 }
+
+describe("turn states with hideThinkingBlock set before the session starts", () => {
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let session: AgentSession;
+	let mode: InteractiveMode;
+	let term: ModeTerminal;
+
+	beforeAll(() => {
+		initTheme();
+	});
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-turn-states-startup-");
+		const settings = await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		cfgHideThinkingBlock.override(settings, true);
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings,
+			modelRegistry,
+		});
+		term = createModeTerminal({ columns: 120, rows: 32 });
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, new EventBus(), term.frame);
+	});
+
+	afterEach(async () => {
+		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
+		await session?.dispose();
+		authStorage?.close();
+		tempDir?.removeSync();
+		resetSettingsForTest();
+	});
+
+	it("hides a finished reply's thinking block", async () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "Considering the request carefully." },
+				{ type: "text", text: "Answer after thinking." },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: USAGE,
+			timestamp: 10,
+		};
+		mode.presentAssistant(message);
+		await using ui = await nativeShell(mode.shell);
+		const reply = parentOf(ui.node("md"));
+		expect(ui.get(reply).c.map(child => ui.get(child).k)).toEqual(["md"]);
+	});
+});
 
 describe("turn states", () => {
 	let tempDir: TempDir;
