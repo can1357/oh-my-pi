@@ -138,7 +138,13 @@ Licences. The root `LICENSE` is MIT, "Copyright (c) 2025 Mario Zechner" and "Cop
 
 ## Status in omp
 
-**Status: In progress. S1 landed; S2 to S7 are not started.** The `oauth.toml` kinds, the custom OAuth modules and the Azure env-var pattern exist in part.
+**Status: In progress. S1 and S2 landed; S3 to S7 are not started.** The `oauth.toml` kinds, the custom OAuth modules and the Azure env-var pattern exist in part.
+
+**S2 (D2, account-scoped base URL; PR #693).**
+- `cloudflare_effective_route` (`crates/ai/src/provider/builtin.rs`) is the only resolver for the `cloudflare-ai-gateway` provider. It fills `{account}`, `<account>`, `{gateway}` and `<gateway>` in the route's base URL from a validated `CloudflareGatewayConfig`, re-derives `trust_domain.origin` from the result, and refuses a URL that still contains `{`, `}`, `<` or `>` (`cloudflare-effective-endpoint-invalid`). Without a config the call fails with `cloudflare-gateway-not-configured` before any request is built, so a literal placeholder never reaches the wire. Every other provider returns `None` from this resolver and is unchanged.
+- `production_cloudflare_gateway` and `cloudflare_gateway_from` (`crates/driver/src/registry.rs`) read `OMP_CLOUDFLARE_ACCOUNT_ID` and `OMP_CLOUDFLARE_AI_GATEWAY_NAME`. Both present and valid give a config. Either absent leaves the gateway unconfigured, so each call fails with the typed error instead of sending a placeholder. A present but invalid value is refused at startup, even when the other value is absent. `cloudflare_coordinate_is_valid` (`builtin.rs`) is the coordinate check. The values come from the environment, never from `CredentialMetadata`, as O2 settled.
+- Tests: `cloudflare_gateway_route_fills_account_and_gateway_from_validated_config`, `cloudflare_gateway_without_config_fails_and_never_yields_a_placeholder_url`, `cloudflare_gateway_config_refuses_unsafe_coordinates` and `other_providers_are_untouched_by_the_cloudflare_resolver` in `builtin.rs`; `cloudflare_gateway_needs_both_values_and_refuses_invalid_ones` in `registry.rs`.
+- Not done by S2: S5 (Snowflake) still needs this seam to carry the account coordinate for its own base URL; no second provider uses it yet.
 
 **S1 (D1, data rows).**
 - `fixtures/llm-oracle/catalog/providers.toml` has `sambanova`, `coralbricks`, `helmcode`, `modular` and `otari`, all `open-ai-chat` bearer routes, each unselectable until its key is set. Env names are `OMP_<ID>_API_KEY` then the vendor's own name (`SAMBANOVA_API_KEY`, `CORAL_API_KEY`, `HELMCODE_API_KEY`, `MODULAR_API_KEY`, `OTARI_API_KEY`). `CORALBRICKS_API_KEY` is not carried: upstream's own comment says the Coral pi extension introduced it.
