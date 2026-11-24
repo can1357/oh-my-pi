@@ -181,4 +181,32 @@ describe("InputController Python prompt prefix", () => {
 		expect(handleBtwCommand).not.toHaveBeenCalled();
 		expect(submitted).toEqual([{ text, images: undefined, imageLinks: undefined, streamingBehavior: "steer" }]);
 	});
+
+	it("submits a draft starting with two or more question marks as a normal prompt", async () => {
+		const { ctx, editor, handleBtwCommand, handlePythonCommand, startPendingSubmission, submitted } = createContext();
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await editor.onSubmit?.("?? is this valid syntax");
+
+		expect(handleBtwCommand).not.toHaveBeenCalled();
+		expect(handlePythonCommand).not.toHaveBeenCalled();
+		expect(startPendingSubmission).toHaveBeenCalledWith(
+			{
+				text: "?? is this valid syntax",
+				images: undefined,
+				imageLinks: undefined,
+				streamingBehavior: "steer",
+			},
+			{ clearEditor: false },
+		);
+		expect(submitted).toEqual([
+			{
+				text: "?? is this valid syntax",
+				images: undefined,
+				imageLinks: undefined,
+				streamingBehavior: "steer",
+			},
+		]);
+	});
 });

@@ -14,6 +14,7 @@
 
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
+- A draft beginning with two or more question marks (`??`) is now sent as the user typed it instead of being turned into a `/btw` side question
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
