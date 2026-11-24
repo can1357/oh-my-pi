@@ -5808,10 +5808,10 @@ async function pairSynthesizedExecResult(
 	await sink(synthesized);
 }
 
-/** Exported for tests: drives one Cursor interaction update through the streaming state machine. */
 // Cursor's tool-call dialect; cursor-agent sometimes returns it as text instead of a tool call (issue 8495).
 const TOOL_CALL_MARKUP_LEAK = "<|open|>toolscall";
 
+/** Exported for tests: drives one Cursor interaction update through the streaming state machine. */
 export function processInteractionUpdate(
 	update: any,
 	output: AssistantMessage,
