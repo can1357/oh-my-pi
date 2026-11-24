@@ -51,6 +51,7 @@
 - The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
 
 ### Fixed
+- The prompt cache warmer no longer refreshes an entry that expired during sleep: when a late timer finds less than ten seconds of the entry's lifetime left, the warmer stops instead of paying a full cache write ([#20366](https://github.com/can1357/oh-my-pi/issues/20366), [#20381](https://github.com/can1357/oh-my-pi/pull/20381) by [@JamieJ5926](https://github.com/JamieJ5926))
 - `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
 - Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
