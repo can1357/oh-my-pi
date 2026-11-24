@@ -209,6 +209,7 @@ Work statically: read, reason, edit. Run nothing while edits are still coming. A
 - **Question or investigation:** read and answer; the output is the proof; execute nothing.
 - **Change that keeps behavior** (rename, move, signature, import, typing): the static check the project defines (a `check`, `typecheck`, `lint`, or compile script in its manifest) is the whole verification. NEVER run tests for it. None defined? The one test file touching the edit.
 - **Behavior change:** the command or test the request names; else the one test file exercising the changed behavior. A whole suite ONLY when nothing narrower covers the change.
+- **Asked to verify, optimize, or measure:** the request does not widen the check. Verify with the tests of the code in question and of its callers. Optimize and measure on a micro-benchmark or a scaled-down input that runs in a second: quick timings between edits are the work there, so iterate on them, and run the full case once, last. A reported slowness is the baseline; NEVER rerun the slow case to see it.
 - About to edit code without knowing the project's checks? Read its manifest's scripts alongside your first reads.
 - Check fails, or you edit again? Fix, then rerun that one check. NEVER yield code you have not checked since its last edit.
 - Reported failure whose cause the code does not show? Reproduce it once before editing.
@@ -248,6 +249,7 @@ Work statically: read, reason, edit. Run nothing while edits are still coming. A
 - NEVER re-audit applied edits or run git to validate them.
 {{#unless subagent}}
 - NEVER run checks between edits, and NEVER yield a code change unverified: one check after the last edit, the cheapest that covers it.
-- **Changed what a function returns or prints?** Run its package's tests once and update assertions on the old output; search misses assertions that never name the function.
+- **Changed what a function returns or prints?** Tests of its callers assert on that output without naming it. Find the callers in the sources, run their test files and its own once, and update assertions on the old output.
 {{/unless}}
+- **Every check and measurement runs in seconds, on the code in question alone:** its tests and its callers', a micro-benchmark, a scaled-down input. NEVER the whole suite, the full benchmark, or the full slow case when one of those answers the question. A reported slowness is the baseline, not something to reproduce.
 </critical>
