@@ -1,6 +1,6 @@
 import { $which } from "@oh-my-pi/pi-utils";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { DoctorCheck } from "./types";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 export async function runDoctorChecks(): Promise<DoctorCheck[]> {
 	const checks: DoctorCheck[] = [];
@@ -48,10 +48,10 @@ export function formatDoctorResults(checks: DoctorCheck[]): string {
 	for (const check of checks) {
 		const icon =
 			check.status === "ok"
-				? theme.status.enabled
+				? currentTheme().symbols.symbol("status.enabled")
 				: check.status === "warning"
-					? theme.status.warning
-					: theme.status.error;
+					? currentTheme().symbols.symbol("status.warning")
+					: currentTheme().symbols.symbol("status.error");
 		lines.push(`${icon} ${check.name}: ${check.message}`);
 	}
 

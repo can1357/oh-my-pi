@@ -3,22 +3,37 @@
  * spans are started, mutated, and ended on the main thread's real tracer.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import {
-	type Context,
-	context,
-	type Exception,
-	type Link,
-	type Span,
-	type SpanAttributes,
-	type SpanAttributeValue,
-	type SpanContext,
-	type SpanOptions,
-	type SpanStatus,
-	type TimeInput,
-	type Tracer,
-	trace,
+import type * as OtelApi from "@opentelemetry/api";
+import type {
+	Context,
+	Exception,
+	Link,
+	Span,
+	SpanAttributes,
+	SpanAttributeValue,
+	SpanContext,
+	SpanOptions,
+	SpanStatus,
+	TimeInput,
+	Tracer,
 } from "@opentelemetry/api";
-import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import type * as OtelContextAsyncHooks from "@opentelemetry/context-async-hooks";
+
+// Lazy loaders: this module is reachable from main-thread startup via thread
+// services, but only workers bridging telemetry actually need OTEL at runtime.
+let otelApiCache: typeof OtelApi | undefined;
+function otelApi(): typeof OtelApi {
+	if (!otelApiCache) otelApiCache = require("@opentelemetry/api") as typeof OtelApi;
+	return otelApiCache;
+}
+
+let otelAsyncHooksCache: typeof OtelContextAsyncHooks | undefined;
+function otelAsyncHooks(): typeof OtelContextAsyncHooks {
+	if (!otelAsyncHooksCache) {
+		otelAsyncHooksCache = require("@opentelemetry/context-async-hooks") as typeof OtelContextAsyncHooks;
+	}
+	return otelAsyncHooksCache;
+}
 import type { RemoteObject } from "../rpc";
 import {
 	fromWireSpanContext,
@@ -38,8 +53,9 @@ let contextManagerChecked = false;
 export function ensureWorkerContextManager(): void {
 	if (contextManagerChecked) return;
 	contextManagerChecked = true;
+	const { AsyncLocalStorageContextManager } = otelAsyncHooks();
 	const manager = new AsyncLocalStorageContextManager().enable();
-	if (!context.setGlobalContextManager(manager)) manager.disable();
+	if (!otelApi().context.setGlobalContextManager(manager)) manager.disable();
 }
 
 /**
@@ -163,7 +179,8 @@ export class RemoteTracer implements Tracer {
 		ensureWorkerContextManager();
 	}
 
-	startSpan(name: string, options?: SpanOptions, ctx: Context = context.active()): Span {
+	startSpan(name: string, options?: SpanOptions, ctx: Context = otelApi().context.active()): Span {
+		const { trace } = otelApi();
 		const started = this.#remote.callSync(
 			"startSpan",
 			name,
@@ -210,6 +227,7 @@ export class RemoteTracer implements Tracer {
 		} else {
 			throw new TypeError("startActiveSpan requires a callback");
 		}
+		const { context, trace } = otelApi();
 		const parent = ctx ?? context.active();
 		const span = this.startSpan(name, options, parent);
 		return context.with(trace.setSpan(parent, span), fn, undefined, span);

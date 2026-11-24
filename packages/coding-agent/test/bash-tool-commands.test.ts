@@ -19,8 +19,8 @@ import type { ClientBridge, ClientBridgeTerminalHandle } from "@oh-my-pi/pi-codi
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { resolveToolCommand, type ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
-import { convertImageToPng } from "@oh-my-pi/pi-tui/png-conversion";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { convertImageToPng } from "@oh-my-pi/pi-coding-agent/utils/png-conversion";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 

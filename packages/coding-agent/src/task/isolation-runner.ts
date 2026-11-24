@@ -36,7 +36,7 @@ import { withRepoLock } from "../utils/repo-lock";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
-import type { NestedRepoPatch, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { NestedRepoPatch, SingleResult } from "./task-details";
 import {
 	applyNestedPatches,
 	captureDeltaPatch,

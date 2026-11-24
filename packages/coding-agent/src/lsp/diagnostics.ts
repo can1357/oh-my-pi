@@ -1,4 +1,4 @@
-import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type FileDiagnosticsResult } from "../tools/details/lsp";
 import * as fs from "node:fs";
 import path from "node:path";
 import { isRecord, logger, untilAborted, toError } from "@oh-my-pi/pi-utils";
@@ -28,15 +28,14 @@ import type {
 	TextEdit,
 } from "./types";
 import {
-	fileToUri,
 	formatDiagnostic,
 	formatDiagnosticsSummary,
 	formatLocation,
 	mergeDiagnosticLists,
 	readLocationContext,
 	sortDiagnostics,
-	uriToFile,
 } from "./utils";
+import { fileToUri, uriToFile } from "./uri";
 
 const DIAGNOSTIC_MESSAGE_LIMIT = 50;
 export const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;

@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,9 +6,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { OmfgController } from "@oh-my-pi/pi-coding-agent/modes/controllers/omfg-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { Container, type TUI } from "@oh-my-pi/pi-tui";
+import { Shell } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { clearCache, readDirEntries } from "@oh-my-pi/pi-coding-agent/capability/fs";
 
@@ -53,7 +52,7 @@ interface HarnessOptions {
 
 interface Harness {
 	ctx: InteractiveModeContext;
-	container: Container;
+	shell: Shell;
 	projectDir: string;
 	agentDir: string;
 	ttsrAddRule: Mock<AddRule>;
@@ -111,10 +110,9 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 		ruleJudge: () => undefined,
 		ttsrManager: { addRule: ttsrAddRule },
 	} as unknown as InteractiveModeContext["session"];
-	const container = new Container();
+	const shell = new Shell();
 	const ctx = {
-		ui: { requestRender: vi.fn() } as unknown as TUI,
-		omfgContainer: container,
+		shell,
 		session,
 		sessionManager: { getCwd: () => projectDir } as unknown as InteractiveModeContext["sessionManager"],
 		settings: { getAgentDir: () => agentDir } as unknown as InteractiveModeContext["settings"],
@@ -124,12 +122,8 @@ async function createHarness(options: HarnessOptions): Promise<Harness> {
 		showHookSelector,
 		showHookConfirm,
 	} as unknown as InteractiveModeContext;
-	return { ctx, container, projectDir, agentDir, ttsrAddRule, showHookSelector, showHookConfirm, showHookInput };
+	return { ctx, shell, projectDir, agentDir, ttsrAddRule, showHookSelector, showHookConfirm, showHookInput };
 }
-
-beforeAll(async () => {
-	await initTheme();
-});
 
 afterEach(async () => {
 	vi.restoreAllMocks();
@@ -170,9 +164,9 @@ describe("OmfgController", () => {
 
 		await controller.start("stop this");
 
-		expect(harness.container.children).toHaveLength(1);
+		expect(harness.shell.dock.slot("omfg").occupied()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);
-		expect(harness.container.children).toHaveLength(0);
+		expect(harness.shell.dock.slot("omfg").occupied()).toBe(false);
 		expect(signal?.aborted).toBe(true);
 		expect(controller.hasActiveRequest()).toBe(false);
 		expect(await Bun.file(path.join(harness.projectDir, ".omp", "rules", "ts-no-any.md")).exists()).toBe(false);
@@ -204,7 +198,7 @@ describe("OmfgController", () => {
 		await controller.start("stop using any");
 		await registered.promise;
 
-		expect(harness.container.children).toHaveLength(0);
+		expect(harness.shell.dock.slot("omfg").occupied()).toBe(false);
 		expect(controller.hasActiveRequest()).toBe(false);
 		expect(harness.ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("ts-no-any.md"));
 	});

@@ -6,8 +6,8 @@
  */
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTarget } from "../../session/auth-storage";
-import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
-import { summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import type { ResetUsageAccount } from "../../modes/view-model/overlays/reset-usage-selector";
+import { summarizeUsageResetCredits } from "../../session/usage-display";
 
 const CODEX_PROVIDER_ID = "openai-codex";
 const CLAUDE_PROVIDER_ID = "anthropic";

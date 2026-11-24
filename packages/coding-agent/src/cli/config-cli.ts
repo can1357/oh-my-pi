@@ -10,8 +10,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
 import { type AnySetting, lookup } from "../config/registry";
 import { Settings, settings } from "../config/settings";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import { initXdg } from "./commands/init-xdg";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 // =============================================================================
 // Types
@@ -354,8 +354,10 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 		console.log(JSON.stringify({ key: def.path, value: saved, ...shadow?.json }));
 		return;
 	}
-	console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(saved)}`));
-	if (shadow) console.log(chalk.yellow(`${theme.status.warning} ${shadow.message}`));
+	console.log(
+		chalk.green(`${currentTheme().symbols.symbol("status.success")} Set ${def.path} = ${formatValue(saved)}`),
+	);
+	if (shadow) console.log(chalk.yellow(`${currentTheme().symbols.symbol("status.warning")} ${shadow.message}`));
 }
 
 /** Value `setting` holds in the global config layer — what `config set` wrote. */
@@ -433,7 +435,9 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 		console.log(JSON.stringify(redacted ? { key: def.path, redacted: true } : { key: def.path, value }));
 	} else {
 		console.log(
-			chalk.green(`${theme.status.success} Reset ${def.path} to ${redacted ? REDACTED : formatValue(value)}`),
+			chalk.green(
+				`${currentTheme().symbols.symbol("status.success")} Reset ${def.path} to ${redacted ? REDACTED : formatValue(value)}`,
+			),
 		);
 	}
 }

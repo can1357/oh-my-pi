@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { type ConflictEntry, renderConflictRegion } from "@oh-my-pi/pi-tui/tools/conflict-detect";
+import { type ConflictEntry, renderConflictRegion } from "@oh-my-pi/pi-coding-agent/tools/conflict-region";
 import {
 	ConflictHistory,
 	type ConflictReplacement,
@@ -10,7 +10,7 @@ import {
 	scanConflictLines,
 	spliceConflict,
 } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 /** Replacement lines the caller typed in full, with no token expansion. */
 function typed(lines: string[]): ConflictReplacement {

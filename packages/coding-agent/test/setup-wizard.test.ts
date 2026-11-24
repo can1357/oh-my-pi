@@ -4,30 +4,22 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgSetupVersion, cfgSymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import {
 	ALL_SCENES,
-	createSetupHost,
 	CURRENT_SETUP_VERSION,
+	createSetupHost,
 	markSetupWizardComplete,
 	runSetupWizard,
 	type SetupScene,
-	type SetupSceneHost,
 	selectSetupScenes,
 } from "@oh-my-pi/pi-coding-agent/modes/setup";
-import { providersSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/sign-in";
-import { themeSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/theme";
-import { SetupWizardComponent } from "@oh-my-pi/pi-tui/setup/wizard-overlay";
-import { setTerminalGlyphProtocol } from "@oh-my-pi/pi-tui/terminal-capabilities";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-
-import { cfgSetupVersion, cfgSymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
-
-type SetupApplicationSceneHost = Omit<SetupSceneHost, "ctx"> & { ctx: InteractiveModeContext };
-
-function bindSceneHost(host: SetupApplicationSceneHost): SetupSceneHost {
-	return { ...host, ctx: createSetupHost(host.ctx) };
-}
+import { jsx, signal } from "@oh-my-pi/pi-tui";
+import * as terminalSession from "@oh-my-pi/pi-tui/driver/session";
+import type { SceneContext, SceneResult, SceneView, SetupHost } from "../src/ui/setup/types";
+import { SetupWizard, type SetupWizardModel } from "../src/ui/setup/wizard";
+import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 function fakeContextWithConfiguredModel(): InteractiveModeContext {
 	return {
@@ -39,24 +31,40 @@ function fakeContextWithConfiguredModel(): InteractiveModeContext {
 	} as unknown as InteractiveModeContext;
 }
 
-function testScene(id: string, minVersion: number, shouldRun?: () => boolean): SetupScene {
+function testScene(id: string, minVersion: number, mount?: SetupScene["mount"]): SetupScene {
 	return {
 		id,
 		title: id,
+		subtitle: "",
 		step: id,
 		minVersion,
-		shouldRun,
-		mount: () => ({
-			title: id,
-			render: () => [],
-			invalidate: () => {},
-		}),
+		mount: mount ?? (() => ({ body: jsx("text", { spans: [{ t: id }] }) })),
 	};
 }
 
-afterEach(async () => {
-	await initTheme(false, "unicode", false, "titanium", "light");
-});
+/** A scene context over `host` whose `finish` resolves `finished`. */
+function sceneContext(host: SetupHost): {
+	context: SceneContext;
+	finished: Promise<SceneResult>;
+} {
+	const { promise, resolve } = Promise.withResolvers<SceneResult>();
+	return {
+		context: {
+			host,
+			finish: resolve,
+			maxLines: signal<number | undefined>(undefined),
+		},
+		finished: promise,
+	};
+}
+
+/** `view`'s body on a scripted terminal, focused where the wizard focuses it. */
+function mountScene(view: SceneView): LayerTerminal {
+	const term = mountLayer(() => view.body);
+	const root = term.term.surface.layer()[0];
+	if (root) term.term.focus(view.focusTarget?.(root) ?? root);
+	return term;
+}
 
 describe("setup wizard scene selection", () => {
 	// Tests run from a source checkout, which never updates itself; pin a self-updating install.
@@ -98,9 +106,24 @@ describe("setup wizard scene selection", () => {
 	it("honors hard environment gates", async () => {
 		const ctx = fakeContextWithConfiguredModel();
 		expect(await selectSetupScenes(0, ALL_SCENES, ctx, { isTTY: false })).toEqual([]);
-		expect(await selectSetupScenes(0, ALL_SCENES, ctx, { isTTY: true, resuming: true })).toEqual([]);
-		expect(await selectSetupScenes(0, ALL_SCENES, ctx, { isTTY: true, skipEnv: "1" })).toEqual([]);
-		expect(await selectSetupScenes(0, ALL_SCENES, ctx, { isTTY: true, setupWizardEnabled: false })).toEqual([]);
+		expect(
+			await selectSetupScenes(0, ALL_SCENES, ctx, {
+				isTTY: true,
+				resuming: true,
+			}),
+		).toEqual([]);
+		expect(
+			await selectSetupScenes(0, ALL_SCENES, ctx, {
+				isTTY: true,
+				skipEnv: "1",
+			}),
+		).toEqual([]);
+		expect(
+			await selectSetupScenes(0, ALL_SCENES, ctx, {
+				isTTY: true,
+				setupWizardEnabled: false,
+			}),
+		).toEqual([]);
 	});
 
 	it("force mode ignores version and user skip gates but still requires a TTY", async () => {
@@ -113,7 +136,12 @@ describe("setup wizard scene selection", () => {
 			force: true,
 		});
 		expect(selected.map(scene => scene.id)).toEqual(ALL_SCENES.map(scene => scene.id));
-		expect(await selectSetupScenes(0, ALL_SCENES, ctx, { isTTY: false, force: true })).toEqual([]);
+		expect(
+			await selectSetupScenes(0, ALL_SCENES, ctx, {
+				isTTY: false,
+				force: true,
+			}),
+		).toEqual([]);
 	});
 
 	it("skips the auto-update question where omp cannot update itself (Tern, Nix, a source checkout)", async () => {
@@ -125,25 +153,15 @@ describe("setup wizard scene selection", () => {
 	});
 
 	it("drops the glyph scene once the terminal renders omp's bundled icons in-band", async () => {
-		setTerminalGlyphProtocol(true);
-		try {
-			const scenes = await selectSetupScenes(0, ALL_SCENES, fakeContextWithConfiguredModel(), { isTTY: true });
-			expect(scenes.map(scene => scene.id)).toEqual(
-				ALL_SCENES.map(scene => scene.id).filter(id => id !== "glyph-mode"),
-			);
-		} finally {
-			setTerminalGlyphProtocol(false);
-		}
-	});
-
-	it("applies scene shouldRun only as a hard environment gate", async () => {
-		const selected = await selectSetupScenes(
-			0,
-			[testScene("blocked", 1, () => false), testScene("allowed", 1, () => true)],
-			fakeContextWithConfiguredModel(),
-			{ isTTY: true },
+		const identity = terminalSession.terminalIdentity();
+		vi.spyOn(terminalSession, "terminalIdentity").mockReturnValue({
+			...identity,
+			glyphs: true,
+		});
+		const scenes = await selectSetupScenes(0, ALL_SCENES, fakeContextWithConfiguredModel(), { isTTY: true });
+		expect(scenes.map(scene => scene.id)).toEqual(
+			ALL_SCENES.map(scene => scene.id).filter(id => id !== "glyph-mode"),
 		);
-		expect(selected.map(scene => scene.id)).toEqual(["allowed"]);
 	});
 });
 
@@ -162,9 +180,7 @@ describe("setup wizard model selection", () => {
 	});
 
 	async function pickModelDuringSetup(settings: Settings): Promise<string> {
-		await initTheme(false, "unicode", false, "titanium", "dark");
 		let available: Model[] = [];
-		const finished = Promise.withResolvers<string>();
 		const setModel = mock(
 			async (
 				selected: Model,
@@ -177,37 +193,41 @@ describe("setup wizard model selection", () => {
 				return { switched: true };
 			},
 		);
-		const host = bindSceneHost({
-			ctx: {
-				settings,
-				session: {
-					model: undefined,
-					modelRegistry: {
-						getAvailable: () => available,
-						getAll: () => available,
-						refresh: async (strategy: string) => {
-							if (strategy === "online-if-uncached") available = [CUSTOM_MODEL];
-						},
+		const refreshed = Promise.withResolvers<void>();
+		const host = createSetupHost({
+			settings,
+			session: {
+				model: undefined,
+				modelRegistry: {
+					getAvailable: () => available,
+					getAll: () => available,
+					refresh: async (strategy: string) => {
+						if (strategy === "online-if-uncached") available = [CUSTOM_MODEL];
+						refreshed.resolve();
 					},
-					setModel,
-					effectiveServiceTier: () => undefined,
 				},
-				ui: { terminal: { rows: 30 } },
+				setModel,
+				effectiveServiceTier: () => undefined,
 			},
-			requestRender: () => {},
-			finish: (next: string) => finished.resolve(next),
-			setFocus: () => {},
-			restoreFocus: () => {},
-		} as unknown as SetupApplicationSceneHost);
+		} as unknown as InteractiveModeContext);
 		const scene = ALL_SCENES.find(candidate => candidate.id === "model");
 		expect(scene).toBeDefined();
 
-		const controller = scene!.mount(host);
-		expect(controller.render?.(120).join("\n")).not.toContain("minimax-m3");
-		await controller.onMount?.();
-		expect(controller.render?.(120).join("\n")).toContain("minimax-m3");
-		controller.handleInput?.("\r");
-		return finished.promise;
+		const { context, finished } = sceneContext(host);
+		const view = scene!.mount(context);
+		const term = mountScene(view);
+		try {
+			expect(term.text()).not.toContain("minimax-m3");
+			view.onMount?.();
+			await refreshed.promise;
+			await Promise.resolve();
+			expect(term.text()).toContain("minimax-m3");
+			term.handleInput("\r");
+			return await finished;
+		} finally {
+			term.dispose();
+			view.dispose?.();
+		}
 	}
 
 	it("discovers and saves an uncached custom model as the global default", async () => {
@@ -238,287 +258,149 @@ describe("setup wizard persistence", () => {
 		expect(cfgSetupVersion.get(settings)).toBe(CURRENT_SETUP_VERSION);
 	});
 
-	it("can run a targeted scene without setup-version or welcome-intro side effects", async () => {
-		const settings = Settings.isolated({ setupVersion: 0 });
-		const hideOverlay = mock(() => {});
-		const setFocus = mock((_component: unknown) => {});
-		const requestRender = mock(() => {});
-		const playWelcomeIntro = mock(() => {});
-		let component: SetupWizardComponent | undefined;
-		const scene: SetupScene = {
-			id: "providers",
-			title: "providers",
-			step: "providers",
-			minVersion: 1,
-			mount: host => ({
-				title: "providers",
-				onMount: () => host.finish("done"),
-				render: () => [],
-				invalidate: () => {},
-			}),
-		};
-		const ctx = {
+	function nativeShellCtx(settings: Settings, playWelcomeIntro: () => void): InteractiveModeContext {
+		// Tern draws its own look, so the terminal-look `theme` scene is not shown there.
+		return {
 			settings,
 			playWelcomeIntro,
-			ui: {
-				terminal: { rows: 24 },
-				showOverlay: (nextComponent: SetupWizardComponent) => {
-					component = nextComponent;
-					return { hide: hideOverlay };
-				},
-				setFocus,
-				requestRender,
-			},
+			shell: { native: () => true },
 		} as unknown as InteractiveModeContext;
+	}
 
-		const pending = runSetupWizard(ctx, [scene], { markComplete: false, playWelcomeIntro: false });
-		component?.handleInput?.("\n");
-		component?.handleInput?.("\n");
-		await pending;
+	it("can run a targeted scene without setup-version or welcome-intro side effects", async () => {
+		const settings = Settings.isolated({ setupVersion: 0 });
+		const playWelcomeIntro = mock(() => {});
+		const theme = ALL_SCENES.find(scene => scene.id === "theme")!;
+
+		await runSetupWizard(nativeShellCtx(settings, playWelcomeIntro), [theme], {
+			markComplete: false,
+			playWelcomeIntro: false,
+		});
 
 		expect(cfgSetupVersion.get(settings)).toBe(0);
 		expect(playWelcomeIntro).not.toHaveBeenCalled();
-		expect(hideOverlay).toHaveBeenCalledTimes(1);
-		expect(setFocus).toHaveBeenCalled();
+	});
+
+	it("persists completion and plays the welcome intro by default", async () => {
+		const settings = Settings.isolated();
+		const playWelcomeIntro = mock(() => {});
+		const theme = ALL_SCENES.find(scene => scene.id === "theme")!;
+
+		await runSetupWizard(nativeShellCtx(settings, playWelcomeIntro), [theme]);
+
+		expect(cfgSetupVersion.get(settings)).toBe(CURRENT_SETUP_VERSION);
+		expect(playWelcomeIntro).toHaveBeenCalledTimes(1);
 	});
 });
-describe("setup wizard mouse routing", () => {
-	it("synthesizes arrow keys from wheel notches for scenes without routeMouse", () => {
-		const received: string[] = [];
-		const scene: SetupScene = {
-			id: "scrollable",
-			title: "scrollable",
-			step: "scrollable",
-			minVersion: 1,
-			mount: () => ({
-				title: "scrollable",
-				handleInput: (data: string) => received.push(data),
-				render: () => [],
-				invalidate: () => {},
-			}),
-		};
-		const ctx = {
+
+describe("setup wizard mouse wheel", () => {
+	function mountWizard(scene: SetupScene): {
+		model: SetupWizardModel;
+		term: LayerTerminal;
+	} {
+		let model: SetupWizardModel | undefined;
+		const host = createSetupHost({
 			settings: Settings.isolated(),
-			ui: {
-				terminal: { rows: 24 },
-				setFocus: () => {},
-				requestRender: () => {},
-			},
-		} as unknown as InteractiveModeContext;
-		const component = new SetupWizardComponent(createSetupHost(ctx), [scene]);
+		} as unknown as InteractiveModeContext);
+		const term = mountLayer(
+			() =>
+				SetupWizard({
+					host,
+					scenes: [scene],
+					version: "0.0.0",
+					now: () => 0,
+					rows: () => 24,
+					onDone: () => {},
+					ref: m => {
+						model = m;
+					},
+				}),
+			{ columns: 80, rows: 24 },
+		);
+		if (!model) throw new Error("Setup wizard did not hand out its model");
+		model.skipSplash();
+		term.render();
+		return { model, term };
+	}
+
+	it("sends arrow keys to scenes without their own wheel handling", () => {
+		const received: string[] = [];
+		const { model, term } = mountWizard(
+			testScene("scrollable", 1, () => ({
+				body: jsx("col", {
+					onKey: (key: { id: string }) => {
+						received.push(key.id);
+						return true;
+					},
+					children: jsx("text", { spans: [{ t: "scrollable" }] }),
+				}),
+			})),
+		);
 		try {
-			void component.run();
-			// Left click during the splash advances into the scene, like Enter.
-			component.handleInput("\x1b[<0;5;5M");
-			component.handleInput("\x1b[<64;10;5M"); // wheel up
-			component.handleInput("\x1b[<65;10;5M"); // wheel down
-			component.handleInput("\x1b[<35;10;5M"); // pointer motion — swallowed
-			component.handleInput("\x1b[<0;10;5M"); // click in scene — swallowed
-			expect(received).toEqual(["\x1b[A", "\x1b[B"]);
+			model.wheel(-1);
+			model.wheel(1);
+			expect(received).toEqual(["up", "down"]);
 		} finally {
-			component.dispose();
+			term.dispose();
 		}
 	});
 
-	it("routes hit-tested mouse events at scene-local coordinates to scenes with routeMouse", async () => {
-		await initTheme(false, "unicode", false, "titanium", "light");
-		const routed: { kind: string; line: number; col: number }[] = [];
+	it("hands the wheel to scenes that scroll themselves, without synthesized keys", () => {
+		const wheel: number[] = [];
 		const keys: string[] = [];
-		const scene: SetupScene = {
-			id: "mouse",
-			title: "mouse",
-			step: "mouse",
-			minVersion: 1,
-			mount: () => ({
-				title: "mouse",
-				handleInput: (data: string) => keys.push(data),
-				routeMouse: (event, line, col) => {
-					const kind =
-						event.wheel !== null
-							? `wheel:${event.wheel}`
-							: event.motion
-								? "motion"
-								: event.leftClick
-									? "click"
-									: "other";
-					routed.push({ kind, line, col });
-				},
-				render: () => ["MARKER-ROW"],
-				invalidate: () => {},
-			}),
-		};
-		const ctx = {
-			settings: Settings.isolated(),
-			ui: {
-				terminal: { rows: 24 },
-				setFocus: () => {},
-				requestRender: () => {},
-			},
-		} as unknown as InteractiveModeContext;
-		const component = new SetupWizardComponent(createSetupHost(ctx), [scene]);
+		const { model, term } = mountWizard(
+			testScene("mouse", 1, () => ({
+				body: jsx("col", {
+					onKey: (key: { id: string }) => {
+						keys.push(key.id);
+						return true;
+					},
+					children: jsx("text", { spans: [{ t: "MARKER-ROW" }] }),
+				}),
+				wheel: delta => void wheel.push(delta),
+			})),
+		);
 		try {
-			void component.run();
-			component.handleInput("\r"); // splash → scene
-			await Bun.sleep(500); // let the splash→scene dissolve (420ms) finish so the frame is the scene
-			const frame = component.render(80);
-			const row = frame.findIndex(line => line.includes("MARKER-ROW"));
-			expect(row).toBeGreaterThan(0);
-			const indent = /^ */.exec(frame[row])?.[0].length ?? 0;
-			expect(indent).toBeGreaterThan(0);
-			// SGR reports are 1-based; two columns into the marker text.
-			component.handleInput(`\x1b[<35;${indent + 3};${row + 1}M`);
-			component.handleInput(`\x1b[<0;${indent + 3};${row + 1}M`);
-			component.handleInput("\x1b[<64;1;1M"); // wheel forwards regardless of pointer position
-			expect(routed.slice(0, 2)).toEqual([
-				{ kind: "motion", line: 0, col: 2 },
-				{ kind: "click", line: 0, col: 2 },
-			]);
-			expect(routed[2]?.kind).toBe("wheel:-1");
-			// routeMouse scenes get no synthesized arrows and no raw SGR bytes.
+			model.wheel(-1);
+			model.wheel(1);
+			expect(wheel).toEqual([-1, 1]);
 			expect(keys).toEqual([]);
 		} finally {
-			component.dispose();
+			term.dispose();
 		}
-	});
-});
-describe("setup wizard short terminals", () => {
-	function shortTerminalCtx(rows: number): InteractiveModeContext {
-		return {
-			settings: Settings.isolated(),
-			ui: {
-				terminal: { rows },
-				setFocus: () => {},
-				requestRender: () => {},
-				invalidate: () => {},
-			},
-			session: {
-				modelRegistry: {
-					authStorage: {
-						credentials: { has: () => false },
-						keys: { source: () => undefined },
-					},
-				},
-			},
-			openInBrowser: () => {},
-		} as unknown as InteractiveModeContext;
-	}
-
-	/**
-	 * Advance the wizard's dissolve clock past SCENE_TRANSITION_MS so render()
-	 * shows the fully revealed scene without waiting real time. Activate after
-	 * the splash→scene input (the transition timestamps itself on entry).
-	 */
-	function skipDissolve(): { mockRestore(): void } {
-		const realNow = performance.now.bind(performance);
-		return vi.spyOn(performance, "now").mockImplementation(() => realNow() + 1_000);
-	}
-
-	it("keeps the selected provider row visible while navigating on a 24-row terminal", async () => {
-		await initTheme(false, "unicode", false, "titanium", "light");
-		const component = new SetupWizardComponent(createSetupHost(shortTerminalCtx(24)), [providersSetupScene]);
-		void component.run();
-		component.handleInput("\r"); // splash → scene
-		const nowSpy = skipDissolve();
-		try {
-			// Walk down past a full wrap and back up; the selection must stay
-			// inside the 24-row frame on every step (the list window used to
-			// assume ten visible rows and the wizard clipped the cursor off).
-			for (const key of [...Array(45).fill("\x1b[B"), "\x1b[A", "\x1b[A"]) {
-				component.handleInput(key);
-				const frame = component.render(80).map(line => Bun.stripANSI(line));
-				expect(frame.length).toBe(24);
-				expect(frame.some(line => line.includes(`${theme.nav.cursor} `))).toBe(true);
-			}
-		} finally {
-			nowSpy.mockRestore();
-			component.dispose();
-		}
-	});
-
-	it("keeps the curated theme list and its selection visible on a 24-row terminal", async () => {
-		await initTheme(false, "unicode", false, "titanium", "light");
-		const component = new SetupWizardComponent(createSetupHost(shortTerminalCtx(24)), [themeSetupScene]);
-		void component.run();
-		component.handleInput("\r"); // splash → scene
-		const nowSpy = skipDissolve();
-		try {
-			const frame = component.render(80).map(line => Bun.stripANSI(line));
-			expect(frame.length).toBe(24);
-			expect(frame.some(line => line.trimStart().startsWith(theme.nav.cursor))).toBe(true);
-			for (const label of ["Match terminal", "Titanium", "Light", "Colorblind colors", "ANSI-safe", "Browse all"]) {
-				expect(frame.some(line => line.includes(label))).toBe(true);
-			}
-		} finally {
-			nowSpy.mockRestore();
-			component.dispose();
-		}
-	});
-});
-
-describe("setup wizard theme previews", () => {
-	it("restores the selected glyph preset after previewing ANSI-safe mode", async () => {
-		await initTheme(false, "nerd", false, "titanium", "light");
-		const settings = Settings.isolated({ symbolPreset: "nerd", colorBlindMode: false });
-		const setupScene = ALL_SCENES.find(scene => scene.id === "theme");
-		expect(setupScene).toBeDefined();
-
-		const host = bindSceneHost({
-			ctx: {
-				settings,
-				ui: {
-					invalidate: () => {},
-					requestRender: () => {},
-				},
-			},
-			requestRender: () => {},
-			finish: () => {},
-			setFocus: () => {},
-			restoreFocus: () => {},
-		} as unknown as SetupApplicationSceneHost);
-
-		const controller = setupScene!.mount(host);
-		controller.handleInput?.("5");
-		await Bun.sleep(20);
-		expect(theme.getSymbolPreset()).toBe("ascii");
-
-		controller.handleInput?.("2");
-		await Bun.sleep(20);
-		expect(cfgSymbolPreset.get(settings)).toBe("nerd");
-		expect(theme.getSymbolPreset()).toBe("nerd");
 	});
 });
 
 describe("setup wizard glyph scene", () => {
 	it("lists Nerd Font first and commits the chosen preset", async () => {
-		await initTheme(false, "unicode", false, "titanium", "light");
 		const settings = Settings.isolated();
 		const scene = ALL_SCENES.find(s => s.id === "glyph-mode");
 		expect(scene).toBeDefined();
 
-		let finished = false;
-		const host = bindSceneHost({
-			ctx: {
-				settings,
-				ui: { invalidate: () => {}, requestRender: () => {} },
-			},
-			requestRender: () => {},
-			finish: () => {
-				finished = true;
-			},
-			setFocus: () => {},
-			restoreFocus: () => {},
-		} as unknown as SetupApplicationSceneHost);
+		const host = createSetupHost({
+			settings,
+		} as unknown as InteractiveModeContext);
+		// The preview restyles the whole UI; record it instead of switching the shared theme.
+		const preview = vi.fn();
+		const { context, finished } = sceneContext(
+			Object.assign(Object.create(host) as SetupHost, {
+				previewSymbolPreset: preview,
+			}),
+		);
+		const view = scene!.mount(context);
+		const term = mountScene(view);
+		try {
+			// Row "1" is Nerd Font (it must lead the list) and previews across the UI.
+			term.handleInput("1");
+			expect(preview).toHaveBeenLastCalledWith("nerd");
 
-		const controller = scene!.mount(host);
-		// Row "1" is now Nerd Font (it must lead the list).
-		controller.handleInput?.("1");
-		await Bun.sleep(20);
-		expect(theme.getSymbolPreset()).toBe("nerd");
-
-		controller.handleInput?.("\n");
-		await Bun.sleep(20);
-		expect(cfgSymbolPreset.get(settings)).toBe("nerd");
-		expect(finished).toBe(true);
+			term.handleInput("\r");
+			expect(await finished).toBe("done");
+			expect(cfgSymbolPreset.get(settings)).toBe("nerd");
+		} finally {
+			term.dispose();
+			view.dispose?.();
+		}
 	});
 });
 
