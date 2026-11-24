@@ -1647,9 +1647,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// The composer hint follows the ask above, running agents and the conversation's start.
 		this.#effect(() => this.composer.setPlaceholder(this.#composerHint()));
 		this.#effect(() => this.composer.setNativePlaceholder(this.#nativeComposerPlaceholder()));
-		// A `/btw` note taking or giving back the composer changes its role and chip.
+		// A `/btw` note taking or giving back the composer changes its role and chip; so does a draft
+		// that starts or stops skipping the ask waiting above (read only while one waits).
 		this.#effect(() => {
 			this.#btwController.isFocused();
+			this.#extensionUiController.composerAsk();
 			untrack(() => this.#syncComposerState());
 		});
 		// Idle, the terminal's status row keeps the working row's trailer (band title with its pin,
@@ -3842,10 +3844,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#syncComposerState();
 	}
 
-	/** The composer's mode: a turn runs (Stop for Send), the draft is a shell command or a `/btw` question. */
+	/**
+	 * The composer's mode: a turn runs (Stop for Send), the draft is a shell command or a `/btw`
+	 * question, the view is a subagent's (its viewing header), sending the draft skips the ask above.
+	 */
 	#syncComposerState(): void {
 		this.#composerHintRevision.set(this.#composerHintRevision.peek() + 1);
 		const draft = untrack(this.composer.text).trimStart();
+		const viewing = this.#viewingLineage();
 		this.composer.setState({
 			running: this.#working.kind !== undefined || this.session.isStreaming,
 			...(this.isBashMode
@@ -3856,7 +3862,25 @@ export class InteractiveMode implements InteractiveModeContext {
 						? { shell: { kind: "btw", excluded: false } }
 						: {}),
 			...(untrack(() => this.isBtwFocused) ? { btw: true } : {}),
+			...(viewing ? { viewing } : {}),
+			...(untrack(() => this.#extensionUiController.composerAsk()) === "skip" ? { skipsAsk: true } : {}),
 		});
+	}
+
+	/** The focused subagent and its live ancestors below main, outermost first; undefined on the main session. */
+	#viewingLineage(): string[] | undefined {
+		const id = this.focusedAgentId;
+		if (!id) return undefined;
+		const registry = AgentRegistry.global();
+		const lineage = [id];
+		for (
+			let parent = registry.get(id)?.parentId;
+			parent && parent !== MAIN_AGENT_ID && !lineage.includes(parent) && registry.get(parent);
+			parent = registry.get(parent)?.parentId
+		) {
+			lineage.unshift(parent);
+		}
+		return lineage;
 	}
 
 	/**

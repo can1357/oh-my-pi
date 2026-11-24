@@ -33,7 +33,7 @@ import { resolveReadPath } from "../../tools/path-utils";
 import { vocalizer } from "../../tts/vocalizer";
 import { chipLabel, collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
-import { combineAtomizers } from "../../ui/composer/composer";
+import { combineAtomizers, FOCUS_ACTION } from "../../ui/composer/composer";
 import { modelMentionAtomizer } from "../../ui/composer/model-mention-chips";
 import { skillAtomizer } from "../../ui/composer/skill-chips";
 import { getSkillSlashCommandName } from "../../extensibility/skills";
@@ -244,9 +244,6 @@ function safeAbort(label: string, fn: () => void): void {
 // deliberate human double-tap is always tens of milliseconds apart.
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
-
-/** Native composer action prefix for the viewing header's agent crumbs. */
-const FOCUS_ACTION = "focus:";
 
 /** Whether `node` is `root` or lies below it. */
 function containsNode(root: UiNode, node: UiNode): boolean {

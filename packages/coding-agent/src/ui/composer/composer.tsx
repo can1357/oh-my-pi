@@ -3,7 +3,8 @@
  * The composer: the prompt field and its state.
  *
  * One `col` node (role `omp.editor`, `omp.editor.bash|python|btw-ask` in
- * a draft mode, tone `pending` while a turn runs) holding the `line` row (mode
+ * a draft mode, tone `pending` while a turn runs) holding the `focus` row
+ * (the viewing header, while a subagent is viewed), the `line` row (mode
  * chip and the `editor` field), the `bar` row (status facts the app slots
  * in, then Send or Stop) and, while completing, the `complete` popup. A Tern
  * terminal draws it natively; the terminal backend paints it with the
@@ -85,7 +86,15 @@ import {
 import type { VimMode } from "./vim";
 import { UndoHistory, type UndoStacks, VimEditor } from "./vim-editor";
 import { holdText, SpaceHoldGesture, type SpaceHoldHandler } from "../../config/keybindings/space-hold";
-import { actionKey, formatTooltipKey } from "../keys/hints";
+import { MAIN_AGENT_ID } from "../../registry/agent-hub-types";
+import { actionKbd, actionKey, formatTooltipKey } from "../keys/hints";
+
+/**
+ * Action prefix of the viewing header's links: `focus:<agent id>` views that agent, the main
+ * agent's id ({@link MAIN_AGENT_ID}) goes back to the main session. The app handles them
+ * ({@link Composer.addActionHandler}).
+ */
+export const FOCUS_ACTION = "focus:";
 
 /** Live state the composer shows (set by the app). */
 export interface ComposerState {
@@ -99,11 +108,22 @@ export interface ComposerState {
 	readonly shell?: { readonly kind: "bash" | "python" | "btw"; readonly excluded?: boolean };
 	/** Drafts go to the `/btw` note the user clicked, as its follow-ups: role `omp.editor.btw`, a `btw` chip that leads back to the chat. */
 	readonly btw?: boolean;
+	/**
+	 * The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main
+	 * session. Natively the viewing header (`omp.composer.focus`) names it over the draft.
+	 */
+	readonly viewing?: readonly string[];
+	/**
+	 * Sending the draft skips the ask waiting above the composer: natively a `skips ask` chip leads
+	 * the input and Send reads Skip & send (`omp.composer.skip`).
+	 */
+	readonly skipsAsk?: boolean;
 }
 
 /** Whether two composer states draw the same composer (see {@link ComposerState}). */
 function sameComposerState(a: ComposerState, b: ComposerState): boolean {
-	if (a.running !== b.running || a.btw !== b.btw) return false;
+	if (a.running !== b.running || a.btw !== b.btw || a.skipsAsk !== b.skipsAsk) return false;
+	if (a.viewing?.length !== b.viewing?.length || a.viewing?.some((id, i) => id !== b.viewing?.[i])) return false;
 	if (a.shell === b.shell) return true;
 	return (
 		a.shell !== undefined &&
@@ -1824,6 +1844,20 @@ export class Composer {
 					</row>
 				);
 			}
+			if (!s && this.#state().skipsAsk) {
+				return (
+					<row
+						key="mode"
+						role="omp.composer.mode"
+						tone="warning"
+						align="center"
+						gap="xs"
+						title="Sending this message skips the questions above"
+					>
+						<text key="label" spans={[{ s: "warning", t: "skips ask" }]} wrap="none" />
+					</row>
+				);
+			}
 			if (!s) return null;
 			const title = s.excluded ? `${SHELL_TITLES[s.kind]} · not sent to the model` : SHELL_TITLES[s.kind];
 			return (
@@ -1833,8 +1867,61 @@ export class Composer {
 				</row>
 			);
 		};
+		// The viewing header while a subagent is focused: an eye, the agent's ancestors as links
+		// (`omp.composer.crumb`), the agent itself (`omp.composer.agent`), then the way back to the
+		// main session (`omp.composer.exit`, the interrupt key's keycap: Esc on an empty draft). Tern's
+		// tray reads it: the named agent's card is marked as viewed, and its MAIN bar runs the exit's click.
+		const viewingHeader = (): JSXNode => {
+			const viewing = this.#state().viewing;
+			const agent = viewing?.at(-1);
+			if (viewing === undefined || agent === undefined) return null;
+			const back = formatTooltipKey(getKeybindings().keysFor("app.interrupt")[0] ?? "escape");
+			return (
+				<row
+					key="focus"
+					role="omp.composer.focus"
+					align="center"
+					gap="xs"
+					title={`Viewing subagent ${agent}: what you send goes to it`}
+				>
+					<icon key="icon" name="eye" />
+					<text key="label" text="Viewing" wrap="none" />
+					{viewing.slice(0, -1).map(id => (
+						<text
+							key={`crumb:${id}`}
+							role="omp.composer.crumb"
+							text={id}
+							wrap="none"
+							title={`View ${id}`}
+							actions={{ click: `${FOCUS_ACTION}${id}` }}
+						/>
+					))}
+					<text key="agent" role="omp.composer.agent" text={agent} wrap="none" />
+					<row
+						key="exit"
+						role="omp.composer.exit"
+						align="center"
+						gap="xs"
+						title={`Back to the main session  ${back}`}
+						actions={{ click: `${FOCUS_ACTION}${MAIN_AGENT_ID}` }}
+					>
+						<kbd key="key" keys={actionKbd("app.interrupt", "escape")} />
+						<text key="label" text="main" wrap="none" />
+					</row>
+				</row>
+			);
+		};
 		const submitControl = (): JSXNode =>
-			this.#state().running ? (
+			this.#state().skipsAsk ? (
+				<text
+					key="skip"
+					actions={{ click: "submit" }}
+					role="omp.composer.skip"
+					text="Skip & send"
+					title="Send this message instead of answering the questions  ⏎"
+					tone="warning"
+				/>
+			) : this.#state().running ? (
 				<text
 					key="stop"
 					actions={{ click: "interrupt" }}
@@ -1973,6 +2060,7 @@ export class Composer {
 				}}
 			>
 				{() => this.#slots().context}
+				{viewingHeader}
 				{() => this.#slots().chips}
 				<row key="line" role="omp.composer.line" align="start" gap="sm">
 					{modeChip}
