@@ -19,7 +19,8 @@ import { initTheme } from "../../../src/ui/theme/service";
 const restoreTheme = currentTheme();
 
 beforeAll(() => {
-	initTheme();
+	// The glow assertions read truecolor SGR: pin the depth instead of following the runner's env.
+	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true } });
 });
 
 afterAll(() => {

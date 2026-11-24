@@ -7,6 +7,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { isSettingsInitialized, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -75,10 +76,14 @@ describe("paste then Enter in one read", () => {
 
 	it("opens the menu when Enter comes in a later read", async () => {
 		const { ctx, term, submitted } = setup();
+		const menu = new ExtensionUiController(ctx);
+		const opened = vi.spyOn(ctx, "showHookSelector").mockImplementation((...args) => menu.showHookSelector(...args));
 		term.paste(LARGE);
 		await Promise.resolve();
-		expect(ctx.showHookSelector).toHaveBeenCalledTimes(1);
+		expect(opened).toHaveBeenCalledTimes(1);
+		// The open menu takes the Enter: it picks the first action instead of submitting the draft.
 		enter(ctx, false);
+		expect(await opened.mock.results[0]?.value).toBe("Attach as a wrapped block");
 		expect(submitted).toEqual([]);
 	});
 });

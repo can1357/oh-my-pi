@@ -26,6 +26,14 @@ function mount(onDelete: (session: SessionSelectorEntry) => Promise<boolean>): M
 	});
 }
 
+/** The delete question replaces the list: titled, naming only the selected session (Alpha). */
+function expectAlphaDeleteQuestion(picker: MountedSessionSelector): void {
+	const screen = picker.screen();
+	expect(screen).toContain("Delete session?");
+	expect(screen).toContain("Alpha");
+	expect(screen).not.toContain("Beta");
+}
+
 describe("session picker delete confirmation", () => {
 	it("keeps the session visible and shows the error when delete fails after confirmation", async () => {
 		const onDelete = vi.fn(async () => {
@@ -34,7 +42,7 @@ describe("session picker delete confirmation", () => {
 		const picker = mount(onDelete);
 
 		picker.press("delete");
-		expect(picker.screen()).toContain("Delete “Alpha”?");
+		expectAlphaDeleteQuestion(picker);
 
 		picker.press("enter");
 		await deletes(onDelete);
@@ -44,7 +52,7 @@ describe("session picker delete confirmation", () => {
 		expect(screen).toContain("Error: disk failed");
 		expect(screen).toContain("Alpha");
 		expect(screen).toContain("Beta");
-		expect(screen).not.toContain("Delete “Alpha”?");
+		expect(screen).not.toContain("Delete session?");
 	});
 
 	it("keeps the session visible when delete is canceled upstream", async () => {
@@ -79,7 +87,7 @@ describe("session picker delete confirmation", () => {
 		const picker = mount(onDelete);
 
 		picker.press("backspace");
-		expect(picker.screen()).toContain("Delete “Alpha”?");
+		expectAlphaDeleteQuestion(picker);
 
 		picker.press("enter");
 		await deletes(onDelete);
@@ -101,7 +109,7 @@ describe("session picker delete confirmation", () => {
 
 		const screen = picker.screen();
 		expect(onDelete).not.toHaveBeenCalled();
-		expect(screen).not.toContain("Delete “");
+		expect(screen).not.toContain("Delete session?");
 		expect(screen).toContain("alph");
 		expect(screen).not.toContain("alpha");
 	});
