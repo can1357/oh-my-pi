@@ -1851,6 +1851,21 @@ export interface TodoBackendChange {
 	next: TodoPhase[];
 }
 
+/** How a `todo` call's change fared with the selected todo backend. */
+export type TodoApplyResult =
+	| { kind: "committed" }
+	/** The backend threw. */
+	| { kind: "refused"; message: string }
+	/** Nothing committed for another reason: timeout, list or session changed, abort, closing. */
+	| { kind: "stale"; message: string };
+
+/** Puts a `todo` call's change to the selected backend, which commits it when it accepts or when none decides. */
+export type TodoChangeApplier = (
+	change: TodoBackendChange,
+	commit: () => void,
+	signal?: AbortSignal,
+) => TodoApplyResult | Promise<TodoApplyResult>;
+
 /**
  * A todo backend registered with `pi.registerTodoBackend()`. omp keeps the todo list; the backend
  * the `todo.backend` setting selects is told about every change to it.
@@ -1884,9 +1899,8 @@ export interface TodoBackendDefinition {
 	 * corrects a backend that wrote here. A refusal, a timeout, a late answer or a list that
 	 * changed meanwhile fails the call with omp's list unchanged, and the backend is sent omp's
 	 * whole list once. A todo call made once the session is closing fails without asking the
-	 * backend, and nothing is resent. Changes
-	 * that do not come from the model's `todo` call (`/todo`, RPC `set_todos`, eval, resets,
-	 * subagents) are not asked: they reach `replace`.
+	 * backend, and nothing is resent. Changes that do not come from the model's `todo` call
+	 * (`/todo`, RPC `set_todos`, eval, resets, subagents) are not asked: they reach `replace`.
 	 */
 	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
 }

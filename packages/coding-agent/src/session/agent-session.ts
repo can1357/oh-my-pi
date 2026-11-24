@@ -12165,17 +12165,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
 	}
 
-	/**
-	 * Put a `todo` call's change to the selected todo backend before it commits; see
-	 * {@link ExtensionRunner.applyTodoBackend}. `native` when none decides, and nothing is committed then.
-	 */
+	/** Put a `todo` call's change to the selected todo backend; see {@link ExtensionRunner.applyTodoBackend}. */
 	applyTodoChange(
 		change: TodoBackendChange,
 		commit: () => void,
 		signal?: AbortSignal,
 	): TodoApplyResult | Promise<TodoApplyResult> {
 		const backend = this.#todoBackend();
-		if (backend === undefined || !this.#extensionRunner) return { kind: "native" };
+		if (backend === undefined || !this.#extensionRunner) {
+			commit();
+			return { kind: "committed" };
+		}
 		return this.#extensionRunner.applyTodoBackend({
 			backend,
 			change,

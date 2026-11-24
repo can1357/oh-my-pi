@@ -728,17 +728,18 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		let refused = false;
 		if (op !== "view" && errors.length === 0) {
 			const commit = () => this.session.setTodoPhases?.(updated);
-			// The selected todo backend may veto first; the commit then runs in the step that reads its
-			// answer. Without one (or from a program, not the model) it commits before any await.
+			// Programmatic callers (eval, shell bridge) are not put to the backend.
 			const asked = context?.programmatic
 				? undefined
 				: this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);
-			const outcome = asked instanceof Promise ? await asked : asked;
-			if (outcome === undefined || outcome.kind === "native") commit();
-			else if (outcome.kind !== "committed") {
-				errors.push(outcome.message);
-				refused = outcome.kind === "refused";
-				current = clonePhases(this.session.getTodoPhases?.() ?? []);
+			if (!asked) commit();
+			else {
+				const outcome = asked instanceof Promise ? await asked : asked;
+				if (outcome.kind !== "committed") {
+					errors.push(outcome.message);
+					refused = outcome.kind === "refused";
+					current = clonePhases(this.session.getTodoPhases?.() ?? []);
+				}
 			}
 		}
 		// A batch with any error is discarded wholesale: persisting a
