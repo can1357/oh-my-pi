@@ -82,6 +82,8 @@ Dictation started with this button stays in the draft, regardless of `stt.submit
 
 For live English transcription, select **Nemotron 0.6B (live streaming, English)** in `omp setup speech`, or set `modelRoles.dictation` to `local/nemotron-streaming-en-0.6b`. Words appear in the draft while you speak. The first recording waits for the model to load before opening the microphone; start speaking when the button says **Recording · Stop**. Later recordings reuse the loaded model. See [local speech models](local-models.md#speech-to-text) for download and language details.
 
+A cloud dictation model (one served by `openai-transcriptions`) normally transcribes the whole recording after you stop. Set `stt.cloudLive: true` to send each phrase when you pause instead: its text joins the draft while you keep speaking, and the rest follows within a moment of stopping. Each phrase is a separate request transcribed without the others as context, and if one fails the dictation is never auto-submitted.
+
 ## Recover a cleared prompt
 
 Press `Ctrl+C` to clear an unsent composer draft, then `Up` to recall it. Older drafts and submitted prompts share the existing Up/Down navigation. Recalled drafts remain editable and are never sent until you submit them.
