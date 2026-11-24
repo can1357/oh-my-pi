@@ -1098,9 +1098,12 @@ impl GitRepo {
 		} else {
 			let mut changed = target.clone();
 			changed.remove_entries(|_, entry_path, _| !write.contains(entry_path));
-			let mut checkout_options = linked_repo
-				.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
-				.map_err(|err| Error::backend("git worktree add", err))?;
+			let mut checkout_options = worktree_checkout_options(
+				self,
+				&linked_repo,
+				gix::worktree::stack::state::attributes::Source::IdMapping,
+				"git worktree add",
+			)?;
 			checkout_options.overwrite_existing = true;
 			let progress = gix::progress::Discard;
 			let interrupt = std::sync::atomic::AtomicBool::new(false);
@@ -1946,6 +1949,28 @@ fn resolve_checkout_target(
 	Ok((resolve_commit(repo, branch.as_deref().unwrap_or(rev))?, branch))
 }
 
+/// Checkout options for `repo`, a linked worktree or the primary checkout.
+///
+/// gix reads `info/attributes` under `repo.git_dir()`, which for a linked worktree is its
+/// `worktrees/<name>` directory; git reads it from the common directory. Without this, a
+/// `filter=` rule in `.git/info/attributes` never reached a linked worktree's checkout, and
+/// its blobs were written in their stored form. The attribute stack comes from the common
+/// repository; everything else comes from `repo`.
+fn worktree_checkout_options(
+	owner: &GitRepo,
+	repo: &gix::Repository,
+	source: gix::worktree::stack::state::attributes::Source,
+	op: &'static str,
+) -> Result<gix::worktree::state::checkout::Options> {
+	let common = gix::open(owner.info().common_dir.as_path()).map_err(|e| Error::backend(op, e))?;
+	let mut opts = repo.checkout_options(source).map_err(|e| Error::backend(op, e))?;
+	opts.attributes = common
+		.checkout_options(source)
+		.map_err(|e| Error::backend(op, e))?
+		.attributes;
+	Ok(opts)
+}
+
 fn checkout_tree(
 	owner: &GitRepo,
 	repo: &gix::Repository,
@@ -1987,9 +2012,12 @@ fn checkout_tree(
 			}
 		}
 	}
-	let mut opts = repo
-		.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
-		.map_err(|e| Error::backend("git checkout", e))?;
+	let mut opts = worktree_checkout_options(
+		owner,
+		repo,
+		gix::worktree::stack::state::attributes::Source::IdMapping,
+		"git checkout",
+	)?;
 	opts.overwrite_existing = true;
 	let progress = gix::progress::Discard;
 	let interrupt = std::sync::atomic::AtomicBool::new(false);
