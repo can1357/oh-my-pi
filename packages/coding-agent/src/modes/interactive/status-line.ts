@@ -1,0 +1,774 @@
+/**
+ * The status line's data (see {@link StatusLineModel}): one {@link StatusFacts}
+ * snapshot, recomputed when the viewed session emits an event, when the app
+ * moves a mode or a badge, when a background read (git, usage quota, pull
+ * request) lands, and on the wall clock while a segment shows time.
+ *
+ * Session state is not reactive, so the session's events bump a revision the
+ * snapshot reads; {@link SessionStatusLine.refresh} does the same for changes
+ * that emit no event (a model switch through the API, a settings edit).
+ */
+import * as os from "node:os";
+import * as path from "node:path";
+import type { UsageReport } from "@oh-my-pi/pi-ai";
+import { getNextTimeBasedPricingTransition, getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
+import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
+import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
+import type { AgentViewSession } from "../../session/agent-session-handle";
+import { latestJobWidget } from "../../tools/details/job-widget";
+import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
+import type { CollabStatus, StatusLineModel } from "../types";
+import { statusLineHost } from "../status-line-host";
+import type { LoopConditionConfig, LoopLimitRuntime } from "../view-model/status-line/loop";
+import {
+	type CodexResetFireworksEvent,
+	type CodexResetUsageSnapshot,
+	detectCodexResetFireworks,
+} from "../view-model/overlays/codex-reset-fireworks";
+import { codexResetSnapshot, quotaFromReports } from "./status-quota";
+
+/** Git and jj status are refreshed at most this often (a HEAD move refreshes the branch at once). */
+const VCS_STATUS_TTL_MS = 5_000;
+/** Usage reports are fetched at most this often. */
+const USAGE_TTL_MS = 5 * 60_000;
+/** First usage fetch waits this long so startup paints first. */
+const USAGE_START_DELAY_MS = 1_500;
+const USAGE_TIMEOUT_MS = 2_000;
+/** A streaming reply's deltas refresh the facts at most this often (tokens and rate move with it). */
+const STREAM_REFRESH_MS = 100;
+/** A pull request lookup is repeated at most this often per branch. */
+const PR_TTL_MS = 60_000;
+
+/** Project and worktree directory names of a linked git worktree (the project from its primary checkout). */
+function linkedWorktreeNames(
+	linked: { readonly root: string; readonly primaryRoot: string } | null | undefined,
+): { projectName: string; worktreeName: string } | undefined {
+	if (!linked) return undefined;
+	const base = path.basename(linked.primaryRoot);
+	const projectName = base.endsWith(".git") ? base.slice(0, -4) : base;
+	return projectName ? { projectName, worktreeName: path.basename(linked.root) } : undefined;
+}
+
+/** Short machine name, resolved once (`os.hostname()` is a syscall). */
+let shortHostname: string | undefined;
+
+/** Session members the facts read beyond {@link AgentViewSession}; optional so collab replicas still draw. */
+interface StatusSessionExtras {
+	readonly isStreaming?: boolean;
+	getPromptCacheStatus?(nowMs: number, nextTokens?: number): StatusFacts["promptCache"];
+	getAdvisorStatusOverview?(): {
+		configured: boolean;
+		advisors: readonly { status: string; yielded: boolean }[];
+	};
+}
+
+type StatusSession = AgentViewSession & StatusSessionExtras;
+
+/** One viewed session's active-processing meter. */
+interface ActiveMeter {
+	/** Completed active windows since the last reset. */
+	activeMs: number;
+	/** The open window's start; undefined while idle. */
+	since: number | undefined;
+	/** The session file the meter counts for. */
+	file: string | undefined;
+}
+
+/** Modes and badges the interactive mode pushes. */
+export interface StatusModes {
+	plan?: { enabled: boolean; paused: boolean };
+	goal?: { enabled: boolean; paused: boolean };
+	vibe?: boolean;
+	loop?: { state: "waiting" | "running" | "paused"; limit?: LoopLimitRuntime; condition?: LoopConditionConfig };
+	vim?: StatusFacts["vim"];
+	stream?: { viewers: number };
+	recording?: boolean;
+	pinned?: boolean;
+	subagentTreeCost?: number;
+	vibeWorkerTokenRate?: () => number | null;
+}
+
+interface VcsSnapshot {
+	readonly cwd: string;
+	readonly branch: string | null;
+	readonly status: { staged: number; unstaged: number; untracked: number } | null;
+	readonly pr: { number: number; url: string } | null;
+	readonly worktree?: { projectName: string; worktreeName: string };
+	readonly activeRepoRoot?: string;
+}
+
+/** See the module docs. */
+export class SessionStatusLine implements StatusLineModel {
+	readonly #revision = signal(0);
+	/** Wall clock, advanced once a second while a segment shows time. */
+	readonly #clock = signal(Date.now());
+	readonly #saved: Signal<StatusLineSettings>;
+	readonly #preview = signal<Partial<StatusLineSettings> | undefined>(undefined);
+	readonly #hooks = signal<ReadonlyMap<string, string>>(new Map());
+	readonly #awaiting = signal(false);
+	readonly #collab = signal<CollabStatus | null>(null);
+	/** The running subagents the agents badge counts. */
+	readonly #subagents = signal<ReadonlySet<string>>(new Set());
+	readonly #modes = signal<StatusModes>({});
+	readonly #autoCompact = signal(true);
+	readonly #vcs = signal<VcsSnapshot | undefined>(undefined);
+	readonly #quota = signal<StatusFacts["quota"]>(undefined);
+
+	#session: StatusSession;
+	#focusedAgentId: string | undefined;
+	#unsubscribe: (() => void) | undefined;
+	#bumpQueued = false;
+	#streamBump: NodeJS.Timeout | undefined;
+	#clockTimer: NodeJS.Timeout | undefined;
+	/**
+	 * Active-processing time per viewed session (a focused subagent's turns never feed main's): the
+	 * completed windows since the last reset and the open one's start. A session whose file changed in
+	 * place (`/resume`, `/move`, a fork) starts a fresh meter.
+	 */
+	readonly #meters = new WeakMap<AgentViewSession, ActiveMeter>();
+	/** The active model's next tariff change, and the wakeup repainting the cost at it. */
+	#pricingTimer: NodeJS.Timeout | undefined;
+	#pricingAt: number | undefined;
+	/** When the working state last changed (the brand's color fades across it). */
+	#brandEdgeAt: number | undefined;
+	/** Drops {@link #brandEdgeAt} once its fade is over. */
+	#brandFade: NodeJS.Timeout | undefined;
+	#vcsFetchedAt = 0;
+	#vcsInFlight = false;
+	#vcsGeneration = 0;
+	#unwatchVcs: (() => void) | undefined;
+	#watchedRoot: string | undefined;
+	readonly #defaultBranches = new Map<string, string>();
+	/** Pull request lookups by `cwd\0branch`, each kept for {@link PR_TTL_MS}. */
+	readonly #prs = new Map<string, { at: number; pr: { number: number; url: string } | null }>();
+	#usageKey = "";
+	#usageFetchedAt = 0;
+	#usageInFlight = false;
+	#usageTimer: NodeJS.Timeout | undefined;
+	/** Bumped per usage fetch. */
+	#usageSequence = 0;
+	/** The newest fetch whose answer applied: an older fetch's late answer is dropped. */
+	#usageApplied = 0;
+	#onResetExpiryNotice: ((notice: string) => void) | undefined;
+	/** The last Codex weekly/saved-reset snapshot per account (provider + identity, not model). */
+	readonly #codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
+	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
+	#onPullRequest: ((pr: { number: number; url: string } | undefined) => void) | undefined;
+	#lastPr: { number: number; url: string } | undefined;
+	#disposed = false;
+
+	readonly settings: Accessor<StatusLineSettings> = computed(() => ({ ...this.#saved(), ...this.#preview() }));
+
+	readonly facts: Accessor<StatusFacts> = computed(() => this.#build());
+
+	constructor(session: AgentViewSession) {
+		this.#session = session;
+		this.#saved = signal(statusLineHost.getSettings());
+		this.#attach(session);
+	}
+
+	/** Called with the first PR the active branch resolves to (terminal title). */
+	set onPullRequest(handler: ((pr: { number: number; url: string } | undefined) => void) | undefined) {
+		this.#onPullRequest = handler;
+	}
+
+	/** Called with a warning about saved usage resets about to expire. */
+	set onResetExpiryNotice(handler: ((notice: string) => void) | undefined) {
+		this.#onResetExpiryNotice = handler;
+	}
+
+	/** Called when a Codex usage refresh shows a weekly reset arriving early or a saved reset banked. */
+	set onCodexResetFireworks(handler: ((event: CodexResetFireworksEvent) => void) | undefined) {
+		this.#onCodexResetFireworks = handler;
+	}
+
+	refresh(): void {
+		this.#revision.set(this.#revision.peek() + 1);
+	}
+
+	/** Zero the viewed session's active time; a running window is dropped too (its end then finds the meter idle). */
+	resetActiveTime(): void {
+		const meter = this.#meter();
+		if (meter.activeMs === 0 && meter.since === undefined) return;
+		meter.activeMs = 0;
+		meter.since = undefined;
+		this.#syncClock();
+		this.refresh();
+	}
+
+	markActivityStart(): void {
+		const meter = this.#meter();
+		if (meter.since !== undefined) return;
+		meter.since = Date.now();
+		this.#setBrandEdge(meter.since);
+		this.#syncClock();
+		this.refresh();
+	}
+
+	markActivityEnd(): void {
+		const meter = this.#meter();
+		if (meter.since === undefined) return;
+		meter.activeMs += Math.max(0, Date.now() - meter.since);
+		meter.since = undefined;
+		this.#setBrandEdge(Date.now());
+		this.#syncClock();
+		this.refresh();
+	}
+
+	/**
+	 * Mark the working-state edge and forget it once its fade is over. While a
+	 * stale edge stands the bar keeps reading the terminal clock to ease the
+	 * brand's color, which makes the renderer tick and repaint every frame for
+	 * the rest of the session; dropping it after {@link BRAND_FADE_MS} leaves
+	 * the same final color and stops the idle repaints.
+	 */
+	#setBrandEdge(at: number): void {
+		this.#brandEdgeAt = at;
+		clearTimeout(this.#brandFade);
+		this.#brandFade = setTimeout(() => {
+			this.#brandFade = undefined;
+			if (this.#disposed) return;
+			this.#brandEdgeAt = undefined;
+			this.refresh();
+		}, BRAND_FADE_MS);
+		this.#brandFade.unref?.();
+	}
+
+	/** The viewed session's active time at `now`, the open window included. */
+	activeMs(now = Date.now()): number {
+		const meter = this.#meter();
+		return meter.activeMs + (meter.since === undefined ? 0 : Math.max(0, now - meter.since));
+	}
+
+	#meter(): ActiveMeter {
+		const session = this.#session;
+		const file = session.sessionFile;
+		let meter = this.#meters.get(session);
+		if (meter && file !== undefined && meter.file !== undefined && meter.file !== file) meter = undefined;
+		if (!meter) {
+			meter = { activeMs: 0, since: undefined, file };
+			this.#meters.set(session, meter);
+		}
+		meter.file = file;
+		return meter;
+	}
+
+	setHookStatus(key: string, text: string | undefined): void {
+		const next = new Map(this.#hooks.peek());
+		if (text === undefined) next.delete(key);
+		else next.set(key, text);
+		this.#hooks.set(next);
+	}
+
+	setAwaitingAnswer(awaiting: boolean): void {
+		this.#awaiting.set(awaiting);
+	}
+
+	setCollabStatus(status: CollabStatus | null): void {
+		this.#collab.set(status);
+	}
+
+	setRunningSubagents(agentIds: readonly string[]): boolean {
+		const current = this.#subagents.peek();
+		if (current.size === agentIds.length && agentIds.every(id => current.has(id))) return false;
+		this.#subagents.set(new Set(agentIds));
+		return true;
+	}
+
+	/** Running subagents the badge counts. */
+	get subagentCount(): number {
+		return this.#subagents.peek().size;
+	}
+
+	setSession(session: AgentViewSession, focusedAgentId?: string): void {
+		this.#focusedAgentId = focusedAgentId;
+		if (session !== this.#session) {
+			this.#session = session;
+			this.#attach(session);
+		}
+		this.refresh();
+	}
+
+	previewSettings(settings: Partial<StatusLineSettings> | undefined): void {
+		this.#preview.set(settings);
+		if (settings === undefined) this.#saved.set(statusLineHost.getSettings());
+		this.#syncClock();
+	}
+
+	/** Re-read the saved `statusLine.*` settings (after a settings change). */
+	reloadSettings(): void {
+		this.#saved.set(statusLineHost.getSettings());
+		this.#syncClock();
+	}
+
+	/** Merge mode and badge facts the app owns. */
+	setModes(update: Partial<StatusModes>): void {
+		this.#modes.set({ ...this.#modes.peek(), ...update });
+	}
+
+	setAutoCompactEnabled(enabled: boolean): void {
+		this.#autoCompact.set(enabled);
+	}
+
+	/** The cwd moved: drop VCS state for the old checkout. */
+	applyCwdChange(): void {
+		this.#vcsGeneration++;
+		this.#vcs.set(undefined);
+		this.#vcsFetchedAt = 0;
+		this.#retireWatcher();
+		this.refresh();
+	}
+
+	/** Context tokens and window as the bar shows them (the collab host broadcasts these). */
+	contextBreakdown(): { usedTokens: number; contextWindow: number } {
+		const usage = this.#session.getContextUsage();
+		return {
+			usedTokens: usage?.tokens ?? 0,
+			contextWindow: usage?.contextWindow ?? this.#session.model?.contextWindow ?? 0,
+		};
+	}
+
+	dispose(): void {
+		this.#disposed = true;
+		this.#unsubscribe?.();
+		this.#unsubscribe = undefined;
+		clearTimeout(this.#streamBump);
+		clearInterval(this.#clockTimer);
+		clearTimeout(this.#usageTimer);
+		clearTimeout(this.#pricingTimer);
+		clearTimeout(this.#brandFade);
+		this.#retireWatcher();
+	}
+
+	/** Wake at the shown cost's next time-based tariff change (peak/off-peak), idle or not, to repaint it. */
+	#syncPricingTimer(cost: ModelCost | undefined, now: number): void {
+		const at = cost?.timeBased && !this.#disposed ? getNextTimeBasedPricingTransition(cost, now) : undefined;
+		if (at === this.#pricingAt) return;
+		clearTimeout(this.#pricingTimer);
+		this.#pricingTimer = undefined;
+		this.#pricingAt = at;
+		if (at === undefined) return;
+		this.#pricingTimer = setTimeout(
+			() => {
+				this.#pricingTimer = undefined;
+				this.#pricingAt = undefined;
+				if (!this.#disposed) this.#clock.set(Date.now());
+			},
+			Math.max(0, at - now),
+		);
+		this.#pricingTimer.unref?.();
+	}
+
+	#attach(session: AgentViewSession): void {
+		this.#unsubscribe?.();
+		this.#unsubscribe = session.subscribe(event => {
+			// Every delta would rebuild the facts (account, context usage, compaction) hundreds of times a second.
+			if (event.type === "message_update") this.#queueStreamBump();
+			else this.#queueBump();
+		});
+		this.#quota.set(undefined);
+		this.#usageKey = "";
+	}
+
+	/** Coalesce a burst of session events (streaming deltas) into one recompute. */
+	#queueBump(): void {
+		if (this.#bumpQueued) return;
+		this.#bumpQueued = true;
+		queueMicrotask(() => {
+			this.#bumpQueued = false;
+			if (!this.#disposed) this.refresh();
+		});
+	}
+
+	/** Refresh once {@link STREAM_REFRESH_MS} after a streaming delta, whatever arrives meanwhile. */
+	#queueStreamBump(): void {
+		if (this.#streamBump) return;
+		this.#streamBump = setTimeout(() => {
+			this.#streamBump = undefined;
+			this.#queueBump();
+		}, STREAM_REFRESH_MS);
+		this.#streamBump.unref?.();
+	}
+
+	/** Tick the wall clock once a second while a segment shows time or a turn's active window is open. */
+	#syncClock(): void {
+		const settings = this.settings();
+		const segments = [...(settings.leftSegments ?? []), ...(settings.rightSegments ?? [])];
+		const needs =
+			segments.includes("time") ||
+			(segments.includes("time_spent") && this.#meter().since !== undefined) ||
+			this.#modes.peek().loop?.limit?.kind === "duration";
+		if (needs && !this.#clockTimer) {
+			this.#clockTimer = setInterval(() => this.#clock.set(Date.now()), 1_000);
+			this.#clockTimer.unref?.();
+		} else if (!needs && this.#clockTimer) {
+			clearInterval(this.#clockTimer);
+			this.#clockTimer = undefined;
+		}
+	}
+
+	#build(): StatusFacts {
+		this.#revision();
+		const now = this.#clock();
+		const session = this.#session;
+		const settings = this.settings();
+		const modes = this.#modes();
+		const model = session.state.model ?? session.model;
+		const segments = [...(settings.leftSegments ?? []), ...(settings.rightSegments ?? [])];
+		const stats = session.sessionManager.getUsageStatistics();
+
+		const usage = session.getContextUsage();
+		let contextWindow = usage?.contextWindow ?? model?.contextWindow ?? 0;
+		let tokens = usage?.tokens ?? 0;
+		let percent: number | null =
+			usage?.percent === null || contextWindow === 0 ? null : (tokens / contextWindow) * 100;
+		const collab = this.#collab();
+		const override = collab?.stateOverride?.contextUsage;
+		if (override) {
+			contextWindow = override.contextWindow || contextWindow;
+			tokens = override.tokens ?? tokens;
+			percent = override.percent ?? percent;
+		}
+		const autoCompact = this.#autoCompact();
+		const boundaries =
+			autoCompact && contextWindow > 0
+				? statusLineHost.computeCompactionBoundaries(session, contextWindow, model)
+				: null;
+
+		const advisorOverview = session.getAdvisorStatusOverview?.();
+		const advisorStatuses = advisorOverview?.configured ? advisorOverview.advisors.map(a => a.status) : [];
+		const advisorCost = session.getAdvisorCost();
+		const vcsFacts = this.#vcsFacts(segments);
+		const goal = modes.goal ? session.getGoalModeState()?.goal : undefined;
+		const thinkingLevel = session.state.thinkingLevel;
+		const sessionManager = session.sessionManager;
+		// A task job whose subagent the agents badge already shows is not counted again.
+		const subagents = this.#subagents();
+		const jobs =
+			session
+				.getAsyncJobSnapshot()
+				?.running.filter(job => job.type !== "task" || job.agentId === undefined || !subagents.has(job.agentId))
+				.length ?? 0;
+		const turnStartedAt = this.#meter().since;
+		const activeMs = this.activeMs(now);
+		this.#syncPricingTimer(segments.includes("cost") ? model?.cost : undefined, now);
+		this.#syncUsage(model?.provider, model?.id);
+
+		return {
+			...(model
+				? {
+						model: {
+							id: model.id,
+							...(model.name ? { name: model.name } : {}),
+							thinking: model.thinking !== undefined,
+							...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+						},
+					}
+				: {}),
+			...(thinkingLevel ? { thinkingLevel } : {}),
+			...(session.isAutoThinking ? { autoThinking: true } : {}),
+			...(session.isAutoThinking && session.autoResolvedThinkingLevel()
+				? { autoResolvedLevel: session.autoResolvedThinkingLevel() }
+				: {}),
+			...(session.isFastModeActive() ? { fastMode: true } : {}),
+			...(session.getAnthropicSlowModeLabel() ? { slowModeLabel: session.getAnthropicSlowModeLabel() } : {}),
+			...(advisorStatuses.length > 0
+				? {
+						advisor: {
+							status: advisorStatuses.includes("error")
+								? "error"
+								: advisorStatuses.includes("quota_exhausted")
+									? "quota_exhausted"
+									: advisorStatuses.includes("running")
+										? "running"
+										: "idle",
+							yielded: advisorOverview!.advisors.every(a => a.yielded),
+						},
+					}
+				: {}),
+			...(sessionManager.getSessionName() ? { sessionName: sessionManager.getSessionName() } : {}),
+			sessionId: sessionManager.getSessionId(),
+			...(modes.pinned ? { pinned: true } : {}),
+			...(this.#focusedAgentId ? { focusedAgentId: this.#focusedAgentId } : {}),
+			...(getActiveProfile() ? { profile: getActiveProfile() } : {}),
+			usage: {
+				input: stats.input,
+				output: stats.output,
+				cacheRead: stats.cacheRead,
+				cacheWrite: stats.cacheWrite,
+				orchestrationInput: stats.orchestrationInput,
+				orchestrationOutput: stats.orchestrationOutput,
+				premiumRequests: stats.premiumRequests,
+				cost: stats.cost,
+				subagentCost: stats.subagentCost,
+			},
+			usingSubscription: model ? session.modelRegistry.isUsingSubscription(model) : false,
+			...(this.#focusedAgentId === undefined && modes.subagentTreeCost
+				? { subagentTreeCost: modes.subagentTreeCost }
+				: {}),
+			...(advisorCost
+				? { advisorCost: { cost: advisorCost, usingSubscription: session.isAdvisorUsingSubscription() } }
+				: {}),
+			...(model?.cost ? { pricingPeriod: getTimeBasedPricingPeriod(model.cost, now) } : {}),
+			tokensPerSecond: this.#tokensPerSecond(modes),
+			context: { tokens, window: contextWindow, percent },
+			autoCompact,
+			...(boundaries ? { compaction: boundaries } : {}),
+			speculation: session.compactionSpeculation,
+			cwd: getProjectDir(),
+			home: os.homedir(),
+			...vcsFacts,
+			...(segments.includes("hostname") ? { hostname: (shortHostname ??= os.hostname().split(".")[0]) } : {}),
+			now,
+			...(modes.plan ? { plan: modes.plan } : {}),
+			...(session.getPrewalkState() ? { prewalk: true } : {}),
+			...(modes.goal
+				? {
+						goal: {
+							...modes.goal,
+							...(goal ? { status: goal.status, tokensUsed: goal.tokensUsed } : {}),
+							...(goal?.tokenBudget !== undefined ? { tokenBudget: goal.tokenBudget } : {}),
+							showBudget: statusLineHost.goalStatusInFooter(session),
+						},
+					}
+				: {}),
+			...(modes.vibe ? { vibe: true } : {}),
+			...(modes.loop ? { loop: modes.loop } : {}),
+			...(modes.vim ? { vim: modes.vim } : {}),
+			...(collab ? { collab: { role: collab.role, participantCount: collab.participantCount } } : {}),
+			...(modes.stream ? { stream: modes.stream } : {}),
+			...(modes.recording ? { recording: true } : {}),
+			subagents: subagents.size,
+			jobs,
+			...(jobs > 0 ? withJobGlance(session) : {}),
+			activeMs,
+			...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+			...(this.#brandEdgeAt !== undefined ? { brandEdgeAt: this.#brandEdgeAt } : {}),
+			...(this.#awaiting() ? { awaitingAnswer: true } : {}),
+			...(this.#focusedAgentId === undefined ? { treePosition: this.#treePosition() } : {}),
+			...(this.#quota() ? { quota: this.#quota() } : {}),
+			...(segments.includes("cache") ? { promptCache: session.getPromptCacheStatus?.(now, tokens) } : {}),
+			hooks: [...this.#hooks()].sort(([a], [b]) => a.localeCompare(b)).map(([, text]) => text),
+		};
+	}
+
+	/** The `tree` segment's position; only the main session's tree has one. */
+	#treePosition(): StatusFacts["treePosition"] {
+		const manager = this.#session.sessionManager as { getTreePosition?(): StatusFacts["treePosition"] };
+		return manager.getTreePosition?.();
+	}
+
+	#tokensPerSecond(modes: StatusModes): number | null {
+		const vibe = modes.vibe ? modes.vibeWorkerTokenRate?.() : null;
+		if (vibe !== null && vibe !== undefined) return vibe;
+		return statusLineHost.calculateTokensPerSecond(this.#session.messages, this.#session.isStreaming === true);
+	}
+
+	// ─── VCS ────────────────────────────────────────────────────────────────
+
+	/** Git facts for the bar when a git segment shows; starts a refresh when the cached ones are stale. */
+	#vcsFacts(segments: readonly string[]): Pick<StatusFacts, "git" | "worktree" | "activeRepoRoot"> {
+		const wantsGit = segments.includes("git") || segments.includes("pr");
+		const wantsPath = segments.includes("path");
+		if (!statusLineHost.gitEnabled() || (!wantsGit && !wantsPath)) return {};
+		const snapshot = this.#vcs();
+		const cwd = getProjectDir();
+		if (!this.#vcsInFlight && (snapshot?.cwd !== cwd || Date.now() - this.#vcsFetchedAt >= VCS_STATUS_TTL_MS)) {
+			void this.#refreshVcs(cwd, segments.includes("pr"));
+		}
+		if (!snapshot || snapshot.cwd !== cwd) return {};
+		return {
+			...(wantsGit ? { git: { branch: snapshot.branch, status: snapshot.status, pr: snapshot.pr } } : {}),
+			...(snapshot.worktree ? { worktree: snapshot.worktree } : {}),
+			...(snapshot.activeRepoRoot ? { activeRepoRoot: snapshot.activeRepoRoot } : {}),
+		};
+	}
+
+	async #refreshVcs(cwd: string, wantsPr: boolean): Promise<void> {
+		this.#vcsInFlight = true;
+		const generation = this.#vcsGeneration;
+		let next: VcsSnapshot | undefined;
+		try {
+			const active = statusLineHost.resolveActiveRepo(cwd);
+			const gitCwd = active?.repoRoot ?? cwd;
+			const repository = vcs.repoForDisplay(gitCwd) ?? vcs.repo(gitCwd);
+			if (!repository) {
+				next = { cwd, branch: null, status: null, pr: null };
+			} else {
+				this.#watch(repository);
+				const git = repository.asGit();
+				const headBranch = (head: ReturnType<NonNullable<typeof git>["headSync"]> | undefined) =>
+					head?.kind === "ref" ? (head.branch ?? head.refName ?? "HEAD") : head ? "detached" : null;
+				const branch = git ? headBranch(git.headSync()) : ((await repository.label()) ?? null);
+				// A colocated jj repository shows its own label; pull requests follow the git branch beneath it.
+				const operational = git ?? vcs.repo(gitCwd)?.asGit();
+				const prBranch = git ? branch : operational ? headBranch(operational.headSync()) : null;
+				const status = (await repository.statusSummary().catch(() => null)) ?? null;
+				const worktree = linkedWorktreeNames(git?.linkedWorktree());
+				// The default branch has no pull request of its own: no lookup for it.
+				const pr =
+					wantsPr && prBranch && prBranch !== "detached" && prBranch !== (await this.#defaultBranch(gitCwd))
+						? await this.#lookupPr(gitCwd, prBranch)
+						: null;
+				next = {
+					cwd,
+					branch,
+					status: status && { staged: status.staged, unstaged: status.unstaged, untracked: status.untracked },
+					pr,
+					...(worktree ? { worktree } : {}),
+					...(active ? { activeRepoRoot: active.relativeRepoRoot } : {}),
+				};
+			}
+		} catch {
+			next = { cwd, branch: null, status: null, pr: null };
+		} finally {
+			this.#vcsInFlight = false;
+		}
+		if (this.#disposed || generation !== this.#vcsGeneration) return;
+		this.#vcsFetchedAt = Date.now();
+		const previous = this.#vcs.peek();
+		if (JSON.stringify(previous) !== JSON.stringify(next)) this.#vcs.set(next);
+		const pr = next.pr ?? undefined;
+		if (pr?.url !== this.#lastPr?.url) {
+			this.#lastPr = pr;
+			this.#onPullRequest?.(pr);
+		}
+		// A watcher-less repository is polled through the TTL: wake once it expires.
+		setTimeout(() => {
+			if (!this.#disposed) this.refresh();
+		}, VCS_STATUS_TTL_MS).unref?.();
+	}
+
+	/** The repository's default branch (`main` until resolved), cached per directory. */
+	async #defaultBranch(cwd: string): Promise<string> {
+		let branch = this.#defaultBranches.get(cwd);
+		if (branch === undefined) {
+			branch =
+				(await vcs
+					.git(cwd)
+					?.defaultBranch()
+					.catch(() => undefined)) ?? "main";
+			this.#defaultBranches.set(cwd, branch);
+		}
+		return branch;
+	}
+
+	async #lookupPr(cwd: string, branch: string): Promise<{ number: number; url: string } | null> {
+		const key = `${cwd}\0${branch}`;
+		const cached = this.#prs.get(key);
+		if (cached && Date.now() - cached.at < PR_TTL_MS) return cached.pr;
+		const entry: { at: number; pr: { number: number; url: string } | null } = { at: Date.now(), pr: null };
+		this.#prs.set(key, entry);
+		try {
+			const result = await statusLineHost.lookupPullRequest(cwd);
+			if (result.exitCode !== 0) return null;
+			const parsed = JSON.parse(result.stdout) as { number?: unknown; url?: unknown };
+			entry.pr =
+				typeof parsed.number === "number" && typeof parsed.url === "string"
+					? { number: parsed.number, url: parsed.url }
+					: null;
+			return entry.pr;
+		} catch {
+			return null;
+		}
+	}
+
+	#watch(repository: NonNullable<ReturnType<typeof vcs.repo>>): void {
+		const root = repository.root();
+		if (this.#watchedRoot === root) return;
+		this.#retireWatcher();
+		this.#watchedRoot = root;
+		try {
+			this.#unwatchVcs = vcs.watch(repository, () => {
+				this.#vcsFetchedAt = 0;
+				this.refresh();
+			});
+		} catch {
+			this.#unwatchVcs = undefined;
+		}
+	}
+
+	#retireWatcher(): void {
+		this.#unwatchVcs?.();
+		this.#unwatchVcs = undefined;
+		this.#watchedRoot = undefined;
+	}
+
+	// ─── Usage quota ────────────────────────────────────────────────────────
+
+	/** Compare the account's Codex snapshot with the previous refresh's; a celebration-worthy change fires the handler. */
+	#noteCodexResets(reports: readonly UsageReport[], context: Parameters<typeof quotaFromReports>[1]): void {
+		const snapshot = codexResetSnapshot(reports, context.identity);
+		if (!snapshot) return;
+		const account = `${context.provider}\0${JSON.stringify(context.identity ?? {})}`;
+		const previous = this.#codexResetSnapshots.get(account);
+		this.#codexResetSnapshots.set(account, snapshot);
+		if (!previous || !statusLineHost.codexResetFireworksEnabled()) return;
+		const event = detectCodexResetFireworks(previous, snapshot);
+		if (event) this.#onCodexResetFireworks?.(event);
+	}
+
+	#syncUsage(provider: string | undefined, modelId: string | undefined): void {
+		const session = this.#session;
+		if (this.#disposed || !provider || !statusLineHost.canFetchUsageReports(session)) return;
+		const identity = statusLineHost.activeAccount(session, provider);
+		const key = [provider, modelId ?? "", JSON.stringify(identity ?? {})].join("\0");
+		if (key !== this.#usageKey) {
+			this.#usageKey = key;
+			this.#usageFetchedAt = 0;
+			if (this.#quota.peek() !== undefined) queueMicrotask(() => this.#quota.set(undefined));
+		}
+		if (this.#usageInFlight || (this.#usageFetchedAt > 0 && Date.now() - this.#usageFetchedAt < USAGE_TTL_MS)) return;
+		this.#usageInFlight = true;
+		this.#usageTimer = setTimeout(
+			() => void this.#fetchUsage(session, key, { provider, modelId, identity }),
+			USAGE_START_DELAY_MS,
+		);
+		this.#usageTimer.unref?.();
+	}
+
+	async #fetchUsage(
+		session: StatusSession,
+		key: string,
+		context: Parameters<typeof quotaFromReports>[1],
+	): Promise<void> {
+		const sequence = ++this.#usageSequence;
+		const controller = new AbortController();
+		// At the deadline the next refresh may run; a late answer still applies unless a newer one did.
+		const release = (): void => {
+			if (this.#usageSequence !== sequence || !this.#usageInFlight) return;
+			this.#usageInFlight = false;
+			this.#usageFetchedAt = Date.now();
+		};
+		const deadline = setTimeout(() => {
+			controller.abort();
+			release();
+		}, USAGE_TIMEOUT_MS);
+		deadline.unref?.();
+		try {
+			const reports = await statusLineHost.fetchUsageReports(session, controller.signal);
+			if (this.#disposed || this.#session !== session || this.#usageKey !== key) return;
+			if (sequence < this.#usageApplied) return;
+			this.#usageApplied = sequence;
+			this.#quota.set(quotaFromReports(reports, context, statusLineHost, Date.now()));
+			if (this.#focusedAgentId === undefined && Array.isArray(reports) && this.#onResetExpiryNotice) {
+				const notice = statusLineHost.resetExpiryNotice?.(session, reports, Date.now());
+				if (notice) this.#onResetExpiryNotice(notice);
+			}
+			if (context.provider === "openai-codex" && Array.isArray(reports)) this.#noteCodexResets(reports, context);
+		} catch {
+			// A failed fetch keeps the last quota; the TTL retries.
+		} finally {
+			clearTimeout(deadline);
+			release();
+		}
+	}
+}
+
+/** The freshest live job widget among the running jobs, which the jobs badge glances at. */
+function withJobGlance(session: StatusSession): Pick<StatusFacts, "jobGlance"> {
+	const view = latestJobWidget(session.getRunningJobWidgets?.() ?? [])?.view;
+	return view ? { jobGlance: view } : {};
+}

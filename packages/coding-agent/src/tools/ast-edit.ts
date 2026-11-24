@@ -1,4 +1,4 @@
-import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
+import type { AstEditToolDetails } from "./details/ast-edit";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -15,7 +15,7 @@ import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
-import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { formatHashlineHeader } from "./hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
 
@@ -26,17 +26,13 @@ import { resolveToolTier, strictestApproval, truncateForPrompt } from "./approva
 import { parseReadUrlTarget } from "./fetch";
 import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
-import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
+import { formatGroupedFiles } from "./grouped-file-output";
 
 import { relativeSearchResultPath, resolveTargetResultPath, resolveToolSearchScope } from "./path-utils";
-import {
-	capParseErrors,
-	formatCodeFrameLine,
-	formatCount,
-	formatParseErrors,
-} from "@oh-my-pi/pi-tui/render/render-utils";
+import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "../utils/render-utils";
+import { formatCount } from "@oh-my-pi/pi-utils";
 import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 const astEditOpSchema = type({

@@ -637,16 +637,30 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	) as unknown as OpenAIResponsesReplayItem;
 }
 
+/**
+ * Keep the replay-relevant fields of a reasoning item. Item ids are dropped
+ * (stateless servers reject ids they no longer hold) unless a computer call
+ * needs them, or the item carries OpenRouter's `format` tag: OpenRouter only
+ * hands the upstream reasoning back to the model from an item's `id`, `format`
+ * and `signature`. A Gemini thought signature arrives as an encrypted item whose
+ * `id` is its function call's `call_id`; stripped of either field, OpenRouter
+ * silently drops the blob and Gemini stops thinking a few steps into a tool loop.
+ */
 function sanitizeOpenAIResponsesReasoningItemForReplay(
 	item: Record<string, unknown>,
 	preserveItemId: boolean,
 ): OpenAIResponsesReplayItem {
 	const sanitizedItem: Record<string, unknown> = { type: "reasoning" };
-	if (preserveItemId && typeof item.id === "string") sanitizedItem.id = item.id;
+	const openRouterFormat = typeof item.format === "string" ? item.format : undefined;
+	if ((preserveItemId || openRouterFormat) && typeof item.id === "string") sanitizedItem.id = item.id;
 	if (Array.isArray(item.summary)) sanitizedItem.summary = item.summary;
 	if (Array.isArray(item.content)) sanitizedItem.content = item.content;
 	if (typeof item.encrypted_content === "string" || item.encrypted_content === null) {
 		sanitizedItem.encrypted_content = item.encrypted_content;
+	}
+	if (openRouterFormat) {
+		sanitizedItem.format = openRouterFormat;
+		if (typeof item.signature === "string") sanitizedItem.signature = item.signature;
 	}
 	return sanitizedItem as unknown as OpenAIResponsesReplayItem;
 }

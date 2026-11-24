@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { acquireFileLock, type FileLockHandle, logger, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tools/tool-errors";
 import { DISASM_BACKENDS, type DisasmBackend } from "../../disasm/backend";
 import {
 	DISASM_UNIT_KIND,

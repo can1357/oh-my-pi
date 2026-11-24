@@ -3,14 +3,14 @@
  * and controlled from outside the harness.
  *
  * A bare `omp ps` on a TTY opens the interactive alt-screen monitor
- * (`pi-tui/apps/ps-top`); `--plain`, `--json`, and non-TTY outputs use the static
+ * (`ui/apps/ps-top`); `--plain`, `--json`, and non-TTY outputs use the static
  * listing. Listing never starts the daemon (it reads the daemon's store when
  * none runs); actions (`info`, `logs`, `stop`, `kill`, `restart`, `send`,
  * `mode`) connect through the shared client, which starts the daemon so it can
  * re-adopt detached units before acting on them.
  */
 
-import { truncateToWidth } from "@oh-my-pi/pi-tui";
+import { truncateToWidth } from "../utils/text-width";
 import {
 	daemonHeader,
 	formatCommand,
@@ -22,8 +22,10 @@ import {
 	tableCells,
 	unitLabel,
 	unitName,
-} from "@oh-my-pi/pi-tui/apps/ps-data";
-import { type PsTopHost, runPsTop } from "@oh-my-pi/pi-tui/apps/ps-top";
+} from "./ps-model";
+import { PsTop, PsTopModel } from "../ui/apps/ps-top";
+import { runStandalone } from "../ui/apps/fullscreen";
+import { type PsTopHost } from "../modes/view-model/apps/ps-top";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { closeDaemonClient, daemonClient, probeDaemon } from "../daemon/client";
@@ -154,6 +156,21 @@ function createPsTopHost(): PsTopHost {
 			dropProbe();
 		},
 	};
+}
+
+/** The interactive monitor (`omp ps` on a TTY) until the user quits. */
+function runPsTop(flags: PsCommandArgs["flags"], host: PsTopHost): Promise<void> {
+	return runStandalone({ title: "omp ps" }, screen => {
+		const done = Promise.withResolvers<void>();
+		const model = new PsTopModel(host, {
+			all: flags.all,
+			dir: flags.dir,
+			rows: screen.rows,
+			onQuit: () => done.resolve(),
+		});
+		model.run();
+		return { view: () => PsTop({ model }), done: done.promise, dispose: () => model.dispose() };
+	});
 }
 
 /** Run the board listing or a unit action. */

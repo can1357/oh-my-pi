@@ -18,14 +18,13 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
-import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatRawOutputNotice } from "../tools/output-meta-format";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { Settings } from "../config/settings";
-import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import type { MinimizedMeta } from "../tools/output-meta-format";
+import { type ArtifactAllocator, OutputSink, type OutputSummary } from "../tools/streaming-output";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -37,8 +36,8 @@ import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
 import { loadDirenvEnv } from "./direnv";
+import { attachShellTrace } from "../tools/shell-viz";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
-
 import {
 	cfgBashDirenv,
 	cfgBashDirenvLoadTimeoutMs,
@@ -156,6 +155,10 @@ export interface BashResult extends OutputSummary {
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;
+	/** The command ended in another directory than it started in (a `cd` in it); the next command starts in its own `cwd`. */
+	movedCwd?: boolean;
+	/** The command ended with `set -e` on; the next command starts with it off. */
+	errexit?: boolean;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
 	/**
@@ -191,18 +194,14 @@ const TRACE_POLL_MS = 80;
 
 /**
  * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
- * forwards each changed snapshot, bound to the run (and its `streams`, so
- * a card can show what a step writes there); `stop()` takes the final one.
+ * forwards each changed snapshot, bound to the run so a card presents the
+ * run itself; `stop()` takes the final one.
  *
  * An invalid snapshot is logged once and skipped: the poll runs from a timer,
  * where a throw would escape as an uncaught exception and end the session,
  * and the trace is only a visualization of the run.
  */
-function pollRunTrace(
-	trace: RunTrace,
-	streams: PipeStreams | undefined,
-	onTrace: (trace: ShellTrace) => void,
-): { stop: () => ShellTrace | undefined } {
+function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
 	let last = -1;
 	let latest: ShellTrace | undefined;
 	let warned = false;
@@ -217,7 +216,7 @@ function pollRunTrace(
 			return;
 		}
 		latest = snapshot;
-		attachShellTrace(latest, trace, streams);
+		attachShellTrace(latest, trace);
 		onTrace(latest);
 	};
 	const timer = setInterval(poll, TRACE_POLL_MS);
@@ -978,8 +977,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// Set when the command returns before its native run settled.
 	let unsettled: { run: Promise<ShellRunResult>; cleanup: Promise<void> } | undefined;
 	const runTrace = options?.onTrace ? new RunTrace(finalCommand) : undefined;
-	const tracePoll =
-		runTrace && options?.onTrace ? pollRunTrace(runTrace, options.streams, options.onTrace) : undefined;
+	const tracePoll = runTrace && options?.onTrace ? pollRunTrace(runTrace, options.onTrace) : undefined;
 	// The last snapshot once the run settled (any outcome); `stop()` is idempotent past the first call.
 	let finalTrace: ShellTrace | undefined;
 	const settleTrace = (): { trace: ShellTrace } | Record<string, never> => {
@@ -1119,6 +1117,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			...(winner.result.movedCwd ? { movedCwd: true } : {}),
+			...(winner.result.errexit ? { errexit: true } : {}),
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await settleFork()),

@@ -5,7 +5,7 @@
  * (registry, lifecycle, IRC, jobs, auth, …) crosses as a remote object
  * registered through `./services`.
  */
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "../task/task-details";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { AgentRef } from "../registry/agent-registry";
