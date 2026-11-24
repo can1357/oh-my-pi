@@ -22,6 +22,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "../../../src/ui/theme/service";
 import { blockText, transcriptText } from "../../helpers/transcript-text";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-coding-agent/tools/details/bash";
@@ -462,6 +463,60 @@ describe("EventController async update finalization", () => {
 		expect(painted()).toContain("15m16s");
 		expect(pendingTools.has("tc-wait")).toBe(false);
 		expect(isSettled(component.block.node)).toBe(true);
+	});
+
+	it("settles a read group closed before a turn boundary once its in-flight read ends", async () => {
+		const { controller, ctx } = createFixture();
+		// The streamed call creates the group; its start then marks the read executing.
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tc-read", name: "read", arguments: { path: "a.ts" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test",
+			stopReason: "toolUse",
+			timestamp: 1,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		await controller.handleEvent({ type: "message_start", message });
+		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-read",
+			toolName: "read",
+			args: { path: "a.ts" },
+		});
+		const group = ctx.pendingTools.get("tc-read")!;
+		sealed.push(group);
+		// A later non-read call closes the read group to new reads.
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			args: { command: "sleep 9" },
+		});
+		sealed.push(ctx.pendingTools.get("tc-bash")!);
+
+		// A new turn starts while the read is still executing.
+		await controller.handleEvent({ type: "agent_start" });
+		expect(ctx.pendingTools.get("tc-read")).toBe(group);
+		expect(isSettled(group.block.node)).toBe(false);
+
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-read",
+			toolName: "read",
+			result: { content: [{ type: "text", text: "x" }], isError: false },
+			isError: false,
+		});
+		expect(isSettled(group.block.node)).toBe(true);
 	});
 
 	it("keeps a parked task card available across the next agent turn", async () => {

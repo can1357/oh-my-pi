@@ -635,8 +635,13 @@ export class EventController {
 			for (const toolCallId of this.#toolReplyBlocks.keys()) {
 				if (!this.#executionStartedCallIds.has(toolCallId)) this.#toolReplyBlocks.delete(toolCallId);
 			}
+			// A retained read group keeps its closed marker: its in-flight read settles it.
+			for (const group of this.#closedReadGroups) {
+				if (!retained.has(group)) this.#closedReadGroups.delete(group);
+			}
+		} else {
+			this.#closedReadGroups.clear();
 		}
-		this.#closedReadGroups.clear();
 		this.#finalizeAbandonedPostToolSegments();
 	}
 	/**
