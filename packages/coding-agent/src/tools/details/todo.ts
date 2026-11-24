@@ -40,14 +40,14 @@ export interface TodoToolDetails {
 	phases: TodoPhase[];
 	storage: "session" | "memory";
 	completedTasks?: TodoCompletionTransition[];
-	/** The todo backend refused the change: the model's own call was fine, so it gets no retry reminder. */
-	refused?: boolean;
+	/** The todo backend kept a valid change from committing: the payload was fine, so the call gets no retry reminder. */
+	uncommitted?: "refused" | "stale";
 }
 
 /** How a `todo` call's change fared with the selected todo backend. Host-only: the package root does not export it. */
 export type TodoApplyResult =
 	| { kind: "committed" }
-	/** The backend threw. */
+	/** The backend's `apply` returned `{ block: true }`. */
 	| { kind: "refused"; message: string }
 	/** Nothing committed for another reason: timeout, list, session or backend changed, abort, closing. */
 	| { kind: "stale"; message: string };

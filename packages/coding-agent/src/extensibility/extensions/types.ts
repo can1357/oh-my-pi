@@ -1872,6 +1872,13 @@ export interface TodoBackendChange {
 	next: TodoPhase[];
 }
 
+/** What {@link TodoBackendDefinition.apply} returns: `{ block: true, reason }` refuses the call, as a `tool_call` handler blocks one. */
+export interface TodoBackendApplyResult {
+	block?: boolean;
+	/** Shown to the model on one line. */
+	reason?: string;
+}
+
 /**
  * A todo backend registered with `pi.registerTodoBackend()`. omp keeps the todo list; the backend
  * the `todo.backend` setting selects is told about every change to it.
@@ -1899,17 +1906,15 @@ export interface TodoBackendDefinition {
 	replace(phases: TodoPhase[], ctx: ExtensionContext): void | Promise<void>;
 	/**
 	 * Optional veto, asked before the main session's model commits a change with a `todo` call,
-	 * from an eval cell too: throw to refuse. omp commits `next` only if this resolves within
-	 * `min(10s, the extension handler timeout)` and omp's list is still `previous` (same session,
-	 * call not aborted). Writes here are tolerated: omp resyncs through `replace` after every
-	 * outcome, even with an unchanged list. A committed change reaches `replace` like any other
-	 * commit. A refusal, a timeout, a late answer, or a list, session or backend that changed
-	 * meanwhile fails the call with omp's list unchanged, and omp's whole list goes out once the
-	 * answer settles, on exit at the latest. A todo call made, or still deciding, once the session
-	 * is closing fails. Other changes (`/todo`, RPC `set_todos`, resets, a subagent's calls) are
-	 * not asked: they reach `replace`.
+	 * eval cells included. Return `{ block: true, reason }` to refuse; a throw is an extension
+	 * error and fails the call without refusing it. omp commits `next` only on an accept within
+	 * `min(10s, the extension handler timeout)` of an unchanged list. Writes here are tolerated:
+	 * omp resyncs through `replace` after every outcome. Full contract: docs/extensions.md.
 	 */
-	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
+	apply?(
+		change: TodoBackendChange,
+		ctx: ExtensionContext,
+	): TodoBackendApplyResult | void | Promise<TodoBackendApplyResult | void>;
 }
 
 // ============================================================================

@@ -1854,11 +1854,10 @@ export class ExtensionRunner {
 			async (event, ctx) => {
 				asked = true;
 				this.#todoResyncs.add(resync);
+				// A throw is not a refusal: it reaches `onFailure` below as an extension error.
 				try {
-					await definition.apply?.(event.change, ctx);
-					return { kind: "accepted" };
-				} catch (error) {
-					return { kind: "refused", message: error instanceof Error ? error.message : String(error) };
+					const answer = await definition.apply?.(event.change, ctx);
+					return answer?.block === true ? { kind: "refused", message: answer.reason ?? "" } : { kind: "accepted" };
 				} finally {
 					answered.resolve();
 				}

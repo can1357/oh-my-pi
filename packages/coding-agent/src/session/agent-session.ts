@@ -5252,8 +5252,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				// A refusal is the backend's answer, not a mistake in the payload.
-				if (toolName === "todo" && isError && details?.refused !== true) {
+				// A call the todo backend kept from committing had a valid payload: retrying it unchanged is the model's call.
+				if (toolName === "todo" && isError && details?.uncommitted === undefined) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the

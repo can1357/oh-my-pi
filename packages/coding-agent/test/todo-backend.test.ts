@@ -84,8 +84,8 @@ interface Tracker {
 	asked: TodoBackendChange[];
 	/** Awaited by `apply` once it is recorded. */
 	applyHold?: Promise<void>;
-	/** Thrown by `apply` after `applyHold`. */
-	refusal?: Error;
+	/** Returned by `apply` as `{ block: true, reason }` after `applyHold`. */
+	refusal?: string;
 	extension: ExtensionFactory;
 }
 
@@ -107,7 +107,7 @@ function tracker(id = "tracker", withApply = false): Tracker {
 							self.asked.push(change);
 							for (const resolve of waiting.splice(0)) resolve();
 							await self.applyHold;
-							if (self.refusal) throw self.refusal;
+							if (self.refusal !== undefined) return { block: true, reason: self.refusal };
 						}
 					: undefined,
 				async replace(phases, ctx) {
@@ -701,7 +701,7 @@ describe("todo backend", () => {
 			await call(session, { op: "init", items: ["a"] });
 			await settled(session);
 
-			backend.refusal = new Error("a needs\nevidence\x1b[2J");
+			backend.refusal = "a needs\nevidence\x1b[2J";
 			const gate = Promise.withResolvers<void>();
 			backend.applyHold = gate.promise;
 			const asked = backend.entered();
@@ -717,7 +717,7 @@ describe("todo backend", () => {
 			await settled(session);
 
 			expect(result.isError).toBe(true);
-			expect(result.details?.refused).toBe(true);
+			expect(result.details?.uncommitted).toBe("refused");
 			expect(textOf(result)).toContain('Todo backend "tracker" did not accept this change: a needs evidence');
 			// The current list follows the reason, so the model sees what is still saved.
 			expect(textOf(result).split("a needs evidence")[1]).toContain("- a [");
@@ -730,7 +730,7 @@ describe("todo backend", () => {
 		it("a refusal with no reason still fails the call and says so", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
-			backend.refusal = new Error("");
+			backend.refusal = "";
 
 			const result = await call(session, { op: "init", items: ["a"] });
 			await settled(session);
@@ -820,7 +820,7 @@ describe("todo backend", () => {
 
 		it("a subagent's call asks no backend; a call from an eval cell is asked like the model's own", async () => {
 			const backend = tracker("tracker", true);
-			backend.refusal = new Error("no");
+			backend.refusal = "no";
 			const sub = await open([backend.extension], "tracker", { parentTaskPrefix: "0-Task" });
 			const main = await open([backend.extension], "tracker");
 			// What the eval and shell bridges pass.
@@ -837,7 +837,7 @@ describe("todo backend", () => {
 			await call(sub.session, { op: "init", items: ["a"] });
 			const result = await call(main.session, { op: "init", items: ["b"] }, undefined, context);
 
-			expect(result.details?.refused).toBe(true);
+			expect(result.details?.uncommitted).toBe("refused");
 			expect([contents(sub.session), contents(main.session), backend.asked.length]).toEqual([["a"], [], 1]);
 		});
 
@@ -936,7 +936,7 @@ describe("todo backend", () => {
 		it("a backend switched while apply decides fails the call, saves nothing, and the new backend is neither asked nor sent an empty list", async () => {
 			const first = tracker("first", true);
 			const second = tracker("second", true);
-			second.refusal = new Error("never");
+			second.refusal = "never";
 			const { session } = await open([first.extension, second.extension], "first");
 			const gate = Promise.withResolvers<void>();
 			first.applyHold = gate.promise;
@@ -962,7 +962,7 @@ describe("todo backend", () => {
 			const { session } = await open([backend.extension], "tracker");
 			await call(session, { op: "init", items: ["a"] });
 			await settled(session);
-			backend.refusal = new Error("no");
+			backend.refusal = "no";
 			const gate = Promise.withResolvers<void>();
 			backend.applyHold = gate.promise;
 
@@ -997,7 +997,7 @@ describe("todo backend", () => {
 		it("an id whose owner changes while apply decides fails the call, saves nothing and asks the new owner nothing", async () => {
 			const first = tracker("tracker", true);
 			const second = tracker("tracker", true);
-			second.refusal = new Error("never");
+			second.refusal = "never";
 			const { session } = await open([first.extension, second.extension], "tracker");
 			const gate = Promise.withResolvers<void>();
 			first.applyHold = gate.promise;
@@ -1035,11 +1035,11 @@ describe("todo backend", () => {
 			await session.dispose();
 		});
 
-		it("a refused todo call that follows bash and an accepted one in a message sees the committed list, and leaves no retry reminder", async () => {
+		it("todo calls after bash in one message: apply sees the committed list; a refusal and a throw leave no retry reminder, and only the throw is an extension error", async () => {
 			// Written by the bash call itself as it ends: a real signal that it has finished.
 			const marker = path.join(dir.path(), "bash-done");
 			const asked: Array<{ op: string; bashDone: boolean; previous: TodoPhase[] }> = [];
-			const { session } = await open(
+			const { session, errors } = await open(
 				[
 					pi =>
 						pi.registerTodoBackend({
@@ -1048,8 +1048,9 @@ describe("todo backend", () => {
 							async apply(change) {
 								const bashDone = await Bun.file(marker).exists();
 								asked.push({ op: change.op, bashDone, previous: change.previous });
-								if (change.op === "drop") throw new Error("not now");
-								if (change.op === "done" && !bashDone) throw new Error("bash still running");
+								if (change.op === "append") throw new TypeError("boom");
+								if (change.op === "drop") return { block: true, reason: "not now" };
+								if (change.op === "done" && !bashDone) return { block: true, reason: "bash still running" };
 							},
 						}),
 				],
@@ -1059,7 +1060,7 @@ describe("todo backend", () => {
 			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
 			const todoCall = (
 				id: string,
-				args: { op: string; items?: string[]; task?: string },
+				args: { op: string; items?: string[]; task?: string; phase?: string },
 			): NonNullable<MockResponse["content"]>[number] => ({ type: "toolCall", id, name: "todo", arguments: args });
 			session.agent.streamFn = createMockModel({
 				responses: [
@@ -1076,6 +1077,7 @@ describe("todo backend", () => {
 							},
 							todoCall("d", { op: "done", task: "x" }),
 							todoCall("r", { op: "drop", task: "y" }),
+							todoCall("t", { op: "append", phase: "More", items: ["z"] }),
 						],
 					},
 					{ content: ["ok"] },
@@ -1086,13 +1088,21 @@ describe("todo backend", () => {
 			await session.prompt("next");
 
 			const dropAsked = asked.find(entry => entry.op === "drop");
-			const dropResult = session.messages.find(m => m.role === "toolResult" && m.toolCallId === "r");
 			expect(asked.find(entry => entry.op === "done")?.bashDone).toBe(true);
 			const statuses = Object.fromEntries(session.getTodoPhases()[0].tasks.map(task => [task.content, task.status]));
 			expect(statuses.x).toBe("completed");
 			expect(statuses.y).not.toBe("abandoned");
 			expect(dropAsked?.previous[0].tasks.find(task => task.content === "x")?.status).toBe("completed");
-			expect(dropResult).toMatchObject({ isError: true, details: { refused: true } });
+			const results = session.messages.filter(m => m.role === "toolResult");
+			expect(results.find(m => m.toolCallId === "r")).toMatchObject({
+				isError: true,
+				details: { uncommitted: "refused" },
+			});
+			expect(results.find(m => m.toolCallId === "t")).toMatchObject({
+				isError: true,
+				details: { uncommitted: "stale" },
+			});
+			expect(errors).toEqual(["boom"]);
 			expect(session.messages.filter(m => m.role === "custom" && m.customType === "todo-error-reminder")).toEqual(
 				[],
 			);

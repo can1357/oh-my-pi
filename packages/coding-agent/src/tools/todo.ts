@@ -725,7 +725,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 			? { phases: previousPhases, errors: [] as string[] }
 			: applyParams(clonePhases(previousPhases), entry);
 		let current = previousPhases;
-		let refused = false;
+		let uncommitted: "refused" | "stale" | undefined;
 		if (op !== "view" && errors.length === 0) {
 			const commit = () => this.session.setTodoPhases?.(updated);
 			const asked = this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);
@@ -735,7 +735,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 				const outcome = await asked;
 				if (outcome.kind !== "committed") {
 					errors.push(outcome.message);
-					refused = outcome.kind === "refused";
+					uncommitted = outcome.kind;
 					current = clonePhases(this.session.getTodoPhases?.() ?? []);
 				}
 			}
@@ -747,7 +747,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const effective = failed ? current : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
 		const details: TodoToolDetails = { op, phases: effective, storage };
-		if (refused) details.refused = true;
+		if (uncommitted) details.uncommitted = uncommitted;
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 
 		return {
