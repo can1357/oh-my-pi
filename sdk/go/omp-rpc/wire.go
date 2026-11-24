@@ -723,6 +723,7 @@ type ToolResultMessage struct {
 	Attribution *Attribution    `json:"attribution,omitempty"`
 	PrunedAt    *float64        `json:"prunedAt,omitempty"`
 	Useless     *bool           `json:"useless,omitempty"`
+	Noop        *bool           `json:"noop,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -745,6 +746,7 @@ func (v *ToolResultMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("attribution", &out.Attribution)
 	d.optional("prunedAt", &out.PrunedAt)
 	d.optional("useless", &out.Useless)
+	d.optional("noop", &out.Noop)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err
@@ -6585,6 +6587,7 @@ type HostToolResultPayload struct {
 	Details          json.RawMessage            `json:"details,omitempty"`
 	IsError          *bool                      `json:"isError,omitempty"`
 	Useless          *bool                      `json:"useless,omitempty"`
+	Noop             *bool                      `json:"noop,omitempty"`
 	ProviderMetadata map[string]json.RawMessage `json:"providerMetadata,omitempty"`
 }
 
@@ -6599,6 +6602,7 @@ func (v *HostToolResultPayload) decodeFrom(raw map[string]json.RawMessage) error
 	d.optional("details", &out.Details)
 	d.optional("isError", &out.IsError)
 	d.optional("useless", &out.Useless)
+	d.optional("noop", &out.Noop)
 	d.optional("providerMetadata", &out.ProviderMetadata)
 	if d.err != nil {
 		return d.err

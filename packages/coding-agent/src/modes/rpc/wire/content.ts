@@ -139,6 +139,7 @@ export const messageDefs = {
 		"attribution?": "Attribution",
 		"prunedAt?": "number",
 		"useless?": "boolean",
+		"noop?": "boolean",
 		timestamp: "number",
 	},
 	BashExecutionMessage: {

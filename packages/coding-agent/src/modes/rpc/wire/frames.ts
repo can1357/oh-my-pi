@@ -298,6 +298,7 @@ export const frameDefs = {
 			"details?": "unknown",
 			"isError?": "boolean",
 			"useless?": "boolean",
+			"noop?": "boolean",
 			"providerMetadata?": JSON_OBJECT,
 		},
 		"Tool output: content blocks plus optional details.",
