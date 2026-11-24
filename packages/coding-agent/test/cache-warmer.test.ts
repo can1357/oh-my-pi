@@ -363,6 +363,29 @@ describe("cache warmer lifecycle", () => {
 		expect(h.replays).toHaveLength(2);
 	});
 
+	// macOS sleep stalls the timer while the wall clock runs on: the timer fires after the entry has moved on.
+	test("does not refresh an entry that expired while its timer was stalled", async () => {
+		const h = harness();
+		const armedAt = Date.now();
+		start(h);
+		vi.spyOn(Date, "now").mockReturnValue(armedAt + 5 * 60_000 + 30_000);
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(0);
+		expect(h.refreshes).toEqual([]);
+		expect(h.warmer.status.state).toBe("inactive");
+	});
+
+	test("does not refresh an entry with less than the expiry margin left when its timer fires", async () => {
+		const h = harness();
+		const armedAt = Date.now();
+		start(h);
+		vi.spyOn(Date, "now").mockReturnValue(armedAt + 5 * 60_000 - 5_000);
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(0);
+		expect(h.refreshes).toEqual([]);
+		expect(h.warmer.status.state).toBe("inactive");
+	});
+
 	test("stops after a refresh that re-wrote the prefix instead of reading it", async () => {
 		const h = harness();
 		h.script = { kind: "done", usage: makeUsage({ cacheWrite: PROMPT_TOKENS, output: 1 }) };

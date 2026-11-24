@@ -115,8 +115,8 @@ const CACHE_WARMING_DECIDE_TIMEOUT_MS = 2_000;
 const REPLAY_OUTPUT_PRIOR_TOKENS = 512;
 /** A bridge compaction is decided this long before its entry expires, so its request still reads the entry. */
 const BRIDGE_COMPACTION_LEAD_MS = 60_000;
-/** A refresh replacing a bridge compaction that never reached the provider must go out this long before expiry. */
-const BRIDGE_FALLBACK_MARGIN_MS = 10_000;
+/** A refresh must go out this long before its entry expires, or the entry is gone before the refresh reads it. */
+const EXPIRY_MARGIN_MS = 10_000;
 /** Status reason while a bridge compaction holds the entry. */
 const BRIDGE_IN_PROGRESS_REASON = "bridge compaction in progress";
 
@@ -870,6 +870,12 @@ export class CacheWarmer {
 		run.timer = undefined;
 		run.refreshSentAt = undefined;
 		if (!this.#validateRun(run)) return;
+		// A timer that fires late (macOS sleep stalls it) must not refresh an entry that has run out.
+		const expiresAt = this.#expiresAt(run);
+		if (expiresAt !== undefined && Date.now() > expiresAt - EXPIRY_MARGIN_MS) {
+			this.#stop("cache entry ran out before the refresh fired");
+			return;
+		}
 		const evaluation = this.#evaluate(run, run.nextWarmAt);
 		const { decision, stopReason } = evaluation;
 		run.decisions++;
@@ -913,7 +919,7 @@ export class CacheWarmer {
 		if (outcome === "failed-unaccepted" && this.#validateRun(run)) {
 			const method = this.#rentMethod(run);
 			const expiresAt = this.#expiresAt(run);
-			if (method && expiresAt !== undefined && Date.now() <= expiresAt - BRIDGE_FALLBACK_MARGIN_MS) {
+			if (method && expiresAt !== undefined && Date.now() <= expiresAt - EXPIRY_MARGIN_MS) {
 				await this.#refresh(run, method, extensionOverride);
 				return;
 			}
