@@ -79,6 +79,38 @@ pub(crate) fn sanitize_process_command(command: String) -> String {
 		.collect()
 }
 
+/// The process owner's login name, or the numeric UID if it cannot be resolved.
+pub(crate) fn process_user_name(uid: u32) -> String {
+	#[cfg(unix)]
+	if let Ok(name) = uucore::entries::uid2usr(uid) {
+		return name;
+	}
+	uid.to_string()
+}
+
+#[cfg(all(test, target_os = "macos", any(feature = "util.ps", feature = "util.top")))]
+pub(crate) async fn process_test_output(argv: &[&str]) -> String {
+	use std::io::{self, Read as _};
+
+	use crate::extras::{Fd, Invocation, run};
+
+	let (mut stdout, out) = io::pipe().expect("stdout pipe");
+	let (mut stderr, err) = io::pipe().expect("stderr pipe");
+	let mut invocation = Invocation::new(
+		argv.iter().map(ToString::to_string).collect(),
+		std::env::current_dir().expect("current dir"),
+		omp_vfs::Fs::native(),
+	);
+	invocation.stdio = [Fd::Closed, Fd::from(out), Fd::from(err)];
+	let code = run(invocation).await;
+	let mut output = String::new();
+	let mut errors = String::new();
+	stdout.read_to_string(&mut output).expect("read stdout");
+	stderr.read_to_string(&mut errors).expect("read stderr");
+	assert_eq!((code, errors.as_str()), (0, ""), "{argv:?}");
+	output
+}
+
 /// Translates libproc's pid count into a padded allocation and its C byte size.
 ///
 /// macOS silently truncates the listing to the supplied buffer even when the
@@ -516,7 +548,7 @@ mod proc_snapshot {
 /// macOS process primitives: libproc and `KERN_PROCARGS2`.
 #[cfg(target_os = "macos")]
 pub mod sys {
-	use std::ptr;
+	use std::{mem::MaybeUninit, ptr};
 
 	const KERN_PROCARGS2: libc::c_int = 49;
 	// proc_pidinfo flavors missing from libc. Short BSD info is readable for
@@ -620,6 +652,40 @@ pub mod sys {
 		(actual >= size_of::<libc::proc_bsdinfo>() as i32).then_some(info)
 	}
 
+	/// BSD `ps` reads this record to get start times even when libproc denies
+	/// full BSD info for another user's process.
+	pub(super) fn bsd_start_time(pid: i32) -> Option<(u64, u64)> {
+		// Darwin's 64-bit `kinfo_proc` (arm64 and x86_64) starts with
+		// `kp_proc.p_un.__p_starttime`. sysctl requires room for the full record.
+		#[repr(C)]
+		struct KinfoProc {
+			start: libc::timeval,
+			rest:  [u8; 648 - size_of::<libc::timeval>()],
+		}
+
+		let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+		let mut info = MaybeUninit::<KinfoProc>::uninit();
+		let mut size = size_of::<KinfoProc>();
+		// SAFETY: info is writable for the exact capacity supplied in size.
+		let status = unsafe {
+			libc::sysctl(
+				mib.as_mut_ptr(),
+				4,
+				info.as_mut_ptr().cast(),
+				&raw mut size,
+				ptr::null_mut(),
+				0,
+			)
+		};
+		if status != 0 || size != size_of::<KinfoProc>() {
+			return None;
+		}
+		// SAFETY: a complete record was returned. Read only the timeval at
+		// its start; none of the remaining fields need a Rust representation.
+		let start = unsafe { (&raw const (*info.as_ptr()).start).read() };
+		Some((u64::try_from(start.tv_sec).ok()?, u64::try_from(start.tv_usec).ok()?))
+	}
+
 	/// The executable path libproc reports for `pid`, read into `buffer`.
 	pub fn executable_path(pid: i32, buffer: &mut [u8; PATH_CAPACITY]) -> Option<&[u8]> {
 		// SAFETY: buffer is writable for its length; libproc writes a path no
@@ -688,8 +754,8 @@ mod proc_snapshot {
 	pub struct ProcInfo {
 		pid:      i32,
 		info:     libc::proc_bsdinfo,
-		// Short records have no start time. Pin them with the unique process
-		// ID instead; zero means the ID was unavailable (display only).
+		// Pin short records with the unique process ID; zero means the ID was
+		// unavailable (display only).
 		short_id: Option<u64>,
 		task:     Option<libc::proc_taskinfo>,
 		args:     Vec<String>,
@@ -714,17 +780,24 @@ mod proc_snapshot {
 					args: sys::args(pid),
 				});
 			}
-			// Full BSD info is restricted to the same user; short BSD info
-			// exposes the identity, owner and state of other users' processes.
-			// No start time in a short record: bracket its read with unique
-			// IDs so a PID recycled mid-snapshot cannot be signalled later.
+			// Short BSD info exposes the owner and state of other users'
+			// processes; sysctl fills in the missing start time. Bracket both
+			// reads with unique IDs so a recycled PID cannot mix records.
 			let before = sys::unique_id(pid);
 			let short = sys::short_bsdinfo(pid)?;
-			let short_id = if before == sys::unique_id(pid) { before.unwrap_or(0) } else { 0 };
+			let start = before.and_then(|_| sys::bsd_start_time(pid));
+			let short_id = before.filter(|id| sys::unique_id(pid) == Some(*id));
+			let mut info = bsdinfo_from_short(&short);
+			if short_id.is_some()
+				&& let Some((seconds, micros)) = start
+			{
+				info.pbi_start_tvsec = seconds;
+				info.pbi_start_tvusec = micros;
+			}
 			Some(Self {
 				pid,
-				info: bsdinfo_from_short(&short),
-				short_id: Some(short_id),
+				info,
+				short_id: Some(short_id.unwrap_or(0)),
 				task: None,
 				args: Vec::new(),
 			})
@@ -837,9 +910,9 @@ mod proc_snapshot {
 		}
 
 		pub const fn start_time(&self) -> u64 {
-			if self.short_id.is_some() {
-				// No start time in short BSD info. Never infer ancestry from a
-				// recycled parent PID without comparable start timestamps.
+			if self.info.pbi_start_tvsec == 0 {
+				// Without a comparable timestamp, do not treat this process
+				// as an older parent.
 				return u64::MAX;
 			}
 			self
@@ -849,14 +922,18 @@ mod proc_snapshot {
 				.saturating_add(self.info.pbi_start_tvusec)
 		}
 
-		pub fn age(&self) -> Option<Duration> {
-			if self.short_id.is_some() {
+		pub fn started_at(&self) -> Option<SystemTime> {
+			if self.info.pbi_start_tvsec == 0 {
 				return None;
 			}
-			let start = UNIX_EPOCH
-				+ Duration::from_secs(self.info.pbi_start_tvsec)
-				+ Duration::from_micros(self.info.pbi_start_tvusec);
-			SystemTime::now().duration_since(start).ok()
+			UNIX_EPOCH.checked_add(
+				Duration::from_secs(self.info.pbi_start_tvsec)
+					+ Duration::from_micros(self.info.pbi_start_tvusec),
+			)
+		}
+
+		pub fn age(&self) -> Option<Duration> {
+			SystemTime::now().duration_since(self.started_at()?).ok()
 		}
 
 		pub fn match_name(&self) -> String {

@@ -7,58 +7,38 @@ import type { LiveServerEvent } from "@oh-my-pi/pi-coding-agent/live/protocol";
 import * as liveTransport from "@oh-my-pi/pi-coding-agent/live/transport";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { LiveTransportOptions } from "@oh-my-pi/pi-coding-agent/live/transport";
-import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { type OverlayHandle, Shell } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
+import { type JSXNode, signal } from "@oh-my-pi/pi-tui";
+import { keyEvent } from "../../helpers/input-harness";
 
-/** Fake InteractiveModeContext plus typed capture channels for focus/mount traffic. */
+/** Fake InteractiveModeContext on a real shell, recording what replaced the composer. */
 interface ContextHarness {
 	ctx: InteractiveModeContext;
-	/** The editor stub the controller must restore after live mode ends. */
-	editor: unknown;
-	/** Every component handed to `ui.setFocus`, in order. */
-	focused: unknown[];
-	/** Every component handed to `editorContainer.addChild`, in order. */
-	mounted: unknown[];
-	/** Resolves when `ui.setFocus` sees the original editor again. */
-	editorRefocused: Promise<void>;
+	shell: Shell;
+	/** Every dialog mounted in the composer's place, in order. */
+	dialogs: OverlayHandle[];
 }
 
 function createContext(): ContextHarness {
-	const editor = {
-		getUseTerminalCursor: vi.fn(() => true),
-		setUseTerminalCursor: vi.fn(),
-	};
-	const focused: unknown[] = [];
-	const mounted: unknown[] = [];
-	const refocused = Promise.withResolvers<void>();
+	const shell = new Shell();
+	const dialogs: OverlayHandle[] = [];
 	const ctx = {
+		shell,
 		settings: Settings.isolated({ "live.voice": "vale" }),
-		keybindings: { getKeys: vi.fn(() => ["ctrl+l"]) },
+		keybindings: { keysFor: vi.fn(() => ["ctrl+l"]) },
 		session: {},
 		extractAssistantText: vi.fn(() => ""),
-		editor,
-		editorContainer: {
-			clear: vi.fn(),
-			addChild: vi.fn((component: unknown) => {
-				mounted.push(component);
-			}),
-		},
-		ui: {
-			getShowHardwareCursor: vi.fn(() => true),
-			setShowHardwareCursor: vi.fn(),
-			setFocus: vi.fn((component: unknown) => {
-				focused.push(component);
-				if (component === editor) refocused.resolve();
-			}),
-			requestRender: vi.fn(),
-			requestComponentRender: vi.fn(),
+		showEditorAreaDialog: (factory: () => JSXNode) => {
+			const handle = shell.overlays.show(factory);
+			dialogs.push(handle);
+			return handle;
 		},
 		showError: vi.fn(),
-		chatContainer: { children: [] },
-		present: vi.fn(),
+		presentAssistant: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	return { ctx, editor, focused, mounted, editorRefocused: refocused.promise };
+	return { ctx, shell, dialogs };
 }
 
 afterEach(() => {
@@ -85,8 +65,8 @@ describe("LiveCommandController", () => {
 		}
 	});
 
-	it("stops the session and restores the editor when the live-toggle chord hits the focused visualizer", async () => {
-		const { ctx, editor, focused, mounted, editorRefocused } = createContext();
+	it("stops the session and restores the composer when the live-toggle chord hits the focused visualizer", async () => {
+		const { ctx, shell, dialogs } = createContext();
 		const stop = vi.fn(async () => {});
 		const controller = new LiveCommandController(ctx, options => {
 			const session = new LiveSessionController(options);
@@ -98,18 +78,16 @@ describe("LiveCommandController", () => {
 		await controller.handleCommand();
 		expect(controller.active).toBe(true);
 
-		// The controller replaces and focuses the editor with the visualizer;
-		// Ctrl+L must end the call from there, not just from the editor.
-		const visualizer = focused[0];
-		if (!(visualizer instanceof LiveVisualizer)) {
-			throw new Error("expected the controller to focus a LiveVisualizer");
-		}
-		visualizer.handleInput("\x0c"); // Ctrl+L — the keypress alone must drive teardown
-		await editorRefocused;
+		// The visualizer takes the composer's place and its focus;
+		// Ctrl+L must end the call from there, not just from the composer.
+		const [visualizer] = dialogs;
+		if (!visualizer) throw new Error("expected the controller to mount the visualizer");
+		expect(shell.focused()).toBe(visualizer.node);
+		expect(visualizer.node.handlers.onKey?.(keyEvent("ctrl+l"))).toBe(true); // the keypress alone drives teardown
+		for (let i = 0; !visualizer.closed && i < 20; i++) await Promise.resolve();
 
 		expect(stop).toHaveBeenCalled();
-		expect(mounted.at(-1)).toBe(editor);
-		expect(focused.at(-1)).toBe(editor);
+		expect(visualizer.closed).toBe(true);
 		// `active` stays true until #finish's fire-and-forget settling promise
 		// clears; drain microtasks deterministically instead of sleeping.
 		for (let i = 0; controller.active && i < 20; i++) await Promise.resolve();
@@ -194,8 +172,34 @@ describe("LiveCommandController", () => {
 		expect(controller.active).toBe(true);
 	});
 
+	it("presents the spoken reply in the accent tone", async () => {
+		const { ctx } = createContext();
+		const view = { message: signal(undefined), transient: signal(false), finalized: signal(false) };
+		const present = vi.fn((..._args: Parameters<InteractiveModeContext["presentAssistant"]>) => view);
+		Object.assign(ctx, { presentAssistant: present });
+		const controller = new LiveCommandController(ctx, options => {
+			const session = new LiveSessionController(options);
+			vi.spyOn(session, "start").mockImplementation(async () => {
+				options.callbacks.onTranscript({ role: "assistant", turn: 1, text: "Hello there", final: true });
+			});
+			vi.spyOn(session, "stop").mockResolvedValue();
+			return session;
+		});
+
+		try {
+			await controller.handleCommand();
+			expect(present).toHaveBeenCalledTimes(1);
+			const [message, options] = present.mock.calls[0]!;
+			expect(message?.content).toEqual([{ type: "text", text: "Hello there" }]);
+			expect(options).toEqual({ tone: "accent" });
+			expect(view.finalized()).toBe(true);
+		} finally {
+			await controller.stop();
+		}
+	});
+
 	it("rejects an extension start without an SDP offer before creating a session", async () => {
-		const { ctx, mounted } = createContext();
+		const { ctx, dialogs } = createContext();
 		const factory = vi.fn((options: LiveSessionControllerOptions) => new LiveSessionController(options));
 		const controller = new LiveCommandController(ctx, factory);
 		const untyped = { sdpOffer: undefined } as unknown as ExtensionLiveStartOptions;
@@ -203,17 +207,18 @@ describe("LiveCommandController", () => {
 		await expect(controller.startRemote(untyped)).rejects.toThrow("non-empty sdpOffer");
 		await expect(controller.startRemote({ sdpOffer: "  " })).rejects.toThrow("non-empty sdpOffer");
 		expect(factory).not.toHaveBeenCalled();
-		expect(mounted).toEqual([]);
+		expect(dialogs).toEqual([]);
 		expect(controller.active).toBe(false);
 	});
 
-	it("surfaces a session factory failure from `/live` and puts the editor back", async () => {
-		const { ctx, editor, mounted } = createContext();
+	it("surfaces a session factory failure from `/live` and puts the composer back", async () => {
+		const { ctx, shell, dialogs } = createContext();
 		const controller = new LiveCommandController(ctx, () => {
 			throw new Error("factory broke");
 		});
 		await expect(controller.handleCommand()).rejects.toThrow("factory broke");
-		expect(mounted.at(-1)).toBe(editor);
+		expect(dialogs.every(dialog => dialog.closed)).toBe(true);
+		expect(shell.overlays.open()).toBe(false);
 		expect(controller.active).toBe(false);
 	});
 });

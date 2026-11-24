@@ -51,7 +51,6 @@
       "version": "0.1.0",
       "dependencies": {
         "@oh-my-pi/collab-web": "workspace:*",
-        "@oh-my-pi/pi-tui": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/pi-wire": "catalog:",
         "gifenc": "1.0.3",
@@ -244,23 +243,6 @@
         "@types/react-dom": "catalog:",
       },
     },
-    "packages/tui": {
-      "name": "@oh-my-pi/pi-tui",
-      "version": "19.1.1",
-      "dependencies": {
-        "@oh-my-pi/omptype": "catalog:",
-        "@oh-my-pi/pi-agent-core": "catalog:",
-        "@oh-my-pi/pi-ai": "catalog:",
-        "@oh-my-pi/pi-catalog": "catalog:",
-        "@oh-my-pi/pi-natives": "catalog:",
-        "@oh-my-pi/pi-utils": "catalog:",
-        "@oh-my-pi/pi-wire": "catalog:",
-        "@oh-my-pi/snapcompact": "catalog:",
-      },
-      "devDependencies": {
-        "kitty-vt-wasm": "catalog:",
-      },
-    },
     "packages/typescript-edit-benchmark": {
       "name": "@oh-my-pi/typescript-edit-benchmark",
       "version": "0.0.1",
@@ -273,7 +255,6 @@
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-coding-agent": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
-        "@oh-my-pi/pi-tui": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "prettier": "catalog:",
         "regexp-tree": "catalog:",
@@ -282,6 +263,18 @@
         "@types/babel__generator": "catalog:",
         "@types/babel__traverse": "catalog:",
         "@types/bun": "catalog:",
+      },
+    },
+    "packages/tui": {
+      "name": "@oh-my-pi/pi-tui",
+      "version": "19.1.1",
+      "dependencies": {
+        "@oh-my-pi/pi-natives": "catalog:",
+        "@oh-my-pi/pi-utils": "catalog:",
+        "@oh-my-pi/pi-wire": "catalog:",
+      },
+      "devDependencies": {
+        "kitty-vt-wasm": "catalog:",
       },
     },
     "packages/utils": {

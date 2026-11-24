@@ -6,8 +6,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AstGrepTool } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
-import { astGrepToolRenderer } from "@oh-my-pi/pi-tui/tools/ast-grep";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { astGrepPresenter } from "../../src/ui/tools/ast-grep";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 function createTestSession(cwd = "/tmp/test", overrides: Partial<ToolSession> = {}): ToolSession {
@@ -179,23 +182,25 @@ describe("ast_grep parse errors", () => {
 			expect(details?.nextSkip).toBe(100);
 			expect(modelText).toContain("skip=100");
 
-			await initTheme(false);
-			const theme = await getThemeByName("dark");
-			if (!theme) throw new Error("dark theme unavailable");
-			const tuiText = astGrepToolRenderer
-				.renderResult(result, { expanded: true, isPartial: false }, theme, {
+			const view = astGrepPresenter.result!(
+				result,
+				{ expanded: true, isPartial: false, argsComplete: true, executionStarted: true },
+				{
 					pat: 'console.log("page")',
 					skip: 50.9,
-				})
-				.render(240)
-				.join("\n");
-			expect(tuiText).toContain("skip=100");
-			const native = astGrepToolRenderer.describeResult(
-				result,
-				{ expanded: true, isPartial: false },
-				{ pat: 'console.log("page")', skip: 50.9 },
+				},
 			);
-			expect(JSON.stringify(native)).toContain("skip=100");
+			// The terminal painter reads the same offset from `term` and shares the hint.
+			expect(view?.term).toMatchObject({ nextSkip: 100 });
+			const env = staticEnvironment(loadThemeSync("dark"));
+			const body = createRoot(dispose => {
+				try {
+					return resolveChildren(view?.body)().map(node => describeTree(node, env));
+				} finally {
+					dispose();
+				}
+			});
+			expect(JSON.stringify(body)).toContain("skip=100 for the next page");
 		} finally {
 			await removeWithRetries(tempDir);
 		}

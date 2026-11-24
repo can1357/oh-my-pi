@@ -38,6 +38,15 @@ describe("era probe of a subprocess server", () => {
 		expect(isAlive(deps.pids[0])).toBe(false);
 	});
 
+	it("connects to a server that exits unless initialize arrives first, and lists its tool", async () => {
+		const deps = realDeps();
+		const result = await mcpUpstreams.probe(stdioSpec(path.join(FIXTURES, "strict-mcp.ts")), deps);
+
+		expect(result.era).toBe("legacy");
+		expect(result.discover?._meta?.[MCPMeta.serverInfo]).toEqual({ name: "strict-fixture", version: "1.0.0" });
+		expect(isAlive(deps.pids[0])).toBe(false);
+	});
+
 	it("treats an ordinary method-not-found answer to server/discover as legacy", async () => {
 		const deps = realDeps();
 		const log = path.join(import.meta.dir, `.probe-frames-${process.pid}.log`);

@@ -428,73 +428,112 @@ describe("OpenRouter Responses request shape", () => {
 		expect(headers.get("X-OpenRouter-Cache-TTL")).toBe("7");
 	});
 
-	it("omits native reasoning history for OpenRouter Anthropic turns", async () => {
-		const nativeItem = {
-			type: "reasoning",
-			id: "rs_1",
-			encrypted_content: "encrypted-reasoning",
-			summary: [],
-			format: "google-gemini-v1",
+	// OpenRouter hands a model its earlier reasoning back only from the replayed
+	// item's `id`, `format` and `signature`. Stripped of them, OpenRouter drops the
+	// reasoning unseen: Gemini stops thinking a few steps into a tool loop and
+	// Claude stops thinking between tool calls.
+	it.each([
+		{
+			upstream: "Gemini",
+			modelId: "google/gemini-4-neon",
+			// A Gemini thought signature, keyed by its function call's `call_id`.
+			reasoning: {
+				type: "reasoning",
+				id: "call_1",
+				summary: [],
+				encrypted_content: "gemini-thought-signature",
+				format: "google-gemini-v1",
+			},
+		},
+		{
+			upstream: "Claude",
+			modelId: "anthropic/claude-sonnet-4.6",
+			reasoning: {
+				type: "reasoning",
+				id: "rs_tmp_1",
+				summary: [],
+				content: [{ type: "reasoning_text", text: "Read the file first." }],
+				format: "anthropic-claude-v1",
+				signature: "claude-thinking-signature",
+			},
+		},
+	])("replays $upstream reasoning with the fields OpenRouter restores it from", async ({ modelId, reasoning }) => {
+		const callItem = {
+			type: "function_call",
+			id: "fc_tmp_1",
+			call_id: "call_1",
+			name: "read",
+			arguments: '{"path":"a.ts"}',
+			status: "completed",
 		};
-		const firstResponse = new Response(
-			`${[
-				`data: ${JSON.stringify({ type: "response.output_item.done", item: nativeItem })}`,
-				`data: ${JSON.stringify({
-					type: "response.completed",
-					response: {
-						status: "completed",
-						usage: {
-							input_tokens: 1,
-							output_tokens: 2,
-							total_tokens: 3,
-							input_tokens_details: { cached_tokens: 0 },
-						},
+		const events = [
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: { type: "reasoning", id: reasoning.id, summary: [] },
+			},
+			{ type: "response.output_item.done", output_index: 0, item: { ...reasoning, status: "completed" } },
+			{ type: "response.output_item.added", output_index: 1, item: { ...callItem, arguments: "" } },
+			{ type: "response.output_item.done", output_index: 1, item: callItem },
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: {
+						input_tokens: 1,
+						output_tokens: 2,
+						total_tokens: 3,
+						input_tokens_details: { cached_tokens: 0 },
 					},
-				})}`,
-			].join("\n\n")}\n\n`,
-			{ status: 200, headers: { "content-type": "text/event-stream" } },
-		);
+				},
+			},
+		];
 		const bodies: Record<string, unknown>[] = [];
-		const fetchMock: FetchImpl = vi
-			.fn()
-			.mockImplementationOnce(async (_input: string | URL | Request, init?: RequestInit) => {
-				bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
-				return firstResponse;
-			})
-			.mockImplementationOnce(async (_input: string | URL | Request, init?: RequestInit) => {
-				bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
-				return createSseResponse();
-			}) as FetchImpl;
-		const model = buildOpenRouterModel({ id: "anthropic/claude-sonnet-4", reasoning: true });
-		const responseModel = model as unknown as Model<"openai-responses">;
+		const responses = [
+			new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+			createSseResponse(),
+		];
+		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
+			return responses[bodies.length - 1]!;
+		}) as FetchImpl;
+		const model = buildOpenRouterModel({ id: modelId, reasoning: true }) as unknown as Model<"openai-responses">;
 
 		let firstMessage: AssistantMessage | undefined;
-		const firstStream = streamOpenAIResponses(responseModel, context, { apiKey: "test-key", fetch: fetchMock });
-		for await (const event of firstStream) {
-			if (event.type === "done") {
-				firstMessage = event.message;
-				break;
-			}
+		for await (const event of streamOpenAIResponses(model, context, { apiKey: "test-key", fetch: fetchMock })) {
+			if (event.type === "done") firstMessage = event.message;
 			if (event.type === "error") throw event.error;
 		}
-
-		expect(firstMessage?.api).toBe("openrouter");
-		expect(firstMessage?.providerPayload).toMatchObject({
-			type: "openaiResponsesHistory",
-			provider: "openrouter",
-			items: [nativeItem],
-		});
+		const toolCall = firstMessage?.content.find(block => block.type === "toolCall");
+		if (!firstMessage || toolCall?.type !== "toolCall") throw new Error("Expected a streamed tool call");
 
 		const followup: Context = {
-			messages: [firstMessage!, { role: "user", content: "continue", timestamp: 1 }],
+			messages: [
+				...context.messages,
+				firstMessage,
+				{
+					role: "toolResult",
+					toolCallId: toolCall.id,
+					toolName: "read",
+					content: [{ type: "text", text: "export {}" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
 		};
-		const secondStream = streamOpenAIResponses(responseModel, followup, { apiKey: "test-key", fetch: fetchMock });
-		for await (const event of secondStream) {
+		for await (const event of streamOpenAIResponses(model, followup, { apiKey: "test-key", fetch: fetchMock })) {
 			if (event.type === "done") break;
 			if (event.type === "error") throw event.error;
 		}
 
-		expect(bodies[1]?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "continue" }] }]);
+		const input = bodies[1]?.input as Array<Record<string, unknown>>;
+		expect(input.filter(item => item.type === "reasoning")).toEqual([reasoning]);
+		expect(input.findIndex(item => item.type === "reasoning")).toBeLessThan(
+			input.findIndex(item => item.type === "function_call"),
+		);
 	});
 
 	it("replays foreign tool-call history without a fabricated reasoning id", async () => {
@@ -588,6 +627,103 @@ async function captureDirectResponsesRequest(
 	if (!body) throw new Error("Expected captured direct Responses request");
 	return body;
 }
+
+describe("OpenRouter Responses leaked tool-call healing", () => {
+	function createTextSseResponse(deltas: readonly string[]): Response {
+		const text = deltas.join("");
+		const events = [
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [] },
+			},
+			{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+			...deltas.map(delta => ({ type: "response.output_text.delta", delta })),
+			{
+				type: "response.output_item.done",
+				output_index: 0,
+				item: { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text }] },
+			},
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: {
+						input_tokens: 1,
+						output_tokens: 1,
+						total_tokens: 2,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		];
+		return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
+
+	// Each grammar's call arrives split mid-token, as streamed deltas do.
+	it.each([
+		{
+			grammar: "DeepSeek DSML",
+			model: () => buildOpenRouterModel({ id: "deepseek/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" }),
+			deltas: [
+				"Checking the build.\n<｜DSML｜tool_",
+				'calls>\n<｜DSML｜invoke name="bash">\n<｜DSML｜parameter name="command" string="true">ls -la</｜DSML｜par',
+				"ameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+			],
+			text: "Checking the build.\n",
+			call: { name: "bash", arguments: { command: "ls -la" } },
+		},
+		{
+			grammar: "Kimi section tokens",
+			model: () => buildOpenRouterModel({ id: "moonshotai/kimi-k2", name: "Kimi K2" }),
+			deltas: [
+				"I'll read it. <|tool_calls_section_begin|><|tool_call_be",
+				'gin|>functions.read:0<|tool_call_argument_begin|>{"path":"src/in',
+				'dex.ts"}<|tool_call_end|><|tool_calls_section_end|>',
+			],
+			text: "I'll read it. ",
+			call: { name: "read", arguments: { path: "src/index.ts" } },
+		},
+		{
+			grammar: "Qwen XML",
+			model: () =>
+				buildOpenRouterModel(
+					{ id: "qwen/qwen3-coder", name: "Qwen3 Coder" },
+					{ streamMarkupHealingPattern: "qwen" },
+				),
+			deltas: ["Reading.\n<tool_ca", 'lls>\n<read path="/etc/host', 'name" />\n</tool_calls>'],
+			text: "Reading.\n",
+			call: { name: "read", arguments: { path: "/etc/hostname" } },
+		},
+	])(
+		"turns a $grammar tool call written as text into a live structured call",
+		async ({ model: buildModelUnderTest, deltas, text, call }) => {
+			const model = buildModelUnderTest();
+			const fetchMock: FetchImpl = vi.fn(async () => createTextSseResponse(deltas));
+
+			const events: string[] = [];
+			let message: AssistantMessage | undefined;
+			for await (const event of streamSimple(model, context, { apiKey: "test-key", fetch: fetchMock })) {
+				events.push(event.type);
+				if (event.type === "done") message = event.message;
+				if (event.type === "error") throw new Error(event.error.errorMessage);
+			}
+			if (!message) throw new Error("Expected completed OpenRouter response");
+
+			expect(message.stopReason).toBe("toolUse");
+			expect(message.content).toEqual([
+				expect.objectContaining({ type: "text", text }),
+				expect.objectContaining({ type: "toolCall", ...call }),
+			]);
+			// Streamed live, ahead of the turn's end, so the call can dispatch like a native one.
+			expect(events.indexOf("toolcall_end")).toBeGreaterThan(-1);
+			expect(events.indexOf("toolcall_end")).toBeLessThan(events.indexOf("done"));
+		},
+	);
+});
 
 describe("Responses direct-provider max-token defaults", () => {
 	// `streamOpenAIResponses` is public; callers may bypass `streamSimple` (which
