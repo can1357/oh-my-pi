@@ -3,7 +3,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import type { InteractiveModeContext, ShowStatusOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../../../src/ui/theme/service";
 
 beforeAll(() => {
 	initTheme();
@@ -37,11 +37,9 @@ function harness(draft = "") {
 			getLeafId: () => "a2",
 		},
 		session: { navigateTree },
-		editor: {
-			getText: () => editor.text,
-			get pendingImages() {
-				return [];
-			},
+		composer: {
+			text: () => editor.text,
+			pendingImages: [],
 			setDraft: (text: string) => {
 				editor.text = text;
 			},
@@ -50,7 +48,6 @@ function harness(draft = "") {
 				editor.text = "";
 			},
 		},
-		ui: { requestRender: vi.fn() },
 		truncateTranscriptFromMessage: () => false,
 		renderInitialMessages: vi.fn(async () => {}),
 		reloadTodos: vi.fn(async () => {}),

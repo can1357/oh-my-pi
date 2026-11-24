@@ -1,30 +1,24 @@
-import { formatMCPProgress, MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
-import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
 /**
  * MCP to CustomTool bridge.
  *
  * Converts MCP tool definitions to CustomTool format for the agent.
  */
+import { formatMCPProgress, MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "../tools/details/mcp";
+import type { MCPProgress } from "../tools/mcp-progress";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
 import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import type {
-	CustomTool,
-	CustomToolContext,
-	CustomToolResult,
-	RenderResultOptions,
-} from "../extensibility/custom-tools/types";
+import type { CustomTool, CustomToolContext, CustomToolResult } from "../extensibility/custom-tools/types";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { formatApprovalArguments } from "../tools/approval";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
-import { describeMCPCall, describeMCPResult, renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import { insufficientScopeOf } from "./oauth-discovery";
 import type {
 	MCPAuthChallenge,
 	MCPRequestOptions,
@@ -33,7 +27,7 @@ import type {
 	MCPToolCallResult,
 	MCPToolDefinition,
 } from "./types";
-import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPContent } from "../tools/details/mcp";
 
 /** Options of an {@link MCPReconnect}. */
 export interface MCPReconnectOptions {
@@ -473,6 +467,19 @@ function getMcpAuthChallenge(result: MCPToolCallResult): MCPAuthChallenge | unde
 	return wwwAuthenticate.length > 0 ? { wwwAuthenticate } : undefined;
 }
 
+/**
+ * The challenge of an HTTP refusal for want of scope (RFC 6750 §3.1), read
+ * from the `[WWW-Authenticate: …]` suffix the HTTP upstream appends to its
+ * status error. Any other refusal (an expired or revoked token) is the link's
+ * to refresh, not a reason to ask the user for more consent.
+ */
+function getStepUpChallenge(error: unknown): MCPAuthChallenge | undefined {
+	if (!(error instanceof MCPTransportError) || error.failure !== "http_status") return undefined;
+	const challenge = error.message.match(/\[WWW-Authenticate: (.*?)(?:; Mcp-Auth-Server: [^\]]*)?\]$/)?.[1];
+	if (challenge === undefined || insufficientScopeOf([challenge]) === undefined) return undefined;
+	return { wwwAuthenticate: [challenge] };
+}
+
 async function callToolWithAuthRetry(
 	connection: MCPServerConnection,
 	toolName: string,
@@ -481,9 +488,20 @@ async function callToolWithAuthRetry(
 	signal?: AbortSignal,
 	onProgress?: MCPRequestOptions["onProgress"],
 ): Promise<MCPToolCallAttempt> {
-	const result = await callTool(connection, toolName, args, { signal, onProgress });
-	const authChallenge = getMcpAuthChallenge(result);
-	if (!authChallenge || !reconnect) return { connection, result };
+	let refused: MCPToolCallAttempt;
+	let authChallenge: MCPAuthChallenge | undefined;
+	try {
+		const result = await callTool(connection, toolName, args, { signal, onProgress });
+		refused = { connection, result };
+		authChallenge = getMcpAuthChallenge(result);
+	} catch (error) {
+		// The server refused the call before running it for want of scope:
+		// step up exactly like a tool-result challenge, and retry once.
+		authChallenge = getStepUpChallenge(error);
+		if (!authChallenge || !reconnect) throw error;
+		refused = { connection, error };
+	}
+	if (!authChallenge || !reconnect) return refused;
 
 	let newConnection: MCPServerConnection | null;
 	try {
@@ -492,7 +510,8 @@ async function callToolWithAuthRetry(
 		rethrowIfAborted(error, signal);
 		return { connection, error };
 	}
-	if (!newConnection) return { connection, result };
+	// Authorization declined or failed: the refusal stands.
+	if (!newConnection) return refused;
 
 	try {
 		return {
@@ -840,22 +859,6 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		this.mcpToolName = tool.name;
 		this.mcpServerName = connection.name;
 		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
-	}
-
-	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
-		return renderMCPCall(normalizeToolArgs(args), theme, this.label);
-	}
-
-	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
-		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
-	}
-
-	describeCall(args: unknown, options: RenderResultOptions) {
-		return describeMCPCall(normalizeToolArgs(args), this.label, options);
-	}
-
-	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
-		return describeMCPResult(result, options, normalizeToolArgs(args));
 	}
 
 	async execute(

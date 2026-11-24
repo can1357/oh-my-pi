@@ -3,17 +3,17 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
-class TestModalEditor extends CustomEditor {}
-
-describe("InteractiveMode.setEditorComponent", () => {
+// Custom editor components (`setEditorComponent`) are gone: extensions hook the composer
+// (`addKeyHandler`/`addDecorator`/`setSubmitTransform`/`setShape`). What stays is the startup gate.
+describe("InteractiveMode composer startup submit gate", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
@@ -47,7 +47,15 @@ describe("InteractiveMode.setEditorComponent", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(async () => {
@@ -59,51 +67,9 @@ describe("InteractiveMode.setEditorComponent", () => {
 		resetSettingsForTest();
 	});
 
-	it("replaces the editor and rebinds interactive handlers", () => {
-		mode.editor.setText("draft prompt");
-		const previousEditor = mode.editor;
-		const refreshSpy = vi.spyOn(mode, "refreshSlashCommandState").mockResolvedValue();
-
-		mode.setEditorComponent((_tui, editorTheme) => new TestModalEditor(editorTheme));
-
-		expect(mode.editor).toBeInstanceOf(TestModalEditor);
-		expect(mode.editor).not.toBe(previousEditor);
-		expect(mode.editor.getText()).toBe("draft prompt");
-		expect(mode.editor.onSubmit).toBeDefined();
-		expect(mode.editor.onEscape).toBeDefined();
-		expect(refreshSpy).toHaveBeenCalled();
-	});
-
-	it("exposes the active editor factory while replacing the editor", () => {
-		const firstFactory = (_tui: unknown, editorTheme: ConstructorParameters<typeof TestModalEditor>[0]) =>
-			new TestModalEditor(editorTheme);
-		mode.setEditorComponent(firstFactory);
-
-		expect(mode.getEditorComponent()).toBe(firstFactory);
-
-		let previousFactory: unknown;
-		const secondFactory = (_tui: unknown, editorTheme: ConstructorParameters<typeof TestModalEditor>[0]) => {
-			previousFactory = mode.getEditorComponent();
-			return new TestModalEditor(editorTheme);
-		};
-		mode.setEditorComponent(secondFactory);
-
-		expect(previousFactory).toBe(firstFactory);
-		expect(mode.getEditorComponent()).toBe(secondFactory);
-
-		mode.setEditorComponent(undefined);
-		expect(mode.getEditorComponent()).toBeUndefined();
-	});
-
-	it("keeps the startup submit gate on an editor swapped in before init lifts it", () => {
-		vi.spyOn(mode, "refreshSlashCommandState").mockResolvedValue();
-		expect(mode.editor.disableSubmit).toBe(true);
-
-		mode.setEditorComponent((_tui, editorTheme) => new TestModalEditor(editorTheme));
-		expect(mode.editor.disableSubmit).toBe(true);
-
-		mode.editor.disableSubmit = false;
-		mode.setEditorComponent(undefined);
-		expect(mode.editor.disableSubmit).toBe(false);
+	it("keeps Enter from sending (or clearing) a draft typed before init finishes", () => {
+		mode.composer.setText("draft prompt");
+		mode.composer.submit();
+		expect(mode.composer.text()).toBe("draft prompt");
 	});
 });

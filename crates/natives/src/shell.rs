@@ -186,6 +186,18 @@ pub fn shell_reserved_command_names() -> Vec<&'static str> {
 	omp_shell::reserved_command_names()
 }
 
+/// Repairs `\` continuations after here-document operators in `script`.
+///
+/// Drops the `\` after each `<<EOF &&` (or `||`, `|`, `|&`) so the
+/// here-document body starts on the next line; `null` when nothing needs
+/// repair or the result would not parse. omp's bash tool runs commands
+/// through it.
+#[napi]
+pub fn repair_heredoc_continuations(script: String) -> Option<String> {
+	let fixed = omp_shell::bash::syntax::repair_heredoc_continuations(script.as_bytes())?;
+	String::from_utf8(fixed).ok()
+}
+
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
@@ -525,6 +537,12 @@ pub struct ShellRunResult {
 	pub minimized:   Option<MinimizerResult>,
 	/// Shell working directory after command completion.
 	pub working_dir: Option<String>,
+	/// The command ended in another directory than it started in (a `cd` in
+	/// it); a later run that passes `cwd` starts there instead.
+	pub moved_cwd:   bool,
+	/// The command ended with `errexit` (`set -e`) on; the next run starts
+	/// with it off.
+	pub errexit:     bool,
 }
 
 impl From<CoreShellRunResult> for ShellRunResult {
@@ -535,6 +553,8 @@ impl From<CoreShellRunResult> for ShellRunResult {
 			timed_out:   value.timed_out,
 			minimized:   value.minimized.map(Into::into),
 			working_dir: value.working_dir,
+			moved_cwd:   value.moved_cwd,
+			errexit:     value.errexit,
 		}
 	}
 }
@@ -989,6 +1009,8 @@ mod tests {
 			timed_out:   false,
 			minimized:   None,
 			working_dir: None,
+			moved_cwd:   false,
+			errexit:     false,
 		});
 
 		time::timeout(
@@ -1025,6 +1047,8 @@ mod tests {
 			timed_out:   true,
 			minimized:   None,
 			working_dir: None,
+			moved_cwd:   false,
+			errexit:     false,
 		});
 		let started = time::Instant::now();
 		time::timeout(

@@ -10,7 +10,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { nativeWorkspace, runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 
 const tempRoots: string[] = [];
 /** Order of worktree captures and the run's IRC wake release. */
