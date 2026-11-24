@@ -323,6 +323,10 @@ stopped the turn itself and no request failed, `usage-preflight`, or
 }
 ```
 
+Anonymized exports keep `from` with the same model-identity rule as `model`,
+keep `trigger`, and redact `reason` like `errorMessage`, since a provider error
+can echo request content.
+
 ### `service_tier_change`
 
 ```json

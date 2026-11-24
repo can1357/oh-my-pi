@@ -43,6 +43,8 @@ export const ANONYMIZED_REVIEW_NOTE =
  * - `runtime`: the build stamp; version and commit kept, branch/diff/label tokenized.
  * - `judgment`: a journaled judge query; probabilities and counts kept, the state hash,
  *   question ids, and choice labels tokenized.
+ * - `fallback`: a retry fallback's cause; `from` keeps its identity like `model`, `trigger` is an
+ *   enum, and `reason` is redacted like an error.
  * - `opaque`: replaced whole by a marker.
  */
 type Rule =
@@ -70,7 +72,10 @@ type Rule =
 	| "transforms"
 	| "sessionPath"
 	| "runtime"
-	| "judgment";
+	| "judgment"
+	| "fallback";
+
+const FALLBACK_CAUSE_RULES: Record<string, Rule> = { from: "identity", trigger: "enum", reason: "error" };
 
 function fields(rule: Rule, keys: readonly string[]): Record<string, Rule> {
 	return Object.fromEntries(keys.map(key => [key, rule]));
@@ -351,6 +356,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	previousSessionFiles: "sessionPath",
 	runtime: "runtime",
 	judgment: "judgment",
+	fallback: "fallback",
 	content: "content",
 	...fields("struct", [
 		"message",
@@ -362,7 +368,6 @@ const FIELD_RULES: Record<string, Rule> = {
 		"card",
 		"contextSnapshot",
 		"retryRecovery",
-		"fallback",
 		"supersededBy",
 		"stopDetails",
 		"requestControls",
@@ -1513,6 +1518,17 @@ export class SessionAnonymizer {
 		return out;
 	}
 
+	/** A retry fallback's cause: the model it left is named like `model`, and its reason can echo a provider error. */
+	#fallbackCause(cause: JsonObject): JsonObject {
+		const out: JsonObject = {};
+		for (const key in cause) {
+			const rule = Object.hasOwn(FALLBACK_CAUSE_RULES, key) ? FALLBACK_CAUSE_RULES[key] : undefined;
+			if (rule === undefined) out[this.placeholder(key)] = this.#opaque(cause[key]);
+			else out[key] = this.#field(rule, cause[key], cause, key, false);
+		}
+		return out;
+	}
+
 	#field(rule: Rule, value: unknown, parent: JsonObject, key: string, fromTool: boolean): unknown {
 		// Payload scopes come first: a primitive inside an untrusted payload is still untrusted.
 		switch (rule) {
@@ -1538,6 +1554,8 @@ export class SessionAnonymizer {
 				return isObject(value) ? this.#runtimeStamp(value) : this.#opaque(value);
 			case "judgment":
 				return isObject(value) ? this.#judgmentRecord(value) : this.#opaque(value);
+			case "fallback":
+				return isObject(value) ? this.#fallbackCause(value) : this.#opaque(value);
 			case "name":
 				return this.#field(
 					TOOL_CALL_TYPES[String(parent.type)] === true ? "tool" : "label",

@@ -2317,7 +2317,7 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; cause?: RetryFallbackCause },
+		options: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; cause: RetryFallbackCause },
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2374,12 +2374,9 @@ export class TurnRecovery {
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
 			return false;
 		}
-		this.#host.sessionManager.appendModelChange(
-			candidateSelector,
-			EPHEMERAL_MODEL_CHANGE_ROLE,
-			true,
-			options?.cause && { from: currentSelector, ...options.cause },
-		);
+		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, {
+			fallback: { from: currentSelector, ...options.cause },
+		});
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
@@ -2400,7 +2397,7 @@ export class TurnRecovery {
 			from: currentSelector,
 			to: selector.raw,
 			role,
-			reason: options?.cause && describeFallbackCause(options.cause),
+			reason: describeFallbackCause(options.cause),
 		});
 		return true;
 	}
@@ -2694,9 +2691,8 @@ export class TurnRecovery {
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
 		const cause = failedTurnFallbackCause(failedMessage);
-		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true, {
-			from: currentSelector,
-			...cause,
+		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, {
+			fallback: { from: currentSelector, ...cause },
 		});
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
@@ -2705,9 +2701,10 @@ export class TurnRecovery {
 			from: currentSelector,
 			to: baseSelector,
 			role: "fireworks-fast",
+			// The loop, not the Fast tier, ended the turn: say why, and that the tier still changes.
 			reason:
 				cause.trigger === "agent-loop"
-					? describeFallbackCause(cause)
+					? `${describeFallbackCause(cause)?.replace(/\.?$/, ".")} Retrying on the Standard tier.`
 					: "Request rejected by the Fast tier. Retrying on the Standard tier.",
 		});
 		return true;

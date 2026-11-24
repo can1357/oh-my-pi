@@ -552,6 +552,66 @@ describe("AgentSession retry fallback", () => {
 		},
 	);
 
+	it.each([
+		{
+			cause: "the Fast tier rejected a request",
+			failure: { errorMessage: "upstream connect error or disconnect/reset before headers" },
+			trigger: "request-error",
+			notice: "Request rejected by the Fast tier. Retrying on the Standard tier.",
+		},
+		{
+			cause: "the agent loop stopped a turn",
+			failure: {
+				errorMessage:
+					"Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop.",
+				errorFromAgentLoop: true,
+			},
+			trigger: "agent-loop",
+			notice:
+				"Turn stopped: Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop. Retrying on the Standard tier.",
+		},
+	])(
+		"records why $cause moved a Fireworks Fast session to the Standard tier",
+		async ({ failure, trigger, notice }) => {
+			const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+			if (!fastModel) throw new Error("Expected the bundled Fireworks Fast model to exist");
+			const fastSelector = `${fastModel.provider}/${fastModel.id}`;
+			const baseSelector = `fireworks/${fastModel.id.replace(/-fast$/, "")}`;
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					if (model.id === fastModel.id) return failedTurnStream(model, failure);
+					mock.push({ content: ["the base model did the work"] });
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+			settings.setModelRole("default", fastSelector);
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+			const notices: Array<string | undefined> = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") notices.push(event.reason);
+			});
+
+			await session.prompt("Degrade off Fast and answer on the Standard tier");
+			await session.waitForIdle();
+
+			expect(`${session.model?.provider}/${session.model?.id}`).toBe(baseSelector);
+			expect(notices).toEqual([notice]);
+			const fallbackChange = sessionManager
+				.getEntries()
+				.find(entry => entry.type === "model_change" && entry.resolvedModelIsFallback === true);
+			expect(fallbackChange).toMatchObject({
+				model: baseSelector,
+				fallback: { from: fastSelector, trigger, reason: failure.errorMessage },
+			});
+		},
+	);
+
 	it("walks the fallback chain when the primary provider has no credential, then restores it once one returns", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o");
