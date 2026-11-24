@@ -16,7 +16,7 @@ import {
 	computeNonMessageTokens,
 	estimateContextToolSchemaTokens,
 	type NonMessageTokenSource,
-} from "@oh-my-pi/pi-tui/status-line/context-usage";
+} from "./context-usage";
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
 import { getLatestCompactionEntry } from "./session-context";
 import type { SessionEntry } from "./session-entries";

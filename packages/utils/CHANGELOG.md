@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fatal interactive errors now print a concise cause and the path to the full log after terminal cleanup. Piped stderr still includes the stack trace.
 - `ptree` child processes spawned without an explicit `env` now inherit `Bun.env`, including values loaded from `.env` files after startup, on every platform rather than only under the Linux subreaper.
 
 ## [19.1.0] - 2026-11-21

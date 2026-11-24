@@ -85,11 +85,11 @@ import type { CompactOptions, ContextUsage } from "../extensibility/extensions/t
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
-import { customMessageEntryMessage } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { computeNonMessageTokens, type NonMessageTokenSource } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { customMessageEntryMessage } from "./transcript/transcript-entry";
+import { computeNonMessageTokens, type NonMessageTokenSource } from "./context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import { isCompleteReadResult } from "../tools/read-supersede";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown } from "./agent-session-types";
 import type { CacheBridgeEstimate, CacheBridgeOutcome } from "./cache-warmer";

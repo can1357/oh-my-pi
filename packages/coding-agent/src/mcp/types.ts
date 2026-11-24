@@ -4,8 +4,8 @@ import type {
 	MCPImageContent,
 	MCPResourceContent,
 	MCPTextContent,
-} from "@oh-my-pi/pi-tui/tools/mcp";
-import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
+} from "../tools/details/mcp";
+import type { MCPProgress } from "../tools/mcp-progress";
 /**
  * MCP (Model Context Protocol) type definitions.
  *

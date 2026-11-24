@@ -6,20 +6,20 @@
 import * as path from "node:path";
 import { APP_NAME, getProjectDir, getPythonEnvDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
+import { formatKeyHint } from "../ui/keys/hints";
 import { Settings } from "../config/settings";
 import { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { discoverAuthStorage } from "../sdk";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
 import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODELS } from "../tts";
-import { selectSetupModel } from "@oh-my-pi/pi-tui/apps/setup-model-picker";
+import { selectStandaloneItem } from "../ui/apps/standalone-picker";
 
 import { cfgPythonInterpreter } from "../eval/settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 export type SetupComponent = "python" | "speech";
 
@@ -134,7 +134,7 @@ async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Pr
 	}
 
 	if (!check.pythonPath) {
-		console.error(chalk.red(`${theme.status.error} Python not found`));
+		console.error(chalk.red(`${currentTheme().symbols.symbol("status.error")} Python not found`));
 		console.error(chalk.dim("Install Python 3.8+ or set python.interpreter to its executable path"));
 		process.exit(1);
 	}
@@ -145,11 +145,11 @@ async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Pr
 	}
 
 	if (check.available) {
-		console.log(chalk.green(`\n${theme.status.success} Python execution is ready`));
+		console.log(chalk.green(`\n${currentTheme().symbols.symbol("status.success")} Python execution is ready`));
 		return;
 	}
 
-	console.error(chalk.red(`\n${theme.status.error} Python interpreter reported failure`));
+	console.error(chalk.red(`\n${currentTheme().symbols.symbol("status.error")} Python interpreter reported failure`));
 	process.exit(1);
 }
 
@@ -196,7 +196,10 @@ function buildSpeechComponents(settings: Settings, registry: ModelRegistry): Spe
 			},
 			pick: async () => {
 				const current = resolveLocalSpeechModelId("dictation", settings, registry);
-				const chosen = await selectSetupModel("Speech-to-Text model", sttOptions, current);
+				const chosen = await selectStandaloneItem("Speech-to-Text model", sttOptions, {
+					currentValue: current,
+					noun: "models",
+				});
 				if (chosen === null) return false;
 				if (isSttModelKey(chosen)) {
 					settings.setModelRole("dictation", `local/${chosen}`);
@@ -218,7 +221,10 @@ function buildSpeechComponents(settings: Settings, registry: ModelRegistry): Spe
 			},
 			pick: async () => {
 				const current = resolveLocalSpeechModelId("speech", settings, registry);
-				const chosen = await selectSetupModel("Text-to-Speech model", ttsOptions, current);
+				const chosen = await selectStandaloneItem("Text-to-Speech model", ttsOptions, {
+					currentValue: current,
+					noun: "models",
+				});
 				if (chosen === null) return false;
 				if (isTtsLocalModelKey(chosen)) {
 					settings.setModelRole("speech", `local/${chosen}`);
@@ -280,7 +286,7 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 			await component.pick();
 		}
 		if (await component.isReady()) {
-			console.log(chalk.green(`${theme.status.success} ${component.name} ready`));
+			console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} ${component.name} ready`));
 			continue;
 		}
 		console.log(chalk.dim(`Preparing ${component.name}...`));
@@ -293,12 +299,12 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 		} catch (err) {
 			process.stdout.write("\n");
 			const msg = err instanceof Error ? err.message : `Failed to set up ${component.name}`;
-			console.error(chalk.red(`${theme.status.error} ${msg}`));
+			console.error(chalk.red(`${currentTheme().symbols.symbol("status.error")} ${msg}`));
 			process.exit(1);
 		}
 	}
 
-	console.log(chalk.green(`\n${theme.status.success} Speech is ready`));
+	console.log(chalk.green(`\n${currentTheme().symbols.symbol("status.success")} Speech is ready`));
 	console.log(
 		chalk.dim(
 			`Enable speech-to-text via stt.enabled, then hold ${formatKeyHint("space")} by default to talk (remap or disable it with app.stt.pushToTalk, or bind app.stt.toggle separately); enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.`,

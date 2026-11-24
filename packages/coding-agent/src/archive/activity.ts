@@ -22,8 +22,8 @@ import {
 	transcriptMessages,
 	transcriptStats,
 } from "@oh-my-pi/pi-natives";
-import { previewLine, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
+import { previewLine, shortenPath } from "../utils/render-utils";
 import { formatCount, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { listStatedSessionFiles, parseSessionFileName } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";

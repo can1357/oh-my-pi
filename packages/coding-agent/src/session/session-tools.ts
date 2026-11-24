@@ -24,22 +24,21 @@ import {
 	type SkillWarning,
 	setActiveSkills,
 } from "../extensibility/skills";
-import { type LocalProtocolOptions } from "../internal-urls";
 import { isEvalNamespaceTool } from "../mcp/eval-namespaces";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
-import { invalidateToolSchemaMetadata, type SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { invalidateToolSchemaMetadata, type SystemPromptSources } from "./context-usage";
 import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
-import evalPreludeGuidePrompt from "../prompts/tools/eval-prelude-first-call.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
 import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "text" };
-import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import toolCommandMountNoticePrompt from "../prompts/system/tool-command-mount-notice.md" with { type: "text" };
-import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools";
+import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
+import evalPreludeGuidePrompt from "../prompts/tools/eval-prelude-first-call.md" with { type: "text" };
+import { type BuildSystemPromptResult, toolReadsSkillUris } from "../system-prompt";
 import { isMCPToolName, normalizeToolNames, presentationOrder } from "../tools/builtin-names";
 import {
 	approvalRestrictions,
@@ -52,8 +51,7 @@ import { getApprovalGrants } from "../tools/approval-cache";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
-import { ToolAbortError } from "../tools/tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import {
 	isMountableAsToolCommand,
 	listToolCommands,
@@ -73,15 +71,12 @@ import {
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
-import { type BuildSystemPromptResult, toolReadsSkillUris } from "../system-prompt";
 import { matchModelPattern } from "../utils/model-patterns";
 import { resolveToolWireName } from "../utils/tool-wire-name";
-
 import type { CustomMessage } from "./messages";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-
 import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
 import {
 	cfgExternalThinking,
@@ -98,6 +93,8 @@ import {
 	cfgToolsCommandInline,
 	cfgToolsCommandNotices,
 } from "../tools/settings";
+import type { LocalProtocolOptions } from "../internal-urls";
+import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools";
 
 /**
  * Registered tools a mode may activate mid-session that `active` leaves out, for {@link Agent.setStandbyTools}:

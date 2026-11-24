@@ -17,7 +17,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionAdvisors } from "@oh-my-pi/pi-coding-agent/session/session-advisors";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";

@@ -8,37 +8,37 @@ import { cfgComposerTokenRate } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { TspKind } from "@oh-my-pi/pi-wire";
-import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
+import type { UiNode } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
-const context = (supports: (kind: TspKind) => boolean): DescribeContext => ({
-	cols: 100,
-	reduceMotion: false,
-	dark: true,
-	supports,
-	feature: () => true,
-});
-const cx = context(() => true);
+/** A node as the native backend describes it. */
+interface Described {
+	readonly k: string;
+	readonly key?: string;
+	readonly p?: Readonly<Record<string, unknown>>;
+	readonly c?: readonly Described[];
+}
 
 const PLAN: TodoPhase[] = [
 	{ name: "Notifications", tasks: [{ content: "Add new-mail alerts", status: "in_progress" }] },
 ];
 
-function isNode(child: NativeChild): child is NativeNode {
-	return "k" in child;
+function describeNode(node: UiNode): Described {
+	return describeTree(node, staticEnvironment(currentTheme()), 100) as Described;
 }
 
-function nodes(root: NativeNode): NativeNode[] {
-	const out: NativeNode[] = [root];
-	for (const child of root.c ?? []) if (isNode(child)) out.push(...nodes(child));
-	return out;
+function nodes(root: Described): Described[] {
+	return [root, ...(root.c ?? []).flatMap(nodes)];
 }
 
-function role(n: NativeNode): string | undefined {
-	return n.p !== undefined && "role" in n.p ? n.p.role : undefined;
+function role(n: Described): string | undefined {
+	return n.p?.role as string | undefined;
 }
 
 describe("InteractiveMode native dock activity line", () => {
@@ -48,7 +48,7 @@ describe("InteractiveMode native dock activity line", () => {
 	let mode: InteractiveMode;
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-activity-line-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -62,13 +62,19 @@ describe("InteractiveMode native dock activity line", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(() => {
-		mode.loadingAnimation?.stop();
-		mode.loadingAnimation = undefined;
-		mode.statusContainer.disposeChildren();
+		mode.clearWorking();
 		mode.setTodos([]);
 		session.tokenRate.reset();
 		cfgComposerTokenRate.clearOverride(settings);
@@ -82,54 +88,47 @@ describe("InteractiveMode native dock activity line", () => {
 		resetSettingsForTest();
 	});
 
-	const activity = (describeCx = cx) => mode.statusContainer.describe(describeCx)!;
-	const keys = (root: NativeNode) => (root.c ?? []).filter(isNode).map(n => n.key);
+	/** The dock as the native backend describes it. */
+	const dock = (): Described[] => mode.shell.surface.dock().map(describeNode).flatMap(nodes);
+	/** The activity line (working row + todo), or undefined while it is empty. */
+	const activity = (): Described | undefined => dock().find(n => role(n) === "omp.hud.activity");
+	const keys = (line: Described | undefined) => (line?.c ?? []).map(n => n.key);
 
-	it("describes an empty row without the activity role when nothing shows, the line's own kind", () => {
-		const empty = activity();
-		expect(empty).toMatchObject({ k: "row", c: [] });
-		expect(role(empty)).toBeUndefined();
-		// The same kind both ways: a host keeps the one element (and what it drew into it) as the line comes and goes.
-		mode.ensureLoadingAnimation();
-		expect(activity()).toMatchObject({ k: empty.k, p: { role: "omp.hud.activity" } });
+	it("describes no activity line when no status row runs and there is no plan", () => {
+		expect(activity()).toBeUndefined();
 	});
 
 	it("holds the todo in the activity line, not the HUD pills row, between turns", () => {
 		mode.setTodos(PLAN);
 		const line = activity();
-		expect(role(line)).toBe("omp.hud.activity");
 		expect(keys(line)).toEqual(["todo"]);
-		const todo = (line.c ?? []).filter(isNode)[0]!;
-		expect(todo).toMatchObject({ k: "checklist", p: { mode: "hud", role: "omp.hud.todo" } });
-		expect(mode.describeHudPills()).toMatchObject({ p: { hidden: true }, c: [] });
-
-		// A terminal without `checklist` gets the phase tree in the same slot.
-		const fallback = (activity(context(kind => kind !== "checklist")).c ?? []).filter(isNode)[0]!;
-		expect(fallback).toMatchObject({ k: "col", key: "todo", p: { role: "omp.hud.todo" } });
-		expect(nodes(fallback).some(n => n.k === "tree")).toBe(true);
+		expect(line?.c?.[0]).toMatchObject({ k: "checklist", p: { mode: "hud", role: "omp.hud.todo" } });
+		expect(dock().filter(n => role(n) === "omp.hud.pill")).toEqual([]);
 	});
 
 	it("puts the working row before the todo while a turn runs, and the status alone without a plan", () => {
-		mode.ensureLoadingAnimation();
+		mode.ensureWorkingRow();
 		const statusOnly = activity();
 		expect(keys(statusOnly)).toEqual(["status"]);
-		const status = (statusOnly.c ?? []).filter(isNode)[0]!;
-		expect(role(status)).toBe("omp.hud.status");
-		expect(status.c).toEqual([mode.loadingAnimation!]);
+		expect(role(statusOnly!.c![0]!)).toBe("omp.hud.status");
 
 		mode.setTodos(PLAN);
 		expect(keys(activity())).toEqual(["status", "todo"]);
 	});
 
-	it("shows tok/s in the composer bar only with the setting on and a reading", () => {
-		const rate = () => nodes(mode.editor.describe(cx)).find(n => role(n) === "omp.composer.rate");
+	it("shows tok/s in the composer bar only with the setting on and a reading", async () => {
+		const rate = () => nodes(describeNode(mode.composer.node)).find(n => role(n) === "omp.composer.rate");
 		session.tokenRate.seed(1_000, 10_000);
 		expect(rate()).toBeUndefined();
 
 		cfgComposerTokenRate.override(settings, true);
+		// The setting change reaches the bar on the next tick.
+		await Bun.sleep(0);
 		expect(rate()?.p).toMatchObject({ value: 100, unit: "tok/s" });
 
 		session.tokenRate.reset();
+		// The meter is not reactive: the session event after a reset refreshes the status facts.
+		mode.statusLine.refresh();
 		expect(rate()).toBeUndefined();
 	});
 });

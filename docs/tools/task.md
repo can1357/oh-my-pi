@@ -8,7 +8,7 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/task.md`
 - Key collaborators:
    - `packages/coding-agent/src/task/types.ts` — dynamic schema, agent definitions, output caps.
-   - `packages/tui/src/tools/task.ts` — progress/result and tool-details types.
+   - `packages/coding-agent/src/ui/tools/task.tsx` / `packages/coding-agent/src/task/task-details.ts` — progress/result rendering and tool-details types.
    - `packages/coding-agent/src/task/structured-subagent.ts` — shared task/eval preflight, model/schema policy, artifact retention, execution.
    - `packages/coding-agent/src/task/isolation-runner.ts` — isolation capture, merge, recovery, and lifecycle ownership.
    - `packages/coding-agent/src/task/eval-tools.ts` — expose parent-kernel tools to a child.

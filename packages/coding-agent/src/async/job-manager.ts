@@ -1,9 +1,9 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, truncate } from "@oh-my-pi/pi-utils";
-import { collapseCommand } from "@oh-my-pi/pi-tui/apps/ps-data";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
-import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { collapseCommand } from "../cli/ps-model";
+import type { StructuredSubagentOutput } from "../task/task-details";
+import type { OutputMeta } from "../tools/output-meta-format";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { IrcBus } from "../irc/bus";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";

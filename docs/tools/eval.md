@@ -14,7 +14,7 @@
 - File/percent-command preparation: `packages/coding-agent/src/eval/input.ts`; extension preludes: `packages/coding-agent/src/eval/preludes.ts`
 - JavaScript: `packages/coding-agent/src/eval/js/`
 - Python: `packages/coding-agent/src/eval/py/`
-- Output/truncation: `packages/tui/src/tools/streaming-output.ts`
+- Output/truncation: `packages/coding-agent/src/tools/streaming-output.ts`
 - Python internals: `docs/python-repl.md`
 
 ## Inputs

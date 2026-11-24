@@ -1,23 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-
-type FakeEditor = {
-	onSubmit?: (text: string) => Promise<void>;
-	imageLinks?: readonly (string | undefined)[];
-	setText(text: string): void;
-	getText(): string;
-	addToHistory(text: string): void;
-	setActionKeys(action: string, keys: string[]): void;
-	setCustomKeyHandler(key: string, handler: () => void): void;
-	clearCustomKeyHandlers(): void;
-	pendingImages: ImageContent[];
-	pendingImageLinks: (string | undefined)[];
-};
+import { Composer } from "../src/ui/composer/composer";
 
 function createContext() {
-	let editorText = "";
 	const submitted: unknown[] = [];
 	const handlePythonCommand = vi.fn(async (_code: string, _isExcluded: boolean) => {});
 	const handleBashCommand = vi.fn(async (_command: string, _isExcluded: boolean) => {});
@@ -26,24 +12,10 @@ function createContext() {
 	const prompt = vi.fn(async (_text: string, _options?: unknown) => {});
 	const handleBtwCommand = vi.fn(async (_question: string) => true);
 
-	const editor: FakeEditor = {
-		setText(text) {
-			editorText = text;
-		},
-		getText() {
-			return editorText;
-		},
-		addToHistory: vi.fn(),
-		setActionKeys: vi.fn(),
-		setCustomKeyHandler: vi.fn(),
-		clearCustomKeyHandlers: vi.fn(),
-		pendingImages: [] as ImageContent[],
-		pendingImageLinks: [] as (string | undefined)[],
-	};
+	const editor = new Composer();
 
 	const ctx = {
-		editor: editor as unknown as InteractiveModeContext["editor"],
-		ui: { requestRender: vi.fn() } as unknown as InteractiveModeContext["ui"],
+		composer: editor,
 		session: {
 			isStreaming: false,
 			isCompacting: false,
@@ -63,7 +35,7 @@ function createContext() {
 		onInputCallback,
 		startPendingSubmission,
 		updatePendingMessagesDisplay: vi.fn(),
-		flushPendingBashComponents: vi.fn(),
+		flushPendingExecRuns: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
 		showError: vi.fn(),
 		showWarning: vi.fn(),
@@ -96,7 +68,9 @@ describe("InputController Python prompt prefix", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("$HOME is home");
+		editor.onSubmit?.("$HOME is home");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(handlePythonCommand).not.toHaveBeenCalled();
 		expect(startPendingSubmission).toHaveBeenCalledWith(
@@ -129,7 +103,9 @@ describe("InputController Python prompt prefix", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.(transcript);
+		editor.onSubmit?.(transcript);
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(handlePythonCommand).not.toHaveBeenCalled();
 		expect(startPendingSubmission).toHaveBeenCalledWith(
@@ -157,7 +133,9 @@ describe("InputController Python prompt prefix", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("$ print(1)");
+		editor.onSubmit?.("$ print(1)");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(handlePythonCommand).toHaveBeenCalledWith("print(1)", false);
 		expect(onInputCallback).not.toHaveBeenCalled();
@@ -168,7 +146,9 @@ describe("InputController Python prompt prefix", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("$$ print(1)");
+		editor.onSubmit?.("$$ print(1)");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(handlePythonCommand).toHaveBeenCalledWith("print(1)", true);
 		expect(onInputCallback).not.toHaveBeenCalled();
@@ -179,7 +159,9 @@ describe("InputController Python prompt prefix", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("? what does this do");
+		editor.onSubmit?.("? what does this do");
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(handleBtwCommand).toHaveBeenCalledTimes(1);
 		expect(handleBtwCommand.mock.calls[0]?.[0]).toBe("what does this do");
@@ -192,7 +174,9 @@ describe("InputController Python prompt prefix", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.(text);
+		editor.onSubmit?.(text);
+
+		await controller.waitForSubmissionDispatches();
 
 		expect(handleBtwCommand).not.toHaveBeenCalled();
 		expect(submitted).toEqual([{ text, images: undefined, imageLinks: undefined, streamingBehavior: "steer" }]);

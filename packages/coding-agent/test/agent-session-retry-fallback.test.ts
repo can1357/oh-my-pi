@@ -27,13 +27,12 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-selector";
 import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -45,11 +44,12 @@ import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-c
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { initTheme } from "../src/ui/theme/service";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -308,7 +308,7 @@ describe("AgentSession retry fallback", () => {
 	// mutable retry-fallback cooldown state between tests.
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-retry-fallback-");
-		await initTheme();
+		initTheme();
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		authStorage.keys.setRuntime("openai", "openai-test-key");

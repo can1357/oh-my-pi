@@ -1377,6 +1377,8 @@ export type TspEvent =
 	| { ev: "features"; features: readonly string[] }
 	| { ev: "visible"; sf?: string; visible: boolean }
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
+	/** Menu opening/closing; a toggle of a named sub-item also reports its id. */
+	| { ev: "toggle"; sf: string; id: string; open: boolean; item?: string }
 	| { ev: "select"; sf: string; id: string; item: string }
 	| { ev: "activate"; sf: string; id: string; item: string }
 	/** A click action; a `menu` check or radio row adds its new `checked` state. */
@@ -1438,4 +1440,5 @@ export type TspEvent =
 	 */
 	| { ev: "focus"; sf: string; id: string }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
+	/** A lost surface, or (scoped to `sf`) settled main children dropped under the retention budget. */
 	| { ev: "gone"; sf?: string; ids: readonly string[] };
