@@ -212,6 +212,32 @@ function finalizedErrorStream(model: Model<Api>, failure: AIError.FinalizeResult
 	return stream;
 }
 
+/** A stream that ends the turn with `failure`'s error, as the agent sees a failed turn. */
+function failedTurnStream(
+	model: Model<Api>,
+	failure: Pick<AssistantMessage, "errorMessage" | "errorFromAgentLoop">,
+): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		stream.push({
+			type: "error",
+			reason: "error",
+			error: {
+				role: "assistant",
+				content: [],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: emptyUsage(),
+				stopReason: "error",
+				...failure,
+				timestamp: Date.now(),
+			},
+		});
+	});
+	return stream;
+}
+
 /** A stream that completes normally with a single text block. */
 function recoveredTextStream(model: Model<Api>, text: string): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
@@ -458,6 +484,73 @@ describe("AgentSession retry fallback", () => {
 			},
 		]);
 	});
+
+	it.each([
+		{
+			cause: "a failed request",
+			failure: { errorMessage: "overloaded_error: provider returned error 503" },
+			trigger: "request-error",
+			notice: "Request failed: overloaded_error: provider returned error 503",
+		},
+		{
+			cause: "a turn the agent loop stopped",
+			failure: {
+				errorMessage:
+					"Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop.",
+				errorFromAgentLoop: true,
+			},
+			trigger: "agent-loop",
+			notice:
+				"Turn stopped: Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop.",
+		},
+	])(
+		"records why $cause moved the session to a fallback on its model_change entry",
+		async ({ failure, trigger, notice }) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled test models to exist");
+			}
+			const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					if (`${model.provider}/${model.id}` === primarySelector) return failedTurnStream(model, failure);
+					mock.push({ content: ["Recovered on the fallback"] });
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+			});
+			settings.setModelRole("default", primarySelector);
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+			const notices: Array<string | undefined> = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") notices.push(event.reason);
+			});
+
+			await session.prompt("Recover on the fallback");
+			await session.waitForIdle();
+
+			expect(session.model?.id).toBe(fallbackModel.id);
+			expect(notices).toEqual([notice]);
+			const fallbackChange = sessionManager
+				.getEntries()
+				.find(entry => entry.type === "model_change" && entry.resolvedModelIsFallback === true);
+			expect(fallbackChange).toMatchObject({
+				model: fallbackSelector,
+				fallback: { from: primarySelector, trigger, reason: failure.errorMessage },
+			});
+		},
+	);
 
 	it("walks the fallback chain when the primary provider has no credential, then restores it once one returns", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");

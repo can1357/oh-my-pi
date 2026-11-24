@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AgentLoopError`, thrown when the loop ends a turn itself (a soft tool requirement the model never met); `Agent` marks that turn's error message `errorFromAgentLoop` so hosts can tell it from a failed request
+
 ### Fixed
 
 - Fixed DeepSeek DSML markup leaking into tool-call arguments (e.g. a `</｜DSML｜ parameter>` tail on an edit or bash command) being executed and replayed; the leaked tail is now cut before the call runs

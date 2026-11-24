@@ -170,6 +170,18 @@ const MAX_DSML_LEAK_NUDGES = 2;
 const MAX_SOFT_TOOL_ESCALATIONS = 3;
 
 /**
+ * The loop ended the turn itself, not a provider: the model kept missing a soft
+ * tool requirement. `Agent` marks the turn's error message `errorFromAgentLoop`
+ * so recovery does not report it as a failed request.
+ */
+export class AgentLoopError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "AgentLoopError";
+	}
+}
+
+/**
  * Whether a hard `toolChoice` for a turn conflicts with a pending soft tool
  * requirement — i.e. forbids tools (`"none"`) or forces a *different* specific
  * tool. `"auto"`/`"required"`/`"any"` and a same-tool force still let the model
@@ -1727,7 +1739,7 @@ async function runLoopBody(
 				if (softNonCompliant && softRequiredTool !== undefined) {
 					SpeculativeOperationCoordinator.discardForMessage(message, "soft tool requirement deferred execution");
 					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
-						throw new Error(
+						throw new AgentLoopError(
 							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
 						);
 					}

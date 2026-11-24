@@ -72,6 +72,7 @@ import {
 	type LabelEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
+	type ModelFallbackCause,
 	type ModelUsageEntry,
 	type ModelUsageRecord,
 	lastSelfSelectedLeafId,
@@ -3774,14 +3775,21 @@ export class SessionManager {
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
 	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+	 * @param fallback Why the retry fallback switched models
 	 */
-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+	appendModelChange(
+		model: string,
+		role?: string,
+		resolvedModelIsFallback = false,
+		fallback?: ModelFallbackCause,
+	): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
 			resolvedModelIsFallback,
+			fallback,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
