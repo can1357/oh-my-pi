@@ -17,7 +17,14 @@ import { replaceTabs } from "../utils/text-width";
 import { shortenPath } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { ToolError } from "../tools/tool-errors";
-import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
+import {
+	clampTimeout,
+	lspFloorSeconds,
+	lspTimeoutMessage,
+	lspTimeoutSource,
+	resolveLspTimeouts,
+	TOOL_TIMEOUTS,
+} from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
@@ -119,7 +126,7 @@ import { fileToUri, uriToFile } from "./uri";
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
 
 import { cfgToolsMaxTimeout } from "../tools/settings";
-import { cfgLspRequestTimeout } from "./settings";
+import { cfgLspMinTimeout, cfgLspRequestTimeout } from "./settings";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { type Theme } from "@oh-my-pi/pi-tui/theme/contract";
 
@@ -328,12 +335,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	constructor(private readonly session: ToolSession) {}
 
 	get description(): string {
-		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
-		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(this.session.settings), maxTimeout);
+		const settings = this.session.settings;
+		const maxTimeout = cfgToolsMaxTimeout.get(settings);
+		// Render the effective floor, and never advertise a cap below it: the floor
+		// beats a lower tools.maxTimeout, so the model would be told less than it gets.
+		const floor = lspFloorSeconds(cfgLspMinTimeout.get(settings));
+		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(settings), maxTimeout, floor);
 		return prompt.render(lspDescription, {
 			defaultTimeoutSec: defaults.call,
 			defaultWaitSec: defaults.wait,
-			maxTimeoutSec: clampTimeout("lsp", TOOL_TIMEOUTS.lsp.max, maxTimeout),
+			maxTimeoutSec: Math.max(floor, clampTimeout("lsp", TOOL_TIMEOUTS.lsp.max, maxTimeout)),
+			minTimeoutSec: floor > 0 ? floor : undefined,
 		});
 	}
 
@@ -352,13 +364,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
 			throw new ToolError(`LSP action ${action} is disabled in this read-only session`);
 		}
+		const requestTimeoutSec = cfgLspRequestTimeout.get(this.session.settings);
 		const budget = resolveLspTimeouts(
 			timeout,
-			cfgLspRequestTimeout.get(this.session.settings),
+			requestTimeoutSec,
 			cfgToolsMaxTimeout.get(this.session.settings),
+			cfgLspMinTimeout.get(this.session.settings),
 		);
 		const timeoutSec = budget.call;
 		const waitMs = budget.wait * 1000;
+		const sourceNote = lspTimeoutSource(timeout, requestTimeoutSec, budget);
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const callerSignal = signal;
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
@@ -371,10 +386,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		const rethrowAbort = (err: unknown, serverName?: string): void => {
 			if (!(err instanceof ToolAbortError) && !signal?.aborted) return;
 			if (timeoutSignal.aborted && !callerSignal?.aborted) {
-				const server = serverName ? ` on ${serverName}` : "";
-				throw new ToolError(
-					`LSP ${action} timed out after ${timeoutSec}s${server}. The server may still be indexing; try again or pass timeout=<larger>.`,
-				);
+				throw new ToolError(lspTimeoutMessage(action, timeoutSec, serverName, sourceNote));
 			}
 			throw new ToolAbortError();
 		};
