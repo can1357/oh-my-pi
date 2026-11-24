@@ -473,9 +473,23 @@ describe("RPC queued-message editing", () => {
 			]);
 		}, 30_000);
 
-		test("resume interrupts a run with nothing queued and continues it, and refuses an empty session", async () => {
+		test("resume interrupts a run with nothing queued and continues it, and answers an empty session with a bare turn", async () => {
 			await client.start();
-			expect(await rejectionOf(client.resume())).toMatchObject({ command: "resume", message: "Nothing to resume" });
+			const idle = Promise.withResolvers<void>();
+			const unsubscribe = client.onEvent(event => {
+				if (event.type === "agent_end") idle.resolve();
+			});
+			try {
+				await client.resume();
+				await withTimeout(idle.promise, 10_000, "The bare continue turn never finished");
+			} finally {
+				unsubscribe();
+			}
+			// Nothing to continue from is not an error: the model starts a turn, and
+			// no user message was invented for it.
+			const messages = await client.getMessages();
+			expect(userTexts(messages)).toEqual([]);
+			expect(messages.some(message => message.role === "assistant")).toBe(true);
 			await client.stop();
 
 			await startStreamingTurn();
