@@ -7,9 +7,8 @@
  */
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { CORPUS_DIR, hasCorpus } from "@oh-my-pi/pi-tui/testing/corpus";
 import { builtinThemes, createTheme, type ResolvedTheme } from "@oh-my-pi/pi-tui/theme/index";
-
-const CORPUS = path.join(import.meta.dir, "../corpus");
 
 const KEYS: Record<"dark" | "light", readonly string[]> = {
 	dark: [
@@ -83,10 +82,10 @@ interface CorpusStage {
 async function matchCorpus(themeName: "dark" | "light", theme: ResolvedTheme): Promise<Map<string, string>> {
 	const wanted = new Set(KEYS[themeName]);
 	const found = new Map<string, string>();
-	for await (const file of new Bun.Glob(`**/*.${themeName}.json`).scan(CORPUS)) {
+	for await (const file of new Bun.Glob(`**/*.${themeName}.json`).scan(CORPUS_DIR)) {
 		let data: { stages?: readonly CorpusStage[] };
 		try {
-			data = await Bun.file(path.join(CORPUS, file)).json();
+			data = await Bun.file(path.join(CORPUS_DIR, file)).json();
 		} catch {
 			continue; // a fixture being recaptured right now
 		}
@@ -108,7 +107,7 @@ async function matchCorpus(themeName: "dark" | "light", theme: ResolvedTheme): P
 }
 
 for (const themeName of ["dark", "light"] as const) {
-	describe(`${themeName} theme bytes match the corpus`, () => {
+	describe.skipIf(!hasCorpus())(`${themeName} theme bytes match the corpus`, () => {
 		let found: Map<string, string>;
 		beforeAll(async () => {
 			found = await matchCorpus(themeName, createTheme(builtinThemes()[themeName]!));
