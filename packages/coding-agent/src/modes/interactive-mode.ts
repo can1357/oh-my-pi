@@ -2388,6 +2388,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setDisableSubmit(false);
 		this.#idleMaintenanceActivity.ready = true;
 		this.syncIdleMaintenanceView();
+		// The first alt+p then opens as fast as a reopen.
+		this.#selectorController
+			.warmModelPicker(this.#dialogLifetime.signal)
+			.catch(error => logger.warn("Model picker prewarm failed", { error: String(error) }));
 	}
 
 	/**

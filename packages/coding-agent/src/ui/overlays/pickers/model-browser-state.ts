@@ -108,8 +108,8 @@ interface PickerRowKey {
 	readonly preferences: object;
 	readonly revision: number;
 	readonly pickerProvider: boolean;
-	/** Session tokens over-context rows are flagged against; 0 when none are flagged. */
-	readonly overContextTokens: number;
+	/** Whether rows over the session's context are flagged (the tokens they compare against are kept per row). */
+	readonly markOverContext: boolean;
 }
 
 /** Picker rows per item for one {@link PickerRowKey}, valid until a price falls due. */
@@ -118,8 +118,8 @@ interface PickerRowStore extends PickerRowKey {
 	until: number;
 	readonly held: Map<string, HeldRole[]>;
 	readonly tiers: TieredPerf;
-	/** Each row with the service tier its perf was looked up under. */
-	readonly rows: Map<ModelBrowserItem, { row: TspPickerItem; tier: string | undefined }>;
+	/** Each row with the service tier its perf was looked up under and the session tokens it flags (0: none). */
+	readonly rows: Map<ModelBrowserItem, { row: TspPickerItem; tier: string | undefined; overContext: number }>;
 }
 
 /**
@@ -135,7 +135,7 @@ function storeServes(store: PickerRowStore, key: PickerRowKey, now: number): boo
 		store.preferences === key.preferences &&
 		store.revision === key.revision &&
 		store.pickerProvider === key.pickerProvider &&
-		store.overContextTokens === key.overContextTokens &&
+		store.markOverContext === key.markOverContext &&
 		now < store.until
 	);
 }
@@ -759,7 +759,7 @@ export class ModelBrowserState {
 			preferences: this.source.preferences ?? this.source,
 			revision: this.source.revision,
 			pickerProvider: this.#pickerProvider(),
-			overContextTokens: this.#markOverContext() && this.#contextTokens > 0 ? this.#contextTokens : 0,
+			markOverContext: this.#markOverContext(),
 		};
 		const now = Date.now();
 		const current = this.#pickerRows;
@@ -779,11 +779,12 @@ export class ModelBrowserState {
 		return store;
 	}
 
-	/** `item`'s row from `store`, built when missing or when the service tier picking its perf moved. */
+	/** `item`'s row from `store`, built when missing or when the service tier picking its perf or its context flag moved. */
 	#pickerItem(item: ModelBrowserItem, store: PickerRowStore): TspPickerItem {
 		const tier = store.tiers.has(item.selector) ? this.source.serviceTierFor?.(item.model) : undefined;
+		const overContext = this.isOverContext(item) ? this.#contextTokens : 0;
 		const cached = store.rows.get(item);
-		if (cached && cached.tier === tier) return cached.row;
+		if (cached && cached.tier === tier && cached.overContext === overContext) return cached.row;
 		const model = item.model;
 		store.until = Math.min(store.until, nextPriceChange(model, Date.now()));
 		const facts: Record<string, TspText | number> = {};
@@ -796,7 +797,7 @@ export class ModelBrowserState {
 		if (model.contextWindow) facts.ctx = model.contextWindow;
 		facts.price = pickerPrice(model);
 		const badges: { text: string; tone?: "accent" | "warning" | "success"; title?: string }[] = [];
-		if (this.isOverContext(item)) {
+		if (overContext) {
 			badges.push({
 				text: `ctx>${tokenCount(model.contextWindow ?? 0)}`,
 				tone: "warning",
@@ -832,7 +833,7 @@ export class ModelBrowserState {
 			...(chips.length > 0 ? { chips } : {}),
 			...(title ? { title } : {}),
 		};
-		store.rows.set(item, { row, tier });
+		store.rows.set(item, { row, tier, overContext });
 		return row;
 	}
 
@@ -842,6 +843,23 @@ export class ModelBrowserState {
 	 * `itemsDel`; a patched row stays in the patch), else it is sent whole.
 	 */
 	pickerItems(catalogue: readonly ModelBrowserItem[]): PickerCatalogue {
+		return this.#pickerItemsNow(catalogue);
+	}
+
+	/**
+	 * Builds the picker rows of `catalogue` into the shared row store ahead of
+	 * a picker reading them, a row per step; stops when the inputs move.
+	 */
+	*pickerItemsWork(catalogue: readonly ModelBrowserItem[]): Generator<void, void, undefined> {
+		const store = this.#pickerRowStore();
+		for (const item of catalogue) {
+			if (this.#pickerRowStore() !== store) return;
+			this.#pickerItem(item, store);
+			yield;
+		}
+	}
+
+	#pickerItemsNow(catalogue: readonly ModelBrowserItem[]): PickerCatalogue {
 		const store = this.#pickerRowStore();
 		const rows = catalogue.map(item => this.#pickerItem(item, store));
 		// The same rows again (a query or selection moved): the same patch.

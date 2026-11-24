@@ -16,6 +16,7 @@ import type { TspPickerColumn, TspPickerMark } from "@oh-my-pi/pi-wire";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../../thinking/levels";
 import { FuzzyQuery, FuzzyText, fuzzyRank } from "../../../utils/fuzzy";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { drainWork } from "../../../utils/sliced-work";
 
 /** Canonical display ordering of built-in model roles. */
 export type ModelRole =
@@ -263,6 +264,15 @@ export function resolveRoleAssignments(
 	allModels: ReadonlyArray<Model>,
 	autoCandidates: ReadonlyArray<Model>,
 ): RoleAssignments {
+	return drainWork(roleAssignmentsWork(settings, allModels, autoCandidates));
+}
+
+/** {@link resolveRoleAssignments}, pausing after each role it resolves. */
+function* roleAssignmentsWork(
+	settings: ModelBrowserSource,
+	allModels: ReadonlyArray<Model>,
+	autoCandidates: ReadonlyArray<Model>,
+): Generator<void, RoleAssignments, undefined> {
 	const levelOf = (
 		role: string,
 		resolved: { explicitThinkingLevel: boolean; thinkingLevel?: ConfiguredThinkingLevel },
@@ -297,6 +307,7 @@ export function resolveRoleAssignments(
 		const resolved = settings.resolveRoleValue(value, eligible(allModels, catalogPools, role));
 		if (resolved.model)
 			roles[role] = { model: resolved.model, thinkingLevel: levelOf(role, resolved), autoSelected: false };
+		yield;
 	}
 	if (autoCandidates.length > 0) {
 		const candidatePools = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
@@ -305,6 +316,7 @@ export function resolveRoleAssignments(
 			const resolved = settings.resolveRoleValue(`pi/${role}`, eligible(autoCandidates, candidatePools, role));
 			if (resolved.model)
 				roles[role] = { model: resolved.model, thinkingLevel: levelOf(role, resolved), autoSelected: true };
+			yield;
 		}
 	}
 	return roles;
@@ -556,6 +568,9 @@ function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyA
 	}
 	const loadError = registry.getError();
 	let error = loadError ? String(loadError) : undefined;
+	// The whole catalog first: composing it once lets the available models filter it
+	// rather than compose their own providers' slice of it first.
+	const allModels = registry.getAll("all");
 	let roleModels: ReadonlyArray<Model>;
 	try {
 		roleModels = registry.getAvailable("all");
@@ -563,13 +578,17 @@ function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyA
 		error = errorText(cause);
 		roleModels = [];
 	}
-	return { scoped: undefined, allModels: registry.getAll("all"), roleModels, error };
+	return { scoped: undefined, allModels, roleModels, error };
 }
 
-function scopeFromInputs(settings: ModelBrowserSource, inputs: SessionModelScopeInputs): SessionModelScope {
-	const roles = resolveRoleAssignments(settings, inputs.allModels, inputs.roleModels);
-	const mruOrder = settings.mruOrder;
+function* scopeFromInputs(
+	settings: ModelBrowserSource,
+	inputs: SessionModelScopeInputs,
+	mruOrder: ReadonlyArray<string>,
+): Generator<void, SessionModelScope, undefined> {
+	const roles = yield* roleAssignmentsWork(settings, inputs.allModels, inputs.roleModels);
 	const items = buildBrowserItems(inputs.scoped ?? inputs.roleModels.filter(model => modelKind(model) === "chat"));
+	yield;
 	sortModelItems(items, { roles, mruOrder });
 	return { items, roles, mruOrder, error: inputs.error };
 }
@@ -579,6 +598,14 @@ export function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
 	if (a.length !== b.length) return false;
 	for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false;
 	return true;
+}
+
+/** Everything a {@link SessionModelScope} is derived from, as read at one moment. */
+interface SessionModelScopeKey {
+	preferences: object;
+	revision: number;
+	inputs: SessionModelScopeInputs;
+	mruOrder: ReadonlyArray<string>;
 }
 
 /** The last scope built from one registry, with copies of every input it read. */
@@ -600,6 +627,26 @@ interface ScopeTagged {
 	[kSessionModelScope]?: CachedSessionModelScope;
 }
 
+/** The registry's last scope when it was built from `key`'s inputs. */
+function cachedSessionModelScope(
+	registry: ModelBrowserRegistry,
+	key: SessionModelScopeKey,
+): SessionModelScope | undefined {
+	const cached = (registry as ModelBrowserRegistry & ScopeTagged)[kSessionModelScope];
+	const { inputs } = key;
+	return cached &&
+		cached.preferences === key.preferences &&
+		cached.revision === key.revision &&
+		cached.error === inputs.error &&
+		(cached.scoped === undefined) === (inputs.scoped === undefined) &&
+		(inputs.scoped === undefined || sameItems(cached.scoped!, inputs.scoped)) &&
+		sameItems(cached.allModels, inputs.allModels) &&
+		sameItems(cached.roleModels, inputs.roleModels) &&
+		sameItems(cached.mruOrder, key.mruOrder)
+		? cached.scope
+		: undefined;
+}
+
 /**
  * The session picker's model scope: chat models (or the `--models` scope) in
  * display order, with roles and MRU. The last scope per registry is reused
@@ -612,33 +659,40 @@ export function buildSessionModelScope(
 	registry: ModelBrowserRegistry,
 	scopedModels: ReadonlyArray<Model>,
 ): SessionModelScope {
-	const preferences = settings.preferences ?? settings;
-	const revision = settings.revision;
-	const inputs = readScopeInputs(registry, scopedModels);
-	const mruOrder = settings.mruOrder;
-	const tagged = registry as ModelBrowserRegistry & ScopeTagged;
-	const cached = tagged[kSessionModelScope];
-	if (
-		cached &&
-		cached.preferences === preferences &&
-		cached.revision === revision &&
-		cached.error === inputs.error &&
-		(cached.scoped === undefined) === (inputs.scoped === undefined) &&
-		(inputs.scoped === undefined || sameItems(cached.scoped!, inputs.scoped)) &&
-		sameItems(cached.allModels, inputs.allModels) &&
-		sameItems(cached.roleModels, inputs.roleModels) &&
-		sameItems(cached.mruOrder, mruOrder)
-	)
-		return cached.scope;
-	const scope = scopeFromInputs(settings, inputs);
-	tagged[kSessionModelScope] = {
-		preferences,
-		revision,
+	return drainWork(sessionModelScopeWork(settings, registry, scopedModels));
+}
+
+/**
+ * {@link buildSessionModelScope} as pausable work (between role resolutions
+ * and before the sort), for building it ahead of the first picker. The inputs
+ * are read when it starts; a scope another caller built meanwhile from the
+ * same inputs wins over this one, so readers keep one scope's rows.
+ */
+export function* sessionModelScopeWork(
+	settings: ModelBrowserSource,
+	registry: ModelBrowserRegistry,
+	scopedModels: ReadonlyArray<Model>,
+): Generator<void, SessionModelScope, undefined> {
+	const key: SessionModelScopeKey = {
+		preferences: settings.preferences ?? settings,
+		revision: settings.revision,
+		inputs: readScopeInputs(registry, scopedModels),
+		mruOrder: settings.mruOrder,
+	};
+	const cached = cachedSessionModelScope(registry, key);
+	if (cached) return cached;
+	const scope = yield* scopeFromInputs(settings, key.inputs, key.mruOrder);
+	const raced = cachedSessionModelScope(registry, key);
+	if (raced) return raced;
+	const { inputs } = key;
+	(registry as ModelBrowserRegistry & ScopeTagged)[kSessionModelScope] = {
+		preferences: key.preferences,
+		revision: key.revision,
 		scoped: inputs.scoped && [...inputs.scoped],
 		allModels: [...inputs.allModels],
 		roleModels: [...inputs.roleModels],
 		error: inputs.error,
-		mruOrder: [...mruOrder],
+		mruOrder: [...key.mruOrder],
 		scope,
 	};
 	return scope;
