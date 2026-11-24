@@ -10,7 +10,11 @@ afterAll(() => setCurrentTheme(restoreTheme));
 
 /** The row the cursor is on: the only screen row carrying the `❯` cursor. */
 function selectedRow(term: TestTerminal): string {
-	return settingsScreen(term).split("\n").find(line => line.includes("❯")) ?? "";
+	return (
+		settingsScreen(term)
+			.split("\n")
+			.find(line => line.includes("❯")) ?? ""
+	);
 }
 
 /** The tab drawn on the selection band: the only strong tab with a band behind it. */

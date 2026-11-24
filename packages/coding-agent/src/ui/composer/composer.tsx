@@ -1792,8 +1792,7 @@ export class Composer {
 				caret: terminal ? "none" : m === "insert" || m === "replace" ? "underline" : "block",
 				caretEnd: terminal ? "none" : m === null || m === "insert" || m === "replace" ? "bar" : "block",
 				// Its keys away under the terminal's own cursor, the field draws no hint.
-				placeholder:
-					this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null),
+				placeholder: this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null),
 				...(sel ? { selection: { from: sel.from, to: sel.to } } : {}),
 				caretOverflow: caretOverflow(shape(), paddingX),
 				...(this.#caretGlyph() ? { caretGlyph: this.#caretGlyph() } : {}),

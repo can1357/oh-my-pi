@@ -14,3 +14,4 @@
 - Native menu and tree toggles now reach the intended control or branch. Clicking behind an explicitly modal sheet no longer moves keyboard focus out of it.
 - In terminal rows, modal sheets block clicks into the screen behind them. Inline clicks and hover follow the visible content after scrolling, and closing a fullscreen view restores the previous mouse setting.
 - Returning to the shell after a native session no longer leaves terminal replies in the shell prompt, including after a fatal error.
+- Tern receives large transcript redraws in smaller frames when resuming sessions or returning from a subagent view ([#20374](https://github.com/can1357/oh-my-pi/issues/20374)).

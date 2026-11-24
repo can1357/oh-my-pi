@@ -463,7 +463,11 @@ export class TerminalImages {
 			const converting = this.#convertPng(Buffer.from(source.data, "base64")).then(
 				png => result.set(png),
 				(error: unknown) => {
-					logger.warn("pi-tui: PNG conversion failed", { key: entry.key, mime: source.mime, error: String(error) });
+					logger.warn("pi-tui: PNG conversion failed", {
+						key: entry.key,
+						mime: source.mime,
+						error: String(error),
+					});
 					result.set(null);
 				},
 			);
