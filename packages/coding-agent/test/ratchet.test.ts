@@ -8,7 +8,10 @@ import type { HostEvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval";
 import { type ApprovalOutcome, createRatchetPrelude } from "@oh-my-pi/pi-coding-agent/ratchet/prelude-definition";
 import type { ApprovalStatus, GateResult, RatchetState } from "@oh-my-pi/pi-coding-agent/ratchet/ratchet";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import type {
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResult,
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/ask-dialog";
 
 const FLOW = "router";
 const CASES = Array.from({ length: 10 }, (_, index) => `case_${index}`);

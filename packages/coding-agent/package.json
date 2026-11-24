@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "19.1.0",
+	"version": "19.1.1",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -38,6 +38,7 @@
 		"dist/CHANGELOG-*.md",
 		"dist/*.node",
 		"dist/*.json-*.zst",
+		"dist/perturbation-pool.json-*.txt",
 		"scripts",
 		"examples",
 		"README.md",
@@ -169,8 +170,8 @@
 			"import": "./src/dap/*.ts"
 		},
 		"./debug": {
-			"types": "./src/debug/index.ts",
-			"import": "./src/debug/index.ts"
+			"types": "./src/debug/index.tsx",
+			"import": "./src/debug/index.tsx"
 		},
 		"./debug/*": {
 			"types": "./src/debug/*.ts",
@@ -419,10 +420,6 @@
 		"./modes/acp/*": {
 			"types": "./src/modes/acp/*.ts",
 			"import": "./src/modes/acp/*.ts"
-		},
-		"./modes/components": {
-			"types": "./src/modes/components/index.ts",
-			"import": "./src/modes/components/index.ts"
 		},
 		"./modes/components/*": {
 			"types": "./src/modes/components/*.ts",

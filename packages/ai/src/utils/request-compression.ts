@@ -1,5 +1,5 @@
 import { promisify } from "node:util";
-import * as zlib from "node:zlib";
+import type * as Zlib from "node:zlib";
 import {
 	type RequestBodyEncoding,
 	type RequestCompressionPolicy,
@@ -8,7 +8,15 @@ import {
 import { $flag, logger } from "@oh-my-pi/pi-utils";
 import type { FetchImpl, Model } from "../types";
 
-const gzip = promisify(zlib.gzip);
+// Lazy loader: keeps node:zlib off CLI startup until a request body is actually gzip-compressed.
+let gzipFn: ((buf: Zlib.InputType, options?: Zlib.ZlibOptions) => Promise<Buffer>) | undefined;
+function gzip(buf: Zlib.InputType, options?: Zlib.ZlibOptions): Promise<Buffer> {
+	if (!gzipFn) {
+		const zlib = require("node:zlib") as typeof Zlib;
+		gzipFn = promisify(zlib.gzip);
+	}
+	return gzipFn(buf, options);
+}
 
 /** Bodies below one TCP segment gain nothing from compression; skip them. */
 export const MIN_COMPRESSED_BODY_BYTES = 1024;

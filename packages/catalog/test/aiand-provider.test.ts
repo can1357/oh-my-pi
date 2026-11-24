@@ -44,12 +44,12 @@ describe("ai& provider support", () => {
 	test("registers descriptor, default model, bundled seed, and login provider", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "aiand");
 		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("moonshotai/kimi-k2.7-code");
+		expect(descriptor?.defaultModel).toBe("moonshotai/kimi-k3");
 		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER.aiand).toBe("moonshotai/kimi-k2.7-code");
+		expect(DEFAULT_MODEL_PER_PROVIDER.aiand).toBe("moonshotai/kimi-k3");
 
 		const bundled = getBundledModels("aiand");
-		const defaultModel = bundled.find(model => model.id === "moonshotai/kimi-k2.7-code");
+		const defaultModel = bundled.find(model => model.id === "moonshotai/kimi-k3");
 		expect(defaultModel).toBeDefined();
 		for (const model of bundled) {
 			expect(model.api).toBe("openai-completions");

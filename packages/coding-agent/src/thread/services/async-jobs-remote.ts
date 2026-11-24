@@ -19,7 +19,7 @@
  * Its `process` / `widgetInputs` stay here too; main reads them through a
  * {@link WireJobFeed} whose pulls and final push this module answers.
  */
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../../tools/details/job-widget";
 import type {
 	AsyncJob,
 	AsyncJobDeliverySink,
@@ -282,6 +282,15 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		options: { id?: string; ownerId?: string; agentId?: string },
 	): string {
 		return this.#remote.callSync("publishCompleted", type, label, result, options);
+	}
+
+	publishFailed(
+		type: AsyncJobType,
+		label: string,
+		errorText: string,
+		options: { id?: string; ownerId?: string; agentId?: string },
+	): string {
+		return this.#remote.callSync("publishFailed", type, label, errorText, options);
 	}
 
 	cancel(id: string, filter?: AsyncJobFilter): boolean {

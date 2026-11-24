@@ -21,7 +21,7 @@ import type {
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import type { AdvisorConfig } from "../advisor/advisor-config-types";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager, AsyncJobManagerApi } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
@@ -32,7 +32,7 @@ import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import type { SkillsSettings } from "../extensibility/settings";
 import type { CursorMcpResourceAdapter } from "../cursor";
-import type { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
+import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -46,11 +46,12 @@ import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { ShellStream } from "@oh-my-pi/pi-tui/tools/shell-steps";
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { ImageDescriptions } from "../utils/image-vision-fallback";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
+import type { ShellStream } from "../tools/shell-steps";
+import type { JobWidgetView } from "../tools/details/job-widget";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
-import type { SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import type { SystemPromptSources } from "./context-usage";
 import type { ToolSession } from "../tools";
 import type { ToolCommandState } from "../tools/tool-commands";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
@@ -224,6 +225,8 @@ export interface AgentSessionConfig {
 	inheritedSessionAgents?: readonly AgentDefinition[];
 	/** Models to cycle through with Ctrl+P (from --models flag). */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Whether the cycle scope is derived from enabledModels rather than supplied explicitly. */
+	scopedModelsFromSettings?: boolean;
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
@@ -286,6 +289,8 @@ export interface AgentSessionConfig {
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
+	/** Tools are exactly the explicit list (`restrictToolNames` session option); goal and plan mode are unavailable. */
+	restrictToolNames?: boolean;
 	/** Whether this session may start memory backends. Defaults to true. */
 	memoryEnabled?: boolean;
 	/** Agent directory used when changing memory backends in a live session. */
@@ -321,6 +326,11 @@ export interface AgentSessionConfig {
 	createVibeTools?: () => AgentTool[];
 	/** Names whose current registry entry is the built-in implementation. */
 	builtInToolNames?: Iterable<string>;
+	/**
+	 * Whether a native built-in of this name survives behind a same-name
+	 * extension override; the tool-command transport needs one to run commands.
+	 */
+	hasNativeTool?: (name: string) => boolean;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */
@@ -334,13 +344,23 @@ export interface AgentSessionConfig {
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 	/**
 	 * Builds one advisor's provider request transform. Each advisor is its own
 	 * conversation, so it gets its own transform state (the date/cwd reminder).
 	 * Without it, advisors share {@link transformProviderContext}.
 	 */
-	createAdvisorTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
+	createAdvisorTransformProviderContext?: () => (
+		context: Context,
+		model: Model,
+		signal?: AbortSignal,
+	) => Context | Promise<Context>;
+	/**
+	 * Descriptions of input images for text-only models, shared with {@link transformProviderContext}. Summaries
+	 * and advisor transcripts, which carry history as text, use them for a summary or advisor model that cannot
+	 * see images.
+	 */
+	imageDescriptions?: ImageDescriptions;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */
@@ -571,8 +591,8 @@ export interface RoleModelCycleResult {
 	role: string;
 }
 
-import type { ResolvedRoleModel } from "@oh-my-pi/pi-tui/overlays/model-picker";
-export type { ResolvedRoleModel } from "@oh-my-pi/pi-tui/overlays/model-picker";
+import type { ResolvedRoleModel } from "../modes/view-model/overlays/model-picker";
+export type { ResolvedRoleModel } from "../modes/view-model/overlays/model-picker";
 
 /** Resolvable role models and the currently active index. */
 export interface RoleModelCycle {

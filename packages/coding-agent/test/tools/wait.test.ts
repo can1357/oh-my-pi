@@ -19,8 +19,8 @@ import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
+import type { CoordinationDetails } from "@oh-my-pi/pi-coding-agent/tools/details/wait";
 
 function session(
 	manager?: AsyncJobManager,
@@ -168,6 +168,21 @@ describe("wait", () => {
 		const third = await elapse(tool, 240_000);
 		expect(report(third)).toContain("within 4m");
 		expect(notice(third)).toContain("8m5s");
+		build.resolve("done");
+	});
+
+	test("a tan fork is told to keep waiting after back-to-back idle waits", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const fork = new WaitTool(session(manager, "Main", false, { tanFork: true }));
+		// The fork runs one assignment; an idle wait is not a loop while that assignment
+		// is still blocked, so the reminder keeps it waiting instead of sending it away.
+		expect(notice(await elapse(fork, 5_000))).toBeUndefined();
+		const reminder = notice(await elapse(fork, 240_000));
+		expect(reminder).toBeDefined();
+		expect(reminder).not.toContain("Waiting is not progress");
 		build.resolve("done");
 	});
 

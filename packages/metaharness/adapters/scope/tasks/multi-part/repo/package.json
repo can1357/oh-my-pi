@@ -1,0 +1,9 @@
+{
+	"name": "wc-lite",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"start": "bun src/cli.ts",
+		"test": "bun test"
+	}
+}

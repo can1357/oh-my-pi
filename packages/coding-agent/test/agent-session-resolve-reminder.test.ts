@@ -15,7 +15,7 @@ import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { queueResolveHandler, specialToolCommands } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import type { ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { buildNamedToolChoice } from "@oh-my-pi/pi-coding-agent/utils/tool-choice";
-import { REJECT_COMMAND_NAME, RESOLVE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import { REJECT_COMMAND_NAME, RESOLVE_COMMAND_NAME } from "@oh-my-pi/pi-coding-agent/tools/details/resolve";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession resolve reminder", () => {
@@ -193,6 +193,30 @@ describe("AgentSession resolve reminder", () => {
 		if (!isSoftToolRequirement(directive)) throw new Error("expected soft requirement");
 		expect(directive.toolName).toBe("bash");
 		expect(directive.satisfies?.({ name: "bash", arguments: { command: "resolve looks right" } })).toBe(true);
+	});
+
+	it("tells a bash call that runs another command to finalize the pending preview with resolve or reject", async () => {
+		const fixture = await buildFixture({ toolCommands: true });
+		queueResolveHandler(fixture.toolSession, {
+			label: "AST Edit: 1 replacement in 1 file",
+			sourceToolName: "ast_edit",
+			apply: async () => ({ content: [{ type: "text", text: "Applied" }] }),
+		});
+
+		const directive = fixture.session.nextToolChoiceDirective();
+		if (!isSoftToolRequirement(directive)) throw new Error("expected soft requirement");
+		// Calls `bash`, the required tool, but runs `ast_edit` with `resolve` as its argument.
+		const call = { name: "bash", arguments: { command: 'ast_edit resolve "looks right"' } };
+		expect(directive.satisfies?.(call)).toBe(false);
+		const notice = directive.unsatisfiedNotice?.(call) ?? "";
+		expect(notice).toContain("runs `ast_edit`");
+		expect(notice).toMatch(/`resolve "/);
+		expect(notice).toMatch(/`reject "/);
+
+		// `resolve` behind a `cd` prefix does not run as the leading command, so it finalizes nothing either.
+		const prefixed = { name: "bash", arguments: { command: 'cd /repo && resolve "looks right"' } };
+		expect(directive.satisfies?.(prefixed)).toBe(false);
+		expect(directive.unsatisfiedNotice?.(prefixed)).toContain("with nothing before it");
 	});
 
 	it.each(transitions)("clears a staged preview after a successful %s session boundary", async transition => {

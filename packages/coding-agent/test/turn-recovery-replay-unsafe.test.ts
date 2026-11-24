@@ -181,7 +181,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -234,7 +234,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key" },
+			{ pinFallback: true, apiKey: "test-key", cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -300,7 +300,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "***", signal: controller.signal },
+			{ pinFallback: true, apiKey: "***", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -372,7 +372,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "***", signal: controller.signal },
+			{ pinFallback: true, apiKey: "***", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -430,7 +430,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: "low" as never,
 			},
 			`${model.provider}/${model.id}:high`,
-			{ apiKey: "***" },
+			{ apiKey: "***", cause: { trigger: "request-error" } },
 		);
 		expect(applied).toBe(true);
 		expect(activeModel).toBe(fallback);
@@ -495,7 +495,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "***", signal: controller.signal },
+			{ pinFallback: true, apiKey: "***", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -547,7 +547,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await eventStarted.promise;

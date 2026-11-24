@@ -80,7 +80,7 @@ try {
 	await fs.rm(dir, { recursive: true, force: true });
 }
 `;
-		const result = await $`bun --eval ${script}`.cwd(packageRoot).quiet().nothrow();
+		const result = await $`${process.execPath} --eval ${script}`.cwd(packageRoot).quiet().nothrow();
 		// `.quiet()` captures the child's output; surface it when the child fails so a
 		// red run names the actual VcsError instead of only "Expected: 0 / Received: 1".
 		if (result.exitCode !== 0) {

@@ -24,7 +24,7 @@
  * (sections follow `TAB_GROUPS`), and `config/all-settings.ts` imports every domain in that order.
  */
 import { logger, parseFlag } from "@oh-my-pi/pi-utils";
-import type { AnyUiMetadata, SubmenuOption, UiBase } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import type { AnyUiMetadata, SubmenuOption, UiBase } from "./settings-defs";
 import type { SettingProvenance, Settings } from "./settings";
 
 // ═══════════════════════════════════════════════════════════════════════════

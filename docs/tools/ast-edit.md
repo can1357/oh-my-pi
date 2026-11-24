@@ -13,9 +13,9 @@
    - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing (host paths and internal URLs) and multi-path resolution
    - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native ast-edit reads and writes through
    - `packages/coding-agent/src/tools/resolve.ts` — preview/apply queueing
-   - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
+   - `packages/coding-agent/src/utils/render-utils.ts` — parse-error dedupe and display caps
    - `packages/coding-agent/src/utils/file-display-mode.ts` — hashline vs line-number diff references
-   - `packages/tui/src/tools/hashline-format.ts` — stable hashline header formatting for preview anchors
+   - `packages/coding-agent/src/tools/hashline-format.ts` — stable hashline header formatting for preview anchors
    - `packages/natives/native/index.d.ts` — JS-visible native binding contract
 
 ## Inputs
@@ -102,7 +102,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 - File cap exposed by the wrapper: `PI_MAX_AST_FILES`, default `1000`, in `packages/coding-agent/src/tools/ast-edit.ts`. The cap is passed to each native target independently, not enforced globally across multi-target calls.
 - Native `maxFiles` and `maxReplacements` are both clamped to at least `1` when provided in `crates/natives/src/ast.rs`.
 - The wrapper never sets `maxReplacements`; native behavior therefore defaults to effectively unbounded replacements for a run.
-- Parse issues are deduplicated and capped at `PARSE_ERRORS_LIMIT = 20` entries via `capParseErrors(...)` in `packages/tui/src/render/render-utils.ts`; `details.parseErrors` carries the capped list and `details.parseErrorsTotal` the pre-cap deduplicated count.
+- Parse issues are deduplicated and capped at `PARSE_ERRORS_LIMIT = 20` entries via `capParseErrors(...)` in `packages/coding-agent/src/utils/render-utils.ts`; `details.parseErrors` carries the capped list and `details.parseErrorsTotal` the pre-cap deduplicated count.
 - Directory scans use `include_hidden: true`, `use_gitignore: true`, and skip `node_modules` unless the glob text explicitly mentions `node_modules` in `crates/natives/src/ast.rs`.
 - No separate glob-expansion count cap exists. Candidate count is whatever the resolved path/glob expands to after gitignore filtering, then native `maxFiles` stops mutations after the configured number of touched files.
 - Preview text truncates each rendered `before` and `after` first line to 120 characters in `packages/coding-agent/src/tools/ast-edit.ts`.

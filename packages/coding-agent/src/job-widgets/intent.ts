@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { shortenEmbeddedPaths } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenEmbeddedPaths } from "../utils/render-utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 /** How many trailing messages {@link resolveToolCallIntent} looks through. */

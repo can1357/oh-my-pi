@@ -303,7 +303,11 @@ fn regex_match(ctx: &mut Ctx<'_, '_>, s: &[u8], re: &[u8]) -> T<bool> {
 				.map(|(g, i)| (i, BString::from(g.clone().map_or_default(|g| &s[g]))))
 				.collect();
 			let attrs = cur.as_ref().map_or(Attrs::NONE, |v| v.attrs);
-			ctx.set_var(NAME, Some(Var { attrs, value: VarValue::Indexed(items) }), Level::Dynamic);
+			ctx.set_var(
+				NAME,
+				Some(Var { attrs, value: VarValue::Indexed(items.into()) }),
+				Level::Dynamic,
+			);
 		},
 	}
 	Ok(caps.is_some())

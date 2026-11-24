@@ -12,6 +12,7 @@ import type {
 	UserMessage,
 } from "../../types";
 import lateToolResultTemplate from "./late-tool-result.md" with { type: "text" };
+import toolResultImagesTemplate from "./tool-result-images.md" with { type: "text" };
 import transcriptTemplate from "./transcript.md" with { type: "text" };
 
 /** The exact leading transcript represented by the live conversation. */
@@ -139,6 +140,24 @@ export function lateToolResultPrompt(result: ToolResultMessage): ContentBlock[] 
 			}),
 		},
 		...contentBlocks(result.content),
+		{ type: "text", text: "</tool_result>" },
+	];
+}
+
+/** Deliver MCP tool-result images as ACP prompt blocks because agy offloads MCP media to unexposed files. */
+export function toolResultImagesPrompt(result: ToolResultMessage): ContentBlock[] {
+	const images = result.content.filter((part): part is ImageContent => part.type === "image");
+	if (images.length === 0) return [];
+	return [
+		{
+			type: "text",
+			text: prompt.render(toolResultImagesTemplate, {
+				toolCallId: result.toolCallId,
+				toolName: result.toolName,
+				isError: result.isError,
+			}),
+		},
+		...contentBlocks(images),
 		{ type: "text", text: "</tool_result>" },
 	];
 }

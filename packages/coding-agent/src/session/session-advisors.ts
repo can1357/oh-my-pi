@@ -42,7 +42,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, logger, prompt } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import type { AdvisorConfig } from "../advisor/advisor-config-types";
 import {
 	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
 	ADVISOR_DEFAULT_TOOL_NAMES,
@@ -88,11 +88,12 @@ import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/s
 import type { Settings } from "../config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";
-import { estimateContextToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { estimateContextToolSchemaTokens } from "./context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorBoundaryGuidance from "../prompts/advisor/boundary-guidance.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { ImageDescriptions } from "../utils/image-vision-fallback";
 import {
 	AUTO_THINKING,
 	concreteThinkingLevel,
@@ -100,7 +101,7 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 	automaticThinkingLevel,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
@@ -495,7 +496,11 @@ export interface SessionAdvisorsOptions {
 	configWarnings?: string[];
 	streamFn?: StreamFn;
 	/** Builds each advisor's provider request transform; called once per advisor agent. */
-	createTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
+	createTransformProviderContext?: () => (
+		context: Context,
+		model: Model,
+		signal?: AbortSignal,
+	) => Context | Promise<Context>;
 }
 
 /** Options accepted when an advisor injects a primary-session message. */
@@ -514,6 +519,8 @@ export interface SessionAdvisorsHost {
 	modelRegistry: ModelRegistry;
 	yieldQueue: YieldQueue;
 	obfuscator(): SecretObfuscator | undefined;
+	/** Input-image descriptions; an advisor model that cannot see images reads them in its transcript. */
+	imageDescriptions: ImageDescriptions | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
 	/** Per-model WebSocket preference from the live transport settings (Codex and standard Responses). */
 	preferWebsockets(model: Model): boolean | undefined;
@@ -604,7 +611,9 @@ export class SessionAdvisors {
 	#advisorContextPrompt: string | undefined;
 	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
-	#createTransformProviderContext: (() => (context: Context, model: Model) => Context | Promise<Context>) | undefined;
+	#createTransformProviderContext:
+		| (() => (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>)
+		| undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorConfigWarnings: string[];
@@ -1666,6 +1675,24 @@ export class SessionAdvisors {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator(),
+				// The advisor reads the transcript as text, where an image is only `[image]`: any description is
+				// better, so made ones always stand in, and new ones are made when the advisor or the primary
+				// cannot see images (the primary's requests carry them then anyway).
+				prepareImageDescriptions: async (messages, signal) => {
+					const descriptions = this.#host.imageDescriptions;
+					const describeFor = descriptions?.textOnlyModel(
+						advisorRef.agent.state.model,
+						this.#host.agent.state.model,
+					);
+					if (!descriptions || !describeFor) return;
+					try {
+						await descriptions.prepare(messages, describeFor, signal);
+					} catch (err) {
+						// An aborted review leaves undescribed images as `[image]`; the next batch describes them.
+						logger.debug("advisor image descriptions not prepared", { err: String(err) });
+					}
+				},
+				withImageDescriptions: message => this.#host.imageDescriptions?.withDescriptions(message) ?? message,
 				includeReasoning: descriptor.config.includeReasoning,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {

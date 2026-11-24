@@ -14,18 +14,10 @@ import {
 	type AdvisorConfigScope,
 	type AdvisorSyncBacklog,
 	type WatchdogConfigDoc,
-} from "@oh-my-pi/pi-tui/overlays/advisor-config";
+} from "./advisor-config-types";
 
-export {
-	ADVISOR_REVIEW_MODES,
-	ADVISOR_SESSION_SCOPES,
-	ADVISOR_SYNC_BACKLOG_MODES,
-} from "@oh-my-pi/pi-tui/overlays/advisor-config";
-export type {
-	AdvisorReviewMode,
-	AdvisorSessionScope,
-	AdvisorSyncBacklog,
-} from "@oh-my-pi/pi-tui/overlays/advisor-config";
+export { ADVISOR_REVIEW_MODES, ADVISOR_SESSION_SCOPES, ADVISOR_SYNC_BACKLOG_MODES } from "./advisor-config-types";
+export type { AdvisorReviewMode, AdvisorSessionScope, AdvisorSyncBacklog } from "./advisor-config-types";
 /**
  * Runtime health of a single advisor, surfaced in stats and the status line.
  * - `running` — actively processing primary turns
