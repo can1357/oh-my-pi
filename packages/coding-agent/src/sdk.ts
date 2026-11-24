@@ -5384,6 +5384,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			state: new ToolConversationState(),
 			// An advisor is a conversation of its own with no hidden-message channel: its preludes stay read-first.
 			noteEvalPreludeCall: undefined,
+			// An advisor's cell calls are its own: the primary's tool-call loop guard does not count them.
+			recordCellToolCall: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
