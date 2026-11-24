@@ -2531,14 +2531,14 @@ export class AcpAgent implements Agent {
 
 	#getAvailableModes(session: AgentSession): Array<{ id: string; name: string; description: string }> {
 		const modes = [{ id: ACP_DEFAULT_MODE_ID, name: "Default", description: "Standard ACP headless mode" }];
-		if (cfgPlanEnabled.get(session.settings)) {
+		// Plan mode ends by `propose`, which a --no-tools session does not register.
+		if (cfgPlanEnabled.get(session.settings) && !session.restrictToolNames) {
 			modes.push({
 				id: ACP_PLAN_MODE_ID,
 				name: "Plan",
 				description: "Read-only planning mode that drafts a plan to a markdown file before any code changes",
 			});
 		}
-		void session;
 		return modes;
 	}
 
