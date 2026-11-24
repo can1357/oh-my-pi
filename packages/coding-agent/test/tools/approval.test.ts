@@ -458,6 +458,8 @@ describe("tool-owned dynamic approval declarations", () => {
 			"echo $(rm -rf /)",
 			"xargs sh -c 'rm -rf /'",
 			'ssh build.example "rm -rf /"',
+			"python3 -c \"import os; os.system('rm -rf /')\"",
+			'echo "rm -rf /" | python3',
 		]) {
 			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}

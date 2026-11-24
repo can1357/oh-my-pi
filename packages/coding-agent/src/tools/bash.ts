@@ -211,31 +211,37 @@ const CRITICAL_RM_TEXT_PATTERNS = [
 	/\bsudo\s+rm\b/i, // any `sudo rm`.
 ];
 
-/** Bash syntax the simple-command reading does not follow, so an rm inside it is judged as text. */
-const UNREAD_BASH_SYNTAX = /`|\$\(|[<>]|\\\n/;
+/** Bash syntax the simple-command reading does not follow: a substitution, a parameter, a backtick, a redirect or a continuation. */
+const UNREAD_BASH_SYNTAX = /[`$<>]|\\\n/;
 
-/** Programs that run a command line given as one of their words, so a delete inside that word is a delete. */
-const COMMAND_LINE_RUNNERS = new Set([
-	"ash",
-	"bash",
-	"busybox",
-	"csh",
-	"dash",
-	"env",
-	"eval",
-	"fish",
-	"ksh",
-	"parallel",
-	"script",
-	"sh",
-	"ssh",
-	"su",
-	"sudo",
-	"tcsh",
-	"watch",
-	"xargs",
-	"zsh",
+/** Commands that print, read, move or test text and never run an argument as a command line. `rg` and `git grep` are left out: `--pre` and `-O` run one. */
+const TEXT_ONLY_COMMANDS = new Set([
+	"cat",
+	"cd",
+	"cmp",
+	"diff",
+	"echo",
+	"egrep",
+	"export",
+	"false",
+	"fgrep",
+	"grep",
+	"head",
+	"ls",
+	"mkdir",
+	"printf",
+	"pwd",
+	"sleep",
+	"tail",
+	"test",
+	"touch",
+	"true",
+	"unset",
+	"wc",
 ]);
+
+/** `git` subcommands that never run an argument as a command line. */
+const TEXT_ONLY_GIT_SUBCOMMANDS = new Set(["add", "blame", "commit", "diff", "log", "show", "status"]);
 
 function commandBaseName(word: string): string {
 	return word.slice(word.lastIndexOf("/") + 1).toLowerCase();
@@ -259,25 +265,29 @@ function isCriticalRmCall(words: readonly string[]): boolean {
 }
 
 /**
- * Whether a bash command runs a critical rm. The rm call is read from the simple commands the tokenizer
- * splits out, so text quoted inside another command (a grep pattern, a commit message) is not a delete.
- * A command whose words do not show what runs keeps the text patterns: a substitution, a backtick, a
- * redirect, a line continuation, a `$` in a word, an rm that is not the command word, or a word that
- * runs a command line such as a shell, `sudo` or `xargs`.
+ * Whether a bash command runs a critical rm. When every simple command is an rm call or a text-only
+ * command, the rm calls are judged from their words, so text quoted inside a grep pattern or a commit
+ * message is not a delete. Any other command, or any substitution, backtick, redirect or parameter,
+ * keeps the text patterns: such a line can run its text, through a shell, an interpreter, sudo, xargs
+ * or a pipe into one of them.
  */
 function isCriticalRemoval(command: string): boolean {
 	const simple = tokenizeShellSegments(command).map(words => {
 		const start = words.findIndex(word => !isShellEnvironmentAssignment(word));
 		return start < 0 ? [] : words.slice(start);
 	});
-	let unread = UNREAD_BASH_SYNTAX.test(command);
-	for (const words of simple) {
-		for (const [index, word] of words.entries()) {
-			const base = commandBaseName(word);
-			if (word.includes("$") || COMMAND_LINE_RUNNERS.has(base) || (index > 0 && base === "rm")) unread = true;
-		}
-	}
-	return simple.some(isCriticalRmCall) || (unread && CRITICAL_RM_TEXT_PATTERNS.some(pattern => pattern.test(command)));
+	const judged =
+		!UNREAD_BASH_SYNTAX.test(command) &&
+		simple.every(words => words.length === 0 || commandBaseName(words[0] ?? "") === "rm" || isTextOnlyCommand(words));
+	if (!judged) return CRITICAL_RM_TEXT_PATTERNS.some(pattern => pattern.test(command));
+	return simple.some(isCriticalRmCall);
+}
+
+/** Whether a simple command only prints, reads, moves or tests text, so its arguments are not run. */
+function isTextOnlyCommand(words: readonly string[]): boolean {
+	const [name = "", subcommand = ""] = words;
+	const base = commandBaseName(name);
+	return TEXT_ONLY_COMMANDS.has(base) || (base === "git" && TEXT_ONLY_GIT_SUBCOMMANDS.has(subcommand));
 }
 
 /** Whether a bash command matches a critical pattern on its text, or runs a critical rm. */
