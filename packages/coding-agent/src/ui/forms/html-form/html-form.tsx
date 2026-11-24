@@ -20,6 +20,13 @@ import { keyTitle } from "../../styles/panels/common";
 import { FoldSummaryNode } from "../../overlays/panels/ask-dialog";
 import { ActionButton } from "../../overlays/panels/common";
 
+export interface HtmlFormCountdown {
+	/** When the running inactivity countdown fires, on the host clock (epoch ms). */
+	deadline(): number | undefined;
+	/** Restart as input does; false if untimed or already fired. */
+	reset(): boolean;
+}
+
 export interface HtmlFormProps {
 	readonly model: HtmlFormModel;
 	/** A title replacing "Ask · N of M answered" (terminal). */
@@ -34,6 +41,7 @@ export interface HtmlFormProps {
 	readonly now?: () => number;
 	/** Idle time (ms) after which the draft is sent as it is. */
 	readonly timeout?: number;
+	readonly countdown?: (handle: HtmlFormCountdown) => void;
 }
 
 /** Rows a picture takes on a tall terminal. */
@@ -507,9 +515,12 @@ export function HtmlFormDialog(props: HtmlFormProps): JSXNode {
 				model.timeout();
 			});
 	});
-	const restart = (): void => {
-		if (timeout !== undefined && !untrack(timedOut)) deadline.set(untrack(now) + timeout);
+	const restart = (): boolean => {
+		if (timeout === undefined || untrack(timedOut)) return false;
+		deadline.set(untrack(now) + timeout);
+		return true;
 	};
+	props.countdown?.({ deadline: () => (untrack(timedOut) ? undefined : untrack(deadline)), reset: restart });
 	const look = (): HtmlFormLook => ({
 		look: "omp.html-form",
 		model,

@@ -8,7 +8,7 @@ import { nativeShell } from "../../helpers/native-shell";
 import { signal } from "@oh-my-pi/pi-tui";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import { parseHtmlForm } from "../../../src/tools/html-form/parse";
-import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../../src/ui/forms/html-form";
+import { formMedia, type HtmlFormCountdown, HtmlFormDialog, HtmlFormModel } from "../../../src/ui/forms/html-form";
 import { figureWorkSettled } from "../../../src/ui/transcript/figures";
 import { corpusSuite, type Driver, type Mounted, settle } from "../setup/harness";
 
@@ -47,6 +47,46 @@ test("native form checkboxes and option-note menus reach the submitted answers",
 	expect(onSubmit).toHaveBeenCalledWith({ parts: ["leg"] }, [
 		expect.objectContaining({ name: "parts", value: "leg", text: "repair" }),
 	]);
+});
+
+test("exposes and resets only a running inactivity deadline", async () => {
+	await using ui = await nativeShell();
+	const now = signal(10_000);
+	const onTimeout = vi.fn();
+	const model = new HtmlFormModel(parseHtmlForm('<form><input name="answer"></form>'), {
+		onSubmit: () => {},
+		onCancel: () => {},
+		onTimeout,
+	});
+	function mount(timeout?: number): HtmlFormCountdown {
+		let handle: HtmlFormCountdown | undefined;
+		ui.shell.dock.slot("ask").set(() =>
+			HtmlFormDialog({
+				model,
+				now,
+				timeout,
+				countdown: h => {
+					handle = h;
+				},
+			}),
+		);
+		if (!handle) throw new Error("Expected a mounted countdown handle");
+		return handle;
+	}
+	const timed = mount(1000);
+	expect(timed.deadline()).toBe(11_000);
+	now.set(10_500);
+	expect(timed.reset()).toBe(true);
+	expect(timed.deadline()).toBe(11_500);
+	now.set(11_000);
+	expect(onTimeout).not.toHaveBeenCalled();
+	now.set(11_500);
+	expect(onTimeout).toHaveBeenCalledTimes(1);
+	expect(timed.deadline()).toBeUndefined();
+	expect(timed.reset()).toBe(false);
+	const untimed = mount();
+	expect(untimed.deadline()).toBeUndefined();
+	expect(untimed.reset()).toBe(false);
 });
 
 corpusSuite({
