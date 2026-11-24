@@ -651,8 +651,10 @@ export async function listCdpTargets(cdpUrl: string, signal?: AbortSignal): Prom
 }
 
 /**
- * The first relay in `cdpUrls` whose Chrome has a page matching `matcher` (a target id, a URL or a title substring,
- * as `target` takes one), or null when none lists one. A relay that does not answer is passed over.
+ * The first relay in `cdpUrls` whose Chrome has an adoptable page matching `matcher` (a target id, a URL or a title
+ * substring, as `target` takes one), or null when none lists one. Discarded and internal pages do not count: the
+ * listing hides them, and a match there would send the open to a relay that then refuses the page. A relay that
+ * does not answer is passed over.
  */
 export async function findRelayForTarget(
 	cdpUrls: readonly string[],
@@ -661,7 +663,9 @@ export async function findRelayForTarget(
 ): Promise<string | null> {
 	const listings = await Promise.all(cdpUrls.map(cdpUrl => fetchRelayEntries(cdpUrl, signal)));
 	const index = listings.findIndex(entries =>
-		entries?.some(entry => entry.type === "page" && relayEntryMatches(entry, matcher)),
+		entries?.some(
+			entry => entry.type === "page" && isAdoptableRelayEntry(entry) && relayEntryMatches(entry, matcher),
+		),
 	);
 	return index < 0 ? null : (cdpUrls[index] ?? null);
 }

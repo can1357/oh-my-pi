@@ -10,7 +10,8 @@ import {
 	type TabSnapshot,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
-import { releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import * as registry from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import * as tabSupervisor from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { getBrowserRelayInstallRegistryFile } from "@oh-my-pi/pi-utils/dirs";
@@ -37,7 +38,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-	for (const name of opened.splice(0)) await releaseTab(name, { kill: false }).catch(() => undefined);
+	for (const name of opened.splice(0)) await tabSupervisor.releaseTab(name, { kill: false }).catch(() => undefined);
 	await daemon?.close();
 	daemon = undefined;
 	extension?.close();
@@ -346,6 +347,26 @@ describe("browser targets with a relay per Chrome profile", () => {
 		}
 	}, 20_000);
 
+	it("adopts the live page when an earlier relay's match is discarded or internal", async () => {
+		const relays = await startRelayProfiles(
+			[
+				snapshot(1, { url: "https://mail.example/", title: "Mail", discarded: true }),
+				snapshot(3, { url: "devtools://devtools/bundled/inspector.html", title: "Docs" }),
+			],
+			[
+				snapshot(2, { url: "https://mail.example/", title: "Mail" }),
+				snapshot(4, { url: "https://docs.example/", title: "Docs" }),
+			],
+		);
+		try {
+			// The discarded and devtools pages are listed first, so a check that counts them picks the wrong relay.
+			expect(await findRelayForTarget([relays.older, relays.newer], "Mail")).toBe(relays.newer);
+			expect(await findRelayForTarget([relays.older, relays.newer], "Docs")).toBe(relays.newer);
+		} finally {
+			await relays.cleanup();
+		}
+	}, 20_000);
+
 	it("drives the relay an app URL names and attaches to any other CDP URL", async () => {
 		for (const key of ENV_KEYS) delete process.env[key];
 		const relays = await startRelayProfiles([], []);
@@ -353,6 +374,12 @@ describe("browser targets with a relay per Chrome profile", () => {
 			expect(resolveBrowserKind({ action: "open", app: `${relays.newer}/` }, session())).toEqual({
 				kind: "relay",
 				cdpUrl: relays.newer,
+			});
+			// `localhost` and `127.0.0.1` name the same live relay.
+			const localhost = relays.newer.replace("127.0.0.1", "localhost");
+			expect(resolveBrowserKind({ action: "open", app: localhost }, session())).toEqual({
+				kind: "relay",
+				cdpUrl: localhost,
 			});
 			expect(resolveBrowserKind({ action: "open", app: "http://127.0.0.1:9222" }, session())).toEqual({
 				kind: "connected",
@@ -369,5 +396,41 @@ describe("browser targets with a relay per Chrome profile", () => {
 		expect(
 			resolveBrowserKind({ action: "open", app: relays.older }, session({ "browser.relayUrl": relays.older })),
 		).toEqual({ kind: "relay", cdpUrl: relays.older });
+	}, 20_000);
+
+	it("reopens a tab adopted from an older relay on that relay unless app is a relay URL", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		const relays = await startRelayProfiles([], []);
+		const adopted = {
+			browser: { kind: { kind: "relay" as const, cdpUrl: relays.older } },
+			kindTag: "relay" as const,
+		};
+		const tabs = spyOn(tabSupervisor, "getTab").mockReturnValue(
+			adopted as NonNullable<ReturnType<typeof tabSupervisor.getTab>>,
+		);
+		const chosen: string[] = [];
+		const acquire = spyOn(registry, "acquireBrowser").mockImplementation(async kind => {
+			chosen.push(kind.kind === "relay" ? kind.cdpUrl : kind.kind);
+			throw new Error("stop after the relay is chosen");
+		});
+		const reopen = { action: "open", name: "x", url: "https://mail.example/", timeout: 10 };
+		try {
+			await expect(invoke(session({ "browser.relay": true }), reopen)).rejects.toThrow(
+				"stop after the relay is chosen",
+			);
+			expect(chosen).toEqual([relays.older]);
+			chosen.length = 0;
+			await expect(invoke(session(), { ...reopen, app: "relay" })).rejects.toThrow("stop after the relay is chosen");
+			expect(chosen).toEqual([relays.older]);
+			chosen.length = 0;
+			await expect(invoke(session(), { ...reopen, app: relays.newer })).rejects.toThrow(
+				"bound to a different browser",
+			);
+			expect(chosen).toEqual([]);
+		} finally {
+			tabs.mockRestore();
+			acquire.mockRestore();
+			await relays.cleanup();
+		}
 	}, 20_000);
 });

@@ -573,6 +573,15 @@ async function openBrowser(
 		// A tab that fell back to Chromium keeps it, as does one opened while the WebKit host was not installed.
 		const chromium = chromiumKind(params, session);
 		if (browserKey(existing.browser.kind) === browserKey(chromium)) kind = chromium;
+	} else if (
+		existingKind?.kind === "relay" &&
+		resolved.kind === "relay" &&
+		!(params.app !== undefined && URL_SCHEME.test(params.app))
+	) {
+		// Reopening by name keeps the relay the tab was adopted from. The open would otherwise resolve the newest
+		// relay, and openOnKind would refuse the name as bound to a different browser. An app that is a relay URL
+		// still names one explicitly.
+		kind = existingKind;
 	}
 	if (kind.kind === "relay" && params.target) {
 		// With a relay per Chrome profile, the page `target` names may be open in another profile than the one a
