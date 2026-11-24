@@ -1,9 +1,4 @@
-import {
-	HL_FILE_HASH_LENGTH,
-	HL_FILE_HASH_SEP,
-	HL_FILE_PREFIX,
-	HL_FILE_SUFFIX,
-} from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_FILE_SUFFIX } from "./hashline-format";
 
 const HL_TRAILING_TAG_RE = new RegExp(`${HL_FILE_HASH_SEP}[0-9A-Fa-f]{${HL_FILE_HASH_LENGTH}}$`);
 

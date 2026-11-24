@@ -23,7 +23,7 @@ import {
 	ROOM_KEY_BYTES,
 	WRITE_TOKEN_BYTES,
 } from "@oh-my-pi/pi-wire";
-import type { CollabSessionState } from "@oh-my-pi/pi-tui/status-line/types";
+import type { CollabSessionState } from "../modes/view-model/status-line/types";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 
