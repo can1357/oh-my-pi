@@ -642,6 +642,25 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["status", "--porcelain"])).toBe("?? second.txt\n");
 	});
 
+	it("lists deselected agent edits separately from unrecorded paths", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await write("Main", undefined, "first.txt", "first\n");
+		await write("Main", undefined, "second.txt", "second\n");
+		await Bun.write(path.join(root, "unrecorded.txt"), "outside the journal\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
+		expect(draft.summary()).toContain("✓ second.txt  +1  [Main]");
+		draft.only(["first.txt"]);
+
+		const [beforeUnrecorded, unrecorded] = draft.summary().split("\nUnrecorded:");
+		expect(beforeUnrecorded).toContain("Left out: 1 path(s)");
+		expect(beforeUnrecorded).toContain("  · second.txt  +1  [Main]");
+		expect(unrecorded).toContain("1 path(s)");
+		expect(unrecorded).toContain("  · unrecorded.txt  +1");
+		expect(unrecorded).not.toContain("second.txt");
+	});
+
 	it("rejects all-unmatched keep targets without changing a curated selection", async () => {
 		const { root, journal, write } = await emptyRepo();
 		await write("Main", undefined, "first.txt", "first\n");

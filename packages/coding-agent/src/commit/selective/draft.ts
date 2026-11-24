@@ -54,8 +54,8 @@ const RECENT_COMMIT_LIMIT = 256;
 const COMMIT_DATE_SLACK_MS = 1000;
 /** Display cap for one change line. */
 const LINE_DISPLAY_CHARS = 160;
-/** Unrecorded paths the summary names; the rest are counted. */
-const UNRECORDED_LIST_LIMIT = 12;
+/** Paths the summary names per unselected category; the rest are counted. */
+const UNSELECTED_LIST_LIMIT = 12;
 
 /** Scope selector: `undefined` → caller + subagents; `"self"`; `"*"`; agent id(s), each with its subagents. */
 export type ScopeSpec = string | readonly string[] | undefined;
@@ -875,15 +875,25 @@ export class Draft {
 		const selected: string[] = [];
 		const review: string[] = [];
 		const otherAgents = new Map<string, number>();
-		/** Changed by nobody on record: nothing selected, nothing to review, no agent outside the scope. */
-		const unrecorded: FileChange[] = [];
+		type PathList = { count: number; rows: string[] };
+		const leftOut: PathList = { count: 0, rows: [] };
+		const unrecorded: PathList = { count: 0, rows: [] };
+		const addPath = (list: PathList, file: FileChange, agents?: ReadonlySet<string>) => {
+			list.count++;
+			if (list.rows.length >= UNSELECTED_LIST_LIMIT) return;
+			const size = file.whole ? `whole ${wholeLabel(file)}` : `${formatCounts(file.counts)}${modeChange(file)}`;
+			const owners = agents ? `  [${[...agents].join(", ")}]` : "";
+			list.rows.push(`  · ${file.path}  ${size}${owners}`);
+		};
 		for (const file of this.#files) {
 			const counted = this.#describeFile(file);
 			if (counted.selected) selected.push(counted.selected);
 			review.push(...counted.review);
 			for (const agent of counted.outOfScopeAgents) otherAgents.set(agent, (otherAgents.get(agent) ?? 0) + 1);
-			if (!counted.selected && counted.review.length === 0 && counted.outOfScopeAgents.size === 0) {
-				unrecorded.push(file);
+			if (counted.leftOutAgents) {
+				addPath(leftOut, file, counted.leftOutAgents);
+			} else if (!counted.selected && counted.review.length === 0 && counted.outOfScopeAgents.size === 0) {
+				addPath(unrecorded, file);
 			}
 		}
 		lines.push(selected.length > 0 ? "Selected:" : "Selected: nothing", ...selected);
@@ -895,18 +905,16 @@ export class Draft {
 			});
 			lines.push(`Other agents of this session, not in scope: ${parts.join(", ")}`);
 		}
-		if (unrecorded.length > 0) {
-			lines.push(
-				`Unrecorded: ${unrecorded.length} path(s) changed by other programs or by hand; take() the ones your commands produced.`,
-			);
-			for (const file of unrecorded.slice(0, UNRECORDED_LIST_LIMIT)) {
-				const size = file.whole ? `whole ${wholeLabel(file)}` : `${formatCounts(file.counts)}${modeChange(file)}`;
-				lines.push(`  · ${file.path}  ${size}`);
-			}
-			if (unrecorded.length > UNRECORDED_LIST_LIMIT) {
-				lines.push(`  … ${unrecorded.length - UNRECORDED_LIST_LIMIT} more`);
-			}
-		}
+		const appendPaths = (list: PathList, header: string) => {
+			if (list.count === 0) return;
+			lines.push(header, ...list.rows);
+			if (list.count > list.rows.length) lines.push(`  … ${list.count - list.rows.length} more`);
+		};
+		appendPaths(leftOut, `Left out: ${leftOut.count} path(s) with deselected agent edits; take() to select.`);
+		appendPaths(
+			unrecorded,
+			`Unrecorded: ${unrecorded.count} path(s) changed by other programs or by hand; take() the ones your commands produced.`,
+		);
 		const tail: string[] = [];
 		if (this.staged.length > 0) tail.push(`Staged by others: ${this.staged.length} path(s), left staged.`);
 		if (this.skipped.length > 0) tail.push(`Skipped: ${this.skipped.join(", ")} (submodule or nested repository).`);
@@ -914,7 +922,12 @@ export class Draft {
 		return lines.join("\n");
 	}
 
-	#describeFile(file: FileChange): { selected?: string; review: string[]; outOfScopeAgents: Set<string> } {
+	#describeFile(file: FileChange): {
+		selected?: string;
+		review: string[];
+		outOfScopeAgents: Set<string>;
+		leftOutAgents?: ReadonlySet<string>;
+	} {
 		const outOfScopeAgents = new Set(file.editors.filter(agent => !this.scope.has(agent)));
 		if (file.whole) {
 			const label = wholeLabel(file);
@@ -946,10 +959,16 @@ export class Draft {
 				`  ? ${file.path}  ${formatCounts(file.counts)}${modeChange(file)}; edited by ${file.editors.join(", ")}, but the edit record cannot be replayed`,
 			);
 		}
+		// Use surviving owned edits: editors can include writes already committed or canceled out.
+		let leftOutAgents: Set<string> | undefined;
 		for (const op of ops) {
-			if (status[op.id] === "other" && !isPseudoActor(op.by) && !this.scope.has(op.by)) outOfScopeAgents.add(op.by);
+			const opStatus = status[op.id];
+			if (opStatus === "other" && !isPseudoActor(op.by) && !this.scope.has(op.by)) outOfScopeAgents.add(op.by);
+			else if (opStatus === "own" && chosen.length === 0 && !isPseudoActor(op.by)) {
+				(leftOutAgents ??= new Set()).add(op.by);
+			}
 		}
-		if (!attribution || chosen.length === 0) return { review, outOfScopeAgents };
+		if (!attribution || chosen.length === 0) return { review, outOfScopeAgents, leftOutAgents };
 		const leftOut = ops.filter(op => !file.selected.has(op.id));
 		const owners = [...new Set(chosen.map(op => op.by))];
 		const mark = leftOut.length === 0 ? "✓" : "◐";
