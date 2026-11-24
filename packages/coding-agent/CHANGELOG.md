@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- Prompts starting with two or more question marks now send normally instead of opening `/btw` ([#20337](https://github.com/can1357/oh-my-pi/issues/20337)).
 - Tern no longer loses the tray's dots when the working line above the composer comes and goes: the line stays one row instead of turning into an empty column while idle
 - In the bash tool on macOS, `ls -lT` shows full timestamps instead of failing with `invalid tab size`, `uptime` prints macOS's format, and `chmod +a` and the other ACL forms run `/bin/chmod`.
 - The bash tool's `top -l` now reports load averages, user/sys/idle CPU and usernames, and `ps` shows start and elapsed times for other users' processes such as pid 1.

@@ -239,10 +239,10 @@ function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
 	return next === 32 || next === 9 || next === 10 || next === 13 ? prefixLength : 0;
 }
 
-/** The question after a `?` draft's sigil (the `/btw` shortcut), or undefined when the draft is not one. */
+/** The side question after a single leading `?`, or undefined when the draft has no such sigil. */
 function parseBtwShortcutInput(text: string): string | undefined {
 	const trimmed = text.trimStart();
-	return trimmed.startsWith("?") ? trimmed.slice(1).trim() : undefined;
+	return trimmed[0] === "?" && trimmed[1] !== "?" ? trimmed.slice(1).trim() : undefined;
 }
 
 function parsePythonCommandInput(text: string): { code: string; isExcluded: boolean } | undefined {
