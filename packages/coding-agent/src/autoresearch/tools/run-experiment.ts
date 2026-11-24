@@ -1,4 +1,3 @@
-import { runExperimentToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -15,7 +14,7 @@ import {
 	TailBuffer,
 	type TruncationResult,
 	truncateTail,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+} from "../../tools/streaming-output";
 
 import { parseWorkDirDirtyPaths } from "../git";
 import {
@@ -25,14 +24,14 @@ import {
 	tryGitPrefix,
 	tryGitStatus,
 } from "../helpers";
-import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
-import { formatElapsed } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
+import { formatNum } from "../tool-details";
+import { formatElapsed } from "../results-data";
 import { buildExperimentState } from "../state";
 import { quotePosixArgument } from "../../utils/shell-quote";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
-import type { ASIData, RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
-import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type { ASIData, RunDetails, RunExperimentProgressDetails } from "../tool-details";
+import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "../tool-details";
 
 const runExperimentSchema = type({
 	"timeout_seconds?": type("number").describe("timeout in seconds (default 600)"),
@@ -62,7 +61,6 @@ export function createRunExperimentTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof runExperimentSchema, RunDetails | RunExperimentProgressDetails> {
 	return {
-		...runExperimentToolRenderer,
 		name: "run_experiment",
 		label: "Run Experiment",
 		description:

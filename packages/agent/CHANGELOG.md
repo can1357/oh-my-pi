@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SoftToolRequirement.unsatisfiedNotice`: the skipped-result text for a call to the required tool that fails `satisfies`, so a host can name the invocation it needs instead of the generic request to call that tool ([#20335](https://github.com/can1357/oh-my-pi/pull/20335) by [@baekjosh](https://github.com/baekjosh))
+- Added `AgentLoopError`, thrown when the loop ends a turn itself (a soft tool requirement the model never met); `Agent` marks that turn's error message `errorFromAgentLoop` so hosts can tell it from a failed request ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
+
 ### Fixed
 
 - Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed DeepSeek DSML markup leaking into tool-call arguments (e.g. a `</｜DSML｜ parameter>` tail on an edit or bash command) being executed and replayed; the leaked tail is now cut before the call runs
+- Fixed DSML markup removed from a DeepSeek turn's text and reasoning still being sent back to the model on OpenRouter's Responses route, which replays the turn's original output items
+- Fixed the loop aborting an unmet soft tool requirement without answering that turn's tool calls, so continuing the run (as a retry does) executed a call the requirement had refused ([#20338](https://github.com/can1357/oh-my-pi/pull/20338) by [@baekjosh](https://github.com/baekjosh))
 
 ## [19.1.1] - 2026-11-23
 

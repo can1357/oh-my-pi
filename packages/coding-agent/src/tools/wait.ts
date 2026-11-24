@@ -20,8 +20,8 @@ import { USER_AWAIT_ID } from "../registry/agent-awaits";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { PromptCacheEntry } from "../session/cache-warmer";
 import { stalledWaiters } from "../session/stalled-waiters";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import type { IrcMessage } from "../irc/irc-types";
+import type { CoordinationDetails } from "./details/wait";
 import { throwIfAborted } from "./tool-errors";
 
 import { cfgLaunchEnabled } from "./settings";

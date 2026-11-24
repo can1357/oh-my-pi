@@ -7,7 +7,7 @@ import * as daemonClients from "@oh-my-pi/pi-coding-agent/daemon/client";
 import type { DaemonClient, DaemonOp } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import type { UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { UnitSnapshot } from "@oh-my-pi/pi-coding-agent/daemon/daemon-types";
 
 const MARKER = "omp-bash-cd-root-marker";
 const FILESYSTEM_ROOT = path.resolve("/");

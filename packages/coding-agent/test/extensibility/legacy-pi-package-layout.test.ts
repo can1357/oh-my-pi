@@ -19,12 +19,7 @@ const NPM_PACKAGES: readonly (readonly [npmDir: string, name: string])[] = [
 ];
 
 /** The shims the collector points at inside the installed coding-agent package. */
-const SHIM_FILES = [
-	"legacy-pi-ai-shim.ts",
-	"legacy-pi-coding-agent-shim.ts",
-	"legacy-pi-tui-shim.ts",
-	"legacy-typebox.ts",
-];
+const SHIM_FILES = ["legacy-pi-ai-shim.ts", "legacy-pi-coding-agent-shim.ts", "legacy-typebox.ts"];
 
 /** A stand-in for a published package: a manifest plus the sources its exports point at. */
 async function writeInstalledPackage(dir: string, name: string, marker: string = name): Promise<void> {

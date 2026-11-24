@@ -1,8 +1,11 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { renderTreeSelector } from "../../helpers/tree-selector";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 let counter = 0;
 function makeMessageNode(message: AgentMessage, parentId: string | null = null, label?: string): SessionTreeNode {
@@ -18,21 +21,13 @@ function makeMessageNode(message: AgentMessage, parentId: string | null = null, 
 }
 
 function render(tree: SessionTreeNode[], width = 120): string {
-	const selector = new TreeSelectorComponent(
-		tree,
-		tree[tree.length - 1]?.entry.id ?? null,
-		60,
-		() => {},
-		() => {},
+	return renderTreeSelector(
+		{ roots: tree, currentLeafId: tree[tree.length - 1]?.entry.id ?? null },
+		{ columns: width, rows: 60 },
 	);
-	return Bun.stripANSI(selector.render(width).join("\n"));
 }
 
 describe("TreeSelectorComponent developer message rendering", () => {
-	beforeAll(async () => {
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-	});
-
 	it("renders developer messages with their content, not just [developer]", () => {
 		const planContent = "## Plan\n\n1. Fix the tree selector\n2. Update the HTML export";
 		const root = makeMessageNode({ role: "user", content: "/plan", timestamp: 1 });
