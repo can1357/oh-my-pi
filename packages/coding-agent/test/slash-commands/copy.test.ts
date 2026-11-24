@@ -33,7 +33,7 @@ function createRuntimeHarness(messages: AgentMessage[], viewMessages: AgentMessa
 			ctx: {
 				session: { messages },
 				viewSession: { messages: viewMessages },
-				editor: { setText },
+				composer: { setText },
 				showStatus,
 				showWarning,
 				showCopySelector,

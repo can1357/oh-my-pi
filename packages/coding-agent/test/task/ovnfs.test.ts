@@ -9,7 +9,7 @@ import * as path from "node:path";
 import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 import * as client from "../../src/ovnfs/client";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import * as daemon from "../../src/ovnfs/daemon";
 import { ISOLATION_OWNER_FILE } from "../../src/task/isolation-ownership";
 import * as isolationRunner from "../../src/task/isolation-runner";

@@ -174,8 +174,8 @@
 			"import": "./src/dap/*.ts"
 		},
 		"./debug": {
-			"types": "./src/debug/index.ts",
-			"import": "./src/debug/index.ts"
+			"types": "./src/debug/index.tsx",
+			"import": "./src/debug/index.tsx"
 		},
 		"./debug/*": {
 			"types": "./src/debug/*.ts",
@@ -424,10 +424,6 @@
 		"./modes/acp/*": {
 			"types": "./src/modes/acp/*.ts",
 			"import": "./src/modes/acp/*.ts"
-		},
-		"./modes/components": {
-			"types": "./src/modes/components/index.ts",
-			"import": "./src/modes/components/index.ts"
 		},
 		"./modes/components/*": {
 			"types": "./src/modes/components/*.ts",
