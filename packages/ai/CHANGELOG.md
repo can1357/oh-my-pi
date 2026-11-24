@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed new sessions picking an account whose organization refuses OAuth: the account now stays out of rotation for a day instead of one minute ([#20373](https://github.com/can1357/oh-my-pi/issues/20373), [#20382](https://github.com/can1357/oh-my-pi/pull/20382) by [@JamieJ5926](https://github.com/JamieJ5926))
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
 - Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
 - GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
