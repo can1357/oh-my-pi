@@ -33,6 +33,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 import { instrumentRelay, waitFor } from "./helpers/throttled-host";
 
@@ -213,24 +214,22 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 				setDisableReasoning: () => {},
 			},
 		},
-		statusContainer: { clear: () => {} },
-		pendingShellContainer: { clear: () => {} },
-		pendingMessagesContainer: { clear: () => {} },
+		clearTransientSessionUi: () => {},
+		clearWorking: () => false,
+		ensureWorkingRow: () => {},
+		updatePendingMessagesDisplay: () => {},
 		compactionQueuedMessages: [],
-		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
-		loadingAnimation: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
 			setAwaitingAnswer: () => {},
-			invalidate: () => {},
 			resetActiveTime: () => {},
+			refresh: () => {},
 			markActivityStart: () => {},
 			markActivityEnd: () => {},
 		},
-		ui: { requestRender: () => {} },
 		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
@@ -259,6 +258,7 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 			Object.assign(ctx, { collabGuest: guest });
 		},
 		closeLinkBrowser: () => {},
+		configureDialogEditor: () => {},
 		rerenderInLinkBrowser: () => {},
 		rebuildTranscriptScrollback: () => {},
 		showHookSelector: (
@@ -492,10 +492,8 @@ function makeHostContext(): InteractiveModeContext {
 		statusLine: {
 			setCollabStatus: () => {},
 			setAwaitingAnswer: () => {},
-			invalidate: () => {},
-			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+			facts: () => ({ context: { tokens: 0, window: 0, percent: null } }),
 		},
-		ui: { requestRender: () => {} },
 		showStatus: () => {},
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
@@ -809,28 +807,28 @@ describe("guest ask unavailable literal answer (#4375)", () => {
 // ui-request frames.
 
 /** Context double with the extra members `#showLocalAskDialog` touches when
- *  mounting the local AskDialogComponent. The local dialog is never driven
+ *  mounting the local ask dialog. The local dialog is never driven
  *  (no input), so it never settles and the remote guest wins the race.
  *  Reuses makeHostContext for the CollabHost-facing members. */
 function makeAskHostContext(): InteractiveModeContext {
 	const base = makeHostContext();
-	// Stub only the surface the local ask-dialog mount path calls: the ask's and
-	// composer's containers, ui focus/render, the composer's border, and editor. The real
+	// Stub only the surface the local ask-dialog mount path calls: the shell (its ask slot and
+	// focus), the composer, and the status line's awaiting-answer flag. The real
 	// InteractiveModeContext has many more members; the double-cast below is
 	// the established test pattern in this file (see makeHostContext) for a
 	// complex interface that is only partially exercised.
+	const ui = createInteractiveModeContext();
 	const stub = {
 		...base,
-		editorContainer: { clear: () => {}, addChild: () => {} },
-		askContainer: { addChild: () => {}, removeChild: () => {} },
-		editor: { getText: () => "", setText: () => {} },
+		shell: ui.shell,
+		composer: ui.composer,
+		hud: ui.hud,
+		keybindings: ui.keybindings,
+		showEditorAreaDialog: ui.showEditorAreaDialog,
+		interceptInput: ui.interceptInput,
+		dialogVim: ui.dialogVim,
 		closeLinkBrowser: () => {},
-		ui: {
-			requestRender: () => {},
-			setFocus: () => {},
-			terminal: { rows: 40, columns: 80 },
-			addInputListener: () => () => {},
-		},
+		statusLine: { ...base.statusLine, setAwaitingAnswer: () => {} },
 	};
 	return stub as unknown as InteractiveModeContext;
 }

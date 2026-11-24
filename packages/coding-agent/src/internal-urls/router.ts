@@ -11,10 +11,8 @@
  */
 import * as path from "node:path";
 import type { ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
-import { setInternalUrlCompletionHost } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
-import { splitInternalUrlSel } from "@oh-my-pi/pi-tui/tools/read";
-import { setInternalUrlSchemeHost, splitUrlScheme } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { splitUrlScheme } from "./url-scheme";
+import { ToolError } from "../tools/tool-errors";
 import type { ToolSession } from "../tools";
 import { TIER_RANK } from "../tools/approval";
 import { AgentProtocolHandler } from "./agent-protocol";
@@ -49,16 +47,7 @@ import type {
 	WriteContext,
 } from "./types";
 import { VaultProtocolHandler } from "./vault-protocol";
-
-setInternalUrlCompletionHost({
-	completionSchemes: () => InternalUrlRouter.instance().completionSchemes(),
-	resolveCompletions: (scheme, query, context) => InternalUrlRouter.instance().complete(scheme, query, context),
-});
-
-setInternalUrlSchemeHost({
-	spec: scheme => InternalUrlRouter.instance().spec(scheme),
-	specs: () => InternalUrlRouter.instance().specs(),
-});
+import { splitInternalUrlSel } from "../tools/details/read";
 
 /**
  * Routed read/search target.

@@ -8,7 +8,8 @@ import * as path from "node:path";
 import { grep } from "@oh-my-pi/pi-natives";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import type { Location } from "./types";
-import { readLocationContext, uriToFile } from "./utils";
+import { uriToFile } from "./uri";
+import { readLocationContext } from "./utils";
 
 const TEXT_CHECK_MAX_MATCHES = 2_000;
 const TEXT_CHECK_TIMEOUT_MS = 3_000;

@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "../utils/render-utils";
 import { memoryNoticeErrorText } from "../memory-backend/messages";
 import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";

@@ -61,7 +61,7 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		refreshSkillState: vi.fn(async () => {}),
 		refreshSlashCommandState: vi.fn(async () => {}),
 		showStatus: vi.fn(() => {}),
-		editor: { setText: vi.fn(() => {}) },
+		composer: { setText: vi.fn(() => {}) },
 	} as never as InteractiveModeContext;
 	return { ctx, mcpManager, session, mcpTools };
 }

@@ -2647,7 +2647,11 @@ type BashResult struct {
 	ArtifactError map[string]json.RawMessage `json:"artifactError,omitempty"`
 	Minimized     map[string]json.RawMessage `json:"minimized,omitempty"`
 	WorkingDir    *string                    `json:"workingDir,omitempty"`
-	Images        []ImageContent             `json:"images,omitempty"`
+	// The command ended in another directory than it started in; the next command starts in its own cwd.
+	MovedCwd *bool `json:"movedCwd,omitempty"`
+	// The command ended with `set -e` on; the next command starts with it off.
+	Errexit *bool          `json:"errexit,omitempty"`
+	Images  []ImageContent `json:"images,omitempty"`
 	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	Trace map[string]json.RawMessage `json:"trace,omitempty"`
 	// Set when the command overlapped another one on the session's persistent shell and ran in a fork of it.
@@ -2681,6 +2685,8 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("artifactError", &out.ArtifactError)
 	d.optional("minimized", &out.Minimized)
 	d.optional("workingDir", &out.WorkingDir)
+	d.optional("movedCwd", &out.MovedCwd)
+	d.optional("errexit", &out.Errexit)
 	d.optional("images", &out.Images)
 	d.optional("trace", &out.Trace)
 	d.optional("fork", &out.Fork)

@@ -1,23 +1,28 @@
-import { type HookMessageRenderer } from "@oh-my-pi/pi-tui/chat/extension-types";
-export { type HookMessageRenderOptions, type HookMessageRenderer } from "@oh-my-pi/pi-tui/chat/extension-types";
+import type { ExtensionRender, ExtensionTheme, ExtensionUiHost, HookMessageRenderer } from "../extensions/render-types";
+export type {
+	ExtensionRender,
+	ExtensionRows,
+	ExtensionTheme,
+	ExtensionUiHost,
+	HookMessageRenderer,
+	HookMessageRenderOptions,
+} from "../extensions/render-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
-import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
-import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { KeybindingsManager } from "../../config/keybindings/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
-import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditToolDetails } from "../../tools/details/edit";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
-import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
-import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
-import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { BashToolDetails } from "../../tools/details/bash";
+import type { GlobToolDetails } from "../../tools/details/glob";
+import type { GrepToolDetails } from "../../tools/details/grep";
+import type { ReadToolDetails } from "../../tools/details/read";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -102,8 +107,9 @@ export interface HookUIContext {
 	setStatus(key: string, text: string | undefined): void;
 
 	/**
-	 * Show a custom component with keyboard focus.
-	 * The factory receives TUI, theme, keybindings, and a done() callback to close the component.
+	 * Show a custom view with keyboard focus: pi-tui nodes (one root node, which takes focus) or a
+	 * rows object (`{ render(width), handleInput?(data) }`).
+	 * The factory receives the UI host, theme, keybindings, and a done() callback to close the view.
 	 * Matches the interactive controller call shape (same arity as ExtensionUIContext.custom).
 	 * Can be async for fire-and-forget work (don't await the work, just start it).
 	 *
@@ -112,27 +118,25 @@ export interface HookUIContext {
 	 *
 	 * @example
 	 * // Sync factory
-	 * const result = await ctx.ui.custom((tui, theme, keybindings, done) => {
-	 *   const component = new MyComponent(tui, theme);
-	 *   component.onFinish = (value) => done(value);
-	 *   return component;
-	 * });
+	 * const result = await ctx.ui.custom((ui, theme, keybindings, done) => (
+	 *   <col onKey={key => (key.id === "escape" ? (done(undefined), true) : false)}>
+	 *     <text spans={[{ t: "Press Esc to close", s: "muted" }]} />
+	 *   </col>
+	 * ));
 	 *
 	 * // Async factory with fire-and-forget work
-	 * const result = await ctx.ui.custom(async (tui, theme, keybindings, done) => {
-	 *   const loader = new CancellableLoader(tui, theme.fg("accent"), theme.fg("muted"), "Working...");
-	 *   loader.onAbort = () => done(null);
-	 *   doWork(loader.signal).then(done);  // Don't await - fire and forget
-	 *   return loader;
+	 * const result = await ctx.ui.custom(async (ui, theme, keybindings, done) => {
+	 *   doWork().then(done); // Don't await - fire and forget
+	 *   return { render: width => [theme.fg("muted", "Working...")] };
 	 * });
 	 */
 	custom<T>(
 		factory: (
-			tui: TUI,
-			theme: Theme,
+			ui: ExtensionUiHost,
+			theme: ExtensionTheme,
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
-		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+		) => ExtensionRender | Promise<ExtensionRender>,
 	): Promise<T>;
 
 	/**
@@ -167,7 +171,7 @@ export interface HookUIContext {
 	/**
 	 * Get the current theme for styling custom components.
 	 */
-	readonly theme: Theme;
+	readonly theme: ExtensionTheme;
 }
 
 /**

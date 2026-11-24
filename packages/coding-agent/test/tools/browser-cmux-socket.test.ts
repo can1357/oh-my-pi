@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
 import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 type RequestLine = {
 	id?: unknown;

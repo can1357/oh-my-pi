@@ -309,6 +309,42 @@ describe("agentLoop with AgentMessage", () => {
 		expect(messages.some(message => message.role === "developer")).toBe(false);
 	});
 
+	it("cuts leaked DSML off structured tool-call arguments before they run", async () => {
+		const executions: string[] = [];
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [makeEchoTool(executions)],
+		};
+		// Verbatim shape from a DeepSeek-on-OpenRouter session: the closer (with a
+		// stray space) and the next parameter's opener landed inside the JSON value.
+		const leaked = "rg -n 'metadata' src/dict.rs</｜DSML｜ parameter>|<parameter name=";
+		const quoted = "rg -n '</｜DSML｜parameter>' src";
+		const mock = createMockModel({
+			id: deepseekId,
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", name: "echo", arguments: { value: leaked } },
+						{ type: "toolCall", name: "echo", arguments: { value: quoted } },
+					],
+				},
+				{ content: ["Done."] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		// Deliberately quoted DSML (a grep pattern) is an argument, not a leak.
+		expect(executions).toEqual(["rg -n 'metadata' src/dict.rs", quoted]);
+		expect((messages[1] as AssistantMessage).content).toEqual([
+			expect.objectContaining({ type: "toolCall", arguments: { value: "rg -n 'metadata' src/dict.rs" } }),
+			expect.objectContaining({ type: "toolCall", arguments: { value: quoted } }),
+		]);
+		expect(messages.some(message => message.role === "developer")).toBe(false);
+	});
+
 	it("keeps prose that follows a removed DSML call", async () => {
 		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
 		const mock = createMockModel({

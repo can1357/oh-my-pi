@@ -586,9 +586,31 @@ impl<'s> Parser<'s> {
 		self.compound.pop();
 	}
 
+	/// Record a `\`-newline about to be skipped after `&&`, `||`, `|` or `|&`
+	/// while a here-document waits for the next newline: it moves the body
+	/// below the next line.
+	fn note_doc_line_cont(&mut self) {
+		if self.pending.is_empty()
+			|| self.doc_line_cont.is_some()
+			|| !self.frames.is_empty()
+			|| !matches!(self.lx.last, T::AndAnd | T::OrOr | T::Bar | T::BarAnd)
+		{
+			return;
+		}
+		let rest = &self.buf[self.pos.min(self.buf.len())..];
+		let blanks = rest
+			.iter()
+			.take_while(|&&c| matches!(c, b' ' | b'\t'))
+			.count();
+		if rest[blanks..].starts_with(b"\\\n") {
+			self.doc_line_cont = Some(self.off() + blanks as u32);
+		}
+	}
+
 	/// `read_token`.
 	pub(super) fn read_token(&mut self) -> PResult<Tok> {
 		loop {
+			self.note_doc_line_cont();
 			self.skip_blanks();
 			let lo = self.off();
 			let line = self.line;

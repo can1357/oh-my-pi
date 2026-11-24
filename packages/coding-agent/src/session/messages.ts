@@ -15,7 +15,7 @@ import {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
-} from "@oh-my-pi/pi-tui/chat/messages";
+} from "./transcript/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
@@ -48,7 +48,7 @@ export {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
-} from "@oh-my-pi/pi-tui/chat/messages";
+} from "./transcript/messages";
 import { calculateContextTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	invalidateMessageCache,
@@ -70,8 +70,8 @@ export {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
+import { formatOutputNotice } from "../tools/output-meta-format";
+import { titleTextFromSkillPrompt } from "./transcript/skill-title-input";
 
 /**
  * Logs provider-error turns so their actual cause is available outside the
