@@ -51,6 +51,8 @@ import {
 	roleChipLabel,
 	type SearchAffinity,
 	sameItems,
+	type TieredPerf,
+	tieredPerf,
 	thinkingDotToken,
 } from "../../../modes/view-model/overlays/model-browser";
 import { fuzzyRank } from "../../../utils/fuzzy";
@@ -98,18 +100,64 @@ function perfText(item: ModelBrowserItem, measured: MeasuredPerf | undefined, mo
 	return tps != null && Number.isFinite(tps) && tps > 0 ? `~${formatTps(tps)}` : "";
 }
 
-/** Picker rows per item, valid while every input a row reads is the one it was built from. */
-interface PickerRowCache {
+/** Every input a picker row reads besides its item (and the service tier, kept per row). */
+interface PickerRowKey {
 	readonly roles: RoleAssignments;
 	readonly perf: ReadonlyMap<string, ModelBrowserPerf>;
+	/** The source's preference store (role labels and visibility). */
+	readonly preferences: object;
 	readonly revision: number;
 	readonly pickerProvider: boolean;
-	readonly markOverContext: boolean;
-	/** The earliest price change among the cached rows (Unix ms): the cache is dropped from then. */
+	/** Session tokens over-context rows are flagged against; 0 when none are flagged. */
+	readonly overContextTokens: number;
+}
+
+/** Picker rows per item for one {@link PickerRowKey}, valid until a price falls due. */
+interface PickerRowStore extends PickerRowKey {
+	/** The earliest price change among the stored rows (Unix ms): the store is dropped from then. */
 	until: number;
 	readonly held: Map<string, HeldRole[]>;
+	readonly tiers: TieredPerf;
 	/** Each row with the service tier its perf was looked up under. */
 	readonly rows: Map<ModelBrowserItem, { row: TspPickerItem; tier: string | undefined }>;
+}
+
+/**
+ * The last row store built, shared by every browser: one reading the same
+ * inputs (a reopened picker over the same scope) adopts it and builds no rows.
+ */
+let sharedPickerRows: PickerRowStore | undefined;
+
+/** Whether `store` serves `key` at `now`, its perf map aside. */
+function storeServes(store: PickerRowStore, key: PickerRowKey, now: number): boolean {
+	return (
+		store.roles === key.roles &&
+		store.preferences === key.preferences &&
+		store.revision === key.revision &&
+		store.pickerProvider === key.pickerProvider &&
+		store.overContextTokens === key.overContextTokens &&
+		now < store.until
+	);
+}
+
+/** Whether two perf maps hold equal aggregates under the same keys, in the same order. */
+function samePerf(a: ReadonlyMap<string, ModelBrowserPerf>, b: ReadonlyMap<string, ModelBrowserPerf>): boolean {
+	if (a === b) return true;
+	if (a.size !== b.size) return false;
+	const others = b.entries();
+	for (const [key, entry] of a) {
+		const next = others.next();
+		if (next.done) return false;
+		const [otherKey, other] = next.value;
+		if (
+			otherKey !== key ||
+			other.samples !== entry.samples ||
+			!Object.is(other.tps, entry.tps) ||
+			!Object.is(other.ttftMs, entry.ttftMs)
+		)
+			return false;
+	}
+	return true;
 }
 
 /** `200k` token count as rows show it. */
@@ -243,8 +291,8 @@ export class ModelBrowserState {
 	/** The rows last sent whole as picker `items`, and the ids patched since. */
 	#pickerBase: readonly TspPickerItem[] | undefined;
 	readonly #pickerPatched = new Set<string>();
-	/** Picker rows built so far, while the inputs they read hold. */
-	#pickerRows: PickerRowCache | undefined;
+	/** The row store serving this browser, and the perf map it was matched against. */
+	#pickerRows: { perf: ReadonlyMap<string, ModelBrowserPerf>; store: PickerRowStore } | undefined;
 	/** The rows of the last {@link pickerItems} call and the catalogue it returned. */
 	#pickerLast: { rows: readonly TspPickerItem[]; catalogue: PickerCatalogue } | undefined;
 
@@ -702,48 +750,46 @@ export class ModelBrowserState {
 		return item.provider === "" || !this.#pickerProvider() ? item.id : item.selector;
 	}
 
-	/** The row cache for the inputs as they are now (a fresh one when any moved or a price fell due). */
-	#pickerRowCache(): PickerRowCache {
-		const roles = this.#roles();
+	/** The row store for the inputs as they are now: this browser's, the shared one, or a fresh one. */
+	#pickerRowStore(): PickerRowStore {
 		const perf = this.#perf();
-		const pickerProvider = this.#pickerProvider();
-		const markOverContext = this.#markOverContext();
-		const revision = this.source.revision;
-		const cache = this.#pickerRows;
-		if (
-			cache &&
-			cache.roles === roles &&
-			cache.perf === perf &&
-			cache.revision === revision &&
-			cache.pickerProvider === pickerProvider &&
-			cache.markOverContext === markOverContext &&
-			Date.now() < cache.until
-		)
-			return cache;
-		this.#pickerRows = {
-			roles,
+		const key: PickerRowKey = {
+			roles: this.#roles(),
 			perf,
-			revision,
-			pickerProvider,
-			markOverContext,
-			until: Number.POSITIVE_INFINITY,
-			held: heldRolesByModel(roles, this.source),
-			rows: new Map(),
+			preferences: this.source.preferences ?? this.source,
+			revision: this.source.revision,
+			pickerProvider: this.#pickerProvider(),
+			overContextTokens: this.#markOverContext() && this.#contextTokens > 0 ? this.#contextTokens : 0,
 		};
-		return this.#pickerRows;
+		const now = Date.now();
+		const current = this.#pickerRows;
+		if (current && current.perf === perf && storeServes(current.store, key, now)) return current.store;
+		let store = sharedPickerRows;
+		if (!store || !storeServes(store, key, now) || !samePerf(store.perf, perf)) {
+			store = {
+				...key,
+				until: Number.POSITIVE_INFINITY,
+				held: heldRolesByModel(key.roles, this.source),
+				tiers: tieredPerf(perf),
+				rows: new Map(),
+			};
+			sharedPickerRows = store;
+		}
+		this.#pickerRows = { perf, store };
+		return store;
 	}
 
-	/** `item`'s row from `cache`, built when missing or when the service tier picking its perf moved. */
-	#pickerItem(item: ModelBrowserItem, cache: PickerRowCache): TspPickerItem {
-		const tier = hasTieredPerf(cache.perf, item.selector) ? this.source.serviceTierFor?.(item.model) : undefined;
-		const cached = cache.rows.get(item);
+	/** `item`'s row from `store`, built when missing or when the service tier picking its perf moved. */
+	#pickerItem(item: ModelBrowserItem, store: PickerRowStore): TspPickerItem {
+		const tier = store.tiers.has(item.selector) ? this.source.serviceTierFor?.(item.model) : undefined;
+		const cached = store.rows.get(item);
 		if (cached && cached.tier === tier) return cached.row;
 		const model = item.model;
-		cache.until = Math.min(cache.until, nextPriceChange(model, Date.now()));
+		store.until = Math.min(store.until, nextPriceChange(model, Date.now()));
 		const facts: Record<string, TspText | number> = {};
 		const int = intelligenceOf(model);
 		if (int !== undefined) facts.int = String(int);
-		const speed = perfText(item, measuredPerf(cache.perf, item, tier), "tps")
+		const speed = perfText(item, measuredPerf(store.perf, item, tier, store.tiers), "tps")
 			.replace(/\s*t\/s\s*/, " ")
 			.trim();
 		if (speed) facts.speed = speed;
@@ -760,7 +806,7 @@ export class ModelBrowserState {
 		if (model.isNew) badges.push({ text: "new", tone: "accent" });
 		if (model.isBeta) badges.push({ text: "beta", tone: "warning" });
 		if (isFreeModel(model)) badges.push({ text: "free", tone: "success" });
-		const chips = (cache.held.get(modelIdentityKey(model)) ?? []).map(({ role, assignment }) => {
+		const chips = (store.held.get(modelIdentityKey(model)) ?? []).map(({ role, assignment }) => {
 			const dot = thinkingDotToken(assignment.thinkingLevel);
 			return {
 				text: roleChipLabel(role, this.source),
@@ -772,7 +818,7 @@ export class ModelBrowserState {
 		// Quick-role rows (`@role`) name the role and trail the model they apply.
 		const quickRole = item.provider === "" && item.id.startsWith("@");
 		const title = [
-			...(cache.pickerProvider || item.provider === "" ? [] : [item.provider]),
+			...(store.pickerProvider || item.provider === "" ? [] : [item.provider]),
 			...(model.int != null && Number.isFinite(model.int) ? [`Intelligence ${Math.round(model.int)}`] : []),
 		].join(" · ");
 		const row: TspPickerItem = {
@@ -786,7 +832,7 @@ export class ModelBrowserState {
 			...(chips.length > 0 ? { chips } : {}),
 			...(title ? { title } : {}),
 		};
-		cache.rows.set(item, { row, tier });
+		store.rows.set(item, { row, tier });
 		return row;
 	}
 
@@ -796,8 +842,8 @@ export class ModelBrowserState {
 	 * `itemsDel`; a patched row stays in the patch), else it is sent whole.
 	 */
 	pickerItems(catalogue: readonly ModelBrowserItem[]): PickerCatalogue {
-		const cache = this.#pickerRowCache();
-		const rows = catalogue.map(item => this.#pickerItem(item, cache));
+		const store = this.#pickerRowStore();
+		const rows = catalogue.map(item => this.#pickerItem(item, store));
 		// The same rows again (a query or selection moved): the same patch.
 		const last = this.#pickerLast;
 		if (last && sameItems(last.rows, rows)) return last.catalogue;

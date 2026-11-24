@@ -1013,6 +1013,7 @@ export function measuredPerf(
 	perf: ReadonlyMap<string, ModelBrowserPerf>,
 	item: ModelBrowserItem,
 	serviceTier: string | undefined,
+	tiers?: TieredPerf,
 ): { perf: ModelBrowserPerf; tier?: string } | undefined {
 	if (perf.size === 0) return undefined;
 	if (serviceTier) {
@@ -1021,24 +1022,31 @@ export function measuredPerf(
 	}
 	const standard = perf.get(item.selector);
 	if (standard) return { perf: standard };
-	const best = bestTiers(perf).get(item.selector);
+	const best = (tiers ?? tieredPerf(perf)).get(item.selector);
 	return best && { perf: best.perf, tier: best.tier };
 }
 
 /** Whether `selector` has measured tier aggregates (`selector@tier`): only then does the service tier pick its perf. */
 export function hasTieredPerf(perf: ReadonlyMap<string, ModelBrowserPerf>, selector: string): boolean {
-	return perf.size > 0 && bestTiers(perf).has(selector);
+	return perf.size > 0 && tieredPerf(perf).has(selector);
 }
 
 const kTierIndex = Symbol("model-browser.tierIndex");
 
-/** A perf map tagged with its {@link bestTiers} index and the size it was built at. */
+/** A perf map tagged with its {@link tieredPerf} index and the size it was built at. */
 interface TierIndexed {
 	[kTierIndex]?: { size: number; best: Map<string, { perf: ModelBrowserPerf; tier: string }> };
 }
 
-/** The fastest `selector@tier` aggregate per selector (the first of equals), for every `@` a key could split at. */
-function bestTiers(perf: ReadonlyMap<string, ModelBrowserPerf>): Map<string, { perf: ModelBrowserPerf; tier: string }> {
+/** The fastest `selector@tier` aggregate per selector of one perf map (see {@link tieredPerf}). */
+export type TieredPerf = ReadonlyMap<string, { perf: ModelBrowserPerf; tier: string }>;
+
+/**
+ * The fastest `selector@tier` aggregate per selector (the first of equals), for
+ * every `@` a key could split at. Pass it to {@link measuredPerf} when looking
+ * up many rows of one perf map.
+ */
+export function tieredPerf(perf: ReadonlyMap<string, ModelBrowserPerf>): TieredPerf {
 	const tagged = perf as ReadonlyMap<string, ModelBrowserPerf> & TierIndexed;
 	const indexed = tagged[kTierIndex];
 	if (indexed && indexed.size === perf.size) return indexed.best;
