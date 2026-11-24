@@ -173,7 +173,6 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionStopEventResult,
-	TodoApplyResult,
 	TodoBackendChange,
 	ToolInfo,
 	TreePreparation,
@@ -292,7 +291,7 @@ import { toolCommandDispatches } from "../tools/tool-commands";
 import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME } from "../tools/details/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import type { TodoPhase } from "../tools/details/todo";
+import type { TodoApplyResult, TodoPhase } from "../tools/details/todo";
 import { ToolError } from "../tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";

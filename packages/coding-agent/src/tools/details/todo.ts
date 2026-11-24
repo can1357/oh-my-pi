@@ -44,6 +44,14 @@ export interface TodoToolDetails {
 	refused?: boolean;
 }
 
+/** How a `todo` call's change fared with the selected todo backend. Host-only: the package root does not export it. */
+export type TodoApplyResult =
+	| { kind: "committed" }
+	/** The backend threw. */
+	| { kind: "refused"; message: string }
+	/** Nothing committed for another reason: timeout, list, session or backend changed, abort, closing. */
+	| { kind: "stale"; message: string };
+
 /** Minimum overlap (after normalization) required for a substring match.
  * Picked at six chars to admit single-word identifiers like "review" /
  * "Sonnet" without admitting tiny common substrings like "test" / "fix"

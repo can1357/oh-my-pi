@@ -51,7 +51,7 @@ import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import { sanitizeDisplayLine } from "../inventory/display-text";
-import type { TodoPhase } from "../../tools/details/todo";
+import type { TodoApplyResult, TodoPhase } from "../../tools/details/todo";
 import { extensionLinkClicksAvailable } from "./link-clicks";
 import {
 	notifyTranscriptPresentersChanged,
@@ -111,7 +111,6 @@ import type {
 	SessionStopEvent,
 	SessionStopEventResult,
 	ShortcutConflict,
-	TodoApplyResult,
 	TodoBackendChange,
 	TodoBackendDefinition,
 	ToolCallEvent,
