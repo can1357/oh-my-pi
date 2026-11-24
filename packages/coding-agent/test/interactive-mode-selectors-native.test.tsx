@@ -320,6 +320,55 @@ describe("inline selectors in a Tern terminal", () => {
 		expect(has(ui, "editor")).toBe(true);
 	});
 
+	it("tells a user whose reset lookup failed that nothing was spent, not that no resets are usable", async () => {
+		await using ui = await nativeShell(mode.shell);
+		const spent: string[] = [];
+		const reset = mode.showEditorAreaDialog(() => (
+			<ResetUsageSelector
+				accounts={[
+					{
+						label: "c@x.so",
+						provider: "anthropic",
+						providerLabel: "Claude Max",
+						availableCount: 0,
+						redeemableCount: 0,
+						target: { credentialId: 19, provider: "anthropic" },
+						active: false,
+						error: "Failed to load saved resets",
+					},
+					{
+						label: "d@x.so",
+						provider: "anthropic",
+						providerLabel: "Claude Max",
+						availableCount: 0,
+						redeemableCount: 0,
+						target: { credentialId: 20, provider: "anthropic" },
+						active: false,
+					},
+				]}
+				onSelect={account => {
+					spent.push(account.label);
+				}}
+				onCancel={() => {}}
+			/>
+		));
+		// The status line the picker draws under its title.
+		const statusText = (): string => {
+			const { subtitle } = sheet(ui);
+			return typeof subtitle === "string" ? subtitle : (subtitle ?? []).map(span => span.t).join("");
+		};
+		ui.send({ ev: "select", sf: ui.sf, id: ui.node("picker").id, item: "anthropic:19:" });
+		ui.send({ ev: "activate", sf: ui.sf, id: ui.node("picker").id, item: "anthropic:19:" });
+		expect(statusText()).toContain("Failed to load saved resets");
+		expect(statusText()).toContain("nothing was spent");
+		expect(statusText()).not.toContain("no saved resets usable");
+		ui.send({ ev: "select", sf: ui.sf, id: ui.node("picker").id, item: "anthropic:20:" });
+		ui.send({ ev: "activate", sf: ui.sf, id: ui.node("picker").id, item: "anthropic:20:" });
+		expect(statusText()).toContain("no saved resets usable right now");
+		expect(spent).toEqual([]);
+		reset.close();
+	});
+
 	it("a hook select is a hoisted picker; an inline one is a dock card whose row click answers", async () => {
 		await using ui = await nativeShell(mode.shell);
 		const plain = mode.showHookSelector("Pick a fruit", ["Apple", "Banana"]);

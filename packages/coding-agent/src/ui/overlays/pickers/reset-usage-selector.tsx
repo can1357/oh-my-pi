@@ -134,6 +134,10 @@ export function ResetUsageSelector(props: ResetUsageSelectorProps): JSXNode {
 	const activate = (): void => {
 		const account = byKey.get(selected() ?? "");
 		if (!account) return;
+		if (account.error) {
+			status.set(`That account's saved resets are unavailable (${account.error}), so nothing was spent.`);
+			return;
+		}
 		if (account.redeemableCount <= 0) {
 			status.set(
 				account.unavailableReason
