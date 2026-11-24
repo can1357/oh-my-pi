@@ -36,7 +36,7 @@
 
 ### Fixed
 
-- Fixed a pending preview telling the model to call `bash` again when its `bash` command ran something other than `resolve` or `reject` (such as `ast_edit resolve …`): the skipped call now names the command it ran and says the command must be `resolve` or `reject`, instead of leaving the model to repeat it until the turn aborts ([#20335](https://github.com/can1357/oh-my-pi/pull/20335) by [@baekjosh](https://github.com/baekjosh))
+- Fixed a pending preview telling the model to call `bash` again when its `bash` command ran something other than `resolve` or `reject` (such as `ast_edit resolve …`); the skipped call now names the command it ran and says the command must be `resolve` or `reject` ([#20335](https://github.com/can1357/oh-my-pi/pull/20335) by [@baekjosh](https://github.com/baekjosh))
 - Tern no longer loses the tray's dots when the working line above the composer comes and goes: the line stays one row instead of turning into an empty column while idle
 - In the bash tool on macOS, `ls -lT` shows full timestamps instead of failing with `invalid tab size`, `uptime` prints macOS's format, and `chmod +a` and the other ACL forms run `/bin/chmod`.
 - The bash tool's `top -l` now reports load averages, user/sys/idle CPU and usernames, and `ps` shows start and elapsed times for other users' processes such as pid 1.
