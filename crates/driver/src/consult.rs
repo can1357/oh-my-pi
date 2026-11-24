@@ -410,6 +410,12 @@ pub const SEANCE_PROMPT: &str =
 	 disagrees with what the session\nrecorded. You cannot edit files, run commands or start other \
 	 agents. If the history does not\ncontain the answer, say what is missing instead of guessing.";
 
+/// The one question `/seance` asks the consult child. The saved history is the
+/// evidence; this turn does not resume the source session.
+pub const SEANCE_TASK: &str = "Index this finished session. Name the decisions it recorded, the \
+                               work it left open, and the history entries that show each one. If \
+                               the history does not say, say what is missing.";
+
 /// Kernel options that run a read-only child over `root`.
 ///
 /// The child opens the private copy of the journal and keeps its own sessions
@@ -460,8 +466,10 @@ mod tests {
 
 	use super::{
 		CONSULT_TOOLS, ConsultError, ConsultRoot, ConsultSource, NativeExtensionMode, OWNER_LOCK,
-		ROOT_PREFIX, SEANCE_PROMPT, SWEEP_GRACE, child_options, prepare_root, resolve_source, sweep,
+		ROOT_PREFIX, SEANCE_PROMPT, SEANCE_TASK, SWEEP_GRACE, child_options, prepare_root,
+		resolve_source, sweep,
 	};
+	use crate::sessions::SessionIndex;
 
 	fn kind(name: &'static str) -> Kind {
 		Kind { name: Str::new_static(name), rev: 1 }
@@ -531,6 +539,56 @@ mod tests {
 		let before = listing(dir.path());
 		resolve_source(dir.path(), ID, None).expect("resolve");
 		assert_eq!(listing(dir.path()), before);
+	}
+
+	#[test]
+	fn a_held_private_root_adds_nothing_the_picker_lists() {
+		let dir = tempdir().expect("dir");
+		let temp = tempdir().expect("temp");
+		write_session(dir.path(), ID, &["m"]);
+		let before = SessionIndex::open(dir.path())
+			.expect("index")
+			.list()
+			.into_iter()
+			.map(|row| row.id)
+			.collect::<Vec<_>>();
+		let files_before = listing(dir.path());
+		let source = resolve_source(dir.path(), ID, None).expect("source");
+		let root = prepare_root(temp.path(), &source).expect("root");
+		assert!(root.journal().starts_with(temp.path()));
+		assert!(!root.journal().starts_with(dir.path()));
+		let during = SessionIndex::open(dir.path())
+			.expect("index")
+			.list()
+			.into_iter()
+			.map(|row| row.id)
+			.collect::<Vec<_>>();
+		assert_eq!(during, before, "a consult root must not appear in the session index");
+		assert_eq!(listing(dir.path()), files_before);
+		drop(root);
+		assert_eq!(SessionIndex::open(dir.path()).expect("index").list().len(), before.len());
+		assert_eq!(listing(dir.path()), files_before);
+	}
+
+	#[test]
+	fn consult_errors_render_as_one_line() {
+		let samples = [
+			ConsultError::EmptySelector.to_string(),
+			ConsultError::PrefixTooShort { prefix: Str::new("ab") }.to_string(),
+			ConsultError::NotFound { selector: Str::new("missing") }.to_string(),
+			ConsultError::Ambiguous { prefix: Str::new("01JABCDE"), count: 2 }.to_string(),
+			ConsultError::OutsideSessions { path: PathBuf::from("/etc/passwd") }.to_string(),
+			ConsultError::ForeignTranscript { path: PathBuf::from("old.jsonl") }.to_string(),
+			ConsultError::Live { path: PathBuf::from("live.oms") }.to_string(),
+			ConsultError::NoSavedModel { path: PathBuf::from("none.oms") }.to_string(),
+			ConsultError::RootOwned { path: PathBuf::from("omp-consult-held") }.to_string(),
+			ConsultError::Io(std::io::Error::other("missing")).to_string(),
+		];
+		for text in samples {
+			assert!(!text.is_empty(), "blank consult error");
+			assert!(!text.contains('\n'), "consult error spans lines: {text}");
+		}
+		assert!(!SEANCE_TASK.is_empty());
 	}
 
 	#[test]

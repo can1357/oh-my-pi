@@ -241,6 +241,19 @@ impl Presenter {
 					Ok(Box::new(SidePanel::btw(question_for_panel.clone(), events, cx)) as Box<_>)
 				})))?
 			},
+			CommandAction::Seance { selector, model } => {
+				let Some(selector) = selector else {
+					return Ok(self.notice(super::session::SEANCE_USAGE));
+				};
+				let model_for_service = model.clone();
+				self.act(HostAction::Open(PanelOpener::new(move |cx| {
+					let events = cx
+						.services
+						.seance(selector.as_str(), model_for_service.as_deref())
+						.map_err(crate::fault)?;
+					Ok(Box::new(SidePanel::btw(selector.clone(), events, cx)) as Box<_>)
+				})))?
+			},
 			CommandAction::Tan { task } => {
 				let _ = self
 					.commands

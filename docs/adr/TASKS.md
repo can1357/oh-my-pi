@@ -242,6 +242,15 @@ Owner prompt 2026-11-12, roadmap P0 to P5. New records: [0051](0051-durable-resu
 - **OPEN** ADRs 0051 to 0053 are proposals, not implementation-ready: an EGM implementation-readiness review (2026-11-12) found factual errors, now corrected, and decisions left open, now listed in each record's "Not yet specified" section. Settle those lists before code.
 - **OPEN** the question text for the four decisions above was judged not decidable from its own text for three of them (reviewer finding); rewrite with definitions before asking the owner again.
 
+## ADR 0056 — consult a saved session
+
+ADR status: **proposed; S0–S4 implemented, P1–P3 open**.
+
+- **DONE** S0–S3: `Journal::is_live`, `resolve_source`, the private root and sweep, and the read-only child (`read`, `grep`, `glob`) in `crates/driver/src/consult.rs`.
+- **DONE** S4: `/seance [selector] [--model]` behind `cl_seance_enabled` (bool, default false). The slash palette omits the command while the convar is off. A bare `/seance` prints usage and leaves the resume picker closed. The app service copies the source to a private root and shows the answer in the `/btw` side panel. Each `ConsultError` is one line. Chat startup sweeps abandoned `omp-consult-*` roots.
+- **OPEN** P1–P3: the completion probe. D6 still requires a measurement that a copy reuses the child's prompt cache.
+- **OPEN** O2: that cache figure is unverified.
+
 ## ADR 0048 — schema and serialization boundaries
 
 ADR status: **accepted 2026-10-28; implementation gate open**.
@@ -407,6 +416,11 @@ Found while building units 2 and 4, and not part of R1:
   `kind = advisor`, but classifying it needs a wider signature; `notice/data` alone would swallow
   unrelated notices. ADR 0039 section A4 names advisor subtrees as host-local, so R1 ships with
   that card unredacted.
+
+## ADR 0054 — shell builtins
+
+- **DONE** S2 write seam: `Host::open_write` over `PathPolicy::open`; a new `DirFd::open_walk` walks each component with no-follow (only the final component follows `symlink_behavior`); `DirFd::open` and `open_subdir` are unchanged because `rm` uses them. No builtin registered. Device writes other than `/dev/null` stay denied by the default workspace policy. O3 (migrate existing writers) remains open.
+
 
 ## Superseded task snapshots
 

@@ -152,6 +152,11 @@ impl AppServices {
 		};
 		let live_journal = Arc::clone(&state.live_journal);
 		let root = live_journal.read().parent().map(PathBuf::from);
+		if let Err(error) =
+			omp_driver::consult::sweep(&std::env::temp_dir(), omp_driver::consult::SWEEP_GRACE)
+		{
+			tracing::warn!(%error, "consult root sweep failed");
+		}
 		if let Some(root) = root
 			&& let Ok(blobs) = omp_journal::blob::BlobStore::open(&root)
 		{
@@ -462,6 +467,14 @@ impl Services for AppServices {
 		context: &str,
 	) -> ServiceResult<flume::Receiver<omp_chat::overlays::services::SideEvent>> {
 		session_ops::btw(&self.state, question, context)
+	}
+
+	fn seance(
+		&self,
+		selector: &str,
+		model: Option<&str>,
+	) -> ServiceResult<flume::Receiver<omp_chat::overlays::services::SideEvent>> {
+		session_ops::seance(&self.state, selector, model)
 	}
 
 	fn project_dir(&self) -> ServiceResult<PathBuf> {
