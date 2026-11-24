@@ -36,6 +36,8 @@ const notifications: string[] = [];
 const documents = new Map<string, { version: number; text: string }>();
 const workspaceFolders = new Set<string>();
 const watchedFileChanges: unknown[] = [];
+const willRenameFiles: unknown[] = [];
+const didRenameFiles: unknown[] = [];
 let nextServerRequestId = 1;
 const pendingServerRequests = new Map<
 	string | number,
@@ -113,6 +115,8 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 				notifications: [...notifications],
 				workspaceFolders: [...workspaceFolders],
 				watchedFileChanges: [...watchedFileChanges],
+				willRenameFiles: [...willRenameFiles],
+				didRenameFiles: [...didRenameFiles],
 			});
 			break;
 		}
@@ -139,6 +143,7 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 			respond(id, null);
 			break;
 		default: {
+			if (message.method === "workspace/willRenameFiles") willRenameFiles.push(message.params);
 			const response = initializationOptions?.responses?.[message.method];
 			if (response === undefined) {
 				respond(id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
@@ -190,6 +195,9 @@ function handleNotification(message: JsonRpcMessage): void {
 			watchedFileChanges.push(...changes);
 			break;
 		}
+		case "workspace/didRenameFiles":
+			didRenameFiles.push(message.params);
+			break;
 		case "test/crash":
 			process.stderr.write("error: Unknown binary 'rust-analyzer' in official toolchain\n");
 			process.exit(3);

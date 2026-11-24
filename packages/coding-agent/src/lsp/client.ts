@@ -946,7 +946,7 @@ async function foreignCheckoutForRealPath(cwd: string, realFilePath: string): Pr
 	return checkout;
 }
 
-/** Match the resolved foreign workspace folder, leaving files in the session checkout as spelled. */
+/** Use the resolved spelling for foreign documents, with or without workspace-folder support. Leave other paths as supplied. */
 export async function workspaceDocumentPath(cwd: string, filePath: string): Promise<string> {
 	const resolved = await realPathOf(filePath);
 	return resolved !== filePath && (await foreignCheckoutForRealPath(cwd, resolved)) ? resolved : filePath;

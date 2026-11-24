@@ -144,11 +144,19 @@ interface FileRenamePair {
 async function enumerateRenamePairs(
 	source: string,
 	dest: string,
+	cwd: string,
 ): Promise<{ pairs: FileRenamePair[]; directory: boolean; exceeded: boolean }> {
+	const pairFor = async (oldPath: string, newPath: string): Promise<FileRenamePair> => {
+		const [oldDocument, newDocument] = await Promise.all([
+			workspaceDocumentPath(cwd, oldPath),
+			workspaceDocumentPath(cwd, newPath),
+		]);
+		return { oldUri: fileToUri(oldDocument), newUri: fileToUri(newDocument) };
+	};
 	const stat = await fs.promises.stat(source);
 	if (!stat.isDirectory()) {
 		return {
-			pairs: [{ oldUri: fileToUri(source), newUri: fileToUri(dest) }],
+			pairs: [await pairFor(source, dest)],
 			directory: false,
 			exceeded: false,
 		};
@@ -163,10 +171,7 @@ async function enumerateRenamePairs(
 		const parent = entry.parentPath ?? source;
 		const absOld = path.join(parent, entry.name);
 		const rel = path.relative(source, absOld);
-		pairs.push({
-			oldUri: fileToUri(absOld),
-			newUri: fileToUri(path.join(dest, rel)),
-		});
+		pairs.push(await pairFor(absOld, path.join(dest, rel)));
 	}
 	return { pairs, directory: true, exceeded: false };
 }
@@ -281,9 +286,14 @@ async function offTargetNote(
 	return `\n⚠ ${misses.length} location(s) do not mention ${symbolName} (${examples})${clangdHint}`;
 }
 
-function* answerFileUris(answer: Location[] | WorkspaceEdit): Iterable<string> {
+type CheckoutAnswer = Location[] | WorkspaceEdit | (CodeAction | Command)[];
+
+function* answerFileUris(answer: CheckoutAnswer): Iterable<string> {
 	if (Array.isArray(answer)) {
-		for (const location of answer) yield location.uri;
+		for (const item of answer) {
+			if ("uri" in item) yield item.uri;
+			else if ("edit" in item && item.edit) yield* answerFileUris(item.edit);
+		}
 		return;
 	}
 	if (answer.changes) {
@@ -299,11 +309,7 @@ function* answerFileUris(answer: Location[] | WorkspaceEdit): Iterable<string> {
 }
 
 /** Opening one document is not evidence of indexing the checkout; answering from another file is. */
-async function answerShowsCheckout(
-	answer: Location[] | WorkspaceEdit,
-	targetFile: string,
-	checkout: string,
-): Promise<boolean> {
+async function answerShowsCheckout(answer: CheckoutAnswer, targetFile: string, checkout: string): Promise<boolean> {
 	const queriedFile = await realPathOf(targetFile);
 	const seen = new Set([targetFile, queriedFile]);
 	for (const uri of answerFileUris(answer)) {
@@ -553,7 +559,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						throwIfAborted(signal);
 						if (serverConfig.createClient) {
 							const linterClient = getLinterClient(serverName, serverConfig, this.session.cwd);
-							const diagnostics = await linterClient.lint(resolved, signal);
+							const diagnostics = await linterClient.lint(documentPath, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
 							reportedServers.push(serverName);
@@ -769,7 +775,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
-			const enumerated = await enumerateRenamePairs(source, dest);
+			const enumerated = await enumerateRenamePairs(source, dest, this.session.cwd);
 			if (enumerated.exceeded) {
 				return {
 					content: [
@@ -1510,7 +1516,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const symbolName = symbol ? parseSymbolSpec(symbol).symbol : undefined;
 
 			let output: string;
-			let answer: Location[] | WorkspaceEdit | undefined;
+			let answer: CheckoutAnswer | undefined;
 			// Set on bare empty-lookup outcomes (no definition/references/…): the
 			// result carries no information once consumed, so compaction may elide
 			// it. Clean diagnostics runs are NOT useless — they are verification
@@ -1554,6 +1560,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No definition found";
 						useless = true;
 					} else {
+						answer = locations;
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1580,6 +1587,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No type definition found";
 						useless = true;
 					} else {
+						answer = locations;
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1605,6 +1613,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No implementation found";
 						useless = true;
 					} else {
+						answer = locations;
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1776,7 +1785,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: edit => {
+								answer = edit;
+								return applyWorkspaceEditWithLsp(edit, this.session.cwd, signal);
+							},
 							executeCommand: async commandItem => {
 								await sendRequest(
 									client,
@@ -1809,6 +1821,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						break;
 					}
 
+					answer = result;
 					const actionLines = result.map((actionItem, index) => `  ${formatCodeAction(actionItem, index)}`);
 					output = `${result.length} code action(s):\n${actionLines.join("\n")}`;
 					break;
