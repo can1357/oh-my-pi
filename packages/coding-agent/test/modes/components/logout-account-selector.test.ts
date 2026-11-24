@@ -1,14 +1,14 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { LogoutAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { StoredAuthCredential } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { toLogoutAccounts } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/logout";
+import { LogoutAccountSelector } from "../../../src/ui/overlays/pickers/logout-account-selector";
+import { mountOverlay } from "../../helpers/overlay-terminal";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await initTheme();
-});
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
-describe("LogoutAccountSelectorComponent", () => {
+describe("logout account selector", () => {
 	it("starts on the active stored account and selects that credential", () => {
 		const rows: StoredAuthCredential[] = [
 			{
@@ -40,21 +40,25 @@ describe("LogoutAccountSelectorComponent", () => {
 		];
 		const accounts = toLogoutAccounts("anthropic", rows, { activeIdentity: { accountId: "acct-b" } });
 		const selected: number[] = [];
-		const component = new LogoutAccountSelectorComponent(
-			"Anthropic",
-			accounts,
-			account => selected.push(account.credentialId),
-			() => {},
+		const term = mountOverlay(
+			() =>
+				LogoutAccountSelector({
+					provider: "Anthropic",
+					accounts,
+					onSelect: account => selected.push(account.credentialId),
+					onCancel: () => {},
+				}),
+			{ columns: 100 },
 		);
+		try {
+			const rendered = term.screen().join("\n");
+			expect(rendered).toContain("b@example.com (active)");
+			expect(rendered.indexOf("b@example.com")).toBeLessThan(rendered.indexOf("a@example.com"));
 
-		const rendered = component
-			.render(100)
-			.map(line => Bun.stripANSI(line))
-			.join("\n");
-		expect(rendered).toContain("b@example.com (active)");
-		expect(rendered.indexOf("b@example.com")).toBeLessThan(rendered.indexOf("a@example.com"));
-
-		component.handleInput("\n");
+			term.press("enter");
+		} finally {
+			term.dispose();
+		}
 
 		expect(selected).toEqual([12]);
 	});

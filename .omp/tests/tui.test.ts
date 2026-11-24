@@ -125,7 +125,7 @@ setTerminalHeadless(false);
 				op: "start",
 				name,
 				bin: process.execPath,
-				args: ["--preload", preload, path.resolve(import.meta.dir, "../../packages/tui/examples/debug-demo.ts")],
+				args: ["--preload", preload, path.resolve(import.meta.dir, "../../packages/tui/examples/debug-demo.tsx")],
 				cols: 10,
 				rows: 3,
 			});

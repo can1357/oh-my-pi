@@ -7,6 +7,7 @@ exports_files(["Cargo.toml"])
 
 rust_library(
     name = "edit",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     compile_data = glob([

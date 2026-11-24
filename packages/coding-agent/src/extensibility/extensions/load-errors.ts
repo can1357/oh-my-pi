@@ -1,4 +1,5 @@
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, truncateToWidth } from "../../utils/text-width";
+import { shortenPath, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import type { LoadExtensionsResult } from "./types";
 
 /** Formats extension load failures for user-visible startup diagnostics. */

@@ -12,7 +12,7 @@ function createRuntimeHarness() {
 		showDebugSelector,
 		runtime: {
 			ctx: {
-				editor: { setText } as unknown as InteractiveModeContext["editor"],
+				composer: { setText } as unknown as InteractiveModeContext["composer"],
 				showStatus,
 				showDebugSelector,
 			} as unknown as InteractiveModeContext,
