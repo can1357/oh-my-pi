@@ -1,13 +1,12 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import type { AskToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/ask";
 import { Settings } from "../src/config/settings";
 import type { ExtensionUIDialogOptions, ExtensionUISelectItem } from "../src/extensibility/extensions";
-import { HookSelectorComponent } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "../src/tools";
 import { AskTool } from "../src/tools/ask";
-import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+import { HookSelector } from "../src/ui/overlays/pickers/hook-selector";
+import { mountLayer } from "./helpers/layer-terminal";
 
 type AskExecutionResult = AgentToolResult<AskToolDetails>;
 type AskSelect = (
@@ -30,7 +29,11 @@ async function drainMicrotasks(): Promise<void> {
 function createAskTool(): AskTool {
 	return new AskTool({
 		hasUI: true,
-		settings: Settings.isolated({ "ask.timeout": 0.01, "ask.notify": "off", "speech.enabled": false }),
+		settings: Settings.isolated({
+			"ask.timeout": 0.01,
+			"ask.notify": "off",
+			"speech.enabled": false,
+		}),
 		getPlanModeState: () => ({ enabled: false }),
 	} as unknown as ToolSession);
 }
@@ -61,12 +64,6 @@ function runAsk(html: string, context: AgentToolContext) {
 }
 
 describe("AskTool timeout", () => {
-	beforeAll(async () => {
-		const loaded = await getThemeByName("dark");
-		if (!loaded) throw new Error("theme unavailable");
-		setThemeInstance(loaded);
-	});
-
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
@@ -126,7 +123,9 @@ describe("AskTool timeout", () => {
 			startTimeout = dialogOptions?.onTimeoutStart;
 			return Promise.withResolvers<string | undefined>().promise;
 		});
-		const { context, abort } = selectContext(select, { timeoutStartsOnPresentation: true });
+		const { context, abort } = selectContext(select, {
+			timeoutStartsOnPresentation: true,
+		});
 		const outcome = runAsk(DB_FORM, context);
 
 		await drainMicrotasks();
@@ -191,12 +190,17 @@ describe("AskTool timeout", () => {
 		vi.useFakeTimers();
 		const onTimeoutStart = vi.fn();
 		const onTimeoutReset = vi.fn();
-		const selector = new HookSelectorComponent("Pick one", ["SQLite", "Postgres"], vi.fn(), vi.fn(), {
-			timeout: 10,
-			tui: { requestRender: vi.fn() } as unknown as TUI,
-			onTimeoutStart,
-			onTimeoutReset,
-		});
+		const selector = mountLayer(() =>
+			HookSelector({
+				title: "Pick one",
+				options: ["SQLite", "Postgres"],
+				onSelect: vi.fn(),
+				onCancel: vi.fn(),
+				timeout: 10,
+				onTimeoutStart,
+				onTimeoutReset,
+			}),
+		);
 
 		selector.handleInput("j");
 

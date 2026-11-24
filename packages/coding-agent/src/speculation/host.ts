@@ -32,7 +32,7 @@ import {
 } from "../tools/read";
 import { isCpuProfilePath } from "../utils/cpuprofile";
 import { isSampleProfilePath } from "../utils/sample-profile";
-import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { isVideoPath } from "../utils/video-preview";
 import { cfgTaskSpeculativeLaunch } from "../task/settings";
 
 import {

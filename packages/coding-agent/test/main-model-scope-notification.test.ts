@@ -26,7 +26,6 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	__resetDirsFromEnvForTests,
 	getProjectDir,
@@ -35,8 +34,9 @@ import {
 	setInteractiveHost,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import { createTestSession, type TestSessionContext } from "./utilities";
+import { initTheme } from "../src/ui/theme/service";
 
 function scopedModel(id: string): ScopedModel {
 	return {
@@ -90,7 +90,7 @@ describe("startup model fallback notice after first-run setup", () => {
 		originalProject = getProjectDir();
 		setProjectDir(tmp);
 		resetSettingsForTest();
-		await initTheme();
+		initTheme();
 		settings = await Settings.init({ inMemory: true, cwd: tmp });
 		cfgStartupCheckUpdate.override(settings, false);
 		cfgStartupChangelogMode.override(settings, "hidden");
@@ -170,7 +170,11 @@ describe("startup model fallback notice after first-run setup", () => {
 		});
 		spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
-		beginStartupComposer({ terminal: new VirtualTerminal(), version: "test", cache: false });
+		beginStartupComposer({
+			driver: memoryTerminal({ columns: 80, rows: 24 }).options,
+			version: "test",
+			cache: false,
+		});
 		const originalIsTTY = process.stdin.isTTY;
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		const authStorage = await AuthStorage.create(path.join(tmp, "auth.db"));

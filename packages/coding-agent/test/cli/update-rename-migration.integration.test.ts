@@ -28,7 +28,7 @@ import {
 	type ReleaseInfo,
 	type RenameMigrationSteps,
 } from "../../src/cli/update-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../../src/ui/theme/service";
 
 const OLD_PKG = "omp-rename-fixture-old";
 const NEW_PKG = "omp-rename-fixture-new";
@@ -43,7 +43,7 @@ let newDir: string;
 // process-wide log spy so the package-manager scenarios can run concurrently.
 beforeAll(async () => {
 	vi.spyOn(console, "log").mockImplementation(() => {});
-	await initTheme();
+	initTheme();
 	fixtureDir = await TempDir.create("@omp-rename-itest-");
 	({ oldDir, newDir } = await makeFixtures(fixtureDir.path()));
 });

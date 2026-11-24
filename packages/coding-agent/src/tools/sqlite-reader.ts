@@ -1,6 +1,7 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
-import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatBytes } from "@oh-my-pi/pi-utils";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { ToolError } from "./tool-errors";
 
 const SQLITE_MAGIC = new Uint8Array([
 	0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00,

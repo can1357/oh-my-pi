@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { draftComposer } from "../helpers/input-harness";
 
 type Attachments = Pick<SubmittedUserInput, "images" | "imageLinks">;
 
@@ -13,32 +14,11 @@ function createHarness(
 	const handleVibeModeCommand = vi.fn(async (_prompt?: string, _input?: Attachments) => true);
 	const handleGoalModeCommand = vi.fn(async (_prompt?: string, _input?: Attachments) => true);
 	const handleGuidedGoalCommand = vi.fn(async (_prompt?: string, _input?: Attachments) => true);
-	let editorText = "";
-	const editor = {
-		onSubmit: undefined as undefined | ((text: string) => Promise<void>),
-		addToHistory: vi.fn(),
-		getText: () => editorText,
-		getExpandedText: () => editorText,
-		setText(text: string) {
-			editorText = text;
-		},
-		// The stub skips chip collapsing so assertions read the wire-format text.
-		setCollapsedText(text: string) {
-			editorText = text;
-		},
-		pendingImages: [oldImage],
-		pendingImageLinks: ["file:///old.png"] as (string | undefined)[],
-		imageLinks: undefined as (string | undefined)[] | undefined,
-		clearDraft() {
-			editorText = "";
-			this.pendingImages = [];
-			this.pendingImageLinks = [];
-			this.imageLinks = undefined;
-		},
-	};
+	const editor = draftComposer([oldImage], ["file:///old.png"]);
+	vi.spyOn(editor, "addToHistory");
 	const showError = vi.fn();
 	const ctx = {
-		editor,
+		composer: editor,
 		planModeEnabled: false,
 		planModePaused: false,
 		vibeModeEnabled: false,
@@ -63,7 +43,6 @@ function createHarness(
 		},
 		focusedAgentId: undefined,
 		collabGuest: undefined,
-		ui: { requestRender: vi.fn() },
 		compactionQueuedMessages: [],
 		updatePendingMessagesDisplay: vi.fn(),
 		showStatus: vi.fn(),
@@ -146,7 +125,7 @@ describe("mode command attachments", () => {
 		await submission;
 
 		expect(harness.handlePlanModeCommand.mock.calls[0]?.[1]?.images).toHaveLength(1);
-		expect(harness.editor.getText()).toBe("later draft");
+		expect(harness.editor.expandedText()).toBe("later draft");
 		expect(harness.editor.pendingImages).toEqual([laterImage]);
 		expect(harness.editor.pendingImageLinks).toEqual(["file:///later.png"]);
 	});
@@ -164,7 +143,7 @@ describe("mode command attachments", () => {
 		await submission;
 
 		expect(harness.handlePlanModeCommand).toHaveBeenCalled();
-		expect(harness.editor.getText()).toBe("later draft");
+		expect(harness.editor.expandedText()).toBe("later draft");
 		expect(harness.editor.pendingImages).toEqual([laterImage]);
 		expect(harness.editor.pendingImageLinks).toEqual(["file:///later.png"]);
 	});
@@ -176,7 +155,7 @@ describe("mode command attachments", () => {
 		if (!planSubmission) throw new Error("expected editor submit handler");
 
 		await planSubmission;
-		expect(failedPlan.editor.getText()).toBe("/plan inspect this [Image #1]");
+		expect(failedPlan.editor.expandedText()).toBe("/plan inspect this [Image #1]");
 		expect(failedPlan.editor.pendingImages).toHaveLength(1);
 		expect(failedPlan.editor.pendingImageLinks).toEqual(["file:///old.png"]);
 		expect(failedPlan.showError).toHaveBeenCalledWith("plan setup failed");
@@ -192,15 +171,15 @@ describe("mode command attachments", () => {
 		const laterImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
 		harness[handler].mockImplementationOnce(async () => {
 			harness.editor.setText("later [Image #1]");
-			harness.editor.pendingImages = [laterImage];
-			harness.editor.pendingImageLinks = ["file:///later.png"];
+			harness.editor.pendingImages.splice(0, Infinity, laterImage);
+			harness.editor.pendingImageLinks.splice(0, Infinity, "file:///later.png");
 			throw new Error("setup failed");
 		});
 		const submission = harness.editor.onSubmit?.(`${command} inspect this [Image #1]`);
 		if (!submission) throw new Error("expected editor submit handler");
 
 		await submission;
-		expect(harness.editor.getText()).toBe(`${command} inspect this [Image #2]\n\nlater [Image #1]`);
+		expect(harness.editor.expandedText()).toBe(`${command} inspect this [Image #2]\n\nlater [Image #1]`);
 		expect(harness.editor.pendingImages).toHaveLength(2);
 		expect(harness.editor.pendingImages[0]).toBe(laterImage);
 		expect(harness.editor.pendingImageLinks).toEqual(["file:///later.png", "file:///old.png"]);

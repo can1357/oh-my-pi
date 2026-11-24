@@ -7,7 +7,7 @@ import {
 	resolveActiveRepoContext,
 	resolveActiveRepoContextSync,
 } from "@oh-my-pi/pi-coding-agent/utils/active-repo-context";
-import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+import type { ActiveRepoContext } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/host";
 
 const itWithSymlinkPrivilege = process.platform === "win32" ? it.skip : it;
 

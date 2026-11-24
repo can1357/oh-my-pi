@@ -28,8 +28,8 @@ import mnemopiInstructions from "../prompts/system/mnemopi-instructions.md" with
 import type { AgentSession } from "../session/agent-session";
 import { tinyModelClient } from "../tiny/title-client";
 import { unmeteredMessage } from "../utils/title-generator";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { shortenPath } from "../utils/render-utils";
+import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
 import {
 	loadMnemopiConfig,
 	type MnemopiBackendConfig,
