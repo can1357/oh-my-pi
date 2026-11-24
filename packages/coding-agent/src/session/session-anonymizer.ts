@@ -1519,12 +1519,12 @@ export class SessionAnonymizer {
 	}
 
 	/** A retry fallback's cause: the model it left is named like `model`, and its reason can echo a provider error. */
-	#fallbackCause(cause: JsonObject): JsonObject {
+	#fallbackCause(cause: JsonObject, fromTool: boolean): JsonObject {
 		const out: JsonObject = {};
 		for (const key in cause) {
 			const rule = Object.hasOwn(FALLBACK_CAUSE_RULES, key) ? FALLBACK_CAUSE_RULES[key] : undefined;
 			if (rule === undefined) out[this.placeholder(key)] = this.#opaque(cause[key]);
-			else out[key] = this.#field(rule, cause[key], cause, key, false);
+			else out[key] = this.#field(rule, cause[key], cause, key, fromTool);
 		}
 		return out;
 	}
@@ -1555,7 +1555,7 @@ export class SessionAnonymizer {
 			case "judgment":
 				return isObject(value) ? this.#judgmentRecord(value) : this.#opaque(value);
 			case "fallback":
-				return isObject(value) ? this.#fallbackCause(value) : this.#opaque(value);
+				return isObject(value) ? this.#fallbackCause(value, fromTool) : this.#opaque(value);
 			case "name":
 				return this.#field(
 					TOOL_CALL_TYPES[String(parent.type)] === true ? "tool" : "label",
