@@ -12,8 +12,10 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { StatusHud } from "../src/ui/dock";
+import { createModeTerminal, renderRows } from "./helpers/mode-terminal";
 
 const COLUMNS = 40;
 
@@ -24,7 +26,7 @@ describe("InteractiveMode live working label", () => {
 	let mode: InteractiveMode;
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-working-label-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -38,8 +40,15 @@ describe("InteractiveMode live working label", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		Object.defineProperty(mode.ui.terminal, "columns", { get: () => COLUMNS, configurable: true });
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	afterAll(async () => {
@@ -52,12 +61,11 @@ describe("InteractiveMode live working label", () => {
 
 	it("keeps a long live label on one row", () => {
 		const jobs = ["bg_1", "bg_2", "bg_3", "bg_4", "bg_5", "bg_6"];
-		mode.ensureLoadingAnimation();
+		mode.ensureWorkingRow();
 		mode.setWorkingMessage(() => `Waiting for ${jobs.length} background jobs: ${jobs.join(", ")}`);
 
-		const rows = mode.statusContainer
-			.render(COLUMNS)
-			.map(line => Bun.stripANSI(line).trimEnd())
+		const rows = renderRows(() => StatusHud({ model: mode.hud.status }), COLUMNS)
+			.map(line => line.trimEnd())
 			.filter(line => line.length > 0);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]).toContain("Waiting for 6 background jobs");

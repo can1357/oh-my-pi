@@ -1349,3 +1349,29 @@ fn global_replacement_patterns_may_start_with_a_slash() {
 		);
 	}
 }
+
+#[test]
+fn heredoc_continuations_after_operators_are_repaired() {
+	// The first body line fails to parse as a command, the second parses (and
+	// would run): both continuations go, and each `&&` chains past `EOF`.
+	let src = b"cat <<'EOF' && \\\nfix(js): a\nEOF\ncat <<'EOF' && \\\nfeat: b\nEOF\ngit push\n";
+	let fixed = repair_heredoc_continuations(src).unwrap();
+	assert_eq!(
+		core::str::from_utf8(&fixed).unwrap(),
+		"cat <<'EOF' && \nfix(js): a\nEOF\ncat <<'EOF' && \nfeat: b\nEOF\ngit push\n"
+	);
+}
+
+#[test]
+fn heredoc_continuations_that_mean_something_else_are_kept() {
+	for src in [
+		// A command before the body: without the `\` the `|` dangles at the end.
+		&b"cat <<EOF | \\\njq .\n{}\nEOF\n"[..],
+		// Here-document bodies are data.
+		b"cat >x.sh <<'OUT'\ncat <<EOF && \\\necho hi\nEOF\nOUT\n",
+		// An arithmetic shift is not a here-document.
+		b"echo $((1 << 2)) && \\\necho hi\n",
+	] {
+		assert_eq!(repair_heredoc_continuations(src), None, "{}", core::str::from_utf8(src).unwrap());
+	}
+}

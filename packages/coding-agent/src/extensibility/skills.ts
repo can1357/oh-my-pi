@@ -31,10 +31,11 @@ import {
 	registeredPluginRootOf,
 	scanSkillsFromDir,
 } from "../discovery/helpers";
-import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";
+import { substitutePluginRoot } from "../discovery/substitute-plugin-root";
 import type { SkillPromptDetails } from "../session/messages";
 import { expandTilde } from "../tools/path-utils";
 
@@ -60,6 +61,12 @@ export interface Skill {
 	 * every `skill://` resource access must realpath-resolve within it.
 	 */
 	containRoot?: string;
+	/**
+	 * Plugin install path supplying this skill (Claude marketplace plugins).
+	 * `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}` in the skill's Markdown
+	 * body are substituted with it when the body is read (#20165).
+	 */
+	pluginRoot?: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
 }
@@ -277,6 +284,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			...(capSkill._source?.pluginRoot !== undefined && { pluginRoot: capSkill._source.pluginRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		})),
@@ -476,6 +484,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			...(capSkill._source?.pluginRoot !== undefined && { pluginRoot: capSkill._source.pluginRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		};
@@ -519,6 +528,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+					...(capSkill._source?.pluginRoot !== undefined && { pluginRoot: capSkill._source.pluginRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
@@ -602,6 +612,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			...(capSkill._source?.pluginRoot !== undefined && { pluginRoot: capSkill._source.pluginRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		});
@@ -854,11 +865,15 @@ export type SkillInvocationKind = "user" | "autoload";
 export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
 
 /** Read a skill's instruction body before rendering user-provided arguments. */
-export async function loadSkillPromptBody(skill: Pick<Skill, "filePath">): Promise<string> {
+export async function loadSkillPromptBody(skill: Pick<Skill, "filePath" | "pluginRoot">): Promise<string> {
 	const content = await Bun.file(skill.filePath).text();
 	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
 	// diagnostics to the loader, which already parsed this frontmatter.
-	return parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
+	let body = parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
+	// Claude Code parity (#20165): plugin skills resolve ${CLAUDE_PLUGIN_ROOT} /
+	// ${OMP_PLUGIN_ROOT} in the Markdown body when the content is loaded.
+	if (skill.pluginRoot !== undefined) body = substitutePluginRoot(body, skill.pluginRoot);
+	return body;
 }
 
 /** A skill's instruction body and the skill it was read from. */

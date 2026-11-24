@@ -99,6 +99,22 @@ export async function restoreRelayGroups(): Promise<void> {
 }
 
 /**
+ * Take `tabId` out of the relay's group before the relay closes it. Chrome saves every tab group, and closing a saved
+ * group's last tab only closes the group, leaving an "omp" chip in the bookmarks bar per session; ungrouping deletes
+ * it. Tabs in other groups are untouched: ungrouping the last tab of the user's own saved group would delete that one.
+ */
+export function ungroupRelayTab(tabId: number): Promise<void> {
+	return enqueueGroupOp(async () => {
+		const tab = await chrome.tabs.get(tabId).catch(() => null);
+		if (!tab || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) return;
+		const title = await loadRelayGroupTitle();
+		if (!title) return;
+		const group = await chrome.tabGroups.get(tab.groupId).catch(() => null);
+		if (group?.title === title) await chrome.tabs.ungroup(tabId).catch(() => {});
+	});
+}
+
+/**
  * Group a panel conversation's tabs under `title`, into `groupId` when given and still open. Never reuses a group by
  * title, and never the relay's omp group: dissolving that one on disconnect would scatter the conversation.
  */

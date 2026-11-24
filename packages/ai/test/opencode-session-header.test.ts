@@ -872,6 +872,57 @@ describe("session header on the Anthropic transport", () => {
 	});
 });
 
+// #20261: `/btw` and other side turns send their own `:side:` sessionId plus
+// `parentSessionId`; OpenCode routes by `x-opencode-session`, so it must carry
+// the parent's id or the side request lands on a worker without its KV cache.
+describe("side request affinity on the OpenCode session header", () => {
+	const side = { sessionId: "parent:side:1", parentSessionId: "parent" };
+
+	it("routes a side request to the parent conversation on a Go Completions lane", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers));
+			return chatSse();
+		};
+
+		const response = await completeSimple(
+			makeOpenCodeGoCompletionsLaneModel("deepseek-v4.1-flash"),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{ apiKey: "key", ...side, promptCacheKey: "parent", fetch: fetchMock as typeof fetch },
+		);
+
+		expect(response.stopReason).toBe("stop");
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("parent");
+	});
+
+	it("routes a side request to the parent conversation on Go Responses and Zen", () => {
+		for (const model of [makeOpenCodeGoMuseModel("muse-spark-1.3"), makeOpenCodeZenMuseModel()]) {
+			const setup = resolveOpenAIRequestSetup(model, { apiKey: "key", messages: [], ...side });
+			expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("parent");
+		}
+	});
+
+	it("keeps the shared family key over the parent on an opted-in Go lane", () => {
+		const setup = resolveOpenAIRequestSetup(makeOpenCodeGoMuseModel(), {
+			apiKey: "key",
+			messages: [],
+			...side,
+			promptCacheAffinityKey: "parent:task",
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("parent:task");
+	});
+
+	it("routes by the parent on OpenCode Anthropic while the Claude session header keeps the side id", () => {
+		const options = buildAnthropicClientOptions({
+			model: makeOpenCodeGoAnthropicModel(),
+			apiKey: "opencode_test_key",
+			...side,
+		});
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("parent");
+		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("parent:side:1");
+	});
+});
+
 describe("custom provider backend identity on the OpenCode affinity lanes", () => {
 	// Regression (PR #16988): a credential-bearing custom provider declaring
 	// `providerType: "opencode-go"` resolves every Go catalog rule — the

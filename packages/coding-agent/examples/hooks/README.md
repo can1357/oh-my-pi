@@ -24,9 +24,9 @@ cp permission-gate.ts ~/.omp/agent/hooks/pre/
 | `dirty-repo-guard.ts`    | Prevents session changes with uncommitted git changes                          |
 | `auto-commit-on-exit.ts` | Auto-commits on exit using last assistant message for commit message           |
 | `custom-compaction.ts`   | Custom compaction that summarizes entire conversation                          |
-| `qna.ts`                 | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
+| `qna.tsx`                | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
 | `status-line.ts`         | Shows plain-text turn progress in the footer via `ctx.ui.setStatus()`          |
-| `handoff.ts`             | Transfer context to a new focused session via `/handoff <goal>`                |
+| `handoff.tsx`            | Transfer context to a new focused session via `/handoff <goal>`                |
 
 ## Writing Hooks
 

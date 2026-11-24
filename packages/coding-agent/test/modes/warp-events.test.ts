@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import * as terminalCapabilities from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import type {
 	AgentEndEvent,
@@ -18,7 +17,6 @@ import { createWarpEventBridgeExtension, createWarpEventEmitter } from "../../sr
 import { SILENT_ABORT_MARKER, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../src/session/messages";
 import { type ActiveTerminalHarness, startActiveTerminal } from "../helpers/active-terminal";
 
-const originalTerminalId = terminalCapabilities.TERMINAL.id;
 const originalTmux = Bun.env.TMUX;
 const originalProtocolVersion = process.env.WARP_CLI_AGENT_PROTOCOL_VERSION;
 const project = path.basename(process.cwd());
@@ -26,13 +24,11 @@ const OSC_PREFIX = "\x1b]777;notify;warp://cli-agent;";
 
 type RegisteredHandler = (...args: never[]) => void;
 
-function enableWarpProtocol(terminalId = "warp"): void {
-	Object.defineProperty(terminalCapabilities.TERMINAL, "id", { value: terminalId, configurable: true });
+function enableWarpProtocol(): void {
 	process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = "1";
 }
 
 function restoreProtocolEnvironment(): void {
-	Object.defineProperty(terminalCapabilities.TERMINAL, "id", { value: originalTerminalId, configurable: true });
 	if (originalProtocolVersion === undefined) {
 		delete process.env.WARP_CLI_AGENT_PROTOCOL_VERSION;
 	} else {
@@ -194,10 +190,10 @@ describe("Warp CLI-agent events", () => {
 		}
 	});
 
-	it("creates an emitter from protocol version alone even when terminal id is base", () => {
+	it("creates an emitter from protocol version alone, whatever the terminal identity", () => {
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
 		setTmuxSession(false);
-		enableWarpProtocol("base");
+		enableWarpProtocol();
 
 		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
 		expect(emitter).toBeDefined();
@@ -803,10 +799,10 @@ describe("Warp CLI-agent event routing", () => {
 	it.each([
 		["plain", false],
 		["tmux-wrapped", true],
-	] as const)("writes the %s OSC 777 through the active terminal, never straight to stdout", (_form, inTmux) => {
+	] as const)("writes the %s OSC 777 through the active terminal, never straight to stdout", async (_form, inTmux) => {
 		enableWarpProtocol();
 		setTmuxSession(inTmux);
-		harness = startActiveTerminal();
+		harness = await startActiveTerminal();
 		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
 
 		emitter?.emit({ event: "stop" });

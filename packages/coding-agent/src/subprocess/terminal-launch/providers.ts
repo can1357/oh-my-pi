@@ -1,4 +1,4 @@
-import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import type { MultiplexerId } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import { cmuxLaunchProvider } from "./cmux";
 import { herdrLaunchProvider } from "./herdr";
 import { orcaLaunchProvider } from "./orca";
@@ -33,11 +33,11 @@ export const terminalLaunchProviders = {
 	},
 	orca: orcaLaunchProvider,
 } as const satisfies Record<
-	TerminalMultiplexer,
+	MultiplexerId,
 	{ capabilities: SupportedMultiplexerCapabilities | UnsupportedMultiplexerCapabilities }
 >;
 
 /** Canonical multiplexer launch capabilities and presentation metadata, keyed by multiplexer. */
 export const terminalLaunchCapabilities = Object.fromEntries(
 	Object.entries(terminalLaunchProviders).map(([multiplexer, provider]) => [multiplexer, provider.capabilities]),
-) as { [M in TerminalMultiplexer]: (typeof terminalLaunchProviders)[M]["capabilities"] };
+) as { [M in MultiplexerId]: (typeof terminalLaunchProviders)[M]["capabilities"] };

@@ -7,12 +7,12 @@
 - Entry: `packages/coding-agent/src/tools/grep.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/grep.md`
 - Key collaborators:
-   - `packages/tui/src/tools/match-line-format.ts` — model-facing anchor formatting.
+   - `packages/coding-agent/src/tools/match-line-format.ts` — model-facing anchor formatting.
    - `packages/coding-agent/src/tools/path-utils.ts` — path normalization, glob splitting (host paths and internal URLs), result-path joining.
    - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native grep walks and reads through.
    - `packages/coding-agent/src/tools/file-recorder.ts` — file ordering for grouped output.
-   - `packages/tui/src/tools/grouped-file-output.ts` — grouped per-file text layout.
-   - `packages/tui/src/tools/streaming-output.ts` — inline output budgets and final byte truncation.
+   - `packages/coding-agent/src/tools/grouped-file-output.ts` — grouped per-file text layout.
+   - `packages/coding-agent/src/tools/streaming-output.ts` — inline output budgets and final byte truncation.
    - `packages/coding-agent/src/edit/store.ts` — session-scoped native `EditStore` snapshots and seen-line tracking.
    - `packages/coding-agent/src/tools/settings.ts` — default context lines.
    - `packages/natives/native/index.d.ts` — native `grep()` types exposed to TS.
@@ -49,7 +49,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - `displayContent` — TUI-only rendering text with `│` gutters instead of model anchors.
    - `missingPaths` — multi-path entries skipped because their base path did not exist.
    - `binaryMatches` — cwd-relative paths of files skipped as binary during directory or glob scans although their content matches.
-- No-match result text is `No matches found` (`No matches in text files` when only skipped binary files match, `No matches in searched content` when a multiline search limited large files to their first 4MB, or `No more results (<total> files total; skip=<N> is past the end)` when `skip` points past the last file page), optionally followed by skipped missing-path, unreadable-archive, oversized-file, or binary-match notes. The binary-match note names up to five matching binary files. Matching results append the same notes in the closing trailer, and `grepToolRenderer` (`packages/tui/src/tools/grep.ts`) shows a `binary matches` count in both terminal (`renderResult`) and native Tern (`describeResult`) views.
+- No-match result text is `No matches found` (`No matches in text files` when only skipped binary files match, `No matches in searched content` when a multiline search limited large files to their first 4MB, or `No more results (<total> files total; skip=<N> is past the end)` when `skip` points past the last file page), optionally followed by skipped missing-path, unreadable-archive, oversized-file, or binary-match notes. The binary-match note names up to five matching binary files. Matching results append the same notes in the closing trailer, and `grepPresenter` (`packages/coding-agent/src/ui/tools/grep.tsx`) shows a `binary matches` count in both terminal (`renderResult`) and native Tern (`describeResult`) views.
 
 ## Flow
 
@@ -100,10 +100,10 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - caps multi-file output to 20 files per page (`DEFAULT_FILE_LIMIT`), using `skip` as the next file offset;
 - caps matches per file to 10 for multi-file scopes and 50 for single-file scopes, and names the rendered files the cap trimmed in a closing line placed past the byte cap (`More than 10 matches in a.ts; grep keeps the first 10 per file when searching several. Search one file alone for up to 50.`; a single file gets `More than 50 matches; …` with a line-range hint). The page label's total reads `N+` only when native grep stopped at `INTERNAL_TOTAL_CAP`, not when a per-file cap bit;
 - round-robins selected per-file matches so one file does not monopolize the page;
-- sanitizes emitted match and context lines with `sanitizeText()` (`packages/utils/src/sanitize-text.ts`, stripping ANSI escapes, NUL, and other control characters), then formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` (`packages/tui/src/render/render-utils.ts`) for TUI;
+- sanitizes emitted match and context lines with `sanitizeText()` (`packages/utils/src/sanitize-text.ts`, stripping ANSI escapes, NUL, and other control characters), then formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` (`packages/coding-agent/src/utils/render-utils.ts`) for TUI;
 - in hashline mode, calls `getEditStore(session).recordSnapshotFile()` for each eligible rendered file to mint the `#TAG` anchor, then records emitted lines with `recordSeenLinesFromBody()`. Archive entries, immutable external materializations, and immutable URL schemes are skipped; a mutable file-backed URL (`local://`) is snapshotted against its backing host file (`resultSnapshotPath()`). Files too large or unreadable for snapshots fall back to plain line output.
 
-14. Final text is passed through `truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER })`, so the effective cap is the default byte cap from `packages/tui/src/tools/streaming-output.ts`, not the default line cap.
+14. Final text is passed through `truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER })`, so the effective cap is the default byte cap from `packages/coding-agent/src/tools/streaming-output.ts`, not the default line cap.
 15. `toolResult()` attaches text plus limit/truncation metadata.
 
 ## Modes / Variants
@@ -150,8 +150,8 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - File page limit: `20` files (`DEFAULT_FILE_LIMIT` in `packages/coding-agent/src/tools/grep.ts`).
 - Per-file match caps: `10` for multi-file scopes (`MULTI_FILE_PER_FILE_MATCHES`), `50` for single-file scopes (`SINGLE_FILE_MATCHES`).
 - Ordinary native preselection cap: `2000` matches per invocation (`INTERNAL_TOTAL_CAP`). Line-range filters increase the fetch caps before JS filtering.
-- Line truncation: `512` UTF-8 bytes per emitted line content, including the native `...` markers but not the line prefix or `[col N]` suffix (`DEFAULT_MAX_COLUMN` in `packages/tui/src/tools/streaming-output.ts`). Native grep windows a cut match line around the first match the searcher found (re-run over the search buffer from the line's start, as ripgrep's printer does) and reports its `column`; JS reports `linesTruncated`.
-- Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/tui/src/tools/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
+- Line truncation: `512` UTF-8 bytes per emitted line content, including the native `...` markers but not the line prefix or `[col N]` suffix (`DEFAULT_MAX_COLUMN` in `packages/coding-agent/src/tools/streaming-output.ts`). Native grep windows a cut match line around the first match the searcher found (re-run over the search buffer from the line's start, as ripgrep's printer does) and reports its `column`; JS reports `linesTruncated`.
+- Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/tools/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
 - Context defaults: `grep.contextBefore = 0`, `grep.contextAfter = 0` in `packages/coding-agent/src/tools/settings.ts`.
 - Pagination: `skip` is a file-page offset for multi-file scopes. The result text says `Use skip=<N> for the next page` when more files remain.
 - Native directory-scan cache: disabled natively for this tool — `GrepOptions` has no `cache` field; `build_grep_walk_request` hard-codes `.cache(false)` in `crates/natives/src/grep.rs`.

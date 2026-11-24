@@ -1,4 +1,4 @@
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhase } from "../../tools/details/todo";
 import {
 	applyOpsToPhases,
 	getLatestTodoPhasesFromEntries,

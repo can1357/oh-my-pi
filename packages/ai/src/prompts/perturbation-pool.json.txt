@@ -17290,6 +17290,165 @@
 				"Whatever else the assignment needs can be done now; NEVER start `sleep` jobs in order to wait longer.",
 				"Anything else needed by the assignment can be done now; NEVER start `sleep` jobs so as to wait longer."
 			]
+		},
+		{
+			"source": "Read-only local history: recent projects, past sessions with recaps, full-text session search, prompt history, and tool-call activity (calls, regex over transcripts, counts, raw records).",
+			"origin": "tools/archive.md",
+			"variants": [
+				"Local history, read-only: recent projects, past sessions with recaps, full-text session search, prompt history, plus tool-call activity (calls, regex over transcripts, counts, raw records).",
+				"Read-only local history covering recent projects, past sessions with recaps, full-text session search, prompt history, and tool-call activity (calls, regex over transcripts, counts, raw records)."
+			]
+		},
+		{
+			"source": "- You SHOULD use it when the user refers to earlier work (\"what did we do yesterday\", \"the prompt where I asked about X\", \"pick up the auth work\"), asks for recent projects or sessions, or asks how tools behaved across sessions.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- You SHOULD use it when the user refers to earlier work (what did we do yesterday, the prompt where I asked about X, pick up the auth work), asks for recent projects or sessions, or asks how tools behaved across sessions.",
+				"- You SHOULD use it when the user mentions earlier work (what did we do yesterday, the prompt where I asked about X, pick up the auth work), requests recent projects or sessions, or asks how tools behaved across sessions.",
+				"- You SHOULD use it when the user refers to previous work (what did we do yesterday, the prompt where I asked about X, pick up the auth work), asks about recent projects or sessions, or asks how tools behaved across sessions."
+			]
+		},
+		{
+			"source": "- Scope: `project` omitted → current project; `\"*\"` → every project; otherwise a project path (`~` and relative paths resolve against the cwd). `limit`: 1–500, default 20; `calls`, `grep`, `messages` allow up to 10000.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- Scope: with `project` omitted → current project; `\"*\"` → every project; else a project path (`~` and relative paths resolve against the cwd). `limit`: 1–500, default 20; `calls`, `grep`, `messages` permit up to 10000.",
+				"- Scope: omitting `project` → current project; `\"*\"` → every project; otherwise a project path (`~` and relative paths resolve against the cwd). `limit`: 1–500, default 20; `calls`, `grep`, `messages` allow up to 10000."
+			]
+		},
+		{
+			"source": "- Time window: `since` (inclusive) and `until` (exclusive) on every method but `session`. Each is an age before now (`\"90m\"`, `\"36h\"`, `\"8d\"`, `\"2w\"`), an ISO date (`\"2026-11-16\"`, local midnight), an ISO date-time (local unless it names a zone), a JS `Date`, or a Python `datetime`.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- Time window: `since` (inclusive) and `until` (exclusive) on every method except `session`. Each is an age before now (`\"90m\"`, `\"36h\"`, `\"8d\"`, `\"2w\"`), an ISO date (`\"2026-11-16\"`, local midnight), an ISO date-time (local unless it names a zone), a JS `Date`, or a Python `datetime`.",
+				"- Time window: `since` (inclusive) and `until` (exclusive) on every method but `session`. Each can be an age before now (`\"90m\"`, `\"36h\"`, `\"8d\"`, `\"2w\"`), an ISO date (`\"2026-11-16\"`, local midnight), an ISO date-time (local unless it names a zone), a JS `Date`, or a Python `datetime`.",
+				"- Time window: `since` (inclusive) and `until` (exclusive) on every method but `session`. Every one is an age before now (`\"90m\"`, `\"36h\"`, `\"8d\"`, `\"2w\"`), an ISO date (`\"2026-11-16\"`, local midnight), an ISO date-time (local unless it names a zone), a JS `Date`, or a Python `datetime`."
+			]
+		},
+		{
+			"source": "- `projects({since, until, limit})` → `[{path, sessions, lastActive, latest}]` by last activity; `latest` is the project's newest session.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `projects({since, until, limit})` → `[{path, sessions, lastActive, latest}]` ordered by last activity; `latest` is the project's newest session.",
+				"- `projects({since, until, limit})` → `[{path, sessions, lastActive, latest}]` sorted by last activity; `latest` is that project's newest session."
+			]
+		},
+		{
+			"source": "- `sessions({project, since, until, limit})` → `[{id, file, project, title, created, modified, messages, status, recap}]`, newest first; 0-turn empties skipped; `recap` is the newest one. A window keeps sessions active in it.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `sessions({project, since, until, limit})` → `[{id, file, project, title, created, modified, messages, status, recap}]`, newest first; empty 0-turn ones skipped; `recap` is the newest. A window keeps sessions active in it.",
+				"- `sessions({project, since, until, limit})` → `[{id, file, project, title, created, modified, messages, status, recap}]`, newest first; 0-turn empties are skipped; `recap` is the newest. A window retains sessions active in it.",
+				"- `sessions({project, since, until, limit})` → `[{id, file, project, title, created, modified, messages, status, recap}]`, newest first; skipped are 0-turn empties; `recap` is the newest one. A window keeps sessions active in it."
+			]
+		},
+		{
+			"source": "- `search(query, {project, since, until, limit})` → sessions whose title, a recap, or a user or assistant message matches, newest first: `sessions` fields plus `matches: [{source, text, at}]` (`source`: `\"title\"`, `\"recap\"`, `\"user\"`, or `\"assistant\"`; a message's `text` is a snippet around the hit; `at` is `null` for titles). Covers all of history, not only the newest `limit` sessions.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `search(query, {project, since, until, limit})` → sessions where a title, a recap, or a user or assistant message matches, newest first: `sessions` fields plus `matches: [{source, text, at}]` (`source`: `\"title\"`, `\"recap\"`, `\"user\"`, or `\"assistant\"`; a message's `text` is a snippet around the hit; `at` is `null` for titles). Covers all of history, not only the newest `limit` sessions.",
+				"- `search(query, {project, since, until, limit})` → sessions whose title, recap, or user or assistant message matches, newest first: `sessions` fields plus `matches: [{source, text, at}]` (`source`: `\"title\"`, `\"recap\"`, `\"user\"`, or `\"assistant\"`; a message's `text` is a snippet around the hit; for titles `at` is `null`). Covers all of history, not only the newest `limit` sessions.",
+				"- `search(query, {project, since, until, limit})` → sessions with a matching title, recap, or user or assistant message, newest first: `sessions` fields plus `matches: [{source, text, at}]` (`source`: `\"title\"`, `\"recap\"`, `\"user\"`, or `\"assistant\"`; a message's `text` is a snippet around the hit; `at` is `null` for titles). Covers all of history, not only the newest `limit` sessions."
+			]
+		},
+		{
+			"source": "- `prompts({query, project, since, until, limit})` → `[{text, at, project, session, uses}]`, newest first; `query` keeps matching prompts, including ones with no session.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `prompts({query, project, since, until, limit})` → `[{text, at, project, session, uses}]`, newest first; `query` retains matching prompts, including ones lacking a session.",
+				"- `prompts({query, project, since, until, limit})` → `[{text, at, project, session, uses}]`, newest first; `query` keeps prompts that match, including ones with no session.",
+				"- `prompts({query, project, since, until, limit})` → `[{text, at, project, session, uses}]`, newest first; `query` keeps matching prompts, even those with no session."
+			]
+		},
+		{
+			"source": "- `recaps({project, since, until, limit})` → `[{text, at, session, project}]`, newest first.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `recaps({project, since, until, limit})` → `[{text, at, session, project}]`, ordered newest first.",
+				"- `recaps({project, since, until, limit})` → `[{text, at, session, project}]`, with newest first.",
+				"- `recaps({project, since, until, limit})` → `[{text, at, session, project}]`, newest at the top."
+			]
+		},
+		{
+			"source": "- `calls({tool, match, result, error, flags, project, subagents, since, until, limit})` → tool calls, newest first: `[{session, agent, project, file, at, entry, callId, tool, args, result, resultChars, isError, reasoning, model, version}]`. `tool`: name or list; `match`: regex over every string inside the arguments; `result`: regex over the result text; `error: true` keeps failed calls, `false` succeeded ones. `reasoning`: last 4,000 characters of the thinking and reply before the call; `version`: omp version that ran it.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `calls({tool, match, result, error, flags, project, subagents, since, until, limit})` → tool calls, newest first: `[{session, agent, project, file, at, entry, callId, tool, args, result, resultChars, isError, reasoning, model, version}]`. `tool`: name or list; `match`: regex over every string inside the arguments; `result`: regex over the result text; `error: true` keeps failed calls, `false` keeps succeeded ones. `reasoning`: last 4,000 characters of thinking and reply before the call; `version`: omp version that ran it.",
+				"- `calls({tool, match, result, error, flags, project, subagents, since, until, limit})` → tool calls, newest first: `[{session, agent, project, file, at, entry, callId, tool, args, result, resultChars, isError, reasoning, model, version}]`. `tool`: name or list; `match`: regex over every string within the arguments; `result`: regex over the result text; `error: true` keeps failed calls, `false` succeeded ones. `reasoning`: last 4,000 characters of the thinking and reply before the call; `version`: omp version that ran it.",
+				"- `calls({tool, match, result, error, flags, project, subagents, since, until, limit})` → tool calls, newest first: `[{session, agent, project, file, at, entry, callId, tool, args, result, resultChars, isError, reasoning, model, version}]`. `tool`: name or list; `match`: regex over every string inside the arguments; `result`: regex over the result text; `error: true` keeps failed calls, `false` succeeded ones. `reasoning`: the last 4,000 characters of thinking and reply before the call; `version`: omp version that ran it."
+			]
+		},
+		{
+			"source": "- `grep(pattern, {sources, tool, flags, project, subagents, since, until, limit})` → regex matches, newest first: `[{session, agent, project, file, at, entry, source, tool, callId, text, match}]`. `sources` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"args\"`, `\"result\"`; `tool` narrows `args`/`result`; `text` is a snippet around `match`.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `grep(pattern, {sources, tool, flags, project, subagents, since, until, limit})` → regex matches, newest first: `[{session, agent, project, file, at, entry, source, tool, callId, text, match}]`. `sources` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"args\"`, `\"result\"`; `tool` narrows `args`/`result`; `text` is the snippet around `match`.",
+				"- `grep(pattern, {sources, tool, flags, project, subagents, since, until, limit})` → regex matches, newest first: `[{session, agent, project, file, at, entry, source, tool, callId, text, match}]`. `sources` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"args\"`, `\"result\"`; `tool` narrows down `args`/`result`; `text` is a snippet around `match`.",
+				"- `grep(pattern, {sources, tool, flags, project, subagents, since, until, limit})` → regex matches, newest first: `[{session, agent, project, file, at, entry, source, tool, callId, text, match}]`. `sources` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"args\"`, `\"result\"`; `tool` narrows `args`/`result`; a snippet around `match` is `text`."
+			]
+		},
+		{
+			"source": "- `stats({by, tool, match, result, error, flags, project, subagents, since, until, limit})` → `[{key, calls, errors}]` for calls matching the `calls` filters; `by` (default `\"tool\"`): `\"tool\"`, `\"day\"` (local `YYYY-MM-DD`, newest first), `\"model\"`, `\"version\"`, `\"project\"`, `\"session\"`. Others sort by most calls.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `stats({by, tool, match, result, error, flags, project, subagents, since, until, limit})` → `[{key, calls, errors}]` for calls that match the `calls` filters; `by` (default `\"tool\"`): `\"tool\"`, `\"day\"` (local `YYYY-MM-DD`, newest first), `\"model\"`, `\"version\"`, `\"project\"`, `\"session\"`. The others sort by most calls.",
+				"- `stats({by, tool, match, result, error, flags, project, subagents, since, until, limit})` → `[{key, calls, errors}]` for calls matching the `calls` filters; `by` (default `\"tool\"`): `\"tool\"`, `\"day\"` (local `YYYY-MM-DD`, newest first), `\"model\"`, `\"version\"`, `\"project\"`, `\"session\"`. All others sort by most calls.",
+				"- `stats({by, tool, match, result, error, flags, project, subagents, since, until, limit})` → `[{key, calls, errors}]` for calls matching the `calls` filters; `by` (default `\"tool\"`): `\"tool\"`, `\"day\"` (local `YYYY-MM-DD`, newest first), `\"model\"`, `\"version\"`, `\"project\"`, `\"session\"`. Others are sorted by most calls."
+			]
+		},
+		{
+			"source": "- `messages(id, {kinds, since, until, limit})` → the newest `limit` records of one transcript, whole, oldest first: `[{entry, at, kind, text, tool, callId, args, isError}]`. `kinds` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"call\"`, `\"result\"`. `id`: session id prefix or any transcript `file`, subagent ones included.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `messages(id, {kinds, since, until, limit})` → the newest `limit` records of a single transcript, whole, oldest first: `[{entry, at, kind, text, tool, callId, args, isError}]`. `kinds` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"call\"`, `\"result\"`. `id`: session id prefix or any transcript `file`, subagent ones included.",
+				"- `messages(id, {kinds, since, until, limit})` → the newest `limit` records of one transcript, in full, oldest first: `[{entry, at, kind, text, tool, callId, args, isError}]`. `kinds` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"call\"`, `\"result\"`. `id`: session id prefix or any transcript `file`, subagent ones included.",
+				"- `messages(id, {kinds, since, until, limit})` → the newest `limit` records of one transcript, whole, oldest first: `[{entry, at, kind, text, tool, callId, args, isError}]`. `kinds` (default all): `\"user\"`, `\"assistant\"`, `\"thinking\"`, `\"call\"`, `\"result\"`. `id`: a session id prefix or any transcript `file`, subagent ones included."
+			]
+		},
+		{
+			"source": "- Regex (`match`, `result`, `pattern`): the `grep` tool's dialect (Rust regex; look-around and back-references work); `^`/`$` anchor at lines. `flags`: `i` ignores case, `s` lets `.` cross newlines. A JS `RegExp` or Python compiled pattern works too; its flags merge into `flags`.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- Regex (`match`, `result`, `pattern`): the `grep` tool's dialect (Rust regex; look-around and back-references work); `^`/`$` anchor at lines. `flags`: `i` ignores case, `s` allows `.` across newlines. A JS `RegExp` or Python compiled pattern works too; its flags merge into `flags`.",
+				"- Regex (`match`, `result`, `pattern`): the `grep` tool's dialect (Rust regex; look-around and back-references work); `^`/`$` anchor at lines. `flags`: `i` ignores case, `s` lets `.` cross newlines. A JS `RegExp` or Python compiled pattern also works; its flags merge into `flags`.",
+				"- Regex (`match`, `result`, `pattern`): the `grep` tool's dialect (Rust regex; look-around and back-references work); `^`/`$` anchor at lines. `flags`: `i` ignores case, `s` lets `.` cross newlines. A JS `RegExp` or compiled Python pattern works too; its flags merge into `flags`."
+			]
+		},
+		{
+			"source": "- `subagents: true` adds the subagent transcripts of every session in scope; records name them in `agent` (`\"Scout\"`, `\"Scout/Helper\"`). Default off: they triple the bytes read.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `subagents: true` adds subagent transcripts for every session in scope; records name them in `agent` (`\"Scout\"`, `\"Scout/Helper\"`). Off by default: they triple the bytes read.",
+				"- `subagents: true` adds every in-scope session's subagent transcripts; records name them in `agent` (`\"Scout\"`, `\"Scout/Helper\"`). Default off: they triple the bytes read.",
+				"- `subagents: true` adds the subagent transcripts of each session in scope; records name them in `agent` (`\"Scout\"`, `\"Scout/Helper\"`). Default off: they triple the bytes read."
+			]
+		},
+		{
+			"source": "- `calls`, `grep`, and `stats` read transcripts from disk; a wide window over every project takes seconds. Narrow `since` and `project` first.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- `calls`, `grep`, and `stats` read transcripts from disk; a wide window across every project takes seconds. Narrow `since` and `project` first.",
+				"- `calls`, `grep`, and `stats` read transcripts from disk; a wide window over all projects takes seconds. Narrow `since` and `project` first.",
+				"- `calls`, `grep`, and `stats` read transcripts off disk; a wide window over every project takes seconds. Narrow `since` and `project` first."
+			]
+		},
+		{
+			"source": "- Filters see whole texts; returned `calls` records cut a result over 1,000 characters to its first and last 500, and an argument string over 4,000 to its first and last 2,000. `messages` returns records whole.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- Filters see whole texts; returned `calls` records trim a result over 1,000 characters to its first and last 500, and an argument string over 4,000 to its first and last 2,000. `messages` returns records whole.",
+				"- Filters see whole texts; returned `calls` records cut a result longer than 1,000 characters to its first and last 500, and an argument string longer than 4,000 to its first and last 2,000. `messages` returns records whole.",
+				"- Filters see whole texts; returned `calls` records cut any result over 1,000 characters to its first and last 500, and any argument string over 4,000 to its first and last 2,000. `messages` returns records whole."
+			]
+		},
+		{
+			"source": "- You MUST use `calls`, `grep`, `stats`, or `messages` for thinking, tool calls, and tool output; NEVER parse session JSONL files yourself.",
+			"origin": "tools/archive.md",
+			"variants": [
+				"- For thinking, tool calls, and tool output, you MUST use `calls`, `grep`, `stats`, or `messages`; NEVER parse session JSONL files yourself.",
+				"- You MUST use `calls`, `grep`, `stats`, or `messages` for thinking, tool calls, and tool output; NEVER parse the session JSONL files yourself.",
+				"- You MUST use `calls`, `grep`, `stats`, or `messages` for thinking, tool calls, and tool output; you should NEVER parse session JSONL files yourself."
+			]
 		}
 	]
 }
