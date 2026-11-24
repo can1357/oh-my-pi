@@ -8,6 +8,7 @@ fix/force-cli-verify
 relay/zys-10234-3ff86e7ac4
 fix/chat-completions-claude-demoted-reasoning
 chore/fork-safe-compat-01a20e96
+fix/extension-dependency-refresh
 feat/composer-draft-stash
 fix/typed-text-import-declarations
 perf/startup-audit
