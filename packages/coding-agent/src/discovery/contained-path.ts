@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 /** Lexical containment: `target` is `base` itself or a descendant of it. */
-function isContained(base: string, target: string): boolean {
+export function isContained(base: string, target: string): boolean {
 	const relative = path.relative(base, target);
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }

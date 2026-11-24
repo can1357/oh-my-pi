@@ -17,6 +17,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
+import { isContained, realpathIfExists } from "./contained-path";
 import {
 	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
@@ -132,9 +133,18 @@ async function readMarketplaceRootManifest(root: ClaudePluginRoot): Promise<Clau
 	return null;
 }
 
-function isWithinPluginRoot(rootPath: string, targetPath: string): boolean {
-	const relative = path.relative(rootPath, targetPath);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+/**
+ * Whether a path a plugin manifest names stays inside the plugin root. The lexical
+ * check runs first. When the target exists, its symlinks are resolved and the real
+ * target must sit under the real root, so a link inside the root that points outside
+ * it is refused. A missing target has nothing to read and passes.
+ */
+async function isWithinPluginRoot(rootPath: string, targetPath: string): Promise<boolean> {
+	if (!isContained(rootPath, targetPath)) return false;
+	const realTarget = await realpathIfExists(targetPath);
+	if (realTarget === null) return true;
+	const realRoot = (await realpathIfExists(rootPath)) ?? rootPath;
+	return isContained(realRoot, realTarget);
 }
 
 /**
@@ -181,20 +191,26 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 		}
 	}
 
+	const outsideFallbackWarning = `[claude-plugins] Ignoring ${options.fallback} directory outside plugin root for ${root.id}`;
 	if (configured.length === 0) {
-		return { dirs: [fallbackDir], warnings: [] };
+		if (await isWithinPluginRoot(root.path, fallbackDir)) return { dirs: [fallbackDir], warnings: [] };
+		return { dirs: [], warnings: [outsideFallbackWarning] };
 	}
 
 	const seen = new Set<string>();
 	const dirs: string[] = [];
 	const warnings: string[] = [];
 	if (options.includeFallback && !options.marketplaceRootManifest) {
-		seen.add(fallbackDir);
-		dirs.push(fallbackDir);
+		if (await isWithinPluginRoot(root.path, fallbackDir)) {
+			seen.add(fallbackDir);
+			dirs.push(fallbackDir);
+		} else {
+			warnings.push(outsideFallbackWarning);
+		}
 	}
 	for (const { entryPath, key } of configured) {
 		const resolved = path.resolve(root.path, entryPath);
-		if (!isWithinPluginRoot(root.path, resolved)) {
+		if (!(await isWithinPluginRoot(root.path, resolved))) {
 			warnings.push(
 				`[claude-plugins] Ignoring ${String(key)} path outside plugin root for ${root.id}: ${entryPath}`,
 			);
@@ -519,7 +535,7 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 			const configured = pointer.trim();
 			if (configured.length === 0) continue;
 			const resolved = path.resolve(root.path, configured);
-			if (!isWithinPluginRoot(root.path, resolved)) {
+			if (!(await isWithinPluginRoot(root.path, resolved))) {
 				return {
 					path: null,
 					inlineServers: null,
