@@ -51,6 +51,7 @@
 - The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
 
 ### Fixed
+- Fixed a session that restored a web-search model (`web/exa`) and failed on its next turn with `Unhandled API in mapOptionsForApi: web-search`; it now restores its default model ([#17314](https://github.com/can1357/oh-my-pi/issues/17314), [#20383](https://github.com/can1357/oh-my-pi/pull/20383) by [@JamieJ5926](https://github.com/JamieJ5926))
 - `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
 - Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
