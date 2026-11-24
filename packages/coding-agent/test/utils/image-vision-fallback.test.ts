@@ -1,13 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Api, AssistantMessage, completeSimple, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Context, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	ImageDescriptions,
 	type DescribeAttachedImagesDeps,
 	describeAttachedImagesForTextModel,
 } from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
@@ -18,6 +19,8 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 // 1x1 transparent PNG.
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+// 1x1 red PNG: a second, distinct image.
+const RED_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=";
 
 const visionModel: Model<"openai-responses"> = buildModel({
 	id: "gpt-4o",
@@ -133,11 +136,13 @@ describe("describeAttachedImagesForTextModel", () => {
 		}) as typeof completeSimple;
 		const costGate = new CostGate(Settings.isolated({ "session.maxCost": 1 }), 0, () => {});
 		const deps = { ...makeDeps(testDir, [textModel, visionModel], billed), costGate };
-		const image = { type: "image" as const, data: TINY_PNG_BASE64, mimeType: "image/png" };
-
-		await describeAttachedImagesForTextModel([image], deps);
+		await describeAttachedImagesForTextModel([{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }], deps);
 		expect(costGate.spent).toBe(1.2);
-		const capped = await describeAttachedImagesForTextModel([image], deps);
+		// A different image: the first one's saved description would be reused without a request.
+		const capped = await describeAttachedImagesForTextModel(
+			[{ type: "image", data: RED_PNG_BASE64, mimeType: "image/png" }],
+			deps,
+		);
 
 		expect(stub.calls).toHaveLength(1);
 		expect(capped[0]!.text).not.toContain("red balloon");
@@ -293,5 +298,266 @@ describe("describeAttachedImagesForTextModel", () => {
 		expect(stub.calls).toHaveLength(0);
 		expect(blocks).toHaveLength(1);
 		expect(blocks[0]!.text).toContain("No vision-capable model");
+	});
+});
+
+describe("ImageDescriptions", () => {
+	let testDir: string;
+
+	beforeEach(async () => {
+		testDir = await fs.mkdtemp(path.join(os.tmpdir(), "vision-transform-wire-"));
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await removeWithRetries(testDir);
+	});
+
+	function makeProxyModel(compat: ModelSpec["compat"]): Model<Api> {
+		return buildModel({
+			id: "deepseek-v4-flash",
+			name: "deepseek-v4-flash",
+			api: "openai-completions",
+			provider: "myproxy",
+			baseUrl: "https://proxy.example.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+			compat,
+		} as ModelSpec);
+	}
+
+	it("falls back for a wire-stripped model that declares image input, not for an opted-out one", async () => {
+		const stub = makeCompleteStub("should not be used");
+		const { transform } = new ImageDescriptions(() => makeDeps(testDir, [], stub.fn));
+		const context: Context = {
+			systemPrompt: [],
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "what is this?" },
+						{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
+					],
+					timestamp: 1,
+				},
+			],
+		};
+
+		const stripped = await transform(context, makeProxyModel({ stripImageInput: true }));
+		expect(stripped.messages[0]?.content).toEqual([
+			{ type: "text", text: "what is this?" },
+			{ type: "text", text: expect.stringContaining("No vision-capable model") },
+		]);
+
+		const optedOut = await transform(context, makeProxyModel({ stripImageInput: false }));
+		expect(optedOut).toBe(context);
+		expect(stub.calls).toHaveLength(0);
+	});
+
+	function imageContext(): Context {
+		return {
+			systemPrompt: [],
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "what is this?" },
+						{ type: "image", data: RED_PNG_BASE64, mimeType: "image/png" },
+					],
+					timestamp: 1,
+				},
+			],
+		};
+	}
+
+	it("describes an image once, for later requests and for a resumed session", async () => {
+		const stub = makeCompleteStub("A red pixel.");
+		const deps = () => makeDeps(testDir, [textModel, visionModel], stub.fn);
+
+		const first = await new ImageDescriptions(deps).transform(imageContext(), textModel);
+		const { transform } = new ImageDescriptions(deps);
+		await transform(imageContext(), textModel);
+		const resumed = await transform(imageContext(), textModel);
+
+		expect(JSON.stringify(first.messages)).toContain("A red pixel.");
+		expect(JSON.stringify(resumed.messages)).toContain("A red pixel.");
+		expect(JSON.stringify(resumed.messages)).not.toContain('"type":"image"');
+		expect(stub.calls).toHaveLength(1);
+	});
+
+	it("leaves summary archive frames and tool-result images to the provider", async () => {
+		const stub = makeCompleteStub("should not be used");
+		const { transform } = new ImageDescriptions(() => makeDeps(testDir, [textModel, visionModel], stub.fn));
+		const image = { type: "image" as const, data: RED_PNG_BASE64, mimeType: "image/png" };
+		const context: Context = {
+			systemPrompt: [],
+			messages: [
+				{ role: "user", content: [image], historyRewriteAt: 1, timestamp: 1 },
+				{
+					role: "toolResult",
+					toolCallId: "call",
+					toolName: "read",
+					content: [image],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		};
+
+		expect(await transform(context, textModel)).toBe(context);
+		expect(stub.calls).toHaveLength(0);
+	});
+
+	it("asks again after a failed description, once the retry delay has passed", async () => {
+		let fail = true;
+		const stub = makeCompleteStub("A red pixel.");
+		const flaky = (async (...args: Parameters<typeof completeSimple>) => {
+			const message = await stub.fn(...args);
+			return fail ? { ...message, stopReason: "error" as const } : message;
+		}) as typeof completeSimple;
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { transform } = new ImageDescriptions(() => makeDeps(testDir, [textModel, visionModel], flaky));
+
+		const failed = await transform(imageContext(), textModel);
+		fail = false;
+		const meanwhile = await transform(imageContext(), textModel);
+		now += 61_000;
+		const retried = await transform(imageContext(), textModel);
+
+		expect(JSON.stringify(failed.messages)).toContain("Image description unavailable");
+		expect(JSON.stringify(meanwhile.messages)).toContain("Image description unavailable");
+		expect(JSON.stringify(retried.messages)).toContain("A red pixel.");
+		expect(stub.calls).toHaveLength(2);
+	});
+
+	it("describes an image once a vision model becomes available, not before", async () => {
+		const stub = makeCompleteStub("A red pixel.");
+		let available: Model<Api>[] = [textModel];
+		const { transform } = new ImageDescriptions(() => makeDeps(testDir, available, stub.fn));
+
+		const unavailable = await transform(imageContext(), textModel);
+		await transform(imageContext(), textModel);
+		available = [textModel, visionModel];
+		const described = await transform(imageContext(), textModel);
+
+		expect(JSON.stringify(unavailable.messages)).toContain("No vision-capable model");
+		expect(JSON.stringify(described.messages)).toContain("A red pixel.");
+		expect(stub.calls).toHaveLength(1);
+	});
+
+	it("keeps at most four vision requests in flight", async () => {
+		const stub = makeCompleteStub("A pixel.");
+		let inFlight = 0;
+		let peak = 0;
+		// Requests hold until four are in flight, so an uncapped run would start a fifth meanwhile.
+		const full = Promise.withResolvers<void>();
+		const counted = (async (...args: Parameters<typeof completeSimple>) => {
+			peak = Math.max(peak, ++inFlight);
+			if (inFlight === 4) full.resolve();
+			await full.promise;
+			inFlight--;
+			return stub.fn(...args);
+		}) as typeof completeSimple;
+		const { transform } = new ImageDescriptions(() => makeDeps(testDir, [textModel, visionModel], counted));
+		const images = Array.from({ length: 9 }, (_, index) => ({
+			type: "image" as const,
+			data: Buffer.from(`image ${index}`).toString("base64"),
+			mimeType: "image/png",
+		}));
+
+		const described = await transform(
+			{ systemPrompt: [], messages: [{ role: "user", content: images, timestamp: 1 }] },
+			textModel,
+		);
+
+		expect(JSON.stringify(described.messages)).not.toContain('"type":"image"');
+		expect(stub.calls).toHaveLength(9);
+		expect(peak).toBe(4);
+	});
+
+	it("describes the newest images first, so a history backlog cannot delay the current prompt's", async () => {
+		const asked: string[] = [];
+		const stub = makeCompleteStub("A pixel.");
+		const recording = (async (model, context, options) => {
+			const image = context.messages[0]?.content;
+			if (Array.isArray(image) && image[0]?.type === "image") asked.push(image[0].data);
+			return stub.fn(model, context, options);
+		}) as typeof completeSimple;
+		const { transform } = new ImageDescriptions(() => makeDeps(testDir, [textModel, visionModel], recording));
+		const image = (label: string) => ({
+			type: "image" as const,
+			data: Buffer.from(label).toString("base64"),
+			mimeType: "image/png",
+		});
+		const history = Array.from({ length: 8 }, (_, index) => image(`history ${index}`));
+		const current = image("current prompt");
+
+		await transform(
+			{
+				systemPrompt: [],
+				messages: [
+					{ role: "user", content: history, timestamp: 1 },
+					{ role: "user", content: [{ type: "text", text: "what is this?" }, current], timestamp: 2 },
+				],
+			},
+			textModel,
+		);
+
+		expect(asked).toHaveLength(9);
+		expect(asked.slice(0, 4)).toContain(current.data);
+	});
+
+	it("stops asking a vision model that is timing out, leaving the rest for later", async () => {
+		let requests = 0;
+		const hang = (async (_model, _context, options) => {
+			requests++;
+			const { promise, reject } = Promise.withResolvers<never>();
+			options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+			return promise;
+		}) as typeof completeSimple;
+		// A real, short timeout: the request timeout is an AbortSignal.timeout, which fake timers do not drive.
+		const { transform } = new ImageDescriptions(() => ({
+			...makeDeps(testDir, [textModel, visionModel], hang),
+			timeoutMs: 30,
+		}));
+		const images = Array.from({ length: 9 }, (_, index) => ({
+			type: "image" as const,
+			data: Buffer.from(`image ${index}`).toString("base64"),
+			mimeType: "image/png",
+		}));
+
+		const result = await transform(
+			{ systemPrompt: [], messages: [{ role: "user", content: images, timestamp: 1 }] },
+			textModel,
+		);
+
+		expect(requests).toBe(4);
+		const content = JSON.stringify(result.messages);
+		expect(content.match(/Image description unavailable/g)).toHaveLength(4);
+		expect(content.match(/"type":"image"/g)).toHaveLength(5);
+	});
+
+	it("finishes a description an aborted request started, for the next request", async () => {
+		const stub = makeCompleteStub("A red pixel.");
+		const release = Promise.withResolvers<void>();
+		const held = (async (...args: Parameters<typeof completeSimple>) => {
+			await release.promise;
+			return stub.fn(...args);
+		}) as typeof completeSimple;
+		const { transform } = new ImageDescriptions(() => makeDeps(testDir, [textModel, visionModel], held));
+		const controller = new AbortController();
+
+		const aborted = transform(imageContext(), textModel, controller.signal);
+		controller.abort();
+		await expect(aborted).rejects.toThrow();
+		release.resolve();
+		const next = await transform(imageContext(), textModel);
+
+		expect(JSON.stringify(next.messages)).toContain("A red pixel.");
+		expect(stub.calls).toHaveLength(1);
 	});
 });
