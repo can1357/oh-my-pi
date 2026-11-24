@@ -18,7 +18,7 @@ import * as review from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands
 import { createResolvedReviewTarget } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/target";
 import type { SendUserMessageOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../../../src/ui/theme/service";
 
 const DIFF = `diff --git a/src/value.ts b/src/value.ts
 --- a/src/value.ts
@@ -65,7 +65,7 @@ function createContext(
 }
 
 beforeAll(async () => {
-	await initTheme();
+	initTheme();
 });
 
 afterEach(() => {

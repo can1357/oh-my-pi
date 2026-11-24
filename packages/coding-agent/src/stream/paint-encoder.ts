@@ -1,19 +1,36 @@
 /**
- * TUI paint → stream screen frames.
+ * Presented terminal frames → stream screen frames.
  *
  * Both consumers of a session's screen — the live `omp stream` publisher and
- * the `/record` recorder — observe `TuiPaint`s and need the same thing out of
+ * the `/record` recorder — observe the frames the terminal renderer presents
+ * ({@link StreamFrameSource}) and need the same thing out of
  * them: rows reduced to the stream-safe ANSI subset, secrets redacted, and the
  * viewport expressed as full snapshots or row patches against what the
  * consumer last emitted. {@link StreamPaintEncoder} owns that pipeline;
  * callers only decide when to drain it and where the frames go.
  */
 import { STREAM_HISTORY_LIMIT, type StreamRow } from "@oh-my-pi/pi-wire";
-import type { TuiPaint } from "@oh-my-pi/pi-tui";
+import type { PresentedFrame } from "@oh-my-pi/pi-tui";
 import type { StreamScreenFrame } from "./protocol";
 import type { StreamRedactor } from "./redactor";
 
 const IMAGE_PLACEHOLDER = "\u{10eeee}";
+
+/** Where a session's presented frames come from (the interactive mode's terminal renderer). */
+export interface StreamFrameSource {
+	/** The terminal's size now. */
+	size(): { readonly columns: number; readonly rows: number };
+	/** Observe every presented frame; returns the removal. */
+	onFrame(listener: (frame: PresentedFrame) => void): () => void;
+	/** The last frame presented (its viewport seeds a new observer), if any. */
+	current(): PresentedFrame | undefined;
+}
+
+/** The last frame of `source` as a seed: its screen, without history it already reported. */
+export function seedFrame(source: StreamFrameSource): PresentedFrame | undefined {
+	const frame = source.current();
+	return frame && { ...frame, history: [], reset: false };
+}
 
 /** Paint coalescing window between encoder drains; bounds frame rate for live viewers and recordings alike. */
 export const STREAM_FLUSH_INTERVAL_MS = 50;
@@ -144,7 +161,7 @@ export class StreamPaintEncoder {
 		);
 	}
 
-	push(paint: TuiPaint): void {
+	push(paint: PresentedFrame): void {
 		if (paint.reset) {
 			this.#pendingReset = true;
 			this.#pendingForceFull = true;

@@ -19,6 +19,7 @@ When no hard tool-choice directive takes precedence, a pending preview makes `Ag
 
 - `toolName: "bash"` while tool commands are active, else `resolve`
 - `satisfies: isPreviewResolutionToolCall`
+- `unsatisfiedNotice` from `resolve-unsatisfied.md`: the skipped result for a `bash` call that runs something other than `resolve` or `reject` names the command it ran and says the whole command must be `resolve` or `reject`, with nothing before it
 - reminder from `resolve-reminder.md`
 
 The model complies by running only `resolve` or `reject` in that turn, as the command while tool commands are mounted or as the tool otherwise. A different call, or one of those batched with a detour, is noncompliant: the calls are skipped and the next turn forces the tool that would run the resolution (`bash`, else `resolve`). Repeated noncompliance eventually aborts rather than looping indefinitely.
@@ -49,7 +50,7 @@ Ordinary print mode has no interactive review surface and ignores `plan.defaultO
 
 ## Rendering
 
-The TUI renders each command through its own renderer in `packages/tui/src/tools/resolve.ts`. `resolveRenderer` and `rejectRenderer` draw a pending `Resolve` line with the `proposed -> resolved` / `proposed -> rejected` badge and the reason, then a framed `Accept` / `Discard` / `Failed` block built from `ResolveDetails` (label, optional source tool badge, reason). `proposeRenderer` draws `Propose` with the plan title and then the approval outcome, and `reportIssueRenderer` draws `Report Tool Issue`. A command run inside `bash` draws the same card through its dispatch record: the bash renderer feeds each `details.toolCommands` entry to `renderToolCommandDispatch`, which resolves the tool's own renderer and hands it the dispatch's parsed `args` as the call and `inner` as the result.
+The TUI renders each command through its own presenter in `packages/coding-agent/src/ui/tools/resolve.tsx`. `resolveToolPresenter` and `rejectToolPresenter` draw a pending `Resolve` line with the `proposed -> resolved` / `proposed -> rejected` badge and the reason, then a framed `Accept` / `Discard` / `Failed` block built from `ResolveDetails` (label, optional source tool badge, reason). `proposePresenter` (`packages/coding-agent/src/ui/tools/propose.tsx`) draws `Propose` with the plan title and then the approval outcome, and `reportIssuePresenter` draws `Report Tool Issue`. A command run inside `bash` draws the same card through its dispatch record: the bash renderer feeds each `details.toolCommands` entry to `renderToolCommandDispatch`, which resolves the tool's own renderer and hands it the dispatch's parsed `args` as the call and `inner` as the result.
 
 ## Custom tools
 
