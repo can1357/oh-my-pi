@@ -522,6 +522,7 @@ describe("tool-owned dynamic approval declarations", () => {
 
 	it("reads the word after -- as an operand, not as an option", () => {
 		expect(bashApproval("rm -- '--no-preserve-root'")).toBe("exec");
+		expect(bashApproval("rm -- -rf /")).toBe("exec");
 		expect(bashApproval("rm -rf -- /")).toEqual({
 			tier: "exec",
 			override: true,
@@ -546,6 +547,8 @@ describe("tool-owned dynamic approval declarations", () => {
 		"sh -c 'rm -rf '/",
 		'eval "r"m" -rf /"',
 		"git commit --trailer 'k=r''m -rf /' -m m",
+		"$'rm' -rf /",
+		"rm -rf -- x /",
 	])("keeps refusing a real delete: %s", command => {
 		expect(bashApproval(command)).toEqual({
 			tier: "exec",
