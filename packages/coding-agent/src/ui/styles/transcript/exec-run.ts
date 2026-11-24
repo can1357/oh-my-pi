@@ -16,7 +16,9 @@ import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { highlightCode } from "@oh-my-pi/pi-tui/text/highlight";
 import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { appInterruptKeys } from "../../../config/keybindings/matchers";
 import { terminalPaddingX } from "../terminal-padding";
+import { expandKeyLabel, keyLabel } from "../../keys/hints";
 import type { ExecRunTerm } from "../../transcript/exec-run";
 import { imageLink } from "../tools/file-common";
 import { toolProps } from "../tools/look";
@@ -75,7 +77,7 @@ function paintExecRun(node: UiNode, cx: PaintContext): Block {
 	if (!running) {
 		const parts: string[] = [];
 		const hidden = expanded ? 0 : Math.max(0, term.lines.length - PREVIEW_ROWS);
-		if (hidden > 0) parts.push(theme.fg("dim", `… ${hidden} more lines (⌃O to expand)`));
+		if (hidden > 0) parts.push(theme.fg("dim", `… ${hidden} more lines (${expandKeyLabel(theme)} to expand)`));
 		for (const notice of term.notices) parts.push(theme.fg(notice.color, notice.text));
 		if (parts.length > 0) rows.push(...padded(`\n${parts.join("\n")}`));
 	}
@@ -83,7 +85,8 @@ function paintExecRun(node: UiNode, cx: PaintContext): Block {
 	if (running) {
 		const frames = theme.symbols.spinnerFrames;
 		const frame = cx.reduceMotion ? frames[0]! : frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length]!;
-		label = `${theme.fg(color, frame)} ${theme.fg("muted", "Running… (⎋ to cancel)")}`;
+		const interrupt = keyLabel(theme, appInterruptKeys()[0] ?? "escape");
+		label = `${theme.fg(color, frame)} ${theme.fg("muted", `Running… (${interrupt} to cancel)`)}`;
 	} else if (props.status === "cancelled") label = theme.fg("warning", "cancelled");
 	else if (props.status === "error") label = theme.fg("error", `exit ${props.exit}`);
 	rows.push(rule(theme, color, width, label));

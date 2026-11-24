@@ -17,6 +17,8 @@ import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
+import { keyLabel } from "../../../keys/hints";
+import { keyLabels } from "../../panels/common";
 import {
 	currentResults,
 	findBaselineMetric,
@@ -56,14 +58,14 @@ export function overlayBodyLineCount(runtime: AutoresearchDashboardRuntime): num
 
 // ─── Lines ──────────────────────────────────────────────────────────────────
 
-/** `↑/↓`-style key glyphs the hints show. */
-const KEYS = { collapse: "⌃X", overlay: "⌃⇧X", expand: "⌃X" } as const;
-
 function expandedHeader(runtime: AutoresearchDashboardRuntime, width: number, theme: Theme): string {
 	const name = runtime.state.name;
 	const status = modeStatus(runtime);
 	const label = name ? ` autoresearch: ${replaceTabs(name)} ` : " autoresearch ";
-	const hint = theme.fg("dim", ` ${KEYS.collapse} collapse  ${KEYS.overlay} overlay${status ? `  ${status}` : ""} `);
+	const hint = theme.fg(
+		"dim",
+		` ${keyLabel(theme, "ctrl+x")} collapse  ${keyLabel(theme, "ctrl+shift+x")} overlay${status ? `  ${status}` : ""} `,
+	);
 	const fill = Math.max(0, width - visibleWidth(label) - visibleWidth(hint));
 	return truncate(`${theme.fg("accent", label)}${theme.fg("borderMuted", "-".repeat(fill))}${hint}`, width);
 }
@@ -130,7 +132,7 @@ function collapsedLine(runtime: AutoresearchDashboardRuntime, theme: Theme, now:
 	} else if (!runtime.autoresearchMode) {
 		parts.push(theme.fg("dim", ` | ${modeStatus(runtime)}`));
 	}
-	parts.push(theme.fg("dim", ` | ${KEYS.expand} expand`));
+	parts.push(theme.fg("dim", ` | ${keyLabel(theme, "ctrl+x")} expand`));
 	return parts.join("");
 }
 
@@ -365,7 +367,9 @@ defineRolePainter("col", "omp.app.autoresearch", (node, cx): Block => {
 	} else {
 		for (let i = 0; i < height; i++) rows.push(truncate(body[i] ?? "", width));
 	}
-	const hint = theme.fg("dim", " ↑/↓ j/k PgUp PgDn g ⇧G ⎋ ");
+	const hints = keyLabels(theme, ["up", "down"]);
+	const keys = ["pageUp", "pageDown", "g", "shift+g", "escape"].map(key => keyLabel(theme, key)).join(" ");
+	const hint = theme.fg("dim", ` ${hints} j/k ${keys} `);
 	rows.push(`${theme.fg("borderMuted", "-".repeat(Math.max(0, width - visibleWidth(hint))))}${hint}`);
 	return { rows };
 });

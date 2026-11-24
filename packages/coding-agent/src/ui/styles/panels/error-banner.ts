@@ -7,6 +7,7 @@
 import { type Block, defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import { terminalPaddingX } from "../terminal-padding";
+import { expandKeyLabel } from "../../keys/hints";
 
 /** Message rows shown before the overflow hint. */
 const MAX_ROWS = 4;
@@ -30,7 +31,10 @@ defineRolePainter("row", "omp.errorBanner", (node, cx): Block => {
 	const inner = cx.width - 2 * paddingX;
 	const textWidth = Math.max(1, inner - 2);
 	const body: string[] = [];
-	const headline = theme.style("strong", theme.fg("error", `✘ ${lines[0] ?? "Unknown error"}`));
+	const headline = theme.style(
+		"strong",
+		theme.fg("error", `${theme.symbols.symbol("status.error")} ${lines[0] ?? "Unknown error"}`),
+	);
 	const hang = theme.style("strong", theme.fg("error", "  "));
 	const headRows = wrap(headline, textWidth);
 	headRows.forEach((row, index) => {
@@ -43,7 +47,7 @@ defineRolePainter("row", "omp.errorBanner", (node, cx): Block => {
 	const rows = ["", rule, ...body.slice(0, MAX_ROWS)];
 	if (body.length > MAX_ROWS) {
 		// A cut headline leaves its bold open over the hint.
-		const hint = theme.fg("dim", `  … +${body.length - MAX_ROWS} more lines (⌃O to expand)`);
+		const hint = theme.fg("dim", `  … +${body.length - MAX_ROWS} more lines (${expandKeyLabel(theme)} to expand)`);
 		rows.push(`${pad}${headRows.length > MAX_ROWS ? theme.style("strong", hint) : hint}`);
 	}
 	for (const row of wrap(theme.fg("dim", "Dismissed when you send your next message."), inner)) {

@@ -7,9 +7,6 @@ import { padTo, replaceTabs, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/wi
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { terminalPaddingX } from "../terminal-padding";
 
-/** The key that expands and collapses transcript blocks, as hints name it. */
-export const EXPAND_KEY = "⌃O";
-
 const BG_RESET = /\x1b\[(?:0|49)m/g;
 
 /**
