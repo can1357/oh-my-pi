@@ -1,13 +1,12 @@
 /**
- * What a draft can hold besides typed text: collapsed pastes and attachment
- * chips. Both are atoms in the text: deleting into one deletes all of it.
+ * What a draft can hold besides typed text: attachment chips, atoms in the
+ * text (deleting into one deletes all of it).
  *
- * - A paste of more than 10 lines or 1000 characters collapses to
- *   `[Paste #N, +L lines]` / `[Paste #N, C chars]`; the content comes back on
- *   submit.
- * - A chip (`📄 #1`, `📷 #1`, `🎬 #2`: the symbol preset's `chip.*` glyph and
- *   a number) stands for a text attachment, an image or a video. In the
- *   terminal each chip takes its own color from a fixed palette.
+ * A chip (`📄 #1`, `📷 #1`, `🎬 #2`: the symbol preset's `chip.*` glyph and a
+ * number) stands for a text attachment, an image or a video. A paste of more
+ * than 10 lines or 1000 characters collapses into a text chip; the content
+ * comes back on submit. In the terminal each chip takes its own color from a
+ * fixed palette.
  */
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 
@@ -24,8 +23,8 @@ export interface DraftImage {
 export interface Atom {
 	/** The text the atom occupies in the draft. */
 	readonly label: string;
-	/** A chip (attachment), a collapsed paste's marker, or a token chip (`/skill:name`) standing for its command. */
-	readonly kind: ChipKind | "marker" | "token";
+	/** A chip (attachment) or a token chip (`/skill:name`) standing for its command. */
+	readonly kind: ChipKind | "token";
 	/** Its number among its kind (`#N`). */
 	readonly n: number;
 	/** What the atom expands to on submit (pasted text, an image reference); the label itself when absent. */
@@ -62,20 +61,14 @@ export function markerPixelSize(marker: string | undefined): { readonly w: numbe
 	return size ? { w: Number(size[1]), h: Number(size[2]) } : undefined;
 }
 
-/** Lines over which a paste collapses into a marker. */
+/** Lines over which a paste collapses into a text chip. */
 export const PASTE_MAX_LINES = 10;
-/** Characters over which a paste collapses into a marker. */
+/** Characters over which a paste collapses into a text chip. */
 export const PASTE_MAX_CHARS = 1000;
 
-/** Whether pasted `text` collapses into a marker. */
+/** Whether pasted `text` collapses into a text chip. */
 export function collapsesPaste(text: string): boolean {
 	return text.split("\n").length > PASTE_MAX_LINES || text.length > PASTE_MAX_CHARS;
-}
-
-/** The marker of paste `n` holding `text`. */
-export function pasteMarker(n: number, text: string): string {
-	const lines = text.split("\n").length;
-	return lines > PASTE_MAX_LINES ? `[Paste #${n}, +${lines} lines]` : `[Paste #${n}, ${text.length} chars]`;
 }
 
 /** Default chip glyphs (the unicode symbol preset). */

@@ -12,16 +12,17 @@
  * popup under it.
  *
  * The composer owns the draft: text and caret (edits from the field apply
- * here; deleting into a paste marker or chip deletes all of it), undo,
- * prompt history (Up on an empty draft or the first row of a recalled one,
- * Down on its last row), collapsed pastes and attachment chips, completion
+ * here; deleting into a chip deletes all of it), undo, prompt history (Up on
+ * an empty draft or the first row of a recalled one, Down on its last row),
+ * attachment chips (a large paste collapses into one), completion
  * (`/command`, `@path`), Vim modes and submission.
  *
  * Extension hooks: {@link Composer.addKeyHandler} (consulted before the
- * composer's own bindings), {@link Composer.addDecorator} (styled ranges over
- * the draft), {@link Composer.setSubmitTransform} (rewrite or cancel what is
- * sent) and the shape ({@link Composer.setShape}; shapes are registered with
- * `registerComposerShape`).
+ * composer's own bindings), {@link Composer.addPasteHandler} (consulted
+ * before a paste is typed or collapsed), {@link Composer.addDecorator}
+ * (styled ranges over the draft), {@link Composer.setSubmitTransform}
+ * (rewrite or cancel what is sent) and the shape ({@link Composer.setShape};
+ * shapes are registered with `registerComposerShape`).
  */
 import {
 	type Accessor,
@@ -73,7 +74,6 @@ import {
 	type DraftImage,
 	draftImageBlob,
 	expandAtoms,
-	pasteMarker,
 } from "./attachments";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -171,6 +171,9 @@ export type ComposerDecorator = (text: string) => readonly ComposerDecoration[];
 
 /** A key handler consulted before the composer's bindings; true takes the key. */
 export type ComposerKeyHandler = (key: KeyEvent, composer: Composer) => boolean;
+
+/** A paste handler consulted before the composer types or collapses the paste; true takes it. */
+export type ComposerPasteHandler = (paste: PasteEvent, composer: Composer) => boolean;
 
 /** An edit typed or pasted into the field: `[from, to)` of the old draft became `insert`. */
 export interface ComposerEdit {
@@ -367,7 +370,7 @@ export class Composer {
 	readonly #nativePlaceholder = signal<TspText | undefined>(undefined);
 
 	readonly #atoms: Signal<readonly Atom[]> = signal<readonly Atom[]>([]);
-	readonly #counts: Record<ChipKind | "marker", number> = { paste: 0, image: 0, video: 0, marker: 0 };
+	readonly #counts: Record<ChipKind, number> = { paste: 0, image: 0, video: 0 };
 	/** Images the draft's chips stand for. */
 	readonly pendingImages: DraftImage[] = [];
 	/** Each pending image's source link (a file path or URL), parallel to {@link pendingImages}. */
@@ -422,6 +425,7 @@ export class Composer {
 	readonly #slots = signal<ComposerSlots>({});
 
 	readonly #keyHandlers: ComposerKeyHandler[] = [];
+	readonly #pasteHandlers: ComposerPasteHandler[] = [];
 	readonly #editListeners: ComposerEditListener[] = [];
 	/** The open popup lists replacements for a range of the draft. */
 	#replacing: ReplacementPicker | undefined;
@@ -591,8 +595,8 @@ export class Composer {
 	}
 
 	/**
-	 * Insert an atom labelled `label` (a chip of `kind`, or a marker) expanding to `expansion` on
-	 * submit. An image joins {@link pendingImages} with its source `link`.
+	 * Insert an atom labelled `label` (a chip of `kind`, a text chip by default) expanding to
+	 * `expansion` on submit. An image joins {@link pendingImages} with its source `link`.
 	 */
 	insertAtom(
 		label: string,
@@ -616,7 +620,7 @@ export class Composer {
 		]);
 	}
 
-	/** The draft with every atom (paste marker, chip) replaced by what it stands for. */
+	/** The draft with every atom (chip, token) replaced by what it stands for. */
 	expandedText(): string {
 		return expandAtoms(this.#text(), this.#atoms());
 	}
@@ -1005,21 +1009,23 @@ export class Composer {
 		this.#atomizer = atomizer;
 	}
 
-	/** The attachments the draft's chips stand for, in insertion order (collapsed pastes are not chips). */
+	/** The attachments the draft's chips stand for, in insertion order (token chips are not attachments). */
 	chips(): readonly Atom[] {
 		const text = this.#text();
-		return this.#atoms().filter(atom => atom.kind !== "marker" && atom.kind !== "token" && text.includes(atom.label));
+		return this.#atoms().filter(atom => atom.kind !== "token" && text.includes(atom.label));
 	}
 
+	/**
+	 * A paste into the field: the app's handlers first ({@link addPasteHandler}), then a large
+	 * one collapses into a text chip; anything else is left for the field to type.
+	 */
 	#onPaste(paste: PasteEvent): boolean {
 		this.#jump = undefined;
+		for (const handler of this.#pasteHandlers) if (handler(paste, this)) return true;
 		const text = paste.text.replace(/\r\n?/g, "\n");
 		if (!collapsesPaste(text)) return false;
-		const n = ++this.#counts.marker;
-		const label = pasteMarker(n, text);
-		this.#atoms.set([...this.#atoms(), { label, kind: "marker", n, expansion: text }]);
 		this.#closeCompletion();
-		this.#insert(label);
+		this.insertTextAttachment(text);
 		return true;
 	}
 
@@ -1121,7 +1127,7 @@ export class Composer {
 	#restoreState(state: DraftState | undefined): void {
 		const atoms = state?.atoms ?? [];
 		this.#atoms.set(atoms);
-		for (const kind of ["paste", "image", "video", "marker"] as const)
+		for (const kind of ["paste", "image", "video"] as const)
 			this.#counts[kind] = Math.max(0, ...atoms.filter(atom => atom.kind === kind).map(atom => atom.n));
 		this.pendingImages.splice(0, this.pendingImages.length, ...(state?.images ?? []));
 		this.pendingImageLinks.splice(0, this.pendingImageLinks.length, ...(state?.links ?? []));
@@ -1140,7 +1146,7 @@ export class Composer {
 		this.#revision++;
 		this.#atoms.set([]);
 		this.#recalledState = false;
-		for (const kind of ["paste", "image", "video", "marker"] as const) this.#counts[kind] = 0;
+		for (const kind of ["paste", "image", "video"] as const) this.#counts[kind] = 0;
 		this.pendingImages.length = 0;
 		this.pendingImageLinks.length = 0;
 		this.#linksRevision.set(this.#linksRevision.peek() + 1);
@@ -1711,6 +1717,15 @@ export class Composer {
 		};
 	}
 
+	/** Consult `handler` for every paste into the field before the composer types or collapses it; returns its removal. */
+	addPasteHandler(handler: ComposerPasteHandler): () => void {
+		this.#pasteHandlers.push(handler);
+		return () => {
+			const at = this.#pasteHandlers.indexOf(handler);
+			if (at !== -1) this.#pasteHandlers.splice(at, 1);
+		};
+	}
+
 	/** Hear every edit made in the field (typing, pastes, deletions); returns its removal. */
 	addEditListener(listener: ComposerEditListener): () => void {
 		this.#editListeners.push(listener);
@@ -1792,7 +1807,6 @@ export class Composer {
 			const text = this.#text();
 			const { ranges, extra } = decorations();
 			const out: EditorTermRange[] = ranges.map(({ from, to, atom }) => {
-				if (atom.kind === "marker") return { from, to, s: "accent strong", whole: true };
 				if (atom.kind === "token") {
 					const href = atom.link && chipHref(atom.link.path, atom.link.line);
 					return { from, to, s: atom.s ?? "accent strong", whole: true, ...(href ? { href } : {}) };

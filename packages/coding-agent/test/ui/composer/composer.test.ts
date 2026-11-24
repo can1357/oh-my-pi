@@ -10,7 +10,13 @@ import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { plainRows } from "@oh-my-pi/pi-tui/testing/cells";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { getKeybindings, KeybindingsManager, setKeybindings } from "../../../src/config/keybindings/keybindings";
-import { Composer, type ComposerOptions, composerShape, registerComposerShape } from "../../../src/ui/composer";
+import {
+	Composer,
+	type ComposerOptions,
+	chipLabel,
+	composerShape,
+	registerComposerShape,
+} from "../../../src/ui/composer";
 import { key, sendKey, sendPaste } from "./harness";
 
 function make(options: ComposerOptions = {}): { composer: Composer; type(...keys: string[]): void } {
@@ -37,13 +43,14 @@ describe("submission", () => {
 		const { composer, type } = make({ onSubmit: text => sent.push(text) });
 		type("see ");
 		sendPaste(composer.node, composer.field, Array.from({ length: 12 }, (_, i) => `l${i}`).join("\n"));
-		expect(composer.text()).toBe("see [Paste #1, +12 lines]");
+		// The paste collapses into a text chip, staged with the space after it.
+		expect(composer.text()).toBe(`see ${chipLabel("paste", 1)} `);
 		composer.setSubmitTransform(text => text.toUpperCase());
 		type("\r");
-		expect(sent).toEqual([`SEE ${Array.from({ length: 12 }, (_, i) => `L${i}`).join("\n")}`]);
+		expect(sent).toEqual([`SEE ${Array.from({ length: 12 }, (_, i) => `L${i}`).join("\n")} `]);
 		expect(composer.text()).toBe("");
 		type("\x1b[A");
-		expect(composer.text()).toBe("see [Paste #1, +12 lines]");
+		expect(composer.text()).toBe(`see ${chipLabel("paste", 1)} `);
 	});
 	test("a transform returning undefined keeps the draft", () => {
 		const { composer, type } = make({ onSubmit: () => {} });
@@ -119,9 +126,9 @@ describe("raw field selection", () => {
 		type("\x1b[97;9u");
 		const pasted = Array.from({ length: 14 }, (_, i) => `line ${i}`).join("\n");
 		sendPaste(composer.node, composer.field, pasted);
-		expect(composer.expandedText()).toBe(pasted);
+		expect(composer.expandedText()).toBe(`${pasted} `);
 		type("!");
-		expect(composer.expandedText()).toBe(`${pasted}!`);
+		expect(composer.expandedText()).toBe(`${pasted} !`);
 	});
 	test("a push-to-talk candidate types over the selection before a hold is recognized", () => {
 		const { composer, type } = make({ text: "draft" });
@@ -269,7 +276,7 @@ describe("history recall with attachments", () => {
 		expect(composer.text()).toStartWith("[Image #1] ");
 		expect(composer.pendingImages).toEqual([IMAGE]);
 		expect(composer.pendingImageLinks).toEqual(["/tmp/shot.png"]);
-		expect(composer.chips().map(chip => chip.kind)).toEqual(["image", "paste"]);
+		expect(composer.chips().map(chip => chip.kind)).toEqual(["image", "paste", "paste"]);
 		type("\r");
 		expect(sent[1]).toBe(sent[0]);
 		expect(sent[1]).toContain("attached text");

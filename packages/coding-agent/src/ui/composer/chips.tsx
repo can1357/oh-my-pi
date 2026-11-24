@@ -67,10 +67,7 @@ export function ComposerChips(props: { composer: Composer }): JSXNode {
 	const chips = () =>
 		props.composer
 			.chips()
-			.filter(
-				(atom): atom is Atom & { kind: "paste" | "image" | "video" } =>
-					atom.kind !== "marker" && atom.kind !== "token",
-			);
+			.filter((atom): atom is Atom & { kind: "paste" | "image" | "video" } => atom.kind !== "token");
 	return (
 		<row role="omp.composer.chips" gap="sm" wrap={true} hidden={() => chips().length === 0}>
 			<For each={chips}>

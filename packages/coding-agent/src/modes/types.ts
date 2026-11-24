@@ -441,7 +441,8 @@ export interface InteractiveModeContext {
 	 * `insertTextAttachment`, `insertAtom`, `pendingImages`, `chips()`), history (`addToHistory`),
 	 * `submit()`, state (`setState`, `setFaint`, `setBorderColor`, `setDisableSubmit`, `setSlots`)
 	 * and extension hooks (`addKeyHandler` — runs before the composer's own bindings while it has
-	 * focus, the home of app editor actions —, `addDecorator`, `setSubmitTransform`, `setShape`).
+	 * focus, the home of app editor actions —, `addPasteHandler` — runs before the composer types
+	 * or collapses a paste —, `addDecorator`, `setSubmitTransform`, `setShape`).
 	 * `composer.field` is the node to focus for typing. Replaces `editor` / `editorContainer`.
 	 */
 	readonly composer: Composer;

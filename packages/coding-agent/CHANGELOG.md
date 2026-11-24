@@ -58,6 +58,7 @@
 
 ### Fixed
 - Images reach each request as the receiving model needs them: after switching to a text-only model, queued and earlier images are described by the vision model (once per image, reused across turns and resumes); after switching to a vision model, they are sent as images again with no stale description. Compaction and branch summaries and advisor reviews carry the descriptions whenever their model or the session's cannot see images, and a failed description is retried instead of sticking ([#20369](https://github.com/can1357/oh-my-pi/pull/20369) by [@taibenvenuti](https://github.com/taibenvenuti))
+- A large paste always collapses to the same text chip (`📄 #1`, with its card): one pasted with Tern's or kitty's paste key no longer lands as a `[Paste #1, +90 lines]` marker, and it opens the large-paste menu and attaches pasted image paths like any other paste
 - Edit cards in hashline, sloppy and magic modes name their target file again instead of `…`: while a call streams, and in the Agent Hub transcript of a subagent
 - In Tern, viewing a subagent shows the composer's `Viewing` header again, so the tray marks that agent's card (amber, with an eye) and its MAIN bar leads back to the main session
 - Attachment chips show the symbol preset's icon again instead of an emoji (a Nerd Font glyph in Tern): in the draft, on the chip's card and in sent prompts; skill and model chips of sent prompts follow the preset too
