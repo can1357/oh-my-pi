@@ -194,18 +194,14 @@ mod admission {
 					.iter()
 					.any(|backend| backend == *required)
 			}) {
-				return Err(PolicyControlFailure::EnforcementUnavailable(Str::from(format!(
-					"required sandbox backend {required} is unavailable"
-				))));
+				return Err(PolicyControlFailure::BackendUnavailable { backend: required.clone() });
 			}
 			if profile.mode == SandboxMode::Enforce
 				&& (!self.capabilities.filesystem
 					|| (!self.capabilities.network && profile.network.mode != "open")
 					|| (!self.capabilities.resource_limits && profile.resources != Default::default()))
 			{
-				return Err(PolicyControlFailure::EnforcementUnavailable(Str::new_static(
-					"active sandbox facilities cannot enforce the requested profile",
-				)));
+				return Err(PolicyControlFailure::EnforcementFacilitiesMismatch);
 			}
 			Ok(())
 		}
