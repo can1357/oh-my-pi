@@ -907,9 +907,17 @@ impl Activation {
 
 #[cfg(test)]
 mod tests {
-	use std::path::Path;
+	use std::{
+		path::{Path, PathBuf},
+		sync::{
+			Arc,
+			atomic::{AtomicBool, AtomicUsize, Ordering},
+		},
+	};
 
-	use super::exec_argv;
+	use zbus::{Guid, connection::Builder as ConnectionBuilder, interface, zvariant::OwnedValue};
+
+	use super::{Entry, HashMap, dbus_rt, exec_argv};
 
 	fn parse(value: &str) -> super::CoreResult<Vec<String>> {
 		exec_argv(
@@ -972,6 +980,74 @@ mod tests {
 			"app",
 			"$(touch /tmp/file); * | >"
 		]);
+	}
+
+	/// An `org.freedesktop.Application` peer whose `Activate` either succeeds
+	/// or reports the method as unsupported.
+	#[derive(Clone, Default)]
+	struct Application {
+		supported: Arc<AtomicBool>,
+		calls:     Arc<AtomicUsize>,
+	}
+
+	#[interface(name = "org.freedesktop.Application")]
+	impl Application {
+		fn activate(&self, _platform: HashMap<String, OwnedValue>) -> zbus::fdo::Result<()> {
+			self.calls.fetch_add(1, Ordering::SeqCst);
+			if self.supported.load(Ordering::SeqCst) {
+				Ok(())
+			} else {
+				Err(zbus::fdo::Error::UnknownMethod("Activate".into()))
+			}
+		}
+	}
+
+	/// Failure mode: an unsupported `Activate` blocks the entry's Exec
+	/// fallback, or a successful one leaves `open()` free to launch Exec too.
+	#[test]
+	fn unsupported_dbus_activate_allows_exec_fallback_and_success_does_not() {
+		let application = Application::default();
+		let (_server, client) = dbus_rt::block_on({
+			let application = application.clone();
+			async move {
+				let (client, server) = tokio::net::UnixStream::pair().unwrap();
+				let server = ConnectionBuilder::unix_stream(server)
+					.server(Guid::generate())
+					.unwrap()
+					.p2p()
+					.serve_at("/org/example/App", application)
+					.unwrap()
+					.build();
+				let client = ConnectionBuilder::unix_stream(client).p2p().build();
+				tokio::try_join!(server, client).unwrap()
+			}
+		})
+		.expect("shared D-Bus runtime");
+		let entry = Entry {
+			id:                "org.example.App.desktop".into(),
+			path:              PathBuf::from("/apps/org.example.App.desktop"),
+			name:              "Example".into(),
+			icon:              None,
+			exec:              Some("example".into()),
+			working_directory: None,
+			terminal:          false,
+			dbus:              true,
+		};
+
+		assert!(
+			!entry
+				.activate_dbus(&client, true)
+				.expect("an unsupported Activate is not a hard failure"),
+			"an unsupported Activate must leave the Exec fallback to open()"
+		);
+		application.supported.store(true, Ordering::SeqCst);
+		assert!(
+			entry
+				.activate_dbus(&client, true)
+				.expect("a successful Activate succeeds"),
+			"a successful Activate must stop open() from launching Exec"
+		);
+		assert_eq!(application.calls.load(Ordering::SeqCst), 2);
 	}
 
 	#[test]
