@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed typed prose such as `SK whatevertext` rendering as a skill chip and deleting as one unit in the prompt and in sent messages; only skills invoked with `/skill:<name>` are styled as chips ([#17287](https://github.com/can1357/oh-my-pi/issues/17287), [#19973](https://github.com/can1357/oh-my-pi/pull/19973) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed typed prose such as `SK whatevertext` rendering as a skill chip and deleting as one unit in the prompt and in sent messages; only registered skills are styled as chips ([#17287](https://github.com/can1357/oh-my-pi/issues/17287), [#19973](https://github.com/can1357/oh-my-pi/pull/19973) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Corrected math environment detection to properly handle blocks starting with `\begin`
 - Cmd+A highlights the full text of editors and inputs when the terminal forwards the shortcut. Typing, deleting or pasting replaces the selected range.
 - Native overlays follow the field they are anchored to, including when the field moves or shares its local key with another field.

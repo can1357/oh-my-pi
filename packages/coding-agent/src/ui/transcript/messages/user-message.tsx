@@ -37,7 +37,7 @@ export interface UserMessageModel {
 	readonly synthetic?: boolean;
 	/** Delivered into the response that was streaming. */
 	readonly liveSteered?: boolean;
-	/** SKILL.md path of a skill chip, by skill name. */
+	/** SKILL.md path of a registered skill, by name; other skill-glyph prose stays plain. */
 	readonly skillPath?: (name: string) => string | undefined;
 	/** Magic keywords that glow in the prompt (the enabled ones); none when absent. */
 	readonly magicKeywords?: Reactive<readonly GlowingKeyword[]>;

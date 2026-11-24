@@ -5,7 +5,7 @@
  * - `[Image #N, WxH]` / `[Video #N]` markers collapse to `📷 #N` / `🎬 #N`
  *   (linked to the attachment's file when one is known).
  * - `<model agent="m1" name="x"/>` mention tags show as `⬢ x`.
- * - Skill chips (`✦ name`) are kept and linked to their SKILL.md.
+ * - Skill chips (`✦ name` of a registered skill) are kept and linked to their SKILL.md.
  *
  * Natively each token is an `md` mark styled as the composer decorates it;
  * the terminal colors attachment chips with their composer identity color.
@@ -40,6 +40,7 @@ export function chipText(
 	text: string,
 	options: {
 		readonly imageLinks?: readonly (string | undefined)[];
+		/** SKILL.md path of a registered skill, by name. A name without a path stays plain text. */
 		readonly skillPath?: (name: string) => string | undefined;
 	} = {},
 ): ChipText {
@@ -64,12 +65,9 @@ export function chipText(
 	});
 	for (const match of out.matchAll(SKILL_CHIP)) {
 		const label = match[0];
-		if (!chips.has(label))
-			chips.set(label, {
-				label,
-				kind: "skill",
-				path: options.skillPath?.(match[1]!),
-			});
+		const path = options.skillPath?.(match[1]!);
+		// Only a registered skill (one with a SKILL.md path) is a chip; other skill-glyph prose stays plain.
+		if (path !== undefined && !chips.has(label)) chips.set(label, { label, kind: "skill", path });
 	}
 	return { text: out, chips: [...chips.values()] };
 }
