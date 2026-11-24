@@ -16,23 +16,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const VCS_MODULE = path.join(import.meta.dir, "..", "native", "vcs.js");
+const COMMIT_CHILD = path.join(import.meta.dir, "commit-git-config-global-child.ts");
 const roots: string[] = [];
 afterEach(async () => {
 	await Promise.all(roots.splice(0).map(root => fs.rm(root, { force: true, recursive: true })));
 });
-
-/** Calls the public native `git(dir).commitCreate` with no options and prints the outcome. */
-const COMMIT_CHILD = `
-const { git } = await import(process.argv[1]);
-const repo = git(process.argv[2]);
-try {
-	await repo.commitCreate(process.argv[3], {});
-	console.log("committed");
-} catch (error) {
-	console.log("refused: " + (error instanceof Error ? error.message : String(error)));
-}
-`;
 
 async function runGit(cwd: string, env: Record<string, string>, ...args: string[]): Promise<string> {
 	const proc = Bun.spawn(["git", ...args], { cwd, env, stdout: "pipe", stderr: "pipe" });
@@ -52,7 +40,7 @@ async function fixture(): Promise<{ root: string; scratch: string; env: Record<s
 	const home = path.join(scratch, "home");
 	await fs.mkdir(home);
 	await Bun.write(path.join(home, ".gitconfig"), "[user]\n\tname = Ambient A\n\temail = ambient@example.test\n");
-	const env = {
+	const env: Record<string, string> = {
 		...(process.env as Record<string, string>),
 		HOME: home,
 		XDG_CONFIG_HOME: path.join(home, ".config"),
@@ -95,7 +83,7 @@ async function globalConfigEnv(
 }
 
 async function commitInChild(root: string, env: Record<string, string>, message: string): Promise<string> {
-	const proc = Bun.spawn([process.execPath, "-e", COMMIT_CHILD, VCS_MODULE, root, message], {
+	const proc = Bun.spawn([process.execPath, COMMIT_CHILD, root, message], {
 		env,
 		stdout: "pipe",
 		stderr: "pipe",
@@ -140,5 +128,36 @@ describe("commitCreate honors GIT_CONFIG_GLOBAL (issue #19819)", () => {
 		expect(await runGit(root, commitEnv, "log", "-1", "--format=%an <%ae>")).toBe(
 			"Identity B <identity-b@example.test>",
 		);
+	});
+
+	test("GIT_WORK_TREE in the environment does not move the commit off the repo's worktree", async () => {
+		const { root, scratch, env } = await fixture();
+		const otherWorktree = path.join(scratch, "other-worktree");
+		await fs.mkdir(otherWorktree);
+		await Bun.write(path.join(otherWorktree, "tracked.txt"), "other\n");
+		// The pre-commit hook records the directory and GIT_WORK_TREE it runs with.
+		const hooks = path.join(scratch, "hooks");
+		await fs.mkdir(hooks);
+		const seen = path.join(scratch, "hook-seen");
+		const hook = path.join(hooks, "pre-commit");
+		await Bun.write(hook, `#!/bin/sh\npwd -P > '${seen}'\necho "$GIT_WORK_TREE" >> '${seen}'\n`);
+		await fs.chmod(hook, 0o755);
+		const commitEnv = await globalConfigEnv(env, scratch, hooks);
+
+		await Bun.write(path.join(root, "tracked.txt"), "one\ntwo\n");
+		await runGit(root, commitEnv, "add", "tracked.txt");
+		const before = await runGit(root, commitEnv, "rev-parse", "HEAD");
+
+		const conflictingEnv = { ...commitEnv, GIT_WORK_TREE: otherWorktree };
+		expect(await commitInChild(root, conflictingEnv, "feat: conflicting work tree")).toBe("committed");
+		expect(await runGit(root, commitEnv, "rev-parse", "HEAD")).not.toBe(before);
+		expect(await runGit(root, commitEnv, "show", "HEAD:tracked.txt")).toBe("one\ntwo");
+		expect(await runGit(root, commitEnv, "log", "-1", "--format=%an <%ae>")).toBe(
+			"Identity B <identity-b@example.test>",
+		);
+		const [hookCwd, hookWorkTree] = (await Bun.file(seen).text()).split("\n");
+		const repoRoot = await fs.realpath(root);
+		expect(await fs.realpath(hookCwd)).toBe(repoRoot);
+		expect(await fs.realpath(hookWorkTree)).toBe(repoRoot);
 	});
 });
