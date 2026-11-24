@@ -50,13 +50,14 @@ import {
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgEvalToolsEnabled } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 const AGENT: AgentDefinition = {
@@ -273,6 +274,7 @@ describe("structured subagent primitive", () => {
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
 
 		const planSession = session({ planMode: true });
+		cfgEvalToolsEnabled.set(planSession.settings, true);
 		const customTools = createEvalCustomTools(planSession, [
 			{
 				name: "word_count",
@@ -1014,6 +1016,7 @@ describe("structured subagent primitive", () => {
 		const spawners: WeakRef<ToolSession>[] = [];
 		const spawn = async (): Promise<void> => {
 			const parent = session();
+			cfgEvalToolsEnabled.set(parent.settings, true);
 			Object.assign(parent, { effectiveExtensionRoots: extensionRoots, localProtocolOptions });
 			spawners.push(new WeakRef(parent));
 			const customTools = createEvalCustomTools(parent, [descriptor]);

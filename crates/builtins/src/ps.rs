@@ -19,7 +19,7 @@ use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 use crate::{
 	host::{INTERRUPTED_EXIT_CODE, ProcContext, Process, ShellPaths},
 	proc_select::{parse_group_list, parse_i32_list, parse_terminal_list, parse_user_list},
-	proc_snapshot::{CpuTimes, ProcInfo, ThreadInfo},
+	proc_snapshot::{CpuTimes, ProcInfo, ThreadInfo, process_user_name},
 };
 
 #[derive(Parser)]
@@ -292,7 +292,16 @@ impl PsProcessRow {
 		} else {
 			crate::proc_snapshot::sanitize_process_command(argv.join(" "))
 		};
-		let age = process.age();
+		#[cfg(target_os = "macos")]
+		let (started_at, age) = {
+			let started_at = process.started_at();
+			(started_at, started_at.and_then(|start| now.duration_since(start).ok()))
+		};
+		#[cfg(not(target_os = "macos"))]
+		let (started_at, age) = {
+			let age = process.age();
+			(age.and_then(|age| now.checked_sub(age)), age)
+		};
 		Self {
 			pid: process.pid(),
 			ppid: process.ppid(),
@@ -308,7 +317,7 @@ impl PsProcessRow {
 			terminal: process.terminal_id(),
 			state: process.state(),
 			start_time: process.start_time(),
-			started_at: age.and_then(|age| now.checked_sub(age)),
+			started_at,
 			age,
 			cpu_times: process.cpu_times(),
 			virtual_size: process.virtual_bytes(),
@@ -968,13 +977,7 @@ fn render_ps_table(rows: &[PsProcessRow], columns: &[PsColumn], no_headers: bool
 	if has_field(PsField::User) || has_field(PsField::Ruser) {
 		let uids = rows.iter().flat_map(|row| [row.user, row.ruid]).flatten();
 		for uid in uids {
-			user_names.entry(uid).or_insert_with(|| {
-				#[cfg(unix)]
-				let name = uucore::entries::uid2usr(uid).ok();
-				#[cfg(not(unix))]
-				let name: Option<String> = None;
-				name.unwrap_or_else(|| uid.to_string())
-			});
+			user_names.entry(uid).or_insert_with(|| process_user_name(uid));
 		}
 	}
 	let mut group_names = HashMap::new();
@@ -1492,6 +1495,30 @@ mod tests {
 		assert_eq!(format_ps_split_time(Duration::from_micros(5_000)), "0:00.01");
 		assert_eq!(format_ps_split_time(Duration::from_micros(59_995_000)), "1:00.00");
 		assert_eq!(format_ps_split_time(Duration::from_secs(3_725)), "62:05.00");
+	}
+
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn start_time_fields_are_available_for_root_owned_pid_one() {
+		use crate::proc_snapshot::process_test_output;
+
+		let reference = std::process::Command::new("/bin/ps")
+			.args(["-o", "pid=,lstart=", "-p", "1"])
+			.env("LC_ALL", "C")
+			.output()
+			.expect("run system ps");
+		assert!(reference.status.success(), "{reference:?}");
+		let expected = std::str::from_utf8(&reference.stdout).expect("system ps output");
+		let output =
+			process_test_output(&["ps", "-o", "pid=,lstart=,start=,etime=,etimes=", "-p", "1"]).await;
+		let rest = output.trim().strip_prefix(expected.trim()).unwrap_or_else(|| {
+			panic!("lstart does not match system ps:\n{output}\n{expected}");
+		});
+		let mut columns = rest.split_whitespace();
+		assert!(columns.next().is_some_and(|start| start != "?"), "{output}");
+		assert!(columns.next().is_some_and(|elapsed| elapsed.contains(':')), "{output}");
+		assert!(columns.next().is_some_and(|elapsed| elapsed.parse::<u64>().is_ok()), "{output}");
+		assert!(columns.next().is_none(), "{output}");
 	}
 
 	#[test]

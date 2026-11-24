@@ -3,7 +3,7 @@ import { isCompiledBinary, logger, untilAborted, workerHostEntry } from "@oh-my-
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, resolveSpawnArgs, waitForCdp } from "./attach";
 import { type CmuxKind, CmuxUnavailableError } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";

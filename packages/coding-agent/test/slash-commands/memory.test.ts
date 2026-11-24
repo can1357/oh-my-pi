@@ -12,7 +12,7 @@ function createRuntime() {
 		addToHistory,
 		runtime: {
 			ctx: {
-				editor: { setText, addToHistory } as unknown as InteractiveModeContext["editor"],
+				composer: { setText, addToHistory } as unknown as InteractiveModeContext["composer"],
 				handleMemoryCommand,
 			} as unknown as InteractiveModeContext,
 		},

@@ -3,7 +3,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getWebKitHostPath, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
-import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { enforceInlineByteCap } from "./streaming-output";
 import { CmuxUnavailableError, resolveCmuxKind } from "./browser/cmux/rpc";
 import { type CdpTarget, describeCdpTargets, listCdpTargets, resolveSpawnArgs } from "./browser/attach";
 import {
@@ -32,7 +32,7 @@ import { installWebKitEngine, webKitEngineToInstall } from "./browser/webkit/ins
 import { resolveWebKitKind, VIEWER_PLATFORMS } from "./browser/webkit/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
-import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { OutputMeta } from "./output-meta-format";
 import type { Viewport } from "puppeteer-core";
 import {
 	type AcquireTabResult,
@@ -55,7 +55,7 @@ import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
 import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 

@@ -10,7 +10,7 @@ import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import { generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // A call whose arguments span several lines, so a structural read elides the

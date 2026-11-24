@@ -1,21 +1,38 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../../src/config/settings";
-import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import { MoveOverlay } from "../../../src/ui/overlays/panels/move-overlay";
+import { extensionOverlay } from "../../../src/modes/controllers/extension-ui-blocks";
+import { singleNode } from "../../../src/ui/extensions/render-output";
+import { nativeShell } from "../../helpers/native-shell";
+import { mountOverlay } from "../../helpers/overlay-terminal";
+import { type MoveOverlayResult } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/move-overlay";
 import {
 	moveDirectorySource,
 	resolveExistingDirectory,
 	resolveMovePath,
 } from "../../../src/modes/move-directory-source";
-import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-// Strip SGR colors so assertions see visible text only.
-const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
-const strip = (lines: readonly string[]): string => lines.map(stripAnsi).join("\n");
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
+
+/** The move overlay over `cwd` on a terminal, its root focused (it owns the keys), `onDone` recording. */
+function mount(cwd: string, onDone: (result: MoveOverlayResult | undefined) => void = () => {}): TestTerminal {
+	return mountOverlay(() => MoveOverlay({ cwd, source: moveDirectorySource, onDone }), {
+		columns: 80,
+		focusKind: "col",
+	});
+}
+
+const screen = (term: TestTerminal): string => {
+	term.render();
+	return term.screen().join("\n");
+};
 
 describe("resolveMovePath", () => {
 	it("expands ~ to homedir", () => {
@@ -60,14 +77,8 @@ describe("resolveExistingDirectory", () => {
 describe("MoveOverlay", () => {
 	let tmp: string;
 	let cwd: string;
-	let uiTheme: Theme;
-
 	beforeAll(async () => {
 		await Settings.init({ inMemory: true });
-		const loaded = await getThemeByName("dark");
-		if (!loaded) throw new Error("theme unavailable");
-		uiTheme = loaded;
-		setThemeInstance(uiTheme);
 	});
 
 	beforeEach(async () => {
@@ -82,22 +93,43 @@ describe("MoveOverlay", () => {
 		await fsp.rm(tmp, { recursive: true, force: true });
 	});
 
-	it("renders every frame row at the assigned overlay width", () => {
-		const overlay = new MoveOverlay(cwd, () => {}, moveDirectorySource);
-		const lines = overlay.render(72);
-		const plainLines = lines.map(stripAnsi);
+	it("routes native selection, buttons and activation inside the mounted /move extension layer", async () => {
+		await using ui = await nativeShell();
+		const results: (MoveOverlayResult | undefined)[] = [];
+		const show = () =>
+			ui.shell.overlays.show(
+				() =>
+					extensionOverlay(
+						singleNode(MoveOverlay({ cwd, source: moveDirectorySource, onDone: result => results.push(result) })),
+						false,
+						true,
+					),
+				{ focus: root => root.children()[0]! },
+			);
+		const first = show();
+		const list = ui.node("list", "results");
+		const beta = list.c[1]!;
+		ui.send({ ev: "select", sf: ui.sf, id: list.id, item: beta });
+		expect(ui.node("list", "results").p.selected).toBe(beta);
+		expect(results).toEqual([]);
+		ui.click("button", "accept");
+		expect(ui.node("input").p.text).toBe(path.join(cwd, "beta"));
+		ui.click("button", "confirm");
+		expect(results).toEqual([{ directory: path.join(cwd, "beta") }]);
+		first.close();
 
-		expect(lines.map(line => visibleWidth(line))).toEqual(Array(lines.length).fill(72));
-		expect(plainLines[0]!.endsWith(uiTheme.boxRound.topRight)).toBe(true);
-		expect(plainLines.at(-1)!.endsWith(uiTheme.boxRound.bottomRight)).toBe(true);
-		for (const line of plainLines.slice(1, -1)) {
-			expect(line.endsWith(uiTheme.boxRound.vertical)).toBe(true);
-		}
+		show();
+		ui.send({ ev: "edit", sf: ui.sf, id: ui.node("input").id, from: 0, to: 0, text: "alp", cursor: 3, len: 0 });
+		expect(ui.node("input").p.text).toBe("alp");
+		const filtered = ui.node("list", "results");
+		ui.send({ ev: "activate", sf: ui.sf, id: filtered.id, item: filtered.c[0]! });
+		expect(results[1]).toEqual({ directory: path.join(cwd, "alpha") });
 	});
 
 	it("lists child directories (excluding hidden and files) on empty input", () => {
-		const overlay = new MoveOverlay(cwd, () => {}, moveDirectorySource);
-		const text = strip(overlay.render(80));
+		const term = mount(cwd);
+		const text = screen(term);
+		term.dispose();
 		expect(text).toContain("alpha/");
 		expect(text).toContain("beta/");
 		expect(text).not.toContain(".hidden/");
@@ -105,94 +137,79 @@ describe("MoveOverlay", () => {
 	});
 
 	it("filters results as the user types", () => {
-		const overlay = new MoveOverlay(cwd, () => {}, moveDirectorySource);
-		overlay.handleInput("a");
-		overlay.handleInput("l");
-		const text = strip(overlay.render(80));
+		const term = mount(cwd);
+		term.type("al");
+		const text = screen(term);
+		term.dispose();
 		expect(text).toContain("alpha/");
 		expect(text).not.toContain("beta/");
 	});
 
 	it("shows dot directories after a dot prefix is typed", () => {
-		const overlay = new MoveOverlay(cwd, () => {}, moveDirectorySource);
-		overlay.handleInput(".");
-		const text = strip(overlay.render(80));
+		const term = mount(cwd);
+		term.type(".");
+		const text = screen(term);
+		term.dispose();
 		expect(text).toContain(".hidden/");
 	});
 
 	it("accepts bracketed paste and multi-byte input while filtering controls", () => {
 		let result: MoveOverlayResult | undefined;
-		const overlay = new MoveOverlay(
-			cwd,
-			r => {
-				result = r;
-			},
-			moveDirectorySource,
-		);
-		overlay.handleInput("\x1b[200~new\nø\x1b[201~");
-		overlay.handleInput("\r");
+		const term = mount(cwd, r => {
+			result = r;
+		});
+		term.paste("new\nø");
+		term.press("enter");
+		term.dispose();
 		expect(result).toBeDefined();
 		expect(result!.directory).toBe("newø");
 	});
 
 	it("calls done with undefined on Escape", () => {
 		let result: MoveOverlayResult | undefined = "sentinel" as unknown as MoveOverlayResult;
-		const overlay = new MoveOverlay(
-			cwd,
-			r => {
-				result = r;
-			},
-			moveDirectorySource,
-		);
-		overlay.handleInput("\x1b");
+		const term = mount(cwd, r => {
+			result = r;
+		});
+		term.press("escape");
+		term.dispose();
 		expect(result).toBeUndefined();
 	});
 
 	it("calls done with the highlighted directory on Enter", () => {
 		let result: MoveOverlayResult | undefined;
-		const overlay = new MoveOverlay(
-			cwd,
-			r => {
-				result = r;
-			},
-			moveDirectorySource,
-		);
+		const term = mount(cwd, r => {
+			result = r;
+		});
 		// First result should be "alpha/" (sorted alphabetically).
-		overlay.handleInput("\r");
+		term.press("enter");
+		term.dispose();
 		expect(result).toBeDefined();
 		expect(result!.directory).toBe(path.join(cwd, "alpha"));
 	});
 
 	it("calls done with the typed path on Enter when no results match", () => {
 		let result: MoveOverlayResult | undefined;
-		const overlay = new MoveOverlay(
-			cwd,
-			r => {
-				result = r;
-			},
-			moveDirectorySource,
-		);
+		const term = mount(cwd, r => {
+			result = r;
+		});
 		// Type a path that won't match any directory in cwd.
-		overlay.handleInput("z");
-		overlay.handleInput("z");
-		overlay.handleInput("\r");
+		term.type("zz");
+		term.press("enter");
+		term.dispose();
 		expect(result).toBeDefined();
 		expect(result!.directory).toBe("zz");
 	});
 
 	it("Tab accepts the highlighted suggestion into the input", () => {
 		let result: MoveOverlayResult | undefined;
-		const overlay = new MoveOverlay(
-			cwd,
-			r => {
-				result = r;
-			},
-			moveDirectorySource,
-		);
-		overlay.handleInput("\t");
+		const term = mount(cwd, r => {
+			result = r;
+		});
+		term.press("tab");
 		// After tab, the input should be the full path of the first result.
 		// Press Enter to confirm — the result should be the alpha directory.
-		overlay.handleInput("\r");
+		term.press("enter");
+		term.dispose();
 		expect(result).toBeDefined();
 		expect(result!.directory).toBe(path.join(cwd, "alpha"));
 	});
@@ -211,11 +228,10 @@ describe("MoveOverlay", () => {
 
 			const statSpy = spyOn(fs, "statSync");
 			try {
-				const overlay = new MoveOverlay(bulk, () => {}, moveDirectorySource);
+				const term = mount(bulk);
 				statSpy.mockClear();
-				overlay.handleInput("s");
-				overlay.handleInput("u");
-				overlay.handleInput("b");
+				term.type("sub");
+				term.dispose();
 				// Each keystroke may `statSync` at most once — the
 				// `resolveExistingDirectory` probe on the typed prefix. Entries
 				// are classified via `Dirent`, not one stat apiece.
@@ -256,8 +272,9 @@ describe("MoveOverlay", () => {
 				fakeDirent("real-file.txt"),
 			] as never);
 			try {
-				const overlay = new MoveOverlay(unknownFs, () => {}, moveDirectorySource);
-				const text = strip(overlay.render(80));
+				const term = mount(unknownFs);
+				const text = screen(term);
+				term.dispose();
 				expect(text).toContain("real-dir/");
 				expect(text).not.toContain("real-file.txt");
 			} finally {

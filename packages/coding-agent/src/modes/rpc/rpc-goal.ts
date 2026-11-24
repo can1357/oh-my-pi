@@ -8,7 +8,7 @@
  * opt-in continuation driver keyed to agent lifecycle events instead of an
  * editor idle window.
  */
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { Goal } from "../../tools/details/goal";
 import { logger } from "@oh-my-pi/pi-utils";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../../goals/settings";
 import { type GoalModeState, goalContinuationActivity, goalFromModeData } from "../../goals/state";

@@ -1,5 +1,6 @@
 import { expect, it } from "bun:test";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
 import type { AssistantMessage, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -87,4 +88,44 @@ it("replays frozen caller-owned function calls without mutating them", () => {
 	expect(input).toContainEqual(expect.objectContaining({ call_id: "call_ok", arguments: '{"a":1}' }));
 	const badCall = input.find(item => item.type === "function_call" && item.call_id === "call_bad");
 	expect(JSON.parse(String(badCall?.arguments))).toMatchObject({ __rawJson: '{"a":' });
+});
+
+it("replays a DSML-cleaned turn without the leaked markup in its text, reasoning or arguments", () => {
+	const leaked = { i: "Read the struct</｜DSML｜ parameter><｜DSML｜ parameter name=", path: "src/dict.rs" };
+	const reasoning = {
+		type: "reasoning",
+		id: "rs_1",
+		summary: [],
+		content: [{ type: "reasoning_text", text: "Plan.</｜｜DSML｜｜parameter>" }],
+	};
+	const previous = assistantWithNativeHistory([
+		reasoning,
+		{
+			type: "message",
+			id: "msg_1",
+			role: "assistant",
+			content: [{ type: "output_text", text: "Checking.</｜｜DSML｜｜invoke>" }],
+		},
+		{ type: "function_call", id: "fc_1", call_id: "call_1", name: "read", arguments: JSON.stringify(leaked) },
+	]);
+	previous.content = [
+		{ type: "thinking", thinking: "Plan.</｜｜DSML｜｜parameter>", thinkingSignature: JSON.stringify(reasoning) },
+		{ type: "text", text: "Checking.</｜｜DSML｜｜invoke>" },
+		{ type: "toolCall", id: "call_1|fc_1", name: "read", arguments: leaked },
+	];
+
+	expect(removeDsmlToolMarkupLeak(previous)).toBe(true);
+	const input = buildParams(model, { messages: [previous] }, undefined, undefined).params.input as unknown as Array<
+		Record<string, unknown>
+	>;
+
+	expect(JSON.stringify(input)).not.toContain("DSML");
+	expect(input).toContainEqual(
+		expect.objectContaining({ type: "reasoning", content: [{ type: "reasoning_text", text: "Plan." }] }),
+	);
+	expect(input).toContainEqual(
+		expect.objectContaining({ type: "message", content: [{ type: "output_text", text: "Checking." }] }),
+	);
+	const call = input.find(item => item.type === "function_call" && item.call_id === "call_1");
+	expect(JSON.parse(String(call?.arguments))).toEqual({ i: "Read the struct", path: "src/dict.rs" });
 });

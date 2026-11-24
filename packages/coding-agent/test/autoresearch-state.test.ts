@@ -7,8 +7,8 @@ import {
 	reconstructControlState,
 } from "@oh-my-pi/pi-coding-agent/autoresearch/state";
 import { AutoresearchStorage, closeAllAutoresearchStorages } from "@oh-my-pi/pi-coding-agent/autoresearch/storage";
-import type { ExperimentResult } from "@oh-my-pi/pi-tui/tools/autoresearch";
-import { findBaselineMetric, findBaselineRunNumber } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
+import type { ExperimentResult } from "@oh-my-pi/pi-coding-agent/autoresearch/tool-details";
+import { findBaselineMetric, findBaselineRunNumber } from "@oh-my-pi/pi-coding-agent/autoresearch/results-data";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
