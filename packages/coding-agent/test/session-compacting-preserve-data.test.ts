@@ -92,13 +92,22 @@ describe("session.compacting preserveData", () => {
 			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
 			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
 		};
-		const extensionRunner = {
-			hasHandlers: vi.fn((eventType: string) => eventType === "session.compacting"),
-			emit: vi.fn(async (event: { type: string }) =>
-				event.type === "session.compacting" ? { preserveData: { shared: "fresh" } } : undefined,
-			),
-			clearManagedTimers: vi.fn(),
-		} as unknown as ExtensionRunner;
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session.compacting", async () => ({ preserveData: { shared: "fresh" } }));
+			},
+			localTempDir.path(),
+			new EventBus(),
+			new ExtensionRuntime(),
+			"compacting-fresh",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			localTempDir.path(),
+			localSessionManager,
+			modelRegistry,
+		);
 		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
 		vi.spyOn(compactionModule, "compact").mockResolvedValue({
 			summary: "context-full summary",
@@ -166,13 +175,22 @@ describe("session.compacting preserveData", () => {
 			},
 			timestamp: Date.now() - 1,
 		});
-		const extensionRunner = {
-			hasHandlers: vi.fn((eventType: string) => eventType === "session.compacting"),
-			emit: vi.fn(async (event: { type: string }) =>
-				event.type === "session.compacting" ? { preserveData: { handoffState: "keep-me" } } : undefined,
-			),
-			clearManagedTimers: vi.fn(),
-		} as unknown as ExtensionRunner;
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session.compacting", async () => ({ preserveData: { handoffState: "keep-me" } }));
+			},
+			localTempDir.path(),
+			new EventBus(),
+			new ExtensionRuntime(),
+			"compacting-handoff",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			localTempDir.path(),
+			localSessionManager,
+			modelRegistry,
+		);
 		const localAgent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			convertToLlm: compactionModule.defaultConvertToLlm,
@@ -305,6 +323,89 @@ describe("session.compacting preserveData", () => {
 		} finally {
 			authStorage.close();
 			await tempDir.remove();
+		}
+	});
+
+	it("drops provider compaction replay and snapcompact archive keys a session.compacting hook returns", async () => {
+		const localTempDir = TempDir.createSync("@pi-compacting-filter-");
+		const localSessionManager = SessionManager.inMemory(localTempDir.path());
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
+		const model = { ...bundled, contextWindow: 200_000, maxTokens: 64_000 };
+		const firstKeptEntryId = localSessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		};
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session.compacting", async () => ({
+					preserveData: {
+						openaiRemoteCompaction: { id: "remote" },
+						anthropicCompaction: { id: "native" },
+						snapcompact: { frames: [] },
+						keep: "kept",
+					},
+				}));
+			},
+			localTempDir.path(),
+			new EventBus(),
+			new ExtensionRuntime(),
+			"compacting-filter",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			localTempDir.path(),
+			localSessionManager,
+			modelRegistry,
+		);
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "context-full summary",
+			shortSummary: undefined,
+			firstKeptEntryId,
+			tokensBefore: 100,
+			details: {},
+		});
+		const localAgent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const localSession = new AgentSession({
+			agent: localAgent,
+			sessionManager: localSessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.methodOrder": ["soft"],
+			}),
+			modelRegistry,
+			extensionRunner,
+		});
+
+		try {
+			await localSession.compact();
+			const compactionEntry = localSessionManager.getEntries().find(entry => entry.type === "compaction");
+			if (compactionEntry?.type !== "compaction") throw new Error("Expected persisted compaction entry");
+			expect(compactionEntry.preserveData).toEqual({ keep: "kept" });
+		} finally {
+			await localSession.dispose();
+			await localTempDir.remove();
+			authStorage.close();
+			vi.restoreAllMocks();
 		}
 	});
 });

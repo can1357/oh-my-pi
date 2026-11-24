@@ -285,6 +285,7 @@ export class HookRunner {
 			| ToolResultEventResult
 			| undefined;
 		const toolResultContexts: string[] = [];
+		let compactingResult: SessionCompactingResult | undefined;
 
 		for (const hook of this.hooks) {
 			const handlers = hook.handlers.get(event.type);
@@ -318,10 +319,11 @@ export class HookRunner {
 							toolResultContexts.push(toolResult.additionalContext);
 					}
 					if (event.type === "session.compacting" && handlerResult) {
-						result = mergeSessionCompactingResult(
-							result as SessionCompactingResult | undefined,
+						compactingResult = mergeSessionCompactingResult(
+							compactingResult,
 							handlerResult as SessionCompactingResult,
 						);
+						result = compactingResult;
 					}
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);

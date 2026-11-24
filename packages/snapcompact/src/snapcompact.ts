@@ -1187,6 +1187,15 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 /** Provider-native compaction payloads a snapcompact pass supersedes. */
 const PROVIDER_COMPACTION_PRESERVE_KEYS = ["openaiRemoteCompaction", "anthropicCompaction"] as const;
 
+/**
+ * Drops the provider-native compaction payloads ({@link PROVIDER_COMPACTION_PRESERVE_KEYS}) from an
+ * extension's `preserveData` before a snapcompact pass persists it. The frame archive under
+ * {@link PRESERVE_KEY} is not removed here; {@link stripPreservedArchive} does that.
+ *
+ * Undefined behaviour: `undefined` in gives `undefined` out. A provider key counts as present even when
+ * its value is `undefined`. When no provider key is present, the input object is returned as the same
+ * reference. When stripping removes every key, the result is `undefined`, never `{}`.
+ */
 export function stripProviderCompactionPreserveData(
 	preserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {

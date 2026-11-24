@@ -2207,6 +2207,7 @@ export class ExtensionRunner {
 		// subscribed; building `ctx` for a zero-handler event is pure waste.
 		let ctx: ExtensionContext | undefined;
 		let result: SessionBeforeEventResult | SessionCompactingResult | SessionStopEventResult | undefined;
+		let compactingResult: SessionCompactingResult | undefined;
 
 		if (this.#isSessionShutdownEvent(event)) {
 			const timeoutMs = handlerTimeoutForEvent(event.type);
@@ -2254,10 +2255,11 @@ export class ExtensionRunner {
 					}
 
 					if (event.type === "session.compacting" && handlerResult) {
-						result = mergeSessionCompactingResult(
-							result as SessionCompactingResult | undefined,
+						compactingResult = mergeSessionCompactingResult(
+							compactingResult,
 							handlerResult as SessionCompactingResult,
 						);
+						result = compactingResult;
 					}
 
 					if (event.type === "session_stop" && handlerResult) {
