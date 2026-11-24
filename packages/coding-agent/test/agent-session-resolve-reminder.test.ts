@@ -212,6 +212,11 @@ describe("AgentSession resolve reminder", () => {
 		expect(notice).toContain("runs `ast_edit`");
 		expect(notice).toMatch(/`resolve "/);
 		expect(notice).toMatch(/`reject "/);
+
+		// `resolve` behind a `cd` prefix does not run as the leading command, so it finalizes nothing either.
+		const prefixed = { name: "bash", arguments: { command: 'cd /repo && resolve "looks right"' } };
+		expect(directive.satisfies?.(prefixed)).toBe(false);
+		expect(directive.unsatisfiedNotice?.(prefixed)).toContain("with nothing before it");
 	});
 
 	it.each(transitions)("clears a staged preview after a successful %s session boundary", async transition => {

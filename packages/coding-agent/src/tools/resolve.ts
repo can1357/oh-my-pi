@@ -218,8 +218,9 @@ export function buildResolveReminderMessage(
 
 /**
  * Skipped-result notice for a `bash` call made while a preview is pending that
- * does not run `resolve` or `reject`: names the command it ran, when that is a
- * session tool command, and the command that finalizes the preview.
+ * does not run `resolve` or `reject` as its leading command: names that command
+ * when the shell does not reserve it (`cd` and other builtins go unnamed), and
+ * says the whole command must be `resolve` or `reject`.
  */
 export function buildResolveUnsatisfiedNotice(toolCall: ToolCallLike, sourceToolName: string): string {
 	return prompt

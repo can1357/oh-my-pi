@@ -19,7 +19,7 @@ When no hard tool-choice directive takes precedence, a pending preview makes `Ag
 
 - `toolName: "bash"` while tool commands are active, else `resolve`
 - `satisfies: isPreviewResolutionToolCall`
-- `unsatisfiedNotice` from `resolve-unsatisfied.md`: the skipped result for a `bash` call that runs something other than `resolve` or `reject` names the command it ran and the command to run instead
+- `unsatisfiedNotice` from `resolve-unsatisfied.md`: the skipped result for a `bash` call that runs something other than `resolve` or `reject` names the command it ran and says the whole command must be `resolve` or `reject`, with nothing before it
 - reminder from `resolve-reminder.md`
 
 The model complies by running only `resolve` or `reject` in that turn, as the command while tool commands are mounted or as the tool otherwise. A different call, or one of those batched with a detour, is noncompliant: the calls are skipped and the next turn forces the tool that would run the resolution (`bash`, else `resolve`). Repeated noncompliance eventually aborts rather than looping indefinitely.
