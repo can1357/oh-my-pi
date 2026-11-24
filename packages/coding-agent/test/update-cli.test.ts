@@ -544,8 +544,12 @@ describe("update-cli install target detection", () => {
 
 describe("update-cli package manager commands", () => {
 	it("targets the Homebrew tap formula and switches to reinstall for forced updates", () => {
-		expect(buildHomebrewUpdateArgs(false)).toEqual(["upgrade", "--yes", "can1357/tap/omp"]);
-		expect(buildHomebrewUpdateArgs(true)).toEqual(["reinstall", "--yes", "can1357/tap/omp"]);
+		expect(buildHomebrewUpdateArgs(false)).toEqual(["upgrade", "can1357/tap/omp"]);
+		expect(buildHomebrewUpdateArgs(true)).toEqual(["reinstall", "can1357/tap/omp"]);
+	});
+
+	it("tells brew not to ask for confirmation on the upgrade and reinstall child", () => {
+		expect(updateCli.buildHomebrewUpdateEnv({ PATH: "/bin" })).toEqual({ PATH: "/bin", HOMEBREW_NO_ASK: "1" });
 	});
 
 	it("targets the mise GitHub backend and overrides release-age settings for attended updates", () => {

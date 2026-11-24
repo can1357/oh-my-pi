@@ -1400,12 +1400,19 @@ export function buildNpmUpdateEnv(
 	return { ...base, npm_config_min_release_age: "0" };
 }
 
-/**
- * `--yes` skips brew's y/n confirmation. brew asks for it whenever its stdin and stdout are a terminal, and
- * {@link runInstaller} gives the child this terminal, so without the flag `omp update` waited on that prompt.
- */
 export function buildHomebrewUpdateArgs(force: boolean): string[] {
-	return [force ? "reinstall" : "upgrade", "--yes", HOMEBREW_FORMULA];
+	return [force ? "reinstall" : "upgrade", HOMEBREW_FORMULA];
+}
+
+/**
+ * omp update tells brew not to ask for confirmation on the upgrade and reinstall child. brew's ask prompt is on by
+ * default and HOMEBREW_NO_ASK=1 turns that default off. An argv flag does not do it: brew 5.1.15 rejects `--yes`
+ * as an invalid option.
+ */
+export function buildHomebrewUpdateEnv(
+	base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+	return { ...base, HOMEBREW_NO_ASK: "1" };
 }
 
 /**
@@ -1749,7 +1756,7 @@ async function updateViaHomebrew(expectedVersion: string, force: boolean): Promi
 
 	console.log(chalk.dim("Updating via Homebrew..."));
 	const args = buildHomebrewUpdateArgs(force);
-	const exitCode = await runInstaller(["brew", ...args]);
+	const exitCode = await runInstaller(["brew", ...args], buildHomebrewUpdateEnv());
 	if (exitCode !== 0) {
 		throw new Error(`brew ${args[0]} failed with exit code ${exitCode}`);
 	}
