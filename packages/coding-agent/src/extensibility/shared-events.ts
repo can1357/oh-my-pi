@@ -522,15 +522,18 @@ export interface SessionCompactingResult {
 
 /**
  * Fold one `session.compacting` handler result into the accumulated result. `prompt` and
- * `context` are last-writer-wins per field; `preserveData` is shallow-merged so each
- * handler's top-level key survives.
+ * `context` are last-writer-wins per defined field, so an undefined field keeps the earlier
+ * handler's value (an explicit empty context array is defined and still replaces it);
+ * `preserveData` is shallow-merged so each handler's top-level key survives.
  */
 export function mergeSessionCompactingResult(
 	accumulated: SessionCompactingResult | undefined,
 	next: SessionCompactingResult,
 ): SessionCompactingResult {
-	const merged: SessionCompactingResult = { ...accumulated, ...next };
-	if (accumulated?.preserveData !== undefined || next.preserveData !== undefined) {
+	const merged: SessionCompactingResult = { ...accumulated };
+	if (next.prompt !== undefined) merged.prompt = next.prompt;
+	if (next.context !== undefined) merged.context = next.context;
+	if (next.preserveData !== undefined) {
 		merged.preserveData = { ...accumulated?.preserveData, ...next.preserveData };
 	}
 	return merged;

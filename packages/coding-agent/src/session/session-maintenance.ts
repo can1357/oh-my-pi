@@ -2724,16 +2724,19 @@ export class SessionMaintenance {
 		const onAttempt = (message: AssistantMessage) => {
 			if (message.usage.totalTokens > 0) run.accepted = true;
 		};
+		// The handoff request is the transcript as the preparation saw it. The session.compacting
+		// handlers below await, and a tool result that lands meanwhile must not reach the summary.
+		const liveMessages = this.#host.agent.state.messages;
+		const pendingMessage = run.bridge ? findPendingToolCall(liveMessages, message => message) : -1;
+		const handoffMessages = liveMessages.slice(0, pendingMessage < 0 ? undefined : pendingMessage);
 		const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined, signal);
 		let armed: ArmedSpeculation;
 		if (method === "handoff") {
-			const liveMessages = this.#host.agent.state.messages;
-			const pendingMessage = run.bridge ? findPendingToolCall(liveMessages, message => message) : -1;
 			const document = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
 				model,
 				autoTriggered: true,
 				signal,
-				...(pendingMessage < 0 ? {} : { messages: liveMessages.slice(0, pendingMessage) }),
+				messages: handoffMessages,
 				onAttempt,
 			});
 			if (!document) return clear();
