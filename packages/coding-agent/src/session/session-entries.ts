@@ -22,6 +22,9 @@ export const SESSION_TITLE_SLOT_ENTRY_TYPE = "title";
 
 export const TITLE_CHANGE_ENTRY_TYPE = "title_change";
 
+/** Marks the end of a `/tan` session's inherited history; data is the fork's session ID. */
+export const TAN_FORK_BOUNDARY_CUSTOM_TYPE = "tan-fork-boundary";
+
 export type SessionTitleSource = "auto" | "user";
 
 /** Fixed-width first-line slot carrying the mutable current session title. */

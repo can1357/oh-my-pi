@@ -5,6 +5,18 @@
 ### Added
 
 - Added `LiveSteerClaim.absorb()` handling: steering a provider delivered and answered inside one response is recorded after that response without another provider request ([#16184](https://github.com/can1357/oh-my-pi/pull/16184) by [@joseotaviorf](https://github.com/joseotaviorf))
+### Fixed
+
+- Fixed DeepSeek DSML markup leaking into tool-call arguments (e.g. a `</｜DSML｜ parameter>` tail on an edit or bash command) being executed and replayed; the leaked tail is now cut before the call runs
+- Fixed DSML markup removed from a DeepSeek turn's text and reasoning still being sent back to the model on OpenRouter's Responses route, which replays the turn's original output items
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- Prevented oversized handoffs from reaching the provider by detecting when prepared context exceeds the target model’s context window.
+- Preserved provider error status, error identifiers, retry classification, and cancellation markers on failed or cancelled assistant turns.
+- Fixed speculative tool calls hanging when discarded or aborted before execution completed.
 
 ## [19.1.0] - 2026-11-21
 

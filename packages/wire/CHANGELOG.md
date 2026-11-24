@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `waiting` on agent tray cards: the agent runs, but its current call only waits on its own agents or jobs.
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

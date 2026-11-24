@@ -1,9 +1,5 @@
-import {
-	formatMCPProgress,
-	MCP_TOOL_NAME_PREFIX,
-	type MCPProgress,
-	type MCPToolDetails,
-} from "@oh-my-pi/pi-tui/tools/mcp";
+import { formatMCPProgress, MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp-progress";
 /**
  * MCP to CustomTool bridge.
  *

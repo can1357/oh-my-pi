@@ -244,6 +244,34 @@ where
 	}
 }
 
+/// Starts `work` on Tokio's blocking pool inside the worker panic boundary.
+///
+/// For async exports that fan work out: a panic rejects with an error instead
+/// of reaching stderr. The work starts at the call, so several run at once
+/// before any is awaited; call it on the runtime (inside [`future`]).
+///
+/// # Errors
+/// When `work` panics or the runtime drops it.
+pub fn spawn_blocking<T, F>(
+	tag: &'static str,
+	work: F,
+) -> impl Future<Output = Result<T>> + Send + 'static
+where
+	F: FnOnce() -> T + Send + 'static,
+	T: Send + 'static,
+{
+	let handle = tokio::task::spawn_blocking(move || {
+		let _guard = profile_region(tag);
+		let _work = native_work();
+		catch_worker_panic(tag, work)
+	});
+	async move {
+		handle
+			.await
+			.map_err(|err| Error::from_reason(format!("native task `{tag}` failed: {err}")))?
+	}
+}
+
 /// Construct the same named rejection napi uses when an `AbortSignal` cancels
 /// async work. This path handles cancellation observed after `compute` has
 /// already returned successfully.

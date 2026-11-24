@@ -31,8 +31,8 @@ pub(super) use selection::select_dragged;
 use super::{
 	super::{
 		ax::{
-			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, confirm_read_as, normalize_role_macos,
-			performable_names, require_read_as, text_readback, truncate_chars,
+			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, bounded_number, confirm_read_as,
+			normalize_role_macos, performable_names, require_read_as, text_readback, truncate_chars,
 		},
 		backend::{AxBackend, DeliveryMode, KeyboardFocus, is_raise_action, native_action_name},
 		control,
@@ -1871,6 +1871,7 @@ fn activate_for_menu(
 		&window,
 		entry_front,
 		in_overlay,
+		input::KeyPurpose::Menu,
 		visit,
 	)?;
 	// The press that makes the window key waits in the application's event
@@ -3527,18 +3528,6 @@ fn stringify_number(number: &CFNumber) -> String {
 		number.as_f64().map(bounded_number)
 	};
 	text.unwrap_or_default()
-}
-
-/// A number as `Display` writes it, or in scientific notation where that would
-/// run past 24 characters (`f64::MAX` has 309 digits), the longest an `f64`
-/// takes in scientific notation: an extreme value an app publishes stays short.
-fn bounded_number<T: std::fmt::Display + std::fmt::LowerExp>(value: T) -> String {
-	let text = value.to_string();
-	if text.len() <= 24 {
-		text
-	} else {
-		format!("{value:e}")
-	}
 }
 
 fn nonempty(value: Option<String>) -> Option<String> {
