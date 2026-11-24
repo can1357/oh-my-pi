@@ -811,6 +811,12 @@ export interface LiveSteerClaim {
 	readonly messages: readonly UserMessage[];
 	/** The server owns the input: the caller records it right after the current response. */
 	accept(): void;
+	/**
+	 * The input reached the model inside the current response, which already
+	 * answers it: the caller records it right after that response and does not
+	 * ask the model again.
+	 */
+	absorb(): void;
 	/** Not delivered: the caller sends the input with its next request. */
 	reject(): void;
 }
@@ -860,6 +866,12 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	cursorOnToolResult?: CursorToolResultHandler;
 	/** The caller's client runs every tool: Cursor offers them all as MCP tools and hands each call off to it. */
 	cursorExternalToolExecutor?: boolean;
+	/**
+	 * Conversation size at which a Cursor turn is asked to wrap up. Cursor runs
+	 * its tool loop server-side, so the host's compaction threshold only takes
+	 * effect between turns; omit to let a turn run until it ends on its own.
+	 */
+	cursorContextBudgetTokens?: number;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
 	 * dispatch directly to the Bedrock provider. Model-level values take
@@ -1369,6 +1381,14 @@ export interface ContextSnapshot {
 	lastMessageTimestamp?: number;
 }
 
+/** One steering message absorbed mid-stream by a Cursor turn. */
+export interface AnsweredSteeringEntry {
+	/** Trimmed text as the model read it. */
+	text: string;
+	/** Index in `AssistantMessage.content` where the model round that read this steering starts. */
+	beforeContentIndex?: number;
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (
@@ -1452,6 +1472,17 @@ export interface AssistantMessage {
 	requestControls?: AnthropicRequestControls;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
+	/**
+	 * The provider asked this response to end at `contextBudgetTokens` so the host
+	 * can compact between turns (Cursor). Set only when the notice reached the model.
+	 */
+	contextBudgetWrapUp?: boolean;
+	/**
+	 * Steering this response absorbed mid-stream as tool-result context, as the
+	 * model read it (trimmed), in delivery order (Cursor). The host records copies
+	 * after the response; history builders place them inside it, not as new input.
+	 */
+	answeredSteering?: AnsweredSteeringEntry[];
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	/** On a refusal: how many of other models' reasoning blocks the refused request replayed as text. */

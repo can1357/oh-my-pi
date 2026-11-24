@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added mid-turn steering on Cursor models: a message you send while a Cursor turn runs reaches the model with its next tool result instead of waiting for the whole server-side tool loop to finish ([#16184](https://github.com/can1357/oh-my-pi/pull/16184) by [@joseotaviorf](https://github.com/joseotaviorf))
 - The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses
 - Tray cards now mark subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so Tern shows them apart from subagents doing work
 - The shell's `tail -r` builtin now takes `-c`, `-b`, and `+N` counts like BSD `tail`, and `tail -b N` selects 512-byte blocks; `-r` with `-f` is BSD's usage error instead of a "pipe through tac" refusal
@@ -36,6 +37,7 @@
 
 ### Fixed
 
+- Fixed Cursor turns growing past `compaction.thresholdTokens`: Cursor runs its tool loop server-side, so a single turn could replay millions of tokens before omp could compact. A turn that crosses the threshold is now asked to wrap up, and omp compacts and continues the task ([#16181](https://github.com/can1357/oh-my-pi/pull/16181) by [@joseotaviorf](https://github.com/joseotaviorf))
 - Tern no longer loses the tray's dots when the working line above the composer comes and goes: the line stays one row instead of turning into an empty column while idle
 - In the bash tool on macOS, `ls -lT` shows full timestamps instead of failing with `invalid tab size`, `uptime` prints macOS's format, and `chmod +a` and the other ACL forms run `/bin/chmod`.
 - The bash tool's `top -l` now reports load averages, user/sys/idle CPU and usernames, and `ps` shows start and elapsed times for other users' processes such as pid 1.

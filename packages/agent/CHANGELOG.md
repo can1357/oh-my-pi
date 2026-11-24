@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `LiveSteerClaim.absorb()` handling: steering a provider delivered and answered inside one response is recorded after that response without another provider request ([#16184](https://github.com/can1357/oh-my-pi/pull/16184) by [@joseotaviorf](https://github.com/joseotaviorf))
 ### Fixed
 
 - Fixed DeepSeek DSML markup leaking into tool-call arguments (e.g. a `</｜DSML｜ parameter>` tail on an edit or bash command) being executed and replayed; the leaked tail is now cut before the call runs

@@ -125,9 +125,12 @@ function messageFrames(itemId: string, text: string): Frame[] {
 }
 
 /** A source holding one steering message; records how the provider settled it. */
-function oneShotSteering(text: string): { source: LiveSteering; settled: () => "accepted" | "rejected" | undefined } {
+function oneShotSteering(text: string): {
+	source: LiveSteering;
+	settled: () => "accepted" | "absorbed" | "rejected" | undefined;
+} {
 	let claimed = false;
-	let outcome: "accepted" | "rejected" | undefined;
+	let outcome: "accepted" | "absorbed" | "rejected" | undefined;
 	const idle = (signal: AbortSignal) => {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		if (signal.aborted) resolve();
@@ -143,6 +146,9 @@ function oneShotSteering(text: string): { source: LiveSteering; settled: () => "
 				messages: [{ role: "user", content: text, timestamp: Date.now() }],
 				accept: () => {
 					outcome = "accepted";
+				},
+				absorb: () => {
+					outcome = "absorbed";
 				},
 				reject: () => {
 					outcome = "rejected";

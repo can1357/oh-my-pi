@@ -154,6 +154,21 @@ describe("agent loop live steering", () => {
 		expect(liveSteeredTexts(transcript)).toEqual(["use tabs"]);
 	});
 
+	it("records steering the response already answered without asking the model again", async () => {
+		const { contexts, transcript } = await runSteered(async (live, queue) => {
+			queue.push(createUserMessage("use tabs"));
+			(await live.claim(new AbortController().signal))?.absorb();
+		});
+
+		expect(contexts).toHaveLength(1);
+		expect(transcript.map(message => (message.role === "user" ? userText(message) : message.role))).toEqual([
+			"start",
+			"assistant",
+			"use tabs",
+		]);
+		expect(liveSteeredTexts(transcript)).toEqual(["use tabs"]);
+	});
+
 	it("delivers rejected steering at the next boundary ahead of input queued after it", async () => {
 		const { contexts, transcript } = await runSteered(async (live, queue) => {
 			queue.push(createUserMessage("use tabs"));

@@ -1288,8 +1288,10 @@ async function runLoopBody(
 
 	let pendingMessages: AgentMessage[] = [];
 	// Steering the provider took from the queue during the last response:
-	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
+	// `liveAccepted` reached the model inside it, `liveAbsorbed` reached it and
+	// was answered there, `liveDeferred` did not reach it.
 	let liveAccepted: AgentMessage[] = [];
+	let liveAbsorbed: AgentMessage[] = [];
 	let liveDeferred: AgentMessage[] = [];
 	const endAbortedBeforeModel = async (messages: AgentMessage[], turnOpen: boolean): Promise<boolean> => {
 		if (!signal?.aborted || !config.isUndeliveredQueuedMessage) return false;
@@ -1607,6 +1609,7 @@ async function runLoopBody(
 					const channel = preparedProviderCall.liveSteering;
 					if (channel) {
 						liveAccepted.push(...channel.accepted);
+						liveAbsorbed.push(...channel.absorbed);
 						liveDeferred.push(...channel.deferred);
 					}
 				}
@@ -1848,6 +1851,20 @@ async function runLoopBody(
 					dsmlLeakNudges++;
 					hasMoreToolCalls = true;
 				}
+
+				// The response already answered this steering: record it at this
+				// boundary instead of asking the model about it again. Aborted runs
+				// leave it unrecorded, so the agent requeues it like accepted steering.
+				if (liveAbsorbed.length > 0 && !signal?.aborted) {
+					for (const steer of liveAbsorbed) {
+						if (steer.role === "user") steer.liveSteered = true;
+						currentContext.messages.push(steer);
+						newMessages.push(steer);
+					}
+					emitInputMessages(stream, liveAbsorbed);
+					additionalMessages.push(...liveAbsorbed);
+				}
+				liveAbsorbed = [];
 
 				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
 					additionalMessages,
