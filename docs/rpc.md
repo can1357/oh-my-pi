@@ -477,7 +477,7 @@ The TUI's empty Enter and its `.`/`c` continue shortcut:
 
 `abort_and_deliver_queue` interrupts a streaming run that has queued user input (or steering the in-flight response took live) and continues it with that input. With no run streaming or nothing queued it does nothing and answers `aborted: false`.
 
-`resume` continues the agent. A running turn is interrupted first; when input is queued, that input continues the run instead of the continue directive. A prompt the model has not answered yet runs again as is. It answers once the continuation is under way, or fails with `Nothing to resume` when the session has no conversation to continue.
+`resume` continues the agent. A running turn is interrupted first; when input is queued, that input continues the run instead of the continue directive. An Esc-interrupted assistant tail is replayed as prefill, exactly as `/continue` does; a prompt the model has not answered yet runs again as is. With nothing to continue from it sends a bare turn so the model starts one, matching `/continue` — it never fails for want of a conversation. It answers once the continuation is under way.
 
 Both wait behind user input received before them, so a `prompt` sent just before is queued by the time they run and is the input they deliver. Unlike `abort`, they cancel no earlier input and leave goal continuation running; an `abort` received after them cancels them if they have not started. Older runtimes reject both. The TypeScript client exposes `abortAndDeliverQueue(): Promise<boolean>` and `resume(): Promise<void>`.
 

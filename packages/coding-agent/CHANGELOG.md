@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/continue` command resumes a response you interrupted with Esc — the model picks up exactly where it stopped, with no extra message added to the conversation. It and the `.`/`c` shortcut now share one idle path: both replay an interrupted assistant tail, and with nothing to continue from they start a bare turn instead of refusing with "Nothing to resume".
+
 ### Breaking Changes
 
 - Extensions, hooks and custom tools draw with `@oh-my-pi/pi-tui` instead of `@oh-my-pi/pi-tui`. Tool `renderCall`/`renderResult`, message and thinking renderers, `ctx.ui.custom`, `ctx.ui.setWidget`, `setHeader` and `setFooter` return pi-tui nodes (JSX), or a `{ render(width): string[] }` rows object, which keeps old row renderers working once they drop their pi-tui imports. UI factories receive a `ui` host (`requestRender`, `size`, `suspend`) instead of the `TUI`, and renderers receive pi-tui's theme plus `bold`/`italic`/`underline`/`strikethrough`/`inverse`. See [Migrating from pi-tui](../../docs/extensions.md#migrating-from-pi-tui).
@@ -51,6 +55,7 @@
 - The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
 
 ### Fixed
+
 - `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
 - Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
@@ -117,6 +122,7 @@
 - Removed `fileToUri`, `uriToFile` and `EquivalentUriMap` from `@oh-my-pi/pi-coding-agent/lsp/utils`; they are exported from `@oh-my-pi/pi-coding-agent/lsp/uri` ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Hindsight now retains only the turns added by a `/tan` fork, not the parent transcript it inherited for context ([#20259](https://github.com/can1357/oh-my-pi/issues/20259)).
 - Remapped `tui.select.*`, `tui.editor.*`, `tui.input.*`, `app.interrupt`, `app.session.*`, `app.tree.previousBranch`/`nextBranch`, `app.ask.*`, `app.approval.approve`, `app.message.followUp` and `app.editor.external` keys work again in every picker, list, menu, settings page, dialog and text field of the rebuilt UI (they answered only to the default keys), and the tree selector's branch navigation is back; key hints and button tooltips show the keys you bound.
+
 ### Fixed
 
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).

@@ -8,7 +8,7 @@ import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-b
 import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, findCompactMode, type ParsedCompactArgs, parseCompactArgs } from "../session/compact-modes";
-import { isInterruptReason } from "../session/messages";
+import { findResumableAbortedAssistant, isInterruptReason } from "../session/messages";
 import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
 import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
@@ -508,6 +508,46 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showStatus("Nothing to retry");
 			}
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "continue",
+		icon: "redo",
+		description: "Continue an interrupted response, or pick the work back up from the current context",
+		getTuiAutocompleteDescription: runtime => {
+			const tail = findResumableAbortedAssistant(runtime.ctx.session.messages);
+			return tail
+				? "Continue: resumable interrupted turn"
+				: "Continue: nothing interrupted — continues from context";
+		},
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before continuing.", runtime);
+			}
+			if (runtime.session.continueInterrupted()) {
+				await runtime.output("Continuing the interrupted turn.");
+			} else {
+				// Nothing interrupted: the same idle path the `.`/`c` shortcut takes,
+				// which answers an empty transcript with a bare turn and anything else
+				// with the manual continue directive.
+				await runtime.session.resume();
+			}
+			// Same post-prompt continuation contract as /retry: the continuation is
+			// only scheduled, so ACP hosts must keep their prompt turn open across
+			// it or its output would stream into an already-unsubscribed turn.
+			await runtime.keepTurnOpenUntilIdle?.();
+			return commandConsumed({ agentInvoked: true });
+		},
+		handleTui: async (_command, runtime) => {
+			clearSubmittedText(runtime);
+			if (runtime.ctx.session.isStreaming) {
+				runtime.ctx.showStatus("Busy — wait for the current response to finish or abort it first.");
+				return;
+			}
+			if (runtime.ctx.session.continueInterrupted()) return;
+			// Nothing interrupted: continue from what the transcript already holds,
+			// the same path `.`/`c` takes.
+			await runtime.ctx.session.resume();
 		},
 	},
 	{
