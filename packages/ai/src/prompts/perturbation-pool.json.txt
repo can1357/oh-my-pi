@@ -8516,12 +8516,12 @@
 			]
 		},
 		{
-			"source": "Use the eval `commit` namespace to commit your changes (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`) rather than `git add`/`git commit`: it captures only the lines you and your subagents wrote, leaving other agents' staged and unstaged work untouched.",
+			"source": "When committing, use the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`) rather than `git add`/`git commit`: it captures only the lines you and your subagents wrote, leaving other agents' staged and unstaged work untouched.",
 			"origin": "tools/commit-guidance.md",
 			"variants": [
-				"Commit changes via the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`) instead of `git add`/`git commit`: it captures only lines you and your subagents wrote, leaving other agents' staged and unstaged work untouched.",
-				"Rather than `git add`/`git commit`, use the eval `commit` namespace to commit your changes (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`): it captures only the lines you and your subagents wrote, leaving other agents' staged and unstaged work untouched.",
-				"Commit your changes with the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`) rather than `git add`/`git commit`: it captures only the lines you and your subagents wrote, leaving other agents' staged and unstaged work untouched."
+				"When committing, go through the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`) instead of `git add`/`git commit`: it captures only lines you and your subagents wrote, leaving other agents' staged and unstaged work untouched.",
+				"When you commit, use the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`) rather than `git add`/`git commit`: it captures only the lines you and your subagents wrote, leaving other agents' staged and unstaged work untouched.",
+				"For commits, use the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`), not `git add`/`git commit`: it captures only the lines you and your subagents wrote and leaves other agents' staged and unstaged work untouched."
 			]
 		},
 		{
