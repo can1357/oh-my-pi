@@ -1735,10 +1735,6 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
 	});
 
-	// The parent turned a directory the isolation held into a regular file after
-	// the copy. The baseline's untracked path below it is absent from the parent
-	// (lstat reports ENOTDIR, not ENOENT), so it counts as vanished and the task's
-	// own edit is still captured.
 	// The lock is the only untracked file at baseline, so it is last there; the new
 	// file sorts after it, so it is not last in the current patch. Its position must
 	// not make an unchanged lock look modified.
@@ -1768,6 +1764,10 @@ describe("commitToBranch preserves agent commits", () => {
 		expect(delta.rootPatch).not.toContain(".beads.gate.lock");
 	});
 
+	// The parent turned a directory the isolation held into a regular file after
+	// the copy. The baseline's untracked path below it is absent from the parent
+	// (lstat reports ENOTDIR, not ENOENT), so it counts as vanished and the task's
+	// own edit is still captured.
 	it("treats a baseline untracked path under a parent file as vanished", async () => {
 		await fs.mkdir(path.join(isolation, "sub"), { recursive: true });
 		await fs.writeFile(path.join(isolation, "sub", "lock.txt"), "pid 2\n");
