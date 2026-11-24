@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- Python eval cells that open with `//` or `/* */` comment lines (as some models write them) now run instead of failing with a syntax error; tracebacks keep the original line numbers.
 - `/compact` and plan approval now fall back to a soft summary when `compaction.methodOrder` leaves out `soft`, instead of failing with "No configured compaction method can run manually."
 - Prompts starting with two or more question marks now send normally instead of opening `/btw` ([#20337](https://github.com/can1357/oh-my-pi/issues/20337)).
 - An MCP tool call refused with HTTP 403 `insufficient_scope` now asks you to authorize the missing scope, keeping the scopes already granted, and retries the call once after you approve; declining shows the 403 ([#20340](https://github.com/can1357/oh-my-pi/issues/20340))
