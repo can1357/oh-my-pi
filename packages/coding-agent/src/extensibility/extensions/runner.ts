@@ -612,7 +612,6 @@ interface TodoApplyRequest {
 	current(): TodoPhase[];
 	commit(): void;
 	resend(): void;
-	/** Read when the call starts and again at commit: the session began closing. */
 	closing(): boolean;
 	/** The selected todo backend id, or undefined for native. */
 	selected(): string | undefined;
@@ -1806,12 +1805,6 @@ export class ExtensionRunner {
 		this.#todoGivenUp.abort();
 	}
 
-	/** Whether `extension`'s `definition` still owns the todo backend `id`. */
-	#holdsTodoBackend(id: string, extension: Extension, definition: TodoBackendDefinition): boolean {
-		const owner = this.getTodoBackends().get(id);
-		return owner?.extension === extension && owner.definition === definition;
-	}
-
 	/**
 	 * Ask the backend `todo.backend` selects to accept a `todo` call's change. `request.commit`
 	 * runs in the same synchronous step as the checks of the answer. `apply` is not queued behind
@@ -1869,13 +1862,14 @@ export class ExtensionRunner {
 		);
 		if (!asked) answered.resolve();
 		// Why the change can no longer commit, checked in the same synchronous step as the commit.
+		const owner = this.getTodoBackends().get(backend);
 		const staleCause = signal?.aborted
 			? "The call was aborted"
 			: this.#todoClosed || closing()
 				? "The session closed"
 				: this.sessionManager.getSessionId() !== sessionId
 					? "The session changed"
-					: selected() !== backend || !this.#holdsTodoBackend(backend, extension, definition)
+					: selected() !== backend || owner?.extension !== extension || owner.definition !== definition
 						? "The todo backend changed"
 						: !Bun.deepEquals(current(), change.previous)
 							? "The todo list changed"
