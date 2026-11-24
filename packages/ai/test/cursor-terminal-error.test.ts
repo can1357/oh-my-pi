@@ -32,6 +32,10 @@ import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 
+// The markup cursor-agent sometimes streams as text instead of a tool call (issue 8495).
+const TOOL_CALL_MARKUP_TEXT =
+	'<|open|>toolscall tool="Shell" index="1"<|sep|><|open|>argument key="command" type="string"<|sep|>git add -A && git commit -m "ci: fix format check and skip native builds on Windows" && git push 2>&1 | tail -2 && sleep 10 && ghargument<|sep|><|close|>call<|sep|><|close|>toolsmessage<|sep|>';
+
 type Scenario =
 	| { kind: "success" }
 	| { kind: "connect-error-after-turn" }
@@ -52,7 +56,8 @@ type Scenario =
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-transport-error"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-hang" }
-	| { kind: "todo-start-then-death" };
+	| { kind: "todo-start-then-death" }
+	| { kind: "tool-call-markup-text" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -445,6 +450,20 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "tool-call-markup-text") {
+			stream.write(
+				Buffer.concat([
+					// Split inside the marker, as the transport delivers it.
+					textDeltaFrame(TOOL_CALL_MARKUP_TEXT.slice(0, 4)),
+					textDeltaFrame(TOOL_CALL_MARKUP_TEXT.slice(4)),
+					stepCompletedFrame(),
+					turnEndedFrame(),
+				]),
+			);
+			stream.end();
+			return;
+		}
+
 		stream.write(Buffer.concat([textDeltaFrame("hello"), turnEndedFrame()]));
 
 		if (scenario.kind === "connect-error-after-turn") {
@@ -612,6 +631,20 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
+	});
+
+	it("ends the turn with an error, not stored text, when tool-call markup comes back as text (issue 8495)", async () => {
+		scenario = { kind: "tool-call-markup-text" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		const storedText = result.content
+			.filter(block => block.type === "text")
+			.map(block => (block as { text: string }).text)
+			.join("");
+		expect(storedText).not.toContain("<|open|>toolscall");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("tool-call markup");
 	});
 
 	it("half-closes its request once the Connect end frame arrives", async () => {

@@ -1946,6 +1946,8 @@ function streamCursorWithWireMode(
 			// unpaired and stripped from every rebuilt transcript. Each dispatch
 			// already swallows its own rejection, so this only waits.
 			await drainInFlightDispatches();
+			// A dispatch that refused tool-call markup cannot throw here: its rejection is swallowed.
+			if (state.toolCallMarkupRefusal) throw new Error(state.toolCallMarkupRefusal);
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
@@ -2428,6 +2430,12 @@ export interface BlockState {
 	setTextBlock: (b: (TextContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setToolCall: (t: ToolCallState | null) => void;
+	/**
+	 * Set when the text path refuses Cursor's tool-call markup (issue 8495). Nothing after the marker is
+	 * stored, and the turn ends with this message once the transport drains. Optional so existing test
+	 * harnesses stay valid.
+	 */
+	toolCallMarkupRefusal?: string;
 	setFirstTokenTime: () => void;
 	/** Mirror a server-confirmed todo snapshot into local session state. */
 	onTodoSnapshot?: CursorTodoSyncHandler;
@@ -5826,12 +5834,13 @@ export function processInteractionUpdate(
 	if (updateCase === "textDelta") {
 		state.setFirstTokenTime();
 		const delta = update.message.value.text || "";
+		if (state.toolCallMarkupRefusal) return;
 		// The marker can straddle two deltas, so check the stored tail plus this delta before anything is stored.
 		const seam = (state.currentTextBlock?.text.slice(-(TOOL_CALL_MARKUP_LEAK.length - 1)) ?? "") + delta;
 		if (seam.includes(TOOL_CALL_MARKUP_LEAK)) {
-			throw new Error(
-				"Cursor emitted tool-call markup as text instead of a native tool call; the call did not run.",
-			);
+			state.toolCallMarkupRefusal =
+				"Cursor emitted tool-call markup as text instead of a native tool call; the call did not run.";
+			return;
 		}
 		if (!state.currentTextBlock) {
 			const block: TextContent & { [kStreamingBlockIndex]: number } = {
