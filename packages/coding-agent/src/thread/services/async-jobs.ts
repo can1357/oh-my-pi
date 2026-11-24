@@ -230,6 +230,7 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		publishFailed: (manager, type, label, errorText, options) =>
 			manager.publishFailed(type, label, errorText, options),
 		cancel: (manager, id, filter) => manager.cancel(id, filter),
+		failEvalJob: (manager, jobId, errorText, filter) => manager.failEvalJob(jobId, new Error(errorText), filter),
 		getJob: (manager, id) => {
 			const job = manager.getJob(id);
 			return job ? toJobWire(job) : undefined;

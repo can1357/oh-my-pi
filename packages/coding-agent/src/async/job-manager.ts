@@ -410,6 +410,16 @@ export interface AsyncJobManagerApi {
 	): string;
 	/** Cancel one running job; a filter whose owner does not match reads as not-found. */
 	cancel(id: string, filter?: AsyncJobFilter): boolean;
+	/**
+	 * Fail a running eval job whose JS kernel died; `killSession` is the intended
+	 * caller. Marks the job failed, queues its failure delivery through the
+	 * ordinary async-result path, and aborts the job's controller. The job's own
+	 * promise stays open until the run body finishes cleaning up, so owner
+	 * reaping keeps reporting the work as live. A `filter` whose owner does not
+	 * match reads as not-found; returns false for unknown ids, non-eval jobs,
+	 * and jobs that already settled.
+	 */
+	failEvalJob(jobId: string, error: unknown, filter?: AsyncJobFilter): boolean;
 	getJob(id: string): AsyncJob | undefined;
 	/** Running background jobs; foreground-backed jobs stay hidden until promoted. */
 	getRunningJobs(filter?: AsyncJobFilter): AsyncJob[];
@@ -647,10 +657,16 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			}
 		};
 		const forcedFailure = type === "eval" ? Promise.withResolvers<never>() : undefined;
-		if (forcedFailure) this.#forcedEvalFailures.set(id, forcedFailure.reject);
+		if (forcedFailure) {
+			this.#forcedEvalFailures.set(id, forcedFailure.reject);
+			// The race can settle via the run first, so a late forced failure must not
+			// surface as an unhandled rejection on the abandoned racer.
+			forcedFailure.promise.catch(() => {});
+		}
 		job.promise = (async () => {
+			let runPromise: Promise<string | AsyncJobRunResult> | undefined;
 			try {
-				const runPromise = run({
+				runPromise = run({
 					jobId: id,
 					signal: abortController.signal,
 					reportProgress,
@@ -689,6 +705,10 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 						this.#enqueueDelivery(id, errorText);
 					}
 				}
+				// A forced eval failure delivers the error above while the run body is
+				// still executing its cleanup. Owner reaping reads this promise as proof
+				// the owned work exited, so it stays open until the run settles.
+				if (runPromise) await runPromise.catch(() => {});
 			}
 			this.#forcedEvalFailures.delete(id);
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
@@ -705,12 +725,22 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			}
 			this.#notifyJobsChanged(id);
 		})();
+
 		this.#jobs.set(id, job);
 		this.#evicted.delete(id);
 		this.#notifyJobsChanged(id);
 		return id;
 	}
 
+	/**
+	 * Fail a running eval job whose JS kernel died; `killSession` is the intended
+	 * caller. Marks the job failed, queues its failure delivery through the
+	 * ordinary async-result path, and aborts the job's controller. The job's own
+	 * promise stays open until the run body finishes cleaning up, so owner
+	 * reaping keeps reporting the work as live. A `filter` whose owner does not
+	 * match reads as not-found; returns false for unknown ids, non-eval jobs,
+	 * and jobs that already settled.
+	 */
 	failEvalJob(jobId: string, error: unknown, filter?: AsyncJobFilter): boolean {
 		const job = this.#jobs.get(jobId);
 		if (

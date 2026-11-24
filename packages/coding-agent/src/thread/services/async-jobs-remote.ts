@@ -297,6 +297,11 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.callSync("cancel", id, filter);
 	}
 
+	failEvalJob(jobId: string, error: unknown, filter?: AsyncJobFilter): boolean {
+		const errorText = error instanceof Error ? error.message : String(error);
+		return this.#remote.callSync("failEvalJob", jobId, errorText, filter);
+	}
+
 	getJob(id: string): AsyncJob | undefined {
 		const wire = this.#remote.callSync("getJob", id);
 		if (!wire) {
