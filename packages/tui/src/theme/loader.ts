@@ -23,8 +23,13 @@ export function builtinThemes(): Readonly<Record<string, ThemeJson>> {
 	return BUILTIN_THEMES;
 }
 
-/** Path a custom theme named `name` is read from. */
+/**
+ * Path a custom theme named `name` is read from. A path separator is refused: it is the only way
+ * a name leaves the themes directory, and a `..` segment needs one. The refusal is the unknown-theme
+ * error, so the caller falls back as it does for any missing name.
+ */
 export function customThemePath(name: string): string {
+	if (/[\\/]/.test(name)) throw new Error(`Theme not found: ${name}`);
 	return path.join(getCustomThemesDir(), `${name}.json`);
 }
 
