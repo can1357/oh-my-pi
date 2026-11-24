@@ -870,8 +870,8 @@ export class CacheWarmer {
 		run.timer = undefined;
 		run.refreshSentAt = undefined;
 		if (!this.#validateRun(run)) return;
-		// Sleep stalls the timer while the wall clock runs on. A late fire must not refresh an entry that has run out,
-		// nor one with less than the margin left; an on-time fire keeps the schedule's own margin.
+		// Sleep stalls the timer while the wall clock runs on. A fire more than the margin behind schedule must not
+		// refresh an entry that has run out, or one with less than the margin left; an on-time fire keeps the schedule's own margin.
 		const expiresAt = this.#expiresAt(run);
 		const now = Date.now();
 		const late = now - run.nextWarmAt > EXPIRY_MARGIN_MS;
