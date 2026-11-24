@@ -70,6 +70,28 @@ fn truncate_preserves_non_monotonic_whole_word_select() {
 	assert_eq!(Encoding::Jev.count(&u16s[..end]), 32_000);
 }
 
+/// A prefix re-splits the whitespace run at its end: Jev counts
+/// `" \u{a0} \u{a0}"` after 2, 3, and 4 units as 32,000, 32,001, and 32,000,
+/// so the cut must reach past the over-budget middle to all four.
+#[test]
+fn truncate_scans_the_whole_whitespace_run() {
+	let text = format!("{}{}", "1".repeat(31_999), " \u{a0} \u{a0}🙂");
+	let u16s: Vec<u16> = text.encode_utf16().collect();
+	let end = jev::truncate_u16(&u16s, 32_000);
+	assert_eq!(end, 32_003);
+	assert_eq!(Encoding::Jev.count(&u16s[..end]), 32_000);
+}
+
+/// NFC input: at budget 1 the cuts after 4..=7 units count 1, 5, 6, 1, and
+/// the whole-word 7-unit prefix is the longest that fits.
+#[test]
+fn truncate_keeps_whole_word_on_nfc_input() {
+	let u16s: Vec<u16> = "ություն!e\u{301} xxxxxxxxxxxx".encode_utf16().collect();
+	let end = jev::truncate_u16(&u16s, 1);
+	assert_eq!(end, 7);
+	assert_eq!(Encoding::Jev.count(&u16s[..end]), 1);
+}
+
 #[test]
 fn encode_is_none() {
 	assert_eq!(Encoding::Jev.encode("hello"), None);
