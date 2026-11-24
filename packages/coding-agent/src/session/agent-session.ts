@@ -5083,6 +5083,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		if (event.type === "turn_start") {
+			this.#loopGuards.startTurn();
 			this.#advisors.onPrimaryTurnStart();
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, this.#goalUsage());
 		}

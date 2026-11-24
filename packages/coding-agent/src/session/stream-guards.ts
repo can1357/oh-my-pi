@@ -208,12 +208,18 @@ export class LoopGuards {
 	#geminiHeaderDetector: GeminiHeaderRunDetector | undefined;
 	#toolCallLoopGuard: ToolCallLoopGuard | undefined;
 	#toolCallLoopGuardSettingsKey: string | undefined;
-	/** Repetition among the calls the current turn's cells made, reset when the turn ends. */
+	/** Repetition among the calls the current turn's cells made, reset when a turn starts and when it ends. */
 	#cellCallGuard: ToolCallLoopGuard | undefined;
 	#cellCallDetection: RepeatedToolCallDetection | undefined;
 
 	constructor(host: StreamGuardsHost) {
 		this.#host = host;
+	}
+
+	/** Starts a turn with no cell calls counted: a cell that ran between turns (a user `$` command) is not this turn's. */
+	startTurn(): void {
+		this.#cellCallGuard = undefined;
+		this.#cellCallDetection = undefined;
 	}
 
 	/** Records a completed turn and injects a redirect when calls repeat. */
