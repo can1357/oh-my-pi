@@ -395,9 +395,9 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	await $`bun install`;
 	await $`cargo update --workspace`;
 	await generateNixBunDeps(nixBunDepsGenerator);
-	// bazel/clippy.bazelrc mirrors [workspace.lints] in Cargo.toml; regenerate
-	// it here (like the lockfiles) so the bazel clippy policy can never drift.
-	// The release_gate CI job runs the matching `--check`.
+	// bazel/clippy.bazelrc and bazel/lints/BUILD.bazel mirror [workspace.lints]
+	// in Cargo.toml; regenerate them here (like the lockfiles) so the bazel
+	// clippy policy can never drift. The release_gate CI job runs the matching `--check`.
 	await $`bun scripts/gen-clippy-bazelrc.ts`;
 	// MODULE.bazel.lock caches the crate_universe extension result keyed by
 	// Cargo.toml/Cargo.lock hashes, which the bump just rewrote. Unrefreshed,

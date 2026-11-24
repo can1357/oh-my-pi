@@ -7,7 +7,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import type { ToolSession } from "../index";
