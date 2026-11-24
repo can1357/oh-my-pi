@@ -28,15 +28,14 @@ import type {
 	TextEdit,
 } from "./types";
 import {
-	fileToUri,
 	formatDiagnostic,
 	formatDiagnosticsSummary,
 	formatLocation,
 	mergeDiagnosticLists,
 	readLocationContext,
 	sortDiagnostics,
-	uriToFile,
 } from "./utils";
+import { fileToUri, uriToFile } from "./uri";
 
 const DIAGNOSTIC_MESSAGE_LIMIT = 50;
 export const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;

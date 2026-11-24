@@ -7,11 +7,12 @@ import * as path from "node:path";
 import { type Agent, AgentBusyError, type AgentMessage, agentPauseGate, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
 	AutocompleteProvider,
 	Component,
+	Editor,
 	EditorTheme,
 	KeyId,
 	LoaderMessageColorFn,
@@ -96,6 +97,7 @@ import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybindin
 import {
 	formatModelStringWithRouting,
 	type ResolvedModelRoleValue,
+	resolveExactModelIdentity,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
@@ -263,7 +265,7 @@ import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { wrapTreeLine } from "@oh-my-pi/pi-tui/render/hanging-wrap";
 import { WidthAwareText } from "@oh-my-pi/pi-tui/render/width-aware-text";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
-import { copyToClipboard } from "../utils/clipboard";
+import { copyToClipboard, readTextFromClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
@@ -478,6 +480,9 @@ import {
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
+	cfgTuiVimShowCommand,
+	cfgTuiVimStartMode,
+	cfgTuiVimYankToClipboard,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
@@ -518,6 +523,8 @@ const cfgLiveUiSettings = combine({
 	"composer.shape": cfgComposerShape,
 	"tui.vimMode": cfgTuiVimMode,
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
+	"tui.vimShowCommand": cfgTuiVimShowCommand,
+	"tui.vimStartMode": cfgTuiVimStartMode,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
 	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
 	"compaction.idleEnabled": cfgCompactionIdleEnabled,
@@ -747,8 +754,12 @@ export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
 /** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
 class AnchoredLiveContainer extends Container {}
 
-/** An empty HUD slot: the terminal owns spacing, so nothing is described. */
-const EMPTY_HUD: NativeNode = col([]);
+/**
+ * The activity line with nothing to show and no tray to seat: the line without its role. It stays a
+ * row, as the line is, so the host keeps one element as the line comes and goes; a kind change makes
+ * the host drop the element and draw a new one, losing what it drew into it (a tray host's dots).
+ */
+const EMPTY_STATUS: NativeNode = row([], { align: "center", gap: "sm" });
 /** The activity line with nothing in it: on a tray host it stays while the tray has cards, the host's seat for them. */
 const EMPTY_ACTIVITY: NativeNode = row([], { role: "omp.hud.activity", align: "center", gap: "sm" });
 
@@ -1423,6 +1434,11 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
 /** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
 const JOBS_SHEET_REFRESH_MS = 250;
+type PlanPreModelState = {
+	model?: Model;
+	identity?: string;
+	thinkingLevel?: ConfiguredThinkingLevel;
+};
 
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
@@ -1758,7 +1774,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * retry and compaction loaders describe themselves as the working row;
 	 * other rows describe themselves) in an `omp.hud.status` column, then the
 	 * todo HUD, so the todo holds its place as the turn starts and ends.
-	 * Nothing to show describes the empty HUD. On a host with the tray, the
+	 * Nothing to show describes the line without its role ({@link EMPTY_STATUS}),
+	 * never another kind of node. On a host with the tray, the
 	 * row is the tray's header: while the main agent is idle its caption
 	 * stands in for the status rows, and while the tray has cards the line
 	 * stays, empty if need be, as the seat the host draws them from.
@@ -1793,7 +1810,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				? row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" })
 				: seat
 					? EMPTY_ACTIVITY
-					: EMPTY_HUD;
+					: EMPTY_STATUS;
 		this.#statusHudNative = { children: children.slice(), todo, caption, seat, node: described };
 		return described;
 	}
@@ -2000,7 +2017,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#pendingGoalContinuationTurns = 0;
 	#previousGoalContinuationActivity: string | undefined;
 	#goalSuppressNextContinuation = false;
-	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+	#planModePreviousModelState: PlanPreModelState | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
@@ -2540,6 +2557,10 @@ export class InteractiveMode implements InteractiveModeContext {
 					return;
 				case "status.path":
 					openPath(this.sessionManager.getCwd());
+					return;
+				// The tree position shows only for the main session, which `/tree` navigates.
+				case "status.tree":
+					this.showTreeSelector();
 					return;
 			}
 		};
@@ -4471,7 +4492,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.updateEditorBorderColor();
 		}
 		if (any("composer.shape")) this.syncComposerShape();
-		if (any("tui.vimMode", "tui.vimModeDisplay")) this.#applyVimModeSetting();
+		if (any("tui.vimMode", "tui.vimModeDisplay", "tui.vimShowCommand", "tui.vimStartMode")) {
+			this.#applyVimModeSetting();
+		}
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
 		if (any("display.subagentLivePreview")) {
 			this.#renderSubagentList();
@@ -5966,20 +5989,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #applyPlanModeModel(): Promise<void> {
+		const currentModel = this.session.model;
 		const resolved = this.session.resolveRoleModelWithThinking("plan");
 		if (!resolved.model) return;
-
-		const currentModel = this.session.model;
-		// Capture the pre-plan model so #exitPlanMode can restore it. Only the
-		// entry path records this — a mid-planning role change (below) leaves the
-		// active model on the plan role, so overwriting here would restore the old
-		// plan model instead of the user's real pre-plan model.
-		this.#planModePreviousModelState = currentModel
-			? {
-					model: currentModel,
-					thinkingLevel: this.session.configuredThinkingLevel(),
-				}
-			: undefined;
+		// Only an entry captures this; role changes while planning must not overwrite it.
+		this.#planModePreviousModelState = {
+			...(currentModel ? { model: currentModel, identity: formatModelStringWithRouting(currentModel) } : {}),
+			thinkingLevel: this.session.configuredThinkingLevel(),
+		};
 
 		await this.#applyPlanModelTransition(currentModel, resolved);
 	}
@@ -6089,8 +6106,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#planModeHasEntered = false;
 				this.#updatePlanModeStatus();
 			}
-			if (options?.restorePlanModel && previousModel) {
-				await this.#restorePlanPreviousModel(previousModel);
+			if (options?.restorePlanModel) {
+				await this.#restorePlanPreviousModel(previousModel ?? {});
 			}
 		}
 
@@ -6214,7 +6231,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (sessionContext.mode === "plan") {
 			const planFilePath = sessionContext.modeData?.planFilePath as string | undefined;
-			await this.#enterPlanMode({ planFilePath, preserveRestoredModel: true });
+			const prePlanModelIdentity = sessionContext.modeData?.prePlanModelIdentity;
+			const previousModel =
+				typeof prePlanModelIdentity === "string"
+					? resolveExactModelIdentity(prePlanModelIdentity, this.session.modelRegistry)
+					: undefined;
+			const prePlanThinkingLevel = parseConfiguredThinkingLevel(
+				typeof sessionContext.modeData?.prePlanThinkingLevel === "string"
+					? sessionContext.modeData.prePlanThinkingLevel
+					: undefined,
+			);
+			await this.#enterPlanMode({
+				planFilePath,
+				preserveRestoredModel: true,
+				previousModelState:
+					typeof prePlanModelIdentity === "string"
+						? {
+								...(previousModel ? { model: previousModel } : {}),
+								identity: prePlanModelIdentity,
+								thinkingLevel: prePlanThinkingLevel,
+							}
+						: undefined,
+			});
 		} else if (sessionContext.mode === "plan_paused") {
 			this.planModePaused = true;
 			this.#planModeHasEntered = true;
@@ -6238,6 +6276,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		planFilePath?: string;
 		workflow?: "parallel" | "iterative";
 		preserveRestoredModel?: boolean;
+		previousModelState?: PlanPreModelState;
 	}): Promise<void> {
 		if (this.planModeEnabled) {
 			return;
@@ -6308,19 +6347,40 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.session.sendPlanModeContext({ deliverAs: "steer" });
 		}
 		this.#planModeHasEntered = true;
-		// Session loading already restored the model recorded in the journal.
-		// Reapplying today's plan role here would replace a CLI/session-specific
-		// selection with current config during --resume or an in-process switch.
+		if (options?.previousModelState) {
+			this.#planModePreviousModelState = options.previousModelState;
+		}
+		// Resume already restored the active plan model; applying the role again
+		// would overwrite any execution target restored from the journal.
 		if (!options?.preserveRestoredModel) {
 			await this.#applyPlanModeModel();
 		}
 		this.#updatePlanModeStatus();
-		this.sessionManager.appendModeChange("plan", { planFilePath });
+		this.sessionManager.appendModeChange("plan", this.#planModeJournalData(planFilePath));
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
 	}
 
-	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
-		if (modelsAreEqual(this.session.model, prev.model)) {
+	#planModeJournalData(planFilePath: string): Record<string, unknown> {
+		const previous = this.#planModePreviousModelState;
+		const identity =
+			previous?.identity ?? (previous?.model ? formatModelStringWithRouting(previous.model) : undefined);
+		return {
+			planFilePath,
+			...(identity
+				? {
+						prePlanModelIdentity: identity,
+						...(previous?.thinkingLevel !== undefined ? { prePlanThinkingLevel: previous.thinkingLevel } : {}),
+					}
+				: {}),
+		};
+	}
+
+	async #restorePlanPreviousModel(prev: PlanPreModelState): Promise<void> {
+		if (!prev.model) return;
+		if (
+			this.session.model &&
+			formatModelStringWithRouting(this.session.model) === formatModelStringWithRouting(prev.model)
+		) {
 			// Same model — only thinking level may differ. Avoid setModelTemporary()
 			// which would reset provider-side sessions and break continuity.
 			this.session.setThinkingLevel(prev.thinkingLevel);
@@ -6418,7 +6478,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.setPlanModeState(planModeState);
 			if (
 				planModeModelState &&
-				(!modelsAreEqual(this.session.model, planModeModelState.model) ||
+				(!routedModelsAreEqual(this.session.model, planModeModelState.model) ||
 					this.session.configuredThinkingLevel() !== planModeModelState.thinkingLevel)
 			) {
 				try {
@@ -6455,7 +6515,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.planModePaused = options?.paused ?? false;
 		this.planModePlanFilePath = undefined;
 		this.#planModePreviousToolPresentation = undefined;
-		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
+		if (!options?.deferModelRestore || !this.#planModePreviousModelState?.model) {
+			this.#planModePreviousModelState = undefined;
+		}
 		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
 		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
@@ -6801,15 +6863,43 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** Apply the `tui.vimMode` setting to an editor and route Visual-mode yanks to the clipboard. */
+	/** Apply the `tui.vimMode` settings to the composer and route its clipboard registers. */
 	#applyVimMode(editor: CustomEditor): void {
+		editor.vimStartMode = cfgTuiVimStartMode.get(settings);
+		// Only the composer has a slash-command menu for `:` to open.
+		editor.vimSlashCommands = true;
 		editor.setVimMode(cfgTuiVimMode.get(settings));
-		editor.onYank = text => {
-			void this.#copyYankToClipboard(text);
-		};
+		this.#wireVimClipboard(editor);
 		// Recolor the prompt border on every mode switch: in a modal editor the mode has to be
 		// visible at a glance, and the border is where bash/python mode already signal themselves.
 		editor.onVimModeChange = () => this.#syncVimStatus(editor);
+		// Normal-mode `/` and `?` open the same prompt-history search as Ctrl+R.
+		editor.onHistorySearch = () => this.showHistorySearch();
+	}
+
+	/**
+	 * Clipboard routing: a yank reaches the system clipboard when it names `"+`/`"*`, or always under
+	 * `tui.vimYankToClipboard`; `"+p`/`"*p` read it back.
+	 */
+	#wireVimClipboard(editor: Editor): void {
+		editor.onYank = (text, register) => {
+			if (register === "+" || register === "*" || cfgTuiVimYankToClipboard.get(settings)) {
+				void this.#copyYankToClipboard(text);
+			}
+		};
+		editor.readClipboard = readTextFromClipboard;
+		editor.requestRender = () => this.ui.requestRender();
+	}
+
+	configureDialogEditor(editor: Editor): void {
+		this.#wireVimClipboard(editor);
+		editor.vimStartMode = cfgTuiVimStartMode.get(settings);
+		// Dialogs have no status line of their own; the cursor shape is what shows the mode. Only the
+		// editor holding the keys sets it (an editor built for a form the keys are not in must not);
+		// gaining focus re-announces the mode, so the shape follows focus.
+		editor.onVimModeChange = mode => {
+			if (editor.focused) this.ui.terminal.setCursorShape?.(mode === "insert" ? "bar" : "block");
+		};
 	}
 
 	/**
@@ -6834,7 +6924,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			editor.vimEnabled
 				? {
 						mode: editor.vimMode,
-						pending: editor.vimPending,
+						pending: cfgTuiVimShowCommand.get(settings) ? editor.vimPending : "",
 						selectedLines: editor.vimSelectedLines,
 						display: cfgTuiVimModeDisplay.get(settings),
 					}
@@ -8017,7 +8107,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planState = this.session.getPlanModeState();
 		if (planState?.enabled && planState.planFilePath !== planFilePath) {
 			this.session.setPlanModeState({ ...planState, planFilePath });
-			this.sessionManager.appendModeChange("plan", { planFilePath });
+			this.sessionManager.appendModeChange("plan", this.#planModeJournalData(planFilePath));
 			// Reported only once committed: the next planning turn reads this state.
 			this.#notifyModeChanged();
 		}
@@ -8226,9 +8316,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				// different configured thinking level silently keeps the pre-plan level.
 				const restoredState = this.#planModePreviousModelState;
 				const restoredIndex =
-					cycle && restoredState
+					cycle && restoredState?.model
 						? cycle.models.findIndex(entry => {
-								if (!modelsAreEqual(entry.model, restoredState.model)) return false;
+								if (!routedModelsAreEqual(entry.model, restoredState.model)) return false;
 								if (!entry.explicitThinkingLevel) return true;
 								return entry.thinkingLevel === restoredState.thinkingLevel;
 							})

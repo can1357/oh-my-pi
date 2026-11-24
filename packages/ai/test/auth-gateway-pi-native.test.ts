@@ -327,6 +327,57 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 });
+describe("pi-native gateway catalog", () => {
+	it("serves model facts without the gateway's routing or account state", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-models-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const served = buildModel({
+			id: "gpt-gateway-only",
+			name: "Gateway Only",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 500_000,
+			maxContextWindow: 922_000,
+			maxTokens: 128_000,
+			headers: { "chatgpt-account-id": "acct-1" },
+			accountAccess: { "acct-1": {} },
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => served,
+			listModels: () => [served],
+			version: "test",
+		});
+		try {
+			expect((await fetch(`${handle.url}/v1/pi/models`)).status).toBe(401);
+			const response = await fetch(`${handle.url}/v1/pi/models`, {
+				headers: { Authorization: "Bearer test-token" },
+			});
+			expect(response.status).toBe(200);
+			const { models } = (await response.json()) as { models: Array<Record<string, unknown>> };
+			expect(models).toHaveLength(1);
+			expect(models[0]).toMatchObject({
+				id: "gpt-gateway-only",
+				provider: "openai-codex",
+				contextWindow: 500_000,
+				maxContextWindow: 922_000,
+				thinking: { efforts: served.thinking?.efforts },
+			});
+			for (const key of ["baseUrl", "headers", "accountAccess"]) expect(models[0]).not.toHaveProperty(key);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("pi-native gateway retry budgets", () => {
 	it("limits upstream OpenAI requests on persistent 429", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-retry-"));

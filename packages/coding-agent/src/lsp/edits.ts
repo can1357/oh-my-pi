@@ -16,7 +16,8 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
-import { readTextFromDisk, uriToFile } from "./utils";
+import { uriToFile } from "./uri";
+import { readTextFromDisk } from "./utils";
 
 // =============================================================================
 // Text Edit Application
