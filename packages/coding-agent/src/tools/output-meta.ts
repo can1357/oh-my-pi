@@ -16,18 +16,8 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
 
-import {
-	type OutputSummary,
-	type TruncationResult,
-	truncateMiddle,
-	truncateTail,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import {
-	formatOutputNotice,
-	type MinimizedMeta,
-	type OutputMeta,
-	type TruncationMeta,
-} from "@oh-my-pi/pi-tui/tools/output-meta";
+import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "./streaming-output";
+import { formatOutputNotice, type MinimizedMeta, type OutputMeta, type TruncationMeta } from "./output-meta-format";
 import { renderError } from "./tool-errors";
 import {
 	cfgToolsArtifactHeadBytes,

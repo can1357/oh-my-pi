@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeErrorLine } from "@oh-my-pi/pi-coding-agent/modes/view-model/chrome/error-block";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 
 describe("safe error lines", () => {
 	it("shortens multiple quoted home paths without splitting a home directory containing spaces", () => {

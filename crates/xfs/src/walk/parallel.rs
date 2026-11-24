@@ -940,10 +940,14 @@ impl<K: Sink> Ctx<K> {
 		let ignores = match &self.ignorer {
 			None => None,
 			Some(_) if names.is_empty() => Some(DirIgnores::default()),
-			Some(ignorer) => Some(
-				DirIgnores::load(&mut st.session, &dir, names, ignorer.sources(), stamp.is_some())
-					.await,
-			),
+			Some(ignorer) => {
+				join_into(&self.fs, &self.root, rel, &mut st.abs);
+				let sources = ignorer.sources();
+				Some(
+					DirIgnores::load(&mut st.session, &dir, &st.abs, names, sources, stamp.is_some())
+						.await,
+				)
+			},
 		};
 		let frame = match &ignores {
 			Some(ignores) => ignores.frame(frame.as_ref(), names, rel),

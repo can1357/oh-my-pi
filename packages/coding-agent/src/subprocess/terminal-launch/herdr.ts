@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { hasMultiplexerSession } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import { quotePosixArgument, quotePosixArgv } from "../../utils/shell-quote";
 import { launchError, nestedString, parseJson, runStep } from "./shared";
 import type {
@@ -83,7 +83,7 @@ const launchHerdr: TerminalLaunchBackend<"herdr", typeof capabilities> = async (
 	if (platform === "win32") {
 		throw launchError(request, "capability", "Herdr launches are not supported on Windows.");
 	}
-	if (!hasTerminalMultiplexerSession("herdr", env)) {
+	if (!hasMultiplexerSession("herdr", env)) {
 		throw launchError(request, "capability", "Herdr launch requires an active Herdr pane or workspace.");
 	}
 	const focusArgs = request.focus === undefined ? [] : [request.focus ? "--focus" : "--no-focus"];

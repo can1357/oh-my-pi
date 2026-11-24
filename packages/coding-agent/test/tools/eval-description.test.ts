@@ -153,8 +153,9 @@ describe("eval tool description", () => {
 	});
 
 	it("inlines every topic when the session cannot open help:// links", () => {
-		const linked = new EvalTool(makeSession({})).description;
-		const inlined = new EvalTool(makeSession({ readActive: false })).description;
+		const settings = { "eval.tools.enabled": true };
+		const linked = new EvalTool(makeSession({ settings })).description;
+		const inlined = new EvalTool(makeSession({ readActive: false, settings })).description;
 		for (const uri of ["help://eval/judge", "help://eval/helpers", "help://eval/agents"]) {
 			expect(linked).toContain(uri);
 			expect(inlined).not.toContain(uri);

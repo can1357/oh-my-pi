@@ -1,19 +1,19 @@
 /**
- * `omp gallery` — render every built-in tool's renderer across its lifecycle.
+ * `omp gallery` — render every built-in tool presenter across its lifecycle.
  *
- * For each tool with a registered renderer, the gallery drives a real
- * {@link ToolExecutionComponent} through four states — streaming arguments,
- * arguments complete (in progress), success, and failure — and prints the
- * rendered output to stdout. It exists for visual QA of tool renderers without
- * having to provoke each state through a live agent session.
+ * For each tool with a registered presenter, the gallery drives the
+ * transcript's real tool block ({@link ToolCall} + {@link ToolBlock}) through
+ * four states — streaming arguments, arguments complete (in progress),
+ * success, and failure — and prints the painted rows to stdout. It exists for
+ * visual QA of tool views without having to provoke each state through a live
+ * agent session.
  */
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { TUI } from "@oh-my-pi/pi-tui";
-import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
+import "../ui/styles/tools";
+import "../ui/tools";
+import { printRows } from "../ui/print-rows";
+import { toolPresenter, toolPresenterNames } from "../ui/tools/registry";
+import { ToolBlock, ToolCall } from "../ui/transcript/tool-block";
 import {
 	type GalleryFixture,
 	type GalleryPreviewEntry,
@@ -24,9 +24,13 @@ import {
 	getSegmentGalleryEntries,
 	getSegmentGalleryInventory,
 } from "./gallery-fixtures";
+import { GALLERY_NOW } from "./gallery-fixtures/status-facts";
 import { captureGalleryScreenshots } from "./gallery-screenshot";
 
 import { cfgColorBlindMode, cfgSymbolPreset, cfgThemeDark, cfgThemeLight } from "../modes/settings";
+import { initTheme } from "../ui/theme/service";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { bold } from "@oh-my-pi/pi-tui/theme/theme";
 
 /** Lifecycle states the gallery renders, in display order. */
 export const GALLERY_STATES = ["streaming", "progress", "success", "error"] as const;
@@ -129,28 +133,6 @@ const GENERIC_ERROR: GalleryResult = {
 	isError: true,
 };
 
-/**
- * Build the fake `AgentTool` the component needs for its label, edit mode, and —
- * for `customRendered` fixtures — the renderer functions that route it through
- * the same custom-tool branch production uses (see {@link GalleryFixture}).
- */
-function fakeToolFor(name: string, fixture: GalleryFixture | undefined): AgentTool | undefined {
-	if (!fixture?.label && !fixture?.editMode && !fixture?.customRendered) return undefined;
-	const tool: Record<string, unknown> = { name, label: fixture.label ?? name, mode: fixture.editMode };
-	if (fixture.customRendered) {
-		const renderer = toolRenderers[fixture.renderer ?? name] as
-			| { renderCall?: unknown; renderResult?: unknown; mergeCallAndResult?: unknown; inline?: unknown }
-			| undefined;
-		if (renderer) {
-			tool.renderCall = renderer.renderCall;
-			tool.renderResult = renderer.renderResult;
-			tool.mergeCallAndResult = renderer.mergeCallAndResult;
-			tool.inline = renderer.inline;
-		}
-	}
-	return tool as unknown as AgentTool;
-}
-
 /** The curated fixture for a tool, or a generic one for registry tools lacking sample data. */
 export function resolveFixture(name: string): GalleryFixture {
 	return (
@@ -163,9 +145,8 @@ export function resolveFixture(name: string): GalleryFixture {
 }
 
 /**
- * Render a single tool/state pair to lines. Builds a fresh component, drives it
- * to the requested state, settles any async edit preview, then snapshots the
- * render and stops all animation timers.
+ * Render a single tool/state pair to rows: a fresh tool call driven to the
+ * requested state, painted once as the transcript's tool block.
  */
 export async function renderGalleryState(
 	name: string,
@@ -177,47 +158,29 @@ export async function renderGalleryState(
 	if (fixture.renderState) {
 		return await fixture.renderState(state, width, expanded);
 	}
-
-	// A non-customRendered fixture may borrow another tool's built-in renderer
-	// (e.g. `edit_delete` → `edit`): drive the component under that real tool
-	// name so the sample exercises the exact production branch, not the
-	// custom-tool one (which tints/pads non-framed result rows).
-	const componentName = fixture.customRendered ? name : (fixture.renderer ?? name);
-	const tool = fakeToolFor(componentName, fixture);
-	const streamingArgs = state === "streaming" ? (fixture.streamingArgs ?? fixture.args) : fixture.args;
-	// The component only calls `requestRender`/`requestComponentRender` (via
-	// its loader) during a static render; `imageBudget` is consulted solely
-	// when images render, which the gallery disables. A cast avoids
-	// constructing a real terminal.
-	const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-	const component = new ToolExecutionComponent(
-		componentName,
-		streamingArgs,
-		{ showImages: false, useBuiltInRenderer: !fixture.customRendered },
-		tool,
-		ui,
-		getProjectDir(),
-	);
-	component.setExpanded(expanded);
-
+	const call = new ToolCall({
+		id: `gallery-${name}`,
+		name,
+		label: fixture.label ?? name,
+		args: state === "streaming" ? (fixture.streamingArgs ?? fixture.args) : fixture.args,
+		presenter: toolPresenter(fixture.renderer ?? name),
+		now: () => GALLERY_NOW,
+	});
+	call.setExpanded(expanded);
+	call.setShowImages(false);
+	if (fixture.editMode) call.setRenderContext({ editMode: fixture.editMode });
 	if (state !== "streaming") {
-		component.setArgsComplete();
-		component.setExecutionStarted();
+		call.setArgsComplete();
+		call.setExecutionStarted();
 	}
-	if (state === "success") {
-		component.updateResult(fixture.result, false);
-	} else if (state === "error") {
-		component.updateResult(fixture.errorResult ?? GENERIC_ERROR, false);
-	}
+	if (state === "success") call.updateResult(fixture.result, false);
+	else if (state === "error") call.updateResult(fixture.errorResult ?? GENERIC_ERROR, false);
+	return printRows(() => ToolBlock({ call }), width, { now: GALLERY_NOW });
+}
 
-	// Edit-like renderers compute their diff preview off the render path; wait
-	// for it to settle so the snapshot is deterministic instead of racing a tick.
-	// Static fixtures have no live batch source, so bound the wait tightly.
-	await component.whenPreviewSettled(50);
-
-	const lines = component.render(width);
-	component.stopAnimation();
-	return lines;
+/** Every tool the gallery knows: registered presenters plus curated fixtures. */
+function galleryToolNames(): string[] {
+	return Array.from(new Set([...toolPresenterNames(), ...Object.keys(galleryFixtures)])).sort();
 }
 
 function resolveWidth(requested: number | undefined): number {
@@ -229,7 +192,7 @@ function resolveWidth(requested: number | undefined): number {
 function sectionRule(label: string, width: number): string {
 	const prefix = `── ${label} `;
 	const fill = Math.max(0, width - prefix.length);
-	return theme.fg("accent", theme.bold(`${prefix}${"─".repeat(fill)}`));
+	return currentTheme().fg("accent", bold(`${prefix}${"─".repeat(fill)}`));
 }
 
 /**
@@ -249,11 +212,11 @@ async function renderGallerySections(
 		const heading = fixture.label && fixture.label !== name ? `${name} — ${fixture.label}` : name;
 		const lines: string[] = ["", sectionRule(heading, width)];
 		for (const state of states) {
-			lines.push("", theme.fg("dim", `  · ${GALLERY_STATE_LABELS[state]}`));
+			lines.push("", currentTheme().fg("dim", `  · ${GALLERY_STATE_LABELS[state]}`));
 			try {
 				for (const line of await renderGalleryState(name, fixture, state, width, expanded)) lines.push(line);
 			} catch (err) {
-				lines.push(theme.fg("error", `  render failed: ${String(err)}`));
+				lines.push(currentTheme().fg("error", `  render failed: ${String(err)}`));
 			}
 		}
 		sections.push({ heading, lines });
@@ -281,11 +244,11 @@ async function renderPreviewSections(
 	for (const entry of entries) {
 		const lines = ["", sectionRule(entry.heading, width)];
 		for (const variant of entry.variants) {
-			lines.push("", theme.fg("dim", `  · ${variant.label}`));
+			lines.push("", currentTheme().fg("dim", `  · ${variant.label}`));
 			try {
 				for (const line of await variant.render(width, expanded)) lines.push(line);
 			} catch (err) {
-				lines.push(theme.fg("error", `  render failed: ${String(err)}`));
+				lines.push(currentTheme().fg("error", `  render failed: ${String(err)}`));
 			}
 		}
 		sections.push({ heading: entry.heading, lines });
@@ -304,7 +267,7 @@ export async function renderGallerySurfaceSections(
 	const sections: GallerySection[] = [];
 
 	if (surfaces.includes("tool")) {
-		const allNames = Array.from(new Set([...Object.keys(toolRenderers), ...Object.keys(galleryFixtures)])).sort();
+		const allNames = galleryToolNames();
 		const names = args.tool ? allNames.filter(name => name === args.tool) : allNames;
 		sections.push(...(await renderGallerySections(names, states, width, expanded)));
 	}
@@ -330,18 +293,17 @@ export async function runGalleryCommand(args: GalleryCommandArgs): Promise<void>
 	// terminal advertises its color support, so force truecolor before the theme
 	// (and therefore every SGR escape it emits) is built.
 	if (args.screenshot) process.env.COLORTERM = "truecolor";
-	await initTheme(
-		false,
-		cfgSymbolPreset.get(settingsInstance),
-		cfgColorBlindMode.get(settingsInstance),
-		cfgThemeDark.get(settingsInstance),
-		cfgThemeLight.get(settingsInstance),
-	);
+	initTheme({
+		symbolPreset: cfgSymbolPreset.get(settingsInstance),
+		colorBlindMode: cfgColorBlindMode.get(settingsInstance),
+		dark: cfgThemeDark.get(settingsInstance),
+		light: cfgThemeLight.get(settingsInstance),
+	});
 
 	const width = resolveWidth(args.width);
 	const surfaces = resolveSurfaces(args);
 	if (surfaces.includes("tool") && args.tool) {
-		const knownTools = Array.from(new Set([...Object.keys(toolRenderers), ...Object.keys(galleryFixtures)])).sort();
+		const knownTools = galleryToolNames();
 		if (!knownTools.includes(args.tool)) {
 			process.stdout.write(`Unknown tool '${args.tool}'. Known tools: ${knownTools.join(", ")}\n`);
 			return;

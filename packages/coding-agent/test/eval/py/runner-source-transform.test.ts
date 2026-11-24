@@ -171,6 +171,22 @@ describe.skipIf(!pythonPath)("Python runner quoted-source transformation", () =>
 		expectSuccess(await executeCell(code), "shell-quotes-isolated");
 	});
 
+	it("ignores a leading // and /* */ comment preamble while keeping line numbers", async () => {
+		const code = [
+			"",
+			"// Use Python for quick static graph analysis",
+			"/* multi-line",
+			"   block */",
+			"# python comment",
+			"/* inline */ import sys",
+			"assert sys._getframe().f_lineno == 7",
+			'value = "// not a comment"',
+			'assert value.startswith("//")',
+			'print("comment-preamble-ignored")',
+		].join("\n");
+		expectSuccess(await executeCell(code), "comment-preamble-ignored");
+	});
+
 	it("reports unterminated quoted source without executing its apparent shell commands", async () => {
 		const frames = await executeCell('source = """\n!echo must-not-run\n');
 		expect(frames.find(frame => frame.type === "done")?.status).toBe("error");

@@ -3,7 +3,7 @@
  * stays; a folded section body becomes `… [lines A-B]`. Headings and short
  * sections are structure (`s`), sections kept on rank `a`, folded ones `f`.
  */
-import type { SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightReason } from "../../tools/details/spotlight";
 import { countNewlines } from "@oh-my-pi/pi-utils";
 import { DOC_FILE, fileLines, readTargets, resolveTarget } from "./command";
 import { words } from "./lines";
