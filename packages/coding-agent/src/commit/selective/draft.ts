@@ -877,21 +877,23 @@ export class Draft {
 		const otherAgents = new Map<string, number>();
 		type PathList = { count: number; rows: string[] };
 		const leftOut: PathList = { count: 0, rows: [] };
+		let mixedLeftOut = 0;
 		const unrecorded: PathList = { count: 0, rows: [] };
-		const addPath = (list: PathList, file: FileChange, agents?: ReadonlySet<string>) => {
+		const addPath = (list: PathList, file: FileChange, details?: string) => {
 			list.count++;
 			if (list.rows.length >= UNSELECTED_LIST_LIMIT) return;
-			const size = file.whole ? `whole ${wholeLabel(file)}` : `${formatCounts(file.counts)}${modeChange(file)}`;
-			const owners = agents ? `  [${[...agents].join(", ")}]` : "";
-			list.rows.push(`  · ${file.path}  ${size}${owners}`);
+			const size =
+				details ?? (file.whole ? `whole ${wholeLabel(file)}` : `${formatCounts(file.counts)}${modeChange(file)}`);
+			list.rows.push(`  · ${file.path}  ${size}`);
 		};
 		for (const file of this.#files) {
 			const counted = this.#describeFile(file);
 			if (counted.selected) selected.push(counted.selected);
 			review.push(...counted.review);
 			for (const agent of counted.outOfScopeAgents) otherAgents.set(agent, (otherAgents.get(agent) ?? 0) + 1);
-			if (counted.leftOutAgents) {
-				addPath(leftOut, file, counted.leftOutAgents);
+			if (counted.leftOut) {
+				addPath(leftOut, file, counted.leftOut.details);
+				if (counted.leftOut.mixed) mixedLeftOut++;
 			} else if (!counted.selected && counted.review.length === 0 && counted.outOfScopeAgents.size === 0) {
 				addPath(unrecorded, file);
 			}
@@ -910,7 +912,13 @@ export class Draft {
 			lines.push(header, ...list.rows);
 			if (list.count > list.rows.length) lines.push(`  … ${list.count - list.rows.length} more`);
 		};
-		appendPaths(leftOut, `Left out: ${leftOut.count} path(s) with deselected agent edits; take() to select.`);
+		let leftOutHint = "take() to select";
+		if (mixedLeftOut > 0) {
+			const mixedHint = "for mixed paths, show(path) then take(path, units)";
+			leftOutHint =
+				mixedLeftOut === leftOut.count ? mixedHint : `take() for paths without other edits; ${mixedHint}`;
+		}
+		appendPaths(leftOut, `Left out: ${leftOut.count} path(s) with deselected agent edits; ${leftOutHint}.`);
 		appendPaths(
 			unrecorded,
 			`Unrecorded: ${unrecorded.count} path(s) changed by other programs or by hand; take() the ones your commands produced.`,
@@ -926,7 +934,7 @@ export class Draft {
 		selected?: string;
 		review: string[];
 		outOfScopeAgents: Set<string>;
-		leftOutAgents?: ReadonlySet<string>;
+		leftOut?: { details: string; mixed: boolean };
 	} {
 		const outOfScopeAgents = new Set(file.editors.filter(agent => !this.scope.has(agent)));
 		if (file.whole) {
@@ -936,13 +944,11 @@ export class Draft {
 			return { review: reason ? [`  ? ${file.path}  whole ${label}; ${reason}`] : [], outOfScopeAgents };
 		}
 		// Unkept attribution has no review or out-of-scope lines (see createDraft): rebuild it only for a selection.
-		const attribution = file.attribution ?? (file.selected.size > 0 ? lineAttribution(file) : undefined);
-		const ops = attribution?.ops ?? [];
-		const hunks = attribution?.hunks ?? [];
+		const selected = file.selected.size > 0;
+		const attribution = file.attribution ?? (selected ? lineAttribution(file) : undefined);
 		const status = file.classification?.status ?? [];
-		const chosen = ops.filter(op => file.selected.has(op.id));
 		const review: string[] = [];
-		hunks.forEach((hunk, index) => {
+		attribution?.hunks.forEach((hunk, index) => {
 			const reviewOps = hunk.ops.filter(op => status[op.id] === "review" && !file.selected.has(op.id));
 			if (reviewOps.length === 0) return;
 			const reasons = new Set(
@@ -954,30 +960,38 @@ export class Draft {
 			review.push(`  ? ${file.path}  hunk ${index + 1}: ${[...reasons].join("; ") || "needs review"}`);
 		});
 		// Edits the journal cannot replay leave every line unrecorded: the agent picks its own.
-		if (!file.attribution && chosen.length === 0 && file.editors.some(agent => this.scope.has(agent))) {
+		if (!file.attribution && !selected && file.editors.some(agent => this.scope.has(agent))) {
 			review.push(
 				`  ? ${file.path}  ${formatCounts(file.counts)}${modeChange(file)}; edited by ${file.editors.join(", ")}, but the edit record cannot be replayed`,
 			);
 		}
+		if (!attribution) return { review, outOfScopeAgents };
+		const { ops } = attribution;
 		// Use surviving owned edits: editors can include writes already committed or canceled out.
-		let leftOutAgents: Set<string> | undefined;
+		const inRow = (op: ChangeOp) =>
+			selected ? file.selected.has(op.id) : status[op.id] === "own" && !isPseudoActor(op.by);
+		let rowOps: ChangeOp[] | undefined;
 		for (const op of ops) {
-			const opStatus = status[op.id];
-			if (opStatus === "other" && !isPseudoActor(op.by) && !this.scope.has(op.by)) outOfScopeAgents.add(op.by);
-			else if (opStatus === "own" && chosen.length === 0 && !isPseudoActor(op.by)) {
-				(leftOutAgents ??= new Set()).add(op.by);
+			if (status[op.id] === "other" && !isPseudoActor(op.by) && !this.scope.has(op.by)) outOfScopeAgents.add(op.by);
+			if (inRow(op)) (rowOps ??= []).push(op);
+		}
+		if (!rowOps) return { review, outOfScopeAgents };
+		let details = `${formatCounts(countOps(file, attribution, rowOps))}${modeChange(file)}`;
+		const mixed = rowOps.length < ops.length;
+		if (mixed) {
+			const others = new Set<string>();
+			for (const op of ops) {
+				if (inRow(op)) continue;
+				const actor = actorName(op.by);
+				others.add(!selected && status[op.id] === "review" ? `${actor} (review)` : actor);
 			}
+			details += ` of ${formatCounts(file.counts)}; ${selected ? "left out" : "also"}: ${[...others].join(", ")}`;
 		}
-		if (!attribution || chosen.length === 0) return { review, outOfScopeAgents, leftOutAgents };
-		const leftOut = ops.filter(op => !file.selected.has(op.id));
-		const owners = [...new Set(chosen.map(op => op.by))];
-		const mark = leftOut.length === 0 ? "✓" : "◐";
-		let line = `  ${mark} ${file.path}  ${formatCounts(countOps(file, attribution, chosen))}${modeChange(file)}`;
-		if (leftOut.length > 0) {
-			const others = [...new Set(leftOut.map(op => actorName(op.by)))];
-			line += ` of ${formatCounts(file.counts)}; left out: ${others.join(", ")}`;
-		}
-		return { selected: `${line}  [${owners.map(actorName).join(", ")}]`, review, outOfScopeAgents };
+		const owners = new Set<string>();
+		for (const op of rowOps) owners.add(op.by);
+		details += `  [${[...owners].map(actorName).join(", ")}]`;
+		if (!selected) return { review, outOfScopeAgents, leftOut: { details, mixed } };
+		return { selected: `  ${mixed ? "◐" : "✓"} ${file.path}  ${details}`, review, outOfScopeAgents };
 	}
 
 	/**
