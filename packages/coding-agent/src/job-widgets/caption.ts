@@ -4,7 +4,7 @@
  * model writes it once per job, from the command and the intent it was
  * started with; it never sees the job's output.
  */
-import { shortenEmbeddedPaths } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenEmbeddedPaths } from "../utils/render-utils";
 import { prompt, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-caption-system.md" with { type: "text" };

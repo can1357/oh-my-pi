@@ -2,6 +2,8 @@ import { Document, type DocumentFragment, Element, Text } from "./core";
 
 /** Closing-tag patterns for raw-text elements, reused across parses (callers reset `lastIndex`). */
 const RAW_TEXT_CLOSE: Record<string, RegExp> = { script: /<\/script\s*>/gi, style: /<\/style\s*>/gi };
+/** Closing-tag patterns for HTML RCDATA elements: text up to the close tag, entities decoded, no tags. */
+const RCDATA_CLOSE: Record<string, RegExp> = { textarea: /<\/textarea\s*>/gi, title: /<\/title\s*>/gi };
 const DOCTYPE_PATTERN = /<!doctype\b/iy;
 const TAG_NAME_PATTERN = /[^\s/>]+/y;
 const ATTRIBUTE_NAME_PATTERN = /[^\s=/>]+/y;
@@ -359,11 +361,17 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 			const closePattern = Object.hasOwn(RAW_TEXT_CLOSE, parsed.name)
 				? RAW_TEXT_CLOSE[parsed.name]
 				: new RegExp(`</${parsed.name}\\s*>`, "ig");
-			closePattern.lastIndex = index;
-			const match = closePattern.exec(html);
-			const rawEnd = match?.index ?? html.length;
-			element.appendChild(new Text(html.slice(index, rawEnd), document));
-			index = match ? closePattern.lastIndex : html.length;
+			const [text, next] = readUntilClose(html, index, closePattern);
+			element.appendChild(new Text(text, document));
+			index = next;
+			continue;
+		}
+		// Feeds keep XML parsing (CDATA titles) and SVG `<title>` holds child elements, so only HTML-namespace
+		// elements of an HTML document get RCDATA treatment.
+		if (!xmlLike && namespace === HTML_NAMESPACE && Object.hasOwn(RCDATA_CLOSE, parsed.name) && !parsed.selfClosing) {
+			const [text, next] = readUntilClose(html, index, RCDATA_CLOSE[parsed.name]);
+			if (text) element.appendChild(new Text(decodeEntities(text), document));
+			index = next;
 			continue;
 		}
 		// Feed documents follow XML rules: only an explicit `/>` closes immediately, so RSS `<link>url</link>`
@@ -376,6 +384,14 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 			parent = element;
 		}
 	}
+}
+
+/** Read the text from `index` up to the next `closePattern` match (or EOF); returns it and the index past the close tag. */
+function readUntilClose(html: string, index: number, closePattern: RegExp): [text: string, next: number] {
+	closePattern.lastIndex = index;
+	const match = closePattern.exec(html);
+	if (!match) return [html.slice(index), html.length];
+	return [html.slice(index, match.index), closePattern.lastIndex];
 }
 
 function isDoctypeAt(html: string, index: number): boolean {

@@ -84,6 +84,11 @@ export class RotatingFileSink {
 		this.#onRotate = options.onRotate;
 	}
 
+	/** The file currently open for records, including any size-rotation suffix. */
+	get currentPath(): string | undefined {
+		return this.#fd === undefined ? undefined : this.#activePath;
+	}
+
 	#openFd(filePath: string): void {
 		this.#closeFd();
 		this.#fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND);

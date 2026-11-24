@@ -906,6 +906,17 @@ describe("model thinking derivation", () => {
 		expect(vertex.compat.supportsPerMessageEffort).toBe(false);
 	});
 
+	it("keeps mid-conversation tool changes off Vertex, which rejects tool_removal but accepts mid-conversation system", () => {
+		for (const id of ["claude-opus-5-5", "claude-opus-4-8", "claude-fable-5"]) {
+			const direct = createModel({ id, api: "anthropic-messages", provider: "anthropic" });
+			const vertex = createModel({ id: `${id}@default`, api: "anthropic-messages", provider: "google-vertex" });
+
+			expect(direct.compat.supportsMidConversationToolChanges).toBe(true);
+			expect(vertex.compat.supportsMidConversationToolChanges).toBe(false);
+			expect(vertex.compat.supportsMidConversationSystem).toBe(true);
+		}
+	});
+
 	it("materializes a bare /v1/models Haiku 5.5 row as adaptive and priced, unlike Haiku 4.5", () => {
 		// Anthropic's /v1/models carries no capability metadata for a new id.
 		const discovered = (id: string) =>

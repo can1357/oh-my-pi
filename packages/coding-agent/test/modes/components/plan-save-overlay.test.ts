@@ -1,50 +1,47 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { visibleWidth } from "@oh-my-pi/pi-tui";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import type { PlanSaveOverlayResult } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/plan-save-overlay";
+import { signal } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../../src/config/settings";
-import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
-import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { PlanSave } from "../../../src/ui/overlays/panels/plan-save";
+import { mountOverlay } from "../../helpers/overlay-terminal";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-describe("PlanSaveOverlay", () => {
-	let uiTheme: Theme;
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
+describe("plan save overlay", () => {
 	beforeAll(async () => {
 		await Settings.init({ inMemory: true });
-		const loaded = await getThemeByName("dark");
-		if (!loaded) throw new Error("theme unavailable");
-		uiTheme = loaded;
-		setThemeInstance(uiTheme);
-	});
-
-	it("renders the generated filename as a dim empty-input suggestion", () => {
-		const overlay = new PlanSaveOverlay("AUTO_QA_PLAN.md", () => {});
-		overlay.focused = true;
-		const lines = overlay.render(80);
-
-		expect(lines.join("\n")).toContain(theme.fg("dim", "AUTO_QA_PLAN.md"));
-		expect(lines.map(visibleWidth)).toEqual(Array(lines.length).fill(80));
 	});
 
 	it("uses the latest generated suggestion when entered empty", () => {
 		let result: PlanSaveOverlayResult | undefined;
-		const overlay = new PlanSaveOverlay("PLAN.md", value => {
-			result = value;
+		const suggested = signal("PLAN.md");
+		const term = mountOverlay(() => PlanSave({ suggestedPath: suggested, onDone: value => (result = value) }), {
+			focusKind: "input",
 		});
-
-		overlay.setSuggestedPath("AUTO_QA_PLAN.md");
-		overlay.handleInput("\r");
-
+		try {
+			expect(term.screen().join("\n")).toContain("PLAN.md");
+			suggested.set("AUTO_QA_PLAN.md");
+			term.press("enter");
+		} finally {
+			term.dispose();
+		}
 		expect(result).toEqual({ path: "AUTO_QA_PLAN.md" });
 	});
 
 	it("uses a typed path instead of the suggestion", () => {
 		let result: PlanSaveOverlayResult | undefined;
-		const overlay = new PlanSaveOverlay("AUTO_QA_PLAN.md", value => {
-			result = value;
-		});
-
-		overlay.pasteText("plans/review.md");
-		overlay.handleInput("\r");
-
+		const term = mountOverlay(
+			() => PlanSave({ suggestedPath: () => "AUTO_QA_PLAN.md", onDone: value => (result = value) }),
+			{ focusKind: "input" },
+		);
+		try {
+			term.paste("plans/review.md");
+			term.press("enter");
+		} finally {
+			term.dispose();
+		}
 		expect(result).toEqual({ path: "plans/review.md" });
 	});
 });

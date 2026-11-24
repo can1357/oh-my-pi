@@ -21,9 +21,9 @@
  */
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort, ImageContent, Model, ServiceTierByFamily, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
+import type { IrcMessage } from "../irc/irc-types";
+import type { TodoPhase } from "../tools/details/todo";
 import type { AsyncJobManagerApi } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";

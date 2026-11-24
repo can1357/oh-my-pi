@@ -17,12 +17,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { chipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { $which } from "@oh-my-pi/pi-utils";
+import { chipLabel } from "../src/ui/composer/attachments";
+import { Composer } from "../src/ui/composer/composer";
 
 // A clipboard with no image on it — the deterministic default for the
 // not-found assertions so a real screenshot on the dev's clipboard cannot
@@ -40,28 +40,20 @@ const ONE_PX_PNG = Buffer.from(
 const hasFfmpeg = Boolean($which("ffmpeg") && $which("ffprobe"));
 
 function createContext() {
-	const pasteText = vi.fn();
-	const insertText = vi.fn();
-	const insertAtom = vi.fn();
-	const requestRender = vi.fn();
+	const composer = new Composer();
+	const pasteText = vi.spyOn(composer, "insertText");
+	const insertAtom = vi.spyOn(composer, "insertAtom");
 	const showStatus = vi.fn();
 	const ctx = {
-		editor: {
-			pasteText,
-			insertText,
-			insertAtom,
-			imageLinks: undefined,
-			pendingImages: [] as ImageContent[],
-			pendingImageLinks: [] as (string | undefined)[],
-		} as unknown as InteractiveModeContext["editor"],
-		ui: { requestRender, getFocused: () => null } as unknown as InteractiveModeContext["ui"],
+		composer,
+		shell: { focused: () => composer.field },
 		sessionManager: {
 			getCwd: () => process.cwd(),
 			putBlob: async () => ({ hash: "h", path: "/tmp/h.png", displayPath: "/tmp/h.png" }),
 		} as unknown as InteractiveModeContext["sessionManager"],
 		showStatus,
 	} as unknown as InteractiveModeContext;
-	return { ctx, spies: { pasteText, insertText, insertAtom, requestRender, showStatus } };
+	return { ctx, spies: { pasteText, insertAtom, showStatus } };
 }
 
 describe("InputController.handleImagePathPaste (issue #2375)", () => {
@@ -160,8 +152,8 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 
 		expect(spies.pasteText).not.toHaveBeenCalled();
 		expect(spies.showStatus).not.toHaveBeenCalled();
-		expect(ctx.editor.pendingImages.length).toBe(1);
-		expect(ctx.editor.pendingImages[0]?.mimeType).toBe("image/png");
+		expect(ctx.composer.pendingImages.length).toBe(1);
+		expect(ctx.composer.pendingImages[0]?.mimeType).toBe("image/png");
 	});
 
 	it("locally: attaches the clipboard image when the pasted path resolves to a non-image file", async () => {
@@ -184,8 +176,8 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 		}
 
 		expect(spies.pasteText).not.toHaveBeenCalled();
-		expect(ctx.editor.pendingImages.length).toBe(1);
-		expect(ctx.editor.pendingImages[0]?.mimeType).toBe("image/png");
+		expect(ctx.composer.pendingImages.length).toBe(1);
+		expect(ctx.composer.pendingImages[0]?.mimeType).toBe("image/png");
 	});
 
 	it.skipIf(!hasFfmpeg)("locally: attaches a pasted video as a preview image", async () => {
@@ -220,8 +212,8 @@ describe("InputController.handleImagePathPaste (issue #2375)", () => {
 
 		expect(spies.pasteText).not.toHaveBeenCalled();
 		expect(spies.showStatus).not.toHaveBeenCalled();
-		expect(ctx.editor.pendingImages).toHaveLength(1);
-		expect(ctx.editor.pendingImages[0]?.mimeType).toBe("image/png");
-		expect(spies.insertAtom).toHaveBeenCalledWith(chipLabel("video", 1), "[Video #1, 960x480]");
+		expect(ctx.composer.pendingImages).toHaveLength(1);
+		expect(ctx.composer.pendingImages[0]?.mimeType).toBe("image/png");
+		expect(spies.insertAtom).toHaveBeenCalledWith(chipLabel("video", 1), "[Video #1, 960x480]", expect.anything());
 	});
 });

@@ -12,7 +12,7 @@
    - `packages/coding-agent/src/session/todo-tracker.ts` — owns canonical phases, restores branch snapshots, and manages completion reminders.
    - `packages/coding-agent/src/session/agent-session.ts` — exposes todo state hooks and emits failure reminders.
    - `packages/coding-agent/src/modes/controllers/todo-command-controller.ts` — `/todo` command path, custom-entry persistence, transcript reminder injection.
-   - `packages/tui/src/render/render-utils.ts` — collapsed-preview cap for renderer trees.
+   - `packages/coding-agent/src/utils/render-utils.ts` — collapsed-preview cap for renderer trees.
 
 ## Inputs
 
@@ -137,7 +137,7 @@ The same file also exposes non-tool helpers used by `/todo`:
 - `init.list`: applies to a single op (`todoSchema`). The params object carries exactly one op.
 - `init.list[*].items`: schema-level `minItems: 1`.
 - Flat `init.items` and `append.items`: the shared schema allows any array length, but op-specific execution rejects missing/empty lists.
-- Renderer collapsed preview: `PREVIEW_LIMITS.COLLAPSED_ITEMS = 8` (`packages/tui/src/render/render-utils.ts`).
+- Renderer collapsed preview: `PREVIEW_LIMITS.COLLAPSED_ITEMS = 8` (`packages/coding-agent/src/utils/render-utils.ts`).
 - Execution-time repair: an omitted `op` is inferred only for the unambiguous payloads described above; the schema itself still requires `op`.
 - HUD auto-hide delay: `tasks.todoClearDelay` default `60` seconds; `< 0` disables hiding, `0` hides immediately. Applies only when all tasks are closed; pending or in-progress work keeps the HUD visible. Canonical state survives the display change and session resume.
 - Tool execution mode: `concurrency = "exclusive"`, `strict = true`, `loadMode = "discoverable"`.

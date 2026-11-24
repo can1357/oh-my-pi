@@ -12,8 +12,8 @@ import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
-import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
-import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { getThinkingLevelMetadata } from "../thinking/levels";
+import { setFeedModelBadgeEnabled } from "../utils/render-utils";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
