@@ -4507,6 +4507,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.sessionManager.appendModeChange("none");
 				return;
 			}
+			// A --no-tools session cannot run the goal; leave it journaled for a session that can.
+			if (this.session.restrictToolNames) {
+				this.session.goalRuntime.clearAccounting();
+				return;
+			}
 			this.session.setGoalModeState({
 				enabled: sessionContext.mode === "goal",
 				mode: "active",
@@ -4605,6 +4610,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.vibeModeEnabled) {
 			this.showWarning("Exit vibe mode first.");
+			return;
+		}
+		// Plan mode ends by `propose`, which a --no-tools session does not register.
+		if (this.session.restrictToolNames) {
+			this.showWarning("Plan mode is unavailable in a --no-tools session.");
 			return;
 		}
 
@@ -4873,6 +4883,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.vibeModeEnabled) {
 			this.showWarning("Exit vibe mode first.");
+			return;
+		}
+		// Goal mode runs through the `goal` tool, which a --no-tools session does not register.
+		if (this.session.restrictToolNames) {
+			this.showWarning("Goal mode is unavailable in a --no-tools session.");
 			return;
 		}
 		const enabledTools = this.session.getEnabledToolNames();
