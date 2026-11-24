@@ -175,8 +175,12 @@ behavior {
 	exclude-models provider="xiaomi-token-plan-cn" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-sgp" substring="-tts" substring="-asr"
 	// Text-chat transports cannot serve StepFun's audio-only and image-editing
-	// SKUs, which its /v1/models roster interleaves with the chat models.
-	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large"
+	// SKUs, which its /v1/models roster interleaves with the chat models, nor
+	// `dr-search-api`, the roster entry for its standalone web search service
+	// (`POST /v1/search`, platform.stepfun.com/docs/zh/api-reference/search/search),
+	// which is not a chat model.
+	exclude-models provider="stepfun" prefix="stepaudio-" prefix="step-image-" prefix="step-tts-" prefix="step-2x-large" \
+		exact="dr-search-api"
 	// Helmcode's /v1/models roster lists embedding, rerank, TTS, and STT models
 	// beside the chat models (helmcode.com/docs/models).
 	exclude-models provider="helmcode" exact="qwen3-embedding" exact="rerank" exact="kokoro" exact="whisper"

@@ -1,5 +1,6 @@
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import type { SessionContinuation } from "../session/session-listing";
 import type { SessionPersistenceNotice } from "../session/session-manager";
 

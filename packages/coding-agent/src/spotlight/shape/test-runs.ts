@@ -4,7 +4,7 @@
  * counted marker into the saved full log. Kept lines are structure (`s`), short runs between them shown as context
  * (`c`), the noise folded (`f`).
  */
-import type { SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightReason } from "../../tools/details/spotlight";
 import { alignedTo, bump, noteWhy, type Run, shifted } from "./run";
 import { type LineRun, readCall, rebasePeaks, type SourcePeak } from "./view";
 

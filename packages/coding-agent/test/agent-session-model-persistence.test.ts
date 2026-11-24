@@ -19,7 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
-import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { createAssistantMessage } from "./helpers/agent-session-setup";

@@ -1,15 +1,11 @@
-import { type ElidedRange, formatSingleLine } from "@oh-my-pi/pi-tui/tools/read";
+import { type ElidedRange, formatSingleLine } from "./details/read";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { countNewlines } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
-import {
-	formatHashlineHeader,
-	formatNumberedLines,
-	splitAddressableFileLines,
-} from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { formatHashlineHeader, formatNumberedLines, splitAddressableFileLines } from "./hashline-format";
 import { normalizeToLF } from "../edit/normalize";
-import { isMarkdownPath } from "@oh-my-pi/pi-tui/theme";
+import { isMarkdownPath } from "../utils/lang-from-path";
 import type { ToolSession } from "../sdk";
 import {
 	DEFAULT_MAX_BYTES,
@@ -18,7 +14,7 @@ import {
 	type TruncationResult,
 	truncateHead,
 	truncateHeadBytes,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+} from "./streaming-output";
 import {
 	buildLineEntriesWithBlockContext,
 	type LineEntry,
@@ -28,11 +24,12 @@ import {
 } from "../utils/block-context";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { formatPathRelativeToCwd } from "./path-utils";
-import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-tui/tools/read";
+import { type LineRange } from "./line-ranges";
+import type { ReadToolDetails, ReadTruncationStats } from "./details/read";
 import { isRawSelector, type ParsedSelector, resolveTailSelector, selToOffsetLimit } from "./read-selector";
-import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatBytes } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "../utils/render-utils";
+import { ToolError } from "./tool-errors";
 import { resolveArtifactSpillThreshold, resolveInlineByteCapBudget, type TruncationMetaInput } from "./output-meta";
 import { toolResult } from "./tool-result";
 

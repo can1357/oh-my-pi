@@ -77,6 +77,19 @@ describe("Otari discovery", () => {
 		});
 	});
 
+	test("a region stored at login wins the discovery endpoint and sends only the key", async () => {
+		const calls: Array<{ url: string; authorization: string | null }> = [];
+		const options = otariModelManagerOptions({
+			apiKey: JSON.stringify({ token: "otari-eu-key", baseUrl: "https://eu.api.otari.ai/api/v1" }),
+			baseUrl: BASE_URL,
+			fetch: rosterFetch([HAIKU], calls),
+		});
+		const models = (await options.fetchDynamicModels?.()) ?? [];
+
+		expect(calls).toEqual([{ url: "https://eu.api.otari.ai/api/v1/models", authorization: "Bearer otari-eu-key" }]);
+		expect(models[0]?.baseUrl).toBe("https://eu.api.otari.ai/api/v1");
+	});
+
 	test("drops rows that cannot answer a chat completion", async () => {
 		const options = otariModelManagerOptions({
 			apiKey: "otari-test-key",

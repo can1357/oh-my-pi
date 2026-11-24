@@ -12,13 +12,14 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode paused-plan guard message", () => {
 	let tempDir: TempDir;
@@ -28,7 +29,7 @@ describe("InteractiveMode paused-plan guard message", () => {
 	let modelRegistry: ModelRegistry;
 
 	beforeAll(async () => {
-		await initTheme();
+		initTheme();
 		tempDir = TempDir.createSync("@pi-plan-paused-guard-");
 		authStorage = createInMemoryAuthStorage();
 		modelRegistry = new ModelRegistry(authStorage);
@@ -51,7 +52,15 @@ describe("InteractiveMode paused-plan guard message", () => {
 			settings: Settings.isolated({}),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, new EventBus());
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			new EventBus(),
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(async () => {

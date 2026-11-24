@@ -18,7 +18,7 @@ import {
 } from "./protocol";
 import { OUTPUT_ACTIVE_LEVEL, OutputActivity } from "./output-activity";
 import { type LiveEndpoint, LiveTransport, resolveLiveEndpoint } from "./transport";
-import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import type { LivePhase } from "../modes/view-model/apps/live-visualizer";
 import { DEFAULT_LIVE_VOICE } from "./voices";
 
 const MIN_BARGE_IN_LEVEL = 0.04;
