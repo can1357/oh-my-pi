@@ -526,8 +526,7 @@ An explicit model `cost` in `models.yml`, including `modelOverrides`, is a flat-
 A new custom model in `models.yml` that omits `cost` inherits its bundled reference row's card,
 schedule included. References are matched by model id and prefer larger context/output limits,
 then complete cache pricing and first-party OpenAI rows. A same-provider, same-id custom entry
-instead preserves the existing model's pricing when `cost` is omitted. Generic proxy and
-generic proxy discovery keeps pricing local-unknown (zero) rather than borrowing upstream prices.
+instead preserves the existing model's pricing when `cost` is omitted. Generic proxy discovery keeps pricing local-unknown (zero) rather than borrowing upstream prices.
 OpenAI-model-list discovery reads each row's `min_prompt_price` and `min_completion_price` as
 per-million-token prices when the endpoint reports them, and stays at zero when it does not; rich
 provider discovery such as LiteLLM can supply its own prices.
