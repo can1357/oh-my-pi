@@ -981,15 +981,13 @@ describe("todo backend", () => {
 			expect(tasksOf(backend)).toEqual([["a"], ["a"]]);
 		});
 
-		it("a call aborted before apply runs asks nothing and sends nothing", async () => {
+		it("a call aborted before apply runs asks nothing and sends nothing, on exit either", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
 			const abort = new AbortController();
 			abort.abort();
 			const result = await call(session, { op: "init", items: ["a"] }, abort.signal);
-			// A resync would queue its list on microtasks: let it run if one was scheduled.
-			await Bun.sleep(0);
-			await settled(session);
+			await session.dispose();
 
 			expect(textOf(result)).toContain("aborted");
 			expect([backend.asked, backend.calls]).toEqual([[], []]);
@@ -1046,8 +1044,8 @@ describe("todo backend", () => {
 						pi.registerTodoBackend({
 							id: "veto",
 							replace() {},
-							apply(change) {
-								const bashDone = fs.existsSync(marker);
+							async apply(change) {
+								const bashDone = await Bun.file(marker).exists();
 								asked.push({ op: change.op, bashDone, previous: change.previous });
 								if (change.op === "drop") throw new Error("not now");
 								if (change.op === "done" && !bashDone) throw new Error("bash still running");
