@@ -12,6 +12,7 @@ import { lexMarkdown, type Token } from "@oh-my-pi/pi-tui/text/markdown/lexer";
  * alone, as is a link whose source cannot be located exactly.
  */
 export function rewriteLinkDestinations(text: string, resolve: (href: string) => string | undefined): string {
+	if (!text.includes("]")) return text;
 	const edits: { start: number; end: number; target: string }[] = [];
 	let cursor = 0;
 	const visit = (tokens: readonly Token[] | undefined): void => {

@@ -51,6 +51,7 @@
 
 ### Fixed
 
+- Fixed context token accounting to reflect changes in system prompt sources
 - Cmd+A selects the full draft even when Tern forwards the keystroke; typing or pasting replaces the selection. Click the model name or chevron in Tern, or press Alt+P, to open the searchable `/switch` sheet without losing the draft.
 - Native composer status controls become clickable when the live session can handle them. The effort ring changes effort independently of the model name.
 - Tern pointer events now reach the selected `/move` directory and agent, session rename field, and tool-form checkboxes and option notes. Empty-result pickers respond to **Clear search**.

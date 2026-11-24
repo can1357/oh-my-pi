@@ -403,7 +403,6 @@ function nonMessageTokenCacheEntry(
 	const toolSchemasInContext = session.model?.toolSchemasInContext !== false;
 	const pruneToolDescriptions = session.agent?.prunesToolDescriptions?.(session.model) === true;
 	const toolsRevision = getToolSchemaMetadataRevision(toolsRef);
-	const promptSourcesRef = session.systemPromptSources;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
 	if (
 		entry &&
@@ -413,14 +412,13 @@ function nonMessageTokenCacheEntry(
 		entry.pruneToolDescriptions === pruneToolDescriptions &&
 		entry.toolsRevision === toolsRevision &&
 		entry.sourceRevision === sourceRevision &&
-		entry.promptSourcesRef === promptSourcesRef &&
 		entry.tokenizerRef === tokenizer
 	) {
 		return entry;
 	}
 	entry = {
 		systemPromptRef,
-		promptSourcesRef,
+		promptSourcesRef: undefined,
 		toolsRef,
 		toolSchemasInContext,
 		pruneToolDescriptions,
@@ -465,14 +463,16 @@ export function computeNonMessageBreakdown(
 	sourceRevision = 0,
 ): NonMessageBreakdown {
 	const entry = nonMessageTokenCacheEntry(session, tokenizer, sourceRevision);
-	if (entry.breakdown) return entry.breakdown;
+	const promptSourcesRef = session.systemPromptSources;
+	if (entry.breakdown && entry.promptSourcesRef === promptSourcesRef) return entry.breakdown;
+	entry.promptSourcesRef = promptSourcesRef;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const toolsTokens = estimateContextToolSchemaTokens(tools, tokenizer, session.model, {
 		sourceRevision,
 		pruneDescriptions: entry.pruneToolDescriptions,
 	});
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
-	const { byBlock } = claimPromptSources(systemPromptParts, session.systemPromptSources);
+	const { byBlock } = claimPromptSources(systemPromptParts, promptSourcesRef);
 	let skillsTokens = 0;
 	let instructionFilesTokens = 0;
 	let systemContextTokens = 0;
