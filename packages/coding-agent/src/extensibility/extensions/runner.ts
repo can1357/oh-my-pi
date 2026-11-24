@@ -46,7 +46,11 @@ import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
-import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+import {
+	accumulateToolCallResult,
+	buildAggregatedToolCallResult,
+	mergeSessionCompactingResult,
+} from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
@@ -2250,7 +2254,10 @@ export class ExtensionRunner {
 					}
 
 					if (event.type === "session.compacting" && handlerResult) {
-						result = handlerResult as SessionCompactingResult;
+						result = mergeSessionCompactingResult(
+							result as SessionCompactingResult | undefined,
+							handlerResult as SessionCompactingResult,
+						);
 					}
 
 					if (event.type === "session_stop" && handlerResult) {

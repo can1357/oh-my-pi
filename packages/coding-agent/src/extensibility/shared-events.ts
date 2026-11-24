@@ -520,6 +520,22 @@ export interface SessionCompactingResult {
 	preserveData?: Record<string, unknown>;
 }
 
+/**
+ * Fold one `session.compacting` handler result into the accumulated result. `prompt` and
+ * `context` are last-writer-wins per field; `preserveData` is shallow-merged so each
+ * handler's top-level key survives.
+ */
+export function mergeSessionCompactingResult(
+	accumulated: SessionCompactingResult | undefined,
+	next: SessionCompactingResult,
+): SessionCompactingResult {
+	const merged: SessionCompactingResult = { ...accumulated, ...next };
+	if (accumulated?.preserveData !== undefined || next.preserveData !== undefined) {
+		merged.preserveData = { ...accumulated?.preserveData, ...next.preserveData };
+	}
+	return merged;
+}
+
 /** Return type for `session_before_shutdown` handlers */
 export interface SessionBeforeShutdownResult {
 	/** If true, cancel this shutdown attempt. */

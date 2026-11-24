@@ -6,7 +6,11 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { createNoOpUIContext } from "../utils";
-import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+import {
+	accumulateToolCallResult,
+	buildAggregatedToolCallResult,
+	mergeSessionCompactingResult,
+} from "../shared-events";
 import type {
 	AppendEntryHandler,
 	BranchHandler,
@@ -314,7 +318,10 @@ export class HookRunner {
 							toolResultContexts.push(toolResult.additionalContext);
 					}
 					if (event.type === "session.compacting" && handlerResult) {
-						result = handlerResult as SessionCompactingResult;
+						result = mergeSessionCompactingResult(
+							result as SessionCompactingResult | undefined,
+							handlerResult as SessionCompactingResult,
+						);
 					}
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);

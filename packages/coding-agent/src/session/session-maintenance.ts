@@ -435,7 +435,8 @@ function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	const preserveData = { ...hookPreserveData, ...resultPreserveData };
+	// Fresh session.compacting keys win over keys an earlier compaction carried into the result.
+	const preserveData = { ...resultPreserveData, ...hookPreserveData };
 	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
 }
 
@@ -1690,7 +1691,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
+				preserveData = { ...snapcompactResult.preserveData, ...compactionPrep.preserveData };
 			} else if (selectedMethod === "handoff") {
 				if (
 					snapshot &&
@@ -1708,6 +1709,7 @@ export class SessionMaintenance {
 				shortSummary = undefined;
 				firstKeptEntryId = preparation.firstKeptEntryId;
 				tokensBefore = preparation.tokensBefore;
+				preserveData = compactionPrep.preserveData;
 			} else {
 				codexCompaction = createCodexCompactionContext({
 					trigger: "manual",
@@ -2718,6 +2720,7 @@ export class SessionMaintenance {
 		const onAttempt = (message: AssistantMessage) => {
 			if (message.usage.totalTokens > 0) run.accepted = true;
 		};
+		const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined, signal);
 		let armed: ArmedSpeculation;
 		if (method === "handoff") {
 			const liveMessages = this.#host.agent.state.messages;
@@ -2738,6 +2741,7 @@ export class SessionMaintenance {
 					firstKeptEntryId: preparation.firstKeptEntryId,
 					tokensBefore: preparation.tokensBefore,
 					details,
+					preserveData: compactionPrep.preserveData,
 				},
 				action: "handoff",
 				method,
@@ -2745,7 +2749,6 @@ export class SessionMaintenance {
 				contextTokensAtStart: contextTokens,
 			};
 		} else {
-			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined, signal);
 			// No hookCompaction is passed above, so "fromHook" is unreachable;
 			// the guard just narrows the union.
 			if (compactionPrep.kind === "fromHook") return clear();
@@ -4227,7 +4230,9 @@ export class SessionMaintenance {
 
 			hookContext = result?.context;
 			hookPrompt = result?.prompt;
-			preserveData = result?.preserveData;
+			// Extensions may not supply engine-owned provider replay or snapcompact archive keys.
+			preserveData = snapcompact.stripProviderCompactionPreserveData(result?.preserveData);
+			preserveData = snapcompact.stripPreservedArchive(preserveData);
 		}
 
 		if (hookCompaction) {
@@ -6263,7 +6268,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
+				preserveData = { ...snapcompactResult.preserveData, ...compactionPrep.preserveData };
 			} else {
 				const liveModel = this.#model;
 				const candidates = this.#getCompactionModelCandidates(

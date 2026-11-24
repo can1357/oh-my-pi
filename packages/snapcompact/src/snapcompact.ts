@@ -1187,7 +1187,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 /** Provider-native compaction payloads a snapcompact pass supersedes. */
 const PROVIDER_COMPACTION_PRESERVE_KEYS = ["openaiRemoteCompaction", "anthropicCompaction"] as const;
 
-function stripProviderCompactionPreserveData(
+export function stripProviderCompactionPreserveData(
 	preserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
 	if (!preserveData || !PROVIDER_COMPACTION_PRESERVE_KEYS.some(key => key in preserveData)) {
