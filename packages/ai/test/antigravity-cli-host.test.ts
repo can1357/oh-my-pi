@@ -1,11 +1,13 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { streamAntigravityCli } from "@oh-my-pi/pi-ai/providers/antigravity-cli";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import { agyCredentialKey } from "@oh-my-pi/pi-ai/providers/antigravity-cli/credentials";
 import {
 	AgyHost,
 	describeToolArguments,
@@ -18,10 +20,18 @@ import {
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
-import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	ProviderSessionState,
+	Tool,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
@@ -211,7 +221,7 @@ afterEach(async () => {
 });
 
 async function fixture(options: AgyHostOptions = {}, roster?: string[]) {
-	const dir = await mkdtemp(path.join(tmpdir(), "agy-host-test-"));
+	const dir = await mkdtemp(path.join(os.tmpdir(), "agy-host-test-"));
 	const started = new Queue<FakeAgy>();
 	const clock = new Clock();
 	const instances: FakeAgy[] = [];
@@ -1091,5 +1101,62 @@ describe("AgyHost quota retry notices", () => {
 		const { run, error } = await finalNotice(chunks);
 		expect(error).toBeUndefined();
 		expect(run.writer.output.content).toEqual([{ type: "text", text: chunks.join("") }]);
+	});
+});
+
+describe("AgyHost sessions beside an active step", () => {
+	it("serves a compaction summary that arrives during the session's streaming step on its own host", async () => {
+		// Credentials stage under the config root, which the resolver builds from os.homedir() when setAgentDir rebuilds it.
+		const home = await mkdtemp(path.join(os.tmpdir(), "agy-session-home-"));
+		const homedir = spyOn(os, "homedir").mockReturnValue(home);
+		const previousAgentDir = getAgentDir();
+		setAgentDir(path.join(home, "agent"));
+		try {
+			const state = await fixture();
+			const apiKey = JSON.stringify({
+				token: "access-token",
+				refreshToken: "refresh-token",
+				expiresAt: Date.now() + 3_600_000,
+				email: "agy@example.com",
+				accountId: "agy-account",
+			});
+			const sessionId = "session-under-compaction";
+			const key = `antigravity-acp:${agyCredentialKey(apiKey)}:${sessionId}`;
+			const providerSessionState = new Map<string, ProviderSessionState>([[key, state.host]]);
+
+			// The session's own turn holds its host's only step open.
+			const turn = step(state.host, [user("long turn")]);
+			const sessionFake = await state.started.next();
+			const sessionPrompt = await sessionFake.prompts.next();
+
+			// Compaction's summary request reaches the same session while that step streams.
+			const summary = streamAntigravityCli(
+				model,
+				{ messages: [user("Summarize the conversation")] },
+				{ apiKey, sessionId, providerSessionState },
+			).result();
+			const summaryFake = await Promise.race([
+				state.started.next(),
+				summary.then(message => {
+					throw new Error(`summary settled without its own host: ${message.errorMessage}`);
+				}),
+			]);
+			const summaryPrompt = await summaryFake.prompts.next();
+			summaryFake.text("Summary of the earlier turns.");
+			summaryPrompt.response.resolve({ stopReason: "end_turn" });
+			expect((await summary).content).toEqual([{ type: "text", text: "Summary of the earlier turns." }]);
+
+			// The session's own turn is untouched by the summary and finishes normally.
+			expect(providerSessionState.get(key)).toBe(state.host);
+			expect(sessionFake.closed).toBe(false);
+			sessionFake.text("Still working.");
+			sessionPrompt.response.resolve({ stopReason: "end_turn" });
+			await turn.done;
+			expect(turn.writer.output.content).toEqual([{ type: "text", text: "Still working." }]);
+		} finally {
+			homedir.mockRestore();
+			setAgentDir(previousAgentDir);
+			await rm(home, { recursive: true, force: true });
+		}
 	});
 });

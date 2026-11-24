@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Split-turn compaction on `antigravity-cli` no longer fails with "Antigravity CLI is already running a request for this session": a summary that arrives during the session's streaming step now runs on its own host ([#20191](https://github.com/can1357/oh-my-pi/issues/20191), [#PR_NUMBER](https://github.com/can1357/oh-my-pi/pull/PR_NUMBER) by [@JamieJ5926](https://github.com/JamieJ5926))
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
 - Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
 - GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))

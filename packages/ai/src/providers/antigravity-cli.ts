@@ -71,6 +71,17 @@ async function runStep(
 	const key = `antigravity-acp:${account}:${options.sessionId ?? "default"}`;
 	if (sessions) {
 		const existing = sessions.get(key);
+		if (existing instanceof AgyHost && existing.stepActive) {
+			// A request beside the session's streaming step (a compaction summary) runs on a host of its own;
+			// the session's host keeps its one step.
+			const side = existing.sibling();
+			try {
+				await side.step(model, context, stepOptions, writer);
+			} finally {
+				await side.dispose();
+			}
+			return;
+		}
 		const host = existing instanceof AgyHost ? existing : new AgyHost(directory);
 		if (host !== existing) sessions.set(key, host);
 		await host.step(model, context, stepOptions, writer);

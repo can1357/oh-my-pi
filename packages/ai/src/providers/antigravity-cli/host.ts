@@ -223,6 +223,16 @@ export class AgyHost implements ProviderSessionState {
 		return this.#turn !== undefined || this.#pending !== undefined || this.#step !== undefined;
 	}
 
+	/** True while a step is streaming; a request that arrives now cannot join it. */
+	get stepActive(): boolean {
+		return this.#step !== undefined;
+	}
+
+	/** A fresh host on this account directory and these options, for a request that cannot join this host's step. */
+	sibling(): AgyHost {
+		return new AgyHost(this.#geminiDir, this.#options);
+	}
+
 	/** Emit one assistant step, parking at a tool call or finishing at the ACP turn end. */
 	async step(model: Model, context: Context, options: AgyStepOptions, writer: StepWriter): Promise<void> {
 		if (this.#step) throw new Error("Antigravity CLI is already running a request for this session");
