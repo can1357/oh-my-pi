@@ -118,7 +118,7 @@ Invalid override keys are ignored and logged (`logger.debug`).
 
 #### Box-drawing borders
 
-All outlined chrome — tool-result frames, overlays, code fences, the editor, the welcome banner — draws with the `boxRound.*` tokens: rounded corners (`╭╮╰╯`) plus tee/cross junctions (`├┤┬┴┼`, which have no rounded Unicode form, so they are sourced from the `boxSharp.*` tokens). Markdown tables are the sole exception and keep the fully sharp `boxSharp.*` set (`┌┐└┘`).
+All outlined chrome — tool-result frames, overlays, the editor, the welcome banner — draws with the `boxRound.*` tokens: rounded corners (`╭╮╰╯`) plus tee/cross junctions (`├┤┬┴┼`, which have no rounded Unicode form, so they are sourced from the `boxSharp.*` tokens). Markdown tables are the sole exception and keep the fully sharp `boxSharp.*` set (`┌┐└┘`). Markdown code fences are not outlined: their opening and closing fence lines are painted with `mdCodeBlockBorder` and the body has no frame. A `mermaid` fence renders as a diagram instead, when the diagram renders.
 
 Override behavior follows from that split:
 
