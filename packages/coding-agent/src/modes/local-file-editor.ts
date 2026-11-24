@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
-import { disambiguateDisplayLabels, replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { disambiguateDisplayLabels, shortenPath } from "../utils/render-utils";
+import { replaceTabs } from "../utils/text-width";
 import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, type LocalFileEntry, type LocalProtocolOptions, listLocalFiles } from "../internal-urls";
 import { getEditorCommand, openEditorOnPath } from "../utils/external-editor";
@@ -132,14 +133,10 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 
 	let exitCode: number;
 	try {
-		ctx.ui.stop();
-		exitCode = await openEditorOnPath(editorCmd, chosen.path);
+		exitCode = await ctx.suspend(() => openEditorOnPath(editorCmd, chosen.path));
 	} catch (error) {
 		ctx.showWarning(`Failed to open external editor: ${showErrorMessage(error)}`);
 		return;
-	} finally {
-		ctx.ui.start();
-		ctx.ui.requestRender();
 	}
 
 	if (exitCode !== 0) {

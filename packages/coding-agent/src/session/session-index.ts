@@ -32,6 +32,7 @@ import {
 import { getHistoryDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { getDbBusyTimeoutMs, isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import type { TimeWindow } from "./time-window";
 
 const SESSION_INDEX_DDL = `
 CREATE TABLE IF NOT EXISTS session_titles (
@@ -221,6 +222,8 @@ export interface SessionRecapQuery {
 	sessionIds?: readonly string[];
 	/** Recaps produced in this exact working directory. */
 	cwd?: string;
+	/** Recaps journaled within this window. */
+	window?: TimeWindow;
 	/** Maximum rows returned. */
 	limit?: number;
 }
@@ -250,6 +253,15 @@ export function listSessionRecaps(query: SessionRecapQuery = {}): SessionRecap[]
 	if (query.cwd !== undefined) {
 		where.push("cwd = ?");
 		params.push(query.cwd);
+	}
+	// Journaled in Unix seconds.
+	if (query.window?.since !== undefined) {
+		where.push("created_at >= ?");
+		params.push(query.window.since / 1000);
+	}
+	if (query.window?.until !== undefined) {
+		where.push("created_at < ?");
+		params.push(query.window.until / 1000);
 	}
 	let sql = "SELECT session_id, cwd, recap, created_at FROM session_recaps";
 	if (where.length > 0) sql += ` WHERE ${where.join(" AND ")}`;

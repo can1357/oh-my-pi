@@ -7,7 +7,7 @@ import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import { toolWireName } from "../tools/builtin-names";
 import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
-import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { type TodoItem, type TodoPhase } from "../tools/details/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";

@@ -2,7 +2,6 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode 
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { applyToolProxy } from "../../extensibility/tool-proxy";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type {
 	RpcHostToolCallRequest,
@@ -11,6 +10,7 @@ import type {
 	RpcHostToolResult,
 	RpcHostToolUpdate,
 } from "./rpc-types";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 
 type RpcHostToolOutput = (frame: RpcHostToolCallRequest | RpcHostToolCancelRequest) => void;
 

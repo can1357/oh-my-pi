@@ -7,13 +7,14 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../../src/ui/theme/service";
+import { createModeTerminal } from "../helpers/mode-terminal";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -75,10 +76,17 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 	});
 	const goalTool = new GoalTool(goalToolSession);
 	toolRegistry.set("goal", goalTool as unknown as Tool);
-	const mode = new InteractiveMode(session, "test");
+	const mode = new InteractiveMode(
+		session,
+		"test",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		createModeTerminal().frame,
+	);
 	vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
-	vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
-	mode.ui.requestRender = vi.fn();
+	vi.spyOn(mode, "ensureWorkingRow").mockImplementation(() => {});
 	return {
 		mode,
 		session,

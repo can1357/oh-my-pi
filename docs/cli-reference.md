@@ -111,6 +111,9 @@ or `--fork`.
 | `--provider-session-id <id>` | Reuse a specific provider-side session id for continuity and cache scoping.                                                |
 | `--prompt-cache-key <key>`   | Override the provider prompt-cache key for this session.                                                                   |
 | `--service-tier <tier>`      | OpenAI service tier: `none`, `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast` (`none` omits `service_tier`). |
+| `--no-judge`                 | Run judge-role calls only on the active model's provider; with no active model, nothing is judged.                         |
+| `--no-spotlight`             | Send no Spotlight requests, unless the active model's provider is `stencil` and `spotlight.url` is the default.           |
+| `--offline`                  | Both of the above, and keep memories, titles, commit messages, subagents, fallback models, web search, speech, image generation and descriptions, image questions, skill and MCP hints, job widgets and eval `completion()` on the active model's provider; a feature with no model there is skipped or fails. Not a network firewall: MCP servers and web fetches still go out. |
 
 See [providers](./providers.md) and [models](./models.md) for model resolution.
 
@@ -161,7 +164,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--hook <path>`                   | Load a hook/extension file (repeatable). See [hooks](./hooks.md).                                                                                                                         |
 | `--trusted-extension <abs-path>`  | Exact allowlist of existing absolute module files (repeatable); disables ambient extension discovery and package-root sub-discovery. Cannot be combined with `--extension`/`-e`/`--hook`. |
 | `--plugin-dir <dir>`              | Add a local plugin directory to discovery (repeatable).                                                                                                                                   |
-| `--no-extensions`                 | Disable extension discovery (explicit `-e` paths still work).                                                                                                                             |
+| `--no-extensions`                 | Disable extension, custom tool, and custom command module discovery (explicit `-e` paths still work).                                                                                                                             |
 | `--skills <globs>`                | Comma-separated glob patterns to filter [skills](./skills.md) (e.g. `git-*,docker`).                                                                                                      |
 | `--no-skills`                     | Disable skills discovery and loading.                                                                                                                                                     |
 | `--no-rules`                      | Disable rules discovery and loading. See [context files](./context-files.md).                                                                                                             |

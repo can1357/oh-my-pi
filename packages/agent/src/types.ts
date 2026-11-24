@@ -120,6 +120,9 @@ export type AgentBeforeModelCall = (
 	signal?: AbortSignal,
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
 
+/** The tool-call shape a {@link SoftToolRequirement} inspects. */
+export type SoftToolCall = { name: string; arguments?: Record<string, unknown> };
+
 /**
  * A soft tool requirement: the host wants `toolName` called before the loop
  * runs other tools or yields, but WITHOUT paying the forced-`toolChoice` cost
@@ -148,7 +151,13 @@ export interface SoftToolRequirement {
 	 * specific invocation shape (e.g. a `bash` call running a particular tool
 	 * command) instead of any call to `toolName`. Escalation still forces `toolName`.
 	 */
-	satisfies?(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean;
+	satisfies?(toolCall: SoftToolCall): boolean;
+	/**
+	 * Skipped-result text for a call to `toolName` that fails `satisfies`. Without
+	 * it, that call gets the generic notice asking for a `toolName` call, which
+	 * repeats the call the model just made instead of naming the invocation needed.
+	 */
+	unsatisfiedNotice?(toolCall: SoftToolCall): string;
 	/** Host-owned reminder messages, injected once per `id` activation. */
 	reminder: AgentMessage[];
 }

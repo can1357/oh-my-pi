@@ -2,39 +2,19 @@ import { describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { draftComposer } from "./helpers/input-harness";
 
 function createContext(options?: {
 	hasInterruptibleInput?: boolean;
 	pendingImages?: ImageContent[];
 	pendingImageLinks?: (string | undefined)[];
 }) {
-	let editorText = "";
 	const abort = vi.fn(async () => {});
 	const prompt = vi.fn(async () => {});
 	const updatePendingMessagesDisplay = vi.fn();
-	const requestRender = vi.fn();
 	const showError = vi.fn();
 	const ctx = {
-		editor: {
-			imageLinks: undefined as (string | undefined)[] | undefined,
-			setText(text: string) {
-				editorText = text;
-			},
-			// The stub skips chip collapsing so assertions read the wire-format text.
-			setCollapsedText(text: string) {
-				editorText = text;
-			},
-			getText() {
-				return editorText;
-			},
-			addToHistory: vi.fn(),
-			pendingImages: options?.pendingImages ? [...options.pendingImages] : ([] as ImageContent[]),
-			pendingImageLinks:
-				options?.pendingImageLinks ??
-				options?.pendingImages?.map(() => undefined) ??
-				([] as (string | undefined)[]),
-		},
-		ui: { requestRender },
+		composer: draftComposer(options?.pendingImages, options?.pendingImageLinks),
 		session: {
 			isStreaming: true,
 			isCompacting: false,
@@ -59,7 +39,7 @@ function createContext(options?: {
 		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
 		hasActiveOmfg: () => false,
 	} as unknown as InteractiveModeContext;
-	return { ctx, abort, prompt, updatePendingMessagesDisplay, requestRender, showError };
+	return { ctx, abort, prompt, updatePendingMessagesDisplay, showError };
 }
 
 describe("empty submit with queued messages", () => {
@@ -67,26 +47,25 @@ describe("empty submit with queued messages", () => {
 		// An image-only draft is a bare marker: the composer always stages the
 		// chip token, which expands to `[Image #1]` at submit time.
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
-		const { ctx, abort, prompt, updatePendingMessagesDisplay, requestRender } = createContext({
+		const { ctx, abort, prompt, updatePendingMessagesDisplay } = createContext({
 			hasInterruptibleInput: false,
 			pendingImages: [image],
 		});
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("[Image #1]");
+		await ctx.composer.onSubmit?.("[Image #1]");
 
 		expect(abort).not.toHaveBeenCalled();
 		expect(prompt).toHaveBeenCalledWith("[Image #1]", { streamingBehavior: "steer", images: [image] });
-		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(ctx.editor.pendingImageLinks).toEqual([]);
+		expect(ctx.composer.pendingImages).toEqual([]);
+		expect(ctx.composer.pendingImageLinks).toEqual([]);
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
 	it("restores an image-only steer when streaming dispatch rejects", async () => {
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
-		const { ctx, abort, prompt, showError, updatePendingMessagesDisplay, requestRender } = createContext({
+		const { ctx, abort, prompt, showError, updatePendingMessagesDisplay } = createContext({
 			hasInterruptibleInput: false,
 			pendingImages: [image],
 			pendingImageLinks: ["local://draft.png"],
@@ -97,16 +76,14 @@ describe("empty submit with queued messages", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("[Image #1]");
+		await ctx.composer.onSubmit?.("[Image #1]");
 
 		expect(abort).not.toHaveBeenCalled();
 		expect(showError).toHaveBeenCalledWith("queue rejected");
-		expect(ctx.editor.getText()).toBe("[Image #1]");
-		expect(ctx.editor.pendingImages).toEqual([image]);
-		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
-		expect(ctx.editor.imageLinks).toEqual(["local://draft.png"]);
+		expect(ctx.composer.expandedText()).toBe("[Image #1]");
+		expect(ctx.composer.pendingImages).toEqual([image]);
+		expect(ctx.composer.pendingImageLinks).toEqual(["local://draft.png"]);
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
 	it("queues an image-only steer instead of aborting when messages are already queued", async () => {
@@ -115,7 +92,7 @@ describe("empty submit with queued messages", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("[Image #1]");
+		await ctx.composer.onSubmit?.("[Image #1]");
 
 		expect(abort).not.toHaveBeenCalled();
 		expect(prompt).toHaveBeenCalledWith("[Image #1]", { streamingBehavior: "steer", images: [image] });
@@ -129,10 +106,10 @@ describe("empty submit with queued messages", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await ctx.editor.onSubmit?.("");
+		await ctx.composer.onSubmit?.("");
 
 		expect(prompt).not.toHaveBeenCalled();
 		expect(abort).toHaveBeenCalled();
-		expect(ctx.editor.pendingImages).toEqual([]);
+		expect(ctx.composer.pendingImages).toEqual([]);
 	});
 });

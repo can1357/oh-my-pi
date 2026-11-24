@@ -17,7 +17,7 @@ import * as probeModule from "@oh-my-pi/pi-coding-agent/task/completion-probe";
 import { runSubprocess, type SubagentToolResult } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 const agent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };

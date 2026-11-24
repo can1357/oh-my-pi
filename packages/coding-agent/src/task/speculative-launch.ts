@@ -24,7 +24,7 @@ import {
 	type ToolSpeculationAssessmentContext,
 	type ToolSpeculationStreamSession,
 } from "@oh-my-pi/pi-agent-core";
-import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import type { TaskParams } from "./task-details";
 import type { SpawnRun } from "./spawn-run";
 
 /**

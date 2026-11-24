@@ -1,6 +1,6 @@
 import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { slashCommandCapability } from "../capability/slash-command";
-import { slashCommandFrontmatterDisplay } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
+import { slashCommandFrontmatterDisplay } from "./inventory/inspector-model";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { appendInlineArgsFallback, templateUsesInlineArgPlaceholders } from "../config/prompt-templates";
 import type { SlashCommand } from "../discovery";

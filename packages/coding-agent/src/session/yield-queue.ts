@@ -1,6 +1,11 @@
 import { type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
 import { logger, toError } from "@oh-my-pi/pi-utils";
 
+/** Rejection message for a queued entry whose dispatcher's `isStale` dropped it. */
+export function yieldQueueStaleMessage(kind: string): string {
+	return `Yield queue entry became stale: ${kind}`;
+}
+
 export interface YieldDispatcher<P> {
 	/** Drop entries already delivered through another path. Called per-entry at flush time. */
 	isStale?(entry: P): boolean;
@@ -254,7 +259,7 @@ export class YieldQueue {
 					continue;
 				}
 				if (stale) {
-					entry.reject?.(new Error(`Yield queue entry became stale: ${kind}`));
+					entry.reject?.(new Error(yieldQueueStaleMessage(kind)));
 					continue;
 				}
 			}

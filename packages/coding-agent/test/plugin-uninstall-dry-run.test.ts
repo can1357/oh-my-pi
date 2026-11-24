@@ -15,11 +15,11 @@ import { runPluginCommand } from "@oh-my-pi/pi-coding-agent/cli/plugin-cli";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import type { InstalledPluginSummary } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../src/ui/theme/service";
 
 describe("runPluginCommand({ action: 'uninstall', flags: { dryRun } })", () => {
 	beforeEach(async () => {
-		await initTheme();
+		initTheme();
 		spyOn(console, "log").mockImplementation(() => undefined);
 		spyOn(console, "error").mockImplementation(() => undefined);
 	});
