@@ -22,7 +22,7 @@ import {
 import { type MCPInitializeResult, MCPNotificationMethods, type MCPRequestOptions } from "../types";
 import type { McpEra, McpServerSpec, McpUpstreamExit } from "./contract";
 import { encodeMcpHeaderValue, HttpUpstream } from "./http-upstream";
-import { MCP_LEGACY_INITIALIZE_PARAMS, openLegacySession, parseInitializeResult } from "./legacy-session";
+import { openLegacySession, parseInitializeResult } from "./legacy-session";
 import type {
 	McpPeer,
 	McpPeerDeps,
@@ -900,7 +900,7 @@ function eraOfDiscoverError(error: unknown): McpEra | undefined {
 async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: AbortSignal): Promise<McpProbeResult> {
 	upstream.onRequest = legacyRequestHandler(deps);
 	await upstream.connect(deps.spawn, signal);
-	const initialized = await outcomeOf(upstream.request("initialize", { ...MCP_LEGACY_INITIALIZE_PARAMS }, { signal }));
+	const initialized = await outcomeOf(openLegacySession(upstream, signal));
 	if ("error" in initialized) {
 		// The server refused the legacy handshake: it may be of the 2026-07-28
 		// era alone, so ask its own question before giving up.
@@ -912,10 +912,6 @@ async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: Ab
 		if ("error" in discovered && eraOfDiscoverError(discovered.error) === "modern") return { era: "modern" };
 		throw initialized.error;
 	}
-	const session = parseInitializeResult(initialized.value);
-	// Complete the handshake before anything else: a strict server refuses
-	// requests until it has seen the initialized notification.
-	await upstream.notify("notifications/initialized");
 	const discovered = await Promise.race([
 		outcomeOf(upstream.request("server/discover", { _meta: requestMeta() }, { signal })),
 		Bun.sleep(PROBE_DISCOVER_GRACE_MS).then(() => undefined),
@@ -924,7 +920,7 @@ async function probeStdio(upstream: StdioUpstream, deps: McpPeerDeps, signal: Ab
 		const result = discoverResultOf(discovered.value);
 		if (result) return { era: "modern", discover: result };
 	}
-	return { era: "legacy", discover: legacyDiscover(session) };
+	return { era: "legacy", discover: legacyDiscover(initialized.value) };
 }
 
 /** The HTTP status behind a failed modern POST, whether or not its body was a JSON-RPC error. */
