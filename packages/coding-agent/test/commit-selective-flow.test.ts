@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { commitSelection, type CommitOutcome } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
-import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
+import { createDraft, type SelectedChange } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
 import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
 import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -692,7 +692,7 @@ describe("selective commit flow", () => {
 			/a\.txt: take\(\) without units would add lines that are not yours: .*pre-existing/,
 		);
 		expect(draft.selection()).toEqual(selected);
-		const bothSelected = [
+		const bothSelected: SelectedChange[] = [
 			{
 				kind: "text",
 				path: "a.txt",
@@ -704,6 +704,8 @@ describe("selective commit flow", () => {
 		expect(draft.selection()).toEqual(bothSelected);
 		expect(draft.diff()).toContain("-line 1\n+other session\n");
 		expect(draft.diff()).toContain("-line 10\n+main session\n");
+		draft.drop({ path: "a.txt" });
+		expect(draft.selection()).toEqual([]);
 		expect(() => draft.take({ path: "**" })).not.toThrow();
 		expect(draft.selection()).toEqual(bothSelected);
 		expect(draft.diff()).toContain("-line 1\n+other session\n");
