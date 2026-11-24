@@ -15,6 +15,9 @@ export default class Commit extends Command {
 		push: Flags.boolean({ description: "Push after committing" }),
 		"dry-run": Flags.boolean({ description: "Preview without committing" }),
 		"no-changelog": Flags.boolean({ description: "Skip changelog updates" }),
+		amend: Flags.boolean({
+			description: "Replace HEAD with the staged changes; --push then uses --force-with-lease",
+		}),
 		legacy: Flags.boolean({ description: "Use legacy deterministic pipeline" }),
 		context: Flags.string({ char: "c", description: "Additional context for the model" }),
 		model: Flags.string({ char: "m", description: "Override model selection" }),
@@ -27,6 +30,7 @@ export default class Commit extends Command {
 			push: flags.push ?? false,
 			dryRun: flags["dry-run"] ?? false,
 			noChangelog: flags["no-changelog"] ?? false,
+			amend: flags.amend ?? false,
 			legacy: flags.legacy,
 			context: flags.context,
 			model: flags.model,

@@ -21,13 +21,15 @@ export interface CommitToolOptions {
 	state: CommitAgentState;
 	changelogTargets: string[];
 	enableAnalyzeFiles?: boolean;
+	/** Offer `split_commit`; off when amending, which replaces exactly one commit. */
+	enableSplit?: boolean;
 }
 
 export function createCommitTools(options: CommitToolOptions): Array<CustomTool<any, any>> {
 	const tools: Array<CustomTool<any, any>> = [
 		createGitOverviewTool(options.cwd, options.state),
 		createGitFileDiffTool(options.cwd, options.state),
-		createGitHunkTool(options.cwd),
+		createGitHunkTool(options.cwd, options.state),
 		createRecentCommitsTool(options.cwd),
 	];
 
@@ -47,8 +49,10 @@ export function createCommitTools(options: CommitToolOptions): Array<CustomTool<
 	tools.push(
 		createProposeChangelogTool(options.state, options.changelogTargets),
 		createProposeCommitTool(options.cwd, options.state),
-		createSplitCommitTool(options.cwd, options.state, options.changelogTargets),
 	);
+	if (options.enableSplit ?? true) {
+		tools.push(createSplitCommitTool(options.cwd, options.state, options.changelogTargets));
+	}
 
 	return tools;
 }

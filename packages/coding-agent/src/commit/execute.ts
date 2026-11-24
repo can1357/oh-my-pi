@@ -44,10 +44,13 @@ export function abortOnGitFailure(context: string, error: vcs.VcsError, note?: s
  * Push the current branch, reporting a refused push (missing upstream, rejected
  * ref) through {@link abortOnGitFailure} instead of letting the raw
  * `VcsError` escape. Prints the success line on completion.
+ *
+ * @param options.forceWithLease Push with `--force-with-lease`, for an amended HEAD
+ *   whose replaced commit may already be on the remote.
  */
-export async function pushOrAbort(cwd: string): Promise<void> {
+export async function pushOrAbort(cwd: string, options: { forceWithLease?: boolean } = {}): Promise<void> {
 	try {
-		await vcs.requireGit(cwd).push({});
+		await vcs.requireGit(cwd).push({ forceWithLease: options.forceWithLease });
 	} catch (error) {
 		if (vcs.isVcsError(error)) abortOnGitFailure("Push failed", error);
 		throw error;

@@ -7,6 +7,10 @@ Goal:
 Summarize purpose and commit-relevant changes.
 {{/if}}
 
+{{#if amend_diff}}
+The change amends the last commit: inspect it with `{{amend_diff}}`, not the staged diff alone.
+{{/if}}
+
 Return concise JSON object:
 - summary: 1-sentence file-role description
 - highlights: 2-5 bullets, notable behaviors or changes

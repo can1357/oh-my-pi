@@ -10,6 +10,7 @@ import { discoverAuthStorage, loadCliExtensionProviders } from "../../sdk";
 import type { ModelUsageLedger } from "../../session/model-usage-journal";
 import { resolvePrimaryModel, resolveSmolModel } from "../model-selection";
 import type { ConventionalCommit } from "../types";
+import { type CommitDiffSource, resolveAmendDiffSource, STAGED_DIFF } from "../diff-source";
 import { renderStat } from "../utils";
 import { CommitInferenceCache } from "./cache";
 import { type ConventionalGenerationConfig, conventionalGenerationConfig } from "./config";
@@ -28,6 +29,8 @@ export interface GenerateGitCommitOptions {
 	cwd: string;
 	modelOverride?: string;
 	stageIfEmpty?: boolean;
+	/** Describe HEAD plus the staged changes, for amending HEAD; never stages. */
+	amend?: boolean;
 	onProgress?: CommitProgress;
 	signal?: AbortSignal;
 	/** Session the generation runs inside (the git overlay); the standalone commands have none. */
@@ -48,30 +51,39 @@ function renderNumstat(entries: VcsNumstatEntry[]): string {
 		.concat(entries.length > 0 ? "\n" : "");
 }
 
-/** Generate a commit message from the staged tree, staging all only when the index is empty. */
+/**
+ * Generate a commit message from the staged tree, staging all only when the index is empty.
+ * With `amend`, describe HEAD's first parent against the staged index instead.
+ */
 export async function generateGitCommit(options: GenerateGitCommitOptions): Promise<GeneratedGitCommit> {
 	const repo = vcs.requireGit(options.cwd);
 	const settings = await Settings.init({ cwd: options.cwd });
 	const config = conventionalGenerationConfig(cfgCommit.get(settings));
-	let stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
+	let source: CommitDiffSource = STAGED_DIFF;
 	let stagedAll = false;
-	if (stagedFiles.length === 0 && options.stageIfEmpty !== false) {
+	if (options.amend) {
+		const amendSource = await resolveAmendDiffSource(repo);
+		if (!amendSource) throw new Error("No commit to amend");
+		source = amendSource;
+	}
+	let stagedFiles = await repo.changedFiles(source, options.signal);
+	if (stagedFiles.length === 0 && !options.amend && options.stageIfEmpty !== false) {
 		options.onProgress?.("Staging all changes…");
 		await repo.stageFiles([], options.signal);
 		stagedAll = true;
-		stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
+		stagedFiles = await repo.changedFiles(source, options.signal);
 	}
 	if (stagedFiles.length === 0) throw new Error("No staged changes to analyze");
 
-	options.onProgress?.("Reading staged changes…");
-	const initialDiff = await repo.diffText({ cached: true }, options.signal);
+	options.onProgress?.(options.amend ? "Reading amended commit changes…" : "Reading staged changes…");
+	const initialDiff = await repo.diffText(source, options.signal);
 	const diff =
 		Buffer.byteLength(initialDiff) <= config.maxDiffLength
 			? initialDiff
-			: await repo.diffText({ cached: true, context: 1 }, options.signal);
+			: await repo.diffText({ ...source, context: 1 }, options.signal);
 	if (!diff.trim()) throw new Error("No staged changes to analyze");
 
-	const numstatEntries = await repo.numstat({ cached: true }, options.signal);
+	const numstatEntries = await repo.numstat(source, options.signal);
 	const stat = renderStat(numstatEntries);
 	const numstat = renderNumstat(numstatEntries);
 	const context = await collectGenerationContext(options.cwd, options.signal);

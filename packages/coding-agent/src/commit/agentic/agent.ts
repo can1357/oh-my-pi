@@ -4,6 +4,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import typesDescriptionPrompt from "../../commit/prompts/types-description.md" with { type: "text" };
+import type { CommitDiffSource } from "../../commit/diff-source";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import { createAgentSession } from "../../sdk";
@@ -30,6 +31,8 @@ export interface CommitAgentInput {
 	changelogTargets: string[];
 	requireChangelog: boolean;
 	diffText?: string;
+	/** Set only when amending: the amended commit's changes, replacing the staged diff. */
+	amendDiffSource?: CommitDiffSource;
 	existingChangelogEntries?: ExistingChangelogEntries[];
 	onComplete?: (state: CommitAgentState) => Promise<void> | void;
 }
@@ -41,10 +44,12 @@ export interface ExistingChangelogEntries {
 
 export async function runCommitAgentSession(input: CommitAgentInput): Promise<CommitAgentState> {
 	const typesDescription = prompt.render(typesDescriptionPrompt);
+	const amend = input.amendDiffSource !== undefined;
 	const systemPrompt = prompt.render(agentSystemPrompt, {
 		types_description: typesDescription,
+		amend,
 	});
-	const state: CommitAgentState = { diffText: input.diffText };
+	const state: CommitAgentState = { diffText: input.diffText, diffSource: input.amendDiffSource };
 	const spawns = "sonic";
 	const tools = createCommitTools({
 		cwd: input.cwd,
@@ -55,6 +60,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		state,
 		changelogTargets: input.changelogTargets,
 		enableAnalyzeFiles: true,
+		enableSplit: !amend,
 	});
 
 	const { session } = await createAgentSession({
@@ -163,6 +169,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 			user_context: input.userContext,
 			changelog_targets: input.changelogTargets.length > 0 ? input.changelogTargets.join("\n") : undefined,
 			existing_changelog_entries: input.existingChangelogEntries,
+			amend,
 		});
 		const MAX_RETRIES = 3;
 		let retryCount = 0;
@@ -174,7 +181,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		});
 		while (retryCount < MAX_RETRIES && !isProposalComplete(state, needsChangelog)) {
 			retryCount += 1;
-			const reminder = buildReminderMessage(state, needsChangelog, retryCount, MAX_RETRIES);
+			const reminder = buildReminderMessage(state, needsChangelog, amend, retryCount, MAX_RETRIES);
 			await session.prompt(reminder, {
 				attribution: "agent",
 				expandPromptTemplates: false,
@@ -301,12 +308,13 @@ function isProposalComplete(state: CommitAgentState, requireChangelog: boolean):
 function buildReminderMessage(
 	state: CommitAgentState,
 	requireChangelog: boolean,
+	amend: boolean,
 	retryCount: number,
 	maxRetries: number,
 ): string {
 	const missing: string[] = [];
 	if (!state.proposal && !state.splitProposal) {
-		missing.push("commit proposal (propose_commit or split_commit)");
+		missing.push(amend ? "commit proposal (propose_commit)" : "commit proposal (propose_commit or split_commit)");
 	}
 	if (requireChangelog && !state.changelogProposal) {
 		missing.push("changelog entries (propose_changelog)");

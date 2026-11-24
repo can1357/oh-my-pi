@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { CommitAgentState } from "../../../commit/agentic/state";
+import { type CommitAgentState, toolDiffOptions } from "../../../commit/agentic/state";
 import {
 	capDetails,
 	MAX_DETAIL_ITEMS,
@@ -57,8 +57,9 @@ export function createProposeCommitTool(cwd: string, state: CommitAgentState): C
 
 			const summaryValidation = validateSummaryRules(summary);
 			const analysisValidation = validateAnalysis(analysis);
-			const stagedFiles = state.overview?.files ?? (await repo.changedFiles({ cached: true }));
-			const diffText = state.diffText ?? (await repo.diffText({ cached: true }));
+			const source = toolDiffOptions(state, true);
+			const stagedFiles = state.overview?.files ?? (await repo.changedFiles(source));
+			const diffText = state.diffText ?? (await repo.diffText(source));
 			const typeValidation = validateTypeConsistency(params.type, stagedFiles, {
 				diffText,
 				summary,

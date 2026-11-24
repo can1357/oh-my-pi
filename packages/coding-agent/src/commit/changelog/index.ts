@@ -4,6 +4,7 @@ import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
 import { CHANGELOG_CATEGORIES } from "../../commit/types";
+import type { CommitDiffSource } from "../diff-source";
 import { renderStat } from "../utils";
 import { detectChangelogBoundaries } from "./detect";
 import { generateChangelogEntries } from "./generate";
@@ -19,6 +20,8 @@ export interface ChangelogFlowInput {
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
 	stagedFiles: string[];
+	/** Changes the entries describe: staged, or the amended commit's. */
+	diffSource: CommitDiffSource;
 	dryRun: boolean;
 	maxDiffChars?: number;
 	onProgress?: (message: string) => void;
@@ -44,6 +47,7 @@ export async function runChangelogFlow({
 	apiKey,
 	thinkingLevel,
 	stagedFiles,
+	diffSource,
 	dryRun,
 	maxDiffChars,
 	onProgress,
@@ -58,9 +62,9 @@ export async function runChangelogFlow({
 	const updated: string[] = [];
 	for (const boundary of boundaries) {
 		onProgress?.(`Generating entries for ${boundary.changelogPath}…`);
-		const diff = await repo.diffText({ cached: true, files: boundary.files });
+		const diff = await repo.diffText({ ...diffSource, files: boundary.files });
 		if (!diff.trim()) continue;
-		const stat = renderStat(await repo.numstat({ cached: true, files: boundary.files }));
+		const stat = renderStat(await repo.numstat({ ...diffSource, files: boundary.files }));
 		const diffForPrompt = truncateDiff(diff, maxDiffChars ?? DEFAULT_MAX_DIFF_CHARS);
 		const changelogContent = await Bun.file(boundary.changelogPath).text();
 		let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
