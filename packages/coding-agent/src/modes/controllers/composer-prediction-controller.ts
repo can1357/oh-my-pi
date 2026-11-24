@@ -80,6 +80,44 @@ interface Prediction {
 
 type PredictionContext = Pick<InteractiveModeContext, "settings" | "viewSession" | "focusedAgentId" | "composer">;
 
+export interface AutomaticPromptLimits {
+	minutes: number;
+	tokens: number;
+	dollars: number;
+	turns: number;
+}
+
+export interface AutomaticPromptStatus {
+	turns: number;
+	limits: AutomaticPromptLimits;
+	elapsedMs: number;
+	tokens: number;
+	dollars: number;
+}
+
+interface AutomaticPromptRun {
+	startedAt: number;
+	startedTokens: number;
+	startedDollars: number;
+	limits: AutomaticPromptLimits;
+	session: AgentViewSession;
+	seen: Set<string>;
+	turns: number;
+}
+
+function promptKey(text: string): string {
+	return text.toLowerCase().replace(NON_WORD, " ").trim();
+}
+
+function userMessageText(message: AgentMessage): string | undefined {
+	if (message.role !== "user") return undefined;
+	if (typeof message.content === "string") return message.content;
+	return message.content
+		.filter(part => part.type === "text")
+		.map(part => part.text)
+		.join(" ");
+}
+
 /**
  * Normalize a prediction reply to the single line the composer shows, or
  * `undefined` when the model skipped, rambled, or replied with nothing usable.
@@ -142,13 +180,69 @@ export class ComposerPredictionController {
 	/** Metrics sink; the global provider when unset. */
 	readonly #meterProvider: MeterProvider | undefined;
 	#abort: AbortController | undefined;
+	#automaticRun: AutomaticPromptRun | undefined;
+	readonly #onAutomaticStop: ((reason: string) => void) | undefined;
 	/** Reactive: the composer's ghost reads {@link choices}, so offering or retiring repaints it. */
 	readonly #prediction = signal<Prediction | undefined>(undefined);
 
-	constructor(ctx: PredictionContext, options: { deadlineMs?: number; meterProvider?: MeterProvider } = {}) {
+	constructor(
+		ctx: PredictionContext,
+		options: {
+			deadlineMs?: number;
+			meterProvider?: MeterProvider;
+			onAutomaticStop?: (reason: string) => void;
+		} = {},
+	) {
 		this.#ctx = ctx;
 		this.#deadlineMs = options.deadlineMs ?? PREDICTION_DEADLINE_MS;
 		this.#meterProvider = options.meterProvider;
+		this.#onAutomaticStop = options.onAutomaticStop;
+	}
+
+	/** Start submitting predicted follow-ups, bounded by all four caller-selected limits. */
+	startAutomatic(limits: AutomaticPromptLimits): void {
+		if (this.#ctx.focusedAgentId !== undefined) throw new Error("Auto-prompt is available only in the main session");
+		const session = this.#ctx.viewSession;
+		const stats = session.getSessionStats();
+		const seen = new Set(
+			session.messages
+				.map(userMessageText)
+				.filter((text): text is string => text !== undefined)
+				.map(promptKey)
+				.filter(Boolean),
+		);
+		this.#automaticRun = {
+			startedAt: Date.now(),
+			startedTokens: stats.tokens.total,
+			startedDollars: stats.cost,
+			limits,
+			session,
+			seen,
+			turns: 0,
+		};
+		this.request();
+	}
+
+	/** Current auto-prompt counters, if a bounded run is active. */
+	getAutomaticStatus(): AutomaticPromptStatus | undefined {
+		const run = this.#automaticRun;
+		if (!run) return undefined;
+		const stats = run.session.getSessionStats();
+		return {
+			turns: run.turns,
+			limits: run.limits,
+			elapsedMs: Date.now() - run.startedAt,
+			tokens: Math.max(0, stats.tokens.total - run.startedTokens),
+			dollars: Math.max(0, stats.cost - run.startedDollars),
+		};
+	}
+
+	/** Stop automatic follow-ups without interrupting a turn already in progress. */
+	stopAutomatic(): boolean {
+		if (!this.#automaticRun) return false;
+		this.#automaticRun = undefined;
+		this.cancel();
+		return true;
 	}
 
 	/** The prediction's alternatives for the conversation as it stands now, most likely first, if one is ready. */
@@ -161,7 +255,11 @@ export class ComposerPredictionController {
 	/** Predict the next message for the turn that just completed, superseding any earlier prediction. */
 	request(): void {
 		this.cancel();
-		if (!cfgComposerPredictions.get(this.#ctx.settings)) return;
+		if (this.#automaticRun && this.#automaticRun.session !== this.#ctx.viewSession) {
+			this.#stopAutomatic("the active session changed");
+			return;
+		}
+		if (!cfgComposerPredictions.get(this.#ctx.settings) && !this.#automaticRun) return;
 		// A focused subagent's "user" is the parent agent, not the person at the composer.
 		if (this.#ctx.focusedAgentId !== undefined) return;
 		const session = this.#ctx.viewSession;
@@ -169,7 +267,25 @@ export class ComposerPredictionController {
 		// prediction), and a compaction would rewrite the history the prediction reads: skip the
 		// billed request either way.
 		const model = session.model;
-		if (!model || session.isStreaming || session.isCompacting || this.#ctx.composer.text()) return;
+		if (this.#automaticRun) {
+			const limitReason = this.#automaticLimitReason();
+			if (limitReason) {
+				this.#stopAutomatic(limitReason);
+				return;
+			}
+		}
+		if (this.#automaticRun && this.#ctx.composer.text()) {
+			this.#stopAutomatic("a composer draft was entered");
+			return;
+		}
+		if (!model) {
+			if (this.#automaticRun) this.#stopAutomatic("the session has no model selected");
+			return;
+		}
+		if (session.isStreaming || session.isCompacting) {
+			if (this.#automaticRun) this.#stopAutomatic("the session is busy");
+			return;
+		}
 		const abort = new AbortController();
 		this.#abort = abort;
 		const source: PredictionSource = {
@@ -181,7 +297,7 @@ export class ComposerPredictionController {
 			leafId: session.sessionManager.getLeafId(),
 			model: `${model.provider}/${model.id}`,
 		};
-		void this.#run(source, abort, cfgComposerPredictionAlternatives.get(this.#ctx.settings));
+		void this.#run(source, abort, this.#automaticRun ? true : cfgComposerPredictionAlternatives.get(this.#ctx.settings));
 	}
 
 	/** The composer painted the current prediction; its first painted frame counts it as shown. */
@@ -251,15 +367,93 @@ export class ComposerPredictionController {
 				onUsage: message => this.#recordUsage(source, message),
 			});
 			const choices = parseReply(replyText, alternatives);
-			outcome = this.#offer(source, abort, choices);
-			if (outcome === "offered") offered = choices?.length;
+			if (this.#automaticRun) {
+				outcome = await this.#submitAutomatic(source, abort, choices);
+			} else {
+				outcome = this.#offer(source, abort, choices);
+			}
+			if (outcome === "offered" || outcome === "submitted") offered = choices?.length;
 		} catch (error) {
 			outcome = abort.signal.aborted ? "cancelled" : deadline.aborted ? "timeout" : "error";
 			if (outcome === "error") logger.debug("Composer prediction failed", { error: String(error) });
+			if (this.#automaticRun && (outcome === "error" || outcome === "timeout")) {
+				this.#stopAutomatic(outcome === "timeout" ? "the prediction request timed out" : "the prediction request failed");
+			}
 		} finally {
 			if (this.#abort === abort) this.#abort = undefined;
 		}
 		recordPredictionRequest(outcome, source.model, performance.now() - startedAt, offered, this.#meterProvider);
+	}
+
+	async #submitAutomatic(
+		source: PredictionSource,
+		abort: AbortController,
+		choices: string[] | undefined,
+	): Promise<PredictionOutcome> {
+		const run = this.#automaticRun;
+		if (!run || run.session !== source.session || this.#abort !== abort) return "cancelled";
+		if (!this.#isCurrent(source)) {
+			this.#stopAutomatic("the conversation changed while a prediction was running");
+			return "stale";
+		}
+		if (!choices?.length) {
+			this.#stopAutomatic("DeepSeek had no useful next prompt (NO_PREDICTION or no usable reply).");
+			return "skipped";
+		}
+		if (this.#ctx.composer.text()) {
+			this.#stopAutomatic("a composer draft was entered");
+			return "stale";
+		}
+		const limitReason = this.#automaticLimitReason();
+		if (limitReason) {
+			this.#stopAutomatic(limitReason);
+			return "skipped";
+		}
+		const choice = choices.find(text => !run.seen.has(promptKey(text)));
+		if (!choice) {
+			this.#stopAutomatic("all suggested follow-ups repeated an earlier prompt");
+			return "skipped";
+		}
+		if (source.session.isStreaming || source.session.isCompacting) {
+			this.#stopAutomatic("the session became busy before the next prompt could be sent");
+			return "cancelled";
+		}
+		run.seen.add(promptKey(choice));
+		run.turns++;
+		try {
+			void source.session.prompt(choice).then(
+				submitted => {
+					if (!submitted) this.#stopAutomatic("the session did not accept the next prompt");
+				},
+				error => {
+					logger.debug("Automatic prompt submission failed", { error: String(error) });
+					this.#stopAutomatic("the next prompt could not be submitted");
+				},
+			);
+			return "submitted";
+		} catch (error) {
+			logger.debug("Automatic prompt submission failed", { error: String(error) });
+			this.#stopAutomatic("the next prompt could not be submitted");
+			return "error";
+		}
+	}
+
+	#stopAutomatic(reason: string): void {
+		if (!this.#automaticRun) return;
+		this.#automaticRun = undefined;
+		this.cancel();
+		this.#onAutomaticStop?.(reason);
+	}
+
+	#automaticLimitReason(): string | undefined {
+		const run = this.#automaticRun;
+		if (!run) return undefined;
+		const status = this.getAutomaticStatus()!;
+		if (status.elapsedMs >= run.limits.minutes * 60_000) return "time limit reached";
+		if (status.tokens >= run.limits.tokens) return "token limit reached";
+		if (status.dollars >= run.limits.dollars) return "spend limit reached";
+		if (run.turns >= run.limits.turns) return "turn limit reached";
+		return undefined;
 	}
 
 	/** Offer settled alternatives as the composer prediction when it is still wanted; returns how it settled. */

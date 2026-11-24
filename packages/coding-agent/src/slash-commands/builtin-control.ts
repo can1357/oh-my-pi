@@ -86,6 +86,87 @@ async function runPauseScreen(ctx: InteractiveModeContext): Promise<void> {
 
 export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
+		name: "autoprompt",
+		icon: "sparkle",
+		description: "Automatically submit predicted follow-ups within time, token, spend, and turn limits",
+		allowArgs: true,
+		subcommandOptional: true,
+		subcommands: [
+			{
+				name: "start",
+				description: "Start bounded automatic follow-ups",
+				usage: "[--minutes N] [--tokens N] [--dollars N] [--turns N]",
+			},
+			{ name: "stop", description: "Stop automatic follow-ups" },
+			{ name: "status", description: "Show auto-prompt limits and usage" },
+		],
+		handleTui: (command, runtime) => {
+			const ctx = runtime.ctx;
+			const tokens = command.args.trim().split(/\s+/).filter(Boolean);
+			const verb = tokens.shift()?.toLowerCase() ?? "status";
+			if (verb === "stop") {
+				const stopped = ctx.eventController.composerPrediction.stopAutomatic();
+				ctx.showStatus(stopped ? "Auto-prompt stopped." : "Auto-prompt is not running.");
+				clearSubmittedText(runtime);
+				return;
+			}
+			if (verb === "status") {
+				const status = ctx.eventController.composerPrediction.getAutomaticStatus();
+				ctx.showStatus(
+					status
+						? `Auto-prompt active: ${status.turns}/${status.limits.turns} turns, ${Math.floor(status.elapsedMs / 60_000)}/${status.limits.minutes} min, ` +
+							`${status.tokens}/${status.limits.tokens} tokens, $${status.dollars.toFixed(2)}/$${status.limits.dollars.toFixed(2)}.`
+						: "Auto-prompt is not running.",
+				);
+				clearSubmittedText(runtime);
+				return;
+			}
+			if (verb !== "start") {
+				ctx.showError(
+					"Usage: /autoprompt start [--minutes N] [--tokens N] [--dollars N] [--turns N] | stop | status",
+				);
+				clearSubmittedText(runtime);
+				return;
+			}
+			const limits = { minutes: 480, tokens: 100_000, dollars: 5, turns: 20 };
+			const maxima = { minutes: 1_440, tokens: 10_000_000, dollars: 1_000, turns: 1_000 };
+			for (let i = 0; i < tokens.length; i++) {
+				const match = /^(--minutes|--tokens|--dollars|--turns)(?:=(.+))?$/.exec(tokens[i]!);
+				if (!match) {
+					ctx.showError(`Unknown auto-prompt option: ${tokens[i]}`);
+					clearSubmittedText(runtime);
+					return;
+				}
+				const raw = match[2] ?? tokens[++i];
+				const value = Number(raw);
+				const key = match[1]!.slice(2) as keyof typeof limits;
+				if (
+					!raw ||
+					!Number.isFinite(value) ||
+					value <= 0 ||
+					value > maxima[key] ||
+					(key !== "dollars" && !Number.isInteger(value))
+				) {
+					ctx.showError(
+						`${match[1]} needs a positive${key === "dollars" ? "" : " whole"} number no greater than ${maxima[key]}.`,
+					);
+					clearSubmittedText(runtime);
+					return;
+				}
+				limits[key] = value;
+			}
+			clearSubmittedText(runtime);
+			try {
+				ctx.eventController.composerPrediction.startAutomatic(limits);
+				ctx.showStatus(
+					`Auto-prompt started: up to ${limits.turns} follow-ups, ${limits.minutes} min, ${limits.tokens} tokens, and $${limits.dollars} additional spend. Use /autoprompt stop to stop it.`,
+				);
+			} catch (error) {
+				ctx.showError(error instanceof Error ? error.message : String(error));
+			}
+		},
+	},
+	{
 		name: "force",
 		icon: "hammer",
 		description: "Force next turn to use a specific tool",
