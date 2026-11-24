@@ -19,8 +19,8 @@ import {
 	type ResolveAction,
 	type ResolveDetails,
 	type ResolveInvocation,
-} from "@oh-my-pi/pi-tui/tools/resolve";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+} from "./details/resolve";
+import { ToolError } from "./tool-errors";
 import { prompt } from "@oh-my-pi/pi-utils";
 import resolveReminderPrompt from "../prompts/system/resolve-reminder.md" with { type: "text" };
 import type { Tool, ToolSession } from ".";

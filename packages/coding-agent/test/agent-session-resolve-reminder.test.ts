@@ -15,7 +15,7 @@ import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { queueResolveHandler, specialToolCommands } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import type { ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { buildNamedToolChoice } from "@oh-my-pi/pi-coding-agent/utils/tool-choice";
-import { REJECT_COMMAND_NAME, RESOLVE_COMMAND_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import { REJECT_COMMAND_NAME, RESOLVE_COMMAND_NAME } from "@oh-my-pi/pi-coding-agent/tools/details/resolve";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession resolve reminder", () => {

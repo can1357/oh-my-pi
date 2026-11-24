@@ -25,9 +25,10 @@ import {
 	markPerCallContextMessage,
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { addKeyAliases, canonicalKeyId, type KeyId, type Keybinding } from "@oh-my-pi/pi-tui";
-import { KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { appApproveKeys, appFollowUpKeys } from "@oh-my-pi/pi-tui/keybinding-matchers";
+import { canonicalKeyId, type KeyId } from "../../config/keybindings/key-id";
+import { KeybindingsManager } from "../../config/keybindings/keybindings";
+import { KEYBINDINGS, type Keybinding } from "../../config/keybindings/app-keybindings";
+import { appApproveKeys, appFollowUpKeys } from "../../config/keybindings/matchers";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
@@ -35,7 +36,10 @@ import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
-import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { extensionTheme } from "../../ui/extensions/render-output";
+import type { ComposerShape } from "../../ui/styles/composer/shapes";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
@@ -46,14 +50,13 @@ import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shar
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
-import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
+import { sanitizeDisplayLine } from "../inventory/display-text";
+import type { TodoPhase } from "../../tools/details/todo";
+import { extensionLinkClicksAvailable } from "./link-clicks";
 import {
 	notifyTranscriptPresentersChanged,
 	readTranscriptPresentation,
-} from "@oh-my-pi/pi-tui/chat/transcript-presentation";
+} from "../../session/transcript/transcript-presentation";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
@@ -565,10 +568,8 @@ const noOpUIContext: ExtensionUIContext = {
 	getEditorText: () => "",
 	editor: async () => undefined,
 	addAutocompleteProvider: () => {},
-	setEditorComponent: () => {},
-	getEditorComponent: () => undefined,
 	get theme() {
-		return theme;
+		return extensionTheme(currentTheme());
 	},
 	getAllThemes: () => Promise.resolve([]),
 	getTheme: () => Promise.resolve(undefined),
@@ -1490,8 +1491,8 @@ export class ExtensionRunner {
 	}
 
 	/** Composer shapes registered during extension load, with later extensions winning id collisions. */
-	getComposerShapes(): ComposerShapeDefinition[] {
-		const shapes = new Map<string, ComposerShapeDefinition>();
+	getComposerShapes(): ComposerShape[] {
+		const shapes = new Map<string, ComposerShape>();
 		for (const extension of this.extensions) {
 			for (const [id, shape] of extension.composerShapes) shapes.set(id, shape);
 		}
@@ -1562,15 +1563,11 @@ export class ExtensionRunner {
 
 	/** Backs `ExtensionAPI.getShortcutConflict`; `extensionPath`'s own registrations are not conflicts. */
 	getShortcutConflict(shortcut: KeyId, extensionPath?: string): ShortcutConflict | undefined {
-		const lowered = shortcut.toLowerCase() as KeyId;
-		if (ExtensionRunner.#RESERVED_SHORTCUTS.has(canonicalKeyId(lowered))) return { kind: "reserved" };
-		// Compare alias sets, as the TUI matches keys: a bare shifted symbol also fires on `shift+`.
-		const wanted = new Set<string>();
-		addKeyAliases(wanted, lowered);
+		// Compare event ids, as the keymap matches keys: every spelling of a chord shares one id.
+		const wanted = canonicalKeyId(shortcut.toLowerCase());
+		if (ExtensionRunner.#RESERVED_SHORTCUTS.has(wanted)) return { kind: "reserved" };
 		const holds = (bound: Iterable<KeyId>): boolean => {
-			const keys = new Set<string>();
-			for (const key of bound) addKeyAliases(keys, key.toLowerCase() as KeyId);
-			for (const key of wanted) if (keys.has(key)) return true;
+			for (const key of bound) if (canonicalKeyId(key.toLowerCase()) === wanted) return true;
 			return false;
 		};
 		const keymap = this.#keybindings ?? (ExtensionRunner.#defaultKeybindings ??= KeybindingsManager.inMemory());
@@ -1581,7 +1578,7 @@ export class ExtensionRunner {
 					? appApproveKeys(keymap)
 					: action === "app.message.followUp"
 						? appFollowUpKeys(keymap)
-						: keymap.getKeys(action),
+						: keymap.keysFor(action),
 			),
 		);
 		if (keybindings.length > 0) return { kind: "keybinding", keybindings };
@@ -1592,14 +1589,15 @@ export class ExtensionRunner {
 
 	getShortcuts(): Map<KeyId, ExtensionShortcut> {
 		const allShortcuts = new Map<KeyId, ExtensionShortcut>();
-		// Each match key (alias) to the registration holding it: a later registration of the same chord,
+		// Each chord's event id to the registration holding it: a later registration of the same chord,
 		// in any spelling, replaces the earlier one, so the editor binds exactly one handler per chord.
 		const holders = new Map<string, KeyId>();
 		for (const ext of this.extensions) {
 			for (const [key, shortcut] of ext.shortcuts) {
 				const normalizedKey = key.toLowerCase() as KeyId;
+				const id = canonicalKeyId(normalizedKey);
 
-				if (ExtensionRunner.#RESERVED_SHORTCUTS.has(canonicalKeyId(normalizedKey))) {
+				if (ExtensionRunner.#RESERVED_SHORTCUTS.has(id)) {
 					logger.warn("Extension shortcut conflicts with built-in shortcut", {
 						key,
 						extensionPath: shortcut.extensionPath,
@@ -1607,12 +1605,9 @@ export class ExtensionRunner {
 					continue;
 				}
 
-				const aliases = new Set<string>();
-				addKeyAliases(aliases, normalizedKey);
-				for (const alias of aliases) {
-					const held = holders.get(alias);
-					const existing = held === undefined ? undefined : allShortcuts.get(held);
-					if (held === undefined || existing === undefined) continue;
+				const held = holders.get(id);
+				const existing = held === undefined ? undefined : allShortcuts.get(held);
+				if (held !== undefined && existing !== undefined) {
 					logger.warn("Extension shortcut conflict", {
 						key,
 						extensionPath: shortcut.extensionPath,
@@ -1620,7 +1615,7 @@ export class ExtensionRunner {
 					});
 					allShortcuts.delete(held);
 				}
-				for (const alias of aliases) holders.set(alias, normalizedKey);
+				holders.set(id, normalizedKey);
 				allShortcuts.set(normalizedKey, shortcut);
 			}
 		}

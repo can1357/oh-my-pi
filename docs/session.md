@@ -184,10 +184,10 @@ roles under `type: "message"`:
 | `developer`              | pi-ai         | Developer-role instruction turn.                                                  |
 | `assistant`              | pi-ai         | Model turn; tool calls live in its `content` as `{ "type": "toolCall" }` blocks.  |
 | `toolResult`             | pi-ai         | Result of one tool call — **not** `tool_result`. Carries `toolCallId`/`toolName`. |
-| `bashExecution`          | pi-tui        | Standalone `!`-bash run.                                                          |
-| `pythonExecution`        | pi-tui        | Standalone Python run.                                                            |
-| `hookMessage`            | pi-tui        | Legacy hook-injected message, retained for migration; new code uses `custom`.     |
-| `fileMention`            | pi-tui        | Inlined `@file` mention contents.                                                 |
+| `bashExecution`          | coding-agent  | Standalone `!`-bash run.                                                          |
+| `pythonExecution`        | coding-agent  | Standalone Python run.                                                            |
+| `hookMessage`            | coding-agent  | Legacy hook-injected message, retained for migration; new code uses `custom`.     |
+| `fileMention`            | coding-agent  | Inlined `@file` mention contents.                                                 |
 
 Branch and compaction summary roles are synthesized from dedicated top-level entries
 during session-context reconstruction. Extension messages sent through `pi.sendMessage`
@@ -208,7 +208,7 @@ a message role. An extension keying off `message.role` that matches snake_case c
 `toolResult` (and every other camelCase role) — no error is raised. Match the camelCase
 values above verbatim. The base roles are `Message` in `packages/ai/src/types.ts`; the rest
 are merged into `CustomAgentMessages` (`packages/agent/src/compaction/messages.ts`,
-`packages/tui/src/chat/messages.ts`). Coding-agent re-exports the custom types and
+`packages/coding-agent/src/session/transcript/messages.ts`). Coding-agent re-exports the custom types and
 converts them for provider context in `packages/coding-agent/src/session/messages.ts`.
 
 ### `model_usage`

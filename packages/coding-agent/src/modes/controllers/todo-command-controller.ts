@@ -6,7 +6,7 @@ import {
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
 } from "../../tools/todo";
-import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { type TodoItem, type TodoPhase } from "../../tools/details/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
@@ -418,9 +418,10 @@ export class TodoCommandController {
 		const initialMarkdown =
 			current.length > 0 ? phasesToMarkdown(current) : "# Todos\n- [ ] (replace this with your tasks)\n";
 
-		this.ctx.ui.stop();
 		try {
-			const result = await openInEditor(editorCmd, initialMarkdown, { extension: ".todo.md" });
+			const result = await this.ctx.suspend(() =>
+				openInEditor(editorCmd, initialMarkdown, { extension: ".todo.md" }),
+			);
 			if (result === null) {
 				this.ctx.showWarning("Editor exited without saving; todos unchanged.");
 				return;
@@ -437,9 +438,6 @@ export class TodoCommandController {
 			this.ctx.showWarning(
 				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
 			);
-		} finally {
-			this.ctx.ui.start();
-			this.ctx.ui.requestRender();
 		}
 	}
 

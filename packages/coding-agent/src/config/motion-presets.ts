@@ -1,6 +1,6 @@
 // The `tui.motion` presets. Free of coding-agent imports so the flag table can import it during CLI
 // bootstrap; the derivation that applies them lives beside the setting handles in `modes/settings.ts`.
-import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
+import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "./spinner-interval";
 
 export const MOTION_MODES = ["full", "reduced", "none"] as const;
 export type MotionMode = (typeof MOTION_MODES)[number];

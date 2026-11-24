@@ -1,7 +1,7 @@
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { $flag } from "@oh-my-pi/pi-utils";
 
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditMode } from "../tools/details/edit";
 import type { Settings } from "../config/settings";
 import { cfgEditMode, type EditModeSetting, editModelVariants } from "../edit/settings";
 import { matchModelPattern } from "./model-patterns";

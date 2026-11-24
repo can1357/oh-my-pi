@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -21,7 +21,6 @@ import {
 	type ExecutedWorkspaceChange,
 	sortAndValidateTextEdits,
 } from "@oh-my-pi/pi-coding-agent/lsp/edits";
-import { renderCall, renderResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import {
 	type CodeAction,
 	type CreateFile,
@@ -36,7 +35,7 @@ import {
 	type TextDocumentEdit,
 	type WorkspaceEdit,
 } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type LspToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/lsp";
 import {
 	applyCodeAction,
 	collectGlobMatches,
@@ -49,7 +48,7 @@ import {
 	resolveSymbolColumn,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import { fileToUri, uriToFile } from "@oh-my-pi/pi-coding-agent/lsp/uri";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
@@ -57,8 +56,13 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
-import { renderResult as renderLocalResult } from "@oh-my-pi/pi-tui/tools/lsp";
-import { getLanguageFromPath } from "@oh-my-pi/pi-tui/lang-from-path";
+import { ToolCall } from "../../src/ui/transcript/tool-block";
+import { toolCallText, toolText } from "../helpers/tool-text";
+import { getLanguageFromPath } from "@oh-my-pi/pi-coding-agent/utils/lang-from-path";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const lspTestSettings = Settings.isolated();
 
@@ -1901,79 +1905,71 @@ describe("lsp regressions", () => {
 	});
 
 	it("sanitizes symbol metadata in renderer output", async () => {
-		const theme = await getThemeByName("dark");
-		const uiTheme = theme!;
-		const renderOptions: RenderResultOptions = { expanded: false, isPartial: false };
-
-		const call = renderCall(
-			{ action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
-			renderOptions,
-			uiTheme,
+		const callText = sanitizeText(
+			toolCallText(
+				new ToolCall({
+					id: "call-1",
+					name: "lsp",
+					args: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
+				}),
+			),
 		);
-		const callText = sanitizeText(call.render(120).join("\n"));
 		const normalizedCallText = callText.replace(/\s+/g, " ");
 		expect(normalizedCallText).toContain("foo bar baz");
 		expect(callText).not.toContain("\t");
-		const result = renderResult(
-			{
-				content: [{ type: "text", text: "No definition found" }],
-				details: {
-					action: "definition",
-					success: true,
-					request: {
+		const resultText = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
+				result: {
+					content: [{ type: "text", text: "No definition found" }],
+					details: {
 						action: "definition",
-						file: "src/example.ts",
-						line: 10,
-						symbol: "foo\tbar\nbaz",
+						success: true,
+						request: { action: "definition", file: "src/example.ts", line: 10, symbol: "foo\tbar\nbaz" },
 					},
 				},
-			},
-			renderOptions,
-			uiTheme,
+			}),
 		);
-		const resultText = sanitizeText(result.render(120).join("\n"));
 		const normalizedResultText = resultText.replace(/\s+/g, " ");
 		expect(normalizedResultText).toContain("src/example.ts:10 (foo bar baz)");
 		expect(resultText).not.toContain("\t");
 	});
 
 	it("sanitizes tabs in rendered diagnostic output", async () => {
-		const theme = await getThemeByName("dark");
-		const uiTheme = theme!;
-		const renderOptions: RenderResultOptions = { expanded: false, isPartial: false };
-
-		const result = renderResult(
-			{
-				content: [
-					{
-						type: "text",
-						text: "Diagnostics: 1 error(s)\nsrc/example.go:183:41 [error] [compiler] too many\targuments in call (WrongArgCount)",
-					},
-				],
-			},
-			renderOptions,
-			uiTheme,
+		const resultText = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "diagnostics", file: "src/example.go" },
+				result: {
+					content: [
+						{
+							type: "text",
+							text: "Diagnostics: 1 error(s)\nsrc/example.go:183:41 [error] [compiler] too many\targuments in call (WrongArgCount)",
+						},
+					],
+				},
+			}),
 		);
-
-		const resultText = sanitizeText(result.render(120).join("\n"));
 		expect(resultText).not.toContain("\t");
 		expect(resultText.replace(/\s+/g, " ")).toContain("too many arguments in call");
 	});
 
 	it("hang-wraps expanded generic output without tabs or lost text (#7041, #15824)", async () => {
-		const theme = await getThemeByName("dark");
 		const note =
 			"note: 'configured, not started' means the binary resolves on PATH but no request has spawned it yet";
-		const result = renderLocalResult(
-			{
-				content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}\n  ${note}` }],
-			},
-			{ expanded: true, isPartial: false },
-			theme!,
-		);
-
 		const width = 80;
-		const lines = sanitizeText(result.render(width).join("\n")).split("\n");
+		const lines = sanitizeText(
+			toolText({
+				name: "lsp",
+				args: { action: "status" },
+				result: { content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}\n  ${note}` }] },
+				expanded: true,
+				width,
+			}),
+		)
+			.split("\n")
+			.filter(line => line.trim() !== "");
 		const text = lines.join("\n");
 		expect(text).not.toContain("\t");
 		expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);

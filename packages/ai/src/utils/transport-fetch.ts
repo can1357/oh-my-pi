@@ -1,6 +1,15 @@
 import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
-import { coworkFetch } from "../providers/cowork-fetch";
+import type * as CoworkFetchModule from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
+
+// Lazy loader: keeps cowork-fetch (node:https, internal:http, node:tls, node:zlib)
+// off CLI startup until an Anthropic Messages request actually runs.
+let coworkFetchPromise: Promise<typeof CoworkFetchModule.coworkFetch> | undefined;
+const lazyCoworkFetch: FetchImpl = async (input, init) => {
+	coworkFetchPromise ??= import("../providers/cowork-fetch").then(m => m.coworkFetch);
+	const fn = await coworkFetchPromise;
+	return fn(input, init);
+};
 import type { Api, FetchImpl, Model } from "../types";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
@@ -32,7 +41,8 @@ export function transportFetch(
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
-		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+		given ??
+		(model.provider === "anthropic" && model.api === "anthropic-messages" ? lazyCoworkFetch : globalThis.fetch);
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
