@@ -2802,7 +2802,12 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		const find = (id: string) => registry.getAll().find(m => m.provider === "openai-test" && m.id === id);
-		expect(find("openai-test/priced-model")?.cost).toEqual({ input: 0.05, output: 0.25, cacheRead: 0, cacheWrite: 0 });
+		expect(find("openai-test/priced-model")?.cost).toEqual({
+			input: 0.05,
+			output: 0.25,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
 		expect(find("openai-test/free-model")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		expect(find("openai-test/unpriced-model")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 	});
