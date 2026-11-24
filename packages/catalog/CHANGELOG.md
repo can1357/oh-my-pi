@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Gemini models on Venice get their tool schemas sent in Google's dialect, so a JSON Schema `type` array no longer makes Venice reject the request ([#12269](https://github.com/can1357/oh-my-pi/issues/12269), [#20413](https://github.com/can1357/oh-my-pi/pull/20413) by [@JamieJ5926](https://github.com/JamieJ5926))
 - QwenCloud Token Plan model discovery now reports the endpoint host and failure reason when `/models` cannot be loaded ([#20343](https://github.com/can1357/oh-my-pi/issues/20343)).
 - Fixed requests to Bedrock's Kimi K3.1 Pro Highspeed profiles failing with "The task request was rejected by the target"; requests now ask for 131,072 output tokens instead of the full context window ([#20240](https://github.com/can1357/oh-my-pi/pull/20240) by [@alblez](https://github.com/alblez))
 - Fixed Claude Opus 4.8+, Sonnet 5.5, Haiku 5.5, and Fable/Mythos 5 on Google Vertex failing every turn with a 400 (`Input tag 'tool_removal'`) after the active tool set changed mid-session ([#20275](https://github.com/can1357/oh-my-pi/issues/20275))
