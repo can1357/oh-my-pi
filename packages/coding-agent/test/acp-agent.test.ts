@@ -926,10 +926,14 @@ describe("ACP agent", () => {
 		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
 
 		const handler = session.planProposalHandler!;
-		await handler("words-counter");
+		const result = (await handler("words-counter")) as { content: Array<{ type: string; text: string }> };
 
 		expect(session.planModeState?.enabled).toBe(true);
 		expect(elicitations).toHaveLength(0);
+		// The refusal reaches the user only as this tool result, so it must name a way
+		// forward and must not send the agent back to `propose` on this client.
+		expect(result.content[0]?.text).toMatch(/Default mode/);
+		expect(result.content[0]?.text).not.toMatch(/Plan refinement requested/);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

@@ -2613,11 +2613,17 @@ export class AcpAgent implements Agent {
 				session.setPlanModeState({ ...state, planFilePath });
 			}
 			const normalizedTitle = normalizePlanTitle(resolvedTitle).title;
+			// Without elicitation.form the confirmation cannot be shown, so a retry of
+			// propose would hit the same refusal: tell the agent to wait for the user.
+			const text =
+				this.#clientCapabilities?.elicitation?.form == null
+					? "Plan approval needs a client that can show a confirmation form, and this client cannot. Plan mode stays on. Present the plan to the user and wait for them to switch the session to Default mode before implementing. Do not call propose again."
+					: `Plan refinement requested. Update the plan file, then submit ${normalizedTitle} with \`propose\` again when ready.`;
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: `Plan refinement requested. Update the plan file, then submit ${normalizedTitle} with \`propose\` again when ready.`,
+						text,
 					},
 				],
 				details,
@@ -2716,8 +2722,9 @@ export class AcpAgent implements Agent {
 	 * explicit `APPROVE_OPTION` selection. Refine, dismissal (`undefined`), or
 	 * any unrecognized value falls through to refine semantics — the caller
 	 * keeps plan mode active and surfaces guidance text to the agent. Clients
-	 * without `elicitation.form` support get the same refine result: with no
-	 * confirmation surface, silence must never read as approval (#11686).
+	 * without `elicitation.form` support get `false` without a prompt, since no
+	 * confirmation surface exists and silence must never read as approval (#11686);
+	 * the caller tells the agent how to proceed.
 	 */
 	async #requestAcpPlanApprovalChoice(sessionId: string, title: string, planContent: string): Promise<boolean> {
 		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;
