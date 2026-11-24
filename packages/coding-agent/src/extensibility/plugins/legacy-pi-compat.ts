@@ -17,7 +17,6 @@ import {
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
-import { getLoadedBabelParser, loadBabelParser } from "../../eval/js/shared/rewrite-imports";
 import { assertBunCanImport } from "../module-path";
 
 const USE_BUNDLED_PI_MODULES = isCompiledBinary() || Boolean(process.env.PI_BUNDLED);
@@ -61,7 +60,9 @@ interface ExtensionSpecifierReference {
 	readonly end: number;
 }
 
-function parseExtensionSourceWith(parser: typeof BabelParser, source: string, importerPath: string): ParseResult {
+function parseExtensionSource(source: string, importerPath: string): ParseResult {
+	// Installing specifier hooks needs no parser; only a real source rewrite does.
+	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
 	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {
@@ -72,7 +73,7 @@ function parseExtensionSourceWith(parser: typeof BabelParser, source: string, im
 	}
 
 	try {
-		return parser.parse(source, {
+		return parseBabel(source, {
 			sourceType: "unambiguous",
 			allowAwaitOutsideFunction: true,
 			allowReturnOutsideFunction: true,
@@ -459,7 +460,11 @@ function staticMemberPropertyName(node: StructuralAstNode): string | null {
 	return null;
 }
 
-function collectExtensionSpecifierReferences(ast: ParseResult): ExtensionSpecifierReference[] {
+function collectExtensionSpecifierReferences(
+	source: string,
+	importerPath: string,
+	ast: ParseResult = parseExtensionSource(source, importerPath),
+): ExtensionSpecifierReference[] {
 	const references: ExtensionSpecifierReference[] = [];
 	const record = (kind: ExtensionSpecifierReference["kind"], literal: unknown): void => {
 		const node = asAstNode(literal);
@@ -688,13 +693,10 @@ function writeExtensionSourceAnalysis(cacheKey: string, analysis: ExtensionSourc
 		});
 }
 
-function getCachedExtensionSourceAnalysis(
-	source: string,
-	importerPath: string,
-): { cacheKey: string; analysis?: ExtensionSourceAnalysis } {
+function getExtensionSourceAnalysis(source: string, importerPath: string): ExtensionSourceAnalysis {
 	const cacheKey = extensionParseCacheKey(source, importerPath);
 	const memoryCached = extensionSourceAnalysisCache.get(cacheKey);
-	if (memoryCached) return { cacheKey, analysis: memoryCached };
+	if (memoryCached) return memoryCached;
 
 	const db = getExtensionParseCacheDb();
 	try {
@@ -707,7 +709,7 @@ function getCachedExtensionSourceAnalysis(
 			const cached = parseCachedAnalysis(row);
 			if (cached) {
 				extensionSourceAnalysisCache.set(cacheKey, cached);
-				return { cacheKey, analysis: cached };
+				return cached;
 			}
 		}
 	} catch (error) {
@@ -716,14 +718,11 @@ function getCachedExtensionSourceAnalysis(
 		});
 	}
 
-	return { cacheKey };
-}
-
-function buildExtensionSourceAnalysis(ast: ParseResult, cacheKey: string): ExtensionSourceAnalysis {
+	const ast = parseExtensionSource(source, importerPath);
 	const sourceType = ast.program.sourceType;
 	const analysis: ExtensionSourceAnalysis = {
 		sourceType,
-		references: collectExtensionSpecifierReferences(ast),
+		references: collectExtensionSpecifierReferences(source, importerPath, ast),
 		hasCommonJsSyntax:
 			sourceType === "script" &&
 			collectScopedAstNodes(ast, node => node.type === "CallExpression" || node.type === "MemberExpression").some(
@@ -739,25 +738,6 @@ function buildExtensionSourceAnalysis(ast: ParseResult, cacheKey: string): Exten
 	extensionSourceAnalysisCache.set(cacheKey, analysis);
 	writeExtensionSourceAnalysis(cacheKey, analysis);
 	return analysis;
-}
-
-async function getExtensionSourceAnalysis(source: string, importerPath: string): Promise<ExtensionSourceAnalysis> {
-	const { cacheKey, analysis } = getCachedExtensionSourceAnalysis(source, importerPath);
-	if (analysis) return analysis;
-	const parser = await loadBabelParser();
-	const ast = parseExtensionSourceWith(parser, source, importerPath);
-	return buildExtensionSourceAnalysis(ast, cacheKey);
-}
-
-function getExtensionSourceAnalysisSync(source: string, importerPath: string): ExtensionSourceAnalysis {
-	const { cacheKey, analysis } = getCachedExtensionSourceAnalysis(source, importerPath);
-	if (analysis) return analysis;
-	const parser = getLoadedBabelParser();
-	if (!parser) {
-		throw new Error(`@babel/parser is not loaded for synchronous extension rewrite: ${importerPath}`);
-	}
-	const ast = parseExtensionSourceWith(parser, source, importerPath);
-	return buildExtensionSourceAnalysis(ast, cacheKey);
 }
 
 function applySpecifierReplacements(
@@ -1214,7 +1194,7 @@ async function rewriteLegacyExtensionSource(
 	// Compiled mode completes the override map from the build-supplied module
 	// keys on first use; every rewrite path must see the full map.
 	await ensureLegacyPiOverridesReady();
-	const references = (await getExtensionSourceAnalysis(source, importerPath)).references;
+	const references = getExtensionSourceAnalysis(source, importerPath).references;
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
 		assertNoPiTuiImport(reference.specifier, importerPath);
@@ -2041,7 +2021,7 @@ async function collectExtensionSpecifierReplacements(
 ): Promise<Array<ExtensionSpecifierReference & { replacement: string }>> {
 	const { references } = sources
 		? await sources.analyze(importerPath)
-		: await getExtensionSourceAnalysis(source, importerPath);
+		: getExtensionSourceAnalysis(source, importerPath);
 	const resolvedSpecifierTargets = new Map<string, string>();
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
@@ -2066,11 +2046,6 @@ async function collectExtensionSpecifierReplacements(
 		resolvedSpecifierTargets.set(`${reference.kind}\0${reference.specifier}`, replacement);
 		replacements.push({ ...reference, replacement });
 	}
-	if (resolvedSpecifierTargets.size > 0) {
-		// Preload `@babel/parser` before publishing synchronous specifier targets so
-		// CJS graph hydration can always re-parse if the file changes on disk later.
-		await loadBabelParser();
-	}
 	extensionSynchronousSpecifierTargets.set(importerPath, resolvedSpecifierTargets);
 	return replacements;
 }
@@ -2081,7 +2056,7 @@ function rewriteExtensionSpecifiersFromCache(source: string, importerPath: strin
 		return source;
 	}
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
-	for (const reference of getExtensionSourceAnalysisSync(source, importerPath).references) {
+	for (const reference of getExtensionSourceAnalysis(source, importerPath).references) {
 		const replacement = resolvedSpecifierTargets.get(`${reference.kind}\0${reference.specifier}`);
 		if (replacement) {
 			replacements.push({ ...reference, replacement });
@@ -2112,7 +2087,7 @@ async function moduleRequiresNativeAddonUncached(modulePath: string): Promise<bo
 	} catch {
 		return false;
 	}
-	for (const reference of (await getExtensionSourceAnalysis(source, modulePath)).references) {
+	for (const reference of getExtensionSourceAnalysis(source, modulePath).references) {
 		if (reference.kind === "require" && (await resolveExtensionNativeAddon(reference.specifier, modulePath))) {
 			return true;
 		}
