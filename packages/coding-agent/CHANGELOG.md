@@ -7,6 +7,7 @@
 - Added `voice` and `speechFormats` to `models.yml` speech models; the `tts` tool switches between MP3 and WAV output to match the formats a model returns ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added `speech.cloud` (default off) to vocalize `speech.enabled` output through the cloud speech models configured in the `speech` role ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
+- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
