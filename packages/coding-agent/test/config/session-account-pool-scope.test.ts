@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -76,6 +77,90 @@ test("an exclusive session pool falls back only inside its allowlist and denies 
 		scope.release();
 		expect(authStorage.sessions.permits("anthropic", PRIMARY_SESSION, accountC.credentialId)).toBe(true);
 		expect(await authStorage.keys.get("openrouter", PRIMARY_SESSION)).toBe("outside-api-key");
+	} finally {
+		authStorage.close();
+	}
+});
+
+test("a nested agent pool intersects with its parent's exclusive pool", async () => {
+	const authStorage = createInMemoryAuthStorage();
+	try {
+		await authStorage.credentials.set(
+			"anthropic",
+			["a", "b", "c"].map(suffix => ({
+				type: "oauth" as const,
+				access: `access-${suffix}`,
+				refresh: `refresh-${suffix}`,
+				expires: Date.now() + 60 * 60_000,
+				accountId: `account-${suffix}`,
+				email: `${suffix}@example.com`,
+				orgId: `org-${suffix}`,
+			})),
+		);
+		const rootRegistry = new ModelRegistry(authStorage);
+		const parentScope = new SessionAccountPoolScope(
+			authStorage,
+			{ anthropic: ["email:a@example.com|org:org-a", "email:b@example.com|org:org-b"] },
+			PRIMARY_SESSION,
+			{ denyUnlistedProviders: true },
+		);
+		const parentRegistry = parentScope.registry(rootRegistry);
+		const childScope = new SessionAccountPoolScope(
+			authStorage,
+			{ anthropic: ["email:b@example.com|org:org-b", "email:c@example.com|org:org-c"] },
+			SECONDARY_SESSION,
+		);
+		const childRegistry = childScope.registry(parentRegistry);
+
+		expect(await childRegistry.getApiKeyForProvider("anthropic", SECONDARY_SESSION)).toBe("access-b");
+		await authStorage.credentials.set(
+			"anthropic",
+			["a", "c"].map(suffix => ({
+				type: "oauth" as const,
+				access: `access-${suffix}`,
+				refresh: `refresh-${suffix}`,
+				expires: Date.now() + 60 * 60_000,
+				accountId: `account-${suffix}`,
+				email: `${suffix}@example.com`,
+				orgId: `org-${suffix}`,
+			})),
+		);
+		await expect(childRegistry.getApiKeyForProvider("anthropic", SECONDARY_SESSION)).rejects.toThrow(
+			"restricted to its OAuth account pool",
+		);
+
+		childScope.release();
+		parentScope.release();
+	} finally {
+		authStorage.close();
+	}
+});
+
+test("exclusive pool availability excludes providers without a permitted stored account", async () => {
+	const authStorage = createInMemoryAuthStorage();
+	try {
+		await authStorage.credentials.set("anthropic", {
+			type: "oauth",
+			access: "access-a",
+			refresh: "refresh-a",
+			expires: Date.now() + 60 * 60_000,
+			accountId: "account-a",
+			email: "a@example.com",
+			orgId: "org-a",
+		});
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		const scope = new SessionAccountPoolScope(
+			authStorage,
+			{ anthropic: ["email:missing@example.com|org:org-missing"] },
+			PRIMARY_SESSION,
+			{ denyUnlistedProviders: true },
+		);
+		const registry = scope.registry(new ModelRegistry(authStorage));
+
+		expect(registry.hasConfiguredAuth(model)).toBe(false);
+		expect(registry.getAvailable().some(candidate => candidate.provider === "anthropic")).toBe(false);
+		scope.release();
 	} finally {
 		authStorage.close();
 	}

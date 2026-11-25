@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `auth.sessionAccountPools` and `--account-pool` to bind top-level sessions to named OAuth account sets across resume, with child agent pools allowed only to narrow them ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+
+### Changed
+
+- Usage Details now includes every stored account even when inference is restricted to a session account pool ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+- Interactive `/login` adds the new OAuth account only to the current session scope, and `/session pin` restricts pooled sessions to the selected account ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
@@ -279,14 +288,8 @@
 - Compound bash approval prompts now show each command segment separately, distinguishing allowed segments from those requiring approval.
 - Removed the `seance` agent, `/seance` command, and the task tool's `sourceSession` parameter.
 
-### Added
-
-- Added `auth.sessionAccountPools` and `--account-pool` to restrict a top-level session to named OAuth account sets ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
-
 ### Changed
 
-- Usage Details now includes every stored account even when inference is restricted to a session account pool ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
-- Interactive `/login` adds the new OAuth account only to the current session pool, and `/session pin` hard-restricts configured pool sessions to the selected account ([#19134](https://github.com/can1357/oh-my-pi/pull/19134) by [@ggombee](https://github.com/ggombee)).
 - Added `auth.unpausedProviders` (**Unpaused Providers** in `/settings`) to turn paused providers such as Google Antigravity back on at your own risk; stored logins come back as they were
 - Todo tool status line now displays task count for multiple targets
 - Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`.

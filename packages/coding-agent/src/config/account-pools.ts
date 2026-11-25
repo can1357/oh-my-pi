@@ -95,8 +95,37 @@ export function validateAgentAccountPools(value: unknown): Record<string, OAuthA
 	return pools;
 }
 
-/** Unscoped registry behind each registry {@link SessionAccountPoolScope.registry} returned. */
-const scopedRegistryTargets = new WeakMap<ModelRegistry, ModelRegistry>();
+interface ScopedRegistryPolicy {
+	target: ModelRegistry;
+	pools: OAuthAccountPools;
+	denyUnlistedProviders: boolean;
+}
+
+/** Effective pool policy behind each registry returned by {@link SessionAccountPoolScope.registry}. */
+const scopedRegistryPolicies = new WeakMap<ModelRegistry, ScopedRegistryPolicy>();
+
+function intersectAccountPoolPolicies(
+	left: OAuthAccountPools,
+	leftDenyUnlisted: boolean,
+	right: OAuthAccountPools,
+	rightDenyUnlisted: boolean,
+): OAuthAccountPools {
+	const providers = new Set([...Object.keys(left), ...Object.keys(right)]);
+	const intersection: Record<string, readonly string[]> = Object.create(null);
+	for (const provider of providers) {
+		const leftListed = Object.hasOwn(left, provider);
+		const rightListed = Object.hasOwn(right, provider);
+		if (leftListed && rightListed) {
+			const rightKeys = new Set(right[provider]);
+			intersection[provider] = left[provider].filter(identityKey => rightKeys.has(identityKey));
+		} else if (leftListed) {
+			intersection[provider] = rightDenyUnlisted ? [] : [...left[provider]];
+		} else if (rightListed) {
+			intersection[provider] = leftDenyUnlisted ? [] : [...right[provider]];
+		}
+	}
+	return intersection;
+}
 
 export interface SessionAccountPoolScopeOptions {
 	/** Treat providers absent from the pool map as deny-all instead of unrestricted. */
@@ -127,7 +156,7 @@ export class SessionAccountPoolScope {
 	readonly #pins = new Map<string, Map<string, string>>();
 	/** Provider session id → logical session id that owns it. */
 	readonly #owners = new Map<string, string>();
-	readonly #denyUnlistedProviders: boolean;
+	#denyUnlistedProviders: boolean;
 	/** Provider id → restriction lease, by restricted provider session id. */
 	readonly #leases = new Map<string, Map<string, SessionRestrictionLease>>();
 	#primarySessionId: string;
@@ -242,6 +271,33 @@ export class SessionAccountPoolScope {
 		return [...pool, ...additions];
 	}
 
+	/**
+	 * Compose this scope with a registry's inherited policy before routing through
+	 * its unscoped target. Restrictions are cumulative: an exact child pool can
+	 * narrow a parent pool but can never restore an identity or provider the
+	 * parent excluded.
+	 */
+	#narrowToInheritedPolicy(policy: ScopedRegistryPolicy): void {
+		const pools = intersectAccountPoolPolicies(
+			policy.pools,
+			policy.denyUnlistedProviders,
+			this.#pools,
+			this.#denyUnlistedProviders,
+		);
+		for (const [sessionId, leases] of this.#leases) {
+			for (const [provider, lease] of leases) {
+				this.#authStorage.sessions.unrestrict(provider, sessionId, lease);
+			}
+		}
+		this.#leases.clear();
+		for (const provider of Object.keys(this.#pools)) delete this.#pools[provider];
+		for (const [provider, identityKeys] of Object.entries(pools)) {
+			this.#pools[provider] = [...identityKeys];
+		}
+		this.#denyUnlistedProviders ||= policy.denyUnlistedProviders;
+		for (const sessionId of this.#owners.keys()) this.restrict(sessionId);
+	}
+
 	#refreshProvider(owner: string, provider: string): void {
 		const identityKeys = this.#identities(provider, owner);
 		for (const [sessionId, leases] of this.#leases) {
@@ -294,20 +350,35 @@ export class SessionAccountPoolScope {
 	}
 
 	/**
-	 * `registry` with its key lookups (`getApiKey`, `getApiKeyForProvider`,
-	 * `getApiKeyWithCredentialForProvider`, `getApiKeyAndHeaders`, `resolver`)
-	 * routed through this scope. Every other member is the unscoped registry's,
-	 * so model state, discovery, and caches stay shared. A registry another
-	 * scope returned is unwrapped first: a nested agent with its own pools uses
-	 * them, not its parent's.
+	 * `registry` with credential lookup and availability probes routed through
+	 * this scope. Every other member is the unscoped registry's, so model state,
+	 * discovery, and caches stay shared. When `registry` is already scoped, its
+	 * effective policy is intersected with this one before the root registry is
+	 * exposed; nested agents therefore only narrow their parent's boundary.
 	 */
 	registry(registry: ModelRegistry): ModelRegistry {
-		const target = scopedRegistryTargets.get(registry) ?? registry;
+		const inherited = scopedRegistryPolicies.get(registry);
+		if (inherited) this.#narrowToInheritedPolicy(inherited);
+		const target = inherited?.target ?? registry;
 		const getApiKey = (model: Model<Api>, sessionId?: string, options?: { signal?: AbortSignal }) =>
 			target.getApiKey(model, this.#sessionIdFor(model.provider, sessionId), options);
 		const getApiKeyWithCredentialForProvider = (provider: string, sessionId?: string, options?: AuthApiKeyOptions) =>
 			target.getApiKeyWithCredentialForProvider(provider, this.#sessionIdFor(provider, sessionId), options);
+		const hasScopedAuth = (provider: string): boolean | undefined => {
+			const sessionId = this.#sessionIdFor(provider, undefined);
+			if (sessionId === undefined) return undefined;
+			return target.authStorage.oauth
+				.accounts(provider)
+				.some(account => this.#authStorage.sessions.permits(provider, sessionId, account.credentialId));
+		};
+		const hasConfiguredAuth = (model: Model<Api>): boolean =>
+			hasScopedAuth(model.provider) ?? target.hasConfiguredAuth(model);
 		const scoped: Partial<ModelRegistry> = {
+			getAvailable: kind => target.getAvailable(kind).filter(hasConfiguredAuth),
+			getAvailableForProviders: (providers, kind) =>
+				target.getAvailableForProviders(providers, kind).filter(hasConfiguredAuth),
+			hasConfiguredAuth,
+			hasConcreteAuth: provider => hasScopedAuth(provider) ?? target.hasConcreteAuth(provider),
 			getApiKey,
 			getApiKeyWithCredentialForProvider,
 			getApiKeyForProvider: (provider, sessionId, options) =>
@@ -359,7 +430,11 @@ export class SessionAccountPoolScope {
 				return method;
 			},
 		});
-		scopedRegistryTargets.set(proxy, target);
+		scopedRegistryPolicies.set(proxy, {
+			target,
+			pools: this.#pools,
+			denyUnlistedProviders: this.#denyUnlistedProviders,
+		});
 		return proxy;
 	}
 }

@@ -673,6 +673,12 @@ export interface CreateAgentSessionOptions {
 	 * @internal
 	 */
 	oauthAccountPoolsDenyUnlistedProviders?: boolean;
+	/**
+	 * Named top-level pool bound to this transcript. The CLI restores it from
+	 * the session header and rejects a different or missing definition.
+	 * @internal
+	 */
+	accountPool?: string;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -2245,6 +2251,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	const taskPromptCacheKey = options.taskPromptCacheKey ?? sessionManager.getHeader()?.taskPromptCacheKey;
 	if (taskPromptCacheKey !== undefined) await sessionManager.setTaskPromptCacheKey(taskPromptCacheKey);
+	if (options.accountPool !== undefined) await sessionManager.setAccountPool(options.accountPool);
 	if (options.credentialSourceSessionId) {
 		// A revived or resumed child already pins, in its own transcript, the accounts that
 		// hold its conversation cache. Inheriting the parent's automatic sticky for those

@@ -2097,6 +2097,7 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 			taskPromptCacheKey: options?.taskPromptCacheKey,
+			accountPool: options?.accountPool,
 		};
 		const workspace = normalizeSessionWorkspace({
 			cwd: this.#cwd,
@@ -2515,7 +2516,8 @@ export class SessionManager {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
-		const sessionFile = this.#resetToNewSession(options);
+		const accountPool = options?.accountPool ?? this.#header.accountPool;
+		const sessionFile = this.#resetToNewSession(accountPool === undefined ? options : { ...options, accountPool });
 		if (options?.drop !== true) await this.ensureOnDisk();
 		return sessionFile;
 	}
@@ -2560,6 +2562,7 @@ export class SessionManager {
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			accountPool: this.#header.accountPool,
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
@@ -2811,7 +2814,10 @@ export class SessionManager {
 		const sessionDir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(this.#cwd, undefined, storage);
 		const manager = new SessionManager(this.#cwd, sessionDir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		manager.#resetToNewSession({ taskPromptCacheKey: this.#header.taskPromptCacheKey });
+		manager.#resetToNewSession({
+			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			accountPool: this.#header.accountPool,
+		});
 		manager.#sessionName = this.#sessionName;
 		manager.#titleSource = this.#titleSource;
 		manager.#titleUpdatedAt = this.#titleUpdatedAt;
@@ -4032,6 +4038,15 @@ export class SessionManager {
 		await this.#rewriteAtomically();
 	}
 
+	/** Durably bind this transcript to one named `auth.sessionAccountPools` policy. */
+	async setAccountPool(name: string): Promise<void> {
+		if (this.#header.accountPool === name) return;
+		this.#header.accountPool = name;
+		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
+		this.#rewriteRequired = true;
+		await this.#rewriteAtomically();
+	}
+
 	/**
 	 * Stash the parent-derived sibling family candidate without touching the
 	 * header. Unlike {@link setTaskPromptCacheKey} this is neither persisted nor
@@ -4341,6 +4356,7 @@ export class SessionManager {
 				parentSession: sourceHeader?.id,
 				providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(sourceHeader),
 				taskPromptCacheKey: sourceHeader?.taskPromptCacheKey,
+				accountPool: sourceHeader?.accountPool,
 			},
 			options?.sessionFile,
 		);

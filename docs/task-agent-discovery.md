@@ -334,9 +334,10 @@ list allows no account. Saved resets about to expire are still salvaged on every
 salvage serves the account that holds the reset. Pools do not pick models, so model and retry-fallback policy still decide
 which provider the child calls. The pool covers every key lookup the agent makes, whatever provider
 session id it carries: fresh or reset sessions, advisors, title generation, skill compression, and
-subagents it spawns without their own entry (an entry of their own replaces it). Vibe workers take
-the pool from their first turn, and a parked agent revived in the same process or after a restart
-takes the live entry for its agent name. A custom SDK `getApiKey` resolver bypasses pools.
+subagents it spawns. A child with its own entry receives the per-provider identity intersection, so
+it can narrow an inherited session or agent pool but cannot restore an excluded account or provider.
+Vibe workers take the pool from their first turn, and a parked agent revived in the same process or
+after a restart takes the live entry for its agent name. A custom SDK `getApiKey` resolver bypasses pools.
 
 Runtime output schema precedence is:
 

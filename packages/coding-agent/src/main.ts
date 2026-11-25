@@ -1471,7 +1471,14 @@ export async function buildSessionOptions(
 	} else {
 		const namedPools = cfgAuthSessionAccountPools.get(activeSettings);
 		const names = Object.keys(namedPools);
-		let selectedName = parsed.accountPool;
+		const boundName = sessionManager?.getHeader()?.accountPool;
+		if (boundName !== undefined && parsed.accountPool !== undefined && parsed.accountPool !== boundName) {
+			throw new CliUsageError(
+				`This session is bound to account pool ${JSON.stringify(boundName)}; ` +
+					`--account-pool ${JSON.stringify(parsed.accountPool)} cannot replace it.`,
+			);
+		}
+		let selectedName = boundName ?? parsed.accountPool;
 		if (selectedName === undefined) {
 			if (names.length > 1) {
 				throw new CliUsageError(
@@ -1479,14 +1486,17 @@ export async function buildSessionOptions(
 				);
 			}
 			selectedName = names[0];
-			if (selectedName !== undefined) parsed.accountPool = selectedName;
 		}
 		if (selectedName !== undefined) {
+			parsed.accountPool = selectedName;
 			const selected = resolveSessionAccountPool(namedPools, selectedName);
 			if (!selected) {
 				const available = names.length > 0 ? ` Available pools: ${names.join(", ")}.` : "";
-				throw new CliUsageError(`Unknown account pool ${JSON.stringify(selectedName)}.${available}`);
+				const prefix =
+					boundName === selectedName ? "Session is bound to unknown account pool" : "Unknown account pool";
+				throw new CliUsageError(`${prefix} ${JSON.stringify(selectedName)}.${available}`);
 			}
+			options.accountPool = selectedName;
 			options.oauthAccountPools = selected;
 			options.oauthAccountPoolsDenyUnlistedProviders = true;
 		}

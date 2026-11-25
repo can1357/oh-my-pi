@@ -27,17 +27,19 @@ const DEFAULT_POOLS: SessionAccountPools = {
 	personal: { "openai-codex": ["account:personal"] },
 };
 
-async function buildWithPools(pools: SessionAccountPools, cliArgs: string[] = [], mode?: Mode) {
+async function buildWithPools(pools: SessionAccountPools, cliArgs: string[] = [], mode?: Mode, boundPool?: string) {
 	const cwd = tempDir.join("project");
 	const parsed = parseArgs(["--cwd", cwd, ...cliArgs]);
 	parsed.mode = mode;
 	const settings = Settings.isolated({
 		"auth.sessionAccountPools": pools,
 	});
+	const sessionManager = SessionManager.inMemory(cwd);
+	if (boundPool !== undefined) await sessionManager.setAccountPool(boundPool);
 	const options = await buildSessionOptions(
 		parsed,
 		[],
-		SessionManager.inMemory(cwd),
+		sessionManager,
 		new ModelRegistry(authStorage, tempDir.join("models.yml")),
 		settings,
 	);
@@ -53,6 +55,7 @@ test("top-level text and JSON sessions receive only the explicitly selected pool
 		const options = await build(["--account-pool", "company"], mode);
 		expect(options.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com"] });
 		expect(options.oauthAccountPoolsDenyUnlistedProviders).toBe(true);
+		expect(options.accountPool).toBe("company");
 	}
 });
 
@@ -62,6 +65,7 @@ test("the sole configured pool is selected automatically", async () => {
 	});
 	expect(options.oauthAccountPools).toEqual({ "openai-codex": ["account:personal"] });
 	expect(options.oauthAccountPoolsDenyUnlistedProviders).toBe(true);
+	expect(options.accountPool).toBe("personal");
 	expect(parsed.accountPool).toBe("personal");
 });
 
@@ -70,6 +74,20 @@ test("multiple configured pools require a known explicit selection", async () =>
 	await expect(build(["--account-pool", "missing"])).rejects.toThrow('Unknown account pool "missing"');
 	expect(parseArgs(["--account-pool=company"]).accountPool).toBe("company");
 	expect(() => parseArgs(["--account-pool", ""])).toThrow("--account-pool requires a non-empty pool name");
+});
+
+test("a resumed session restores its bound pool and rejects widening or missing policy", async () => {
+	const { options, parsed } = await buildWithPools(DEFAULT_POOLS, [], undefined, "company");
+	expect(options.accountPool).toBe("company");
+	expect(options.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com"] });
+	expect(parsed.accountPool).toBe("company");
+
+	await expect(buildWithPools(DEFAULT_POOLS, ["--account-pool", "personal"], undefined, "company")).rejects.toThrow(
+		'This session is bound to account pool "company"',
+	);
+	await expect(buildWithPools({ personal: DEFAULT_POOLS.personal }, [], undefined, "company")).rejects.toThrow(
+		'Session is bound to unknown account pool "company"',
+	);
 });
 
 test("RPC and ACP hosts keep ownership of their session credential policy", async () => {

@@ -322,6 +322,7 @@ describe("createAgentSession cwd after /move", () => {
 			model,
 			oauthAccountPools: { anthropic: ["email:a@example.com|org:org-a"] },
 			oauthAccountPoolsDenyUnlistedProviders: true,
+			accountPool: "company",
 			restrictToolNames: true,
 			toolNames: ["read"],
 			disableExtensionDiscovery: true,
@@ -344,6 +345,7 @@ describe("createAgentSession cwd after /move", () => {
 			throw new Error("destination project rescope failed");
 		});
 		try {
+			expect(sessionManager.getHeader()?.accountPool).toBe("company");
 			const output: string[] = [];
 			const runtime = {
 				session,
@@ -380,6 +382,7 @@ describe("createAgentSession cwd after /move", () => {
 			expect(sessionManager.getCwd()).toBe(cwdA);
 			expect(permits(accountA)).toBe(true);
 			expect(permits(accountB)).toBe(false);
+			expect(sessionManager.getHeader()?.accountPool).toBe("company");
 		} finally {
 			reloadForCwdSpy.mockRestore();
 			setProjectDir(originalProjectDir);

@@ -82,6 +82,12 @@ export interface SessionHeader {
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
+	/**
+	 * Named `auth.sessionAccountPools` policy this session is durably bound to.
+	 * Local-only: anonymized shares redact it, and resume fails closed when the
+	 * current settings no longer define the same name.
+	 */
+	accountPool?: string;
 }
 
 export interface NewSessionOptions {
@@ -89,6 +95,8 @@ export interface NewSessionOptions {
 	/** Provider prompt-cache identity to seed on the new session header. */
 	providerPromptCacheKey?: string;
 	taskPromptCacheKey?: string;
+	/** Named account pool to bind to the new session. */
+	accountPool?: string;
 	/**
 	 * Skip flushing the current session and delete it instead of saving. The
 	 * successor starts lazy: no empty header is written until it has content.
