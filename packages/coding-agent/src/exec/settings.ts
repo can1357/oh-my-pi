@@ -26,6 +26,14 @@ export interface BashApprovalPatternRule {
 const EMPTY_BASH_PATTERNS: BashApprovalPatternRule[] = [];
 
 const EMPTY_STRING_ARRAY: string[] = [];
+
+// Perl keeps reading switches after consuming an argument to -e/-E, -I, or -m/-M.
+// Treat quoted and escaped text as part of that argument, not as more switches.
+const PERL_ARGUMENT = String.raw`(?:[^ \t\r\n;|&<>()'"\\]|\\[^\n]|'[^']*'|"(?:[^"\\]|\\[\s\S])*")+`;
+const PERL_SWITCH_CLUSTER = "(?:[0-7acfglnpSstTuUwWX]|d(?!t?[:=])|V(?!:))*";
+const PERL_SWITCH_VALUE = String.raw`(?:[eEImM](?:${PERL_ARGUMENT}|[ \t]+(?!#)${PERL_ARGUMENT})|(?:[CDFx]|dt?[:=]|V:)${PERL_ARGUMENT}?)`;
+const PERL_IN_PLACE_PATTERN = String.raw`^[ \t]*perl[ \t]+(?:-(?=[^ \t\r\n-])${PERL_SWITCH_CLUSTER}${PERL_SWITCH_VALUE}?[ \t]+)*-${PERL_SWITCH_CLUSTER}i`;
+
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		// `cat` that sends stdout to a file or reads a heredoc writes rather than
@@ -55,7 +63,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		message: "Use the `edit` tool instead of sed -i. It provides diff preview and fuzzy matching.",
 	},
 	{
-		pattern: "^\\s*perl\\s+.*-[pn]?i",
+		pattern: PERL_IN_PLACE_PATTERN,
 		tool: "edit",
 		message: "Use the `edit` tool instead of perl -i. It provides diff preview and fuzzy matching.",
 	},
