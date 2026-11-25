@@ -8,11 +8,10 @@
  * fresh and describes everything again); {@link NativeBackend.stop} sends
  * any pending change and closes it (`x`).
  *
- * Frames: changes schedule a frame; each frame carries the reconciler's ops
- * with a per-surface sequence number. At most `credits` frames stay
- * unacknowledged: changes made while blocked coalesce into the next frame,
- * sent once an `ack` returns a credit. If the oldest frame stays unanswered
- * for {@link STALLED_ACK_MS}, the credits reset (one warning per stall).
+ * Frames: large reconciliations go out as ordered, byte-bounded batches.
+ * Each batch spends a credit and gets its own sequence number. Changes made
+ * while blocked coalesce behind the unsent ops. If the oldest frame stays
+ * unanswered for {@link STALLED_ACK_MS}, the credits reset (one warning per stall).
  *
  * Events: the terminal's UI events become {@link UiEvent}s delivered to the
  * node they name and bubbled to the nearest handler; keys and pastes the
@@ -21,7 +20,7 @@
  * terminal and reports `edit` events), then to `options.onKey`.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { TspEvent, TspFrame, TspOpen } from "@oh-my-pi/pi-wire";
+import type { TspEvent, TspFrame, TspOp, TspOpen } from "@oh-my-pi/pi-wire";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { InputEvent } from "../driver/contract";
 import type { KeyEvent, UiEvent } from "../events";
@@ -36,6 +35,15 @@ import { Reconciler } from "./reconcile";
 
 /** How long the oldest unacknowledged frame may wait before the credits reset. */
 export const STALLED_ACK_MS = 5000;
+
+// APC chunking is separate: Tern still applies and draws each reassembled frame as one unit.
+const MAX_FRAME_BYTES = 24 * 1024 * 1024;
+
+interface PendingOps {
+	readonly ops: TspOp[];
+	start: number;
+	overflow: { readonly json: string; readonly bytes: number } | undefined;
+}
 
 /** Options of a {@link NativeBackend}. */
 export interface NativeBackendOptions {
@@ -101,9 +109,10 @@ function toUiEvent(
 				...(event.checked === undefined ? {} : { checked: event.checked }),
 			};
 		case "change":
-			return "text" in event
-				? { type: "docChange", key, text: event.text }
-				: { type: "change", key, item: event.item, value: event.value };
+			if ("text" in event) return { type: "docChange", key, text: event.text };
+			return "item" in event
+				? { type: "change", key, item: event.item, value: event.value }
+				: { type: "change", key, value: event.value };
 		case "comment":
 			return "comment" in event
 				? { type: "commentNote", key, comment: event.comment, note: event.note }
@@ -138,12 +147,14 @@ export class NativeBackend {
 	readonly id: string;
 	readonly #options: NativeBackendOptions;
 	readonly #surface: Surface;
+	readonly #framePrefix: string;
 	#connection: TspConnection | undefined;
 	#clock: NativeClock | undefined;
 	#reconciler: Reconciler | undefined;
 	#running = false;
 	#opened = false;
 	#seq = 0;
+	#pending: PendingOps | undefined;
 	#unacked: { readonly s: number; readonly sentAt: number }[] = [];
 	#cancelFrame: (() => void) | undefined;
 	#cancelStall: (() => void) | undefined;
@@ -155,6 +166,7 @@ export class NativeBackend {
 		this.#options = options;
 		this.#surface = options.surface;
 		this.id = options.id ?? `s:${nextSurface++}`;
+		this.#framePrefix = `{"sf":${JSON.stringify(this.id)},"s":`;
 	}
 
 	/** Whether the surface is open and rendering. */
@@ -253,6 +265,7 @@ export class NativeBackend {
 
 	#halt(): void {
 		this.#running = false;
+		this.#pending = undefined;
 		this.#cancelFrame?.();
 		this.#cancelFrame = undefined;
 		this.#cancelStall?.();
@@ -274,23 +287,94 @@ export class NativeBackend {
 
 	#send(force: boolean): boolean {
 		const reconciler = this.#reconciler!;
-		if (this.#options.active?.() === false) return false;
-		if (!reconciler.dirty) return false;
+		const active = this.#options.active?.() !== false;
+		if ((!active && !force) || (!this.#pending && (!active || !reconciler.dirty))) return false;
 		if (!force && !this.#hasCredit()) return false;
 		const connection = this.#connection!;
-		const { ops, blobs } = reconciler.reconcile();
-		if (ops.length === 0) return false;
-		connection.ensureBlobs(blobs);
-		const frame: TspFrame = { sf: this.id, s: ++this.#seq, ops };
-		// Counted before writing: an acknowledgement may arrive while the write is still on the stack.
-		this.#unacked.push({ s: frame.s, sentAt: this.#clock!.now() });
-		connection.sendJson("f", frame);
-		this.#options.onFrame?.(frame);
-		return true;
+		let sent = false;
+		let reconciled = false;
+		do {
+			if (!this.#pending) {
+				reconciled = true;
+				const { ops, blobs } = reconciler.reconcile();
+				if (ops.length === 0) break;
+				this.#pending = { ops, start: 0, overflow: undefined };
+				connection.ensureBlobs(blobs);
+			}
+			this.#writeFrame(connection, this.#pending);
+			sent = true;
+		} while ((this.#pending || (force && active && !reconciled && reconciler.dirty)) && (force || this.#hasCredit()));
+		return sent;
+	}
+
+	#writeFrame(connection: TspConnection, pending: PendingOps): void {
+		const { ops, start } = pending;
+		const s = ++this.#seq;
+		let body = `${this.#framePrefix}${s},"ops":[`;
+		let bytes = Buffer.byteLength(body) + 2; // Closing `]}`.
+		let end = start;
+		for (; end < ops.length; end++) {
+			const json = pending.overflow?.json ?? JSON.stringify(ops[end]!);
+			const size = pending.overflow?.bytes ?? Buffer.byteLength(json);
+			const separator = end === start ? "" : ",";
+			// A wire op is indivisible; send an oversized op by itself.
+			if (separator && bytes + 1 + size > MAX_FRAME_BYTES) {
+				pending.overflow = { json, bytes: size };
+				break;
+			}
+			pending.overflow = undefined;
+			body += separator + json;
+			bytes += separator.length + size;
+		}
+		pending.start = end;
+		if (end === ops.length) this.#pending = undefined;
+		// Account for the frame before writing: an ack can arrive on the write stack.
+		this.#unacked.push({ s, sentAt: this.#clock!.now() });
+		// Slice before sending: an eviction handled on the write stack compacts `ops`.
+		const onFrame = this.#options.onFrame;
+		const sent = onFrame ? ops.slice(start, end) : undefined;
+		connection.send("f", `${body}]}`);
+		if (sent) onFrame?.({ sf: this.id, s, ops: sent });
+	}
+
+	#forget(ids: readonly string[]): void {
+		const pending = this.#pending;
+		const reconciler = this.#reconciler!;
+		if (!pending) {
+			reconciler.forget(ids);
+			return;
+		}
+		const gone = new Map<string, string | null>();
+		reconciler.forget(ids, gone);
+		// An evicted id the reconciler still holds (a changed settled block queued
+		// as del + add) keeps its ops so the add recreates it; drop the rest.
+		for (const id of ids) if (!gone.has(id) && !reconciler.resolve({ id })) gone.set(id, null);
+		if (gone.size === 0) return;
+		// The terminal can evict between batches. Skip ops for lost nodes and
+		// keep surviving insertions in order if their `before` sibling was lost.
+		const { ops, start } = pending;
+		let end = start;
+		for (let i = start; i < ops.length; i++) {
+			let op = ops[i]!;
+			if (op[1] != null && gone.has(op[1])) continue;
+			if (op[0] === "add" || op[0] === "move") {
+				if (gone.has(op[2])) continue;
+				const before = op[3];
+				if (before !== null && gone.has(before)) {
+					const next = gone.get(before) ?? null;
+					op = op[0] === "add" ? ["add", op[1], op[2], next, op[4]] : ["move", op[1], op[2], next];
+				}
+			}
+			ops[end++] = op;
+		}
+		ops.length = end;
+		if (end === start) this.#pending = undefined;
+		else pending.overflow = undefined;
 	}
 
 	#hasCredit(): boolean {
-		const credits = this.#connection!.credits;
+		// Let retention events from one batch reach us before continuing a split reconciliation.
+		const credits = this.#pending ? 1 : this.#connection!.credits;
 		if (this.#unacked.length < credits) return true;
 		const oldest = this.#unacked[0]!;
 		const now = this.#clock!.now();
@@ -338,11 +422,12 @@ export class NativeBackend {
 			case "gone":
 				if (event.sf !== undefined && event.sf !== this.id) return;
 				if (!event.ids.includes(this.id)) {
-					if (event.sf === this.id) this.#reconciler!.forget(event.ids);
+					if (event.sf === this.id) this.#forget(event.ids);
 					return;
 				}
 				// The terminal no longer has the surface: open it fresh and describe everything again.
 				this.#reconciler!.reset();
+				this.#pending = undefined;
 				this.#unacked = [];
 				this.#open(false);
 				this.flush();
@@ -352,6 +437,7 @@ export class NativeBackend {
 			case "motion":
 			case "features":
 			case "visible":
+			case "checkout":
 			case "error":
 				return;
 		}

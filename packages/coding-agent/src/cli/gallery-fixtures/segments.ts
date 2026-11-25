@@ -8,7 +8,7 @@ import type { StatusLineSegmentOptions } from "../../modes/view-model/status-lin
 import { printRows } from "../../ui/print-rows";
 import type { StatusFacts } from "../../ui/status/facts";
 import { effectiveStatusSettings, segmentView } from "../../ui/status/segments";
-import { StatusLine } from "../../ui/status/status-line";
+import { createStatusLine } from "../../ui/status/status-line";
 import "../../ui/styles/composer";
 import "../../ui/styles/status";
 import {
@@ -91,7 +91,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 		}
 		case "path":
 			return [
-				{ label: "workspace path" },
+				{ label: "workspace path", facts: { activeRepoRoot: "oh-my-pi" } },
 				{
 					label: "linked worktree",
 					options: { path: { stripWorkPrefix: true } },
@@ -225,7 +225,12 @@ function renderIsolatedSegment(id: StatusLineSegmentId, spec: SegmentVariantSpec
 	const shown = segmentView(id, facts, effectiveStatusSettings(settings)) !== null || facts.subagents > 0;
 	if (!shown) return [currentTheme().fg("dim", "  (hidden for this sample)")];
 	return printRows(
-		() => StatusLine({ settings: () => settings, facts: () => facts, placement: () => GALLERY_BAR_PLACEMENT }),
+		() =>
+			createStatusLine({
+				settings: () => settings,
+				facts: () => facts,
+				placement: () => GALLERY_BAR_PLACEMENT,
+			}).preview(undefined),
 		width,
 		{ now: GALLERY_NOW },
 	);

@@ -1,5 +1,5 @@
 import type { TSchema } from "@oh-my-pi/pi-ai";
-import { $env, isRecord, logger, tryParseJson } from "@oh-my-pi/pi-utils";
+import { $env, asRecord, isRecord, logger, tryParseJson } from "@oh-my-pi/pi-utils";
 import type { CustomTool, CustomToolResult } from "../extensibility/custom-tools/types";
 import { type CallMcpOptions, callMCP } from "../mcp/json-rpc";
 import type { ExaSearchResponse, MCPTool, MCPToolWrapperConfig } from "./types";
@@ -14,10 +14,6 @@ type MCPWrappedToolDetails = {
 /** Find EXA_API_KEY from Bun.env or .env files */
 export function findApiKey(): string | null {
 	return $env.EXA_API_KEY;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-	return isRecord(value) ? value : null;
 }
 
 function isMcpTool(value: unknown): value is MCPTool {
