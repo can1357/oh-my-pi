@@ -2,7 +2,7 @@ import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetached
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { errorMessage, logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { continuesConversation } from "../modes/utils/conversation-position";
@@ -21,7 +21,7 @@ import {
 import type { SessionWorktree } from "../worktree/backend";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
 	ParsedSlashCommand,

@@ -42,10 +42,12 @@ const PR_7 = {
 	stderr: "",
 };
 const NO_PR = { exitCode: 1, stdout: "", stderr: "no pull requests found" };
+/** The status line's least time between two git/jj reads (`VCS_READ_INTERVAL_MS`). */
+const READ_INTERVAL_MS = 5_000;
 
-/** A git checkout whose HEAD the test moves, as `!git checkout` would (the HEAD watcher then fires). */
+/** A git checkout whose HEAD the test moves, as `git checkout` would. */
 function mockCheckout(initial: VcsHeadState): {
-	checkout(head: VcsHeadState): void;
+	moveHead(head: VcsHeadState): void;
 } {
 	let head = initial;
 	const handle = {
@@ -59,22 +61,15 @@ function mockCheckout(initial: VcsHeadState): {
 		asGit: () => handle,
 		asJj: () => null,
 		root: () => root,
-		watchTarget: () => `${root}/.git/HEAD`,
 		statusSummary: () => handle.statusSummary(),
 	} as unknown as VcsRepo;
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfo);
 	vi.spyOn(vcs, "git").mockReturnValue(handle);
 	vi.spyOn(vcs, "repo").mockReturnValue(repo);
 	vi.spyOn(vcs, "repoForDisplay").mockReturnValue(repo);
-	let headMoved = (): void => {};
-	vi.spyOn(vcs, "watch").mockImplementation((_repo, onChange) => {
-		headMoved = onChange as () => void;
-		return () => {};
-	});
 	return {
-		checkout(next) {
+		moveHead(next) {
 			head = next;
-			headMoved();
 		},
 	};
 }
@@ -96,7 +91,8 @@ function branch(name: string): VcsHeadState {
 }
 
 async function startOnPrBranch(initial: VcsHeadState) {
-	const checkout = mockCheckout(initial);
+	vi.useFakeTimers();
+	const { moveHead } = mockCheckout(initial);
 	const run = vi.spyOn(github, "run").mockResolvedValue(NO_PR).mockResolvedValueOnce(PR_7);
 	const component = statusLine(
 		statusSession({
@@ -107,6 +103,14 @@ async function startOnPrBranch(initial: VcsHeadState) {
 	lineText(component);
 	await flushStatus();
 	expect(lineText(component)).toContain("#7");
+	const checkout = {
+		/** `!git checkout`: the command's end re-reads the branch once the read interval allows. */
+		checkout(head: VcsHeadState) {
+			moveHead(head);
+			component.refreshVcs();
+			vi.advanceTimersByTime(READ_INTERVAL_MS);
+		},
+	};
 	return { checkout, run, component };
 }
 
@@ -123,6 +127,7 @@ afterAll(() => {
 afterEach(() => {
 	disposeStatusLines();
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
 describe("status line PR segment across branch switches", () => {

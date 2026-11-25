@@ -15,14 +15,51 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
 
 /**
  * Whether an OAuth refresh failure is definitive (the credential must be
- * disabled) versus transient. A typed {@link Flag.OAuthExpiry} marker anywhere
- * on the error's cause chain (an {@link OAuthError} built with `definitive`)
- * decides first; otherwise the message text classifier {@link isOAuthExpiry}
- * covers providers that do not mark their failures.
+ * disabled) versus transient. An {@link OAuthError} on the error's cause chain
+ * that carries a provider verdict (`definitive` set either way) decides first;
+ * then a typed {@link Flag.OAuthExpiry} marker; otherwise the message text
+ * classifier {@link isOAuthExpiry} covers providers that do not judge their
+ * failures.
  */
 export function isDefinitiveOAuthFailure(error: unknown): boolean {
+	const verdict = oauthGrantVerdict(error);
+	if (verdict !== undefined) return verdict;
 	if (is(classify(error), Flag.OAuthExpiry)) return true;
 	return isOAuthExpiry(error instanceof Error ? error.message : String(error));
+}
+
+/** The first provider verdict an {@link OAuthError} on `error`'s cause chain carries. */
+function oauthGrantVerdict(error: unknown, depth = 0): boolean | undefined {
+	if (depth > 6 || !(error instanceof Error)) return undefined;
+	if (error instanceof OAuthError && error.definitive !== undefined) return error.definitive;
+	return oauthGrantVerdict(error.cause, depth + 1);
+}
+
+/** HTTP status and message of an upstream failure: an Error, a bare string, or a stream error record. */
+function upstreamFailure(error: unknown): { status: number | undefined; message: string | undefined } {
+	let httpStatus = extractHttpStatusFromError(error);
+	let message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	if (typeof error === "object" && error !== null) {
+		if (httpStatus === undefined && "errorStatus" in error && typeof error.errorStatus === "number") {
+			httpStatus = error.errorStatus;
+		}
+		if (message === undefined && "errorMessage" in error && typeof error.errorMessage === "string") {
+			message = error.errorMessage;
+		}
+	}
+	return { status: httpStatus ?? (message ? extractHttpStatusFromError({ message }) : undefined), message };
+}
+
+const REVOKED_OAUTH_BEARER_PATTERN = /\bOAuth token has been revoked\b/i;
+
+/**
+ * Whether Anthropic refused the OAuth bearer itself as revoked (a 403 `OAuth
+ * token has been revoked`). Unlike other 403s the login may be intact, so
+ * Claude Code refreshes it like a 401 instead of treating the account as denied.
+ */
+export function isRevokedOAuthBearerError(error: unknown): boolean {
+	const { status, message } = upstreamFailure(error);
+	return status === 403 && message !== undefined && REVOKED_OAUTH_BEARER_PATTERN.test(message);
 }
 
 const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b/i;
@@ -66,18 +103,7 @@ export function isAuthRetryableError(error: unknown): boolean {
 	if (isUsageLimit(error)) return true;
 	if (isAccountPolicyError(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
-	let httpStatus = extractHttpStatusFromError(error);
-	let message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-	if (typeof error === "object" && error !== null) {
-		if (httpStatus === undefined && "errorStatus" in error && typeof error.errorStatus === "number") {
-			httpStatus = error.errorStatus;
-		}
-		if (message === undefined && "errorMessage" in error && typeof error.errorMessage === "string") {
-			message = error.errorMessage;
-		}
-	}
-	const embeddedStatus = message ? extractHttpStatusFromError({ message }) : undefined;
-	const status = httpStatus ?? embeddedStatus;
+	const { status, message } = upstreamFailure(error);
 	if (isConcurrencyCapExclusion(status, message)) return false;
 	// A Cline surface-gate 403 is per-model client policy, not a credential
 	// problem: sibling keys fail identically, so rotation only burns them.

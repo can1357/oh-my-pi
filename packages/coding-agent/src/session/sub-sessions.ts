@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { isAdvisorTranscriptName } from "../advisor/transcript-recorder";
+import { isAdvisorTranscriptName } from "../advisor/transcript-names";
 import { getAgentTombstonePath } from "../registry/agent-tombstone";
 import { resolveSessionLeafId, type SessionEntry, type SessionHeader } from "./session-entries";
 import { loadSessionFile, parseSessionContent, type SessionLoadResult } from "./session-loader";

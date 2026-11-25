@@ -22,7 +22,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { DownloadActivity } from "../../downloads/activity";
 import type { JudgmentBatchProgress } from "../../eval/judgment-batch-events";
 import { sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
-import { formatCost } from "../overlays/pickers/agent-hub-model";
+import { formatCost } from "../../modes/view-model/overlays/agent-hub-renderer";
 import "../styles/dock";
 import type { ProgressTerm } from "../styles/dock/progress";
 import { keyLabel } from "../keys/hints";

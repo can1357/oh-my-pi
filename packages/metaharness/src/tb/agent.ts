@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { benchSettingsYaml } from "../bench-settings";
 import type { AgentBinaries, AgentConfig, GatewayConfig, GuestArch } from "./types";
 import type { TrialVm } from "./vmon";
 
@@ -124,7 +125,7 @@ web_search:
   enabled: false
 find:
   enabled: ${agent.tools.includes("find")}
-`;
+${benchSettingsYaml()}`;
 	const writeConfig = await vm.exec(
 		`mkdir -p "$HOME/.omp/agent"\ncat > "$HOME/.omp/agent/models.yml" <<'OMP_MODELS_EOF'\n${modelsYaml}OMP_MODELS_EOF\ncat > "$HOME/.omp/agent/config.yml" <<'OMP_CONFIG_EOF'\n${configYaml}OMP_CONFIG_EOF`,
 	);
