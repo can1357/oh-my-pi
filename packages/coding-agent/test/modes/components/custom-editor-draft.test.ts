@@ -211,7 +211,7 @@ describe("cleared draft recall", () => {
 		const submitted: string[] = [];
 		const ed = editor({ onSubmit: text => submitted.push(text) });
 		ed.composer.insertTextAttachment("canceled text attachment");
-		ed.paste(LONG_PASTE("canceled legacy paste"));
+		ed.paste(LONG_PASTE("canceled pasted text"));
 		const otherPrompt = `different ${ed.composer.text()}`.trim();
 		ed.composer.clearDraft();
 		ed.composer.addToHistory(otherPrompt);

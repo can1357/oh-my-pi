@@ -371,6 +371,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		const rethrowAbort = (err: unknown, serverName?: string): void => {
 			if (!(err instanceof ToolAbortError) && !signal?.aborted) return;
 			if (timeoutSignal.aborted && !callerSignal?.aborted) {
+				if (err instanceof ToolError) throw err;
 				const server = serverName ? ` on ${serverName}` : "";
 				throw new ToolError(
 					`LSP ${action} timed out after ${timeoutSec}s${server}. The server may still be indexing; try again or pass timeout=<larger>.`,

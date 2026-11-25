@@ -19,6 +19,7 @@ import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { padTo, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatDuration } from "@oh-my-pi/pi-utils";
+import { keyLabel } from "../../../keys/hints";
 import {
 	collapseCommand,
 	flagsCell,
@@ -99,7 +100,9 @@ const clampTop = (top: number, total: number, height: number) => Math.max(0, Mat
 defineRolePainter("col", "omp.app.ps", (node, cx): Block => {
 	const model = (node.props() as { term?: { ps?: PsTopModel } }).term?.ps;
 	if (!model) return { rows: [] };
-	const pen = penOf(cx.theme);
+	const theme = cx.theme;
+	const pen = penOf(theme);
+	const escape = keyLabel(theme, "escape");
 	const width = cx.width;
 	const height = Math.max(6, model.screenRows());
 	const now = cx.now();
@@ -145,7 +148,11 @@ defineRolePainter("col", "omp.app.ps", (node, cx): Block => {
 		}
 		model.infoTop = clampTop(model.infoTop, body.length, bodyHeight);
 		return {
-			rows: [header("unit info"), ...window(body, model.infoTop, bodyHeight, width), ...footer("⎋ back · q back")],
+			rows: [
+				header("unit info"),
+				...window(body, model.infoTop, bodyHeight, width),
+				...footer(`${escape} back · q back`),
+			],
 		};
 	}
 
@@ -160,7 +167,7 @@ defineRolePainter("col", "omp.app.ps", (node, cx): Block => {
 			rows: [
 				header(title),
 				...window(lines, top, bodyHeight, width),
-				...footer("⎋ back · q back · view refreshes live"),
+				...footer(`${escape} back · q back · view refreshes live`),
 			],
 		};
 	}
@@ -227,7 +234,9 @@ defineRolePainter("col", "omp.app.ps", (node, cx): Block => {
 		rows: [
 			header(title),
 			...window(lines, model.tableTop, bodyHeight, width),
-			...footer("↑/↓ select · ⏎ info · l logs · s stop · x kill · r restart · a all scopes · q quit"),
+			...footer(
+				`${keyLabel(theme, "up")}/${keyLabel(theme, "down")} select · ${keyLabel(theme, "enter")} info · l logs · s stop · x kill · r restart · a all scopes · q quit`,
+			),
 		],
 	};
 });

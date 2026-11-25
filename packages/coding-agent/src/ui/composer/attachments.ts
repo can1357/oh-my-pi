@@ -1,14 +1,14 @@
 /**
- * What a draft can hold besides typed text: collapsed pastes and attachment
- * chips. Both are atoms in the text: deleting into one deletes all of it.
+ * What a draft can hold besides typed text: attachment chips, atoms in the
+ * text (deleting into one deletes all of it).
  *
- * - A paste of more than 10 lines or 1000 characters collapses to
- *   `[Paste #N, +L lines]` / `[Paste #N, C chars]`; the content comes back on
- *   submit.
- * - A chip (`📄 #1`, `📷 #1`, `🎬 #2`: the symbol preset's `chip.*` glyph and
- *   a number) stands for a text attachment, an image or a video. In the
- *   terminal each chip takes its own color from a fixed palette.
+ * A chip (`📄 #1`, `📷 #1`, `🎬 #2`: the symbol preset's `chip.*` glyph and a
+ * number) stands for a text attachment, an image or a video. A paste of more
+ * than 10 lines or 1000 characters collapses into a text chip; the content
+ * comes back on submit. In the terminal each chip takes its own color from a
+ * fixed palette.
  */
+import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 
 export type ChipKind = "paste" | "image" | "video";
 
@@ -23,8 +23,8 @@ export interface DraftImage {
 export interface Atom {
 	/** The text the atom occupies in the draft. */
 	readonly label: string;
-	/** A chip (attachment), a collapsed paste's marker, or a token chip (`/skill:name`) standing for its command. */
-	readonly kind: ChipKind | "marker" | "token";
+	/** A chip (attachment) or a token chip (`/skill:name`) standing for its command. */
+	readonly kind: ChipKind | "token";
 	/** Its number among its kind (`#N`). */
 	readonly n: number;
 	/** What the atom expands to on submit (pasted text, an image reference); the label itself when absent. */
@@ -38,20 +38,37 @@ export interface Atom {
 	readonly link?: { readonly path: string; readonly line?: number };
 }
 
-/** Lines over which a paste collapses into a marker. */
-export const PASTE_MAX_LINES = 10;
-/** Characters over which a paste collapses into a marker. */
-export const PASTE_MAX_CHARS = 1000;
+/** A draft image's blob id, riding on the image so its bytes are hashed and registered once. */
+const kBlob = Symbol("composer.imageBlob");
 
-/** Whether pasted `text` collapses into a marker. */
-export function collapsesPaste(text: string): boolean {
-	return text.split("\n").length > PASTE_MAX_LINES || text.length > PASTE_MAX_CHARS;
+interface DraftImageWithBlob extends DraftImage {
+	[kBlob]?: string;
 }
 
-/** The marker of paste `n` holding `text`. */
-export function pasteMarker(n: number, text: string): string {
-	const lines = text.split("\n").length;
-	return lines > PASTE_MAX_LINES ? `[Paste #${n}, +${lines} lines]` : `[Paste #${n}, ${text.length} chars]`;
+/**
+ * The blob id of a draft image, its bytes registered so a terminal can be sent them: what the
+ * chip's token in the field and the picture on its card name.
+ */
+export function draftImageBlob(image: DraftImage): string {
+	const tagged = image as DraftImageWithBlob;
+	tagged[kBlob] ??= registerBlob(Buffer.from(image.data, "base64"), image.mimeType);
+	return tagged[kBlob];
+}
+
+/** The pixel size an image or video chip's marker states (`[Image #1, 800x600]`), when it states one. */
+export function markerPixelSize(marker: string | undefined): { readonly w: number; readonly h: number } | undefined {
+	const size = marker === undefined ? null : /^\[(?:Image|Video) #\d+, (\d+)x(\d+)[\],]/.exec(marker);
+	return size ? { w: Number(size[1]), h: Number(size[2]) } : undefined;
+}
+
+/** Lines over which a paste collapses into a text chip. */
+export const PASTE_MAX_LINES = 10;
+/** Characters over which a paste collapses into a text chip. */
+export const PASTE_MAX_CHARS = 1000;
+
+/** Whether pasted `text` collapses into a text chip. */
+export function collapsesPaste(text: string): boolean {
+	return text.split("\n").length > PASTE_MAX_LINES || text.length > PASTE_MAX_CHARS;
 }
 
 /** Default chip glyphs (the unicode symbol preset). */
