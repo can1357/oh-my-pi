@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ## [19.2.1] - 2026-11-25
