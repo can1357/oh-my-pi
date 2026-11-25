@@ -76,6 +76,15 @@ export interface ComposerRowContext extends ComposerChromeContext {
 	readonly overflow: number;
 }
 
+/** Terminal rows for one editor row; arrays place the text on their first row. */
+export type ComposerRowRender =
+	| string[]
+	| {
+			readonly rows: readonly string[];
+			/** Zero-based index in `rows` of the row containing the editor text. */
+			readonly textRow: number;
+	  };
+
 /** A composer shape (see the module docs). */
 export interface ComposerShape {
 	readonly id: string;
@@ -101,10 +110,16 @@ export interface ComposerShape {
 	sideWidth(paddingX: number): number;
 	/** Top chrome row, if any. */
 	top?(cx: ComposerChromeContext): string | undefined;
-	/** A content row in its chrome (usually one row). */
-	row(cx: ComposerRowContext): string[];
+	/** A content row in its chrome, with an explicit text position when chrome precedes it. */
+	row(cx: ComposerRowContext): ComposerRowRender;
 	/** Bottom chrome row, if any. */
 	bottom?(cx: ComposerChromeContext): string | undefined;
+}
+
+/** Paint a shape's content rows for surfaces that do not position a terminal caret. */
+export function composerRowLines(shape: ComposerShape, cx: ComposerRowContext): readonly string[] {
+	const rendered = shape.row(cx);
+	return Array.isArray(rendered) ? rendered : rendered.rows;
 }
 
 const shapes = new Map<string, ComposerShape>();
