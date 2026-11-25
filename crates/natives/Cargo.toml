@@ -37,8 +37,6 @@ zune-jpeg.workspace = true
 tinyvec.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
-# Already in the graph via omp-builtins; wakes the OAuth callback wait.
-notify = "=8.2.0"
 log = "0.4"
 # Already in the graph via omp-builtins; SIMD newline search for IPC line framing.
 memchr = "2.7.4"

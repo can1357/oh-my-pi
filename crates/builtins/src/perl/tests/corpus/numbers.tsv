@@ -1,0 +1,35 @@
+# Perl corpus: numbers. Format and regeneration: crates/builtins/src/perl/tests.rs.
+abs	print join("|", abs(-3.2), abs(3.2)), "\n";	3.2|3.2␊
+base-convert	print join("|", hex("0xff"), oct("0b100"), oct("077")), "\n";	255|4|63␊
+binary	print join("|", 0b1011_0010), "\n";	178␊
+exponent	print join("|", 3.2e-7), "\n";	3.2e-07␊
+first-uv	print join("|", 9223372036854775808), "\n";	9223372036854775808␊
+fraction-format	print join("|", 0.1 + 0.2), "\n";	0.3␊
+hex-float	print join("|", 0x1.8p-2), "\n";	0.375␊
+hex	print join("|", 0xFa_Ce), "\n";	64206␊
+int-truncate	print join("|", int(-12.9), int(12.9)), "\n";	-12|12␊
+integer-division	use integer; print -7/3,"\n";	-2␊
+integer-modulus	use integer; print -7%3,"\n";	-1␊
+integer-overflow	use integer; my $x = 9223372036854775807; print $x+1,"\n";	-9223372036854775808␊
+integer	print join("|", 123456789), "\n";	123456789␊
+large-iv	print join("|", 9223372036854775807), "\n";	9223372036854775807␊
+leading-dot	print join("|", .125), "\n";	0.125␊
+math	print join("|", sqrt(81), exp(0), log(1), sin(0), cos(0), atan2(0,1)), "\n";	9|1|0|0|1|0␊
+max-uv	print join("|", 18446744073709551615), "\n";	18446744073709551615␊
+min-iv	print join("|", -9223372036854775808), "\n";	-9223372036854775808␊
+nan-comparison	print join("|", ("NaN"+0 <=> 3)//"unordered"), "\n";	unordered␊
+nan-warnings	use warnings; print "xyz"+1,"\n";	1␊	stderr=Argument "xyz" isn't numeric in addition (+) at nan-warnings.pl line 1.␊
+numify-hex-not-literal	print join("|", "0x12" + 0), "\n";	0␊
+numify-infinity	print join("|", "Inf"+0, "-inf"+0), "\n";	Inf|-Inf␊
+numify-nan	print join("|", "NaN"+0), "\n";	NaN␊
+numify-prefix	print join("|", " -12.5junk" + 0), "\n";	-12.5␊
+octal-prefix	print join("|", 0o751), "\n";	489␊
+octal	print join("|", 0751), "\n";	489␊
+positive-exponent	print join("|", 1.25E+12), "\n";	1250000000000␊
+scientific-format	print join("|", 1e-20, 1e20), "\n";	1e-20|1e+20␊
+trailing-dot	print join("|", 17.), "\n";	17␊
+underscores	print join("|", 12_345_678), "\n";	12345678␊
+unsigned-exact	print join("|", 18446744073709551615 - 18446744073709551614), "\n";	1␊
+version-bare	print join("|", unpack('C*', 1.2.3)), "\n";	1|2|3␊
+vstring	print join("|", unpack('C*', v8.13.21)), "\n";	8|13|21␊
+zero	print join("|", 0), "\n";	0␊

@@ -14,13 +14,13 @@
 import { ToolError } from "../tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { shellChangeSnapshots } from "../commit/selective/journal";
-import { executeBash } from "../exec/bash-executor";
+import { executeBash, sessionShellEnv } from "../exec/bash-executor";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { cfgBashGitGuard } from "../exec/settings";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { ovnfsCommand } from "../task/settings";
-import type { ToolSession } from "../tools";
+import { owningSessionId, type ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { sessionShellSpeech } from "../tts/shell-speech";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -94,6 +94,7 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 				};
 	const result = await executeBash(command, {
 		cwd: cwd ? resolveToCwd(cwd, session.cwd) : session.cwd,
+		env: sessionShellEnv({ id: owningSessionId(session), file: session.getSessionFile() }),
 		// 0 disables the executor deadline: the cell's own deadline governs.
 		timeout: timeout === undefined ? 0 : timeout * 1000,
 		signal,

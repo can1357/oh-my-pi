@@ -98,6 +98,7 @@ interface RefSnapshot {
 	readonly displayName: string;
 	readonly kind: AgentRef["kind"];
 	readonly parentId: AgentRef["parentId"];
+	readonly parentSessionKey: AgentRef["parentSessionKey"];
 	readonly status: AgentRef["status"];
 	readonly session: AgentSessionHandle | null;
 	readonly sessionFile: string | null;
@@ -152,6 +153,7 @@ const mainRefCodec: RpcCodec<AgentRef> = {
 			displayName: ref.displayName,
 			kind: ref.kind,
 			parentId: ref.parentId,
+			parentSessionKey: ref.parentSessionKey,
 			status: ref.status,
 			session: ref.session,
 			sessionFile: ref.sessionFile,
@@ -183,6 +185,7 @@ function refresh(ref: AgentRef, snapshot: RefSnapshot): AgentRef {
 	ref.displayName = snapshot.displayName;
 	ref.kind = snapshot.kind;
 	ref.parentId = snapshot.parentId;
+	ref.parentSessionKey = snapshot.parentSessionKey;
 	ref.status = snapshot.status;
 	ref.session = snapshot.session;
 	ref.sessionFile = snapshot.sessionFile;
