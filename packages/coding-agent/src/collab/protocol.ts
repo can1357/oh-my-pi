@@ -12,16 +12,16 @@ import type {
 	BusChannel,
 	CollabUiRequest,
 	GuestFrame,
-	ParsedCollabLink,
 	Participant,
 	AgentSnapshot as WireAgentSnapshot,
 } from "@oh-my-pi/pi-wire";
 import {
 	DEFAULT_RELAY_URL,
 	ENVELOPE_HEADER_LENGTH,
+	formatCollabLink,
+	isLocalRelayHostname,
+	normalizeRelayOrigin,
 	ROOM_ID_BYTES,
-	ROOM_KEY_BYTES,
-	WRITE_TOKEN_BYTES,
 } from "@oh-my-pi/pi-wire";
 import type { CollabSessionState } from "../modes/view-model/status-line/types";
 import type { AgentSessionEvent } from "../session/agent-session";
@@ -41,7 +41,10 @@ export type {
 export {
 	COLLAB_PROMPT_MESSAGE_TYPE,
 	COLLAB_PROTO,
+	formatCollabLink,
+	generateRoomId,
 	packEnvelope,
+	parseCollabLink,
 	rewriteEnvelopePeer,
 	unpackEnvelope,
 } from "@oh-my-pi/pi-wire";
@@ -163,77 +166,6 @@ export function encodeSnapshotChunk(entryJsons: readonly string[], final: boolea
 // Link format: wss://<host[:port]>/r/<roomId>.<base64url-32-byte-key>
 // ═══════════════════════════════════════════════════════════════════════════
 
-const ROOM_PATH_RE = /^\/r\/([A-Za-z0-9_-]{10,64})(?:\.([A-Za-z0-9_-]+))?$/;
-const BARE_LINK_RE = /^([A-Za-z0-9_-]{10,64})[#.]([A-Za-z0-9_-]+)$/;
-const B64URL_RE = /^[A-Za-z0-9_-]+$/;
-const LOCAL_HOSTNAMES: Record<string, true> = { localhost: true, "127.0.0.1": true, "::1": true, "[::1]": true };
-
-function isLocalHostname(hostname: string): boolean {
-	return LOCAL_HOSTNAMES[hostname] === true;
-}
-
-export function generateRoomId(): string {
-	const bytes = new Uint8Array(ROOM_ID_BYTES);
-	crypto.getRandomValues(bytes);
-	return Buffer.from(bytes).toString("base64url");
-}
-
-/** Normalize a relay base URL (ws/wss/http/https) into a ws/wss origin, or an error. */
-function normalizeRelayOrigin(relayUrl: string): { origin: string } | { error: string } {
-	let url: URL;
-	try {
-		url = new URL(relayUrl);
-	} catch {
-		return { error: `Invalid relay URL: ${relayUrl}` };
-	}
-	let scheme: string;
-	switch (url.protocol) {
-		case "wss:":
-		case "https:":
-			scheme = "wss:";
-			break;
-		case "ws:":
-		case "http:":
-			scheme = "ws:";
-			break;
-		default:
-			return { error: `Unsupported relay URL scheme: ${url.protocol}` };
-	}
-	if (scheme === "ws:" && !isLocalHostname(url.hostname)) {
-		return { error: "relay link must be wss:// (plain ws:// is only allowed for localhost)" };
-	}
-	const port = url.port ? `:${url.port}` : "";
-	return { origin: `${scheme}//${url.hostname}${port}` };
-}
-
-/**
- * Render the shareable link. Compact forms: the default relay collapses to
- * `<roomId>.<key>`, other wss relays drop the scheme (`host[:port]/r/…`);
- * only localhost ws:// links keep their full URL so parsing cannot
- * mis-infer wss.
- *
- * The room secret is dot-joined (`<roomId>.<key>`) rather than `#`-joined:
- * RFC 3986 forbids a raw `#` inside a fragment, so strict URL stacks (macOS
- * Foundation behind terminal click-to-open) percent-encode a second `#` to
- * `%23` and break the link. Parsers still accept the legacy `#` form and the
- * mangled `%23` form.
- *
- * Full links append the write token to the key
- * (`base64url(key ∥ writeToken)`); read-only (view) links carry the bare
- * 32-byte key, which is also the pre-token link format.
- */
-export function formatCollabLink(relayUrl: string, roomId: string, key: Uint8Array, writeToken?: Uint8Array): string {
-	const normalized = normalizeRelayOrigin(relayUrl);
-	if ("error" in normalized) throw new Error(normalized.error);
-	const secret = writeToken ? Buffer.concat([key, writeToken]) : Buffer.from(key);
-	const keyText = secret.toString("base64url");
-	if (normalized.origin === DEFAULT_RELAY_URL) return `${roomId}.${keyText}`;
-	const compact = normalized.origin.startsWith("wss://")
-		? normalized.origin.slice("wss://".length)
-		: normalized.origin;
-	return `${compact}/r/${roomId}.${keyText}`;
-}
-
 function normalizeCollabWebBaseUrl(relayUrl: string, webUrl?: string): string {
 	const explicitWebUrl = webUrl?.trim();
 	if (!explicitWebUrl) {
@@ -253,7 +185,7 @@ function normalizeCollabWebBaseUrl(relayUrl: string, webUrl?: string): string {
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		throw new Error("collab.webUrl must start with http:// or https://");
 	}
-	if (url.protocol === "http:" && !isLocalHostname(url.hostname)) {
+	if (url.protocol === "http:" && !isLocalRelayHostname(url.hostname)) {
 		throw new Error("collab.webUrl must use https:// unless it targets localhost");
 	}
 	if (url.search || url.hash) {
@@ -276,51 +208,4 @@ export function formatCollabWebLink(
 	webUrl?: string,
 ): string {
 	return `${normalizeCollabWebBaseUrl(relayUrl, webUrl)}/#${formatCollabLink(relayUrl, roomId, key, writeToken)}`;
-}
-
-export function parseCollabLink(link: string): ParsedCollabLink | { error: string } {
-	// Lenient input: terminals that open OSC 8 links through strict URL stacks
-	// (macOS Foundation) percent-encode the legacy second `#` to `%23`.
-	let text = link.trim().replace(/%23/gi, "#");
-	// Bare `<roomId>.<key>` (legacy `<roomId>#<key>`) → default relay.
-	const bare = BARE_LINK_RE.exec(text);
-	if (bare) text = `${DEFAULT_RELAY_URL}/r/${bare[1]}.${bare[2]}`;
-	// Scheme-less `host[:port]/r/…` → wss.
-	else if (!text.includes("://")) text = `wss://${text}`;
-	let url: URL;
-	try {
-		url = new URL(text);
-	} catch {
-		return { error: `Invalid collab link: ${link}` };
-	}
-	if ((url.protocol === "http:" || url.protocol === "https:") && url.hash) {
-		const inner = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
-		const parsed = parseCollabLink(inner);
-		if (!("error" in parsed)) return parsed;
-	}
-	const normalized = normalizeRelayOrigin(url.origin);
-	if ("error" in normalized) return normalized;
-	const match = ROOM_PATH_RE.exec(url.pathname);
-	if (!match) {
-		// Non-http(s) deep links may also carry a complete collab link in the
-		// fragment. http(s) links are handled once above so invalid fragments
-		// fall through to direct relay validation instead of double-recursing.
-		const inner = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
-		if (inner && url.protocol !== "http:" && url.protocol !== "https:") return parseCollabLink(inner);
-		return { error: "Collab link must contain a /r/<roomId> path" };
-	}
-	const roomId = match[1]!;
-	// Key rides dot-joined in the path (`/r/<roomId>.<key>`); legacy links
-	// carry it in the fragment (`/r/<roomId>#<key>`).
-	const fragment = match[2] ?? (url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
-	if (!fragment) {
-		return { error: "Collab link is missing the <key> part" };
-	}
-	const secret = B64URL_RE.test(fragment) ? new Uint8Array(Buffer.from(fragment, "base64url")) : null;
-	if (!secret || (secret.byteLength !== ROOM_KEY_BYTES && secret.byteLength !== ROOM_KEY_BYTES + WRITE_TOKEN_BYTES)) {
-		return { error: "Collab link key must be 32 (view) or 48 (full) base64url bytes" };
-	}
-	const key = secret.subarray(0, ROOM_KEY_BYTES);
-	const writeToken = secret.byteLength > ROOM_KEY_BYTES ? secret.subarray(ROOM_KEY_BYTES) : undefined;
-	return { wsUrl: `${normalized.origin}/r/${roomId}`, roomId, key, writeToken };
 }

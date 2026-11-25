@@ -1,7 +1,7 @@
 import { clearSubmittedText, runWithDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { errorMessage, prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -27,7 +27,7 @@ import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "t
 import type { AgentSession } from "../session/agent-session";
 import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "../thinking/levels";
 import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { SlashCommandSpec } from "./types";
 import {

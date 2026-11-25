@@ -4,7 +4,7 @@
  */
 import { OmpMark } from "@oh-my-pi/collab-web/src/components/shell/OmpMark";
 import type { Notice } from "@oh-my-pi/collab-web/src/lib/client";
-import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { errorMessage, isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { ImagePlus, X } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type {
@@ -83,10 +83,6 @@ const EMPTY_SNAPSHOT: PanelSnapshot = {
 
 function normalizeDirs(raw: unknown): string[] {
 	return Array.isArray(raw) ? raw.filter((dir): dir is string => typeof dir === "string") : [];
-}
-
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function basename(path: string): string {
@@ -346,7 +342,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 			} catch (error) {
 				setStrip({
 					tone: "error",
-					message: `Couldn’t attach to ${hostTitle(host)}: ${errorText(error)}`,
+					message: `Couldn’t attach to ${hostTitle(host)}: ${errorMessage(error)}`,
 					action: { label: "Retry", run: () => void attachHost(host) },
 				});
 			}
@@ -448,7 +444,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 			error => {
 				setStrip({
 					tone: "error",
-					message: `Stop didn’t reach omp: ${errorText(error)}`,
+					message: `Stop didn’t reach omp: ${errorMessage(error)}`,
 					action: { label: "Retry", run: stop },
 				});
 			},
@@ -575,12 +571,12 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 					const groupTitle = `omp · ${target.getSnapshot().state?.sessionName ?? target.title}`;
 					worker.request("groupTabs", { tabIds, title: groupTitle, groupId: before?.groupId }).then(
 						({ groupId }) => updateConversation(target.id, { tabIds, groupId }),
-						error => notify("warning", `Couldn’t group the conversation’s tabs: ${errorText(error)}`),
+						error => notify("warning", `Couldn’t group the conversation’s tabs: ${errorMessage(error)}`),
 					);
 				}
 			} catch (error) {
 				composerRef.current?.restore(outgoing);
-				setStrip({ tone: "error", message: `Couldn’t send: ${errorText(error)}` });
+				setStrip({ tone: "error", message: `Couldn’t send: ${errorMessage(error)}` });
 			}
 		},
 		[worker, startRpc, settings.value.defaultCwd, shortcuts.set, updateConversation, notify],
@@ -610,7 +606,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 	const copyMarkdown = useCallback((): void => {
 		void navigator.clipboard.writeText(transcriptMarkdown(timeline())).then(
 			() => notify("info", "Transcript copied as Markdown"),
-			error => notify("error", `Couldn’t copy: ${errorText(error)}`),
+			error => notify("error", `Couldn’t copy: ${errorMessage(error)}`),
 		);
 	}, [timeline, notify]);
 
@@ -640,7 +636,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 			const { filename } = await worker.request("exportGif", { frames });
 			notify("info", `Saved ${filename}`);
 		} catch (error) {
-			notify("error", `GIF export failed: ${errorText(error)}`);
+			notify("error", `GIF export failed: ${errorMessage(error)}`);
 		}
 	}, [timeline, worker, notify]);
 
@@ -650,7 +646,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 		setCompacting(true);
 		target
 			.compact()
-			.catch(error => notify("error", `Compaction failed: ${errorText(error)}`))
+			.catch(error => notify("error", `Compaction failed: ${errorMessage(error)}`))
 			.finally(() => setCompacting(false));
 	}, [notify]);
 
@@ -711,7 +707,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 				case "open-tab-group": {
 					const first = conversation?.tabIds[0];
 					if (first !== undefined)
-						worker.request("focusTab", { tabId: first }).catch(error => notify("error", errorText(error)));
+						worker.request("focusTab", { tabId: first }).catch(error => notify("error", errorMessage(error)));
 					break;
 				}
 			}
@@ -886,7 +882,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 				const command = `omp --resume ${sessionId}`;
 				void navigator.clipboard.writeText(command).then(
 					() => notify("info", `Copied “${command}”. Paste it in a terminal.`),
-					error => notify("error", `Couldn’t copy: ${errorText(error)}`),
+					error => notify("error", `Couldn’t copy: ${errorMessage(error)}`),
 				);
 			},
 		},
@@ -939,7 +935,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 				onOpenRpc={openRpc}
 				onNewIn={cwd => {
 					startRpc(cwd, basename(cwd), activeTab === null ? [] : [activeTab.tabId]).catch(error =>
-						setStrip({ tone: "error", message: `Couldn’t start omp in ${cwd}: ${errorText(error)}` }),
+						setStrip({ tone: "error", message: `Couldn’t start omp in ${cwd}: ${errorMessage(error)}` }),
 					);
 				}}
 				onNewChat={newChat}
@@ -953,7 +949,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 							openRpc(owner);
 							const main = owner.tabIds[0];
 							if (main !== undefined)
-								worker.request("focusTab", { tabId: main }).catch(error => notify("error", errorText(error)));
+								worker.request("focusTab", { tabId: main }).catch(error => notify("error", errorMessage(error)));
 						}}
 					/>
 				) : (
@@ -1020,7 +1016,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 					onRunShortcut={shortcut => {
 						worker.request("runShortcut", { shortcutId: shortcut.id }).then(
 							() => notify("info", `Started /${shortcut.name}`),
-							error => notify("error", `Couldn’t run /${shortcut.name}: ${errorText(error)}`),
+							error => notify("error", `Couldn’t run /${shortcut.name}: ${errorMessage(error)}`),
 						);
 					}}
 					onClose={() => setSheet(null)}

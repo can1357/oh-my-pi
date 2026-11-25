@@ -89,14 +89,13 @@ describe("Antigravity CLI credential ownership", () => {
 		expect(() => parseAgyApiKey(JSON.stringify({ token: "secret" }))).toThrow();
 	});
 
-	it("keeps account ownership stable across rotations and changes host revisions", () => {
+	it("keeps account ownership stable across rotations", () => {
 		const rotated = JSON.stringify({
 			...JSON.parse(apiKey),
 			token: "rotated-access",
 			refreshToken: "rotated-refresh",
 		});
 		expect(agyCredentialKey(rotated)).toBe(agyCredentialKey(apiKey));
-		expect(agyCredentialVersion(rotated)).not.toBe(agyCredentialVersion(apiKey));
 		const other = JSON.stringify({
 			...JSON.parse(apiKey),
 			accountId: "another-account",
@@ -108,6 +107,18 @@ describe("Antigravity CLI credential ownership", () => {
 			agyCredentialKey(JSON.stringify(emailOnly)),
 		);
 		expect(() => agyCredentialKey(JSON.stringify({ ...emailOnly, email: undefined }))).toThrow();
+	});
+
+	it("changes host revisions only when agy needs to reload its staged credential source", () => {
+		const renewed = { ...JSON.parse(apiKey), token: "rotated-access", expiresAt: grant.expires + 3_600_000 };
+		expect(agyCredentialVersion(JSON.stringify(renewed))).toBe(agyCredentialVersion(apiKey));
+		expect(agyCredentialVersion(JSON.stringify({ ...renewed, refreshToken: "rotated-refresh" }))).not.toBe(
+			agyCredentialVersion(apiKey),
+		);
+		const broker = { ...renewed, refreshToken: "__remote__" };
+		expect(agyCredentialVersion(JSON.stringify(broker))).not.toBe(
+			agyCredentialVersion(JSON.stringify({ ...broker, token: grant.access, expiresAt: grant.expires })),
+		);
 	});
 
 	it("stages a private complete native file and atomically replaces it without changing another account", async () => {

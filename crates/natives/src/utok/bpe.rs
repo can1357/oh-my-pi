@@ -501,6 +501,23 @@ impl BpeEncoding {
 	}
 }
 
+/// Step `pos` backward by one UTF-16 scalar boundary (2 units for a valid
+/// surrogate pair, 1 unit otherwise), clamped to `0`.
+#[inline]
+pub(crate) fn prev_u16_boundary(units: &[u16], pos: usize) -> usize {
+	if pos == 0 {
+		return 0;
+	}
+	if pos >= 2
+		&& (0xdc00..=0xdfff).contains(&units[pos - 1])
+		&& (0xd800..=0xdbff).contains(&units[pos - 2])
+	{
+		pos - 2
+	} else {
+		pos - 1
+	}
+}
+
 /// Normalize/transcode as required, split with `splitter`, and feed each
 /// piece's UTF-8 bytes to `f`. Crate-visible so count-only families that
 /// price pieces differently (Jev) reuse the normalization and splitting
@@ -545,7 +562,7 @@ fn scan<U: Unit>(splitter: &Splitter, units: &[U], f: &mut impl FnMut(&[u8])) {
 
 /// UTF-8 bytes of one piece: identity for `u8`, otherwise re-encoded into
 /// `buf` (reused across pieces — one allocation per call, amortized nil).
-fn piece_bytes<'a, U: Unit>(piece: &'a [U], buf: &'a mut Vec<u8>) -> &'a [u8] {
+pub(crate) fn piece_bytes<'a, U: Unit>(piece: &'a [U], buf: &'a mut Vec<u8>) -> &'a [u8] {
 	if let Some(bytes) = U::as_utf8(piece) {
 		return bytes;
 	}
@@ -583,7 +600,7 @@ fn decode_lossy<U: Unit>(units: &[U]) -> String {
 
 /// NFC quick-check over the decoded codepoint stream, allocation-free
 /// (conservative: `false` means "may need normalization").
-fn nfc_quick<U: Unit>(units: &[U]) -> bool {
+pub(crate) fn nfc_quick<U: Unit>(units: &[U]) -> bool {
 	struct Cps<'a, U: Unit>(&'a [U], usize);
 	impl<U: Unit> Iterator for Cps<'_, U> {
 		type Item = u32;

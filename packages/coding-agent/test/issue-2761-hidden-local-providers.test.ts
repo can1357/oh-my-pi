@@ -45,12 +45,12 @@ interface RegistrySpec {
 	discoverable?: string[];
 	discovery?: (providerId: string) => unknown;
 	hasAuth?: (providerId: string) => boolean;
-	refresh?: (mode: string) => Promise<void>;
+	refreshIfStale?: () => Promise<boolean>;
 }
 
 function makeRegistry(spec: RegistrySpec): ModelRegistry {
 	return {
-		refresh: spec.refresh ?? (async () => {}),
+		refreshIfStale: spec.refreshIfStale ?? (async () => false),
 		refreshProvider: async () => {},
 		getError: () => undefined,
 		getAvailable: spec.models,
@@ -91,7 +91,7 @@ function createHub(registry: ModelRegistry): LayerTerminal {
 	return hub;
 }
 
-/** Flush the constructor's offline-refresh promise chain and any re-probes. */
+/** Flush the constructor's freshness-check promise chain and any re-probes. */
 async function settle(): Promise<void> {
 	for (let i = 0; i < 5; i++) {
 		await Bun.sleep(0);
@@ -185,9 +185,9 @@ describe("issue #2761: unconfigured local providers in the Model Hub sidebar", (
 		expect(normalize(hub.render(220))).toContain("lm-studio");
 	});
 
-	test("the online refresh resurfaces a hidden local when its server appears", async () => {
+	test("a stale catalog refresh resurfaces a hidden local when its server appears", async () => {
 		let serving = false;
-		const probed: string[] = [];
+		let checks = 0;
 		const hub = createHub(
 			makeRegistry({
 				models: () => {
@@ -196,33 +196,35 @@ describe("issue #2761: unconfigured local providers in the Model Hub sidebar", (
 				},
 				discoverable: ["lm-studio"],
 				discovery: id => discoveryState(id, serving ? "ok" : "unavailable"),
-				refresh: async mode => {
-					probed.push(mode);
+				refreshIfStale: async () => {
+					checks++;
 					serving = true;
+					return true;
 				},
 			}),
 		);
 		await settle();
-		expect(probed).toEqual(["online"]);
+		expect(checks).toBe(1);
 		const rendered = normalize(hub.render(220));
 		expect(rendered).toContain("lm-studio");
 		expect(rendered).toContain("local-model");
 	});
 
 	test("does not refresh a hidden local that stays down more than once when the hub opens", async () => {
-		const probed: string[] = [];
+		let checks = 0;
 		const hub = createHub(
 			makeRegistry({
 				models: () => [makeModel("prov-a", "model-a")],
 				discoverable: ["lm-studio"],
 				discovery: id => discoveryState(id, "unavailable"),
-				refresh: async mode => {
-					probed.push(mode);
+				refreshIfStale: async () => {
+					checks++;
+					return true;
 				},
 			}),
 		);
 		await settle();
-		expect(probed).toEqual(["online"]);
+		expect(checks).toBe(1);
 		expect(normalize(hub.render(220))).not.toContain("lm-studio");
 	});
 });
