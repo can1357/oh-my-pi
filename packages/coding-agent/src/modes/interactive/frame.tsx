@@ -208,9 +208,8 @@ export class AppFrame {
 			this.composer.setSlots({});
 			return;
 		}
-		const nerd = () => currentTheme().symbols.preset === "nerd";
 		const placement = computed(() => shapePlacement(composerShape(this.#shape()), this.composer.completing()));
-		const line = createStatusLine({ settings: statusLine.settings, facts: statusLine.facts, placement, nerd });
+		const line = createStatusLine({ settings: statusLine.settings, facts: statusLine.facts, placement });
 		this.composer.setStatus(line.chrome.composerStatus);
 		this.#statusPreview = line.preview;
 		this.#statusPanel.set(line.panel);
