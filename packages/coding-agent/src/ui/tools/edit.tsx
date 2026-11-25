@@ -16,16 +16,18 @@
  */
 import { editInspect } from "@oh-my-pi/pi-natives";
 import { parseCompactDiff } from "@oh-my-pi/pi-tui/text/diff";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 import { splitMagicSections } from "../../edit/magic-sections";
-import type {
-	EditMode,
-	EditToolDetails,
-	EditToolPerFileResult,
-	Operation,
-	PerFileDiffPreview,
+import { normalizeEditMode } from "../../edit/settings";
+import {
+	diffStats,
+	type EditMode,
+	type EditToolDetails,
+	type EditToolPerFileResult,
+	type Operation,
+	type PerFileDiffPreview,
 } from "../../tools/details/edit";
 import {
 	HASHLINE_TAG_SUFFIX_RE,
@@ -320,17 +322,6 @@ function callFacts(args: EditArgs, state: ToolViewState, mode: EditMode | undefi
 
 function operationTitle(op: Operation | undefined): string {
 	return op === "create" ? "Create" : op === "delete" ? "Delete" : "Edit";
-}
-
-/** Added and removed lines of a diff. */
-export function diffStats(diff: string): { added: number; removed: number } {
-	let added = 0;
-	let removed = 0;
-	for (const line of diff ? diff.split("\n") : []) {
-		if (line.startsWith("+")) added++;
-		else if (line.startsWith("-")) removed++;
-	}
-	return { added, removed };
 }
 
 function statsMeta(added: number, removed: number): string | undefined {
@@ -790,6 +781,19 @@ function editPresenter(defaultMode: EditMode | undefined): ToolPresenter<EditArg
 		call: (args, state) => callView(args ?? {}, state, defaultMode),
 		result: (result, state, args) => resultView(result, state, args, defaultMode),
 	};
+}
+
+/**
+ * The payload grammar a call to `toolName` streams, which the host threads to
+ * the call as `editMode`: apply_patch's own, the `edit` tool's `mode` getter
+ * (`undefined` for a bridge edit tool without one), none for other tools.
+ * Without it a hashline, sloppy or magic payload's target path stays unknown
+ * until the result arrives.
+ */
+export function toolEditMode(toolName: string, tool: unknown): EditMode | undefined {
+	if (toolName === "apply_patch") return "apply_patch";
+	if (toolName !== "edit" || !isRecord(tool) || typeof tool.mode !== "string") return undefined;
+	return normalizeEditMode(tool.mode);
 }
 
 export const editToolPresenter = editPresenter(undefined);

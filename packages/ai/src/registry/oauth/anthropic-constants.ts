@@ -6,7 +6,8 @@
  * only a fresh interactive login recovers the account. Observed against
  * production (grants authorized 2026-06-20/06-25 died 30d later to the hour
  * despite healthy 8h rotations); matches Claude Code's documented monthly
- * re-login. Consumers use this to warn before the deadline — it is a display
- * heuristic, not a wire contract.
+ * re-login. Consumers use this to warn before the deadline when the login
+ * recorded no server-stated end (`OAuthCredentials.refreshExpires`) — it is a
+ * display heuristic, not a wire contract.
  */
 export const ANTHROPIC_OAUTH_GRANT_TTL_MS = 30 * 24 * 60 * 60 * 1000;

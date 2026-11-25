@@ -31,6 +31,7 @@ import {
 } from "./lexer";
 import { EXTENSION_LINK_ID, extensionLinkTest } from "./links";
 import { mermaidRows } from "./mermaid";
+import { markdownLook } from "./look";
 import { type MarkdownStyles, markdownStyles, stylePrefix } from "./styles";
 import { growingTableCell, repairOrphanClosingFence, speculativeStreamingSource } from "./stream";
 import { renderTable } from "./table";
@@ -42,7 +43,7 @@ export interface MarkdownOptions {
 	readonly paddingX?: number;
 	/** Blank rows above and below the text (default 0). */
 	readonly paddingY?: number;
-	/** Palette hues for headings, emphasis, inline code and table headers (default true). */
+	/** Palette hues for headings, emphasis, inline code and table headers (default: the host's {@link markdownLook}). */
 	readonly colorful?: boolean;
 	/** Wrap links in OSC 8 hyperlinks (default false). */
 	readonly hyperlinks?: boolean;
@@ -52,7 +53,7 @@ export interface MarkdownOptions {
 	 * draw OSC 66).
 	 */
 	readonly textSizing?: boolean;
-	/** Draw ```mermaid fences as diagrams (default true). */
+	/** Draw ```mermaid fences as diagrams (default: the host's {@link markdownLook}). */
 	readonly mermaid?: boolean;
 	/** TSP span tokens every prose run is drawn with (`"muted em"` for thinking traces). */
 	readonly textStyle?: string;
@@ -815,14 +816,22 @@ export function renderMarkdown(source: string, width: number, options: MarkdownO
 	return [...renderMarkdownFrame(source, width, options).rows];
 }
 
+/** `options` with the host's look where they leave `colorful` or `mermaid` unset. */
+function withHostLook(options: MarkdownOptions): MarkdownOptions {
+	if (options.colorful !== undefined && options.mermaid !== undefined) return options;
+	const look = markdownLook();
+	return { ...options, colorful: options.colorful ?? look.colorful, mermaid: options.mermaid ?? look.mermaid };
+}
+
 /**
  * Rows of `source` at `width` and the stable prefix among them: the rows of
  * every block before the last one being written (and the blank row after
  * them), plus the top padding. With `stream` off nothing is stable: the
  * caller owns the whole document.
  */
-export function renderMarkdownFrame(source: string, width: number, options: MarkdownOptions): MarkdownFrame {
+export function renderMarkdownFrame(source: string, width: number, given: MarkdownOptions): MarkdownFrame {
 	if (!source.trim()) return { rows: [], stable: 0 };
+	const options = withHostLook(given);
 	const stream = options.stream ?? false;
 	const normalized = normalizeSource(source, stream);
 	const inner = Math.max(1, width - 2 * (options.paddingX ?? 0));

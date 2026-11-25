@@ -36,6 +36,7 @@ import {
 	createSourceMeta,
 	discoverExtensionModulePaths,
 	loadFilesFromDir,
+	mergeLoadResults,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -282,10 +283,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 		}),
 	]);
 
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -348,10 +346,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 		}),
 	]);
 
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -389,10 +384,7 @@ async function loadPrompts(ctx: LoadContext): Promise<LoadResult<Prompt>> {
 		}),
 	]);
 
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -442,10 +434,7 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 		}),
 	]);
 
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -482,10 +471,7 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 		}),
 	]);
 
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
