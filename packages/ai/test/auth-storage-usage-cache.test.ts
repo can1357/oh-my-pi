@@ -975,43 +975,6 @@ describe("AuthStorage usage cache: jitter", () => {
 	});
 });
 
-describe("AuthStorage usage cache: long-lived Anthropic login", () => {
-	it("serves header usage without probing account endpoints the inference-only token cannot read", async () => {
-		// `anthropic-long-lived` logins persist no refresh token.
-		const credential: AuthCredential = {
-			type: "oauth",
-			access: "sk-ant-oat01-long",
-			refresh: "",
-			expires: Date.now() + 300 * 24 * 3_600_000,
-			accountId: "account-long",
-			email: "long@example.com",
-		};
-		const store = makeStore([{ id: 1, provider: "anthropic", credential, disabledCause: null }]);
-		const requested: string[] = [];
-		const storage = new AuthStorage(store, {
-			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
-			usageFetch: Object.assign(
-				async (input: string | URL | Request) => {
-					requested.push(String(input));
-					return Response.json({ error: { type: "permission_error" } }, { status: 403 });
-				},
-				{ preconnect: fetch.preconnect },
-			),
-		});
-		try {
-			await storage.credentials.reload();
-			await storage.keys.get("anthropic", "s");
-			expect(storage.usage.ingestHeaders("anthropic", usageHeaders("0.02", "0.3"), { sessionId: "s" })).toBe(true);
-
-			const report = requireAnthropicReport(await storage.usage.reports());
-			expect(requireLimit(report, "anthropic:5h").amount.used).toBe(2);
-			expect(requested).toEqual([]);
-		} finally {
-			storage.close();
-		}
-	});
-});
-
 describe("AuthStorage usage cache: header ingestion", () => {
 	let store: ObservableStore;
 	let storage: AuthStorage;

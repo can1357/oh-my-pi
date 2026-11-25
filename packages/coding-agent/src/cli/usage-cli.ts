@@ -567,30 +567,43 @@ const RELOGIN_WARN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Re-login deadline line for providers whose OAuth grants expire a fixed
- * period after the interactive login (today: Anthropic, ~30 days regardless
- * of refresh rotation). The current access token keeps working past the
- * grant's end, so whichever lasts longer sets the deadline — for a long-lived
- * login, the token's own expiry a year out. Silent until the deadline is under
- * a week out — a nudge before the broker auto-disables the row, not a
- * permanent countdown.
+ * period after the interactive login (today: Anthropic). The grant ends when
+ * the server said at login, else ~30 days after it regardless of refresh
+ * rotation. The current access token keeps working past the grant's end, so
+ * whichever lasts longer sets the deadline — for a long-lived login, the
+ * token's own expiry a year out. Silent until the deadline is under a week
+ * out — a nudge before the broker auto-disables the row, not a permanent
+ * countdown.
  */
 function formatReloginDeadline(
 	account: UsageAccountIdentity,
 	nowMs: number,
 	redaction?: Map<string, string>,
 ): string | undefined {
-	if (account.provider !== "anthropic" || account.type !== "oauth" || !account.authorizedAt) return undefined;
-	const grantEnd = account.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS;
+	if (account.provider !== "anthropic" || account.type !== "oauth") return undefined;
+	const stated = account.refreshExpires !== undefined;
+	const grantEnd =
+		account.refreshExpires ??
+		(account.authorizedAt ? account.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS : undefined);
+	if (grantEnd === undefined) return undefined;
 	const deadline = Math.max(grantEnd, account.expires ?? 0);
 	const tokenBound = deadline > grantEnd;
 	const remaining = deadline - nowMs;
 	if (remaining > RELOGIN_WARN_WINDOW_MS) return undefined;
 	const label = accountIdentityLabel(account, redaction);
 	if (remaining <= 0) {
-		const reason = tokenBound ? "access token expired" : "grant is past Anthropic's ~30d lifetime";
+		const reason = tokenBound
+			? "access token expired"
+			: stated
+				? "refresh token expired"
+				: "grant is past Anthropic's ~30d lifetime";
 		return `  ${chalk.red(`⚠ ${label} — ${reason}; re-login now`)}`;
 	}
-	const reason = tokenBound ? "access token expires" : "Anthropic expires OAuth grants ~30d after login";
+	const reason = tokenBound
+		? "access token expires"
+		: stated
+			? "refresh token expires"
+			: "Anthropic expires OAuth grants ~30d after login";
 	return `  ${chalk.yellow(`⚠ ${label} — re-login within ${formatDuration(remaining)} (${reason})`)}`;
 }
 

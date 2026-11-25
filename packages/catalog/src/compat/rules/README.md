@@ -390,6 +390,7 @@ auth "anthropic" {
             access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value
             refresh "refresh_token"
             expires "seconds" path="expires_in" from="created_at" skew-ms=300000 fallback-ms=3600000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
+            refresh-expires-in "refresh_token_expires_in"   // seconds until the refresh token ends → `refreshExpires`
             email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
         }
         userinfo url="https://…/userinfo" email="email" account-id="sub"
@@ -397,8 +398,11 @@ auth "anthropic" {
         paste-key prefix="sk-or-" validate-url="https://…"   // manual input starting with prefix is an API key
     }
     refresh {                                   // or `refresh "none"` / `refresh hook="name"`
-        token url="…" body="json" { headers { anthropic-beta "oauth-2025-04-20" } }   // defaults to the login token request
+        token url="…" body="json" { headers { User-Agent "…" } }   // defaults to the login token request
         require "projectId"
+        scopes "user:profile" "user:inference"   // sent space-joined as `scope`; a 400 `invalid_scope` retries once without it
+        window-ms 300000                         // renew this close to expiry (default 60000)
+        dead-grant "invalid_grant" except-description="account_on_hold"   // only 400/401 refusals with these codes disable the login
         credential { … }                        // defaults to the login map
         after-refresh hook="…"
     }

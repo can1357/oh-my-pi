@@ -7,10 +7,11 @@ import type {
 	CompiledAuthValue,
 	CompiledCredentialField,
 	CompiledCredentialMap,
+	CompiledDeadGrant,
 	CompiledOAuthRequest,
 	CompiledUserinfo,
 } from "@oh-my-pi/pi-catalog/compat/types";
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, isRecord } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { HOOKS } from "../hooks";
@@ -184,6 +185,10 @@ export function mapCredentials(
 		const value = readField(map[key], body, claims);
 		if (value !== undefined) credentials[key] = value;
 	}
+	const refreshSeconds = map.refreshExpiresIn === undefined ? undefined : jsonPath(body, map.refreshExpiresIn);
+	if (typeof refreshSeconds === "number" && Number.isFinite(refreshSeconds)) {
+		credentials.refreshExpires = Date.now() + refreshSeconds * 1000;
+	}
 	return credentials;
 }
 
@@ -193,6 +198,34 @@ export interface RequestContext {
 	signal?: AbortSignal;
 	/** Extra headers merged under the rule's declared headers. */
 	headers?: Record<string, string>;
+	/** Refusals that prove the grant dead; when set, every failure carries that verdict. */
+	deadGrant?: CompiledDeadGrant;
+}
+
+interface OAuthRefusal {
+	code?: string;
+	description?: string;
+}
+
+/** RFC 6749 §5.2 fields of a token-endpoint refusal; some servers nest the code as `error.type`. */
+function oauthRefusal(body: unknown): OAuthRefusal {
+	if (!isRecord(body)) return {};
+	const { error, error_description: description } = body;
+	return {
+		code:
+			typeof error === "string" ? error : isRecord(error) && typeof error.type === "string" ? error.type : undefined,
+		description: typeof description === "string" ? description : undefined,
+	};
+}
+
+/** Whether a refusal proves the grant dead under `rule`; RFC 6749 refuses grants with 400 and clients with 401. */
+function isDeadGrant(rule: CompiledDeadGrant, status: number, refusal: OAuthRefusal): boolean {
+	return (
+		(status === 400 || status === 401) &&
+		refusal.code !== undefined &&
+		rule.codes.includes(refusal.code) &&
+		(rule.exceptDescription === undefined || refusal.description !== rule.exceptDescription)
+	);
 }
 
 /**
@@ -235,6 +268,8 @@ export async function postTokenRequest(
 	}
 	const timeoutSignal = AbortSignal.timeout(request.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 	const signal = context.signal ? AbortSignal.any([context.signal, timeoutSignal]) : timeoutSignal;
+	// Under a dead-grant policy a failure that reached no verdict keeps the grant.
+	const kept = context.deadGrant ? false : undefined;
 	let response: Response;
 	try {
 		response = await context.fetch(url, {
@@ -248,12 +283,17 @@ export async function postTokenRequest(
 			throw new AIError.LoginCancelledError(`OAuth login cancelled: ${String(context.signal.reason)}`);
 		}
 		if (timeoutSignal.aborted) {
-			throw new AIError.OAuthError(`Timed out waiting for ${url}`, { kind: "timeout", provider: context.provider });
+			throw new AIError.OAuthError(`Timed out waiting for ${url}`, {
+				kind: "timeout",
+				provider: context.provider,
+				definitive: kept,
+			});
 		}
 		throw new AIError.OAuthError(`${context.provider} request to ${url} failed: ${describeError(cause)}`, {
 			kind: errorKind,
 			provider: context.provider,
 			cause,
+			definitive: kept,
 		});
 	}
 	const text = await response.text();
@@ -266,9 +306,16 @@ export async function postTokenRequest(
 		}
 	}
 	if (!response.ok && errorKind !== "device-auth") {
+		const refusal = oauthRefusal(body);
 		throw new AIError.OAuthError(
 			`${context.provider} ${errorKind === "token-refresh" ? "token refresh" : "token exchange"} failed: ${response.status} ${text.slice(0, 500)}`,
-			{ kind: errorKind, provider: context.provider, status: response.status },
+			{
+				kind: errorKind,
+				provider: context.provider,
+				status: response.status,
+				code: refusal.code,
+				definitive: context.deadGrant ? isDeadGrant(context.deadGrant, response.status, refusal) : undefined,
+			},
 		);
 	}
 	return { body: body ?? text, response };

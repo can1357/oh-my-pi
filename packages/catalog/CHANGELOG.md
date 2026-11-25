@@ -13,6 +13,7 @@
 ### Changed
 
 - Changed auth rule compiler to preserve numeric parameters as numbers in token requests
+- Auth rule `refresh` blocks accept `scopes`, `window-ms`, and `dead-grant`, setting the refresh scope (with an `invalid_scope` fallback), how early tokens renew, and which token-endpoint refusals disable a login; Anthropic uses all three to match Claude Code.
 - Updated the `judge` role for OpenCode Go and Zen to prefer OpenCode's free `jev-1.13-free` model, with Zen's `jev-1.14` as a fallback.
 - Changed ai&'s default model to `moonshotai/kimi-k3`, replacing the unavailable `moonshotai/kimi-k2.7-code`.
 - Classified OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models as judge models rather than chat models.

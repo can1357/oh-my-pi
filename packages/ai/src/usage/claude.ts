@@ -704,11 +704,6 @@ function claudeUsageToken(credential: UsageCredential): string | undefined {
 async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	if (params.provider !== "anthropic") return null;
 	const credential = params.credential;
-	// Long-lived logins (`rules/auth/anthropic-long-lived.kdl`) store no refresh
-	// token and hold `user:inference` only: `/usage` and `/profile` answer 403.
-	// Their windows come from inference rate-limit headers
-	// (`parseClaudeRateLimitHeaders`), which the failure path keeps serving.
-	if (credential.type === "oauth" && !credential.refreshToken) return null;
 	const accessToken = claudeUsageToken(params.credential);
 	if (!accessToken) return null;
 

@@ -1239,6 +1239,28 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("⚠ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
 	});
 
+	it("times the warning by the server-stated grant end over the ~30d estimate", () => {
+		const now = Date.now();
+		const DAY = 24 * HOUR;
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(
+				[],
+				[
+					{
+						provider: "anthropic",
+						type: "oauth",
+						email: "stated@example.test",
+						// The ~30d estimate alone would leave 20 days and stay silent.
+						authorizedAt: now - 10 * DAY,
+						refreshExpires: now + 2 * DAY,
+					},
+				],
+				now,
+			),
+		);
+		expect(text).toContain("⚠ stated@example.test — re-login within 2d (refresh token expires)");
+	});
+
 	it("times a long-lived Anthropic login by its token expiry, not the ~30d grant", () => {
 		const now = Date.now();
 		const DAY = 24 * HOUR;
@@ -1257,7 +1279,7 @@ describe("formatUsageBreakdown", () => {
 			),
 		);
 		// Past the grant lifetime, months of token left: no warning.
-		expect(text).not.toContain("year@example.test — ");
+		expect(text).not.toContain("⚠ year@example.test");
 		expect(text).toContain("⚠ ending@example.test — re-login within 3d (access token expires)");
 	});
 

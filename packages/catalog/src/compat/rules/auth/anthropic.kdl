@@ -22,7 +22,10 @@ auth "anthropic" {
 		credential {
 			access "access_token"
 			refresh "refresh_token"
-			expires "seconds" path="expires_in" skew-ms=300000
+			// The server's own expiry; `refresh window-ms` decides when to renew.
+			expires "seconds" path="expires_in" skew-ms=0
+			// When the grant ends; `omp usage` estimates ~30d after login without it.
+			refresh-expires-in "refresh_token_expires_in"
 			account-id "account.uuid"
 			email "account.email_address"
 			org-id "organization.uuid"
@@ -33,22 +36,32 @@ auth "anthropic" {
 		after-exchange hook="anthropic-identity"
 	}
 	refresh {
-		token url="https://api.anthropic.com/v1/oauth/token" body="json" {
-			// Claude Code sends these on refresh but not on the initial code exchange.
+		// Claude Code renews every login at its one TOKEN_URL through axios,
+		// whose defaults supply these headers.
+		token url="https://platform.claude.com/v1/oauth/token" body="json" {
 			headers {
-				anthropic-beta "oauth-2025-04-20"
-				User-Agent "anthropic-sdk-typescript/{claude_code_sdk_version} userOAuthProvider"
+				Accept "application/json, text/plain, */*"
+				User-Agent "axios/{claude_code_axios_version}"
 			}
 		}
-		// Long-lived logins (`anthropic-long-lived.kdl`) store no refresh token;
-		// fail them locally with a re-login error instead of posting an empty grant.
+		// Claude Code's refresh scope set; `org:create_api_key` is login-only. A
+		// grant from before one of these scopes falls back to its own scopes.
+		scopes "user:profile" "user:inference" "user:sessions:claude_code" "user:mcp_servers" \
+			"user:file_upload" "user:plugins"
+		// 1-year logins (`anthropic-long-lived.kdl`) store no refresh token and must
+		// never refresh: fail them locally with a re-login error.
 		require "refresh"
+		// Claude Code renews within 5 minutes of the server-reported expiry.
+		window-ms 300000
+		// Claude Code ends a login only on `invalid_grant`; a held account can appeal.
+		dead-grant "invalid_grant" except-description="account_on_hold"
 		// Org fields are deliberately not remapped on refresh: the org a
 		// credential is scoped to is fixed at login and merged from the stored row.
 		credential {
 			access "access_token"
 			refresh "refresh_token"
-			expires "seconds" path="expires_in" skew-ms=300000
+			expires "seconds" path="expires_in" skew-ms=0
+			refresh-expires-in "refresh_token_expires_in"
 			account-id "account.uuid"
 			email "account.email_address"
 		}

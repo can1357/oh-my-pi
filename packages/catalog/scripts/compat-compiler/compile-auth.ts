@@ -267,6 +267,10 @@ function credentialMap(node: KdlNodeView | undefined, base?: CompiledCredentialM
 			case "expires":
 				map.expires = expiry(child);
 				break;
+			case "refresh-expires-in":
+				leaf(child, []);
+				map.refreshExpiresIn = singleString(child);
+				break;
 			default: {
 				const key = CREDENTIAL_FIELDS[child.name as keyof typeof CREDENTIAL_FIELDS];
 				if (!key) unexpected(child, "credential");
@@ -681,6 +685,23 @@ function refreshNode(node: KdlNodeView, login: CompiledLogin | undefined): Compi
 				refresh.require = positionalStrings(child);
 				if (refresh.require.length === 0 || refresh.require.some(v => !v)) malformed(child);
 				break;
+			case "scopes":
+				leaf(child, []);
+				refresh.scopes = positionalStrings(child);
+				if (refresh.scopes.length === 0 || refresh.scopes.some(v => !v)) malformed(child);
+				break;
+			case "window-ms":
+				refresh.windowMs = singleInt(child);
+				break;
+			case "dead-grant": {
+				leaf(child, ["except-description"]);
+				const codes = positionalStrings(child);
+				if (codes.length === 0 || codes.some(v => !v)) malformed(child);
+				const exceptDescription = propString(child, "except-description");
+				if (exceptDescription === "") malformed(child);
+				refresh.deadGrant = exceptDescription === undefined ? { codes } : { codes, exceptDescription };
+				break;
+			}
 			case "credential":
 				credentialNode = child;
 				break;

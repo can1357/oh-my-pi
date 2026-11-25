@@ -45,10 +45,16 @@ export type OAuthCredentials = {
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an
 	 * absolute grant lifetime (Anthropic expires the whole refresh-token
-	 * family ~30 days after authorization regardless of rotation) use it to
-	 * surface re-login deadlines before the grant dies.
+	 * family ~30 days after authorization regardless of rotation) estimate
+	 * re-login deadlines from it when {@link refreshExpires} is unknown.
 	 */
 	authorizedAt?: number;
+	/**
+	 * Epoch ms the server says the refresh token, and with it the login, ends.
+	 * Set at login from the token response; a refresh can only bring it forward
+	 * (see `mergeRefreshedCredential`).
+	 */
+	refreshExpires?: number;
 };
 
 export type OAuthProvider = OAuthProviderUnion;
