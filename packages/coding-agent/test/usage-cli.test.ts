@@ -1239,6 +1239,50 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("⚠ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
 	});
 
+	it("times the warning by the server-stated grant end over the ~30d estimate", () => {
+		const now = Date.now();
+		const DAY = 24 * HOUR;
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(
+				[],
+				[
+					{
+						provider: "anthropic",
+						type: "oauth",
+						email: "stated@example.test",
+						// The ~30d estimate alone would leave 20 days and stay silent.
+						authorizedAt: now - 10 * DAY,
+						refreshExpires: now + 2 * DAY,
+					},
+				],
+				now,
+			),
+		);
+		expect(text).toContain("⚠ stated@example.test — re-login within 2d (refresh token expires)");
+	});
+
+	it("times a long-lived Anthropic login by its token expiry, not the ~30d grant", () => {
+		const now = Date.now();
+		const DAY = 24 * HOUR;
+		const longLived = (email: string, ageDays: number, expiresInDays: number): UsageAccountIdentity => ({
+			provider: "anthropic",
+			type: "oauth",
+			email,
+			authorizedAt: now - ageDays * DAY,
+			expires: now + expiresInDays * DAY,
+		});
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(
+				[],
+				[longLived("year@example.test", 40, 325), longLived("ending@example.test", 362, 3)],
+				now,
+			),
+		);
+		// Past the grant lifetime, months of token left: no warning.
+		expect(text).not.toContain("⚠ year@example.test");
+		expect(text).toContain("⚠ ending@example.test — re-login within 3d (access token expires)");
+	});
+
 	it("renders provider-level notes once per provider, not duplicated per account or limit", () => {
 		const providerNote = "Usage data can be delayed by up to five minutes.";
 		const multiAccount = [

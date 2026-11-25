@@ -15,6 +15,8 @@ rust_library(
         "src/*.txt",
         # The `file` magic database and rule order.
         "src/file/magic*",
+        # Embedded Perl modules.
+        "src/perl/**/*.pm",
         # `include_bytes!` wire captures for the rsync sender tests.
         "src/rsync/sender/testdata/*",
     ]),
@@ -71,6 +73,7 @@ rust_library(
         "util.od",
         "util.open",
         "util.paste",
+        "util.perl",
         "util.pgrep",
         "util.pidwait",
         "util.pkill",
@@ -139,6 +142,7 @@ rust_library(
 rust_test(
     name = "builtins_test",
     crate = ":builtins",
+    data = glob(["src/perl/tests/corpus/**"]),
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     deps = all_crate_deps(normal_dev = True) + ["//crates/vendor/grep-searcher"],

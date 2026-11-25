@@ -1,0 +1,47 @@
+# Perl corpus: regex. Format and regeneration: crates/builtins/src/perl/tests.rs.
+anchor-g	my $s='aa,bb cc'; while($s =~ /\G(\w+),?/gc){print "$1|"} print pos($s),"\n";	aa|bb|5␊
+backref	my ($x)='abb' =~ /(b)\1/; print "$x\n";	b␊
+branch-reset	my ($x)='bb' =~ /(?|(a)|(b+))/; print "$x\n";	bb␊
+capture-offsets	'a12x' =~ /(\d)(\d)/; print join(',',@-),'|',join(',',@+),"\n";	1,1,2|3,2,3␊
+captures	my ($num,$word)='12-ab' =~ /(\d+)-(\w+)/; print "$num|$word\n";	12|ab␊
+end-before-final-newline	print "abc\n" =~ /abc\Z/ ? 1:0,"\n";	1␊
+end-strict	print "abc\n" =~ /abc\z/ ? 1:0,"\n";	0␊
+extended	print 'ab12' =~ / [a-z]+ \d+ /x ? 1:0,"\n";	1␊
+global-captures	my @m='x1 y2' =~ /(\w)(\d)/g; print "@m\n";	x 1 y 2␊
+global-continue	my $s='a1b'; $s =~ /\d/gc; $s =~ /\d/gc; print pos($s),"\n";	2␊
+global-list	my @m='x1y2z3' =~ /\d/g; print "@m\n";	1 2 3␊
+global-scalar	my $s='a1b2'; while ($s =~ /\d/g) {print "$&@",pos($s),'|'} print defined(pos($s))?'retained':'reset',"\n";	1@2|2@4|reset␊
+global-zero-width	my $s='axa'; while($s =~ /(?=a)/g){print pos($s),'|'} print "\n";	0|2|␊
+ignore-case	print 'AbC' =~ /abc/i ? 1:0,"\n";	1␊
+inline-modifier	print 'aBCd' =~ /a(?i:bc)d/ ? 1:0,"\n";	1␊
+keep-mark	'preMIDpost' =~ /MID/p; print "${^PREMATCH}|${^MATCH}|${^POSTMATCH}\n";	pre|MID|post␊
+last-capture	'ab' =~ /(a)(b)/; print "$+\n";	b␊
+lazy	my ($x)='aaa' =~ /(a+?)/; print "$x\n";	a␊
+list-without-captures	my @m='ab' =~ /ab/; print "@m\n";	1␊
+lookahead	my @x='cat1 catx cat2' =~ /(cat)(?=\d)/g; print "@x\n";	cat cat␊
+lookbehind	my @x='x1 y2 x3' =~ /(?<=x)\d/g; print "@x\n";	1 3␊
+match-variable	'leftMIDright' =~ /MID/; print "$`|$&|$'\n";	left|MID|right␊
+match	my $s='abc'; print $s=~/b/?1:0,"\n";	1␊
+multiline	print "left\nright\n" =~ /^right$/m ? 1:0,"\n";	1␊
+named-backref	print 'abab' =~ /(?<r>ab)\k<r>/ ? 1:0,"\n";	1␊
+named-duplicate	'ab' =~ /(?<x>a)(?<x>b)/; print $+{x},'|',join(',',@{$-{x}}),"\n";	a|a,b␊
+named-hash	'foo42' =~ /(?<word>[a-z]+)(?<num>\d+)/; print join('|',map {"$_=$+{$_}"}sort keys %+),"\n";	num=42|word=foo␊
+named	'foo42' =~ /(?<word>[a-z]+)(?<num>\d+)/; print "$+{word}|$+{num}\n";	foo|42␊
+negated	my $s='abc'; print $s!~/z/?1:0,"\n";	1␊
+negative-lookahead	my @x='cat1 catx cat2' =~ /cat(?!\d)/g; print "@x\n";	cat␊
+negative-lookbehind	my @x='x1 y2 x3' =~ /(?<!x)\d/g; print "@x\n";	2␊
+no-match	my $s='abc'; print $s=~/z/?1:0,"\n";	0␊
+noncapture-flag	'ab' =~ /(a)(?<named>b)/n; print "$1|$+{named}\n";	b|b␊
+noncapture	my @m='ab' =~ /(?:a)(b)/; print "@m\n";	b␊
+numbered	'foo42' =~ /(foo)(\d+)/; print "$1|$2\n";	foo|42␊
+optional-capture	my @m='b' =~ /(a)?(b)/; print join('|',map {$_//'-'} @m),"\n";	-|b␊
+possessive	print 'aaaa' =~ /a++a/ ? 1:0,"\n";	0␊
+quoted-interpolation	my $p='a+b'; print 'a+b' =~ /\Q$p\E/ ? 1:0,"\n";	1␊
+regex-ref	my $r=qr/abc/; print ref($r),"\n";	Regexp␊
+regex-stringify	my $r=qr/abc/im; print "$r\n";	(?^mi:abc)␊
+replace-start-keep	my $s='key=value'; $s =~ /key=\K\w+/; print "$&\n";	value␊
+reuse-pattern	'alpha' =~ /pha/; print 'elephant' =~ // ? 1:0,"\n";	1␊
+set-pos-negative	my $s='ababa'; pos($s)=-2; $s =~ /a/g; print pos($s),"\n";	5␊
+set-pos	my $s='ababa'; pos($s)=2; $s =~ /a/g; print pos($s),"\n";	3␊
+singleline	print "left\nright" =~ /left.right/s ? 1:0,"\n";	1␊
+topic	local $_='abc'; print /b/?1:0,"\n";	1␊

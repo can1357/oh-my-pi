@@ -26,15 +26,18 @@ def _make_commit():
         return [str(unit) for unit in _flat(units)] or None
 
     class _Draft:
-        __slots__ = ("id", "details", "_text")
+        __slots__ = ("id", "_details", "_text")
 
         def __init__(self, details, text):
             self.id = details["id"]
-            self.details = details
+            self._details = details
             self._text = text
 
         def __repr__(self):
             return self._text
+
+        def details(self):
+            return self._details
 
         async def _run(self, action, params, silent):
             text, details = await _call(action, {**params, "draft": self.id})
@@ -88,7 +91,7 @@ def _make_commit():
             )
             # The committed draft is gone; continue with what remains.
             self.id = details["remaining"]["id"]
-            self.details = details["remaining"]
+            self._details = details["remaining"]
             self._text = text
             return details
 

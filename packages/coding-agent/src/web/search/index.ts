@@ -21,7 +21,7 @@ import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { ty
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
 import { journalCompletion, type ModelUsageLedger } from "../../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../../session/role-models";
-import { discoverAuthStorage } from "../../sdk";
+import { discoverSessionAuthStorage as discoverAuthStorage } from "../../session/auth-broker-config";
 import type { ToolSession } from "../../tools";
 import { throwIfAborted } from "../../tools/tool-errors";
 import {
