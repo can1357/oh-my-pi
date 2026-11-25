@@ -11,6 +11,7 @@
 
 - Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Extensions can serve their own internal URL schemes with `pi.registerUrlScheme(handler)`: `read`, `write`, composer completion and the system prompt reach the handler in the sessions that load the extension, a suspended extension stops serving, and two extensions registering one scheme in a session are reported as an extension error ([#20538](https://github.com/can1357/oh-my-pi/pull/20538) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Changed
 
