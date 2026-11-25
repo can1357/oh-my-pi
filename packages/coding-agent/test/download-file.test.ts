@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { downloadFile } from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
+import { downloadFile } from "@oh-my-pi/pi-coding-agent/downloads/file";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function mockDownloadResponse(response: Response): void {

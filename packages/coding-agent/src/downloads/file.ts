@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
-import { $which, fetchWithRetry, logger, ptree, WhichCachePolicy } from "@oh-my-pi/pi-utils";
-import { trackDownload } from "../downloads/activity";
+import { fetchWithRetry, ptree } from "@oh-my-pi/pi-utils";
 
 const TOOL_DOWNLOAD_TIMEOUT_MS = 120_000;
 
@@ -105,72 +104,4 @@ export async function downloadFile(url: string, dest: string, options: DownloadF
 		}
 		throw err;
 	}
-}
-
-// Install a Python package via uv (preferred) or pip
-async function installPythonPackage(pkg: string, signal?: AbortSignal): Promise<boolean> {
-	if (signal?.aborted) return false;
-	try {
-		// Try uv first (faster, better isolation)
-		const uv = $which("uv");
-		if (uv) {
-			const result = await ptree.exec([uv, "tool", "install", pkg], {
-				signal,
-				allowNonZero: true,
-				allowAbort: true,
-				stderr: "full",
-			});
-			if (result.exitCode === 0) return true;
-			if (signal?.aborted) return false;
-		}
-
-		// Fall back to pip
-		const pip = $which("pip3") || $which("pip");
-		if (pip) {
-			const result = await ptree.exec([pip, "install", "--user", pkg], {
-				signal,
-				allowNonZero: true,
-				allowAbort: true,
-				stderr: "full",
-			});
-			return result.exitCode === 0;
-		}
-
-		return false;
-	} catch (error) {
-		logger.warn(`Failed to install Python package ${pkg}`, {
-			error: error instanceof Error ? error.message : String(error),
-		});
-		return false;
-	}
-}
-
-/** Options for {@link ensureTool}. */
-export interface EnsureToolOptions {
-	signal?: AbortSignal;
-	/** Suppress install/failure log lines. */
-	silent?: boolean;
-}
-
-/** Locates Trafilatura on PATH or installs it via uv or pip. */
-export async function ensureTool(tool: "trafilatura", options: EnsureToolOptions = {}): Promise<string | undefined> {
-	const { signal, silent = false } = options;
-	const existing = $which(tool);
-	if (existing || signal?.aborted) return existing ?? undefined;
-
-	if (!silent) logger.debug(`${tool} not found. Installing via uv/pip...`);
-	const tracker = trackDownload(tool, { detail: "installing" });
-	const success = await installPythonPackage(tool, signal);
-	if (signal?.aborted) {
-		tracker.done();
-		return undefined;
-	}
-	const installedPath = success ? $which(tool, { cache: WhichCachePolicy.Fresh }) : undefined;
-	if (installedPath) {
-		tracker.done();
-		return installedPath;
-	}
-	tracker.fail(new Error(`could not install ${tool} with uv or pip`));
-	if (!silent) logger.warn(`Failed to install ${tool}`);
-	return undefined;
 }
