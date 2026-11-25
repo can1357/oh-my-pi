@@ -254,6 +254,7 @@ describe("Chrome native host install", () => {
 				"google-chrome-canary",
 				"chromium",
 				"BraveSoftware/Brave-Browser",
+				"BraveSoftware/Brave-Origin",
 			].map(browser => `.config/${browser}/NativeMessagingHosts`),
 		},
 		{ platform: "win32", roots: [".omp/browser-relay"] },

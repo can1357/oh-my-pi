@@ -83,6 +83,16 @@ const BROWSERS: readonly BrowserDefinition[] = [
 		winInstall: "BraveSoftware\\Brave-Browser",
 		keychain: "Brave Safe Storage",
 	},
+	{
+		name: "Brave Origin",
+		darwin: "BraveSoftware/Brave-Origin",
+		linux: "BraveSoftware/Brave-Origin",
+		win32: "BraveSoftware/Brave-Origin/User Data",
+		app: "Brave Origin.app",
+		bundleId: "com.brave.Browser.origin",
+		// Linux uses brave-origin and Windows ships brave.exe (not chrome.exe), so auto-load skips Origin there.
+		keychain: "Brave Safe Storage",
+	},
 ];
 
 /** Where to look for browser user data; each defaults to this user's. */
