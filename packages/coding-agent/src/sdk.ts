@@ -2208,7 +2208,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					items: options.rules,
 					warnings: undefined,
 				})
-			: logger.time("discoverTtsrRules", () => loadCapability<Rule>(ruleCapability.id, { cwd, agentDir }));
+			: logger.time("discoverTtsrRules", () =>
+					loadCapability<Rule>(ruleCapability.id, {
+						cwd,
+						agentDir,
+						disabledExtensions: [...disabledExtensionIds],
+					}),
+				);
 	rawRulesPromise.catch(() => {});
 	const customToolPathsPromise =
 		options.restrictToolNames === true
@@ -4449,15 +4455,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Sessions handed an explicit rule set (subagents inherit the parent's) keep it
 			// but still re-bucket, so live `ttsr.*` filter changes apply to them too.
 			if (hasSession) {
+				const disabledExtensions = [...cfgDisabledExtensions.get(settings)];
 				// These reads share only the cwd and discovery scope. Start them together:
 				// a slow repository lookup must not delay context files or rules, including
 				// the first refresh after session_start hooks have edited those files.
 				const [repoContext, refreshedContextFiles, ruleItems] = await Promise.all([
 					logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd),
 					pinnedContextFiles === undefined
-						? logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-								...cfgDisabledExtensions.get(settings),
-							])
+						? logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, disabledExtensions)
 						: undefined,
 					options.rules ??
 						logger
@@ -4467,6 +4472,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								loadCapability<Rule>(ruleCapability.id, {
 									cwd: promptCwd,
 									agentDir,
+									disabledExtensions,
 									extensionRoots: buildSessionExtensionRoots(),
 								}),
 							)
