@@ -8,7 +8,7 @@
 
 ### Changed
 
-- A provider's authored seed rows now survive that provider's `exclude-models` rules at generation, so a family exclusion such as xai-oauth's `prefix="grok-voice-"` no longer drops a seeded runner row ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 ## [19.2.1] - 2026-11-25
 
 ### Fixed

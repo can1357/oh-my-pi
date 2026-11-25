@@ -4,7 +4,7 @@
 
 ### Added
 
-- Dictation accepts `xai-stt` models such as `xai-oauth/grok-voice-transcribe-2.0` instead of warning "Unsupported speech-to-text API"; the `tts` tool keeps its 15,000-character cap, the shared floor across its speech backends ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
