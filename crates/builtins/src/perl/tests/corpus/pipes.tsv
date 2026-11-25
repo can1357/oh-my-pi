@@ -1,0 +1,15 @@
+# Perl corpus: pipes. Format and regeneration: crates/builtins/src/perl/tests.rs.
+backticks-list	my @s=`printf 'one\ntwo\n'`; print scalar(@s),"|",@s;	2|one␊two␊
+backticks	my $s=`printf 'one\ntwo\n'`; print "$s$?\n";	one␊two␊0␊
+capture-exit	my $s=`echo ok; exit 9`; chomp $s; print "$s|",$?>>8,"\n";	ok|9␊
+pipe-close-status	open my $f,'-|','sh','-c','echo ok; exit 5' or die $!; print scalar <$f>; print close($f)?1:0,'|',$?>>8,"\n";	ok␊0|5␊
+pipe-read-list	open my $f,'-|','echo','hello' or die $!; print scalar <$f>; print close($f)?1:0,"|$?\n";	hello␊1|0␊
+pipe-read-shell	open my $f,'-|',q{printf 'yes\n' | cat} or die $!; print scalar <$f>; close $f;	yes␊
+pipe-read-two-arg	open my $f,'echo hello |' or die $!; print scalar <$f>; close $f;	hello␊
+pipe-write-two-arg	open my $f,'| cat' or die $!; print {$f} "written\n"; close $f or die $!;	written␊
+pipe-write	open my $f,'|-','cat' or die $!; print {$f} "written\n"; close $f or die $!;	written␊
+qx-quote	my $x='hello'; my $s=qx{echo $x}; print $s;	hello␊
+system-exit	my $v=system('sh','-c','exit 7'); print "$v|",$?>>8,"\n";	1792|7␊
+system-explicit	my $v=system {'echo'} 'echo','hello'; print "$v|$?\n";	hello␊0|0␊
+system-list	my $v=system('echo','hello'); print "$v|$?\n";	hello␊0|0␊
+system-shell	my $v=system(q{printf 'left\n' | cat}); print "$v|$?\n";	left␊0|0␊

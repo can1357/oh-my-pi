@@ -1,0 +1,5 @@
+{
+	"extends": "../../../tsconfig.workspace.json",
+	"include": ["."],
+	"exclude": ["tasks"]
+}

@@ -1,0 +1,15 @@
+# Perl corpus: formats. Format and regeneration: crates/builtins/src/perl/tests.rs.
+center	our $x="cat";␊format STDOUT =␊<@||||>␊$x␊.␊write;	< cat >␊
+decimal	our $x=1.25;␊format STDOUT =␊@###.##␊$x␊.␊write;	   1.25␊
+expressions	our $x=3;␊format STDOUT =␊<@>>> @>>> >␊$x+1, $x*2␊.␊write;	<   4    6 >␊
+file	open my $f,">","data" or die $!; my $old=select($f); $~="BODY"; select($old);␊format BODY =␊hello␊.␊write $f; close $f;		after:data=hello␊
+formline-accumulate	formline "@<<<<\n", "abc"; formline "@>>>>\n", "xyz"; print $^A;	abc␊  xyz␊
+formline	formline "@<<<<\n", "abc"; print $^A;	abc␊
+left	our $x="cat";␊format STDOUT =␊<@<<<<>␊$x␊.␊write;	<cat  >␊
+multiple-lines	our $x="cat";␊format STDOUT =␊Fixed header␊@<<<< one␊$x␊@>>>> two␊$x␊.␊write;	Fixed header␊cat   one␊  cat two␊
+named	format OTHER =␊custom␊.␊$~="OTHER"; write;	custom␊
+repeat	our $x="one two three four";␊format STDOUT =␊^<<<< ~~␊$x␊.␊write;	one␊two␊three␊four␊
+right	our $x="cat";␊format STDOUT =␊<@>>>> >␊$x␊.␊write;	<  cat >␊
+static	␊format STDOUT =␊Hello format␊.␊write;	Hello format␊
+suppress-empty	our $x="";␊format STDOUT =␊~ @<<<<␊$x␊shown␊.␊write;	shown␊
+top-of-page	format STDOUT_TOP =␊HEADER␊.␊format STDOUT =␊body␊.␊write;	HEADER␊body␊

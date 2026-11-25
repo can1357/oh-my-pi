@@ -158,12 +158,13 @@ export async function renderGalleryState(
 	if (fixture.renderState) {
 		return await fixture.renderState(state, width, expanded);
 	}
+	const toolName = fixture.renderer ?? name;
 	const call = new ToolCall({
 		id: `gallery-${name}`,
-		name,
+		name: toolName,
 		label: fixture.label ?? name,
 		args: state === "streaming" ? (fixture.streamingArgs ?? fixture.args) : fixture.args,
-		presenter: toolPresenter(fixture.renderer ?? name),
+		presenter: toolPresenter(toolName),
 		now: () => GALLERY_NOW,
 	});
 	call.setExpanded(expanded);

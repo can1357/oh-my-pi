@@ -15,7 +15,6 @@ import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-in
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { initTheme } from "../src/ui/theme/service";
@@ -117,7 +116,6 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 			undefined,
 			createModeTerminal().frame,
 		);
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 		cleanups.push(() => mode.stop());
 		await mode.init();
 		const modes = ctx?.sessionModes;

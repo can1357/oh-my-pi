@@ -1,5 +1,10 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
-import { signal } from "@oh-my-pi/pi-tui";
+import { expect, test } from "bun:test";
+import { createRoot, resolveChildren, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { bubbleEvent, bubbleKey, pathTo } from "@oh-my-pi/pi-tui/dispatch";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import {
 	type JobsPanelDetail,
 	JobsPanel,
@@ -7,7 +12,7 @@ import {
 	type JobsPanelSource,
 } from "../../../../src/ui/overlays/pickers/jobs-panel";
 import type { JobWidgetView } from "../../../../src/tools/details/job-widget";
-import { type Driver, pickerSuite } from "./harness";
+import { type Driver, keyFromRaw, nodeAtKeypath, pickerSuite } from "./harness";
 
 // The capture's own clock (its cases ran in order: `jobs` moved it 1.5s for the rest).
 const NOW = 1_900_000_000_000;
@@ -68,6 +73,104 @@ const JOBS: JobsPanelSnapshot = {
 	],
 	agents: [{ id: "CreditAudit", parentId: "root" }],
 };
+
+const GROUPED_JOBS: JobsPanelSnapshot = {
+	rootId: "root",
+	agents: [
+		{ id: "Verify", parentId: "root" },
+		{ id: "Audit", parentId: "root" },
+	],
+	running: [
+		{ id: "main", type: "bash", status: "running", label: "run suite", startTime: NOW - 10_000, ownerId: "root" },
+		{ id: "verify", type: "bash", status: "running", label: "check diff", startTime: NOW - 7_000, ownerId: "Verify" },
+		{ id: "audit-1", type: "bash", status: "running", label: "read ledger", startTime: NOW - 2_000, ownerId: "Audit" },
+		{ id: "audit-2", type: "bash", status: "running", label: "sort ledger", startTime: NOW - 1_000, ownerId: "Audit" },
+	],
+	recent: [],
+};
+
+const LIST_PATH = "split/master/jobs";
+
+function withGroupedJobs(check: (root: UiNode, list: () => UiNode, cancelled: string[]) => void): void {
+	createRoot(dispose => {
+		try {
+			const cancelled: string[] = [];
+			const source: JobsPanelSource = {
+				load: () => GROUPED_JOBS,
+				inspect: () => undefined,
+				cancel: id => void cancelled.push(id),
+				close() {},
+			};
+			const [root] = resolveChildren(<JobsPanel source={source} selected="audit-2" now={() => NOW} />)();
+			if (!root) throw new Error("missing jobs panel");
+			const list = (): UiNode => {
+				const node = nodeAtKeypath(root, LIST_PATH);
+				if (!node) throw new Error("missing jobs list");
+				return node;
+			};
+			check(root, list, cancelled);
+		} finally {
+			dispose();
+		}
+	});
+}
+
+test("describes subagents without task jobs as plain headings in tree order", () => {
+	withGroupedJobs((_root, list) => {
+		const theme = currentTheme();
+		const branch = theme.symbols.symbol("tree.branch");
+		const last = theme.symbols.symbol("tree.last");
+		expect(describeTree(list(), staticEnvironment(theme))).toEqual({
+			k: "list",
+			key: "jobs",
+			p: { selected: "audit-2", max: { lines: 12 }, actions: { click: "select", dblclick: "activate" } },
+			c: [
+				{ k: "text", key: expect.any(String), p: { role: "omp.jobs.group", spans: [{ t: "Audit" }], wrap: "none" } },
+				expect.objectContaining({
+					k: "item",
+					key: "audit-1",
+					p: expect.objectContaining({ label: [{ t: `${branch} `, s: "mono dim" }, { t: "read ledger", s: "mono" }] }),
+				}),
+				expect.objectContaining({ k: "item", key: "audit-2" }),
+				{ k: "text", key: expect.any(String), p: { role: "omp.jobs.group", spans: [{ t: "Verify" }], wrap: "none" } },
+				expect.objectContaining({
+					k: "item",
+					key: "verify",
+					p: expect.objectContaining({ label: [{ t: `${last} `, s: "mono dim" }, { t: "check diff", s: "mono" }] }),
+				}),
+				expect.objectContaining({ k: "item", key: "main" }),
+			],
+		});
+	});
+});
+
+test("moves selection across a painted heading and keeps row actions keyed by job", () => {
+	withGroupedJobs((root, list, cancelled) => {
+		const theme = currentTheme();
+		const env = staticEnvironment(theme);
+		const last = theme.symbols.symbol("tree.last");
+		const groupRows = () => paintNode(env, root, 80).rows.slice(3, 7);
+		expect(groupRows()).toEqual([
+			`> ${last} running  bash 1.0s  sort ledger`,
+			"  Verify",
+			`  ${last} running  bash 7.0s  check diff`,
+			"  running  bash 10.0s  run suite",
+		]);
+
+		bubbleKey([root], keyFromRaw("\x1b[B"));
+		expect(groupRows()).toEqual([
+			`  ${last} running  bash 1.0s  sort ledger`,
+			"  Verify",
+			`> ${last} running  bash 7.0s  check diff`,
+			"  running  bash 10.0s  run suite",
+		]);
+
+		expect(bubbleEvent(pathTo([root], list()), { type: "activate", key: LIST_PATH, item: "main" })).toBe(true);
+		expect(groupRows()[3]).toBe("> running  bash 10.0s  run suite");
+		bubbleKey([root], keyFromRaw("x"));
+		expect(cancelled).toEqual(["main"]);
+	});
+});
 
 const LONG_COMMAND = Array.from({ length: 40 }, (_, i) => `echo step ${i} && sleep 1`).join("\n");
 const DETAILS: Record<string, JobsPanelDetail> = {

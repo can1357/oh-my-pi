@@ -329,6 +329,32 @@ describe("native reconciler", () => {
 		expect(h.ops()).toEqual([["set", "main/0/0", { title: "two" }]]);
 	});
 
+	it("morphs a re-created node that moved up since it was first described", async () => {
+		const before = signal(["x", "y", "z"]);
+		const text = signal("a");
+		const h = await mount(() => ({
+			main: (
+				<>
+					<For each={before}>{t => <text text={t} />}</For>
+					{() => (
+						<col>
+							<text text={text()} />
+						</col>
+					)}
+				</>
+			),
+		}));
+		// The col leaves index 3 for index 2, whose id `main/2` the block after `x` still holds.
+		before.set(["y", "z"]);
+		h.settle();
+		expect(h.ops()).toEqual([["del", "main/0"]]);
+		for (const next of ["ab", "abc"]) {
+			text.set(next);
+			h.settle();
+			expect(h.ops()).toEqual([["text", "main/3/0", "append", next.slice(-1)]]);
+		}
+	});
+
 	it("re-adds a node whose kind changed under a fresh id, deleting the old one last", async () => {
 		const code = signal(false);
 		const h = await mount(() => ({
@@ -979,6 +1005,57 @@ describe("native pacing and transport", () => {
 		h.clock.advance(1);
 		expect(h.tern.frames.length).toBe(sent + 1);
 		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "ab" });
+	});
+
+	it("redraws a large replacement transcript in UTF-8-bounded frames", async () => {
+		const replace = signal(false);
+		const block = "界".repeat(3 * 1024 * 1024);
+		const h = await mount(
+			() => {
+				const old = (
+					<card key="old" ref={settle}>
+						<text>Old chat</text>
+					</card>
+				);
+				const removed = (
+					<text key="removed" ref={settle}>
+						Removed from the new view
+					</text>
+				);
+				const a = <text key="a">{block}</text>;
+				const b = <text key="b">{block}</text>;
+				const c = <text key="c">{block}</text>;
+				return { main: () => (replace() ? [a, old, b, c] : [removed, old]) };
+			},
+			{ credits: 3, autoAck: false },
+		);
+		const start = h.tern.received.length;
+		h.tern.ackAll();
+		replace.set(true);
+		h.settle();
+		const frameSizes = () =>
+			h.tern.received
+				.slice(start)
+				.filter(m => m.verb === "f")
+				.map(m => Buffer.byteLength(m.body));
+		expect(Math.max(...frameSizes())).toBeLessThanOrEqual(24 * 1024 * 1024);
+		expect(frameSizes()).toHaveLength(1);
+
+		// Retention can remove both a queued insertion anchor and a row about to be deleted.
+		const doc = h.tern.doc("s:t");
+		expect(
+			doc.apply([
+				["del", "main/old"],
+				["del", "main/removed"],
+			]),
+		).toEqual([]);
+		h.tern.event({ ev: "gone", sf: "s:t", ids: ["main/old", "main/removed"] });
+		h.tern.ackAll();
+		h.settle();
+		expect(frameSizes()).toHaveLength(2);
+		expect(Math.max(...frameSizes())).toBeLessThanOrEqual(24 * 1024 * 1024);
+		expect(doc.tree("main").c?.map(node => node.id)).toEqual(["main/a", "main/b", "main/c"]);
+		expect(h.tern.errors).toEqual([]);
 	});
 
 	it("chunks frames over the negotiated APC limit", async () => {
