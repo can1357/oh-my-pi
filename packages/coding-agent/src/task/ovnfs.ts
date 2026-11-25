@@ -23,15 +23,17 @@
  * The record stays until removal is confirmed: a failed removal keeps it, and
  * reusing the slot moves it aside instead of deleting it.
  *
+ * The checkouts record the session that spawned the run (`ovnfs ls` SESSION).
+ *
  * @example
  * // Picked by the task runner when ovnfs is found and `isolation.backend` is auto:
- * const open = ovnfsWorkspace("/work/ovnfs/bin/ovnfs");
+ * const open = ovnfsWorkspace("/work/ovnfs/bin/ovnfs", parentSessionId);
  * const workspace = await open(repoRoot, "AuthRefactor"); // workspace.dir: /work/.tree/agents/omp-authrefactor-1a2b3c
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { callOvnfs, checkoutStem, type NewReply, removeCheckout } from "../ovnfs/checkouts";
+import { callOvnfs, checkoutStem, type NewReply, newCheckout, removeCheckout } from "../ovnfs/checkouts";
 import { OvnfsError, socketFeatures } from "../ovnfs/client";
 import { startDaemon } from "../ovnfs/daemon";
 import { type CheckoutRecord, OVNFS_CHECKOUT_FILE, releaseOvnfsCheckout } from "../ovnfs/task-record";
@@ -93,6 +95,8 @@ class OvnfsWorkspace implements IsolationWorkspace {
 		private baseDir: string,
 		private readonly command: string,
 		private readonly checkout: string,
+		/** The session that spawned the run, which its checkouts record. */
+		private readonly session: string | undefined,
 		/** The checkout's capture when it is the run's starting state; then no baseline is taken at start. */
 		capture: { base: string; repoRoot: string } | undefined,
 	) {
@@ -132,7 +136,7 @@ class OvnfsWorkspace implements IsolationWorkspace {
 		// A start checkout an earlier, interrupted call left behind.
 		await removeCheckout(this.command, start);
 		try {
-			const reply = await callOvnfs<NewReply>(this.command, "new", { base, name: start });
+			const reply = await newCheckout(this.command, { base, name: start, session: this.session });
 			return await captureIsolationBaseline(reply.checkout.path, repoRoot);
 		} finally {
 			try {
@@ -199,10 +203,10 @@ async function claimFreeSlot(baseDir: string): Promise<boolean> {
 
 /**
  * Workspaces that are ovnfs checkouts of the repository, opened through the ovnfs
- * executable `command`. Failures say what is wrong with ovnfs; there is no
- * silent fallback to native isolation.
+ * executable `command` for runs that session `session` spawns. Failures say
+ * what is wrong with ovnfs; there is no silent fallback to native isolation.
  */
-export function ovnfsWorkspace(command: string): OpenWorkspace {
+export function ovnfsWorkspace(command: string, session?: string): OpenWorkspace {
 	return async (repoRoot, agentId) => {
 		const baseDir = taskIsolationBaseDir(repoRoot, agentId);
 		if (!(await claimFreeSlot(baseDir))) {
@@ -243,9 +247,9 @@ export function ovnfsWorkspace(command: string): OpenWorkspace {
 			const record: CheckoutRecord = { command, checkout };
 			await Bun.write(path.join(baseDir, OVNFS_CHECKOUT_FILE), JSON.stringify(record));
 			recorded = true;
-			const reply = await callOvnfs<NewReply>(command, "new", { dir: repoRoot, name: checkout });
+			const reply = await newCheckout(command, { dir: repoRoot, name: checkout, session });
 			const capture = await startingCapture(command, repoRoot, reply);
-			return new OvnfsWorkspace(reply.checkout.path, baseDir, command, checkout, capture);
+			return new OvnfsWorkspace(reply.checkout.path, baseDir, command, checkout, session, capture);
 		} catch (err) {
 			// `exists` refused the name: that checkout predates this attempt, so
 			// only the new local record goes — removing the checkout would

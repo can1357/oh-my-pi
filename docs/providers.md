@@ -157,6 +157,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | Provider ID                      | Environment variable(s)                                                             |
 | -------------------------------- | ----------------------------------------------------------------------------------- |
 | `abliteration`                   | `ABLITERATION_API_KEY`, then `ABLIT_KEY`                                            |
+| `arkanecloud`                    | `ARKANECLOUD_API_KEY`                                                               |
 | `aiand`                          | `AIAND_API_KEY`                                                                     |
 | `cerebras`                       | `CEREBRAS_API_KEY`                                                                  |
 | `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`                     |
@@ -203,6 +204,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                      |
 | `qianfan`                        | `QIANFAN_API_KEY`                                                                   |
 | `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                      |
+| `refuseless`                     | `REFUSELESS_API_KEY`                                                                |
 | `synthetic`                      | `SYNTHETIC_API_KEY`                                                                 |
 | `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                              |
 | `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                           |
