@@ -159,6 +159,8 @@ describe("plan-yolo approval autosave", () => {
 			restoreThinkingLevel: () => {},
 			resolveDefaultPrewalk: () => undefined,
 			resolveAutoPrewalkTarget: () => undefined,
+			resolveAutoPrewalkPlanner: () => "unused",
+			prepareAutoPrewalkPlanner: async () => "unused",
 			classifyAutoPrewalk: async () => undefined,
 			emitNotice: (level, message, source) => {
 				notices.push({ level, message, source });
@@ -167,6 +169,7 @@ describe("plan-yolo approval autosave", () => {
 				modelTemporaryCalls.push(args);
 				return true;
 			},
+			setThinkingLevel: () => {},
 			setActiveToolsByName: async () => {},
 			restoreNonMCPToolPresentation: async () => {},
 			getAllToolNames: () => [],

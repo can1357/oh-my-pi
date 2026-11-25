@@ -27,6 +27,7 @@ import {
 	signal,
 	type UiEvent,
 } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import type { TspPickerItem, TspSpan } from "@oh-my-pi/pi-wire";
 import type { HookSelectorSlider } from "../../../modes/view-model/overlays/hook-selector";
@@ -422,11 +423,13 @@ export function HookSelector(props: HookSelectorProps): JSXNode {
 			const text = plainInlineMarkdown(option.label);
 			if (radio) {
 				const filled = selectedIndex() === index;
-				return [{ t: `${filled ? "◉" : "○"} `, s: filled && !isDisabled ? "accent" : "dim" }, { t: text }];
+				const marker = currentTheme().symbols.symbol(filled ? "radio.selected" : "radio.unselected");
+				return [{ t: `${marker} `, s: filled && !isDisabled ? "accent" : "dim" }, { t: text }];
 			}
 			if (props.selectionMarker === "checkbox" && index < markable) {
 				const on = checked.has(index);
-				return [{ t: `${on ? "☑" : "☐"} `, s: on && !isDisabled ? "success" : "dim" }, { t: text }];
+				const marker = currentTheme().symbols.symbol(on ? "checkbox.checked" : "checkbox.unchecked");
+				return [{ t: `${marker} `, s: on && !isDisabled ? "success" : "dim" }, { t: text }];
 			}
 			return [{ t: text }];
 		};

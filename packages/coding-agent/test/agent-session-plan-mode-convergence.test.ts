@@ -9,6 +9,8 @@
  *  T3. A plan-mode turn that stops without a decision tool call is reminded at the
  *      terminal settle, bounded by PLAN_MODE_REMINDER_MAX (then yields to the
  *      user), and either decision tool resets the counter.
+ *  T4. Leaving plan mode drops its read-only rules from model context, both live
+ *      and on session restore, so execution turns do not refuse edits.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
@@ -20,7 +22,7 @@ import {
 	type ToolApproval,
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
-import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockCall, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -29,6 +31,7 @@ import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm, PLAN_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -205,6 +208,7 @@ describe("AgentSession plan-mode convergence", () => {
 				messages: [],
 			},
 			streamFn: mock.stream,
+			convertToLlm,
 		});
 		const currentAgent = agent;
 
@@ -304,6 +308,40 @@ describe("AgentSession plan-mode convergence", () => {
 		);
 		expect(sawIrc).toBe(true);
 		expect(harness.mock.calls.length).toBe(0);
+	});
+
+	it("T4a: plan rules stop reaching the model once plan mode exits", async () => {
+		const harness = await createPlanSession([
+			{ content: [{ type: "toolCall", name: "ask", arguments: {} }] },
+			{ content: ["asked"] },
+			{ content: ["asked again"] },
+			{ content: ["editing"] },
+		]);
+		const requestText = (call: MockCall | undefined) => JSON.stringify(call?.context.messages);
+
+		await harness.session.prompt("plan a harmless edit");
+		await harness.session.waitForIdle();
+		harness.session.setPlanModeState(undefined);
+		await harness.session.prompt("plan mode is off; make the edit");
+		await harness.session.waitForIdle();
+
+		const execRequest = requestText(harness.mock.calls.at(-1));
+		expect(requestText(harness.mock.calls[0])).toContain("Plan mode active.");
+		expect(execRequest).toContain("plan mode is off; make the edit");
+		expect(execRequest).not.toContain("Plan mode active.");
+	});
+
+	it("T4b: persisted plan rules are not restored into model context", async () => {
+		const harness = await createPlanSession([]);
+		harness.session.sessionManager.appendCustomMessageEntry(
+			PLAN_MODE_CONTEXT_MESSAGE_TYPE,
+			"<critical>Plan mode active. stale</critical>",
+			false,
+		);
+
+		const restored = convertToLlm(harness.session.sessionManager.buildSessionContext().messages);
+
+		expect(JSON.stringify(restored)).not.toContain("Plan mode active.");
 	});
 
 	it("T3a: convergence reminders are bounded by the cap, then yield to the user", async () => {

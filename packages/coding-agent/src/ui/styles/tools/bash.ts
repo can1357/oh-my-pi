@@ -18,6 +18,7 @@ import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
 import type { BashStat, BashTerm } from "../../tools/bash";
 import { resultPictures, withoutDrawnPlaceholders } from "./file-common";
 import {
+	bracketed,
 	capLines,
 	frameInner,
 	frameRows,
@@ -66,7 +67,7 @@ export function commandLines(theme: Theme, command: string, prefix: string, lang
 
 function statText(theme: Theme, stat: BashStat): string {
 	const icon = stat.icon ? (stat.icon.includes(".") ? theme.symbols.symbol(stat.icon) : stat.icon) : "";
-	const text = icon ? `${icon} ${stat.text}` : stat.text;
+	const text = icon ? `${icon}${stat.iconSeparator ?? " "}${stat.text}` : stat.text;
 	return theme.fg(stat.color ?? "dim", text);
 }
 
@@ -137,7 +138,7 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	const outputLines = output.trim().length > 0 ? ansiLines(output).map(line => theme.fg("toolOutput", line)) : [];
 	const limit = Math.min(term.previewLines ?? PREVIEW_WINDOW_ROWS, PREVIEW_WINDOW_ROWS);
 	const shown = expanded ? outputLines : tailRows(theme, outputLines, limit, frameInner(width));
-	if (term.warning) shown.push(theme.fg("warning", `⟦${term.warning}⟧`));
+	if (term.warning) shown.push(theme.fg("warning", bracketed(theme, term.warning)));
 	const stats = (term.stats ?? []).map(stat => statText(theme, stat));
 	if (term.liveClock) {
 		const seconds = Math.floor(runningMs(props, cx) / 1000);

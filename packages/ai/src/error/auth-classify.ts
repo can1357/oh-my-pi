@@ -1,4 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
+import { ProviderHttpError } from "./classes";
 import {
 	classify,
 	Flag,
@@ -7,6 +8,7 @@ import {
 	isClinePassSurfaceGateMessage,
 	isOAuthExpiry,
 	isUsageLimit,
+	status,
 } from "./flags";
 import { OAuthError } from "./oauth";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
@@ -34,6 +36,19 @@ export function isInvalidatedOAuthTokenError(error: unknown): boolean {
 	}
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 	return message !== undefined && INVALIDATED_OAUTH_TOKEN_PATTERN.test(message);
+}
+
+/** Whether Anthropic explicitly refused OAuth for the account's organization, not just this request. */
+export function isAnthropicOAuthOrganizationDenial(provider: string, error: unknown): boolean {
+	if (provider !== "anthropic") return false;
+	const rawStatus = typeof error === "string" ? /^\s*(\d{3})\b/.exec(error)?.[1] : undefined;
+	const responseStatus = status(error) ?? (rawStatus === undefined ? undefined : Number(rawStatus));
+	if (responseStatus !== undefined && responseStatus !== 403) return false;
+	if (error instanceof ProviderHttpError && error.code === "oauth_not_allowed_for_organization") return true;
+	const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+	return /\boauth_not_allowed_for_organization\b|\bOAuth authentication is currently not allowed for this organization\b/i.test(
+		message,
+	);
 }
 
 /**

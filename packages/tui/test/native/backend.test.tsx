@@ -981,6 +981,57 @@ describe("native pacing and transport", () => {
 		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "ab" });
 	});
 
+	it("redraws a large replacement transcript in UTF-8-bounded frames", async () => {
+		const replace = signal(false);
+		const block = "界".repeat(3 * 1024 * 1024);
+		const h = await mount(
+			() => {
+				const old = (
+					<card key="old" ref={settle}>
+						<text>Old chat</text>
+					</card>
+				);
+				const removed = (
+					<text key="removed" ref={settle}>
+						Removed from the new view
+					</text>
+				);
+				const a = <text key="a">{block}</text>;
+				const b = <text key="b">{block}</text>;
+				const c = <text key="c">{block}</text>;
+				return { main: () => (replace() ? [a, old, b, c] : [removed, old]) };
+			},
+			{ credits: 3, autoAck: false },
+		);
+		const start = h.tern.received.length;
+		h.tern.ackAll();
+		replace.set(true);
+		h.settle();
+		const frameSizes = () =>
+			h.tern.received
+				.slice(start)
+				.filter(m => m.verb === "f")
+				.map(m => Buffer.byteLength(m.body));
+		expect(Math.max(...frameSizes())).toBeLessThanOrEqual(24 * 1024 * 1024);
+		expect(frameSizes()).toHaveLength(1);
+
+		// Retention can remove both a queued insertion anchor and a row about to be deleted.
+		const doc = h.tern.doc("s:t");
+		expect(
+			doc.apply([
+				["del", "main/old"],
+				["del", "main/removed"],
+			]),
+		).toEqual([]);
+		h.tern.event({ ev: "gone", sf: "s:t", ids: ["main/old", "main/removed"] });
+		h.tern.ackAll();
+		h.settle();
+		expect(frameSizes()).toHaveLength(2);
+		expect(Math.max(...frameSizes())).toBeLessThanOrEqual(24 * 1024 * 1024);
+		expect(doc.tree("main").c?.map(node => node.id)).toEqual(["main/a", "main/b", "main/c"]);
+		expect(h.tern.errors).toEqual([]);
+	});
+
 	it("chunks frames over the negotiated APC limit", async () => {
 		const long = "é漢🙂 ".repeat(40);
 		const h = await mount(() => ({ main: <text>{long}</text> }), { apc: 32 });

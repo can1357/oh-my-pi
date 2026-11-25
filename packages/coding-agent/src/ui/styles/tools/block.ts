@@ -20,6 +20,7 @@ import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { imageLabel, paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
+import { terminalPaddingX } from "../terminal-padding";
 import { tint, tintRow } from "./default";
 import { imageLink, resultPictures } from "./file-common";
 import { lookFor, type ToolProps, toolProps } from "./look";
@@ -187,13 +188,15 @@ function paintLookRows(node: UiNode, cx: PaintContext): Block {
 		const rows = ["", ...inner.rows.map(row => ` ${row}`), ""].map(row => tintRow(cx.theme, key, row, cx.width));
 		return { rows };
 	}
-	if (look.inset) {
-		const inner = look.paint(node, withContext(still, { width: Math.max(1, cx.width - 1) }));
+	const paddingX = look.inset ? terminalPaddingX() : 0;
+	if (paddingX > 0) {
+		const pad = " ".repeat(paddingX);
+		const inner = look.paint(node, withContext(still, { width: Math.max(1, cx.width - paddingX) }));
 		return {
 			...inner,
-			rows: inner.rows.map(row => (row === "" ? row : ` ${row}`)),
-			...(inner.hits ? { hits: inner.hits.map(hit => ({ ...hit, col: hit.col + 1 })) } : {}),
-			...(inner.cursor ? { cursor: { row: inner.cursor.row, col: inner.cursor.col + 1 } } : {}),
+			rows: inner.rows.map(row => (row === "" ? row : pad + row)),
+			...(inner.hits ? { hits: inner.hits.map(hit => ({ ...hit, col: hit.col + paddingX })) } : {}),
+			...(inner.cursor ? { cursor: { row: inner.cursor.row, col: inner.cursor.col + paddingX } } : {}),
 		};
 	}
 	return look.paint(node, still);
