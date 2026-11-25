@@ -25,6 +25,11 @@ function bundled(provider: "anthropic", id: string): Model<Api> {
 	return model;
 }
 
+/** A bundled row with explicit catalog metrics, so the test does not depend on the bundled catalog's scores. */
+function scoredFixture(): Model<Api> {
+	return { ...bundled("anthropic", "claude-fable-5"), int: 65.7, tps: 66.2 } as Model<Api>;
+}
+
 /** Run `omp models --json` over an exact model set and parse what it printed. */
 async function listAsJson(models: Model<Api>[]): Promise<ListedModel[]> {
 	const authStorage = await AuthStorage.create(":memory:");
@@ -74,7 +79,7 @@ describe("omp models --json catalog metrics", () => {
 	});
 
 	it("prints null for an unscored model instead of omitting the keys", async () => {
-		const scored = bundled("anthropic", "claude-fable-5");
+		const scored = scoredFixture();
 		const unscored = { ...scored, id: "unscored-fixture", int: undefined, tps: undefined } as Model<Api>;
 
 		const listed = await listAsJson([scored, unscored]);
@@ -85,14 +90,14 @@ describe("omp models --json catalog metrics", () => {
 		expect(row).toHaveProperty("tps", null);
 		// Same listing, other row scored: the null is the model's own fact, not
 		// the whole `--json` path dropping the fields.
-		expect(listed.find(entry => entry.id === scored.id)?.int).toBe(scored.int as number);
+		expect(listed.find(entry => entry.id === scored.id)?.int).toBe(65.7);
 	});
 
 	it("prints a zero output speed as unmeasured, matching the model browser", async () => {
-		const model = { ...bundled("anthropic", "claude-fable-5"), tps: 0 } as Model<Api>;
+		const model = { ...scoredFixture(), tps: 0 } as Model<Api>;
 		const [listed] = await listAsJson([model]);
 		expect(listed?.tps).toBeNull();
 		// The score survives: zero speed disqualifies `tps` alone.
-		expect(listed?.int).toBe(model.int as number);
+		expect(listed?.int).toBe(65.7);
 	});
 });
