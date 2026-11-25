@@ -103,6 +103,23 @@ describe("session picker search", () => {
 		expect(harness.filtered()).toEqual(ids(reference));
 	});
 
+	it("shows each session's model on its row and finds the session by it", () => {
+		const sessions = [
+			makeSession("a", { firstMessage: "fix the parser", model: "anthropic/claude-sonnet-4-5" }),
+			makeSession("b", { firstMessage: "fix the parser again", model: "openai/gpt-5.2" }),
+			makeSession("c", { firstMessage: "fix the parser thrice" }),
+		];
+		const harness = makeHarness(sessions);
+
+		// A regression drops the model from the row, so a session cannot be told apart by it.
+		const text = harness.selector.text(120);
+		expect(text).toContain("anthropic/claude-sonnet-4-5");
+		expect(text).toContain("openai/gpt-5.2");
+
+		harness.type("gpt-5");
+		expect(harness.filtered()).toEqual(["b"]);
+	});
+
 	it("follows the latest query when it changes mid-typing", () => {
 		const sessions = makeCorpus();
 		const harness = makeHarness(sessions);

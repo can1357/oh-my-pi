@@ -15,6 +15,8 @@ export interface SessionSelectorEntry {
 	firstMessage: string;
 	allMessagesText: string;
 	status?: SessionSelectorStatus;
+	/** `provider/model` of the session's last assistant reply; absent when it is not known. */
+	model?: string;
 	/** Path to the parent session when this one was forked. */
 	parentSessionPath?: string;
 }
@@ -40,6 +42,7 @@ function sessionSearchText(session: SessionSelectorEntry): string {
 		session.cwd ?? "",
 		session.firstMessage ?? "",
 		session.allMessagesText,
+		session.model ?? "",
 		session.path,
 	];
 	return parts.filter(Boolean).join(" ");

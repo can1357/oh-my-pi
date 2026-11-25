@@ -60,6 +60,12 @@ export interface SessionInfo {
 	 * synthesized {@link SessionInfo}s (cross-project stubs, tests) leave it unset.
 	 */
 	status?: SessionStatus;
+	/**
+	 * `provider/model` of the session's last persisted assistant reply. Unset
+	 * when the session never replied, when the listing read no tail window, or
+	 * when the reply lies outside it.
+	 */
+	model?: string;
 }
 
 export interface ResolvedSessionMatch {
@@ -163,14 +169,23 @@ export function sessionDisplayName(info: SessionInfo): string {
 	return `Untitled · ${time}`;
 }
 
+interface SessionTail {
+	status: SessionStatus;
+	model?: string;
+}
+
 /**
- * Derive a {@link SessionStatus} from a tail window of a session file. Entries are
- * newline-terminated on write, so within the window only the first line can be a
- * partial fragment — it simply fails to parse and is skipped. We walk backwards to
- * the last `message` entry and classify by its role / stop reason.
+ * Derive {@link SessionStatus} and the last assistant's `provider/model` from
+ * a tail window of a session file. Entries are newline-terminated on write,
+ * so within the window only the first line can be a partial fragment — it
+ * simply fails to parse and is skipped. We walk backwards to the last
+ * `message` entry and classify it by role / stop reason, and on to the last
+ * assistant turn for the model; neither is guessed past the window.
  */
-function deriveSessionStatus(suffix: string): SessionStatus {
-	if (!suffix) return "unknown";
+function deriveSessionTail(suffix: string): SessionTail {
+	const tail: SessionTail = { status: "unknown" };
+	let statusFound = false;
+	if (!suffix) return tail;
 	const lines = suffix.split("\n");
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i];
@@ -184,16 +199,28 @@ function deriveSessionStatus(suffix: string): SessionStatus {
 		} catch {
 			continue;
 		}
-		if (entry.type === "message" && entry.message) {
-			return statusFromTailMessage(entry.message);
+		const message = entry.type === "message" ? entry.message : undefined;
+		if (!message) continue;
+		if (!statusFound) {
+			tail.status = statusFromTailMessage(message);
+			statusFound = true;
 		}
+		if (tail.model === undefined && message.role === "assistant" && message.provider && message.model) {
+			// Transcript text: it reaches the terminal row, the Tern column and the
+			// search haystack, so control characters are stripped here, once.
+			const model = sanitizeSessionName(`${message.provider}/${message.model}`);
+			if (model) tail.model = model;
+		}
+		if (statusFound && tail.model !== undefined) break;
 	}
-	return "unknown";
+	return tail;
 }
 
 interface TailMessage {
 	role?: string;
 	stopReason?: string;
+	provider?: string;
+	model?: string;
 	content?: unknown;
 }
 
@@ -547,7 +574,7 @@ async function scanSessionFile(
 			size,
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
-			status: withStatus ? deriveSessionStatus(suffix) : undefined,
+			...(withStatus ? deriveSessionTail(suffix) : { status: undefined }),
 		};
 		// The cache keeps its own shallow copy; hits also hand out copies, so
 		// callers can never mutate the shared cached object.
@@ -990,7 +1017,7 @@ async function lastActivity(session: SessionInfo, storage: SessionStorage): Prom
 		let reachedHeader = false;
 		for (let i = lines.length - 1; i >= 0 && !reachedHeader; i--) {
 			const line = lines[i];
-			// Same cheap rejection as deriveSessionStatus: blank lines and the leading partial fragment.
+			// Same cheap rejection as deriveSessionTail: blank lines and the leading partial fragment.
 			if (line.charCodeAt(0) !== 123) continue;
 			let entry: {
 				type?: unknown;

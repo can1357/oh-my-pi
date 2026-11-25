@@ -3,7 +3,7 @@
  * rename card `omp.overlay.sessions` too): a frame holding the load status or
  * error, the search field, and the sessions that fit the terminal, each a
  * heading row (bold behind a `❯` when selected), its first message under a
- * title, and a dim facts row (age, size, current, status, fork, folder), with
+ * title, and a dim facts row (age, size, current, status, fork, model, folder), with
  * a scrollbar once they overflow. A delete question or the rename form takes
  * the list's place. The key hints close the frame, pinned to the terminal's
  * last rows in the fullscreen picker. The list scrolls at its edge; a new
@@ -39,6 +39,8 @@ export type SessionsLookRow = {
 	readonly pinned: boolean;
 	readonly status?: string;
 	readonly fork: boolean;
+	/** `provider/model` of the session's last assistant reply; empty when it is not known. */
+	readonly model: string;
 	/** The session's folder; empty when the picker does not show folders. */
 	readonly cwd: string;
 };
@@ -171,6 +173,7 @@ function listRows(
 			facts += ` ${dot} ${theme.style(tone, `${theme.symbols.symbol(symbol)} ${label}`)}`;
 		}
 		if (row.fork) facts += ` ${dot} ${dim(`${theme.symbols.icon("branch")} fork`)}`;
+		if (row.model) facts += ` ${dot} ${dim(row.model)}`;
 		if (row.cwd) facts += ` ${dot} ${dim(row.cwd)}`;
 		rows.push(truncate(facts, rowWidth));
 		// The last session ends flush against the hints, whose blank row stands in for its own.
