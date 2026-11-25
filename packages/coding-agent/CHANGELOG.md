@@ -353,6 +353,9 @@
 - Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
 - Ask form option notes wrap as you type in the terminal, with a visible caret on pasted carriage returns and title arrows when a very long draft is only partly shown ([#20880](https://github.com/can1357/oh-my-pi/pull/20880) by [@brianzilla](https://github.com/brianzilla)).
 - Model discovery reads the reasoning effort ladder, default level and mandatory flag from `/v1/models` rows that publish them as a `reasoning: { supported_efforts, default_effort, mandatory }` object (the OpenRouter shape), not only from flat `supported_reasoning_levels` ([#20879](https://github.com/can1357/oh-my-pi/pull/20879) by [@Xytronix](https://github.com/Xytronix))
+- Declining a provider's consent screen during `/login` or `omp login` now reports the sign-in as canceled, in the terminal and on the browser page, instead of as a failed login
+- A classifier refusal now ends the turn and is handed back to the agent instead of re-sending the refused content to every fallback chain entry at full price; only the zero-cost retry Anthropic's fallback credit grants still switches, and `retry.fallbackRevertPolicy: cooldown-expiry` restores the primary after it ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
+- Provider content-filter stops (Bedrock `content_filtered`, Anthropic's content filtering policy, Gemini's blocked-by-content-filters wording) no longer retry or walk the fallback chain ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
 
 ### Removed
 
