@@ -1,10 +1,12 @@
-import { setSystemTime } from "bun:test";
+import { expect, setSystemTime, test } from "bun:test";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import type { PsBoard } from "../../../../src/cli/ps-model";
 import type { ProcSpec, UnitScope, UnitSnapshot } from "../../../../src/daemon/daemon-types";
 import type { PsTopHost } from "../../../../src/modes/view-model/apps/ps-top";
 import { PsTop, PsTopModel } from "../../../../src/ui/apps/ps-top";
-import { type AppDriver, appSuite } from "../harness";
+import { type AppDriver, appSuite, paintAppRows } from "../harness";
 
 setSystemTime(new Date(CORPUS_NOW));
 
@@ -91,6 +93,19 @@ function host(opts: Opts): PsTopHost {
 		close: () => {},
 	};
 }
+
+test("the process board paints ASCII selection and info shortcuts", () => {
+	const env = staticEnvironment(loadThemeSync("dark", { symbolPreset: "ascii" }));
+	const opts = { rows: 24 };
+	const model = new PsTopModel(host(opts), { all: false, rows: () => opts.rows, onQuit: () => {} });
+	model.board.set(board(opts, false));
+	try {
+		const rows = paintAppRows(() => PsTop({ model }), env, 130);
+		expect(rows.find(row => row.includes("all scopes"))).toContain("Up/Down select · Enter info");
+	} finally {
+		model.dispose();
+	}
+});
 
 const CASES: Record<string, Opts> = {
 	board: { rows: 24 },
