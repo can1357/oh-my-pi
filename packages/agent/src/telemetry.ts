@@ -1233,7 +1233,7 @@ export function failChatSpan(
 }
 
 function applyChatResponseAttributes(span: Span, message: AssistantMessage): void {
-	span.setAttribute(GenAIAttr.ResponseModel, message.model);
+	span.setAttribute(GenAIAttr.ResponseModel, message.upstreamModel ?? message.model);
 	if (message.responseId) span.setAttribute(GenAIAttr.ResponseId, message.responseId);
 	if (message.upstreamProvider) {
 		span.setAttribute(OmpGenAIAttr.ResponseUpstreamProvider, message.upstreamProvider);
