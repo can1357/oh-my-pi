@@ -58,6 +58,7 @@ import { DEFAULT_USAGE_REQUEST_TIMEOUT_MS, UsageCache } from "./auth/usage-cache
 import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
+export { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "./auth/blocks";
 export {
 	isSameOAuthAccount,
 	isSqliteBusyError,
