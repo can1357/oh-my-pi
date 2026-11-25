@@ -514,12 +514,6 @@ export function routingVariantPlain(provider: string, wireModel: string): string
 	return undefined;
 }
 
-/** Whether any routing-variant suffix is declared for `provider`. */
-export function hasRoutingVariants(provider: string): boolean {
-	const lower = provider.toLowerCase();
-	return rules.taxonomy.collapse.routingVariants.some(rule => rule.providers.includes(lower));
-}
-
 /** Whether `provider`'s discovery recovers canonical intrinsic parameters. */
 export function recoversCanonicalParams(provider: string): boolean {
 	const lower = provider.toLowerCase();

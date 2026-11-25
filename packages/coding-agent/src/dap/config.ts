@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isRecord, logger, ptree, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+import { Process } from "@oh-my-pi/pi-natives";
+import { isRecord, logger, WhichCachePolicy } from "@oh-my-pi/pi-utils";
 import { hasRootMarkers, parseConfigContent, resolveCommand } from "../lsp/config";
 import { type ConfigFileAdapter, configFileSources } from "../utils/config-file-sources";
 import DEFAULTS from "./defaults.json" with { type: "json" };
@@ -389,24 +390,6 @@ const RUNTIME_ADAPTERS: ReadonlyArray<readonly [RegExp, string]> = [
 
 const ATTACH_PROBE_TIMEOUT_MS = 1_000;
 
-/** Executable name of a running process, or undefined when it cannot be read. */
-async function processImageName(pid: number): Promise<string | undefined> {
-	try {
-		if (process.platform === "linux") {
-			return (await fs.promises.readFile(`/proc/${pid}/comm`, "utf-8")).trim() || undefined;
-		}
-		if (process.platform === "win32") return undefined;
-		const result = await ptree.exec(["ps", "-o", "comm=", "-p", String(pid)], {
-			allowNonZero: true,
-			signal: AbortSignal.timeout(ATTACH_PROBE_TIMEOUT_MS),
-		});
-		const image = result.stdout.trim();
-		return image ? path.basename(image) : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
 /** Whether `host:port` serves a V8 inspector (node --inspect), which js-debug attaches to. */
 async function isV8Inspector(host: string, port: number): Promise<boolean> {
 	try {
@@ -437,8 +420,9 @@ export async function selectAttachAdapter(
 	}
 	const available = getAvailableAdapters(cwd);
 	const byName = (name: string) => available.find(adapter => adapter.name === name);
-	if (target.pid !== undefined) {
-		const image = await processImageName(target.pid);
+	const pid = target.pid;
+	if (pid !== undefined && Number.isInteger(pid) && pid > 0 && pid <= 0x7fff_ffff) {
+		const image = Process.fromPid(pid)?.executableName();
 		const runtimeAdapter = image ? RUNTIME_ADAPTERS.find(([pattern]) => pattern.test(image))?.[1] : undefined;
 		const match = runtimeAdapter ? byName(runtimeAdapter) : undefined;
 		if (match) return match;

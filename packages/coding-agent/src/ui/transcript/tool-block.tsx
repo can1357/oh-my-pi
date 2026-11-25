@@ -49,24 +49,22 @@ import { toolPresenter } from "../tools/registry";
 import { settledRevision } from "../shell/transcript";
 import { presentShellScript, presentShellTrace } from "../tools/shell-viz";
 import { imageBlob, inlineImageTerm } from "./messages/image";
+import { presenterRows } from "./figures/presented-block";
 import { RESULT_IMAGE_ROLE } from "./image-links";
 import { ShellVizState } from "./shell-viz-state";
 import type { ToolCommandResolver } from "../tools/tool-command";
+
+/** An extension presenter's own compact row: its label and the rows below it (theme-token spans kept). */
+export interface CompactRow {
+	readonly label?: TspText;
+	readonly rows?: readonly TspText[];
+}
 
 /**
  * How an extension transcript presenter wants a call shown: as usual, as a
  * compact line (optionally with its own label and rows), or not at all.
  */
-export type ToolPresentation =
-	| "full"
-	| "compact"
-	| "hidden"
-	| {
-			readonly compact: {
-				readonly label?: string;
-				readonly rows?: readonly string[];
-			};
-	  };
+export type ToolPresentation = "full" | "compact" | "hidden" | { readonly compact: CompactRow };
 
 /** A tool result as the transcript receives it (images included). */
 export interface ToolCallResult extends ToolResult {
@@ -742,8 +740,7 @@ function compactBody(presentation: ToolPresentation): JSXNode {
 	if (typeof presentation !== "object") return undefined;
 	const rows = presentation.compact.rows ?? [];
 	if (rows.length === 0) return undefined;
-	const spans = rows.flatMap((row, i) => (i === 0 ? [{ t: row }] : [{ t: "\n" }, { t: row }]));
-	return <text spans={spans} wrap="none" />;
+	return <text spans={presenterRows(rows)} wrap="none" />;
 }
 
 /** The transcript tool block of `call`. */

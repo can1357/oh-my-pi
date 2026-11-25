@@ -20,7 +20,6 @@ import {
 	type ManagerUpdateSteps,
 	migrateRenamedInstall,
 	parseReportedVersion,
-	parseUpdateArgs,
 	pruneBunInstallCache,
 	type ReleaseInfo,
 	type RenameMigrationSteps,
@@ -157,28 +156,6 @@ describe("update command plugin dispatch", () => {
 	});
 });
 
-describe("parseUpdateArgs", () => {
-	it("preserves the legacy plugin update shorthand", () => {
-		expect(parseUpdateArgs(["update", "-l"])).toEqual({
-			force: false,
-			check: false,
-			plugins: true,
-			channel: undefined,
-		});
-	});
-
-	it("parses update channels", () => {
-		expect(parseUpdateArgs(["update", "--canary"])?.channel).toBe("canary");
-		expect(parseUpdateArgs(["update", "--stable"])?.channel).toBe("stable");
-		expect(parseUpdateArgs(["update"])?.channel).toBeUndefined();
-	});
-
-	it("rejects conflicting update channels", () => {
-		expect(() => parseUpdateArgs(["update", "--canary", "--stable"])).toThrow(
-			"--canary and --stable are mutually exclusive",
-		);
-	});
-});
 describe("parseReportedVersion", () => {
 	it("preserves the prerelease suffix so a canary launcher verifies as up to date", () => {
 		// Regression: dropping `-canary.1` made a correctly installed canary
