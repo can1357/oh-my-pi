@@ -21,7 +21,7 @@ import type { Skill, SkillRediscoveryHost } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
-import type { InternalUrlRouter, LocalProtocolOptions } from "../internal-urls";
+import type { InternalUrlRouter, LocalProtocolOptions, UrlSchemeSource } from "../internal-urls";
 import type { DaemonCompletionEvent } from "../daemon/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManagerApi, MCPToolScope } from "../mcp";
@@ -488,6 +488,8 @@ export interface ToolSession {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** This session's URL router: its own schemes (RPC host URIs), then the built-ins. Unset: built-ins only. */
 	urlRouter?: InternalUrlRouter;
+	/** The RPC host URI schemes this session resolves; task subagents it spawns on its thread inherit them. */
+	hostUriSources?: readonly UrlSchemeSource[];
 	/** Settings instance for passing to subagents */
 	settings: Settings;
 	/** Plan mode state (if active) */

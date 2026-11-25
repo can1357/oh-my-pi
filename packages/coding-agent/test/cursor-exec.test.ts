@@ -29,6 +29,8 @@ import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { SessionUrlSchemes } from "@oh-my-pi/pi-coding-agent/internal-urls/scheme-table";
+import { RpcHostUriBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-uris";
 import {
 	bridgeToolMap,
 	createBridgeEditTool,
@@ -2177,6 +2179,27 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 
 		expect(result.isError).toBe(false);
 		expect(await Bun.file(target).exists()).toBe(false);
+	});
+
+	// The write-policy check classifies the path with the session router, so the delete must too:
+	// a URL of the session's own schemes is refused, never removed as a same-named local file.
+	it("refuses a URL of the session's host scheme and leaves the same-named local file", async () => {
+		const schemes = new SessionUrlSchemes();
+		new RpcHostUriBridge(() => {}, schemes.hostUris).setSchemes([{ scheme: "db" }]);
+		const lookalike = path.join(cwd, "db:", "x");
+		await Bun.write(lookalike, "local file");
+		const handlers = new CursorExecHandlers({
+			urlRouter: schemes.router,
+			cwd,
+			tools: new Map(),
+			allowDirectFileMutation: true,
+			getToolContext: () => yoloToolContext(),
+		});
+
+		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del-url", path: "db://x" }));
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(lookalike).text()).toBe("local file");
 	});
 
 	it("returns the deleted file size in details, including zero-byte files", async () => {

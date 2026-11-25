@@ -59,6 +59,21 @@ export class UrlSchemeTable implements UrlSchemeSource {
 export class SessionUrlSchemes {
 	/** Schemes the RPC host registered for this session (`set_host_uri_schemes`). */
 	readonly hostUris = new UrlSchemeTable("Host URI scheme");
-	/** The session's router: {@link hostUris}, then the built-ins. */
-	readonly router = new InternalUrlRouter([this.hostUris]);
+	/**
+	 * The host URI schemes this session resolves: its own {@link hostUris}, then the
+	 * ones it inherited from the session that spawned it. Read live, never written.
+	 */
+	readonly hostUriSources: readonly UrlSchemeSource[];
+	/** The session's router: {@link hostUriSources}, then the built-ins. */
+	readonly router: InternalUrlRouter;
+
+	/**
+	 * `parentHostUris` is the spawning session's {@link hostUriSources}: a task
+	 * subagent on the parent's thread resolves the RPC host's schemes the parent
+	 * resolves, including ones the host registers after the spawn.
+	 */
+	constructor(parentHostUris: readonly UrlSchemeSource[] = []) {
+		this.hostUriSources = [this.hostUris, ...parentHostUris];
+		this.router = new InternalUrlRouter(this.hostUriSources);
+	}
 }

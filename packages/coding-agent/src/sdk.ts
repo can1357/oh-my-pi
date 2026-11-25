@@ -164,6 +164,7 @@ import {
 	type LocalProtocolOptions,
 	outRepliesActive,
 	SessionUrlSchemes,
+	type UrlSchemeSource,
 } from "./internal-urls";
 import { onJudgeRejection } from "./judgment";
 import { holdSharedLsp } from "./lsp/client";
@@ -1021,6 +1022,11 @@ export interface CreateAgentSessionOptions {
 
 	/** Override local:// protocol options for subagent local:// sharing. Default: uses the session's own artifacts dir and session ID. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/**
+	 * The spawning session's RPC host URI schemes (`ToolSession.hostUriSources`), resolved
+	 * after this session's own. Set only for a subagent on the parent's thread.
+	 */
+	parentHostUriSources?: readonly UrlSchemeSource[];
 
 	/** Settings instance. Default: Settings.init({ cwd, agentDir }) */
 	settings?: Settings;
@@ -2701,9 +2707,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		};
 		// This session's own URL schemes; its tools and the AgentSession resolve through one router.
-		const urlSchemes = new SessionUrlSchemes();
+		const urlSchemes = new SessionUrlSchemes(options.parentHostUriSources);
 		const toolSession: ToolSession = {
 			urlRouter: urlSchemes.router,
+			hostUriSources: urlSchemes.hostUriSources,
 			get cwd() {
 				return sessionManager.getCwd();
 			},

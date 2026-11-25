@@ -92,8 +92,9 @@ describe("RpcHostUriBridge", () => {
 		expect(resource.contentType).toBe("application/json");
 		expect(resource.notes).toEqual(["fresh"]);
 
-		// The other session never reaches the host: the URL falls through to the built-ins' MCP resource fallback.
-		await expect(otherSession.router.resolve("db://users/42")).rejects.toThrow("No MCP manager available");
+		// The other session never reaches the host: the URL falls through to the built-ins' MCP resource
+		// fallback, whose message depends on whether an earlier test left a process MCP manager behind.
+		await expect(otherSession.router.resolve("db://users/42")).rejects.toThrow(/MCP/);
 		expect(out.frames).toHaveLength(1);
 		bridge.clear("test cleanup");
 	});

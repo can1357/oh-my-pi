@@ -1718,10 +1718,11 @@ a message or fall back to `content` for textual error surfacing:
 - The agent's `edit` tool does not target host URIs. Hosts that want to
   mutate virtual files expose `write` and let the model use the `write` tool
   with replacement content.
-- Schemes belong to the RPC session: its tools resolve them, while other
-  sessions in the same process and the session's subagents do not.
-  `set_host_uri_schemes` replaces the previous set, dropping anything not in
-  the new list.
+- Schemes belong to the RPC session: its tools resolve them, and so do the
+  task subagents it runs on the main thread, including schemes registered
+  after the spawn. Other sessions in the same process, and subagents placed in
+  a worker thread (`task.workerThreads`), do not. `set_host_uri_schemes`
+  replaces the previous set, dropping anything not in the new list.
 - Schemes are normalized to lowercase before registration.
 - Send `content` for successful reads; the current bridge treats an omitted
   value as an empty string. `contentType` defaults to `text/plain` and its

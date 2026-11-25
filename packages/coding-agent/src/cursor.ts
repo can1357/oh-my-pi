@@ -51,6 +51,7 @@ import { approvalTargetKey } from "./tools/approval-targets";
 import { getApprovalGrants } from "./tools/approval-cache";
 import {
 	confineToWorkspace,
+	isInternalUrlPath,
 	resolveReadPathAsync,
 	resolveToCwd,
 	splitPathAndSelPreferringLiteral,
@@ -385,16 +386,22 @@ async function materializeEdit(
 	pathArg: string,
 	content: string,
 ): Promise<ToolResultMessage> {
-	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
+	// A URL of the session's schemes is written through its handler, so there is no local preimage to diff.
+	const router = options.urlRouter;
+	const absolutePath = isInternalUrlPath(pathArg, router)
+		? undefined
+		: resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd, router);
 	let before: string | undefined;
-	try {
-		before = await fs.promises.readFile(absolutePath, "utf8");
-	} catch (error) {
-		if (isEnoent(error)) before = "";
+	if (absolutePath !== undefined) {
+		try {
+			before = await fs.promises.readFile(absolutePath, "utf8");
+		} catch (error) {
+			if (isEnoent(error)) before = "";
+		}
 	}
 	const written = await executeTool(withoutEvents(options), "write", toolCallId, { path: pathArg, content });
 	const result: ToolResultMessage = { ...written, toolName: "edit" };
-	if (!written.isError && before !== undefined) {
+	if (!written.isError && before !== undefined && absolutePath !== undefined) {
 		// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
 		const { diff, firstChangedLine } = editDiffString(
 			normalizeToLF(stripBom(before).text),
@@ -474,11 +481,12 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 
 	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: { path: pathArg } });
 
-	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
 	let isError = false;
 	let result: AgentToolResult<unknown>;
 
 	try {
+		// The session router, as in the write-policy check: a URL of the session's schemes is refused, not deleted as a local path.
+		const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd, options.urlRouter);
 		let fileStat: fs.Stats | undefined;
 		try {
 			fileStat = fs.statSync(absolutePath);
@@ -1052,7 +1060,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			// frame write anywhere this process can reach, so confine it here
 			// rather than trusting the declaration.
 			const cwd = this.options.getCwd?.() ?? this.options.cwd;
-			const absolutePath = confineToWorkspace(downloadPath, cwd);
+			const absolutePath = confineToWorkspace(downloadPath, cwd, this.options.urlRouter);
 			if (!absolutePath) throw new Error(`Refusing to download outside the workspace: ${downloadPath}`);
 			await writeWithoutFollowingLinks(absolutePath, payload);
 			// The path echoed back is the one the frame asked for; the model

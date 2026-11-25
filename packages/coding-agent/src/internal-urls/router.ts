@@ -396,7 +396,7 @@ export class InternalUrlRouter {
 
 	/**
 	 * Absolute roots of every `sandbox`-scope writable scheme (plan mode keeps them writable), located
-	 * for `context` through {@link locateSync}; {@link register} requires such schemes to be linkable.
+	 * for `context` through {@link locateSync}; {@link assertProtocolHandlerSpec} requires such schemes to be linkable.
 	 */
 	sandboxRoots(context?: ResolveContext): string[] {
 		const roots: string[] = [];

@@ -72,7 +72,7 @@ async function fileExistsAsync(filePath: string): Promise<boolean> {
 	}
 }
 
-function normalizeAtPrefix(filePath: string): string {
+function normalizeAtPrefix(filePath: string, router: InternalUrlRouter): string {
 	if (!filePath.startsWith("@")) return filePath;
 
 	const withoutAt = filePath.slice(1);
@@ -85,8 +85,8 @@ function normalizeAtPrefix(filePath: string): string {
 		withoutAt.startsWith("~/") ||
 		// Windows absolute paths (drive letters / UNC / root-relative)
 		path.win32.isAbsolute(withoutAt) ||
-		// Internal URL shorthands (built-in schemes: this is filesystem path normalization)
-		InternalUrlRouter.builtins().canHandle(withoutAt)
+		// Internal URL shorthands of the caller's router
+		router.canHandle(withoutAt)
 	) {
 		return withoutAt;
 	}
@@ -106,7 +106,12 @@ function stripFileUrl(filePath: string): string {
 
 export { expandTilde };
 
-export function expandPath(filePath: string): string {
+/**
+ * Normalize a user-typed path: stray `@`/`:` prefixes, `file://` URLs, Unicode spaces,
+ * Windows extended-length prefixes and `~`. A leading `@` is stripped from a URL of a
+ * scheme `router` handles; callers with no session pass nothing and get the built-ins.
+ */
+export function expandPath(filePath: string, router: InternalUrlRouter = InternalUrlRouter.builtins()): string {
 	// Some models intermittently prefix an otherwise-valid path with a stray
 	// `:` (e.g. `:/abs/path`, `:../rel`, or the Windows forms `:C:\repo\file`
 	// and `:.\src`). No real path starts with `:` and it never begins a
@@ -117,7 +122,7 @@ export function expandPath(filePath: string): string {
 	// `..\`, drive-letter `C:`) path shapes.
 	const deColoned = /^:(?=[/\\~]|\.\.?[/\\]|[A-Za-z]:)/.test(filePath) ? filePath.slice(1) : filePath;
 	const normalized = stripWindowsExtendedLengthPathPrefix(
-		stripFileUrl(normalizeUnicodeSpaces(normalizeAtPrefix(deColoned))),
+		stripFileUrl(normalizeUnicodeSpaces(normalizeAtPrefix(deColoned, router))),
 	);
 	return expandTilde(normalized);
 }
@@ -300,19 +305,19 @@ export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: strin
 }
 
 /**
- * Filesystem-path guard: refuses a built-in internal URL. Reached only after a tool's own URL
- * routing, so it checks the process-wide built-in schemes, not a session's.
+ * Filesystem-path guard: refuses a URL of a scheme `router` handles. Tools route their URLs
+ * before resolving a path, so this catches callers that act on the filesystem directly.
  */
-function assertNotInternalUrl(expanded: string, original: string): void {
-	if (!InternalUrlRouter.builtins().canHandle(expanded)) return;
+function assertNotInternalUrl(expanded: string, original: string, router: InternalUrlRouter): void {
+	if (!router.canHandle(expanded)) return;
 	throw new Error(
 		`Path "${original}" uses internal scheme "${extractUriScheme(expanded)}://" and must be resolved through the proper protocol handler, not as a filesystem path.`,
 	);
 }
 
 /** Whether `filePath` (after `@`/single-slash alias normalization) is a URL of a scheme `router` handles. */
-function isInternalUrlPath(filePath: string, router: InternalUrlRouter): boolean {
-	return router.canHandle(expandPath(filePath));
+export function isInternalUrlPath(filePath: string, router: InternalUrlRouter): boolean {
+	return router.canHandle(expandPath(filePath, router));
 }
 
 /**
@@ -323,9 +328,16 @@ function isInternalUrlPath(filePath: string, router: InternalUrlRouter): boolean
  * often pass `/` to mean “search from here”, and letting tools escape to the
  * filesystem root is almost never what they intended. A shell `cd` target is
  * not a tool input: use {@link resolveShellDirectory}.
+ *
+ * Throws on a URL of a scheme `router` handles: pass the session's router when
+ * the path reaches the filesystem without going through the session's URL routing.
  */
-export function resolveToCwd(filePath: string, cwd: string): string {
-	return resolveDirectory(filePath, cwd, true);
+export function resolveToCwd(
+	filePath: string,
+	cwd: string,
+	router: InternalUrlRouter = InternalUrlRouter.builtins(),
+): string {
+	return resolveDirectory(filePath, cwd, true, router);
 }
 
 /**
@@ -335,12 +347,17 @@ export function resolveToCwd(filePath: string, cwd: string): string {
  * is the filesystem root. Explicit tool path inputs keep the workspace alias.
  */
 export function resolveShellDirectory(filePath: string, cwd: string): string {
-	return resolveDirectory(filePath, cwd, false);
+	return resolveDirectory(filePath, cwd, false, InternalUrlRouter.builtins());
 }
 
-function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boolean): string {
-	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath));
-	assertNotInternalUrl(expanded, filePath);
+function resolveDirectory(
+	filePath: string,
+	cwd: string,
+	aliasWorkspaceRoot: boolean,
+	router: InternalUrlRouter,
+): string {
+	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath, router));
+	assertNotInternalUrl(expanded, filePath, router);
 	if (aliasWorkspaceRoot && /^\/+$/.test(expanded)) return cwd;
 	if (path.isAbsolute(expanded)) return expanded;
 	return path.resolve(cwd, expanded);
@@ -362,15 +379,18 @@ function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boo
  * because a download names a file that does not exist yet, so the link in its
  * path is the only thing that can be resolved before the write.
  *
- * The cwd itself is rejected: a download names a file, never the directory.
+ * The cwd itself is rejected: a download names a file, never the directory. So
+ * is a URL of a scheme `router` handles: it is not a filesystem target at all.
  */
-export function confineToWorkspace(filePath: string, cwd: string): string | null {
+export function confineToWorkspace(
+	filePath: string,
+	cwd: string,
+	router: InternalUrlRouter = InternalUrlRouter.builtins(),
+): string | null {
 	if (!filePath || path.isAbsolute(filePath)) return null;
 	// `~` expands to an absolute path, and an internal URL is not a filesystem
-	// target at all; neither is a relative workspace path. The path is a
-	// server-supplied download target, not a tool URL, so only the built-in
-	// schemes are checked, like {@link resolveToCwd}'s guard.
-	if (filePath.startsWith("~") || isInternalUrlPath(filePath, InternalUrlRouter.builtins())) return null;
+	// target at all; neither is a relative workspace path.
+	if (filePath.startsWith("~") || isInternalUrlPath(filePath, router)) return null;
 	const root = path.resolve(cwd);
 	const resolved = path.resolve(root, filePath);
 	if (!isUnderRootLexical(resolved, root)) return null;
@@ -530,7 +550,7 @@ export function formatPathRelativeToCwd(
 	if (isInternalUrlPath(normalized, router)) {
 		return options.trailingSlash && !normalized.endsWith("/") ? `${normalized}/` : normalized;
 	}
-	const expanded = expandPath(normalized);
+	const expanded = expandPath(normalized, router);
 	const resolvedPath = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(cwd, expanded);
 	const relative = path.relative(resolvedCwd, resolvedPath);
 	const isWithinCwd = relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
@@ -555,7 +575,7 @@ export function stripOuterDoubleQuotes(input: string): string {
 /** Search root for a parsed base path: a URL `router` handles as spelled (single-slash alias normalized), else {@link resolveToCwd}. */
 export function resolveSearchBase(basePath: string, cwd: string, router: InternalUrlRouter): string {
 	const url = router.normalize(basePath);
-	return router.canHandle(url) ? url : resolveToCwd(basePath, cwd);
+	return router.canHandle(url) ? url : resolveToCwd(basePath, cwd, router);
 }
 
 /**
@@ -675,7 +695,7 @@ async function delimitedPathPartResolves(
 	if (isInternalUrlPath(entry, router)) return true;
 	const peeled = splitPathAndSel(entry).path;
 	const { basePath } = splitter(peeled);
-	const absoluteBasePath = resolveToCwd(basePath, cwd);
+	const absoluteBasePath = resolveToCwd(basePath, cwd, router);
 	try {
 		await fs.promises.stat(absoluteBasePath);
 		return true;
@@ -750,7 +770,7 @@ async function probeInternalUrlTarget(
 
 async function internalUrlEntryResolves(entry: string, filesystem: InternalUrlFilesystem): Promise<boolean> {
 	const router = filesystem.router;
-	const peeledUrl = router.split(expandPath(entry)).path;
+	const peeledUrl = router.split(expandPath(entry, router)).path;
 	if (router.isGlob(peeledUrl)) {
 		let parsedUrl: ParsedSearchPath | undefined;
 		try {
