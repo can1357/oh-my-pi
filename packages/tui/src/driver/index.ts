@@ -278,7 +278,6 @@ export function createTerminalDriver(
 	let stopping: Promise<void> | undefined;
 	const stopWriter = (): void => {
 		cancelKittyHold?.();
-		kittyReady.set(true);
 		stopStallPoll();
 		writer.stop();
 	};
@@ -341,13 +340,24 @@ export function createTerminalDriver(
 			await terminal.start();
 			if (!running) return;
 			setJamoWidth(resolveJamoWidth(terminal.identity.id, env));
+			let kittyHold: Promise<void> | undefined;
 			if (terminal.identity.id === "ghostty" && terminal.capabilities.images === "kitty") {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				kittyHold = promise;
+				const finish = (): void => {
+					clearTimeout(timer);
+					cancelKittyHold = undefined;
+					kittyReady.set(true);
+					resolve();
+				};
+				const timer = setTimeout(finish, GHOSTTY_IMAGE_DELAY_MS);
+				cancelKittyHold = finish;
 				kittyReady.set(false);
-				const timer = setTimeout(() => kittyReady.set(true), GHOSTTY_IMAGE_DELAY_MS);
-				cancelKittyHold = () => clearTimeout(timer);
 			}
 			writer.resize(terminal.columns, terminal.rows);
 			const cursor = await terminal.queryCursor();
+			// Start the hold alongside the cursor probe, but don't let the first frame commit pending rows.
+			if (kittyHold) await kittyHold;
 			if (running) writer.start(cursor);
 		},
 		stop() {

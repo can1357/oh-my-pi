@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed images above the viewport missing from Ghostty scrollback when resuming a session ([#20523](https://github.com/can1357/oh-my-pi/issues/20523)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

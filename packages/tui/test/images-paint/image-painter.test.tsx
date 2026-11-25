@@ -10,6 +10,7 @@ import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { driverImages, TermBackend } from "@oh-my-pi/pi-tui/term/backend";
 import { type PaintEnvironment, paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import "@oh-my-pi/pi-tui/term/painters/index";
+import { startProcessDriver } from "@oh-my-pi/pi-tui/testing/process-driver";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 
@@ -203,6 +204,35 @@ class StubDriver implements TerminalDriver {
 }
 
 describe("terminal backend image seam", () => {
+	test("the first Ghostty history write includes images from above the viewport", async () => {
+		const { driver, output } = await startProcessDriver({ env: { TERM_PROGRAM: "ghostty" } });
+		const tail = Array.from({ length: driver.rows + 1 }, (_, i) => `later row ${i}`);
+		const surface = createSurface(() => ({
+			main: [
+				<rows key="caption" lines={["restored image"]} />,
+				<image key="image" blob={BLOB} w={100} h={100} max={{ w: "4ch" }} />,
+				<rows key="tail" lines={tail} />,
+			],
+		}));
+		const backend = new TermBackend({
+			surface,
+			driver,
+			theme: () => theme,
+			images: driverImages(driver.images, () => driver.capabilities),
+		});
+		try {
+			output.length = 0;
+			backend.start();
+			const bytes = output.join("");
+			expect(bytes).toContain("restored image");
+			expect(bytes).toMatch(/\x1b_Ga=t,[^;]*\bi=(\d+);[\s\S]*\x1b_Ga=p,[^\x1b]*\bi=\1,/);
+		} finally {
+			backend.stop();
+			surface.dispose();
+			await driver.stop();
+		}
+	});
+
 	test("painters reach the images the backend was given", () => {
 		const { images, seam } = store();
 		const driver = new StubDriver(images);
