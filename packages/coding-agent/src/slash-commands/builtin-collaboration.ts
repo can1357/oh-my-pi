@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import { clearSubmittedText } from "./helpers/draft";
-import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
+import { APP_NAME, errorMessage, formatAge } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "../ui/keys/hints";
 import { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -18,7 +18,7 @@ import { openPath } from "../utils/open";
 import { copyToClipboard } from "../utils/clipboard";
 import { refreshStatusLine } from "./builtin-modes";
 import { CollabQrCode } from "../ui/transcript/figures/collab";
-import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import { formatDumpArchiveReport } from "../session/session-dump-format";
 import type { SlashCommandSpec } from "./types";
 
