@@ -67,13 +67,18 @@ describe("AcpAgent.dispose under a running turn", () => {
 					return { delayMs: 60_000, content: ["never streamed"] };
 				},
 			]);
-			let acp: AcpAgent;
+			const acpRef: { value?: AcpAgent } = {};
 			const sink: Stream = {
 				writable: new WritableStream<AnyMessage>(),
 				readable: new ReadableStream<AnyMessage>(),
 			};
-			const connection = new AgentSideConnection(() => acp, sink);
-			acp = new AcpAgent(connection, async () => session);
+			new AgentSideConnection(connection => {
+				const acp = new AcpAgent(connection, async () => session);
+				acpRef.value = acp;
+				return acp;
+			}, sink);
+			const acp = acpRef.value;
+			if (!acp) throw new Error("Expected ACP agent to be initialized");
 			try {
 				await acp.initialize({ protocolVersion: 1, clientCapabilities: {} });
 				const { sessionId } = await acp.newSession({ cwd: tempDir.path(), mcpServers: [] });
