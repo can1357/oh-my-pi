@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import {
 	buildReplanTitleContext,
@@ -31,6 +32,7 @@ function customMessage(customType: string, attribution: "agent" | "user"): Custo
 }
 
 const COLLAB_IMAGE: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+const QUOTED_THINKING_READER = getBundledModel("openai", "gpt-5.2");
 
 /** A writable-collab peer's prompt (the web Inbox's first instruction) as `CollabHost` submits it. */
 function collabPrompt(content: CustomMessage["content"], attribution: "agent" | "user" = "user"): CustomMessage {
@@ -114,10 +116,11 @@ describe("convertToLlm", () => {
 			interruptedThinkingContinuity(),
 		];
 
-		const llm = convertToLlm(messages);
+		const llm = convertToLlm(messages, QUOTED_THINKING_READER);
 		const assistant = llm.find(entry => entry.role === "assistant");
 		expect(Array.isArray(assistant?.content) && assistant.content.map(block => block.type)).toEqual(["text"]);
 		expect(llm.some(entry => entry.role === "developer")).toBe(true);
+		expect(convertToLlm(messages)).toEqual(llm.filter(entry => entry.role === "assistant"));
 	});
 
 	it("keeps trailing thinking on the assistant LLM view when no continuity message follows", () => {
@@ -280,7 +283,10 @@ describe("convertMessagesForContextView", () => {
 		]);
 		const messages: AgentMessage[] = [userMessage("question", 1), assistant];
 		const production = convertToLlm(messages);
-		const viewed = convertMessagesForContextView([messages[0], assistant, interruptedThinkingContinuity()]);
+		const viewed = convertMessagesForContextView(
+			[messages[0], assistant, interruptedThinkingContinuity()],
+			QUOTED_THINKING_READER,
+		);
 		const viewedAssistant = viewed[1].message;
 		expect(viewedAssistant.role === "assistant" && viewedAssistant.content.map(block => block.type)).toEqual([
 			"text",

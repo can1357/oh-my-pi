@@ -144,7 +144,10 @@ NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits onl
 Need a second copy of a folder (risky experiment, another branch, tests or review beside the user's work)? MUST use an ovnfs checkout, not git worktree add, git clone or cp -r, unless the user asks for those:
 - `cd <folder> && {{ovnfs}} new --name <name>` (lowercase a-z0-9._-) prints only the checkout's path, in about a second: the folder as it is now, uncommitted edits, untracked files and build dirs included. --rev <rev> starts tracked files at a commit or branch instead, without in-flight edits (to verify your patch); ignored build dirs stay.
 - Work in the printed path: writes and commits stay in the checkout; git commands that discard changes run there, saving the discards first.
-- Back: `{{ovnfs}} diff <name> [-p]` lists changes; `{{ovnfs}} apply <name> [--dry-run]` merges them into the folder as uncommitted edits; `{{ovnfs}} land <name>` puts the checkout's commits on the folder's branch, files included. Conflict? `{{ovnfs}} pull <name>` merges the folder's newer files into the checkout: resolve there, then apply or land again.
+- Back: `{{ovnfs}} diff <name> [-p]` lists changes. Commit them in the checkout, then `{{ovnfs}} land <name>`: it copies the commits onto the folder's branch, files included, keeping the folder's uncommitted edits on top; it refuses while the checkout holds uncommitted changes.
+  - Branch moved since? `{{ovnfs}} land <name> --rebase` replays the commits onto it.
+  - Files conflict with the folder's uncommitted edits? `{{ovnfs}} land <name> --markers` writes the markers into the folder: resolve there, then land again.
+  - User wants uncommitted edits, not commits? `{{ovnfs}} apply <name>` merges every change that way, flattening commits. Conflicts? `{{ovnfs}} pull <name>` marks them in the checkout: resolve there, then apply again.
 - Done: `{{ovnfs}} rm <name>` discards what was not applied or landed; `{{ovnfs}} ls` lists checkouts; more in `{{ovnfs}} help`.
 {{/has}}
 {{/if}}

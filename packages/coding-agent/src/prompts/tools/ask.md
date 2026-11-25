@@ -21,7 +21,7 @@ Several viable choices: pick conservative/standard, proceed, state choice.
   - lone checkbox or radio group left unchecked → omitted
   - type="number" → a number; text fields → their text
   - automatic "Other" text → the radio's value, or an extra checkbox array entry
-- Free input: `<input type="text|number|date|email|url">`, <textarea>; placeholder, min/max, pattern, required are enforced.
+- Free input: `<input type="text|number|date|email|url">`, <textarea>; placeholder, min/max, pattern, required are hints: broken answers get flagged, never blocked, so answers MAY break them.
 - Pictures: `<img src="…" alt="…">` and inline <svg> diagrams, as their own blocks.
   - `src`: an http(s) URL, a data: URI, or a file path relative to the working directory.
   - Inside a <label> an image shows only its alt.

@@ -52,6 +52,7 @@ import {
 	hubFallbackStatsSession,
 	hubRowMetrics,
 } from "../../../modes/view-model/overlays/agent-hub-projection";
+import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import {
 	type AgentHubRegistry,
 	type AgentRecordLike,
@@ -85,7 +86,6 @@ import {
 	agentTask,
 	compareFrozenRanks,
 	type FrozenRank,
-	formatCost,
 	formatMetricDuration,
 	hubModel,
 	localDateTime,

@@ -22,6 +22,10 @@
 //!   it, so `echo x | cmd arg` and `cmd arg` inside a `while read` loop leave
 //!   the input to its reader. Stdin it cannot pass on fails the command with
 //!   status 2.
+//! - An argument that is a job spec (`%1`, `%%`, `%name`) naming a job of the
+//!   invoking shell that runs a program stays as written in `argv`; the request
+//!   also carries that program's OS pid for it, so a command taking pids can
+//!   accept job specs as `kill` does.
 //! - The reply's stdout and stderr are written to the command's own fds 1 and
 //!   2; its exit code, clamped to `0..=255`, is the command's status. A failed
 //!   call reports `NAME: <reason>` on stderr with status 1.
@@ -85,6 +89,10 @@ pub struct SessionCommandRequest {
 	/// Stdin read to end of file when an argument is a bare `-`; empty
 	/// otherwise.
 	pub stdin: String,
+	/// Arguments that are job specs naming a job of the invoking shell that
+	/// runs a program, each with that program's OS pid (`jobs -x`'s
+	/// substitution); empty when none is.
+	pub jobs:  Vec<(String, u32)>,
 }
 
 /// What a session command writes and the status it ends with.
@@ -182,12 +190,18 @@ impl SessionCommands {
 			.skip(1)
 			.map(|arg| arg.to_str_lossy().into_owned())
 			.collect();
+		let jobs = inv
+			.jobs
+			.iter()
+			.map(|(spec, pid)| (spec.to_str_lossy().into_owned(), *pid))
+			.collect();
 		let [stdin, stdout, stderr] = inv.stdio;
 		let stdin = argv.iter().any(|arg| arg == "-").then_some(stdin);
 		let cancel = CancellationToken::new();
 		let call = Call {
 			name,
 			argv,
+			jobs,
 			cwd: inv.cwd.to_str_lossy().into_owned(),
 			stdin,
 			stdout,
@@ -308,6 +322,7 @@ pub fn reserved_command_names() -> Vec<&'static str> {
 struct Call {
 	name:    String,
 	argv:    Vec<String>,
+	jobs:    Vec<(String, u32)>,
 	cwd:     String,
 	/// `None` when no argument is `-`: stdin is never read.
 	stdin:   Option<FdRef>,
@@ -327,7 +342,7 @@ struct Failure {
 impl Call {
 	/// The command, to its status.
 	async fn run(self) -> i32 {
-		let Self { name, argv, cwd, stdin, stdout, stderr, handler, ended, cancel } = self;
+		let Self { name, argv, jobs, cwd, stdin, stdout, stderr, handler, ended, cancel } = self;
 		let work = async {
 			let reply = tokio::select! {
 				biased;
@@ -335,7 +350,7 @@ impl Call {
 					status: FAILED,
 					reason: "the shell run that provided this command has ended".to_owned(),
 				}),
-				reply = serve(&name, argv, cwd, stdin, &*handler) => reply,
+				reply = serve(&name, argv, jobs, cwd, stdin, &*handler) => reply,
 			};
 			match reply {
 				Ok(SessionCommandResult { stdout: out, stderr: err, exit_code }) => {
@@ -362,6 +377,7 @@ impl Call {
 async fn serve(
 	name: &str,
 	argv: Vec<String>,
+	jobs: Vec<(String, u32)>,
 	cwd: String,
 	stdin: Option<FdRef>,
 	handler: &dyn SessionCommandHandler,
@@ -372,7 +388,7 @@ async fn serve(
 			.map_err(|reason| Failure { status: BAD_STDIN, reason })?,
 		None => String::new(),
 	};
-	let request = SessionCommandRequest { name: name.to_owned(), argv, cwd, stdin };
+	let request = SessionCommandRequest { name: name.to_owned(), argv, cwd, stdin, jobs };
 	handler
 		.call(request)
 		.await
