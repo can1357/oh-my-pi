@@ -470,6 +470,8 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	/** Original submission time when the host has already displayed the prompt. */
+	submittedAt?: number;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/**

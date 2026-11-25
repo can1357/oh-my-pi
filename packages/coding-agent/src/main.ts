@@ -509,6 +509,7 @@ export async function submitInteractiveInput(
 			let forwarded = false;
 			try {
 				forwarded = await session.prompt(input.text, {
+					submittedAt: input.submittedAt,
 					images: input.images,
 					streamingBehavior,
 					followUps: input.followUps,

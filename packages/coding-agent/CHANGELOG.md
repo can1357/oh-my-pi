@@ -36,6 +36,7 @@
 - `/wt` now identifies ovnfs checkouts explicitly, and `--offline` keeps routing, image descriptions, and related auxiliary operations on the active provider.
 - Selective commits preserve the drafted contents and Git filtering for large, binary, and non-text files, while avoiding overwrites when the file changed concurrently.
 - The daemon and package now use less idle memory by loading catalogs, browser relay support, and prompt perturbation data only when needed.
+- The prompt bubble’s Edit & resend button stops the current response, discards queued input, and rewinds the transcript to before the selected prompt. The prompt stays in the composer until you send it.
 
 ### Fixed
 

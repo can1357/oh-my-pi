@@ -1034,7 +1034,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	onInputCallback?: (input: SubmittedUserInput) => void;
 	optimisticUserMessageSignature: string | undefined = undefined;
 	locallySubmittedUserSignatures: Set<string> = new Set();
-	#pendingSubmittedInput: SubmittedUserInput | undefined;
+	#pendingSubmittedInput: (SubmittedUserInput & { submittedAt: number }) | undefined;
 	#pendingSubmissionDispose: (() => void) | undefined;
 	#pendingSubmissionPreservesDraft = false;
 	/** Unregisters this mode's transcript-image blob writer (a later mode's registration survives). */
@@ -1884,17 +1884,15 @@ export class InteractiveMode implements InteractiveModeContext {
 						this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
 				);
 				return;
-			case "rewind":
-				this.showUserMessageSelector();
-				return;
 			case "edit-turn":
 			case "retry-turn":
 			case "rewind-turn":
 			case "fork-turn":
-				void this.#selectorController.runTurnAction(act.slice(0, -"-turn".length) as TurnAct, {
-					role: "user",
-					at: timestamp,
-				});
+				void this.#selectorController.runTurnAction(
+					act.slice(0, -"-turn".length) as TurnAct,
+					{ role: "user", at: timestamp },
+					this.#pendingSubmittedInput,
+				);
 		}
 	}
 
@@ -3332,7 +3330,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		},
 		options?: { preserveDraft?: boolean; clearEditor?: boolean },
 	): SubmittedUserInput {
-		const submission: SubmittedUserInput = {
+		const submission = {
+			submittedAt: Date.now(),
 			text: input.text,
 			images: input.images,
 			imageLinks: input.imageLinks,
@@ -3358,15 +3357,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			const imageCount = submission.images?.length ?? 0;
 			this.optimisticUserMessageSignature = `${submission.text}\u0000${imageCount}`;
 			this.#pendingSubmissionDispose = this.recordLocalSubmission(submission.text, imageCount);
-			this.#optimisticUserMessageBlocks = this.addMessageToChat(
-				{
-					role: "user",
-					content: [{ type: "text", text: submission.text }, ...(submission.images ?? [])],
-					attribution: "user",
-					timestamp: Date.now(),
-				},
-				input.imageLinks ? { imageLinks: input.imageLinks } : {},
-			);
+			this.#replayOptimisticUserMessage();
 		} else {
 			this.clearOptimisticUserMessage();
 		}
@@ -4068,7 +4059,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				role: "user",
 				content: [{ type: "text", text: submission.text }, ...(submission.images ?? [])],
 				attribution: "user",
-				timestamp: Date.now(),
+				timestamp: submission.submittedAt,
 			},
 			submission.imageLinks ? { imageLinks: submission.imageLinks } : {},
 		);
@@ -4792,9 +4783,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A mid-turn exit must interrupt the currently streaming turn.
 		// The plan-mode prompt instructs the model to keep planning until it
 		// submits the plan with `propose`, so the live turn must be aborted inside
-		// `runModeExitTeardown` to avoid restarting on the stale toolset.
+		// `withQueueDrainPaused` to avoid restarting on the stale toolset.
 		if (options?.interruptActiveTurn && this.session.isStreaming) {
-			await this.session.runModeExitTeardown(async () => {
+			await this.session.withQueueDrainPaused(async () => {
 				await this.session.abort({ reason: USER_INTERRUPT_LABEL });
 				await this.#tearDownPlanMode(options);
 			});
@@ -5978,7 +5969,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// turn would otherwise let a queued user steer/follow-up restart on the
 		// still-live Vibe tools before this teardown removes them (issue #8326).
 		let killed = 0;
-		await this.session.runModeExitTeardown(async () => {
+		await this.session.withQueueDrainPaused(async () => {
 			if (this.session.isStreaming) {
 				await this.session.abort();
 			}

@@ -36,7 +36,12 @@ function harness(draft = "") {
 			getEntry: (id: string) => branch.find(e => e.id === id),
 			getLeafId: () => "a2",
 		},
-		session: { navigateTree },
+		session: { navigateTree, abortForRewind: async () => {} },
+		eventController: { resetTranscriptAnchors: () => {} },
+		cancelGoalContinuation: () => {},
+		cancelPendingSubmission: () => false,
+		updatePendingMessagesDisplay: () => {},
+		clearTransientSessionUi: () => {},
 		composer: {
 			text: () => editor.text,
 			pendingImages: [],
@@ -66,7 +71,7 @@ describe("SelectorController turn actions", () => {
 
 		await h.controller.runTurnAction("retry", { role: "assistant", at: 21 });
 
-		expect(h.navigateTree).toHaveBeenCalledWith("u2", { summarize: false });
+		expect(h.navigateTree).toHaveBeenCalledWith("u2", { summarize: false, requireIdle: true });
 		expect(h.editor.submitted).toEqual(["second prompt"]);
 		expect(h.statuses.map(([message]) => message)).toEqual(["Retrying the turn"]);
 	});
@@ -85,7 +90,7 @@ describe("SelectorController turn actions", () => {
 
 		await h.controller.runTurnAction("edit", { role: "user", at: 10 });
 
-		expect(h.navigateTree).toHaveBeenCalledWith("u1", { summarize: false });
+		expect(h.navigateTree).toHaveBeenCalledWith("u1", { summarize: false, requireIdle: true });
 		expect(h.editor).toMatchObject({ text: "first prompt", submitted: [] });
 		const [message, options] = h.statuses.at(-1)!;
 		expect(message).toBe("Rewound 2 turns");

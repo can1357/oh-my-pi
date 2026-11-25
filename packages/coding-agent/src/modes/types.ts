@@ -113,6 +113,8 @@ export type YieldCompaction = ConversationPosition & {
 
 export type SubmittedUserInput = {
 	text: string;
+	/** Submission time shared by the optimistic prompt bubble and its persisted turn. */
+	submittedAt?: number;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	customType?: string;
