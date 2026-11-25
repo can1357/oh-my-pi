@@ -1,7 +1,7 @@
 /**
  * Terminal looks of the dock's status rows.
  *
- * - `row` `omp.working`: a blank row, then one cell in: the interrupt key
+ * - `row` `omp.working`: a blank row, then the inset interrupt key
  *   (muted, or the accent's dim hue) and the label shimmering — or, for a
  *   maintenance run, a spinner frame (accent; warning for a retry) and the
  *   muted line. A trailer docks right when two cells stay free.
@@ -14,6 +14,7 @@ import { shimmerTiers } from "@oh-my-pi/pi-tui/term/painters/shimmer";
 import { type ShimmerMode, type ShimmerTiers, shimmerText } from "@oh-my-pi/pi-tui/text/shimmer";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { terminalPaddingX } from "../terminal-padding";
 import { keyLabel } from "../../keys/hints";
 import { termOf } from "../messages/fill";
 
@@ -85,15 +86,16 @@ function paintWorking(node: UiNode, cx: PaintContext): Block {
 		const looks = tiers(theme, term.accent);
 		text = term.shimmer && !cx.reduceMotion ? shimmerText(message, now, term.shimmer, looks) : looks.mid(message);
 	}
-	const body = truncate(` ${lead} ${text}`, cx.width);
+	const body = truncate(`${" ".repeat(terminalPaddingX())}${lead} ${text}`, cx.width);
 	return { rows: ["", docked(body, term.trailer?.(), cx.width)] };
 }
 
 function paintRetryHint(node: UiNode, cx: PaintContext): Block {
 	const key = termOf<{ key: string }>(node).key ?? "f5";
 	const theme = cx.theme;
+	const pad = " ".repeat(terminalPaddingX() + 1);
 	return {
-		rows: ["", truncate(`  ${theme.fg("dim", keyLabel(theme, key))}${theme.fg("muted", " to retry")}`, cx.width)],
+		rows: ["", truncate(`${pad}${theme.fg("dim", keyLabel(theme, key))}${theme.fg("muted", " to retry")}`, cx.width)],
 	};
 }
 

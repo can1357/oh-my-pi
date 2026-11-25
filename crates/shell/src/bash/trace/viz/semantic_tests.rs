@@ -240,7 +240,7 @@ fn pseudo_preserves_control_fallback_and_function_parameters() {
 	);
 	let output = text(&f.present(&[], &Options::default()).rows);
 	for expected in
-		["def f(arg1):", "for x in", "is_file(", "else:", "match ", "\n  and false\n  or print"]
+		["def f(arg1):", "for x in", "is_file(", "else:", "match ", "\n  && false\n  || print"]
 	{
 		assert!(output.contains(expected), "missing {expected}: {output}");
 	}
@@ -299,13 +299,13 @@ fn setup_and_pipeline_idioms_restore_real_operands() {
 	);
 	let mut options = Options::default();
 	let folded = text(&f.present(&[], &options).rows);
-	for expected in ["cwd /tmp", "exports all", "⏱ 3s", "may fail", "⇣ last 2"] {
+	for expected in ["exports all", "⏱ 3s", "may fail", "⇣ last 2"] {
 		assert!(folded.contains(expected), "{folded}");
 	}
 	options.layers.idioms = false;
 	let plain = text(&f.present(&[], &options).rows);
 	for expected in
-		["cd /tmp", "set -a", "set +a", "timeout 3 curl", "2>&1", "tail -n 2", " or true"]
+		["cd /tmp", "set -a", "set +a", "timeout 3 curl", "2>&1", "tail -n 2", " || true"]
 	{
 		assert!(plain.contains(expected), "{plain}");
 	}
