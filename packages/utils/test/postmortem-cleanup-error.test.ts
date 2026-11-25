@@ -165,6 +165,7 @@ describe("postmortem expected cleanup errors", () => {
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toContain("[Uncaught Exception] Error: unexpected cleanup exception");
+		expect(result.stderr).toContain("probe.ts:"); // piped stderr retains the stack
 	});
 
 	it("prints recovery commands for a session that fatal cleanup saved", async () => {
@@ -179,6 +180,7 @@ describe("postmortem expected cleanup errors", () => {
 			);
 			postmortem.register("session", async () => {
 				await Promise.resolve();
+				process.stderr.write("async handoff complete\\n");
 				saved = true;
 				cancelHint();
 			});
@@ -188,6 +190,10 @@ describe("postmortem expected cleanup errors", () => {
 
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toContain("[Unhandled Rejection] Error: session crashed");
+		expect(result.stderr).toContain("async handoff complete");
+		expect(result.stderr.indexOf("async handoff complete")).toBeLessThan(
+			result.stderr.indexOf("[Unhandled Rejection]"),
+		);
 		expect(result.stderr).toContain("[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
 	});
 
@@ -272,6 +278,19 @@ describe("postmortem expected cleanup errors", () => {
 			expect(result.stderr).not.toContain("[Recovery]");
 		},
 	);
+
+	it("does not write a fatal report or recovery hint to a terminal declared dead", async () => {
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+			postmortem.registerFatalRecoveryHint(() => ({ label: "Main", command: "omp --resume" }));
+			postmortem.declareTerminalDead();
+			Promise.reject(new Error("fatal on stalled terminal"));
+			await Promise.withResolvers<void>().promise;
+		`);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).not.toContain("fatal on stalled terminal");
+		expect(result.stderr).not.toContain("[Recovery]");
+	});
 
 	it("exits after an uncaught exception when terminal stderr is revoked", async () => {
 		const result = await runPostmortemProbe(`

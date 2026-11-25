@@ -180,7 +180,7 @@ Delegate only when the request or repository guidance calls for it.
 
 {{#if mountedCommands.length}}
 # Tool Commands
-Each listed tool is also a command in `{{toolRefs.bash}}`: run `<tool> <positional> [--flag value]`; `<tool> --help` prints usage derived from its schema.
+The commands documented below (not the Tool Inventory above) run inside `{{toolRefs.bash}}`: `<tool> <positional> [--flag value]`; `<tool> --help` prints usage derived from its schema.
 Raw JSON arguments object: `-j '<json>'`, `@file`, or `-` (stdin); bad arguments exit 2 with a usage hint.
 {{toolCommandDocs}}
 {{/if}}

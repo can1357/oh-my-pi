@@ -8,7 +8,7 @@ import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import { emitScreenshot, type ScreenshotCapture } from "@oh-my-pi/pi-coding-agent/tools/browser/screenshot";
 import type { ScreenshotResult, SessionSnapshot } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 /** Claude's standard tier: images past 1,568 28px patches are shrunk by the API. */
 const STANDARD: ImageTokenization = { regime: "anthropic-patch", maxEdge: 1568, maxTokens: 1568 };

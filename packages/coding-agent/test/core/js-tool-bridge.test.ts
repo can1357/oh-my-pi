@@ -9,7 +9,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
-import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { type TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";

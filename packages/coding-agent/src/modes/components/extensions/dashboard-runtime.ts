@@ -1,4 +1,4 @@
-import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
+import type { ExtensionDashboardRuntime } from "../../../extensibility/inventory/extension-dashboard";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
 import type { EffectiveExtensionRoots } from "../../../capability/types";

@@ -518,6 +518,13 @@ function writeEmbeddedAddonFile(targetPath, content) {
 	}
 }
 
+/**
+ * Refreshes `targetDir`'s activity time before probing, so a concurrently
+ * starting newer build's `cleanupStaleNativeVersions` spares it until this
+ * process loads the addon. A directory this process cannot create or touch
+ * (read-only mount, another owner) is fatal only when a file must be written:
+ * an addon already at its build's hash path is used as-is.
+ */
 export function extractEmbeddedAddons({ files, targetDir }) {
 	for (const file of files) {
 		if (!isSafeEmbeddedAddonFilename(file.filename)) {
@@ -527,10 +534,17 @@ export function extractEmbeddedAddons({ files, targetDir }) {
 			throw new Error(`Unsafe embedded addon hash for ${file.filename}: ${file.hash}`);
 		}
 	}
+	let prepareError = null;
+	try {
+		prepareNativeVersionDir(targetDir);
+	} catch (err) {
+		prepareError = err;
+	}
 	const writtenPaths = [];
 	for (const file of files) {
 		const targetPath = embeddedAddonPath(targetDir, file);
 		if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
+		if (prepareError) throw prepareError;
 		const content = Bun.zstdDecompressSync(fs.readFileSync(file.zstdPath));
 		if (content.length !== file.size) {
 			throw new Error(`Embedded addon size mismatch for ${file.filename}: expected ${file.size}, got ${content.length}`);
@@ -597,14 +611,6 @@ function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(c
 	if (!hasMatchingEmbeddedAddon(ctx) || !file) return null;
 
 	startupMarker("native:extractEmbeddedAddon:start");
-	try {
-		prepareNativeVersionDir(ctx.versionedDir);
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		errors.push(`embedded addon dir: ${message}`);
-		return null;
-	}
-
 	try {
 		extractEmbeddedAddons({ files: [file], targetDir: ctx.versionedDir });
 		return embeddedAddonPath(ctx.versionedDir, file);

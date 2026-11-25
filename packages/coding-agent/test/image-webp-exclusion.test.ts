@@ -9,7 +9,7 @@ import {
 	normalizeModelContextImages,
 	normalizeModelContextMessages,
 } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
-import { modelLacksWebpSupport, webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { modelLacksWebpSupport, webpExclusionForModel } from "@oh-my-pi/pi-coding-agent/utils/image-input";
 
 // 1x1 red PNG seed, upscaled + re-encoded as WebP at test time so no binary
 // fixture is checked in. Bun.Image sniffs format from bytes.

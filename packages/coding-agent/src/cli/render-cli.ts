@@ -2,11 +2,11 @@
  * `omp render` — draw a session's entire thread through the production
  * transcript pipeline, headlessly.
  *
- * Replays the session into a real `InteractiveMode` + `TUI` wired to an
- * in-process byte-sink terminal, then prints the composed transcript lines.
- * `--timing` reports phase costs; `--repaint N` re-runs the clear-scrollback
- * full repaint that `/tree`, Esc-Esc navigation, `/resume`, and theme changes
- * issue — the frame whose cost users feel as a frozen UI on big sessions.
+ * Replays the session into a real `InteractiveMode` rendering on an in-memory
+ * terminal, then prints the composed transcript rows. `--timing` reports phase
+ * costs; `--repaint N` re-runs the full history replay that `/tree`, Esc-Esc
+ * navigation, `/resume`, and theme changes issue — the frame whose cost users
+ * feel as a frozen UI on big sessions.
  *
  * The session file is copied to a temp dir before opening, so rendering never
  * takes the single-writer lock on (or appends breadcrumbs to) a live session.
@@ -15,19 +15,22 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Terminal, TerminalAppearance, TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
-import type { RenderScheduler } from "@oh-my-pi/pi-tui/tui";
+import type { UiNode } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatBytes, getProjectDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
-import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
+import { AppFrame } from "../modes/interactive/frame";
 import { InteractiveMode } from "../modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "../session/agent-session";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import { resolveSessionFileArg } from "./session-arg";
 import { SessionManager } from "../session/session-manager";
+import { initTheme } from "../ui/theme/service";
 
 export interface RenderCommandArgs {
 	/** Session file path or id prefix; default: most recent session for cwd. */
@@ -46,90 +49,31 @@ export interface RenderCommandArgs {
 	quiet?: boolean;
 }
 
-/** Byte-sink terminal: counts emitted output, never touches a real TTY. */
-class SinkTerminal implements Terminal {
-	bytes = 0;
-	writes = 0;
-	readonly #columns: number;
-	readonly #rows: number;
-
-	constructor(columns: number, rows: number) {
-		this.#columns = columns;
-		this.#rows = rows;
+/** Paint the transcript's blocks as the terminal draws them, blank rows between them included. */
+function transcriptRows(mode: InteractiveMode, width: number): string[] {
+	const transcript = mode.shell.transcript;
+	const env = staticEnvironment(currentTheme());
+	const rows: string[] = [];
+	let above: UiNode | undefined;
+	for (const node of transcript.nodes()) {
+		const block = renderBlock(node, width, { env }).rows;
+		if (block.length === 0) continue;
+		if (above) for (let gap = transcript.separator(above, node); gap > 0; gap--) rows.push("");
+		rows.push(...block);
+		above = node;
 	}
-
-	start(): void {}
-	stop(): void {}
-	async drainInput(): Promise<void> {}
-	write(data: string): void {
-		this.bytes += Buffer.byteLength(data);
-		this.writes++;
-	}
-	get columns(): number {
-		return this.#columns;
-	}
-	get rows(): number {
-		return this.#rows;
-	}
-	get kittyProtocolActive(): boolean {
-		return false;
-	}
-	get kittyEnableSequence(): string | null {
-		return null;
-	}
-	moveBy(): void {}
-	hideCursor(): void {}
-	showCursor(): void {}
-	clearLine(): void {}
-	clearFromCursor(): void {}
-	clearScreen(): void {}
-	setTitle(): void {}
-	setProgress(): void {}
-	onAppearanceChange(): void {}
-	refreshAppearance(_requestToken?: TerminalAppearanceRequestToken): void {}
-	get appearance(): TerminalAppearance | undefined {
-		return undefined;
-	}
+	return rows;
 }
 
-/**
- * Deterministic render scheduler: queues callbacks instead of arming timers so
- * the command can drain every pending paint synchronously between phases.
- */
-class DrainScheduler implements RenderScheduler {
-	#time = 0;
-	#immediate: (() => void)[] = [];
-	#renders = new Map<number, () => void>();
-	#nextId = 0;
-
-	now(): number {
-		this.#time += 20;
-		return this.#time;
-	}
-
-	scheduleImmediate(callback: () => void): void {
-		this.#immediate.push(callback);
-	}
-
-	scheduleRender(callback: () => void, _delayMs: number): { cancel(): void } {
-		const id = this.#nextId++;
-		this.#renders.set(id, callback);
-		return { cancel: () => void this.#renders.delete(id) };
-	}
-
-	/** Run queued callbacks until no render work remains. */
-	drain(): void {
-		for (let rounds = 0; this.#immediate.length > 0 || this.#renders.size > 0; rounds++) {
-			if (rounds > 100) throw new Error("render scheduler did not settle after 100 drain rounds");
-			const immediate = this.#immediate;
-			this.#immediate = [];
-			for (const callback of immediate) callback();
-			if (this.#renders.size === 0) continue;
-			const renders = [...this.#renders.values()];
-			this.#renders.clear();
-			for (const callback of renders) callback();
-		}
-	}
+/** Resolves with the next frame the terminal renderer presents. */
+function nextFrame(mode: InteractiveMode): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const stop = mode.shell.host?.onFrame(() => {
+		stop?.();
+		resolve();
+	});
+	if (!stop) resolve();
+	return promise;
 }
 
 function formatMs(ms: number): string {
@@ -140,7 +84,7 @@ function formatMs(ms: number): string {
 export async function runRenderCommand(args: RenderCommandArgs): Promise<number> {
 	const cwd = getProjectDir();
 	const settings = await Settings.init({ cwd });
-	await initTheme();
+	initTheme();
 
 	const sourcePath = await resolveSessionFileArg(args.session, cwd);
 	const sourceSize = (await fs.stat(sourcePath)).size;
@@ -175,30 +119,28 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 			settings,
 			modelRegistry,
 		});
-		const terminal = new SinkTerminal(width, height);
-		const scheduler = new DrainScheduler();
-		const composer = new Composer({
-			terminal,
-			tuiOptions: { renderScheduler: scheduler },
-			preferences: { quiet: true },
-		});
-		mode = new InteractiveMode(session, VERSION, undefined, undefined, undefined, undefined, composer);
+		const terminal = memoryTerminal({ columns: width, rows: height });
+		const frame = new AppFrame({ version: VERSION, shape: "band", quiet: true });
+		await frame.start({ resizeScrollback: "rebuild", native: false, driver: terminal.options });
+		mode = new InteractiveMode(session, VERSION, undefined, undefined, undefined, undefined, frame);
 		await mode.init({ suppressWelcomeIntro: true });
-		scheduler.drain();
 
-		// Replay: transcript context build + component construction (the phase
+		// Replay: transcript context build + block construction (the phase
 		// renderInitialMessages runs after /tree navigation and on resume).
 		const replayStart = performance.now();
+		const painted = nextFrame(mode);
 		await mode.renderInitialMessages({ clearTerminalHistory: true });
 		const replayMs = performance.now() - replayStart;
 
-		// First full paint: compose every transcript row and emit it, exactly
-		// what the clear-scrollback repaint after navigation writes to the PTY.
+		// First full paint: every transcript row composed and written, what the
+		// history replay after navigation writes to the terminal.
 		const paintStart = performance.now();
-		const bytesBeforePaint = terminal.bytes;
-		scheduler.drain();
+		const bytesBeforePaint = terminal.bytes();
+		const writesBeforePaint = terminal.output.length;
+		await painted;
 		const paintMs = performance.now() - paintStart;
-		const paintBytes = terminal.bytes - bytesBeforePaint;
+		const paintBytes = terminal.bytes() - bytesBeforePaint;
+		const paintWrites = terminal.output.length - writesBeforePaint;
 
 		const entries = sessionManager.getEntries();
 		let messageCount = 0;
@@ -207,27 +149,28 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		const repaints: { ms: number; bytes: number }[] = [];
 		for (let i = 0; i < (args.repaint ?? 0); i++) {
 			const start = performance.now();
-			const before = terminal.bytes;
-			mode.ui.requestRender(true, { clearScrollback: true });
-			scheduler.drain();
-			repaints.push({ ms: performance.now() - start, bytes: terminal.bytes - before });
+			const before = terminal.bytes();
+			const repainted = nextFrame(mode);
+			mode.shell.host?.replayHistory();
+			await repainted;
+			repaints.push({ ms: performance.now() - start, bytes: terminal.bytes() - before });
 		}
 
+		const lines = transcriptRows(mode, width);
 		if (!args.quiet) {
-			const lines = mode.chatContainer.render(width);
 			const text = args.plain ? lines.map(line => Bun.stripANSI(line)).join("\n") : lines.join("\n");
 			process.stdout.write(text);
 			process.stdout.write("\n");
 		}
 
 		if (args.timing || args.repaint) {
-			const rows = mode.chatContainer.render(width).length;
+			const rows = lines.length;
 			const report = [
 				`session  ${sourcePath}`,
 				`         ${formatBytes(sourceSize)}, ${entries.length} entries, ${messageCount} messages, ${rows} transcript rows @ ${width}x${height}`,
 				`open     ${formatMs(openMs)}`,
 				`replay   ${formatMs(replayMs)}  (transcript build + component construction)`,
-				`paint    ${formatMs(paintMs)}  (full frame compose + emit: ${formatBytes(paintBytes)}, ${terminal.writes} writes)`,
+				`paint    ${formatMs(paintMs)}  (full frame compose + emit: ${formatBytes(paintBytes)}, ${paintWrites} writes)`,
 			];
 			if (repaints.length > 0) {
 				const times = repaints.map(r => r.ms);
@@ -245,6 +188,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 	} finally {
 		try {
 			mode?.stop();
+			await mode?.shell.stop();
 			await session?.dispose();
 		} catch (err) {
 			logger.debug("omp render teardown failed", { error: String(err) });

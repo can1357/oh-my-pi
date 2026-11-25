@@ -7,7 +7,7 @@
 import { expect, it } from "bun:test";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { SpawnRun } from "@oh-my-pi/pi-coding-agent/task/spawn-run";
-import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
 
 const permit = { acquire: async () => {}, release: () => {} };
 const done = { content: [{ type: "text", text: "done" }] } as AgentToolResult<TaskToolDetails>;

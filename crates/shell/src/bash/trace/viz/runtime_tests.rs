@@ -62,6 +62,21 @@ fn rows(p: &Value) -> Vec<(String, &Value)> {
 		.collect()
 }
 
+#[test]
+fn zsh_child_words_show_source_text_not_token_bytes() {
+	let (trace, stdout) = run_native_shell("zsh -c 'v=$(echo x)\nprintf %s -m1 \"a b\" \"$v\"'");
+	assert_eq!(stdout, b"-m1a bx");
+	let shown = rows(&present(&trace, &Options::default()))
+		.into_iter()
+		.map(|(text, _)| text)
+		.collect::<Vec<_>>()
+		.join("\n");
+	assert!(!shown.contains('\u{fffd}'), "{shown}");
+	for expected in ["v = $(echo x)", "printf %s -m1 \"a b\" \"$v\""] {
+		assert!(shown.contains(expected), "missing {expected}: {shown}");
+	}
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsing() {
 	// A command still streaming in: nothing has run, its last line is
@@ -72,8 +87,8 @@ async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsi
 	let shown = rows(&streaming);
 	let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
 	assert_eq!(texts, [
-		"cwd /tmp",
-		"and git add -A",
+		"cd /tmp",
+		"&& git add -A",
 		"for f in glob(\"*.go\"):",
 		"print(f\"{f}\")",
 		"if true; th"
@@ -103,9 +118,9 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 	// closed; each case is one way the tail is cut off.
 	for (script, expected) in [
 		// Open quote: the word grows in place.
-		("cd /tmp && rg -n \"va", &["cwd /tmp", "and rg -n ‹va›"][..]),
+		("cd /tmp && rg -n \"va", &["cd /tmp", "&& rg -n ‹va›"][..]),
 		// Pipe awaiting its next stage.
-		("cd /tmp && rg -n x a.cpp |", &["cwd /tmp", "and rg -n ‹x› a.cpp"]),
+		("cd /tmp && rg -n x a.cpp |", &["cd /tmp", "&& rg -n ‹x› a.cpp"]),
 		// Redirection awaiting its target: `2` stays an argument until then.
 		("make 2>", &["make 2"]),
 		// A command name that is so far a reserved word (`fi` of `find`).
@@ -151,7 +166,7 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 		// A heredoc open in `$(` ends before the `$(` closes.
 		("git add -A && git commit -m \"$(cat <<'EOF'\nfix: x\n\nBody.", &[
 			"git add -A",
-			"and git commit -m f\"{⟨cat <<'EOF'",
+			"&& git commit -m f\"{⟨cat <<'EOF'",
 			"fix: x",
 			"",
 			"Body.",
@@ -166,7 +181,7 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 		("out=$(for f i", &["out = ⟨⟩"]),
 		("out=$(for f in *.txt; d", &["out = ⟨⟩"]),
 		// A lone `&` is so far the start of `&&`.
-		("cd /repo &", &["cwd /repo"]),
+		("cd /repo &", &["cd /repo"]),
 		// A redirection of the clobber form awaits its target too.
 		("echo hi >|", &["print(\"hi\")"]),
 		// A body still empty keeps its compound drawn.
@@ -183,7 +198,7 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 		("x=$(echo a\\", &["x = ⟨print(\"a\")⟩"]),
 		// An empty body: the placeholder it is closed with draws no row.
 		("for f in a b; do", &["for f in [\"a\", \"b\"]:"]),
-		("cd /tmp && (", &["cwd /tmp", "and subshell:"]),
+		("cd /tmp && (", &["cd /tmp", "&& subshell:"]),
 		// A header still arriving: the start of `then` is not a command.
 		("if true; th", &["if true:"]),
 		// Nor are the starts of `in` and `do`.
@@ -191,12 +206,12 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 		("for f in a b; d", &["for f in [\"a\", \"b\"]:"]),
 		// A compound keyword with no header yet stays the command name it
 		// read as a byte earlier (`fo`).
-		("cd /tmp && for", &["cwd /tmp", "and for"]),
+		("cd /tmp && for", &["cd /tmp", "&& for"]),
 		("for f in a; do echo $f; for", &["for f in [\"a\"]:", "print(f)", "for"]),
 		// A loop opening inside a loop on the same line.
 		("for i in 1 2; do for v", &["for i in [\"1\", \"2\"]:", "for v in args:"]),
 		// The fd of a redirection still arriving after a compound.
-		("(cd /tmp) 2>", &["subshell:", "cwd /tmp"]),
+		("(cd /tmp) 2>", &["subshell:", "cd /tmp"]),
 		// A function header: the name stays a command until `()` arrives,
 		// then the definition is drawn before its body.
 		("x; gen(", &["x", "gen"]),
@@ -213,7 +228,7 @@ fn streamed_tail_is_drawn_as_it_will_continue() {
 	// A tail no completion closes stays literal, but not the commands
 	// before it, nor the compound around it.
 	for (script, drawn, literal) in [
-		("cd /tmp && for (", &["cwd /tmp"][..], " && for ("),
+		("cd /tmp && for (", &["cd /tmp"][..], " && for ("),
 		("for f in a; do\n  echo $f\n  for (", &["for f in [\"a\"]:", "print(f)"], "  for ("),
 		("f() {\n  local x=1\n  for (", &["def f():", "local x=1"], "  for ("),
 		("ls\nfi x", &["ls"], "fi x"),
@@ -353,7 +368,7 @@ fn bare_test_bracket_without_operands_renders_instead_of_panicking() {
 	// `words[1..0]` and aborted the host process.
 	for (script, expected) in [
 		("[", &[""][..]),
-		("a && [", &["a", "and "]),
+		("a && [", &["a", "&& "]),
 		("! [", &["not "]),
 		("x=$(a); [", &["x = ⟨a⟩", ""]),
 		("test", &[""]),
@@ -374,7 +389,7 @@ async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame()
 			.filter(|row| {
 				row["id"]
 					.as_str()
-					.is_some_and(|id| id.starts_with("frame-"))
+					.is_some_and(|id| id.starts_with("frame-") && !id.starts_with("frame-end-"))
 			})
 			.count()
 	};
@@ -1053,7 +1068,7 @@ fn chain_rows(p: &Value) -> Vec<(String, u64, String)> {
 async fn segmented_and_chain_keeps_pseudo_connectors_while_running_and_after() {
 	// Regression for #18408: the minimizer runs each `&&` operand as its own
 	// unit, and the operators between (and before) them were drawn as raw
-	// ` && ` rows instead of Pseudo `and` connectors.
+	// ` && ` rows instead of Pseudo `&&` connector rows.
 	let root = tempfile::tempdir().unwrap();
 	let gate = root.path().join("gate");
 	let wait = root.path().join("wait.sh");
@@ -1066,7 +1081,7 @@ async fn segmented_and_chain_keeps_pseudo_connectors_while_running_and_after() {
 	assert!(
 		pending[1..]
 			.iter()
-			.all(|(text, depth, role)| text.starts_with("and ") && *depth == 1 && role == "stmt"),
+			.all(|(text, depth, role)| text.starts_with("&& ") && *depth == 1 && role == "stmt"),
 		"{pending:?}"
 	);
 
@@ -1174,5 +1189,63 @@ async fn running_command_keeps_the_script_it_runs_active() {
 			rows(&finished).iter().all(|(_, row)| row["active"] != true),
 			"{command:?}: {finished}"
 		);
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_its_command_ran_is_one_frame_under_that_command() {
+	let dir = tempfile::tempdir().unwrap();
+	let file = dir.path().join("script.sh");
+	let body = "x=1\nf() { echo \"$1\"; }\nf a\nf b\n";
+	std::fs::write(&file, body).unwrap();
+	let shell = Shell::new(None);
+	// The engine compiles such a script one command at a time; each is a
+	// unit of its own, none of them in the command text.
+	for (script, runner) in [
+		(format!("bash {} | cat", file.display()), "bash "),
+		(format!(". {}", file.display()), "source("),
+		(format!("s='{body}'; eval \"$s\""), "eval "),
+	] {
+		let trace = run(&shell, &script).await;
+		let live = present(&trace, &Options::default());
+		let shown = rows(&live);
+		let opens = |id: &str| id.starts_with("frame-") && !id.starts_with("frame-end-");
+		let frames: Vec<usize> = (0..shown.len())
+			.filter(|&i| shown[i].1["id"].as_str().is_some_and(opens))
+			.collect();
+		assert_eq!(frames.len(), 1, "{script}: {live}");
+		let frame = frames[0];
+		let (command, command_row) = &shown[frame - 1];
+		assert!(command.starts_with(runner), "{script}: {live}");
+		let depth = shown[frame].1["depth"].as_u64().unwrap();
+		assert_eq!(depth, command_row["depth"].as_u64().unwrap() + 1, "{script}: {live}");
+		let end = frame
+			+ shown[frame..]
+				.iter()
+				.position(|(_, row)| {
+					row["id"]
+						.as_str()
+						.is_some_and(|id| id.starts_with("frame-end-"))
+				})
+				.unwrap();
+		let inside: Vec<&str> = shown[frame + 1..end]
+			.iter()
+			.map(|(text, _)| text.as_str())
+			.collect();
+		assert_eq!(
+			inside,
+			["x = \"1\"", "def f(arg1):", "print(f\"{arg1}\")", "f(\"a\")", "f(\"b\")"],
+			"{script}: {live}"
+		);
+		assert!(
+			shown[frame + 1..end]
+				.iter()
+				.all(|(_, row)| row["depth"].as_u64() >= Some(depth))
+		);
+		assert_eq!(live["output"], "a\nb\n");
+		let stored = StoredVisualization::from_snapshot_json(&trace.snapshot_json()).unwrap();
+		let restored: Value =
+			serde_json::from_str(&stored.presentation_json(&Options::default()).unwrap()).unwrap();
+		assert_eq!(live, restored, "{script}");
 	}
 }

@@ -129,6 +129,14 @@ A nonblank `name` routes to `startService()` before finite-command timeout, asyn
 
 The result carries `details.service` (`name`, `state`, `ready`, `timedOut`, optional `pid`), not finite-command timeout/async metadata.
 
+### The `o2ctl services` shell command
+
+While services can launch, the embedded shell also has an `o2ctl` command (`src/launch/o2ctl-command.ts`, installed with the session's tool commands for each run). Its `services` namespace reaches the same project-scoped registry as `name`; every other `o2ctl` namespace is reserved:
+
+- `o2ctl services add <name> <pid|%job>` adopts a process that is already running (`cmd &`, `nohup cmd &`) as service `<name>` without restarting it (`adoptService()`; the daemon's `open` with `adopt: <pid>`). A `%job` spec names a job of the calling shell that runs a program (the shell passes the program's pid with the request, as `jobs -x` would substitute it). The service is owned by the session and held like a started one (session lifetime, or persistent under `launch.persist`); it is never restarted. The daemon watches it by pid like a detached service, and when its stdout (else stderr) is a regular file (`nohup.out`, `> log`), that file is linked in as the service's output log, so `read proc://<name>` and the service output view show it. Fails when the name belongs to a live service, the pid is not a live process of the user, or it is already a service's process.
+- `o2ctl services ls` lists the project's services (`listServices()`); `o2ctl services stop <name>` stops one (`stopService()`). An adopted service is stopped by SIGTERM to its process tree, then SIGKILL to its whole process family; its process group is not signalled, as it need not lead one.
+- The command exists only in the embedded shell, not in a `pty` command, a service's own shell, or the user's shell.
+
 ## Non-interactive execution engine (`executeBash`)
 
 ## Shell session reuse model
@@ -352,7 +360,7 @@ This table covers finite-command execution; named-service routing is described s
 ## Implementation files
 
 - [`src/tools/bash.ts`](../packages/coding-agent/src/tools/bash.ts) — tool entrypoint, normalization/interception, service/async/PTY selection, result/error mapping.
-- [`packages/tui/src/tools/bash.ts`](../packages/tui/src/tools/bash.ts) — bash tool renderer and result detail types.
+- [`packages/coding-agent/src/ui/tools/bash.tsx`](../packages/coding-agent/src/ui/tools/bash.tsx) — bash tool renderer (detail types: `packages/coding-agent/src/tools/details/bash.ts`).
 - [`src/launch/services.ts`](../packages/coding-agent/src/launch/services.ts) — named-service validation and project-broker supervision.
 - [`src/internal-urls/proc-protocol.ts`](../packages/coding-agent/src/internal-urls/proc-protocol.ts) — service/job inspection, input, stop, and lifetime controls.
 - [`src/tools/bash-pty-selection.ts`](../packages/coding-agent/src/tools/bash-pty-selection.ts) — `canUseInteractiveBashPty` predicate for choosing the local PTY overlay.
@@ -362,12 +370,12 @@ This table covers finite-command execution; named-service routing is described s
 - [`src/exec/non-interactive-env.ts`](../packages/coding-agent/src/exec/non-interactive-env.ts) — non-interactive child-process env defaults (`buildNonInteractiveEnv`) used by the non-PTY executor.
 - [`src/exec/direnv.ts`](../packages/coding-agent/src/exec/direnv.ts) — direnv/devenv environment loading used by executor preflight.
 - [`src/tools/bash-interactive.ts`](../packages/coding-agent/src/tools/bash-interactive.ts) — PTY runtime, overlay UI, input normalization, and interactive `TERM` setup.
-- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts) — `OutputSink`, `TailBuffer`, truncation/artifact spill, and summary metadata.
+- [`packages/coding-agent/src/tools/streaming-output.ts`](../packages/coding-agent/src/tools/streaming-output.ts) — `OutputSink`, `TailBuffer`, truncation/artifact spill, and summary metadata.
 - [`src/tools/output-meta.ts`](../packages/coding-agent/src/tools/output-meta.ts) — settings-to-output-budget helpers.
-- [`packages/tui/src/tools/output-meta.ts`](../packages/tui/src/tools/output-meta.ts) — truncation metadata and recovery notices.
+- [`packages/coding-agent/src/tools/output-meta.ts`](../packages/coding-agent/src/tools/output-meta.ts) — truncation metadata and recovery notices.
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — session-level `executeBash` surface.
 - [`src/session/bash-runner.ts`](../packages/coding-agent/src/session/bash-runner.ts) — bang-command execution, result ownership, message recording, and abort lifecycle.
-- [`packages/tui/src/chat/bash-execution.ts`](../packages/tui/src/chat/bash-execution.ts) — interactive `!` command execution component.
+- [`packages/coding-agent/src/ui/transcript/exec-run.tsx`](../packages/coding-agent/src/ui/transcript/exec-run.tsx) — interactive `!` command execution component.
 - [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts) — wiring for interactive `!` command UI stream/update completion.
 - [`src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts) — RPC `bash` and `abort_bash` command surface.
 - [`src/internal-urls/local-protocol.ts`](../packages/coding-agent/src/internal-urls/local-protocol.ts) — `local://` resolution, including spills (`local://<id>.log`).

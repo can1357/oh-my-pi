@@ -4,7 +4,7 @@ import * as path from "node:path";
 
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
-import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+import type { ActiveRepoContext } from "../modes/view-model/status-line/host";
 
 function compareEntryNames(left: fs.Dirent, right: fs.Dirent): number {
 	if (left.name < right.name) return -1;

@@ -1,5 +1,5 @@
-import { repairCollapsedScheme, tryExtractEmbeddedUrlSelector } from "@oh-my-pi/pi-tui/tools/fetch";
-import type { ReadUrlToolDetails } from "@oh-my-pi/pi-tui/tools/fetch";
+import { repairCollapsedScheme, tryExtractEmbeddedUrlSelector } from "./details/fetch";
+import type { ReadUrlToolDetails } from "./details/fetch";
 import type { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -7,7 +7,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
-import { $which, ptree } from "@oh-my-pi/pi-utils";
+import { $which, errorMessage, ptree } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveFormat,
 	formatArchiveEntryLines,
@@ -21,8 +21,8 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
 import type { AgentStorageApi } from "../session/agent-storage";
-import { DEFAULT_MAX_BYTES, truncateHead, truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { DEFAULT_MAX_BYTES, truncateHead, truncateHeadBytes } from "./streaming-output";
+import { webpExclusionForModel } from "../utils/image-input";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
@@ -33,16 +33,16 @@ import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES } from "../web/scrapers/types";
 import { type BinaryFetchResult, convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
-import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
+import { applyListLimit } from "./list-limit";
 import { parseTailCount } from "./path-utils";
-import { type LineRange, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
+import { type LineRange, parseLineRanges } from "./line-ranges";
+import { isReadableUrlPath } from "./details/read";
 import { executeJsonQuery } from "./read-json";
 import type { ParsedSelector } from "./read-selector";
-import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-utils";
 import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
 import { ToolAbortError } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -909,10 +909,6 @@ function getArchiveFormatHint(mime: string, extensionHint: string): ArchiveForma
 	return undefined;
 }
 
-function formatErrorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 function binaryContentType(mime: string): string {
 	return mime || "application/octet-stream";
 }
@@ -1031,7 +1027,7 @@ async function tryRenderBinaryPayload(
 				resultNotes,
 			);
 		} catch (error) {
-			resultNotes.push(`Notebook rendering failed: ${formatErrorMessage(error)}`);
+			resultNotes.push(`Notebook rendering failed: ${errorMessage(error)}`);
 			return buildBinaryPayloadResult(
 				url,
 				finalUrl,
@@ -1056,7 +1052,7 @@ async function tryRenderBinaryPayload(
 				resultNotes,
 			);
 		} catch (error) {
-			resultNotes.push(`SQLite rendering failed: ${formatErrorMessage(error)}`);
+			resultNotes.push(`SQLite rendering failed: ${errorMessage(error)}`);
 			return buildBinaryPayloadResult(
 				url,
 				finalUrl,
@@ -1084,7 +1080,7 @@ async function tryRenderBinaryPayload(
 				resultNotes,
 			);
 		} catch (error) {
-			resultNotes.push(`Archive rendering failed: ${formatErrorMessage(error)}`);
+			resultNotes.push(`Archive rendering failed: ${errorMessage(error)}`);
 			return buildBinaryPayloadResult(
 				url,
 				finalUrl,
