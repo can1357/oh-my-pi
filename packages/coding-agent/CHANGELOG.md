@@ -19,6 +19,10 @@
 
 - Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
 
+### Fixed
+
+- In Tern, the agent tray no longer keeps showing the previous session's agents after `/resume` switches to another session.
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

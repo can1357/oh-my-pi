@@ -102,7 +102,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "../registry/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { registerPersistedSubagents } from "../registry/persisted-agents";
+import { isSessionTreeRef, registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "./view-model/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
@@ -1553,17 +1553,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeInlineImageLimits = followInlineImageLimits(() => this.shell.size().rows);
 		this.#tray = new TrayFeed(
 			{
-				input: () =>
-					collectTrayInput({
+				input: () => {
+					// A collab guest's registry mirrors the host's session: every agent in it is the session's.
+					const root = this.collabGuest ? undefined : this.sessionManager.getSessionFile();
+					return collectTrayInput({
 						observers: this.#observerRegistry,
-						refs: getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global()).list(),
+						refs: getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global())
+							.list()
+							.filter(ref => isSessionTreeRef(ref, root)),
 						manager: this.session.asyncJobManager,
 						snapshot: () => this.session.getAsyncJobSnapshot({ recentLimit: Number.POSITIVE_INFINITY }),
 						irc: IrcBus.existing(),
 						showAgents: cfgDisplayPinnedAgents.get(settings) !== "off",
 						canFocus: this.collabGuest === undefined,
 						reviving: this.#trayReviving,
-					}),
+					});
+				},
 				main: () => this.#trayMain.state(id => runsInlineAgent(this.#observerRegistry.getSessions(), id)),
 				focusAgent: id => {
 					this.focusAgentSession(id).catch((error: unknown) =>
