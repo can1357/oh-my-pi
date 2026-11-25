@@ -4,35 +4,6 @@
 
 ### Fixed
 
-- Opening `/model` reuses fresh provider catalogs instead of fetching them again. F5 still forces a provider refresh.
-### Changed
-
-- Model hub search prepares its index between input turns and shares fuzzy matches with the provider sidebar.
-- ovnfs checkout guidance now has agents commit in the checkout and `land` the commits (`--rebase` when the branch moved, `--markers` on conflicts), keeping `apply` for when you want uncommitted edits.
-- Streaming text and tool progress no longer repaint unchanged status-bar content.
-- ovnfs checkout guidance now picks `land` for work committed in a checkout (with `--rebase` when the branch moved) and `apply` for uncommitted edits.
-### Changed
-
-- Reduced repeated model lookups during catalog discovery and model-role selection.
-### Changed
-
-- Startup can resolve `--model @role` and `--model pi/role` without composing the full catalog when the role names an available provider/model.
-### Changed
-
-- The terminal welcome animation now waits until the composer is ready for input.
-### Changed
-
-- The working terminal title now updates four times per second by default; an explicit spinner interval still controls both the title and the TUI.
-- Waiting on unchanged background jobs no longer polls for progress; the wait card's visible elapsed clocks continue to run.
-### Changed
-
-- `/model` opens faster after the session's model picker has warmed up.
-### Changed
-
-- Reduced CLI bootstrap work by loading session construction, the Cursor execution bridge, peer mesh, and persisted-agent support when needed.
-### Changed
-
-- Opening a full model catalog on subsequent launches reuses unchanged catalog data instead of rebuilding it.
 - Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
 
 ## [19.2.0] - 2026-11-25
@@ -72,6 +43,18 @@
 - The daemon and package now use less idle memory by loading catalogs, browser relay support, and prompt perturbation data only when needed.
 - The prompt bubble’s Edit & resend button now stops the current response, discards queued input, and rewinds the transcript to before the selected prompt.
 - The eval `commit` draft exposes its record as the synchronous `details()` method instead of a `details` field.
+- Rewinding (Esc Esc, `/branch`/`/rewind`, a turn's Edit and Retry) branches into a new session again instead of moving within the current one; the session you left stays unchanged and the toast's Undo resumes it.
+- Model hub search prepares its index between input turns and shares fuzzy matches with the provider sidebar.
+- ovnfs checkout guidance now has agents commit in the checkout and `land` the commits (`--rebase` when the branch moved, `--markers` on conflicts), keeping `apply` for when you want uncommitted edits.
+- Streaming text and tool progress no longer repaint unchanged status-bar content.
+- Reduced repeated model lookups during catalog discovery and model-role selection.
+- Startup can resolve `--model @role` and `--model pi/role` without composing the full catalog when the role names an available provider/model.
+- The terminal welcome animation now waits until the composer is ready for input.
+- The working terminal title now updates four times per second by default; an explicit spinner interval still controls both the title and the TUI.
+- Waiting on unchanged background jobs no longer polls for progress; the wait card's visible elapsed clocks continue to run.
+- `/model` opens faster after the session's model picker has warmed up.
+- Reduced CLI bootstrap work by loading session construction, the Cursor execution bridge, peer mesh, and persisted-agent support when needed.
+- Opening a full model catalog on subsequent launches reuses unchanged catalog data instead of rebuilding it.
 
 ### Fixed
 
@@ -94,6 +77,7 @@
 - A broadcast from the main agent now interrupts its waiting subagents: it reaches them as a parent steer (or interrupt) instead of sitting queued until their current `wait` window elapses. Broadcasts between peers still queue without interrupting.
 - Fixed the shared mnemopi embedding server and local tiny-model workers staying loaded for as long as any session that used them stays open; they now unload 15 minutes after their last request ([#20452](https://github.com/can1357/oh-my-pi/issues/20452))
 - LSP `idleTimeoutMs` now shuts down idle language servers even while other processes keep changing files in the workspace; forwarded watched-file changes no longer count as activity ([#20451](https://github.com/can1357/oh-my-pi/issues/20451)).
+- Opening `/model` reuses fresh provider catalogs instead of fetching them again. F5 still forces a provider refresh.
 
 ### Removed
 

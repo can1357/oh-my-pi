@@ -2,25 +2,19 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `label` to editor terminal decoration ranges: replacement text drawn in place of a range on rows where it fits and the caret is outside it.
-
-### Changed
-
-- Terminal animations now skip unchanged frames and share redraws with streaming content; shimmer motion runs at 20 fps.
-
 ## [19.2.0] - 2026-11-25
 
 ### Added
 
 - Added `@oh-my-pi/pi-tui`, a terminal UI with a unified Tern Surface Protocol node tree, native and terminal rendering, reactive signals, compiler-free JSX, role-based painters and widgets, terminal input and capability support, multiplexer and image handling, resize policies, notifications, Markdown and text utilities, themes, and terminal testing utilities.
 - Added checkout event support to TSP connections and hosts.
+- Added `label` to editor terminal decoration ranges: replacement text drawn in place of a range on rows where it fits and the caret is outside it.
 
 ### Changed
 
 - Hosts now report when the terminal displays the checkout itself through `checkoutShown`.
 - Theme files are polled for changes, keeping live reload working when editors replace files during save.
+- Terminal animations now skip unchanged frames and share redraws with streaming content; shimmer motion runs at 20 fps.
 
 ### Fixed
 

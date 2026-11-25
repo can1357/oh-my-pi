@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Agents can accept an asynchronous Cursor handler factory; a session opens its execution bridge on the first Cursor request, including after a model switch.
-
 ## [19.2.0] - 2026-11-25
 
 ### Added
@@ -14,6 +10,7 @@
 - Added `AgentLoopError` and turn-level error metadata so hosts can distinguish an agent loop that ended because a soft tool requirement was not met from a failed request.
 - Added abort-signal support to provider-context transformation and side-request context building.
 - Added optional tool detachment when aborting an agent run, allowing tools that support background execution to continue instead of being terminated.
+- Agents can accept an asynchronous Cursor handler factory; a session opens its execution bridge on the first Cursor request, including after a model switch.
 
 ### Fixed
 

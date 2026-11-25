@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Repeated provider resolution reuses bundled model fingerprints instead of serializing the same catalog rows again.
-
 ## [19.2.0] - 2026-11-25
 
 ### Added
@@ -22,6 +18,7 @@
 - Classified OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models as judge models rather than chat models.
 - Removed StepFun's `dr-search-api` web-search SKU from chat-model listings.
 - Updated Devin and Cursor pricing and usage accounting for image tokens and long-context GPT-5.6 models to match their published rates and limits.
+- Repeated provider resolution reuses bundled model fingerprints instead of serializing the same catalog rows again.
 
 ### Fixed
 
