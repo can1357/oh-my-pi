@@ -109,9 +109,10 @@ function toUiEvent(
 				...(event.checked === undefined ? {} : { checked: event.checked }),
 			};
 		case "change":
-			return "text" in event
-				? { type: "docChange", key, text: event.text }
-				: { type: "change", key, item: event.item, value: event.value };
+			if ("text" in event) return { type: "docChange", key, text: event.text };
+			return "item" in event
+				? { type: "change", key, item: event.item, value: event.value }
+				: { type: "change", key, value: event.value };
 		case "comment":
 			return "comment" in event
 				? { type: "commentNote", key, comment: event.comment, note: event.note }

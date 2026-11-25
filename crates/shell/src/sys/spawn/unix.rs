@@ -30,6 +30,10 @@
 //!
 //! **Waiting** reports stops and continues besides the exit
 //! ([`ExtProc::poll_event`]).
+//!
+//! **Measured spawns** (`time`) run the program under a helper process on
+//! Linux, so its peak resident set is its own rather than the host's
+//! (`measure`).
 
 use std::{
 	cell::RefCell,
@@ -262,14 +266,27 @@ impl Scope {
 		}
 	}
 
-	/// KILL whatever is left in the scope after the external exited
-	/// (identity-pinned; a `Process` scope has nothing beyond the pid).
-	fn sweep(self) {
-		let _ = match self {
-			Self::Group(id) => proc::kill_group(id, Signal::Kill),
-			Self::Session(id) => proc::kill_session(id, Signal::Kill),
-			Self::Process { .. } => return,
+	/// KILL whatever is left in the scope after the external exited, and
+	/// every process of `family` (taken when the external was terminated or
+	/// abandoned) with whatever those have started since, wherever they are
+	/// now: a member that moved to a group or session of its own (a
+	/// debugger's stopped inferior, a `setsid` daemon) is no longer in the
+	/// scope, and its parent's TERM may have left it to init.
+	/// Identity-pinned; a `Process` scope has nothing beyond the pid (and
+	/// no family: [`UnixProc::family`]).
+	fn sweep(self, family: &[ProcInfo]) {
+		if matches!(self, Self::Process { .. }) {
+			return;
+		}
+		let Ok(table) = proc::list() else {
+			return;
 		};
+		let doomed = proc::family(&table, family);
+		let me = std::process::id() as i32;
+		let rest = table
+			.iter()
+			.filter(|p| p.pid != me && self.contains(p) && !doomed.iter().any(|d| d.pid == p.pid));
+		proc::signal_each(doomed.iter().chain(rest), libc::SIGKILL);
 	}
 }
 
@@ -588,7 +605,13 @@ fn may_need_script_fallback(path: &[u8], cwd: &[u8]) -> bool {
 			.contains(&0)
 }
 
-pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
+/// Spawn `spec`; `measured`: for `time`, whose report reads its usage
+/// (`measure`).
+pub(super) fn spawn(
+	shared: &Arc<Shared>,
+	spec: SpawnSpec<'_>,
+	measured: bool,
+) -> io::Result<Box<dyn ExtProc>> {
 	let SpawnSpec {
 		path,
 		argv,
@@ -641,6 +664,15 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		}
 		fds.push((fd, child_fd(shared, s, Dir::Probe, &mut pumps, &mut feeds)?));
 	}
+	#[cfg(target_os = "linux")]
+	let report = (measured
+		&& redirs.is_none()
+		&& place != Place::Inherit
+		&& !sigmask_ign.contains(Signal::Chld))
+	.then(|| measure::Report::attach(&mut fds))
+	.flatten();
+	#[cfg(not(target_os = "linux"))]
+	let _ = measured;
 	lift(&mut fds)?;
 	let tracker = Tracker::new(pumps.iter().map(Pump::outputs).sum());
 	// Polled by the `ExtProc`; dropped (stopping every pump) on any failure
@@ -648,10 +680,17 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let pumps = Pumps::new(pumps, feeds, &tracker);
 	let program =
 		Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits, tty, closed: &closed };
-	let launched = match &redirs {
-		Some(redirs) => fork_redirs(&program, &fds, place, redirs),
-		None => launch(&shared.state, &program, &fds, place),
+	let direct = |fds: &[(i32, Source)]| match &redirs {
+		Some(redirs) => fork_redirs(&program, fds, place, redirs),
+		None => launch(&shared.state, &program, fds, place),
 	};
+	#[cfg(target_os = "linux")]
+	let (launched, report) = match report {
+		Some(report) => report.launch(&shared.state, &program, &mut fds, place, direct),
+		None => (direct(&fds), None),
+	};
+	#[cfg(not(target_os = "linux"))]
+	let launched = direct(&fds);
 	// Our copies of the child's ends: pumps see end of file when the child
 	// (and what it forks) closes its own.
 	drop(fds);
@@ -703,11 +742,14 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		shared: Arc::clone(shared),
 		detached: lineage.detached,
 		reaped: false,
+		family: Vec::new(),
 		pumps,
 		#[cfg(target_os = "linux")]
 		pidfd,
 		#[cfg(target_os = "linux")]
 		awaited: false,
+		#[cfg(target_os = "linux")]
+		report,
 	}))
 }
 
@@ -1614,6 +1656,10 @@ struct UnixProc {
 	/// [`ExtProc::usage`] reaped it already: dropping it must not reap again
 	/// (the pid may name another child by then).
 	reaped:   bool,
+	/// The process and what descended from it when it was last sent TERM or
+	/// KILL ([`UnixProc::family`]): a cancel signals before it drops, and
+	/// the signal may orphan members the abandon escalation must still kill.
+	family:   Vec<ProcInfo>,
 	/// The child's pumps and the shared input feeds it holds (kept open
 	/// while this lives), driven by `poll_wait`.
 	pumps:    Pumps,
@@ -1625,6 +1671,41 @@ struct UnixProc {
 	/// been woken by its readiness and check the exit status.
 	#[cfg(target_os = "linux")]
 	awaited:  bool,
+	/// A measured spawn's pipe from its helper, which reports the
+	/// program's usage there ([`measure`]).
+	#[cfg(target_os = "linux")]
+	report:   Option<fs::File>,
+}
+
+impl UnixProc {
+	/// The process and every process descended from it, those in other
+	/// groups and sessions included ([`proc::family`]), seeded also with the
+	/// family taken at an earlier TERM or KILL (members its parent's death
+	/// left to init). Empty for a process-only scope (`Sessions::Inherit`:
+	/// termination reaches the pid alone, as in bash) or when the process
+	/// table cannot be read. Only while the process is unreaped, so its pid
+	/// names it.
+	fn family(&self) -> Vec<ProcInfo> {
+		if matches!(self.scope, Scope::Process { .. }) {
+			return Vec::new();
+		}
+		let Ok(table) = proc::list() else {
+			return Vec::new();
+		};
+		let mut roots: Vec<ProcInfo> = table
+			.iter()
+			.filter(|p| p.pid == self.pid)
+			.cloned()
+			.collect();
+		roots.extend(self.family.iter().cloned());
+		proc::family(&table, &roots)
+	}
+
+	/// TERM (and continue) the members of `family` the scope's TERM did not
+	/// reach: those that moved to a group or session of their own.
+	fn term_outside_scope(&self, family: &[ProcInfo]) {
+		proc::signal_each(family.iter().filter(|p| !self.scope.contains(p)), libc::SIGTERM);
+	}
 }
 
 #[cfg(target_os = "linux")]
@@ -1702,6 +1783,9 @@ impl ExtProc for UnixProc {
 	}
 
 	fn signal(&mut self, sig: Signal) -> io::Result<()> {
+		if matches!(sig, Signal::Term | Signal::Kill) && !self.detached {
+			self.family = self.family();
+		}
 		self.tracker.lock().signalled(sig);
 		self.scope.signal(sig)
 	}
@@ -1726,6 +1810,8 @@ impl ExtProc for UnixProc {
 		let apple = apple_usage(self.pid);
 		let ru = self.shared.state.reap(self.pid);
 		self.reaped = true;
+		#[cfg(target_os = "linux")]
+		let ru = self.report.take().and_then(measure::usage).unwrap_or(ru);
 		let usage = proc_usage(&ru);
 		#[cfg(target_os = "macos")]
 		let usage = match apple {
@@ -1752,6 +1838,14 @@ impl Drop for UnixProc {
 			crate::sys::park::exits::forget(self.pid);
 		}
 		let grace = self.shared.config.grace;
+		// Taken before anything is signalled, so no member is orphaned
+		// mid-walk. Only the engine polls the tracker, so an exit that is
+		// not collected now is not collected below either.
+		let family = if self.detached || self.tracker.lock().collected() {
+			Vec::new()
+		} else {
+			self.family()
+		};
 		let mut life = self.tracker.lock();
 		if self.detached {
 			let exited = life.release();
@@ -1781,8 +1875,9 @@ impl Drop for UnixProc {
 				}
 				let _ = self.scope.signal(Signal::Cont);
 				drop(life);
+				self.term_outside_scope(&family);
 				self.shared.state.reap(self.pid);
-				escalate_at(&self.tracker, self.scope, sweep_at);
+				escalate_at(&self.tracker, self.scope, sweep_at, family);
 			},
 			Abandon::Escalate { term, kill_at } => {
 				// Under the lock: the waiter cannot record the exit and reap
@@ -1793,7 +1888,8 @@ impl Drop for UnixProc {
 				// A stopped (paused) group acts on TERM only once continued.
 				let _ = self.scope.signal(Signal::Cont);
 				drop(life);
-				escalate_at(&self.tracker, self.scope, kill_at);
+				self.term_outside_scope(&family);
+				escalate_at(&self.tracker, self.scope, kill_at, family);
 				// Parked: a waiter observes the exit and reaps.
 				#[cfg(target_os = "linux")]
 				self.unpark();
@@ -1804,23 +1900,26 @@ impl Drop for UnixProc {
 
 /// [`escalate`] on a thread of its own; at once when no thread can be
 /// started (KILL now rather than never).
-fn escalate_at(tracker: &Arc<Tracker>, scope: Scope, kill_at: Instant) {
+fn escalate_at(tracker: &Arc<Tracker>, scope: Scope, kill_at: Instant, family: Vec<ProcInfo>) {
 	let waiter = Arc::clone(tracker);
+	// A failed thread spawn drops its closure: share the family with it.
+	let family: Arc<[ProcInfo]> = family.into();
+	let theirs = Arc::clone(&family);
 	let started = thread::Builder::new()
 		.name("obash-kill".into())
 		.stack_size(SMALL_STACK)
-		.spawn(move || escalate(&waiter, scope, kill_at));
+		.spawn(move || escalate(&waiter, scope, kill_at, &theirs));
 	if started.is_err() {
 		let now = Instant::now();
 		tracker.lock().schedule_kill(now);
-		escalate(tracker, scope, now);
+		escalate(tracker, scope, now, &family);
 	}
 }
 
 /// After `kill_at`: KILL the scope if its leader is still running (under the
 /// lock, so it is unreaped), then every straggler left in a group or session
-/// (identity-pinned).
-fn escalate(tracker: &Tracker, scope: Scope, kill_at: Instant) {
+/// and every process of `family` and its descendants (identity-pinned).
+fn escalate(tracker: &Tracker, scope: Scope, kill_at: Instant, family: &[ProcInfo]) {
 	let now = Instant::now();
 	if kill_at > now {
 		thread::sleep(kill_at - now);
@@ -1831,7 +1930,7 @@ fn escalate(tracker: &Tracker, scope: Scope, kill_at: Instant) {
 			let _ = scope.signal(Signal::Kill);
 		}
 	}
-	scope.sweep();
+	scope.sweep(family);
 }
 
 fn leftover_procs(shared: &Shared) -> io::Result<Vec<(Scope, ProcInfo)>> {
@@ -1869,5 +1968,7 @@ pub(super) fn kill_leftovers(shared: &Shared) -> io::Result<Vec<Leftover>> {
 	Ok(killed)
 }
 
+#[cfg(target_os = "linux")]
+mod measure;
 #[cfg(test)]
 mod tests;

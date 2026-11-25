@@ -652,6 +652,8 @@ export interface ExecutorOptions {
 	 * passes its own `getAgentId()`).
 	 */
 	parentAgentId?: string;
+	/** Runtime identity of the spawning session; names alone can collide across roots. */
+	parentSessionKey?: string;
 	/** Same-type siblings share a cache route without sharing conversation state. */
 	parentPromptCacheKey?: string;
 	/**
@@ -5308,6 +5310,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					parentTaskPrefix: id,
 					asyncJobManager: options.asyncJobManager,
 					parentAgentId: options.parentAgentId,
+					parentSessionKey: options.parentSessionKey,
 					agentId: id,
 					agentDisplayName: agent.name,
 					agentName: agent.name,

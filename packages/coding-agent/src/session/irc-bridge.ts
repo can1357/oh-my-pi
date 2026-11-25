@@ -197,7 +197,8 @@ export class IrcBridge {
 		const fromParent = parentId === msg.from;
 		// A subagent's result answers its parent, and its run may be waiting on its
 		// own descendants, whose questions it must see in-run. Anyone else's
-		// message gets a turn of its own.
+		// message, or a broadcast leg, gets a turn of its own: a broadcast asks
+		// everyone, so answering it must never replace a finished report.
 		let fromDescendant = false;
 		const seen = new Set<string>();
 		for (
@@ -213,7 +214,8 @@ export class IrcBridge {
 		}
 		// The recipient's ancestor: its parent, grandparent, and so on. The main
 		// agent is the only broadcaster and every subagent descends from it, so a
-		// broadcast leg from it asks its descendants directly.
+		// broadcast leg from it interrupts a busy descendant (ending its `wait`)
+		// rather than waiting quietly for the next step boundary.
 		let fromAncestor = false;
 		const walked = new Set<string>();
 		for (let id = parentId; id !== undefined && !walked.has(id); id = registry.get(id)?.parentId) {
@@ -223,8 +225,7 @@ export class IrcBridge {
 			}
 			walked.add(id);
 		}
-		const peerMessage =
-			parentId !== undefined && (msg.broadcast === true ? !fromAncestor : !fromParent && !fromDescendant);
+		const peerMessage = parentId !== undefined && (msg.broadcast === true || (!fromParent && !fromDescendant));
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent, mid-turn asides, relays, broadcast legs and progress notes have no such relay.

@@ -91,6 +91,15 @@ regex = "1.11"
 # `awk`: POSIX leftmost-longest matching (hybrid DFA, `MatchKind::All`).
 regex-automata = "0.4"
 rustc-hash = "2.1.1"
+# `perl`: insertion-ordered hashes, PCRE2 matching, sockets, XID identifiers,
+# `\N{NAME}` lookup, Unicode::Normalize, `\b{wb}`/`\b{sb}` boundaries.
+icu_normalizer = { version = "2.0", default-features = false, features = ["compiled_data"], optional = true }
+indexmap = { version = "2", optional = true }
+pcre2-sys = { workspace = true, optional = true }
+socket2 = { version = "0.6", features = ["all"], optional = true }
+unicode-ident = { version = "1", optional = true }
+unicode-segmentation = { version = "1.13", optional = true }
+unicode_names2 = { version = "4", optional = true }
 self_cell = "1.0.4"
 serde = { workspace = true, optional = true }
 serde_json = "1"
@@ -174,7 +183,8 @@ features = ["io-util", "macros", "rt"]
 dns-lookup = "3.0.1"
 
 [target."cfg(unix)".dependencies]
-nix = { version = "0.31.3", features = ["fs", "poll", "process", "resource", "signal", "term", "user"] }
+# `socket`/`net`/`uio`: perl's recv with packed peer addresses.
+nix = { version = "0.31.3", features = ["fs", "net", "poll", "process", "resource", "signal", "socket", "term", "uio", "user"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "system", "time"] }
 uucore = { version = "0.8.0", features = ["fsxattr", "safe-traversal"] }
 
@@ -287,6 +297,16 @@ default = ["utils"]
 # Hands files and URLs to the desktop: macos, linux and windows targets.
 "util.open" = ["dep:block2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:zbus"]
 "util.paste" = []
+# `perl`: Perl 5 interpreter; PCRE2 is the closest engine to Perl's regexes.
+"util.perl" = [
+  "dep:icu_normalizer",
+  "dep:indexmap",
+  "dep:pcre2-sys",
+  "dep:socket2",
+  "dep:unicode-ident",
+  "dep:unicode-segmentation",
+  "dep:unicode_names2",
+]
 "util.pgrep" = ["util.proc-match"]
 "util.pidwait" = ["util.proc-match"]
 "util.pkill" = ["util.proc-match"]
@@ -393,6 +413,7 @@ utils = [
   "util.od",
   "util.open",
   "util.paste",
+  "util.perl",
   "util.pgrep",
   "util.pidwait",
   "util.pkill",

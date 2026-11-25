@@ -688,6 +688,51 @@ describe("Codex model discovery", () => {
 		}
 	});
 
+	it("unions service tiers across accounts and keeps each account's own list", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-tiers-"));
+		const tiers = (...ids: string[]) => ids.map(id => ({ id, name: id, description: id }));
+		const fetchFn: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const pro = new Headers(init?.headers).get("chatgpt-account-id") === "account-pro";
+				return Response.json({
+					models: [
+						{
+							slug: "gpt-6-sol",
+							display_name: "GPT-6 Sol",
+							service_tiers: pro ? tiers("priority", "ultrafast") : tiers("priority"),
+						},
+					],
+				});
+			},
+			{ preconnect() {} },
+		);
+		try {
+			// The Plus account is listed first: its tier list must not shadow the Pro account's.
+			const result = await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [
+							{ accessToken: "token-plus", accountId: "account-plus" },
+							{ accessToken: "token-pro", accountId: "account-pro" },
+						],
+						fetch: fetchFn,
+					}),
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+
+			const sol = result.models.find(model => model.id === "gpt-6-sol");
+			expect(sol?.serviceTiers).toEqual(["priority", "ultrafast"]);
+			expect(sol?.accountAccess).toEqual({
+				"account-plus": { serviceTiers: ["priority"] },
+				"account-pro": { serviceTiers: ["priority", "ultrafast"] },
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps bundled Codex models when any account catalog fetch fails (#6265)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-union-fail-"));
 		const bundled: ModelSpec<"openai-codex-responses"> = {

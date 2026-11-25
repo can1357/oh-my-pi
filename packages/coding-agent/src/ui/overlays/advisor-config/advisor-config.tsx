@@ -876,7 +876,7 @@ export function AdvisorConfigOverlay(props: AdvisorConfigOverlayProps): JSXNode 
 			}
 			case "change": {
 				const advisor = index < 0 ? undefined : untrack(advisors)[index];
-				if (!advisor) return;
+				if (!advisor || !("item" in event)) return;
 				const value = event.value;
 				if (event.item === "toggleEnabled" && typeof value === "boolean") {
 					if (value !== (advisor.enabled !== false)) detailSelect(index, "toggleEnabled");
