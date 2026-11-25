@@ -429,7 +429,6 @@
 ### Fixed
 
 - Resuming a goal whose token budget is already spent now keeps it budget-limited instead of reporting it active with 0 tokens remaining, and incomplete-todo reminders no longer ask the agent to keep working while the goal is budget-limited ([#20455](https://github.com/can1357/oh-my-pi/issues/20455))
-- Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
 - SIGTERM or SIGHUP during an `omp acp` turn records `Previous OMP process exited before completing the turn.` That turn resumes with `omp --restore` ([#20446](https://github.com/can1357/oh-my-pi/pull/20446) by [@nick-maderight](https://github.com/nick-maderight)).
 
 ## [19.2.0] - 2026-11-25
