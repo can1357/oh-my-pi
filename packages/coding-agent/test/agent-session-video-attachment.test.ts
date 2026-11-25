@@ -113,18 +113,21 @@ describe("AgentSession video attachments", () => {
 
 	for (const operation of ["pop", "clear"] as const) {
 		it(`${operation} removes a queued video's hidden path with the restored prompt`, async () => {
-			if (!session) throw new Error("Session was not initialized");
+			const target = session;
+			if (!target) throw new Error("Session was not initialized");
 			const preview = createVideoPreviewImage({ type: "image", data: TINY_PNG, mimeType: "image/png" }, SOURCE_PATH);
-			await session.followUp("Review [Video #1]", [preview]);
+			await target.withQueueDrainPaused(async () => {
+				await target.followUp("Review [Video #1]", [preview]);
+				const restored = operation === "pop" ? target.popLastQueuedMessage() : target.clearQueue().followUp[0];
+				expect(restored?.text).toBe("Review [Video #1]");
+				expect(restored?.images).toHaveLength(1);
+				expect(videoPreviewSource(restored!.images![0])).toBe(SOURCE_PATH);
+				expect(target.agent.hasQueuedMessages()).toBe(false);
+			});
 
-			const restored = operation === "pop" ? session.popLastQueuedMessage() : session.clearQueue().followUp[0];
-			expect(restored?.text).toBe("Review [Video #1]");
-			expect(restored?.images).toHaveLength(1);
-			expect(videoPreviewSource(restored!.images![0])).toBe(SOURCE_PATH);
-
-			await session.prompt("New request");
-			expect(JSON.stringify(session.messages)).not.toContain(SOURCE_PATH);
-			expect(session.messages.filter(message => message.role === "user").map(message => message.content)).toEqual([
+			await target.prompt("New request");
+			expect(JSON.stringify(target.messages)).not.toContain(SOURCE_PATH);
+			expect(target.messages.filter(message => message.role === "user").map(message => message.content)).toEqual([
 				[{ type: "text", text: "New request" }],
 			]);
 		});

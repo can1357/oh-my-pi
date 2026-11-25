@@ -3142,11 +3142,13 @@ export declare enum KeyEventType {
 }
 
 /**
- * SIGKILL every process of the family of `pids`: one process-table
- * snapshot, the ppid walk plus every group/session a member leads, then
- * SIGCONT the stopped ones. With `spareHangupIgnoring`, members ignoring
- * SIGHUP and everything descended (ppid chain) from them are left alone.
- * Returns the number signalled. Windows kills each pid's tree.
+ * SIGKILL every process of the family of `pids`; returns the number
+ * signalled.
+ *
+ * One process-table snapshot, the ppid walk plus every group/session a
+ * member leads, then SIGCONT the stopped ones. With `spareHangupIgnoring`,
+ * members ignoring SIGHUP and everything descended (ppid chain) from them
+ * are left alone. Windows kills each pid's tree.
  */
 export declare function killProcessFamily(pids: Array<number>, options?: KillProcessFamilyOptions | undefined | null): number
 
@@ -3187,7 +3189,9 @@ export interface LineRange {
 
 /**
  * Live processes (never the caller) whose environment contains exactly
- * `name=value`. Reads the environment each process was exec'd with: only
+ * `name=value`.
+ *
+ * Reads the environment each process was exec'd with: only
  * the caller's user's processes are readable, others are skipped. macOS
  * also withholds the environment of Apple platform binaries (`/bin/sh`,
  * `/bin/sleep`, …) even from the same user, so those never match there.

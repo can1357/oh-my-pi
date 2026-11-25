@@ -52,6 +52,7 @@ interface AssistantTerm {
 interface ProseTerm {
 	source?: string;
 	links?: ReadonlyMap<string, string>;
+	deferFigures?: boolean;
 }
 
 interface SectionTerm {
@@ -215,6 +216,8 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 	let rendered = false;
 	let toolImages = false;
 	let pulsed = false;
+	let afterFigure = false;
+	let deferredAt = Number.POSITIVE_INFINITY;
 	const dots = termOf<AssistantTerm>(node).thinkingDots;
 	const pulse = (): void => {
 		if (pulsed) return;
@@ -230,8 +233,20 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 	for (const child of node.children()) {
 		const role = propsOf<{ role: string }>(child).role ?? "";
 		const key = child.key() ?? "";
-		if (child.kind === "md") {
+		if (role === "omp.embed" || role === "omp.figure.svg" || role === "omp.figure.code") {
+			const figure = cx.paint(child, cx.width);
+			if (figure.rows.length > 0) {
+				if (rendered) rows.push("");
+				rows.push(...figure.rows);
+				rendered = true;
+				afterFigure = true;
+			}
+		} else if (child.kind === "md") {
 			const frame = markdownRows(child, cx, false);
+			if (afterFigure && frame.rows.length) rows.push("");
+			afterFigure = false;
+			// The streaming source is replaced by its figure, so its rows cannot retire yet.
+			if (termOf<ProseTerm>(child).deferFigures) deferredAt = Math.min(deferredAt, rows.length);
 			for (const hit of frame.hits ?? []) hits.push({ ...hit, row: rows.length + hit.row });
 			streamed(frame, propsOf<{ stream: boolean }>(child).stream === true);
 			rendered ||= frame.rows.length > 0;
@@ -282,6 +297,7 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 		}
 	}
 	pulse();
+	stable = Math.min(stable, deferredAt);
 	return { rows, ...(stable > 0 ? { stable } : {}), ...(hits.length > 0 ? { hits } : {}) };
 }
 

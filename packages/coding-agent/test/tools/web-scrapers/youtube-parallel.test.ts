@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
 import * as parallelModule from "@oh-my-pi/pi-coding-agent/web/parallel";
 import { handleYouTube } from "@oh-my-pi/pi-coding-agent/web/scrapers/youtube";
 
@@ -17,8 +16,8 @@ describe("handleYouTube with Parallel extract", () => {
 		delete process.env.PARALLEL_API_KEY;
 	});
 
-	it("returns Parallel extract content before yt-dlp fallback", async () => {
-		const ensureToolSpy = vi.spyOn(toolsManager, "ensureTool");
+	it("returns Parallel extract content before the player fallback", async () => {
+		const playerFetch = vi.spyOn(globalThis, "fetch");
 		vi.spyOn(parallelModule, "extractWithParallel").mockResolvedValue({
 			requestId: "extract-youtube-1",
 			results: [
@@ -42,6 +41,6 @@ describe("handleYouTube with Parallel extract", () => {
 		expect(result?.contentType).toBe("text/markdown");
 		expect(result?.content).toContain("Parallel summary for the video page");
 		expect(result?.notes).toContain("Used Parallel extract for YouTube");
-		expect(ensureToolSpy).not.toHaveBeenCalled();
+		expect(playerFetch).not.toHaveBeenCalled();
 	});
 });

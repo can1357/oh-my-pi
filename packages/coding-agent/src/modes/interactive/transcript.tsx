@@ -36,6 +36,7 @@ import type { AgentViewSession } from "../../session/agent-session-handle";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../../session/transcript/messages";
 import { isReplyWrite, replyDisplayMessage } from "../../session/transcript/reply-write";
 import { messageBlock, readTranscriptPresentation } from "../../session/transcript/transcript-presentation";
+import { capturePage } from "../../tools/browser/page-shot";
 import { type SpotlightDetails, spotlightDetails } from "../../tools/details/spotlight";
 import { isWaitingPollDetails } from "../../tools/details/wait";
 import { presentShellInspector } from "../../ui/apps/shell-visualizer";
@@ -56,6 +57,7 @@ import { type ExecRun, ExecRunBlock } from "../../ui/transcript/exec-run";
 import { cardExpansion } from "../../ui/transcript/expansion";
 import { PresentedBlock } from "../../ui/transcript/figures/presented-block";
 import { SpotlightNotice } from "../../ui/transcript/figures/spotlight";
+import type { FigureCell } from "../../ui/transcript/figures/svg";
 import {
 	AssistantMessageBlock,
 	type AssistantMessageModel,
@@ -85,6 +87,12 @@ export interface DisplayFlags {
 	readonly expandThinkingBlocks: Signal<boolean>;
 	/** `terminal.showImages`. */
 	readonly showImages: Signal<boolean>;
+	/** `tui.renderSvg`. */
+	readonly renderSvg: Signal<boolean>;
+	/** `tui.renderEmbeds`. */
+	readonly renderEmbeds: Signal<boolean>;
+	/** Cell size when the terminal supports inline pictures. */
+	readonly figureCell: Signal<FigureCell | undefined>;
 	/** Tables get charts (the main session's do, a focused subagent's do not). */
 	readonly tableCharts: Accessor<boolean>;
 	/** Show bash commands through the shell engine's presentation (`display.shellVisualization`). */
@@ -277,6 +285,7 @@ export class TranscriptPresenter {
 			errorExpanded: signal(false),
 		};
 		const thinkingRate = signal(0);
+		const sessionManager = this.#host.viewSession.sessionManager;
 		const model: AssistantMessageModel = {
 			message: signals.message,
 			transient: signals.transient,
@@ -285,6 +294,10 @@ export class TranscriptPresenter {
 			expandThinking: display.expandThinkingBlocks,
 			proseOnlyThinking: display.proseOnlyThinking.peek(),
 			showImages: display.showImages,
+			renderSvg: display.renderSvg,
+			renderEmbeds: display.renderEmbeds,
+			figureCell: display.figureCell,
+			embedHost: { cwd: () => sessionManager.getCwd(), capturePage },
 			showToolResultImages: () => !display.hideToolActivity(),
 			tableCharts: display.tableCharts,
 			toolResultMedia: signals.toolResultMedia,
