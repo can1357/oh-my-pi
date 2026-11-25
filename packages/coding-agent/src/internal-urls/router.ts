@@ -215,7 +215,7 @@ export class InternalUrlRouter {
 		return this.#handler(scheme.toLowerCase())?.spec;
 	}
 
-	/** Specs of every registered scheme: built-ins in registration order, then the session's own. */
+	/** Spec of every registered scheme, as {@link spec} reports it: built-ins in registration order, then the session's own. */
 	specs(): ReadonlyMap<string, SchemeSpec> {
 		const specs = new Map<string, SchemeSpec>();
 		for (const [scheme, handler] of this.#entries()) specs.set(scheme, handler.spec);
@@ -483,11 +483,23 @@ export class InternalUrlRouter {
 		return this.#builtinHandlers.get(scheme);
 	}
 
-	/** Every registered `[scheme, handler]`: built-ins in registration order, then each source's own. */
+	/**
+	 * Every scheme with the handler that serves it ({@link #handler}): built-ins in registration
+	 * order, then the sources' own. A scheme several sources (or registrations of one source) name
+	 * is listed once, with the handler that wins it, so metadata agrees with dispatch.
+	 */
 	*#entries(): Generator<[string, ProtocolHandler]> {
-		yield* this.#builtinHandlers;
+		for (const [scheme, handler] of this.#builtinHandlers) {
+			if (this.#handler(scheme) === handler) yield [scheme, handler];
+		}
+		const listed = new Set<string>();
 		for (const source of this.#sources) {
-			for (const handler of source.handlers()) yield [handler.scheme.toLowerCase(), handler];
+			for (const handler of source.handlers()) {
+				const scheme = handler.scheme.toLowerCase();
+				if (listed.has(scheme) || this.#handler(scheme) !== handler) continue;
+				listed.add(scheme);
+				yield [scheme, handler];
+			}
 		}
 	}
 

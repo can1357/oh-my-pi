@@ -95,6 +95,35 @@ describe("session scheme registration invariants", () => {
 		expect(InternalUrlRouter.isBuiltin("fixture")).toBe(false);
 		expect(InternalUrlRouter.isBuiltin("LOCAL")).toBe(true);
 	});
+
+	it("reports only the handler that serves a scheme an earlier source shadows", () => {
+		const own = new UrlSchemeTable("Host URI scheme");
+		const inherited = new UrlSchemeTable("Host URI scheme");
+		own.replace([
+			fixture({ backing: "remote", selectors: "none", immutable: true }, { promptDoc: () => "own fixture://" }),
+		]);
+		inherited.replace([
+			fixture(
+				{ backing: "remote", selectors: "none", immutable: false, write: { ...fileWrite, via: "handler" } },
+				{ write: async () => {}, promptDoc: () => "inherited fixture://", complete: async () => [] },
+			),
+		]);
+		const router = new InternalUrlRouter([own, inherited]);
+		const host = {
+			skillUriAccess: false,
+			ruleCount: 0,
+			securityEnabled: false,
+			settingsApproval: false,
+			outReplies: false,
+			subagent: false,
+		};
+
+		expect(router.specs().get("fixture")).toBe(router.spec("fixture"));
+		expect(router.specs().get("fixture")?.write).toBeUndefined();
+		expect(router.writeTier("fixture://rows/1", "x", undefined)).toMatchObject({ policy: "deny" });
+		expect(router.describe(host).filter(line => line.includes("fixture://"))).toEqual(["own fixture://"]);
+		expect(router.completionSchemes()).not.toContain("fixture");
+	});
 });
 
 describe("InternalUrlRouter URL shape", () => {
