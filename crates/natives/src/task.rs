@@ -558,10 +558,18 @@ where
 	let cancellation = CancellationToken::new();
 	let _cancel_on_exit = cancellation.clone().drop_guard();
 	let fs = fs.with_cancellation(cancellation.clone());
+	// Set from this frame, on the caller's runtime, when it returns or is
+	// dropped. The aborts below land only when an `FS_RUNTIME` worker next
+	// polls the aborted task, and with a few walks in flight every worker is
+	// in a walker's listing loop, so none ever does: the walks ran over the
+	// whole tree after their callers had timed out. Every walk the work
+	// starts reads this flag at its next directory instead.
+	let stop = omp_xfs::walk::Stop::new();
+	let _stop_on_exit = stop.clone().on_drop();
 	let spawned = FS_RUNTIME.spawn(async move {
 		let _guard = profile_region(tag);
 		let _work = native_work();
-		let mut work = pin!(work(fs));
+		let mut work = pin!(stop.scope(work(fs)));
 		let scoped = future::poll_fn(|cx| {
 			crate::crash_handler::blocking_task_panic_scope(|| work.as_mut().poll(cx))
 		});
@@ -580,9 +588,10 @@ where
 			Err(err) => Err(Error::from_reason(format!("native task `{tag}` failed: {err}"))),
 		}),
 		_ = cancel_token.wait() => {
-			// Stop the walk two ways: the provider's cancellation ends the work
-			// in flight, and aborting the task drops the future at its next
-			// yield so nothing runs on unobserved.
+			// Stop the walk three ways: the scope stop (set as this returns)
+			// halts the walkers, the provider's cancellation ends the work in
+			// flight, and aborting the task drops the future at its next yield
+			// so nothing runs on unobserved.
 			cancellation.cancel();
 			worker.abort();
 			None

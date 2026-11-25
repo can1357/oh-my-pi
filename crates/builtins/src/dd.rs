@@ -2028,11 +2028,45 @@ mod tests {
 		err:  String,
 	}
 
+	/// Replaces the elapsed time and transfer rate in `dd` statistics with `T` and `R`.
+	fn normalize_stats(stderr: &str) -> String {
+		const PREFIX: &str = "copied, ";
+		let mut out = String::with_capacity(stderr.len());
+		let mut copied = 0;
+		for at in memchr::memmem::find_iter(stderr.as_bytes(), PREFIX.as_bytes()) {
+			let rest = &stderr[at + PREFIX.len()..];
+			let time = rest
+				.bytes()
+				.take_while(|b| matches!(b, b'0'..=b'9' | b'.' | b'e' | b'+' | b'-'))
+				.count();
+			if time == 0 {
+				continue;
+			}
+			let Some(rest) = rest[time..].strip_prefix(" s, ") else {
+				continue;
+			};
+			let rate = rest.bytes().take_while(|b| matches!(b, b'0'..=b'9' | b'.')).count();
+			if rate == 0 {
+				continue;
+			}
+			let Some(rest) = rest[rate..].strip_prefix(' ') else {
+				continue;
+			};
+			let rest = rest.strip_prefix(['k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y', 'R', 'Q']).unwrap_or(rest);
+			if let Some(rest) = rest.strip_prefix("B/s") {
+				out.push_str(&stderr[copied..at]);
+				out.push_str("copied, T, R");
+				copied = stderr.len() - rest.len();
+			}
+		}
+		out.push_str(&stderr[copied..]);
+		out
+	}
+
 	impl Outcome {
 		/// Stderr with the elapsed time and rate replaced by `T` and `R`.
 		fn stats(&self) -> String {
-			let pattern = regex::Regex::new(r"copied, [0-9.e+-]+ s, [0-9.]+ [kMGTPEZYRQ]?B/s").unwrap();
-			pattern.replace_all(&self.err, "copied, T, R").into_owned()
+			normalize_stats(&self.err)
 		}
 	}
 

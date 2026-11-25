@@ -15,6 +15,7 @@ import {
 	stageNative,
 } from "@oh-my-pi/pi-tui/testing/corpus";
 import { composerFacts } from "../../../src/ui/status/composer-facts";
+import type { StatusFacts } from "../../../src/ui/status/facts";
 import { corpusStatusFacts } from "./fixture";
 
 const SCREEN = "composer/surface";
@@ -34,6 +35,77 @@ function find(node: NativeNode, match: (node: NativeNode) => boolean): NativeNod
 	}
 	return undefined;
 }
+
+test("the native composer cache fact describes the next message only when cache status is known", () => {
+	const env = corpusEnvironment("dark");
+	createRoot(dispose => {
+		try {
+			const base = corpusStatusFacts();
+			const facts = signal<StatusFacts>(base);
+			const { extras } = composerFacts({
+				settings: () => ({ preset: "custom", leftSegments: ["cache"], rightSegments: [] }),
+				facts,
+				click: action => ({ click: action }),
+			});
+			if (!isUiNode(extras)) throw new Error("Expected the composer extras node");
+			const native = () => describeTree(extras, env);
+			expect(native()).not.toHaveProperty("c");
+
+			const entry = { inferred: true, touchedAt: base.now, cachedTokens: 42, nextTokens: 60 };
+			facts.set({ ...base, promptCache: { ...entry, state: "warm", tier: "short" } });
+			expect(native()).toMatchObject({
+				c: [
+					{
+						k: "seg",
+						key: "cache",
+						p: {
+							role: "omp.composer.cache",
+							side: "right",
+							aria: "Likely cached, no expiry",
+							actions: { click: "status.cache" },
+							hovercard: {
+								k: "col",
+								p: { role: "omp.composer.cache.card" },
+								c: [
+									{ k: "text", p: { text: "Likely cached, no expiry" } },
+									{ k: "text", p: { spans: [{ t: "Next message reads ~42 from cache", s: "muted" }] } },
+								],
+							},
+						},
+					},
+				],
+			});
+
+			facts.set({
+				...base,
+				promptCache: { ...entry, state: "cold", tier: "short", reason: { kind: "expired", at: base.now } },
+			});
+			expect(native()).toMatchObject({
+				c: [
+					{
+						k: "seg",
+						key: "cache",
+						p: {
+							title: "Not cached — expired\nNext message re-sends ~60",
+							hovercard: {
+								k: "col",
+								p: { role: "omp.composer.cache.card" },
+								c: [
+									{ k: "text", p: { spans: [{ t: "Not cached — expired", s: "warning" }] } },
+									{ k: "text", p: { spans: [{ t: "Next message re-sends ~60", s: "muted" }] } },
+								],
+							},
+						},
+					},
+				],
+			});
+			facts.set(base);
+			expect(native()).not.toHaveProperty("c");
+		} finally {
+			dispose();
+		}
+	});
+});
 
 const dir = path.join(CORPUS_DIR, SCREEN);
 const files = fs.existsSync(dir)

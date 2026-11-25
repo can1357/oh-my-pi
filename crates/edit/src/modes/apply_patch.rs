@@ -5,10 +5,8 @@
 use std::{
 	collections::{HashMap, HashSet},
 	path::{Path, PathBuf},
-	sync::{Arc, LazyLock},
+	sync::Arc,
 };
-
-use regex::Regex;
 
 use super::patch::{Operation, PatchEngine, PatchInput, stage_patch};
 use crate::{
@@ -19,6 +17,7 @@ use crate::{
 	files::{FileRead, FileSource},
 	notebook::{is_notebook_path, notebook_to_editable_text},
 	path_policy::{PathPolicy, canonical_key},
+	scan::{keyword, space},
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
 	text::{LineEnding, detect_line_ending, js_trim, normalize_to_lf, strip_bom},
@@ -31,22 +30,52 @@ const DELETE_FILE_MARKER: &str = "*** Delete File: ";
 const UPDATE_FILE_MARKER: &str = "*** Update File: ";
 const MOVE_TO_MARKER: &str = "*** Move to: ";
 
-static PATH_NOISE_FILE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)^\s*\*{3}\s*(?:Add|Update|Delete)\s+File\s*:\s*")
-		.expect("valid path-noise regex")
-});
-static PATH_NOISE_MOVE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)^\s*\*{3}\s*Move\s+to\s*:\s*").expect("valid move-noise regex")
-});
-static ENVELOPE_PATH: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?m)^\s*\*{3}\s+(?:Add|Update|Delete)\s+File\s*:\s*(\S.*?)\s*$")
-		.expect("valid apply-patch path regex")
-});
+/// Strips a file or move header accidentally nested in a path.
+fn strip_path_header<'a>(value: &'a str, verbs: &[&str], noun: &str) -> Option<&'a str> {
+	let rest = value.trim_start().strip_prefix("***")?.trim_start();
+	let rest = verbs.iter().find_map(|verb| keyword(rest, verb))?;
+	let rest = keyword(space(rest)?, noun)?;
+	Some(rest.trim_start().strip_prefix(':')?.trim_start())
+}
 
 /// Remove an accidentally nested apply-patch header from a path.
 pub fn strip_apply_patch_path_noise(value: &str) -> String {
-	let value = PATH_NOISE_FILE.replace(value, "");
-	PATH_NOISE_MOVE.replace(&value, "").into_owned()
+	let value = strip_path_header(value, &["Add", "Update", "Delete"], "File").unwrap_or(value);
+	strip_path_header(value, &["Move"], "to")
+		.unwrap_or(value)
+		.to_owned()
+}
+
+/// Parses a case-sensitive file header and finds the start of its path.
+fn envelope_path_start(line: &str) -> Option<&str> {
+	let rest = space(line.strip_prefix("***")?)?;
+	let rest = rest
+		.strip_prefix("Add")
+		.or_else(|| rest.strip_prefix("Update"))
+		.or_else(|| rest.strip_prefix("Delete"))?;
+	let rest = space(rest)?.strip_prefix("File")?;
+	let path = rest.trim_start().strip_prefix(':')?.trim_start();
+	(!path.is_empty()).then_some(path)
+}
+
+/// Finds authored paths in an envelope, including headers with wrapped
+/// whitespace.
+fn envelope_paths(mut input: &str) -> impl Iterator<Item = &str> {
+	std::iter::from_fn(move || {
+		loop {
+			let line = input.trim_start();
+			if line.is_empty() {
+				return None;
+			}
+			if let Some(path) = envelope_path_start(line) {
+				let (path, rest) = path.split_once('\n').unwrap_or((path, ""));
+				// Any remaining whitespace is also skipped before the next header.
+				input = rest;
+				return Some(path.trim_end());
+			}
+			input = line.split_once('\n')?.1;
+		}
+	})
 }
 
 /// One parsed Codex envelope entry.
@@ -506,11 +535,7 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 }
 
 fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<FileOpIntent>) {
-	let paths = ENVELOPE_PATH
-		.captures_iter(input)
-		.filter_map(|capture| capture.get(1).map(|value| value.as_str().trim().to_owned()))
-		.filter(|path| !path.is_empty())
-		.collect::<Vec<_>>();
+	let paths = envelope_paths(input).map(str::to_owned).collect::<Vec<_>>();
 	let entries = parse_apply_patch(input)
 		.or_else(|_| parse_apply_patch_streaming(input))
 		.unwrap_or_default();

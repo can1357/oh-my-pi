@@ -1,0 +1,21 @@
+# Perl corpus: packages. Format and regeneration: crates/builtins/src/perl/tests.rs.
+default	print __PACKAGE__,"\n";	main␊
+glob-array-slot	our @foo=(1,2); my $a=*foo{ARRAY}; push @$a,3; print "@foo\n";	1 2 3␊
+glob-code-alias	sub foo {17} *bar=\&foo; print bar(),"\n";	17␊
+glob-hash-slot	our %foo=(a=>1); print *foo{HASH}->{a},"\n";	1␊
+glob-localize	our $x=4; {local *x; $x=9; print "$x|"} print "$x\n";	9|4␊
+glob-name	print *foo{NAME},'|',*foo{PACKAGE},"\n";	foo|main␊
+glob-scalar-alias	our $foo=8; *bar=*foo; $bar++; print "$foo|$bar\n";	9|9␊
+glob-slot-alias	our $foo=8; our @foo=(1,2); *bar=\$foo; $bar++; print "$foo|",scalar(@bar),"\n";	9|0␊
+glob-string	print *foo,"\n";	*main::foo␊
+line	print __LINE__,"\n";	1␊
+old-package-separator	$Planets'Mars'x=9; print "$Planets::Mars::x\n";	9␊
+package-block	package Mars { our $x=4; print __PACKAGE__,'|' } print __PACKAGE__,"\n";	Mars|main␊
+package-sub-block	sub f { package Mars; return __PACKAGE__ } print f(),'|',__PACKAGE__,"\n";	Mars|main␊
+package-version	package Mars 1.25; print "$Mars::VERSION\n";	1.25␊
+package	package Mars; print __PACKAGE__,"\n";	Mars␊
+qualified-sub	package Mars; sub f {5} package Earth; print Mars::f(),"\n";	5␊
+qualified	package Mars; our $x=4; package Earth; our $x=9; print "$Mars::x|$Earth::x\n";	4|9␊
+source	print __FILE__,"\n";	source.pl␊
+stash-coderef	package Mars; sub foo {42} my $f=*{$Mars::{foo}}{CODE}; print $f->(),"\n";	42␊
+stash-key	package Mars; our $foo=4; print exists $Mars::{foo}?1:0,"\n";	1␊
