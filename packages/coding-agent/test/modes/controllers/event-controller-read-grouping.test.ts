@@ -13,17 +13,28 @@
  * one-entry block).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { AssistantView, InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { isSettled } from "@oh-my-pi/pi-tui";
+import { isSettled, nativeSupports } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { TSP_KINDS } from "@oh-my-pi/pi-wire";
+import { followInlineImageLimits } from "../../../src/ui/transcript/messages/image";
 import { initTheme } from "../../../src/ui/theme/service";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { nativeShell } from "../../helpers/native-shell";
 import { blockText } from "../../helpers/transcript-text";
 
-import { cfgDisplayShowTokenUsage, cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import {
+	cfgDisplayShowTokenUsage,
+	cfgTerminalShowImages,
+	cfgTuiMaxInlineImageRows,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 beforeAll(() => {
 	initTheme();
@@ -251,6 +262,97 @@ describe("EventController read-group accretion", () => {
 		expect(isSettled(group!.block.node)).toBe(true);
 	});
 
+	it("sends the same deduplicated grouped media live and on replay, with blobs for hosts without media", async () => {
+		const image: ImageContent = {
+			type: "image",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+			mimeType: "image/png",
+		};
+		const picture = "/tmp/grouped picture.png";
+		const pdf = "/tmp/grouped document.pdf";
+		const reads: readonly Pick<ToolResultMessage, "toolCallId" | "content" | "details">[] = [
+			{ toolCallId: "first", content: [image], details: { mediaPath: picture } },
+			{ toolCallId: "second", content: [image], details: { mediaPath: picture } },
+			{ toolCallId: "pdf", content: [{ type: "text", text: "Extracted page" }], details: { mediaPath: pdf } },
+			{ toolCallId: "blob", content: [image], details: {} },
+		];
+		const results = reads.map((result): ToolResultMessage => ({
+			role: "toolResult",
+			toolName: "read",
+			isError: false,
+			timestamp: 2,
+			...result,
+		}));
+		const content = results.map(result => toolCall("read", result.toolCallId, { path: `${result.toolCallId}.bin` }));
+		const env = staticEnvironment(currentTheme());
+		const previews = (ctx: InteractiveModeContext) => {
+			const [view] = assistants(ctx);
+			if (!view) throw new Error("missing assistant reply");
+			return view.block.native().flatMap(node =>
+				node
+					.children()
+					.filter(child => child.kind === "media" || child.kind === "image")
+					.map(child => describeTree(child, env)),
+			);
+		};
+
+		cfgTuiMaxInlineImageRows.override(settings, 10);
+		const stopSizing = followInlineImageLimits(() => 50);
+		try {
+			for (const drawsMedia of [true, false]) {
+				const live = createFixture();
+				await using _host = await nativeShell(live.ctx.shell, {
+					kinds: drawsMedia ? TSP_KINDS : TSP_KINDS.filter(kind => kind !== "media"),
+				});
+				expect(nativeSupports("media")).toBe(drawsMedia);
+				await streamCompletion(live.controller, content);
+				for (const result of results) {
+					await live.controller.handleEvent({
+						type: "tool_execution_end",
+						toolCallId: result.toolCallId,
+						toolName: "read",
+						result,
+						isError: false,
+					});
+				}
+
+				const rebuilt = createFixture();
+				try {
+					new UiHelpers(rebuilt.ctx).renderSessionContext({
+						messages: [assistantMessage(content), ...results],
+						thinkingLevel: "off",
+						serviceTier: undefined,
+						models: {},
+						injectedTtsrRules: [],
+						mode: "none",
+					});
+					const liveTree = previews(live.ctx);
+					expect(previews(rebuilt.ctx)).toEqual(liveTree);
+					const blob = { alt: "image/png", blob: expect.any(String), w: 1, h: 1 };
+					if (drawsMedia) {
+						expect(liveTree).toEqual([
+							{ k: "media", key: "rfirst", p: { path: picture, max: { h: "10lines" } } },
+							{ k: "media", key: "rpdf", p: { path: pdf, max: { h: "10lines" } } },
+							{ k: "image", key: "rblob:0", p: blob },
+						]);
+					} else {
+						const linked = { ...blob, href: Bun.pathToFileURL(picture).href, actions: { menu: ["open"] } };
+						expect(liveTree).toEqual([
+							{ k: "image", key: "rfirst:0", p: linked },
+							{ k: "image", key: "rsecond:0", p: linked },
+							{ k: "image", key: "rblob:0", p: blob },
+						]);
+					}
+				} finally {
+					rebuilt.ctx.shell.transcript.clear();
+					rebuilt.ctx.shell.surface.dispose();
+				}
+			}
+		} finally {
+			stopSizing();
+		}
+	});
+
 	it("keeps live read images on the reply that issued the read, shown or not", async () => {
 		cfgTerminalShowImages.override(Settings.instance, false);
 		const { controller, ctx } = createFixture();
@@ -274,6 +376,6 @@ describe("EventController read-group accretion", () => {
 		// The reply holds the image whatever the visibility; the display flag decides whether it draws.
 		const [assistant] = assistants(ctx);
 		expect(assistant).toBeDefined();
-		expect(assistant!.toolResultImages.peek().get(id)).toEqual([image]);
+		expect(assistant!.toolResultMedia.peek().get(id)?.images).toEqual([image]);
 	});
 });

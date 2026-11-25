@@ -1,3 +1,4 @@
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import { clearSubmittedText } from "./helpers/draft";
 import { reset as resetCapabilities } from "../capability";
 import {
@@ -6,7 +7,7 @@ import {
 	resolveOrDefaultProjectRegistryPath,
 } from "../discovery/helpers.js";
 import type { InteractiveModeContext } from "../modes/types";
-import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type { SlashCommandSpec } from "./types";
 

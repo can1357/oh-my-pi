@@ -1342,7 +1342,7 @@ mod follow {
 	mod files {
 		//! File handle management for `tail --follow`.
 		use std::{
-			collections::{HashMap, hash_map::Keys},
+			collections::HashMap,
 			io::{BufRead, BufReader, Write},
 			path::{Path, PathBuf},
 		};
@@ -1403,20 +1403,8 @@ mod follow {
 				self.map.get_mut(k).unwrap()
 			}
 		
-			pub fn get_mut_metadata(&mut self, path: &Path) -> Option<&Metadata> {
-				self.get_mut(path).metadata.as_ref()
-			}
-		
-			pub fn keys(&self) -> Keys<'_, PathBuf, PathData> {
-				self.map.keys()
-			}
-		
 			pub fn contains_key(&self, k: &Path) -> bool {
 				self.map.contains_key(k)
-			}
-		
-			pub fn get_last(&self) -> Option<&PathBuf> {
-				self.last.as_ref()
 			}
 		
 			/// Return true if there is only stdin remaining
@@ -1443,18 +1431,6 @@ mod follow {
 			/// anymore.
 			pub fn reset_reader(&mut self, path: &Path) {
 				self.get_mut(path).reader = None;
-			}
-		
-			/// Reopen the file at the monitored `path`
-			pub fn update_reader(&mut self, path: &Path) -> TailResult<()> {
-				/*
-				BUG: If it's not necessary to reopen a file, GNU's tail calls seek to offset 0.
-				As a workaround, we always reopen the file even though this might not always
-				be necessary.
-				*/
-				let file = self.fs.open(path)?;
-				self.set_reader(path, file);
-				Ok(())
 			}
 		
 			/// Follow `path` through `file` from the handle's current position.
@@ -1528,7 +1504,7 @@ mod follow {
 			pub reader:          Option<BufReader<File>>,
 			pub metadata:        Option<Metadata>,
 			pub display_name:    String,
-			/// Consecutive provider polls that read nothing from `reader`; with
+			/// Consecutive checks that read nothing from `reader`; with
 			/// `--follow=name` the name is rechecked once this reaches
 			/// `--max-unchanged-stats`.
 			pub unchanged_stats: u32,
@@ -1542,121 +1518,64 @@ mod follow {
 			) -> Self {
 				Self { reader, metadata, display_name: display_name.to_owned(), unchanged_stats: 0 }
 			}
-		
-			pub fn from_other_with_path(data: Self, path: &Path, fs: &BlockingFs) -> Self {
-				// Remove old reader
-				let old_reader = data.reader;
-				let reader = if old_reader.is_some() {
-					// Use old reader with the same file descriptor if there is one
-					old_reader
-				} else if let Ok(file) = fs.open(path) {
-					// Open new file tail from start
-					Some(BufReader::new(file))
-				} else {
-					// Probably file was renamed/moved or removed again
-					None
-				};
-		
-				Self::new(reader, fs.metadata(path).ok(), data.display_name.as_str())
-			}
 		}
 	}
 	
 	#[cfg(not(target_os = "wasi"))]
 	mod watch {
-		//! Notification and polling follow loop.
+		//! The follow loop: GNU `tail_forever` checks of every operand once per
+		//! `--sleep-interval`, woken early by [`omp_xfs::watch`] for the native
+		//! operands it reports changed.
 		use std::{
-			io::{BufReader, ErrorKind, Seek, SeekFrom, Write},
+			io::{self, BufReader, ErrorKind, Seek, SeekFrom, Write},
 			path::{Path, PathBuf},
 			sync::{
 				Arc,
 				atomic::{AtomicBool, Ordering},
-				mpsc::{self, Receiver, channel},
+				mpsc::{self, Receiver, RecvTimeoutError},
 			},
 			time::{Duration, Instant},
 		};
-		
-		use notify::{RecommendedWatcher, RecursiveMode, Watcher, WatcherKind};
+
+		use omp_vfs::{BlockingFs, File};
+		use omp_xfs::watch::{Backend, Config, Root, Watcher};
 		use uucore::display::Quotable;
-		
-		use crate::openfile::OpenFile;
-		use omp_vfs::{BlockingFs, File, parent_path};
-		
+
 		use crate::{
 			host::{Host, StreamWriter},
+			openfile::OpenFile,
 			tail::{
 				TailError,
 				TailResult,
 				args::{FollowMode, Settings},
 				follow::files::{FileHandling, PathData},
-				paths::{Input, InputKind, MetadataExtTail, PathExtTail},
+				paths::{InputKind, MetadataExtTail},
 				platform, text,
 			},
 		};
-		
-		pub struct WatcherRx {
-			watcher:  Box<dyn Watcher>,
-			receiver: Receiver<Result<notify::Event, notify::Error>>,
+
+		/// The watcher's mechanism: kqueue on macOS, where `FSEvents` reports a
+		/// write only once the writer closes the file; the native one elsewhere.
+		const BACKEND: Backend = if cfg!(target_os = "macos") {
+			Backend::Kqueue
+		} else {
+			Backend::Default
+		};
+
+		/// The longest the loop waits before it looks at cancellation and
+		/// `--pid` again.
+		const SLICE: Duration = Duration::from_millis(100);
+
+		/// The watcher over the native operands.
+		struct Watch {
+			_watcher: Watcher,
+			/// Per batch, the indices into `operands` it touched; an `Err` ends
+			/// the watch.
+			changes:  Receiver<io::Result<Vec<usize>>>,
+			/// The watched operands, by root index.
+			operands: Vec<PathBuf>,
 		}
-		
-		impl WatcherRx {
-			fn new(
-				watcher: Box<dyn Watcher>,
-				receiver: Receiver<Result<notify::Event, notify::Error>>,
-			) -> Self {
-				Self { watcher, receiver }
-			}
-		
-			/// Wrapper for `notify::Watcher::watch` to also add the parent directory of
-			/// `path` if necessary.
-			fn watch_with_parent(&mut self, path: &Path, fs: &BlockingFs) -> TailResult<()> {
-				let mut path = path.to_owned();
-				#[cfg(target_os = "linux")]
-				if fs.is_file(&path) {
-					/*
-					NOTE: Using the parent directory instead of the file is a workaround.
-					This workaround follows the recommendation of the notify crate authors:
-					> On some platforms, if the `path` is renamed or removed while being watched, behavior may
-					> be unexpected. See discussions in [#165] and [#166]. If less surprising behavior is wanted
-					> one may non-recursively watch the _parent_ directory as well and manage related events.
-					NOTE: Adding both: file and parent results in duplicate/wrong events.
-					Tested for notify::InotifyWatcher and for notify::PollWatcher.
-					*/
-					if let Some(parent) = parent_path(&path) {
-						if fs.is_dir(parent) {
-							path = parent.to_owned();
-						} else {
-							path = PathBuf::from(".");
-						}
-					} else {
-						return Err(TailError::message(format!("cannot watch parent directory of {}", path.quote())));
-					}
-				}
-				if path.is_relative() {
-					path = fs.canonicalize(&path)?;
-				}
-		
-				// for syscalls: 2x "inotify_add_watch" ("filename" and ".") and 1x
-				// "inotify_rm_watch"
-				self.watch(&path, RecursiveMode::NonRecursive)?;
-				Ok(())
-			}
-		
-			fn watch(&mut self, path: &Path, mode: RecursiveMode) -> TailResult<()> {
-				self
-					.watcher
-					.watch(path, mode)
-					.map_err(|err| TailError::message(err.to_string()))
-			}
-		
-			fn unwatch(&mut self, path: &Path) -> TailResult<()> {
-				self
-					.watcher
-					.unwatch(path)
-					.map_err(|err| TailError::message(err.to_string()))
-			}
-		}
-		
+
 		pub struct Observer {
 			/// Whether --retry was given on the command line
 			pub retry: bool,
@@ -1664,14 +1583,13 @@ mod follow {
 			/// The [`FollowMode`]
 			pub follow: Option<FollowMode>,
 		
-			/// Indicates whether to use the fallback `polling` method instead of the
-			/// platform specific event driven method. Since `use_polling` is subject to
-			/// change during runtime it is moved out of [`Settings`].
+			/// No watcher wakes the loop: operands are checked once per
+			/// `--sleep-interval` only. Set by `---disable-inotify`, when no
+			/// operand is a native file, and when the watcher fails.
 			pub use_polling: bool,
-		
-			pub watcher_rx: Option<WatcherRx>,
-			pub orphans:    Vec<PathBuf>,
-			pub files:      FileHandling,
+
+			watch: Option<Watch>,
+			pub files: FileHandling,
 		
 			pub pid: platform::Pid,
 			pub stdout: StreamWriter,
@@ -1696,18 +1614,7 @@ mod follow {
 					0
 				};
 		
-				Self {
-					retry,
-					follow,
-					use_polling,
-					watcher_rx: None,
-					orphans: Vec::new(),
-					files,
-					pid,
-					stdout,
-					stderr,
-					cancel,
-				}
+				Self { retry, follow, use_polling, watch: None, files, pid, stdout, stderr, cancel }
 			}
 		
 			pub fn from(
@@ -1759,365 +1666,169 @@ mod follow {
 				Ok(())
 			}
 		
+			/// Starts watching the native file operands, before their initial
+			/// output so no later change is missed. Each operand is watched by
+			/// name: replacing, removing and recreating it are reported too.
 			pub fn start(&mut self, settings: &Settings, host: &mut Host) -> TailResult<()> {
-				if settings.follow.is_none() {
+				if settings.follow.is_none() || self.use_polling {
 					return Ok(());
 				}
-		
-				// notify's watchers, its PollWatcher included, observe host paths
-				// directly. Use them only when the filesystem declares every operand
-				// native; otherwise poll every operand through the provider.
-				let native = settings.inputs.iter().all(|input| match input.kind() {
-					InputKind::Stdin => true,
-					InputKind::File(path) => self.files.fs().is_native_local(path),
-				});
-				if !native {
+				let operands: Vec<PathBuf> = settings
+					.inputs
+					.iter()
+					.filter_map(|input| match input.kind() {
+						InputKind::File(path)
+							if path != Path::new(text::DEV_STDIN) && self.files.fs().is_native_local(path) =>
+						{
+							Some(path.clone())
+						},
+						_ => None,
+					})
+					.collect();
+				if operands.is_empty() || BACKEND.resolve() == Backend::Poll {
 					self.use_polling = true;
 					return Ok(());
 				}
-		
-				let (tx, rx) = channel();
-		
-				/*
-				Watcher is implemented per platform using the best implementation available on that
-				platform. In addition to such event driven implementations, a polling implementation
-				is also provided that should work on any platform.
-				Linux / Android: inotify
-				macOS: FSEvents / kqueue
-				Windows: ReadDirectoryChangesWatcher
-				FreeBSD / NetBSD / OpenBSD / DragonflyBSD: kqueue
-				Fallback: polling every n seconds
-		
-				NOTE:
-				We force the use of kqueue with: features=["macos_kqueue"].
-				On macOS only `kqueue` is suitable for our use case because `FSEvents`
-				waits for file close util it delivers a modify event. See:
-				https://github.com/notify-rs/notify/issues/240
-				*/
-		
-				let watcher: Box<dyn Watcher>;
-				let watcher_config = notify::Config::default()
-					.with_poll_interval(settings.sleep_sec)
-					/*
-					NOTE: By enabling compare_contents, performance will be significantly impacted
-					as all files will need to be read and hashed at each `poll_interval`.
-					However, this is necessary to pass: "gnu/tests/tail-2/F-vs-rename.sh"
-					*/
-					.with_compare_contents(true);
-				if self.use_polling || RecommendedWatcher::kind() == WatcherKind::PollWatcher {
-					self.use_polling = true; // We have to use polling because there's no supported backend
-					watcher = Box::new(notify::PollWatcher::new(tx, watcher_config).unwrap());
-				} else {
-					let tx_clone = tx.clone();
-					match RecommendedWatcher::new(tx, notify::Config::default()) {
-						Ok(w) => watcher = Box::new(w),
-						Err(e) if e.to_string().starts_with("Too many open files") => {
-							/*
-							NOTE: This ErrorKind is `Uncategorized`, but it is not recommended
-							to match an error against `Uncategorized`
-							NOTE: Could be tested with decreasing `max_user_instances`, e.g.:
-							`sudo sysctl fs.inotify.max_user_instances=64`
-							*/
-							let _ = writeln!(
-								self.stderr,
-								"tail: {} cannot be used, reverting to polling: Too many open files",
-								text::BACKEND
-							);
-							host.fail(1);
-							self.use_polling = true;
-							watcher = Box::new(notify::PollWatcher::new(tx_clone, watcher_config).unwrap());
-						},
-						Err(e) => return Err(TailError::message(e.to_string())),
-					}
+
+				let (sender, changes) = mpsc::channel();
+				let roots = operands.len();
+				let mut config = Config::new(operands.iter().cloned().map(Root::flat));
+				config.backend = BACKEND;
+				let started = Watcher::start(config, move |batch| {
+					let touched = batch.map(|batch| {
+						if batch.overflowed() {
+							(0..roots).collect()
+						} else {
+							batch.iter().map(|event| event.root).collect()
+						}
+					});
+					let _ = sender.send(touched);
+				});
+				match started {
+					Ok(watcher) => self.watch = Some(Watch { _watcher: watcher, changes, operands }),
+					Err(error) => {
+						let _ = writeln!(
+							self.stderr,
+							"tail: {} cannot be used, reverting to polling: {error}",
+							text::BACKEND
+						);
+						host.fail(1);
+						self.use_polling = true;
+					},
 				}
-		
-				self.watcher_rx = Some(WatcherRx::new(watcher, rx));
-				self.init_files(&settings.inputs)?;
-		
 				Ok(())
-			}
-		
-			pub fn follow_descriptor(&self) -> bool {
-				self.follow == Some(FollowMode::Descriptor)
 			}
 		
 			pub fn follow_name(&self) -> bool {
 				self.follow == Some(FollowMode::Name)
 			}
 		
-			pub fn follow_descriptor_retry(&self) -> bool {
-				self.follow_descriptor() && self.retry
-			}
-		
 			pub fn follow_name_retry(&self) -> bool {
 				self.follow_name() && self.retry
 			}
-		
-			fn init_files(&mut self, inputs: &[Input]) -> TailResult<()> {
-				let fs = self.files.fs();
-				if let Some(watcher_rx) = &mut self.watcher_rx {
-					for input in inputs {
-						match input.kind() {
-							InputKind::Stdin => (),
-							InputKind::File(path) => {
-								#[cfg(all(unix, not(target_os = "linux")))]
-								if !fs.is_file(path) {
-									continue;
-								}
-								let path = path.clone();
-		
-								if path.is_tailable(fs) {
-									// Add existing regular files to `Watcher` (InotifyWatcher).
-									watcher_rx.watch_with_parent(&path, fs)?;
-								} else if !path.is_orphan(fs) {
-									// If `path` is not a tailable file, add its parent to `Watcher`.
-									watcher_rx.watch(parent_path(&path).unwrap(), RecursiveMode::NonRecursive)?;
-									// Add symlinks to orphans for retry polling (target may not exist)
-									if fs.is_symlink(&path) {
-										self.orphans.push(path);
-									}
-								} else {
-									// If there is no parent, add `path` to `orphans`.
-									self.orphans.push(path);
-								}
-							},
-						}
-					}
-				}
-				Ok(())
-			}
-		
-			#[allow(clippy::cognitive_complexity, reason = "preserves upstream notify event state machine")]
-			fn handle_event(&mut self, event: &notify::Event, settings: &Settings) -> TailResult<Vec<PathBuf>> {
-				use notify::event::{
-					CreateKind, DataChange, EventKind, MetadataKind, ModifyKind, RemoveKind, RenameMode,
+
+			/// Waits up to `timeout` for the watcher and returns the operands it
+			/// reported changed, in operand order; without a watcher, sleeps.
+			/// A watch that ends leaves the loop polling.
+			fn wait(&mut self, timeout: Duration) -> Vec<PathBuf> {
+				let Some(watch) = &self.watch else {
+					std::thread::sleep(timeout);
+					return Vec::new();
 				};
-		
-				let event_path = event.paths.first().unwrap();
-				let mut paths: Vec<PathBuf> = vec![];
-				let display_name = self.files.get(event_path).display_name.clone();
-		
-				match event.kind {
-		            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any | MetadataKind::WriteTime) | ModifyKind::Data(DataChange::Any) | ModifyKind::Name(RenameMode::To)) |
-		            EventKind::Create(CreateKind::File | CreateKind::Folder | CreateKind::Any) => {
-		                if let Ok(new_md) = self.files.fs().metadata(event_path) {
-		                    let is_tailable = new_md.is_tailable();
-		                    let pd = self.files.get(event_path);
-		                    if let Some(old_md) = &pd.metadata {
-		                        if is_tailable {
-		                            // We resume tracking from the start of the file,
-		                            // assuming it has been truncated to 0. This mimics GNU's `tail`
-		                            // behavior and is the usual truncation operation for log files.
-		                            if !old_md.is_tailable() {
-		                                let _ = writeln!(
-		                                    self.stderr,
-		                                    "tail: {} has become accessible",
-		                                    display_name.quote()
-		                                );
-		                                self.files.update_reader(event_path)?;
-		                            } else if pd.reader.is_none() {
-		                                let _ = writeln!(
-		                                    self.stderr,
-		                                    "tail: {} has appeared;  following new file",
-		                                    display_name.quote()
-		                                );
-		                                self.files.update_reader(event_path)?;
-		                            } else if event.kind == EventKind::Modify(ModifyKind::Name(RenameMode::To))
-		                            || (self.use_polling && !old_md.same_file(&new_md)) {
-		                                let _ = writeln!(
-		                                    self.stderr,
-		                                    "tail: {} has been replaced;  following new file",
-		                                    display_name.quote()
-		                                );
-		                                self.files.update_reader(event_path)?;
-		                            } else if old_md.got_truncated(&new_md)? {
-		                                let _ = writeln!(
-		                                    self.stderr,
-		                                    "tail: {}: file truncated",
-		                                    display_name
-		                                );
-		                                self.files.update_reader(event_path)?;
-		                            }
-		                            paths.push(event_path.clone());
-		                        } else if !is_tailable && old_md.is_tailable() {
-		                            if pd.reader.is_some() {
-		                                self.files.reset_reader(event_path);
-		                            } else {
-		                                let _ = writeln!(
-		                                    self.stderr,
-		                                    "tail: {} has been replaced with an untailable file",
-		                                    display_name.quote()
-		                                );
-		                            }
-		                        }
-		                    } else if is_tailable {
-		                        let _ = writeln!(
-		                            self.stderr,
-		                            "tail: {} has appeared;  following new file",
-		                            display_name.quote()
-		                        );
-		                        self.files.update_reader(event_path)?;
-		                        paths.push(event_path.clone());
-		                    } else if settings.retry {
-		                        if self.follow_descriptor() {
-		                            let _ = writeln!(
-		                                self.stderr,
-		                                "tail: {} has been replaced with an untailable file; giving up on this name",
-		                                display_name.quote()
-		                            );
-		                            let _ = self.watcher_rx.as_mut().unwrap().watcher.unwatch(event_path);
-		                            self.files.remove(event_path);
-		                            if self.files.no_files_remaining(settings) {
-		                                return Err(TailError::message("no files remaining".to_string()));
-		                            }
-		                        } else {
-		                            let _ = writeln!(
-		                                self.stderr,
-		                                "tail: {} has been replaced with an untailable file",
-		                                display_name.quote()
-		                            );
-		                        }
-		                    }
-		                    self.files.update_metadata(event_path, Some(new_md));
-		                } else if self.files.fs().is_symlink(event_path) && settings.retry {
-		                    self.files.reset_reader(event_path);
-		                    self.orphans.push(event_path.clone());
-		                }
-		            }
-		            EventKind::Remove(RemoveKind::File | RemoveKind::Any)
-		
-		                // | EventKind::Modify(ModifyKind::Name(RenameMode::Any))
-		                | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-		                if self.follow_name() {
-		                    if settings.retry {
-		                        if let Some(old_md) = self.files.get_mut_metadata(event_path)
-		                            && old_md.is_tailable() && self.files.get(event_path).reader.is_some() {
-		                                let _ = writeln!(
-		                                    self.stderr,
-		                                    "tail: {} has become inaccessible: No such file or directory",
-		                                    display_name.quote()
-		                                );
-		                            }
-		                        if event_path.is_orphan(self.files.fs()) && !self.orphans.contains(event_path) {
-		                            let _ = writeln!(
-		                                self.stderr,
-		                                "tail: directory containing watched file was removed"
-		                            );
-		                            let _ = writeln!(
-		                                self.stderr,
-		                                "tail: {} cannot be used, reverting to polling",
-		                                text::BACKEND
-		                            );
-		                            self.orphans.push(event_path.clone());
-		                            let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
-		                        }
-		                    } else {
-		                        let _ = writeln!(
-		                            self.stderr,
-		                            "tail: {}: No such file or directory",
-		                            display_name
-		                        );
-		                        if !self.files.files_remaining() && self.use_polling {
-		                            // NOTE: GNU's tail exits here for `---disable-inotify`
-		                            return Err(TailError::message("no files remaining".to_string()));
-		                        }
-		                    }
-		                    self.files.reset_reader(event_path);
-		                } else if self.follow_descriptor_retry() {
-		                    // --retry only effective for the initial open
-		                    let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
-		                    self.files.remove(event_path);
-		                } else if self.use_polling && event.kind == EventKind::Remove(RemoveKind::Any) {
-		                    /*
-		                    BUG: The watched file was removed. Since we're using Polling, this
-		                    could be a rename. We can't tell because `notify::PollWatcher` doesn't
-		                    recognize renames properly, and without the new name we cannot
-		                    work around this by simply reopening the file.
-		                    */
-		                }
-		            }
-		            EventKind::Modify(ModifyKind::Name(RenameMode::Both))
-		                /*
-		                NOTE: For `tail -f a`, keep tracking additions to b after `mv a b`
-		                (gnu/tests/tail-2/descriptor-vs-rename.sh)
-		                NOTE: The File/BufReader doesn't need to be updated.
-		                However, we need to update our `files.map`.
-		                This can only be done for inotify, because this EventKind does not
-		                trigger for the PollWatcher.
-		                BUG: As a result, there's a bug if polling is used:
-		                $ tail -f file_a ---disable-inotify
-		                $ mv file_a file_b
-		                $ echo A >> file_b
-		                $ echo A >> file_a
-		                The last append to file_a is printed, however this shouldn't be because
-		                after the "mv" tail should only follow "file_b".
-		                TODO: [2022-05; jhscheer] add test for this bug
-		                */
-		
-		                if self.follow_descriptor() => {
-		                    let new_path = event.paths.last().unwrap();
-		                    paths.push(new_path.clone());
-		
-		                    let new_data = PathData::from_other_with_path(self.files.remove(event_path), new_path, self.files.fs());
-		                    self.files.insert(
-		                        new_path,
-		                        new_data,
-		                        self.files.get_last().unwrap() == event_path
-		                    );
-		
-		                    // Unwatch old path and watch new path
-		                    let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
-		                    self.watcher_rx.as_mut().unwrap().watch_with_parent(new_path, self.files.fs())?;
-		                }
-		            _ => {}
-		        }
-				Ok(paths)
+				let mut roots = Vec::new();
+				let mut ended = None;
+				let mut next = match watch.changes.recv_timeout(timeout) {
+					Ok(batch) => Some(batch),
+					Err(RecvTimeoutError::Timeout) => None,
+					Err(RecvTimeoutError::Disconnected) => Some(Err(io::Error::other("watcher stopped"))),
+				};
+				// Batches queued behind the first (e.g. after SIGSTOP) are taken
+				// too, so each operand prints once, under one header.
+				while let Some(batch) = next {
+					match batch {
+						Ok(touched) => roots.extend(touched),
+						Err(error) => {
+							ended = Some(error);
+							break;
+						},
+					}
+					next = watch.changes.try_recv().ok();
+				}
+				roots.sort_unstable();
+				roots.dedup();
+				let changed = roots
+					.into_iter()
+					.map(|root| watch.operands[root].clone())
+					.collect();
+				if let Some(error) = ended {
+					let _ = writeln!(
+						self.stderr,
+						"tail: {} cannot be used, reverting to polling: {error}",
+						text::BACKEND
+					);
+					self.watch = None;
+					self.use_polling = true;
+				}
+				changed
 			}
-		
-			/// One provider polling pass, GNU `tail_forever` without kernel
-			/// notification: each followed operand is checked through the
-			/// injected filesystem and new data is read from its handle.
-			/// Returns whether anything was printed.
-			fn poll_provider(&mut self, settings: &Settings) -> TailResult<bool> {
+
+			/// Checks every operand, in operand order like GNU. Returns whether
+			/// anything was printed.
+			fn check_all(&mut self, settings: &Settings) -> TailResult<bool> {
 				let mut read_some = false;
-				// Operand order, like GNU; without kernel events no key is renamed.
 				for input in &settings.inputs {
 					let InputKind::File(path) = input.kind() else {
 						continue;
 					};
-					if !self.files.contains_key(path) {
-						continue;
-					}
-					if self.files.get(path).reader.is_none() {
-						self.recheck_provider_name(path, settings)?;
-					} else {
-						self.check_handle_truncation(path)?;
-					}
-					if !self.has_reader(path) {
-						continue;
-					}
-					if self.files.tail_file(path, settings.verbose, &mut self.stdout)? {
-						self.files.get_mut(path).unchanged_stats = 0;
-						read_some = true;
-						continue;
-					}
-					if !self.follow_name() {
-						continue;
-					}
-					// `--max-unchanged-stats`: a name that stayed idle is rechecked
-					// to catch rotation (rename, then a new file under the name).
-					let data = self.files.get_mut(path);
-					if data.unchanged_stats < settings.max_unchanged_stats {
-						data.unchanged_stats += 1;
-						continue;
-					}
-					data.unchanged_stats = 0;
-					self.recheck_provider_name(path, settings)?;
-					if self.has_reader(path) {
-						read_some |= self.files.tail_file(path, settings.verbose, &mut self.stdout)?;
+					if self.files.contains_key(path) {
+						read_some |= self.check(path, settings, false)?;
 					}
 				}
 				Ok(read_some)
+			}
+
+			/// Checks the operands the watcher reported changed. Returns whether
+			/// anything was printed.
+			fn check_changed(&mut self, changed: &[PathBuf], settings: &Settings) -> TailResult<bool> {
+				let mut read_some = false;
+				for path in changed {
+					if self.files.contains_key(path) {
+						read_some |= self.check(path, settings, true)?;
+					}
+				}
+				Ok(read_some)
+			}
+
+			/// One operand's step of GNU `tail_forever`: opens a name that
+			/// appeared, catches truncation and replacement, and prints what was
+			/// appended. A name the watcher reported `changed` is rechecked at
+			/// once; otherwise `--follow=name` rechecks a name that stayed idle
+			/// for `--max-unchanged-stats` checks, to catch rotation. Returns
+			/// whether anything was printed.
+			fn check(&mut self, path: &Path, settings: &Settings, changed: bool) -> TailResult<bool> {
+				if self.files.get(path).reader.is_none() || (changed && self.follow_name()) {
+					self.recheck_name(path, settings)?;
+				} else {
+					self.check_handle_truncation(path)?;
+				}
+				if !self.has_reader(path) {
+					return Ok(false);
+				}
+				if self.files.tail_file(path, settings.verbose, &mut self.stdout)? {
+					self.files.get_mut(path).unchanged_stats = 0;
+					return Ok(true);
+				}
+				if changed || !self.follow_name() {
+					return Ok(false);
+				}
+				let data = self.files.get_mut(path);
+				if data.unchanged_stats < settings.max_unchanged_stats {
+					data.unchanged_stats += 1;
+					return Ok(false);
+				}
+				data.unchanged_stats = 0;
+				self.recheck_name(path, settings)?;
+				Ok(self.has_reader(path) && self.files.tail_file(path, settings.verbose, &mut self.stdout)?)
 			}
 		
 			fn has_reader(&self, path: &Path) -> bool {
@@ -2144,11 +1855,11 @@ mod follow {
 				Ok(())
 			}
 		
-			/// GNU `recheck` through the provider: opens a followed name once it
-			/// appears or becomes accessible, reopens it when the name now refers
-			/// to a different or shorter file, and reports names that vanished or
-			/// became untailable.
-			fn recheck_provider_name(&mut self, path: &Path, settings: &Settings) -> TailResult<()> {
+			/// GNU `recheck`: opens a followed name once it appears or becomes
+			/// accessible, reopens it when the name now refers to a different or
+			/// shorter file, and reports names that vanished or became
+			/// untailable.
+			fn recheck_name(&mut self, path: &Path, settings: &Settings) -> TailResult<()> {
 				let display_name = self.files.get(path).display_name.clone();
 				let metadata = match self.files.fs().metadata(path) {
 					Ok(metadata) => metadata,
@@ -2267,26 +1978,6 @@ mod follow {
 			}
 		}
 		
-		/// Sleeps one `--sleep-interval` in short slices so cancellation stays
-		/// responsive. Returns false once cancelled.
-		fn sleep_interval(cancel: &AtomicBool, interval: Duration) -> bool {
-			const SLICE: Duration = Duration::from_millis(100);
-			let deadline = Instant::now().checked_add(interval);
-			loop {
-				if cancel.load(Ordering::Relaxed) {
-					return false;
-				}
-				let remaining = deadline.map_or(SLICE, |deadline| {
-					deadline.saturating_duration_since(Instant::now())
-				});
-				if remaining.is_zero() {
-					return true;
-				}
-				std::thread::sleep(remaining.min(SLICE));
-			}
-		}
-		
-		#[allow(clippy::cognitive_complexity, reason = "preserves upstream follow loop")]
 		pub fn follow(
 			mut observer: Observer,
 			settings: &Settings,
@@ -2297,170 +1988,37 @@ mod follow {
 			}
 		
 			let process = platform::ProcessChecker::new(observer.pid);
-		
-			let mut timeout_counter = 0;
-		
-			// main follow loop
+			// When every operand is checked next; `None` never (an interval past
+			// the clock's range). A check that printed something is followed by
+			// another at once, like GNU's.
+			let mut next_check = Some(Instant::now());
 			loop {
 				if observer.cancel.load(Ordering::Relaxed) {
-					break;
+					return Ok(());
 				}
-				let mut _read_some = false;
-		
-				// If `--pid=p`, tail checks whether process p
-				// is alive at least every `--sleep-interval=N` seconds
-				if settings.follow.is_some() && observer.pid != 0 && process.is_dead() {
-					// p is dead, tail will also terminate
-					break;
+				// With `--pid=p`, tail stops once process p is gone.
+				if observer.pid != 0 && process.is_dead() {
+					return Ok(());
 				}
-		
-				// For `-F` we need to poll if an orphan path becomes available during runtime.
-				// If a path becomes an orphan during runtime, it will be added to orphans.
-				// To be able to differentiate between the cases of test_retry8 and test_retry9,
-				// here paths will not be removed from orphans if the path becomes available.
-				if observer.follow_name_retry() {
-					for new_path in &observer.orphans {
-						if let Ok(md) = observer.files.fs().metadata(new_path) {
-							let pd = observer.files.get(new_path);
-							if md.is_tailable() && pd.reader.is_none() {
-								let _ = writeln!(
-									observer.stderr,
-									"tail: {} has appeared;  following new file",
-									pd.display_name.quote()
-								);
-								observer.files.update_metadata(new_path, Some(md));
-								observer.files.update_reader(new_path)?;
-								_read_some =
-									observer.files.tail_file(new_path, settings.verbose, &mut observer.stdout)?;
-								if let Some(watcher_rx) = observer.watcher_rx.as_mut() {
-									watcher_rx.watch_with_parent(new_path, observer.files.fs())?;
-								}
-							}
-						}
-					}
-				}
-		
-				if observer.watcher_rx.is_none() {
-					// No kernel watcher observes these operands: inspect them
-					// through the provider, sleeping only after an idle pass.
-					if !observer.poll_provider(settings)? {
-						// Stop once the reader of our stdout pipe has gone away.
-						if stdout.reader_gone() {
-							return Ok(());
-						}
-						if !sleep_interval(&observer.cancel, settings.sleep_sec) {
-							break;
-						}
-					}
-					continue;
-				}
-		
-				// With  -f, sleep for approximately N seconds (default 1.0) between iterations;
-				// We wake up if Notify sends an Event or if we wait more than `sleep_sec`.
-				let rx_result = observer
-					.watcher_rx
-					.as_mut()
-					.unwrap()
-					.receiver
-					.recv_timeout(settings.sleep_sec.min(Duration::from_millis(100)));
-		
-				if rx_result.is_ok() {
-					timeout_counter = 0;
-				}
-		
-				let mut paths = vec![]; // Paths worth checking for new content to print
-		
-				// Helper closure to process a single event
-				let process_event = |observer: &mut Observer,
-				                     event: notify::Event,
-				                     settings: &Settings,
-				                     paths: &mut Vec<PathBuf>|
-				 -> TailResult<()> {
-					if let Some(event_path) = event.paths.first()
-						&& observer.files.contains_key(event_path)
-					{
-						// Handle Event if it is about a path that we are monitoring
-						let new_paths = observer.handle_event(&event, settings)?;
-						for p in new_paths {
-							if !paths.contains(&p) {
-								paths.push(p);
-							}
-						}
-					}
-					Ok(())
+				let now = Instant::now();
+				let read_some = if next_check.is_some_and(|at| now >= at) {
+					let read_some = observer.check_all(settings)?;
+					next_check = if read_some {
+						Some(now)
+					} else {
+						now.checked_add(settings.sleep_sec)
+					};
+					read_some
+				} else {
+					let timeout = next_check.map_or(SLICE, |at| (at - now).min(SLICE));
+					let changed = observer.wait(timeout);
+					observer.check_changed(&changed, settings)?
 				};
-		
-				match rx_result {
-					Ok(Ok(event)) => {
-						process_event(&mut observer, event, settings, &mut paths)?;
-		
-						// Drain events already queued behind this one (e.g. after
-						// SIGSTOP) so each path prints once with one header. No spin or
-						// timed wait: later events start the next iteration at once.
-						while let Ok(Ok(event)) = observer.watcher_rx.as_mut().unwrap().receiver.try_recv() {
-							process_event(&mut observer, event, settings, &mut paths)?;
-						}
-					},
-					Ok(Err(notify::Error { kind: notify::ErrorKind::Io(e), paths }))
-						if e.kind() == std::io::ErrorKind::NotFound =>
-					{
-						if let Some(event_path) = paths.first()
-							&& observer.files.contains_key(event_path)
-						{
-							let _ = observer
-								.watcher_rx
-								.as_mut()
-								.unwrap()
-								.watcher
-								.unwatch(event_path);
-						}
-					},
-					Ok(Err(notify::Error { kind: notify::ErrorKind::MaxFilesWatch, .. })) => {
-						return Err(TailError::message(format!("{} resources exhausted", text::BACKEND)));
-					},
-					Ok(Err(e)) => {
-						return Err(TailError::message(format!("NotifyError: {}", e)));
-					},
-					Err(mpsc::RecvTimeoutError::Timeout) => {
-						timeout_counter += 1;
-						// Stop once the reader of our stdout pipe has gone away.
-						if stdout.reader_gone() {
-							return Ok(());
-						}
-					},
-					Err(e) => {
-						return Err(TailError::message(format!("RecvTimeoutError: {}", e)));
-					},
-				}
-		
-				if observer.use_polling && settings.follow.is_some() {
-					// Consider all files to potentially have new content.
-					// This is a workaround because `Notify::PollWatcher`
-					// does not recognize the "renaming" of files.
-					paths = observer.files.keys().cloned().collect::<Vec<_>>();
-				}
-		
-				// main print loop
-				for path in &paths {
-					_read_some = observer.files.tail_file(path, settings.verbose, &mut observer.stdout)?;
-				}
-		
-				if timeout_counter == settings.max_unchanged_stats {
-					/*
-					TODO: [2021-10; jhscheer] implement timeout_counter for each file.
-					'--max-unchanged-stats=n'
-					When tailing a file by name, if there have been n (default n=5) consecutive iterations
-					for which the file has not changed, then open/fstat the file to determine if that file
-					name is still associated with the same device/inode-number pair as before. When
-					following a log file that is rotated, this is approximately the number of seconds
-					between when tail prints the last pre-rotation lines and when it prints the lines that
-					have accumulated in the new log file. This option is meaningful only when polling
-					(i.e., without inotify) and when following by name.
-					*/
+				// Stop once the reader of our stdout pipe has gone away.
+				if !read_some && stdout.reader_gone() {
+					return Ok(());
 				}
 			}
-		
-			Ok(())
 		}
 	}
 	
@@ -2468,7 +2026,7 @@ mod follow {
 	#[cfg(not(target_os = "wasi"))]
 	pub use watch::{Observer, follow};
 	
-	// WASI: notify/inotify are unavailable, so `tail -f` cannot work.
+	// WASI: the follow loop is not built, so `tail -f` cannot work.
 	// Provide minimal stubs matching the real Observer API so tail compiles.
 	#[cfg(target_os = "wasi")]
 	mod wasi_stubs {
@@ -2666,7 +2224,7 @@ mod paths {
 	use crate::openfile::{DescriptorPath, STDIN_FD};
 	use omp_vfs::{BlockingFs, File, Metadata};
 
-	use crate::{host::Host, tail::{TailResult, text}};
+	use crate::{host::Host, tail::text};
 	
 	#[derive(Debug, Clone)]
 	pub enum InputKind {
@@ -2794,8 +2352,6 @@ mod paths {
 	pub trait MetadataExtTail {
 		fn is_tailable(&self) -> bool;
 		#[cfg(not(target_os = "wasi"))]
-		fn got_truncated(&self, other: &Metadata) -> TailResult<bool>;
-		#[cfg(not(target_os = "wasi"))]
 		fn identity_differs(&self, other: &Metadata) -> bool;
 	}
 	
@@ -2803,12 +2359,6 @@ mod paths {
 		fn is_tailable(&self) -> bool {
 			let ft = self.file_type();
 			ft.is_file() || ft.is_char_device() || ft.is_fifo()
-		}
-	
-		/// Return true if the file was modified and is now shorter
-		#[cfg(not(target_os = "wasi"))]
-		fn got_truncated(&self, other: &Metadata) -> TailResult<bool> {
-			Ok(other.len() < self.len() && other.modified()? != self.modified()?)
 		}
 	
 		/// True only when both sides report a file identity and the
@@ -2823,7 +2373,6 @@ mod paths {
 	#[cfg(not(target_os = "wasi"))]
 	pub trait PathExtTail {
 		fn is_stdin(&self) -> bool;
-		fn is_orphan(&self, fs: &BlockingFs) -> bool;
 		fn is_tailable(&self, fs: &BlockingFs) -> bool;
 	}
 	
@@ -2833,11 +2382,6 @@ mod paths {
 			self.eq(Self::new(text::DASH))
 				|| self.eq(Self::new(text::DEV_STDIN))
 				|| self.eq(Self::new("standard input"))
-		}
-	
-		/// Return true if `path` does not have an existing parent directory
-		fn is_orphan(&self, fs: &BlockingFs) -> bool {
-			!matches!(omp_vfs::parent_path(self), Some(parent) if fs.is_dir(parent))
 		}
 	
 		/// Return true if `path` is is a file type that can be tailed
@@ -2994,13 +2538,14 @@ mod text {
 	pub const DASH: &str = "-";
 	pub const DEV_STDIN: &str = "/dev/stdin";
 	
-	#[cfg(target_os = "linux")]
+	/// The `tail -f` watcher's mechanism, as its warnings name it.
+	#[cfg(any(target_os = "linux", target_os = "android"))]
 	pub const BACKEND: &str = "inotify";
-	#[cfg(all(unix, not(target_os = "linux")))]
+	#[cfg(target_os = "macos")]
 	pub const BACKEND: &str = "kqueue";
 	#[cfg(target_os = "windows")]
 	pub const BACKEND: &str = "ReadDirectoryChanges";
-	#[cfg(not(any(unix, target_os = "windows")))]
+	#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows")))]
 	pub const BACKEND: &str = "polling";
 }
 
@@ -4129,5 +3674,52 @@ mod tests {
 		cancel.store(true, std::sync::atomic::Ordering::Relaxed);
 		assert_eq!(tail.join().unwrap(), 0);
 		assert!(stopped, "tail -f kept following after its reader exited");
+	}
+
+	// Failure mode: without the file-system watcher waking it, `tail -F`
+	// noticed an append or a replaced file only once per `--sleep-interval`.
+	#[cfg(unix)]
+	#[test]
+	fn follow_wakes_on_append_and_replacement_before_the_sleep_interval() {
+		use std::{io::Write as _, sync::mpsc, time::Duration};
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("log");
+		fs::write(&path, "first\n").unwrap();
+		let parsed = Tail::try_parse_from(["tail", "-F", "-s", "600", path.to_str().unwrap()]).unwrap();
+		let (mut host, _) = Host::for_test("tail", "", dir.path());
+		let (mut reader, writer) = std::io::pipe().unwrap();
+		host.stdout = crate::openfile::OpenFile::from(writer);
+		let cancel = host.cancel_flag();
+		let tail = std::thread::spawn(move || parsed.run(&mut host));
+		let (sender, output) = mpsc::channel();
+		std::thread::spawn(move || {
+			let mut chunk = [0; 64];
+			while let Ok(read @ 1..) = std::io::Read::read(&mut reader, &mut chunk) {
+				let _ = sender.send(chunk[..read].to_vec());
+			}
+		});
+		let mut printed = Vec::new();
+		let mut expect = |text: &str| {
+			while !printed.ends_with(text.as_bytes()) {
+				match output.recv_timeout(Duration::from_secs(10)) {
+					Ok(chunk) => printed.extend(chunk),
+					Err(_) => panic!("waiting for {text:?}, printed {:?}", String::from_utf8_lossy(&printed)),
+				}
+			}
+		};
+		expect("first\n");
+
+		let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+		file.write_all(b"second\n").unwrap();
+		expect("second\n");
+
+		let replacement = dir.path().join("log.new");
+		fs::write(&replacement, "third\n").unwrap();
+		fs::rename(&replacement, &path).unwrap();
+		expect("third\n");
+
+		cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+		assert_eq!(tail.join().unwrap(), 0);
 	}
 }

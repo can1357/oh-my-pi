@@ -23,6 +23,7 @@ import {
 	unitName,
 } from "../../../cli/ps-model";
 import type { UnitScope, UnitSnapshot } from "../../../daemon/daemon-types";
+import { formatTooltipKey } from "../../keys/hints";
 import { stableKey } from "../../overlays/pickers/format";
 import "../../styles/apps/ps-top/look";
 import type { PsRow, PsTopModel } from "./model";
@@ -55,9 +56,6 @@ const STATE_ICON: Record<TspTone, string> = {
 	user: "user",
 };
 
-/** Key hints as the buttons' titles write them. */
-const TITLE_KEYS: Readonly<Record<string, string>> = { enter: "⏎", escape: "esc" };
-
 /** An action-bar button: label, optional key, tone and title. */
 function Button(props: {
 	readonly act: string;
@@ -66,7 +64,7 @@ function Button(props: {
 	readonly tone?: TspTone;
 	readonly title?: string;
 }): JSXNode {
-	const hint = props.keys && (TITLE_KEYS[props.keys] ?? props.keys);
+	const hint = props.keys && formatTooltipKey(props.keys);
 	return (
 		<ActionButton
 			id={props.act}

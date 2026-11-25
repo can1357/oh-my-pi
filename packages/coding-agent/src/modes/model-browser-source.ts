@@ -35,6 +35,7 @@ export function createModelBrowserSource(
 		get revision() {
 			return settings.revision;
 		},
+		preferences: settings,
 		get defaultThinkingLevel() {
 			return cfgDefaultThinkingLevel.get(settings);
 		},

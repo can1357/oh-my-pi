@@ -39,6 +39,8 @@ export interface ToolTerm {
 	readonly expanded?: boolean;
 	/** The call's args. */
 	readonly args?: unknown;
+	/** False when the terminal should suppress inline result pictures. */
+	readonly showImages?: false;
 	/** The result's image placeholders in order: where a look draws one, it links to its image. */
 	readonly imageLinks?: readonly {
 		readonly text: string;
@@ -76,7 +78,7 @@ export interface ToolLook {
 	 * setting, while its compact row stays still unless {@link animated}.
 	 */
 	readonly clocked?: boolean;
-	/** A frameless look set in by one cell, in line with prose and the read row. */
+	/** A frameless look that takes the standard terminal inset, like prose. */
 	readonly inset?: boolean;
 	/** The transcript wraps the look in the custom-tool box: one blank row and one cell of padding around it, tinted by status. */
 	readonly boxed?: boolean;
