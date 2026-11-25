@@ -40,7 +40,11 @@ export interface PeerReport {
 export interface AgentsProbe {
 	threadId(): Promise<string>;
 	/** Build a real session (mock model) and register it as `id` in the (remote) registry. */
-	open(id: string, options: { sessionFile?: string; gated?: boolean; monitored?: boolean }): Promise<string>;
+	open(
+		id: string,
+		options: { sessionFile?: string; gated?: boolean; monitored?: boolean; initialPromptPending?: boolean },
+	): Promise<string>;
+	clearInitialPromptPending(id: string, ownerId: string): Promise<boolean>;
 	/** Run a prompt on the local session to completion. */
 	prompt(id: string, text: string): Promise<void>;
 	/** Emit a tool call on a specific session, even after another session takes its id. */
@@ -133,7 +137,9 @@ const probe: AgentsProbe = {
 			kind: "sub",
 			session,
 			sessionFile: options.sessionFile ?? null,
-			status: "idle",
+			status: options.initialPromptPending ? "running" : "idle",
+			parentId: options.initialPromptPending ? "Main" : undefined,
+			initialPromptPending: options.initialPromptPending,
 		});
 		registry.syncSessionStatus(id, session);
 		if (options.monitored) {
@@ -144,6 +150,8 @@ const probe: AgentsProbe = {
 		}
 		return session.instanceKey;
 	},
+	clearInitialPromptPending: async (id, ownerId) =>
+		AgentRegistry.global().clearInitialPromptPending(id, local(ownerId)),
 	prompt: async (id, text) => {
 		await local(id).prompt(text);
 	},
