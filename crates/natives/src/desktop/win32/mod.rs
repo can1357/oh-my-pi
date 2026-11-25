@@ -832,7 +832,7 @@ public class TestPeer : ListBoxAutomationPeer, IScrollProvider {
 	public TestPeer(ListBox owner) : base(owner) {}
 	IScrollProvider Inner { get { return (IScrollProvider)base.GetPattern(PatternInterface.Scroll); } }
 	public override object GetPattern(PatternInterface pattern) { return pattern == PatternInterface.Scroll ? this : base.GetPattern(pattern); }
-	public void Scroll(ScrollAmount across, ScrollAmount down) { if (!Fixture.Grow()) Inner.Scroll(across, down); if (across != ScrollAmount.NoAmount) Fixture.Swap(); }
+	public void Scroll(ScrollAmount across, ScrollAmount down) { if (!Fixture.Grow()) Inner.Scroll(across, down); if (across != ScrollAmount.NoAmount) Fixture.Swap(Inner); }
 	public void SetScrollPercent(double across, double down) { Inner.SetScrollPercent(across, down); }
 	public double HorizontalScrollPercent { get { return Inner.HorizontalScrollPercent; } }
 	public double VerticalScrollPercent { get { return Inner.VerticalScrollPercent; } }
@@ -862,8 +862,10 @@ public static class Fixture {
 		list.UpdateLayout();
 		return true;
 	}
-	public static void Swap() {
+	public static void Swap(IScrollProvider inner) {
 		if (!swap) return;
+		list.UpdateLayout();
+		if (inner.HorizontalScrollPercent > 0) return;
 		swap = false; page2.Visibility = Visibility.Visible; page2.UpdateLayout();
 	}
 	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
@@ -883,6 +885,8 @@ public static class Fixture {
 	public static void Run() {
 		list = new TestList();
 		page2 = new ListBox { Visibility = Visibility.Hidden };
+		ScrollViewer.SetCanContentScroll(page2, true);
+		VirtualizingPanel.SetScrollUnit(page2, ScrollUnit.Item);
 		for (var row = 1; row <= 60; row++) page2.Items.Add("Page 2 row " + row);
 		page2.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler((sender, e) => { page2Offset = e.VerticalOffset; }));
 		hosted = new System.Windows.Forms.ListBox { IntegralHeight = false };
@@ -1002,7 +1006,7 @@ public static class Fixture {
 			worker.execute(&request, &token).map(drop)
 		};
 		let initial = list.state();
-		let error = scroll(x, y, (0.0, 100.0), None).unwrap_err();
+		let error = scroll(x, y, (0.0, 27_400.0), None).unwrap_err();
 		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
 		assert_eq!(list.state(), initial);
 		assert_eq!(foreground(), list.other);
@@ -1018,7 +1022,7 @@ public static class Fixture {
 		list.post(CHROMIUM);
 		assert_eq!(list.state(), hosted);
 		assert!(window::has_chromium_descendant(list.window));
-		let error = scroll(x, y, (0.0, 100.0), None).unwrap_err();
+		let error = scroll(width * 0.85, y, (0.0, 100.0), None).unwrap_err();
 		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
 		assert_eq!(list.state(), hosted);
 		assert_eq!(foreground(), list.other);
@@ -1083,10 +1087,12 @@ public static class Fixture {
 		assert_eq!(foreground(), list.other);
 		list.post(FRONT);
 		assert!(window::wait_for_foreground(list.window, Duration::from_secs(2)).unwrap());
-		list.post(SWAP);
 		let before_swap = list.state();
-		let result = scroll(x, y, (-100.0, 100.0), None);
+		assert!(before_swap[ACROSS] > 0.0);
+		list.post(SWAP);
+		let result = scroll(x, y, (-27_300.0, 100.0), None);
 		let swapped = list.state();
+		assert_eq!(swapped[ACROSS], 0.0, "the horizontal axis must reach the left edge");
 		assert_eq!(
 			swapped[PAGE2_OFFSET],
 			before_swap[PAGE2_OFFSET] + f64::from(per_notch),
