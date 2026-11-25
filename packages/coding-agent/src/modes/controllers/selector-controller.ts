@@ -525,7 +525,7 @@ export class SelectorController {
 				defaultToolNames: ADVISOR_DEFAULT_TOOL_NAMES,
 				externalEditor: text => {
 					const command = getEditorCommand();
-					return command ? openInEditor(command, text) : Promise.resolve(null);
+					return command ? this.ctx.suspend(() => openInEditor(command, text)) : Promise.resolve(null);
 				},
 				scopedModels: this.ctx.session.scopedModels,
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),

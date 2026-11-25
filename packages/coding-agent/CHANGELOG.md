@@ -13,6 +13,7 @@
 ### Fixed
 
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- The external editor (Ctrl+G) opened from an extension `ctx.ui.editor` dialog, the ask prompt, or the advisor instructions editor no longer has omp drawing over it and taking its keys ([#20546](https://github.com/can1357/oh-my-pi/pull/20546) by [@rierek](https://github.com/rierek))
 
 ## [19.2.1] - 2026-11-25
 
