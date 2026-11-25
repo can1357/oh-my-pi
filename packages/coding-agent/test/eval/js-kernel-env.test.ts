@@ -36,11 +36,21 @@ describe("JS eval kernel env", () => {
 		expect(fs.existsSync(stubDir)).toBe(false);
 	});
 
-	it.skipIf(!isWindows)("extends the PATH key the env already uses on Windows instead of adding a second one", () => {
+	it.skipIf(!isWindows)("moves a Windows `Path` key to `PATH` so a Worker's Bun.$ searches the stub", () => {
 		using dir = TempDir.createSync("@omp-bun-stub-");
 		const env = jsKernelEnv({ Path: "C:\\x" }, { compiled: true, stubDir: dir.join("stub"), which: () => null });
-		expect(Object.keys(env)).toEqual(["Path"]);
-		expect(env.Path).toBe(`C:\\x;${dir.join("stub")}`);
+		expect(env).toEqual({ PATH: `C:\\x;${dir.join("stub")}` });
+	});
+
+	it("keeps using a stub another version left when it cannot be replaced", () => {
+		using dir = TempDir.createSync("@omp-bun-stub-");
+		const stubDir = dir.join("stub");
+		fs.mkdirSync(stubDir);
+		fs.writeFileSync(path.join(stubDir, isWindows ? "bun.cmd" : "bun"), "older stub", { mode: 0o755 });
+		spyOn(fs, "renameSync").mockImplementation(() => {
+			throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+		});
+		expect(bunStubPathEntry("/x", { compiled: true, stubDir, which: () => null })).toBe(stubDir);
 	});
 
 	it("starts the kernel without a stub, leaving no staging file, when publishing fails", () => {
