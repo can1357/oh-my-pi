@@ -333,7 +333,8 @@ const field: ComposerShape = {
 	paddingX: 1,
 	sideWidth: paddingX => paddingX + 1,
 	row(cx) {
-		if (cx.imeSafeCursorTail) return [cx.accent("▐") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}`)];
+		if (cx.imeSafeCursorTail)
+			return [cx.accent("▐") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}`)];
 		const interior = `${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}${cx.pad}${" ".repeat(rightCells(cx) - 1)}`;
 		return [cx.accent("▐") + cx.surface(interior) + cx.accent("▌")];
 	},
@@ -351,7 +352,8 @@ const rail: ComposerShape = {
 	paddingX: 1,
 	sideWidth: paddingX => paddingX + 1,
 	row(cx) {
-		if (cx.imeSafeCursorTail) return [cx.accent("▎") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}`)];
+		if (cx.imeSafeCursorTail)
+			return [cx.accent("▎") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}`)];
 		const fill = Math.max(0, cx.paddingX + 1 - cx.overflow);
 		return [
 			cx.accent("▎") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}${cx.pad}${" ".repeat(fill)}`),
