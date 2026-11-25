@@ -184,7 +184,18 @@ func (v *ImageContent) decodeFrom(raw map[string]json.RawMessage) error {
 
 func (v ImageContent) MarshalJSON() ([]byte, error) {
 	type plain ImageContent
-	return encodeObject(plain(v), `"type":"image"`, v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.ProviderFile != nil {
+		encoded, err := json.Marshal(v.ProviderFile)
+		if err != nil {
+			return nil, err
+		}
+		extra["providerFile"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), `"type":"image"`, extra)
 }
 
 type ImageContentDetail string
@@ -249,7 +260,18 @@ func (v *ToolCall) decodeFrom(raw map[string]json.RawMessage) error {
 
 func (v ToolCall) MarshalJSON() ([]byte, error) {
 	type plain ToolCall
-	return encodeObject(plain(v), `"type":"toolCall"`, v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.ProviderMetadata != nil {
+		encoded, err := json.Marshal(v.ProviderMetadata)
+		if err != nil {
+			return nil, err
+		}
+		extra["providerMetadata"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), `"type":"toolCall"`, extra)
 }
 
 // Anthropic server-side fallback boundary marker; consumers other than Anthropic ignore it.
@@ -532,7 +554,39 @@ func (v *Usage) decodeFrom(raw map[string]json.RawMessage) error {
 
 func (v Usage) MarshalJSON() ([]byte, error) {
 	type plain Usage
-	return encodeObject(plain(v), "", v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.Orchestration != nil {
+		encoded, err := json.Marshal(v.Orchestration)
+		if err != nil {
+			return nil, err
+		}
+		extra["orchestration"] = encoded
+	}
+	if v.Cttl != nil {
+		encoded, err := json.Marshal(v.Cttl)
+		if err != nil {
+			return nil, err
+		}
+		extra["cttl"] = encoded
+	}
+	if v.Server != nil {
+		encoded, err := json.Marshal(v.Server)
+		if err != nil {
+			return nil, err
+		}
+		extra["server"] = encoded
+	}
+	if v.Credits != nil {
+		encoded, err := json.Marshal(v.Credits)
+		if err != nil {
+			return nil, err
+		}
+		extra["credits"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), "", extra)
 }
 
 // Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope.
@@ -610,7 +664,18 @@ func (v *UserMessage) decodeFrom(raw map[string]json.RawMessage) error {
 
 func (v UserMessage) MarshalJSON() ([]byte, error) {
 	type plain UserMessage
-	return encodeObject(plain(v), `"role":"user"`, v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.ProviderPayload != nil {
+		encoded, err := json.Marshal(v.ProviderPayload)
+		if err != nil {
+			return nil, err
+		}
+		extra["providerPayload"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), `"role":"user"`, extra)
 }
 
 type DeveloperMessage struct {
@@ -649,7 +714,18 @@ func (v *DeveloperMessage) decodeFrom(raw map[string]json.RawMessage) error {
 
 func (v DeveloperMessage) MarshalJSON() ([]byte, error) {
 	type plain DeveloperMessage
-	return encodeObject(plain(v), `"role":"developer"`, v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.ProviderPayload != nil {
+		encoded, err := json.Marshal(v.ProviderPayload)
+		if err != nil {
+			return nil, err
+		}
+		extra["providerPayload"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), `"role":"developer"`, extra)
 }
 
 type AssistantMessage struct {
@@ -710,7 +786,18 @@ func (v *AssistantMessage) decodeFrom(raw map[string]json.RawMessage) error {
 
 func (v AssistantMessage) MarshalJSON() ([]byte, error) {
 	type plain AssistantMessage
-	return encodeObject(plain(v), `"role":"assistant"`, v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.ProviderPayload != nil {
+		encoded, err := json.Marshal(v.ProviderPayload)
+		if err != nil {
+			return nil, err
+		}
+		extra["providerPayload"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), `"role":"assistant"`, extra)
 }
 
 type ToolResultMessage struct {
@@ -800,7 +887,18 @@ func (v *BashExecutionMessage) decodeFrom(raw map[string]json.RawMessage) error 
 
 func (v BashExecutionMessage) MarshalJSON() ([]byte, error) {
 	type plain BashExecutionMessage
-	return encodeObject(plain(v), `"role":"bashExecution"`, v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.Meta != nil {
+		encoded, err := json.Marshal(v.Meta)
+		if err != nil {
+			return nil, err
+		}
+		extra["meta"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), `"role":"bashExecution"`, extra)
 }
 
 type PythonExecutionMessage struct {
@@ -843,7 +941,18 @@ func (v *PythonExecutionMessage) decodeFrom(raw map[string]json.RawMessage) erro
 
 func (v PythonExecutionMessage) MarshalJSON() ([]byte, error) {
 	type plain PythonExecutionMessage
-	return encodeObject(plain(v), `"role":"pythonExecution"`, v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.Meta != nil {
+		encoded, err := json.Marshal(v.Meta)
+		if err != nil {
+			return nil, err
+		}
+		extra["meta"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), `"role":"pythonExecution"`, extra)
 }
 
 type CustomMessage struct {
@@ -997,7 +1106,18 @@ func (v *CompactionSummaryMessage) decodeFrom(raw map[string]json.RawMessage) er
 
 func (v CompactionSummaryMessage) MarshalJSON() ([]byte, error) {
 	type plain CompactionSummaryMessage
-	return encodeObject(plain(v), `"role":"compactionSummary"`, v.Extra)
+	extra := make(map[string]json.RawMessage)
+	if v.ProviderPayload != nil {
+		encoded, err := json.Marshal(v.ProviderPayload)
+		if err != nil {
+			return nil, err
+		}
+		extra["providerPayload"] = encoded
+	}
+	for key, value := range v.Extra {
+		extra[key] = value
+	}
+	return encodeObject(plain(v), `"role":"compactionSummary"`, extra)
 }
 
 type FileMentionItem struct {
@@ -1833,6 +1953,33 @@ func (v *ThinkingConfig) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+func (v ThinkingConfig) MarshalJSON() ([]byte, error) {
+	type plain ThinkingConfig
+	extra := make(map[string]json.RawMessage)
+	if v.EffortMap != nil {
+		encoded, err := json.Marshal(v.EffortMap)
+		if err != nil {
+			return nil, err
+		}
+		extra["effortMap"] = encoded
+	}
+	if v.EffortRouting != nil {
+		encoded, err := json.Marshal(v.EffortRouting)
+		if err != nil {
+			return nil, err
+		}
+		extra["effortRouting"] = encoded
+	}
+	if v.EffortBudgets != nil {
+		encoded, err := json.Marshal(v.EffortBudgets)
+		if err != nil {
+			return nil, err
+		}
+		extra["effortBudgets"] = encoded
+	}
+	return encodeObject(plain(v), "", extra)
+}
+
 // Model descriptor: the client-relevant subset of the server's model record.
 type ModelInfo struct {
 	ID        string `json:"id"`
@@ -1886,6 +2033,26 @@ func (v *ModelInfo) decodeFrom(raw map[string]json.RawMessage) error {
 	}
 	*v = out
 	return nil
+}
+
+func (v ModelInfo) MarshalJSON() ([]byte, error) {
+	type plain ModelInfo
+	extra := make(map[string]json.RawMessage)
+	if v.Headers != nil {
+		encoded, err := json.Marshal(v.Headers)
+		if err != nil {
+			return nil, err
+		}
+		extra["headers"] = encoded
+	}
+	if v.Compat != nil {
+		encoded, err := json.Marshal(v.Compat)
+		if err != nil {
+			return nil, err
+		}
+		extra["compat"] = encoded
+	}
+	return encodeObject(plain(v), "", extra)
 }
 
 type QueueMode string
@@ -2697,6 +2864,33 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+func (v BashResult) MarshalJSON() ([]byte, error) {
+	type plain BashResult
+	extra := make(map[string]json.RawMessage)
+	if v.ArtifactError != nil {
+		encoded, err := json.Marshal(v.ArtifactError)
+		if err != nil {
+			return nil, err
+		}
+		extra["artifactError"] = encoded
+	}
+	if v.Minimized != nil {
+		encoded, err := json.Marshal(v.Minimized)
+		if err != nil {
+			return nil, err
+		}
+		extra["minimized"] = encoded
+	}
+	if v.Trace != nil {
+		encoded, err := json.Marshal(v.Trace)
+		if err != nil {
+			return nil, err
+		}
+		extra["trace"] = encoded
+	}
+	return encodeObject(plain(v), "", extra)
+}
+
 type ShellForkOutcome struct {
 	// What the command set carried back into the session's shell; `false`: it stayed in the fork.
 	Carried bool `json:"carried"`
@@ -2791,6 +2985,19 @@ func (v *CompactionResult) decodeFrom(raw map[string]json.RawMessage) error {
 	}
 	*v = out
 	return nil
+}
+
+func (v CompactionResult) MarshalJSON() ([]byte, error) {
+	type plain CompactionResult
+	extra := make(map[string]json.RawMessage)
+	if v.PreserveData != nil {
+		encoded, err := json.Marshal(v.PreserveData)
+		if err != nil {
+			return nil, err
+		}
+		extra["preserveData"] = encoded
+	}
+	return encodeObject(plain(v), "", extra)
 }
 
 // A role a model holds, as picker rows chip it.
@@ -3232,6 +3439,26 @@ func (v *SessionStats) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+func (v SessionStats) MarshalJSON() ([]byte, error) {
+	type plain SessionStats
+	extra := make(map[string]json.RawMessage)
+	if v.RoutedModels != nil {
+		encoded, err := json.Marshal(v.RoutedModels)
+		if err != nil {
+			return nil, err
+		}
+		extra["routedModels"] = encoded
+	}
+	if v.EditRejections != nil {
+		encoded, err := json.Marshal(v.EditRejections)
+		if err != nil {
+			return nil, err
+		}
+		extra["editRejections"] = encoded
+	}
+	return encodeObject(plain(v), "", extra)
+}
+
 type MessagesPage struct {
 	Messages      []AgentMessage `json:"messages"`
 	TotalMessages int64          `json:"totalMessages"`
@@ -3411,6 +3638,19 @@ func (v *SubagentSnapshot) decodeFrom(raw map[string]json.RawMessage) error {
 	}
 	*v = out
 	return nil
+}
+
+func (v SubagentSnapshot) MarshalJSON() ([]byte, error) {
+	type plain SubagentSnapshot
+	extra := make(map[string]json.RawMessage)
+	if v.Progress != nil {
+		encoded, err := json.Marshal(v.Progress)
+		if err != nil {
+			return nil, err
+		}
+		extra["progress"] = encoded
+	}
+	return encodeObject(plain(v), "", extra)
 }
 
 // Incremental subagent transcript read.
@@ -3848,7 +4088,22 @@ func (v *AgentEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
 
 func (v AgentEndEvent) MarshalJSON() ([]byte, error) {
 	type plain AgentEndEvent
-	return encodeObject(plain(v), `"type":"agent_end"`, nil)
+	extra := make(map[string]json.RawMessage)
+	if v.Telemetry != nil {
+		encoded, err := json.Marshal(v.Telemetry)
+		if err != nil {
+			return nil, err
+		}
+		extra["telemetry"] = encoded
+	}
+	if v.Coverage != nil {
+		encoded, err := json.Marshal(v.Coverage)
+		if err != nil {
+			return nil, err
+		}
+		extra["coverage"] = encoded
+	}
+	return encodeObject(plain(v), `"type":"agent_end"`, extra)
 }
 
 type TurnStartEvent struct{}
@@ -6578,7 +6833,15 @@ func (v *ExtensionUiActivity) decodeFrom(raw map[string]json.RawMessage) error {
 
 func (v ExtensionUiActivity) MarshalJSON() ([]byte, error) {
 	type plain ExtensionUiActivity
-	return encodeObject(plain(v), `"type":"extension_ui_activity"`, nil)
+	extra := make(map[string]json.RawMessage)
+	if v.Data != nil {
+		encoded, err := json.Marshal(v.Data)
+		if err != nil {
+			return nil, err
+		}
+		extra["data"] = encoded
+	}
+	return encodeObject(plain(v), `"type":"extension_ui_activity"`, extra)
 }
 
 // Authoritative deadline after accepting a dialog activity reset.
@@ -6721,6 +6984,19 @@ func (v *HostToolResultPayload) decodeFrom(raw map[string]json.RawMessage) error
 	}
 	*v = out
 	return nil
+}
+
+func (v HostToolResultPayload) MarshalJSON() ([]byte, error) {
+	type plain HostToolResultPayload
+	extra := make(map[string]json.RawMessage)
+	if v.ProviderMetadata != nil {
+		encoded, err := json.Marshal(v.ProviderMetadata)
+		if err != nil {
+			return nil, err
+		}
+		extra["providerMetadata"] = encoded
+	}
+	return encodeObject(plain(v), "", extra)
 }
 
 // Streams partial output of a pending host tool call.

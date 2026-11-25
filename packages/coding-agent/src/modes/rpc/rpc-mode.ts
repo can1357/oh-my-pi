@@ -1494,11 +1494,14 @@ export function requestRpcDialog<T>(
 		opts?.signal?.removeEventListener("abort", onAbort);
 		pendingRequests.delete(id);
 	};
-	const finish = (value: T) => {
-		if (settled) return;
+	const claim = () => {
+		if (settled) return false;
 		settled = true;
 		cleanup();
-		resolve(value);
+		return true;
+	};
+	const finish = (value: T) => {
+		if (claim()) resolve(value);
 	};
 	const fail = (cause: Error) => {
 		if (settled) return;
@@ -1518,20 +1521,31 @@ export function requestRpcDialog<T>(
 		cancelHostDialog();
 		finish(defaultValue);
 	};
+	const expire = () => {
+		if (!claim()) return;
+		try {
+			opts?.onTimeout?.();
+			resolve(defaultValue);
+		} catch (cause) {
+			reject(toError(cause));
+		} finally {
+			cancelHostDialog();
+		}
+	};
 	const armTimeout = (announce: boolean) => {
 		if (settled || timeout === undefined) return;
 		clearTimeout(timeoutId);
 		expiresAt = Date.now() + timeout;
-		timeoutId = setTimeout(() => {
-			if (settled) return;
-			opts?.onTimeout?.();
-			cancelHostDialog();
-			finish(defaultValue);
-		}, timeout);
+		timeoutId = setTimeout(expire, timeout);
 		if (announce) output({ type: "extension_ui_state", id, expiresAt });
 	};
 	const activity = (frame: RpcExtensionUIActivity) => {
 		if (settled) return;
+		// The deadline is authoritative even if the event loop has not run its timer yet.
+		if (expiresAt !== undefined && Date.now() >= expiresAt) {
+			expire();
+			return;
+		}
 		try {
 			if (
 				Object.keys(frame).some(key => !["type", "id", "reset", "data"].includes(key)) ||
@@ -1548,11 +1562,12 @@ export function requestRpcDialog<T>(
 	opts?.signal?.addEventListener("abort", onAbort, { once: true });
 	pendingRequests.set(id, {
 		resolve: response => {
-			if (settled) return;
+			// Parsing can call extension code (onTimeout), which may synchronously abort.
+			if (!claim()) return;
 			try {
-				finish(parseResponse(response));
+				resolve(parseResponse(response));
 			} catch (cause) {
-				fail(toError(cause));
+				reject(toError(cause));
 			}
 		},
 		activity: timeout === undefined ? undefined : activity,

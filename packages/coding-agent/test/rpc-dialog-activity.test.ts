@@ -143,3 +143,54 @@ test("activity metadata cannot push a form past the host's intact-frame budget o
 	expect(pending.size).toBe(0);
 	expect(frames).toEqual([]);
 });
+
+test.each([true, false])("overdue activity reset=%s cannot beat an unexecuted timer callback", async reset => {
+	vi.useFakeTimers();
+	const a = form();
+	a.pending.get(a.id)!.activity!({ type: "extension_ui_activity", id: a.id, reset: false, data: { code: "saved" } });
+	// Advancing wall time alone deliberately leaves the due timer callback unexecuted.
+	vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1001);
+	a.pending.get(a.id)!.activity!({ type: "extension_ui_activity", id: a.id, reset, data: { code: "too late" } });
+	expect(a.pending.size).toBe(0);
+	expect(await a.result).toEqual({ data: { code: "saved" }, timedOut: true });
+	expect(a.frames.filter(f => (f as { type: string }).type === "extension_ui_state")).toEqual([]);
+	vi.advanceTimersByTime(5000);
+	expect(a.frames.filter(f => (f as { method?: string }).method === "cancel")).toHaveLength(1);
+});
+
+test.each(["host", "server"] as const)("%s timeout claims settlement before a reentrant abort", async source => {
+	vi.useFakeTimers();
+	const pending = new RpcPendingExtensionRequests();
+	const frames: object[] = [];
+	const controller = new AbortController();
+	const onTimeout = vi.fn(() => controller.abort());
+	const result = requestRpcFormDialog(pending, f => frames.push(f), 1048575, html, {
+		timeout: 1000,
+		signal: controller.signal,
+		onTimeout,
+	});
+	const id = [...pending.keys()][0]!;
+	if (source === "host")
+		pending.get(id)!.resolve({ type: "extension_ui_response", id, cancelled: true, timedOut: true });
+	else vi.advanceTimersByTime(1000);
+	expect(await result).toEqual({ data: { code: "AB", env: "prod" }, timedOut: true });
+	expect(onTimeout).toHaveBeenCalledTimes(1);
+	expect(frames.filter(f => (f as { method?: string }).method === "cancel")).toHaveLength(source === "host" ? 0 : 1);
+	expect(pending.size).toBe(0);
+});
+
+test("an explicitly empty draft clears a checked checkbox default on timeout", async () => {
+	vi.useFakeTimers();
+	const pending = new RpcPendingExtensionRequests();
+	const result = requestRpcFormDialog(
+		pending,
+		() => {},
+		1048575,
+		'<form><label><input type="checkbox" name="enabled" value="yes" checked>Enabled</label></form>',
+		{ timeout: 1000 },
+	);
+	const id = [...pending.keys()][0]!;
+	pending.get(id)!.activity!({ type: "extension_ui_activity", id, data: {} });
+	vi.advanceTimersByTime(1000);
+	expect(await result).toEqual({ data: {}, timedOut: true });
+});

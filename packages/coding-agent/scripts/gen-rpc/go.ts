@@ -546,6 +546,7 @@ class GoEmitter {
 		const fields: StructField[] = [];
 		const decode: string[] = [];
 		const constants: string[] = [];
+		const optionalMaps: { key: string; name: string }[] = [];
 		const fieldNames = new Set<string>();
 		for (const field of def.fields) {
 			if (field.required && field.type.kind === "literal") {
@@ -565,6 +566,7 @@ class GoEmitter {
 			fieldNames.add(name);
 			const plan = this.#fieldPlan(def.name, field);
 			fields.push({ doc: field.doc, name, type: plan.type, tag: jsonTag(field.key, plan.omitempty) });
+			if (plan.omitempty && plan.type.startsWith("map[")) optionalMaps.push({ key: field.key, name });
 			const args = `${goString(field.key)}, &out.${name}`;
 			if (field.scalarOrArray) {
 				if ((nonNull(field.type) ?? field.type).kind !== "array") {
@@ -606,10 +608,27 @@ class GoEmitter {
 				(def.open ? "\tout.Extra = d.rest()\n" : "") +
 				`\tif d.err != nil {\n\t\treturn d.err\n\t}\n\t*v = out\n\treturn nil\n}\n`,
 		);
-		if (constants.length > 0 || def.open) {
+		if (constants.length > 0 || def.open || optionalMaps.length > 0) {
+			// omitempty conflates nil with a non-nil empty map. Preserve explicit {} drafts.
+			const extra = optionalMaps.length > 0 ? "extra" : def.open ? "v.Extra" : "nil";
+			const preserveMaps =
+				optionalMaps.length === 0
+					? ""
+					: `\textra := make(map[string]json.RawMessage)\n` +
+						optionalMaps
+							.map(
+								field =>
+									`\tif v.${field.name} != nil {\n` +
+									`\t\tencoded, err := json.Marshal(v.${field.name})\n` +
+									`\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n` +
+									`\t\textra[${goString(field.key)}] = encoded\n\t}\n`,
+							)
+							.join("") +
+						(def.open ? `\tfor key, value := range v.Extra {\n\t\textra[key] = value\n\t}\n` : "");
 			parts.push(
 				`func (v ${def.name}) MarshalJSON() ([]byte, error) {\n\ttype plain ${def.name}\n` +
-					`\treturn encodeObject(plain(v), ${constants.length > 0 ? goLiteral(constants.join(",")) : '""'}, ${def.open ? "v.Extra" : "nil"})\n}\n`,
+					preserveMaps +
+					`\treturn encodeObject(plain(v), ${constants.length > 0 ? goLiteral(constants.join(",")) : '""'}, ${extra})\n}\n`,
 			);
 		}
 		return parts.join("\n");

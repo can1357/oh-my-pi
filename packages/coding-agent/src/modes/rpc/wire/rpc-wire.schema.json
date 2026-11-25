@@ -6011,6 +6011,7 @@
 				"type",
 				"id"
 			],
+			"additionalProperties": false,
 			"description": "User activity on a timed dialog. reset defaults to true; data is a full form draft, not a patch."
 		},
 		"ExtensionUiState": {

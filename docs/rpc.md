@@ -1416,15 +1416,23 @@ new user input must use `reset:false`, so reconnecting does not extend time:
 {"type":"extension_ui_activity","id":"123","reset":false,"data":{"target":"prod","owner":"in progress"}}
 ```
 
-On inactivity timeout the server returns the last valid draft as
-`{data, timedOut:true}`. A host-reported timeout uses the same snapshot. Without
+On inactivity timeout the extension's `ctx.ui.formDialog()` receives the last
+valid draft as `{data, timedOut:true}`. A host-reported timeout uses the same snapshot. Without
 any draft activity, this remains the existing default-form result. This wire
 extension currently snapshots `data` only; it does not carry option notes or
 images. Cancellation and abort retain their existing meaning.
 
+The built-in `ask` tool applies its own answer validation after this extension
+result: if any field fails its required/pattern constraints, its timeout result
+retains the existing `answers: []` behavior, even when another field has a draft
+value. This protocol preserves the form-dialog draft; it does not expose an
+incomplete draft as submitted `ask` answers.
+
 Invalid activity emits `extension_ui_activity_error` with `id` and `error`,
 without changing the last valid draft or current deadline. Activity for an
-already-resolved/unknown id is ignored. Closed/aborted dialogs cannot be revived.
+already-resolved/unknown id is ignored. Once the server deadline has elapsed,
+activity (including `reset:false`) cannot update the draft or revive the dialog,
+even if the timer callback has not yet run. Closed/aborted dialogs cannot be revived.
 The host must report user interaction, not a periodic keepalive.
 
 Python hosts can call `send_ui_activity(id, data=..., reset=False)` and listen

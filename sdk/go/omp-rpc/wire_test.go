@@ -325,3 +325,35 @@ func TestResultDecoding(t *testing.T) {
 		t.Fatalf("command error: %v", err)
 	}
 }
+
+func TestActivityDraftPreservesAbsentVersusEmptyThroughInbound(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		data     map[string]json.RawMessage
+		wantData string
+	}{
+		{"absent", nil, ""},
+		{"empty", map[string]json.RawMessage{}, "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, err := json.Marshal(RpcInbound{Value: ExtensionUiActivity{ID: "ui-1", Data: tc.data}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &got); err != nil {
+				t.Fatal(err)
+			}
+			if string(got["data"]) != tc.wantData {
+				t.Fatalf("got %s; want data %q", encoded, tc.wantData)
+			}
+			var decoded ExtensionUiActivity
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if (decoded.Data == nil) != (tc.data == nil) {
+				t.Fatalf("draft presence lost: %#v", decoded)
+			}
+		})
+	}
+}

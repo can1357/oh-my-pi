@@ -299,7 +299,7 @@ export const frameDefs = {
 	),
 
 	ExtensionUiActivity: doc(
-		{ type: "'extension_ui_activity'", id: "string", "reset?": "boolean", "data?": JSON_OBJECT },
+		{ type: "'extension_ui_activity'", id: "string", "reset?": "boolean", "data?": JSON_OBJECT, "+": "reject" },
 		"User activity on a timed dialog. reset defaults to true; data is a full form draft, not a patch.",
 	),
 	ExtensionUiState: doc(
