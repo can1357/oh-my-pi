@@ -19,7 +19,7 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 } from "../tools/streaming-output";
-import { InternalUrlRouter } from "../internal-urls/router";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, resizeImage } from "./image-resize";
 import { VideoError, buildVideoContactSheetPng, formatVideoDetails, probeVideo, videoMimeForPath } from "./video";
@@ -54,6 +54,7 @@ function sanitizeMentionPath(rawPath: string): string | null {
 async function resolveMentionPath(
 	filePath: string,
 	cwd: string,
+	router: InternalUrlRouter,
 ): Promise<{ resolvedPath: string; absolutePath: string } | null> {
 	// Exact resolution only. The TUI @-selector inserts the real, complete path, so a
 	// mention that does not resolve to an existing file or directory is prose, not a file
@@ -62,7 +63,7 @@ async function resolveMentionPath(
 	// Resolution itself can throw (an internal-scheme URL such as `@local://x` is not a
 	// filesystem path), so it stays inside the try: an unresolvable mention is prose too.
 	try {
-		const absolutePath = resolveReadPath(filePath, cwd, InternalUrlRouter.builtins());
+		const absolutePath = resolveReadPath(filePath, cwd, router);
 		await Bun.file(absolutePath).stat();
 		return { resolvedPath: filePath, absolutePath };
 	} catch {
@@ -203,9 +204,11 @@ export interface FileMentionOptions {
 	signal?: AbortSignal;
 }
 
+/** Read `filePaths` for the prompt; a mention of a URL of a scheme `router` handles is prose, not a file. */
 export async function generateFileMentionMessages(
 	filePaths: string[],
 	cwd: string,
+	router: InternalUrlRouter,
 	options?: FileMentionOptions,
 ): Promise<FileMentionMessage[]> {
 	if (filePaths.length === 0) return [];
@@ -216,7 +219,7 @@ export async function generateFileMentionMessages(
 
 	for (const filePath of filePaths) {
 		if (options?.signal?.aborted) return [];
-		const resolved = await resolveMentionPath(filePath, cwd);
+		const resolved = await resolveMentionPath(filePath, cwd, router);
 		if (!resolved) {
 			continue;
 		}

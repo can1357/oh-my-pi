@@ -10170,16 +10170,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Auto-read @filepath mentions
 			const fileMentions = extractFileMentions(expandedText);
 			if (fileMentions.length > 0) {
-				const fileMentionMessages = await generateFileMentionMessages(fileMentions, this.sessionManager.getCwd(), {
-					autoResizeImages: cfgImagesAutoResize.get(this.settings),
-					useHashLines: resolveFileDisplayMode(this).hashLines,
-					// Mentions display tagged rows like `read`: record them where edit
-					// checks provenance, the tool session's store.
-					snapshotStore: this.#evalToolSession
-						? getEditStore(this.#evalToolSession)
-						: (this.editStore ??= new EditStore()),
-					signal: setupAbort.signal,
-				});
+				const fileMentionMessages = await generateFileMentionMessages(
+					fileMentions,
+					this.sessionManager.getCwd(),
+					this.urlRouter,
+					{
+						autoResizeImages: cfgImagesAutoResize.get(this.settings),
+						useHashLines: resolveFileDisplayMode(this).hashLines,
+						// Mentions display tagged rows like `read`: record them where edit
+						// checks provenance, the tool session's store.
+						snapshotStore: this.#evalToolSession
+							? getEditStore(this.#evalToolSession)
+							: (this.editStore ??= new EditStore()),
+						signal: setupAbort.signal,
+					},
+				);
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
 				}
