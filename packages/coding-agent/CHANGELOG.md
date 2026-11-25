@@ -375,6 +375,11 @@
 - Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - Cache warming no longer sends a refresh after sleep or another timer delay leaves less than ten seconds before cache expiry ([#20366](https://github.com/can1357/oh-my-pi/issues/20366)).
+- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
+- omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
+### Fixed
+
+- Fixed `edit` on a bare file name answering "Use the write tool" when the tag matches a file read outside the workspace; the error now names that file's full path so the retry needs no re-read ([#16087](https://github.com/can1357/oh-my-pi/pull/16087) by [@nick-maderight](https://github.com/nick-maderight))
 
 ## [19.2.1] - 2026-11-25
 
@@ -416,21 +421,6 @@
 - Fixed idle follow-ups becoming stuck after extension messages or compaction summaries.
 - Fixed resuming goals whose token budget is exhausted so they remain budget-limited, and prevented incomplete-goal reminders from asking the agent to continue while budget-limited.
 - Assistant replies show SVG fences and HTML image and page embeds inline again on terminals that support graphics ([#20508](https://github.com/can1357/oh-my-pi/issues/20508)).
-- Fixed ACP `session/load` and `session/resume` rejecting saved Copilot 1M models during a background catalog refresh ([#20467](https://github.com/can1357/oh-my-pi/issues/20467)).
-### Fixed
-
-- `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` now apply to assistant replies, thinking, user prompts, extension messages, summaries and tool output, not only plain Markdown blocks ([#20468](https://github.com/can1357/oh-my-pi/issues/20468))
-### Fixed
-
-- Fixed rules from extension packages listed in a config overlay's `extensions:` (`PI_CONFIG_FILES`/`--config`) disappearing after the system prompt is rebuilt, e.g. after `setActiveTools`, `/new`, or `/clear` ([#20475](https://github.com/can1357/oh-my-pi/issues/20475))
-### Fixed
-
-- Fixed idle follow-ups getting stuck in After yield after an extension message or a compaction summary ([#20465](https://github.com/can1357/oh-my-pi/issues/20465)).
-### Fixed
-
-- Resuming a goal whose token budget is already spent now keeps it budget-limited instead of reporting it active with 0 tokens remaining, and incomplete-todo reminders no longer ask the agent to keep working while the goal is budget-limited ([#20455](https://github.com/can1357/oh-my-pi/issues/20455))
-- Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
-- Fixed `edit` on a bare file name answering "Use the write tool" when the tag matches a file read outside the workspace; the error now names that file's full path so the retry needs no re-read ([#16087](https://github.com/can1357/oh-my-pi/pull/16087) by [@nick-maderight](https://github.com/nick-maderight))
 
 ## [19.2.0] - 2026-11-25
 
