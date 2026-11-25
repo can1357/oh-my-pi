@@ -2,7 +2,7 @@
  * `omp.assistant` / `omp.assistant.rewound` columns: the assistant's reply
  * as transcript rows.
  *
- * - Text: Markdown one cell in, code fences drawn literally at column 0;
+ * - Text: Markdown with the standard inset, code fences drawn literally at column 0;
  *   prose in the block's `tone` when set (`/live`'s spoken reply), else in
  *   `assistantMessageText` when the theme sets it.
  * - Thinking: italic Markdown in `thinkingText`, set off from what follows
@@ -13,7 +13,7 @@
  *   `[Image: mime]` in `toolOutput`; after a blank row (tool-result images
  *   share one).
  * - The turn-ending error: `Error: …` wrapped under a hanging indent, capped
- *   at 8 rows with a `… +N more lines (⌃O to expand)` hint while collapsed
+ *   at 8 rows with a `… +N more lines` expansion hint while collapsed
  *   (hidden while the same error is pinned and collapsed); the abort label;
  *   or the recovered-retry note, each after a blank row.
  * - Markers draw as dividers; the rewound tag and usage line are native-only.
@@ -28,7 +28,9 @@ import { renderMarkdownFrame, takeExtensionLinks } from "@oh-my-pi/pi-tui/text/m
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import { EXPAND_KEY, hexFg, paddedText, propsOf, termOf } from "./fill";
+import { terminalPaddingX } from "../terminal-padding";
+import { expandKeyLabel } from "../../keys/hints";
+import { hexFg, paddedText, propsOf, termOf } from "./fill";
 import { imageLink } from "../tools/file-common";
 
 /** Facets of the hidden-thinking pulse. */
@@ -64,20 +66,22 @@ export function errorRows(theme: Theme, message: string, width: number, maxRows:
 		.map(line => line.trim())
 		.filter(line => line.length > 0);
 	if (lines.length === 0) lines.push("Unknown error");
-	const wrapWidth = Math.max(1, width - 4);
+	const paddingX = terminalPaddingX();
+	const pad = " ".repeat(paddingX);
+	const wrapWidth = Math.max(1, width - 2 * paddingX - 2);
 	const rows: string[] = [];
 	lines.forEach((line, index) => {
 		wrap(theme.fg("error", index === 0 ? `Error: ${line}` : line), wrapWidth).forEach((row, part) => {
-			if (rows.length === 0) rows.push(` ${row}`);
+			if (rows.length === 0) rows.push(`${pad}${row}`);
 			// A wrapped continuation keeps the line's color through its hang; a new line's hang is plain.
-			else rows.push(part === 0 ? `   ${row}` : ` ${theme.fg("error", "  ")}${row}`);
+			else rows.push(`${pad}${part === 0 ? "  " : theme.fg("error", "  ")}${row}`);
 		});
 	});
 	if (rows.length <= maxRows) return rows;
 	const hidden = rows.length - maxRows;
 	return [
 		...rows.slice(0, maxRows),
-		` ${theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${EXPAND_KEY} to expand)`)}`,
+		`${pad}${theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${expandKeyLabel(theme)} to expand)`)}`,
 	];
 }
 
@@ -95,7 +99,7 @@ function proseRows(
 	const schemes = routedLinkSchemes();
 	const frame = renderMarkdownFrame(term.source ?? props.text ?? "", cx.width, {
 		theme: cx.theme,
-		paddingX: 1,
+		paddingX: terminalPaddingX(),
 		codeIndent: 0,
 		textStyle: props.tone ?? (cx.theme.has("assistantMessageText") ? "assistantMessageText" : undefined),
 		stream: props.stream === true,
@@ -120,7 +124,7 @@ function thinkingRows(section: UiNode, cx: PaintContext): { rows: readonly strin
 	const props = propsOf<{ text: string; stream: boolean }>(body);
 	return renderMarkdownFrame(termOf<ProseTerm>(body).source ?? props.text ?? "", cx.width, {
 		theme: cx.theme,
-		paddingX: 1,
+		paddingX: terminalPaddingX(),
 		textStyle: "thinkingText em",
 		stream: props.stream === true,
 		hyperlinks: cx.hyperlinks,
@@ -130,7 +134,7 @@ function thinkingRows(section: UiNode, cx: PaintContext): { rows: readonly strin
 function pulseRow(cx: PaintContext, dots: { tokens: number; rate: number }): string {
 	const theme = cx.theme;
 	const frame = cx.reduceMotion ? 0 : Math.floor(cx.now() / PULSE_FRAME_MS) % PULSE_FRAMES.length;
-	let row = ` ${theme.fg("thinkingText", PULSE_FRAMES[frame]!)}${theme.fg("muted", " Thinking")}`;
+	let row = `${" ".repeat(terminalPaddingX())}${theme.fg("thinkingText", PULSE_FRAMES[frame]!)}${theme.fg("muted", " Thinking")}`;
 	if (dots.rate >= 0.05) {
 		const rate = Math.min(SPEED_MAX, dots.rate);
 		if (dots.tokens > 0) row += theme.fg("dim", ` · ${formatNumber(dots.tokens)}`);
@@ -161,7 +165,8 @@ function imageRows(cx: PaintContext, image: UiNode): readonly string[] {
 	const mime = termOf<{ mime: string }>(image).mime ?? propsOf<{ alt: string }>(image).alt ?? "image";
 	const label = cx.theme.fg("toolOutput", `[Image: ${mime}]`);
 	// The placeholder links to the image's file (a blob copy of its bytes).
-	if (!cx.images) return [` ${imageLink(cx, label, propsOf<{ blob?: string }>(image).blob)}`];
+	if (!cx.images)
+		return [`${" ".repeat(terminalPaddingX())}${imageLink(cx, label, propsOf<{ blob?: string }>(image).blob)}`];
 	const inner = Object.create(cx, { width: { value: Math.max(1, cx.width - 1), enumerable: true } }) as PaintContext;
 	return paintImage(image, inner, label).rows.map(row => ` ${row}`);
 }
