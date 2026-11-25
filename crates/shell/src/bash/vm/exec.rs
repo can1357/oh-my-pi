@@ -811,6 +811,12 @@ fn end_run(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>, run: &super::proc::Run) 
 	k.emit(cx, (vp.vpid, vp.mode), Some(run), EventData::RunEnd { status });
 	k.trace_sources.remove(&vp.vpid);
 	k.trace_unit_origins.remove(&vp.vpid);
+	// A subshell's vproc runs only its run: its usage is the run's.
+	if vp.transient
+		&& let Some(usage) = vp.usage.as_deref()
+	{
+		k.run_usage.insert(run.id, *usage);
+	}
 	k.done.push_back((run.id, status));
 }
 

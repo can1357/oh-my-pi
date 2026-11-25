@@ -5,6 +5,7 @@ import {
 	actionHintSpans,
 	actionKey,
 	actionKeys,
+	expandKeyLabel,
 	formatDoubleTap,
 	formatKeyHint,
 	formatTooltipDoubleTap,
@@ -36,6 +37,15 @@ describe("action keys", () => {
 		const keybindings = KeybindingsManager.inMemory({ "app.clipboard.copyPrompt": [] });
 		expect(actionKeys("app.clipboard.copyPrompt", keybindings)).toBe("");
 		expect(actionKey("app.clipboard.copyPrompt", keybindings)).toBe("");
+	});
+
+	it("draws the primary tool expansion binding in the supplied preset", () => {
+		setKeyHintPlatform("darwin");
+		const keybindings = KeybindingsManager.inMemory({ "app.tools.expand": ["alt+k", "ctrl+o"] });
+		const nerd = loadThemeSync("dark", { symbolPreset: "nerd" });
+		expect(expandKeyLabel(nerd, keybindings)).toBe("\u{f0635} K");
+		expect(expandKeyLabel(currentTheme(), keybindings)).toBe("⌥K");
+		expect(expandKeyLabel(nerd, KeybindingsManager.inMemory({ "app.tools.expand": [] }))).toBe("\u{f0634} O");
 	});
 
 	it("keeps Alt and Super labels off macOS", () => {

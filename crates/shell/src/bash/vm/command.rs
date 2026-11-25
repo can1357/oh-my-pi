@@ -20,9 +20,9 @@ use super::{
 	expand::{CompoundElem, Expander, Stop, compound_text},
 	probe::{self, Search, absolute, candidates},
 	proc::{
-		AssignValue, Awaited, BangStage, DeferPhase, ExecAs, ExecState, Frame, FrameKind, JobState,
-		Live, PathSearch, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot, Stage, Target,
-		Transfer, Vproc,
+		AssignValue, Awaited, BangStage, DeferPhase, ExecAs, ExecState, Frame, FrameKind, JobLookup,
+		JobState, Live, PathSearch, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot,
+		Stage, Target, Transfer, Vproc,
 	},
 	state::{self, Level, Scope, Var, VarMap},
 	xtrace,
@@ -172,6 +172,21 @@ fn names_path(k: &Kernel, name: &[u8]) -> bool {
 	name.contains(&b'/')
 		|| (k.engine.config().platform == crate::bash::ids::Platform::Windows
 			&& name.contains(&b'\\'))
+}
+
+/// The arguments of `argv` that are job specs naming a job of `vp` that runs
+/// a program, each with that program's OS pid ([`Invocation::jobs`]).
+fn job_pids(vp: &Vproc, argv: &[BString]) -> Vec<(BString, u32)> {
+	argv
+		.iter()
+		.skip(1)
+		.filter_map(|word| {
+			let JobLookup::Job(number) = vp.jobs.lookup(word.strip_prefix(b"%")?) else {
+				return None;
+			};
+			Some((word.clone(), vp.jobs.get(number)?.os_pid?))
+		})
+		.collect()
 }
 
 /// The current command's expanded words, borrowed shared: lookups that also
@@ -2361,6 +2376,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			let extra = extra_fds(vp);
 			let argv = st(vp).argv.clone();
 			let tag = st(vp).tag;
+			let jobs = job_pids(vp, &argv);
 			let inv = Invocation {
 				argv: &argv,
 				env: &env,
@@ -2370,6 +2386,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				tag,
 				vpid: vp.vpid,
 				umask,
+				jobs: &jobs,
 			};
 			match cx.host.start(&native, inv) {
 				Ok(task) => {
@@ -4563,6 +4580,14 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 					Poll::Pending => return Some(Flow::Block(WaitKey::Ext { pid })),
 				}
 			};
+			// Reaped now, before the drop below: what `time` reports.
+			let usage = match &mut scratch(vp).live {
+				Live::Ext(child) if exit.is_some() => child.usage(),
+				_ => None,
+			};
+			if let Some(usage) = usage {
+				vp.count_usage(&usage);
+			}
 			let killed = match exit {
 				Some(ExitStatus::Signaled(sig)) => Some(sig),
 				_ => None,

@@ -16,6 +16,7 @@ import {
 	type RawSseDebugSnapshot,
 	rawSseRecordLines,
 } from "../../../debug/raw-sse-buffer";
+import { formatKeyHint } from "../../keys/hints";
 import { ViewerFrameModel } from "../viewer-frame";
 
 /** `data:` lines up to this long show as captured; longer JSON payloads are pretty-printed over several `data:` lines. */
@@ -236,7 +237,7 @@ export class RawSseViewerModel {
 		const theme = currentTheme();
 		const help = theme.fg(
 			"dim",
-			"⎋ close · ⌃C copy raw · End follow tail · wheel scroll · click summary toggles follow",
+			`${formatKeyHint("escape")} close · ${formatKeyHint("ctrl+c")} copy raw · ${formatKeyHint("end")} follow tail · wheel scroll · click summary toggles follow`,
 		);
 		const status = this.status();
 		return status ? `${theme.fg("success", status.text)}  ${help}` : help;

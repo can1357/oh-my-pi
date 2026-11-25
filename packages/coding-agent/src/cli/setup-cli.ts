@@ -12,7 +12,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
-import { discoverAuthStorage } from "../sdk";
+import { discoverSessionAuthStorage as discoverAuthStorage } from "../session/auth-broker-config";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
 import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODELS } from "../tts";
