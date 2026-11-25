@@ -1161,7 +1161,7 @@ export async function finishChatSpan(
 	},
 ): Promise<void> {
 	if (!span) return;
-	applyChatResponseAttributes(span, message);
+	applyChatResponseAttributes(span, message, options.modelId);
 	applyUsageAttributes(span, message.usage);
 	applyGatewayAttributes(span, options.responseHeaders, options.baseUrl);
 	const cost = applyCostEstimate(telemetry, span, message, options.serviceTier, options.stepNumber, options.modelId);
@@ -1232,8 +1232,11 @@ export function failChatSpan(
 	span.end();
 }
 
-function applyChatResponseAttributes(span: Span, message: AssistantMessage): void {
-	span.setAttribute(GenAIAttr.ResponseModel, message.upstreamModel ?? message.model);
+function applyChatResponseAttributes(span: Span, message: AssistantMessage, requestedModelId?: string): void {
+	// A provider that promoted `model` to a served fallback has named the serving model;
+	// `upstreamModel` can still hold the declined primary's signed id.
+	const promoted = requestedModelId !== undefined && message.model !== requestedModelId;
+	span.setAttribute(GenAIAttr.ResponseModel, promoted ? message.model : (message.upstreamModel ?? message.model));
 	if (message.responseId) span.setAttribute(GenAIAttr.ResponseId, message.responseId);
 	if (message.upstreamProvider) {
 		span.setAttribute(OmpGenAIAttr.ResponseUpstreamProvider, message.upstreamProvider);
