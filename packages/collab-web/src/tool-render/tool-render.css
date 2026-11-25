@@ -4,26 +4,28 @@
  * page defines --text/--muted/--dim/… from the active theme. Every color used
  * below resolves through the `--tv-*` bridge with a static fallback so the
  * bundle also works standalone. Dense devtool aesthetic: mono type, hairlines,
- * 4px radii, whisper hovers. */
+ * 6px radii, whisper hovers. */
 
 .tv-card {
-	--tv-fg: var(--fg, var(--text, oklch(0.92 0.01 307)));
-	--tv-muted: var(--fg-muted, var(--muted, oklch(0.71 0.016 307)));
-	--tv-faint: var(--fg-faint, var(--dim, oklch(0.53 0.018 307)));
-	--tv-accent: var(--accent, oklch(0.674 0.23 341));
-	--tv-ok: var(--ok, var(--success, oklch(0.76 0.14 150)));
-	--tv-err: var(--err, var(--error, oklch(0.66 0.19 25)));
-	--tv-warn: var(--warn, var(--warning, oklch(0.79 0.14 85)));
-	--tv-border: var(--border, oklch(1 0 0 / 9%));
-	--tv-inset: var(--bg-inset, var(--info-bg, oklch(0 0 0 / 22%)));
-	--tv-raised: var(--bg-raised, var(--container-bg, oklch(1 0 0 / 4%)));
-	--tv-ring: var(--ring, oklch(0.817 0.112 205 / 70%));
+	--tv-fg: var(--fg, var(--text, oklch(0.95 0.005 260)));
+	--tv-muted: var(--fg-muted, var(--muted, oklch(0.74 0.01 260)));
+	--tv-faint: var(--fg-faint, var(--dim, oklch(0.64 0.012 260)));
+	--tv-accent: var(--accent, oklch(0.81 0.12 205));
+	--tv-ok: var(--ok, var(--success, oklch(0.76 0.14 160)));
+	--tv-err: var(--err, var(--error, oklch(0.7 0.17 25)));
+	--tv-warn: var(--warn, var(--warning, oklch(0.82 0.15 85)));
+	--tv-border: var(--border, oklch(1 0 0 / 10%));
+	--tv-inset: var(--bg-inset, var(--info-bg, oklch(0 0 0 / 24%)));
+	--tv-raised: var(--bg-raised, var(--container-bg, oklch(1 0 0 / 5%)));
+	--tv-ring: var(--ring, oklch(0.81 0.12 205));
 	--tv-mono: var(--font-mono, ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace);
 
+	max-width: 100%;
+	min-width: 0;
 	border: 1px solid var(--tv-border);
-	border-radius: 6px;
+	border-radius: 8px;
 	font-family: var(--tv-mono);
-	font-size: 12px;
+	font-size: 12.5px;
 	line-height: 1.5;
 	color: var(--tv-fg);
 	isolation: isolate;
@@ -41,7 +43,8 @@
 	align-items: center;
 	gap: 8px;
 	width: 100%;
-	padding: 5px 10px;
+	min-height: 34px;
+	padding: 6px 10px;
 	background: none;
 	border: 0;
 	font: inherit;
@@ -50,10 +53,12 @@
 	cursor: pointer;
 	touch-action: manipulation;
 	-webkit-tap-highlight-color: transparent;
+	transition: background 120ms ease-out;
 }
 
 .tv-head:hover {
 	background: color-mix(in oklch, var(--tv-fg) 4%, transparent);
+	transition-duration: 150ms;
 }
 
 .tv-head:focus-visible {
@@ -92,7 +97,7 @@
 
 .tv-name {
 	flex: none;
-	font-size: 11px;
+	font-size: 11.5px;
 	font-weight: 600;
 	letter-spacing: 0.02em;
 	color: var(--tv-muted);
@@ -104,7 +109,7 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	font-size: 11.5px;
+	font-size: 12px;
 	color: var(--tv-muted);
 }
 
@@ -135,11 +140,12 @@
 	gap: 8px;
 	padding: 8px 10px 10px;
 	border-top: 1px solid var(--tv-border);
+	min-width: 0;
 }
 
 .tv-intent {
 	font-style: italic;
-	font-size: 11px;
+	font-size: 11.5px;
 	color: var(--tv-faint);
 }
 
@@ -147,7 +153,7 @@
 	margin: 0;
 	padding: 6px 10px;
 	border-top: 1px solid var(--tv-border);
-	font-size: 11px;
+	font-size: 11.5px;
 	line-height: 1.45;
 	color: var(--tv-faint);
 	white-space: pre-wrap;
@@ -161,10 +167,10 @@
 .tv-badge {
 	display: inline-block;
 	padding: 0 5px;
-	border-radius: 3px;
+	border-radius: 4px;
 	background: var(--tv-raised);
-	font-size: 10px;
-	line-height: 16px;
+	font-size: 10.5px;
+	line-height: 17px;
 	color: var(--tv-muted);
 	vertical-align: 1px;
 }
@@ -226,7 +232,7 @@
 .tv-agent-link {
 	border: 0;
 	font: inherit;
-	font-size: 10px;
+	font-size: 10.5px;
 	cursor: pointer;
 }
 
@@ -258,9 +264,9 @@
 
 .tv-kv {
 	display: grid;
-	grid-template-columns: max-content 1fr;
+	grid-template-columns: max-content minmax(0, 1fr);
 	gap: 2px 10px;
-	font-size: 11.5px;
+	font-size: 12px;
 }
 
 .tv-kv-key {
@@ -283,12 +289,13 @@
 
 .tv-pre {
 	margin: 0;
-	padding: 7px 9px;
-	border-radius: 4px;
+	padding: 8px 10px;
+	border-radius: 5px;
 	background: var(--tv-inset);
 	font-family: var(--tv-mono);
-	font-size: 11.5px;
+	font-size: 12px;
 	line-height: 1.5;
+	max-width: 100%;
 	overflow-x: auto;
 	tab-size: 3;
 }
@@ -309,7 +316,7 @@
 
 .tv-out-title {
 	padding: 0 1px 3px;
-	font-size: 10px;
+	font-size: 10.5px;
 	letter-spacing: 0.05em;
 	text-transform: uppercase;
 	color: var(--tv-faint);
@@ -318,11 +325,11 @@
 .tv-expand {
 	align-self: flex-start;
 	margin-top: 3px;
-	padding: 0 1px;
+	padding: 2px 4px;
 	background: none;
 	border: 0;
 	font-family: var(--tv-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	color: var(--tv-faint);
 	cursor: pointer;
 }
@@ -343,7 +350,8 @@
 .tv-cmd {
 	display: flex;
 	gap: 7px;
-	font-size: 11.5px;
+	font-size: 12px;
+	min-width: 0;
 }
 
 .tv-cmd-prompt {
@@ -366,10 +374,11 @@
 
 .tv-diff {
 	margin: 0;
-	border-radius: 4px;
+	border-radius: 5px;
 	background: var(--tv-inset);
-	font-size: 11.5px;
+	font-size: 12px;
 	line-height: 1.5;
+	max-width: 100%;
 	overflow-x: auto;
 	padding: 5px 0;
 }
@@ -404,6 +413,8 @@
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
+	min-width: 0;
+	max-width: 100%;
 }
 
 .tv-cell {
@@ -414,7 +425,7 @@
 
 .tv-cell-title {
 	padding: 0 1px 3px;
-	font-size: 10px;
+	font-size: 10.5px;
 	letter-spacing: 0.05em;
 	text-transform: uppercase;
 	color: var(--tv-faint);
@@ -426,7 +437,7 @@
 	display: flex;
 	flex-direction: column;
 	gap: 3px;
-	font-size: 11.5px;
+	font-size: 12px;
 }
 
 .tv-row {
@@ -457,14 +468,14 @@
 	display: flex;
 	flex-direction: column;
 	gap: 2px;
-	font-size: 11.5px;
+	font-size: 12px;
 }
 
 .tv-todo-phase {
 	margin-top: 4px;
 	color: var(--tv-muted);
 	font-weight: 600;
-	font-size: 10.5px;
+	font-size: 11px;
 	letter-spacing: 0.04em;
 	text-transform: uppercase;
 }
@@ -511,9 +522,9 @@
 
 .tv-note {
 	padding: 6px 9px;
-	border-radius: 4px;
+	border-radius: 5px;
 	background: var(--tv-raised);
-	font-size: 11.5px;
+	font-size: 12px;
 	color: var(--tv-muted);
 	overflow-wrap: anywhere;
 }
@@ -544,7 +555,7 @@
 .tv-img {
 	max-height: 180px;
 	max-width: 100%;
-	border-radius: 4px;
+	border-radius: 5px;
 	border: 1px solid var(--tv-border);
 	cursor: zoom-in;
 	background: var(--tv-inset);
@@ -553,7 +564,7 @@
 /* ---- markdown-ish prose (plain text bodies) ---- */
 
 .tv-prose {
-	font-size: 11.5px;
+	font-size: 12px;
 	line-height: 1.55;
 	color: var(--tv-fg);
 	white-space: pre-wrap;
@@ -615,11 +626,41 @@
 	font-weight: 600;
 }
 
-/* ---- animation ---- */
+/* ---- animation & responsive ---- */
 
 @keyframes tv-rot {
 	to {
 		transform: rotate(360deg);
+	}
+}
+
+@media (max-width: 768px) {
+	.tv-head {
+		min-height: 44px;
+		padding: 8px 12px;
+	}
+
+	.tv-expand {
+		min-height: 44px;
+		display: inline-flex;
+		align-items: center;
+		padding: 0 6px;
+		font-size: 12px;
+	}
+
+	.tv-agent-link {
+		min-height: 36px;
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 8px;
+		font-size: 11.5px;
+	}
+}
+
+@media (max-width: 420px) {
+	.tv-kv {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 2px;
 	}
 }
 
@@ -628,7 +669,8 @@
 		animation: tv-pulse 1.4s ease-in-out infinite;
 	}
 
-	.tv-chev {
+	.tv-chev,
+	.tv-head {
 		transition: none;
 	}
 

@@ -4,6 +4,7 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "@oh-my-pi/pi-wire";
+import { X } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useMemo, useState } from "react";
 import { fmtCost, fmtDuration, fmtTokens, relTime } from "../../lib/format";
@@ -61,10 +62,11 @@ const AgentRow = memo(function AgentRow(props: {
 		<button
 			type="button"
 			className={selected ? "ag-row ag-row--selected" : "ag-row"}
+			aria-pressed={selected}
 			onClick={() => onSelect(selected ? null : agent.id)}
 		>
 			<span className="ag-row-head">
-				<span className={`ag-dot ag-dot--${agent.status}`} />
+				<span className={`ag-dot ag-dot--${agent.status}`} aria-hidden="true" />
 				<span className="ag-row-name">{agent.displayName}</span>
 				<span className="ag-chip">{agent.kind}</span>
 			</span>
@@ -85,8 +87,9 @@ export const AgentsPanel = memo(function AgentsPanel(props: {
 	lifecycle: ReadonlyMap<string, SubagentLifecyclePayload>;
 	selectedId: string | null;
 	onSelect(id: string | null): void;
+	onClose?(): void;
 }): ReactNode {
-	const { agents, progress, lifecycle, selectedId, onSelect } = props;
+	const { agents, progress, lifecycle, selectedId, onSelect, onClose } = props;
 	const now = useNow(1000);
 
 	const sorted = useMemo(() => {
@@ -102,9 +105,19 @@ export const AgentsPanel = memo(function AgentsPanel(props: {
 		return { mains, subs };
 	}, [agents]);
 
+	const SectionHeading = onClose ? "h3" : "h2";
+
 	return (
 		<div className="ag-panel">
-			<div className="ag-heading">Session</div>
+			{onClose && (
+				<div className="ag-panel-bar">
+					<h2 className="ag-panel-title">Agents</h2>
+					<button type="button" className="ag-iconbtn" aria-label="Close agents panel" onClick={onClose}>
+						<X size={16} aria-hidden="true" />
+					</button>
+				</div>
+			)}
+			<SectionHeading className="ag-heading">Session</SectionHeading>
 			{sorted.mains.map(agent => (
 				<AgentRow
 					key={agent.id}
@@ -116,10 +129,10 @@ export const AgentsPanel = memo(function AgentsPanel(props: {
 					onSelect={onSelect}
 				/>
 			))}
-			<div className="ag-heading">
+			<SectionHeading className="ag-heading">
 				Subagents
 				{sorted.subs.length > 0 && <span className="ag-heading-count">{sorted.subs.length}</span>}
-			</div>
+			</SectionHeading>
 			{sorted.subs.map(agent => (
 				<AgentRow
 					key={agent.id}

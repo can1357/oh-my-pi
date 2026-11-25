@@ -16,8 +16,8 @@ export interface ComposerProps {
 	queuedMessageCount: number;
 }
 
-/** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with shell.css). */
-const LINE_PX = 20;
+/** Textarea metrics: line-height 22px + 8px vertical padding × 2 (kept in sync with shell.css). */
+const LINE_PX = 22;
 const PAD_Y = 16;
 const MAX_ROWS = 8;
 
@@ -98,7 +98,8 @@ function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
 				onKeyDown={onKeyDown}
 				onCompositionStart={onCompositionStart}
 				onCompositionEnd={onCompositionEnd}
-				placeholder="type your response…"
+				placeholder="Type your response…"
+				aria-label="Response to host prompt"
 				rows={1}
 				spellCheck={false}
 			/>
@@ -107,9 +108,10 @@ function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
 					type="button"
 					className="sh-btn sh-btn-primary"
 					onClick={() => onSubmit(draft)}
+					aria-label="Submit response"
 					title="submit response"
 				>
-					<SendHorizontal size={12} /> <span className="sh-btn-label">Submit</span>
+					<SendHorizontal size={14} aria-hidden="true" /> <span className="sh-btn-label">Submit</span>
 				</button>
 			</div>
 		</div>
@@ -155,7 +157,7 @@ export const Composer = memo(function Composer({
 
 	if (uiRequest && canPrompt) {
 		return (
-			<div className="sh-composer sh-composer-ask">
+			<div className="sh-composer sh-composer-ask" role="region" aria-label="Host question">
 				<div className="sh-ask-title">{uiRequest.title}</div>
 				{uiRequest.kind === "select" ? (
 					<div className="sh-ask-options">
@@ -167,9 +169,10 @@ export const Composer = memo(function Composer({
 									key={`${uiRequest.reqId}-${index}-${label}`}
 									type="button"
 									className={`sh-ask-option${checked ? " sh-ask-option-checked" : ""}`}
+									aria-pressed={checked}
 									onClick={() => client.sendUiResponse(uiRequest.reqId, label)}
 								>
-									<span className="sh-ask-option-marker">
+									<span className="sh-ask-option-marker" aria-hidden="true">
 										{uiRequest.selectionMarker === "checkbox" ? (checked ? "☑" : "☐") : checked ? "◉" : "○"}
 									</span>
 									<span className="sh-ask-option-copy">
@@ -199,9 +202,10 @@ export const Composer = memo(function Composer({
 							className="sh-btn sh-btn-stop"
 							onClick={() => client.sendAbort()}
 							disabled={!live}
+							aria-label="Stop current turn"
 							title="stop the current turn"
 						>
-							<Square size={11} /> <span className="sh-btn-label">Stop</span>
+							<Square size={12} aria-hidden="true" /> <span className="sh-btn-label">Stop</span>
 						</button>
 					)}
 				</div>
@@ -227,13 +231,14 @@ export const Composer = memo(function Composer({
 								? "Prompt the host agent…"
 								: "Waiting for the session…"
 					}
+					aria-label={readOnly ? "Read-only session" : "Prompt the host agent"}
 					disabled={!canPrompt}
 					rows={1}
 					spellCheck={false}
 				/>
 				<div className="sh-composer-actions">
 					{busy && queued > 0 && (
-						<span className="sh-queued">
+						<span className="sh-queued" role="status" aria-live="polite">
 							<span className="sh-queued-label">queued </span>×{queued}
 						</span>
 					)}
@@ -243,9 +248,10 @@ export const Composer = memo(function Composer({
 							className="sh-btn sh-btn-stop"
 							onClick={() => client.sendAbort()}
 							disabled={!live}
+							aria-label="Stop current turn"
 							title="stop the current turn"
 						>
-							<Square size={11} /> <span className="sh-btn-label">Stop</span>
+							<Square size={12} aria-hidden="true" /> <span className="sh-btn-label">Stop</span>
 						</button>
 					)}
 					<button
@@ -253,9 +259,10 @@ export const Composer = memo(function Composer({
 						className="sh-btn sh-btn-primary"
 						onClick={send}
 						disabled={!canSend}
+						aria-label="Send prompt"
 						title="send (Enter)"
 					>
-						<SendHorizontal size={12} /> <span className="sh-btn-label">Send</span>
+						<SendHorizontal size={14} aria-hidden="true" /> <span className="sh-btn-label">Send</span>
 					</button>
 				</div>
 			</div>
