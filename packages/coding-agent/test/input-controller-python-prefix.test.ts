@@ -13,6 +13,7 @@ function createContext() {
 	const handleBtwCommand = vi.fn(async (_question: string) => true);
 
 	const editor = new Composer();
+	vi.spyOn(editor, "addToHistory");
 
 	const ctx = {
 		composer: editor,
@@ -138,6 +139,8 @@ describe("InputController Python prompt prefix", () => {
 		await controller.waitForSubmissionDispatches();
 
 		expect(handlePythonCommand).toHaveBeenCalledWith("print(1)", false);
+		expect(editor.addToHistory).toHaveBeenCalledTimes(1);
+		expect(editor.addToHistory).toHaveBeenCalledWith("$ print(1)");
 		expect(onInputCallback).not.toHaveBeenCalled();
 	});
 
@@ -151,6 +154,8 @@ describe("InputController Python prompt prefix", () => {
 		await controller.waitForSubmissionDispatches();
 
 		expect(handlePythonCommand).toHaveBeenCalledWith("print(1)", true);
+		expect(editor.addToHistory).toHaveBeenCalledTimes(1);
+		expect(editor.addToHistory).toHaveBeenCalledWith("$$ print(1)");
 		expect(onInputCallback).not.toHaveBeenCalled();
 	});
 

@@ -44,6 +44,7 @@ type PromptCustomMessage = Mock<
 			queueOnly?: boolean;
 			onPromptQueued?: (queued: readonly unknown[]) => void;
 			onPromptAdmitted?: () => void;
+			onAccepted?: () => void;
 		},
 	) => Promise<void>
 >;
@@ -64,7 +65,7 @@ function createStubInputControllerContext(opts: {
 	vi.spyOn(editor, "addToHistory");
 	const promptCustomMessage: PromptCustomMessage = vi.fn(async () => {});
 	const prompt = vi.fn(async (_text: string, _options?: unknown) => {});
-	const handleGoalModeCommand = vi.fn(async (_rest?: string) => {});
+	const handleGoalModeCommand = vi.fn(async (_rest?: string) => true);
 	const updatePendingMessagesDisplay = vi.fn();
 	const showError = vi.fn();
 	const renderOptimisticSkillMessage = vi.fn();
@@ -91,6 +92,8 @@ function createStubInputControllerContext(opts: {
 			return (this as typeof ctx).session;
 		},
 		showError,
+		notifyComposerStash: vi.fn(),
+		cancelComposerStashNotice: vi.fn(),
 		handleGoalModeCommand,
 		goalModeEnabled: false,
 		updatePendingMessagesDisplay,
@@ -381,6 +384,31 @@ describe("InputController optimistic skill row (#8895)", () => {
 		expect(clearOptimisticSkillMessage).toHaveBeenCalledTimes(1);
 		expect(showError).toHaveBeenCalledTimes(1);
 		expect(editor.expandedText()).toBe("/skill:test-skill go");
+	});
+
+	it("does not replace a restored rich stash when accepted skill dispatch later rejects", async () => {
+		const { ctx, editor, promptCustomMessage, showError } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+		});
+		const controller = new InputController(ctx);
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		editor.pendingImages.push(image);
+		editor.pendingImageLinks.push("file:///stash.png");
+		editor.setText("stashed [Image #1]");
+		controller.handleStash();
+		promptCustomMessage.mockImplementation(async (_message, options) => {
+			options?.onAccepted?.();
+			throw new Error("post-prompt failure");
+		});
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill go");
+		await editor.onSubmit?.("/skill:test-skill go");
+
+		expect(showError).toHaveBeenCalledWith("post-prompt failure");
+		expect(editor.expandedText()).toBe("stashed [Image #1]");
+		expect(editor.pendingImages).toEqual([image]);
+		expect(editor.pendingImageLinks).toEqual(["file:///stash.png"]);
 	});
 });
 

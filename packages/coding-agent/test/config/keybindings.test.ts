@@ -204,6 +204,40 @@ describe("default keymap", () => {
 		expect(appFollowUpKeys(manager)).toEqual(["ctrl+enter", "ctrl+q"]);
 		expect(matchesAnyKey(ctrl("q"), appFollowUpKeys(manager))).toBe(true);
 	});
+
+	it("keeps the default Hub chord off Ctrl+S", () => {
+		const manager = KeybindingsManager.inMemory();
+
+		expect(manager.keysFor("app.agents.hub")).toEqual(["alt+a"]);
+		expect(manager.keysFor("app.editor.stash")).toEqual(["ctrl+s"]);
+		expect(manager.resolvedBindings()).not.toHaveProperty("app.session.observe");
+	});
+
+	it("preserves an explicit Hub Ctrl+S remap instead of silently binding stash over it", () => {
+		const manager = KeybindingsManager.inMemory({ "app.agents.hub": "ctrl+s" });
+
+		expect(manager.keysFor("app.agents.hub")).toEqual(["ctrl+s"]);
+		expect(manager.keysFor("app.editor.stash")).toEqual([]);
+		expect(manager.resolvedBindings()["app.editor.stash"]).toEqual([]);
+	});
+
+	it("keeps the editor stash despite a configured session-selector sort shortcut", () => {
+		const manager = KeybindingsManager.inMemory({ "app.session.toggleSort": "ctrl+s" });
+
+		expect(manager.keysFor("app.editor.stash")).toEqual(["ctrl+s"]);
+		expect(manager.keysFor("app.session.toggleSort")).toEqual(["ctrl+s"]);
+		expect(manager.resolvedBindings()["app.editor.stash"]).toBe("ctrl+s");
+	});
+
+	it("still gives an explicit Hub remap precedence when selector sort shares the chord", () => {
+		const manager = KeybindingsManager.inMemory({
+			"app.session.toggleSort": "ctrl+s",
+			"app.agents.hub": "ctrl+s",
+		});
+
+		expect(manager.keysFor("app.editor.stash")).toEqual([]);
+		expect(manager.keysFor("app.agents.hub")).toEqual(["ctrl+s"]);
+	});
 });
 
 describe("getDefaultPasteImageKeys", () => {
@@ -287,6 +321,41 @@ describe("KeybindingsManager.create", () => {
 		expect(YAML.parse(await Bun.file(path.join(tempDir, "keybindings.yml")).text())).toEqual({
 			"app.clipboard.copyPrompt": ["alt+c", "ctrl+shift+c"],
 			"app.session.fork": "ctrl+f",
+		});
+	});
+
+	it("merges both old observer names with explicit Hub chords regardless of YAML entry order", async () => {
+		const configPath = path.join(tempDir, "keybindings.yml");
+		await Bun.write(
+			configPath,
+			YAML.stringify({
+				observeSessions: ["ctrl+o", "alt+o"],
+				"app.session.observe": ["ctrl+s", "ctrl+o"],
+				"app.agents.hub": ["ctrl+s", "alt+h"],
+			}),
+		);
+
+		const manager = KeybindingsManager.create(tempDir);
+		expect(manager.keysFor("app.agents.hub")).toEqual(["ctrl+s", "alt+h", "ctrl+o", "alt+o"]);
+		expect(manager.keysFor("app.editor.stash")).toEqual([]);
+		expect(YAML.parse(await Bun.file(configPath).text())).toEqual({
+			"app.agents.hub": ["ctrl+s", "alt+h", "ctrl+o", "alt+o"],
+		});
+		expect(manager.resolvedBindings()).not.toHaveProperty("app.session.observe");
+		expect(manager.resolvedBindings()).not.toHaveProperty("observeSessions");
+	});
+
+	it("migrates old observer JSON remaps without a new Hub entry", async () => {
+		await Bun.write(
+			path.join(tempDir, "keybindings.json"),
+			JSON.stringify({ observeSessions: "ctrl+o", "app.session.observe": "ctrl+s" }),
+		);
+
+		const manager = KeybindingsManager.create(tempDir);
+		expect(manager.keysFor("app.agents.hub")).toEqual(["alt+a", "ctrl+s", "ctrl+o"]);
+		expect(manager.keysFor("app.editor.stash")).toEqual([]);
+		expect(YAML.parse(await Bun.file(path.join(tempDir, "keybindings.yml")).text())).toEqual({
+			"app.agents.hub": ["alt+a", "ctrl+s", "ctrl+o"],
 		});
 	});
 

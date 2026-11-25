@@ -7,8 +7,9 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { ModeCommandResult, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { normalizeCustomMessagePayload, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -20,6 +21,7 @@ import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { initTheme } from "../../src/ui/theme/service";
 import { createModeTerminal } from "../helpers/mode-terminal";
+import { key, sendKey } from "../ui/composer/harness";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -236,6 +238,63 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(await toolNamesFor(harness)).not.toContain("goal");
 	});
 
+	it("restores a rich stash after local goal actions without repeating the slash command", async () => {
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		vi.spyOn(harness.mode, "showHookConfirm").mockResolvedValue(true);
+
+		for (const [command, enabled] of [
+			["/goal show", true],
+			["/goal budget 120", true],
+			["/goal pause", false],
+			["/goal resume", true],
+			["/goal drop", false],
+		] as const) {
+			replace(harness.mode.composer.pendingImages, [image]);
+			replace(harness.mode.composer.pendingImageLinks, ["file:///saved.png"]);
+			harness.mode.composer.setText("saved [Image #1]");
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			harness.mode.composer.setText(command);
+			harness.mode.composer.setText(""); // Enter detaches the submitted text before onSubmit.
+			await harness.mode.composer.onSubmit?.(command);
+			expect(harness.mode.goalModeEnabled).toBe(enabled);
+			expect(harness.mode.composer.expandedText()).toBe("saved [Image #1]");
+			expect(harness.mode.composer.pendingImages).toEqual([image]);
+			expect(harness.mode.composer.pendingImageLinks).toEqual(["file:///saved.png"]);
+			harness.mode.composer.clearDraft({ recall: false });
+		}
+	});
+
+	it("restores the stash when the /goal set dialog is cancelled", async () => {
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		vi.spyOn(harness.mode, "showHookEditor").mockResolvedValue(undefined);
+		harness.mode.composer.setText("saved draft");
+		sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+		harness.mode.composer.setText("/goal set");
+		harness.mode.composer.setText(""); // Enter detaches the submitted text before onSubmit.
+
+		await harness.mode.composer.onSubmit?.("/goal set");
+
+		expect(harness.mode.composer.text()).toBe("saved draft");
+		expect(harness.mode.goalModeEnabled).toBe(false);
+	});
+
+	it("keeps a rejected goal objective in front of the untouched stash", async () => {
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.mode.composer.setText("saved draft");
+		sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+		harness.mode.composer.setText("/goal another objective");
+		harness.mode.composer.setText(""); // Enter detaches the submitted text before onSubmit.
+
+		await harness.mode.composer.onSubmit?.("/goal another objective");
+		expect(harness.mode.composer.text()).toBe("/goal another objective");
+		harness.mode.composer.clearDraft({ recall: false });
+		sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+		expect(harness.mode.composer.text()).toBe("saved draft");
+	});
+
 	it("replaces the active goal via /goal set", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		const originalGoal = harness.session.getGoalModeState()?.goal;
@@ -310,8 +369,11 @@ describe("InteractiveMode goal mode integration", () => {
 	const attachmentCases: Array<{
 		name: string;
 		text: string;
-		prepare?: (mode: InteractiveMode) => Promise<boolean | void>;
-		submit: (mode: InteractiveMode, input: Pick<SubmittedUserInput, "images" | "imageLinks">) => Promise<boolean>;
+		prepare?: (mode: InteractiveMode) => Promise<ModeCommandResult | void>;
+		submit: (
+			mode: InteractiveMode,
+			input: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		) => Promise<ModeCommandResult>;
 	}> = [
 		{
 			name: "/goal",
@@ -576,6 +638,80 @@ describe("InteractiveMode goal mode integration", () => {
 		Reflect.deleteProperty(harness.session, "isRunActive");
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
 		await waiter.inputPromise;
+	});
+
+	it("returns a dropped slash objective to the editor without consuming the stash", async () => {
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		replace(harness.mode.composer.pendingImages, [image]);
+		replace(harness.mode.composer.pendingImageLinks, ["file:///stash.png"]);
+		harness.mode.composer.setText("saved [Image #1]");
+		sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+
+		const waiter = await armInputWaiter(harness.mode);
+		harness.mode.composer.setText("/goal ship the release");
+		harness.mode.composer.setText(""); // Enter detaches the submitted text before onSubmit.
+		await harness.mode.composer.onSubmit?.("/goal ship the release");
+		await waiter.inputPromise;
+		expect(waiter.getResolvedInput()?.text).toBe("ship the release");
+		expect(harness.mode.composer.text()).toBe("");
+		// Abort real session preflight after the pending objective enters prompt().
+		// AgentSession reports a dropped user prompt; cancelling the UI submission
+		// itself would not exercise that hand-back path.
+		const { promise: preflightEntered, resolve: enterPreflight } = Promise.withResolvers<void>();
+		const { promise: releasePreflight, resolve: release } = Promise.withResolvers<void>();
+		const getApiKey = harness.session.modelRegistry.getApiKey.bind(harness.session.modelRegistry);
+		vi.spyOn(harness.session.modelRegistry, "getApiKey").mockImplementationOnce(async (...args) => {
+			enterPreflight();
+			await releasePreflight;
+			return getApiKey(...args);
+		});
+		const dispatch = submitInteractiveInput(harness.mode, harness.session, waiter.getResolvedInput()!);
+		await preflightEntered;
+		const aborting = harness.session.abort({ goalReason: "internal" });
+		release();
+		await Promise.all([dispatch, aborting]);
+		expect(harness.mode.composer.text()).toBe("ship the release");
+		harness.mode.composer.clearDraft({ recall: false });
+		sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+		expect(harness.mode.composer.expandedText()).toBe("saved [Image #1]");
+		expect(harness.mode.composer.pendingImages).toEqual([image]);
+		expect(harness.mode.composer.pendingImageLinks).toEqual(["file:///stash.png"]);
+	});
+
+	it("continues the goal across an untouched restored draft, but pauses for ordinary edits", async () => {
+		await harness.mode.init({ suppressWelcomeIntro: true });
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		replace(harness.mode.composer.pendingImages, [image]);
+		replace(harness.mode.composer.pendingImageLinks, ["file:///stash.png"]);
+		harness.mode.composer.setText("saved [Image #1]");
+		sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+		sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+		expect(harness.mode.composer.expandedText()).toBe("saved [Image #1]");
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waiter.inputPromise;
+		const input = waiter.getResolvedInput();
+		expect(input?.customType).toBe("goal-continuation");
+		expect(harness.mode.composer.expandedText()).toBe("saved [Image #1]");
+		expect(harness.mode.composer.pendingImages).toEqual([image]);
+		if (!input) throw new Error("expected goal continuation");
+		expect(harness.mode.markPendingSubmissionStarted(input)).toBe(true);
+		harness.mode.finishPendingSubmission(input);
+
+		sendKey(harness.mode.composer.node, harness.mode.composer.field, key("x"));
+		const edited = harness.mode.composer.expandedText();
+		const nextWaiter = await armInputWaiter(harness.mode);
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+		expect(nextWaiter.getResolvedInput()).toBeUndefined();
+		expect(harness.mode.composer.expandedText()).toBe(edited);
+		harness.mode.cancelGoalContinuation();
+		harness.mode.onInputCallback?.({ text: "cleanup", cancelled: true, started: false });
+		await nextWaiter.inputPromise;
 	});
 
 	it("stops repeated goal continuations when identical tool evidence adds no new signal", async () => {

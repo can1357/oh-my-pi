@@ -29,6 +29,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal } from "./helpers/mode-terminal";
+import { key, sendKey } from "./ui/composer/harness";
 
 function stubTool(name: string): AgentTool {
 	return {
@@ -209,6 +210,20 @@ describe("InteractiveMode vibe mode toggle", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	it("restores a stashed draft after a local /vibe exit", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		mode.composer.setText("saved draft");
+		sendKey(mode.composer.node, mode.composer.field, key("\x13"));
+		mode.composer.setText("/vibe exit");
+		mode.composer.setText(""); // Enter detaches the submitted text before onSubmit.
+
+		await mode.composer.onSubmit?.("/vibe exit");
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(mode.composer.text()).toBe("saved draft");
 	});
 
 	it("preserves the parent Todo tool and restores the exact pre-vibe toolset on exit", async () => {

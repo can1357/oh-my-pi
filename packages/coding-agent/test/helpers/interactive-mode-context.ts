@@ -303,6 +303,8 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		closeLinkBrowser: vi.fn(),
 		syncComposerShape: vi.fn(),
 		syncExtensionLinks: vi.fn(),
+		notifyComposerStash: vi.fn(),
+		cancelComposerStashNotice: vi.fn(),
 		rerenderInLinkBrowser: vi.fn(),
 		redrawTranscriptBlocks: vi.fn(),
 		refreshTranscriptPresentation: vi.fn(),

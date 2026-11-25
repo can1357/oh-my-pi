@@ -15,6 +15,7 @@ import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-ag
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { initTheme } from "../../src/ui/theme/service";
 import { createModeTerminal } from "../helpers/mode-terminal";
+import { key, sendKey } from "../ui/composer/harness";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -223,6 +224,135 @@ describe("guided goal setup", () => {
 
 			expect(followUp).toHaveBeenCalledTimes(1);
 			expect(followUp.mock.calls[0]?.[2]).toEqual({ synthetic: true });
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("restores the stashed composer as soon as the kickoff is accepted, before its turn completes", async () => {
+		const harness = await createHarness();
+		try {
+			await harness.mode.init({ suppressWelcomeIntro: true });
+			const savedImage: ImageContent = { type: "image", data: "c2F2ZWQ=", mimeType: "image/png" };
+			const submittedImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
+			harness.mode.composer.pendingImages.splice(0, harness.mode.composer.pendingImages.length, savedImage);
+			harness.mode.composer.pendingImageLinks.splice(
+				0,
+				harness.mode.composer.pendingImageLinks.length,
+				"file:///saved.png",
+			);
+			harness.mode.composer.setText("saved [Image #1]");
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			harness.mode.composer.pendingImages.splice(0, harness.mode.composer.pendingImages.length, submittedImage);
+			harness.mode.composer.pendingImageLinks.splice(
+				0,
+				harness.mode.composer.pendingImageLinks.length,
+				"file:///submitted.png",
+			);
+			harness.mode.composer.setText("/guided-goal ship [Image #1]");
+
+			const accepted = Promise.withResolvers<void>();
+			const turn = Promise.withResolvers<void>();
+			const promptSpy = vi.spyOn(harness.session, "prompt").mockImplementation(async (_text, options) => {
+				expect(harness.mode.composer.text()).toBe("");
+				expect(harness.mode.composer.pendingImages).toEqual([]);
+				expect(options?.images).toEqual([submittedImage]);
+				options?.onAccepted?.();
+				accepted.resolve();
+				await turn.promise;
+				return true;
+			});
+			harness.mode.composer.setText(""); // Enter detaches submitted text before invoking onSubmit.
+			const submission = harness.mode.composer.onSubmit?.("/guided-goal ship [Image #1]");
+			await accepted.promise;
+			expect(harness.mode.composer.expandedText()).toBe("saved [Image #1]");
+			expect(harness.mode.composer.pendingImages).toEqual([savedImage]);
+			expect(harness.mode.composer.pendingImageLinks).toEqual(["file:///saved.png"]);
+			turn.resolve();
+			await submission;
+			expect(promptSpy).toHaveBeenCalledTimes(1);
+			expect(harness.mode.composer.expandedText()).toBe("saved [Image #1]");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("retains a rejected guided-goal attempt without consuming the stash", async () => {
+		const harness = await createHarness();
+		try {
+			await harness.mode.init({ suppressWelcomeIntro: true });
+			harness.mode.composer.setText("saved draft");
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			harness.mode.composer.setText("/guided-goal ship");
+			const pending = Promise.withResolvers<boolean>();
+			vi.spyOn(harness.session, "prompt").mockImplementation(() => pending.promise);
+			harness.mode.composer.setText("");
+			const submission = harness.mode.composer.onSubmit?.("/guided-goal ship");
+			expect(harness.mode.composer.text()).toBe("");
+			pending.resolve(false);
+			await submission;
+			expect(harness.mode.composer.text()).toBe("/guided-goal ship");
+			harness.mode.composer.clearDraft({ recall: false });
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			expect(harness.mode.composer.text()).toBe("saved draft");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("restores the stash immediately after a streaming kickoff is queued", async () => {
+		const harness = await createHarness();
+		try {
+			await harness.mode.init({ suppressWelcomeIntro: true });
+			Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
+			harness.mode.composer.setText("saved draft");
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			harness.mode.composer.setText("/guided-goal ship");
+			harness.mode.composer.setText("");
+			await harness.mode.composer.onSubmit?.("/guided-goal ship");
+			expect(harness.session.agent.peekFollowUpQueue()).toHaveLength(1);
+			expect(harness.mode.composer.text()).toBe("saved draft");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("keeps the attempted slash command and stash when a streaming kickoff fails to enqueue", async () => {
+		const harness = await createHarness();
+		try {
+			await harness.mode.init({ suppressWelcomeIntro: true });
+			Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
+			harness.mode.composer.setText("saved draft");
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			harness.mode.composer.setText("/guided-goal ship");
+			vi.spyOn(harness.session.agent, "followUp").mockImplementationOnce(() => {
+				throw new Error("enqueue failed");
+			});
+			harness.mode.composer.setText("");
+			await harness.mode.composer.onSubmit?.("/guided-goal ship");
+			expect(harness.session.agent.peekFollowUpQueue()).toHaveLength(0);
+			expect(harness.mode.composer.text()).toBe("/guided-goal ship");
+			harness.mode.composer.clearDraft({ recall: false });
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			expect(harness.mode.composer.text()).toBe("saved draft");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("preserves a rejected bare guided-goal command ahead of the stash", async () => {
+		const harness = await createHarness({ goalEnabled: false });
+		try {
+			await harness.mode.init({ suppressWelcomeIntro: true });
+			harness.mode.composer.setText("saved draft");
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			harness.mode.composer.setText("/guided-goal");
+			harness.mode.composer.setText("");
+			await harness.mode.composer.onSubmit?.("/guided-goal");
+			expect(harness.mode.composer.text()).toBe("/guided-goal");
+			harness.mode.composer.clearDraft({ recall: false });
+			sendKey(harness.mode.composer.node, harness.mode.composer.field, key("\x13"));
+			expect(harness.mode.composer.text()).toBe("saved draft");
 		} finally {
 			await harness.cleanup();
 		}

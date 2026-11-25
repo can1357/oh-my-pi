@@ -29,6 +29,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal } from "./helpers/mode-terminal";
+import { key, sendKey } from "./ui/composer/harness";
 
 describe("InteractiveMode plan mode exit", () => {
 	let tempDir: TempDir;
@@ -87,6 +88,20 @@ describe("InteractiveMode plan mode exit", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	it("restores a stashed draft after a local /plan exit", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handlePlanModeCommand();
+		mode.composer.setText("saved draft");
+		sendKey(mode.composer.node, mode.composer.field, key("\x13"));
+		mode.composer.setText("/plan exit");
+		mode.composer.setText(""); // Enter detaches the submitted text before onSubmit.
+
+		await mode.composer.onSubmit?.("/plan exit");
+
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.composer.text()).toBe("saved draft");
 	});
 
 	it("aborts the in-flight turn when exited mid-stream", async () => {
