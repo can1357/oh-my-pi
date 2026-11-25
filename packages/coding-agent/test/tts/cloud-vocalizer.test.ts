@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, spyOn, test, vi } from "bun:test";
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { ProviderHttpError, ValidationError } from "@oh-my-pi/pi-ai/error";
 import * as speech from "@oh-my-pi/pi-ai/speech";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -111,13 +111,31 @@ describe("resamplePcm", () => {
 
 describe("cloud speech vocalizer", () => {
 	test("keeps unconfigured cloud defaults out of the chain so speech stays local", () => {
-		const settings = Settings.isolated();
+		const settings = Settings.isolated({ "speech.cloud": true });
 		const chain = resolveVocalizerSpeechChain({ settings, registry: gatewayRegistry(settings) });
 		expect(chain.every(model => model.api === "local-inference")).toBe(true);
 	});
 
+	test("keeps a configured cloud model out of the chain while speech.cloud is off", () => {
+		const settings = Settings.isolated({
+			modelRoles: { speech: "gw/eleven" },
+			"retry.fallbackChains": { speech: ["gw/gemini-tts"] },
+		});
+		const chain = resolveVocalizerSpeechChain({ settings, registry: gatewayRegistry(settings) });
+		expect(chain.every(model => model.api === "local-inference")).toBe(true);
+		const optedIn = Settings.isolated({
+			"speech.cloud": true,
+			modelRoles: { speech: "gw/eleven" },
+			"retry.fallbackChains": { speech: ["gw/gemini-tts"] },
+		});
+		expect(
+			resolveVocalizerSpeechChain({ settings: optedIn, registry: gatewayRegistry(optedIn) }).map(m => m.id),
+		).toEqual(["eleven", "gemini-tts"]);
+	});
+
 	test("drops a configured MP3-only model and keeps WAV-capable ones in order", () => {
 		const settings = Settings.isolated({
+			"speech.cloud": true,
 			modelRoles: { speech: "gw/mp3-tts" },
 			"retry.fallbackChains": { speech: ["gw/eleven", "gw/gemini-tts"] },
 		});
@@ -128,6 +146,7 @@ describe("cloud speech vocalizer", () => {
 	test("offline mode keeps cloud models from other providers out of the chain", () => {
 		const settings = Settings.isolated({
 			"models.offline": true,
+			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 		});
 		const registry = gatewayRegistry(settings);
@@ -142,6 +161,7 @@ describe("cloud speech vocalizer", () => {
 	test("speaks through the cloud chain, failing over to the next model", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
+			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: ["gw/gemini-tts"] },
 		});
@@ -172,6 +192,7 @@ describe("cloud speech vocalizer", () => {
 	test("resamples a fallback model's audio to the rate the utterance started at", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
+			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: ["gw/gemini-tts"] },
 		});
@@ -204,6 +225,7 @@ describe("cloud speech vocalizer", () => {
 	test("skips a model that failed with 401 for the rest of the session and warns when the chain is exhausted", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
+			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: [] },
 		});
@@ -241,6 +263,7 @@ describe("cloud speech vocalizer", () => {
 	test("retries a model that failed transiently on the next utterance", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
+			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: [] },
 		});
@@ -265,51 +288,10 @@ describe("cloud speech vocalizer", () => {
 		expect(recording.written.length).toBe(1);
 	});
 
-	function jsonResult(body: unknown): speech.SpeechResult {
-		return { ...wavResult([], 24_000), audio: new TextEncoder().encode(JSON.stringify(body)) };
-	}
-
-	test.each([
-		{ name: "a reported 503", body: { error: { message: "upstream overloaded", code: 503 } } },
-		{ name: "no status", body: { error: { message: "upstream overloaded", type: "server_error" } } },
-	])("retries a model whose 2xx JSON error body carries $name on the next utterance", async ({ body }) => {
+	test("lifts a permanent exclusion when credentials change mid-session", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
-			modelRoles: { speech: "gw/eleven" },
-			"retry.fallbackChains": { speech: [] },
-		});
-		const registry = gatewayRegistry(settings);
-		const warnings: string[] = [];
-		vi.spyOn(logger, "warn").mockImplementation(message => {
-			warnings.push(message);
-		});
-		const errors: unknown[] = [];
-		vi.spyOn(logger, "debug").mockImplementation((_message, context) => {
-			errors.push((context as { error?: unknown } | undefined)?.error);
-		});
-		const requests: string[] = [];
-		spyOn(speech, "synthesizeSpeech").mockImplementation(async model => {
-			requests.push(model.id);
-			return requests.length === 1 ? jsonResult(body) : wavResult([0.25], 24_000);
-		});
-		const recording = recordingPlayer();
-		const vocalizer = new Vocalizer(() => recording.player);
-		vocalizer.setModelSource({ settings, registry });
-
-		vocalizer.speak("Hello there.");
-		await vocalizer.idle();
-		vocalizer.speak("Still there?");
-		await vocalizer.idle();
-
-		expect(requests).toEqual(["eleven", "eleven"]);
-		expect(recording.written.length).toBe(1);
-		expect(warnings).not.toContain("vocalizer: speech model failed permanently; skipping it for this session");
-		expect(errors).toContain("gw/eleven speech API returned an error body: upstream overloaded");
-	});
-
-	test("skips a model whose 2xx JSON error body reports a 401 for the rest of the session", async () => {
-		const settings = Settings.isolated({
-			"speech.enabled": true,
+			"speech.cloud": true,
 			modelRoles: { speech: "gw/eleven" },
 			"retry.fallbackChains": { speech: [] },
 		});
@@ -318,7 +300,8 @@ describe("cloud speech vocalizer", () => {
 		const requests: string[] = [];
 		spyOn(speech, "synthesizeSpeech").mockImplementation(async model => {
 			requests.push(model.id);
-			return jsonResult({ error: { message: "invalid api key", status: "401" } });
+			if (requests.length === 1) throw new ProviderHttpError("gw/eleven speech API failed (401)", 401);
+			return wavResult([0.25], 24_000);
 		});
 		const recording = recordingPlayer();
 		const vocalizer = new Vocalizer(() => recording.player);
@@ -328,7 +311,119 @@ describe("cloud speech vocalizer", () => {
 		await vocalizer.idle();
 		vocalizer.speak("Still there?");
 		await vocalizer.idle();
-
 		expect(requests).toEqual(["eleven"]);
+
+		// A login or new key bumps the credential generation; the excluded model is tried again.
+		await authStorage.credentials.set("gw", [{ type: "api_key", key: "gw-fixed-key" }]);
+		vocalizer.speak("Logged in now.");
+		await vocalizer.idle();
+		expect(requests).toEqual(["eleven", "eleven"]);
+		expect(recording.written.length).toBe(1);
+	});
+
+	test("lifts a permanent exclusion when the model catalog is reloaded", async () => {
+		const settings = Settings.isolated({
+			"speech.enabled": true,
+			"speech.cloud": true,
+			modelRoles: { speech: "gw/eleven" },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = gatewayRegistry(settings);
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const requests: string[] = [];
+		spyOn(speech, "synthesizeSpeech").mockImplementation(async model => {
+			requests.push(model.id);
+			if (requests.length === 1) throw new ProviderHttpError("gw/eleven speech API failed (400)", 400);
+			return wavResult([0.25], 24_000);
+		});
+		const recording = recordingPlayer();
+		const vocalizer = new Vocalizer(() => recording.player);
+		vocalizer.setModelSource({ settings, registry });
+
+		vocalizer.speak("Hello there.");
+		await vocalizer.idle();
+		vocalizer.speak("Still there?");
+		await vocalizer.idle();
+		expect(requests).toEqual(["eleven"]);
+
+		// Editing models.yml (here: a newer mtime) reloads the catalog on the next refresh.
+		const modelsPath = path.join(tempDir, "models.yml");
+		const later = new Date(Date.now() + 60_000);
+		fs.utimesSync(modelsPath, later, later);
+		await registry.refresh("offline");
+		vocalizer.speak("Config fixed.");
+		await vocalizer.idle();
+		expect(requests).toEqual(["eleven", "eleven"]);
+		expect(recording.written.length).toBe(1);
+	});
+
+	test("retries a model whose request failed validation on the next utterance", async () => {
+		const settings = Settings.isolated({
+			"speech.enabled": true,
+			"speech.cloud": true,
+			modelRoles: { speech: "gw/eleven" },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = gatewayRegistry(settings);
+		const warnings: string[] = [];
+		vi.spyOn(logger, "warn").mockImplementation(message => {
+			warnings.push(message);
+		});
+		const requests: string[] = [];
+		spyOn(speech, "synthesizeSpeech").mockImplementation(async model => {
+			requests.push(model.id);
+			if (requests.length === 1) throw new ValidationError("input exceeds the character limit");
+			return wavResult([0.25], 24_000);
+		});
+		const recording = recordingPlayer();
+		const vocalizer = new Vocalizer(() => recording.player);
+		vocalizer.setModelSource({ settings, registry });
+
+		vocalizer.speak("A very long sentence.");
+		await vocalizer.idle();
+		vocalizer.speak("Short.");
+		await vocalizer.idle();
+
+		expect(requests).toEqual(["eleven", "eleven"]);
+		expect(recording.written.length).toBe(1);
+		expect(warnings).not.toContain("vocalizer: speech model failed permanently; skipping it for this session");
+	});
+	test.each([
+		{ name: "a reported 503", body: { error: { message: "upstream overloaded", code: 503 } }, calls: 2 },
+		{ name: "no status", body: { error: { message: "upstream overloaded", type: "server_error" } }, calls: 2 },
+		{ name: "a reported 401", body: { error: { message: "invalid api key", status: "401" } }, calls: 1 },
+	])("classifies a 2xx JSON error body with $name through pi-ai's speech transport", async ({ body, calls }) => {
+		const settings = Settings.isolated({
+			"speech.enabled": true,
+			"speech.cloud": true,
+			modelRoles: { speech: "gw/eleven" },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = gatewayRegistry(settings);
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		let requests = 0;
+		spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async () => {
+					requests += 1;
+					return new Response(JSON.stringify(body), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				},
+				{ preconnect: globalThis.fetch.preconnect },
+			),
+		);
+		const recording = recordingPlayer();
+		const vocalizer = new Vocalizer(() => recording.player);
+		vocalizer.setModelSource({ settings, registry });
+
+		vocalizer.speak("Hello there.");
+		await vocalizer.idle();
+		vocalizer.speak("Still there?");
+		await vocalizer.idle();
+
+		expect(requests).toBe(calls);
+		expect(recording.written.length).toBe(0);
 	});
 });

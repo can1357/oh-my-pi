@@ -9,6 +9,11 @@
 ### Removed
 
 - Removed the `SPEECH_FORMATS` value export; import it from `@oh-my-pi/pi-catalog/types`. The `SpeechFormat` type is still exported ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Speech synthesis rejects a JSON error body sent with a 2xx status as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

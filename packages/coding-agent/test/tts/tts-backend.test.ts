@@ -304,4 +304,26 @@ describe("configured gateway speech models", () => {
 		);
 		expect(bodies[1]).not.toHaveProperty("voice");
 	});
+	test("reports a 2xx JSON error body as a failure instead of writing it as audio", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { speech: "gw/gemini/flash-tts" },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = new ModelRegistry(authStorage, writeGatewaySpeechModels(), { settings });
+		const fetchImpl: FetchImpl = async () =>
+			new Response(JSON.stringify({ error: { message: "voice is required", code: 400 } }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		const result = await ttsTool.execute(
+			"tts-gateway-error-body",
+			{ text: "Hello gateway", output_path: "voice.wav" },
+			undefined,
+			createContext(settings, registry, tempDir, fetchImpl),
+		);
+
+		expect(result.isError).toBe(true);
+		expect(fs.existsSync(path.join(tempDir, "voice.wav"))).toBe(false);
+	});
 });

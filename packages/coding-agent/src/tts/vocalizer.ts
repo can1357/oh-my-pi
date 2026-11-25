@@ -21,8 +21,8 @@
  * In both modes the synthesis session (worker, player) opens lazily on the
  * first speakable segment, and an idle timer speaks buffered text when
  * generation stalls (tool call, thinking block). The session is local Phonon
- * streaming unless the speech role chain starts with an explicitly configured
- * cloud model, which then synthesizes each segment as WAV
+ * streaming unless `speech.cloud` is on and the speech role chain starts with
+ * an explicitly configured cloud model, which then synthesizes each segment as WAV
  * ({@link createCloudSpeechStream}). One
  * {@link StreamingAudioPlayer} per utterance plays chunks back gaplessly;
  * utterance playback is chained so sequential utterances never overlap.
@@ -55,7 +55,7 @@ import { BlockAccumulator, type SpeechEnhancer } from "./speech-enhancer";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
 
-import { cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechSpeed, cfgSpeechVoice } from "./settings";
+import { cfgSpeechCloud, cfgSpeechEnabled, cfgSpeechEnhanced, cfgSpeechSpeed, cfgSpeechVoice } from "./settings";
 
 /** Quiet time on the delta stream before the buffered partial is spoken. */
 const IDLE_FLUSH_MS = 1000;
@@ -64,10 +64,16 @@ const COALESCE_MIN_CHARS = 400;
 /** Bounded rewrite concurrency across utterances. */
 const MAX_REWRITES_IN_FLIGHT = 2;
 
+/** Registry surface the vocalizer resolves the speech role and cloud credentials through. */
+export interface VocalizerRegistry extends ModelBrowserRegistry {
+	resolver(model: Model<Api>, sessionId?: string): ApiKeyResolver;
+	/** Credential snapshot; a new generation (login, key change) lifts session exclusions. */
+	readonly authStorage: { readonly credentials: { readonly generation: number } };
+}
+
 export interface VocalizerModelSource {
 	settings: Settings;
-	/** `resolver` authenticates cloud speech; a registry without it limits the vocalizer to local models. */
-	registry: ModelBrowserRegistry & { resolver?(model: Model<Api>, sessionId?: string): ApiKeyResolver };
+	registry: VocalizerRegistry;
 	getSessionProvider?: () => string | undefined;
 	sessionId?: string;
 }
@@ -85,21 +91,21 @@ export function resolveLocalSpeechModelId(source: VocalizerModelSource): string 
 
 /**
  * Speech-role candidates the vocalizer can play, in chain order: local models,
- * plus explicitly configured cloud speech models that return WAV when the
- * source can authenticate them. Unconfigured cloud defaults are left out, so
- * speech without a configured role stays on-device. `models.offline` admits
- * only the session provider's models, as for {@link resolveLocalSpeechModelId}.
+ * plus (with `speech.cloud` on) explicitly configured cloud speech models that
+ * return WAV. With `speech.cloud` off, or for unconfigured cloud defaults,
+ * speech stays on-device. `models.offline` admits only the session provider's
+ * models, as for {@link resolveLocalSpeechModelId}.
  */
 export function resolveVocalizerSpeechChain(source: VocalizerModelSource): Model<Api>[] {
 	const pool = roleCandidatePool("speech", source.settings, source.registry);
-	const canAuthenticate = source.registry.resolver !== undefined;
+	const allowCloud = cfgSpeechCloud.get(source.settings);
 	const offline = cfgOffline.get(source.settings);
 	return resolveRoleChain("speech", source.settings, pool)
 		.filter(
 			({ model, explicit }) =>
 				(!offline || model.provider === source.getSessionProvider?.()) &&
 				(model.api === "local-inference" ||
-					(explicit && canAuthenticate && isSpeechApi(model.api) && speechModelSupportsFormat(model, "wav"))),
+					(explicit && allowCloud && isSpeechApi(model.api) && speechModelSupportsFormat(model, "wav"))),
 		)
 		.map(candidate => candidate.model);
 }
@@ -144,8 +150,15 @@ export class Vocalizer {
 	#enhancer: SpeechEnhancer | null = null;
 	/** Live per-session settings and registry used to resolve the speech role. */
 	#modelSource: VocalizerModelSource | null = null;
-	/** Cloud speech models (`provider/id`) that failed permanently in this session; reset with the model source. */
+	/**
+	 * Cloud speech models (`provider/id`) that failed permanently in this session.
+	 * Reset with the model source, and when the registry's catalog or credentials
+	 * change after they were recorded.
+	 */
 	#cloudExcluded = new Set<string>();
+	/** Catalog revision and credential generation {@link #cloudExcluded} was recorded against. */
+	#excludedCatalog: object | undefined;
+	#excludedCredentials: number | undefined;
 	/** Fires when the delta stream goes quiet mid-sentence; speaks the partial. */
 	#idleTimer: NodeJS.Timeout | null = null;
 	/** Abort controllers of every not-yet-finished utterance; all aborted on {@link clear}. */
@@ -177,6 +190,25 @@ export class Vocalizer {
 		this.clear();
 		this.#modelSource = source;
 		this.#cloudExcluded = new Set();
+		this.#excludedCatalog = undefined;
+		this.#excludedCredentials = undefined;
+	}
+
+	/**
+	 * Permanent-failure exclusions still valid for `registry`: a catalog reload
+	 * (fixed `models.yml`) or a credential change (login, new key) can repair a
+	 * model, so either one starts a fresh set. Checked on every lookup and
+	 * insert, so a change during an utterance is seen by the next one.
+	 */
+	#validExclusions(registry: VocalizerRegistry): Set<string> {
+		const catalog = registry.catalogRevision;
+		const credentials = registry.authStorage.credentials.generation;
+		if (catalog !== this.#excludedCatalog || credentials !== this.#excludedCredentials) {
+			if (this.#cloudExcluded.size > 0) this.#cloudExcluded = new Set();
+			this.#excludedCatalog = catalog;
+			this.#excludedCredentials = credentials;
+		}
+		return this.#cloudExcluded;
 	}
 
 	/** Stop any active local synthesis when the session provider no longer permits it. */
@@ -432,15 +464,19 @@ export class Vocalizer {
 		const speed = cfgSpeechSpeed.get(sessionSettings);
 		const chain = source ? resolveVocalizerSpeechChain(source) : [];
 		const first = chain[0];
-		// The chain only admits a cloud model when the registry can resolve its credentials.
 		const handle =
 			source && first && first.api !== "local-inference"
 				? createCloudSpeechStream({
 						chain,
-						resolveApiKey: model => source.registry.resolver!(model, source.sessionId),
+						resolveApiKey: model => source.registry.resolver(model, source.sessionId),
 						localVoice: voice,
 						localSpeed: speed,
-						excluded: this.#cloudExcluded,
+						excluded: {
+							has: label => this.#validExclusions(source.registry).has(label),
+							add: label => {
+								this.#validExclusions(source.registry).add(label);
+							},
+						},
 						signal: abort.signal,
 					})
 				: ttsClient.synthesizeStream(first?.id ?? TTS_LOCAL_MODELS[0].key, { voice, speed, signal: abort.signal });

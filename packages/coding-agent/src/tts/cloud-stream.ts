@@ -6,13 +6,14 @@
  * decoded to PCM, strictly in push order. A failing candidate is dropped for
  * the rest of the utterance and the segment retries on the next one; a
  * `local-inference` candidate later in the chain synthesizes on-device. A
- * permanent failure (missing key, 4xx other than 408/429, audio that is not
+ * permanent failure (missing key, 4xx other than 408/425/429, audio that is not
  * WAV) is also recorded in the caller's `excluded` set, so later utterances
- * skip that model instead of paying its latency again; transient failures
- * (network, 5xx, 408, 429) are retried on the next utterance. A JSON error body
- * sent with a 2xx status is classified by the status it reports, and counts as
- * transient when it reports none. When every
- * candidate has failed the stream closes, so playback ends instead of stalling.
+ * skip that model instead of paying its latency again; other failures (network,
+ * 5xx, 408, 425, 429, a request the model rejected before sending it) are
+ * retried on the next utterance. A JSON error body sent with a 2xx status
+ * arrives from pi-ai as a `ProviderHttpError` and is classified the same way.
+ * When every candidate has failed the stream closes, so playback ends instead
+ * of stalling.
  *
  * The player runs at one rate per utterance, so every chunk is resampled to
  * the rate of the utterance's first chunk when fail-over lands on a model
@@ -32,9 +33,15 @@ export interface CloudSpeechStreamOptions {
 	/** Local voice/speed for a local candidate reached by fail-over. */
 	localVoice: string;
 	localSpeed: number;
-	/** `provider/id` of models that failed permanently earlier in the session; this stream adds to it. */
-	excluded: Set<string>;
+	/** Models that failed permanently earlier in the session; this stream adds to it. */
+	excluded: SpeechModelExclusions;
 	signal: AbortSignal;
+}
+
+/** Speech models skipped after a permanent failure, keyed by `provider/id`. */
+export interface SpeechModelExclusions {
+	has(label: string): boolean;
+	add(label: string): void;
 }
 
 /** Thrown when a candidate answered with audio the vocalizer cannot decode. */
@@ -42,63 +49,13 @@ class UndecodableSpeechError extends Error {
 	override readonly name = "UndecodableSpeechError";
 }
 
-/**
- * The error a gateway reported in a 2xx body instead of audio (`{"error": ...}`),
- * or `undefined` when the body is not such an envelope. A status is taken only
- * from a numeric (or 3-digit string) `status`/`code` field in the 4xx/5xx range.
- */
-function readSpeechErrorBody(label: string, body: Uint8Array): Error | undefined {
-	let start = 0;
-	while (
-		start < body.length &&
-		(body[start] === 0x20 || body[start] === 0x09 || body[start] === 0x0a || body[start] === 0x0d)
-	) {
-		start += 1;
-	}
-	if (body[start] !== 0x7b) return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(new TextDecoder().decode(body.subarray(start)));
-	} catch {
-		return undefined;
-	}
-	if (typeof parsed !== "object" || parsed === null || !("error" in parsed)) return undefined;
-	const envelope = parsed as { error: unknown; status?: unknown; code?: unknown };
-	const error = envelope.error;
-	const fields = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
-	const detail =
-		typeof error === "string" ? error : typeof fields.message === "string" ? fields.message : JSON.stringify(error);
-	let status: number | undefined;
-	let code: string | undefined;
-	for (const value of [fields.status, fields.code, envelope.status, envelope.code]) {
-		const numeric =
-			typeof value === "number"
-				? value
-				: typeof value === "string" && /^\d{3}$/.test(value)
-					? Number(value)
-					: undefined;
-		if (numeric !== undefined && numeric >= 400 && numeric < 600) {
-			status ??= numeric;
-		} else if (typeof value === "string" && value.length > 0) {
-			code ??= value;
-		}
-	}
-	const message = `${label} speech API returned an error body: ${detail.slice(0, 300)}`;
-	return status === undefined ? new Error(message) : new AIError.ProviderHttpError(message, status, { code });
-}
-
 /** HTTP statuses that may succeed when the same request is sent again. */
 const TRANSIENT_CLIENT_STATUSES = new Set([408, 425, 429]);
 
 /** Whether retrying `error` on a later utterance cannot succeed without a configuration change. */
 function isPermanentSpeechFailure(error: unknown): boolean {
-	if (
-		error instanceof AIError.MissingApiKeyError ||
-		error instanceof AIError.ValidationError ||
-		error instanceof UndecodableSpeechError
-	) {
-		return true;
-	}
+	// A ValidationError is left out: it can come from one segment (a length limit) rather than the model.
+	if (error instanceof AIError.MissingApiKeyError || error instanceof UndecodableSpeechError) return true;
 	const status = error instanceof AIError.ProviderHttpError ? error.status : undefined;
 	return status !== undefined && status >= 400 && status < 500 && !TRANSIENT_CLIENT_STATUSES.has(status);
 }
@@ -140,8 +97,6 @@ export function createCloudSpeechStream(options: CloudSpeechStreamOptions): TtsS
 					{ text, format: "wav" },
 					{ apiKey: options.resolveApiKey(model), signal },
 				);
-				const bodyError = readSpeechErrorBody(label, result.audio);
-				if (bodyError) throw bodyError;
 				try {
 					return decodeWav(result.audio);
 				} catch (error) {
