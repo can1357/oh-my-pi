@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `press()` on Windows refusing an item of a WPF app's open context menu with `BackgroundUnavailable` ("can take foreground") while that app's window held the foreground ([#20177](https://github.com/can1357/oh-my-pi/pull/20177) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

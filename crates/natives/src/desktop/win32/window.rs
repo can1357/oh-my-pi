@@ -36,10 +36,11 @@ use windows_sys::{
 				BM_CLICK, BM_GETCHECK, BS_AUTO3STATE, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON,
 				BS_OWNERDRAW, CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT,
 				ChildWindowFromPointEx, EnumChildWindows, EnumWindows, GA_PARENT, GA_ROOT,
-				GUITHREADINFO, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetForegroundWindow,
-				GetGUIThreadInfo, GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect,
-				GetWindowThreadProcessId, IsChild, IsIconic, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY,
-				SetForegroundWindow, WS_EX_LAYERED,
+				GUITHREADINFO, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
+				GetForegroundWindow, GetGUIThreadInfo, GetLayeredWindowAttributes, GetWindow,
+				GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsChild, IsIconic,
+				IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, SetForegroundWindow, WS_EX_LAYERED,
+				WS_EX_NOACTIVATE, WS_POPUP,
 			},
 		},
 	},
@@ -674,12 +675,39 @@ pub(super) fn wait_for_foreground(target: HWND, timeout: Duration) -> CoreResult
 	}
 }
 
+/// Whether the user has `target` in front: it holds the foreground, or it is
+/// a non-activating popup (`WS_POPUP` with `WS_EX_NOACTIVATE`, as a WPF context
+/// menu or dropdown is) whose direct owner holds the foreground. The style
+/// keeps a click or show from activating the popup, though the app can still
+/// activate it explicitly. A window's other owned windows, such as a modeless
+/// dialog, can activate themselves, so they do not count.
+fn in_front(target: HWND, foreground: HWND) -> bool {
+	if foreground.is_null() {
+		return false;
+	}
+	let target = root(target);
+	if root(foreground) == target {
+		return true;
+	}
+	// SAFETY: these calls validate the handle and only read from it.
+	let (style, extended, owner) = unsafe {
+		(
+			GetWindowLongW(target, GWL_STYLE) as u32,
+			GetWindowLongW(target, GWL_EXSTYLE) as u32,
+			GetWindow(target, GW_OWNER),
+		)
+	};
+	style & WS_POPUP != 0 && extended & WS_EX_NOACTIVATE != 0 && owner == foreground
+}
+
 /// Known self-activating providers cannot be made background-safe by changing
 /// `WS_EX_NOACTIVATE` (explicit `SetForegroundWindow` bypasses it), disabling
 /// foreign windows (synchronous, racy and potentially permanent on a hang), or
 /// restoring focus afterward (already disturbed the user and changed z-order).
+/// The open context menu of the window in front is in front with it.
 pub(super) fn ensure_pattern_safe(root: HWND) -> CoreResult<()> {
-	if !owns_foreground(root)
+	// SAFETY: GetForegroundWindow has no preconditions.
+	if !in_front(root, unsafe { GetForegroundWindow() })
 		&& (is_xaml_host(root)
 			|| with_class_name(root, |class| is_chromium_class(class) || is_wpf_class(class))
 			|| has_chromium_descendant(root))
@@ -843,7 +871,12 @@ pub(super) fn click_button(hwnd: HWND, top: HWND) -> CoreResult<()> {
 
 #[cfg(test)]
 pub(super) mod tests {
-	use std::cell::Cell;
+	use std::{
+		cell::Cell,
+		io::{BufRead, BufReader},
+		process::{Child, ChildStdout, Command, Stdio},
+		sync::Arc,
+	};
 
 	use windows_sys::Win32::{
 		Foundation::{HWND, LPARAM, LRESULT, WPARAM},
@@ -855,18 +888,22 @@ pub(super) mod tests {
 			WindowsAndMessaging::{
 				BM_CLICK, BM_GETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_GROUPBOX, BS_OWNERDRAW,
 				BS_PUSHBUTTON, CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-				GWL_STYLE, GWLP_WNDPROC, GetClassInfoW, GetParent, HWND_TOPMOST, RegisterClassW,
-				SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
-				SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW, SetWindowLongW, SetWindowPos,
-				WM_COMMAND, WM_LBUTTONDOWN, WM_LBUTTONUP, WNDCLASSW, WNDPROC, WS_CHILD,
-				WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP,
+				GWL_STYLE, GWLP_WNDPROC, GetClassInfoW, GetParent, HWND_TOPMOST, PostMessageW,
+				RegisterClassW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+				SendMessageW, SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW, SetWindowLongW,
+				SetWindowPos, WM_APP, WM_COMMAND, WM_LBUTTONDOWN, WM_LBUTTONUP, WNDCLASSW, WNDPROC,
+				WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW,
+				WS_POPUP,
 			},
 		},
 	};
 
-	use super::{
-		super::{super::error::ErrorCode, capture},
-		*,
+	use super::{super::capture, *};
+	use crate::desktop::{
+		Request, Response, Worker,
+		control::{self, CancellationSource},
+		error::ErrorCode,
+		types::{AxQuery, DisplaySelector, Target},
 	};
 
 	/// Owns fixture windows on a pumping thread, separate from the caller
@@ -1372,5 +1409,327 @@ pub(super) mod tests {
 		assert_eq!(native_button(pushed), None);
 		// SAFETY: this thread owns parent and its child.
 		unsafe { DestroyWindow(parent) };
+	}
+
+	/// Posted to the WPF window: it prints `mark` after queued WPF clicks.
+	const MARK: u32 = WM_APP + 7;
+	/// Posted to the WPF window: it opens its context menu.
+	const OPEN_MENU: u32 = WM_APP + 9;
+	/// Posted to the WPF window: it activates its unrelated window (`wParam`
+	/// 0) or itself (1), as the user switching windows would.
+	const ACTIVATE: u32 = WM_APP + 10;
+	/// Posted to the WPF window: the next UI Automation pattern query on the
+	/// `Mark` item activates the unrelated window before it answers, as the
+	/// user switching windows while the provider answers would. It prints
+	/// `armed`.
+	const SWITCH_ON_LOOKUP: u32 = WM_APP + 11;
+	/// Posted to the WPF window: it prints `menu open` while its context menu
+	/// is open, or `menu closed` once its `Closed` has fired, after the menu's
+	/// window is gone (a closing fade can outlast `IsOpen`).
+	const MENU_STATE: u32 = WM_APP + 12;
+
+	/// A WPF window whose context menu holds a `Mark` item, with an activatable
+	/// popup it owns and an unrelated window of the same app, in its own
+	/// `PowerShell` process as an app's would be. It prints `ready` and the
+	/// three windows' handles once they show; `opened` and the screen centre of
+	/// the `Mark` item when the menu opens; `activated` or `deactivated` and a
+	/// window's name whenever one of the three gains or loses activation; and
+	/// what each command did.
+	const WPF_MENU: &str = r#"
+Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml,UIAutomationProvider,UIAutomationTypes -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Automation.Peers;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Threading;
+public class SwitchingItem : MenuItem {
+	protected override AutomationPeer OnCreateAutomationPeer() { return new SwitchingPeer(this); }
+}
+public class SwitchingPeer : MenuItemAutomationPeer {
+	public SwitchingPeer(MenuItem owner) : base(owner) {}
+	public override object GetPattern(PatternInterface pattern) {
+		if (Fixture.switchOnLookup) {
+			Fixture.switchOnLookup = false;
+			Fixture.other.Activate();
+		}
+		return base.GetPattern(pattern);
+	}
+}
+public static class Fixture {
+	[DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hwnd, int index);
+	[DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+	public static bool switchOnLookup;
+	public static Window other;
+	static Window window;
+	static ContextMenu menu;
+	static bool menuClosed, closedWanted;
+	static void Say(string line) { Console.Out.WriteLine(line); Console.Out.Flush(); }
+	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
+		if (message == 0x8007) window.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => Say("mark")));
+		else if (message == 0x8009) { menu.IsOpen = false; menu.IsOpen = true; }
+		else if (message == 0x800A) Say((w == IntPtr.Zero ? other : window).Activate() ? "switch succeeded" : "switch failed");
+		else if (message == 0x800B) { switchOnLookup = true; Say("armed"); }
+		else if (message == 0x800C) {
+			if (menu.IsOpen) Say("menu open");
+			else if (menuClosed) Say("menu closed");
+			else closedWanted = true;
+		}
+		return IntPtr.Zero;
+	}
+	static IntPtr Handle(Window window) { return new WindowInteropHelper(window).Handle; }
+	static void Watch(Window window, string name) {
+		window.Activated += (sender, e) => Say("activated " + name);
+		window.Deactivated += (sender, e) => Say("deactivated " + name);
+	}
+	public static void Run() {
+		var item = new SwitchingItem { Header = "Mark" };
+		item.Click += (sender, e) => Say("marked");
+		menu = new ContextMenu { StaysOpen = true };
+		menu.Items.Add(item);
+		menu.Closed += (sender, e) => {
+			menuClosed = true;
+			if (closedWanted) { closedWanted = false; Say("menu closed"); }
+		};
+		menu.Opened += (sender, e) => menuClosed = false;
+		menu.Opened += (sender, e) => menu.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => {
+			var centre = item.PointToScreen(new Point(item.ActualWidth / 2, item.ActualHeight / 2));
+			Say("opened " + (int)centre.X + " " + (int)centre.Y);
+		}));
+		var target = new Button { Content = "Target", ContextMenu = menu };
+		menu.PlacementTarget = target;
+		window = new Window { Title = "omp test: wpf menu", Left = 40, Top = 40, Width = 300, Height = 200, Content = target };
+		var press = new Button { Content = "Dialog button" };
+		press.Click += (sender, e) => Say("dialog pressed");
+		var dialog = new Window { Title = "omp test: wpf dialog", ShowActivated = false, Left = 360, Top = 40, Width = 240, Height = 140, Content = press };
+		dialog.SourceInitialized += (sender, e) => {
+			var hwnd = Handle(dialog);
+			SetWindowLong(hwnd, -16, GetWindowLong(hwnd, -16) | unchecked((int)0x80000000));
+		};
+		other = new Window { Title = "omp test: wpf other", ShowActivated = false, Left = 360, Top = 220, Width = 240, Height = 140 };
+		Watch(window, "main");
+		window.SourceInitialized += (sender, e) => HwndSource.FromHwnd(Handle(window)).AddHook(Hook);
+		window.ContentRendered += (sender, e) => {
+			// An owner must have been shown before a window can take it.
+			dialog.Owner = window;
+			dialog.Show();
+			other.Show();
+			Watch(dialog, "dialog");
+			Watch(other, "other");
+			Say("ready " + Handle(window) + " " + Handle(dialog) + " " + Handle(other));
+		};
+		window.ShowDialog();
+	}
+}
+'@
+[Fixture]::Run()
+"#;
+
+	struct WpfMenu {
+		host:   Child,
+		output: BufReader<ChildStdout>,
+	}
+
+	impl WpfMenu {
+		fn line(&mut self) -> Vec<String> {
+			let mut line = String::new();
+			assert_ne!(self.output.read_line(&mut line).unwrap(), 0, "the WPF window closed");
+			line.split_whitespace().map(str::to_string).collect()
+		}
+
+		/// What `window` printed before a dispatcher mark queued below Render,
+		/// after the WPF clicks queued before the mark was posted.
+		fn printed(&mut self, window: HWND) -> Vec<String> {
+			// SAFETY: a plain message to a window this test's fixture owns.
+			assert_ne!(unsafe { PostMessageW(window, MARK, 0, 0) }, 0, "posting mark failed");
+			let mut lines = Vec::new();
+			loop {
+				let line = self.line().join(" ");
+				if line == "mark" {
+					return lines;
+				}
+				lines.push(line);
+			}
+		}
+
+		/// The lines printed before `wanted`, waiting for it as long as the
+		/// test runs.
+		fn until(&mut self, wanted: &str) -> Vec<String> {
+			let mut lines = Vec::new();
+			loop {
+				let line = self.line().join(" ");
+				assert_ne!(line, "switch failed", "the fixture could not activate its window");
+				if line == wanted {
+					return lines;
+				}
+				lines.push(line);
+			}
+		}
+	}
+
+	impl Drop for WpfMenu {
+		fn drop(&mut self) {
+			let _ = self.host.kill();
+			let _ = self.host.wait();
+		}
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn an_item_of_the_open_context_menu_of_the_window_in_front_is_pressed() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let mut host = Command::new("powershell")
+			.args(["-NoProfile", "-Command", WPF_MENU])
+			.stdout(Stdio::piped())
+			.spawn()
+			.unwrap();
+		let output = BufReader::new(host.stdout.take().unwrap());
+		// From here a failed assertion still closes the windows.
+		let mut app = WpfMenu { host, output };
+		let handle = |word: &str| {
+			with_exposed_provenance_mut::<std::ffi::c_void>(word.parse::<usize>().unwrap())
+		};
+		let ready = loop {
+			let line = app.line();
+			if line[0] == "ready" {
+				break line;
+			}
+		};
+		let (main, dialog, other) = (handle(&ready[1]), handle(&ready[2]), handle(&ready[3]));
+		let mut worker = Worker::new(DisplaySelector::Active, Arc::default(), Arc::default());
+		let token = CancellationSource::default().token();
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let foreground = || unsafe { GetForegroundWindow() };
+		// A titled window's element by its name.
+		let named = |worker: &mut Worker, window: HWND, title: &str| {
+			let query = AxQuery { title: Some(title.to_string()), ..AxQuery::default() };
+			let request = Request::AxQuery {
+				target: Target::Window(window.expose_provenance().to_string()),
+				query,
+				reply: flume::unbounded().0,
+			};
+			let Response::Nodes(nodes) = worker.execute(&request, &token).unwrap() else {
+				panic!("AxQuery returns nodes");
+			};
+			nodes[0].ref_.clone()
+		};
+		// The menu's popup has no title, so its item is found by its point:
+		// the element there is the item's text, inside the item.
+		let at = |worker: &mut Worker, (x, y): (f64, f64)| {
+			let request =
+				Request::AxElementAt { target: Target::Desktop, x, y, reply: flume::unbounded().0 };
+			let Response::Node(Some(mut node)) = worker.execute(&request, &token).unwrap() else {
+				panic!("AxElementAt finds an element on the menu item");
+			};
+			for _ in 0..4 {
+				if node.role == "menuitem" {
+					return node.ref_;
+				}
+				let request =
+					Request::AxParent { reference: node.ref_, reply: flume::unbounded().0 };
+				let Response::Node(Some(parent)) = worker.execute(&request, &token).unwrap() else {
+					panic!("the element under the point has a parent");
+				};
+				node = parent;
+			}
+			panic!("no menu item holds the point: {node:?}");
+		};
+		let press = |worker: &mut Worker, reference: String| {
+			let request = Request::AxPerform {
+				reference,
+				action: "press".to_string(),
+				menu: None,
+				reply: flume::unbounded().0,
+			};
+			worker.execute(&request, &token).map(drop)
+		};
+		let open_menu = |app: &mut WpfMenu| {
+			// SAFETY: a plain message to a window this test's fixture owns.
+			assert_ne!(unsafe { PostMessageW(main, OPEN_MENU, 0, 0) }, 0, "posting open menu failed");
+			let opened = app.line();
+			assert_eq!(opened[0], "opened", "{opened:?}");
+			(opened[1].parse::<f64>().unwrap(), opened[2].parse::<f64>().unwrap())
+		};
+
+		assert_eq!(
+			foreground(),
+			main,
+			"the WPF window did not come to the front: run from a focused terminal"
+		);
+		app.printed(main);
+		// Each check below also sees that none of the app's windows gained or
+		// lost activation during the call.
+		let item = at(&mut worker, open_menu(&mut app));
+		press(&mut worker, item).unwrap();
+		assert_eq!(app.printed(main), ["marked"]);
+		assert_eq!(foreground(), main);
+
+		// The owned popup can activate itself despite being shown without
+		// activation: refused, unlike the menu's WS_EX_NOACTIVATE popup.
+		// SAFETY: these queries read the fixture's live popup handle.
+		unsafe {
+			assert_ne!(GetWindowLongW(dialog, GWL_STYLE) as u32 & WS_POPUP, 0);
+			assert_eq!(GetWindowLongW(dialog, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE, 0);
+			assert_eq!(GetWindow(dialog, GW_OWNER), foreground());
+		}
+		let button = named(&mut worker, dialog, "Dialog button");
+		let error = press(&mut worker, button).unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		assert_eq!(app.printed(main), Vec::<String>::new());
+		assert_eq!(foreground(), main);
+
+		// The user switches windows while the item's provider answers the
+		// pattern query: refused before anything is sent.
+		let item = at(&mut worker, open_menu(&mut app));
+		// SAFETY: a plain message to a window this test's fixture owns.
+		assert_ne!(unsafe { PostMessageW(main, SWITCH_ON_LOOKUP, 0, 0) }, 0, "posting arm failed");
+		app.until("armed");
+		let error = press(&mut worker, item).unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		let printed = app.printed(main);
+		assert!(
+			printed.contains(&"activated other".to_string())
+				&& !printed.contains(&"marked".to_string()),
+			"{printed:?}"
+		);
+		assert_eq!(foreground(), other);
+		// SAFETY: a plain message to a window this test's fixture owns.
+		assert_ne!(unsafe { PostMessageW(main, ACTIVATE, 1, 0) }, 0, "posting activation failed");
+		app.until("switch succeeded");
+		app.printed(main);
+		assert_eq!(foreground(), main);
+
+		// With another window in front, the menu is behind it: refused.
+		let item = at(&mut worker, open_menu(&mut app));
+		// SAFETY: a plain message to a window this test's fixture owns.
+		assert_ne!(unsafe { PostMessageW(main, ACTIVATE, 0, 0) }, 0, "posting activation failed");
+		app.until("switch succeeded");
+		app.printed(main);
+		assert_eq!(foreground(), other);
+		// SAFETY: a plain message to a window this test's fixture owns.
+		assert_ne!(unsafe { PostMessageW(main, MENU_STATE, 0, 0) }, 0, "posting menu query failed");
+		let mut seen = Vec::new();
+		let menu_open = loop {
+			match app.line().join(" ").as_str() {
+				"menu open" => break true,
+				"menu closed" => break false,
+				line => seen.push(line.to_string()),
+			}
+		};
+		assert_eq!(seen, Vec::<String>::new());
+		let error = press(&mut worker, item).unwrap_err();
+		if menu_open {
+			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		} else {
+			// Where Windows closes the menu once another window of the app
+			// activates, its closing has finished and the item has no host
+			// window left: refused before any pattern lookup.
+			assert_eq!(error.code, ErrorCode::AxFailed, "{error}");
+			assert!(error.message.contains("cannot establish the native window"), "{error}");
+		}
+		assert_eq!(app.printed(main), Vec::<String>::new());
+		assert_eq!(foreground(), other);
 	}
 }
