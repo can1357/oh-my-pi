@@ -8843,3 +8843,110 @@ export function bifrostModelManagerOptions(config?: BifrostModelManagerConfig): 
 			}),
 	};
 }
+
+function mapArkaneCloudThinkingConfig(value: unknown): ThinkingConfig | undefined {
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const wireEfforts = Array.isArray(value.supported_efforts) ? value.supported_efforts : [];
+	const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
+	if (efforts.length === 0) {
+		return undefined;
+	}
+	const thinking: ThinkingConfig = { mode: "effort", efforts };
+	// Published both ways so a model-identity default (e.g. a `-thinking` id
+	// read as reasoning-locked) cannot override what the row says.
+	if (typeof value.can_disable === "boolean") {
+		thinking.requiresEffort = !value.can_disable;
+	}
+	return thinking;
+}
+
+function mapArkaneCloudModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	if (entry.type !== "text") {
+		return null;
+	}
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	const capabilities = isRecord(entry.capabilities) ? entry.capabilities : {};
+	const reasoning = isRecord(entry.reasoning) ? entry.reasoning : undefined;
+	const thinking = mapArkaneCloudThinkingConfig(entry.reasoning);
+	// The host-wide wire shape (`reasoning: { enabled: false }` to switch off,
+	// top-level `reasoning_effort` for intensity) lives in arkanecloud.kdl; only
+	// what each row publishes is mapped here.
+	const compat: OpenAICompat | undefined = reasoning
+		? {
+				// Reasons but publishes no effort ladder: never send an
+				// identity-derived `reasoning_effort` it never advertised.
+				...(thinking === undefined && { supportsReasoningEffort: false }),
+				// Only an explicit `can_disable: true` may send the disable switch;
+				// otherwise thinking-off clamps to the lowest published effort
+				// (nothing is sent when there is no ladder).
+				...(reasoning.can_disable !== true && { reasoningDisableMode: "lowest-effort" }),
+				// A default-off model needs an explicit switch-on, or picking a
+				// thinking level would leave it silently not reasoning.
+				...(reasoning.enabled_by_default === false && {
+					whenThinking: { extraBody: { reasoning: { enabled: true } } },
+				}),
+			}
+		: undefined;
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		// The `reasoning` block is omitted entirely for models that do not
+		// reason, so its presence is the signal — independent of whether the
+		// model also exposes an effort dial.
+		reasoning: reasoning !== undefined,
+		...(thinking ? { thinking } : {}),
+		...(compat ? { compat } : {}),
+		input: toInputCapabilities(entry.input_modalities),
+		// `tool_calling` defaults to true upstream because tools are forwarded to
+		// the serving provider verbatim; only an explicit false is a real signal.
+		...(capabilities.tool_calling === false ? { supportsTools: false } : {}),
+		cost: {
+			input: toPositiveNumber(pricing.input, 0),
+			output: toPositiveNumber(pricing.output, 0),
+			// Text rows always carry a cache-read rate (it falls back to the input
+			// rate upstream); ArkaneCloud bills no separate cache-write.
+			cacheRead: toPositiveNumber(pricing.cache_read, 0),
+			cacheWrite: 0,
+		},
+		contextWindow: toPositiveNumber(entry.context_length, null),
+		maxTokens: toPositiveNumber(entry.max_output_tokens, null),
+	};
+}
+
+/**
+ * ArkaneCloud model manager: `/api/v2/models` is the whole catalog for the API
+ * key (personal and team keys see different models and prices), so nothing is
+ * bundled and the model cache is scoped to the key. Rows that are not
+ * `type: "text"`, such as image generation, are dropped. Each row's
+ * `reasoning` block (`supported_efforts`, `can_disable`, `enabled_by_default`)
+ * sets that model's reasoning compat; the host-wide dialect is the
+ * `thinking-format` in `arkanecloud.kdl`.
+ */
+export function arkaneCloudModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = (config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("arkanecloud")!).replace(/\/$/, "");
+	return {
+		providerId: "arkanecloud",
+		cacheProviderId: resolveModelCacheProviderId("arkanecloud", { apiKey, baseUrl }),
+		dynamicCostAuthoritative: true,
+		dynamicInputAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "arkanecloud",
+					baseUrl,
+					apiKey,
+					mapModel: mapArkaneCloudModel,
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
