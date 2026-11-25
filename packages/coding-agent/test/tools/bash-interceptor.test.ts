@@ -341,6 +341,8 @@ describe("default Perl in-place rule", () => {
 		"perl -0777 -Mstrict -pi -e 1 f",
 		"perl -e 's/a/b/' -pi f",
 		"perl -I 'some lib' -ni -e 1 f",
+		"perl -C -pi -e 1 f",
+		"perl -x -pi f",
 	])("routes %s to edit", command => {
 		expect(checkBashInterception(command, ["edit"]).suggestedTool).toBe("edit");
 	});
