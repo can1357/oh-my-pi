@@ -64,12 +64,13 @@ export type SessionsLookTerm = PickerTerm & {
 	readonly fill?: number;
 };
 
-const STATUS: Readonly<Record<string, [string, string]>> = {
-	complete: ["success", "✔ done"],
-	interrupted: ["warning", "⚠ interrupted"],
-	aborted: ["muted", "⏹ aborted"],
-	error: ["error", "✘ error"],
-	pending: ["accent", "⏳ pending"],
+type SessionStatusLook = readonly [tone: string, symbol: string, label: string];
+const STATUS: Readonly<Record<string, SessionStatusLook>> = {
+	complete: ["success", "status.success", "done"],
+	interrupted: ["warning", "status.warning", "interrupted"],
+	aborted: ["muted", "status.aborted", "aborted"],
+	error: ["error", "status.error", "error"],
+	pending: ["accent", "status.pending", "pending"],
 };
 
 /** Rows a session takes: its heading, its first message under a title, its facts and the blank after. */
@@ -151,11 +152,11 @@ function listRows(
 	// The scrollbar's column comes off the rows once the list overflows its budget.
 	const rowWidth = Math.max(0, width - (window.total > term.budget ? 1 : 0));
 	const dim = (text: string): string => theme.style("dim", text);
-	const dot = dim(" · ");
+	const dot = dim(theme.symbols.symbol("sep.dot"));
 	for (let i = window.start; i < window.end; i++) {
 		const row = sessions[i]!;
 		const selected = i === selectedIndex;
-		const lead = selected ? theme.style("accent", "❯ ") : "  ";
+		const lead = selected ? theme.style("accent", `${theme.symbols.symbol("nav.cursor")} `) : "  ";
 		const pin = row.pinned ? `${theme.style("accent", theme.symbols.symbol("icon.pin"))} ` : "";
 		const room = Math.max(0, rowWidth - 2 - visibleWidth(pin));
 		const heading = truncate(row.title || row.first, room);
@@ -165,8 +166,11 @@ function listRows(
 		let facts = `  ${dim(row.age)} ${dot} ${dim(row.size)}`;
 		if (row.current) facts += ` ${dot} ${theme.style("accent", "current")}`;
 		const status = row.status ? STATUS[row.status] : undefined;
-		if (status) facts += ` ${dot} ${theme.style(status[0], status[1])}`;
-		if (row.fork) facts += ` ${dot} ${dim("⑂ fork")}`;
+		if (status) {
+			const [tone, symbol, label] = status;
+			facts += ` ${dot} ${theme.style(tone, `${theme.symbols.symbol(symbol)} ${label}`)}`;
+		}
+		if (row.fork) facts += ` ${dot} ${dim(`${theme.symbols.icon("branch")} fork`)}`;
 		if (row.cwd) facts += ` ${dot} ${dim(row.cwd)}`;
 		rows.push(truncate(facts, rowWidth));
 		// The last session ends flush against the hints, whose blank row stands in for its own.

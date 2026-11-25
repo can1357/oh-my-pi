@@ -22,6 +22,11 @@ export function keyLabel(theme: Theme, key: string): string {
 	return formatKey(key, { preset: theme.symbols.preset, platform: keyHintPlatform() });
 }
 
+/** The primary tool expansion key in `theme`'s symbol preset. */
+export function expandKeyLabel(theme: Theme, keybindings: KeybindingsManager = getKeybindings()): string {
+	return keyLabel(theme, keybindings.keysFor("app.tools.expand")[0] ?? "ctrl+o");
+}
+
 /** One key in the active theme (`ctrl+shift+c` → `⌃⇧C` on macOS, `Ctrl+⇧C` elsewhere). */
 export function formatKeyHint(key: string): string {
 	return formatKey(key, activeKeyStyle());
