@@ -25,9 +25,10 @@ import {
 	usageSubscriptionPlan,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
+import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
-import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
-import { peakBuckets, renderSparkline } from "@oh-my-pi/pi-tui/components/sparkline";
+import { formatProviderName } from "../modes/view-model/chrome/format";
+import { peakBuckets, sparkline } from "@oh-my-pi/pi-tui/term/painters/chart";
 import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -36,7 +37,7 @@ import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { resetAccountLockKey } from "../session/codex-auto-reset";
 import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { collapseSharedUsageReports, summarizeUsageResetCredits } from "../session/usage-display";
 import { reportMatchesStatus } from "../session/claude-auto-reset";
 import {
 	classifyResetExpiry,
@@ -1035,7 +1036,7 @@ function renderHistorySparkline(entries: UsageHistoryEntry[], sinceMs: number, n
 	const points = entries.flatMap(entry =>
 		entry.usedFraction === undefined ? [] : [{ at: entry.recordedAt, value: entry.usedFraction }],
 	);
-	return renderSparkline(peakBuckets(points, sinceMs, nowMs, HISTORY_SPARK_WIDTH), {
+	return sparkline(peakBuckets(points, sinceMs, nowMs, HISTORY_SPARK_WIDTH), {
 		min: 0,
 		max: 1,
 		gap: chalk.dim("·"),
@@ -1157,6 +1158,65 @@ async function loadUsageSources(
 	return modelRegistry;
 }
 
+interface OrgPolicyRejectedAccount extends UsageAccountIdentity {
+	status: "rejected by org policy";
+	eligible: false;
+	blockedUntilMs: number;
+}
+
+/** Match persisted blocks by credential row, not email or usage report identity. */
+function collectOrgPolicyRejectedAccounts(
+	authStorage: AuthStorage,
+	provider: string | undefined,
+): OrgPolicyRejectedAccount[] {
+	const oauthRows = authStorage.credentials
+		.list()
+		.filter(
+			row => row.credential.type === "oauth" && (provider === undefined || row.provider.toLowerCase() === provider),
+		);
+	const blocks = new Map(
+		authStorage.blocks
+			.list(oauthRows.map(row => row.id))
+			.filter(block => block.blockScope === OAUTH_ORG_POLICY_BLOCK_SCOPE)
+			.map(block => [block.credentialId, block]),
+	);
+	const rejected: OrgPolicyRejectedAccount[] = [];
+	for (const { id, provider: rowProvider, credential } of oauthRows) {
+		const block = blocks.get(id);
+		if (credential.type !== "oauth" || block?.providerKey !== `${rowProvider}:oauth`) continue;
+		const { email, accountId, projectId, enterpriseUrl, orgId, orgName } = credential;
+		rejected.push({
+			provider: rowProvider,
+			type: "oauth",
+			email,
+			accountId,
+			projectId,
+			enterpriseUrl,
+			orgId,
+			orgName,
+			status: "rejected by org policy",
+			eligible: false,
+			blockedUntilMs: block.blockedUntilMs,
+		});
+	}
+	return rejected;
+}
+
+function formatOrgPolicyRejections(
+	rejected: OrgPolicyRejectedAccount[],
+	nowMs: number,
+	redaction?: Map<string, string>,
+): string {
+	return [
+		chalk.bold("OAuth eligibility"),
+		...rejected.map(account => {
+			const label = accountIdentityLabel(account, redaction);
+			const wait = formatDuration(account.blockedUntilMs - nowMs);
+			return `  ${formatProviderName(account.provider)} · ${label} — ${chalk.red(account.status)} ${chalk.dim(`(retry in ${wait})`)}`;
+		}),
+	].join("\n");
+}
+
 /** Name the providers that do hold credentials so a mistyped `--provider` id is easy to correct. */
 function formatNoProviderCredentials(provider: string, storedAccounts: UsageAccountIdentity[]): string {
 	const stored = [...new Set(storedAccounts.map(account => account.provider))].sort();
@@ -1170,6 +1230,18 @@ function formatNoProviderCredentials(provider: string, storedAccounts: UsageAcco
 /** Apply a redaction mask to an optional identity field. */
 function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
+}
+
+function redactUsageAccountForJson<T extends UsageAccountIdentity>(account: T, redaction: Map<string, string>): T {
+	return {
+		...account,
+		email: maskIdentity(redaction, account.email),
+		accountId: maskIdentity(redaction, account.accountId),
+		projectId: maskIdentity(redaction, account.projectId),
+		enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
+		orgId: maskIdentity(redaction, account.orgId),
+		orgName: maskIdentity(redaction, account.orgName),
+	};
 }
 
 const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName"] as const;
@@ -1689,9 +1761,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			accounts = accounts.filter(account => account.provider.toLowerCase() === wanted);
 			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
 		}
+		const nowMs = Date.now();
+		const orgPolicyRejectedAccounts = collectOrgPolicyRejectedAccounts(authStorage, cmd.provider?.toLowerCase());
 
 		const redaction = cmd.redact
-			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled))
+			? buildRedactionMap(
+					collectIdentityStrings(filteredReports, [...accounts, ...orgPolicyRejectedAccounts], disabled),
+				)
 			: undefined;
 
 		if (cmd.json) {
@@ -1707,15 +1783,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			let unreportedAccounts = annotated.accountsWithoutUsage;
 			if (redaction) {
 				trimmed = trimmed.map(report => redactReportForJson(report, redaction));
-				unreportedAccounts = unreportedAccounts.map(account => ({
-					...account,
-					email: maskIdentity(redaction, account.email),
-					accountId: maskIdentity(redaction, account.accountId),
-					projectId: maskIdentity(redaction, account.projectId),
-					enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
-					orgId: maskIdentity(redaction, account.orgId),
-					orgName: maskIdentity(redaction, account.orgName),
-				}));
+				unreportedAccounts = unreportedAccounts.map(account => redactUsageAccountForJson(account, redaction));
 			}
 			const capacity: Record<string, ProviderWindowStat[]> = {};
 			for (const report of filteredReports) {
@@ -1734,17 +1802,23 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				}));
 			}
 			const payload = {
-				generatedAt: Date.now(),
+				generatedAt: nowMs,
 				reports: trimmed,
 				accountsWithoutUsage: unreportedAccounts,
 				disabledCredentials: disabledForJson,
 				capacity,
+				orgPolicyRejectedAccounts:
+					orgPolicyRejectedAccounts.length === 0
+						? undefined
+						: redaction
+							? orgPolicyRejectedAccounts.map(account => redactUsageAccountForJson(account, redaction))
+							: orgPolicyRejectedAccounts,
 			};
 			process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 			return;
 		}
 
-		if (filteredReports.length === 0 && accounts.length === 0) {
+		if (filteredReports.length === 0 && accounts.length === 0 && orgPolicyRejectedAccounts.length === 0) {
 			// An explicit --provider keeps every stored account of that provider, so
 			// reaching here with one means none is stored for it. Without one,
 			// credentials may exist only for providers without a usage endpoint.
@@ -1765,9 +1839,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			settings,
 			accounts: provider => authStorage.oauth.accounts(provider),
 		};
-		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,
-		);
+		const sections = [
+			formatUsageBreakdown(filteredReports, accounts, nowMs, redaction, disabled, policyOptions, resetOptions),
+		];
+		if (orgPolicyRejectedAccounts.length > 0) {
+			sections.push(formatOrgPolicyRejections(orgPolicyRejectedAccounts, nowMs, redaction));
+		}
+		process.stdout.write(`${sections.join("\n\n")}\n`);
 	} catch (error) {
 		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or
 		// pre-endpoint broker; report one line instead of a stack dump.

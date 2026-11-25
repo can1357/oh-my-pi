@@ -7,8 +7,8 @@
  * - format the generic approval prompt body.
  */
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs } from "@oh-my-pi/pi-tui";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs } from "../utils/text-width";
+import { shortenPath } from "../utils/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
 import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";

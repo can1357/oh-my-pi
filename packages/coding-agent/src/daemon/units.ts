@@ -10,13 +10,8 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import {
-	truncateHead,
-	truncateHeadBytes,
-	truncateTail,
-	truncateTailBytes,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import type { DaemonReadySpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../tools/streaming-output";
+import type { DaemonReadySpec } from "./daemon-types";
 import { isEnoent, logger, sanitizeText, withTimeout } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";
@@ -591,6 +586,11 @@ export class UnitTable {
 		entry.lastUsed = Date.now();
 		let lease: string | undefined;
 		if (request.lease !== false) lease = this.#addLease(entry, connection);
+		// The connection closed while this open waited for the unit, so `disconnected` already ran without this lease.
+		if (lease !== undefined && connection.closed) {
+			this.#dropConnectionLeases(connection.client.connectionId);
+			lease = undefined;
+		}
 		if (request.awaitReady !== false) {
 			try {
 				if (entry.procRuntime && entry.proc?.ready) {
@@ -957,14 +957,7 @@ export class UnitTable {
 	disconnected(connection: UnitConnection): void {
 		const connectionId = connection.client.connectionId;
 		this.#watchers.delete(connection);
-		// A dropped connection is not a release: give its client time to reconnect and retake the lease.
-		const graceUntil = Date.now() + this.#leaseGraceMs;
-		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
-			const entry = this.#leases.get(leaseId)?.entry;
-			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
-			this.#dropLease(leaseId);
-		}
-		this.#connectionLeases.delete(connectionId);
+		this.#dropConnectionLeases(connectionId);
 		for (const [owner, registration] of this.#ownerConnections) {
 			if (registration.connection.client.connectionId === connectionId) this.#ownerConnections.delete(owner);
 		}
@@ -1500,6 +1493,17 @@ export class UnitTable {
 		this.#evaluateIdle(entry);
 		this.#emit(entry);
 		return leaseId;
+	}
+
+	/** Drop a lost connection's leases. Not a release: each unit waits out the reconnect grace before idling. */
+	#dropConnectionLeases(connectionId: string): void {
+		const graceUntil = Date.now() + this.#leaseGraceMs;
+		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
+			const entry = this.#leases.get(leaseId)?.entry;
+			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
+			this.#dropLease(leaseId);
+		}
+		this.#connectionLeases.delete(connectionId);
 	}
 
 	#dropLease(leaseId: string): void {

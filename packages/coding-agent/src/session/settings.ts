@@ -28,8 +28,8 @@ import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/opena
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
-import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { formatKeyHint } from "../ui/keys/hints";
+import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking/levels";
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
@@ -114,7 +114,8 @@ export const cfgPrewalkFrom = register({
 		tab: "model",
 		group: "Prewalk",
 		label: "Prewalk planning model",
-		description: "Model or role (default '@default') that /prewalk restart returns to for planning.",
+		description:
+			"Model or role (default '@default') to plan on: /prewalk restart returns to it, and Auto Prewalk's Escalate mode moves a front-loaded task to it before planning.",
 	},
 });
 
@@ -134,7 +135,7 @@ export const cfgPrewalkInto = register({
 export const cfgPrewalkAuto = register({
 	id: "prewalk.auto",
 	type: "enum",
-	values: ["off", "suggest", "on"] as const,
+	values: ["off", "suggest", "on", "escalate"] as const,
 	default: "off",
 	ui: {
 		tab: "model",
@@ -147,13 +148,20 @@ export const cfgPrewalkAuto = register({
 			{
 				value: "suggest",
 				label: "Suggest",
-				description: "Classify each task and report the decision without arming prewalk",
+				description:
+					"Classify each task and report the decision, and whether Escalate would plan on another model, without arming prewalk",
 			},
 			{
 				value: "on",
 				label: "On",
 				description:
 					"For confidently front-loaded tasks, arm a handoff from the active model to the auto target; the next task starts back on the planning model",
+			},
+			{
+				value: "escalate",
+				label: "Escalate",
+				description:
+					"Like On, but plan on the Prewalk planning model (prewalk.from) first: a confidently front-loaded task moves there before setup and hands off from it; the next task starts back where this one started. When the planning model is already active, this is On, except that '@initial' then has nothing to hand back to",
 			},
 		],
 	},
@@ -167,9 +175,13 @@ export const cfgPrewalkAutoTarget = register({
 		tab: "model",
 		group: "Prewalk",
 		label: "Auto-prewalk target",
-		description: "Model or role (default '@smol') auto-prewalk hands off to at the first edit/write.",
+		description:
+			"Model or role (default '@smol') auto-prewalk hands off to at the first edit/write. '@initial' (Escalate only) hands back to the model and thinking level the task started on.",
 	},
 });
+
+/** `prewalk.autoTarget` value that hands an `escalate` task back to the model and effort it started on. */
+export const PREWALK_INITIAL_TARGET = "@initial";
 
 function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;

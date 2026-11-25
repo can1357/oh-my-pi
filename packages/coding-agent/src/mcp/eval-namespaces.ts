@@ -20,8 +20,8 @@
  */
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai";
-import { blobExtensionForImageMimeType, normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { blobExtensionForImageMimeType, normalizeBlobExtension } from "../utils/image-format";
+import { ToolError } from "../tools/tool-errors";
 import { isRecord, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";

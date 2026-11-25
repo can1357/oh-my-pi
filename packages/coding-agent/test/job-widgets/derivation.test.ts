@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { JobWidgetBlock, JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetBlock, JobWidgetView } from "@oh-my-pi/pi-coding-agent/tools/details/job-widget";
 import {
 	JobWidgetRuntime,
 	type JobTextChunk,

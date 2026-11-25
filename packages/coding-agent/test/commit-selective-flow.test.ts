@@ -11,6 +11,7 @@ import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/com
 import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -401,6 +402,54 @@ describe("selective commit flow", () => {
 		expect((await git(root, ["diff", "--cached", "--name-only"])).trim()).toBe("b.ts");
 	});
 
+	it("does not advance HEAD or stage a reversal when the shared index stays locked", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "agent.txt"), "before\n");
+		await Bun.write(path.join(root, "other.txt"), "before\n");
+		await Bun.write(path.join(root, "delete.txt"), "delete me\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		await Bun.write(path.join(root, "other.txt"), "staged by someone else\n");
+		await git(root, ["add", "other.txt"]);
+		const staged = await git(root, ["diff", "--cached"]);
+		await write("Main", undefined, "agent.txt", "after\n");
+		const deleted = path.join(root, "delete.txt");
+		await fs.rm(deleted);
+		journal.recordChange({ agent: "Main", tool: "edit", path: deleted, before: "delete me\n", after: null });
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+
+		const lock = path.join(root, ".git", "index.lock");
+		await Bun.write(lock, "");
+		try {
+			const result = await commitSelection(
+				draft,
+				{ subject: "fix: locked" },
+				{ journal, agent: { agent: "Main" } },
+			).catch((error: unknown) => error);
+			expect(await git(root, ["diff", "--cached"])).toBe(staged);
+			expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+			expect(await Bun.file(lock).exists()).toBe(true);
+			expect(result).toBeInstanceOf(Error);
+			expect(String(result)).toContain("shared index");
+		} finally {
+			await fs.rm(lock);
+		}
+		const fresh = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(fresh.staged).toEqual(["other.txt"]);
+		expect(
+			fresh
+				.selection()
+				.map(change => change.path)
+				.sort(),
+		).toEqual(["agent.txt", "delete.txt"]);
+		await commitSelection(fresh, { subject: "fix: retry" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["ls-tree", "--name-only", "HEAD"])).toBe("agent.txt\nother.txt\n");
+		expect(await git(root, ["show", "HEAD:agent.txt"])).toBe("after\n");
+		expect(await git(root, ["diff", "--cached"])).toBe(staged);
+	}, 60_000);
+
 	it.skipIf(process.platform === "win32")(
 		"runs hooks without reporting sparse-checkout paths as unstaged deletions",
 		async () => {
@@ -432,6 +481,7 @@ describe("selective commit flow", () => {
 					"set -e",
 					'[ -z "$(git diff --name-only)" ]',
 					"git add kept/inside",
+					"git sparse-checkout reapply --sparse-index",
 					'git ls-files --sparse > "$GIT_DIR/omp-hook-sparse.txt"',
 				].join("\n") + "\n",
 			);
@@ -1364,5 +1414,77 @@ describe("selective commit flow", () => {
 		expect(amended.parent).toBe(seed);
 		expect(amended.paths).toEqual(["a.txt", "b.txt"]);
 		expect((await git(root, ["rev-list", "--count", "HEAD"])).trim()).toBe("2");
+	});
+
+	describe("large unrelated files (#20176)", () => {
+		const LARGE_BYTES = 8 * 1024 * 1024;
+		const LARGE_FILES = ["unrelated.asar", "unrelated.dmg"];
+
+		/** Repo with a committed `src.ts`, an edit to it, and two unrelated 8 MiB untracked files. */
+		async function largeUnrelatedRepo() {
+			const repo = await emptyRepo();
+			await repo.write("Main", undefined, "src.ts", "one\n");
+			await git(repo.root, ["add", "."]);
+			await git(repo.root, ["commit", "-q", "-m", "seed"]);
+			await repo.write("Main", undefined, "src.ts", "two\n");
+			for (const file of LARGE_FILES) {
+				await Bun.write(path.join(repo.root, file), new Uint8Array(LARGE_BYTES).fill(7));
+			}
+			return repo;
+		}
+
+		/** Spies on the native conversion, recording the paths each call converts together. */
+		function observeConversions(): string[][] {
+			const calls: string[][] = [];
+			const observe = (repo: VcsGitRepo): VcsGitRepo =>
+				new Proxy(repo, {
+					get(target, prop) {
+						if (prop === "worktreeToGit") {
+							return (inputs: Array<{ path: string; data: Uint8Array }>, signal?: unknown) => {
+								calls.push(inputs.map(input => input.path));
+								return target.worktreeToGit(inputs, signal);
+							};
+						}
+						const value = Reflect.get(target, prop, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+			const realGit = vcs.git.bind(vcs);
+			const realRequireGit = vcs.requireGit.bind(vcs);
+			vi.spyOn(vcs, "git").mockImplementation(dir => {
+				const repo = realGit(dir);
+				return repo && observe(repo);
+			});
+			vi.spyOn(vcs, "requireGit").mockImplementation(dir => observe(realRequireGit(dir)));
+			return calls;
+		}
+
+		it("converts large unrelated files one at a time", async () => {
+			const { root, journal } = await largeUnrelatedRepo();
+			const calls = observeConversions();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			expect(draft.paths).toEqual(expect.arrayContaining(LARGE_FILES));
+
+			for (const call of calls) {
+				if (call.some(file => LARGE_FILES.includes(file))) expect(call).toHaveLength(1);
+			}
+			expect(
+				calls
+					.flat()
+					.filter(file => LARGE_FILES.includes(file))
+					.sort(),
+			).toEqual(LARGE_FILES);
+		});
+
+		it("selected large file commits its exact bytes", async () => {
+			const { root, journal } = await largeUnrelatedRepo();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			draft.take({ path: "unrelated.asar" });
+			const change = draft.selection().find(item => item.path === "unrelated.asar");
+			if (change?.kind !== "whole" || !change.after) throw new Error("expected a whole-file change");
+			expect((await git(root, ["cat-file", "-s", change.after.id])).trim()).toBe(String(LARGE_BYTES));
+		});
 	});
 });

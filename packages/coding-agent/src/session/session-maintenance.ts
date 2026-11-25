@@ -85,11 +85,11 @@ import type { CompactOptions, ContextUsage } from "../extensibility/extensions/t
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
-import { customMessageEntryMessage } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { computeNonMessageTokens, type NonMessageTokenSource } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { customMessageEntryMessage } from "./transcript/transcript-entry";
+import { computeNonMessageTokens, type NonMessageTokenSource } from "./context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import { isCompleteReadResult } from "../tools/read-supersede";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown } from "./agent-session-types";
 import type { CacheBridgeEstimate, CacheBridgeOutcome } from "./cache-warmer";
@@ -529,7 +529,12 @@ export interface SessionMaintenanceHost {
 	replaceMessagesFromSessionContext(messages: AgentMessage[]): void;
 	/** Preserve the eval runtime snapshot at the history rewrite boundary for replay. */
 	persistEvalStateContext(): void;
-	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
+	/** With `withImageDescriptions`, images are replaced by the descriptions {@link prepareImageDescriptions} made. */
+	convertToLlmForSideRequest(messages: AgentMessage[], withImageDescriptions?: boolean): Message[];
+	/** The model to describe images for when `reader` gets history as text; undefined when none is needed. */
+	imageDescriptionModel(reader: Model): Model | undefined;
+	/** Describe the images of `messages` for `model`, a model that cannot see them. */
+	prepareImageDescriptions(messages: AgentMessage[], model: Model, signal?: AbortSignal): Promise<void>;
 	/** The provider context a live turn sends for `summarized` + `retained`, cut to the `summarized` range, as `model` reads it. */
 	buildLiveProviderContext(
 		summarized: AgentMessage[],
@@ -1344,6 +1349,8 @@ export class SessionMaintenance {
 			: undefined;
 		let methods: CompactionMethod[] = [];
 		let selectedMethodIndex = -1;
+		// Next method in `methods` this pass can run if the selected one fails; -1 when none remains.
+		let fallbackMethodIndex = -1;
 		let compactionCommitted = false;
 		const markCommitted = (): void => {
 			compactionCommitted = true;
@@ -1440,11 +1447,13 @@ export class SessionMaintenance {
 			// A reader that cannot replay the active model's native payload rules out the remote method; its
 			// native lanes run before a configured endpoint, so an endpoint does not make it portable.
 			const readerModel = options?.readerModel;
-			methods = resolveCompactionMethodOrder(
-				compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder,
-			).filter(
+			const modeOrder = compactMode?.overrides.methodOrder;
+			const order = resolveCompactionMethodOrder(modeOrder ?? compactionSettings.methodOrder).filter(
 				method => method !== "remote" || !readerModel || canReplayRemoteCompactionFrom(activeModel, readerModel),
 			);
+			// A manual pass always compacts: soft summarization runs on any model, so it ends a configured
+			// order that omits it. `/compact <mode>` keeps its pinned chain.
+			methods = modeOrder || order.includes("soft") ? order : [...order, "soft"];
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
 			const runsManually = (method: CompactionMethod): boolean => {
 				switch (method) {
@@ -1463,11 +1472,13 @@ export class SessionMaintenance {
 						return false;
 				}
 			};
+			// Every chain starts runnable (soft, or a mode's pinned method) and nested passes start at a
+			// runnable fallback, so selection always finds a method.
 			selectedMethodIndex = methods.findIndex((method, index) => index >= methodOffset && runsManually(method));
+			fallbackMethodIndex = methods.findIndex(
+				(method, index) => index > selectedMethodIndex && runsManually(method),
+			);
 			const selectedMethod = methods[selectedMethodIndex];
-			if (!selectedMethod) {
-				throw new Error("No configured compaction method can run manually.");
-			}
 			// `/compact snapcompact` pins the order to snapcompact alone, so its
 			// blockers name the `/compact` mode of the next manual method (remote or
 			// soft): plain `/compact` can run an experimental rollover instead.
@@ -1496,6 +1507,10 @@ export class SessionMaintenance {
 								: undefined,
 						);
 			if ((requireProviderRemote || remoteReader) && compactionCandidates.length === 0) {
+				// Reached only after an earlier soft pass failed; its warning already named the cause.
+				if (fallbackMethodIndex === -1) {
+					throw new Error(`remote compaction is unavailable for ${activeModel.id}`);
+				}
 				this.#host.emitNotice(
 					"warning",
 					`remote compaction is unavailable for ${activeModel.id}; trying the next preferred method`,
@@ -1507,7 +1522,7 @@ export class SessionMaintenance {
 					await this.compact(
 						customInstructions,
 						options,
-						selectedMethodIndex + 1,
+						fallbackMethodIndex,
 						compactionAbortController,
 						markCommitted,
 					),
@@ -1729,7 +1744,6 @@ export class SessionMaintenance {
 							// `before_agent_start` override included — so a provider-native
 							// compaction shares the live request's cached prefix.
 							remoteSystemPrompt: this.#host.agent.state.systemPrompt,
-							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
 						},
 						compactionCandidates,
@@ -1814,8 +1828,7 @@ export class SessionMaintenance {
 				!compactionCommitted &&
 				!compactionSignal.aborted &&
 				!(error instanceof CompactionCancelledError) &&
-				selectedMethodIndex >= 0 &&
-				selectedMethodIndex + 1 < methods.length
+				fallbackMethodIndex !== -1
 			) {
 				this.#host.emitNotice(
 					"warning",
@@ -1827,7 +1840,7 @@ export class SessionMaintenance {
 						await this.compact(
 							customInstructions,
 							options,
-							selectedMethodIndex + 1,
+							fallbackMethodIndex,
 							compactionAbortController,
 							markCommitted,
 						),
@@ -4078,6 +4091,27 @@ export class SessionMaintenance {
 		return journalCompletion(this.#host.sessionManager, { purpose: `compaction:${method}`, usageOnly: true });
 	}
 
+	/**
+	 * History conversion for a summary request to `candidate`. A summary carries history as text, so when the
+	 * candidate or the session's model cannot see images, each summarized image is described first and its
+	 * description stands in for it.
+	 */
+	async #summaryConvertToLlm(
+		preparation: CompactionPreparation,
+		candidate: Model,
+		signal: AbortSignal,
+	): Promise<(messages: AgentMessage[]) => Message[]> {
+		const describeFor = this.#host.imageDescriptionModel(candidate);
+		if (describeFor) {
+			await this.#host.prepareImageDescriptions(
+				[...preparation.messagesToSummarize, ...preparation.turnPrefixMessages],
+				describeFor,
+				signal,
+			);
+		}
+		return messages => this.#host.convertToLlmForSideRequest(messages, describeFor !== undefined);
+	}
+
 	async #compactWithFallbackModel(
 		method: CompactionMethod,
 		preparation: CompactionPreparation,
@@ -4113,6 +4147,7 @@ export class SessionMaintenance {
 			}
 
 			try {
+				const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, signal);
 				return await compact(
 					this.#host.obfuscatePreparationForProvider(preparation),
 					candidate,
@@ -4122,7 +4157,7 @@ export class SessionMaintenance {
 					{
 						...options,
 						metadata: this.#host.agent.metadataForProvider(candidate.provider),
-						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+						convertToLlm,
 						buildProviderContext: (summarized, retained, signal, model) =>
 							this.#host.buildLiveProviderContext(summarized, retained, signal, model),
 						isUserAuthored: isUserAuthoredMessage,
@@ -6297,6 +6332,7 @@ export class SessionMaintenance {
 					let attempt = 0;
 					while (true) {
 						try {
+							const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, autoCompactionSignal);
 							compactResult = await compact(
 								this.#host.obfuscatePreparationForProvider(preparation),
 								candidate,
@@ -6310,7 +6346,7 @@ export class SessionMaintenance {
 									remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
-									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+									convertToLlm,
 									buildProviderContext: (summarized, retained, signal, model) =>
 										this.#host.buildLiveProviderContext(summarized, retained, signal, model),
 									isUserAuthored: isUserAuthoredMessage,
