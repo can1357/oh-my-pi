@@ -20,7 +20,7 @@ import {
 	type ExtensionProvider,
 	isShadowedExtension,
 } from "../../../extensibility/inventory/types";
-import { fuzzyHits } from "../../../modes/view-model/overlays/model-browser";
+import { fuzzyHits } from "../../../utils/fuzzy";
 import { stableKey } from "../pickers/format";
 import {
 	isDiscoveredMcpServer,
