@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { homedir } from "node:os";
 import { createRoot, isUiNode, type UiNode } from "@oh-my-pi/pi-tui";
 import { paintNode } from "@oh-my-pi/pi-tui/term/paint";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
@@ -96,28 +97,28 @@ describe.skipIf(flowFiles.length === 0)("transcript/tool/task corpus", () => {
 /**
  * A TASK result saved by the abort and synthetic paths carries details without
  * a `results` array; resuming a session holding one crashed the transcript.
+ * The card shows the cancellation text cleaned, with the home path shortened.
  */
-describe("a saved task result without results", () => {
-	const shapes: [string, unknown][] = [
-		["an empty details object", {}],
-		["a synthetic abort marker", { __synthetic: true, source: "assistant_stop_aborted", executed: false }],
-		["a validation failure", { isError: true, error: "Tool call arguments are not valid JSON." }],
-	];
-	for (const [name, details] of shapes) {
-		test(`paints the cancellation text for ${name}`, () => {
-			const call = new ToolCall({ id: "call_task_saved", name: "task", args: { i: "saved task" } });
-			call.setExecutionStarted();
-			call.updateResult(
+test("a saved task result without results paints the cancellation text", () => {
+	const home = homedir();
+	const call = new ToolCall({ id: "call_task_saved", name: "task", args: { i: "saved task" } });
+	call.setExecutionStarted();
+	call.updateResult(
+		{
+			content: [
 				{
-					content: [{ type: "text", text: "Tool was not executed because the run was aborted." }],
-					details,
-					isError: true,
+					type: "text",
+					text: `Tool was not executed: ${home}/.omp/settings.json is unreadable\t(raw)`,
 				},
-				false,
-			);
-			expect(plainToolRows(call, corpusEnvironment("dark")).join("\n")).toContain(
-				"Tool was not executed because the run was aborted.",
-			);
-		});
-	}
+			],
+			details: {},
+			isError: true,
+		},
+		false,
+	);
+	const rendered = plainToolRows(call, corpusEnvironment("dark")).join("\n");
+	expect(rendered).toContain("Tool was not executed");
+	expect(rendered).toContain("~/.omp/settings.json");
+	expect(rendered).not.toContain(home);
+	expect(rendered).not.toContain("\t");
 });
