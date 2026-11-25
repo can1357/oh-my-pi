@@ -16,6 +16,7 @@ import type {
 	ThinkingContent,
 	ToolExample,
 } from "@oh-my-pi/pi-ai";
+import type { OptionNote } from "../../tools/html-form/data";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
@@ -858,7 +859,14 @@ export type RpcExtensionUIRequest =
 			timeout?: number;
 	  }
 	/** The whole HTML form of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required. */
-	| { type: "extension_ui_request"; id: string; method: "form"; html: string; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "form";
+			html: string;
+			timeout?: number;
+			supportsNotes?: boolean;
+	  }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {
 			type: "extension_ui_request";
@@ -1016,7 +1024,7 @@ export type RpcExtensionUIResponse =
 			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
 	  }
 	/** Submitted data of a `form` request, by control `name`; validated against the form. */
-	| { type: "extension_ui_response"; id: string; data: Record<string, unknown> };
+	| { type: "extension_ui_response"; id: string; data: Record<string, unknown>; notes?: OptionNote[] };
 
 // ============================================================================
 // Helper type for extracting command types

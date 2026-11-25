@@ -6022,6 +6022,8 @@ type FormUiRequest struct {
 	ID      string `json:"id"`
 	HTML    string `json:"html"`
 	Timeout *int64 `json:"timeout,omitempty"`
+	// True when this server accepts option notes and images in the form response.
+	SupportsNotes *bool `json:"supportsNotes,omitempty"`
 }
 
 func (v *FormUiRequest) UnmarshalJSON(data []byte) error {
@@ -6036,6 +6038,7 @@ func (v *FormUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("method", "form")
 	d.required("html", &out.HTML)
 	d.optional("timeout", &out.Timeout)
+	d.optional("supportsNotes", &out.SupportsNotes)
 	if d.err != nil {
 		return d.err
 	}
@@ -6471,11 +6474,42 @@ func (v AnswersUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
 }
 
+// A note on a selected enabled choice. The server derives question and option labels from the form.
+type FormOptionNote struct {
+	Name     string         `json:"name"`
+	Question string         `json:"question"`
+	Option   string         `json:"option"`
+	Value    string         `json:"value"`
+	Text     string         `json:"text"`
+	Images   []ImageContent `json:"images,omitempty"`
+}
+
+func (v *FormOptionNote) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "FormOptionNote", v.decodeFrom)
+}
+
+func (v *FormOptionNote) decodeFrom(raw map[string]json.RawMessage) error {
+	var out FormOptionNote
+	d := fieldDecoder{raw: raw, owner: "FormOptionNote"}
+	d.required("name", &out.Name)
+	d.required("question", &out.Question)
+	d.required("option", &out.Option)
+	d.required("value", &out.Value)
+	d.required("text", &out.Text)
+	d.optional("images", &out.Images)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 // Answers a `form` request with the submitted form data.
 type DataUiResponse struct {
 	ID string `json:"id"`
 	// Submitted values by control `name`: a string, a number, or a string array.
-	Data map[string]json.RawMessage `json:"data"`
+	Data  map[string]json.RawMessage `json:"data"`
+	Notes []FormOptionNote           `json:"notes,omitempty"`
 }
 
 func (v *DataUiResponse) UnmarshalJSON(data []byte) error {
@@ -6488,6 +6522,7 @@ func (v *DataUiResponse) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "extension_ui_response")
 	d.required("id", &out.ID)
 	d.required("data", &out.Data)
+	d.optional("notes", &out.Notes)
 	if d.err != nil {
 		return d.err
 	}

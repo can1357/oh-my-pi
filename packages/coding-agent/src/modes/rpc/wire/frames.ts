@@ -208,7 +208,17 @@ export const frameDefs = {
 		"Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.",
 	),
 	FormUiRequest: doc(
-		{ type: UI, id: "string", method: "'form'", html: "string", "timeout?": "number.integer" },
+		{
+			type: UI,
+			id: "string",
+			method: "'form'",
+			html: "string",
+			"timeout?": "number.integer",
+			"supportsNotes?": doc(
+				"boolean",
+				"True when this server accepts option notes and images in the form response.",
+			),
+		},
 		"The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.",
 	),
 	CancelUiRequest: doc(
@@ -271,10 +281,22 @@ export const frameDefs = {
 		{ type: "'extension_ui_response'", id: "string", answers: "AskAnswer[]" },
 		"Answers an `ask` request: one `AskAnswer` per question, in question order.",
 	),
+	FormOptionNote: doc(
+		{
+			name: "string",
+			question: "string",
+			option: "string",
+			value: "string",
+			text: "string",
+			"images?": "ImageContent[]",
+		},
+		"A note on a selected enabled choice. The server derives question and option labels from the form.",
+	),
 	DataUiResponse: doc(
 		{
 			type: "'extension_ui_response'",
 			id: "string",
+			"notes?": "FormOptionNote[]",
 			data: doc(JSON_OBJECT, "Submitted values by control `name`: a string, a number, or a string array."),
 		},
 		"Answers a `form` request with the submitted form data.",

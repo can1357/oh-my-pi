@@ -465,6 +465,13 @@ if request.method == "form":
     client.send_ui_data(request.id, {"store": "sqlite", "ttl_days": 30})
 ```
 
+When `request.supports_notes is True`, pass optional `notes=[...]` to `send_ui_data`.
+Each note carries `name`, `value`, `question`, `option`, `text`, and optional
+`images` (`ImageContent` dictionaries). It describes an enabled original option
+selected in `data`; it does not replace that value with an Other answer. The
+server derives question/option labels from the form. Do not send notes to an
+older server that omits `supports_notes`: it cannot return them to the model.
+
 For non-interactive scripts, you can install a default headless policy instead of
 handling every request manually:
 

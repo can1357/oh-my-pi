@@ -57,7 +57,7 @@ export default function (pi) {
 			id: "ask",
 			name: "Scripted ask",
 			reasoning: false,
-			input: ["text"],
+			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 32768,
 			maxTokens: 1024,
@@ -74,7 +74,7 @@ export default function (pi) {
 				model: model.id,
 				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 				timestamp: Date.now(),
-				content: [{ type: "text", text: "done" }],
+				content: [{ type: "text", text: last?.role === "toolResult" ? JSON.stringify(last.content) : "done" }],
 				stopReason: "stop",
 			};
 			stream.push({ type: "start", partial: message });
@@ -714,6 +714,7 @@ describe("RPC form dialog", () => {
 			type: "extension_ui_request",
 			id: request.id,
 			method: "form",
+			supportsNotes: true,
 			html: DEPLOY_FORM,
 			timeout: 60_000,
 		});
@@ -727,6 +728,39 @@ describe("RPC form dialog", () => {
 		});
 	});
 
+	it("returns selected-option notes and image blocks with labels derived from the form", async () => {
+		const pending = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const result = requestRpcFormDialog(pending, output, FRAME_LIMIT, DEPLOY_FORM);
+		const id = requireRequest(output.mock.calls[0]?.[0]).id;
+		respond(pending, id, {
+			data: { target: "prod" },
+			notes: [
+				{
+					name: "target",
+					value: "prod",
+					question: "forged",
+					option: "forged",
+					text: "Reviewed [Image #1]",
+					images: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
+				},
+			],
+		});
+		expect(await result).toEqual({
+			data: { release: "r7", target: "prod", checks: [], replicas: "", owner: "" },
+			notes: [
+				{
+					name: "target",
+					value: "prod",
+					question: "Which target?",
+					option: "Production",
+					text: "Reviewed [Image #1]",
+					images: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
+				},
+			],
+		});
+		expect(pending.size).toBe(0);
+	});
 	it.each([
 		["no data object", { data: ["prod"] }, "must carry a data object"],
 		["a field the form lacks", { data: { target: "prod", region: "eu" } }, 'unknown field "region"'],
@@ -1122,6 +1156,20 @@ describe("RPC ask dialog", () => {
 		const askRequests: Record<string, unknown>[] = [];
 		const formRequests: Record<string, unknown>[] = [];
 		const toolResults: unknown[] = [];
+		const providerResults: unknown[] = [];
+		const image = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j3ioAAAAASUVORK5CYII=",
+		};
+		const note = {
+			name: "db",
+			value: "pg",
+			question: "ignored",
+			option: "ignored",
+			text: "Reviewed [Image #1, 1x1]",
+			images: [image],
+		};
 		let optInResponse: unknown;
 		let finished = false;
 		const html =
@@ -1144,7 +1192,26 @@ describe("RPC ask dialog", () => {
 					await send({ type: "extension_ui_response", id: frame.id, cancelled: true });
 				} else if (frame.type === "extension_ui_request" && frame.method === "form") {
 					formRequests.push(frame);
-					await send({ type: "extension_ui_response", id: frame.id, data: { db: "pg" } });
+					await send({
+						type: "extension_ui_response",
+						id: frame.id,
+						data: { db: "pg" },
+						...(formRequests.length === 2 ? { notes: [note] } : {}),
+					});
+				} else if (
+					frame.type === "message_end" &&
+					isRecord(frame.message) &&
+					frame.message.role === "assistant" &&
+					Array.isArray(frame.message.content)
+				) {
+					const first = frame.message.content[0];
+					if (
+						isRecord(first) &&
+						first.type === "text" &&
+						typeof first.text === "string" &&
+						first.text.startsWith("[")
+					)
+						providerResults.push(JSON.parse(first.text));
 				} else if (frame.type === "tool_execution_end" && frame.toolName === "ask") {
 					toolResults.push(frame.result);
 				} else if (frame.type === "prompt_result" && frame.id === "default-form") {
@@ -1175,12 +1242,27 @@ describe("RPC ask dialog", () => {
 		});
 		expect(askRequests).toEqual([]);
 		expect(formRequests).toEqual([
-			expect.objectContaining({ method: "form", html }),
-			expect.objectContaining({ method: "form", html }),
+			expect.objectContaining({ method: "form", html, supportsNotes: true }),
+			expect.objectContaining({ method: "form", html, supportsNotes: true }),
 		]);
 		const answered = expect.objectContaining({
 			details: { answers: [{ name: "db", question: "Which database?", answer: "Postgres" }] },
 		});
-		expect(toolResults).toEqual([answered, answered]);
+		expect(toolResults[0]).toEqual(answered);
+		expect(toolResults[1]).toEqual(
+			expect.objectContaining({
+				details: {
+					answers: [{ name: "db", question: "Which database?", answer: "Postgres" }],
+					notes: [{ name: "db", value: "pg", question: "Which database?", option: "Postgres", text: note.text }],
+				},
+			}),
+		);
+		expect(providerResults).toHaveLength(2);
+		expect(providerResults[1]).toEqual(
+			expect.arrayContaining([
+				image,
+				expect.objectContaining({ type: "text", text: expect.stringContaining(note.text) }),
+			]),
+		);
 	}, 60_000);
 });

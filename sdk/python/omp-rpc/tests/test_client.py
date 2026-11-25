@@ -1203,6 +1203,37 @@ class RpcClientTests(unittest.TestCase):
                 },
             )
 
+    def test_form_option_notes_and_images_reach_the_wire(self) -> None:
+        notes = [
+            {
+                "name": "target",
+                "value": "prod",
+                "question": "Target",
+                "option": "Production",
+                "text": "Reviewed [Image #1]",
+                "images": [{"type": "image", "data": "aGk=", "mimeType": "image/png"}],
+            }
+        ]
+        with self.make_client() as client:
+            client.prompt("needs form")
+            request = client.next_ui_request(timeout=2.0)
+            client.send_ui_data(request.id, {"target": "prod"}, notes=notes)
+            client.wait_for_idle(timeout=2.0)
+            self.assertEqual(
+                client.request_raw("debug_last_ui_response"),
+                {
+                    "type": "extension_ui_response",
+                    "id": "ui-form",
+                    "data": {"target": "prod"},
+                    "notes": notes,
+                },
+            )
+
+    def test_form_notes_reject_non_json_numbers_before_sending(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(ValueError):
+                client.send_ui_data("ui-form", {}, notes=[{"text": float("nan")}])
+
     def test_form_data_rejects_booleans_before_sending(self) -> None:
         with self.make_client() as client:
             with self.assertRaises(TypeError):
@@ -1345,7 +1376,7 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(client.get_state().queued_message_count, 1)
 
     def test_remove_queued_message_rejects_missing_result(self) -> None:
-        server = FAKE_SERVER.replace('{"removed": removed}', '{}')
+        server = FAKE_SERVER.replace('{"removed": removed}', "{}")
         with self.make_client(server) as client:
             with self.assertRaises(ValueError):
                 client.remove_queued_message("missing", "steering")
@@ -1557,7 +1588,9 @@ class RpcClientTests(unittest.TestCase):
                     with self.make_client(server) as client:
                         target = Path("/tmp/unavailable-session")
                         before = client.get_state()
-                        change = client.open_session if command == "open_session" else client.switch_session
+                        change = (
+                            client.open_session if command == "open_session" else client.switch_session
+                        )
                         with self.assertRaises(RpcCommandError) as ctx:
                             change(target)
                         self.assertEqual(ctx.exception.command, command)

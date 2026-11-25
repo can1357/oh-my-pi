@@ -14,6 +14,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessageEvent, ImageContent, Model, Usage } from "@oh-my-pi/pi-ai";
+import type { OptionNote } from "@oh-my-pi/pi-coding-agent/tools/html-form/data";
 import type { BashResult } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import type { RpcGoalResult } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
@@ -238,6 +239,7 @@ export type Frames = Assert<
 		uiCancel: Inbound<Wire.CancelUiResponse, Extract<RpcExtensionUIResponse, { cancelled: unknown }>>;
 		uiAnswers: Inbound<Wire.AnswersUiResponse, Extract<RpcExtensionUIResponse, { answers: unknown }>>;
 		uiData: Inbound<Wire.DataUiResponse, Extract<RpcExtensionUIResponse, { data: unknown }>>;
+		formOptionNote: Inbound<Wire.FormOptionNote, OptionNote>;
 		responseFailure: Outbound<Extract<RpcResponse, { success: false }>, Wire.RpcResponse>;
 	}>
 >;

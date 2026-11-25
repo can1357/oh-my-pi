@@ -73,6 +73,7 @@ import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpe
 import { cfgSttEnabled } from "../../stt/settings";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
+import { parseRpcFormNotes } from "./rpc-form-notes";
 import { selectRpcEntries } from "./rpc-compat";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import {
@@ -1339,7 +1340,8 @@ function parseFormDialogResponse(
 			if (carried && value !== undefined) data[name] = value;
 		}
 	}
-	return { data };
+	const notes = parseRpcFormNotes(form, data, "notes" in response ? response.notes : undefined);
+	return { data, ...(notes.length ? { notes } : {}) };
 }
 
 /**
@@ -1354,7 +1356,7 @@ export async function requestRpcFormDialog(
 	dialogOptions?: ExtensionUIDialogOptions,
 ): Promise<ExtensionFormDialogResult | undefined> {
 	// Protocol v1 shrinks an oversized frame and cuts the HTML, so the host could not answer the controls past the cut.
-	const request = { method: "form", html, timeout: dialogOptions?.timeout };
+	const request = { method: "form", html, timeout: dialogOptions?.timeout, supportsNotes: true };
 	// A throwaway id measures the frame: Snowflake ids are always 16 characters, so it encodes to the real id's length.
 	const bytes = encodedBytes({ type: "extension_ui_request", id: Snowflake.next(), ...request });
 	if (bytes > maxFrameBytes) {

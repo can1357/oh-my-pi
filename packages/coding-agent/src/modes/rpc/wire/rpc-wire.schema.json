@@ -5560,6 +5560,10 @@
 				},
 				"timeout": {
 					"type": "integer"
+				},
+				"supportsNotes": {
+					"type": "boolean",
+					"description": "True when this server accepts option notes and images in the form response."
 				}
 			},
 			"required": [
@@ -5906,6 +5910,40 @@
 			],
 			"description": "Answers an `ask` request: one `AskAnswer` per question, in question order."
 		},
+		"FormOptionNote": {
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"question": {
+					"type": "string"
+				},
+				"option": {
+					"type": "string"
+				},
+				"value": {
+					"type": "string"
+				},
+				"text": {
+					"type": "string"
+				},
+				"images": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ImageContent"
+					}
+				}
+			},
+			"required": [
+				"name",
+				"question",
+				"option",
+				"value",
+				"text"
+			],
+			"description": "A note on a selected enabled choice. The server derives question and option labels from the form."
+		},
 		"DataUiResponse": {
 			"type": "object",
 			"properties": {
@@ -5920,6 +5958,12 @@
 					"properties": {},
 					"additionalProperties": {},
 					"description": "Submitted values by control `name`: a string, a number, or a string array."
+				},
+				"notes": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/FormOptionNote"
+					}
 				}
 			},
 			"required": [

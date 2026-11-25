@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- RPC form hosts can submit selected-option notes and images alongside form answers ([#20156](https://github.com/can1357/oh-my-pi/issues/20156)).
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes
