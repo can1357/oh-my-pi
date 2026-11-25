@@ -2579,41 +2579,53 @@ describe("AgentSession retry delay cap", () => {
 	it("moves a Devin session off a login whose weekly quota is spent", async () => {
 		const model = getBundledModel("devin", "swe-1-6");
 		if (!model) throw new Error("Expected bundled Devin test model to exist");
-		await authStorage.credentials.set("devin", [
-			{ type: "api_key", key: "devin-key-1" },
-			{ type: "api_key", key: "devin-key-2" },
-		]);
-		// Devin's end-of-stream Connect trailer: no HTTP status, no reset time.
-		const weeklyQuotaError =
-			"Devin stream error failed_precondition: Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage to purchase on-demand usage or turn on auto-reload.";
-		const mock = createMockModel();
-		const requestedKeys: string[] = [];
-		const agent = new Agent({
-			getApiKey: requested => modelRegistry.resolver(requested, agent.sessionId),
-			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (requestedModel, context, options) => {
-				const apiKey = resolveInitialApiKey(options?.apiKey);
-				requestedKeys.push(apiKey);
-				// Whichever login the session starts on is the spent one: Devin refuses it every time.
-				mock.push(
-					apiKey === requestedKeys[0] ? { throw: weeklyQuotaError } : { content: ["answered on the other login"] },
-				);
-				return mock.stream(requestedModel, context, options);
-			},
+		// No usage provider: the rotation must come from the refusal alone, with no GetUserStatus call.
+		const localStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-		});
-		mockSchedulerWaitWithClock();
-		await session.prompt("Trigger Devin weekly quota");
-		await session.waitForIdle();
-		const last = lastAssistant(session);
-		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "answered on the other login" });
-		expect([...requestedKeys].sort()).toEqual(["devin-key-1", "devin-key-2"]);
+		try {
+			await localStorage.credentials.reload();
+			await localStorage.credentials.set("devin", [
+				{ type: "api_key", key: "devin-key-1" },
+				{ type: "api_key", key: "devin-key-2" },
+			]);
+			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
+			// Devin's end-of-stream Connect trailer: no HTTP status, no reset time.
+			const weeklyQuotaError =
+				"Devin stream error failed_precondition: Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage to purchase on-demand usage or turn on auto-reload.";
+			const mock = createMockModel();
+			const requestedKeys: string[] = [];
+			const agent = new Agent({
+				getApiKey: requested => localRegistry.resolver(requested, agent.sessionId),
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (requestedModel, context, options) => {
+					const apiKey = resolveInitialApiKey(options?.apiKey);
+					requestedKeys.push(apiKey);
+					// Whichever login the session starts on is the spent one: Devin refuses it every time.
+					mock.push(
+						apiKey === requestedKeys[0]
+							? { throw: weeklyQuotaError }
+							: { content: ["answered on the other login"] },
+					);
+					return mock.stream(requestedModel, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: localRegistry,
+			});
+			mockSchedulerWaitWithClock();
+			await session.prompt("Trigger Devin weekly quota");
+			await session.waitForIdle();
+			const last = lastAssistant(session);
+			expect(last.stopReason).toBe("stop");
+			expect(last.content).toContainEqual({ type: "text", text: "answered on the other login" });
+			expect([...requestedKeys].sort()).toEqual(["devin-key-1", "devin-key-2"]);
+		} finally {
+			localStorage.close();
+		}
 	});
 
 	it("tries every Codex account before the configured model fallback on cyber-policy denials", async () => {
