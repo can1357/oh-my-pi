@@ -422,31 +422,6 @@
 - Fixed idle follow-ups becoming stuck after extension messages or compaction summaries.
 - Fixed resuming goals whose token budget is exhausted so they remain budget-limited, and prevented incomplete-goal reminders from asking the agent to continue while budget-limited.
 - Assistant replies show SVG fences and HTML image and page embeds inline again on terminals that support graphics ([#20508](https://github.com/can1357/oh-my-pi/issues/20508)).
-- A broadcast from the main agent that arrives while a subagent is finishing no longer replaces that subagent's report; the subagent answers it in a separate turn, and the broadcast still interrupts a waiting subagent.
-- On Linux, `time -l` and `time -v` in the bash tool report the program's own maximum resident set size instead of at least omp's.
-
-### Added
-
-- Agents can switch their own or a live child's model via `agent://<id>/model` using permitted agent kinds, including user-tagged models, and adjust thinking via `agent://<id>/effort` or a model suffix.
-- In Tern, clicking a pasted image's chip opens it in Tern's image annotator; Done replaces the attachment with the annotated (possibly cropped) picture and its new size.
-- Added `archive.transcript(id, {detail, budget, turns})` in eval: renders a past session within a character budget, compacting prompts, replies, thinking, and tool calls by kind until it fits, and dropping from the middle of the conversation as a last resort; calls are counted per tool, and back-to-back `read`/`glob`/`grep`/`find` calls list their paths merged by shared prefix; `detail` and `turns` zoom in.
-### Fixed
-
-- Fixed ACP `session/load` and `session/resume` rejecting saved Copilot 1M models during a background catalog refresh ([#20467](https://github.com/can1357/oh-my-pi/issues/20467)).
-### Fixed
-
-- `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` now apply to assistant replies, thinking, user prompts, extension messages, summaries and tool output, not only plain Markdown blocks ([#20468](https://github.com/can1357/oh-my-pi/issues/20468))
-### Fixed
-
-- Fixed rules from extension packages listed in a config overlay's `extensions:` (`PI_CONFIG_FILES`/`--config`) disappearing after the system prompt is rebuilt, e.g. after `setActiveTools`, `/new`, or `/clear` ([#20475](https://github.com/can1357/oh-my-pi/issues/20475))
-### Fixed
-
-- Fixed idle follow-ups getting stuck in After yield after an extension message or a compaction summary ([#20465](https://github.com/can1357/oh-my-pi/issues/20465)).
-### Fixed
-
-- Resuming a goal whose token budget is already spent now keeps it budget-limited instead of reporting it active with 0 tokens remaining, and incomplete-todo reminders no longer ask the agent to keep working while the goal is budget-limited ([#20455](https://github.com/can1357/oh-my-pi/issues/20455))
-- A classifier refusal now ends the turn and is handed back to the agent instead of re-sending the refused content to every fallback chain entry at full price; only the zero-cost retry Anthropic's fallback credit grants still switches, and `retry.fallbackRevertPolicy: cooldown-expiry` restores the primary after it ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
-- Provider content-filter stops (Bedrock `content_filtered`, Anthropic's content filtering policy, Gemini's blocked-by-content-filters wording) no longer retry or walk the fallback chain ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
 
 ## [19.2.0] - 2026-11-25
 
