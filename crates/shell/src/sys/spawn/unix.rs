@@ -1558,10 +1558,10 @@ fn reap(pid: i32) -> libc::rusage {
 	ru
 }
 
-/// The usage `wait4` reported for a reaped child, plus on macOS what its
-/// zombie still told [`proc_pid_rusage`](libc::proc_pid_rusage) (`apple`):
-/// instructions, cycles and the peak memory footprint.
-fn proc_usage(ru: &libc::rusage, apple: Option<&libc::rusage_info_v4>) -> ProcUsage {
+/// The usage `wait4` reported for a reaped child. Instructions, cycles and the
+/// peak footprint stay 0: only macOS reports them, and
+/// [`ExtProc::usage`] fills them in from [`apple_usage`] there.
+fn proc_usage(ru: &libc::rusage) -> ProcUsage {
 	let ns = |tv: libc::timeval| {
 		(tv.tv_sec.max(0) as u64) * 1_000_000_000 + (tv.tv_usec.max(0) as u64) * 1_000
 	};
@@ -1582,9 +1582,9 @@ fn proc_usage(ru: &libc::rusage, apple: Option<&libc::rusage_info_v4>) -> ProcUs
 		signals:              count(ru.ru_nsignals),
 		voluntary_switches:   count(ru.ru_nvcsw),
 		involuntary_switches: count(ru.ru_nivcsw),
-		instructions:         apple.map_or(0, |ri| ri.ri_instructions),
-		cycles:               apple.map_or(0, |ri| ri.ri_cycles),
-		peak_footprint:       apple.map_or(0, |ri| ri.ri_lifetime_max_phys_footprint),
+		instructions:         0,
+		cycles:               0,
+		peak_footprint:       0,
 	}
 }
 
@@ -1721,13 +1721,23 @@ impl ExtProc for UnixProc {
 		if self.reaped || !self.tracker.lock().collected() {
 			return None;
 		}
+		// The zombie is only queryable until it is reaped.
 		#[cfg(target_os = "macos")]
 		let apple = apple_usage(self.pid);
-		#[cfg(not(target_os = "macos"))]
-		let apple = None;
 		let ru = self.shared.state.reap(self.pid);
 		self.reaped = true;
-		Some(proc_usage(&ru, apple.as_ref()))
+		let usage = proc_usage(&ru);
+		#[cfg(target_os = "macos")]
+		let usage = match apple {
+			Some(ri) => ProcUsage {
+				instructions: ri.ri_instructions,
+				cycles: ri.ri_cycles,
+				peak_footprint: ri.ri_lifetime_max_phys_footprint,
+				..usage
+			},
+			None => usage,
+		};
+		Some(usage)
 	}
 }
 
