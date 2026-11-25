@@ -452,6 +452,10 @@ export interface CompiledCredentialMap {
 	projectId?: CompiledCredentialField;
 	apiEndpoint?: CompiledCredentialField;
 	enterpriseUrl?: CompiledCredentialField;
+	/** Dot path to the refresh token's remaining lifetime in seconds (`OAuthCredentials.refreshExpires`). */
+	refreshExpiresIn?: string;
+	/** Granted scopes (`OAuthCredentials.scope`), usually the response's `scope`. */
+	scope?: CompiledCredentialField;
 }
 
 /** Bearer GET that enriches credentials with identity fields. */
@@ -462,16 +466,17 @@ export interface CompiledUserinfo {
 }
 
 /**
- * One token-endpoint style request. `params` values may use `{placeholders}`
- * (`code`, `state`, `redirect_uri`, `code_verifier`, `client_id`,
- * `client_secret`, `refresh_token`, `device_code`, `scope`, `base`).
+ * One token-endpoint style request. String `params` values may use
+ * `{placeholders}` (`code`, `state`, `redirect_uri`, `code_verifier`,
+ * `client_id`, `client_secret`, `refresh_token`, `device_code`, `scope`,
+ * `base`); numeric values go out as JSON numbers.
  */
 export interface CompiledOAuthRequest {
 	url: CompiledAuthValue;
 	body: "form" | "json";
 	/** Include the grant's standard parameter set before `params`. */
 	standard: boolean;
-	params: Record<string, string>;
+	params: Record<string, string | number>;
 	headers: Record<string, string>;
 	timeoutMs?: number;
 }
@@ -555,6 +560,16 @@ export type CompiledLogin =
 	| CompiledDeviceCodeLogin
 	| CompiledCustomLogin;
 
+/**
+ * Token-endpoint refusals that prove a refresh grant dead: a 400/401 whose
+ * RFC 6749 `error` code is in `codes`, unless its `error_description` equals
+ * `exceptDescription`.
+ */
+export interface CompiledDeadGrant {
+	codes: string[];
+	exceptDescription?: string;
+}
+
 /** Refresh-token grant declared for a provider. */
 export type CompiledRefresh =
 	| { kind: "none" }
@@ -564,6 +579,12 @@ export type CompiledRefresh =
 			token: CompiledOAuthRequest;
 			/** Stored credential fields that must be present before refreshing. */
 			require: string[];
+			/** Sent space-joined as `scope`; a 400 `invalid_scope` retries once without it. */
+			scopes?: string[];
+			/** Refresh once the access token is this close to expiry; the engine default otherwise. */
+			windowMs?: number;
+			/** When set, only these refusals disable the login; every other refresh failure keeps it. */
+			deadGrant?: CompiledDeadGrant;
 			credential: CompiledCredentialMap;
 			userinfo?: CompiledUserinfo;
 			afterRefresh?: string;

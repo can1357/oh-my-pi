@@ -1,5 +1,11 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
+import { afterEach, expect, test } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { ResolvedTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NotificationRule } from "../../../../src/session/transcript/ttsr-notification";
 import {
@@ -18,6 +24,21 @@ import {
 	TtsrNotice,
 } from "../../../../src/ui/transcript/messages/notices";
 import { screenSuite, single } from "./harness";
+
+let originalTheme: ResolvedTheme | undefined;
+afterEach(() => {
+	if (originalTheme) setCurrentTheme(originalTheme);
+	originalTheme = undefined;
+});
+
+test("the tangent status breadcrumb uses the ASCII dash", () => {
+	originalTheme = currentTheme();
+	const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+	setCurrentTheme(theme);
+	const node = single(<TangentDispatch details={{ jobId: "task-1", work: "Review results" }} />);
+	const rows = paintNode(staticEnvironment(theme), node, 80).rows.map(stripEscapes);
+	expect(rows.find(row => row.includes("task-1"))).toContain("[task] task-1 - Review results");
+});
 
 const BOLD = (text: string) => `\x1b[1m${text}\x1b[22m`;
 const ITALIC = (text: string) => `\x1b[3m${text}\x1b[23m`;

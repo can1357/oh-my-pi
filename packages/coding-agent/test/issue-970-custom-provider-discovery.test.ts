@@ -20,7 +20,7 @@ function normalizeRenderedText(text: string): string {
 
 async function createHub(state: ProviderDiscoveryState): Promise<LayerTerminal> {
 	const modelRegistry = {
-		refresh: async () => {},
+		refreshIfStale: async () => false,
 		refreshProvider: async () => {},
 		getError: () => undefined,
 		getAvailable: () => [],

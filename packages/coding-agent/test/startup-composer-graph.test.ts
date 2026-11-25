@@ -47,4 +47,22 @@ describe("startup composer prepaint graph", () => {
 			/omptype/,
 		]);
 	});
+
+	it("loads session construction only after CLI bootstrap, and optional feature implementations only on demand", async () => {
+		const featureOnly = [
+			/coding-agent\/src\/cursor(?:-bridge-tools)?\.ts$/,
+			/irc\/mesh-link\.ts$/,
+			/advisor\/transcript-recorder\.ts$/,
+			/registry\/persisted-scan\.ts$/,
+			/task\/persisted-revive\.ts$/,
+		];
+		const main = await importedModules("src/main.ts");
+		expectGraphExcludes(main, [
+			...featureOnly,
+			/coding-agent\/src\/sdk\.ts$/,
+			/coding-agent\/src\/tools\/index\.ts$/,
+		]);
+		expectGraphExcludes(await importedModules("src/sdk.ts"), featureOnly);
+		expectGraphExcludes(await importedModules("src/cursor.ts"), [/coding-agent\/src\/(sdk|tools\/index)\.ts$/]);
+	});
 });
