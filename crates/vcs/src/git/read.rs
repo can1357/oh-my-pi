@@ -253,8 +253,19 @@ impl GitRepo {
 			if git_dir.join(marker).exists() {
 				return Ok(Some(kind));
 			}
-			if git_dir.join("sequencer/todo").exists() {
-				return Ok(Some("sequencer"));
+		}
+		if let Ok(todo) = std::fs::read_to_string(git_dir.join("sequencer/todo")) {
+			for line in todo.lines().map(str::trim) {
+				if line.is_empty() || line.starts_with('#') {
+					continue;
+				}
+				if line.starts_with("revert ") {
+					return Ok(Some("revert"));
+				}
+				if line.starts_with("pick ") {
+					return Ok(Some("cherry-pick"));
+				}
+				break;
 			}
 		}
 		if self.is_reftable() {
@@ -1494,6 +1505,17 @@ mod tests {
 		fs::write(git_dir.join("REBASE_HEAD"), "")?;
 		assert_eq!(repo.operation_kind()?, None);
 		assert!(!repo.operation_in_progress()?);
+		// Multi-commit cherry-pick/revert sequencer without
+		// CHERRY_PICK_HEAD/REVERT_HEAD.
+		fs::create_dir_all(git_dir.join("sequencer"))?;
+		fs::write(git_dir.join("sequencer/todo"), "pick deadbeef\n")?;
+		assert_eq!(repo.operation_kind()?, Some("cherry-pick"));
+		fs::write(git_dir.join("CHERRY_PICK_HEAD"), "deadbeef\n")?;
+		assert_eq!(repo.operation_kind()?, Some("cherry-pick"));
+		fs::remove_file(git_dir.join("CHERRY_PICK_HEAD"))?;
+		fs::write(git_dir.join("sequencer/todo"), "revert deadbeef\n")?;
+		assert_eq!(repo.operation_kind()?, Some("revert"));
+		fs::remove_dir_all(git_dir.join("sequencer"))?;
 		Ok(())
 	}
 

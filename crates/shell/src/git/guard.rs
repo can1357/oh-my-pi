@@ -310,7 +310,6 @@ fn matches_in_progress(repo: &GitRepo, sub: Sub) -> bool {
 		Ok(Some("merge")) => sub == Sub::Merge,
 		Ok(Some("cherry-pick")) => sub == Sub::CherryPick,
 		Ok(Some("revert")) => sub == Sub::Revert,
-		Ok(Some("sequencer")) => matches!(sub, Sub::CherryPick | Sub::Revert),
 		_ => false,
 	}
 }

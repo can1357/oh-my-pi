@@ -31,7 +31,7 @@
 
 ### Changed
 
-- `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases, and retries transient `packed-refs.lock` contention ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
+- `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, and fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
 - The agent matches verification to the request: questions get answers without running anything, plain edits skip test suites, typecheckers and builds nobody asked for, and changes to a function's output run that package's tests
 - The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - With Vim editing mode on, `y` no longer copies to the system clipboard; use `"+y` / `"*y`, or turn on `tui.vimYankToClipboard` to get the old behavior ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
