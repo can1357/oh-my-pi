@@ -6,6 +6,7 @@
 
 - Added `Shell.heldProcesses()`: every live external a shell session holds, in or between runs (`&`/`nohup &` jobs left running included), with whether its `nohup` started it.
 - Added `listProcessesWithEnv(name, value)`, `processInfo(pids)`, `processOutputFiles(pid)` and `killProcessFamily(pids, { spareHangupIgnoring })` for finding processes by an inherited environment tag, describing live processes, locating the file a process writes its output to, and killing a process family while sparing `nohup`'d members.
+- Added an in-process `perl` shell builtin: a Perl 5.34 interpreter covering the core language, regexes (via PCRE2), formats, `tie`, weak references, the common command-line switches (`-e -n -p -i -0 -l -a -F -M`), and commonly used core modules (List::Util, Scalar::Util, POSIX, Data::Dumper, JSON::PP, File::*, Getopt::Long, Time::*, Digest::*, Encode, Storable, …). File and command I/O runs through the shell, so `scheme://` paths and other builtins work from Perl code.
 
 ### Fixed
 
