@@ -12,6 +12,7 @@ import {
 	DEFAULT_BLOCK_MS,
 	credentialBlockScopesForRequest,
 	modelAccountPolicyBlockScope,
+	OAUTH_ORG_POLICY_BLOCK_SCOPE,
 	providerTypeKey,
 } from "./blocks";
 import type { CredentialBlocks } from "./blocks";
@@ -46,6 +47,8 @@ import {
 const SIBLING_UNBLOCK_WAIT_MAX_MS = 5_000;
 /** Slack past a sibling's deadline so the post-wait resolve sees the block expired. */
 const SIBLING_UNBLOCK_SLACK_MS = 25;
+/** Org policy rarely changes during a session; the next request after expiry can probe again. */
+const OAUTH_ORG_POLICY_BLOCK_MS = 7 * 24 * 60 * 60_000;
 
 /** Routing scope and strategy for one failed credential. */
 export type CredentialBlockRouting = {
@@ -215,11 +218,24 @@ export class RateLimits implements LimitsApi {
 				};
 	}
 
+	#exhaustedOrgPolicyRotation(
+		provider: string,
+		sessionId: string | undefined,
+		requestScopes: readonly string[],
+	): CredentialRotation {
+		const poolUnavailableReason = this.#deps.blocks.describeOrgPolicyPoolExhaustion(
+			provider,
+			sessionId,
+			this.#deps.affinity,
+			requestScopes,
+		);
+		return poolUnavailableReason ? { switched: false, poolUnavailableReason } : { switched: false };
+	}
+
 	/**
 	 * Whether any sibling is unblocked under the scopes selection reads; else the
-	 * earliest unblock. A sibling with a live model-policy block was refused the
-	 * requested model, and no block expiry restores that, so it adds no unblock
-	 * time a caller could usefully wait for.
+	 * earliest unblock. A sibling refused by model or organization policy adds
+	 * no unblock time a caller could usefully wait for.
 	 */
 	#siblingAvailability(
 		provider: string,
@@ -239,8 +255,14 @@ export class RateLimits implements LimitsApi {
 			);
 			if (siblingBlockedUntil === undefined) return { free: true };
 			if (
-				modelPolicyScope !== undefined &&
-				this.#deps.blocks.isScopeBlocked(provider, routing.providerKey, sibling.index, modelPolicyScope)
+				this.#deps.blocks.isScopeBlocked(
+					provider,
+					routing.providerKey,
+					sibling.index,
+					OAUTH_ORG_POLICY_BLOCK_SCOPE,
+				) ||
+				(modelPolicyScope !== undefined &&
+					this.#deps.blocks.isScopeBlocked(provider, routing.providerKey, sibling.index, modelPolicyScope))
 			) {
 				continue;
 			}
@@ -446,6 +468,7 @@ export class RateLimits implements LimitsApi {
 	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan,
 	 *   Anthropic model-not-found 404, or agy `Unknown model ID`) → temporarily
 	 *   block only that requested model, then rotate. A denial naming another model or provider changes nothing.
+	 * - exact OAuth organization denial → persist a longer account-wide block.
 	 * - other account-scoped policy denial → temporarily block that account
 	 *   without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
@@ -493,18 +516,26 @@ export class RateLimits implements LimitsApi {
 			apiKey: options?.apiKey,
 			allowStaleOAuthBearer: accountPolicy,
 		});
-		if (!sessionCredential) return { switched: false };
 		if (accountPolicy) {
 			const modelPolicyScope = modelPolicy ? modelAccountPolicyBlockScope(options?.modelId) : undefined;
 			if (modelPolicy && modelPolicyScope === undefined) return { switched: false };
 			const routing = this.#credentialBlockRouting(
 				provider,
-				sessionCredential.type,
+				sessionCredential?.type ?? "oauth",
 				options?.modelId,
 				modelPolicyScope,
 			);
+			if (!sessionCredential) {
+				// A request-layer recovery may have already recorded the refusal and dropped the pin.
+				return this.#exhaustedOrgPolicyRotation(provider, sessionId, routing.siblingBlockScopes);
+			}
 			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
-			routing.blockScope = modelPolicyScope ?? ACCOUNT_POLICY_BLOCK_SCOPE;
+			const orgPolicy =
+				!modelPolicy &&
+				sessionCredential.type === "oauth" &&
+				AIError.isAnthropicOAuthOrganizationDenial(provider, error);
+			routing.blockScope =
+				modelPolicyScope ?? (orgPolicy ? OAUTH_ORG_POLICY_BLOCK_SCOPE : ACCOUNT_POLICY_BLOCK_SCOPE);
 			const sticky = this.#deps.affinity.get(provider, sessionId);
 			if (
 				!sessionCredential.explicit ||
@@ -518,13 +549,17 @@ export class RateLimits implements LimitsApi {
 				sessionCredential.type,
 				sessionCredential.index,
 				// Model-entitlement denials keep the short block: they bar only the requested model.
-				Date.now() + (modelPolicy ? DEFAULT_BLOCK_MS : ACCOUNT_POLICY_BLOCK_MS),
+				Date.now() +
+					(modelPolicy ? DEFAULT_BLOCK_MS : orgPolicy ? OAUTH_ORG_POLICY_BLOCK_MS : ACCOUNT_POLICY_BLOCK_MS),
 				routing,
 				false,
 				{ signal: options?.signal },
 			);
-			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
+			const rotation = await awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
+			if (rotation.switched || sessionCredential.type !== "oauth") return rotation;
+			return this.#exhaustedOrgPolicyRotation(provider, sessionId, routing.siblingBlockScopes);
 		}
+		if (!sessionCredential) return { switched: false };
 
 		const providerKey = providerTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting

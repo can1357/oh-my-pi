@@ -3,7 +3,7 @@
  * a text-only model must receive the vision-role description, same as images sent
  * as prompt content (#16853).
  */
-import { afterEach, expect, it, spyOn } from "bun:test";
+import { afterEach, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,8 +17,8 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { createTestImageDescriptions } from "./helpers/image-description";
 
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
@@ -41,26 +41,32 @@ it("describes an @-mentioned image for a text-only model", async () => {
 	if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
 	const textOnly: Model = { ...bundled, input: ["text"] };
 	const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+	const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+	const modelRegistry = new ModelRegistry(authStorage);
+	const descriptions = createTestImageDescriptions({
+		modelRegistry,
+		settings,
+		artifactsDir: dir,
+		description: "a single grey pixel",
+	});
 	const session = new AgentSession({
 		agent: new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model: textOnly, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
 			convertToLlm,
+			transformProviderContext: descriptions.transform,
 		}),
 		sessionManager: SessionManager.inMemory(),
-		settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-		modelRegistry: new ModelRegistry(authStorage),
+		settings,
+		modelRegistry,
 	});
 	cleanups.push(() => session.dispose());
-	const describe = spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockResolvedValue([
-		{ type: "text", text: "a single grey pixel" },
-	]);
-	cleanups.push(() => describe.mockRestore());
 
 	await session.prompt(`@${imagePath} what does this say?`);
 
-	expect(describe).toHaveBeenCalledTimes(1);
-	expect(describe.mock.calls[0]?.[0]).toHaveLength(1);
-	expect(JSON.stringify(mock.calls[0]?.context.messages)).toContain("a single grey pixel");
+	expect(descriptions.calls).toHaveLength(1);
+	const request = JSON.stringify(mock.calls[0]?.context.messages);
+	expect(request).toContain("a single grey pixel");
+	expect(request).not.toContain('"type":"image"');
 });

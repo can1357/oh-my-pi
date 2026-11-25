@@ -1,9 +1,10 @@
-import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
+import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
-import { isSqliteCorruptionError, USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
+import { isSqliteCorruptionError, resolveCredentialIdentityKey, USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
 import { isUsageLimitReached, usageReportMetadataValue, usageReportScopeAccountId } from "./usage-report";
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
@@ -33,12 +34,14 @@ export const AUTH_BLOCK_SCOPE = "auth";
 /** Account-policy backoffs apply to every model and survive quota resets. */
 export const ACCOUNT_POLICY_BLOCK_SCOPE = "account-policy";
 /**
- * How long an account-wide policy denial (an organization that refuses OAuth, for example) keeps its
- * credential out of rotation. Usage evidence never heals this block early, so a one-minute block picks
- * the dead account again for every new session.
+ * How long a non-organization account-wide policy denial keeps its credential out of rotation. An
+ * organization refusal uses OAUTH_ORG_POLICY_BLOCK_MS in rotation.ts instead. Usage evidence never heals
+ * this block early, so a one-minute block picks the dead account again for every new session.
  */
 export const ACCOUNT_POLICY_BLOCK_MS = 24 * 60 * 60_000;
-const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE] as const;
+/** An organization refused OAuth for this login; even last-resort routing must skip it. */
+export const OAUTH_ORG_POLICY_BLOCK_SCOPE = "oauth-org-policy";
+const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE, OAUTH_ORG_POLICY_BLOCK_SCOPE] as const;
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
 
@@ -366,6 +369,45 @@ export class CredentialBlocks implements BlocksApi {
 	isScopeBlocked(provider: string, providerKey: string, credentialIndex: number, blockScope: string): boolean {
 		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
 		return credentialId !== undefined && this.#exactBlockedUntil(credentialId, providerKey, blockScope) !== undefined;
+	}
+
+	/** Explain a restricted pool with an org rejection and no unblocked account. */
+	describeOrgPolicyPoolExhaustion(
+		provider: string,
+		sessionId: string | undefined,
+		affinity: SessionAffinity,
+		requestScopes: readonly string[],
+	): string | undefined {
+		if (!affinity.isRestricted(provider, sessionId)) return undefined;
+		const providerKey = providerTypeKey(provider, "oauth");
+		const reasons: string[] = [];
+		let hasOrgRejection = false;
+		for (const { id, credential } of this.#deps.pool.entries(provider)) {
+			if (!affinity.allows(provider, sessionId, credential)) continue;
+			const scopes = this.#readPersistedCredentialBlockScopes(id, providerKey);
+			const orgRejection = this.#exactBlockedUntil(id, providerKey, OAUTH_ORG_POLICY_BLOCK_SCOPE, scopes);
+			const until = orgRejection ?? this.#blockedUntilById(id, providerKey, requestScopes, scopes);
+			if (until === undefined) return undefined;
+			const label = sanitizeText(resolveCredentialIdentityKey(provider, credential) ?? `credential ${id}`);
+			if (orgRejection !== undefined) {
+				hasOrgRejection = true;
+				reasons.push(`${label} rejected by org policy`);
+			} else {
+				const authOrPolicyBlock =
+					this.#exactBlockedUntil(id, providerKey, AUTH_BLOCK_SCOPE, scopes) !== undefined ||
+					this.#exactBlockedUntil(id, providerKey, ACCOUNT_POLICY_BLOCK_SCOPE, scopes) !== undefined ||
+					requestScopes.some(
+						scope =>
+							scope.startsWith(MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX) &&
+							this.#exactBlockedUntil(id, providerKey, scope, scopes) !== undefined,
+					);
+				const reason = authOrPolicyBlock ? "blocked" : "usage-limited";
+				reasons.push(`${label} ${reason} until ${new Date(until).toISOString()}`);
+			}
+		}
+		return hasOrgRejection
+			? `All accounts allowed by the session OAuth account pool for ${provider} are unusable: ${reasons.join("; ")}`
+			: undefined;
 	}
 
 	/**
