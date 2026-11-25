@@ -246,6 +246,7 @@ export class IrcBridge {
 			details: {
 				id: msg.id,
 				from: msg.from,
+				...(msg.fromLabel ? { fromLabel: msg.fromLabel } : {}),
 				message: msg.body,
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),

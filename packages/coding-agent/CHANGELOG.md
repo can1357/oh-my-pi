@@ -49,6 +49,7 @@
 - Eval-defined tools (`@tool` / `tool(fn)` and the `tools` field on `task`, `agent()`, `workpool()`) are now off by default; set `eval.tools.enabled` to turn them back on
 - When `/wt` moves the session into an ovnfs checkout, its message now says "Moved to ovnfs checkout <name> at <path>" instead of "Moved to worktree"
 - Cross-instance agent messaging (`task.crossInstance`) is now on by default: other omp instances in the same folder can read your agents' outputs and message them; turn the setting off to opt out
+- Messages to and from agents of other omp instances show that instance's session title instead of its pid (`IRC ⟵ Fix login flow`, `Fix login flow/Reviewer` for its subagents); untitled sessions still show the pid. `agent://peers` lists each instance's session title next to its pid
 
 ### Changed
 

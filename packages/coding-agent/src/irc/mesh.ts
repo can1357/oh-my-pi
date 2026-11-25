@@ -10,6 +10,7 @@
 import type { IrcDeliveryReceipt } from "./irc-types";
 import { isRecord, logger, toError } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import type { AgentSession } from "../session/agent-session";
 import { canonicalProjectDir, daemonClient } from "../daemon/client";
 import { type DaemonClient, type DaemonTunnel, projectScope } from "../daemon/protocol";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -38,6 +39,8 @@ const REJOIN_DELAY_MS = 1_000;
 /** The mesh link of this process. */
 class AgentMesh {
 	readonly #projectDir: string;
+	readonly #session: AgentSession;
+	readonly #unsubscribeSession: (() => void)[];
 	readonly #lifetime = new AbortController();
 	#unsubscribeReconnect?: () => void;
 	#unsubscribeRegistry?: () => void;
@@ -50,8 +53,14 @@ class AgentMesh {
 	readonly #wakes = new Map<number, number[]>();
 	#publishQueued = false;
 
-	constructor(projectDir: string) {
+	constructor(projectDir: string, session: AgentSession) {
 		this.#projectDir = projectDir;
+		this.#session = session;
+		// A rename or a switch to another session retitles this instance for its peers.
+		this.#unsubscribeSession = [
+			session.sessionManager.onSessionNameChanged(() => this.#schedulePublish()),
+			session.registerSessionChangeCallback(() => this.#schedulePublish()),
+		];
 		this.#rejoin();
 	}
 
@@ -62,6 +71,17 @@ class AgentMesh {
 
 	peer(pid: number): MeshPeer | undefined {
 		return pid === process.pid ? undefined : this.#peers.get(pid);
+	}
+
+	/**
+	 * Display name of a remote agent: its instance's session title in place of
+	 * the pid (`<title>/<id>` for a subagent). Undefined while that instance has
+	 * no title; messages still address {@link formatPeerAddress}.
+	 */
+	label(address: PeerAddress): string | undefined {
+		const title = this.peer(address.pid)?.title;
+		if (!title) return undefined;
+		return address.id ? `${title}/${address.id}` : title;
 	}
 
 	/** Deliver `body` from local agent `from` to a remote agent; resolves with the recipient's receipt. */
@@ -103,6 +123,7 @@ class AgentMesh {
 	/** Leave the room and dispose subscriptions and pending deliveries. */
 	stop(): void {
 		this.#lifetime.abort();
+		for (const unsubscribe of this.#unsubscribeSession) unsubscribe();
 		this.#unsubscribeReconnect?.();
 		this.#unsubscribeRegistry?.();
 		this.#tunnel?.close();
@@ -148,12 +169,7 @@ class AgentMesh {
 				this.#rejoin();
 			});
 			this.#unsubscribeRegistry = AgentRegistry.global().onChange(event => {
-				if (event.type === "metadata_changed" || event.ref.kind === "advisor" || this.#publishQueued) return;
-				this.#publishQueued = true;
-				queueMicrotask(() => {
-					this.#publishQueued = false;
-					this.#publishState();
-				});
+				if (event.type !== "metadata_changed" && event.ref.kind !== "advisor") this.#schedulePublish();
 			});
 		}
 		const opened = await client.open({
@@ -192,6 +208,16 @@ class AgentMesh {
 		this.#publishState();
 	}
 
+	/** Publish state once per microtask, however many changes land in it. */
+	#schedulePublish(): void {
+		if (this.#publishQueued) return;
+		this.#publishQueued = true;
+		queueMicrotask(() => {
+			this.#publishQueued = false;
+			this.#publishState();
+		});
+	}
+
 	#publishState(): void {
 		if (!this.#tunnel) return;
 		const registry = AgentRegistry.global();
@@ -205,7 +231,15 @@ class AgentMesh {
 				}
 			}
 		}
-		this.#emit({ t: "state", state: { sessionFile, status: main?.status ?? "unknown", agents } });
+		this.#emit({
+			t: "state",
+			state: {
+				sessionFile,
+				status: main?.status ?? "unknown",
+				agents,
+				title: this.#session.sessionManager.getSessionName(),
+			},
+		});
 	}
 
 	#emit(message: MeshUp): void {
@@ -243,13 +277,15 @@ class AgentMesh {
 				error: `Refused: instance ${process.pid} accepts at most ${WAKE_BUDGET} messages per ${WAKE_WINDOW_MS / 60_000} minutes from one peer.`,
 			};
 		} else {
-			const from = formatPeerAddress({
+			const sender: PeerAddress = {
 				pid: message.fromPid,
 				...(message.from === MAIN_AGENT_ID ? {} : { id: message.from }),
-			});
+			};
+			const fromLabel = this.label(sender);
 			try {
 				receipt = await IrcBus.global().send({
-					from,
+					from: formatPeerAddress(sender),
+					...(fromLabel ? { fromLabel } : {}),
 					to: message.to,
 					body: message.body,
 					localOnly: true,
@@ -287,11 +323,11 @@ export function agentMesh(): AgentMesh | undefined {
 	return mesh;
 }
 
-/** Join or leave the room as the interactive session's cross-instance setting changes. */
-export function bindAgentMesh(projectDir: string, settings: Settings): () => void {
+/** Join or leave the room as the interactive `session`'s cross-instance setting changes. */
+export function bindAgentMesh(projectDir: string, settings: Settings, session: AgentSession): () => void {
 	const apply = (enabled: boolean) => {
 		if (enabled) {
-			mesh ??= new AgentMesh(projectDir);
+			mesh ??= new AgentMesh(projectDir, session);
 		} else {
 			const previous = mesh;
 			mesh = undefined;
