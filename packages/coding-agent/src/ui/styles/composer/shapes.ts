@@ -74,6 +74,8 @@ export interface ComposerRowContext extends ComposerChromeContext {
 	readonly last: boolean;
 	/** Cells an end-of-row caret took from the right chrome's padding. */
 	readonly overflow: number;
+	/** The end-of-input row of a side-bordered shape: the bottom border moves to its own row. */
+	readonly imeSafeCursorTail?: boolean;
 }
 
 /** A composer shape (see the module docs). */

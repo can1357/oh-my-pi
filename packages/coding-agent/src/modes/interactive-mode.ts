@@ -1427,6 +1427,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				vim: cfgTuiVimMode.get(settings),
 				autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
 				hardwareCursor: cfgShowHardwareCursor.get(settings),
+				imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
 			});
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
@@ -3524,6 +3525,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		if (any("showHardwareCursor"))
 			this.composer.setCaret(cfgShowHardwareCursor.get(this.settings) ? "terminal" : "drawn");
+		if (any("tui.imeSafeCursor")) this.#frame.setImeSafeCursor(cfgTuiImeSafeCursor.get(this.settings));
 		if (any("autocompleteMaxVisible"))
 			this.composer.setAutocompleteMaxVisible(cfgAutocompleteMaxVisible.get(this.settings));
 		if (any("composer.shape")) this.syncComposerShape();

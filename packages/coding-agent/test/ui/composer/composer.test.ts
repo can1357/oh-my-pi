@@ -527,3 +527,12 @@ describe("a `?` draft", () => {
 		expect(field?.props()).not.toHaveProperty("lang", expect.anything());
 	});
 });
+
+describe("IME-safe cursor layout", () => {
+	test("moves the box bottom border to its own row at the end of input", () => {
+		const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true });
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.slice(-2)).toEqual(["│  hi", `╰${"─".repeat(18)}╯`]);
+	});
+});
