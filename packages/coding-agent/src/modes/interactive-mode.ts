@@ -394,7 +394,8 @@ import {
 } from "@oh-my-pi/pi-tui";
 
 import { insideMultiplexer } from "@oh-my-pi/pi-tui/driver/mux/detect";
-import { setLinkSchemes, setMarkdownLook } from "@oh-my-pi/pi-tui/term/painters/md";
+import { setLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
+import { setMarkdownLook } from "@oh-my-pi/pi-tui/text/markdown/look";
 import { KeybindingsManager } from "../config/keybindings/keybindings";
 import { appInterruptKeys } from "../config/keybindings/matchers";
 import { setExtensionLinkClicksProvider } from "../extensibility/extensions/link-clicks";
@@ -888,7 +889,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		pills.jobsRunning.set(background.size);
 		pills.jobWidgets.set(this.session.getRunningJobWidgets().filter(entry => background.has(entry.id)));
-		this.statusLine.refresh();
+		this.statusLine.refreshJobs();
 	}
 	/** The job widget registry this mode follows, and how to stop listening to it. */
 	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
@@ -1034,7 +1035,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	onInputCallback?: (input: SubmittedUserInput) => void;
 	optimisticUserMessageSignature: string | undefined = undefined;
 	locallySubmittedUserSignatures: Set<string> = new Set();
-	#pendingSubmittedInput: SubmittedUserInput | undefined;
+	#pendingSubmittedInput: (SubmittedUserInput & { submittedAt: number }) | undefined;
 	#pendingSubmissionDispose: (() => void) | undefined;
 	#pendingSubmissionPreservesDraft = false;
 	/** Unregisters this mode's transcript-image blob writer (a later mode's registration survives). */
@@ -1700,13 +1701,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"thinking.set": value => this.#inputController.setThinkingFromComposer(value),
 				"dictation.toggle": () => void this.#toggleComposerDictation(),
 			},
-			rate: () => {
-				if (!showRate()) return undefined;
-				// Session events refresh the facts; the rate meter itself is not reactive.
-				this.statusLine.facts();
-				const rate = this.tokenRate.rate();
-				return rate === null ? undefined : Math.round(rate * 10) / 10;
-			},
+			rate: () => (showRate() ? this.statusLine.composerRate() : undefined),
 		});
 	}
 
@@ -1811,6 +1806,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#syncTrayHost();
 			});
 		});
+		// Tern reads and shows this session's checkout itself: nothing to read here while it does.
+		this.#effect(() => {
+			const homed = this.shell.native() && this.shell.host?.checkoutShown() === true;
+			untrack(() => this.statusLine.setCheckoutHomed(homed));
+		});
 		this.#probeProgramStatus();
 	}
 
@@ -1879,17 +1879,15 @@ export class InteractiveMode implements InteractiveModeContext {
 						this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
 				);
 				return;
-			case "rewind":
-				this.showUserMessageSelector();
-				return;
 			case "edit-turn":
 			case "retry-turn":
 			case "rewind-turn":
 			case "fork-turn":
-				void this.#selectorController.runTurnAction(act.slice(0, -"-turn".length) as TurnAct, {
-					role: "user",
-					at: timestamp,
-				});
+				void this.#selectorController.runTurnAction(
+					act.slice(0, -"-turn".length) as TurnAct,
+					{ role: "user", at: timestamp },
+					this.#pendingSubmittedInput,
+				);
 		}
 	}
 
@@ -2128,7 +2126,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#inputController.enableEnhancedPaste();
 		}
 		this.#bindShellHost();
-		if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
 		pushTerminalTitle();
 		// Claim the terminal title before any session update: this is the one path
 		// that releases the teardown latch, so a late async `setSessionTerminalTitle`
@@ -2136,7 +2133,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
-		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
+		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).titleSpinnerInterval);
 		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		this.#probeProgramStatus();
@@ -2387,6 +2384,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// other's turn instead of dying.
 		this.composer.setDisableSubmit(false);
 		this.#idleMaintenanceActivity.ready = true;
+		if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
 		this.syncIdleMaintenanceView();
 		// The first alt+p then opens as fast as a reopen.
 		this.#selectorController
@@ -3327,7 +3325,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		},
 		options?: { preserveDraft?: boolean; clearEditor?: boolean },
 	): SubmittedUserInput {
-		const submission: SubmittedUserInput = {
+		const submission = {
+			submittedAt: Date.now(),
 			text: input.text,
 			images: input.images,
 			imageLinks: input.imageLinks,
@@ -3353,15 +3352,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			const imageCount = submission.images?.length ?? 0;
 			this.optimisticUserMessageSignature = `${submission.text}\u0000${imageCount}`;
 			this.#pendingSubmissionDispose = this.recordLocalSubmission(submission.text, imageCount);
-			this.#optimisticUserMessageBlocks = this.addMessageToChat(
-				{
-					role: "user",
-					content: [{ type: "text", text: submission.text }, ...(submission.images ?? [])],
-					attribution: "user",
-					timestamp: Date.now(),
-				},
-				input.imageLinks ? { imageLinks: input.imageLinks } : {},
-			);
+			this.#replayOptimisticUserMessage();
 		} else {
 			this.clearOptimisticUserMessage();
 		}
@@ -3624,7 +3615,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.spinnerInterval);
+		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
 
 		if (
 			any(
@@ -4063,7 +4054,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				role: "user",
 				content: [{ type: "text", text: submission.text }, ...(submission.images ?? [])],
 				attribution: "user",
-				timestamp: Date.now(),
+				timestamp: submission.submittedAt,
 			},
 			submission.imageLinks ? { imageLinks: submission.imageLinks } : {},
 		);
@@ -4787,9 +4778,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A mid-turn exit must interrupt the currently streaming turn.
 		// The plan-mode prompt instructs the model to keep planning until it
 		// submits the plan with `propose`, so the live turn must be aborted inside
-		// `runModeExitTeardown` to avoid restarting on the stale toolset.
+		// `withQueueDrainPaused` to avoid restarting on the stale toolset.
 		if (options?.interruptActiveTurn && this.session.isStreaming) {
-			await this.session.runModeExitTeardown(async () => {
+			await this.session.withQueueDrainPaused(async () => {
 				await this.session.abort({ reason: USER_INTERRUPT_LABEL });
 				await this.#tearDownPlanMode(options);
 			});
@@ -5973,7 +5964,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// turn would otherwise let a queued user steer/follow-up restart on the
 		// still-live Vibe tools before this teardown removes them (issue #8326).
 		let killed = 0;
-		await this.session.runModeExitTeardown(async () => {
+		await this.session.withQueueDrainPaused(async () => {
 			if (this.session.isStreaming) {
 				await this.session.abort();
 			}
@@ -7209,10 +7200,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	// Extension UI integration
 	setToolUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
 		this.#toolUiContextSetter(uiContext, hasUI);
-	}
-
-	initializeHookRunner(uiContext: ExtensionUIContext, hasUI: boolean): void {
-		this.#extensionUiController.initializeHookRunner(uiContext, hasUI);
 	}
 
 	// UI helpers

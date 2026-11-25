@@ -7,7 +7,6 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { initTheme } from "../src/ui/theme/service";
@@ -69,9 +68,6 @@ describe("InteractiveMode tiny-title prewarm", () => {
 			modelRegistry,
 		});
 		mode = new InteractiveMode(session, "test", () => {}, [], undefined, undefined, createModeTerminal().frame);
-		// A real fs.watch on repo HEAD in a parallel Bun worker can trip a Bun
-		// SIGTRAP in the suite; this contract does not need branch watching.
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 	});
 
 	afterEach(async () => {

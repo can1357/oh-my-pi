@@ -6,8 +6,8 @@
 //!   ([`ShellApi::run_subshell_in`]), signals that tree at the deadline
 //!   ([`SigTarget::Label`](crate::bash::SigTarget::Label)), waits for it and
 //!   the externals it started, and escalates to `KILL` after `-k`.
-//! - `time` with options (`-l`, `-v`, `-p`): runs its command in a subshell
-//!   and reports the times and resource usage of the externals it waited for
+//! - `time` with options (`-l`, `-v`, `-p`): runs its command in a subshell and
+//!   reports the times and resource usage of the externals it waited for
 //!   ([`crate::bash::ProcUsage`]), as macOS and GNU `/usr/bin/time` do.
 //! - `nohup`: runs its command in a detached tree ([`Lineage::detached`]): the
 //!   shell's cancel spares it and the spawner leaves its externals running when
@@ -66,13 +66,8 @@ const TIME: ToolRef = ToolRef(6);
 
 /// pi's tools other than the extras, by name; [`ToolConfig::lookup`] offers
 /// `nohup` and `git` only when the session's switches turn them on.
-const TOOLS: [(&str, ToolRef); 5] = [
-	("time", TIME),
-	("timeout", TIMEOUT),
-	("urlmap", URLMAP),
-	("nohup", NOHUP),
-	("git", GIT),
-];
+const TOOLS: [(&str, ToolRef); 5] =
+	[("time", TIME), ("timeout", TIMEOUT), ("urlmap", URLMAP), ("nohup", NOHUP), ("git", GIT)];
 
 /// The switch that hands `nohup` to the system binary.
 const NOHUP_OFF: &str = "PI_DISABLE_NOHUP_BUILTIN";
@@ -204,20 +199,37 @@ impl ToolConfig {
 	}
 }
 
-/// The externals spawned in labeled subshell trees: `(label, pid)`.
+/// The externals spawned in labeled subshell trees, and which trees `time`
+/// measures.
 ///
 /// The host records each spawn whose [`Lineage::label`] is set
-/// ([`SpawnLog::record`]); `timeout` waits for and escalates on its own. Cheap
-/// to clone; clones share the log.
+/// ([`SpawnLog::record`]); `timeout` waits for and escalates on its own. The
+/// host spawns the externals of measured labels for measurement
+/// ([`SpawnLog::measured`]). Cheap to clone; clones share the log.
 #[derive(Clone, Default)]
-pub struct SpawnLog(Arc<Mutex<Vec<(u32, u32)>>>);
+pub struct SpawnLog(Arc<Mutex<LogState>>);
+
+#[derive(Default)]
+struct LogState {
+	/// `(label, pid)` of each recorded spawn.
+	spawns:   Vec<(u32, u32)>,
+	/// Labels of `time` subshells and of the tool subshells below them.
+	measured: Vec<u32>,
+}
 
 impl SpawnLog {
 	/// `pid` was spawned with `lineage`.
 	pub fn record(&self, lineage: Lineage, pid: u32) {
 		if lineage.label != 0 {
-			self.0.lock().push((lineage.label, pid));
+			self.0.lock().spawns.push((lineage.label, pid));
 		}
+	}
+
+	/// Whether externals of label `label` run for `time`, which reports
+	/// their resource usage
+	/// ([`NativeSpawner::spawn_measured`](crate::sys::NativeSpawner::spawn_measured)).
+	pub fn measured(&self, label: u32) -> bool {
+		label != 0 && self.0.lock().measured.contains(&label)
 	}
 
 	/// The recorded externals of `labels` that are still running.
@@ -225,6 +237,7 @@ impl SpawnLog {
 		self
 			.0
 			.lock()
+			.spawns
 			.iter()
 			.filter(|&&(label, pid)| labels.contains(&label) && running(pid))
 			.map(|&(_, pid)| pid)
@@ -232,7 +245,24 @@ impl SpawnLog {
 	}
 
 	fn forget(&self, labels: &[u32]) {
-		self.0.lock().retain(|(label, _)| !labels.contains(label));
+		self
+			.0
+			.lock()
+			.spawns
+			.retain(|(label, _)| !labels.contains(label));
+	}
+
+	/// Measure the externals of `label`, and of the labels started below it.
+	fn measure(&self, label: u32) {
+		self.0.lock().measured.push(label);
+	}
+
+	fn unmeasure(&self, labels: &[u32]) {
+		self
+			.0
+			.lock()
+			.measured
+			.retain(|label| !labels.contains(label));
 	}
 }
 
@@ -274,6 +304,8 @@ const fn signal_os(_pid: u32, _signal: crate::bash::Signal, _group: bool) {}
 struct Labels {
 	last:    u32,
 	parents: Vec<(u32, u32)>,
+	/// Where measured labels are kept: a label below one is measured too.
+	log:     SpawnLog,
 }
 
 impl Labels {
@@ -282,6 +314,9 @@ impl Labels {
 		self.last = self.last.wrapping_add(1).max(1);
 		if parent != 0 {
 			self.parents.push((self.last, parent));
+			if self.log.measured(parent) {
+				self.log.measure(self.last);
+			}
 		}
 		self.last
 	}
@@ -305,6 +340,7 @@ impl Labels {
 
 	fn release(&mut self, group: &[u32]) {
 		self.parents.retain(|(child, _)| !group.contains(child));
+		self.log.unmeasure(group);
 	}
 }
 
@@ -410,9 +446,11 @@ impl Tool {
 /// A tool's subshell: its run and label, and its status once it ended.
 #[derive(Default)]
 struct Child {
-	run:    Option<RunId>,
-	label:  u32,
-	status: Option<i32>,
+	run:      Option<RunId>,
+	label:    u32,
+	status:   Option<i32>,
+	/// Its externals are spawned for measurement (`time`).
+	measured: bool,
 }
 
 impl Child {
@@ -429,6 +467,9 @@ impl Child {
 		redirect: &str,
 	) {
 		self.label = turn.labels.fresh(api.lineage().label);
+		if self.measured {
+			turn.log.measure(self.label);
+		}
 		let mut script = Script::command(format!("\"$@\"{redirect}").into_bytes());
 		script.args = Some(argv);
 		// The command's environment, per-command assignments included.
@@ -511,7 +552,7 @@ impl ToolCalls {
 		Self {
 			active: Vec::new(),
 			orphans: Vec::new(),
-			labels: Labels::default(),
+			labels: Labels { log: log.clone(), ..Labels::default() },
 			log,
 			waker,
 			config,

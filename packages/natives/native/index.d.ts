@@ -831,6 +831,13 @@ export declare class Shell {
    */
   liveBackgroundJobCount(): Promise<number>
   /**
+   * Every live external this shell session holds, whether a run is in
+   * flight or not: background jobs (`cmd &`, `nohup cmd &`) earlier runs
+   * left running included. Each is unreaped while held, so its pid names
+   * it. Empty once the session is gone.
+   */
+  heldProcesses(): Array<HeldProcess>
+  /**
    * Pids of the still-alive processes spawned by this session's in-flight
    * `run`, in spawn order: foreground commands, pipeline stages, and `&`
    * jobs started by that run. Builtins run in-process and never appear.
@@ -2858,6 +2865,17 @@ export declare enum HeldFileKind {
   Locked = 'locked'
 }
 
+/** A live external a shell session holds ([`Shell::held_processes`]). */
+export interface HeldProcess {
+  /** OS process id. */
+  pid: number
+  /**
+   * It runs in a detached tree: started under the shell's `nohup`, which
+   * does not mask `SIGHUP`, so this is how such a process is told apart.
+   */
+  detached: boolean
+}
+
 /**
  * Highlight code and return ANSI-colored lines.
  *
@@ -3124,6 +3142,24 @@ export declare enum KeyEventType {
 }
 
 /**
+ * SIGKILL every process of the family of `pids`: one process-table
+ * snapshot, the ppid walk plus every group/session a member leads, then
+ * SIGCONT the stopped ones. With `spareHangupIgnoring`, members ignoring
+ * SIGHUP and everything descended (ppid chain) from them are left alone.
+ * Returns the number signalled. Windows kills each pid's tree.
+ */
+export declare function killProcessFamily(pids: Array<number>, options?: KillProcessFamilyOptions | undefined | null): number
+
+/** Options for [`kill_process_family`]. */
+export interface KillProcessFamilyOptions {
+  /**
+   * Leave members ignoring SIGHUP (`nohup`) and everything descended from
+   * them alive.
+   */
+  spareHangupIgnoring?: boolean
+}
+
+/**
  * Matches of one [`LineMatcher::match_lines`] call, column-wise.
  *
  * Match `i` is on line `lines[i]` for pattern `rules[i]`, and its named
@@ -3148,6 +3184,16 @@ export interface LineRange {
   /** 1-indexed inclusive last visible line. */
   endLine: number
 }
+
+/**
+ * Live processes (never the caller) whose environment contains exactly
+ * `name=value`. Reads the environment each process was exec'd with: only
+ * the caller's user's processes are readable, others are skipped. macOS
+ * also withholds the environment of Apple platform binaries (`/bin/sh`,
+ * `/bin/sleep`, …) even from the same user, so those never match there.
+ * Empty on platforms without a readable process environment (Windows).
+ */
+export declare function listProcessesWithEnv(name: string, value: string): Array<TaggedProcess>
 
 /**
  * Walk the workspace once and return tree entries plus AGENTS.md candidates.
@@ -3691,6 +3737,25 @@ export interface PredictedWord {
   confidence: number
 }
 
+/**
+ * The record of each of `pids` that is alive (zombies and unknown pids
+ * skipped), from one process-table scan. Empty on Windows.
+ */
+export declare function processInfo(pids: Array<number>): Array<TaggedProcess>
+
+/**
+ * Regular files a process's stdout/stderr (fd 1/2) point at; a field is
+ * undefined when that descriptor is not a regular file (pipe, terminal,
+ * socket, deleted file) or unreadable.
+ */
+export declare function processOutputFiles(pid: number): ProcessOutputFiles
+
+/** Regular files a process's stdout/stderr point at. */
+export interface ProcessOutputFiles {
+  stdout?: string
+  stderr?: string
+}
+
 /** Current state of a process reference. */
 export declare enum ProcessStatus {
   /** The referenced process is still running. */
@@ -3984,6 +4049,12 @@ export interface ShellCommandRequest {
    * otherwise.
    */
   stdin: string
+  /**
+   * Arguments that are job specs (`%1`, `%%`, `%name`) naming a job of the
+   * invoking shell that runs a program, mapped to that program's OS pid;
+   * absent when no argument is one.
+   */
+  jobs?: Record<string, number>
 }
 
 /** Shell-composable response of a session command. */
@@ -4727,6 +4798,19 @@ export declare function supportsLanguage(lang: string): boolean
 export interface SvgCell {
   widthPx: number
   heightPx: number
+}
+
+/** A live process whose environment carries a given `NAME=value` entry. */
+export interface TaggedProcess {
+  pid: number
+  ppid: number
+  /** ms since the epoch */
+  startedAt: number
+  /** full command line, args joined by spaces */
+  command: string
+  /** SIGHUP is ignored (nohup) */
+  ignoresHangup: boolean
+  stopped: boolean
 }
 
 /** Options for [`TextPredictor::new`]. */

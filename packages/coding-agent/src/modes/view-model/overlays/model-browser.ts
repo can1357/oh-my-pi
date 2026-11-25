@@ -12,9 +12,10 @@ import {
 	modelsAreEqual,
 } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TspPickerColumn, TspPickerMark } from "@oh-my-pi/pi-wire";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../../thinking/levels";
-import { FuzzyQuery, FuzzyText, fuzzyRank } from "../../../utils/fuzzy";
+import { type FuzzyFilterResult, type FuzzyMatch, FuzzyQuery, FuzzyText, fuzzyRank } from "../../../utils/fuzzy";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { drainWork } from "../../../utils/sliced-work";
 
@@ -154,6 +155,8 @@ export interface ModelCompactionPoint {
 
 /** Read-only catalog surface consumed by model browsers. */
 export interface ModelBrowserRegistry {
+	/** Identity of the full catalog snapshot; without one, compare its rows. Availability can change independently. */
+	readonly catalogRevision?: object;
 	getError(): unknown;
 	getAvailable(kind?: ModelKind | "all"): Model[];
 	getAll(kind?: ModelKind | "all"): Model[];
@@ -254,6 +257,19 @@ export function buildSearchAffinity(
 
 // ─── Role assignments ───────────────────────────────────────────────────────
 
+// A new catalog/availability snapshot or role predicate gets a new filtered pool.
+// Reusing the pool also reuses the model resolver's indexes on that array.
+const kEligiblePools = Symbol("model-browser.eligiblePools");
+type RolePool = ReadonlyArray<Model> & { [kEligiblePools]?: Map<ModelBrowserRoleInfo["accepts"], Model[]> };
+
+function eligible(pool: RolePool, accepts: ModelBrowserRoleInfo["accepts"]): Model[] {
+	if (!pool[kEligiblePools] && !Object.isExtensible(pool)) return pool.filter(accepts);
+	const byAccepts = (pool[kEligiblePools] ??= new Map());
+	let models = byAccepts.get(accepts);
+	if (!models) byAccepts.set(accepts, (models = pool.filter(accepts)));
+	return models;
+}
+
 /**
  * Resolve every known role to its display assignment: configured role values
  * resolve against `allModels`; unconfigured roles fall back to auto-selection
@@ -282,38 +298,25 @@ function* roleAssignmentsWork(
 			return parseConfiguredThinkingLevel(settings.defaultThinkingLevel) ?? ThinkingLevel.Inherit;
 		return ThinkingLevel.Inherit;
 	};
-	// Roles sharing an `accepts` predicate share one filtered pool.
-	const eligible = (
-		pool: ReadonlyArray<Model>,
-		byAccepts: Map<ModelBrowserRoleInfo["accepts"], Model[]>,
-		role: string,
-	): Model[] => {
-		const accepts = settings.getRoleInfo(role).accepts;
-		let models = byAccepts.get(accepts);
-		if (!models) {
-			models = pool.filter(accepts);
-			byAccepts.set(accepts, models);
-		}
-		return models;
-	};
 
 	const roles: RoleAssignments = {};
 	const configured = new Set<string>();
-	const catalogPools = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
 	for (const role of settings.knownRoleIds) {
 		const value = settings.getModelRole(role);
 		if (!value) continue;
 		configured.add(role);
-		const resolved = settings.resolveRoleValue(value, eligible(allModels, catalogPools, role));
+		const resolved = settings.resolveRoleValue(value, eligible(allModels, settings.getRoleInfo(role).accepts));
 		if (resolved.model)
 			roles[role] = { model: resolved.model, thinkingLevel: levelOf(role, resolved), autoSelected: false };
 		yield;
 	}
 	if (autoCandidates.length > 0) {
-		const candidatePools = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
 		for (const role of settings.knownRoleIds) {
 			if (configured.has(role)) continue;
-			const resolved = settings.resolveRoleValue(`pi/${role}`, eligible(autoCandidates, candidatePools, role));
+			const resolved = settings.resolveRoleValue(
+				`pi/${role}`,
+				eligible(autoCandidates, settings.getRoleInfo(role).accepts),
+			);
 			if (resolved.model)
 				roles[role] = { model: resolved.model, thinkingLevel: levelOf(role, resolved), autoSelected: true };
 			yield;
@@ -534,9 +537,14 @@ function modelItemComparator(
 
 // ─── The session's model scope ──────────────────────────────────────────────
 
-/** Picker candidates and ordering inputs shared with composer model mentions. */
+/** The model hub and session picker share the same assignments, item objects, and display order. */
 export interface SessionModelScope {
+	/** Chat models (or the explicit `--models` list), for session picks and composer mentions. */
 	items: ModelBrowserItem[];
+	/** All available kinds, including runners for the hub's kind-specific roles. */
+	availableItems: ModelBrowserItem[];
+	/** The full or scoped catalog, including models the hub shows under locked providers. */
+	catalogModels: readonly Model[];
 	roles: RoleAssignments;
 	mruOrder: ReadonlyArray<string>;
 	error: string | undefined;
@@ -553,17 +561,13 @@ interface SessionModelScopeInputs {
 	error: string | undefined;
 }
 
-function errorText(cause: unknown): string {
-	return cause instanceof Error ? cause.message : String(cause);
-}
-
 function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyArray<Model>): SessionModelScopeInputs {
 	if (scopedModels.length > 0) {
 		try {
 			const pool = scopedRolePool(scopedModels, registry);
 			return { scoped: scopedModels, allModels: pool, roleModels: pool, error: undefined };
 		} catch (cause) {
-			return { scoped: scopedModels, allModels: scopedModels, roleModels: scopedModels, error: errorText(cause) };
+			return { scoped: scopedModels, allModels: scopedModels, roleModels: scopedModels, error: errorMessage(cause) };
 		}
 	}
 	const loadError = registry.getError();
@@ -575,7 +579,7 @@ function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyA
 	try {
 		roleModels = registry.getAvailable("all");
 	} catch (cause) {
-		error = errorText(cause);
+		error = errorMessage(cause);
 		roleModels = [];
 	}
 	return { scoped: undefined, allModels, roleModels, error };
@@ -583,14 +587,22 @@ function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyA
 
 function* scopeFromInputs(
 	settings: ModelBrowserSource,
-	inputs: SessionModelScopeInputs,
-	mruOrder: ReadonlyArray<string>,
+	inputs: SessionModelScopeKey,
 ): Generator<void, SessionModelScope, undefined> {
-	const roles = yield* roleAssignmentsWork(settings, inputs.allModels, inputs.roleModels);
-	const items = buildBrowserItems(inputs.scoped ?? inputs.roleModels.filter(model => modelKind(model) === "chat"));
+	const { allModels, roleModels, scoped, mruOrder, error } = inputs;
+	const roles = yield* roleAssignmentsWork(settings, allModels, roleModels);
+	const availableItems = buildBrowserItems(roleModels);
 	yield;
-	sortModelItems(items, { roles, mruOrder });
-	return { items, roles, mruOrder, error: inputs.error };
+	sortModelItems(availableItems, { roles, mruOrder });
+	let items = availableItems;
+	if (!scoped) {
+		items = availableItems.filter(item => modelKind(item.model) === "chat");
+	} else if (scoped.length !== availableItems.length) {
+		// scopedRolePool appended non-chat runners; only explicit entries are session picks.
+		const listed = new Set(scoped);
+		items = availableItems.filter(item => listed.has(item.model));
+	}
+	return { items, availableItems, catalogModels: allModels, roles, mruOrder, error };
 }
 
 /** Whether two lists hold the same elements (by identity), in order. */
@@ -601,22 +613,16 @@ export function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
 }
 
 /** Everything a {@link SessionModelScope} is derived from, as read at one moment. */
-interface SessionModelScopeKey {
+interface SessionModelScopeKey extends SessionModelScopeInputs {
 	preferences: object;
 	revision: number;
-	inputs: SessionModelScopeInputs;
+	catalogRevision: object | undefined;
 	mruOrder: ReadonlyArray<string>;
 }
 
-/** The last scope built from one registry, with copies of every input it read. */
+/** The last scope built from one registry, with snapshots of its inputs. */
 interface CachedSessionModelScope {
-	preferences: object;
-	revision: number;
-	scoped: readonly Model[] | undefined;
-	allModels: readonly Model[];
-	roleModels: readonly Model[];
-	error: string | undefined;
-	mruOrder: readonly string[];
+	key: SessionModelScopeKey;
 	scope: SessionModelScope;
 }
 
@@ -629,27 +635,27 @@ interface ScopeTagged {
 
 /** The registry's last scope when it was built from `key`'s inputs. */
 function cachedSessionModelScope(
-	registry: ModelBrowserRegistry,
+	cached: CachedSessionModelScope | undefined,
 	key: SessionModelScopeKey,
 ): SessionModelScope | undefined {
-	const cached = (registry as ModelBrowserRegistry & ScopeTagged)[kSessionModelScope];
-	const { inputs } = key;
-	return cached &&
-		cached.preferences === key.preferences &&
-		cached.revision === key.revision &&
-		cached.error === inputs.error &&
-		(cached.scoped === undefined) === (inputs.scoped === undefined) &&
-		(inputs.scoped === undefined || sameItems(cached.scoped!, inputs.scoped)) &&
-		sameItems(cached.allModels, inputs.allModels) &&
-		sameItems(cached.roleModels, inputs.roleModels) &&
-		sameItems(cached.mruOrder, key.mruOrder)
+	if (!cached) return undefined;
+	const last = cached.key;
+	return last.preferences === key.preferences &&
+		last.revision === key.revision &&
+		last.catalogRevision === key.catalogRevision &&
+		last.error === key.error &&
+		(last.scoped === undefined) === (key.scoped === undefined) &&
+		(!key.scoped || sameItems(last.scoped!, key.scoped)) &&
+		(key.scoped || key.catalogRevision || sameItems(last.allModels, key.allModels)) &&
+		sameItems(last.roleModels, key.roleModels) &&
+		sameItems(last.mruOrder, key.mruOrder)
 		? cached.scope
 		: undefined;
 }
 
 /**
- * The session picker's model scope: chat models (or the `--models` scope) in
- * display order, with roles and MRU. The last scope per registry is reused
+ * The hub's and session picker's models in display order, with roles and MRU.
+ * The last scope per registry is reused
  * (shared by every caller: treat it as read-only) until the source's
  * preferences or revision, the MRU order, the scoped models, or the
  * registry's models or load error change.
@@ -674,27 +680,34 @@ export function* sessionModelScopeWork(
 	scopedModels: ReadonlyArray<Model>,
 ): Generator<void, SessionModelScope, undefined> {
 	const key: SessionModelScopeKey = {
+		// Reading the models can materialize the snapshot: read its revision afterwards.
+		...readScopeInputs(registry, scopedModels),
+		catalogRevision: registry.catalogRevision,
 		preferences: settings.preferences ?? settings,
 		revision: settings.revision,
-		inputs: readScopeInputs(registry, scopedModels),
 		mruOrder: settings.mruOrder,
 	};
-	const cached = cachedSessionModelScope(registry, key);
+	const tagged = registry as ModelBrowserRegistry & ScopeTagged;
+	const previous = tagged[kSessionModelScope];
+	const cached = cachedSessionModelScope(previous, key);
 	if (cached) return cached;
-	const scope = yield* scopeFromInputs(settings, key.inputs, key.mruOrder);
-	const raced = cachedSessionModelScope(registry, key);
-	if (raced) return raced;
-	const { inputs } = key;
-	(registry as ModelBrowserRegistry & ScopeTagged)[kSessionModelScope] = {
-		preferences: key.preferences,
-		revision: key.revision,
-		scoped: inputs.scoped && [...inputs.scoped],
-		allModels: [...inputs.allModels],
-		roleModels: [...inputs.roleModels],
-		error: inputs.error,
+
+	// The prewarm yields between roles. Keep the data we read, even for hosts
+	// returning mutable arrays; a versioned full catalog is already a snapshot.
+	const roleModels = [...key.roleModels];
+	const snapshot = {
+		...key,
+		scoped: key.scoped && [...key.scoped],
+		roleModels,
+		allModels: key.scoped ? roleModels : key.catalogRevision ? key.allModels : [...key.allModels],
 		mruOrder: [...key.mruOrder],
-		scope,
 	};
+	const scope = yield* scopeFromInputs(settings, snapshot);
+	if (previous !== tagged[kSessionModelScope]) {
+		// A foreground reader won; never evict its newer scope with older prewarm work.
+		return cachedSessionModelScope(tagged[kSessionModelScope], snapshot) ?? scope;
+	}
+	tagged[kSessionModelScope] = { key: snapshot, scope };
 	return scope;
 }
 
@@ -758,6 +771,59 @@ export function modelSearchText(item: ModelBrowserItem): string {
 /** {@link modelSearchText} without the provider: what the model part of a `provider/model` query searches. */
 function modelIdSearchText({ id, model }: ModelBrowserItem): string {
 	return isFreeModel(model) ? `${id} free` : id;
+}
+
+interface ModelSearchEntry {
+	text: FuzzyText;
+	/** Only time-dependent pricing needs its haystack checked again. */
+	dynamicText?: string;
+	query?: FuzzyQuery;
+	match?: FuzzyMatch;
+}
+
+/** Whole-text membership shared by the visible pane and the hub's catalog-wide counts. */
+export class ModelSearchIndex {
+	readonly #entries = new WeakMap<ModelBrowserItem, ModelSearchEntry>();
+	#raw?: string;
+	#query?: FuzzyQuery;
+
+	prepare(raw: string): FuzzyQuery {
+		if (raw !== this.#raw || !this.#query) {
+			this.#raw = raw;
+			this.#query = new FuzzyQuery(raw);
+		}
+		return this.#query;
+	}
+
+	warm(item: ModelBrowserItem): ModelSearchEntry {
+		const entry = this.#entries.get(item);
+		if (entry && entry.dynamicText === undefined) return entry;
+		const raw = modelSearchText(item);
+		if (entry?.dynamicText === raw) return entry;
+		const fresh: ModelSearchEntry = { text: new FuzzyText(raw) };
+		if (item.model.cost?.timeBased || item.model.factoryDroidCreditCards?.length) fresh.dynamicText = raw;
+		this.#entries.set(item, fresh);
+		return fresh;
+	}
+
+	match(item: ModelBrowserItem, query: FuzzyQuery): FuzzyMatch {
+		const entry = this.warm(item);
+		if (entry.query !== query || !entry.match) {
+			entry.match = query.match(entry.text);
+			entry.query = query;
+		}
+		return entry.match;
+	}
+
+	rank(items: readonly ModelBrowserItem[], raw: string): FuzzyFilterResult<ModelBrowserItem>[] {
+		const query = this.prepare(raw);
+		const results: FuzzyFilterResult<ModelBrowserItem>[] = [];
+		for (const item of items) {
+			const match = this.match(item, query);
+			if (match.matches) results.push({ item, score: match.score });
+		}
+		return results.sort((a, b) => a.score - b.score);
+	}
 }
 
 /** Inputs to {@link ModelItemRanker}. */
@@ -827,13 +893,13 @@ export class ModelItemRanker {
 	 * `provider/model` query lists the prefixed providers' models first,
 	 * matched on the model part; whole-text matches follow.
 	 */
-	rank(query: string): ModelBrowserItem[] {
+	rank(query: string, index?: ModelSearchIndex): ModelBrowserItem[] {
 		if (!query.trim()) return [...this.items];
 		const rows = new Map<ModelBrowserItem, RankRow>();
 		const scoped = parseProviderScopedQuery(query);
 		if (scoped) this.#rankScoped(scoped, rows);
 		const queryKey = compactModelSearchText(query);
-		for (const { item, score } of fuzzyRank(this.items, query, modelSearchText)) {
+		for (const { item, score } of index?.rank(this.items, query) ?? fuzzyRank(this.items, query, modelSearchText)) {
 			if (rows.has(item)) continue;
 			const keys = this.#keys.get(item)!;
 			rows.set(item, {
@@ -888,43 +954,6 @@ export function rankModelItems(
 	options: ModelRankOptions,
 ): ModelBrowserItem[] {
 	return new ModelItemRanker(items, options).rank(query);
-}
-
-/**
- * Hit ranges of `query` in `label`: each whitespace token marks its first
- * case-insensitive substring, else its characters as a greedy in-order
- * subsequence. Undefined when nothing matches.
- */
-export function fuzzyHits(label: string, query: string): [number, number][] | undefined {
-	const tokens = query
-		.toLowerCase()
-		.split(/\s+/)
-		.filter(token => token.length > 0);
-	if (tokens.length === 0) return undefined;
-	const lower = label.toLowerCase();
-	const marked = new Uint8Array(lower.length);
-	for (const token of tokens) {
-		const at = lower.indexOf(token);
-		if (at >= 0) {
-			marked.fill(1, at, at + token.length);
-			continue;
-		}
-		let from = 0;
-		for (const ch of token) {
-			const index = lower.indexOf(ch, from);
-			if (index < 0) break;
-			marked[index] = 1;
-			from = index + ch.length;
-		}
-	}
-	const ranges: [number, number][] = [];
-	for (let i = 0; i < marked.length; i++) {
-		if (!marked[i]) continue;
-		const start = i;
-		while (i < marked.length && marked[i]) i++;
-		ranges.push([start, i]);
-	}
-	return ranges.length > 0 ? ranges : undefined;
 }
 
 // ─── Facts ──────────────────────────────────────────────────────────────────
