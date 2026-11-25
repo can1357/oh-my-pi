@@ -13,6 +13,7 @@ import {
 	type TranscriptCallFilter,
 	type TranscriptFile,
 	type TranscriptHeader,
+	type TranscriptRecord,
 	TranscriptRecordKind,
 	type TranscriptRegexFlags,
 	TranscriptSource,
@@ -24,18 +25,17 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { ToolError } from "../tools/tool-errors";
 import { previewLine, shortenPath } from "../utils/render-utils";
-import { formatCount, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
+import { formatCount, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { listStatedSessionFiles, parseSessionFileName } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
 import { listSubSessionFiles } from "../session/sub-sessions";
 import type { TimeWindow } from "../session/time-window";
+import { parseCallArgs, type TranscriptKind } from "../session/transcript-view";
 import { mapWithConcurrencyLimitAllSettled } from "../task/parallel";
 import { type ArchiveScope, type ArchiveView, ago, resolveSessionFile, scopeLabel, shortId } from "./archive";
 
 /** Text a `grep` searches: a message's text, or a tool call's arguments or result. */
 export type GrepSource = "user" | "assistant" | "thinking" | "args" | "result";
-/** Kinds of transcript records `messages` returns. */
-export type MessageKind = "user" | "assistant" | "thinking" | "call" | "result";
 /** Facts `archive.stats` counts calls by. */
 export type ArchiveStatsKey = "tool" | "day" | "model" | "version" | "project" | "session";
 
@@ -147,7 +147,7 @@ const SOURCE: Record<GrepSource, TranscriptSource> = {
 	result: TranscriptSource.Result,
 };
 
-const RECORD_KIND: Record<MessageKind, TranscriptRecordKind> = {
+const RECORD_KIND: Record<TranscriptKind, TranscriptRecordKind> = {
 	user: TranscriptRecordKind.User,
 	assistant: TranscriptRecordKind.Assistant,
 	thinking: TranscriptRecordKind.Thinking,
@@ -171,7 +171,7 @@ export async function archiveCalls(
 		entry: call.entry ?? null,
 		callId: call.callId,
 		tool: call.tool,
-		args: parseArgs(call.args),
+		args: parseCallArgs(call.args),
 		result: call.result ?? null,
 		resultChars: call.resultChars ?? null,
 		isError: call.isError ?? null,
@@ -299,22 +299,9 @@ export async function archiveStats(
  */
 export async function archiveMessages(
 	idOrFile: string,
-	options: { kinds?: readonly MessageKind[]; window?: TimeWindow; limit: number; signal?: AbortSignal },
+	options: TranscriptReadOptions,
 ): Promise<ArchiveView<ArchiveMessage[]>> {
-	const file = await resolveSessionFile(idOrFile);
-	try {
-		await fs.promises.stat(file);
-	} catch (error) {
-		if (isEnoent(error)) throw new ToolError(`Not a readable session file: ${shortenPath(file)}`);
-		throw error;
-	}
-	const found = await transcriptMessages({
-		path: file,
-		kinds: options.kinds?.map(kind => RECORD_KIND[kind]),
-		...options.window,
-		limit: options.limit,
-		signal: options.signal,
-	});
+	const { file, records: found } = await readTranscript(idOrFile, options);
 	const records = found.map((record): ArchiveMessage => ({
 		entry: record.entry ?? null,
 		at: isoTime(record.at),
@@ -322,7 +309,7 @@ export async function archiveMessages(
 		text: record.text ?? null,
 		tool: record.tool ?? null,
 		callId: record.callId ?? null,
-		args: record.args === undefined ? null : parseArgs(record.args),
+		args: record.args === undefined ? null : parseCallArgs(record.args),
 		isError: record.isError ?? null,
 	}));
 	const lines =
@@ -339,6 +326,44 @@ export async function archiveMessages(
 		lines.push(`- ${when} · ${kind}: ${previewLine(body, PREVIEW_WIDTH)}`);
 	}
 	return { text: lines.join("\n"), records };
+}
+
+/** What {@link readTranscript} reads of one transcript. */
+export interface TranscriptReadOptions {
+	/** Kinds kept; all when omitted. */
+	kinds?: readonly TranscriptKind[];
+	window?: TimeWindow;
+	/** Newest records kept at most. */
+	limit: number;
+	signal?: AbortSignal;
+}
+
+/**
+ * The newest `limit` records of one transcript, oldest first, with the file
+ * they came from: a session by id prefix, or any transcript file. Backs
+ * `archive.messages` and `archive.transcript`.
+ *
+ * @throws {ToolError} when no session or several match, or the file is not readable.
+ */
+export async function readTranscript(
+	idOrFile: string,
+	options: TranscriptReadOptions,
+): Promise<{ file: string; records: TranscriptRecord[] }> {
+	const file = await resolveSessionFile(idOrFile);
+	try {
+		await fs.promises.stat(file);
+	} catch (error) {
+		if (isEnoent(error)) throw new ToolError(`Not a readable session file: ${shortenPath(file)}`);
+		throw error;
+	}
+	const records = await transcriptMessages({
+		path: file,
+		kinds: options.kinds?.map(kind => RECORD_KIND[kind]),
+		...options.window,
+		limit: options.limit,
+		signal: options.signal,
+	});
+	return { file, records };
 }
 
 /**
@@ -411,16 +436,6 @@ function originOf(
 			file: transcripts.files[file].path,
 		};
 	};
-}
-
-/** Arguments parsed from the scanner's JSON; unparseable JSON reads as none. */
-function parseArgs(json: string): Record<string, unknown> {
-	try {
-		const parsed: unknown = JSON.parse(json);
-		return isRecord(parsed) ? parsed : {};
-	} catch {
-		return {};
-	}
 }
 
 /** ISO-8601 of Unix milliseconds; `null` for a record without a time. */

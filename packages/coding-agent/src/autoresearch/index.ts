@@ -4,6 +4,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { AutocompleteItem } from "../autocomplete/autocomplete";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions";
+import { shouldShowDashboard } from "../ui/apps/autoresearch/model";
 import commandResumeTemplate from "./command-resume.md" with { type: "text" };
 import { createDashboardController } from "./dashboard";
 import { currentResults, findBaselineMetric, findBaselineRunNumber } from "./results-data";
@@ -228,10 +229,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		description: "Toggle autoresearch dashboard",
 		handler(ctx): void {
 			const runtime = getRuntime(ctx);
-			if (runtime.state.results.length === 0 && !runtime.runningExperiment) {
-				ctx.ui.notify("No autoresearch results yet", "info");
-				return;
-			}
+			if (!shouldShowDashboard(runtime)) return;
 			runtime.dashboardExpanded = !runtime.dashboardExpanded;
 			dashboard.updateWidget(ctx, runtime);
 		},

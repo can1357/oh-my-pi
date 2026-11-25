@@ -99,7 +99,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		shutdown: vi.fn(async () => {}),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
-		statusLine: { refresh: statusRefresh },
+		statusLine: { refreshVcs: statusRefresh },
 	} as unknown as InteractiveModeContext;
 	return { ctx, executeBash, presentExecRun, runs, state, statusRefresh };
 }

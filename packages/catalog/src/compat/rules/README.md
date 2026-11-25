@@ -390,15 +390,19 @@ auth "anthropic" {
             access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value
             refresh "refresh_token"
             expires "seconds" path="expires_in" from="created_at" skew-ms=300000 fallback-ms=3600000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
-            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
+            refresh-expires-in "refresh_token_expires_in"   // seconds until the refresh token ends → `refreshExpires`
+            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url, scope
         }
         userinfo url="https://…/userinfo" email="email" account-id="sub"
         after-exchange hook="anthropic-identity"
         paste-key prefix="sk-or-" validate-url="https://…"   // manual input starting with prefix is an API key
     }
     refresh {                                   // or `refresh "none"` / `refresh hook="name"`
-        token url="…" body="json" { headers { anthropic-beta "oauth-2025-04-20" } }   // defaults to the login token request
+        token url="…" body="json" { headers { User-Agent "…" } }   // defaults to the login token request
         require "projectId"
+        scopes "user:profile" "user:inference"   // sent space-joined as `scope`; a 400 `invalid_scope` retries once without it
+        window-ms 300000                         // renew this close to expiry (default 60000)
+        dead-grant "invalid_grant" except-description="account_on_hold"   // only 400/401 refusals with these codes disable the login
         credential { … }                        // defaults to the login map
         after-refresh hook="…"
     }
@@ -430,7 +434,7 @@ auth "anthropic" {
 Login kinds:
 
 - `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= base-url-path= base-url-append= headers-hook=` (`base-url-path`, default `/models`, is appended to the `base-url-env` value and needs it; `base-url-append` ensures a path segment on that value first, e.g. `/v1` for bases that may be bare origins); all accept `label=` (error-message label, defaults to `name`), `optional=#true` (only auth failures reject), and `trust-forbidden=#true` (requires `optional=#true`; a 403 no longer rejects, so only a 401 does).
-- `login "oauth-code" { … }` as above; `token`/`refresh` `params` values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`; the standard grant parameters are sent unless `standard=#false`.
+- `login "oauth-code" { … }` as above; `token`/`refresh` `params` string values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`, and a numeric value (`expires_in 31536000`) is sent as a JSON number; the standard grant parameters are sent unless `standard=#false`.
 - `login "device-code" { client-id …; base-url "…"; scopes …; headers-hook "…"; device url="{base}/…" body="form" { params {…} headers {…} }; token url="…" url-hook="…"; response user-code= device-code= verification-uri= verification-uri-complete= interval= expires-in=; instructions "Enter code: {user_code}"; credential {…}; userinfo …; after-exchange hook=… }`.
 - `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
 
