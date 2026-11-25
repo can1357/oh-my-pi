@@ -157,10 +157,14 @@ test("the SDK keeps prior ACP image bytes after crossing the per-prompt image co
 			userMessage([{ type: "text", text: `Image ${index}` }, INTACT_IMAGE]),
 		);
 		const context = await session.agent.buildSideRequestContext(history, []);
-		const images = context.messages.flatMap(message =>
-			typeof message.content === "string" ? [] : message.content.filter(part => part.type === "image"),
-		);
-		expect(images.map(image => image.data)).toEqual(history.map(() => INTACT_IMAGE.data));
+		const imageData: string[] = [];
+		for (const message of context.messages) {
+			if (typeof message.content === "string") continue;
+			for (const part of message.content) {
+				if (part.type === "image") imageData.push(part.data);
+			}
+		}
+		expect(imageData).toEqual(history.map(() => INTACT_IMAGE.data));
 	} finally {
 		await session.dispose();
 	}

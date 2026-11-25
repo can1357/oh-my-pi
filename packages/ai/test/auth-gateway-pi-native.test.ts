@@ -124,6 +124,7 @@ describe("pi-native parseRequest", () => {
 				onPayload: () => {},
 				onResponse: () => {},
 				onSseEvent: () => {},
+				onProviderNotice: "should-be-stripped",
 				execHandlers: {},
 				providerSessionState: new Map(),
 				notARealField: "ignored",
