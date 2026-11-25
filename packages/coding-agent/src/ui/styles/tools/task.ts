@@ -22,6 +22,7 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { isTaskToolDetails, type TaskToolDetails } from "../../../task/task-details";
 import { expandKeyLabel } from "../../keys/hints";
 import { agentColored } from "../../tools/agent-identity";
+import { cleanText } from "../../tools/agent-common";
 import type { TaskTerm } from "../../tools/task";
 import { assignmentSource, contextSource, flatAgentLabel, noticeLines, runTally } from "../../tools/task/model";
 import { agentLines, callLines, type Line, nestedResultLines, type RowContext } from "../../tools/task/rows";
@@ -100,7 +101,7 @@ function paintTask(node: UiNode, cx: PaintContext): Block {
 		});
 		if (context) sections.push(context);
 		if (brief) sections.push(brief);
-		const text = facts.text ?? "";
+		const text = cleanText(facts.text ?? "");
 		if (text) sections.push({ separator: true, lines: [theme.fg("dim", truncate(text, width))] });
 	} else {
 		const details: TaskToolDetails = facts.details;
