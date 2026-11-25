@@ -32,7 +32,7 @@ describe("AgentSession video attachments", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+			streamFn: createMockModel({ handler: { content: ["Done"] } }).stream,
 		});
 		session = new AgentSession({
 			agent,
@@ -125,7 +125,8 @@ describe("AgentSession video attachments", () => {
 				expect(target.agent.hasQueuedMessages()).toBe(false);
 			});
 
-			await target.prompt("New request");
+			await target.prompt("New request", { streamingBehavior: "followUp" });
+			await target.waitForIdle();
 			expect(JSON.stringify(target.messages)).not.toContain(SOURCE_PATH);
 			expect(target.messages.filter(message => message.role === "user").map(message => message.content)).toEqual([
 				[{ type: "text", text: "New request" }],
