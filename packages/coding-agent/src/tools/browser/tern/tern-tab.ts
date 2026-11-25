@@ -163,6 +163,7 @@ import {
 	type DomReply,
 	type DomRequest,
 	type DomResolveAction,
+	type DomResolved,
 	type DomWaitState,
 	describeDomNode,
 	domCandidateSelector,
@@ -394,6 +395,18 @@ function targetTimeout(label: string, elapsedMs: number, failure: TargetFailure)
 								? "the element is outside the viewport"
 								: "the element keeps moving";
 	return new ToolError(`${label} timed out after ${elapsedMs}ms: ${why} (${failure.count} match(es))`);
+}
+
+/**
+ * What a failed read of an actionability round reports. Every read of the round is bounded by the cell budget, so
+ * one timing out means the budget ran out mid-round: once an earlier round diagnosed the element, that diagnosis is
+ * the action's failure, not the read's transport timeout.
+ */
+function lateRoundFailure(error: unknown, label: string, started: number, last: TargetFailure | undefined): unknown {
+	if (last && error instanceof TernError && error.kind === "timeout") {
+		return targetTimeout(label, Date.now() - started, last);
+	}
+	return error;
 }
 
 /** The error of an observation id whose element left the page. */
@@ -1987,53 +2000,64 @@ export class TernTab implements InProcessRunTab {
 		let recentred = false;
 		let last: TargetFailure | undefined;
 		for (;;) {
-			const found = await this.#locate(spec, frame);
-			if (!found) {
-				last = { reason: "missing", count: 0 };
-			} else {
-				if (resolved.state === "ok") {
-					if (!resolved.point || !resolved.node) {
-						throw new TernError(
-							"protocol",
-							`${this.product} answered dom resolve \`ok\` without a point and node`,
-						);
-					}
-					if (!enabled || !resolved.node.states?.includes("disabled")) {
-						return {
-							x: resolved.point[0],
-							y: resolved.point[1],
-							width: resolved.node.rect[2],
-							height: resolved.node.rect[3],
-							ref: found.ref,
-							node: resolved.node,
-						};
-					}
-					last = { reason: "disabled", count: found.count };
-				} else if (
-					resolved.scroll &&
-					(resolved.state === "offViewport"
-						? wheels < SCROLL_WHEEL_LIMIT
-						: resolved.state === "covered" && !recentred)
-				) {
-					if (resolved.state === "covered") recentred = true;
-					wheels++;
-					const { at, dx, dy } = resolved.scroll;
-					await this.#input([{ type: "wheel", x: at[0], y: at[1], dx, dy, mods: [] }]);
-					continue;
-				} else if (resolved.state === "detached") {
-					if (spec.engine === "id") throw staleId(spec.id);
-					last = { reason: "missing", count: 0 };
-					// A dead ref never names an element again.
-					if (spec.engine === "ref") break;
-				} else if (resolved.state === "covered") {
-					last = {
-						reason: "covered",
-						count: found.count,
-						detail: resolved.coveredBy ? describeDomNode(resolved.coveredBy) : undefined,
-					};
-				} else {
-					last = { reason: resolved.state, count: found.count };
+			let found: { ref: DomRef; count: number } | null;
+			let resolved: DomResolved | undefined;
+			try {
+				found = await this.#locate(spec, frame);
+				if (found) {
+					resolved = await this.#dom({
+						read: "resolve",
+						ref: found.ref,
+						action: resolveAction,
+						// A wheel omp just sent may still be moving the page under a read that checks nothing else.
+						stable: resolveAction !== "none" || wheels > 0 ? RESOLVE_STABLE_UPDATES : 0,
+						timeout: Math.max(1, Math.min(RESOLVE_SETTLE_MS, timeoutMs - (Date.now() - started))),
+					});
 				}
+			} catch (error) {
+				throw lateRoundFailure(error, label, started, last);
+			}
+			if (!found || !resolved) {
+				last = { reason: "missing", count: 0 };
+			} else if (resolved.state === "ok") {
+				if (!resolved.point || !resolved.node) {
+					throw new TernError("protocol", `${this.product} answered dom resolve \`ok\` without a point and node`);
+				}
+				if (!enabled || !resolved.node.states?.includes("disabled")) {
+					return {
+						x: resolved.point[0],
+						y: resolved.point[1],
+						width: resolved.node.rect[2],
+						height: resolved.node.rect[3],
+						ref: found.ref,
+						node: resolved.node,
+					};
+				}
+				last = { reason: "disabled", count: found.count };
+			} else if (
+				resolved.scroll &&
+				(resolved.state === "offViewport"
+					? wheels < SCROLL_WHEEL_LIMIT
+					: resolved.state === "covered" && !recentred)
+			) {
+				if (resolved.state === "covered") recentred = true;
+				wheels++;
+				const { at, dx, dy } = resolved.scroll;
+				await this.#input([{ type: "wheel", x: at[0], y: at[1], dx, dy, mods: [] }]);
+				continue;
+			} else if (resolved.state === "detached") {
+				if (spec.engine === "id") throw staleId(spec.id);
+				last = { reason: "missing", count: 0 };
+				// A dead ref never names an element again.
+				if (spec.engine === "ref") break;
+			} else if (resolved.state === "covered") {
+				last = {
+					reason: "covered",
+					count: found.count,
+					detail: resolved.coveredBy ? describeDomNode(resolved.coveredBy) : undefined,
+				};
+			} else {
+				last = { reason: resolved.state, count: found.count };
 			}
 			const elapsed = Date.now() - started;
 			// A round starting at the deadline has no budget left for its reads: under a
