@@ -33,7 +33,7 @@ import {
 	sessionDisplayName,
 } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
-import type { TimeWindow } from "../session/time-window";
+import { localMinute, type TimeWindow } from "../session/time-window";
 import { syncTranscripts } from "../daemon/modules/transcripts";
 import {
 	indexedMessageCounts,
@@ -473,13 +473,6 @@ function windowLabel(window: TimeWindow | undefined): string {
 	if (window?.since !== undefined) label += ` since ${localMinute(window.since)}`;
 	if (window?.until !== undefined) label += ` until ${localMinute(window.until)}`;
 	return label;
-}
-
-/** `YYYY-MM-DD HH:MM` in local time. */
-function localMinute(at: number): string {
-	const time = new Date(at);
-	const pad = (value: number) => String(value).padStart(2, "0");
-	return `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())} ${pad(time.getHours())}:${pad(time.getMinutes())}`;
 }
 
 /** Relative age of an ISO timestamp (`5m ago`); sub-minute ages read `just now`. */

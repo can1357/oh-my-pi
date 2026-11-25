@@ -1,0 +1,28 @@
+# Perl corpus: diagnostics. Format and regeneration: crates/builtins/src/perl/tests.rs.
+compile-before-run	print "not executed\n";␊my $y = ;		stderr=syntax error at compile-before-run.pl line 2, near "= ;"␊Execution of compile-before-run.pl aborted due to compilation errors.␊	status=255
+divide-zero	my $x=0; print 1/$x;		stderr=Illegal division by zero at divide-zero.pl line 1.␊	status=255
+invalid-assignment	7 = 3;		stderr=Can't modify constant item in scalar assignment at invalid-assignment.pl line 1, near "3;"␊Execution of invalid-assignment.pl aborted due to compilation errors.␊	status=255
+invalid-goto	goto NEVER_DEFINED;		stderr=Can't find label NEVER_DEFINED at invalid-goto.pl line 1.␊	status=255
+invalid-lvalue	my @a=(1); $a[-10]=7;		stderr=Modification of non-creatable array value attempted, subscript -10 at invalid-lvalue.pl line 1.␊	status=255
+invalid-regex	my $x='('; 'a' =~ /$x/;		stderr=Unmatched ( in regex; marked by <-- HERE in m/( <-- HERE / at invalid-regex.pl line 1.␊	status=255
+method-not-a-ref	my $x; $x->nope();		stderr=Can't call method "nope" on an undefined value at method-not-a-ref.pl line 1.␊	status=255
+missing-method	my $x=bless {},'CaseNoMethod'; $x->nope();		stderr=Can't locate object method "nope" via package "CaseNoMethod" at missing-method.pl line 1.␊	status=255
+missing-package	Missing::something();		stderr=Undefined subroutine &Missing::something called at missing-package.pl line 1.␊	status=255
+mod-zero	my $x=0; print 1%$x;		stderr=Illegal modulus zero at mod-zero.pl line 1.␊	status=255
+multiline-die	my $x=1;␊if ($x) {␊    die "line three";␊}		stderr=line three at multiline-die.pl line 3.␊	status=255
+multiline-syntax	my $x=1;␊my $y = ;␊print $x;		stderr=syntax error at multiline-syntax.pl line 2, near "= ;"␊Execution of multiline-syntax.pl aborted due to compilation errors.␊	status=255
+negative-repeat	use warnings; my $x=-2; print 'x' x $x;		stderr=Negative repeat count does nothing at negative-repeat.pl line 1.␊
+negative-seek	open my $f,'<',\my $s; print seek($f,-1,0)?1:0,"\n";	0␊
+no-loop	last;		stderr=Can't "last" outside a loop block at no-loop.pl line 1.␊	status=255
+not-numeric	use warnings; my $x='oho'; print $x*3,"\n";	0␊	stderr=Argument "oho" isn't numeric in multiplication (*) at not-numeric.pl line 1.␊
+numbered-input-die	while (<STDIN>) {␊    die "line marked" if /fail/;␊}		stdin=ok␊fail␊	stderr=line marked at numbered-input-die.pl line 2, <STDIN> line 2.␊	status=255
+read-only	sub bump {$_[0]++} bump(2);		stderr=Modification of a read-only value attempted at read-only.pl line 1.␊	status=255
+strict-refs	use strict; my $name='x'; print $$name;		stderr=Can't use string ("x") as a SCALAR ref while "strict refs" in use at strict-refs.pl line 1.␊	status=255
+strict-subs	use strict; my $x = not_permitted; print "$x\n";		stderr=Bareword "not_permitted" not allowed while "strict subs" in use at strict-subs.pl line 1.␊Execution of strict-subs.pl aborted due to compilation errors.␊	status=255
+strict-vars	use strict; $missing = 5;		stderr=Global symbol "$missing" requires explicit package name (did you forget to declare "my $missing"?) at strict-vars.pl line 1.␊Execution of strict-vars.pl aborted due to compilation errors.␊	status=255
+syntax	my $x = ;		stderr=syntax error at syntax.pl line 1, near "= ;"␊Execution of syntax.pl aborted due to compilation errors.␊	status=255
+uninitialized	use warnings; my $x; print 2+$x,"\n";	2␊	stderr=Use of uninitialized value $x in addition (+) at uninitialized.pl line 1.␊
+unknown-sub	undefined_function();		stderr=Undefined subroutine &main::undefined_function called at unknown-sub.pl line 1.␊	status=255
+wrong-proto	sub f($$) {1} f(1);		stderr=Not enough arguments for main::f at wrong-proto.pl line 1, near "1)"␊Execution of wrong-proto.pl aborted due to compilation errors.␊	status=255
+wrong-signature-many	use feature 'signatures'; no warnings 'experimental::signatures'; sub f($a) {1} f(1,2);		stderr=Too many arguments for subroutine 'main::f' (got 2; expected 1) at wrong-signature-many.pl line 1.␊	status=255
+wrong-signature	use feature 'signatures'; no warnings 'experimental::signatures'; sub f($a,$b) {1} f(1);		stderr=Too few arguments for subroutine 'main::f' (got 1; expected 2) at wrong-signature.pl line 1.␊	status=255

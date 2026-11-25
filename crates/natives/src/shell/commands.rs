@@ -15,7 +15,7 @@
 //!   alive: every call happens while a shell run's pending promise holds the
 //!   loop open.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use napi::{Status, bindgen_prelude::Promise, threadsafe_function::ThreadsafeFunction};
 use napi_derive::napi;
@@ -36,6 +36,10 @@ pub struct ShellCommandRequest {
 	/// UTF-8 stdin read to EOF, only when `argv` contains a bare `-`; empty
 	/// otherwise.
 	pub stdin: String,
+	/// Arguments that are job specs (`%1`, `%%`, `%name`) naming a job of the
+	/// invoking shell that runs a program, mapped to that program's OS pid;
+	/// absent when no argument is one.
+	pub jobs:  Option<HashMap<String, u32>>,
 }
 
 /// Shell-composable response of a session command.
@@ -82,9 +86,10 @@ impl SessionCommandHandler for JsCommands {
 	fn call(&self, request: SessionCommandRequest) -> SessionCommandFuture {
 		let handler = Arc::clone(&self.handler);
 		Box::pin(async move {
-			let SessionCommandRequest { name, argv, cwd, stdin } = request;
+			let SessionCommandRequest { name, argv, cwd, stdin, jobs } = request;
+			let jobs = (!jobs.is_empty()).then(|| jobs.into_iter().collect());
 			let promise = handler
-				.call_async_catch(ShellCommandRequest { name, argv, cwd, stdin })
+				.call_async_catch(ShellCommandRequest { name, argv, cwd, stdin, jobs })
 				.await
 				.map_err(|err| err.reason)?;
 			let ShellCommandResult { stdout, stderr, exit_code } =

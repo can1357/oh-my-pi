@@ -13,6 +13,7 @@ import type { JSXNode, KeyEvent } from "@oh-my-pi/pi-tui";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import "../../styles/apps/live-visualizer/look";
 import { callEnergy, type LiveCallModel, meterValue, PHASE_COLORS, PHASE_ICONS, PHASE_TONES } from "./model";
+import { formatTooltipKey } from "../../keys/hints";
 import { ActionButton } from "../../overlays/panels/common";
 
 export interface LiveVisualizerProps {
@@ -80,7 +81,7 @@ export function LiveVisualizer(props: LiveVisualizerProps): JSXNode {
 				<ActionButton
 					id="mute"
 					label={() => (model.phase() === "muted" ? "Unmute" : "Mute")}
-					title={() => `${model.phase() === "muted" ? "Unmute" : "Mute"}  ␣`}
+					title={() => `${model.phase() === "muted" ? "Unmute" : "Mute"}  ${formatTooltipKey("space")}`}
 					keys={["space"]}
 				/>
 				<ActionButton id="end" label="End call" title="End call  esc" tone="error" keys={["escape"]} />

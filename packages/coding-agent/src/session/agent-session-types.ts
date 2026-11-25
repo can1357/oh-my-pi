@@ -46,6 +46,7 @@ import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { ImageDescriptions } from "../utils/image-vision-fallback";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { ShellStream } from "../tools/shell-steps";
 import type { JobWidgetView } from "../tools/details/job-widget";
@@ -230,6 +231,8 @@ export interface AgentSessionConfig {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
+	/** Validate a candidate for a model change against the session's dispatch restrictions. */
+	assertDispatchModel?: (model: Model) => void;
 	/**
 	 * Disable retry fallback, context promotion and usage-aware fallback: the turn retries on, or fails
 	 * with, its own model instead. Startup model selection, and the return to the primary after a
@@ -288,6 +291,8 @@ export interface AgentSessionConfig {
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
+	/** Tools are exactly the explicit list (`restrictToolNames` session option); goal and plan mode are unavailable. */
+	restrictToolNames?: boolean;
 	/** Whether this session may start memory backends. Defaults to true. */
 	memoryEnabled?: boolean;
 	/** Agent directory used when changing memory backends in a live session. */
@@ -341,13 +346,23 @@ export interface AgentSessionConfig {
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 	/**
 	 * Builds one advisor's provider request transform. Each advisor is its own
 	 * conversation, so it gets its own transform state (the date/cwd reminder).
 	 * Without it, advisors share {@link transformProviderContext}.
 	 */
-	createAdvisorTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
+	createAdvisorTransformProviderContext?: () => (
+		context: Context,
+		model: Model,
+		signal?: AbortSignal,
+	) => Context | Promise<Context>;
+	/**
+	 * Descriptions of input images for text-only models, shared with {@link transformProviderContext}. Summaries
+	 * and advisor transcripts, which carry history as text, use them for a summary or advisor model that cannot
+	 * see images.
+	 */
+	imageDescriptions?: ImageDescriptions;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */
@@ -362,8 +377,8 @@ export interface AgentSessionConfig {
 	onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	/** Per-session raw SSE diagnostic buffer. */
 	rawSseDebugBuffer?: RawSseDebugBuffer;
-	/** Current session message-to-LLM conversion pipeline. */
-	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	/** Current session message-to-LLM conversion pipeline, for the destination receiving the request. */
+	convertToLlm?: (messages: AgentMessage[], model: Model | undefined) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
 	rebuildSystemPrompt?: SystemPromptRebuilder;
 	/** Sources of the initial base prompt, as returned by `buildSystemPrompt`. */
@@ -457,6 +472,8 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	/** Original submission time when the host has already displayed the prompt. */
+	submittedAt?: number;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/**
