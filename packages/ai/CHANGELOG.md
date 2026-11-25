@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed unused exports `isArraySchema`, `getObjectProperties` and `getArrayItemSchema` from `@oh-my-pi/pi-ai/dialect`, `collectKnownCallIds`, `collectCustomCallIds` and `collectComputerCallIds` from `@oh-my-pi/pi-ai/providers/openai-shared`, and `isCursorTokenExpiringSoon` from `@oh-my-pi/pi-ai/oauth/cursor` ([#20529](https://github.com/can1357/oh-my-pi/pull/20529))
+
 ### Added
 
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
