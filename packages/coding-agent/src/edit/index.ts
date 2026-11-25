@@ -757,7 +757,7 @@ export class EditTool implements AgentTool<TInput> {
 				const resource = await router.resolve(target, context);
 				if (resource.isDirectory) return { error: `${url} is a directory`, planWritable: false };
 				if (typeof resource.content !== "string") return { error: `${url} is binary`, planWritable: false };
-				return { path: await writeRemoteMirror(target, resource.content), planWritable: false };
+				return { path: await writeRemoteMirror(target, resource.content, router), planWritable: false };
 			}
 			if (!router.fileWritable(target)) {
 				const reason = spec.write?.via === "handler" ? "is written through `write`, not edited" : "is read-only";
@@ -783,7 +783,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
-		const remote = remoteMirrorUrl(request.path);
+		const remote = remoteMirrorUrl(request.path, sessionUrlRouter(this.session));
 		if (remote !== undefined) return this.#writeRemote(remote, request, signal);
 		const journaled = this.session.recordFileChange !== undefined;
 		const before = journaled ? await readSnapshot(request.path) : undefined;

@@ -3627,7 +3627,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// A remote file `edit` can patch is tagged through its local mirror, under its URL.
 		const mirror =
 			isRemoteTextWritable(spec) && !resource.isDirectory && resource.immutable !== true
-				? await writeRemoteMirror(url, resource.content)
+				? await writeRemoteMirror(url, resource.content, sessionUrlRouter(this.session))
 				: undefined;
 		return buildInMemorySelectorResult(this.session, resource.content, parsedSel, {
 			details,

@@ -98,6 +98,22 @@ export interface UrlSchemeSource {
 	handlers(): Iterable<ProtocolHandler>;
 }
 
+const registrationIds = new WeakMap<ProtocolHandler, string>();
+
+/**
+ * Identity of one handler registration. Two sessions may register the same scheme with different
+ * handlers, so state keyed by URL alone would mix their resources; keying by this identity does not.
+ * Random, so it never repeats across registrations or processes.
+ */
+export function registrationId(handler: ProtocolHandler): string {
+	let id = registrationIds.get(handler);
+	if (id === undefined) {
+		id = crypto.randomUUID();
+		registrationIds.set(handler, id);
+	}
+	return id;
+}
+
 /**
  * Throw when `handler`'s spec write policy disagrees with the handler: `write()` exists exactly for
  * `write.via: "handler"`; `write.via: "file"` needs a mutable file-backed spec with `locate()`; a
