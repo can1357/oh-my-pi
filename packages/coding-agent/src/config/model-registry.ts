@@ -1055,12 +1055,7 @@ export class ModelRegistry {
 		this.#catalogMetrics = new CatalogMetricsIndex(catalog.metricRows);
 		this.#catalogMetricRows = catalog.metricRows;
 		const recompose = this.#hasFullSnapshot;
-		this.#models = [];
-		this.#unprojectedModels = [];
-		this.#baseModels = [];
-		this.#hasFullSnapshot = false;
-		this.#internedStaticModels.clear();
-		this.#providerLookupSnapshots.clear();
+		this.#dropComposedCatalog();
 		// Like the owner after a discovery pass: a composed catalog is rebuilt as the update
 		// lands, not on the next session's model resolution.
 		if (recompose) this.#ensureFullSnapshot();
@@ -1542,6 +1537,10 @@ export class ModelRegistry {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		const staticConfigUnchanged = currentMtime === this.#lastStaticLoadMtime;
 		if (!options?.force && staticConfigUnchanged) {
+			// The loaded inputs still hold, but whole-catalog modifiers read live OAuth
+			// credentials (a login since the last composition, a rotated account).
+			// Recompose lazily so the next lookup reruns them, as a reload would.
+			if (this.#runtimeModelModifiers.size > 0) this.#dropComposedCatalog();
 			return;
 		}
 		// Inside a runtime-change entry point the mirror replays the reload with the change itself.
@@ -1738,20 +1737,25 @@ export class ModelRegistry {
 		this.authStorage.usage.replaceConfiguredProviders(providers);
 	}
 
-	#resetStaticComposition(): void {
-		this.#startupCatalog = undefined;
+	/** Discard the composed catalog and its lookup memos; the next reader recomposes from the loaded inputs. */
+	#dropComposedCatalog(): void {
 		this.#models = [];
 		this.#unprojectedModels = [];
 		this.#baseModels = [];
 		this.#hasFullSnapshot = false;
+		this.#internedStaticModels.clear();
+		this.#providerLookupSnapshots.clear();
+	}
+
+	#resetStaticComposition(): void {
+		this.#startupCatalog = undefined;
+		this.#dropComposedCatalog();
 		this.#cachedStandardModelsByProvider.clear();
 		this.#pendingStandardCacheProviders.clear();
 		this.#cachedAuthoritativeProviders.clear();
 		this.#replacedCacheProviders.clear();
 		this.#runtimeDiscoveredModels = [];
 		this.#runtimeAuthoritativeProviders.clear();
-		this.#internedStaticModels.clear();
-		this.#providerLookupSnapshots.clear();
 		this.#commandConfigsByProvider.clear();
 		this.#hydratedCredentialSignatures.clear();
 	}

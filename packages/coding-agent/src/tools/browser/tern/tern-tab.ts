@@ -1837,16 +1837,20 @@ export class TernTab implements InProcessRunTab {
 				: resolveWaitTimeout(this.#cellMs, explicitTimeout);
 		const started = Date.now();
 		let delay = 30;
-		let last: TernTarget;
+		let last: TernTarget | undefined;
 		for (;;) {
-			last = await this.#kit<TernTarget>("target", [spec, action], frame);
+			try {
+				last = await this.#kit<TernTarget>("target", [spec, action], frame);
+			} catch (error) {
+				throw lateRoundFailure(error, label, started, last && !last.ok ? last : undefined);
+			}
 			if (last.ok) {
 				const offset = await this.#frameOffset(frame);
 				return { x: last.x + offset.x, y: last.y + offset.y, width: last.width, height: last.height };
 			}
 			const elapsed = Date.now() - started;
 			// A round starting at the deadline has no budget left for its reads: under a
-			// binding cell budget they time out and mask the diagnosis below.
+			// binding cell budget they would only time out.
 			if (elapsed + delay >= timeoutMs) break;
 			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
 			await untilAborted(this.#signal, () => Bun.sleep(delay));
@@ -1981,20 +1985,12 @@ export class TernTab implements InProcessRunTab {
 		let delay = 30;
 		let wheels = 0;
 		let recentred = false;
-		let last: TargetFailure;
+		let last: TargetFailure | undefined;
 		for (;;) {
 			const found = await this.#locate(spec, frame);
 			if (!found) {
 				last = { reason: "missing", count: 0 };
 			} else {
-				const resolved = await this.#dom({
-					read: "resolve",
-					ref: found.ref,
-					action: resolveAction,
-					// A wheel omp just sent may still be moving the page under a read that checks nothing else.
-					stable: resolveAction !== "none" || wheels > 0 ? RESOLVE_STABLE_UPDATES : 0,
-					timeout: Math.max(1, Math.min(RESOLVE_SETTLE_MS, timeoutMs - (Date.now() - started))),
-				});
 				if (resolved.state === "ok") {
 					if (!resolved.point || !resolved.node) {
 						throw new TernError(
@@ -2041,7 +2037,7 @@ export class TernTab implements InProcessRunTab {
 			}
 			const elapsed = Date.now() - started;
 			// A round starting at the deadline has no budget left for its reads: under a
-			// binding cell budget they time out and mask the diagnosis below.
+			// binding cell budget they would only time out.
 			if (elapsed + delay >= timeoutMs) break;
 			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
 			await untilAborted(this.#signal, () => Bun.sleep(delay));

@@ -29,6 +29,8 @@
 - On Linux, bash `time -l` and `time -v` now report the measured program's peak memory usage rather than the agent process's usage.
 - Fixed zsh scripts rendered in the pseudo shell so shell syntax is displayed correctly instead of replacement characters.
 - Fixed ACP session loading and resuming for saved Copilot 1M models during background model-catalog refreshes.
+- Fixed Tern browser actions that ran out of time mid-wait reporting a transport timeout instead of why the element was not actionable (disabled, covered, moving).
+- Fixed extension OAuth catalog modifiers (`oauth.modifyModels`) not rerunning on a model-catalog refresh when `models.yml` is unchanged or missing, so a login no longer leaves other providers' models unmodified until restart.
 - Fixed `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` so they apply consistently to assistant replies, thinking, user prompts, extension messages, summaries, and tool output.
 - Fixed rules supplied by extensions in configuration overlays from disappearing when the system prompt is rebuilt.
 - Fixed idle follow-ups becoming stuck after extension messages or compaction summaries.
