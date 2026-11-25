@@ -15,6 +15,45 @@ export function decodeRequestBodyBytes(bytes: Uint8Array, contentEncoding: strin
 }
 
 /**
+ * Read a request body of at most `maxBytes`, rejecting on the declared
+ * `Content-Length` before reading and cancelling the stream once the limit is
+ * crossed. `tooLarge` builds the caller's own error.
+ */
+export async function readBoundedRequestBody(
+	req: Request,
+	maxBytes: number,
+	tooLarge: () => Error,
+): Promise<Uint8Array> {
+	const contentLength = req.headers.get("content-length");
+	if (contentLength !== null) {
+		const declared = Number(contentLength);
+		if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge();
+	}
+	const reader = req.body?.getReader();
+	if (!reader) return new Uint8Array();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		total += value.byteLength;
+		if (total > maxBytes) {
+			await reader.cancel();
+			throw tooLarge();
+		}
+		chunks.push(value);
+	}
+	if (chunks.length === 1) return chunks[0]!;
+	const bytes = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return bytes;
+}
+
+/**
  * Text of a string or byte request body after undoing its content encoding;
  * `undefined` when the request has no such body (none, stream, form data).
  */
