@@ -34,17 +34,24 @@ interface Entry<TEvent, TAnswer> {
 class PromptTable<TEvent, TAnswer> {
 	readonly #entries = new Map<string, Entry<TEvent, TAnswer>>();
 
-	open(id: string, event: TEvent, accept: (answer: TAnswer) => TAnswer | undefined): PendingPrompt<TAnswer> {
+	/** `signal` aborting closes the prompt, so an extension answering after the call was aborted gets false. */
+	open(
+		id: string,
+		event: TEvent,
+		accept: (answer: TAnswer) => TAnswer | undefined,
+		signal?: AbortSignal,
+	): PendingPrompt<TAnswer> {
 		const { promise, resolve } = Promise.withResolvers<TAnswer>();
 		const entry: Entry<TEvent, TAnswer> = { event, accept, settle: resolve };
-		this.#entries.set(id, entry);
-		return {
-			answer: promise,
-			given: () => entry.given,
-			close: () => {
-				if (this.#entries.get(id) === entry) this.#entries.delete(id);
-			},
+		const close = () => {
+			signal?.removeEventListener("abort", close);
+			if (this.#entries.get(id) === entry) this.#entries.delete(id);
 		};
+		if (!signal?.aborted) {
+			this.#entries.set(id, entry);
+			signal?.addEventListener("abort", close, { once: true });
+		}
+		return { answer: promise, given: () => entry.given, close };
 	}
 
 	resolve(id: string, answer: TAnswer): boolean {
@@ -68,9 +75,11 @@ class PromptTable<TEvent, TAnswer> {
  * handlers ran, so one may already have answered), then report how it closed.
  */
 export interface ExtensionAskChannel {
+	/** `signal` (the dialog's) closes the prompt and stops waiting on `ask_requested` handlers: it rejects with an abort. */
 	open(
 		event: AskRequestedEvent,
 		accept: (data: ExtensionAskData) => ExtensionAskData | undefined,
+		signal: AbortSignal,
 	): Promise<PendingPrompt<ExtensionAskAnswer>>;
 	resolved(event: AskResolvedEvent): Promise<void>;
 }
@@ -79,8 +88,14 @@ export class PendingInteractions {
 	readonly #approvals = new PromptTable<ToolApprovalRequestedEvent, ExtensionApprovalAnswer>();
 	readonly #asks = new PromptTable<AskRequestedEvent, ExtensionAskAnswer>();
 
-	openApproval(event: ToolApprovalRequestedEvent): PendingPrompt<ExtensionApprovalAnswer> {
-		return this.#approvals.open(event.toolCallId, event, answer => acceptedApprovalAnswer(event.prompt, answer));
+	openApproval(event: ToolApprovalRequestedEvent, signal?: AbortSignal): PendingPrompt<ExtensionApprovalAnswer> {
+		const { signal: _signal, ...listed } = event;
+		return this.#approvals.open(
+			event.toolCallId,
+			listed,
+			answer => acceptedApprovalAnswer(event.prompt, answer),
+			signal,
+		);
 	}
 
 	resolveApproval(toolCallId: string, answer: ExtensionApprovalAnswer): boolean {
@@ -95,15 +110,27 @@ export class PendingInteractions {
 	openAsk(
 		event: AskRequestedEvent,
 		accept: (data: ExtensionAskData) => ExtensionAskData | undefined,
+		signal?: AbortSignal,
 	): PendingPrompt<ExtensionAskAnswer> {
-		return this.#asks.open(event.askId, event, answer => {
-			if (answer === "cancel") return answer;
-			if (typeof answer !== "object" || answer === null || typeof answer.data !== "object" || answer.data === null) {
-				return undefined;
-			}
-			const data = accept(structuredClone(answer.data));
-			return data ? { data } : undefined;
-		});
+		const { signal: _signal, ...listed } = event;
+		return this.#asks.open(
+			event.askId,
+			listed,
+			answer => {
+				if (answer === "cancel") return answer;
+				if (
+					typeof answer !== "object" ||
+					answer === null ||
+					typeof answer.data !== "object" ||
+					answer.data === null
+				) {
+					return undefined;
+				}
+				const data = accept(structuredClone(answer.data));
+				return data ? { data } : undefined;
+			},
+			signal,
+		);
 	}
 
 	resolveAsk(askId: string, answer: ExtensionAskAnswer): boolean {

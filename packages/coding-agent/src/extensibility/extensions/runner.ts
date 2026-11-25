@@ -222,6 +222,8 @@ const SESSION_BEFORE_EVENTS: Record<string, true> = {
  * the handlers so nothing runs alongside a handler that ignores the abort.
  */
 const RELEASING_SIGNAL_EVENTS: Record<string, true> = {
+	tool_approval_requested: true,
+	ask_requested: true,
 	session_stop: true,
 	session_before_shutdown: true,
 };

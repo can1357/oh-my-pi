@@ -250,11 +250,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	get #askChannel(): ExtensionAskChannel {
 		const runner = this.runner;
 		return {
-			async open(event, accept) {
-				const pending = runner.pendingInteractions.openAsk(event, accept);
+			async open(event, accept, signal) {
+				const pending = runner.pendingInteractions.openAsk(event, accept, signal);
 				if (runner.hasHandlers("ask_requested")) {
 					try {
-						await runner.emit(event);
+						// `ask_requested` releases on `signal`: a handler awaiting remote work never holds an aborted ask open.
+						await runner.emit({ ...event, signal });
 					} catch (err) {
 						pending.close();
 						throw err;
@@ -495,18 +496,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				prompt: approvalPrompt,
 				safetyChecks: pendingSafetyChecks.length > 0,
 				answerable,
+				...(signal ? { signal } : {}),
 			};
 			// Opened before the event, so a handler can answer at once.
-			const pending = answerable ? this.runner.pendingInteractions.openApproval(requestedEvent) : undefined;
-			if (hasApprovalHandlers) {
-				try {
-					await this.runner.emit(requestedEvent);
-				} catch (err) {
-					pending?.close();
-					throw err;
-				}
-			}
-			const extensionAnswer = pending?.given();
+			// Aborting the call closes it too: a later `resolveToolApproval` gets false.
+			const pending = answerable ? this.runner.pendingInteractions.openApproval(requestedEvent, signal) : undefined;
 
 			const emitApprovalResolved = async (approved: boolean, by: "user" | "extension", reason?: string) => {
 				pending?.close();
@@ -527,6 +521,18 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					by,
 				});
 			};
+
+			if (hasApprovalHandlers) {
+				try {
+					// `tool_approval_requested` releases on the call's signal: a handler awaiting remote work
+					// never holds an aborted call, which then takes the abort path below.
+					await this.runner.emit(requestedEvent);
+				} catch (err) {
+					pending?.close();
+					throw err;
+				}
+			}
+			const extensionAnswer = pending?.given();
 
 			// Provider safety checks fail closed without an interactive prompt. Unlike
 			// ordinary tier approval, no setting, yolo mode or extension may bypass this gate.

@@ -1504,6 +1504,11 @@ export interface ToolApprovalRequestedEvent {
 	/** True when the call carries provider safety checks (listed at the end of `prompt.full`). */
 	safetyChecks: boolean;
 	/**
+	 * Aborts when the call is aborted (Esc, a session switch). The call then stops waiting on handlers and the
+	 * approval closes: hand it to remote work so it stops too. Absent when the call has no abort signal.
+	 */
+	signal?: AbortSignal;
+	/**
 	 * Whether `ctx.resolveToolApproval` can answer this call. False when only the host can: a host without a
 	 * UI (the call fails closed), provider safety checks, or a prompt raised by `tools.restrictedFolders`.
 	 */
@@ -1555,6 +1560,11 @@ export interface AskRequestedEvent {
 	/** The form's HTML as the model wrote it. */
 	html: string;
 	fields: AskFieldSummary[];
+	/**
+	 * Aborts when the call is aborted or a user message interrupts the form. The call then stops waiting on
+	 * handlers and the form closes: hand it to remote work so it stops too.
+	 */
+	signal?: AbortSignal;
 }
 
 /** The `ask` form closed. `answered` is false for a cancel, timeout, abort or interrupting message. */

@@ -41,8 +41,10 @@ import { disambiguateDisplayLabels } from "../utils/render-utils";
 import type { AskToolDetails } from "./details/ask";
 import { ToolError } from "./tool-errors";
 import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import type { PendingPrompt } from "../extensibility/extensions/pending-interactions";
 import type {
 	AskFieldSummary,
+	ExtensionAskAnswer,
 	ExtensionFormDialogResult,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -675,20 +677,23 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// Extensions may answer the form too; the first answer wins and closes the other.
 		const sessionId = this.session.getSessionId?.() ?? "";
-		const pending = await context.extensionAsk?.open(
-			{
-				type: "ask_requested",
-				sessionId,
-				askId: toolCallId,
-				toolCallId,
-				html,
-				fields: askFieldSummaries(form, questions),
-			},
-			data => extensionFormData(form, data),
-		);
+		let pending: PendingPrompt<ExtensionAskAnswer> | undefined;
 		let by: "user" | "extension" = "user";
 		let answered: { data: HtmlFormData; notes?: OptionNote[]; timedOut?: boolean } | undefined;
 		try {
+			// Rejects at once when the call is aborted or a message interrupts it while handlers still run.
+			pending = await context.extensionAsk?.open(
+				{
+					type: "ask_requested",
+					sessionId,
+					askId: toolCallId,
+					toolCallId,
+					html,
+					fields: askFieldSummaries(form, questions),
+				},
+				data => extensionFormData(form, data),
+				dialogSignal,
+			);
 			const early = pending?.given();
 			if (early !== undefined) {
 				// Cancelled or interrupted while a handler ran: take that path, not the late answer.

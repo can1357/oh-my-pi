@@ -42,6 +42,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -3417,6 +3418,99 @@ describe("ExtensionRunner", () => {
 			delete globalState.__partialContextApprovalEvents;
 		});
 
+		describe("ask handlers awaiting remote work", () => {
+			type AskSeen = {
+				ctx?: { resolveAsk(id: string, answer: unknown): boolean };
+				entered: () => void;
+				hold: Promise<void>;
+			};
+			const askState = globalThis as typeof globalThis & { __extAsk?: AskSeen };
+			afterEach(() => {
+				delete askState.__extAsk;
+			});
+			const FORM = `<form><label><input type="radio" name="pick" value="a"> A</label><label><input type="radio" name="pick" value="b"> B</label></form>`;
+
+			const runAsk = async (abortWith: "call" | "steering") => {
+				const release = Promise.withResolvers<void>();
+				const entered = Promise.withResolvers<void>();
+				askState.__extAsk = { entered: entered.resolve, hold: release.promise };
+				fs.writeFileSync(
+					path.join(extensionsDir, "ext-ask.ts"),
+					`export default function(pi) {
+						pi.on("ask_requested", async (_event, ctx) => {
+							const seen = globalThis.__extAsk;
+							seen.ctx = ctx;
+							seen.entered();
+							await seen.hold;
+						});
+					}`,
+				);
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				initializeRunner(runner, async () => undefined);
+				const session = {
+					cwd: tempDir.path(),
+					hasUI: true,
+					canPromptUser: true,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated({ "ask.notify": "off" }),
+				} as unknown as ToolSession;
+				const select = vi.fn(async () => undefined);
+				const turn = new AbortController();
+				const steering = new AbortController();
+				const wrapper = new ExtensionToolWrapper(new AskTool(session) as unknown as AgentTool, runner);
+				const execution = (wrapper as ExtensionToolWrapper<any>).execute(
+					"call-ask-held",
+					{ html: FORM },
+					turn.signal,
+					undefined,
+					{
+						sessionManager,
+						modelRegistry,
+						model: undefined,
+						isIdle: () => true,
+						hasQueuedMessages: () => false,
+						abort: () => {},
+						settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+						hasUI: true,
+						ui: { select, input: select, editor: select, notify: () => {} },
+						toolCall: { steeringSignal: steering.signal },
+					} as never,
+				);
+				await entered.promise;
+				if (abortWith === "call") turn.abort();
+				else steering.abort("user");
+				const outcome = await execution.then(
+					value => ({ value }),
+					error => ({ error }),
+				);
+				const late = askState.__extAsk!.ctx!.resolveAsk("call-ask-held", { data: { pick: "a" } });
+				release.resolve();
+				return { outcome, late, select };
+			};
+
+			it("aborting the call ends the ask without waiting on the handler", async () => {
+				const { outcome, late, select } = await runAsk("call");
+				expect("error" in outcome ? String(outcome.error) : "no error").toContain("Ask input was cancelled");
+				expect(late).toBe(false);
+				expect(select).not.toHaveBeenCalled();
+			});
+
+			it("a message interrupting the ask ends it without waiting on the handler", async () => {
+				const { outcome, late, select } = await runAsk("steering");
+				expect("error" in outcome ? String(outcome.error) : "no error").toContain("Ask interrupted by message");
+				expect(late).toBe(false);
+				expect(select).not.toHaveBeenCalled();
+			});
+		});
+
 		describe("answered by an extension", () => {
 			type Seen = {
 				requested: Array<{
@@ -3435,6 +3529,11 @@ describe("ExtensionRunner", () => {
 				inHandlerResult?: boolean;
 				/** Runs at the end of the requested handler. */
 				afterHandler?: () => void;
+				/** The requested handler awaits this before returning, like a remote round-trip. */
+				hold?: Promise<void>;
+				/** When set, the handler answers the moment the call's signal aborts, and stores the result. */
+				answerOnAbort?: boolean;
+				abortResult?: boolean;
 			};
 			const globalState = globalThis as typeof globalThis & { __extApproval?: Seen };
 			afterEach(() => {
@@ -3447,12 +3546,16 @@ describe("ExtensionRunner", () => {
 				fs.writeFileSync(
 					path.join(extensionsDir, "ext-approval.ts"),
 					`export default function(pi) {
-						pi.on("tool_approval_requested", (event, ctx) => {
+						pi.on("tool_approval_requested", async (event, ctx) => {
 							const seen = globalThis.__extApproval;
 							seen.requested.push(event);
 							seen.ctx = ctx;
 							if (seen.inHandler !== undefined) seen.inHandlerResult = ctx.resolveToolApproval(event.toolCallId, seen.inHandler);
+							if (seen.answerOnAbort) event.signal?.addEventListener("abort", () => {
+								seen.abortResult = ctx.resolveToolApproval(event.toolCallId, "once");
+							});
 							seen.afterHandler?.();
+							if (seen.hold) await seen.hold;
 						});
 						pi.on("tool_approval_resolved", event => {
 							globalThis.__extApproval.resolved.push({ approved: event.approved, by: event.by, reason: event.reason });
@@ -3621,6 +3724,28 @@ describe("ExtensionRunner", () => {
 				expect(select).not.toHaveBeenCalled();
 				expect(executed).toHaveBeenCalledTimes(1);
 				expect(notify).toHaveBeenCalledWith("Approval for dangerous_tool answered by extension", "info");
+			});
+
+			it("aborting the call stops waiting on a handler and closes the approval", async () => {
+				const { seen, executed, run } = await setup();
+				const release = Promise.withResolvers<void>();
+				const entered = Promise.withResolvers<void>();
+				seen.hold = release.promise;
+				seen.answerOnAbort = true;
+				seen.afterHandler = () => entered.resolve();
+				const turn = new AbortController();
+				const execution = run("call-held", { signal: turn.signal });
+				await entered.promise;
+				turn.abort();
+				// Ends without the handler returning.
+				await expect(execution).rejects.toThrow(/Aborted/);
+				// Closed the moment the call aborted, before the handler (or anyone) could answer it.
+				expect(seen.abortResult).toBe(false);
+				expect(seen.ctx!.resolveToolApproval("call-held", "once")).toBe(false);
+				expect(seen.ctx!.getPendingToolApprovals()).toEqual([]);
+				expect(executed).not.toHaveBeenCalled();
+				expect(seen.resolved[0]).toMatchObject({ approved: false, by: "user" });
+				release.resolve();
 			});
 
 			it("an answer given while the turn is aborted does not run the call", async () => {
