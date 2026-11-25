@@ -4,7 +4,7 @@
 
 ### Added
 
-- Timed RPC dialogs accept user activity to refresh their inactivity deadline, and form timeouts retain the latest valid data draft.
+- Timed RPC dialogs accept user activity to refresh their inactivity deadline, and form timeouts retain the latest valid data draft ([#20471](https://github.com/can1357/oh-my-pi/pull/20471) by [@tingQian](https://github.com/tingQian)).
 
 ## [19.2.0] - 2026-11-25
 
