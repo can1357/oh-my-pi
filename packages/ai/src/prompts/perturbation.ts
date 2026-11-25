@@ -9,6 +9,14 @@
  * system-prompt opener has an empty variant, so perturbed requests carry no
  * persona line.
  *
+ * Rewriting is search and replace: one regex finds the first word of any
+ * pooled source (or a manual literal, or a code fence to skip), a word tree
+ * narrows the candidates by the second word, and a substring check confirms
+ * the rest. A match counts only where `promptFragments` would cut, so a
+ * pooled clause never rewrites part of a longer sentence. Results sit in an
+ * LRU, since the same system prompts and tool descriptions recur on every
+ * request.
+ *
  * Off by default. A model opts in through the `prompt-perturbation` KDL axis
  * (see `packages/catalog/src/compat/rules/`); `OMP_PROMPT_PERTURBATION=1`
  * forces it on for every model and `OMP_PROMPT_PERTURBATION=0` forces it off.
@@ -35,18 +43,52 @@ interface PerturbationPool {
 	entries: readonly PerturbationEntry[];
 }
 
-interface Perturbation {
-	/** Manual entries: literal text replaced wherever it occurs (the opener, dividers). */
-	literal: RegExp | null;
-	literals: ReadonlyMap<string, string>;
-	/** Generated entries: one sentence or clause, matched as a whole fragment. */
-	fragments: ReadonlyMap<string, string>;
-	/** Rewritten text by input: system prompts and tool descriptions repeat on every request. */
-	memo: Map<string, string>;
+/** A memoized rewrite, stamped with the latest call that returned it. */
+interface Memo {
+	rewritten: string;
+	used: number;
 }
 
-/** Distinct texts memoized before the memo resets; a session renders a few dozen. */
+/** A generated source past its second word. */
+interface Continuation {
+	/** The source from the end of its second word, trailing punctuation included. */
+	rest: string;
+	entry: PerturbationEntry;
+	/** This install's variant, hashed when the source first matches. */
+	variant?: string;
+}
+
+interface Perturbation {
+	/**
+	 * Where a rewrite can begin: a code-fence line (group 1, skipped to its closing fence),
+	 * a manual literal, or the first word of a generated source where a fragment can open (group 2).
+	 */
+	scan: RegExp;
+	/** Manual entries: literal text replaced wherever it occurs (the opener, dividers). */
+	literals: ReadonlyMap<string, string>;
+	/** The manual literals alone, longest first: swapped inside fenced code, which `scan` skips. */
+	literal: RegExp | null;
+	/**
+	 * Generated entries, whole sentences or clauses, by first word, then by second word
+	 * without trailing punctuation; each bucket lists the longest continuation first.
+	 */
+	sources: ReadonlyMap<string, ReadonlyMap<string, readonly Continuation[]>>;
+	installId: string;
+	/**
+	 * Rewritten text by input: system prompts and tool descriptions repeat on every request.
+	 * A hit only restamps its entry: reordering the map, as `LRUCache.get` does, costs several lookups.
+	 */
+	memo: Map<string, Memo>;
+}
+
+/** Distinct texts memoized, least recently used evicted first; a session renders a few dozen. */
 const MEMO_LIMIT = 512;
+
+/** Stamp of the latest memo access. */
+let clock = 0;
+
+/** The rest of a fenced code block: up to and including its closing fence line. */
+const FENCE_CLOSE = /^[^\S\n]*```.*/gm;
 
 let built = false;
 let perturbation: Perturbation | null = null;
@@ -71,14 +113,19 @@ function isSpace(char: string | undefined): boolean {
 	return char === " " || char === "\t";
 }
 
+/** `e.g. foo` and `1.5 s` continue the sentence; only a non-lowercase word starts the next one. */
+function startsSentence(lead: string): boolean {
+	return lead === lead.toUpperCase();
+}
+
 /**
  * Split prose into sentences and clauses. Boundaries are line breaks, sentence
  * ends (`.`/`!`/`?` before a non-lowercase word), `;`, a spaced em dash, and
  * table pipes; backtick spans and brackets are never split, fenced code is never returned.
  * Trailing punctuation (`.`, `!`, `?`, `;`, `:`, `,`) stays outside the fragment.
- * The generator and the runtime share this, so a pooled fragment matches
- * wherever the same sentence renders, whatever line, indentation, or template
- * surrounds it.
+ * The generator pools these; the runtime accepts a pooled source only where
+ * this would cut (`startsFragment`, `endsFragment`), so it matches wherever the
+ * same sentence renders, whatever line, indentation, or template surrounds it.
  */
 export function promptFragments(text: string): PromptFragment[] {
 	const fragments: PromptFragment[] = [];
@@ -114,9 +161,7 @@ export function promptFragments(text: string): PromptFragment[] {
 				if ((char === "." || char === "!" || char === "?" || char === ";") && isSpace(text[i + 1])) {
 					let next = i + 1;
 					while (next < lineEnd && isSpace(text[next])) next++;
-					// `e.g. foo` and `1.5 s` continue the sentence; only a non-lowercase word starts the next one.
-					const lead = text[next] ?? "";
-					if (char === ";" || lead === lead.toUpperCase()) {
+					if (char === ";" || startsSentence(text[next] ?? "")) {
 						cut = i + 1;
 						resume = next;
 					}
@@ -144,7 +189,7 @@ function pickVariant(installId: string, entry: PerturbationEntry): string | unde
 	return entry.variants[digest.readUInt32BE(0) % entry.variants.length];
 }
 
-/** Choose this install's variant of every pooled source. */
+/** Index the pool: manual literals with this install's variant, generated sources as a word tree. */
 function buildPerturbation(): Perturbation | null {
 	// Absolute in a source checkout or a compiled binary (`$bunfs`); relative to the bundle in the npm `dist/cli.js`.
 	const poolFile =
@@ -152,18 +197,53 @@ function buildPerturbation(): Perturbation | null {
 	const pool = JSON.parse(readFileSync(poolFile, "utf8")) as PerturbationPool;
 	const installId = getInstallId();
 	const literals = new Map<string, string>();
-	const fragments = new Map<string, string>();
+	const sources = new Map<string, Map<string, Continuation[]>>();
 	for (const entry of pool.entries) {
-		if (entry.source.length === 0 || entry.variants.length === 0) continue;
-		const variant = pickVariant(installId, entry);
-		if (variant === undefined) continue;
-		(entry.manual ? literals : fragments).set(entry.source, variant);
+		const { source } = entry;
+		if (source.length === 0 || entry.variants.length === 0) continue;
+		if (entry.manual) {
+			const variant = pickVariant(installId, entry);
+			if (variant !== undefined) literals.set(source, variant);
+			continue;
+		}
+		// The generator pools clauses of four or more words; the tree keys on the first two.
+		const first = source.indexOf(" ");
+		if (first === -1) continue;
+		const second = wordEnd(source, first + 1);
+		const root = source.slice(0, first);
+		let level = sources.get(root);
+		if (level === undefined) {
+			level = new Map();
+			sources.set(root, level);
+		}
+		const key = source.slice(first + 1, second);
+		let bucket = level.get(key);
+		if (bucket === undefined) {
+			bucket = [];
+			level.set(key, bucket);
+		}
+		bucket.push({ rest: source.slice(second), entry });
 	}
-	if (literals.size === 0 && fragments.size === 0) return null;
+	if (literals.size === 0 && sources.size === 0) return null;
+	for (const level of sources.values()) {
+		for (const bucket of level.values()) bucket.sort((a, b) => b.rest.length - a.rest.length);
+	}
 	// Longest first so a literal that contains another literal is matched whole.
-	const alternatives = [...literals.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
-	const literal = alternatives.length > 0 ? new RegExp(alternatives.join("|"), "g") : null;
-	return { literal, literals, fragments, memo: new Map() };
+	const literalAlternatives = [...literals.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
+	const alternatives = ["(^[^\\S\\n]*```.*)", ...literalAlternatives];
+	if (sources.size > 0) {
+		// Openings are a superset of where `promptFragments` cuts; `startsFragment` decides.
+		const opening = `(?:${LINE_PREFIX.source}|[.!?;|\\u2014][ \\t]*)`;
+		alternatives.push(`${opening}(${[...sources.keys()].map(escapeRegExp).join("|")})(?= )`);
+	}
+	return {
+		scan: new RegExp(alternatives.join("|"), "gm"),
+		literals,
+		literal: literalAlternatives.length > 0 ? new RegExp(literalAlternatives.join("|"), "g") : null,
+		sources,
+		installId,
+		memo: new Map(),
+	};
 }
 
 /** Rewrite every pooled source in `text` with this install's variant. */
@@ -175,26 +255,118 @@ export function perturbPromptText(text: string): string {
 	}
 	if (perturbation === null) return text;
 	const { memo } = perturbation;
-	let rewritten = memo.get(text);
-	if (rewritten === undefined) {
-		rewritten = rewrite(perturbation, text);
-		if (memo.size >= MEMO_LIMIT) memo.clear();
-		memo.set(text, rewritten);
+	const memoed = memo.get(text);
+	if (memoed !== undefined) {
+		memoed.used = ++clock;
+		return memoed.rewritten;
 	}
+	const rewritten = rewrite(perturbation, text);
+	if (memo.size >= MEMO_LIMIT) evictLeastRecent(memo);
+	memo.set(text, { rewritten, used: ++clock });
 	return rewritten;
 }
 
-function rewrite({ literal, literals, fragments }: Perturbation, text: string): string {
-	if (literal) text = text.replace(literal, match => literals.get(match) ?? match);
-	let out = "";
-	let cursor = 0;
-	for (const { start, end } of promptFragments(text)) {
-		const variant = fragments.get(text.slice(start, end));
-		if (variant === undefined) continue;
-		out += text.slice(cursor, start) + variant;
-		cursor = end;
+/** Drop the entry used longest ago. A full scan, but only on a miss, which already costs a whole rewrite. */
+function evictLeastRecent(memo: Map<string, Memo>): void {
+	let oldest: string | undefined;
+	let used = Number.POSITIVE_INFINITY;
+	for (const [text, entry] of memo) {
+		if (entry.used < used) {
+			used = entry.used;
+			oldest = text;
+		}
 	}
-	return cursor === 0 ? text : out + text.slice(cursor);
+	if (oldest !== undefined) memo.delete(oldest);
+}
+
+function rewrite({ scan, literals, literal, sources, installId }: Perturbation, text: string): string {
+	let out = "";
+	let copied = 0;
+	scan.lastIndex = 0;
+	for (let match = scan.exec(text); match !== null; match = scan.exec(text)) {
+		const [found, fence, root] = match;
+		if (fence !== undefined) {
+			FENCE_CLOSE.lastIndex = scan.lastIndex;
+			// An unclosed fence runs to the end of the text.
+			const close = FENCE_CLOSE.exec(text) === null ? text.length : FENCE_CLOSE.lastIndex;
+			scan.lastIndex = close;
+			if (literal === null) continue;
+			// Fenced code is never paraphrased, but manual literals go wherever they occur.
+			const code = text.slice(match.index, close);
+			const swapped = code.replace(literal, value => literals.get(value) ?? value);
+			if (swapped === code) continue;
+			out += text.slice(copied, match.index) + swapped;
+			copied = close;
+			continue;
+		}
+		let start = match.index;
+		let end = scan.lastIndex;
+		let variant: string | undefined;
+		if (root === undefined) {
+			variant = literals.get(found);
+		} else {
+			// The root word ends the match, and a space follows it.
+			start = end - root.length;
+			const from = end + 1;
+			const key = wordEnd(text, from);
+			const next = sources
+				.get(root)
+				?.get(text.slice(from, key))
+				?.find(({ rest }) => text.startsWith(rest, key) && endsFragment(text, key + rest.length));
+			if (next !== undefined && startsFragment(text, start)) {
+				variant = next.variant ??= pickVariant(installId, next.entry);
+				end = key + next.rest.length;
+			}
+		}
+		if (variant === undefined) continue;
+		out += text.slice(copied, start) + variant;
+		copied = end;
+		scan.lastIndex = end;
+	}
+	return copied === 0 ? text : out + text.slice(copied);
+}
+
+/** End of the word at `from`, before its trailing punctuation; words break at whitespace and table pipes. */
+function wordEnd(text: string, from: number): number {
+	let end = from;
+	while (end < text.length) {
+		const code = text.charCodeAt(end);
+		if (code === 0x20 || code === 0x0a || code === 0x09 || code === 0x0d || code === 0x7c) break;
+		end++;
+	}
+	while (end > from && TRAILING_PUNCTUATION.has(text[end - 1] ?? "")) end--;
+	return end;
+}
+
+/** Whether `promptFragments` could start a fragment at `start`: after a line prefix, a sentence end, `;`, a spaced em dash, or a pipe. */
+function startsFragment(text: string, start: number): boolean {
+	let i = start;
+	while (i > 0 && isSpace(text[i - 1])) i--;
+	const before = text[i - 1];
+	if (before === undefined || before === "\n" || before === "|") return true;
+	if (i < start) {
+		if (before === ";") return true;
+		if (before === "\u2014") return isSpace(text[i - 2]);
+		if ((before === "." || before === "!" || before === "?") && startsSentence(text[start] ?? "")) return true;
+	}
+	const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+	return LINE_PREFIX.exec(text.slice(lineStart, start))?.[0].length === start - lineStart;
+}
+
+/** Whether `promptFragments` could end a fragment at `end`: only spaces and trailing punctuation precede a line end, sentence end, `;`, spaced em dash, or pipe. */
+function endsFragment(text: string, end: number): boolean {
+	for (let i = end; i < text.length; i++) {
+		const char = text[i] ?? "";
+		if (char === "\n" || char === "|") return true;
+		if (char === "\u2014") return isSpace(text[i - 1]) && isSpace(text[i + 1]);
+		if (isSpace(char)) continue;
+		if (!TRAILING_PUNCTUATION.has(char)) return false;
+		if (char === "," || char === ":" || !isSpace(text[i + 1])) continue;
+		let next = i + 1;
+		while (isSpace(text[next])) next++;
+		if (char === ";" || startsSentence(text[next] ?? "")) return true;
+	}
+	return true;
 }
 
 function perturbTools(tools: Tool[] | undefined): Tool[] | undefined {

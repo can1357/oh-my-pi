@@ -56,9 +56,22 @@ describe("per-install prompt perturbation", () => {
 		expect(sample.variants).toContain(rendered.slice(before.length, -after.length));
 	});
 
+	it("leaves a pooled sentence untouched where it is only part of a longer one", () => {
+		for (const text of [
+			`${sample.source}, which no pool entry could have authored.`,
+			`Long before that ${sample.source}.`,
+		]) {
+			expect(perturbPromptText(text)).toBe(text);
+		}
+	});
+
 	it("leaves a pooled sentence inside fenced code untouched", () => {
 		const fenced = `\`\`\`\n${sample.source}\n\`\`\``;
 		expect(perturbPromptText(fenced)).toBe(fenced);
+	});
+
+	it("swaps manual literals inside fenced code too", () => {
+		expect(perturbPromptText("```\n⁂ Runtime\n```")).not.toContain("⁂");
 	});
 
 	it("drops the system-prompt opener instead of paraphrasing it", async () => {
