@@ -371,6 +371,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 		"open",
 		"paste",
+		"perl",
 		"printenv",
 		"readlink",
 		"realpath",

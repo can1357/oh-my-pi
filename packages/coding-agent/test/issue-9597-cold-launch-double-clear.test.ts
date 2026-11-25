@@ -15,6 +15,7 @@ import {
 	cfgAutocompleteMaxVisible,
 	cfgComposerShape,
 	cfgStartupQuiet,
+	cfgTuiImeSafeCursor,
 	cfgTuiResizeScrollback,
 	cfgTuiVimMode,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -50,6 +51,7 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 			resizeScrollback: cfgTuiResizeScrollback.get(settings),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
 			vim: cfgTuiVimMode.get(settings),
+			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
 		};
 	});
 

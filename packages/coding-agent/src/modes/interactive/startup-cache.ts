@@ -54,6 +54,7 @@ export interface StartupPreferences {
 	readonly resizeScrollback: ResizeScrollback;
 	readonly autocompleteMaxVisible: number;
 	readonly vim: boolean;
+	readonly imeSafeCursor: boolean;
 }
 
 /** What the cache knows for a project. */
@@ -94,14 +95,15 @@ function parseUi(
 	value: unknown,
 ): { readonly preferences: StartupPreferences; readonly theme: ComposerThemePreferences } | undefined {
 	if (!isRecord(value) || !isRecord(value.preferences) || !isRecord(value.theme)) return undefined;
-	const { quiet, composerShape, resizeScrollback, autocompleteMaxVisible, vim } = value.preferences;
+	const { quiet, composerShape, resizeScrollback, autocompleteMaxVisible, vim, imeSafeCursor } = value.preferences;
 	const scrollback = typeof resizeScrollback === "string" ? RESIZE_SCROLLBACK[resizeScrollback] : undefined;
 	if (
 		typeof quiet !== "boolean" ||
 		typeof composerShape !== "string" ||
 		!scrollback ||
 		typeof autocompleteMaxVisible !== "number" ||
-		typeof vim !== "boolean"
+		typeof vim !== "boolean" ||
+		(typeof imeSafeCursor !== "boolean" && imeSafeCursor !== undefined)
 	) {
 		return undefined;
 	}
@@ -115,7 +117,14 @@ function parseUi(
 		return undefined;
 	}
 	return {
-		preferences: { quiet, composerShape, resizeScrollback: scrollback, autocompleteMaxVisible, vim },
+		preferences: {
+			quiet,
+			composerShape,
+			resizeScrollback: scrollback,
+			autocompleteMaxVisible,
+			vim,
+			imeSafeCursor: imeSafeCursor === true,
+		},
 		theme: { symbolPreset, colorBlindMode, darkTheme, lightTheme } as ComposerThemePreferences,
 	};
 }
