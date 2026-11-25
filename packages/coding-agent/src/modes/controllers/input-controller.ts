@@ -1167,7 +1167,11 @@ export class InputController {
 			// agent-core queue.
 			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
 				if (this.ctx.session.hasInterruptibleInput) {
-					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					const aborting = this.ctx.session.abort({
+						reason: USER_INTERRUPT_LABEL,
+						deliverQueuedMessages: true,
+						detachTools: true,
+					});
 					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
 				}
@@ -1692,7 +1696,11 @@ export class InputController {
 				: undefined;
 		if (!text && !images) {
 			if (target.isStreaming && target.hasInterruptibleInput) {
-				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+				const aborting = target.abort({
+					reason: USER_INTERRUPT_LABEL,
+					deliverQueuedMessages: true,
+					detachTools: true,
+				});
 				await aborting;
 				this.ctx.updatePendingMessagesDisplay();
 			}
@@ -2354,7 +2362,7 @@ export class InputController {
 		];
 		const restored = this.#restoreEntriesToEditor(allQueued, { currentText: options?.currentText });
 		if (options?.abort) {
-			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, detachTools: allQueued.length > 0 });
 		}
 		return restored;
 	}

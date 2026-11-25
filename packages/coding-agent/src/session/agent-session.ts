@@ -9187,7 +9187,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 		try {
 			const queued = this.hasInterruptibleInput;
-			await this.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: queued });
+			await this.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: queued, detachTools: queued });
 			// Interrupt-and-send: the abort's own drain resumes the run with the queued input.
 			if (queued) return;
 			await this.#resumeIdle(() => {
@@ -12753,12 +12753,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async abort(options?: {
 		goalReason?: "interrupted" | "internal";
 		reason?: string;
-		/**
-		 * Interrupt-and-send (Enter on an empty composer with input queued): force queued user
-		 * follow-ups into the continuation after a user interrupt, and let running tools that can
-		 * (auto-background bash/eval) move into background jobs instead of being killed.
-		 */
+		/** Force queued user follow-ups into the continuation after a user interrupt. */
 		deliverQueuedMessages?: boolean;
+		/**
+		 * Let running tools that can (auto-background bash/eval) move into background jobs instead
+		 * of being killed. Interrupts that carry queued user input set it: the user is redirecting
+		 * the agent, not stopping its work.
+		 */
+		detachTools?: boolean;
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
 	}): Promise<void> {
@@ -12815,7 +12817,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.abortEval();
 			const computerControlRevocation = revokeComputerControlForOwner(this.#eval.getKernelOwnerId());
 			const postPromptDrain = this.#cancelPostPromptTasks(options?.reason);
-			this.agent.abort(options?.reason, { detachTools: forceQueuedDelivery });
+			this.agent.abort(options?.reason, { detachTools: options?.detachTools });
 			await Promise.all([postPromptDrain, computerControlRevocation]);
 			await this.agent.waitForIdle();
 			this.#persistToolResultsEndedWhileDisconnected();
