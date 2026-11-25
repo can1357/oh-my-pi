@@ -1,7 +1,7 @@
 export { truncate } from "@oh-my-pi/pi-utils";
 
 import * as fs from "node:fs/promises";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, pathExists } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
 import type {
 	CodeAction,
@@ -550,16 +550,6 @@ export async function resolveDiagnosticTargets(
 		return { matches: [...matches], truncated: false };
 	}
 	return resolveDiagnosticTarget(file, cwd, maxMatches);
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-	try {
-		await fs.stat(filePath);
-		return true;
-	} catch (error) {
-		if (isEnoent(error)) return false;
-		throw error;
-	}
 }
 
 async function resolveDiagnosticTarget(
