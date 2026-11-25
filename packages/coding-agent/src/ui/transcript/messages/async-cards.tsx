@@ -291,6 +291,8 @@ const IRC_KINDS: Readonly<Record<string, IrcMessage["kind"]>> = {
 /** `details` of an `irc:*` custom message. */
 export interface IrcMessageDetails {
 	readonly from?: string;
+	/** Session title of a sender in another omp instance, shown in place of its pid `from`. */
+	readonly fromLabel?: string;
 	readonly to?: string;
 	/** The body of an `irc:incoming` message. */
 	readonly message?: string;
@@ -316,7 +318,7 @@ export function ircMessage(
 	if (!kind) return undefined;
 	return {
 		kind,
-		from: details?.from,
+		from: details?.fromLabel || details?.from,
 		to: details?.to,
 		body: kind === "incoming" ? details?.message : details?.body,
 		replyTo: details?.replyTo,

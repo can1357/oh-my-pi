@@ -28,6 +28,7 @@ import {
 	type UiNode,
 	untrack,
 } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatAge, formatNumber } from "@oh-my-pi/pi-utils";
 import type {
 	TspKvProps,
@@ -51,6 +52,7 @@ import {
 	hubFallbackStatsSession,
 	hubRowMetrics,
 } from "../../../modes/view-model/overlays/agent-hub-projection";
+import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import {
 	type AgentHubRegistry,
 	type AgentRecordLike,
@@ -84,7 +86,6 @@ import {
 	agentTask,
 	compareFrozenRanks,
 	type FrozenRank,
-	formatCost,
 	formatMetricDuration,
 	hubModel,
 	localDateTime,
@@ -1070,7 +1071,9 @@ export function AgentHub<T extends AgentRecordLike>(
 					title="Open in transcript"
 				>
 					<text spans={[span(activityClock(row.timestamp), "mono dim")]} />
-					<text spans={glyph ? [span(glyph.text ?? NATIVE_GLYPHS[glyph.symbol!] ?? "", glyph.color)] : []} />
+					<text
+						spans={glyph ? [span(glyph.text ?? currentTheme().symbols.symbol(glyph.symbol!), glyph.color)] : []}
+					/>
 					<text spans={[span(sanitizeDisplaySingleLine(activityTitle(row)), "mono muted")]} />
 					<text text={sanitizeDisplaySingleLine(activitySummary(row))} truncate="end" grow={1} />
 				</row>
@@ -1373,11 +1376,3 @@ export function AgentHub<T extends AgentRecordLike>(
 		</picker>
 	);
 }
-
-/** Status glyphs by symbol key for native spans (the unicode preset: native terminals draw their own icons). */
-const NATIVE_GLYPHS: Readonly<Record<string, string>> = {
-	"status.error": "✘",
-	"status.aborted": "⏹",
-	"status.running": "⟳",
-	"status.success": "✔",
-};

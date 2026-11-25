@@ -7,8 +7,10 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
-import { padTo, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { expandKeyLabel } from "../../keys/hints";
 import { type ToolProps, toolProps } from "./look";
 
 /** The run of rule glyphs before a head, a section label or a footer. */
@@ -125,14 +127,27 @@ export function frameRows(theme: Theme, width: number, spec: FrameSpec, rowTags?
 	);
 }
 
-/** `⟦⌃O: Expand⟧`, dim. */
+/** The bracketed hint to expand tool output, dim. */
 export function expandHint(theme: Theme): string {
-	return theme.fg("dim", bracketed(theme, "⌃O: Expand"));
+	return theme.fg("dim", bracketed(theme, `${expandKeyLabel(theme)}: Expand`));
 }
 
-/** `… N more lines ⟦⌃O: Expand⟧`, dim. */
+/** A hidden line count followed by the tool expansion hint, dim. */
 export function moreLinesHint(theme: Theme, hidden: number): string {
 	return `${theme.fg("dim", `… ${hidden} more lines `)}${expandHint(theme)}`;
+}
+
+/** A standalone failure with an error glyph and exactly one `Error:` prefix. */
+export function standaloneErrorRows(cx: PaintContext, message: string): string[] {
+	const theme = cx.theme;
+	const cleaned =
+		replaceTabs(sanitizeText(message))
+			.trim()
+			.replace(/^(?:Error:\s*)+/, "") || "Unknown error";
+	return wrap(
+		`${theme.fg("error", theme.symbols.symbol("status.error"))} ${theme.fg("error", `Error: ${cleaned}`)}`,
+		cx.width,
+	);
 }
 
 /** The status spinner frame at the terminal clock; reduced motion draws the pending glyph. */
@@ -191,11 +206,7 @@ export function statusLine(theme: Theme, line: StatusLine): string {
 	const title = theme.fg(line.titleColor ?? "accent", headerText(line.title));
 	let out = line.glyph ? `${line.glyph} ${title}` : title;
 	if (line.description) out += `: ${theme.fg("muted", headerText(line.description))}`;
-	if (line.badge) {
-		const left = theme.symbols.symbol("format.bracketLeft");
-		const right = theme.symbols.symbol("format.bracketRight");
-		out += ` ${theme.fg(line.badge.color, `${left}${headerText(line.badge.label)}${right}`)}`;
-	}
+	if (line.badge) out += ` ${theme.fg(line.badge.color, bracketed(theme, headerText(line.badge.label)))}`;
 	const meta = (line.meta ?? []).map(headerText).filter(part => part.trim().length > 0);
 	if (meta.length > 0) out += ` ${theme.fg("dim", meta.join(theme.symbols.symbol("sep.dot")))}`;
 	return out;
@@ -229,19 +240,19 @@ export function statusIcon(
 
 /**
  * A collapsed command preview: at most `max` rows, the end kept behind a dim
- * `… N earlier lines ⟦⌃O: Expand⟧` marker.
+ * marker for how many rows were clipped and how to expand them.
  */
 export function capLines(theme: Theme, lines: readonly string[], max: number): string[] {
 	if (lines.length <= max) return [...lines];
 	const visible = max <= 1 ? [] : lines.slice(lines.length - (max - 1));
 	const hidden = lines.length - visible.length;
-	const marker = `… ${hidden} earlier ${hidden === 1 ? "line" : "lines"} ${bracketed(theme, "⌃O: Expand")}`;
-	return [theme.fg("dim", marker), ...visible];
+	const marker = theme.fg("dim", `… ${hidden} earlier ${hidden === 1 ? "line" : "lines"}`);
+	return [`${marker} ${expandHint(theme)}`, ...visible];
 }
 
 /**
  * The tail of an output pane at `width`: lines wrapped, the last `limit`
- * rows kept under a dim `… (N earlier lines, showing S of T) ⟦⌃O: Expand⟧`.
+ * rows kept below the hidden line count and the tool expansion hint.
  */
 export function tailRows(theme: Theme, lines: readonly string[], limit: number, width: number): string[] {
 	const rows: string[] = [];
@@ -252,8 +263,8 @@ export function tailRows(theme: Theme, lines: readonly string[], limit: number, 
 	if (rows.length <= limit) return rows;
 	const shown = limit <= 0 ? [] : rows.slice(rows.length - limit);
 	const hidden = rows.length - shown.length;
-	const marker = `… (${hidden} earlier lines, showing ${shown.length} of ${rows.length}) ${bracketed(theme, "⌃O: Expand")}`;
-	return [theme.fg("dim", marker), ...shown];
+	const marker = theme.fg("dim", `… (${hidden} earlier lines, showing ${shown.length} of ${rows.length})`);
+	return [`${marker} ${expandHint(theme)}`, ...shown];
 }
 
 /** `⟦text⟧` with the theme's brackets. */

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { Ellipsis } from "@oh-my-pi/pi-natives";
 import { expandWindowsLongPath, getWindowsShortPath } from "@oh-my-pi/pi-natives/path";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs, truncateToWidth } from "./text-width";
 
@@ -98,11 +99,6 @@ export const TRUNCATE_LENGTHS = {
 	/** Idle recap status line (~40-word LLM reply) */
 	RECAP: 280,
 } as const;
-
-/** Collapse a possibly multi-line string into one line; whitespace runs (tabs included) become one space. */
-export function flattenLine(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
 
 /**
  * Collapse a possibly multi-line string into a single line, then truncate it to

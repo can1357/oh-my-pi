@@ -94,6 +94,21 @@ function resendText(status: PromptCacheStatus): string {
 	}
 }
 
+function cachedReads(status: PromptCacheStatus): number {
+	return Math.min(status.cachedTokens, status.nextTokens);
+}
+
+/** The hover card's cache state and next-message estimate, without relative times that could go stale. */
+export function promptCacheBrief(status: PromptCacheStatus, nowMs: number): readonly [string, string] {
+	if (status.state === "cold") {
+		const why = status.reason ? ` — ${coldReasonText(status.reason)}` : "";
+		return [`Not cached${why}`, `Next message ${resendText(status)}`];
+	}
+	const cached = status.inferred ? "Likely cached" : "Cached";
+	const until = status.ttlMs === undefined ? ", no expiry" : ` until ${when(status.touchedAt + status.ttlMs, nowMs)}`;
+	return [`${cached}${until}`, `Next message reads ~${formatNumber(cachedReads(status))} from cache`];
+}
+
 /** The `/session` rows, in display order; times say how long ago or ahead of `nowMs` they are. */
 export function promptCacheDetails(status: PromptCacheStatus, nowMs: number): PromptCacheDetailRow[] {
 	const tier: PromptCacheDetailRow = {
@@ -115,7 +130,7 @@ export function promptCacheDetails(status: PromptCacheStatus, nowMs: number): Pr
 		];
 	}
 	const expiresAt = status.ttlMs === undefined ? undefined : status.touchedAt + status.ttlMs;
-	const reads = Math.min(status.cachedTokens, status.nextTokens);
+	const reads = cachedReads(status);
 	return [
 		{ label: "State", value: status.inferred ? "Likely cached" : "Cached" },
 		{

@@ -10,6 +10,7 @@
  * changes, not continuously.
  */
 import { type JSXNode, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { BtwAnswerBody, flatError } from "./btw-answer";
 import { Hints, type KeyHint } from "./common";
@@ -98,16 +99,23 @@ function footerOf(props: BtwPanelProps): Footer {
 	const status = state.status();
 	const copied = state.copied();
 	const hasText = state.answer().trim() !== "";
+	const symbols = currentTheme().symbols;
 	return untrack(() => {
 		switch (status) {
 			case "streaming":
 				return { hints: [{ keys: interruptKbd(), label: "to cancel" }] };
 			case "branching":
-				return { hints: [], note: { s: "muted", t: "⏳ Branching to chat…" } };
+				return { hints: [], note: { s: "muted", t: `${symbols.symbol("status.pending")} Branching to chat…` } };
 			case "aborted":
-				return { status: { s: "warning", t: "⚠ Cancelled" }, hints: [{ keys: interruptKbd(), label: "to close" }] };
+				return {
+					status: { s: "warning", t: `${symbols.symbol("status.warning")} Cancelled` },
+					hints: [{ keys: interruptKbd(), label: "to close" }],
+				};
 			case "error":
-				return { status: { s: "error", t: "✘ Error" }, hints: [{ keys: interruptKbd(), label: "to close" }] };
+				return {
+					status: { s: "error", t: `${symbols.symbol("status.error")} Error` },
+					hints: [{ keys: interruptKbd(), label: "to close" }],
+				};
 		}
 		if (!hasText) return { hints: [{ keys: interruptKbd(), label: "to close" }] };
 		const hints: KeyHint[] = [];
@@ -143,7 +151,10 @@ export function BtwPanel(props: BtwPanelProps): JSXNode {
 			return <text wrap="word" spans={[{ s: "error", t: message }]} />;
 		}
 		if (answer.trim() === "") {
-			const text = status === "streaming" ? "⏳ Waiting for response…" : "No text returned.";
+			const text =
+				status === "streaming"
+					? `${currentTheme().symbols.symbol("status.pending")} Waiting for response…`
+					: "No text returned.";
 			return <text spans={[{ s: "dim", t: text }]} />;
 		}
 		const inject = props.canInject ? (state.injected() ? "sent" : "pending") : undefined;

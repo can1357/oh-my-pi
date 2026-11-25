@@ -20,6 +20,7 @@ import {
 	LSP_ACQUIRE_METHOD,
 	LSP_MODULE_KIND,
 	LSP_MODULE_VERSION,
+	LSP_STARTUP_MAX_MS,
 	LSP_UNRESERVE_METHOD,
 	type LspAcquireResult,
 	lspInstanceKey,
@@ -43,7 +44,7 @@ import type {
 } from "../module";
 import { projectScope, scopeKey, type UnitPolicy, type UnitScope } from "../protocol";
 
-/** Grace after the last lease before an unused server is stopped. */
+/** Grace after the last lease before an unused, initialized server is stopped. */
 const SERVER_LINGER_MS = 5 * 60 * 1_000;
 const SHUTDOWN_BUDGET_MS = 2_000;
 const KILL_GRACE_MS = 2_000;
@@ -237,6 +238,7 @@ class LspServerUnit implements ModuleUnit {
 	#initializeCached = false;
 	#initializeInFlight = false;
 	#initializedSent = false;
+	#startupTimer?: NodeJS.Timeout;
 	#nextId = 1;
 	#nextClientId = 1;
 	#stopping = false;
@@ -279,6 +281,20 @@ class LspServerUnit implements ModuleUnit {
 				return { reason: String(error) };
 			},
 		);
+		if (!this.#initializedSent) this.#armStartupDeadline(this.#child.state().startedAt);
+	}
+
+	#armStartupDeadline(startedAt: number): void {
+		this.#startupTimer = setTimeout(
+			() => {
+				const reason = `initialize timed out after ${LSP_STARTUP_MAX_MS}ms`;
+				for (const [session, id] of this.#initializeWaiters) session.send(rpcError(id, -32000, reason));
+				this.#initializeWaiters.clear();
+				this.#stopReason ??= reason;
+				this.#killServer();
+			},
+			Math.max(0, LSP_STARTUP_MAX_MS - (Date.now() - startedAt)),
+		).unref();
 	}
 
 	/** Free for a new client: nothing attached and the process is not going away. */
@@ -315,12 +331,11 @@ class LspServerUnit implements ModuleUnit {
 
 	async stop(reason: string): Promise<void> {
 		this.#stopReason ??= reason;
-		if (!this.#gone && !this.#stopping) {
+		if (!this.#gone && !this.#stopping && this.#initializedSent) {
 			this.#stopping = true;
 			await this.#shutdownGracefully();
 		}
-		this.#stopping = true;
-		if (!this.#gone) this.#child.kill();
+		this.#killServer();
 		const timer = setTimeout(() => {
 			if (!this.#gone) this.#child.kill("SIGKILL");
 		}, KILL_GRACE_MS);
@@ -448,6 +463,7 @@ class LspServerUnit implements ModuleUnit {
 				if (!request) {
 					if (!this.#initializedSent) {
 						this.#initializedSent = true;
+						clearTimeout(this.#startupTimer);
 						this.#writeServer(message);
 					} else {
 						this.#replayState(session);
@@ -758,6 +774,11 @@ class LspServerUnit implements ModuleUnit {
 		session.closed = true;
 		this.#initializeWaiters.delete(session);
 		if (!this.#sessions.delete(session)) return;
+		if (this.#sessions.size === 0 && !this.#initializedSent) {
+			this.#stopReason ??= "client disconnected before initialization completed";
+			this.#killServer();
+			return;
+		}
 		for (const uri of session.openUris) {
 			this.#documents.delete(uri);
 			this.#writeServer({ jsonrpc: "2.0", method: "textDocument/didClose", params: { textDocument: { uri } } });
@@ -779,6 +800,7 @@ class LspServerUnit implements ModuleUnit {
 
 	#serverExited(code: number): void {
 		if (this.#gone) return;
+		clearTimeout(this.#startupTimer);
 		this.#gone = true;
 		this.#stopping = true;
 		this.#watchedFiles?.close();
@@ -812,10 +834,13 @@ class LspServerUnit implements ModuleUnit {
 	}
 
 	#killServer(): void {
+		clearTimeout(this.#startupTimer);
 		this.#stopping = true;
 		if (this.#gone) return;
 		try {
-			this.#child.kill();
+			// Startup has no protocol-level shutdown, and killing only the launcher
+			// politely can leave its descendants running after it exits.
+			this.#child.kill(this.#initializedSent ? "SIGTERM" : "SIGKILL");
 		} catch {
 			this.#serverExited(-1);
 		}
