@@ -12,6 +12,10 @@
  * Each batch spends a credit and gets its own sequence number. Changes made
  * while blocked coalesce behind the unsent ops. If the oldest frame stays
  * unanswered for {@link STALLED_ACK_MS}, the credits reset (one warning per stall).
+ * A frame that echoes user input (a key, a paste, an `edit`, `undo` or `send`)
+ * may overdraw them by {@link INPUT_OVERDRAFT}, and frames unanswered for
+ * {@link INPUT_STALLED_ACK_MS} stop counting against it, so typing stays live
+ * while the terminal is slow to acknowledge.
  *
  * Events: the terminal's UI events become {@link UiEvent}s delivered to the
  * node they name and bubbled to the nearest handler; keys and pastes the
@@ -35,6 +39,10 @@ import { Reconciler } from "./reconcile";
 
 /** How long the oldest unacknowledged frame may wait before the credits reset. */
 export const STALLED_ACK_MS = 5000;
+/** Frames past the credits a frame echoing user input may leave unacknowledged. */
+export const INPUT_OVERDRAFT = 2;
+/** How long an unacknowledged frame counts against a frame echoing user input. */
+export const INPUT_STALLED_ACK_MS = 250;
 
 // APC chunking is separate: Tern still applies and draws each reassembled frame as one unit.
 const MAX_FRAME_BYTES = 24 * 1024 * 1024;
@@ -159,6 +167,8 @@ export class NativeBackend {
 	#cancelStall: (() => void) | undefined;
 	#stalledSince: number | undefined;
 	#stallResets = 0;
+	/** User input arrived that the next frame echoes (it may overdraw the credits). */
+	#inputPending = false;
 	#unsubscribe: (() => void)[] = [];
 
 	constructor(options: NativeBackendOptions) {
@@ -287,7 +297,12 @@ export class NativeBackend {
 	#send(force: boolean): boolean {
 		const reconciler = this.#reconciler!;
 		const active = this.#options.active?.() !== false;
-		if ((!active && !force) || (!this.#pending && (!active || !reconciler.dirty))) return false;
+		if (!active && !force) return false;
+		if (!this.#pending && (!active || !reconciler.dirty)) {
+			// Input that changed nothing has no echo to send.
+			this.#inputPending = false;
+			return false;
+		}
 		if (!force && !this.#hasCredit()) return false;
 		const connection = this.#connection!;
 		let sent = false;
@@ -303,6 +318,8 @@ export class NativeBackend {
 			this.#writeFrame(connection, this.#pending);
 			sent = true;
 		} while ((this.#pending || (force && active && !reconciled && reconciler.dirty)) && (force || this.#hasCredit()));
+		// Everything reconciled went out, and the echo of any input with it.
+		if (!this.#pending) this.#inputPending = false;
 		return sent;
 	}
 
@@ -390,11 +407,24 @@ export class NativeBackend {
 			this.#unacked = [];
 			return true;
 		}
+		let wait = STALLED_ACK_MS - waited;
+		// A split reconciliation still waits for its retention events, input or not.
+		if (this.#inputPending && !this.#pending) {
+			// An echo counts only the frames younger than INPUT_STALLED_ACK_MS against
+			// `credits + INPUT_OVERDRAFT`. `#unacked` is in send order: the frame that
+			// many from the newest decides.
+			const deciding = this.#unacked.at(-(credits + INPUT_OVERDRAFT));
+			if (!deciding || now - deciding.sentAt >= INPUT_STALLED_ACK_MS) return true;
+			// Retry the held echo once that frame stops counting, not when the credits reset.
+			wait = Math.min(wait, deciding.sentAt + INPUT_STALLED_ACK_MS - now);
+			this.#cancelStall?.();
+			this.#cancelStall = undefined;
+		}
 		if (!this.#cancelStall) {
 			this.#cancelStall = this.#clock!.setTimeout(() => {
 				this.#cancelStall = undefined;
 				this.flush();
-			}, STALLED_ACK_MS - waited);
+			}, wait);
 		}
 		return false;
 	}
@@ -463,6 +493,8 @@ export class NativeBackend {
 			)
 				return;
 		}
+		// The field is controlled: it shows the change once a frame echoes it.
+		if (event.ev === "edit" || event.ev === "undo" || event.ev === "send") this.#inputPending = true;
 		const reconciler = this.#reconciler!;
 		const ui = toUiEvent(event, keypathOf(path), item => reconciler.itemKey(event.id, item));
 		batch(() => {
@@ -518,6 +550,7 @@ export class NativeBackend {
 
 	#onInput(event: InputEvent): void {
 		if (event.type === "key") {
+			this.#inputPending = true;
 			batch(() => {
 				const path = this.#focusPath();
 				if (bubbleKey(path, event.key)) return;
@@ -528,6 +561,7 @@ export class NativeBackend {
 				this.#options.onKey?.(event.key);
 			});
 		} else if (event.type === "paste") {
+			this.#inputPending = true;
 			batch(() => {
 				const path = this.#focusPath();
 				if (bubblePaste(path, event.paste)) return;
