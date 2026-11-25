@@ -70,7 +70,7 @@ afterEach(async () => {
 let discoveryGate: (() => Promise<void>) | undefined;
 /** `reason` of every `before_agent_start` the extension saw, across its bindings. */
 const turnStartReasons: string[] = [];
-const turnStartPromptViews: { reason: string; text: string; blocks: string[]; matched: boolean }[] = [];
+const turnStartPromptViews: { reason: string; text: string; blocks: string[] }[] = [];
 
 /**
  * Registers the way the HexRays ida-mcp extension does: discovery starts at `session_start`, and
@@ -116,7 +116,6 @@ const registersAtFirstTurn: ExtensionFactory = pi => {
 			reason: event.reason,
 			text: event.systemPrompt,
 			blocks: [...event.systemPromptBlocks],
-			matched: event.systemPrompt.match(/^[\s\S]*$/) !== null,
 		});
 		return ensure();
 	});
@@ -256,16 +255,11 @@ it("warm-revives with the tools an extension registered at its first turn", asyn
 		expect(lateToolOutput(revived)).toBe("late_tool ok");
 		// The spawn's prompt, then the revive's replay; the wake turn fires none.
 		expect(turnStartReasons).toEqual(["prompt", "revive"]);
-		expect(
-			turnStartPromptViews.map(view => ({
-				reason: view.reason,
-				matchesBlocks: view.text === view.blocks.join("\n\n"),
-				matched: view.matched,
-			})),
-		).toEqual([
-			{ reason: "prompt", matchesBlocks: true, matched: true },
-			{ reason: "revive", matchesBlocks: true, matched: true },
-		]);
+		const [firstTurn, revivedPrompt] = turnStartPromptViews;
+		expect(firstTurn.blocks).toEqual(revivedPrompt.blocks);
+		expect(revivedPrompt.text).toBe(revivedPrompt.blocks.join("\n\n"));
+		expect(revivedPrompt.text).not.toBe("");
+		expect(revivedPrompt.text).toBe(firstTurn.text);
 	} finally {
 		run.close();
 	}

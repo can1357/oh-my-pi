@@ -1090,6 +1090,102 @@ describe("ExtensionRunner", () => {
 			expect(override).toBeUndefined();
 			expect(original).toEqual(["first", "second"]);
 		});
+
+		it("isolates system prompt blocks from handler mutation", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_agent_start", event => {
+						event.systemPromptBlocks.push("mutated");
+					});
+					pi.on("before_agent_start", event => {
+						if (event.systemPrompt !== "first\\n\\nsecond" || event.systemPromptBlocks.join("|") !== "first|second") {
+							throw new Error("handler mutation changed the next system prompt view");
+						}
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "before-agent-start-mutation.ts"), extCode);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const original = ["first", "second"];
+
+			const override = await runner.emitBeforeAgentStart("hello", undefined, original);
+
+			expect(errors).toEqual([]);
+			expect(override).toBeUndefined();
+			expect(original).toEqual(["first", "second"]);
+		});
+		it("normalizes an undefined system prompt before dispatching handlers", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_agent_start", event => {
+						if (event.systemPrompt !== "" || JSON.stringify(event.systemPromptBlocks) !== "[]") {
+							throw new Error("undefined system prompt was not normalized");
+						}
+						return { systemPrompt: "handler-ran" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "before-agent-start-undefined.ts"), extCode);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+
+			// Exercise the runtime boundary even though the TypeScript API requires an array.
+			const override = await runner.emitBeforeAgentStart("hello", undefined, undefined as unknown as string[]);
+
+			expect(errors).toEqual([]);
+			expect(override).toEqual({ systemPrompt: ["handler-ran"] });
+		});
+		it("reports invalid runtime prompt overrides and continues with the normalized prompt", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "before-agent-start-invalid.js"),
+				`export default pi => pi.on("before_agent_start", () => ({ systemPrompt: null }));`,
+			);
+			fs.writeFileSync(
+				path.join(extensionsDir, "before-agent-start-valid.js"),
+				`
+					export default pi => pi.on("before_agent_start", event => {
+						if (event.systemPrompt !== "" || event.systemPromptBlocks.length !== 0) {
+							throw new Error("invalid prompt override changed the normalized prompt");
+						}
+						return { systemPrompt: "handler-ran" };
+					});
+				`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+
+			const override = await runner.emitBeforeAgentStart("hello", undefined, undefined as unknown as string[]);
+
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.event).toBe("before_agent_start");
+			expect(errors[0]?.error).toContain("systemPrompt");
+			expect(override).toEqual({ systemPrompt: ["handler-ran"] });
+		});
 	});
 
 	describe("before_provider_request chaining", () => {

@@ -2816,7 +2816,7 @@ export class ExtensionRunner {
 		if (!this.hasHandlers("before_agent_start")) return undefined;
 		const ctx = this.createContext();
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
-		let currentSystemPrompt = systemPrompt;
+		let currentSystemPrompt = Array.isArray(systemPrompt) ? [...systemPrompt] : [];
 		let systemPromptModified = false;
 
 		for (const ext of this.extensions) {
@@ -2830,7 +2830,9 @@ export class ExtensionRunner {
 					prompt,
 					images,
 					systemPrompt: currentSystemPrompt.join("\n\n"),
-					systemPromptBlocks: currentSystemPrompt,
+					// Fresh copy per handler: a handler mutating its view must not
+					// leak into the next handler's view or the caller's array.
+					systemPromptBlocks: [...currentSystemPrompt],
 				};
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,
@@ -2846,8 +2848,22 @@ export class ExtensionRunner {
 						messages.push(result.message);
 					}
 					if (result.systemPrompt !== undefined) {
-						currentSystemPrompt =
-							typeof result.systemPrompt === "string" ? [result.systemPrompt] : result.systemPrompt;
+						const override = result.systemPrompt;
+						if (typeof override === "string") {
+							currentSystemPrompt = [override];
+						} else if (Array.isArray(override) && override.every(block => typeof block === "string")) {
+							// Clone: the handler's array must not alias the runner's state.
+							currentSystemPrompt = [...override];
+						} else {
+							// Invalid runtime value (e.g. null): report it and keep the
+							// current prompt so later handlers still see a coherent view.
+							this.emitError({
+								extensionPath: ext.path,
+								event: "before_agent_start",
+								error: "Invalid systemPrompt override: expected a string or an array of strings; ignoring override",
+							});
+							continue;
+						}
 						systemPromptModified = true;
 					}
 				}
