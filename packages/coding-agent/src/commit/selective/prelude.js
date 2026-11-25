@@ -42,10 +42,14 @@
 	};
 	class Draft {
 		#text;
+		#details;
 		constructor(details, text) {
 			this.id = details.id;
-			this.details = details;
+			this.#details = details;
 			this.#text = text;
+		}
+		details() {
+			return this.#details;
 		}
 		toString() {
 			return this.#text;
@@ -102,7 +106,7 @@
 			);
 			// The committed draft is gone; continue with what remains.
 			this.id = response.details.remaining.id;
-			this.details = response.details.remaining;
+			this.#details = response.details.remaining;
 			this.#text = response.text;
 			return response.details;
 		}

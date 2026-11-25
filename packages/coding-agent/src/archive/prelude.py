@@ -168,6 +168,15 @@ def _make_archive():
                 "messages", {"id": id, "kinds": kinds, "since": since, "until": until, "limit": limit}, silent
             )
 
+        async def transcript(
+            self, id, *, detail=None, budget=None, turns=None, since=None, until=None, silent=False
+        ):
+            return await _call(
+                "transcript",
+                {"id": id, "detail": detail, "budget": budget, "turns": turns, "since": since, "until": until},
+                silent,
+            )
+
     return _Archive()
 
 
