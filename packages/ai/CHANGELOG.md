@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Fixed new sessions picking an account whose organization refuses OAuth: the account now stays out of rotation for a day instead of one minute ([#20373](https://github.com/can1357/oh-my-pi/issues/20373), [#20382](https://github.com/can1357/oh-my-pi/pull/20382) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Account-wide policy denials other than an organization's OAuth refusal, such as Codex `cyber_policy`, keep the account out of rotation for a day instead of one minute ([#20373](https://github.com/can1357/oh-my-pi/issues/20373), [#20382](https://github.com/can1357/oh-my-pi/pull/20382) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Anthropic OAuth logins explicitly rejected by their organization stay out of account rotation for seven days, across sessions and restarts ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
 - Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
