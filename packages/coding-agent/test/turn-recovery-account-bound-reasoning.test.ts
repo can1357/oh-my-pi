@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -94,13 +94,19 @@ describe("TurnRecovery account-bound reasoning replay", () => {
 	if (!model) throw new Error("Expected bundled model openai/gpt-4o-mini");
 
 	let tempDir: TempDir;
+	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-turn-recovery-account-bound-reasoning-");
-		const authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
+		authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
 		authStorage.keys.setRuntime("openai", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings: Settings.isolated() });
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		tempDir.removeSync();
 	});
 
 	it("drops the surviving assistant message's native replay payload on this exact 400 (no fallback configured)", async () => {
@@ -109,6 +115,11 @@ describe("TurnRecovery account-bound reasoning replay", () => {
 		const host = createHost(model, modelRegistry, [priorTurn, failedTurn]);
 		const recovery = new TurnRecovery(host);
 
+		// The production no-fallback path in agent-session gates on
+		// isRetryableError. Exercise that gate first. A direct
+		// handleRetryableError call alone would bypass the eligibility check
+		// this regression must cover.
+		expect(recovery.isRetryableError(failedTurn)).toBe(true);
 		const retried = await recovery.handleRetryableError(failedTurn);
 
 		expect(retried).toBe(true);
@@ -127,6 +138,9 @@ describe("TurnRecovery account-bound reasoning replay", () => {
 		const host = createHost(model, modelRegistry, [priorTurn, failedTurn]);
 		const recovery = new TurnRecovery(host);
 
+		expect(recovery.isRetryableError(failedTurn)).toBe(false);
+		// The strip predicate must leave an unrelated 400's payload alone.
+		// Still drive the retry policy directly.
 		await recovery.handleRetryableError(failedTurn);
 
 		const survivingPriorTurn = host.agent.state.messages.find(
