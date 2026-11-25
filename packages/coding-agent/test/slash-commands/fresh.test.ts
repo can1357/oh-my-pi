@@ -9,7 +9,7 @@ function createRuntimeHarness(handleFreshCommand: InteractiveModeContext["handle
 		handleFreshCommand,
 		runtime: {
 			ctx: {
-				editor: { setText } as unknown as InteractiveModeContext["editor"],
+				composer: { setText } as unknown as InteractiveModeContext["composer"],
 				handleFreshCommand,
 			} as InteractiveModeContext,
 		},

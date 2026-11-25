@@ -1,46 +1,34 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ComposerPreferences } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import {
 	beginStartupComposer,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import type { StartupPreferences } from "../src/modes/interactive/startup-cache";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 import { assistantMsg, createTestSession, userMsg } from "./utilities";
 
 import {
 	cfgAutocompleteMaxVisible,
 	cfgComposerShape,
-	cfgShowHardwareCursor,
-	cfgSpellingAutocomplete,
-	cfgSpellingAutocorrect,
-	cfgSpellingTypoDetection,
 	cfgStartupQuiet,
-	cfgTuiImeSafeCursor,
-	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
+	cfgTuiVimMode,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 // Every destructive reset emits one erase-scrollback (ED3). Count that
 // operation without coupling this regression to the ED2/ED3 ordering.
 const ERASE_SCROLLBACK = "\x1b[3J";
 
-/** VirtualTerminal that also records every raw byte the TUI writes. */
-class CapturingTerminal extends VirtualTerminal {
-	readonly raw: string[] = [];
-	override write(data: string): void {
-		this.raw.push(data);
-		super.write(data);
-	}
-	countResets(): number {
-		const all = this.raw.join("");
-		let n = 0;
-		for (let i = all.indexOf(ERASE_SCROLLBACK); i !== -1; i = all.indexOf(ERASE_SCROLLBACK, i + 1)) n++;
-		return n;
-	}
+/** Erase-scrollback operations in `output`. */
+function countResets(output: readonly string[]): number {
+	const all = output.join("");
+	let n = 0;
+	for (let i = all.indexOf(ERASE_SCROLLBACK); i !== -1; i = all.indexOf(ERASE_SCROLLBACK, i + 1)) n++;
+	return n;
 }
 
 // Cold launch first clears native history while painting the prepaint welcome.
@@ -50,23 +38,18 @@ class CapturingTerminal extends VirtualTerminal {
 // after ED3 already ran, leaving a stale welcome above the live UI (issue #9597).
 describe("issue #9597 — cold-launch welcome duplication", () => {
 	let settings: Settings;
-	let config: ComposerPreferences;
+	let config: StartupPreferences;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
-		await initTheme();
+		initTheme();
 		settings = await Settings.init({ inMemory: true });
 		config = {
 			quiet: cfgStartupQuiet.get(settings),
-			composerShape: cfgComposerShape.get(settings) ?? "box",
-			showHardwareCursor: cfgShowHardwareCursor.get(settings),
-			maxInlineImages: cfgTuiMaxInlineImages.get(settings),
+			composerShape: cfgComposerShape.get(settings),
 			resizeScrollback: cfgTuiResizeScrollback.get(settings),
-			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
-			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),
-			spellingAutocomplete: cfgSpellingAutocomplete.get(settings),
-			spellingAutocorrect: cfgSpellingAutocorrect.get(settings),
+			vim: cfgTuiVimMode.get(settings),
 		};
 	});
 
@@ -82,16 +65,16 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 		welcomeRows: number;
 		scrollBuffer: string;
 	}> {
-		const terminal = new CapturingTerminal(100, 30);
+		const terminal = createModeTerminal({ columns: 100, rows: 30 });
 		beginStartupComposer({
 			preferences: config,
-			terminal,
+			driver: terminal.memory.options,
 			version: "18.0.4",
 			cache: false,
 		});
-		await terminal.waitForRender();
 		const lease = takeStartupComposerLease();
 		expect(lease).toBeDefined();
+		await lease!.ready;
 		const testSession = await createTestSession({ inMemory: true });
 		if (resuming) {
 			testSession.sessionManager.appendMessage(userMsg("resume marker question"));
@@ -104,29 +87,24 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 			undefined,
 			undefined,
 			undefined,
-			lease!.composer,
+			lease!.frame,
 		);
 		lease!.adopt();
-		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 		try {
 			await mode.init({ suppressWelcomeIntro: resuming, clearInitialTerminalHistory: true });
-			await terminal.waitForRender();
 			await mode.renderInitialMessages({ preserveExistingChat: true });
-			// The replay rebuild paints in idle chunks after the promise resolves;
-			// settle on the frame that actually shows the replayed transcript.
-			await terminal.waitForRender(
-				() =>
-					!resuming ||
-					terminal.getScrollBuffer().some(line => Bun.stripANSI(line).includes("resume marker answer")),
-			);
-			const rows = terminal.getScrollBuffer().map(l => Bun.stripANSI(l));
+			if (resuming) await terminal.waitFor(() => terminal.text().includes("resume marker answer"));
+			await terminal.settle();
+			const rows = terminal.text().split("\n");
 			return {
-				resets: terminal.countResets(),
+				resets: countResets(terminal.memory.output),
 				welcomeRows: rows.filter(l => l.includes("18.0.4")).length,
 				scrollBuffer: rows.join("\n"),
 			};
 		} finally {
 			mode.stop();
+			await mode.shell.stop();
+			terminal.dispose();
 			await testSession.cleanup();
 		}
 	}

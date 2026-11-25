@@ -28,10 +28,10 @@ import {
 	toError,
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
-import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import type { SessionTreePosition } from "@oh-my-pi/pi-tui/status-line/host";
+import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "../task/task-details";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
+import { isUserRequestEntry } from "./transcript/transcript-entry";
+import type { SessionTreePosition } from "../modes/view-model/status-line/host";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
@@ -72,6 +72,7 @@ import {
 	type LabelEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
+	type ModelFallbackCause,
 	type ModelUsageEntry,
 	type ModelUsageRecord,
 	lastSelfSelectedLeafId,
@@ -3773,15 +3774,16 @@ export class SessionManager {
 	 * Append a model change as a child of the current leaf, then advance the leaf.
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
-	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+	 * @param options.fallback Why a retry fallback selected this model; it marks the entry `resolvedModelIsFallback`
 	 */
-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+	appendModelChange(model: string, role?: string, options?: { fallback?: ModelFallbackCause }): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
-			resolvedModelIsFallback,
+			resolvedModelIsFallback: options?.fallback !== undefined,
+			fallback: options?.fallback,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -4652,9 +4654,11 @@ export class SessionManager {
 		};
 	}
 	/**
-	 * Continue the most recent session, or create a new one if none exists or
-	 * another live omp process writes the one picked
-	 * ({@link SessionStorage.isSessionOwnedElsewhere}).
+	 * Continue the most recent session, or create a new one if none exists.
+	 * A session another live omp process writes
+	 * ({@link SessionStorage.isSessionOwnedElsewhere}) is passed over for the
+	 * newest one in the directory nobody else writes; resuming it would
+	 * duplicate the running conversation into a sibling on the first write.
 	 *
 	 * When the chosen session's conversation went on in another file (it moved
 	 * off its file; see `findSessionContinuation`), this opens the copy to
@@ -4778,26 +4782,35 @@ export class SessionManager {
 			}
 		}
 
-		if (chosenSession === undefined) chosenSession = await findMostRecentNonEmptySession(dir, storage);
-		if (chosenSession) {
-			const fromBreadcrumb = !!breadcrumb && path.resolve(chosenSession) === path.resolve(breadcrumb.sessionFile);
+		/** The copy of `picked` to resume, or undefined while another omp process writes it. */
+		const resumableCopy = async (picked: string): Promise<string | undefined> => {
+			const fromBreadcrumb = !!breadcrumb && path.resolve(picked) === path.resolve(breadcrumb.sessionFile);
 			const continuation = fromBreadcrumb
-				? await findSessionContinuation(chosenSession, storage)
-				: await findRecentSessionContinuation(chosenSession, storage);
-			const resumable = continuation?.session.path ?? chosenSession;
+				? await findSessionContinuation(picked, storage)
+				: await findRecentSessionContinuation(picked, storage);
+			const resumable = continuation?.session.path ?? picked;
 			if (storage.isSessionOwnedElsewhere?.(resumable)) {
-				// Its first write would move it to a sibling, duplicating the
-				// conversation the running process keeps writing: start fresh.
 				logger.debug("Not continuing a session another omp process writes", { sessionFile: resumable });
-				chosenSession = null;
-			} else {
-				if (continuation) options.onSessionContinuation?.(continuation);
-				chosenSession = resumable;
+				return undefined;
+			}
+			if (continuation) options.onSessionContinuation?.(continuation);
+			return resumable;
+		};
+
+		let resumed = chosenSession ? await resumableCopy(chosenSession) : undefined;
+		// Nothing picked yet, or another process writes the pick: the newest
+		// session nobody else writes. `null` means the directory holds none.
+		if (resumed === undefined && chosenSession !== null) {
+			const skipped = chosenSession ? path.resolve(chosenSession) : undefined;
+			for (const session of await listSessions(dir, storage)) {
+				if (isEmptySession(session) || path.resolve(session.path) === skipped) continue;
+				resumed = await resumableCopy(session.path);
+				if (resumed !== undefined) break;
 			}
 		}
 
 		const manager = new SessionManager(cwd, dir, true, storage);
-		if (chosenSession) await manager.setSessionFile(chosenSession);
+		if (resumed) await manager.setSessionFile(resumed);
 		else manager.#resetToNewSession();
 		return manager;
 	}

@@ -17,8 +17,8 @@
  * records live in `activity.ts`.
  */
 import * as path from "node:path";
-import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { ToolError } from "../tools/tool-errors";
 import { formatAge, formatCount, logger } from "@oh-my-pi/pi-utils";
 import { type HistoryEntry, HistoryStorage } from "../session/history-storage";
 import { type WordQuery, wordQuery } from "../session/search-query";
@@ -33,7 +33,7 @@ import {
 	sessionDisplayName,
 } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
-import type { TimeWindow } from "../session/time-window";
+import { localMinute, type TimeWindow } from "../session/time-window";
 import { syncTranscripts } from "../daemon/modules/transcripts";
 import {
 	indexedMessageCounts,
@@ -473,13 +473,6 @@ function windowLabel(window: TimeWindow | undefined): string {
 	if (window?.since !== undefined) label += ` since ${localMinute(window.since)}`;
 	if (window?.until !== undefined) label += ` until ${localMinute(window.until)}`;
 	return label;
-}
-
-/** `YYYY-MM-DD HH:MM` in local time. */
-function localMinute(at: number): string {
-	const time = new Date(at);
-	const pad = (value: number) => String(value).padStart(2, "0");
-	return `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())} ${pad(time.getHours())}:${pad(time.getMinutes())}`;
 }
 
 /** Relative age of an ISO timestamp (`5m ago`); sub-minute ages read `just now`. */

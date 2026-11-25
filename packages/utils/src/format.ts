@@ -84,7 +84,7 @@ export function countNewlines(text: string): number {
 
 /**
  * Truncate a string to maxLen characters, appending an ellipsis if truncated.
- * For display-width-aware truncation (terminals), use truncateToWidth from @oh-my-pi/pi-tui.
+ * For display-width-aware truncation (terminals), use `truncate` from @oh-my-pi/pi-tui/text/width.
  */
 export function truncate(str: string, maxLen: number, ellipsis = "…"): string {
 	if (str.length <= maxLen) return str;

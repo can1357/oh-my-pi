@@ -1735,6 +1735,9 @@ fn slice_with_width_impl(
 				}
 
 				if current_col >= start_col {
+					// Escapes from before the slice come first: replayed after an
+					// in-range escape they would reopen the styles it closes.
+					flush_pending_ansi(&mut out, line, &mut pending_ansi);
 					out.extend_from_slice(&line[i..i + seq_len]);
 				} else {
 					pending_ansi.push((i, seq_len));

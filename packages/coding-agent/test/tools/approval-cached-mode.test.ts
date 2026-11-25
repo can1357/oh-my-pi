@@ -27,7 +27,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/approval-cache";
 import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { getAgentDir, isRecord, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 
 /** Tool that keys `args.path` like read/write/edit do. */
 function pathTool(name: string, tier: ToolTier, cwd: string): AgentTool {
@@ -379,8 +379,6 @@ describe("always-ask-cached wrapper cycle", () => {
 				getEditorText: () => "",
 				editor: async () => undefined,
 				addAutocompleteProvider: () => {},
-				setEditorComponent: () => {},
-				getEditorComponent: () => undefined,
 				get theme() {
 					return {} as never;
 				},

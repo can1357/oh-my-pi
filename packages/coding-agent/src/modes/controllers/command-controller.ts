@@ -12,20 +12,14 @@ import {
 	type UsageReport,
 	usageSubscriptionPlan,
 } from "@oh-my-pi/pi-ai";
-import {
-	type Component,
-	Loader,
-	Markdown,
-	padding,
-	parseSgrMouse,
-	Spacer,
-	Text,
-	visibleWidth,
-	wrapTextWithAnsi,
-} from "@oh-my-pi/pi-tui";
+import { createRoot, type JSXNode, signal, type UiNode, untrack } from "@oh-my-pi/pi-tui";
+import { classifyMultiplexer, type MultiplexerId } from "@oh-my-pi/pi-tui/driver/mux/detect";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import type { TspText } from "@oh-my-pi/pi-wire";
 import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
-import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -43,29 +37,17 @@ import {
 	summarizeMentalModel,
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
-import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
-import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
-import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
-import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
-import { promptCacheDetails } from "@oh-my-pi/pi-tui/status-line/prompt-cache";
-import { messageBlock, PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
-import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import { jobDisplayLabel } from "../../async/job-label";
+import { promptCacheDetails } from "../view-model/status-line/prompt-cache";
+import { type MoveOverlayResult } from "../view-model/overlays/move-overlay";
 import { moveDirectorySource } from "../move-directory-source";
-import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import { continuesConversation } from "../utils/conversation-position";
-import { ContextViewer } from "@oh-my-pi/pi-tui/overlays/context-viewer";
-import type { OverlayHandle } from "@oh-my-pi/pi-tui";
-import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
-import type { TspText } from "@oh-my-pi/pi-wire";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildSessionContextView } from "../../session/context-view";
-import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
-import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
+import { buildToolsMarkdown } from "../../slash-commands/helpers/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
-import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
+import { buildJobTree, jobTreeGuide, jobTreeIndent } from "../view-model/overlays/job-tree";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import { type CompactMode, findCompactMode } from "../../session/compact-modes";
 import {
@@ -90,13 +72,14 @@ import {
 	formatCodexUsageReportLabel,
 	limitMatchesActiveAccount,
 } from "../../slash-commands/helpers/active-oauth-account";
-import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
-import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-import { resolveTernPane } from "../../tools/browser/tern/kind";
-import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
+import { formatProviderName } from "../view-model/chrome/format";
+import { formatCompactQuota } from "../../advisor/advisor-config-types";
+import { resolveTernPane, type TernPane } from "../../tools/browser/tern/kind";
+import { TernError, type TernErrorKind, type TernForked, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
-import { replaceTabs, shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../../utils/text-width";
+import { shortenEmbeddedPaths } from "../../utils/render-utils";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -109,13 +92,9 @@ import { formatDumpArchiveReport, type SessionDumpArchive } from "../../session/
 import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
-import {
-	collapseSharedUsageReports,
-	formatLimitTitle,
-	summarizeUsageResetCredits,
-} from "@oh-my-pi/pi-tui/overlays/usage-display";
-import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
-import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+import { collapseSharedUsageReports, formatLimitTitle, summarizeUsageResetCredits } from "../../session/usage-display";
+import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "../../slash-commands/helpers/usage-amounts";
+import type { UnavailableUsageAccount } from "../view-model/overlays/usage-dashboard";
 
 import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
@@ -130,6 +109,27 @@ import {
 	type TerminalLaunchResult,
 } from "../../subprocess/terminal-launch";
 import { resolveCliEntryCmd } from "../../subprocess/worker-client";
+import { appInterruptKeys } from "../../config/keybindings/matchers";
+import { buildHotkeysMarkdown } from "../../ui/keys/hotkeys";
+import { actionKey } from "../../ui/keys/hints";
+import { ContextViewerModel, contextHead } from "../../ui/overlays/panels/context-viewer";
+import type { OverlayHandle } from "../../ui/shell/overlays";
+import { ExecRun } from "../../ui/transcript/exec-run";
+import {
+	contextViewerView,
+	hotkeysSheetView,
+	loaderView,
+	markdownView,
+	moveOverlayView,
+	reportPanelView,
+	type ReportSheetOptions,
+	reportSheetView,
+	reportTextView,
+	successLineView,
+} from "./command-views";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { bold } from "@oh-my-pi/pi-tui/theme/theme";
 
 /** How long `/fork` waits for Tern to open the fork's pane. */
 const TERN_FORK_TIMEOUT_MS = 10_000;
@@ -145,7 +145,7 @@ function formatCreditValue(value: number): string {
 }
 
 interface ForkTerminalDependencies {
-	classifyTerminalMultiplexer: typeof classifyTerminalMultiplexer;
+	classifyMultiplexer: (env: NodeJS.ProcessEnv) => MultiplexerId | null;
 	environment: () => NodeJS.ProcessEnv;
 	launchTerminal: (request: TerminalLaunchRequest) => Promise<TerminalLaunchResult>;
 	resolveCliEntryCmd: typeof resolveCliEntryCmd;
@@ -196,8 +196,8 @@ function hasForkApiKeyOverride(argv: string[]): boolean {
 }
 
 export class CommandController {
-	/** The open native report sheet and the component it shows. */
-	#reportSheet: { handle: OverlayHandle; component: Component } | undefined;
+	/** The report shown: docked above the composer, or a focused sheet/page (`sheet`). */
+	#report: { readonly dispose: () => void; readonly sheet?: OverlayHandle } | undefined;
 	#forkTerminalDependencies: ForkTerminalDependencies;
 	/** The watcher serving the queued `/compact`, while one runs. */
 	#yieldCompactionWatcher: Promise<void> | undefined;
@@ -207,7 +207,7 @@ export class CommandController {
 		forkTerminalDependencies: Partial<ForkTerminalDependencies> = {},
 	) {
 		this.#forkTerminalDependencies = {
-			classifyTerminalMultiplexer,
+			classifyMultiplexer,
 			environment: () => process.env,
 			launchTerminal,
 			resolveCliEntryCmd,
@@ -233,36 +233,42 @@ export class CommandController {
 	}
 
 	#clearReport(): boolean {
-		const docked = this.ctx.reportContainer;
-		if (docked.children.length === 0) return false;
-		docked.dispose();
-		docked.clear();
-		this.ctx.ui.requestRender();
+		const report = this.#report;
+		if (!report || report.sheet) return false;
+		this.#report = undefined;
+		this.ctx.shell.dock.slot("report").clear();
+		report.dispose();
 		return true;
 	}
 
 	#closeReportSheet(): void {
-		const sheet = this.#reportSheet;
-		if (!sheet) return;
-		this.#reportSheet = undefined;
-		sheet.handle.hide();
-		// Like the docked report, a closed sheet is never shown again.
-		sheet.component.dispose?.();
-		this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
-		this.ctx.ui.requestRender();
+		const report = this.#report;
+		if (!report?.sheet) return;
+		this.#report = undefined;
+		// Closing gives focus back to whatever held it; like the docked report, a closed sheet is never shown again.
+		report.sheet.close();
+		report.dispose();
 	}
 
-	/** Open `component` as a focused full-screen page; callers close any previous sheet first. */
-	#showFullscreenSheet(component: Component): void {
-		const handle = this.ctx.ui.showOverlay(component, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-			fullscreen: true,
+	/**
+	 * Open `content` (built in the root `dispose` ends) as a focused sheet: a
+	 * full-screen page on the terminal's alternate screen, or natively a
+	 * centered sheet with its role and title. Keys go to `focus`, else to
+	 * `onKey` on the sheet itself (for content that rebuilds its root). Callers
+	 * close any previous report first.
+	 */
+	#showSheet(content: JSXNode, dispose: () => void, options: ReportSheetOptions & { focus?: UiNode }): void {
+		const { focus, ...frame } = options;
+		const sheet = this.ctx.shell.overlays.show(() => reportSheetView(content, frame), {
+			focus: root => focus ?? root,
+			// Closed from outside the report (the overlay stack was cleared): forget it.
+			onClose: () => {
+				if (this.#report?.sheet !== sheet) return;
+				this.#report = undefined;
+				dispose();
+			},
 		});
-		this.#reportSheet = { handle, component };
-		this.ctx.ui.setFocus(component);
+		this.#report = { dispose, sheet };
 	}
 
 	/**
@@ -275,38 +281,48 @@ export class CommandController {
 	 * `/usage`, its body scrolled by the terminal once it is long, closed by
 	 * Esc or Close.
 	 */
-	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+	showCommandReport(options: { title: string; head?: TspText; body: () => JSXNode }): void {
 		this.#clearReport();
 		this.#closeReportSheet();
-		const terminal = this.ctx.ui.terminal;
-		const inline = this.ctx.commandReportRows() ?? terminal.rows;
-		let fullScreen = false;
-		const report = new ReportPanel({
-			...options,
-			closeKey: appKey(this.ctx.keybindings, "app.interrupt"),
-			onClose: () => this.#closeReportSheet(),
-			maxRows: () => (fullScreen ? terminal.rows : this.ctx.commandReportRows()),
-		});
-		if (isNativeRendering()) {
-			report.holdFocus();
-			this.#reportSheet = {
-				handle: this.ctx.ui.showOverlay(report, { anchor: "center", width: "90%", maxHeight: "90%" }),
-				component: report,
-			};
-			this.ctx.ui.setFocus(report);
-		} else if (report.heightAt(terminal.columns) > inline) {
-			fullScreen = true;
-			report.holdFocus();
-			this.#showFullscreenSheet(report);
-		} else {
-			this.ctx.reportContainer.addChild(report);
+		const native = this.ctx.shell.native();
+		const size = this.ctx.shell.size;
+		/** `measure` sizes the report at its natural height before it is placed. */
+		const placement = signal<"measure" | "inline" | "page" | "sheet">("measure");
+		const { node, dispose } = createRoot(dispose => ({
+			dispose,
+			node: reportPanelView({
+				title: options.title,
+				body: options.body(),
+				closeKey: actionKey("app.interrupt", this.ctx.keybindings),
+				focused: () => placement() === "page" || placement() === "sheet",
+				maxRows: () => {
+					const at = placement();
+					return at === "page" ? size().rows : at === "inline" ? this.ctx.commandReportRows() : undefined;
+				},
+				onClose: () => this.#closeReportSheet(),
+			}) as UiNode,
+		}));
+		if (native) {
+			placement.set("sheet");
+			this.#showSheet(node, dispose, { page: false, head: options.head ?? options.title, focus: node });
+			return;
 		}
-		this.ctx.ui.requestRender();
+		const { columns, rows } = untrack(size);
+		const inline = this.ctx.commandReportRows() ?? rows;
+		const height = renderBlock(node, columns, { env: staticEnvironment(currentTheme()) }).rows.length;
+		if (height > inline) {
+			placement.set("page");
+			this.#showSheet(node, dispose, { page: true, focus: node });
+			return;
+		}
+		placement.set("inline");
+		this.ctx.shell.dock.slot("report").set(() => node);
+		this.#report = { dispose };
 	}
 
 	/** A titled markdown report; see {@link showCommandReport}. */
 	#showMarkdownPanel(title: string, markdown: string): void {
-		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
+		this.showCommandReport({ title, body: () => markdownView(markdown.trim()) });
 	}
 
 	async #restoreAfterMoveFailure(
@@ -474,8 +490,15 @@ export class CommandController {
 
 	async handleDebugTranscriptCommand(): Promise<void> {
 		try {
-			const width = Math.max(1, this.ctx.ui.terminal.columns);
-			const renderedLines = this.ctx.chatContainer.render(width).map(line => replaceTabs(Bun.stripANSI(line)));
+			const width = Math.max(1, this.ctx.shell.size().columns);
+			const env = staticEnvironment(currentTheme());
+			const renderedLines: string[] = [];
+			for (const block of this.ctx.shell.transcript.blocks()) {
+				// The terminal draws a blank row between blocks unless both pack as compact rows.
+				if (renderedLines.length > 0 && !block.compact()) renderedLines.push("");
+				for (const row of renderBlock(block.node, width, { env }).rows)
+					renderedLines.push(replaceTabs(Bun.stripANSI(row)));
+			}
 			const rendered = renderedLines.join("\n").trimEnd();
 			if (!rendered) {
 				this.ctx.showError("No messages to dump yet.");
@@ -500,22 +523,15 @@ export class CommandController {
 			return;
 		}
 
-		const loader = new BorderedLoader(this.ctx.ui, theme, "Sharing session...");
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(loader);
-		this.ctx.ui.setFocus(loader);
-		this.ctx.ui.requestRender();
-
-		const restoreEditor = () => {
-			loader.dispose();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(this.ctx.editor);
-		};
-		loader.onAbort = () => {
-			restoreEditor();
-			this.ctx.showStatus("Share cancelled");
-		};
+		const loader = new AbortController();
+		const dialog = this.ctx.showEditorAreaDialog(() =>
+			loaderView("Sharing session...", () => {
+				loader.abort();
+				restoreEditor();
+				this.ctx.showStatus("Share cancelled");
+			}),
+		);
+		const restoreEditor = () => dialog.close();
 
 		// Custom share scripts keep their legacy contract: they receive a path
 		// to a standalone HTML export. No fallback to the default flow on error.
@@ -584,9 +600,9 @@ export class CommandController {
 		const normalizedPremiumRequests = Math.round((premiumRequests + Number.EPSILON) * 100) / 100;
 
 		let info = "";
-		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
-		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
-		info += `${theme.fg("dim", "Local:")} ${this.ctx.session.localRoot}\n`;
+		info += `${currentTheme().fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
+		info += `${currentTheme().fg("dim", "ID:")} ${stats.sessionId}\n`;
+		info += `${currentTheme().fg("dim", "Local:")} ${this.ctx.session.localRoot}\n`;
 		const builds = runtimeIdentityHistory(this.ctx.session.sessionManager.getEntries());
 		const running = currentRuntimeIdentity();
 		// A source checkout's diff hash changes with each edit, so a long-lived session can collect
@@ -595,19 +611,19 @@ export class CommandController {
 		const hidden = builds.length > MAX_LISTED_BUILDS ? builds.length - MAX_LISTED_BUILDS + 1 : 0;
 		for (const [index, build] of builds.entries()) {
 			if (hidden > 0 && index > 0 && index <= hidden) {
-				if (index === 1) info += `${theme.fg("dim", `Builds 2–${hidden + 1}:`)} ${hidden} more\n`;
+				if (index === 1) info += `${currentTheme().fg("dim", `Builds 2–${hidden + 1}:`)} ${hidden} more\n`;
 				continue;
 			}
 			const key = builds.length === 1 ? "Build:" : `Build ${index + 1}:`;
-			info += `${theme.fg("dim", key)} ${replaceTabs(sanitizeText(formatRuntimeIdentity(build)))}\n`;
+			info += `${currentTheme().fg("dim", key)} ${replaceTabs(sanitizeText(formatRuntimeIdentity(build)))}\n`;
 		}
 		if (!sameRuntimeIdentity(builds[builds.length - 1], running)) {
-			info += `${theme.fg("dim", "Running:")} ${replaceTabs(sanitizeText(formatRuntimeIdentity(running)))}\n`;
+			info += `${currentTheme().fg("dim", "Running:")} ${replaceTabs(sanitizeText(formatRuntimeIdentity(running)))}\n`;
 		}
-		info += `\n${theme.bold("Provider")}\n`;
+		info += `\n${bold("Provider")}\n`;
 		const model = this.ctx.session.model;
 		if (!model) {
-			info += `${theme.fg("dim", "No model selected")}\n`;
+			info += `${currentTheme().fg("dim", "No model selected")}\n`;
 		} else {
 			const authMode = resolveProviderAuthMode(this.ctx.session.modelRegistry.authStorage, model.provider);
 			const credentialSource = this.ctx.session.modelRegistry.authStorage.keys.describe(
@@ -622,22 +638,23 @@ export class CommandController {
 				preferWebsockets: this.ctx.session.preferWebsockets,
 				providerSessionState: this.ctx.session.providerSessionState,
 			});
-			info += renderProviderSection(providerDetails, theme);
+			info += renderProviderSection(providerDetails, currentTheme());
 			if (stats.routedModels !== undefined) {
 				const routed = Object.entries(stats.routedModels)
 					.sort(([aId, aCount], [bId, bCount]) => bCount - aCount || aId.localeCompare(bId))
 					.map(
-						([id, count]) => `${replaceTabs(sanitizeText(id))}${count > 1 ? theme.fg("dim", ` ×${count}`) : ""}`,
+						([id, count]) =>
+							`${replaceTabs(sanitizeText(id))}${count > 1 ? currentTheme().fg("dim", ` ×${count}`) : ""}`,
 					);
-				info += `${theme.fg("dim", "Served:")} ${routed.join(", ")}\n`;
+				info += `${currentTheme().fg("dim", "Served:")} ${routed.join(", ")}\n`;
 			}
 		}
 		info += `\n`;
-		info += `${theme.bold("Messages")}\n`;
-		info += `${theme.fg("dim", "User:")} ${stats.userMessages}\n`;
-		info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
-		info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
-		info += `${theme.fg("dim", "Tool Results:")} ${stats.toolResults}\n`;
+		info += `${bold("Messages")}\n`;
+		info += `${currentTheme().fg("dim", "User:")} ${stats.userMessages}\n`;
+		info += `${currentTheme().fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
+		info += `${currentTheme().fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
+		info += `${currentTheme().fg("dim", "Tool Results:")} ${stats.toolResults}\n`;
 		if (stats.editRejections !== undefined) {
 			const kinds = Object.entries(stats.editRejections).sort(
 				([aKind, aCount], [bKind, bCount]) => bCount - aCount || aKind.localeCompare(bKind),
@@ -646,55 +663,55 @@ export class CommandController {
 			const breakdown = kinds
 				.map(([kind, count]) => `${replaceTabs(sanitizeText(kind.replaceAll("_", " ")))} ${count}`)
 				.join(", ");
-			info += `${theme.fg("dim", "Edit Rejections:")} ${total} ${theme.fg("dim", `(${breakdown})`)}\n`;
+			info += `${currentTheme().fg("dim", "Edit Rejections:")} ${total} ${currentTheme().fg("dim", `(${breakdown})`)}\n`;
 		}
-		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
+		info += `${currentTheme().fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
 		// Append-only context
 		{
 			const setting = cfgProviderAppendOnlyContext.get(this.ctx.settings);
 			const model = this.ctx.session.model;
 			const mode = shouldEnableAppendOnlyContext(setting, model);
-			const activeLabel = mode ? theme.fg("success", "active") : theme.fg("dim", "inactive");
+			const activeLabel = mode ? currentTheme().fg("success", "active") : currentTheme().fg("dim", "inactive");
 			const settingLabel = setting === "auto" ? `${setting} (${model?.provider ?? "?"})` : setting;
-			info += `${theme.fg("dim", "Append-Only:")} ${activeLabel} (setting: ${settingLabel})\n`;
+			info += `${currentTheme().fg("dim", "Append-Only:")} ${activeLabel} (setting: ${settingLabel})\n`;
 		}
-		info += `${theme.bold("Tokens")}\n`;
-		info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
+		info += `${bold("Tokens")}\n`;
+		info += `${currentTheme().fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
+		info += `${currentTheme().fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
 		if (stats.tokens.cacheRead > 0) {
-			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
+			info += `${currentTheme().fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
 		}
 		if (stats.tokens.cacheWrite > 0) {
-			info += `${theme.fg("dim", "Cache Write:")} ${stats.tokens.cacheWrite.toLocaleString()}\n`;
+			info += `${currentTheme().fg("dim", "Cache Write:")} ${stats.tokens.cacheWrite.toLocaleString()}\n`;
 		}
-		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
+		info += `${currentTheme().fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
 		const cacheStatus = this.ctx.session.getPromptCacheStatus();
 		if (cacheStatus) {
-			info += `\n${theme.bold("Prompt Cache")}\n`;
+			info += `\n${bold("Prompt Cache")}\n`;
 			for (const row of promptCacheDetails(cacheStatus, Date.now())) {
-				const value = row.tone === "warning" ? theme.fg("warning", row.value) : row.value;
-				info += `${theme.fg("dim", `${row.label}:`)} ${value}\n`;
+				const value = row.tone === "warning" ? currentTheme().fg("warning", row.value) : row.value;
+				info += `${currentTheme().fg("dim", `${row.label}:`)} ${value}\n`;
 			}
 		}
 
 		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
-			info += `\n${theme.bold("Cost")}\n`;
+			info += `\n${bold("Cost")}\n`;
 			if (stats.cost > 0) {
-				info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
+				info += `${currentTheme().fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
 			}
 			if (normalizedPremiumRequests > 0) {
-				info += `${theme.fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
+				info += `${currentTheme().fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
 			}
 			if (stats.credits !== undefined) {
-				info += `${theme.fg("dim", "Credits:")} ${formatCreditValue(stats.credits.cost)}\n`;
-				info += `${theme.fg("dim", "Committed Credits:")} ${formatCreditValue(stats.credits.committedCost)}\n`;
-				info += `${theme.fg("dim", "Committed ACU:")} ${formatCreditValue(stats.credits.acuCost)}\n`;
+				info += `${currentTheme().fg("dim", "Credits:")} ${formatCreditValue(stats.credits.cost)}\n`;
+				info += `${currentTheme().fg("dim", "Committed Credits:")} ${formatCreditValue(stats.credits.committedCost)}\n`;
+				info += `${currentTheme().fg("dim", "Committed ACU:")} ${formatCreditValue(stats.credits.acuCost)}\n`;
 			}
 		}
 
 		if (this.ctx.lspServers && this.ctx.lspServers.length > 0) {
-			info += `\n${theme.bold("LSP Servers")}\n`;
+			info += `\n${bold("LSP Servers")}\n`;
 			for (const server of this.ctx.lspServers) {
 				const statusColor =
 					server.status === "ready"
@@ -706,20 +723,20 @@ export class CommandController {
 								: "error";
 				const statusText =
 					server.status === "error" && server.error ? `${server.status}: ${server.error}` : server.status;
-				info += `${theme.fg("dim", `${server.name}:`)} ${theme.fg(statusColor, statusText)} ${theme.fg("dim", `(${server.fileTypes.join(", ")})`)}\n`;
+				info += `${currentTheme().fg("dim", `${server.name}:`)} ${currentTheme().fg(statusColor, statusText)} ${currentTheme().fg("dim", `(${server.fileTypes.join(", ")})`)}\n`;
 			}
 		}
 
 		if (this.ctx.mcpManager) {
 			const mcpServers = this.ctx.mcpManager.getConnectedServers();
-			info += `\n${theme.bold("MCP Servers")}\n`;
+			info += `\n${bold("MCP Servers")}\n`;
 			if (mcpServers.length === 0) {
-				info += `${theme.fg("dim", "None connected")}\n`;
+				info += `${currentTheme().fg("dim", "None connected")}\n`;
 			} else {
 				for (const name of mcpServers) {
 					const conn = this.ctx.mcpManager.getConnection(name);
 					const toolCount = conn?.tools?.length ?? 0;
-					info += `${theme.fg("dim", `${name}:`)} ${theme.fg("success", "connected")} ${theme.fg("dim", `(${toolCount} tools)`)}\n`;
+					info += `${currentTheme().fg("dim", `${name}:`)} ${currentTheme().fg("success", "connected")} ${currentTheme().fg("dim", `(${toolCount} tools)`)}\n`;
 				}
 			}
 		}
@@ -746,7 +763,7 @@ export class CommandController {
 	async handleAdvisorStatusCommand(): Promise<void> {
 		const stats = this.ctx.session.getAdvisorStats();
 		if (!stats.configured) {
-			this.showCommandReport({ title: "Advisor Status", body: new Text("Advisor is disabled.", 0, 0) });
+			this.showCommandReport({ title: "Advisor Status", body: () => reportTextView("Advisor is disabled.") });
 			return;
 		}
 		// Render cached quota data without waiting for the network. Quota lines
@@ -778,9 +795,9 @@ export class CommandController {
 						: a.status === "quota_exhausted" || a.status === "error"
 							? "error"
 							: "dim";
-				info += `\n${theme.fg(color, glyph)} ${theme.bold(a.name)} ${theme.fg("dim", `[${label}]`)}\n`;
+				info += `\n${currentTheme().fg(color, glyph)} ${bold(a.name)} ${currentTheme().fg("dim", `[${label}]`)}\n`;
 				if (a.model) {
-					info += `${theme.fg("dim", "Model:")} ${a.model.provider}/${a.model.id}\n`;
+					info += `${currentTheme().fg("dim", "Model:")} ${a.model.provider}/${a.model.id}\n`;
 				}
 				if (a.model && usageReports) {
 					const identity = resolveActiveAdvisorAccount(a.model.provider, a.sessionId);
@@ -790,28 +807,28 @@ export class CommandController {
 						nowMs,
 						(report, limit) => !identity || limitMatchesActiveAccount(report, limit, identity),
 					);
-					if (quota) info += `${theme.fg("dim", quota)}\n`;
+					if (quota) info += `${currentTheme().fg("dim", quota)}\n`;
 				}
 				if (a.status === "running" || a.status === "quota_exhausted") {
 					const ctx =
 						a.contextWindow > 0
 							? `${a.contextTokens.toLocaleString()} / ${a.contextWindow.toLocaleString()} (${Math.round((a.contextTokens / a.contextWindow) * 100)}%)`
 							: `${a.contextTokens.toLocaleString()}`;
-					info += `${theme.fg("dim", "Context:")} ${ctx}\n`;
-					info += `${theme.fg("dim", "Messages:")} ${a.messages.total.toLocaleString()}\n`;
-					info += `${theme.fg("dim", "Spend:")} ${a.tokens.input.toLocaleString()} in / ${a.tokens.output.toLocaleString()} out`;
+					info += `${currentTheme().fg("dim", "Context:")} ${ctx}\n`;
+					info += `${currentTheme().fg("dim", "Messages:")} ${a.messages.total.toLocaleString()}\n`;
+					info += `${currentTheme().fg("dim", "Spend:")} ${a.tokens.input.toLocaleString()} in / ${a.tokens.output.toLocaleString()} out`;
 					if (a.cost > 0) info += `, $${a.cost.toFixed(4)}`;
 					info += "\n";
 				}
 			}
 			if (stats.active) {
-				info += `\n${theme.bold("Totals")}\n`;
-				info += `${theme.fg("dim", "Tokens:")} ${stats.tokens.total.toLocaleString()}\n`;
-				if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
+				info += `\n${bold("Totals")}\n`;
+				info += `${currentTheme().fg("dim", "Tokens:")} ${stats.tokens.total.toLocaleString()}\n`;
+				if (stats.cost > 0) info += `${currentTheme().fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
 			}
 			this.showCommandReport({
 				title: `Advisor Status (${stats.advisors.length} advisors)`,
-				body: new Text(info.trim(), 0, 0),
+				body: () => reportTextView(info.trim()),
 			});
 			return;
 		}
@@ -822,11 +839,11 @@ export class CommandController {
 			const a = stats.advisors[0];
 			const glyph = CommandController.#advisorStatusGlyph[a.status] ?? "?";
 			const label = CommandController.#advisorStatusLabel[a.status] ?? a.status;
-			info += `${theme.fg(a.status === "running" ? "success" : "error", glyph)} ${a.name} ${theme.fg("dim", `[${label}]`)}\n\n`;
+			info += `${currentTheme().fg(a.status === "running" ? "success" : "error", glyph)} ${a.name} ${currentTheme().fg("dim", `[${label}]`)}\n\n`;
 		}
 		if (model) {
-			info += `${theme.bold("Provider")}\n`;
-			info += `${theme.fg("dim", "Model:")} ${model.provider}/${model.id}\n`;
+			info += `${bold("Provider")}\n`;
+			info += `${currentTheme().fg("dim", "Model:")} ${model.provider}/${model.id}\n`;
 		}
 		if (model && usageReports) {
 			const identity = resolveActiveAdvisorAccount(model.provider, stats.advisors[0]?.sessionId);
@@ -837,29 +854,29 @@ export class CommandController {
 				(report, limit) => !identity || limitMatchesActiveAccount(report, limit, identity),
 			);
 			if (quota) {
-				info += `\n${theme.bold("Quota")}\n`;
-				info += `${theme.fg("dim", quota)}\n`;
+				info += `\n${bold("Quota")}\n`;
+				info += `${currentTheme().fg("dim", quota)}\n`;
 			}
 		}
-		info += `\n${theme.bold("Messages")}\n`;
-		info += `${theme.fg("dim", "User:")} ${stats.messages.user.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Assistant:")} ${stats.messages.assistant.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Total:")} ${stats.messages.total.toLocaleString()}\n`;
-		info += `\n${theme.bold("Context")}\n`;
+		info += `\n${bold("Messages")}\n`;
+		info += `${currentTheme().fg("dim", "User:")} ${stats.messages.user.toLocaleString()}\n`;
+		info += `${currentTheme().fg("dim", "Assistant:")} ${stats.messages.assistant.toLocaleString()}\n`;
+		info += `${currentTheme().fg("dim", "Total:")} ${stats.messages.total.toLocaleString()}\n`;
+		info += `\n${bold("Context")}\n`;
 		if (stats.contextWindow > 0) {
 			const percent = Math.round((stats.contextTokens / stats.contextWindow) * 100);
-			info += `${theme.fg("dim", "Tokens:")} ${stats.contextTokens.toLocaleString()} / ${stats.contextWindow.toLocaleString()} (${percent}%)\n`;
+			info += `${currentTheme().fg("dim", "Tokens:")} ${stats.contextTokens.toLocaleString()} / ${stats.contextWindow.toLocaleString()} (${percent}%)\n`;
 		} else {
-			info += `${theme.fg("dim", "Tokens:")} ${stats.contextTokens.toLocaleString()}\n`;
+			info += `${currentTheme().fg("dim", "Tokens:")} ${stats.contextTokens.toLocaleString()}\n`;
 		}
-		info += `\n${theme.bold("Spend")}\n`;
-		info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
+		info += `\n${bold("Spend")}\n`;
+		info += `${currentTheme().fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
+		info += `${currentTheme().fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
 		if (stats.tokens.cacheRead > 0) {
-			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
+			info += `${currentTheme().fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
 		}
-		if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
-		this.showCommandReport({ title: "Advisor Status", body: new Text(info.trim(), 0, 0) });
+		if (stats.cost > 0) info += `${currentTheme().fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
+		this.showCommandReport({ title: "Advisor Status", body: () => reportTextView(info.trim()) });
 	}
 
 	/**
@@ -876,17 +893,17 @@ export class CommandController {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
-		if (isNativeRendering() && !full) {
+		if (this.ctx.shell.native() && !full) {
 			this.ctx.showJobsSheet();
 			return;
 		}
 
 		const now = Date.now();
-		const columns = this.ctx.ui.terminal.columns ?? 100;
-		let info = `${theme.fg("dim", "Running:")} ${tree.running.length}\n`;
+		const columns = this.ctx.shell.size().columns;
+		let info = `${currentTheme().fg("dim", "Running:")} ${tree.running.length}\n`;
 		if (tree.running.length === 0 && tree.recent.length === 0) {
-			info += `\n${theme.fg("dim", "No async jobs yet.")}`;
-			this.showCommandReport({ title: "Background Jobs", body: new Text(info, 0, 0) });
+			info += `\n${currentTheme().fg("dim", "No async jobs yet.")}`;
+			this.showCommandReport({ title: "Background Jobs", body: () => reportTextView(info) });
 			return;
 		}
 
@@ -895,34 +912,34 @@ export class CommandController {
 		// indent inside the report box.
 		info += "\n";
 		for (const row of buildJobTree([...tree.running, ...tree.recent], tree.agents, tree.rootId)) {
-			const guide = theme.fg("dim", jobTreeGuide(row, theme));
+			const guide = currentTheme().fg("dim", jobTreeGuide(row, currentTheme().symbols));
 			if (row.kind === "agent") {
-				info += `${guide}${theme.bold(row.agent.id)}\n`;
+				info += `${guide}${bold(row.agent.id)}\n`;
 				continue;
 			}
 			const { job } = row;
 			// A spawned subagent's task job takes the agent's id as its id and label: name it once.
-			const agent = row.agent && row.agent.id !== job.id ? ` ${theme.bold(row.agent.id)}` : "";
+			const agent = row.agent && row.agent.id !== job.id ? ` ${bold(row.agent.id)}` : "";
 			info += `${guide}${renderJobLine(job, now)}${agent}\n`;
 			// What the job is for leads; full mode follows it with what the command does and the whole command.
 			const text = full ? (job.command ?? job.label) : jobDisplayLabel(job);
 			if (text === job.id) continue;
-			const indent = jobTreeIndent(row, theme);
-			const prefix = theme.fg("dim", indent);
+			const indent = jobTreeIndent(row, currentTheme().symbols);
+			const prefix = currentTheme().fg("dim", indent);
 			if (!full) {
 				const label = truncateJobLabel(text, Math.max(24, columns - 22 - visibleWidth(indent)));
-				info += `${prefix}${theme.fg("dim", label)}\n`;
+				info += `${prefix}${currentTheme().fg("dim", label)}\n`;
 				continue;
 			}
 			for (const line of wrapTextWithAnsi(
 				shortenEmbeddedPaths(replaceTabs(sanitizeText([job.intent, job.caption, text].filter(Boolean).join("\n")))),
 				Math.max(1, columns - 4 - visibleWidth(indent)),
 			)) {
-				info += `${prefix}${theme.fg("dim", line)}\n`;
+				info += `${prefix}${currentTheme().fg("dim", line)}\n`;
 			}
 		}
 
-		this.showCommandReport({ title: "Background Jobs", body: new Text(info.trimEnd(), 0, 0) });
+		this.showCommandReport({ title: "Background Jobs", body: () => reportTextView(info.trimEnd()) });
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -967,26 +984,32 @@ export class CommandController {
 		const hint =
 			view.kind === "full"
 				? ""
-				: `\n\n${theme.fg("dim", "Use")} ${theme.bold("/changelog full")} ${theme.fg("dim", "to view the complete changelog.")}`;
+				: `\n\n${currentTheme().fg("dim", "Use")} ${bold("/changelog full")} ${currentTheme().fg("dim", "to view the complete changelog.")}`;
 
 		this.#showMarkdownPanel(title, changelogMarkdown + hint);
 	}
 
 	handleHotkeysCommand(): void {
-		const bindings = { keybindings: this.ctx.keybindings };
-		if (isNativeRendering()) {
-			// A native terminal gets a dismissable sheet with keycaps instead of a markdown table.
-			const sheet = new HotkeysSheetComponent(bindings, () => {
-				handle.hide();
-				this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
-				this.ctx.ui.requestRender();
-			});
-			const handle = this.ctx.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
-			this.ctx.ui.setFocus(sheet);
-			this.ctx.ui.requestRender();
+		if (!this.ctx.shell.native()) {
+			this.#showMarkdownPanel("Keyboard Shortcuts", buildHotkeysMarkdown(this.ctx.keybindings));
 			return;
 		}
-		this.#showMarkdownPanel("Keyboard Shortcuts", buildHotkeysMarkdown(bindings));
+		// A native terminal gets a dismissable sheet with keycaps instead of a markdown table.
+		this.#clearReport();
+		this.#closeReportSheet();
+		const { node, dispose } = createRoot(dispose => ({
+			dispose,
+			node: hotkeysSheetView({
+				keybindings: this.ctx.keybindings,
+				onClose: () => this.#closeReportSheet(),
+			}) as UiNode,
+		}));
+		this.#showSheet(node, dispose, {
+			page: false,
+			role: "omp.overlay.hotkeys",
+			head: "Keyboard shortcuts",
+			focus: node,
+		});
 	}
 
 	handleToolsCommand(): void {
@@ -1012,13 +1035,24 @@ export class CommandController {
 		const data = buildSessionContextView(session, breakdown);
 		this.#clearReport();
 		this.#closeReportSheet();
-		const viewer = new ContextViewer(data, {
-			onClose: () => this.#closeReportSheet(),
-			requestRender: () => this.ctx.ui.requestRender(),
-			getRows: () => this.ctx.ui.terminal.rows,
+		const size = this.ctx.shell.size;
+		const model = new ContextViewerModel(
+			data,
+			() => size().rows,
+			() => this.#closeReportSheet(),
+			{ columns: () => size().columns, hour12: this.ctx.shell.hour12 },
+		);
+		// The viewer rebuilds its root as it changes view: its keys are taken on the sheet.
+		const { view, dispose } = createRoot(dispose => ({ dispose, view: contextViewerView(model) }));
+		this.#showSheet(view, dispose, {
+			// A full-screen page in a terminal; natively a sheet titled by the open category.
+			page: !this.ctx.shell.native(),
+			head: () => {
+				model.rev();
+				return contextHead(model);
+			},
+			onKey: key => model.key(key.id),
 		});
-		this.#showFullscreenSheet(viewer);
-		this.ctx.ui.requestRender();
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -1373,15 +1407,16 @@ export class CommandController {
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
-		this.ctx.statusLine.invalidate();
+		this.ctx.statusLine.refresh();
 		this.ctx.statusLine.resetActiveTime();
 		this.ctx.updateEditorBorderColor();
 		this.ctx.clearTransientSessionUi();
 		this.ctx.resetTranscript();
 
-		this.ctx.present([new Spacer(1), new Text(`${theme.fg("accent", `${theme.status.success} ${label}`)}`, 1, 1)]);
+		this.ctx.present(() => successLineView(label));
 		await this.ctx.reloadTodos();
-		this.ctx.ui.requestRender(true, { clearScrollback: true });
+		// The old session's rows leave terminal scrollback too.
+		this.ctx.shell.host?.replayHistory();
 	}
 
 	async handleClearCommand(): Promise<void> {
@@ -1395,8 +1430,7 @@ export class CommandController {
 			return;
 		}
 		const stateLabel = result.closedProviderSessions === 1 ? "provider state" : "provider states";
-		this.ctx.statusLine.invalidate();
-		this.ctx.ui.requestRender();
+		this.ctx.statusLine.refresh();
 		this.ctx.showStatus(`Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`);
 	}
 
@@ -1417,18 +1451,13 @@ export class CommandController {
 		// the session id, title, and transcript file all survive).
 		this.ctx.clearTransientSessionUi();
 		this.ctx.resetTranscript();
-		this.ctx.statusLine.invalidate();
+		this.ctx.statusLine.refresh();
 		this.ctx.updateEditorBorderColor();
 		const noun = result.droppedCount === 1 ? "message" : "messages";
-		this.ctx.present([
-			new Spacer(1),
-			new Text(
-				`${theme.fg("accent", `${theme.status.success} Context reset — ${result.droppedCount} ${noun} dropped; session continues.`)}`,
-				1,
-				1,
-			),
-		]);
-		this.ctx.ui.requestRender(true, { clearScrollback: true });
+		this.ctx.present(() =>
+			successLineView(`Context reset — ${result.droppedCount} ${noun} dropped; session continues.`),
+		);
+		this.ctx.shell.host?.replayHistory();
 	}
 
 	async handleDeleteCommand(): Promise<void> {
@@ -1446,16 +1475,13 @@ export class CommandController {
 		}
 
 		// A Tern pane fork leaves this session untouched, so it may run mid-turn.
-		if (await this.#forkIntoTernPane()) return;
+		const tern = resolveTernPane(this.#forkTerminalDependencies.environment());
+		if (tern && (await this.#forkIntoTern(tern, "pane")) === undefined) return;
 
 		// An in-place fork moves this process onto the new file; a running turn
 		// would finish there and leave the original transcript cut mid-turn.
 		if (this.ctx.session.isStreaming) await this.ctx.session.abort();
-		if (this.ctx.loadingAnimation) {
-			this.ctx.loadingAnimation.stop();
-			this.ctx.loadingAnimation = undefined;
-		}
-		this.ctx.statusContainer.disposeChildren();
+		this.ctx.clearWorking();
 
 		// After a `/fork`, the current session ID is changed to the forked one,
 		// so the session ID before the fork is the one we want to show in the hint.
@@ -1469,28 +1495,28 @@ export class CommandController {
 			return;
 		}
 
-		this.ctx.statusLine.invalidate();
-		this.ctx.ui.requestRender();
+		this.ctx.statusLine.refresh();
 
-		this.ctx.present([
-			new Spacer(1),
-			new Text(
-				theme.fg(
-					"accent",
-					previousSessionId
-						? `${theme.status.success} Session forked · return to original: ${resumeCommand(previousSessionId)} or /resume ${previousSessionId}`
-						: `${theme.status.success} Session forked`,
-				),
-				1,
-				1,
+		this.ctx.present(() =>
+			successLineView(
+				previousSessionId
+					? `Session forked · return to original: ${resumeCommand(previousSessionId)} or /resume ${previousSessionId}`
+					: `Session forked`,
 			),
-		]);
+		);
 	}
 
 	async #handleForkTerminalCommand(placement: "pane" | "window"): Promise<void> {
 		const dependencies = this.#forkTerminalDependencies;
 		const environment = dependencies.environment();
-		const multiplexer = dependencies.classifyTerminalMultiplexer(environment);
+		const multiplexer = dependencies.classifyMultiplexer(environment);
+		// Tern is no multiplexer, but opens the fork in a pane or tab of its own.
+		const tern = multiplexer === null ? resolveTernPane(environment) : null;
+		if (tern) {
+			const refusal = await this.#forkIntoTern(tern, placement);
+			if (refusal !== undefined) this.ctx.showError(`Tern could not open the fork: ${refusal}`);
+			return;
+		}
 		const placementInfo = getTerminalLaunchPlacement(multiplexer, placement);
 		if ("error" in placementInfo) {
 			this.ctx.showError(placementInfo.error);
@@ -1617,50 +1643,54 @@ export class CommandController {
 	}
 
 	/**
-	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session in a new pane beside
-	 * this one, which keeps the original session. False means fork in place instead: outside Tern,
-	 * an unsaved session, a Tern without `fork`, or Tern refusing it. Once the request is out, an
-	 * unconfirmed one is reported rather than retried in place, since Tern may still open the pane.
+	 * `/fork` inside Tern pane `tern`: ask Tern to run `omp --fork` of this session in a new pane beside
+	 * this one, or for `window` in a new tab after this one's, which keeps the original session (a Tern
+	 * from before fork tabs opens a pane). Resolves undefined once the fork is Tern's, else why Tern did
+	 * not take it (an unsaved session, Tern unreachable or without `fork`, or Tern refusing it) for bare
+	 * `/fork` to fork in place and `/fork pane|window` to report. Once the request is out, an
+	 * unconfirmed one is reported here rather than retried, since Tern may still open the fork.
 	 */
-	async #forkIntoTernPane(): Promise<boolean> {
-		const tern = resolveTernPane();
-		if (!tern || !this.ctx.sessionManager.isSessionOnDisk()) return false;
+	async #forkIntoTern(tern: TernPane, placement: "pane" | "window"): Promise<string | undefined> {
+		if (!this.ctx.sessionManager.isSessionOnDisk()) return "the current session has not been persisted yet";
 		const client = new TernSocketClient({ socketPath: tern.socketPath });
+		let forked: TernForked;
 		try {
 			try {
 				await client.connect();
 			} catch (error) {
-				logger.debug("Tern unreachable for /fork; forking in place", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-				return false;
+				const message = error instanceof Error ? error.message : String(error);
+				logger.debug("Tern unreachable for /fork", { error: message });
+				return message;
 			}
-			if (!client.supports("fork")) return false;
+			if (!client.supports("fork")) return "this Tern build cannot open forks; update Tern";
 			// The new pane's omp reads the session file as it starts.
 			await this.ctx.session.flushToDisk();
 			try {
-				await client.fork({ block: tern.pane }, { timeoutMs: TERN_FORK_TIMEOUT_MS });
+				forked = await client.fork(
+					placement === "window" ? { block: tern.pane, tab: true } : { block: tern.pane },
+					{ timeoutMs: TERN_FORK_TIMEOUT_MS },
+				);
 			} catch (error) {
 				if (error instanceof TernError && !TERN_FORK_UNCONFIRMED[error.kind]) {
 					const details = { kind: error.kind, error: error.message };
-					if (error.kind === "failed") logger.warn("Tern could not open the fork pane; forking in place", details);
-					else logger.debug("Tern refused the fork; forking in place", details);
-					return false;
+					if (error.kind === "failed") logger.warn("Tern could not open the fork", details);
+					else logger.debug("Tern refused the fork", details);
+					return error.message;
 				}
 				this.ctx.showError(
 					`Tern did not confirm the fork: ${error instanceof Error ? error.message : String(error)}`,
 				);
-				return true;
+				return undefined;
 			}
 		} finally {
 			client.close();
 		}
-		const note = this.ctx.session.isStreaming ? " · the running response continues here, not in the fork" : "";
-		this.ctx.present([
-			new Spacer(1),
-			new Text(theme.fg("accent", `${theme.status.success} Session forked into a new pane${note}`), 1, 1),
-		]);
-		return true;
+		const notes: string[] = [];
+		if (placement === "window" && forked.tab === undefined) notes.push("this Tern opens forks only in panes");
+		if (this.ctx.session.isStreaming) notes.push("the running response continues here, not in the fork");
+		const where = forked.tab === undefined ? "pane" : "tab";
+		this.ctx.present(() => successLineView([`Session forked into a new ${where}`, ...notes].join(" · ")));
+		return undefined;
 	}
 
 	/**
@@ -1683,8 +1713,8 @@ export class CommandController {
 		// No argument in TUI mode: open the path autocomplete overlay.
 		if (!input) {
 			const result = await this.ctx.showHookCustom<MoveOverlayResult | undefined>(
-				(_tui, _theme, _keybindings, done) =>
-					new MoveOverlay(this.ctx.sessionManager.getCwd(), done, moveDirectorySource),
+				(_ui, _theme, _keybindings, done) =>
+					moveOverlayView({ cwd: this.ctx.sessionManager.getCwd(), source: moveDirectorySource, onDone: done }),
 				{ overlay: true },
 			);
 			if (!result) return; // cancelled
@@ -1738,10 +1768,7 @@ export class CommandController {
 			return this.#relocateSession(resolvedPath);
 		});
 		if (moved) {
-			this.ctx.present([
-				new Spacer(1),
-				new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
-			]);
+			this.ctx.present(() => successLineView(`Moved to ${resolvedPath}`));
 		}
 	}
 
@@ -1764,16 +1791,7 @@ export class CommandController {
 		await this.#withSessionMove(async () => {
 			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
 			const cwd = this.ctx.sessionManager.getCwd();
-			this.ctx.statusContainer.disposeChildren();
-			const loader = new Loader(
-				this.ctx.ui,
-				spinner => theme.fg("accent", spinner),
-				text => theme.fg("muted", text),
-				`Creating worktree on ${branchName}…`,
-				getSymbolTheme().spinnerFrames,
-			);
-			this.ctx.statusContainer.addChild(loader);
-			this.ctx.ui.requestRender();
+			this.ctx.showWorking("maintenance", { label: `Creating worktree on ${branchName}…`, startedAt: Date.now() });
 			let worktree: SessionWorktree;
 			try {
 				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
@@ -1781,8 +1799,7 @@ export class CommandController {
 				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
 			} finally {
-				loader.stop();
-				this.ctx.statusContainer.disposeChildren();
+				this.ctx.clearWorking("maintenance");
 			}
 			if (worktree.cloneError) {
 				logger.warn("worktree clone fell back to plain checkout", {
@@ -1798,14 +1815,7 @@ export class CommandController {
 			if (cleanup.errorMessage !== undefined) {
 				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
 			}
-			this.ctx.present([
-				new Spacer(1),
-				new Text(
-					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree, cleanup.cleaned)}`)}`,
-					1,
-					1,
-				),
-			]);
+			this.ctx.present(() => successLineView(formatSessionWorktreeSummary(worktree, cleanup.cleaned)));
 			return true;
 		});
 		return created;
@@ -1817,22 +1827,14 @@ export class CommandController {
 	 * a turn starting or ending during the hook clears the status rows, spinner included.
 	 */
 	async runWorktreeHook(worktree: SessionWorktree): Promise<void> {
-		const loader = new Loader(
-			this.ctx.ui,
-			spinner => theme.fg("accent", spinner),
-			text => theme.fg("muted", text),
-			"Running post-checkout hook…",
-			getSymbolTheme().spinnerFrames,
-		);
-		this.ctx.statusContainer.addChild(loader);
-		this.ctx.ui.requestRender();
+		// The status row is a turn's while one runs: the hook shows there only when it is free.
+		const shown = this.ctx.working === undefined;
+		if (shown) this.ctx.showWorking("maintenance", { label: "Running post-checkout hook…", startedAt: Date.now() });
 		let warnings: string[];
 		try {
 			warnings = await runSessionWorktreeHook(worktree, this.ctx.session);
 		} finally {
-			loader.stop();
-			this.ctx.statusContainer.removeChild(loader);
-			this.ctx.ui.requestRender();
+			if (shown) this.ctx.clearWorking("maintenance");
 		}
 		for (const warning of warnings) this.ctx.showWarning(warning);
 	}
@@ -1874,7 +1876,6 @@ export class CommandController {
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
-		this.ctx.ui.requestRender();
 		return true;
 	}
 
@@ -1929,74 +1930,48 @@ export class CommandController {
 		isDeferred: boolean,
 		shouldPersistCwd: boolean,
 	): Promise<boolean> {
-		const component = new BashExecutionComponent(command, this.ctx.ui, excludeFromContext);
-		this.ctx.bashComponent = component;
+		const run = new ExecRun({
+			kind: "bash",
+			source: command,
+			excluded: excludeFromContext,
+			ptyViewport: this.#ptyViewport(),
+		});
+		run.setExpanded(this.ctx.toolOutputExpanded);
+		this.ctx.bashRun = run;
 		// Provisional until the session records the run.
-		const block = new PresentedBlock(
-			component,
-			messageBlock({
-				role: "bashExecution",
-				command,
-				output: "",
-				exitCode: undefined,
-				cancelled: false,
-				truncated: false,
-				timestamp: Date.now(),
-				excludeFromContext,
-			}),
-		);
-		block.setExpanded(this.ctx.toolOutputExpanded);
+		const presentation = this.ctx.presentExecRun(run, { deferred: isDeferred });
 		let detachInput: (() => void) | undefined;
 		let finished = false;
 
-		if (isDeferred) {
-			this.ctx.pendingShellContainer.addChild(block);
-			this.ctx.pendingBashComponents.push(block);
-		} else {
-			this.ctx.present(block);
-		}
-		this.ctx.ui.requestRender();
-
 		try {
-			const result = await this.ctx.session.executeBash(
-				command,
-				chunk => {
-					if (this.ctx.bashComponent) {
-						this.ctx.bashComponent.appendOutput(chunk);
-					}
-				},
-				{
-					excludeFromContext,
-					onRecorded: message => block.setBlock(messageBlock(message)),
-					useUserShell: true,
-					// User-shell zsh/fish `!` commands run on a headless PTY; raw
-					// bytes render through the component's vterm replay (color-safe).
-					pty: {
-						...bashPtyViewport(this.ctx.ui),
-						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
-						onStdin: write => {
-							if (finished) return;
-							// A TSP field without a mode handles printable keys itself and sends
-							// `edit` packets instead of raw input. Label it while the PTY owns
-							// the keyboard so Tern delivers those keys to the input listener.
-							detachInput = this.#forwardKeysToPty(component, write);
-							this.ctx.editor.nativeKeyPassthrough = true;
-							this.ctx.ui.requestRender();
-						},
+			const result = await this.ctx.session.executeBash(command, chunk => run.appendOutput(chunk), {
+				excludeFromContext,
+				onRecorded: message => presentation.record(message),
+				useUserShell: true,
+				// User-shell zsh/fish `!` commands run on a headless PTY; raw
+				// bytes render through the run's vterm replay (color-safe).
+				pty: {
+					...this.#ptyViewport(),
+					onChunk: chunk => void run.appendPtyChunk(chunk),
+					onStdin: write => {
+						if (finished) return;
+						// A TSP field without a mode handles printable keys itself and sends
+						// `edit` packets instead of raw input. Mark it while the PTY owns
+						// the keyboard so Tern delivers those keys to the interceptor.
+						detachInput = this.#forwardKeysToPty(run, write);
+						this.ctx.composer.setKeyPassthrough(true);
 					},
 				},
-			);
-			if (this.ctx.bashComponent) {
-				const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
-				this.ctx.bashComponent.setComplete(result.exitCode, result.cancelled, {
-					output: result.output,
-					truncation: meta?.truncation,
-					artifactError: meta?.artifactError,
-					minimized: result.minimized,
-					images: result.images,
-					showImages: cfgTerminalShowImages.get(this.ctx.settings),
-				});
-			}
+			});
+			const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
+			run.setComplete(result.exitCode, result.cancelled, {
+				output: result.output,
+				truncation: meta?.truncation,
+				artifactError: meta?.artifactError,
+				minimized: result.minimized,
+				images: result.images,
+				showImages: cfgTerminalShowImages.get(this.ctx.settings),
+			});
 			try {
 				if (shouldPersistCwd) return await this.#applyBashResultCwd(result);
 			} catch (error) {
@@ -2007,18 +1982,23 @@ export class CommandController {
 				);
 			}
 		} catch (error) {
-			if (this.ctx.bashComponent) {
-				this.ctx.bashComponent.setComplete(undefined, false);
-			}
+			run.setComplete(undefined, false);
 			this.ctx.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		} finally {
 			finished = true;
 			detachInput?.();
-			if (detachInput) this.ctx.editor.nativeKeyPassthrough = false;
-			this.ctx.bashComponent = undefined;
-			this.ctx.ui.requestRender();
+			if (detachInput) this.ctx.composer.setKeyPassthrough(false);
+			if (this.ctx.bashRun === run) this.ctx.bashRun = undefined;
+			// The recorded run is context now (the context meter counts it), and it may have moved HEAD.
+			this.ctx.statusLine.refreshVcs();
 		}
 		return false;
+	}
+
+	/** The PTY size of a `!` run: its frame's inner area on the current terminal. */
+	#ptyViewport(): { cols: number; rows: number } {
+		const { columns, rows } = untrack(this.ctx.shell.size);
+		return { cols: Math.max(20, columns - 2), rows: Math.max(5, rows - 4) };
 	}
 
 	/**
@@ -2027,17 +2007,19 @@ export class CommandController {
 	 * The interrupt key still cancels; focused dialogs and mouse reports keep
 	 * their input. Returns the detach function.
 	 */
-	#forwardKeysToPty(component: BashExecutionComponent, write: (data: string) => void): () => void {
-		return this.ctx.ui.addInputListener(
-			data => {
-				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
-				if (this.ctx.keybindings.matches(data, "app.interrupt") || parseSgrMouse(data)) return undefined;
-				const bytes = component.encodePtyInput(data);
-				if (bytes) write(bytes);
-				return { consume: true };
-			},
-			{ prepend: true },
-		);
+	#forwardKeysToPty(run: ExecRun, write: (data: string) => void): () => void {
+		return this.ctx.interceptInput(event => {
+			if (this.ctx.shell.focused() !== this.ctx.composer.field) return false;
+			if (event.type === "paste") {
+				write(`\x1b[200~${event.paste.text}\x1b[201~`);
+				return true;
+			}
+			if (event.type !== "key") return false;
+			if (this.ctx.keybindings.matches(event.key, "app.interrupt")) return false;
+			const bytes = run.ptyInput(event.key);
+			if (bytes) write(bytes);
+			return true;
+		});
 	}
 
 	async #applyBashResultCwd(result: BashResult): Promise<boolean> {
@@ -2060,59 +2042,31 @@ export class CommandController {
 
 	async handlePythonCommand(code: string, excludeFromContext = false): Promise<void> {
 		const isDeferred = this.ctx.session.isStreaming;
-		this.ctx.pythonComponent = new EvalExecutionComponent(code, this.ctx.ui, excludeFromContext);
+		const run = new ExecRun({ kind: "eval", source: code, excluded: excludeFromContext, language: "python" });
+		run.setExpanded(this.ctx.toolOutputExpanded);
+		this.ctx.pythonRun = run;
 		// Provisional until the session records the cell.
-		const block = new PresentedBlock(
-			this.ctx.pythonComponent,
-			messageBlock({
-				role: "pythonExecution",
-				code,
-				output: "",
-				exitCode: undefined,
-				cancelled: false,
-				truncated: false,
-				timestamp: Date.now(),
-				excludeFromContext,
-			}),
-		);
-		block.setExpanded(this.ctx.toolOutputExpanded);
-
-		if (isDeferred) {
-			this.ctx.pendingShellContainer.addChild(block);
-			this.ctx.pendingPythonComponents.push(block);
-		} else {
-			this.ctx.present(block);
-		}
-		this.ctx.ui.requestRender();
+		const presentation = this.ctx.presentExecRun(run, { deferred: isDeferred });
 
 		try {
-			const result = await this.ctx.session.executePython(
-				code,
-				chunk => {
-					if (this.ctx.pythonComponent) {
-						this.ctx.pythonComponent.appendOutput(chunk);
-					}
-				},
-				{ excludeFromContext, onRecorded: message => block.setBlock(messageBlock(message)) },
-			);
-
-			if (this.ctx.pythonComponent) {
-				const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
-				this.ctx.pythonComponent.setComplete(result.exitCode, result.cancelled, {
-					output: result.output,
-					truncation: meta?.truncation,
-					artifactError: meta?.artifactError,
-				});
-			}
+			const result = await this.ctx.session.executePython(code, chunk => run.appendOutput(chunk), {
+				excludeFromContext,
+				onRecorded: message => presentation.record(message),
+			});
+			const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
+			run.setComplete(result.exitCode, result.cancelled, {
+				output: result.output,
+				truncation: meta?.truncation,
+				artifactError: meta?.artifactError,
+			});
 		} catch (error) {
-			if (this.ctx.pythonComponent) {
-				this.ctx.pythonComponent.setComplete(undefined, false);
-			}
+			run.setComplete(undefined, false);
 			this.ctx.showError(`Python execution failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 
-		this.ctx.pythonComponent = undefined;
-		this.ctx.ui.requestRender();
+		if (this.ctx.pythonRun === run) this.ctx.pythonRun = undefined;
+		// The recorded cell is context now (the context meter counts it), and it may have moved HEAD.
+		this.ctx.statusLine.refreshVcs();
 	}
 
 	async handleCompactCommand(
@@ -2227,9 +2181,8 @@ export class CommandController {
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content,
 	 * `images` strips image blocks, and `thinking` drops the thinking blocks the
-	 * request rebuilds from them, keeping the turns it replays natively (they
-	 * are reported as kept and the transcript is left alone). Rebuilds the chat
-	 * and reports counts.
+	 * request rebuilds and clears interrupted-thinking notes, keeping the turns
+	 * it replays natively. Rebuilds the chat and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -2244,15 +2197,16 @@ export class CommandController {
 			result.toolResultsDropped +
 			result.blocksDropped +
 			(result.imagesDropped ?? 0) +
-			(result.thinkingBlocksDropped ?? 0);
+			(result.thinkingBlocksDropped ?? 0) +
+			(result.interruptedThinkingNotesDropped ?? 0);
 		if (dropped === 0) {
 			// Replayed thinking was left in place: nothing to rebuild, but say so.
 			this.ctx.showStatus((result.thinkingBlocksKept ?? 0) > 0 ? formatShakeSummary(result) : "Nothing to shake.");
 			return;
 		}
 		this.ctx.rebuildChatFromMessages();
-		this.ctx.statusLine.invalidate();
-		this.ctx.ui.requestRender(true, { clearScrollback: true });
+		this.ctx.statusLine.refresh();
+		this.ctx.shell.host?.replayHistory();
 		this.ctx.showStatus(formatShakeSummary(result));
 	}
 
@@ -2280,59 +2234,40 @@ export class CommandController {
 		const inView = () =>
 			!background || (this.ctx.viewSession === session && this.ctx.sessionManager.getSessionId() === sessionId);
 
-		const cancelHint = `(${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
 		const verb = isAuto ? "Auto-compacting context" : "Compacting context";
 		const label = background ? `${verb} in the background` : verb;
 		const startedAt = Date.now();
-		const loader = new Loader(
-			this.ctx.ui,
-			spinner => theme.fg("accent", spinner),
-			text => theme.fg("muted", text),
-			`${label}… ${cancelHint}`,
-			getSymbolTheme().spinnerFrames,
-		);
-		loader.setWorkingRow(
-			() => ({
+		if (background) {
+			// The composer stays free: the run takes the status row only while no turn holds it.
+			this.ctx.hud.status.background.run.set({
+				label,
+				startedAt,
+				interruptKey: appInterruptKeys(this.ctx.keybindings)[0],
+			});
+		} else {
+			this.ctx.showWorking("maintenance", {
 				label: `${label}…`,
 				startedAt,
 				variant: { kind: "compaction" },
 				interruptKey: this.ctx.maintenanceInterruptKey(),
-			}),
-			() => this.ctx.interruptFromPointer(),
-		);
-		if (background) {
-			// The composer stays free: the run takes the status row only while no turn holds it.
-			this.ctx.backgroundCompaction.start({ loader, label: `${label} ${cancelHint}`, startedAt, inView });
-		} else {
-			if (this.ctx.loadingAnimation) {
-				this.ctx.loadingAnimation.stop();
-				this.ctx.loadingAnimation = undefined;
-			}
-			this.ctx.statusContainer.disposeChildren();
-			this.ctx.statusContainer.addChild(loader);
+			});
 		}
-		this.ctx.ui.requestRender();
 
 		let outcome: CompactionOutcome = "ok";
 		try {
 			try {
 				await session.compact(instructions, options);
 			} finally {
-				if (background) {
-					this.ctx.backgroundCompaction.stop();
-					this.ctx.ui.requestRender();
-				} else {
-					loader.stop();
-					this.ctx.statusContainer.removeChild(loader);
-				}
+				if (background) this.ctx.hud.status.background.run.set(undefined);
+				else this.ctx.clearWorking("maintenance");
 			}
 			if (inView()) {
-				this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
-				this.ctx.statusLine.invalidate();
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.statusLine.refresh();
 				if (background) this.ctx.showStatus("Compaction complete");
 				// Rebuilding resets the transcript's emission ledger. Clear terminal
 				// scrollback before re-emitting its blocks (#12140).
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
+				this.ctx.shell.host?.replayHistory();
 			}
 		} catch (error) {
 			if (error instanceof CompactionCancelledError) {
@@ -2358,14 +2293,14 @@ const COLUMN_WIDTH_MIN = 4;
 function renderJobLine(job: AsyncJobSnapshotItem, now: number): string {
 	const duration = formatDuration(Math.max(0, (job.endTime ?? now) - job.startTime));
 	const status = formatJobStatus(job.status);
-	return `${theme.fg("dim", job.id)} ${theme.fg("dim", `[${job.type}]`)} ${status} ${theme.fg("dim", `(${duration})`)}`;
+	return `${currentTheme().fg("dim", job.id)} ${currentTheme().fg("dim", `[${job.type}]`)} ${status} ${currentTheme().fg("dim", `(${duration})`)}`;
 }
 
 function formatJobStatus(status: AsyncJobSnapshotItem["status"]): string {
-	if (status === "running") return theme.fg("warning", "running");
-	if (status === "completed") return theme.fg("success", "completed");
-	if (status === "cancelled") return theme.fg("dim", "cancelled");
-	return theme.fg("error", "failed");
+	if (status === "running") return currentTheme().fg("warning", "running");
+	if (status === "completed") return currentTheme().fg("success", "completed");
+	if (status === "cancelled") return currentTheme().fg("dim", "cancelled");
+	return currentTheme().fg("error", "failed");
 }
 
 function truncateJobLabel(label: string, maxWidth: number): string {
@@ -2539,7 +2474,7 @@ function formatAccountHeaderRow(
 function padColumn(text: string, width: number): string {
 	const visible = visibleWidth(text);
 	if (visible >= width) return text;
-	return `${text}${padding(width - visible)}`;
+	return `${text}${" ".repeat(Math.max(0, width - visible))}`;
 }
 
 type AggregateDisplayStatus = NonNullable<UsageLimit["status"]> | "neutral";
@@ -2618,11 +2553,11 @@ function resolveResetRange(limits: UsageLimit[], nowMs: number): string | null {
 }
 
 function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): string {
-	if (status === "neutral") return uiTheme.fg("dim", uiTheme.status.info);
-	if (status === "exhausted") return uiTheme.fg("error", uiTheme.status.error);
-	if (status === "warning") return uiTheme.fg("warning", uiTheme.status.warning);
-	if (status === "ok") return uiTheme.fg("success", uiTheme.status.success);
-	return uiTheme.fg("dim", uiTheme.status.pending);
+	if (status === "neutral") return uiTheme.fg("dim", uiTheme.symbols.symbol("status.info"));
+	if (status === "exhausted") return uiTheme.fg("error", uiTheme.symbols.symbol("status.error"));
+	if (status === "warning") return uiTheme.fg("warning", uiTheme.symbols.symbol("status.warning"));
+	if (status === "ok") return uiTheme.fg("success", uiTheme.symbols.symbol("status.success"));
+	return uiTheme.fg("dim", uiTheme.symbols.symbol("status.pending"));
 }
 
 function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning" | "error" | "dim" {
@@ -2685,7 +2620,7 @@ export function renderUsageReports(
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
-	lines.push(uiTheme.bold(uiTheme.fg("accent", `Usage${headerSuffix}`)));
+	lines.push(bold(uiTheme.fg("accent", `Usage${headerSuffix}`)));
 	const grouped = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const list = grouped.get(report.provider) ?? [];
@@ -2739,7 +2674,7 @@ export function renderUsageReports(
 			}
 		}
 
-		lines.push(uiTheme.bold(uiTheme.fg("accent", providerName)));
+		lines.push(bold(uiTheme.fg("accent", providerName)));
 		const activeReport =
 			provider === "openai-codex" && activeAccount
 				? ((activeAccount.accountId
@@ -2897,7 +2832,7 @@ export function renderUsageReports(
 			const statusIcon = resolveStatusIcon(status, uiTheme);
 
 			const windowSuffix = formatWindowSuffix(group.label, group.windowLabel, uiTheme);
-			lines.push(`${statusIcon} ${uiTheme.bold(group.label)} ${windowSuffix}`.trim());
+			lines.push(`${statusIcon} ${bold(group.label)} ${windowSuffix}`.trim());
 			const accountLabels = formatAccountHeaderRow(
 				sortedLimits,
 				sortedReports,
@@ -2932,7 +2867,7 @@ export function renderUsageReports(
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
 			const daybreakSuffix = report.metadata?.daybreak === true ? uiTheme.fg("success", " daybreak") : "";
 			lines.push(
-				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${daybreakSuffix}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
+				`${uiTheme.fg("success", uiTheme.symbols.symbol("status.success"))} ${label}${daybreakSuffix}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
 			);
 		}
 		// No per-provider footer; global header shows last check.

@@ -4,7 +4,7 @@ import {
 	formatWallTimeNotice,
 	formatExitCodeNotice,
 	WALL_TIME_NOTICE_MIN_MS,
-} from "@oh-my-pi/pi-tui/tools/bash";
+} from "./details/bash";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,7 +18,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { PipeStreams, type ShellCommands, shellBuiltins } from "@oh-my-pi/pi-natives";
+import { PipeStreams, repairHeredocContinuations, type ShellCommands, shellBuiltins } from "@oh-my-pi/pi-natives";
 import { $which, isEnoent, logger, prompt, spillUrl } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
@@ -33,6 +33,7 @@ import {
 import { shellChangeSnapshots } from "../commit/selective/journal";
 import { type BoardEntry, registerOnBoard } from "../daemon/client";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { BASH_SESSION_ENV } from "../exec/session-processes";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { InternalUrlRouter } from "../internal-urls";
@@ -50,7 +51,7 @@ import type {
 	ClientBridgeTerminalHandle,
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
-import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "./streaming-output";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
@@ -66,9 +67,10 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
-import { isFindEnabled } from "./jfind";
-import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { O2CTL_COMMAND, runO2ctlCommand } from "../launch/o2ctl-command";
+import { findHintVisible } from "./jfind";
+import { formatArtifactErrorNotice } from "./output-meta-format";
+import { formatOutputNotice } from "./output-meta-format";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
@@ -83,7 +85,7 @@ import {
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 import type { ToolCommandDispatch } from "./tool-commands";
@@ -117,9 +119,9 @@ import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { sessionShellSpeech } from "../tts/shell-speech";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
-import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightDetails } from "./details/spotlight";
 
-const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
+const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^- \t]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
 function hasBashApprovalShellControl(command: string): boolean {
 	let quote: "'" | '"' | undefined;
@@ -1026,7 +1028,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			hasAstEdit: isToolActive("ast_edit", cfgAstEditEnabled.get(this.session.settings)),
 			hasGrep: isToolActive("grep", cfgGrepEnabled.get(this.session.settings)),
 			hasGlob: isToolActive("glob", cfgGlobEnabled.get(this.session.settings)),
-			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
+			hasFind: findHintVisible(this.session),
 			hasRead: isToolActive("read", true),
 			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
 			// building a bare ToolSession lack the rebuild lifecycle, so fall back
@@ -1083,9 +1085,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	/**
-	 * Session tool commands for one embedded shell run, or undefined when the session mounts none.
-	 * The handler lives as long as the run: `signal` is the run's own, and every dispatch lands in
-	 * `recorder`, after which `onChange` re-emits the run's frame.
+	 * Session tool commands for one embedded shell run, plus `o2ctl` while services can launch;
+	 * undefined when there are none. The handler lives as long as the run: `signal` is the run's
+	 * own, and every tool dispatch lands in `recorder`, after which `onChange` re-emits the run's
+	 * frame.
 	 */
 	#shellCommands(
 		names: readonly string[],
@@ -1097,24 +1100,30 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			onChange?: () => void;
 		},
 	): ShellCommands | undefined {
-		if (names.length === 0) return undefined;
+		// A mounted tool of that name keeps it.
+		const o2ctl = this.#launchEnabled && !names.includes(O2CTL_COMMAND);
+		if (names.length === 0 && !o2ctl) return undefined;
 		const { recorder, onChange } = options;
+		const tools = createToolCommandHandler({
+			session: this.session,
+			toolCallId: options.toolCallId,
+			signal: options.signal,
+			context: options.context,
+			onDispatch: (dispatch, index) => {
+				recorder.finish(dispatch, index);
+				onChange?.();
+			},
+			onProgress: (dispatch, index) => {
+				recorder.progress(dispatch, index);
+				onChange?.();
+			},
+		});
 		return {
-			names: [...names],
-			handler: createToolCommandHandler({
-				session: this.session,
-				toolCallId: options.toolCallId,
-				signal: options.signal,
-				context: options.context,
-				onDispatch: (dispatch, index) => {
-					recorder.finish(dispatch, index);
-					onChange?.();
-				},
-				onProgress: (dispatch, index) => {
-					recorder.progress(dispatch, index);
-					onChange?.();
-				},
-			}),
+			names: o2ctl ? [...names, O2CTL_COMMAND] : [...names],
+			handler: request =>
+				o2ctl && request.name === O2CTL_COMMAND
+					? runO2ctlCommand(this.session, request, options.signal)
+					: tools(request),
 		};
 	}
 
@@ -1128,8 +1137,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	 * omp process, since an env overlay cannot unset.
 	 */
 	#sessionEnv(toolCallId: string): Record<string, string> {
+		const sessionId = this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "";
 		return {
-			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
+			PI_SESSION_ID: sessionId,
+			// Membership tag for processes the call leaves running (session-processes.ts).
+			[BASH_SESSION_ENV]: sessionId,
 			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
 			PI_TOOL_CALL_ID: toolCallId,
 		};
@@ -1928,6 +1940,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				const patched = await applyPatch.execute(toolCallId, { input: shellPatch }, signal, undefined, ctx);
 				return { content: patched.content, isError: patched.isError, details: {} };
 			}
+		}
+
+		const repaired = repairHeredocContinuations(command);
+		if (repaired !== null) {
+			pendingNotices.push(
+				"Ran without the `\\` after `<<EOF &&`: a line continuation there makes the next line a command and starts the heredoc body after it. End such lines with the operator alone.",
+			);
+			command = repaired;
 		}
 
 		if (cfgWorktreeClone.get(this.session.settings)) {

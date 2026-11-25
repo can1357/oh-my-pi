@@ -2,7 +2,9 @@
 
 Run `/hotkeys` inside an `omp` session for the built-in shortcut reference. Application-action rows reflect remaps loaded from disk; navigation/editing examples use fixed chords. This is not an inventory of extension-registered shortcuts.
 
-Base editor, input, and selector actions use `tui.editor.*`, `tui.input.*`, and `tui.select.*`; application actions use `app.*`. Definitions live in `packages/tui/src/keybindings.ts` and `packages/tui/src/app-keybindings.ts`.
+Base editor, input, and selector actions use `tui.editor.*`, `tui.input.*`, and `tui.select.*`; application actions use `app.*`. Definitions live in `packages/coding-agent/src/config/keybindings/tui-keybindings.ts` and `packages/coding-agent/src/config/keybindings/app-keybindings.ts`; the keymap that loads `keybindings.yml` and matches keys is `packages/coding-agent/src/config/keybindings/keybindings.ts`.
+
+The `tui.select.*` actions (`up`, `down`, `pageUp`, `pageDown`, `confirm`, `cancel`) drive every list: pickers, menus, settings pages, dialogs and the setup wizard. The `tui.editor.*` actions and `tui.input.newLine` drive every text field, the prompt included; `tui.input.submit` submits single-purpose inputs (renames, labels, form fields). Home/End, Space, Tab and ←/→ in lists, and Alt+Enter as a new line in fields, stay fixed. Key hints and button tooltips show the keys you bound.
 
 ## Customize keybindings
 
@@ -16,7 +18,7 @@ app.model.selectTemporary: Alt+P
 app.plan.toggle: Alt+Shift+P
 ```
 
-Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`.
+Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`. Modifier order does not matter (`Shift+Ctrl+P` is `Ctrl+Shift+P`), `Esc`/`Return` mean `Escape`/`Enter`, and a symbol typed with Shift is written as the symbol itself: `?` and `Shift+?` are the same key.
 
 Set an action to an empty array to disable it:
 
@@ -188,7 +190,7 @@ Text killed in Insert mode (`Ctrl+K`, `Ctrl+W`) is what an unnamed `p` puts unti
 
 Only `"+y` and `"*y` copy to the system clipboard, as in Vim. Turn on **Vim Yanks Copy to Clipboard** (`tui.vimYankToClipboard: true`) to make every yank copy there too, as in Vim with `clipboard=unnamed`. Deletes reach the clipboard only through `"+` / `"*`.
 
-A selection that would cut through an attachment placeholder such as `[Image #1, 800x600]` or `[Paste #2, +30 lines]` takes the whole placeholder with it, so a delete can never leave a corrupt fragment behind.
+A selection that would cut through an attachment chip such as `📷 #1` or `📄 #2` takes the whole chip with it, so a delete can never leave a corrupt fragment behind.
 
 ### Escape
 

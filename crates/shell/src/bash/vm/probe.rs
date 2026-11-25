@@ -713,9 +713,7 @@ pub fn path_search(
 	};
 	loop {
 		let Some(path) = search.cands.get(search.idx) else {
-			if !executable_only
-				&& let Some(i) = search.nonexec.take()
-			{
+			if !executable_only && let Some(i) = search.nonexec.take() {
 				search.idx = i;
 				return Search::Found(search.cands[i].clone());
 			}

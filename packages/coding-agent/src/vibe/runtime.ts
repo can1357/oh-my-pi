@@ -5,7 +5,7 @@ import {
 	type VibeSendOutcome,
 	type VibeKillOutcome,
 	type VibeWaitOutcome,
-} from "@oh-my-pi/pi-tui/tools/vibe";
+} from "../tools/details/vibe";
 /**
  * Vibe mode worker-session runtime.
  *
@@ -40,10 +40,10 @@ import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "..
 import { generateTaskName, sanitizeAgentId } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition } from "../task/types";
-import { type AgentProgress, oneLineLabel, type SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { type AgentProgress, oneLineLabel, type SingleResult } from "../task/task-details";
 import type { ToolSession } from "../tools";
-import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatDuration } from "@oh-my-pi/pi-utils";
+import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
 import {
@@ -55,7 +55,7 @@ import {
 	type VibeSpawnLifecycleEvent,
 	type VibeTombstoneReason,
 } from "./lifecycle";
-import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
+import { type VibeCli } from "../tools/details/vibe";
 
 import { cfgTaskAgentAccountPools, cfgTaskAgentModelOverrides } from "../task/settings";
 /**

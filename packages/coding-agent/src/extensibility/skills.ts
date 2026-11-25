@@ -31,7 +31,7 @@ import {
 	registeredPluginRootOf,
 	scanSkillsFromDir,
 } from "../discovery/helpers";
-import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";

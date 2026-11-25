@@ -9,7 +9,7 @@
 - On-demand doc topics (`ReadTool.docTopics()`): `help://read/sources` (`prompts/tools/read-sources.md`: SQLite, archive, JSON query, executable, video, SVG and merge-conflict selectors, plus `write` targets for archives and SQLite) and `help://read/urls` (each internal URL scheme's `promptReference()`: sub-paths, queries and limits its one-line system-prompt entry leaves out).
 - Key collaborators:
    - `packages/coding-agent/src/tools/path-utils.ts` — prefer literal filenames; normalize local paths and recover accidental delimited path lists.
-   - `packages/tui/src/tools/read.ts` / `line-ranges.ts` — split trailing selectors and parse line ranges; `packages/coding-agent/src/tools/read-selector.ts` resolves raw, range, and tail selectors.
+   - `packages/coding-agent/src/tools/details/read.ts` / `packages/coding-agent/src/tools/line-ranges.ts` — split trailing selectors and parse line ranges; `packages/coding-agent/src/tools/read-selector.ts` resolves raw, range, and tail selectors.
    - `packages/coding-agent/src/tools/read-archive.ts`, `read-sqlite.ts`, `read-binary.ts`, `read-pdf.ts`, and `read-format.ts` — specialized readers and shared formatting/pagination.
    - `packages/utils/src/ar` (`@oh-my-pi/pi-utils/ar`) — unified archive registry: detect `archive.ext:inner/path`, index archives, list/read entries.
    - `packages/coding-agent/src/tools/sqlite-reader.ts` — detect SQLite targets, parse selectors, render tables.
@@ -35,7 +35,7 @@
 
 ### Selector grammar
 
-For normal file-like reads, `splitPathAndSel()` in `packages/tui/src/tools/read.ts` recognizes the final suffix only when it matches one of these forms:
+For normal file-like reads, `splitPathAndSel()` in `packages/coding-agent/src/tools/details/read.ts` recognizes the final suffix only when it matches one of these forms:
 
 | Suffix                        | Meaning                                                                                                                                        |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -347,7 +347,7 @@ Notes: ...
 
 ## Limits & Caps
 
-- Shared text truncation defaults from `packages/tui/src/tools/streaming-output.ts`:
+- Shared text truncation defaults from `packages/coding-agent/src/tools/streaming-output.ts`:
    - `DEFAULT_MAX_LINES = 3000`
    - `DEFAULT_MAX_BYTES = 50 * 1024`
 - Local text open-ended default line limit: `read.defaultLimit` (default `300`), clamped to `[1, DEFAULT_MAX_LINES]`.
