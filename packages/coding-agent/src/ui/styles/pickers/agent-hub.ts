@@ -34,6 +34,7 @@ import {
 	STATUS_COLOR,
 	STATUS_SYMBOL,
 } from "../../overlays/pickers/agent-hub-model";
+import { keyLabel } from "../../keys/hints";
 import { agentColored } from "../../tools/agent-identity";
 import { bindingGlyph } from "../panels/common";
 
@@ -616,16 +617,21 @@ function keyHints(pen: Pen, view: HubAgentsView, narrowDetails: boolean, inner: 
 		: view.filter.text
 			? `/${view.filter.text}  ·  `
 			: "";
-	const ok = bindingGlyph("tui.select.confirm", "enter");
-	const esc = bindingGlyph("tui.select.cancel", "escape");
-	const pages = `${bindingGlyph("tui.select.pageUp", "pageUp")}/${bindingGlyph("tui.select.pageDown", "pageDown")}`;
+	const theme = pen.theme;
+	const ok = bindingGlyph("tui.select.confirm", "enter", theme);
+	const esc = bindingGlyph("tui.select.cancel", "escape", theme);
+	const pages = `${bindingGlyph("tui.select.pageUp", "pageUp", theme)}/${bindingGlyph("tui.select.pageDown", "pageDown", theme)}`;
+	const tab = keyLabel(theme, "tab");
 	if (narrowDetails)
 		return pen.theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  ⇥:roster  ${pages}:scroll  ${ok}:open  t:${next}  ${esc}:roster`,
+			`${filter}1:agents  2:activity  ${tab}:roster  ${pages}:scroll  ${ok}:open  t:${next}  ${esc}:roster`,
 		);
 	if (inner < FULL_HINTS_WIDTH)
-		return pen.theme.fg("dim", `${filter}j/k:select  ${ok}:open  t:${next}  ⇥:details  r/x:manage  ${esc}:close`);
+		return pen.theme.fg(
+			"dim",
+			`${filter}j/k:select  ${ok}:open  t:${next}  ${tab}:details  r/x:manage  ${esc}:close`,
+		);
 	return pen.theme.fg(
 		"dim",
 		`${filter}1:agents  2:activity  j/k/wheel:select  ${pages}:details  ${ok}/click:open  t:${next}  r:revive  x:kill  ${esc}:close`,
@@ -748,7 +754,7 @@ function paintActivity(pen: Pen, view: HubActivityView, width: number, height: n
 			pen,
 			theme.fg(
 				"dim",
-				`1:agents  j/k:select  ${bindingGlyph("tui.select.confirm", "enter")}:transcript  ␣:follow  f:filter  s:scope  /:search  ${bindingGlyph("tui.select.cancel", "escape")}:close`,
+				`1:agents  j/k:select  ${bindingGlyph("tui.select.confirm", "enter", theme)}:transcript  ${keyLabel(theme, "space")}:follow  f:filter  s:scope  /:search  ${bindingGlyph("tui.select.cancel", "escape", theme)}:close`,
 			),
 			width,
 		),

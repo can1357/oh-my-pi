@@ -180,10 +180,11 @@ function messageView(target: string, body: string, result: ToolResult<WriteDetai
 	const icon = result === undefined ? "pending" : error ? "error" : "irc";
 	const term = {
 		look: "write-card",
+		message: true,
 		// The terminal head draws the broadcast note in the dim meta color.
 		card: {
 			icon,
-			title: `IRC ➤ ${recipient}`,
+			title: recipient,
 			meta: meta.map(span => (span.t === "broadcast" ? { ...span, s: "dim" } : span)),
 		},
 	};

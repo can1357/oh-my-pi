@@ -512,7 +512,7 @@ export const cfgTaskEnableLsp = register({
 export const cfgTaskCrossInstance = register({
 	id: "task.crossInstance",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",

@@ -523,6 +523,12 @@ pub struct Kernel {
 	pub exec_signals:       HashMap<RunId, i32>,
 	/// Signal death associated with the most recently reported run.
 	pub reported_signal:    Option<(RunId, i32)>,
+	/// Resource usage of submitted subshell runs that ended
+	/// ([`Vproc::usage`] of their vproc), pending their completion report;
+	/// not imaged, as callouts do not survive frame restoration.
+	pub run_usage:          HashMap<RunId, crate::bash::host::ProcUsage>,
+	/// Resource usage of the most recently reported run.
+	pub reported_usage:     Option<(RunId, crate::bash::host::ProcUsage)>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
 	pub bangs:              Vec<proc::Bang>,
@@ -647,6 +653,8 @@ impl Kernel {
 			exited: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
+			run_usage: HashMap::new(),
+			reported_usage: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
 			pid_owners: Vec::new(),
@@ -2045,6 +2053,7 @@ impl Shell {
 				self.k.settle_bang(p.vpid, None);
 				self.k.forget_deferral(p.vpid);
 				self.k.proc_exited(cx.store, p.vpid, p.parent, p.status);
+				self.hand_usage(&p);
 				self.k.ctl.notify();
 				self.rr = 0;
 				self.reaped(cx, p.parent, p.vpid, p.status);
@@ -2182,6 +2191,7 @@ impl Shell {
 	fn report(&mut self) -> Option<Step> {
 		if let Some((run, status)) = self.k.done.pop_front() {
 			self.k.reported_signal = self.k.exec_signals.remove(&run).map(|signal| (run, signal));
+			self.k.reported_usage = self.k.run_usage.remove(&run).map(|usage| (run, usage));
 			return Some(Step::Done { run, status });
 		}
 		let (id, call) = self.k.calls_out.pop_front()?;
@@ -2386,8 +2396,12 @@ impl Shell {
 		p.status = status;
 		let runs: Vec<Run> = p.runs.drain(..).collect();
 		let vpid = (p.vpid, p.mode);
+		let usage = p.usage.as_deref().copied().filter(|_| p.transient);
 		for run in &runs {
 			self.k.exec_signals.remove(&run.id);
+			if let Some(usage) = usage {
+				self.k.run_usage.insert(run.id, usage);
+			}
 			if run.started {
 				self
 					.k
@@ -2402,8 +2416,21 @@ impl Shell {
 			self.k.settle_bang(p.vpid, None);
 			self.k.forget_deferral(p.vpid);
 			self.k.proc_exited(cx.store, p.vpid, p.parent, status);
+			self.hand_usage(&p);
 			self.rr = 0;
 			self.reaped(cx, p.parent, p.vpid, status);
+		}
+	}
+
+	/// Ended vproc `child` hands what it used to its parent (when that still
+	/// runs), as a reaped process's usage joins its parent's children
+	/// usage: a `time`d subshell or pipeline counts its stages' programs.
+	fn hand_usage(&mut self, child: &Vproc) {
+		let (Some(usage), Some(parent)) = (child.usage.as_deref(), child.parent) else {
+			return;
+		};
+		if let Some(p) = self.procs.iter_mut().find(|p| p.vpid == parent) {
+			p.count_usage(usage);
 		}
 	}
 
@@ -2690,6 +2717,18 @@ impl Shell {
 			.reported_signal
 			.filter(|(id, _)| *id == run)
 			.map(|(_, signal)| signal)
+	}
+
+	/// Resource usage of the externals submitted subshell `run` waited for,
+	/// itself or through the subshells and pipeline stages it ran
+	/// ([`crate::bash::ProcUsage`]); `None` when it ran none, or for a root
+	/// run. Ask immediately after its [`Step::Done`].
+	pub fn run_usage(&self, run: RunId) -> Option<crate::bash::host::ProcUsage> {
+		self
+			.k
+			.reported_usage
+			.filter(|(id, _)| *id == run)
+			.map(|(_, usage)| usage)
 	}
 
 	/// Number of the root's background jobs that still wait for a running
@@ -3060,6 +3099,7 @@ impl Vproc {
 			restore_opts: Vec::new(),
 			rlimits: Vec::new(),
 			lineage: crate::bash::host::Lineage::default(),
+			usage: None,
 			trace_base: 0,
 			subshell: 0,
 			command: None,
