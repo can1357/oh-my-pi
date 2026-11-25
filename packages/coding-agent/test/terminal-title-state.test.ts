@@ -5,6 +5,7 @@ import {
 	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
 	setTerminalTitle,
+	setExtensionTerminalTitle,
 	initTerminalTitleState,
 	popTerminalTitle,
 	setSessionTerminalTitle,
@@ -207,6 +208,19 @@ describe("disposeTerminalTitleState", () => {
 		resetObserved(writes, windowsTitleMock);
 		vi.advanceTimersByTime(4000);
 		expect(observedTitles(writes, windowsTitleMock)).toEqual([]);
+	});
+
+	it("stops the clock under an extension title and resumes on either release path", () => {
+		setTerminalTitleState("working");
+		for (const release of [() => setExtensionTerminalTitle(""), () => setSessionTerminalTitle("next")]) {
+			setExtensionTerminalTitle("owned");
+			setTerminalTitleState("working");
+			expect(vi.getTimerCount()).toBe(0);
+			release();
+			resetObserved(writes, windowsTitleMock);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+			expect(observedTitles(writes, windowsTitleMock)).toHaveLength(1);
+		}
 	});
 
 	it("latches: a direct setTerminalTitle after dispose cannot write the shell's tab", () => {

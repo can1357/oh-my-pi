@@ -22,6 +22,9 @@ defineRolePainter("col", "omp.planSave", (node, cx): Block => {
 		const suggested = termOf<{ suggested: string }>(node).suggested ?? "";
 		field = `${theme.style("inverse", " ")}${theme.fg("dim", truncate(suggested, Math.max(0, room - 1), theme.symbols.ellipsis))}`;
 	} else field = inputLine(text, props.cursor ?? text.length, room, "");
-	const hints = theme.fg("dim", `${bindingGlyph("tui.input.submit", "enter")} save · ⌃G cancel`);
+	const hints = theme.fg(
+		"dim",
+		`${bindingGlyph("tui.input.submit", "enter", theme)} save · ${bindingGlyph("tui.select.cancel", "escape", theme)} cancel`,
+	);
 	return { rows: boxRows(theme, "Save plan", [`${prompt}${field}`, hints], cx.width) };
 });

@@ -29,6 +29,12 @@ export type UsageCandidate<T extends AuthCredential> = {
 	accountPriority?: number;
 	/** Present after policy-aware ranking: unblocked and measured at or above its `reclaimAbovePct`. */
 	reclaimReady?: boolean;
+	/**
+	 * Whether this credential offers the request's service tier: `false` when
+	 * discovery, its usage report, or a recent refusal says it does not. Absent
+	 * when the request names no tier or nothing reports either way.
+	 */
+	serviceTierOffered?: boolean;
 };
 
 /** OAuth credential eligible for usage ranking. */
@@ -100,10 +106,18 @@ function compareUsageRankedCandidatePriority(
 	if (planGated && left.planPriority !== right.planPriority) {
 		return left.planPriority - right.planPriority;
 	}
+	// A requested service tier was asked for explicitly and only the accounts
+	// confirmed to offer it can deliver it, so they keep serving past their
+	// allowance and reserve, on paid overage if need be, until they are blocked.
+	const leftOffersTier = left.serviceTierOffered === true;
+	const rightOffersTier = right.serviceTierOffered === true;
+	if (leftOffersTier !== rightOffersTier) return leftOffersTier ? -1 : 1;
 	// Paid overage (Codex credits) never renews, so an account serving past its
 	// allowance yields to any sibling whose renewable allowance is left (#13889).
 	if (left.allowanceSpent !== right.allowanceSpent) return left.allowanceSpent ? 1 : -1;
 	if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
+	// Neither is confirmed to offer the tier: one that may precedes one known not to.
+	if (left.serviceTierOffered !== right.serviceTierOffered) return left.serviceTierOffered === false ? 1 : -1;
 	if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 	// Short-window guard: candidates whose primary (e.g. 5h) window is
 	// nearly exhausted rank behind cool ones regardless of drain urgency —
@@ -145,7 +159,7 @@ function compareUsageRankedCandidates(
 	return priority !== 0 ? priority : left.orderPos - right.orderPos;
 }
 
-/** Sort ranked candidates by blocks, plan, spent allowance, reserve, boost, hot window, usage and drain. */
+/** Sort ranked candidates by blocks, plan, service tier, spent allowance, reserve, boost, hot window, usage and drain. */
 export function orderUsageRankedCandidates<T extends AuthCredential>(
 	candidates: UsageRankedCandidate<T>[],
 	planGated: boolean,
@@ -160,5 +174,6 @@ export function orderUsageRankedCandidates<T extends AuthCredential>(
 		allowanceSpent: candidate.allowanceSpent,
 		accountPriority: candidate.accountPriority,
 		reclaimReady: candidate.reclaimReady,
+		serviceTierOffered: candidate.serviceTierOffered,
 	}));
 }

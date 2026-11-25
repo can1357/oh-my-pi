@@ -1,0 +1,29 @@
+# Perl corpus: quoting. Format and regeneration: crates/builtins/src/perl/tests.rs.
+array-element	my @a=qw(one two); print "$a[1]\n";	two␊
+array-separator	my @a=qw(one two); local $"='!'; print "<@a>\n";	<one!two>␊
+array	my @a=qw(one two); print "<@a>\n";	<one two>␊
+braced	my $x='hi'; print "${x}x\n";	hix␊
+case-block	my $x='AbC'; print "\L$x\E-\U$x\E\n";	abc-ABC␊
+case-combination	my $x='aBc'; print "\u\L$x\E\n";	Abc␊
+case-first	my $x='abc'; print "\u$x-\lABC\n";	Abc-aBC␊
+common-escapes	print unpack('H*', "\a\b\f\n\r\t"), "\n";	07080c0a0d09␊
+control-escape	print unpack('H*', "\cA\c?\e"), "\n";	017f1b␊
+escaped-sigil	my $a='x'; print "\$a|\@a\n";	$a|@a␊
+hash-element	my %h=(ab=>'ok'); print "$h{ab}\n";	ok␊
+heredoc-bare	my $x="ok"; print <<TAG;␊a $x␊TAG	a ok␊
+heredoc-double	my $x="ok"; print <<"TAG";␊a $x␊TAG	a ok␊
+heredoc-expression	my $a=uc <<TXT;␊abc␊TXT␊print $a;	ABC␊
+heredoc-indent	my $x="ok"; print <<~TAG;␊    a $x␊      b␊    TAG	a ok␊  b␊
+heredoc-queue	my $x="ok"; print <<ONE, <<'TWO';␊a $x␊ONE␊b $x␊TWO	a ok␊b $x␊
+heredoc-single	my $x='ok'; print <<'TAG';␊a $x␊TAG	a $x␊
+hex-escape	print unpack('H*', "\x41\x{42}"), "\n";	4142␊
+interpolated-regex	my $needle='cat'; my $r=qr/$needle/i; print 'CAT' =~ $r ? "yes\n" : "no\n";	yes␊
+interpolating-qq	my $x=9; print qq($x(x)), "\n";	9(x)␊
+literal-q	print q{ab{cd}e}, "\n";	ab{cd}e␊
+octal-escape	print unpack('H*', "\101\o{102}"), "\n";	4142␊
+q-exotic-delimiter	print q!hello\!world!, "\n";	hello!world␊
+q-hash-delimiter	print q#hello#,"\n";	hello␊
+quote-block	my $x='a.b*c'; print "\Q$x\E!\n";	a\.b\*c!␊
+qw-square	print join('|', qw[ one  two three ]),"\n";	one|two|three␊
+reference	my $a={x=>[qw(red blue)]}; print "$a->{x}[1]\n";	blue␊
+scalar	my $x='hi'; print "<$x>\n";	<hi>␊

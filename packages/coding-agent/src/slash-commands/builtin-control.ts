@@ -1,10 +1,11 @@
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { clearApprovalGrants } from "../tools/approval-cache";
 import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { signal } from "@oh-my-pi/pi-tui";
