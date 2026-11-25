@@ -369,6 +369,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			pool,
 			overrides,
 			selector,
+			blocks,
 			affinity,
 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
 			sourceLabel,

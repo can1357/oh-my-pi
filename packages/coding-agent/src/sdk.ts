@@ -29,7 +29,7 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 } from "@oh-my-pi/pi-ai";
-import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { resolveApiKeyOnce, withRequestServiceTier } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { anthropicHostRunsTool } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
@@ -6176,11 +6176,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (isOpenAICodexWebSocketPreferred(codexModel, { preferWebsockets: session.preferWebsockets })) {
 				void (async () => {
 					try {
-						const codexPrewarmApiKey = options.getApiKey
-							? // `getApiKey` returns a value-or-promise union; unwrap the promise,
-								// then resolve the result if it is itself an ApiKeyResolver.
-								await resolveApiKeyOnce(await options.getApiKey(codexModel))
-							: await modelRegistry.getApiKey(codexModel, providerSessionId);
+						// Resolve as the first request will, tier included, so the
+						// prewarmed socket belongs to the account that request lands on.
+						const serviceTier = session.effectiveServiceTier(codexModel);
+						const codexPrewarmApiKey = await resolveApiKeyOnce(
+							withRequestServiceTier(
+								// `getApiKey` returns a value-or-promise union; unwrap it first.
+								options.getApiKey
+									? await options.getApiKey(codexModel)
+									: modelRegistry.resolver(codexModel, providerSessionId),
+								serviceTier,
+							),
+						);
 						if (!codexPrewarmApiKey) return;
 						// Load the transport only for an actual Codex prewarm, not unrelated session setup.
 						const { prewarmOpenAICodexResponses } =
@@ -6190,7 +6197,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							sessionId: providerSessionId,
 							preferWebsockets: session.preferWebsockets,
 							providerSessionState: session.providerSessionState,
-							serviceTier: session.effectiveServiceTier(codexModel),
+							serviceTier,
 						});
 					} catch (error) {
 						const errorMessage = error instanceof Error ? error.message : String(error);

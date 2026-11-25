@@ -176,6 +176,8 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	/** Families whose latest turn ran without its tier because the serving account does not offer it. */
+	#withheldTierFamilies = new Set<ServiceTierFamily>();
 
 	constructor(
 		host: ModelControlsHost,
@@ -862,6 +864,8 @@ export class ModelControls {
 	isFastModeActive(): boolean {
 		const model = this.#model;
 		if (!model || !this.#realizesFastTier(model, this.#serviceTierByFamily)) return false;
+		const family = serviceTierFamily(model);
+		if (family && this.#withheldTierFamilies.has(family)) return false;
 		return (
 			model.provider !== "anthropic" || !isAnthropicFastModeFallbackDisabled(this.#host.providerSessionState, model)
 		);
@@ -903,8 +907,34 @@ export class ModelControls {
 		return Object.keys(this.#serviceTierByFamily).length > 0 ? this.#serviceTierByFamily : null;
 	}
 
+	/**
+	 * Record whether the latest turn on `model` ran without its service tier
+	 * because the account that served it does not offer one. Returns whether
+	 * that is a change, so the session announces each transition once.
+	 */
+	noteServiceTierWithheld(model: Model, withheld: boolean): boolean {
+		const family = serviceTierFamily(model);
+		if (!family || this.#withheldTierFamilies.has(family) === withheld) return false;
+		if (withheld) this.#withheldTierFamilies.add(family);
+		else this.#withheldTierFamilies.delete(family);
+		return true;
+	}
+
+	/**
+	 * Forget the provider refusals recorded for `tier` on `model`, so turning a
+	 * fast tier on again probes every credential afresh instead of waiting out
+	 * a cooldown the user may have just fixed (usage credits enabled, plan
+	 * upgraded).
+	 */
+	#rearmServiceTier(model: Model, tier: ServiceTier): void {
+		void this.#host.modelRegistry.authStorage.limits.rearmServiceTier(model.provider, tier, model.id).catch(error => {
+			logger.debug("Service tier re-arm failed", { provider: model.provider, tier, error: String(error) });
+		});
+	}
+
 	/** Set one family's tier (or clear it with `undefined`); persists the change. */
 	setServiceTierFamily(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
+		this.#withheldTierFamilies.delete(family);
 		if (this.#serviceTierByFamily[family] === tier) return;
 		const next: ServiceTierByFamily = { ...this.#serviceTierByFamily };
 		if (tier) next[family] = tier;
@@ -958,6 +988,7 @@ export class ModelControls {
 		if (family === "anthropic" && this.#serviceTierByFamily.anthropic === "priority") {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
+		this.#rearmServiceTier(model, "priority");
 		this.setServiceTierFamily(family, "priority");
 		return true;
 	}
@@ -978,6 +1009,7 @@ export class ModelControls {
 			this.#host.emitNotice("info", "The current model does not offer the Ultrafast service tier.", "priority");
 			return false;
 		}
+		this.#rearmServiceTier(model, "ultrafast");
 		this.setServiceTierFamily("openai", "ultrafast");
 		return true;
 	}

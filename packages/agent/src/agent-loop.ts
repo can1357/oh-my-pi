@@ -22,6 +22,7 @@ import {
 	type ToolResultProviderMetadata,
 	type TSchema,
 	toolWireSchema,
+	withRequestServiceTier,
 	type UserMessage,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -2176,7 +2177,11 @@ async function streamAssistantResponse(
 			: providerAbortSignals.length === 1
 				? providerAbortSignals[0]!
 				: AbortSignal.any(providerAbortSignals);
-	const requestApiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
+	// The credential is chosen for the tier this request will ask for.
+	const requestApiKey = withRequestServiceTier(
+		(config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey,
+		effectiveServiceTier,
+	);
 	let resolvedCredential: ApiKeyResolution;
 	const resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal, resolved => {
 		resolvedCredential = resolved;

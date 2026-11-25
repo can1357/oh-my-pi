@@ -1,5 +1,5 @@
 import { getAgentDbPath, logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import type { Provider } from "../types";
+import type { Provider, ServiceTier } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
@@ -46,6 +46,23 @@ const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
 export function modelAccountPolicyBlockScope(modelId: string | undefined): string | undefined {
 	if (!modelId || modelId.includes("\0")) return undefined;
 	return `${MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX}${modelId}`;
+}
+
+const SERVICE_TIER_BLOCK_SCOPE_PREFIX = "service-tier:";
+
+/**
+ * Scope key for "this credential was refused `serviceTier` on `modelId`".
+ * Read only by tier-preferring selection, never by ordinary block checks: the
+ * credential still serves the model at standard speed. Keyed by model because
+ * both the entitlement (Codex Ultrafast per model) and the refusal (a Claude
+ * model without fast mode) are model-specific.
+ */
+export function serviceTierBlockScope(
+	serviceTier: ServiceTier | undefined,
+	modelId: string | undefined,
+): string | undefined {
+	if (!serviceTier || !modelId || modelId.includes("\0")) return undefined;
+	return `${SERVICE_TIER_BLOCK_SCOPE_PREFIX}${serviceTier}:${modelId}`;
 }
 
 /** Scope keys that a request must check, including model-policy constraints. */
@@ -134,6 +151,8 @@ export class CredentialBlocks implements BlocksApi {
 	readonly #deps: CredentialBlocksDeps;
 	/** Backoff key (provider:type, optionally scoped) -> credential row id -> live in-memory block. */
 	#credentialBackoff: Map<string, Map<number, CredentialBackoff>> = new Map();
+	/** `provider\0serviceTierBlockScope` -> deadline of a tier refusal against a key with no stored row. */
+	#unstoredKeyRefusals: Map<string, number> = new Map();
 
 	constructor(deps: CredentialBlocksDeps) {
 		this.#deps = deps;
@@ -540,6 +559,41 @@ export class CredentialBlocks implements BlocksApi {
 			});
 			return false;
 		}
+	}
+
+	/**
+	 * Whether the provider's unstored key (environment variable, `--api-key`,
+	 * `models.yml`) was refused the tier under `blockScope` and is still cooling
+	 * down. Such a key has no row to hold a block, so the refusal is
+	 * process-local and names the provider rather than the key.
+	 */
+	isUnstoredKeyRefused(provider: string, blockScope: string): boolean {
+		const key = `${provider}\0${blockScope}`;
+		const until = this.#unstoredKeyRefusals.get(key);
+		if (until === undefined) return false;
+		if (until > Date.now()) return true;
+		this.#unstoredKeyRefusals.delete(key);
+		return false;
+	}
+
+	/** Record a tier refusal against the provider's unstored key; see {@link isUnstoredKeyRefused}. */
+	markUnstoredKeyRefused(provider: string, blockScope: string, untilMs: number): void {
+		this.#unstoredKeyRefusals.set(`${provider}\0${blockScope}`, untilMs);
+	}
+
+	/**
+	 * Forget every refusal recorded under one {@link serviceTierBlockScope} for
+	 * a provider's credentials, and drop its cached usage reports so the next
+	 * selection re-reads each account's entitlement.
+	 */
+	clearServiceTierRefusals(provider: string, blockScope: string): void {
+		this.#unstoredKeyRefusals.delete(`${provider}\0${blockScope}`);
+		for (const entry of this.#deps.pool.entries(provider)) {
+			const providerKey = providerTypeKey(provider, entry.credential.type);
+			if (this.#exactBlockedUntil(entry.id, providerKey, blockScope) === undefined) continue;
+			this.clearScope(provider, entry.id, providerKey, blockScope);
+		}
+		this.#deps.usageCache.invalidate(provider);
 	}
 
 	/** Providers whose stale usage-limit blocks a healthy live report may clear. */
