@@ -158,10 +158,12 @@ describe("BashTool execution results", () => {
 			command: "export PI_SESSION_FILE=/stale/parent.jsonl",
 		});
 		const result = await tool.execute("call-env", {
-			command: `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`,
+			command: `printf '%s|%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$OMP_BASH_SESSION"`,
 		});
-		const [id, file] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
+		const [id, file, tag] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
 		expect(id).toBe("session-fg");
+		// The leftover-process membership tag (exec/session-processes.ts).
+		expect(tag).toBe("session-fg");
 		// Empty, not the stale path: the session is not persisted.
 		expect(file).toBe("");
 	});

@@ -16,6 +16,8 @@
  * ```
  */
 
+import * as fs from "node:fs/promises";
+
 export interface FsError extends Error {
 	code: string;
 	errno?: number;
@@ -29,6 +31,17 @@ export function isFsError(err: unknown): err is FsError {
 
 export function isEnoent(err: unknown): err is FsError {
 	return isFsError(err) && err.code === "ENOENT";
+}
+
+/** Whether `target` exists. Only ENOENT means "no"; permission and I/O failures propagate. */
+export async function pathExists(target: string): Promise<boolean> {
+	try {
+		await fs.stat(target);
+		return true;
+	} catch (err) {
+		if (isEnoent(err)) return false;
+		throw err;
+	}
 }
 
 export function isEacces(err: unknown): err is FsError {

@@ -1,10 +1,10 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { afterAll, describe, expect, it } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { all } from "@oh-my-pi/pi-coding-agent/config/registry";
 
 import { getSettingsForTab, SETTING_TABS, TAB_GROUPS } from "@oh-my-pi/pi-coding-agent/config/settings-defs";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
-import { mountSettingsWindow, settingsScreen } from "../../helpers/settings-window";
+import { settingsScreen, setupSettingsWindow } from "../../helpers/settings-window";
 import { cfgRetryUsageAwareFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -13,14 +13,7 @@ const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
 
 describe("settings layout", () => {
-	beforeEach(async () => {
-		resetSettingsForTest();
-		await Settings.init({ inMemory: true });
-	});
-
-	afterEach(() => {
-		resetSettingsForTest();
-	});
+	const mountSettingsWindow = setupSettingsWindow();
 
 	it("every UI setting declares a group registered in TAB_GROUPS for its tab", () => {
 		const violations: string[] = [];
@@ -96,16 +89,12 @@ describe("settings layout", () => {
 
 	it("offers every composer shape in the composer.shape menu", () => {
 		const term = mountSettingsWindow();
-		try {
-			term.type("composer shape");
-			// Open the composer.shape menu
-			term.press("enter");
-			const rendered = settingsScreen(term);
-			expect(rendered).toContain("Composer Shape");
-			expect(rendered).toContain("Rounded Box");
-			expect(rendered).toContain("Claude Code");
-		} finally {
-			term.dispose();
-		}
+		term.type("composer shape");
+		// Open the composer.shape menu
+		term.press("enter");
+		const rendered = settingsScreen(term);
+		expect(rendered).toContain("Composer Shape");
+		expect(rendered).toContain("Rounded Box");
+		expect(rendered).toContain("Claude Code");
 	});
 });

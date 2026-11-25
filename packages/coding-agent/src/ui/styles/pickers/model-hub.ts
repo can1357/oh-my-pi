@@ -25,6 +25,8 @@ import {
 	type StripState,
 } from "../../overlays/pickers/model-hub-state";
 import { getConfiguredThinkingLevelMetadata } from "../../../thinking/levels";
+import { keyLabel } from "../../keys/hints";
+import { bindingGlyph, keyLabels, selectNavGlyphs } from "../panels/common";
 import { caretField } from "./common";
 import {
 	type HubChipRange,
@@ -41,34 +43,6 @@ export type ModelHubTerm = {
 	readonly role: "omp.model-hub";
 	readonly hub: ModelHubState;
 };
-
-const KEY_GLYPHS: Readonly<Record<string, string>> = {
-	enter: "⏎",
-	escape: "⎋",
-	esc: "⎋",
-	tab: "⇥",
-	left: "←",
-	right: "→",
-	up: "↑",
-	down: "↓",
-	backspace: "⌫",
-	space: "␣",
-};
-const MODIFIER_GLYPHS: Readonly<Record<string, string>> = { ctrl: "⌃", alt: "⌥", shift: "⇧", super: "⌘" };
-
-/** One key as hints show it: `⏎`, `⌥←`, `F5`, `f`, `⇧P`. */
-export function hintKey(id: string): string {
-	const parts = id.split("+");
-	const base = parts.pop()!;
-	const mods = parts.map(mod => MODIFIER_GLYPHS[mod] ?? mod).join("");
-	const shown = KEY_GLYPHS[base] ?? (/^f\d+$/.test(base) ? base.toUpperCase() : mods ? base.toUpperCase() : base);
-	return `${mods}${shown}`;
-}
-
-/** Keys joined as hints show alternatives: `⏎/→`. */
-function hintKeys(...ids: string[]): string {
-	return ids.map(hintKey).join("/");
-}
 
 function spansText(theme: Theme, spans: readonly TspSpan[]): string {
 	return spans.map(span => (span.s ? theme.style(span.s, span.t) : span.t)).join("");
@@ -118,17 +92,23 @@ function statusRow(theme: Theme, hub: ModelHubState, width: number): string {
 	if (hub.assignmentPending) return cut(theme.style("accent", " Applying model…"));
 	const assigning = hub.assigning;
 	if (assigning !== null) {
+		const enter = keyLabel(theme, "enter");
+		const cancel = bindingGlyph("tui.select.cancel", "escape", theme);
 		if (assigning.kind === "fallbackKey")
-			return cut(theme.style("accent", " New fallback chain — ⏎ picks the model it protects, ⎋ cancels"));
+			return cut(
+				theme.style("accent", ` New fallback chain — ${enter} picks the model it protects, ${cancel} cancels`),
+			);
 		const info = hub.source.getRoleInfo(assigning.role);
 		const label = theme.style("accent strong", info.tag ?? info.name ?? assigning.role);
 		if (assigning.kind === "fallback") {
 			const verb = assigning.index === null ? "Adding fallback for" : "Replacing fallback of";
 			return cut(
-				`${theme.style("accent", ` ${verb} `)}${label}${theme.style("accent", " — ⏎ picks the fallback model, ⎋ cancels")}`,
+				`${theme.style("accent", ` ${verb} `)}${label}${theme.style("accent", ` — ${enter} picks the fallback model, ${cancel} cancels`)}`,
 			);
 		}
-		return cut(`${theme.style("accent", " Assigning ")}${label}${theme.style("accent", " — ⏎ assigns, ⎋ cancels")}`);
+		return cut(
+			`${theme.style("accent", " Assigning ")}${label}${theme.style("accent", ` — ${enter} assigns, ${cancel} cancels`)}`,
+		);
 	}
 	const entry = hub.activeEntry();
 	const scoped = hub.scoped ? " · --models scope" : "";
@@ -167,8 +147,8 @@ function rolesView(theme: Theme, hub: ModelHubState, width: number, rows: number
 	const { names, active } = hub.presets();
 	const presetKeys =
 		hub.browser.query.length > 0
-			? hintKeys("ctrl+left", "ctrl+right")
-			: `${hintKeys("ctrl+left", "ctrl+right")} · ${hintKeys("p", "shift+p")}`;
+			? keyLabels(theme, ["ctrl+left", "ctrl+right"])
+			: `${keyLabels(theme, ["ctrl+left", "ctrl+right"])} · ${keyLabels(theme, ["p", "shift+p"])}`;
 	const preset =
 		names.length > 0
 			? `   ${theme.style("dim", "Preset:")} ${active ? theme.style("accent", active) : theme.style("muted", "custom")}  ${theme.style("dim", presetKeys)}`
@@ -180,7 +160,7 @@ function rolesView(theme: Theme, hub: ModelHubState, width: number, rows: number
 	);
 	const lines = [
 		cut(
-			`${theme.style("dim", " Roles:")} ${tabs}  ${theme.style("dim", hintKeys("alt+left", "alt+right"))}${preset}`,
+			`${theme.style("dim", " Roles:")} ${tabs}  ${theme.style("dim", keyLabels(theme, ["alt+left", "alt+right"]))}${preset}`,
 		),
 	];
 	let tagWidth = 0;
@@ -270,7 +250,7 @@ function rolesView(theme: Theme, hub: ModelHubState, width: number, rows: number
 	}
 	while (lines.length < rows - 1) lines.push("");
 	if (rows >= 2) {
-		const cycleKey = hintKey("ctrl+p");
+		const cycleKey = keyLabel(theme, "ctrl+p");
 		if (cycle.length > 0) {
 			const selectedRow = hub.rolesRows[hub.roleIndex];
 			const role =
@@ -300,7 +280,12 @@ function lockedView(theme: Theme, hub: ModelHubState, entry: SidebarEntry, width
 	);
 	if (entry.oauth)
 		lines.push(
-			cut(theme.style("accent", `  ${theme.symbols.symbol("nav.cursor")} Log in with OAuth (${hintKey("enter")})`)),
+			cut(
+				theme.style(
+					"accent",
+					`  ${theme.symbols.symbol("nav.cursor")} Log in with OAuth (${keyLabel(theme, "enter")})`,
+				),
+			),
 		);
 	lines.push("");
 	const catalogCount = entry.catalogCount ?? 0;
@@ -325,7 +310,7 @@ function bodyRows(theme: Theme, hub: ModelHubState, width: number, rows: number)
 		const kinds = segmentTrack(theme, MODEL_KIND_TABS, Math.max(0, MODEL_KIND_TABS.indexOf(hub.modelKindTab)));
 		lines.push(
 			truncate(
-				` ${theme.style("dim", "Kind:")} ${kinds}  ${theme.style("dim", hintKeys("alt+left", "alt+right"))}`,
+				` ${theme.style("dim", "Kind:")} ${kinds}  ${theme.style("dim", keyLabels(theme, ["alt+left", "alt+right"]))}`,
 				width,
 				theme.symbols.ellipsis,
 			),
@@ -343,13 +328,13 @@ function bodyRows(theme: Theme, hub: ModelHubState, width: number, rows: number)
 }
 
 /** The footer's key hints for the current view. */
-export function footerHint(hub: ModelHubState): string {
-	const enter = hintKey("enter");
-	const cancel = hintKey("escape");
-	const upDown = hintKeys("up", "down");
-	const left = hintKey("left");
-	const enterRight = hintKeys("enter", "right");
-	const kind = hintKeys("alt+left", "alt+right");
+export function footerHint(theme: Theme, hub: ModelHubState): string {
+	const enter = keyLabel(theme, "enter");
+	const cancel = bindingGlyph("tui.select.cancel", "escape", theme);
+	const upDown = selectNavGlyphs(theme);
+	const left = keyLabel(theme, "left");
+	const enterRight = keyLabels(theme, ["enter", "right"]);
+	const kind = keyLabels(theme, ["alt+left", "alt+right"]);
 	const strip = hub.strip;
 	if (strip) {
 		if (strip.kind === "name") {
@@ -358,7 +343,7 @@ export function footerHint(hub: ModelHubState): string {
 			if (strip.purpose === "preset") return `${enter} save preset · ${cancel} cancel`;
 			return `${enter} create + pick model · ${cancel} cancel`;
 		}
-		const choose = hintKeys("left", "right");
+		const choose = keyLabels(theme, ["left", "right"]);
 		if (strip.kind === "role") return `${choose} choose · ${enter} assign/clear · ${cancel} cancel`;
 		if (strip.kind === "scope") return `${choose} save scope · ${enter} choose · ${cancel} cancel`;
 		return `${choose} thinking level · ${enter} apply · ${cancel} keep`;
@@ -380,7 +365,7 @@ export function footerHint(hub: ModelHubState): string {
 	if (entry.kind === "roles") {
 		const presets = hub.presets().names.length > 0;
 		if (hub.focus !== "list")
-			return `${upDown} providers · ${enterRight} roles · ${kind} tabs${presets ? ` · ${hintKeys("ctrl+left", "ctrl+right")} preset` : ""} · ${cancel} close`;
+			return `${upDown} providers · ${enterRight} roles · ${kind} tabs${presets ? ` · ${keyLabels(theme, ["ctrl+left", "ctrl+right"])} preset` : ""} · ${cancel} close`;
 		// A live query takes printable keys, so the letter commands rest.
 		if (hub.browser.query.length > 0)
 			return `${upDown} rows · ${enter} pick · type to search · ${left} providers · ${cancel} close`;
@@ -391,19 +376,19 @@ export function footerHint(hub: ModelHubState): string {
 			return `${upDown} rows · ${enter} replace · f add another · x remove${thinking}${compaction} · [/] reorder · ${left} providers`;
 		}
 		if (row?.kind === "chainKey")
-			return `${upDown} rows · ${hintKeys("enter", "f")} add fallback · x clear chain · ${left} providers`;
+			return `${upDown} rows · ${keyLabels(theme, ["enter", "f"])} add fallback · x clear chain · ${left} providers`;
 		if (row?.kind === "newFallback")
 			return `${upDown} rows · ${enter} new model/provider fallback chain · ${left} providers`;
 		const thinking = row?.kind === "role" && hub.roleThinkingTarget(row.role) ? " · t thinking" : "";
 		const save = hub.callbacks.onSavePreset ? " · s save preset" : "";
-		const switchPreset = presets ? ` · ${hintKeys("p", "shift+p")} preset` : "";
+		const switchPreset = presets ? ` · ${keyLabels(theme, ["p", "shift+p"])} preset` : "";
 		return `${upDown} rows · ${enter} pick · f fallback · x clear${thinking}${compaction} · c cycle · [/] reorder · n new${save}${switchPreset}`;
 	}
 	if (entry.kind === "provider" && entry.locked)
 		return entry.oauth
 			? `${enter} log in · ${upDown} providers · ${cancel} close`
 			: `${upDown} providers · ${cancel} close`;
-	const refresh = entry.kind === "provider" ? ` · ${hintKey("f5")} refresh` : "";
+	const refresh = entry.kind === "provider" ? ` · ${keyLabel(theme, "f5")} refresh` : "";
 	if (hub.focus === "scope")
 		return `${enterRight} models · ${upDown} providers · type to search · ${kind} kind${refresh} · ${cancel} close`;
 	return `${enter} assign roles · ${upDown} models · ${left} providers · type to search · ${kind} kind${refresh} · ${cancel} close`;
@@ -488,7 +473,7 @@ function paintHub(node: UiNode, cx: PaintContext) {
 	const strip = hub.strip;
 	const footer = strip
 		? stripRow(theme, hub, strip, width - 4).row
-		: truncate(theme.style("dim", footerHint(hub)), width - 4, theme.symbols.ellipsis);
+		: truncate(theme.style("dim", footerHint(theme, hub)), width - 4, theme.symbols.ellipsis);
 	const out = hubFrameRows(theme, width, "Models", side, pane, footer, sidebar);
 	const hits: Hit[] = [{ row: 0, col: 0, width, height: out.length, node }];
 	return { rows: out, hits };
