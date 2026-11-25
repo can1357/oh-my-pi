@@ -999,9 +999,9 @@ describe("ModelRegistry runtime discovery", () => {
 
 		// The built-in openrouter provider reads the same public roster; neither request may carry the gateway key.
 		expect(rosterRequests.length).toBeGreaterThan(0);
-		expect(rosterRequests.some(headers => [...headers.values()].some(value => value.includes("gateway-secret")))).toBe(
-			false,
-		);
+		expect(
+			rosterRequests.some(headers => [...headers.values()].some(value => value.includes("gateway-secret"))),
+		).toBe(false);
 		const model = registry.find("gateway", "acme/agent-1");
 		expect(model).toMatchObject({
 			api: "openai-completions",

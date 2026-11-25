@@ -4,7 +4,7 @@
  * Reasoning models (and codex-style providers) frequently emit one `read` per
  * completion as `[thinking?, toolCall]` rather than batching parallel calls.
  * The transcript should still collapse an uninterrupted run of those reads into
- * a single {@link ReadToolGroupComponent}; a completion that renders visible
+ * a single read group; a completion that renders visible
  * content (non-empty text/thinking) is the only thing that breaks the run, so a
  * fresh group starts after it.
  *
@@ -13,24 +13,32 @@
  * one-entry block).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
-import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { AssistantView, InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { type Component, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import { isSettled, nativeSupports } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { TSP_KINDS } from "@oh-my-pi/pi-wire";
+import { followInlineImageLimits } from "../../../src/ui/transcript/messages/image";
+import { initTheme } from "../../../src/ui/theme/service";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { nativeShell } from "../../helpers/native-shell";
+import { blockText } from "../../helpers/transcript-text";
 
-import { cfgDisplayShowTokenUsage, cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import {
+	cfgDisplayShowTokenUsage,
+	cfgTerminalShowImages,
+	cfgTuiMaxInlineImageRows,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
 
-beforeAll(async () => {
-	await initTheme(false, undefined, undefined, "dark", "light");
+beforeAll(() => {
+	initTheme();
 });
-
-const originalImageProtocol = TERMINAL.imageProtocol;
 
 beforeEach(async () => {
 	resetSettingsForTest();
@@ -39,7 +47,6 @@ beforeEach(async () => {
 
 afterEach(() => {
 	resetSettingsForTest();
-	setTerminalImageProtocol(originalImageProtocol);
 	vi.restoreAllMocks();
 });
 
@@ -79,7 +86,7 @@ function assistantMessage(content: Block[]): AssistantMessage {
 
 function createFixture() {
 	const ctx = createInteractiveModeContext();
-	return { controller: new EventController(ctx), chatContainer: ctx.chatContainer };
+	return { controller: new EventController(ctx), ctx };
 }
 
 /** Drive one assistant completion: message_start then a single full message_update. */
@@ -89,23 +96,40 @@ async function streamCompletion(controller: EventController, content: Block[]): 
 	await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
 }
 
-function readGroups(chatContainer: TranscriptContainer): ReadToolGroupComponent[] {
-	return chatContainer.children.filter((c): c is ReadToolGroupComponent => c instanceof ReadToolGroupComponent);
+function readGroups(ctx: InteractiveModeContext): PendingTool[] {
+	const groups: PendingTool[] = [];
+	for (const block of ctx.shell.transcript.blocks()) {
+		const entry = ctx.transcriptEntry(block);
+		if (entry?.kind === "tool" && entry.tool.group) groups.push(entry.tool);
+	}
+	return groups;
 }
 
-function header(group: ReadToolGroupComponent): string {
-	return Bun.stripANSI(group.render(120).join("\n")).split("\n")[0] ?? "";
+function assistants(ctx: InteractiveModeContext): AssistantView[] {
+	const views: AssistantView[] = [];
+	for (const block of ctx.shell.transcript.blocks()) {
+		const entry = ctx.transcriptEntry(block);
+		if (entry?.kind === "assistant") views.push(entry.view);
+	}
+	return views;
 }
 
-function hasImageComponent(component: Component): boolean {
-	if (component instanceof Image) return true;
-	if (!("children" in component) || !Array.isArray(component.children)) return false;
-	return component.children.some(child => hasImageComponent(child));
+function header(group: PendingTool): string {
+	return (
+		blockText(group.block)
+			.split("\n")
+			.find(line => line.trim() !== "") ?? ""
+	);
+}
+
+/** Blocks drawing the usage of the test's request (1234 in → `1.2K`). */
+function usageBlocks(ctx: InteractiveModeContext) {
+	return ctx.shell.transcript.blocks().filter(block => blockText(block).includes("1.2K"));
 }
 
 describe("EventController read-group accretion", () => {
 	it("collapses a run of single-read completions into one group (mixed/empty thinking)", async () => {
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 
 		// Mirrors the reported session: first read carries reasoning, the rest have
 		// empty or absent thinking. None of them should break the run. Distinct files
@@ -115,14 +139,14 @@ describe("EventController read-group accretion", () => {
 		await streamCompletion(controller, [read("c.ts:1-220")]);
 		await streamCompletion(controller, [read("d.ts:450-535")]);
 
-		const groups = readGroups(chatContainer);
+		const groups = readGroups(ctx);
 		expect(groups.length).toBe(1);
 		expect(header(groups[0]!)).toContain("Read (4)");
 	});
 
 	it("nests a read-only completion's usage inside the active group", async () => {
 		cfgDisplayShowTokenUsage.set(settings, true);
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 		const message = assistantMessage([thinking("Reviewing the target"), read("usage.ts:1-50")]);
 		message.usage = {
 			input: 1234,
@@ -138,17 +162,14 @@ describe("EventController read-group accretion", () => {
 		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 
-		const [group] = readGroups(chatContainer);
+		const [group] = readGroups(ctx);
 		expect(group).toBeDefined();
-		const usageBlocks = chatContainer.children.filter(component =>
-			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
-		);
-		expect(usageBlocks).toEqual([group!]);
+		expect(usageBlocks(ctx)).toEqual([group!.block]);
 	});
 
 	it("keeps usage standalone when visible content follows a read", async () => {
 		cfgDisplayShowTokenUsage.set(settings, true);
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 		const message = assistantMessage([read("usage.ts:1-50"), thinking("Read complete")]);
 		message.usage = {
 			input: 1234,
@@ -164,18 +185,16 @@ describe("EventController read-group accretion", () => {
 		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 
-		const [group] = readGroups(chatContainer);
+		const [group] = readGroups(ctx);
 		expect(group).toBeDefined();
-		const usageBlocks = chatContainer.children.filter(component =>
-			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
-		);
-		expect(usageBlocks).toHaveLength(1);
-		expect(usageBlocks[0]).not.toBe(group!);
+		const usage = usageBlocks(ctx);
+		expect(usage).toHaveLength(1);
+		expect(usage[0]).not.toBe(group!.block);
 	});
 
 	it("starts a fresh group after standalone usage for a mixed-tool turn ending in read", async () => {
 		cfgDisplayShowTokenUsage.set(settings, true);
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 		const message = assistantMessage([toolCall("bash", "bash-mixed", { command: "true" }), read("first.ts:1-50")]);
 		message.usage = {
 			input: 1234,
@@ -192,19 +211,18 @@ describe("EventController read-group accretion", () => {
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 		await streamCompletion(controller, [read("second.ts:1-50")]);
 
-		const groups = readGroups(chatContainer);
+		const groups = readGroups(ctx);
 		expect(groups).toHaveLength(2);
-		const firstGroupIndex = chatContainer.children.indexOf(groups[0]!);
-		const usageIndex = chatContainer.children.findIndex(component =>
-			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
-		);
-		const secondGroupIndex = chatContainer.children.indexOf(groups[1]!);
+		const blocks = ctx.shell.transcript.blocks();
+		const firstGroupIndex = blocks.indexOf(groups[0]!.block);
+		const usageIndex = blocks.indexOf(usageBlocks(ctx)[0]!);
+		const secondGroupIndex = blocks.indexOf(groups[1]!.block);
 		expect(firstGroupIndex).toBeLessThan(usageIndex);
 		expect(usageIndex).toBeLessThan(secondGroupIndex);
 	});
 
 	it("starts a new group after a completion that renders visible reasoning", async () => {
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 
 		await streamCompletion(controller, [read("a.ts:1-50")]);
 		await streamCompletion(controller, [read("b.ts:1-50")]);
@@ -212,36 +230,132 @@ describe("EventController read-group accretion", () => {
 		await streamCompletion(controller, [thinking("Now let me check the other files"), read("c.ts:1-40")]);
 		await streamCompletion(controller, [read("d.ts:1-40")]);
 
-		const groups = readGroups(chatContainer);
+		const groups = readGroups(ctx);
 		expect(groups.length).toBe(2);
 		expect(header(groups[0]!)).toContain("Read (2)");
 		expect(header(groups[1]!)).toContain("Read (2)");
 	});
 
 	it("keeps the active group repaintable until it is finalized", async () => {
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 
 		await streamCompletion(controller, [read("a.ts:1-50")]);
-		const [group] = readGroups(chatContainer);
+		const [group] = readGroups(ctx);
 		// While it is the active run the block must stay in the live region so its
 		// header can re-layout from `Read <path>` to `Read (N)` on risk terminals.
-		expect(group!.isTranscriptBlockFinalized()).toBe(false);
+		expect(isSettled(group!.block.node)).toBe(false);
 
 		// Settle the read so the group has no in-flight result. A finalized group
 		// only commits to native scrollback once its pending entries resolve, so an
 		// unsettled read would keep it live even after the run breaks.
-		group!.updateResult({ content: [{ type: "text", text: "x" }], isError: false }, false, "read-a.ts:1-50");
-		expect(group!.isTranscriptBlockFinalized()).toBe(false);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "read-a.ts:1-50",
+			toolName: "read",
+			result: { content: [{ type: "text", text: "x" }], isError: false },
+			isError: false,
+		} as AgentSessionEvent);
+		expect(isSettled(group!.block.node)).toBe(false);
 
 		// A visible-reasoning completion breaks the run and finalizes the prior group.
 		await streamCompletion(controller, [thinking("done exploring"), read("b.ts:1-50")]);
-		expect(group!.isTranscriptBlockFinalized()).toBe(true);
+		expect(isSettled(group!.block.node)).toBe(true);
 	});
 
-	it("retains live read images while hidden so the visibility toggle can reveal them", async () => {
+	it("sends the same deduplicated grouped media live and on replay, with blobs for hosts without media", async () => {
+		const image: ImageContent = {
+			type: "image",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+			mimeType: "image/png",
+		};
+		const picture = "/tmp/grouped picture.png";
+		const pdf = "/tmp/grouped document.pdf";
+		const reads: readonly Pick<ToolResultMessage, "toolCallId" | "content" | "details">[] = [
+			{ toolCallId: "first", content: [image], details: { mediaPath: picture } },
+			{ toolCallId: "second", content: [image], details: { mediaPath: picture } },
+			{ toolCallId: "pdf", content: [{ type: "text", text: "Extracted page" }], details: { mediaPath: pdf } },
+			{ toolCallId: "blob", content: [image], details: {} },
+		];
+		const results = reads.map((result): ToolResultMessage => ({
+			role: "toolResult",
+			toolName: "read",
+			isError: false,
+			timestamp: 2,
+			...result,
+		}));
+		const content = results.map(result => toolCall("read", result.toolCallId, { path: `${result.toolCallId}.bin` }));
+		const env = staticEnvironment(currentTheme());
+		const previews = (ctx: InteractiveModeContext) => {
+			const [view] = assistants(ctx);
+			if (!view) throw new Error("missing assistant reply");
+			return view.block.native().flatMap(node =>
+				node
+					.children()
+					.filter(child => child.kind === "media" || child.kind === "image")
+					.map(child => describeTree(child, env)),
+			);
+		};
+
+		cfgTuiMaxInlineImageRows.override(settings, 10);
+		const stopSizing = followInlineImageLimits(() => 50);
+		try {
+			for (const drawsMedia of [true, false]) {
+				const live = createFixture();
+				await using _host = await nativeShell(live.ctx.shell, {
+					kinds: drawsMedia ? TSP_KINDS : TSP_KINDS.filter(kind => kind !== "media"),
+				});
+				expect(nativeSupports("media")).toBe(drawsMedia);
+				await streamCompletion(live.controller, content);
+				for (const result of results) {
+					await live.controller.handleEvent({
+						type: "tool_execution_end",
+						toolCallId: result.toolCallId,
+						toolName: "read",
+						result,
+						isError: false,
+					});
+				}
+
+				const rebuilt = createFixture();
+				try {
+					new UiHelpers(rebuilt.ctx).renderSessionContext({
+						messages: [assistantMessage(content), ...results],
+						thinkingLevel: "off",
+						serviceTier: undefined,
+						models: {},
+						injectedTtsrRules: [],
+						mode: "none",
+					});
+					const liveTree = previews(live.ctx);
+					expect(previews(rebuilt.ctx)).toEqual(liveTree);
+					const blob = { alt: "image/png", blob: expect.any(String), w: 1, h: 1 };
+					if (drawsMedia) {
+						expect(liveTree).toEqual([
+							{ k: "media", key: "rfirst", p: { path: picture, max: { h: "10lines" } } },
+							{ k: "media", key: "rpdf", p: { path: pdf, max: { h: "10lines" } } },
+							{ k: "image", key: "rblob:0", p: blob },
+						]);
+					} else {
+						const linked = { ...blob, href: Bun.pathToFileURL(picture).href, actions: { menu: ["open"] } };
+						expect(liveTree).toEqual([
+							{ k: "image", key: "rfirst:0", p: linked },
+							{ k: "image", key: "rsecond:0", p: linked },
+							{ k: "image", key: "rblob:0", p: blob },
+						]);
+					}
+				} finally {
+					rebuilt.ctx.shell.transcript.clear();
+					rebuilt.ctx.shell.surface.dispose();
+				}
+			}
+		} finally {
+			stopSizing();
+		}
+	});
+
+	it("keeps live read images on the reply that issued the read, shown or not", async () => {
 		cfgTerminalShowImages.override(Settings.instance, false);
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 		const toolCall = read("hidden.png");
 		await streamCompletion(controller, [toolCall]);
 		const image: ImageContent = {
@@ -249,21 +363,19 @@ describe("EventController read-group accretion", () => {
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
 			mimeType: "image/png",
 		};
+		const id = toolCall.type === "toolCall" ? toolCall.id : "";
 
 		await controller.handleEvent({
 			type: "tool_execution_end",
-			toolCallId: toolCall.type === "toolCall" ? toolCall.id : "",
+			toolCallId: id,
 			toolName: "read",
 			result: { content: [image], isError: false },
 			isError: false,
 		} as AgentSessionEvent);
 
-		const assistant = chatContainer.children.find(
-			(child): child is AssistantMessageComponent => child instanceof AssistantMessageComponent,
-		);
+		// The reply holds the image whatever the visibility; the display flag decides whether it draws.
+		const [assistant] = assistants(ctx);
 		expect(assistant).toBeDefined();
-		expect(hasImageComponent(assistant!)).toBe(false);
-		assistant?.setImagesVisible(true);
-		expect(hasImageComponent(assistant!)).toBe(true);
+		expect(assistant!.toolResultMedia.peek().get(id)?.images).toEqual([image]);
 	});
 });

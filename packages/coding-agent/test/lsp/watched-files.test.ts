@@ -3,7 +3,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { FileChangeType, type FileEvent } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 import { InotifyBudget, WatchedFilesForwarder } from "@oh-my-pi/pi-coding-agent/lsp/watched-files";
 import { TempDir } from "@oh-my-pi/pi-utils";
 

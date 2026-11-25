@@ -49,6 +49,13 @@ export interface AdvisorRuntimeHost {
 	/** Redact primary transcript bytes before they reach the advisor model. */
 	obfuscator?: SecretObfuscator;
 	/**
+	 * Describe the images of `messages` when the advisor model cannot see them, for
+	 * {@link withImageDescriptions}. Best effort: never rejects.
+	 */
+	prepareImageDescriptions?(messages: AgentMessage[], signal: AbortSignal): Promise<void>;
+	/** `message` with each image the advisor model cannot see replaced by its description. */
+	withImageDescriptions?(message: AgentMessage): AgentMessage;
+	/**
 	 * Pre-prompt context maintenance for the advisor's own append-only context.
 	 * Promotes the advisor model to a larger sibling when its context nears the
 	 * window (mirroring the primary's promote-first policy) and resolves `true`
@@ -962,7 +969,8 @@ export class AdvisorRuntime {
 			.filter(message => !(message.role === "custom" && message.customType === "advisor"))
 			.map(message =>
 				updateSeenContext ? this.#dedupContextMessage(message) : this.#dedupContextMessageReadOnly(message),
-			);
+			)
+			.map(message => this.host.withImageDescriptions?.(message) ?? message);
 		return this.#renderPreparedDelta(delta, wip);
 	}
 
@@ -1255,6 +1263,12 @@ export class AdvisorRuntime {
 					// A maintenance re-prime is not a recovery: the batch keeps its strikes, or a batch that
 					// keeps failing and keeps triggering maintenance is retried without end instead of dropped.
 					this.#clearAdvisorContextAtCurrentCursor();
+					if (
+						this.host.prepareImageDescriptions &&
+						!(await this.#prepareImageDescriptions(rawMessages, epoch, signal))
+					) {
+						return null;
+					}
 					const preparedMessages = this.#prepareBatch(rawMessages);
 					return {
 						batchText,
@@ -1292,6 +1306,9 @@ export class AdvisorRuntime {
 		// now): filters advisor custom messages and collapses re-injected
 		// primary-context to "(unchanged…)". BOTH the single-block text and the
 		// multi-message split derive from this exact list so they never diverge.
+		if (this.host.prepareImageDescriptions && !(await this.#prepareImageDescriptions(rawMessages, epoch, signal))) {
+			return null;
+		}
 		const preparedMessages = this.#prepareBatch(rawMessages);
 		return {
 			batchText,
@@ -1301,6 +1318,16 @@ export class AdvisorRuntime {
 			wip,
 			resetContext: false,
 		};
+	}
+
+	/**
+	 * The advisor reads history as text: describe the images its model cannot see before the batch is
+	 * rendered. Resolves false when a reset or dispose during the wait invalidated the batch. Without the
+	 * host hook there is nothing to wait for, so the drain keeps its synchronous timing.
+	 */
+	async #prepareImageDescriptions(rawMessages: AgentMessage[], epoch: number, signal: AbortSignal): Promise<boolean> {
+		await this.host.prepareImageDescriptions?.(rawMessages, signal);
+		return this.#epoch === epoch;
 	}
 
 	/**
@@ -1322,7 +1349,8 @@ export class AdvisorRuntime {
 		this.#seenContextInFlight ??= [...this.#seenContext];
 		return rawMessages
 			.filter(message => !(message.role === "custom" && message.customType === "advisor"))
-			.map(message => this.#dedupContextMessage(message));
+			.map(message => this.#dedupContextMessage(message))
+			.map(message => this.host.withImageDescriptions?.(message) ?? message);
 	}
 
 	#terminalAssistantFailure(snapshot: number): AssistantMessage | undefined {

@@ -1,10 +1,11 @@
 import { describe, expect, test, vi } from "bun:test";
 import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { setRuntimeProviderRule } from "@oh-my-pi/pi-catalog/compat/cascade";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { logger } from "@oh-my-pi/pi-utils";
-import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-selector";
 import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
@@ -2815,6 +2816,27 @@ describe("provider routing selector (@upstream)", () => {
 		).toBeUndefined();
 	});
 
+	test("unpinning respects the policy provider, catalog order and live rule changes on the same pool", () => {
+		const provider = "test-revision-suffix";
+		const pool = ["FOO@PIN", "foo@pin"].map(id => ({
+			...mockModels[0],
+			provider: "gateway",
+			providerType: provider,
+			id,
+		}));
+		const lookup = (id: string) => resolveProviderModelReference("gateway", id, pool);
+		expect(lookup("foo")).toBeUndefined();
+		try {
+			setRuntimeProviderRule(provider, { "selector-revision-suffix": "@pin" });
+			expect(lookup("foo")).toBe(pool[0]);
+			expect(lookup("Foo@pin")).toBeUndefined(); // ambiguous raw id
+			expect(lookup("foo@pin")).toBe(pool[1]); // exact case still wins
+		} finally {
+			setRuntimeProviderRule(provider, undefined);
+		}
+		expect(lookup("foo")).toBeUndefined();
+	});
+
 	test("a selector naming a catalog provider missing from the pool never matches another provider's raw ids", () => {
 		const openRouterGemini = buildModel({
 			id: "google/gemini-openrouter-only",
@@ -2887,6 +2909,25 @@ describe("provider routing selector (@upstream)", () => {
 		expect(result.model?.id).toBe("z-ai/glm-4.7");
 		expect(result.selector).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
+	});
+
+	test.each(["@smol", "pi/smol"])("%s resolves an authenticated exact role before composing the catalog", cliModel => {
+		const registry = {
+			getAvailable: () => allModels,
+			getProviderModels: (provider: string) => allModels.filter(model => model.provider === provider),
+			getAll: (): never => {
+				throw new Error("composed full catalog");
+			},
+		};
+		const settings = Settings.isolated({ modelRoles: { smol: "openrouter/z-ai/glm-4.7:high" } });
+		const expected = resolveCliModel({
+			cliModel,
+			settings,
+			modelRegistry: { ...registry, getProviderModels: undefined, getAll: () => allModels },
+		});
+		expect(expected.configuredRole).toBe("smol");
+		expect(expected.thinkingLevel).toBe(Effort.High);
+		expect(resolveCliModel({ cliModel, settings, modelRegistry: registry })).toEqual(expected);
 	});
 
 	test("resolveCliModel keeps a role alias's upstream pin in the selector", () => {

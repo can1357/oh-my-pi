@@ -6,6 +6,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
+	type HeldProcess,
 	type MinimizerOptions,
 	type PipeStreams,
 	PtySession,
@@ -18,13 +19,12 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
-import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatRawOutputNotice } from "../tools/output-meta-format";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
-import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import type { MinimizedMeta } from "../tools/output-meta-format";
+import { type ArtifactAllocator, OutputSink, type OutputSummary } from "../tools/streaming-output";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -36,8 +36,8 @@ import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
 import { loadDirenvEnv } from "./direnv";
+import { attachShellTrace } from "../tools/shell-viz";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
-
 import {
 	cfgBashDirenv,
 	cfgBashDirenvLoadTimeoutMs,
@@ -45,6 +45,19 @@ import {
 	cfgShellPath,
 	type ShellMinimizerSettings,
 } from "./settings";
+
+/**
+ * Environment naming the agent session a command runs for: `PI_SESSION_ID` and
+ * `PI_SESSION_FILE` (its transcript's absolute path). Every command omp runs
+ * for a session carries it (bash tool calls and their services, eval `sh()`,
+ * `!` commands, loop conditions, autoresearch runs), so programs such as
+ * `ovnfs new` can tie what they create to the session. Both keys are always
+ * set: an empty value replaces a stale one inherited from a parent omp
+ * process, since an env overlay cannot unset.
+ */
+export function sessionShellEnv(session: { id?: string | null; file?: string | null }): Record<string, string> {
+	return { PI_SESSION_ID: session.id ?? "", PI_SESSION_FILE: session.file ?? "" };
+}
 
 export interface BashExecutorOptions {
 	cwd?: string;
@@ -155,6 +168,10 @@ export interface BashResult extends OutputSummary {
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;
+	/** The command ended in another directory than it started in (a `cd` in it); the next command starts in its own `cwd`. */
+	movedCwd?: boolean;
+	/** The command ended with `set -e` on; the next command starts with it off. */
+	errexit?: boolean;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
 	/**
@@ -190,18 +207,14 @@ const TRACE_POLL_MS = 80;
 
 /**
  * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
- * forwards each changed snapshot, bound to the run (and its `streams`, so
- * a card can show what a step writes there); `stop()` takes the final one.
+ * forwards each changed snapshot, bound to the run so a card presents the
+ * run itself; `stop()` takes the final one.
  *
  * An invalid snapshot is logged once and skipped: the poll runs from a timer,
  * where a throw would escape as an uncaught exception and end the session,
  * and the trace is only a visualization of the run.
  */
-function pollRunTrace(
-	trace: RunTrace,
-	streams: PipeStreams | undefined,
-	onTrace: (trace: ShellTrace) => void,
-): { stop: () => ShellTrace | undefined } {
+function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
 	let last = -1;
 	let latest: ShellTrace | undefined;
 	let warned = false;
@@ -216,7 +229,7 @@ function pollRunTrace(
 			return;
 		}
 		latest = snapshot;
-		attachShellTrace(latest, trace, streams);
+		attachShellTrace(latest, trace);
 		onTrace(latest);
 	};
 	const timer = setInterval(poll, TRACE_POLL_MS);
@@ -308,8 +321,9 @@ const shellSessionsInUse = new Set<string>();
  * dropped once its last
  * background job exits (reaped by the poll loop below). Children stay
  * kill-on-drop, so they still die when the harness tears the Shell down on exit.
+ * Each maps to the session key it ran under, for {@link heldShellProcesses}.
  */
-const retainedShells = new Set<Shell>();
+const retainedShells = new Map<Shell, string>();
 const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
@@ -361,7 +375,7 @@ export async function drainAbortedShells(agentSessionKey: string | undefined): P
 }
 
 /** Keeps `shell` alive while it has live background jobs; whether it had any. */
-async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<boolean> {
+async function retainShellWithLiveBackgroundJobs(shell: Shell, sessionKey: string): Promise<boolean> {
 	let live: number;
 	try {
 		live = await shell.liveBackgroundJobCount();
@@ -369,7 +383,7 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<boolean>
 		return false;
 	}
 	if (live <= 0) return false;
-	retainedShells.add(shell);
+	retainedShells.set(shell, sessionKey);
 	const interval = setInterval(() => {
 		void shell
 			.liveBackgroundJobCount()
@@ -439,7 +453,7 @@ async function releasePersistentShell(
 	// reaped once its last job exits and still dies with the harness. A reset
 	// session tears down.
 	if (!reset) {
-		await retainShellWithLiveBackgroundJobs(shell);
+		await retainShellWithLiveBackgroundJobs(shell, sessionKey);
 	}
 }
 
@@ -495,8 +509,25 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
 	for (const [key, shell] of shellSessions) {
 		if (!isShellSessionOwnedBy(key, agentSessionKey)) continue;
 		shellSessions.delete(key);
-		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
+		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell, key);
 	}
+}
+
+/**
+ * Every live external the shells of an agent session hold, in or between runs (`&`/`nohup &`
+ * jobs left running included), with whether the shell's `nohup` started it: its persistent
+ * shells, its per-job `:async:` shells, and the shells retained for their background jobs.
+ * Covers what the `OMP_BASH_SESSION` environment scan cannot see (macOS hides platform
+ * binaries' env), and tells the shell's `nohup` (which does not mask SIGHUP) apart.
+ */
+export function heldShellProcesses(agentSessionKey: string | undefined): HeldProcess[] {
+	if (!agentSessionKey) return [];
+	const asyncPrefix = `${agentSessionKey}:async:`;
+	const owned = (key: string) => isShellSessionOwnedBy(key, agentSessionKey) || key.startsWith(asyncPrefix);
+	const held: HeldProcess[] = [];
+	for (const [key, shell] of shellSessions) if (owned(key)) held.push(...shell.heldProcesses());
+	for (const [shell, key] of retainedShells) if (owned(key)) held.push(...shell.heldProcesses());
+	return held;
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {
@@ -903,7 +934,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const settleFork = async (): Promise<{ fork?: ShellForkOutcome }> => {
 		if (!sessionBusy) return {};
 		const carried = busyShell?.adopt(executionShell) ?? false;
-		const jobs = await retainShellWithLiveBackgroundJobs(executionShell);
+		const jobs = await retainShellWithLiveBackgroundJobs(executionShell, sessionKey);
 		return { fork: { carried, jobs } };
 	};
 	const userSignal = options?.signal;
@@ -964,8 +995,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// Set when the command returns before its native run settled.
 	let unsettled: { run: Promise<ShellRunResult>; cleanup: Promise<void> } | undefined;
 	const runTrace = options?.onTrace ? new RunTrace(finalCommand) : undefined;
-	const tracePoll =
-		runTrace && options?.onTrace ? pollRunTrace(runTrace, options.streams, options.onTrace) : undefined;
+	const tracePoll = runTrace && options?.onTrace ? pollRunTrace(runTrace, options.onTrace) : undefined;
 	// The last snapshot once the run settled (any outcome); `stop()` is idempotent past the first call.
 	let finalTrace: ShellTrace | undefined;
 	const settleTrace = (): { trace: ShellTrace } | Record<string, never> => {
@@ -1105,6 +1135,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			...(winner.result.movedCwd ? { movedCwd: true } : {}),
+			...(winner.result.errexit ? { errexit: true } : {}),
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await settleFork()),
