@@ -394,15 +394,21 @@ interface AutoresearchCommandHarness {
 	execCalls: Array<{ args: string[]; command: string }>;
 	sentMessages: string[];
 	notifications: Array<{ message: string; type: "info" | "warning" | "error" | undefined }>;
+	shortcuts: Map<string, { handler: (ctx: ExtensionCommandContext) => Promise<void> | void }>;
+	/** Key of every `setWidget` call, in order. */
+	widgetUpdates: string[];
 }
 
 function createCommandHarness(
 	cwd: string,
 	execImpl?: (command: string, args: string[]) => Promise<{ code: number; stderr: string; stdout: string }>,
+	opts: { hasUI?: boolean } = {},
 ): AutoresearchCommandHarness {
 	const execCalls: Array<{ args: string[]; command: string }> = [];
 	const sentMessages: string[] = [];
 	const notifications: Array<{ message: string; type: "info" | "warning" | "error" | undefined }> = [];
+	const shortcuts: AutoresearchCommandHarness["shortcuts"] = new Map();
+	const widgetUpdates: string[] = [];
 	let command: RegisteredCommand | undefined;
 
 	const runGitMock = async (args: string[]) => {
@@ -459,7 +465,9 @@ function createCommandHarness(
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name">): void {
 			command = { name, ...options };
 		},
-		registerShortcut(): void {},
+		registerShortcut(shortcut: string, options: AutoresearchCommandHarness["shortcuts"][string]): void {
+			shortcuts.set(shortcut, options);
+		},
 		registerTool(): void {},
 		getActiveTools(): string[] {
 			return [];
@@ -481,7 +489,7 @@ function createCommandHarness(
 		compact: async () => {},
 		cwd,
 		getContextUsage: () => undefined,
-		hasUI: false,
+		hasUI: opts.hasUI ?? false,
 		isIdle: () => true,
 		model: undefined,
 		modelRegistry: {},
@@ -507,13 +515,15 @@ function createCommandHarness(
 			setHeader(): void {},
 			setStatus(): void {},
 			setTitle(): void {},
-			setWidget(): void {},
+			setWidget(key: string): void {
+				widgetUpdates.push(key);
+			},
 			setWorkingMessage(): void {},
 		},
 		waitForIdle: async () => {},
 	} as unknown as ExtensionCommandContext;
 
-	return { command, ctx, execCalls, sentMessages, notifications };
+	return { command, ctx, execCalls, sentMessages, notifications, shortcuts, widgetUpdates };
 }
 
 describe("autoresearch slash command", () => {
@@ -580,6 +590,31 @@ describe("autoresearch slash command", () => {
 		expect(harness.notifications.some(n => n.message.includes("Autoresearch enabled"))).toBe(false);
 		expect(harness.execCalls.find(c => c.command === "git" && c.args[0] === "checkout")).toBeUndefined();
 		expect(harness.sentMessages).toEqual([]);
+	});
+
+	describe("ctrl+x dashboard toggle", () => {
+		function toggle(harness: AutoresearchCommandHarness): (ctx: ExtensionCommandContext) => Promise<void> | void {
+			const shortcut = harness.shortcuts.get("ctrl+x");
+			if (!shortcut) throw new Error("Expected the ctrl+x shortcut to register");
+			return shortcut.handler;
+		}
+
+		it("does nothing in a session that never enabled autoresearch", async () => {
+			const harness = createCommandHarness(makeTempDir().path(), undefined, { hasUI: true });
+			await toggle(harness)(harness.ctx);
+			expect(harness.notifications).toEqual([]);
+			expect(harness.widgetUpdates).toEqual([]);
+		});
+
+		it("redraws the dashboard before the first result instead of refusing", async () => {
+			const harness = createCommandHarness(makeTempDir().path(), undefined, { hasUI: true });
+			await harness.command.handler("", harness.ctx);
+			harness.notifications.length = 0;
+			harness.widgetUpdates.length = 0;
+			await toggle(harness)(harness.ctx);
+			expect(harness.notifications).toEqual([]);
+			expect(harness.widgetUpdates).toEqual(["autoresearch"]);
+		});
 	});
 });
 
