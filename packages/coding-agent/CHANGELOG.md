@@ -60,6 +60,7 @@
 
 ### Fixed
 
+- RPC stdin now reports a command over `rpc.maxInputRecordBytes` (default 64 MiB), or one that is not valid UTF-8, as a parse error instead of buffering it without bound or running it with replacement characters ([#20410](https://github.com/can1357/oh-my-pi/pull/20410) by [@JamieJ5926](https://github.com/JamieJ5926))
 - `/fork pane` inside Tern now opens the fork in a new Tern pane, and `/fork window`/`/fork tab` in a new Tern tab, instead of failing with "No terminal multiplexer was detected"
 - A language server that times out during startup now reports the resolved executable and stops the launcher and its process group instead of leaving them running ([#20436](https://github.com/can1357/oh-my-pi/issues/20436)).
 - Images reach each request as the receiving model needs them: after switching to a text-only model, queued and earlier images are described by the vision model (once per image, reused across turns and resumes); after switching to a vision model, they are sent as images again with no stale description. Compaction and branch summaries and advisor reviews carry the descriptions whenever their model or the session's cannot see images, and a failed description is retried instead of sticking ([#20369](https://github.com/can1357/oh-my-pi/pull/20369) by [@taibenvenuti](https://github.com/taibenvenuti))
@@ -157,7 +158,6 @@
 
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - `--offline` (`models.offline`) now also keeps image descriptions for text-only models, `read` image questions, skill and MCP routing hints, job widgets and eval `completion()` on the active model's provider; each could pick a model from any provider before ([#20268](https://github.com/can1357/oh-my-pi/pull/20268) by [@Dangerboi](https://github.com/Dangerboi))
-- RPC stdin now reports a command over `rpc.maxInputRecordBytes` (default 64 MiB), or one that is not valid UTF-8, as a parse error instead of buffering it without bound or running it with replacement characters ([#20410](https://github.com/can1357/oh-my-pi/pull/20410) by [@JamieJ5926](https://github.com/JamieJ5926))
 ### Fixed
 
 - Fixed models committing (or running `git init` to commit) without being asked when the selective `commit` helper is enabled.
