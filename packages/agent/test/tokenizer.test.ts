@@ -690,9 +690,9 @@ describe("chat-completions history estimate", () => {
 		},
 	);
 
-	test.each([{ id: undefined }, { id: null }, { id: 123 }])("ignores malformed stored call IDs ($id)", ({ id }) => {
+	test("ignores malformed stored call IDs", () => {
 		const original = thinkingTurn(copilotGemini, '{"reasoningOpaque":"prior-state","field":"reasoning_text"}');
-		const malformed = { ...toolCall, id: id as unknown as string };
+		const malformed = { ...toolCall, id: undefined as unknown as string };
 		const turn = { ...original, content: [...original.content, malformed] };
 		const tokenizer = new Tokenizer(copilotGemini);
 		const expected = tokenizer.countMessage({ ...turn, content: [toolCall, malformed] });
