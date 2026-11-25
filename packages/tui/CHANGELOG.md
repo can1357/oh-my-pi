@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced idle CPU use on Windows after `/restart` ([#20518](https://github.com/can1357/oh-my-pi/pull/20518) by [@ethancawse](https://github.com/ethancawse)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
