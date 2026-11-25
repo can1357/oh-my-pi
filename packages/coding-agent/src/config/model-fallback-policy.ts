@@ -15,7 +15,7 @@ export function allowedFactoryDroidFallbacks(
 	onDisabledFallback?: (message: string) => void,
 ): readonly string[] | undefined {
 	if (isDisabled === NO_DISABLED_MODELS) return undefined;
-	const targets = factoryDroidRefusalTargets(model);
+	const targets = factoryDroidRefusalTargets(model, model.transport === "pi-native" ? "catalog" : "account");
 	let kept = 0;
 	for (const id of targets) {
 		const target = { provider: model.provider, providerType: model.providerType, id };

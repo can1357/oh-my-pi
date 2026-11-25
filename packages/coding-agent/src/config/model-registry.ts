@@ -5,6 +5,7 @@ import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-reg
 import { getProviderHooks, type ProviderHooks, setProviderHooks } from "@oh-my-pi/pi-ai/provider-hooks";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
+import { bindFactoryDroidRequestPolicy } from "@oh-my-pi/pi-ai/providers/factory-droid/request-policy";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
@@ -588,18 +589,20 @@ export class ModelRegistry {
 		if (fresh.length > 0) this.#catalogMetricRows = [...this.#catalogMetricRows, ...fresh];
 	}
 
-	/** Final pass: learned thinking capabilities, catalog metrics, then implicit local providers last. */
+	/** Final pass: request policy, learned thinking capabilities, catalog metrics, then implicit local providers last. */
 	#finalizeModels(models: Model<Api>[]): Model<Api>[] {
-		let learned = models;
+		let finalized = models;
 		for (let index = 0; index < models.length; index++) {
 			const model = models[index];
-			if (!model.thinking?.unverified) continue;
-			const projected = withThinkingCapability(model, this.#cacheDbPath);
+			let projected = model.thinking?.unverified ? withThinkingCapability(model, this.#cacheDbPath) : model;
+			if (model.api === "factory-droid-agent") {
+				projected = bindFactoryDroidRequestPolicy(projected, this.#factoryDroidRefusalFallbacks);
+			}
 			if (projected === model) continue;
-			if (learned === models) learned = models.slice();
-			learned[index] = projected;
+			if (finalized === models) finalized = models.slice();
+			finalized[index] = projected;
 		}
-		return this.#orderImplicitProvidersLast(applyCatalogMetrics(learned, this.#catalogMetrics));
+		return this.#orderImplicitProvidersLast(applyCatalogMetrics(finalized, this.#catalogMetrics));
 	}
 
 	/**
@@ -4132,8 +4135,13 @@ export class ModelRegistry {
 		}
 	}
 
-	readonly #factoryDroidRefusalFallbacks = (model: Model): readonly string[] | undefined =>
-		allowedFactoryDroidFallbacks(model, this.#disabledModelMatcher());
+	readonly #factoryDroidRefusalFallbacks = (model: Model): readonly string[] | undefined => {
+		const matcher = this.#disabledModelMatcher();
+		if (matcher === NO_DISABLED_MODELS) return undefined;
+		const rule = matcher(model);
+		if (rule !== undefined) throw new Error(formatDisabledModelError(model, rule));
+		return allowedFactoryDroidFallbacks(model, matcher);
+	};
 
 	/**
 	 * Check whether auth is configured for a model's provider.

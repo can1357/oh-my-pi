@@ -15,7 +15,7 @@ import {
 	getModelMatchPreferences,
 	resolveModelScope,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgDisabledModels, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions as buildCliSessionOptions,
@@ -508,6 +508,38 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		await expect(createAgentSession(deniedModelOptions(sessionManager))).rejects.toThrow(
 			`Could not restore model openai/gpt-4o-mini: ${deniedMiniMessage}`,
 		);
+	});
+
+	test.each(["startup", "extension"])("restores an allowed literal ID at %s", async phase => {
+		const options = deniedModelOptions();
+		cfgDisabledModels.set(options.settings, ["custom/model"]);
+		options.sessionManager.appendModelChange("custom/model@host");
+		const config: ProviderConfigInput = {
+			api: "openai-completions",
+			apiKey: "test-key",
+			baseUrl: "https://custom.example/v1",
+			models: ["model", "model@host"].map(id => ({
+				id,
+				name: id,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 8192,
+				maxTokens: 1024,
+			})),
+		};
+		if (phase === "startup") options.modelRegistry.registerProvider("custom", config);
+		const extension: ExtensionFactory = pi => pi.registerProvider("custom", config);
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...options,
+			extensions: phase === "extension" ? [extension] : [],
+		});
+		try {
+			expect(session.model?.id).toBe("model@host");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("skips a denied startup fallback target for the next one, never a fuzzy sibling", async () => {

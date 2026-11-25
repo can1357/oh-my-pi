@@ -182,11 +182,13 @@ export function factoryDroidSeedModels(scope: AccountScope): ModelSpec<"factory-
 	);
 }
 
-/** Refusal targets that at least one of this model's possible upstreams can offer. */
+/** Refusal targets on the discovered upstreams, or on all catalog upstreams for a remote account. */
 export function factoryDroidRefusalTargets(
 	model: CatalogPolicyInputs & Pick<ModelSpec, "factoryDroidApiProviders">,
+	scope: "account" | "catalog" = "account",
 ): string[] {
-	const upstreams = model.factoryDroidApiProviders ?? resolveFactoryDroidPolicy(model)?.rotation ?? [];
+	const discovered = scope === "account" ? model.factoryDroidApiProviders : undefined;
+	const upstreams = discovered ?? resolveFactoryDroidPolicy(model)?.rotation ?? [];
 	const targets = new Set<string>();
 	for (const upstream of upstreams) {
 		for (const id of serverSideFallbackModels(model, { upstream })) targets.add(id);

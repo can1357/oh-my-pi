@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage, completeSimple } from "@oh-my-pi/pi-ai";
+import { AuthStorage, complete, completeSimple } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
@@ -54,12 +54,9 @@ describe("ModelRegistry", () => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	test("a retained Factory model and scoped resolver apply the live fallback rule on each request", async () => {
-		const rule = "factory-droid/claude-opus-5";
-		const settings = Settings.isolated();
-		cfgDisabledModels.set(settings, [rule]);
+	async function factoryRegistry(settings: Settings): Promise<ModelRegistry> {
 		authStorage.keys.setRuntime("factory-droid", WORKOS_TOKEN);
-		registry = new ModelRegistry(authStorage, path.join(tmpDir, "models.yaml"), {
+		const factory = new ModelRegistry(authStorage, path.join(tmpDir, "models.yaml"), {
 			settings,
 			fetch: async input =>
 				Response.json(
@@ -68,7 +65,53 @@ describe("ModelRegistry", () => {
 						: { settings: { modelPolicy: { allowAllFactoryModels: true } } },
 				),
 		});
-		await registry.refreshProvider("factory-droid", "online");
+		await factory.refreshProvider("factory-droid", "online");
+		return factory;
+	}
+
+	test("bare bearer completions use the selected Factory registry's current policy", async () => {
+		const rule = "factory-droid/claude-opus-5";
+		const settings = Settings.isolated();
+		const first = await factoryRegistry(settings);
+		const second = await factoryRegistry(Settings.isolated());
+		const requests: CapturedRequest[] = [];
+		const fetch = captureFetch(requests, anthropicChunks("OK"));
+		const caller = async (source: ModelRegistry) => {
+			const model = source.find("factory-droid", "claude-fable-5")!;
+			const apiKey = await source.getApiKey(model);
+			return {
+				model,
+				send: () =>
+					complete(model, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { apiKey, fetch }),
+			};
+		};
+		const retained = await caller(first);
+		const independent = await caller(second);
+
+		cfgDisabledModels.set(settings, [rule]);
+		expect((await retained.send()).stopReason).toBe("stop");
+		expect((await independent.send()).stopReason).toBe("stop");
+		// IPC carries the account's actual roster, not a policy callback or a snapshot of the denylist.
+		const transferred = structuredClone(retained.model);
+		expect(transferred.factoryDroidRefusalFallbacks).toContain("claude-opus-5");
+		expect(transferred.factoryDroidAllowedRefusalFallbacks).toBeUndefined();
+
+		cfgDisabledModels.set(settings, []);
+		expect((await retained.send()).stopReason).toBe("stop");
+		cfgDisabledModels.set(settings, ["factory-droid/claude-fable-5"]);
+		await expect(retained.send()).rejects.toThrow("factory-droid/claude-fable-5");
+		expect(requests.map(request => request.body.fallbacks)).toEqual([
+			undefined,
+			[{ model: "claude-opus-5" }],
+			[{ model: "claude-opus-5" }],
+		]);
+	});
+
+	test("a retained Factory model and scoped resolver apply the live fallback rule on each request", async () => {
+		const rule = "factory-droid/claude-opus-5";
+		const settings = Settings.isolated();
+		cfgDisabledModels.set(settings, [rule]);
+		registry = await factoryRegistry(settings);
 		const selected = registry.find("factory-droid", "claude-fable-5")!;
 		const scope = new SessionAccountPoolScope(authStorage, {}, "test");
 		const apiKey = scope.registry(registry).resolver(selected, "test");

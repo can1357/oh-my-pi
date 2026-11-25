@@ -8,8 +8,8 @@ import type { AssistantMessage, Model, Tool, ToolChoice, UserMessage } from "@oh
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { formatBytes, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
-import { disabledModelMatcher } from "../config/disabled-models";
-import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
+import { disabledModelMatcher, formatDisabledModelError } from "../config/disabled-models";
+import { allowedFactoryDroidFallbacks, withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
 import { providerRoleCandidatePool, roleCandidatePool } from "../config/model-roles";
@@ -238,6 +238,22 @@ export async function completeWidgetRequest(
 			{
 				apiKey: modelRegistry.resolver(model, sessionId),
 				signal,
+				beforeDispatch: () => {
+					const current = disabledModelMatcher(settings);
+					if (current === matcher) return;
+					const rule = current(model);
+					if (rule) throw new Error(formatDisabledModelError(model, rule));
+					// The request already excludes the original denials. Refuse it if its fallback list is now unsafe.
+					if (model.api === "factory-droid-agent") {
+						allowedFactoryDroidFallbacks(
+							model,
+							target => (matcher(target) ? undefined : current(target)),
+							message => {
+								throw new Error(message);
+							},
+						);
+					}
+				},
 				// Widget specs and captions are formatting work; a forced tool call also rules out thinking on some providers.
 				disableReasoning: true,
 				maxTokens: request.maxTokens,

@@ -40,6 +40,7 @@ import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
 import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factory-droid";
+import { factoryDroidRequestModel } from "./providers/factory-droid/request-policy";
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -451,6 +452,7 @@ function streamDispatch<TApi extends Api>(
 	// A provider turned off in its auth rules is never called, even with a key passed in directly.
 	context = perturbContext(model, context);
 	assertProviderEnabled(model.provider);
+	if (model.api === "factory-droid-agent") model = factoryDroidRequestModel(model);
 	const requestOptions = withSupportedSamplingParams(
 		model,
 		withTransportFetch(model, (options || {}) as StreamOptions),
@@ -1035,7 +1037,8 @@ function streamSimpleDispatch<TApi extends Api>(
 								headers: forwardBedrockUserAgent(model.headers, opts?.headers),
 							}
 						: opts;
-				return streamPiNative(model, context, nativeOptions);
+				const requestModel = model.api === "factory-droid-agent" ? factoryDroidRequestModel(model) : model;
+				return streamPiNative(requestModel, context, nativeOptions);
 			}),
 		);
 	}

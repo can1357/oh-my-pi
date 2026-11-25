@@ -38,6 +38,7 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { completeSimple, isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -2662,8 +2663,8 @@ export class SessionAdvisors {
 				candidate.provider === advisorModel.provider && isOpenAiRemoteCompactionApi(advisorModel.api)
 					? preparation
 					: { ...preparation, settings: { ...compactionSettings, remoteEnabled: false } };
-			const remoteEnabled = candidatePreparation.settings.remoteEnabled !== false;
-			const refusal = compactionModelRefusal(candidate, remoteEnabled, this.#host.settings);
+			const getRefusal = () => compactionModelRefusal(candidate, candidatePreparation.settings, this.#host.settings);
+			const refusal = getRefusal();
 			if (refusal) {
 				lastError = new Error(refusal);
 				continue;
@@ -2688,15 +2689,25 @@ export class SessionAdvisors {
 				? buildSessionMetadata(advisorProviderSessionId, candidate.provider, this.#host.modelRegistry.authStorage)
 				: undefined;
 			try {
-				const dispatchRefusal = compactionModelRefusal(candidate, remoteEnabled, this.#host.settings);
+				const dispatchRefusal = getRefusal();
 				if (dispatchRefusal) {
 					lastError = new Error(dispatchRefusal);
 					continue;
 				}
+				// Native requests resolve (and may rotate) credentials inside compact().
+				// Check the owning session again before each lookup releases the credential.
+				const resolver = this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId);
+				const guardedResolver: ApiKeyResolver = async context => {
+					const credential = await resolver(context);
+					const reason = getRefusal();
+					if (reason) throw new Error(reason);
+					return credential;
+				};
+				guardedResolver.factoryDroidRefusalFallbacks = resolver.factoryDroidRefusalFallbacks;
 				compactResult = await compact(
 					candidatePreparation,
 					withDisabledModelFallbackPolicy(candidate, this.#host.settings),
-					this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId),
+					guardedResolver,
 					undefined,
 					signal,
 					{
@@ -2728,7 +2739,7 @@ export class SessionAdvisors {
 			} catch (error) {
 				if (signal.aborted) throw error;
 				const id = AIError.classify(error, candidate.api);
-				if (error instanceof NativeCompactionError && !AIError.is(id, AIError.Flag.AuthFailed)) {
+				if (error instanceof NativeCompactionError && !getRefusal() && !AIError.is(id, AIError.Flag.AuthFailed)) {
 					nativeCompactionFailure ??= { error, provider: candidate.provider };
 					lastError = nativeCompactionFailure.error;
 					continue;

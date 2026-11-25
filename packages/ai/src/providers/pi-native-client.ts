@@ -75,12 +75,11 @@ function buildWireOptions(model: Model, options: SimpleStreamOptions | undefined
 		// Only caller policy crosses this boundary. The gateway discovers its own account's roster.
 		const allowed = model.factoryDroidAllowedRefusalFallbacks;
 		const requested = options?.factoryDroidRefusalFallbacks;
-		if (allowed !== undefined || requested !== undefined) {
-			wire.factoryDroidRefusalFallbacks = options?.disableServerSideFallback
-				? []
-				: allowed && requested
-					? allowed.filter(id => requested.includes(id))
-					: (allowed ?? requested);
+		if (options?.disableServerSideFallback) {
+			wire.factoryDroidRefusalFallbacks = [];
+		} else if (allowed !== undefined || requested !== undefined) {
+			wire.factoryDroidRefusalFallbacks =
+				allowed && requested ? allowed.filter(id => requested.includes(id)) : (allowed ?? requested);
 		}
 	}
 	return wire;

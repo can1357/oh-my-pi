@@ -93,16 +93,24 @@ describe("job widget model chain", () => {
 		expect(sent).toEqual([backup.id]);
 	});
 
-	it("does not send a caption prompt with a refusal fallback denied during credential lookup", async () => {
+	it.each([
+		{ phase: "probe", denied: "claude-opus-5" },
+		{ phase: "dispatch", denied: "claude-opus-5" },
+		{ phase: "dispatch", denied: "claude-fable-5" },
+	])("never sends to $denied after $phase rejects it", async ({ phase, denied }) => {
 		const model = factoryModel("claude-fable-5", ["anthropic"]);
 		const settings = Settings.isolated({ modelRoles: { widget: `${model.provider}/${model.id}` } });
+		const rule = `factory-droid/${denied}`;
 		const modelRegistry = {
 			getAvailable: () => [model],
 			getApiKey: async () => {
-				cfgDisabledModels.set(settings, ["factory-droid/claude-opus-5"]);
+				if (phase === "probe") cfgDisabledModels.set(settings, [rule]);
 				return WORKOS_TOKEN;
 			},
-			resolver: () => async () => WORKOS_TOKEN,
+			resolver: () => async () => {
+				if (phase === "dispatch") cfgDisabledModels.set(settings, [rule]);
+				return WORKOS_TOKEN;
+			},
 		} as unknown as ModelRegistry;
 		const requests: CapturedRequest[] = [];
 		const fetch = captureFetch(requests, anthropicChunks("Build the project"));
@@ -110,9 +118,13 @@ describe("job widget model chain", () => {
 			ai.streamSimple(target, context, { ...options, fetch }).result(),
 		);
 		const caption = createModelJobCaptionWriter({ settings, modelRegistry, sessionId: () => "sess" });
-		expect(await caption({ kind: "bash", command: "make && make test" }, new AbortController().signal)).toBe(
-			"Build the project",
-		);
+		const result = caption({ kind: "bash", command: "make && make test" }, new AbortController().signal);
+		if (phase === "dispatch") {
+			await expect(result).rejects.toThrow(`disabledModels rule "${rule}"`);
+			expect(requests).toHaveLength(0);
+			return;
+		}
+		expect(await result).toBe("Build the project");
 		expect(requests).toHaveLength(1);
 		expect(requests[0]!.body.model).toBe(model.id);
 		expect(requests[0]!.body).not.toHaveProperty("fallbacks");

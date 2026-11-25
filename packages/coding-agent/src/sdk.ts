@@ -74,9 +74,11 @@ import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry
 import {
 	DISABLED_MODELS_NOTICE_SOURCE,
 	type DisabledModelSelection,
+	disabledModelMatcher,
 	disabledModelRule,
 	disabledSelectorRule,
 	formatDisabledModelError,
+	NO_DISABLED_MODELS,
 } from "./config/disabled-models";
 import {
 	disabledProviderIds,
@@ -2455,8 +2457,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
+	const sessionModelDenial = (selector: string): DisabledModelSelection | undefined => {
+		if (disabledModelMatcher(settings) === NO_DISABLED_MODELS) return undefined;
+		const slash = selector.indexOf("/");
+		// Use the current provider catalog on every restore pass, including after extensions load.
+		const catalog = slash > 0 ? modelRegistry.getProviderModels(selector.slice(0, slash)) : undefined;
+		return disabledSelectorRule(selector, settings, undefined, catalog);
+	};
 	const sessionRestoreFailureMessage = (sessionModelStr: string): string => {
-		const denied = disabledSelectorRule(sessionModelStr, settings);
+		const denied = sessionModelDenial(sessionModelStr);
 		return denied
 			? `Could not restore model ${sessionModelStr}: ${formatDisabledModelError(denied.label, denied.rule)}`
 			: `Could not restore model ${sessionModelStr}`;
@@ -2467,7 +2476,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
 				// A denied session model is never restored, even when it is available.
-				if (disabledSelectorRule(sessionModelStr, settings)) {
+				if (sessionModelDenial(sessionModelStr)) {
 					failedSessionModel ??= sessionModelStr;
 					continue;
 				}
@@ -3423,7 +3432,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
-					if (disabledSelectorRule(sessionModelStrings[i], settings)) continue;
+					if (sessionModelDenial(sessionModelStrings[i])) continue;
 					const restored = resolveSessionModelSelector(modelRegistry, sessionModelStrings[i]);
 					if (restored) {
 						const restoredModel = restored.model;

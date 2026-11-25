@@ -22,6 +22,7 @@ import { asGlobalFetch } from "./helpers/fetch-mock";
 import {
 	cfgCompaction,
 	cfgCompactionKeepRecentTokens,
+	cfgCompactionRemoteStreamingV2Enabled,
 	cfgCompactionThresholdTokens,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
@@ -842,6 +843,50 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(JSON.stringify(advisor.state.messages)).toContain("prior advisor output");
 	});
 
+	it.each(["model-disabled", "v2-only-disabled"] as const)(
+		"uses the allowed advisor summarizer when its denied remote override is unreachable (%s)",
+		async route => {
+			registerMockApi();
+			const { advisor, nativeModel, settings } = createAdvisorFallbackHarness();
+			const provider = route === "model-disabled" ? "openai" : "openai-codex";
+			const remoteId = "private-advisor-summarizer";
+			const summarizer = createMockModel({
+				id: "portable-advisor-summarizer",
+				provider,
+				handler: () => ({ content: ["portable advisor summary"] }),
+			});
+			Object.assign(summarizer, {
+				remoteCompaction: {
+					api: "openai-codex-responses",
+					enabled: route !== "model-disabled",
+					v2StreamingEnabled: true,
+					model: remoteId,
+				},
+			});
+			advisor.setModel({ ...nativeModel, provider, compactionModel: `${provider}/${summarizer.id}` });
+			vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([summarizer]);
+			vi.spyOn(session.modelRegistry, "getApiKeyWithCredentialForProvider").mockResolvedValue({
+				apiKey: "test-key",
+			});
+			cfgDisabledModels.set(settings, [`${provider}/${remoteId}`]);
+			cfgCompactionRemoteStreamingV2Enabled.set(settings, route !== "v2-only-disabled");
+			cfgCompactionKeepRecentTokens.set(settings, 1);
+			const fetch = vi
+				.spyOn(globalThis, "fetch")
+				.mockImplementation(
+					asGlobalFetch(async () =>
+						Response.json({ output: [{ type: "compaction", encrypted_content: "unused" }] }),
+					),
+				);
+
+			await session.prompt("review after the portable compaction");
+
+			expect(JSON.stringify(summarizer.calls[0]?.context.messages)).toContain("prior advisor output");
+			expect(JSON.stringify(advisor.state.messages)).toContain("portable advisor summary");
+			expect(fetch).not.toHaveBeenCalled();
+		},
+	);
+
 	it("sends advisor history only to an allowed fallback when credentials resolve after a native target denial", async () => {
 		const { advisor, apiKeySpy, nativeModel, sameProviderModel, settings } = createAdvisorFallbackHarness();
 		const remoteId = "private-advisor-summarizer";
@@ -863,6 +908,36 @@ describe("AgentSession advisor context maintenance", () => {
 
 		expect(compact.mock.calls.map(([, model]) => model.id)).toEqual([sameProviderModel.id]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("allowed advisor summary");
+	});
+
+	it("skips a native advisor target denied during the transport's credential lookup", async () => {
+		const { advisor, apiKeySpy, nativeModel, sameProviderModel, settings } = createAdvisorFallbackHarness();
+		const remoteId = "private-advisor-summarizer";
+		advisor.setModel({ ...nativeModel, remoteCompaction: { ...nativeModel.remoteCompaction, model: remoteId } });
+		cfgCompactionRemoteStreamingV2Enabled.set(settings, false);
+		apiKeySpy.mockImplementation(async model => {
+			if (model.remoteCompaction?.model === remoteId) {
+				vi.spyOn(session.modelRegistry, "getApiKeyWithCredentialForProvider").mockImplementationOnce(async () => {
+					cfgDisabledModels.set(settings, [`${model.provider}/${remoteId}`]);
+					return { apiKey: "test-key" };
+				});
+			}
+			return "test-key";
+		});
+		const requestedModels: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				requestedModels.push(JSON.parse(String(init?.body)).model);
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "allowed-advisor-state" }] });
+			}),
+		);
+
+		await session.prompt("review after native compaction");
+
+		expect(requestedModels).toEqual([
+			sameProviderModel.remoteCompaction?.model ?? sameProviderModel.requestModelId ?? sameProviderModel.id,
+		]);
+		expect(JSON.stringify(advisor.state.messages)).toContain("allowed-advisor-state");
 	});
 
 	it("applies a successful same-provider native advisor fallback", async () => {

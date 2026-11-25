@@ -690,11 +690,17 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(requests[1]!.body.fallbacks).toEqual([{ model: "claude-opus-5" }]);
 		});
 
-		it("applies a live session rule through a pi-native worker without changing its gateway's unconfigured behavior", async () => {
+		it("enforces worker bans and live rules on a gateway route the pi-native client cannot use locally", async () => {
 			const settings = Settings.isolated();
-			const send = createSettingsAwareStreamFn(settings, streamSimple, { disableServerSideFallback: true });
+			const send = createSettingsAwareStreamFn(settings, streamSimple);
+			const worker = createSettingsAwareStreamFn(settings, streamSimple, { disableServerSideFallback: true });
 			const gateway = factoryModel("claude-fable-5", ["anthropic"]);
-			const client: Model = { ...gateway, transport: "pi-native", baseUrl: "http://gateway.test" };
+			const client: Model = {
+				...factoryModel(gateway.id, ["vertex_anthropic"]),
+				factoryDroidRefusalFallbacks: [],
+				transport: "pi-native",
+				baseUrl: "http://gateway.test",
+			};
 			const upstream: CapturedRequest[] = [];
 			const wireOptions: SimpleStreamOptions[] = [];
 			const fetch: FetchImpl = async (_url, init) => {
@@ -715,13 +721,18 @@ describe("createSettingsAwareStreamFn", () => {
 				expect(response.errorMessage).toBeUndefined();
 				expect(response.stopReason).toBe("stop");
 			}
+			// The same unrestricted settings still prohibit fallback for a worker.
+			const response = await (await worker(client, context, options)).result();
+			expect(response.stopReason).toBe("stop");
 			expect(wireOptions[0]?.factoryDroidRefusalFallbacks).toEqual([]);
 			expect(wireOptions[1]).not.toHaveProperty("factoryDroidRefusalFallbacks");
 			expect(wireOptions[2]).not.toHaveProperty("factoryDroidRefusalFallbacks");
+			expect(wireOptions[3]?.factoryDroidRefusalFallbacks).toEqual([]);
 			expect(upstream.map(request => request.body.fallbacks)).toEqual([
 				undefined,
 				[{ model: "claude-opus-5" }],
 				[{ model: "claude-opus-5" }],
+				undefined,
 			]);
 		});
 
