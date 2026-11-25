@@ -593,6 +593,14 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>):
 	return obj;
 }
 
+/** Concatenate per-root load results in order; warnings are always an array. */
+export function mergeLoadResults<T>(results: readonly LoadResult<T>[]): LoadResult<T> {
+	return {
+		items: results.flatMap(r => r.items),
+		warnings: results.flatMap(r => r.warnings ?? []),
+	};
+}
+
 /**
  * Load files from a directory matching extensions.
  * Uses native glob for fast filesystem scanning with gitignore support.
