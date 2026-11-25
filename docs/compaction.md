@@ -218,6 +218,8 @@ Including `shake` in `compaction.methodOrder` performs an inline, local reductio
 
 Threshold, incomplete-output, and overflow recovery advance to the next configured method when shake cannot reclaim enough context to get below the recovery band; this prevents repeated no-op shake loops. Idle shake does not use that fallback because the idle timer rechecks usage before running again. Manual `/shake` is a separate, more aggressive command that can target all eligible history.
 
+`/shake thinking` removes reasoning blocks and hidden notes that quote interrupted reasoning from the active branch. It preserves blocks the current provider still replays natively and reports them as kept. Even without a shake, models that reject quoted reasoning do not receive those notes when resuming a session.
+
 ### Snapcompact method
 
 Including `snapcompact` in `compaction.methodOrder` replaces the LLM summarization call with a local, deterministic archival pass (`compact` from `@oh-my-pi/snapcompact`):

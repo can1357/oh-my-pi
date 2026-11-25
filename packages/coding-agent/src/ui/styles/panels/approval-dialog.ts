@@ -9,9 +9,9 @@ import { type Block, defineRolePainter, EMPTY_BLOCK } from "@oh-my-pi/pi-tui/ter
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { padTo, truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { TspItemProps, TspListProps, TspTextProps } from "@oh-my-pi/pi-wire";
-import { bindingGlyph, boxRows, findNode, keyGlyph, plainText, propsOf, selectNavGlyphs, termOf } from "./common";
+import { bindingGlyph, boxRows, findNode, keyLabels, plainText, propsOf, selectNavGlyphs, termOf } from "./common";
 import { appApproveKeys } from "../../../config/keybindings/matchers";
-import { canonicalKeyId } from "../../../config/keybindings/key-id";
+import { expandKeyLabel } from "../../keys/hints";
 
 const DETAIL_ROWS = 8;
 
@@ -60,22 +60,30 @@ defineRolePainter("col", "omp.editor.ask.approval", (node, cx): Block => {
 		const id = choice.key();
 		if (id === "deny" && term.drafting) label = "Deny and send message";
 		if (id === selected)
-			content.push(theme.style("strong", theme.fg(props.tone === "error" ? "error" : "accent", `❯ ${label}`)));
+			content.push(
+				theme.style(
+					"strong",
+					theme.fg(props.tone === "error" ? "error" : "accent", `${theme.symbols.symbol("nav.cursor")} ${label}`),
+				),
+			);
 		else content.push(`  ${label}`);
 	}
-	const approve = `${appApproveKeys()
-		.map(key => keyGlyph(canonicalKeyId(key)))
-		.join("/")} approve`;
-	const deny = `${bindingGlyph("tui.select.cancel", "escape")} deny`;
+	const approve = `${keyLabels(theme, appApproveKeys())} approve`;
+	const deny = `${bindingGlyph("tui.select.cancel", "escape", theme)} deny`;
 	const hints = term.drafting
-		? ["⏎ deny and send", approve, deny]
-		: [`${selectNavGlyphs()} choose`, `${bindingGlyph("tui.select.confirm", "enter")} select`, approve, deny];
-	if (term.expandable) hints.push(term.expanded ? "⌃O less" : "⌃O details");
+		? [`${bindingGlyph("tui.input.submit", "enter", theme)} deny and send`, approve, deny]
+		: [
+				`${selectNavGlyphs(theme)} choose`,
+				`${bindingGlyph("tui.select.confirm", "enter", theme)} select`,
+				approve,
+				deny,
+			];
+	if (term.expandable) hints.push(`${expandKeyLabel(theme)} ${term.expanded ? "less" : "details"}`);
 	// A draft holds the keys: no scrolling, and typing already steers.
 	if (!term.drafting) {
 		if (lines.length > DETAIL_ROWS)
 			hints.push(
-				`${bindingGlyph("tui.select.pageUp", "pageUp")}/${bindingGlyph("tui.select.pageDown", "pageDown")} scroll`,
+				`${bindingGlyph("tui.select.pageUp", "pageUp", theme)}/${bindingGlyph("tui.select.pageDown", "pageDown", theme)} scroll`,
 			);
 		if (term.draftHost) hints.push("type to deny and steer");
 	}

@@ -1,5 +1,10 @@
+import { afterEach, expect, test } from "bun:test";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { ResolvedTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { LogViewer, LogViewerModel } from "../../../../src/ui/apps/log-viewer";
-import { type AppDriver, type AppScreen, appSuite } from "../harness";
+import { type AppDriver, type AppScreen, appSuite, paintAppRows } from "../harness";
 import { click, mouse } from "../raw-sse/mouse";
 
 process.env.TZ = "UTC";
@@ -101,5 +106,30 @@ const screen: AppScreen = {
 		};
 	},
 };
+
+let originalTheme: ResolvedTheme | undefined;
+afterEach(() => {
+	if (originalTheme) setCurrentTheme(originalTheme);
+	originalTheme = undefined;
+});
+
+test("ASCII log controls show the fixed shortcut for loading older history", () => {
+	originalTheme = currentTheme();
+	const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+	setCurrentTheme(theme);
+	const model = new LogViewerModel({
+		logs: "",
+		terminalRows: 12,
+		processStartMs: LOG_START,
+		processPid: 4242,
+		onExit: () => {},
+		deps: { copyToClipboard: () => {} },
+	});
+	const rows = paintAppRows(() => LogViewer({ model }), staticEnvironment(theme), 240);
+	const controls = rows.find(row => row.includes("collapse/expand"));
+	expect(controls).toContain("Esc close · Ctrl+C copy · Up/Down/wheel move");
+	expect(controls).toContain("Ctrl+O older");
+	expect(rows.find(row => row.includes("when highlighted"))).toContain("Enter loads older");
+});
 
 appSuite(screen);

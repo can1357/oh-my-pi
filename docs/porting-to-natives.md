@@ -20,8 +20,7 @@ The package has no `packages/natives/src/<module>` wrapper layer. Its entrypoint
 
 The VCS subpath exposes discovery and Git/Jujutsu operations through `git`,
 `repo`, `repoForDisplay`, `require`, `requireGit`, and `jj`, plus metadata,
-clone/detach/patch helpers, error predicates, and a head-change watcher built
-on `VcsRepo.watchTarget()`. `repoForDisplay` prefers Jujutsu on equal-root
+clone/detach/patch helpers, and error predicates. `repoForDisplay` prefers Jujutsu on equal-root
 ties; Git-safe automation uses `repo` instead.
 
 Two commands serve different purposes:
