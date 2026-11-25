@@ -55,10 +55,42 @@ export function draftImageBlob(image: DraftImage): string {
 	return tagged[kBlob];
 }
 
+/** A pixel size. */
+export interface PixelSize {
+	readonly w: number;
+	readonly h: number;
+}
+
+/**
+ * The draft image and pixel size of a picture the terminal handed back (Tern's annotator, a
+ * `change` event's value), when `value` is one: a PNG or JPEG with base64 bytes, whole positive
+ * width and height.
+ */
+export function pictureDraftImage(
+	value: unknown,
+): { readonly image: DraftImage; readonly size: PixelSize } | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	if (!("mime" in value && "data" in value && "w" in value && "h" in value)) return undefined;
+	const { mime, data, w, h } = value;
+	if (mime !== "image/png" && mime !== "image/jpeg") return undefined;
+	if (typeof data !== "string" || data === "") return undefined;
+	if (typeof w !== "number" || typeof h !== "number") return undefined;
+	if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1) return undefined;
+	return { image: { type: "image", data, mimeType: mime }, size: { w, h } };
+}
+
+/** An image or video marker's head up to its pixel size (`[Image #1, `), then the size, before `]` or `,`. */
+const MARKER_SIZE = /^(\[(?:Image|Video) #\d+, )(\d+)x(\d+)(?=[\],])/;
+
 /** The pixel size an image or video chip's marker states (`[Image #1, 800x600]`), when it states one. */
-export function markerPixelSize(marker: string | undefined): { readonly w: number; readonly h: number } | undefined {
-	const size = marker === undefined ? null : /^\[(?:Image|Video) #\d+, (\d+)x(\d+)[\],]/.exec(marker);
-	return size ? { w: Number(size[1]), h: Number(size[2]) } : undefined;
+export function markerPixelSize(marker: string | undefined): PixelSize | undefined {
+	const size = marker === undefined ? null : MARKER_SIZE.exec(marker);
+	return size ? { w: Number(size[2]), h: Number(size[3]) } : undefined;
+}
+
+/** `marker` stating pixel size `size` instead of the one it states (unchanged when it states none). */
+export function withMarkerPixelSize(marker: string, size: PixelSize): string {
+	return marker.replace(MARKER_SIZE, (_, head: string) => `${head}${size.w}x${size.h}`);
 }
 
 /** Lines over which a paste collapses into a text chip. */

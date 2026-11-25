@@ -300,12 +300,13 @@ async fn dd_rss(s: &mut Session, command: &str) -> u64 {
 /// `time -l` is the utility, not the keyword timing a command named `-l`:
 /// it reports the program's own peak memory, on its stderr, so a pipe
 /// reads it; a program run inside a nested shell's pipeline counts too.
+/// The peak is the program's, not this process's (Linux exec keeps the
+/// spawner's high-water mark).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn time_reports_a_programs_peak_memory() {
 	let mut s = session();
 	let dd = "/bin/dd if=/dev/zero of=/dev/null bs=67108864 count=1";
-	for command in
-		[format!("time -l {dd}"), format!("time -l sh -c '{dd} 2>/dev/null | cat; true'")]
+	for command in [format!("time -l {dd}"), format!("time -l sh -c '{dd} 2>/dev/null | cat; true'")]
 	{
 		let rss = dd_rss(&mut s, &command).await;
 		assert!((64 << 20..1 << 30).contains(&rss), "{command}: {rss}");

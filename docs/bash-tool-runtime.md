@@ -129,6 +129,14 @@ A nonblank `name` routes to `startService()` before finite-command timeout, asyn
 
 The result carries `details.service` (`name`, `state`, `ready`, `timedOut`, optional `pid`), not finite-command timeout/async metadata.
 
+### The `o2ctl services` shell command
+
+While services can launch, the embedded shell also has an `o2ctl` command (`src/launch/o2ctl-command.ts`, installed with the session's tool commands for each run). Its `services` namespace reaches the same project-scoped registry as `name`; every other `o2ctl` namespace is reserved:
+
+- `o2ctl services add <name> <pid|%job>` adopts a process that is already running (`cmd &`, `nohup cmd &`) as service `<name>` without restarting it (`adoptService()`; the daemon's `open` with `adopt: <pid>`). A `%job` spec names a job of the calling shell that runs a program (the shell passes the program's pid with the request, as `jobs -x` would substitute it). The service is owned by the session and held like a started one (session lifetime, or persistent under `launch.persist`); it is never restarted. The daemon watches it by pid like a detached service, and when its stdout (else stderr) is a regular file (`nohup.out`, `> log`), that file is linked in as the service's output log, so `read proc://<name>` and the service output view show it. Fails when the name belongs to a live service, the pid is not a live process of the user, or it is already a service's process.
+- `o2ctl services ls` lists the project's services (`listServices()`); `o2ctl services stop <name>` stops one (`stopService()`). An adopted service is stopped by SIGTERM to its process tree, then SIGKILL to its whole process family; its process group is not signalled, as it need not lead one.
+- The command exists only in the embedded shell, not in a `pty` command, a service's own shell, or the user's shell.
+
 ## Non-interactive execution engine (`executeBash`)
 
 ## Shell session reuse model

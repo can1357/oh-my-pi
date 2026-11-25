@@ -196,6 +196,32 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it("stays silent while the goal is budget-limited", async () => {
+		const now = Date.now();
+		session.setGoalModeState({
+			enabled: true,
+			mode: "active",
+			goal: {
+				id: "goal-1",
+				objective: "explore the UI",
+				status: "budget-limited",
+				tokenBudget: 100_000,
+				tokensUsed: 156_977,
+				timeUsedSeconds: 98,
+				createdAt: now,
+				updatedAt: now,
+			},
+		});
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("budget reached; summary of progress");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([]);
+		expect(todoReminderTranscriptEntry()).toBeUndefined();
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
 	it.each(["roster", "todo.reminders", "todo.enabled"] as const)(
 		"waits for progress across disabling and re-enabling %s",
 		async control => {

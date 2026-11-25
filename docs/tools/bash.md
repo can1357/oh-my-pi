@@ -107,6 +107,7 @@ The tool returns a `text` content block plus optional `details` and image blocks
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
   - `read proc://` lists owned jobs and project services; `read proc://<id>` inspects status/output without consuming result delivery; `write proc://<id>/kill` with empty `content` cancels the job.
 - Success, named service (`name`): executes `command` through the user's shell under the launch broker, returning readiness, exit, or readiness timeout with state and log tail. A live name is stopped and restarted with the new spec; exit notifications still auto-deliver. `read proc://<name>` inspects status/logs; `write proc://<name>` sends stdin (appends Enter unless content already ends with newline, including empty content); `write proc://<name>/kill` stops it. `write proc://<name>/mode` accepts `persist`, `session`, or `detached`.
+- `o2ctl services` shell command (embedded shell, while services can launch): `o2ctl services add <name> <pid|%job>` keeps a process the command already started (`cmd &`, `nohup cmd &`) as service `<name>` without restarting it; its output is the regular file its stdout (else stderr) writes to, when it has one. `o2ctl services ls` lists the project's services and `o2ctl services stop <name>` stops one. See [bash-tool-runtime](../bash-tool-runtime.md#the-o2ctl-services-shell-command).
 - Background progress / completion:
   - delivered through `onUpdate` / async job manager, not the initial return.
   - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
@@ -276,6 +277,7 @@ Choose the setting by the desired outcome:
 - Background work / cancellation
   - Async and auto-background jobs continue after the initial tool return, until completion, cancellation, or their deadline (unless `timeout: 0` disabled it).
   - Cancellation aborts the native run; PTY overlay dismissal also kills the PTY.
+  - Every run carries `OMP_BASH_SESSION=<session id>`, inherited by everything it starts, even across reparenting and `setsid`; since macOS hides the environment of Apple-signed binaries, the externals the session's shells still hold (`Shell.heldProcesses()`) count as its processes too. A process is `nohup` when it ignores SIGHUP (the system `nohup`) or the shell's own `nohup` started it (which leaves SIGHUP unmasked; the held process records it). With `bash.reapBackground` on (default; forced off in RPC mode), processes a call leaves running (`cmd &`, `(cmd &)`, `nohup cmd &`) that are neither a running bash call's nor a service's are listed to the main agent in a reminder when it stops (each process once, kind `&` or `nohup`), asking it to register them with `o2ctl services add <name> <pid>` or kill them. At session end the `&` ones are SIGKILLed with their whole process tree; `nohup`'d processes and everything under them are never killed (`src/exec/session-processes.ts`, `src/session/leftover-processes.ts`).
 
 ## Limits & Caps
 

@@ -1,17 +1,13 @@
 import * as fs from "node:fs/promises";
 import { disambiguateDisplayLabels, shortenPath } from "../utils/render-utils";
 import { replaceTabs } from "../utils/text-width";
-import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
+import { errorMessage, formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, type LocalFileEntry, type LocalProtocolOptions, listLocalFiles } from "../internal-urls";
 import { getEditorCommand, openEditorOnPath } from "../utils/external-editor";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import type { InteractiveModeContext } from "./types";
 
 const PICKER_TITLE = "Open local:// file in external editor";
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
 
 /** Error text safe for the UI: strips ANSI/C0 bytes and tabs, shortens home paths. */
 function showErrorMessage(error: unknown): string {
