@@ -160,7 +160,7 @@ pub fn would_be_silently_dropped(
 		return Some("WinUI3 hosts pointer input in a content island rather than the frame HWND");
 	}
 	if is_wpf_class(class)
-		&& (matches!(kind, MouseClick | MouseMove | TextInput)
+		&& (matches!(kind, MouseClick | MouseMove | MouseScroll | TextInput)
 			|| (!target.foreground && matches!(kind, Keystroke | KeyCombo)))
 	{
 		return Some(
@@ -413,7 +413,7 @@ mod tests {
 		assert_matrix(background("WinUIDesktopWin32WindowClass"), [
 			true, true, true, false, false, false,
 		]);
-		assert_matrix(background("HwndWrapper[App;;abc]"), [true, true, false, true, true, true]);
+		assert_matrix(background("HwndWrapper[App;;abc]"), [true, true, true, true, true, true]);
 		assert_matrix(background("TkTopLevel.1"), [true, false, false, true, true, true]);
 		assert_matrix(background("gdkSurfaceToplevel"), [true, false, false, false, false, false]);
 		assert_matrix(background("gdkWindowToplevel"), [true, false, false, false, false, false]);
@@ -438,7 +438,7 @@ mod tests {
 	#[test]
 	fn wpf_accepts_posted_keys_only_while_it_owns_the_foreground() {
 		let foreground = TargetTraits { foreground: true, ..background("HwndWrapper[App;;abc]") };
-		assert_matrix(foreground, [true, true, false, false, false, true]);
+		assert_matrix(foreground, [true, true, true, false, false, true]);
 		let native = TargetTraits { foreground: true, ..background("Notepad") };
 		assert_matrix(native, [false; 6]);
 	}

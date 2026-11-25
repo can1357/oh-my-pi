@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows WPF `scroll` silently dropping posted wheel input: a WPF window in front with no Chromium/WebView2 child window scrolls the UI Automation scroll container under the point; other WPF scrolls throw `BackgroundUnavailable` with nothing sent, which the default background fallback reruns in takeover; a sent step whose movement cannot be read back throws `AxUnconfirmed`, and one that left the content in place throws `InputFailed` ([#19870](https://github.com/can1357/oh-my-pi/pull/19870) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed non-finite desktop scroll deltas reaching platform input; WPF UI Automation scrolls now refuse requests outside the posted wheel's signed 16-bit range before sending any input ([#19870](https://github.com/can1357/oh-my-pi/pull/19870) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added
