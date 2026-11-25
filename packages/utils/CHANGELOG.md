@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pathExists()`, which reports a missing path as `false` and rethrows any other filesystem error ([#20483](https://github.com/can1357/oh-my-pi/pull/20483) by [@H4vC](https://github.com/H4vC))
+
 ## [19.2.0] - 2026-11-25
 
 ### Fixed
