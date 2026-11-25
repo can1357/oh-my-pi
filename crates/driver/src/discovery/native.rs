@@ -899,6 +899,24 @@ pub fn check_grant_locations(
 	Ok(())
 }
 
+/// Mode check for `omp ext grant`, beside [`check_grant_locations`]: the store
+/// `<data>/ext` and the user extension root must not be writable by group or
+/// others. Admission does not run it, so a group-writable store is refused when
+/// a grant is issued but does not withdraw grants already recorded.
+///
+/// # Errors
+///
+/// The first [`ProtectedLocationError`] found.
+pub fn check_grant_directory_modes(
+	data_dir: &Path,
+	extension_root: &Path,
+) -> Result<(), super::protected::ProtectedLocationError> {
+	for directory in [data_dir.join("ext"), extension_root.to_path_buf()] {
+		super::protected::check_not_group_or_other_writable(&directory)?;
+	}
+	Ok(())
+}
+
 /// Finds the extension `id` installed under the user extension root and
 /// returns the grant identity admission would match. `Ok(None)` means `id` is
 /// not a user-layer extension.

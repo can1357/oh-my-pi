@@ -92,6 +92,44 @@ fn grants_update_failure(error: GrantPersistenceError) -> miette::Report {
 	}
 }
 
+/// Why `omp ext grant` wrote nothing after it took the grants lock: the store
+/// or the extension no longer matches what the operator confirmed. The grant
+/// file is unchanged.
+#[derive(Debug, thiserror::Error)]
+enum GrantRefusal {
+	/// The store or the extension root no longer passes its checks.
+	#[error("the grant store or the extension root changed before the grant was written")]
+	Location(#[from] omp_driver::discovery::protected::ProtectedLocationError),
+	/// The extension could not be found again.
+	#[error("the extension could not be looked up again before the grant was written")]
+	Lookup(#[from] omp_driver::discovery::native::NativeExtensionError),
+	/// The extension is no longer installed under the user extension root.
+	#[error("extension `{id}` is no longer installed under the user extension root")]
+	Gone {
+		/// The extension id the operator confirmed.
+		id: Str,
+	},
+	/// The extension now lives at another root.
+	#[error("extension `{id}` moved from {} to {} after it was confirmed", was.display(), now.display())]
+	Moved {
+		/// The extension id the operator confirmed.
+		id:  Str,
+		/// The root the operator confirmed.
+		was: PathBuf,
+		/// The root found under the lock.
+		now: PathBuf,
+	},
+	/// The extension's manifest or declared capabilities changed after it was
+	/// confirmed.
+	#[error("extension `{id}` at {} changed after it was confirmed", root.display())]
+	Changed {
+		/// The extension id the operator confirmed.
+		id:   Str,
+		/// The root the operator confirmed.
+		root: PathBuf,
+	},
+}
+
 /// Ctrl+C observed while an extension installer-owned child or network stream
 /// was active.
 #[derive(Clone, Copy, Debug, thiserror::Error, Diagnostic)]
@@ -2072,6 +2110,10 @@ fn grant_with(
 		println!("{}", revoke_report(&args.id, removed));
 		return Ok(());
 	}
+	// A grant is refused on a store or extension root that group or others can
+	// write. Revoke stays allowed: it only removes authority.
+	omp_driver::discovery::native::check_grant_directory_modes(data_dir, &extension_root)
+		.map_err(|error| miette::Report::from_err(GrantRefusal::from(error)))?;
 	let identity =
 		omp_driver::discovery::native::user_extension_grant_identity(home, args.id.as_str())
 			.map_err(|error| miette!("{error}"))?
@@ -2098,7 +2140,7 @@ fn grant_with(
 		));
 	}
 	if let Some(parent) = state.grants.parent() {
-		fs::create_dir_all(parent).into_diagnostic()?;
+		create_private_store(parent).into_diagnostic()?;
 	}
 	let record = Grant {
 		id:                identity.id.clone(),
@@ -2113,13 +2155,56 @@ fn grant_with(
 		granted_by:        Str::new_static("explicit-grant"),
 		duration:          omp_ext::trust::GrantDuration::Persistent,
 	};
-	GrantsFile::update(&state.grants, |grants| {
+	// The checks above ran before the prompt and before the lock. Run them again
+	// under the lock, where no other grant writer can change the file, and write
+	// only if the store and the extension still match what the operator confirmed.
+	GrantsFile::try_update(&state.grants, |grants| {
+		omp_driver::discovery::native::check_grant_locations(
+			data_dir,
+			&extension_root,
+			&state.project,
+			writable_roots,
+		)
+		.map_err(GrantRefusal::from)?;
+		omp_driver::discovery::native::check_grant_directory_modes(data_dir, &extension_root)
+			.map_err(GrantRefusal::from)?;
+		let current =
+			omp_driver::discovery::native::user_extension_grant_identity(home, args.id.as_str())?
+				.ok_or_else(|| GrantRefusal::Gone { id: args.id.clone() })?;
+		if current.root != identity.root {
+			return Err(GrantRefusal::Moved {
+				id:  args.id.clone(),
+				was: identity.root.clone(),
+				now: current.root,
+			});
+		}
+		if current != identity {
+			return Err(GrantRefusal::Changed { id: args.id.clone(), root: identity.root.clone() });
+		}
 		grants.grants.retain(|grant| !is_path_grant(grant));
 		grants.grants.push(record);
+		Ok::<(), GrantRefusal>(())
 	})
-	.map_err(grants_update_failure)?;
+	.map_err(grants_update_failure)?
+	.map_err(miette::Report::from_err)?;
 	println!("{}: granted {capabilities}", args.id);
 	Ok(())
+}
+
+/// Creates the grant store directory owner-only (0700 on Unix), so a default
+/// umask cannot make a store this command creates group-writable. An existing
+/// directory is left as it is; the store checks judge it.
+fn create_private_store(directory: &Path) -> std::io::Result<()> {
+	if let Some(parent) = directory.parent() {
+		fs::create_dir_all(parent)?;
+	}
+	let mut builder = fs::DirBuilder::new();
+	#[cfg(unix)]
+	std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+	match builder.create(directory) {
+		Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+		result => result,
+	}
 }
 
 /// What `omp ext grant --revoke` reports: the records removed, and that a
@@ -4615,7 +4700,8 @@ mod grant_tests {
 	use omp_core::Str;
 
 	use super::{
-		ExtGrantArgs, Grant, GrantsFile, StatePaths, grant_consent, grant_with, revoke_report,
+		ExtGrantArgs, Grant, GrantRefusal, GrantsFile, StatePaths, grant_consent, grant_with,
+		revoke_report,
 	};
 
 	struct Fixture {
@@ -4648,6 +4734,16 @@ mod grant_tests {
 		.expect("manifest");
 		std::fs::create_dir_all(&project).expect("workspace");
 		std::fs::create_dir_all(data.join("ext")).expect("store");
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt as _;
+
+			// The default umask must not decide whether the fixture passes the mode check.
+			for private in [data.join("ext"), home.join(".o2/agent/extensions")] {
+				std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+					.expect("private directory");
+			}
+		}
 		Fixture { _tree: tree, home, project, data, root }
 	}
 
@@ -4789,6 +4885,132 @@ mod grant_tests {
 		assert!(error.to_string().contains("consent"), "{error}");
 		assert_eq!(stored(&f), 0);
 		let _: &Path = &f.root;
+	}
+
+	fn grant_bytes(f: &Fixture) -> Option<Vec<u8>> {
+		std::fs::read(omp_ext::trust::grants_path(&f.data)).ok()
+	}
+
+	/// Runs a grant whose consent callback first runs `change`: the tree moving
+	/// between the operator's confirmation and the write.
+	fn refused_after_change(f: &Fixture, change: impl FnOnce()) -> miette::Report {
+		let state = StatePaths::new(&f.data, &f.project);
+		grant_with(&state, &f.data, &f.home, &[], &args("test.user", false), |_| {
+			change();
+			Ok(true)
+		})
+		.expect_err("a change after consent must be refused")
+	}
+
+	#[test]
+	fn grant_refuses_an_extension_changed_after_consent() {
+		let f = fixture("test.user");
+		let manifest = f.root.join("omp.toml");
+		let error = refused_after_change(&f, || {
+			let mut text = std::fs::read_to_string(&manifest).expect("manifest");
+			text.push_str("# edited after consent\n");
+			std::fs::write(&manifest, text).expect("edit manifest");
+		});
+		assert!(
+			matches!(error.downcast_ref::<GrantRefusal>(), Some(GrantRefusal::Changed { .. })),
+			"{error:?}"
+		);
+		assert_eq!(grant_bytes(&f), None, "nothing written");
+		assert_eq!(stored(&f), 0);
+
+		// The extension is gone, or lives at another root, under the lock.
+		let f = fixture("test.user");
+		let error = refused_after_change(&f, || std::fs::remove_dir_all(&f.root).expect("remove"));
+		assert!(
+			matches!(error.downcast_ref::<GrantRefusal>(), Some(GrantRefusal::Gone { .. })),
+			"{error:?}"
+		);
+		assert_eq!(grant_bytes(&f), None);
+
+		let f = fixture("test.user");
+		let error = refused_after_change(&f, || {
+			std::fs::rename(&f.root, f.root.with_file_name("test.user-moved")).expect("move");
+		});
+		assert!(
+			matches!(error.downcast_ref::<GrantRefusal>(), Some(GrantRefusal::Moved { .. })),
+			"{error:?}"
+		);
+		assert_eq!(grant_bytes(&f), None);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grant_refuses_a_store_made_group_writable_after_consent() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let f = fixture("test.user");
+		run(&f, &args("test.user", false), true).expect("first grant");
+		let before = grant_bytes(&f);
+		let store = f.data.join("ext");
+		let error = refused_after_change(&f, || {
+			std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o770))
+				.expect("group-writable store");
+		});
+		assert!(
+			matches!(
+				error.downcast_ref::<GrantRefusal>(),
+				Some(GrantRefusal::Location(
+					omp_driver::discovery::protected::ProtectedLocationError::GroupOrOtherWritable { .. }
+				))
+			),
+			"{error:?}"
+		);
+		assert_eq!(grant_bytes(&f), before, "the store is unchanged");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grant_checks_directory_modes_before_writing() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let writable_by_others = |path: &Path, mode: u32| {
+			std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("mode");
+		};
+
+		// A group- or other-writable store, then extension root, is refused.
+		for (mode, root) in [(0o770, false), (0o707, false), (0o770, true), (0o702, true)] {
+			let f = fixture("test.user");
+			let directory = if root {
+				f.home.join(".o2/agent/extensions")
+			} else {
+				f.data.join("ext")
+			};
+			writable_by_others(&directory, mode);
+			let error = run(&f, &args("test.user", false), true).expect_err("unsafe directory");
+			assert!(
+				matches!(
+					error.downcast_ref::<GrantRefusal>(),
+					Some(GrantRefusal::Location(
+						omp_driver::discovery::protected::ProtectedLocationError::GroupOrOtherWritable { .. }
+					))
+				),
+				"mode {mode:o} on {}: {error:?}",
+				directory.display()
+			);
+			assert_eq!(grant_bytes(&f), None);
+		}
+
+		// A private store (0700) and a world-readable root (0755) still work.
+		let f = fixture("test.user");
+		writable_by_others(&f.data.join("ext"), 0o700);
+		writable_by_others(&f.home.join(".o2/agent/extensions"), 0o755);
+		run(&f, &args("test.user", false), true).expect("grant on private directories");
+		assert_eq!(stored(&f), 1);
+
+		// A store the command creates is private whatever the umask.
+		let f = fixture("test.user");
+		std::fs::remove_dir(f.data.join("ext")).expect("remove store");
+		run(&f, &args("test.user", false), true).expect("grant creates the store");
+		let mode = std::fs::metadata(f.data.join("ext"))
+			.expect("store")
+			.permissions()
+			.mode();
+		assert_eq!(mode & 0o777, 0o700);
 	}
 
 	/// Installs a copy of the fixture's extension in the workspace layer under

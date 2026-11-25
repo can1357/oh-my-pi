@@ -65,6 +65,18 @@ pub enum ProtectedLocationError {
 	/// This host cannot provide verifiable ownership metadata.
 	#[error("protected location ownership cannot be verified on this host")]
 	Unverifiable,
+	/// A protected directory is writable by its group or by others, so another
+	/// account can add or replace the entries that anchor operator authority.
+	#[error(
+		"protected directory {} is writable by group or others (mode {mode:04o})",
+		path.display()
+	)]
+	GroupOrOtherWritable {
+		/// Directory that group or others can write.
+		path: PathBuf,
+		/// Its permission bits, without the file type.
+		mode: u32,
+	},
 }
 
 /// Computes the workspace, configured, temporary and system temporary write
@@ -122,6 +134,32 @@ pub fn check_protected_location(
 	}
 	Ok(())
 }
+
+/// Refuses a protected directory that its group or others can write. Either
+/// can add, remove or replace entries there, so the grant store or an
+/// extension under the user root would not stay the operator's alone.
+///
+/// A missing path passes: nothing there can be written yet, and the caller
+/// creates it private. A symlink is refused as by [`check_protected_location`].
+/// Only Unix mode bits are inspected; other hosts have none, so the check is a
+/// no-op there (their ownership check already fails closed).
+///
+/// # Errors
+///
+/// [`ProtectedLocationError::GroupOrOtherWritable`] for a directory whose
+/// group or other write bit is set, [`ProtectedLocationError::Symlink`] for a
+/// link, and [`ProtectedLocationError::Inspect`] when its metadata cannot be
+/// read.
+pub fn check_not_group_or_other_writable(path: &Path) -> Result<(), ProtectedLocationError> {
+	match fs::symlink_metadata(path) {
+		Ok(metadata) if metadata.file_type().is_symlink() => {
+			Err(ProtectedLocationError::Symlink { path: path.to_path_buf() })
+		},
+		Ok(metadata) => ensure_not_group_or_other_writable(path, &metadata),
+		Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+		Err(source) => Err(ProtectedLocationError::Inspect { path: path.to_path_buf(), source }),
+	}
+}
 /// Returns a canonical spelling even when the protected path does not exist.
 /// Existing ancestors are resolved first, so symlinked parents cannot leave a
 /// lexical alias that bypasses the sandbox deny.
@@ -143,6 +181,32 @@ fn checked_spellings(path: &Path) -> Result<Vec<PathBuf>, ProtectedLocationError
 fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 	if !paths.contains(&path) {
 		paths.push(path);
+	}
+}
+
+fn ensure_not_group_or_other_writable(
+	path: &Path,
+	metadata: &fs::Metadata,
+) -> Result<(), ProtectedLocationError> {
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt as _;
+
+		// Group write is 0o020 and other write is 0o002; the sticky bit does not
+		// make a shared directory private, so it does not excuse either.
+		let mode = metadata.permissions().mode() & 0o7777;
+		if metadata.is_dir() && mode & 0o022 != 0 {
+			return Err(ProtectedLocationError::GroupOrOtherWritable {
+				path: path.to_path_buf(),
+				mode,
+			});
+		}
+		Ok(())
+	}
+	#[cfg(not(unix))]
+	{
+		let _ = (path, metadata);
+		Ok(())
 	}
 }
 
@@ -251,6 +315,61 @@ mod tests {
 
 		assert!(matches!(
 			check_protected_location(&extension_root, &[]),
+			Err(ProtectedLocationError::Symlink { .. })
+		));
+	}
+
+	#[cfg(unix)]
+	fn directory_with_mode(parent: &Path, name: &str, mode: u32) -> PathBuf {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let directory = parent.join(name);
+		fs::create_dir(&directory).expect("directory");
+		fs::set_permissions(&directory, fs::Permissions::from_mode(mode)).expect("set mode");
+		directory
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn group_or_other_writable_directory_fails_closed() {
+		let tree = tempfile::tempdir().expect("tree");
+		for (name, mode) in [("group", 0o770), ("other", 0o707), ("both", 0o777), ("sticky", 0o1777)]
+		{
+			let directory = directory_with_mode(tree.path(), name, mode);
+			assert!(
+				matches!(
+					check_not_group_or_other_writable(&directory),
+					Err(ProtectedLocationError::GroupOrOtherWritable { mode: found, .. }) if found == mode
+				),
+				"{name}: mode {mode:o} must be refused"
+			);
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn private_directory_passes_the_mode_check() {
+		let tree = tempfile::tempdir().expect("tree");
+		// Readable or searchable by group and others is fine; only write matters.
+		for (name, mode) in [("owner", 0o700), ("shared-read", 0o755), ("group-read", 0o750)] {
+			let directory = directory_with_mode(tree.path(), name, mode);
+			check_not_group_or_other_writable(&directory)
+				.unwrap_or_else(|error| panic!("{name}: mode {mode:o} must pass: {error}"));
+		}
+		check_not_group_or_other_writable(&tree.path().join("missing"))
+			.expect("a missing directory has nothing to write");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn symlinked_directory_fails_the_mode_check() {
+		let tree = tempfile::tempdir().expect("tree");
+		let target = directory_with_mode(tree.path(), "target", 0o700);
+		let link = tree.path().join("link");
+		std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+		assert!(matches!(
+			check_not_group_or_other_writable(&link),
 			Err(ProtectedLocationError::Symlink { .. })
 		));
 	}
