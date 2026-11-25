@@ -534,6 +534,7 @@ export function decodeBase64Url(text: string): Uint8Array | null {
 	return out;
 }
 
+/** A fresh room id: `ROOM_ID_BYTES` random bytes as unpadded base64url. */
 export function generateRoomId(): string {
 	const bytes = new Uint8Array(ROOM_ID_BYTES);
 	crypto.getRandomValues(bytes);
@@ -601,6 +602,12 @@ export function formatCollabLink(relayUrl: string, roomId: string, key: Uint8Arr
 	return `${compact}/r/${roomId}.${keyText}`;
 }
 
+/**
+ * Parse any link form {@link formatCollabLink} produces, plus the legacy `#`-joined
+ * and `%23`-mangled forms and http(s) deep links carrying a collab link in the
+ * fragment. Returns the relay URL, room id, key and optional write token, or
+ * `{ error }` describing why the link is not usable.
+ */
 export function parseCollabLink(link: string): ParsedCollabLink | { error: string } {
 	// Lenient input: terminals that open OSC 8 links through strict URL stacks
 	// (macOS Foundation) percent-encode the legacy second `#` to `%23`.

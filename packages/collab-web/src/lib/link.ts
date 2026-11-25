@@ -1,6 +1,6 @@
 /**
- * Collab link + wire-envelope handling: the browser-safe implementation lives
- * in `@oh-my-pi/pi-wire`, shared with the coding-agent host.
+ * collab-web's entry point for the collab link and wire-envelope helpers. They
+ * are implemented in `@oh-my-pi/pi-wire` and shared with the coding-agent host.
  *
  * Link format: `wss://<host[:port]>/r/<roomId>.<base64url-32-byte-key>`
  * Wire envelope: `[4B uint32 BE peerId][sealed payload]` — the guest always
