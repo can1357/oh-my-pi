@@ -43,7 +43,7 @@ import {
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
 } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModels, getBundledModelSlice, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
 	googleAntigravityModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
@@ -2038,7 +2038,7 @@ export class ModelRegistry {
 			const unrestorableHeaderIds = new Set(cache.unrestorableHeaderModelIds);
 			const bundledModels =
 				omittedHeaderIds.size > 0 || sharedCatalogProvider
-					? (getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[])
+					? getBundledModelSlice(providerId)
 					: undefined;
 			// Every shared-catalog manager layers the catalog additively
 			// (`#collectBuiltInModelManagerOptions`), authoritative or not.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Repeated provider resolution reuses bundled model fingerprints instead of serializing the same catalog rows again.
+
 ## [19.2.0] - 2026-11-25
 
 ### Added

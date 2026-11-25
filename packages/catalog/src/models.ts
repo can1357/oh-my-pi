@@ -71,6 +71,28 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
+
+const bundledSlices = new Map<string, readonly Model<Api>[]>();
+const sharedSlices = new WeakSet<object>();
+const emptySlice: readonly Model<Api>[] = Object.freeze([]);
+
+/** Stable read-only view for consumers that reuse a bundled provider's content identity. */
+export function getBundledModelSlice(provider: GeneratedProvider): readonly Model<Api>[] {
+	const cached = bundledSlices.get(provider);
+	if (cached) return cached;
+	const models = getProviderModels(provider);
+	if (!models) return emptySlice;
+	const slice = Object.freeze(Array.from(models.values()));
+	bundledSlices.set(provider, slice);
+	sharedSlices.add(slice);
+	return slice;
+}
+
+/** Only catalog-owned slices have immutable membership and shared read-only rows. */
+export function isBundledModelSlice(models: readonly unknown[]): boolean {
+	return sharedSlices.has(models);
+}
+
 /** Resolve display semantics without mistaking an absent rate card for a free model. */
 export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingStatus">): ModelPricingStatus {
 	const cost = getEffectiveTokenCost(model.cost);
