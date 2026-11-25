@@ -7,11 +7,12 @@ import { shouldSendServiceTier } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { fetchCodexModels } from "@oh-my-pi/pi-catalog/discovery/codex";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { readModelCache, writeModelCache, writeModelCacheAsync } from "@oh-my-pi/pi-catalog/model-cache";
+import { createModelManager, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import { type Model, modelKind, type ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { getCodexClientVersion } from "@oh-my-pi/pi-catalog/wire/codex-version";
 import { resolveProviderModelReference } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 describe("Codex model discovery", () => {
@@ -1232,10 +1233,7 @@ describe("Codex model discovery", () => {
 				dbPath,
 			);
 
-			let releaseLateResponse: (() => void) | undefined;
-			const lateResponseGate = new Promise<void>(resolve => {
-				releaseLateResponse = resolve;
-			});
+			const { promise: lateResponseGate, resolve: releaseLateResponse } = Promise.withResolvers<void>();
 
 			const refreshPromise = resolveProviderModels<"openai-codex-responses">(
 				{
@@ -1254,7 +1252,7 @@ describe("Codex model discovery", () => {
 			);
 
 			controller.abort(new Error("model discovery timed out after 15000ms"));
-			releaseLateResponse?.();
+			releaseLateResponse();
 
 			await expect(refreshPromise).rejects.toThrow("model discovery timed out after 15000ms");
 
@@ -1271,5 +1269,186 @@ describe("Codex model discovery", () => {
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
+	});
+
+	it("cancels the in-flight Codex model request when the refresh signal aborts", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-cancel-"));
+		const controller = new AbortController();
+		const timeout = new Error("model discovery timed out after 15000ms");
+		const requested = Promise.withResolvers<void>();
+		let requestCancelled = false;
+		const fetchFn: typeof fetch = Object.assign(
+			(_input: string | URL | Request, init?: RequestInit) => {
+				requested.resolve();
+				const signal = init?.signal;
+				if (!signal) return Promise.reject(new Error("Codex model request carried no abort signal"));
+				const response = Promise.withResolvers<Response>();
+				signal.addEventListener(
+					"abort",
+					() => {
+						requestCancelled = true;
+						response.reject(signal.reason);
+					},
+					{ once: true },
+				);
+				return response.promise;
+			},
+			{ preconnect() {} },
+		);
+		try {
+			const manager = createModelManager({
+				...openaiCodexModelManagerOptions({
+					resolveAccounts: async () => [{ accessToken: "test-token" }],
+					fetch: fetchFn,
+				}),
+				cacheDbPath: path.join(tempDir, "models.db"),
+			});
+			const refresh = manager.refresh("online", controller.signal);
+			await requested.promise;
+			controller.abort(timeout);
+
+			expect(requestCancelled).toBe(true);
+			await expect(refresh).rejects.toBe(timeout);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refetches instead of serving a Web roster cached under the unversioned official namespace", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-namespace-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		const rosterFetch = (slug: string, requestedUrls: string[]): typeof fetch =>
+			Object.assign(
+				async (input: string | URL | Request) => {
+					requestedUrls.push(
+						typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
+					);
+					return Response.json({ models: [{ slug, display_name: slug, supported_in_api: true }] });
+				},
+				{ preconnect() {} },
+			);
+		try {
+			// Earlier builds fell back to `/models` and cached its Web roster here as authoritative.
+			await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [{ accessToken: "test-token" }],
+						fetch: rosterFetch("gpt-6.2-sol-wm", []),
+					}),
+					cacheProviderId: `openai-codex:${getCodexClientVersion()}`,
+					cacheDbPath,
+				},
+				"online",
+			);
+
+			const requestedUrls: string[] = [];
+			const result = await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [{ accessToken: "test-token" }],
+						fetch: rosterFetch("gpt-6.2-sol", requestedUrls),
+					}),
+					cacheDbPath,
+				},
+				"online-if-uncached",
+			);
+
+			expect(requestedUrls).toHaveLength(1);
+			const ids = result.models.map(model => model.id);
+			expect(ids).toContain("gpt-6.2-sol");
+			expect(ids).not.toContain("gpt-6.2-sol-wm");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	describe("refresh aborted while its cache write waits behind another connection's write lock", () => {
+		const cachedSol: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-6.2-sol",
+			name: "GPT-6.2 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 500_000,
+			maxTokens: 128_000,
+		};
+		const seededAt = Date.now() - 3 * 60 * 60 * 1000;
+
+		/** Aborts a refresh once its cache write is queued behind a held `BEGIN IMMEDIATE`, then reads the row back after the lock clears. */
+		async function abortRefreshBehindWriteLock(respond: () => Response) {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-queued-abort-"));
+			try {
+				const cacheDbPath = path.join(tempDir, "models.db");
+				const options = {
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [{ accessToken: "test-token" }],
+						fetch: Object.assign(async () => respond(), { preconnect() {} }),
+					}),
+					cacheDbPath,
+				};
+				const cacheProviderId = options.cacheProviderId ?? options.providerId;
+				writeModelCache(cacheProviderId, seededAt, [buildModel(cachedSol)], true, "seed", cacheDbPath);
+				const blocker = new Database(cacheDbPath);
+				try {
+					blocker.run("BEGIN IMMEDIATE");
+					const controller = new AbortController();
+					const timeout = new Error("model discovery timed out after 15000ms");
+					let settled = false;
+					let refreshError: unknown;
+					void resolveProviderModels(options, "online", controller.signal).then(
+						() => {
+							settled = true;
+						},
+						(error: unknown) => {
+							settled = true;
+							refreshError = error;
+						},
+					);
+					// Fetch, merge and serialization finish well within this; the row then waits on the lock.
+					await Bun.sleep(100);
+					expect(settled).toBe(false);
+
+					controller.abort(timeout);
+					const { promise: turned, resolve: turn } = Promise.withResolvers<void>();
+					setImmediate(turn);
+					await turned;
+					// The refresh gives up without waiting out the lock.
+					expect(settled).toBe(true);
+					expect(refreshError).toBe(timeout);
+
+					blocker.run("COMMIT");
+					// The writer lands rows oldest first, so a row the aborted refresh left queued lands first.
+					expect(await writeModelCacheAsync("lock-flush", 1_000, [], true, "flush", cacheDbPath)).toBe("written");
+				} finally {
+					if (blocker.inTransaction) blocker.run("ROLLBACK");
+					blocker.close();
+				}
+				return readModelCache<"openai-codex-responses">(
+					cacheProviderId,
+					24 * 60 * 60 * 1000,
+					Date.now,
+					cacheDbPath,
+				);
+			} finally {
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		}
+
+		it("keeps the cached roster when discovery returned a different one", async () => {
+			const cached = await abortRefreshBehindWriteLock(() =>
+				Response.json({
+					models: [{ slug: "gpt-6.2-astra", display_name: "GPT-6.2-Astra", supported_in_api: true }],
+				}),
+			);
+			expect(cached?.models.map(model => model.id)).toEqual(["gpt-6.2-sol"]);
+		});
+
+		it("keeps the cached row's freshness and authority when discovery failed", async () => {
+			const cached = await abortRefreshBehindWriteLock(() => new Response("gateway timeout", { status: 504 }));
+			expect(cached).toMatchObject({ updatedAt: seededAt, authoritative: true });
+		});
 	});
 });

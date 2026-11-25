@@ -3,22 +3,24 @@ import { withModelDiscoveryTimeout } from "@oh-my-pi/pi-coding-agent/config/mode
 
 describe("withModelDiscoveryTimeout", () => {
 	it("aborts the signal passed to run when the timeout expires", async () => {
-		let capturedSignal: AbortSignal | undefined;
-		let abortedDuringRun = false;
+		let runSettledByAbort = false;
 
 		await expect(
 			withModelDiscoveryTimeout(15, signal => {
-				capturedSignal = signal;
-				return new Promise<string>(() => {
-					signal.addEventListener("abort", () => {
-						abortedDuringRun = true;
-					});
-				});
+				const { promise, reject } = Promise.withResolvers<string>();
+				signal.addEventListener(
+					"abort",
+					() => {
+						runSettledByAbort = true;
+						reject(signal.reason);
+					},
+					{ once: true },
+				);
+				return promise;
 			}),
 		).rejects.toThrow("model discovery timed out after 15ms");
 
-		expect(capturedSignal?.aborted).toBe(true);
-		expect(abortedDuringRun).toBe(true);
+		expect(runSettledByAbort).toBe(true);
 	});
 
 	it("clears the timeout without aborting on fast completion", async () => {

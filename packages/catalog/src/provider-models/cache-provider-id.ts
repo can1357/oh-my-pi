@@ -1,5 +1,5 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
-import { CODEX_BASE_URL } from "../wire/codex";
+import { CODEX_BASE_URL, isOfficialCodexApiUrl } from "../wire/codex";
 import { getCodexClientVersion } from "../wire/codex-version";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
@@ -143,10 +143,19 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "openai-codex": {
 			// The backend filters the roster by client version. A Codex-compatible
 			// gateway publishes its own roster; discovery is authoritative, so the
-			// namespace must follow the endpoint. The official backend keeps the
-			// unhashed namespace so existing caches stay valid.
+			// namespace must follow the endpoint. The official backend's bundled
+			// URL keeps an unhashed namespace, so configuring it explicitly or not
+			// reads one row.
+			// models-v2 (official backend only): earlier builds fell back from
+			// `/codex/models` to `/models`, whose ChatGPT Web roster (`-wm` slugs the
+			// Codex backend rejects) was cached as authoritative and hid plain Codex
+			// models for the full TTL. Gateway namespaces keep their rows, since
+			// `/models` is still a valid roster route there.
 			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "");
-			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${getCodexClientVersion()}`;
+			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:models-v2:${getCodexClientVersion()}`;
+			if (isOfficialCodexApiUrl(baseUrl)) {
+				return `${providerId}:models-v2:${getCodexClientVersion()}:${Bun.hash(baseUrl).toString(36)}`;
+			}
 			return `${providerId}:${getCodexClientVersion()}:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "kiro": {

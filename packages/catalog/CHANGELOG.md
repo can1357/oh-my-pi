@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex models such as GPT-6.2 Sol disappearing for up to two hours, failing with `Unknown model`, after a slow or failed model-list request on the official ChatGPT backend ([#20269](https://github.com/can1357/oh-my-pi/pull/20269) by [@lij113](https://github.com/lij113))
+
 ## [19.1.1] - 2026-11-23
 
 ### Added

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed model discovery that timed out still replacing the cached model list afterwards, which could hide available models until the cache expired ([#20269](https://github.com/can1357/oh-my-pi/pull/20269) by [@lij113](https://github.com/lij113))
+
 ## [19.1.1] - 2026-11-23
 
 ### Breaking Changes

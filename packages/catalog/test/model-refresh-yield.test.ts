@@ -235,4 +235,31 @@ describe("time-sliced model refresh", () => {
 		}
 		expect(cachedNames(cacheDbPath)).toEqual(models.map(model => model.name));
 	});
+
+	it("keeps the writer running when a queued write aborts while the writer yields a spent turn", async () => {
+		await using temp = await TempDir.create("@model-refresh-abort-yield-");
+		const cacheDbPath = temp.join("models.db");
+		const controller = new AbortController();
+		const aborted = writeModelCacheAsync(
+			PROVIDER,
+			1_000,
+			refreshModels("aborted", 3),
+			true,
+			"fp",
+			cacheDbPath,
+			[],
+			undefined,
+			controller.signal,
+		);
+		// Spend this turn's slice budget so the writer yields before its first transaction.
+		Bun.sleepSync(20);
+		// Microtasks only: the row queues and the writer parks on the immediate queue.
+		for (let tick = 0; tick < 50; tick++) await Promise.resolve();
+		controller.abort();
+
+		expect(await aborted).toBe("aborted");
+		const landed = refreshModels("landed", 2);
+		expect(await writeModelCacheAsync(PROVIDER, 2_000, landed, true, "fp", cacheDbPath)).toBe("written");
+		expect(cachedNames(cacheDbPath)).toEqual(landed.map(model => model.name));
+	});
 });

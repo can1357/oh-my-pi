@@ -886,9 +886,10 @@ function pruneOtherPolicies(db: Database, providerId: string, policy: string): v
  * found the payload unchanged and advanced only its freshness or authority;
  * `skipped` found the stored row already equal and wrote nothing;
  * `superseded` lost to a later write for the same provider before landing;
+ * `aborted` was cancelled by the caller's signal before landing and wrote nothing;
  * `failed` hit a storage error (cache writes are best-effort).
  */
-export type ModelCacheWriteOutcome = "written" | "refreshed" | "skipped" | "superseded" | "failed";
+export type ModelCacheWriteOutcome = "written" | "refreshed" | "skipped" | "superseded" | "aborted" | "failed";
 
 /** A provider snapshot serialized for storage as one payload row. */
 interface CacheRowWrite {
@@ -1146,7 +1147,10 @@ export function writeModelCache<TApi extends Api>(
  * rows and wait out another process's write lock asynchronously. Resolves once
  * the row is stored (or found unchanged); until then readers see the previous
  * row whole. When the same provider is written again before this lands, the
- * later write wins and this one resolves `superseded`.
+ * later write wins and this one resolves `superseded`. Once `signal` aborts,
+ * the row is never stored: a write still serializing resolves `aborted` when
+ * serialization ends, and one queued behind another connection's write lock
+ * resolves `aborted` at once.
  */
 export async function writeModelCacheAsync<TApi extends Api>(
 	providerId: string,
@@ -1157,7 +1161,9 @@ export async function writeModelCacheAsync<TApi extends Api>(
 	dbPath?: string,
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
+	signal?: AbortSignal,
 ): Promise<ModelCacheWriteOutcome> {
+	if (signal?.aborted) return "aborted";
 	let target: { resolvedPath: string; shared: boolean };
 	try {
 		target = resolveCacheDb(dbPath);
@@ -1172,6 +1178,7 @@ export async function writeModelCacheAsync<TApi extends Api>(
 	try {
 		const builder = new CacheRowBuilder(staticHeaderSources, restorableHeaderFallback);
 		await forEachInSlices(models, model => builder.add(model));
+		if (signal?.aborted) return "aborted";
 		const write = builder.finish(providerId, updatedAt, authoritative, staticFingerprint);
 		if (latestWriteClaims.get(key) !== claim) return "superseded";
 		if (runModelCacheDb(resolvedPath, shared, db => storedRowUnchanged(db, write))) {
@@ -1179,7 +1186,7 @@ export async function writeModelCacheAsync<TApi extends Api>(
 			return "skipped";
 		}
 		const { promise, resolve } = Promise.withResolvers<ModelCacheWriteOutcome>();
-		enqueueCacheWrite({ resolvedPath, shared, key, claim, write, settle: resolve });
+		enqueueCacheWrite({ resolvedPath, shared, key, claim, write, signal, settle: resolve });
 		return await promise;
 	} catch {
 		return "failed";
@@ -1196,6 +1203,10 @@ interface QueuedCacheWrite {
 	key: string;
 	claim: number;
 	write: CacheRowWrite;
+	/** Cancels the row while it waits; it settles `aborted` and is never stored. */
+	signal?: AbortSignal;
+	/** Removes the abort listener `enqueueCacheWrite` attached to `signal`. */
+	detachAbort?: () => void;
 	settle: (outcome: ModelCacheWriteOutcome) => void;
 }
 
@@ -1206,6 +1217,12 @@ const WRITE_LOCK_RETRY_MS = 5;
 
 function enqueueCacheWrite(job: QueuedCacheWrite): void {
 	writeQueue.push(job);
+	const signal = job.signal;
+	if (signal) {
+		const onAbort = () => settleQueuedWrite(job, "aborted");
+		signal.addEventListener("abort", onAbort, { once: true });
+		job.detachAbort = () => signal.removeEventListener("abort", onAbort);
+	}
 	if (writerActive) return;
 	writerActive = true;
 	// Refreshes resumed by one settled fetch enqueue from successive microtasks;
@@ -1216,6 +1233,7 @@ function enqueueCacheWrite(job: QueuedCacheWrite): void {
 function settleQueuedWrite(job: QueuedCacheWrite, outcome: ModelCacheWriteOutcome): void {
 	const index = writeQueue.indexOf(job);
 	if (index >= 0) writeQueue.splice(index, 1);
+	job.detachAbort?.();
 	if (outcome === "written" || outcome === "refreshed") readRowCache.delete(job.key);
 	recordWriteOutcome(job.write, outcome);
 	job.settle(outcome);
@@ -1238,7 +1256,11 @@ async function drainCacheWrites(): Promise<void> {
 	let lockWaitStart: number | undefined;
 	try {
 		while (writeQueue.length > 0) {
-			if (sliceSpent()) await yieldSlice();
+			if (sliceSpent()) {
+				await yieldSlice();
+				// Aborted rows leave the queue while the writer yields.
+				if (writeQueue.length === 0) break;
+			}
 			const { resolvedPath, shared } = writeQueue[0];
 			let landed: boolean;
 			try {

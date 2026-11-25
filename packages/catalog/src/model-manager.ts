@@ -246,7 +246,9 @@ function restoreCachedModelHeaders<TApi extends Api>(
  * when at least one configured remote source did not refresh successfully.
  * After a network fetch, models are built, merged and persisted in
  * time-budgeted slices across event-loop turns; the returned promise settles
- * once the cache row is stored.
+ * once the cache row is stored. Aborting `signal` cancels the in-flight
+ * fetches and any cache write not yet stored, and rejects with its reason
+ * (an `AbortError` when the reason is not an `Error`).
  */
 export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPayload = unknown>(
 	options: ModelManagerOptions<TApi, TModelsDevPayload>,
@@ -437,6 +439,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				signal,
 			);
 		} else {
 			// Remote fetch failed. Re-persist any prior catalog as a
@@ -499,9 +502,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					dbPath,
 					staticModels,
 					restorableHeaderFallback,
+					signal,
 				);
 			}
 		}
+		// A write the signal cancelled stored nothing; the caller has already given up.
+		throwIfAborted(signal);
 	}
 	const cacheContributed = cacheModels.length > 0;
 	const source: ModelResolutionSource = dynamicFetchSucceeded
