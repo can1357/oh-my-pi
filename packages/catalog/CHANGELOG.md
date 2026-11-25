@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Gemini models on Venice get their tool schemas sent in Google's dialect, so a JSON Schema `type` array no longer makes Venice reject the request ([#12269](https://github.com/can1357/oh-my-pi/issues/12269), [#20413](https://github.com/can1357/oh-my-pi/pull/20413) by [@JamieJ5926](https://github.com/JamieJ5926))
 - A Codex service tier offered by only some logged-in accounts (such as Ultrafast) is no longer hidden when the first account's plan lacks it.
 
 ## [19.2.0] - 2026-11-25
@@ -26,18 +27,6 @@
 
 ### Fixed
 
-- Gemini models on Venice get their tool schemas sent in Google's dialect, so a JSON Schema `type` array no longer makes Venice reject the request ([#12269](https://github.com/can1357/oh-my-pi/issues/12269), [#20413](https://github.com/can1357/oh-my-pi/pull/20413) by [@JamieJ5926](https://github.com/JamieJ5926))
-- QwenCloud Token Plan model discovery now reports the endpoint host and failure reason when `/models` cannot be loaded ([#20343](https://github.com/can1357/oh-my-pi/issues/20343)).
-- Fixed requests to Bedrock's Kimi K3.1 Pro Highspeed profiles failing with "The task request was rejected by the target"; requests now ask for 131,072 output tokens instead of the full context window ([#20240](https://github.com/can1357/oh-my-pi/pull/20240) by [@alblez](https://github.com/alblez))
-- Fixed Claude Opus 4.8+, Sonnet 5.5, Haiku 5.5, and Fable/Mythos 5 on Google Vertex failing every turn with a 400 (`Input tag 'tool_removal'`) after the active tool set changed mid-session ([#20275](https://github.com/can1357/oh-my-pi/issues/20275))
-- Claude models on OpenRouter now get their earlier thinking back on each follow-up request, so models that think between tool calls (e.g. Sonnet 4.6) keep doing so instead of only at the start and end of a tool loop
-- Added OpenCode's free `jev-1.13-free` judge to OpenCode Go; the `judge` role now prefers it on OpenCode Go and Zen logins over OpenRouter's paid Jev and chat models, falling back to Zen's `jev-1.14`
-- ai& now defaults to `moonshotai/kimi-k3`; its previous default, `moonshotai/kimi-k2.7-code`, is no longer served
-- StepFun's `dr-search-api` web search SKU no longer appears as a chat model
-
-### Fixed
-
-- Fixed OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models appearing as chat models that failed every request; they are now judge models
 - Improved QwenCloud Token Plan discovery errors by reporting the endpoint host and underlying failure reason when the models endpoint cannot be loaded.
 - Fixed Bedrock Kimi K3.1 requests failing because of unsupported temperature settings, and fixed Kimi K3.1 Pro Highspeed requests failing due to invalid output-token and reasoning-effort settings.
 - Fixed Claude models on Google Vertex failing after the active tool set changed during a session.
