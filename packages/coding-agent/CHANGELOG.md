@@ -38,6 +38,7 @@
 
 ### Fixed
 
+- Fixed a race that could leave skill and MCP routing hints uncached when two omp processes opened a new hint database at the same time.
 - Fixed image handling across model switches: vision models receive images, text-only models receive reusable descriptions, and compaction, branching, resumes, and advisor reviews preserve the appropriate representation.
 - Fixed numerous Tern and terminal UI regressions, including missing attachment thumbnails and icons, media viewers, prompt-cache details, ask/approval controls, autocomplete placement, key hints, symbol presets, tight layout, subagent navigation, draft selection, clipboard input, and copy/expand behavior.
 - Fixed submission and interaction failures so failed submissions restore the draft instead of exiting, queued input and attachments are not lost or misapplied, pending approvals can be edited safely, and keyboard and pointer actions work across forms and views.

@@ -142,35 +142,44 @@ describe("hint single-flight through the daemon", () => {
 		const storePath = path.join(harness.dir, "hints.db");
 		const callsPath = path.join(harness.dir, "calls.txt");
 		const fixture = path.join(import.meta.dir, "..", "fixtures", "hint-single-flight.ts");
-		const readyPaths = [0, 1].map(index => path.join(harness.dir, `ready-${index}`));
-		const children = readyPaths.map(readyPath =>
-			Bun.spawn([process.execPath, fixture, storePath, callsPath, readyPath], {
+		const children = [0, 1].map(index => {
+			const readyPath = path.join(harness.dir, `ready-${index}`);
+			const child = Bun.spawn([process.execPath, fixture, storePath, callsPath, readyPath], {
 				stdin: "pipe",
 				stdout: "ignore",
 				stderr: "pipe",
 				env: { ...process.env },
-			}),
-		);
+			});
+			return { child, readyPath, stderr: new Response(child.stderr).text() };
+		});
 		try {
 			// Both are loaded and waiting before either starts: they really ask at once.
-			for (const readyPath of readyPaths) await waitFor(() => Bun.file(readyPath).exists(), "child ready");
-			for (const child of children) {
+			await Promise.all(
+				children.map(({ child, readyPath, stderr }) =>
+					waitFor(async () => {
+						if (child.exitCode !== null || child.signalCode !== null) {
+							throw new Error(`child exited ${await child.exited} before ready: ${await stderr}`);
+						}
+						return Bun.file(readyPath).exists();
+					}, "child ready"),
+				),
+			);
+			for (const { child } of children) {
 				child.stdin.write("go\n");
 				await child.stdin.flush();
 			}
-			const exits = await Promise.all(
-				children.map(async child => ({
-					code: await child.exited,
-					stderr: await new Response(child.stderr).text(),
-				})),
+			await Promise.all(
+				children.map(async ({ child, stderr }) => {
+					const code = await child.exited;
+					if (code !== 0) throw new Error(`child exited ${code}: ${await stderr}`);
+				}),
 			);
-			for (const exit of exits) if (exit.code !== 0) throw new Error(`child exited ${exit.code}: ${exit.stderr}`);
 
 			const calls = (await fs.readFile(callsPath, "utf8")).trim().split("\n").sort();
 			expect(calls).toEqual(["hint-0", "hint-1", "hint-2", "hint-3", "hint-4", "hint-5"]);
 		} finally {
-			for (const child of children) child.kill("SIGKILL");
-			await Promise.all(children.map(child => child.exited));
+			for (const { child } of children) child.kill("SIGKILL");
+			await Promise.all(children.map(({ child }) => child.exited));
 		}
 	}, 60_000);
 });
