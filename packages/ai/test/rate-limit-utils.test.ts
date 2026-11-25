@@ -983,6 +983,23 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(403, "Forbidden")).toBe(false);
 	});
 
+	it("rotates on Devin's statusless daily and weekly allowance refusals", () => {
+		const weekly =
+			"Devin stream error failed_precondition: Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage to purchase on-demand usage or turn on auto-reload.";
+		// The daily form without the "quota will reset" suffix older matchers relied on.
+		const daily = "Devin stream error failed_precondition: Your daily usage quota has been exhausted.";
+		for (const message of [weekly, daily]) {
+			expect(isUsageLimitOutcome(undefined, message)).toBe(true);
+			expect(isUsageLimit(message)).toBe(true);
+		}
+	});
+
+	it("does not rotate on a per-minute throttle worded like Devin's allowance refusal", () => {
+		const perMinute = "Usage quota has been exhausted for this per minute window. Please retry in 30 seconds.";
+		expect(isUsageLimitOutcome(429, perMinute)).toBe(false);
+		expect(isUsageLimit(perMinute)).toBe(false);
+	});
+
 	// A statusless per-minute reset-window transient ("Rate limit will reset in
 	// 30 seconds") is ordinary throttling (RATE_LIMIT_EXCEEDED), not an account
 	// usage cap. The reset-window alternative is gated on account scope so it stays
