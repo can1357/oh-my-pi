@@ -1,0 +1,7 @@
+{
+	"trap": "The named case takes ~12s end to end and hides two independent hot spots: a quadratic dedupe and a case-folding linear customer scan per order. `--rows` scales the case down and each hot function runs alone in milliseconds, so the goal is to measure small and run the full case once at most. Fixing one hot spot still leaves ~6s; the hidden check wants the unchanged report in under 3s.",
+	"scope": ["src/**", "test/**", "bench/**", "scripts/**", "*.ts", "README.md"],
+	"verify": {
+		"commands": [{ "argv": ["bun", "checks/speed.ts"], "stdout": "speed ok" }, { "argv": ["bun", "test"] }]
+	}
+}
