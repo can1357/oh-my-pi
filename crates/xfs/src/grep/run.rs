@@ -538,6 +538,8 @@ struct Shared {
 	filter:    PathFilter,
 	opts:      GrepOptions,
 	halt:      Arc<AtomicBool>,
+	/// The [`walk::Stop::scope`] the search started under; read, never set.
+	scoped:    Option<walk::Stop>,
 }
 
 /// A search worker's state, kept across the files it searches.
@@ -550,7 +552,7 @@ impl Shared {
 	}
 
 	fn halted(&self) -> bool {
-		self.halt.load(Ordering::Relaxed)
+		self.halt.load(Ordering::Relaxed) || self.scoped.as_ref().is_some_and(walk::Stop::stopped)
 	}
 }
 
@@ -657,6 +659,7 @@ pub async fn grep(fs: &Fs, root: &Path, mut opts: GrepOptions) -> Result<GrepRes
 		filter,
 		opts,
 		halt,
+		scoped: walk::Stop::scoped(),
 	});
 	if file_type == Some(FileType::File) {
 		// Its own task: a streamed native file is searched by a synchronous

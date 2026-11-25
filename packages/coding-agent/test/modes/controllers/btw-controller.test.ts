@@ -266,6 +266,30 @@ describe("BtwController", () => {
 		await controller.dispose();
 	});
 
+	it("in Tern lets go of the focused note on a press outside it, however many arrive", async () => {
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Answer",
+			assistantMessage: createAssistantMessage("Answer"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		setNative(ctx.shell, true);
+		const controller = new BtwController(ctx);
+
+		await controller.start("Why?");
+		await drainBtwRequest();
+		const note = noteIn(ctx.shell);
+		expect(note.outside).toBeUndefined();
+		note.press("btw-focus");
+		expect(note.outside).toBe("btw-blur");
+		note.press("btw-blur");
+		expect(controller.isFocused()).toBe(false);
+		expect(note.role).toBe("omp.btw.note");
+		// A second press before Tern drew the first one's answer leaves it alone, unlike a click.
+		note.press("btw-blur");
+		expect(controller.isFocused()).toBe(false);
+		await controller.dispose();
+	});
+
 	it("in Tern sends composer drafts to the clicked note as its follow-ups", async () => {
 		const runEphemeralTurn = vi.fn(async (args: RunEphemeralTurnArgs) => ({
 			replyText: `Answer to ${args.promptText.length}`,
