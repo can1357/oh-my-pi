@@ -20,6 +20,9 @@
 ### Changed
 
 - The working terminal title now updates four times per second by default; an explicit spinner interval still controls both the title and the TUI.
+### Changed
+
+- `/model` opens faster after the session's model picker has warmed up.
 
 ## [19.2.0] - 2026-11-25
 

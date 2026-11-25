@@ -24,15 +24,13 @@ import { batch, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatModelSelectorValue, parseModelString, splitUpstreamRouting } from "../../../config/model-selector";
 import {
-	buildBrowserItems,
+	buildSessionModelScope,
 	ModelSearchIndex,
 	type ModelBrowserItem,
 	type ModelRoleLookup,
 	type ResolvedModelRoleValue,
 	type RoleAssignments,
-	resolveRoleAssignments,
 	scopedRolePool,
-	sortModelItems,
 } from "../../../modes/view-model/overlays/model-browser";
 import type {
 	ModelHubCallbacks,
@@ -646,39 +644,20 @@ export class ModelHubState {
 	#sync(): void {
 		const anchorIndex = this.#entries.findIndex(entry => entry.id === this.#activeEntryId);
 		const anchor = { id: this.#activeEntryId, index: anchorIndex, offset: anchorIndex - this.#sidebarScroll };
-		let allModels: ReadonlyArray<Model>;
-		let availableModels: ReadonlyArray<Model>;
-		if (this.scoped) {
-			this.#configError = undefined;
-			try {
-				allModels = scopedRolePool(
-					this.#scopedModels.map(entry => entry.model),
-					this.registry,
-				);
-			} catch (error) {
-				this.#configError = errorText(error);
-				allModels = this.#scopedModels.map(entry => entry.model);
-			}
-			availableModels = allModels;
-		} else {
-			const loadError = this.registry.getError();
-			this.#configError = loadError ? String(loadError) : undefined;
-			allModels = this.registry.getAll("all");
-			try {
-				availableModels = this.registry.getAvailable("all");
-			} catch (error) {
-				this.#configError = errorText(error);
-				availableModels = [];
-			}
-		}
-		const rolePool = this.scoped ? availableModels : this.registry.getAll("all");
-		this.#roles = resolveRoleAssignments(this.source, rolePool, availableModels);
+		const scope = buildSessionModelScope(
+			this.source,
+			this.registry,
+			this.#scopedModels.map(entry => entry.model),
+		);
+		this.#configError = scope.error;
+		this.#roles = scope.roles;
 		this.#buildRolesRows();
 
-		const mruOrder = this.source.mruOrder;
-		this.#availableItems = buildBrowserItems(availableModels);
-		void runSlicedWork(this.#warmSearch(this.#availableItems));
-		sortModelItems(this.#availableItems, { roles: this.#roles, mruOrder });
+		const { mruOrder } = scope;
+		if (this.#availableItems !== scope.availableItems) {
+			this.#availableItems = scope.availableItems;
+			void runSlicedWork(this.#warmSearch(this.#availableItems));
+		}
 		this.browser.setRoles(this.#roles);
 		this.browser.setMruOrder(mruOrder);
 		this.browser.setPerfStats(this.source.modelPerf);
@@ -690,7 +669,7 @@ export class ModelHubState {
 			if (this.#recentItems.length >= RECENT_LIMIT) break;
 		}
 		this.#recentSelectors = new Set(this.#recentItems.map(item => item.selector));
-		this.#buildSidebar(allModels, availableModels);
+		this.#buildSidebar(scope.catalogModels, scope.availableItems);
 		// A background rebuild keeps the focused entry's screen row (or its nearest survivor's).
 		if (anchor.index >= 0) {
 			const survivor = this.#entries.findIndex(entry => entry.id === anchor.id);
@@ -707,7 +686,7 @@ export class ModelHubState {
 		this.#bump();
 	}
 
-	#buildSidebar(allModels: ReadonlyArray<Model>, availableModels: ReadonlyArray<Model>): void {
+	#buildSidebar(allModels: ReadonlyArray<Model>, availableItems: ReadonlyArray<ModelBrowserItem>): void {
 		let disabled: ReadonlySet<string>;
 		try {
 			disabled = new Set(this.source.disabledProviders);
@@ -715,7 +694,7 @@ export class ModelHubState {
 			disabled = new Set();
 		}
 		const available = new Map<string, number>();
-		for (const model of availableModels) available.set(model.provider, (available.get(model.provider) ?? 0) + 1);
+		for (const item of availableItems) available.set(item.provider, (available.get(item.provider) ?? 0) + 1);
 		const catalog = new Map<string, number>();
 		for (const model of allModels) catalog.set(model.provider, (catalog.get(model.provider) ?? 0) + 1);
 
@@ -758,7 +737,7 @@ export class ModelHubState {
 		// Roles leads, so downward hops head into model scopes.
 		this.#fixedEntries = [
 			{ id: "roles", kind: "roles", label: "Roles", annotation: `${assigned}/${visibleRoles.length}` },
-			{ id: "all", kind: "all", label: "All models", annotation: String(availableModels.length) },
+			{ id: "all", kind: "all", label: "All models", annotation: String(availableItems.length) },
 		];
 		this.#unlockedProviders = [...unlocked].sort((a, b) => a.localeCompare(b)).map(id => providerEntryOf(id, false));
 		this.#lockedProviders = [...locked].sort((a, b) => a.localeCompare(b)).map(id => providerEntryOf(id, true));

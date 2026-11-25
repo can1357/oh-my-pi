@@ -4016,6 +4016,11 @@ export class ModelRegistry {
 		if (!this.#catalogMetrics.isEmpty) this.#catalogMetrics.resolve(model);
 	}
 
+	/** Identity of the current full catalog snapshot. Credential availability is checked separately. */
+	get catalogRevision(): object {
+		return this.#models;
+	}
+
 	/**
 	 * Get all models (built-in + custom) of one catalog kind.
 	 * If custom config had errors, returns only built-in models. The default

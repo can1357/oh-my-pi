@@ -20,11 +20,18 @@ import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settin
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { createModelBrowserSource } from "../src/modes/model-browser-source";
-import { ModelHub } from "../src/ui/overlays/pickers/model-hub";
-import { buildBrowserItems, buildSearchAffinity, modelSearchText, rankModelItems } from "../src/modes/view-model/overlays/model-browser";
-import { fuzzyRank } from "../src/utils/fuzzy";
+import {
+	buildBrowserItems,
+	buildSearchAffinity,
+	buildSessionModelScope,
+	modelSearchText,
+	rankModelItems,
+} from "../src/modes/view-model/overlays/model-browser";
 import { isSeparator } from "../src/ui/overlays/pickers/model-browser-state";
+import { ModelHub } from "../src/ui/overlays/pickers/model-hub";
 import { ModelHubState, resetProviderAutoRefreshGuard } from "../src/ui/overlays/pickers/model-hub-state";
+import { prewarmModelPicker } from "../src/ui/overlays/pickers/model-picker";
+import { fuzzyRank } from "../src/utils/fuzzy";
 import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 function normalize(lines: readonly string[]): string {
@@ -274,6 +281,30 @@ describe("ModelHub", () => {
 	});
 
 	describe("role chips and roles view", () => {
+		test("a prewarmed chat picker opens the hub without resolving roles again or hiding kind runners", async () => {
+			const chat = makeModel("test", "chat");
+			const image = makeModel("test", "image", 128_000, undefined, "image");
+			const settings = Settings.isolated({ modelRoles: { image: "test/image" } });
+			const registry = Object.assign(makeRegistry(() => [chat, image]), { prewarmCatalog: () => undefined });
+			await prewarmModelPicker({ source: createModelBrowserSource(settings), registry, scopedModels: [chat] });
+
+			const source = createModelBrowserSource(settings);
+			const resolve = vi.spyOn(source, "resolveRoleValue");
+			const hub = new ModelHubState(source, registry, [{ model: chat }], {
+				onAssign: () => {},
+				onUnassign: () => {},
+				onCancel: () => {},
+			});
+			try {
+				expect(hub.roles.image?.model).toBe(image);
+				expect(hub.availableItems.map(item => item.model)).toContain(image);
+				expect(buildSessionModelScope(source, registry, [chat]).items.map(item => item.model)).toEqual([chat]);
+				expect(resolve).not.toHaveBeenCalled();
+			} finally {
+				hub.dispose();
+			}
+		});
+
 		test("separates chat and kind roles and filters role tabs", () => {
 			const chat = makeModel("test", "chat-model");
 			const image = makeModel("test", "image-model", 128_000, undefined, "image");

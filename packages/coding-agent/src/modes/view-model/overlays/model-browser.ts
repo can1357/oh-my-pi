@@ -154,6 +154,8 @@ export interface ModelCompactionPoint {
 
 /** Read-only catalog surface consumed by model browsers. */
 export interface ModelBrowserRegistry {
+	/** Identity of the full catalog snapshot; without one, compare its rows. Availability can change independently. */
+	readonly catalogRevision?: object;
 	getError(): unknown;
 	getAvailable(kind?: ModelKind | "all"): Model[];
 	getAll(kind?: ModelKind | "all"): Model[];
@@ -534,9 +536,14 @@ function modelItemComparator(
 
 // ─── The session's model scope ──────────────────────────────────────────────
 
-/** Picker candidates and ordering inputs shared with composer model mentions. */
+/** The model hub and session picker share the same assignments, item objects, and display order. */
 export interface SessionModelScope {
+	/** Chat models (or the explicit `--models` list), for session picks and composer mentions. */
 	items: ModelBrowserItem[];
+	/** All available kinds, including runners for the hub's kind-specific roles. */
+	availableItems: ModelBrowserItem[];
+	/** The full or scoped catalog, including models the hub shows under locked providers. */
+	catalogModels: readonly Model[];
 	roles: RoleAssignments;
 	mruOrder: ReadonlyArray<string>;
 	error: string | undefined;
@@ -583,14 +590,22 @@ function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyA
 
 function* scopeFromInputs(
 	settings: ModelBrowserSource,
-	inputs: SessionModelScopeInputs,
-	mruOrder: ReadonlyArray<string>,
+	inputs: SessionModelScopeKey,
 ): Generator<void, SessionModelScope, undefined> {
-	const roles = yield* roleAssignmentsWork(settings, inputs.allModels, inputs.roleModels);
-	const items = buildBrowserItems(inputs.scoped ?? inputs.roleModels.filter(model => modelKind(model) === "chat"));
+	const { allModels, roleModels, scoped, mruOrder, error } = inputs;
+	const roles = yield* roleAssignmentsWork(settings, allModels, roleModels);
+	const availableItems = buildBrowserItems(roleModels);
 	yield;
-	sortModelItems(items, { roles, mruOrder });
-	return { items, roles, mruOrder, error: inputs.error };
+	sortModelItems(availableItems, { roles, mruOrder });
+	let items = availableItems;
+	if (!scoped) {
+		items = availableItems.filter(item => modelKind(item.model) === "chat");
+	} else if (scoped.length !== availableItems.length) {
+		// scopedRolePool appended non-chat runners; only explicit entries are session picks.
+		const listed = new Set(scoped);
+		items = availableItems.filter(item => listed.has(item.model));
+	}
+	return { items, availableItems, catalogModels: allModels, roles, mruOrder, error };
 }
 
 /** Whether two lists hold the same elements (by identity), in order. */
@@ -601,22 +616,16 @@ export function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
 }
 
 /** Everything a {@link SessionModelScope} is derived from, as read at one moment. */
-interface SessionModelScopeKey {
+interface SessionModelScopeKey extends SessionModelScopeInputs {
 	preferences: object;
 	revision: number;
-	inputs: SessionModelScopeInputs;
+	catalogRevision: object | undefined;
 	mruOrder: ReadonlyArray<string>;
 }
 
-/** The last scope built from one registry, with copies of every input it read. */
+/** The last scope built from one registry, with snapshots of its inputs. */
 interface CachedSessionModelScope {
-	preferences: object;
-	revision: number;
-	scoped: readonly Model[] | undefined;
-	allModels: readonly Model[];
-	roleModels: readonly Model[];
-	error: string | undefined;
-	mruOrder: readonly string[];
+	key: SessionModelScopeKey;
 	scope: SessionModelScope;
 }
 
@@ -629,27 +638,27 @@ interface ScopeTagged {
 
 /** The registry's last scope when it was built from `key`'s inputs. */
 function cachedSessionModelScope(
-	registry: ModelBrowserRegistry,
+	cached: CachedSessionModelScope | undefined,
 	key: SessionModelScopeKey,
 ): SessionModelScope | undefined {
-	const cached = (registry as ModelBrowserRegistry & ScopeTagged)[kSessionModelScope];
-	const { inputs } = key;
-	return cached &&
-		cached.preferences === key.preferences &&
-		cached.revision === key.revision &&
-		cached.error === inputs.error &&
-		(cached.scoped === undefined) === (inputs.scoped === undefined) &&
-		(inputs.scoped === undefined || sameItems(cached.scoped!, inputs.scoped)) &&
-		sameItems(cached.allModels, inputs.allModels) &&
-		sameItems(cached.roleModels, inputs.roleModels) &&
-		sameItems(cached.mruOrder, key.mruOrder)
+	if (!cached) return undefined;
+	const last = cached.key;
+	return last.preferences === key.preferences &&
+		last.revision === key.revision &&
+		last.catalogRevision === key.catalogRevision &&
+		last.error === key.error &&
+		(last.scoped === undefined) === (key.scoped === undefined) &&
+		(!key.scoped || sameItems(last.scoped!, key.scoped)) &&
+		(key.scoped || key.catalogRevision || sameItems(last.allModels, key.allModels)) &&
+		sameItems(last.roleModels, key.roleModels) &&
+		sameItems(last.mruOrder, key.mruOrder)
 		? cached.scope
 		: undefined;
 }
 
 /**
- * The session picker's model scope: chat models (or the `--models` scope) in
- * display order, with roles and MRU. The last scope per registry is reused
+ * The hub's and session picker's models in display order, with roles and MRU.
+ * The last scope per registry is reused
  * (shared by every caller: treat it as read-only) until the source's
  * preferences or revision, the MRU order, the scoped models, or the
  * registry's models or load error change.
@@ -674,27 +683,34 @@ export function* sessionModelScopeWork(
 	scopedModels: ReadonlyArray<Model>,
 ): Generator<void, SessionModelScope, undefined> {
 	const key: SessionModelScopeKey = {
+		// Reading the models can materialize the snapshot: read its revision afterwards.
+		...readScopeInputs(registry, scopedModels),
+		catalogRevision: registry.catalogRevision,
 		preferences: settings.preferences ?? settings,
 		revision: settings.revision,
-		inputs: readScopeInputs(registry, scopedModels),
 		mruOrder: settings.mruOrder,
 	};
-	const cached = cachedSessionModelScope(registry, key);
+	const tagged = registry as ModelBrowserRegistry & ScopeTagged;
+	const previous = tagged[kSessionModelScope];
+	const cached = cachedSessionModelScope(previous, key);
 	if (cached) return cached;
-	const scope = yield* scopeFromInputs(settings, key.inputs, key.mruOrder);
-	const raced = cachedSessionModelScope(registry, key);
-	if (raced) return raced;
-	const { inputs } = key;
-	(registry as ModelBrowserRegistry & ScopeTagged)[kSessionModelScope] = {
-		preferences: key.preferences,
-		revision: key.revision,
-		scoped: inputs.scoped && [...inputs.scoped],
-		allModels: [...inputs.allModels],
-		roleModels: [...inputs.roleModels],
-		error: inputs.error,
+
+	// The prewarm yields between roles. Keep the data we read, even for hosts
+	// returning mutable arrays; a versioned full catalog is already a snapshot.
+	const roleModels = [...key.roleModels];
+	const snapshot = {
+		...key,
+		scoped: key.scoped && [...key.scoped],
+		roleModels,
+		allModels: key.scoped ? roleModels : key.catalogRevision ? key.allModels : [...key.allModels],
 		mruOrder: [...key.mruOrder],
-		scope,
 	};
+	const scope = yield* scopeFromInputs(settings, snapshot);
+	if (previous !== tagged[kSessionModelScope]) {
+		// A foreground reader won; never evict its newer scope with older prewarm work.
+		return cachedSessionModelScope(tagged[kSessionModelScope], snapshot) ?? scope;
+	}
+	tagged[kSessionModelScope] = { key: snapshot, scope };
 	return scope;
 }
 
