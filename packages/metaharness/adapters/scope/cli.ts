@@ -24,6 +24,7 @@ import { parseArgs } from "node:util";
 import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { discoverSharedInfra } from "@oh-my-pi/typescript-edit-benchmark/in-process-client";
+import { BENCH_SETTINGS } from "../../src/bench-settings";
 import { renderComparison, renderReport, type ScopeResult, type ScopeRun, summarize } from "./result";
 import { loadTasks, type ScopeTask } from "./tasks";
 import { type PromptRewrite, rescoreRun, runTrial, type TrialConfig } from "./trial";
@@ -214,7 +215,7 @@ async function run(argv: string[]): Promise<void> {
 	if (values.rewrite) log(`  rewrite ${values.rewrite}`);
 	log(`  ${output}`);
 
-	const shared = await discoverSharedInfra();
+	const shared = await discoverSharedInfra({ settings: BENCH_SETTINGS });
 	const queue = tasks.flatMap(task => Array.from({ length: runs }, (_, index) => ({ task, attempt: index + 1 })));
 	try {
 		const worker = async (): Promise<void> => {
