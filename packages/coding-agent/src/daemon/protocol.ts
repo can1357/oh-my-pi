@@ -240,6 +240,13 @@ export interface DaemonCompletionUnregisterOptions {
 	preservePending?: boolean;
 }
 
+export interface DaemonUnitWatchOptions {
+	/** Called when unit observation loses daemon coverage (unexpected disconnect or failed watch registration). */
+	onGap?: (reason: string) => void;
+	/** Keep the event loop alive while watching (default true). Pass false for passive diagnostics. */
+	keepAlive?: boolean;
+}
+
 /**
  * Process-wide connection to the daemon, from `daemonClient()` in `client.ts`.
  * It spawns the daemon when none answers, asks an older daemon to `upgrade`,
@@ -266,7 +273,7 @@ export interface DaemonClient {
 	): (options?: DaemonCompletionUnregisterOptions) => void;
 	onNotify(owner: string, sink: (event: DaemonNotifyEvent) => void): () => void;
 	/** Board subscription; sends `watch` on first use. */
-	onUnit(sink: (event: DaemonUnitEvent) => void): () => void;
+	onUnit(sink: (event: DaemonUnitEvent) => void, options?: DaemonUnitWatchOptions): () => void;
 	/** Fires after the connection was re-established to a (possibly new) daemon; leases are gone. */
 	onReconnect(sink: () => void): () => void;
 	close(): void;

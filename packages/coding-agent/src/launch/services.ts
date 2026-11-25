@@ -16,6 +16,7 @@ import {
 	type DaemonResult,
 	type ProcSpec,
 	projectScope,
+	scopeKey,
 	type UnitPolicy,
 	type UnitScope,
 	type UnitSnapshot,
@@ -26,6 +27,7 @@ import type { ToolSession } from "../tools";
 import { isSharedBrowserUnit } from "../tools/browser/shared-daemon";
 import { resolveToCwd } from "../tools/path-utils";
 import { cfgLaunchEnabled, cfgLaunchPersist } from "../tools/settings";
+import { awaitServiceObservationBarrier } from "./diagnostic-observers";
 
 /** Unit kind of every named service. */
 const SERVICE_KIND = "proc";
@@ -208,9 +210,78 @@ async function request<O extends DaemonOp>(
 	operation: O,
 	signal?: AbortSignal,
 ): Promise<DaemonResult<O["op"]>> {
+	await awaitServiceObservationBarrier(serviceOwner(session));
 	const client = await daemonClient();
 	subscribe(session, client);
 	return client.request(operation, signal);
+}
+
+/** Diagnostic observation handle for a single project scope, independent of owned completion delivery. */
+export interface ServiceObservationHandle {
+	/** List current `proc` services in this project scope. */
+	list(signal?: AbortSignal): Promise<UnitSnapshot[]>;
+	/** Update the set of observed owners without re-subscribing. */
+	setOwners(owners: ReadonlySet<string>): void;
+	/** Stop observing settled service transitions. */
+	dispose(): void;
+}
+
+/**
+ * Observe settled `proc` service generations (`restarting`, `exited`, `failed`) for `owners`
+ * in `cwd`'s project scope without claiming owned completion delivery, acknowledging pending
+ * completions, or keeping the process event loop alive. Resolves once the daemon acknowledges
+ * `watch`, establishing a barrier for any fast service launched afterward.
+ */
+export async function observeProjectServices(
+	cwd: string,
+	owners: ReadonlySet<string>,
+	listener: (unit: UnitSnapshot) => void,
+	onGap?: (reason: string) => void,
+): Promise<ServiceObservationHandle> {
+	const [client, canonicalDir] = await Promise.all([daemonClient(), canonicalProjectDir(cwd)]);
+	const scope = projectScope(canonicalDir);
+	const expectedScopeKey = scopeKey(scope);
+	let watchedOwners = new Set(owners);
+	let disposed = false;
+	let armed = false;
+	const unsubscribe = client.onUnit(
+		event => {
+			if (disposed || event.removed) return;
+			const { unit } = event;
+			if (unit.kind !== SERVICE_KIND) return;
+			if (unit.state !== "restarting" && !TERMINAL_STATES[unit.state]) return;
+			if (scopeKey(unit.scope) !== expectedScopeKey) return;
+			if (!unit.owner || !watchedOwners.has(unit.owner)) return;
+			listener(unit);
+		},
+		{
+			keepAlive: false,
+			onGap: reason => {
+				if (armed && !disposed) onGap?.(reason);
+			},
+		},
+	);
+	try {
+		await client.request({ op: "watch" });
+		armed = true;
+	} catch (error) {
+		unsubscribe();
+		throw error;
+	}
+	return {
+		async list(signal?: AbortSignal): Promise<UnitSnapshot[]> {
+			const { units } = await client.request({ op: "list", scope, kind: SERVICE_KIND }, signal);
+			return units;
+		},
+		setOwners(next: ReadonlySet<string>): void {
+			watchedOwners = new Set(next);
+		},
+		dispose(): void {
+			if (disposed) return;
+			disposed = true;
+			unsubscribe();
+		},
+	};
 }
 
 async function serviceRef(

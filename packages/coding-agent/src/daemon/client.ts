@@ -32,6 +32,7 @@ import {
 	type DaemonResult,
 	type DaemonTunnel,
 	type DaemonUnitEvent,
+	type DaemonUnitWatchOptions,
 	type DaemonWelcome,
 	type OpenRequest,
 	type OpenResult,
@@ -391,6 +392,12 @@ class Tunnel implements DaemonTunnel {
 	}
 }
 
+interface UnitSinkRegistration {
+	sink: (event: DaemonUnitEvent) => void;
+	onGap?: (reason: string) => void;
+	keepAlive: boolean;
+}
+
 class DaemonConnection implements DaemonClient {
 	readonly #options: ConnectOptions;
 	#welcome: DaemonWelcome | undefined;
@@ -406,7 +413,7 @@ class DaemonConnection implements DaemonClient {
 	readonly #abandonedOpens = new Set<string>();
 	readonly #completionSinks = new Map<string, (event: DaemonCompletionEvent) => Promise<void> | void>();
 	readonly #notifySinks = new Map<string, (event: DaemonNotifyEvent) => void>();
-	readonly #unitSinks = new Set<(event: DaemonUnitEvent) => void>();
+	readonly #unitSinks = new Set<UnitSinkRegistration>();
 	readonly #reconnectSinks = new Set<() => void>();
 	/** Owners detached with `preservePending`: the daemon keeps their completions for a later replay. */
 	readonly #preservedOwners = new Set<string>();
@@ -622,12 +629,17 @@ class DaemonConnection implements DaemonClient {
 		};
 	}
 
-	onUnit(sink: (event: DaemonUnitEvent) => void): () => void {
-		this.#unitSinks.add(sink);
+	onUnit(sink: (event: DaemonUnitEvent) => void, options?: DaemonUnitWatchOptions): () => void {
+		const registration: UnitSinkRegistration = {
+			sink,
+			onGap: options?.onGap,
+			keepAlive: options?.keepAlive ?? true,
+		};
+		this.#unitSinks.add(registration);
 		this.#updateRef();
 		if (this.#unitSinks.size === 1) this.#watch();
 		return () => {
-			if (!this.#unitSinks.delete(sink)) return;
+			if (!this.#unitSinks.delete(registration)) return;
 			this.#updateRef();
 		};
 	}
@@ -796,7 +808,24 @@ class DaemonConnection implements DaemonClient {
 	}
 
 	#watch(): void {
-		void this.request({ op: "watch" }).catch(() => this.#scheduleReconnect());
+		void this.request({ op: "watch" }).catch(error => {
+			if (!this.#closed && this.#unitSinks.size > 0) {
+				this.#notifyUnitGap(`Daemon service observation registration failed: ${toError(error).message}`);
+			}
+			this.#scheduleReconnect();
+		});
+	}
+
+	#notifyUnitGap(reason: string): void {
+		if (this.#closed || this.#unitSinks.size === 0) return;
+		for (const registration of this.#unitSinks) {
+			if (!registration.onGap) continue;
+			try {
+				registration.onGap(reason);
+			} catch (error) {
+				logger.warn("Daemon unit observation gap listener failed", { error: toError(error).message });
+			}
+		}
 	}
 
 	/** Send the owner set (with pending unsubscribes and replay requests). */
@@ -854,7 +883,11 @@ class DaemonConnection implements DaemonClient {
 
 	/** Sinks that expect events: while any exists the connection keeps the process alive. */
 	#hasEventSinks(): boolean {
-		return this.#completionSinks.size > 0 || this.#notifySinks.size > 0 || this.#unitSinks.size > 0;
+		if (this.#completionSinks.size > 0 || this.#notifySinks.size > 0) return true;
+		for (const registration of this.#unitSinks) {
+			if (registration.keepAlive) return true;
+		}
+		return false;
 	}
 
 	/** Ref the connection while a reply or a subscribed event is awaited; an idle one must not hold the process. */
@@ -871,7 +904,7 @@ class DaemonConnection implements DaemonClient {
 			!this.#options.reconnect ||
 			this.#reconnectTimer !== undefined ||
 			(this.#link !== undefined && !this.#link.conn.closed) ||
-			(!this.#hasEventSinks() && this.#reconnectSinks.size === 0)
+			(!this.#hasEventSinks() && this.#unitSinks.size === 0 && this.#reconnectSinks.size === 0)
 		) {
 			return;
 		}
@@ -891,6 +924,11 @@ class DaemonConnection implements DaemonClient {
 	#onClose(conn: IpcConnection): void {
 		if (this.#link?.conn !== conn) return;
 		this.#link = undefined;
+		if (!this.#closed && this.#unitSinks.size > 0) {
+			this.#notifyUnitGap(
+				"Daemon service observation connection closed; completions during the coverage gap are unavailable",
+			);
+		}
 		// Leases die with the connection; nothing left to release.
 		this.#abandonedOpens.clear();
 		this.#rejectPending(new Error("Daemon connection closed"));
@@ -946,9 +984,9 @@ class DaemonConnection implements DaemonClient {
 				}
 				return;
 			case "unit":
-				for (const sink of this.#unitSinks) {
+				for (const registration of this.#unitSinks) {
 					try {
-						sink(event);
+						registration.sink(event);
 					} catch (error) {
 						logger.warn("Daemon unit sink failed", { unit: event.unit.id, error: toError(error).message });
 					}
