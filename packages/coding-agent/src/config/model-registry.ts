@@ -34,6 +34,7 @@ import {
 	clampsContextOverride,
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
+import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
 import { applyCatalogMetrics, CatalogMetricsIndex, catalogMetricsOf } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { getModelCacheWriteStats, readModelCache, retainModelCacheConnection } from "@oh-my-pi/pi-catalog/model-cache";
 import {
@@ -65,6 +66,7 @@ import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
 import { redactUrlForLog } from "../utils/redact-url";
+import { END_SLICE, runSlicedWork } from "../utils/sliced-work";
 import type { SearchParams } from "../web/search/providers/base";
 import type { SearchResponse } from "../web/search/types";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -304,6 +306,9 @@ type TaggedModel = Model<Api> & {
 	[kDiscoveredMerge]?: DiscoveredMerge;
 };
 
+/** Age past which a cached provider slice reads as stale. */
+const STANDARD_MODEL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 /**
  * Records `state` on `row` under `key`. Non-enumerable: object spreads that
  * derive a new row from `row` must not carry its memo along.
@@ -311,52 +316,6 @@ type TaggedModel = Model<Api> & {
 function tagModel<T>(row: Model<Api>, key: symbol, state: T): T {
 	Object.defineProperty(row, key, { value: state, writable: true, configurable: true });
 	return state;
-}
-
-/**
- * Main-thread time one slice of a sliced registry merge may run before it
- * yields the event loop: about half a 60 Hz frame, so input and rendering
- * keep up while thousands of discovered rows merge.
- */
-const MERGE_SLICE_MS = 8;
-
-/**
- * Advances `work` until it finishes or the slice has run {@link MERGE_SLICE_MS};
- * true once it finished. Each `yield` of `work` marks a point where it may pause.
- */
-function runMergeSlice(work: Iterator<void>): boolean {
-	const start = performance.now();
-	do {
-		if (work.next().done) return true;
-	} while (performance.now() - start < MERGE_SLICE_MS);
-	return false;
-}
-
-/**
- * Runs `work` in slices of {@link MERGE_SLICE_MS}, yielding one macrotask
- * between slices. The first slice runs synchronously: work that finishes
- * within it returns undefined and costs the caller no extra turn.
- */
-function runSlicedMerge(work: Iterator<void>): Promise<void> | undefined {
-	return runMergeSlice(work) ? undefined : finishSlicedMerge(work);
-}
-
-/** The slices of {@link runSlicedMerge} after the first, each behind a macrotask. */
-async function finishSlicedMerge(work: Iterator<void>): Promise<void> {
-	do {
-		await yieldMacrotask();
-	} while (!runMergeSlice(work));
-}
-
-/**
- * One event-loop turn through the immediate queue. Not a timer: `Bun.sleep(0)`
- * sits in the timer heap, which fake timers freeze, and a merge parked there
- * would never land under a caller that only advances time at its own deadlines.
- */
-function yieldMacrotask(): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	setImmediate(resolve);
-	return promise;
 }
 
 /**
@@ -2037,7 +1996,7 @@ export class ModelRegistry {
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerId of providerIds) {
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
-			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
+			const cache = readModelCache<Api>(cacheProviderId, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
 			const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 			const additiveSharedCatalogProvider = ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 			// An enabled, authenticated special provider runs its own discovery after startup.
@@ -2239,7 +2198,7 @@ export class ModelRegistry {
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
 		for (const providerConfig of this.#discoverableProviders) {
 			const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
-			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
+			const cache = readModelCache<Api>(cacheProviderId, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
 			if (!cache) {
 				this.#providerDiscoveryStates.set(providerConfig.provider, {
 					provider: providerConfig.provider,
@@ -2678,7 +2637,7 @@ export class ModelRegistry {
 	 * and every discovered row merged onto its reference. The results stay in
 	 * the row memos, so the land repeats none of it while its inputs hold and
 	 * runs as one short synchronous step. The work runs in slices
-	 * ({@link runSlicedMerge}) without touching the composed catalog: until the
+	 * ({@link runSlicedWork}) without touching the composed catalog: until the
 	 * pass lands, readers get the last landed catalog, as while the pass
 	 * fetched. Returns undefined when the work fit in the first slice.
 	 */
@@ -2691,7 +2650,7 @@ export class ModelRegistry {
 			builtInDiscovery,
 		);
 		if (touchedProviders.size === 0) return undefined;
-		return runSlicedMerge(this.#runtimeDiscoveryMergeWork(discovered, touchedProviders));
+		return runSlicedWork(this.#runtimeDiscoveryMergeWork(discovered, touchedProviders));
 	}
 
 	/** The work of {@link #prepareRuntimeDiscoveryLanding}; it may pause at every `yield`. */
@@ -3977,6 +3936,68 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Composes the full catalog ahead of its first reader (the model picker),
+	 * in slices ({@link runSlicedWork}) that yield the event loop: the cached
+	 * provider slices, then every bundled row's window policies (memoized on
+	 * the row), then the snapshot itself, which then reuses all of it. A reader
+	 * arriving first just does the rest. Undefined when the catalog is already
+	 * composed or the work fit in the first slice.
+	 */
+	prewarmCatalog(): Promise<void> | undefined {
+		if (this.#hasFullSnapshot) return undefined;
+		return runSlicedWork(this.#catalogPrewarmWork());
+	}
+
+	/** The work of {@link prewarmCatalog}; it may pause at every `yield` and stops once a reader composed the catalog. */
+	*#catalogPrewarmWork(): Generator<void | typeof END_SLICE, void, undefined> {
+		const now = Date.now();
+		for (const providerId of STARTUP_MODEL_CACHE_PROVIDER_IDS) {
+			if (!this.#pendingStandardCacheProviders.has(providerId)) continue;
+			// The parse is memoized per payload, so the slice load below reads the same
+			// rows: their window policies are resolved here a row per step.
+			const cache = readModelCache<Api>(
+				this.#resolveStartupModelCacheProviderId(providerId),
+				STANDARD_MODEL_CACHE_TTL_MS,
+				Date.now,
+				this.#cacheDbPath,
+			);
+			yield;
+			for (const row of cache?.models ?? []) {
+				if (row.provider !== providerId) continue;
+				this.#prewarmModel(row, now);
+				yield;
+			}
+			if (this.#hasFullSnapshot) return;
+			if (this.#pendingStandardCacheProviders.has(providerId)) this.#getCachedStandardModels(new Set([providerId]));
+			yield;
+		}
+		for (const provider of getBundledProviders()) {
+			const providerOverride = this.#providerOverrides.get(provider);
+			for (const bundled of getBundledModels(provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) {
+				this.#prewarmModel(
+					providerOverride ? this.#overriddenBuiltInModel(bundled, providerOverride, now) : bundled,
+					now,
+				);
+				yield;
+			}
+		}
+		for (const discovered of [...this.#cachedDiscoverableModels, ...this.#runtimeDiscoveredModels]) {
+			this.#prewarmModel(discovered, now);
+			yield;
+		}
+		getBundledModelReferenceIndex();
+		// The composition reuses all of the above but still runs as one step: let it start a slice.
+		yield END_SLICE;
+		if (!this.#hasFullSnapshot) this.#ensureFullSnapshot();
+	}
+
+	/** The memoized per-row work a composition does for `model`: its window policies and metric lookup keys. */
+	#prewarmModel(model: Model<Api>, now: number): void {
+		if (!model.contextWindowAuthoritative) this.#contextWindowResolution(model, now);
+		if (!this.#catalogMetrics.isEmpty) this.#catalogMetrics.resolve(model);
+	}
+
+	/**
 	 * Get all models (built-in + custom) of one catalog kind.
 	 * If custom config had errors, returns only built-in models. The default
 	 * excludes role-specific runners so existing session callers remain chat-only.
@@ -4036,12 +4057,16 @@ export class ModelRegistry {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
-			return this.#models.filter(
-				model =>
-					requested.has(model.provider.toLowerCase()) &&
-					isProviderAvailable(model.provider) &&
-					(kind === "all" || modelKind(model) === kind),
-			);
+			// Both provider checks once per provider, not per model.
+			const listed = new Map<string, boolean>();
+			return this.#models.filter(model => {
+				let keep = listed.get(model.provider);
+				if (keep === undefined) {
+					keep = requested.has(model.provider.toLowerCase()) && isProviderAvailable(model.provider);
+					listed.set(model.provider, keep);
+				}
+				return keep && (kind === "all" || modelKind(model) === kind);
+			});
 		}
 		const availableProviders = new Set(
 			this.#knownStaticProviders().filter(
