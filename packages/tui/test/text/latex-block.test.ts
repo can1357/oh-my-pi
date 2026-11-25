@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import { CORPUS_DIR, hasCorpus } from "@oh-my-pi/pi-tui/testing/corpus";
 import { latexToBlock } from "@oh-my-pi/pi-tui/text/latex-block";
 
 describe("latexToBlock (stacked display fractions)", () => {
@@ -335,9 +336,9 @@ describe("latexToBlock (2-D layout)", () => {
  * Corpus: markdown/math renders `$$\int_0^\infty e^{-x^2} \, dx = \frac{\sqrt{\pi}}{2}$$`
  * as a display block (each row behind one cell of markdown padding).
  */
-describe("latexToBlock corpus parity", () => {
+describe.skipIf(!hasCorpus("markdown/math/default.dark.json"))("latexToBlock corpus parity", () => {
 	it("draws the markdown/math display integral as captured", async () => {
-		const corpus = (await Bun.file(`${import.meta.dir}/../corpus/markdown/math/default.dark.json`).json()) as {
+		const corpus = (await Bun.file(`${CORPUS_DIR}/markdown/math/default.dark.json`).json()) as {
 			stages: { rows: Record<string, string[]> }[];
 		};
 		const rows = corpus.stages[0]!.rows["80"]!.map(row => stripVTControlCharacters(row).trimEnd());

@@ -13,10 +13,10 @@ import {
 	createOAuthProvenance,
 	NO_AUTH_SENTINEL,
 	type ResolvedApiKey,
+	refreshReasonFor,
 	resolveAfterRotation,
 } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
-import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { getProviderDefinition } from "../registry";
 import type { Api, FetchImpl, Model, Usage } from "../types";
@@ -250,7 +250,7 @@ export function buildGatewayApiKeyResolver(
 				{
 					...modelKeyOptions(model, sig),
 					forceRefresh: true,
-					refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+					refreshReason: refreshReasonFor(error),
 					rejectedAccessToken,
 				},
 			);

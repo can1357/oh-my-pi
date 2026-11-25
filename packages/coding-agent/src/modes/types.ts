@@ -76,7 +76,7 @@ import type {
 } from "../ui/shell";
 import type { StatusFacts, StatusLineSettings } from "../ui/status/facts";
 import type { ExecRun } from "../ui/transcript/exec-run";
-import type { AssistantMessageModel } from "../ui/transcript/messages/assistant-message";
+import type { AssistantMessageModel, ToolResultMedia } from "../ui/transcript/messages/assistant-message";
 import type { ReadGroup } from "../ui/transcript/read-group";
 import type { ToolCall, ToolCallResult } from "../ui/transcript/tool-block";
 import type { EventBus } from "../utils/event-bus";
@@ -113,6 +113,8 @@ export type YieldCompaction = ConversationPosition & {
 
 export type SubmittedUserInput = {
 	text: string;
+	/** Submission time shared by the optimistic prompt bubble and its persisted turn. */
+	submittedAt?: number;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	customType?: string;
@@ -180,11 +182,13 @@ export interface StatusLineView {
 
 /**
  * The status line's data: one {@link StatusFacts} snapshot the composer chrome and the footer
- * draw, recomputed from the viewed session, settings, git and quota watchers.
+ * draw, recomputed from the viewed session, settings, git and quota reads.
  */
 export interface StatusLineModel extends StatusLineView {
 	/** Re-read session-derived facts now (usage, model, context, modes). Replaces `statusLine.invalidate()`. */
 	refresh(): void;
+	/** Re-read the git/jj facts too: a user `!`/`$` command may have moved HEAD or edited the tree. */
+	refreshVcs(): void;
 	/** Restart the active-processing clock (new session, `/new`). */
 	resetActiveTime(): void;
 	/** A turn started (the active clock runs). */
@@ -252,8 +256,10 @@ export interface AssistantView {
 	readonly finalized: Signal<boolean>;
 	/** Session-resolved destinations of the reply's relative prose links. */
 	readonly linkTargets: Signal<ReadonlyMap<string, string>>;
-	/** Images grouped reads produced, by tool call id. */
-	readonly toolResultImages: Signal<ReadonlyMap<string, readonly ImageContent[]>>;
+	/** Media grouped reads produced, by tool call id. */
+	readonly toolResultMedia: Signal<ReadonlyMap<string, ToolResultMedia>>;
+	/** Record the latest media produced by a grouped read. */
+	setToolResultMedia(toolCallId: string, media: ToolResultMedia): void;
 	readonly cacheInvalidation: Signal<CacheInvalidation | undefined>;
 	readonly servedModelMismatch: Signal<ServedModelMismatch | undefined>;
 	readonly turnUsage: Signal<TurnUsageSummary | undefined>;
@@ -439,7 +445,8 @@ export interface InteractiveModeContext {
 	 * `insertTextAttachment`, `insertAtom`, `pendingImages`, `chips()`), history (`addToHistory`),
 	 * `submit()`, state (`setState`, `setFaint`, `setBorderColor`, `setDisableSubmit`, `setSlots`)
 	 * and extension hooks (`addKeyHandler` — runs before the composer's own bindings while it has
-	 * focus, the home of app editor actions —, `addDecorator`, `setSubmitTransform`, `setShape`).
+	 * focus, the home of app editor actions —, `addPasteHandler` — runs before the composer types
+	 * or collapses a paste —, `addDecorator`, `setSubmitTransform`, `setShape`).
 	 * `composer.field` is the node to focus for typing. Replaces `editor` / `editorContainer`.
 	 */
 	readonly composer: Composer;

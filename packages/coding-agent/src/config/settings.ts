@@ -30,6 +30,7 @@ import {
 	MAIN_CONFIG_FILENAMES,
 	procmgr,
 } from "@oh-my-pi/pi-utils";
+import { pollFile } from "@oh-my-pi/pi-natives/file-poll";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
@@ -159,8 +160,10 @@ type PersistedReloadMode = "strict" | "keep-last-good";
 /** Layer refreshes serialized by `Settings.#exclusive`: disk reloads and cwd re-scopes. */
 type LayerRefreshKind = PersistedReloadMode | "rescope";
 
-/** Quiet period after the last config-file event before the watcher reloads from disk. */
+/** Quiet period after the last config-file change before reloading from disk. */
 const CONFIG_WATCH_DEBOUNCE_MS = 200;
+/** Stat-poll interval for config sources while {@link Settings.startWatching} is active. */
+const CONFIG_POLL_INTERVAL_MS = 500;
 
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
@@ -826,9 +829,9 @@ export class Settings {
 	#activeReload?: { kind: LayerRefreshKind; promise: Promise<void> };
 	/** Whether {@link startWatching} is active. */
 	#watchingFiles = false;
-	/** Directory watchers for config sources, keyed by directory, with the basenames that trigger a reload. */
-	#fileWatchers = new Map<string, { watcher: fs.FSWatcher; names: Set<string> }>();
-	/** Debounce timer for watcher-triggered reloads. */
+	/** Disposers of the stat polls on config sources, keyed by resolved path. */
+	#configPolls = new Map<string, () => void>();
+	/** Debounce timer for poll-triggered reloads. */
 	#watchReloadTimer?: NodeJS.Timeout;
 
 	/** Whether to persist changes */
@@ -1437,19 +1440,20 @@ export class Settings {
 	}
 
 	/**
-	 * Apply on-disk edits live: watch the directories holding config.yml, the
-	 * project settings files, and `--config` overlays, and run a debounced
-	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values; a single value this build cannot read keeps its
-	 * last good value). Arming a watch also schedules one reload, so
-	 * edits that landed before it went live are not lost. Only the persisting
-	 * process-global instance watches; other instances ignore the call. Stopped
-	 * by {@link stopWatching} / {@link cancelPendingSaves}.
+	 * Apply on-disk edits live: stat-poll config.yml, the project settings
+	 * files, and `--config` overlays, and run a debounced keep-last-good reload
+	 * (a file that fails to parse or validate keeps its layer's last good
+	 * values; a single value this build cannot read keeps its last good value).
+	 * Each poll stats its path through every symlink, so atomic saves and
+	 * retargeted links surface like edits. Arming a poll also schedules one
+	 * reload, so edits that landed before it went live are not lost. Only the
+	 * persisting process-global instance watches; other instances ignore the
+	 * call. Stopped by {@link stopWatching} / {@link cancelPendingSaves}.
 	 */
 	startWatching(): void {
 		if (this.#watchingFiles || !this.#persist || this.#savesCancelled || globalInstance !== this) return;
 		this.#watchingFiles = true;
-		this.#syncFileWatchers();
+		this.#syncConfigPolls();
 	}
 
 	/** Stop config-file watching started by {@link startWatching}; idempotent. */
@@ -1457,116 +1461,46 @@ export class Settings {
 		this.#watchingFiles = false;
 		clearTimeout(this.#watchReloadTimer);
 		this.#watchReloadTimer = undefined;
-		for (const { watcher } of this.#fileWatchers.values()) watcher.close();
-		this.#fileWatchers.clear();
+		for (const stop of this.#configPolls.values()) stop();
+		this.#configPolls.clear();
 	}
 
-	/** Directory → basenames whose events should trigger a reload, for every current config source. */
-	#configWatchTargets(): Map<string, Set<string>> {
-		const targets = new Map<string, Set<string>>();
-		const addTarget = (dir: string, name: string) => {
-			const names = targets.get(dir);
-			if (names) names.add(name);
-			else targets.set(dir, new Set([name]));
-		};
-		const addFile = (file: string) => {
-			// Walk physically so every symlink hop (including profile/ancestor
-			// directory links) is observed, not just the logical file and final
-			// realpath. Physical directory keys also re-arm a watch after retargeting.
-			const absolute = path.resolve(file);
-			let dir = path.parse(absolute).root;
-			let segments = physicalTargetSegments(absolute);
-			let hops = 0;
-			while (segments.length > 0) {
-				const segment = segments.shift()!;
-				if (segment === "" || segment === ".") continue;
-				if (segment === "..") {
-					dir = path.dirname(dir);
-					continue;
-				}
-				const current = path.join(dir, segment);
-				if (segments.length === 0) addTarget(dir, segment);
-				try {
-					if (fs.lstatSync(current).isSymbolicLink()) {
-						addTarget(dir, segment);
-						if (++hops > MAX_SYMLINK_HOPS) return;
-						const target = fs.readlinkSync(current);
-						if (path.isAbsolute(target)) dir = path.parse(target).root;
-						segments = [...physicalTargetSegments(target), ...segments];
-					} else {
-						dir = current;
-					}
-				} catch {
-					// Watch the nearest existing parent, even when several
-					// directories or a symlink's referent are missing.
-					addTarget(dir, segment);
-					return;
-				}
-			}
-		};
-		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
+	/** Every current config source, resolved; missing ones are polled too, so their creation is seen. */
+	#configWatchPaths(): Set<string> {
 		const projectCwd = path.resolve(this.#cwd);
 		const projectConfigDir = getProjectAgentDir(projectCwd);
-		addFile(path.join(projectConfigDir, "config.yml"));
-		addFile(path.join(projectConfigDir, "settings.json"));
-		addFile(path.join(projectCwd, ".claude", "settings.json"));
-		for (const file of this.#projectSourcePaths) addFile(file);
-		for (const file of this.#configFiles) addFile(file);
-		return targets;
+		const files = [
+			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
+			path.join(projectConfigDir, "config.yml"),
+			path.join(projectConfigDir, "settings.json"),
+			path.join(projectCwd, ".claude", "settings.json"),
+			...this.#projectSourcePaths,
+			...this.#configFiles,
+		];
+		return new Set(files.map(file => path.resolve(file)));
 	}
 
-	/**
-	 * Reconcile directory watchers with the current config sources. Watching
-	 * directories (not files) keeps atomic rename-over writes observable.
-	 */
-	#syncFileWatchers(): void {
+	/** Reconcile the stat polls with the current config sources. */
+	#syncConfigPolls(): void {
 		if (!this.#watchingFiles) return;
-		const targets = this.#configWatchTargets();
-		let armed = false;
-		for (const [dir, entry] of this.#fileWatchers) {
-			if (targets.has(dir)) continue;
-			entry.watcher.close();
-			this.#fileWatchers.delete(dir);
+		const files = this.#configWatchPaths();
+		for (const [file, stop] of this.#configPolls) {
+			if (files.has(file)) continue;
+			stop();
+			this.#configPolls.delete(file);
 		}
-		for (const [dir, names] of targets) {
-			const existing = this.#fileWatchers.get(dir);
-			if (existing) {
-				// A newly followed target can share a directory with the old one.
-				// Events for its name were filtered out while the reload was reading
-				// the files, so reconcile once even though no new watch was opened.
-				for (const name of names) {
-					if (!existing.names.has(name)) {
-						armed = true;
-						break;
-					}
-				}
-				existing.names = names;
-				continue;
-			}
-			let watcher: fs.FSWatcher;
-			try {
-				watcher = fs.watch(dir, { persistent: false }, (_event, filename) => {
-					const entry = this.#fileWatchers.get(dir);
-					if (!entry || entry.watcher !== watcher) return;
-					if (filename && !entry.names.has(path.basename(filename.toString()))) return;
-					this.#scheduleWatchReload();
-				});
-			} catch (error) {
-				if (!isEnoent(error))
-					logger.debug("Settings: cannot watch config directory", { dir, error: String(error) });
-				continue;
-			}
-			watcher.on("error", error => {
-				logger.debug("Settings: config directory watcher failed", { dir, error: String(error) });
-				watcher.close();
-				if (this.#fileWatchers.get(dir)?.watcher === watcher) this.#fileWatchers.delete(dir);
-			});
-			this.#fileWatchers.set(dir, { watcher, names });
+		let armed = false;
+		for (const file of files) {
+			if (this.#configPolls.has(file)) continue;
+			this.#configPolls.set(
+				file,
+				pollFile(file, () => this.#scheduleWatchReload(), CONFIG_POLL_INTERVAL_MS),
+			);
 			armed = true;
 		}
-		// The sources were last read before a watch or name was added. Bun also
-		// arms macOS FSEvents asynchronously, so a write in between may raise no
-		// event. Re-read once; the next sync adds nothing new, so it settles.
+		// The sources were last read before a new poll took its first stat,
+		// which is its baseline: a write in between raises no change. Re-read
+		// once; the next sync adds nothing new, so it settles.
 		if (armed) this.#scheduleWatchReload();
 	}
 
@@ -1587,8 +1521,8 @@ export class Settings {
 		} catch (error) {
 			logger.warn("Settings: failed to apply on-disk config change", { error: String(error) });
 		}
-		// Sources may have appeared, moved, or vanished; re-target the watchers.
-		this.#syncFileWatchers();
+		// Sources may have appeared, moved, or vanished; re-target the polls.
+		this.#syncConfigPolls();
 	}
 
 	/**
@@ -1905,7 +1839,7 @@ export class Settings {
 			}
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
-			this.#syncFileWatchers();
+			this.#syncConfigPolls();
 		} catch (error) {
 			settled.reject(error);
 			throw error;

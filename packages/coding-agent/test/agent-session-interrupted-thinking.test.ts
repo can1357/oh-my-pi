@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, agentLoop } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, Model, ThinkingContent } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -229,7 +230,7 @@ describe("AgentSession interrupted thinking persistence", () => {
 		// The thinking is stripped from the provider request only: the LLM sees the
 		// assistant turn without the demoted run, plus the reasoning as a hidden
 		// developer continuity turn.
-		const llm = convertToLlm(messages);
+		const llm = convertToLlm(messages, harness.model);
 		const assistantLlm = llm.find(entry => entry.role === "assistant");
 		expect(assistantLlm).toBeDefined();
 		expect(
@@ -238,6 +239,41 @@ describe("AgentSession interrupted thinking persistence", () => {
 		const developerLlm = llm.filter(entry => entry.role === "developer");
 		expect(developerLlm.some(entry => JSON.stringify(entry.content).includes(REASONING_TEXT))).toBe(true);
 	});
+
+	it("gates saved continuity by the receiving model, without rewriting warm history", async () => {
+		const { model, session, sessionManager } = createSession();
+		await emitAssistantEnd(
+			session,
+			sessionManager,
+			thinkingAssistant(model, USER_INTERRUPT_LABEL),
+			entry => entry.type === "custom_message" && entry.customType === INTERRUPTED_THINKING_MESSAGE_TYPE,
+		);
+		const messages = session.agent.state.messages;
+		const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		for (const reader of [model, claude, model]) {
+			const expected = reader === model;
+			// Side requests can override the session's model even when its history and caches are unchanged.
+			const side = await session.convertMessagesToLlm(messages, undefined, reader);
+			expect(JSON.stringify(side).includes(REASONING_TEXT)).toBe(expected);
+			// The primary loop can likewise resolve a different model at the request boundary.
+			await agentLoop(
+				[{ role: "user", content: "continue", timestamp: 3 }],
+				{ systemPrompt: [], messages, tools: [] },
+				{ model, getModel: () => reader, convertToLlm },
+				undefined,
+				mock.stream,
+			).result();
+			expect(JSON.stringify(mock.calls.at(-1)!.context.messages).includes(REASONING_TEXT)).toBe(expected);
+		}
+		expect(messages.some(isInterruptedThinkingMessage)).toBe(true);
+		expect(
+			sessionManager
+				.getBranch()
+				.some(entry => entry.type === "custom_message" && entry.customType === INTERRUPTED_THINKING_MESSAGE_TYPE),
+		).toBe(true);
+	});
+
 	it("skips hidden continuity for a Claude target — reasoning never replays as text", async () => {
 		const harness = createSession(undefined, ["anthropic", "claude-sonnet-4-5"]);
 		await emitAssistantEnd(

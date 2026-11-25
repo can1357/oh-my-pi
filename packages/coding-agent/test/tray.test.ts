@@ -20,7 +20,7 @@ import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
-import { Tray, type TrayAgentItem, TrayModel } from "../src/ui/dock";
+import { Tray, type TrayAgentItem, TrayModel, trayDoingText } from "../src/ui/dock";
 
 function progress(id: string, overrides: Partial<AgentProgress> = {}): AgentProgress {
 	return {
@@ -512,13 +512,16 @@ describe("tray items", () => {
 		expect(done?.item === "done" && done.entries[0]?.name).toBe("Old");
 	});
 
-	it("follows a running agent's stream between calls: the call it writes, its newest line, its reasoning", () => {
+	it("shows a running agent's latest call: the one it runs, else writes, else its last, with what that changed", () => {
 		const f = fixture();
 		f.refs.push(ref("Scout", "running"));
 		const last = {
 			tool: "edit",
-			args: "src/norm.py",
+			args: "src/norm.py, ~/lib/test_norm.py",
 			argsKey: "path",
+			intent: "Fixing the norm",
+			added: 42,
+			removed: 12,
 			endMs: 30_000,
 		};
 		const writing = {
@@ -526,45 +529,39 @@ describe("tray items", () => {
 			tool: "write",
 			args: "tests/test_norm.py",
 			argsKey: "path",
+			intent: "Writing the norm test: Cover the zero vector",
 		} as const;
-		const doing = (overrides: Partial<AgentProgress>): [string, string] => {
+		const doing = (overrides: Partial<AgentProgress>): string => {
 			f.sessions.splice(0, 1, observed("Scout", "active", { recentTools: [last], ...overrides }));
 			const card = buildTrayItems(input(f), new TrayMemory()).items[0];
-			return card?.item === "agent" ? [card.tool, card.text] : ["", ""];
+			return card?.item === "agent" ? trayDoingText(card) : "";
 		};
-		expect(doing({})).toEqual(["edit", "src/norm.py"]);
-		expect(doing({ streaming: writing })).toEqual(["write", "tests/test_norm.py"]);
-		expect(
-			doing({
-				streaming: {
-					...writing,
-					intent: "Writing the norm test: Cover the zero vector",
-				},
-			}),
-		).toEqual(["write", "Writing the norm test"]);
-		expect(
-			doing({
-				currentTool: "bash",
-				currentToolArgs: "[ -f norm.ts ]: echo found",
-			}),
-		).toEqual(["bash", "[ -f norm.ts ]: echo found"]);
-		expect(
-			doing({
-				streaming: { kind: "text" },
-				recentOutput: ["**Next**, the norm test", "Fixed the edit"],
-			}),
-		).toEqual(["", "Next, the norm test"]);
-		expect(doing({ streaming: { kind: "thinking" } })).toEqual(["", "Thinking"]);
-		// A call that runs outranks what streams beside it.
+		// File names only, never the intent; an edit's diff counts at the end.
+		expect(doing({})).toBe("Edit norm.py, test_norm.py +42 −12");
+		// Reasoning and prose between calls leave the last call shown.
+		expect(doing({ streaming: { kind: "thinking" } })).toBe("Edit norm.py, test_norm.py +42 −12");
+		expect(doing({ streaming: { kind: "text" }, recentOutput: ["Next, the norm test"] })).toBe(
+			"Edit norm.py, test_norm.py +42 −12",
+		);
+		expect(doing({ recentTools: [{ ...last, removed: 0 }] })).toBe("Edit norm.py, test_norm.py +42");
+		expect(doing({ recentTools: [{ ...last, added: undefined, removed: undefined, isError: true }] })).toBe(
+			"Edit norm.py, test_norm.py failed",
+		);
+		expect(doing({ streaming: writing })).toBe("Write test_norm.py");
+		expect(doing({ currentTool: "ast_grep", currentToolArgs: "fn $A($$$)", currentToolArgsKey: "pattern" })).toBe(
+			"Ast grep fn $A($$$)",
+		);
+		// A call that runs outranks what streams beside it; a command keeps its paths.
 		expect(
 			doing({
 				currentTool: "bash",
-				currentToolArgs: "bun test",
+				currentToolArgs: "bun test test/norm.test.ts",
 				currentToolArgsKey: "command",
 				streaming: writing,
 			}),
-		).toEqual(["bash", "bun test"]);
-		// The closer look ends with the call being written, as the card says.
+		).toBe("Bash bun test test/norm.test.ts");
+		expect(doing({ recentTools: [], streaming: { kind: "thinking" } })).toBe("Thinking");
+		// The closer look has the room for intents; it ends with the call being written.
 		expect(
 			trayAgentDetail(
 				observed("Scout", "active", {
@@ -574,10 +571,10 @@ describe("tray items", () => {
 				60_000,
 			).tail,
 		).toEqual([
-			{ tool: "edit", text: "src/norm.py", state: "ok", age: undefined },
+			{ tool: "edit", text: "Fixing the norm", state: "ok", age: undefined },
 			{
 				tool: "write",
-				text: "tests/test_norm.py",
+				text: "Writing the norm test",
 				state: "run",
 				age: undefined,
 			},

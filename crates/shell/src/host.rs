@@ -28,8 +28,8 @@ use parking_lot::Mutex;
 use crate::{
 	bash::{
 		Deadline, Event, ExitStatus, ExtProc, FdRef, File, FileKind, Fs, IntrinsicId, Invocation,
-		ModeId, NativeRef, OsHandle, ResolveCtx, Resolved, Rlimit, Signal, SpawnFuture, SpawnSpec,
-		StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict,
+		ModeId, NativeRef, OsHandle, ProcUsage, ResolveCtx, Resolved, Rlimit, Signal, SpawnFuture,
+		SpawnSpec, StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict,
 	},
 	commands::{self, SessionCommands},
 	output_decode,
@@ -605,10 +605,11 @@ impl crate::bash::Host for PiHost {
 	/// On Windows, a utility written in the syntax of the System32 program it
 	/// shadows (`find /c /v ""`, `sort /r`, `timeout /t 5`, `whoami /all`)
 	/// goes to `PATH`'s program of that name ([`crate::cmd_dialect`]).
-	/// Elsewhere, an extra given an option it does not implement (`ps --forest`,
-	/// `tar --hard-dereference`) goes to `PATH`'s program, which may have it;
-	/// with none there the extra runs and reports the option. Windows' `PATH`
-	/// programs of those names are System32's, a different command language.
+	/// Elsewhere, an extra or tool given an option it does not implement (`ps
+	/// --forest`, `tar --hard-dereference`, `time -o`) goes to `PATH`'s
+	/// program, which may have it; with none there the builtin runs and
+	/// reports the option. Windows' `PATH` programs of those names are
+	/// System32's, a different command language.
 	/// A shell command line the engine's own shell does not stand in for
 	/// (`bash -i`, restricted mode) goes to `PATH`'s shell
 	/// ([`loopback::needs_program`]).
@@ -619,27 +620,32 @@ impl crate::bash::Host for PiHost {
 		(cfg!(windows)
 			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default()))
 			|| (!cfg!(windows)
-				&& omp_builtins::extras::lacks_option(
-					&name.to_str_lossy(),
-					argv
-						.iter()
-						.map(|arg| arg.to_str_lossy().into_owned())
-						.collect(),
-				))
+				&& (crate::tools::lacks_option(name, argv)
+					|| omp_builtins::extras::lacks_option(
+						&name.to_str_lossy(),
+						argv
+							.iter()
+							.map(|arg| arg.to_str_lossy().into_owned())
+							.collect(),
+					)))
 	}
 
 	/// Only extras whose whole effect is a process lifetime (`sleep`, `yes`,
-	/// `nohup`, `timeout`) give way to `PATH`'s program in a lone `&` job, so
-	/// `$!` names a pid OS tools see. Any other extra keeps its own dialect
-	/// and the `scheme://` paths only builtins open.
+	/// `timeout`) give way to `PATH`'s program in a lone `&` job, so `$!`
+	/// names a pid OS tools see. Any other extra keeps its own dialect and the
+	/// `scheme://` paths only builtins open. `nohup` stays the tool: only it
+	/// detaches its operand from the cancel and the teardown (`PATH`'s
+	/// `nohup` would die with them), and its `$!` already names the
+	/// operand's process.
 	fn prefers_background_program(&mut self, name: &BStr, resolved: &Resolved) -> bool {
-		const PROGRAMS: [&[u8]; 4] = [b"nohup", b"sleep", b"timeout", b"yes"];
+		const PROGRAMS: [&[u8]; 3] = [b"sleep", b"timeout", b"yes"];
 		// A GNU-style invocation must not acquire System32's incompatible
 		// grammar just because it has an `&` (notably `timeout N COMMAND`).
 		if cfg!(windows) && crate::cmd_dialect::shadows_windows_program(name) {
 			return false;
 		}
-		matches!(resolved, Resolved::Native(_) | Resolved::Tool(_)) && PROGRAMS.contains(&name.as_bytes())
+		matches!(resolved, Resolved::Native(_) | Resolved::Tool(_))
+			&& PROGRAMS.contains(&name.as_bytes())
 	}
 
 	/// The run's session commands ([`crate::commands`]) come before shell
@@ -995,6 +1001,10 @@ impl ExtProc for Observed {
 
 	fn cont(&mut self) -> io::Result<()> {
 		self.child.cont()
+	}
+
+	fn usage(&mut self) -> Option<ProcUsage> {
+		self.child.usage()
 	}
 }
 

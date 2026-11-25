@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { CORPUS_DIR, hasCorpus } from "@oh-my-pi/pi-tui/testing/corpus";
 import { padTo, replaceTabs, spaces, truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 
 interface Fixture {
@@ -12,7 +13,7 @@ interface Fixture {
 	stages: { rows: Record<string, string[]> }[];
 }
 
-const CORPUS = path.join(import.meta.dir, "../corpus/primitives");
+const CORPUS = path.join(CORPUS_DIR, "primitives");
 const ACCENT = "\x1b[38;2;254;188;56m";
 
 async function fixture(screen: string, name: string): Promise<Fixture> {
@@ -25,7 +26,7 @@ const STYLED: Readonly<Record<string, string>> = {
 	"ansi-styled-truncated": `${ACCENT}The quick brown fox jumps over the lazy dog while the build pipeline compiles every package and reports progress line by line.\x1b[39m`,
 };
 
-describe("wrapped text rows", () => {
+describe.skipIf(!hasCorpus("primitives"))("wrapped text rows", () => {
 	for (const name of [
 		"long-wraps",
 		"long-wraps-padded",
@@ -53,7 +54,7 @@ describe("wrapped text rows", () => {
 	}
 });
 
-describe("truncated text rows", () => {
+describe.skipIf(!hasCorpus("primitives"))("truncated text rows", () => {
 	for (const name of [
 		"long-truncated",
 		"unicode-wide-truncated",

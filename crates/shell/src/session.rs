@@ -900,7 +900,9 @@ impl Driver {
 			reset_errexit,
 		} = options;
 		if reset_errexit {
-			self.shell.set_root_option(&mut self.store, OptId::Errexit, false);
+			self
+				.shell
+				.set_root_option(&mut self.store, OptId::Errexit, false);
 		}
 		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
@@ -1020,7 +1022,8 @@ impl Driver {
 	/// host callout ([`ToolCalls::on_done`]); nothing else submits scripts.
 	fn on_done(&mut self, run: RunId, status: i32) {
 		let signal = self.shell.exec_signal(run);
-		self.tools.on_done(run, status, signal);
+		let usage = self.shell.run_usage(run);
+		self.tools.on_done(run, status, signal, usage);
 	}
 
 	/// Start a host callout ([`crate::bash::Resolved::Tool`]).

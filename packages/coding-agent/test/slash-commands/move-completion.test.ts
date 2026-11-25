@@ -49,7 +49,7 @@ describe("/move directory completion", () => {
 		const subDir = path.join(tempDir, "packages");
 		await fs.mkdir(subDir);
 		await fs.mkdir(path.join(subDir, "coding-agent"));
-		await fs.mkdir(path.join(subDir, "ui"));
+		await fs.mkdir(path.join(subDir, "tui"));
 
 		const result = await move!.getArgumentCompletions!("packages/");
 		expect(result).not.toBeNull();

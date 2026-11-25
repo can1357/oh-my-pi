@@ -342,7 +342,7 @@ export class ModelControls {
 	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean; prewalk?: boolean },
+		options?: { ephemeral?: boolean; prewalk?: boolean; metadataResolved?: boolean },
 		selection: "explicit" | "automatic" = "explicit",
 		isCurrent?: () => boolean,
 	): Promise<boolean> {
@@ -351,7 +351,10 @@ export class ModelControls {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
-		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		// A caller that loaded the metadata ahead of time (auto-prewalk, while its judge ran) skips the second probe.
+		const targetModel = options?.metadataResolved
+			? model
+			: await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 		if (isCurrent?.() === false) return false;
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
@@ -708,8 +711,11 @@ export class ModelControls {
 			}
 		}
 
-		// Drop the result if the turn was aborted/superseded while classifying.
-		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
+		// Drop the result if the turn was aborted/superseded while classifying, or if another model was
+		// selected meanwhile: the classifier chose from this model's levels.
+		if (this.#host.promptGeneration() !== generation || !this.#autoThinking || !modelsAreEqual(this.#model, model)) {
+			return;
+		}
 
 		const effort = clampThinkingLevelToCeiling(
 			model,

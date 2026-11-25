@@ -454,6 +454,37 @@ const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 16384 });
 /** Runtime rule per provider id, in registration order ({@link setRuntimeProviderRule}). */
 const runtimeRules = new Map<string, CompiledRule>();
 const rulesChangeListeners: Array<() => void> = [];
+let rulesRevision = 0;
+const catalogAxisScopes = new Map<string, ReadonlySet<string> | null>();
+
+/** Identity of the current rules for consumers caching a resolved model reference. */
+export function cascadeRulesRevision(): number {
+	return rulesRevision;
+}
+
+/** Possible target providers for a catalog axis, or null if a rule is not provider-scoped. */
+export function catalogAxisProviders(axis: string): ReadonlySet<string> | null {
+	const cached = catalogAxisScopes.get(axis);
+	if (cached !== undefined) return cached;
+	const providers = new Set<string>();
+	for (const source of [rules.cascade.rules, runtimeRules.values()]) {
+		for (const rule of source) {
+			if (rule.catalog?.[axis] === undefined) continue;
+			if (!rule.providers) {
+				catalogAxisScopes.set(axis, null);
+				return null;
+			}
+			for (const provider of rule.providers) providers.add(provider);
+		}
+	}
+	catalogAxisScopes.set(axis, providers);
+	return providers;
+}
+
+/** Runtime rules are process-local and must never be baked into a cross-launch catalog. */
+export function hasRuntimeProviderRules(): boolean {
+	return runtimeRules.size !== 0;
+}
 
 /**
  * Adds, replaces, or (with `undefined`) removes the runtime rule assigning
@@ -483,6 +514,8 @@ export function setRuntimeProviderRule(
 	}
 	ruleIndex = undefined;
 	resolveCache.clear();
+	rulesRevision++;
+	catalogAxisScopes.clear();
 	for (const listener of rulesChangeListeners) listener();
 }
 

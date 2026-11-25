@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { type Cell, cellGrid, describeStyle, isBlankCell } from "@oh-my-pi/pi-tui/testing/cells";
-import { loadCase, stageNative } from "@oh-my-pi/pi-tui/testing/corpus";
+import { hasCorpus, loadCase, stageNative } from "@oh-my-pi/pi-tui/testing/corpus";
 import {
 	compactDiffText,
 	parseCompactDiff,
@@ -139,7 +139,7 @@ function firstLookDiff(expected: readonly Cell[][], actual: readonly Cell[][]): 
  * attributes, inverse word emphasis included); only the card's background
  * is left out.
  */
-describe("corpus: edit tool diffs", () => {
+describe.skipIf(!hasCorpus("tools/edit"))("corpus: edit tool diffs", () => {
 	for (const name of [
 		"call-replace-leading-blank-preview",
 		"call-replace-preview-diff",

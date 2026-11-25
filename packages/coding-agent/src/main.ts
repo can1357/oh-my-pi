@@ -102,18 +102,14 @@ import {
 } from "./modes/startup-composer";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
-import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import {
-	type CreateAgentSessionOptions,
-	type CreateAgentSessionResult,
-	createAgentSession,
-	discoverAuthStorage,
-	loadSessionExtensions,
-	resolvePrewalkTarget,
-	SessionModelRestoreError,
-} from "./sdk";
+import { AgentLifecycleManager, type PersistedSubagentReviverFactory } from "./registry/agent-lifecycle";
+import type { CreateAgentSessionOptions, CreateAgentSessionResult, createAgentSession } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
-import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
+import {
+	createAuthStorageSettingsSync,
+	describeAuthBrokerStartupError,
+	discoverSessionAuthStorage as discoverAuthStorage,
+} from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
@@ -141,8 +137,7 @@ import {
 	loadSystemPromptTemplateFile,
 	resolvePromptInput,
 } from "./system-prompt";
-import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
-import { type RestoreOutcome, restoreSession } from "./task/restore";
+import type { RestoreOutcome } from "./task/restore";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
@@ -509,6 +504,7 @@ export async function submitInteractiveInput(
 			let forwarded = false;
 			try {
 				forwarded = await session.prompt(input.text, {
+					submittedAt: input.submittedAt,
 					images: input.images,
 					streamingBehavior,
 					followUps: input.followUps,
@@ -1840,6 +1836,7 @@ export async function buildSessionOptions(
 		const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, roleLookup);
 		const targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 
+		const { resolvePrewalkTarget } = await import("./sdk");
 		const selection = await resolvePrewalkTarget(
 			targetPatterns,
 			target,
@@ -1898,7 +1895,12 @@ export async function buildSessionOptions(
 
 	// Tools
 	if (parsed.noTools) {
+		// `--tools` is the whole tool surface: no MCP, extensions, custom tools,
+		// memory, auto-learn or Auto-QA, and subagents inherit the restriction.
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
+		options.restrictToolNames = true;
+		// The restricted session would not bind them; do not run their factories either.
+		options.disableExtensionDiscovery = true;
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
 	}
@@ -2595,7 +2597,8 @@ export async function runRootCommand(
 			}
 		}
 
-		const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
+		const sdk = await import("./sdk");
+		const createAgentSessionImpl = deps.createAgentSession ?? sdk.createAgentSession;
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 			// Kick off background model discovery only after createAgentSession finishes its parallel
@@ -2668,7 +2671,7 @@ export async function runRootCommand(
 				!(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || parsedArgs.restore || foreignSource);
 			const extensionsResult = parsedArgs.trustedExtensions?.length
 				? { ...(await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)), deferredPaths: [] }
-				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+				: await sdk.loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
 						deferStartupSafe: deferStartupSafeExtensions,
 					});
 			const extensionFlagSink: ExtensionFlagSink = {
@@ -2791,7 +2794,7 @@ export async function runRootCommand(
 			try {
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 			} catch (error) {
-				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof SessionModelRestoreError)) {
+				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof sdk.SessionModelRestoreError)) {
 					throw error;
 				}
 				await sessionManager.close();
@@ -2817,7 +2820,8 @@ export async function runRootCommand(
 				mcpManager,
 				startBackgroundModelDiscovery,
 			} = createdSession;
-			if (isInteractive) session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance));
+			if (isInteractive)
+				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance, session));
 			if (!isInteractive) session.validateRetryFallbackChains();
 
 			const sessionToolNames = session.getAllToolNames();
@@ -2842,16 +2846,24 @@ export async function runRootCommand(
 			// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
 			// bootstrap: ACP keeps several concurrent top-level sessions and a single
 			// process-global factory must not be clobbered by the most recent one.
+			const reviveContext = {
+				session,
+				authStorage,
+				modelRegistry,
+				settings: settingsInstance,
+				enableLsp: sessionOptions.enableLsp ?? true,
+				eventBus,
+				subagentEventBus,
+			};
+			let revive: PersistedSubagentReviverFactory | undefined;
 			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
-				createPersistedSubagentReviverFactory({
-					session,
-					authStorage,
-					modelRegistry,
-					settings: settingsInstance,
-					enableLsp: sessionOptions.enableLsp ?? true,
-					eventBus,
-					subagentEventBus,
-				}),
+				async ref => {
+					if (!revive) {
+						const { createPersistedSubagentReviverFactory } = await import("./task/persisted-revive");
+						revive ??= createPersistedSubagentReviverFactory(reviveContext);
+					}
+					return revive(ref);
+				},
 				() => Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settingsInstance)) || 0),
 			);
 			if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
@@ -3049,7 +3061,12 @@ export async function runRootCommand(
 						startDeferredStartupWork,
 						startupLease,
 						initialArgs.goal,
-						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						parsedArgs.restore
+							? async () => {
+									const { restoreSession } = await import("./task/restore");
+									return restoreSession(session, { eventBus, subagentEventBus });
+								}
+							: undefined,
 						modelFallbackMessage,
 					);
 				} finally {

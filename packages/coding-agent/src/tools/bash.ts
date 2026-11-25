@@ -66,7 +66,7 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
-import { isFindEnabled } from "./jfind";
+import { findHintVisible } from "./jfind";
 import { formatArtifactErrorNotice } from "./output-meta-format";
 import { formatOutputNotice } from "./output-meta-format";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
@@ -119,7 +119,7 @@ import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "./details/spotlight";
 
-const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
+const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^- \t]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
 function hasBashApprovalShellControl(command: string): boolean {
 	let quote: "'" | '"' | undefined;
@@ -1026,7 +1026,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			hasAstEdit: isToolActive("ast_edit", cfgAstEditEnabled.get(this.session.settings)),
 			hasGrep: isToolActive("grep", cfgGrepEnabled.get(this.session.settings)),
 			hasGlob: isToolActive("glob", cfgGlobEnabled.get(this.session.settings)),
-			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
+			hasFind: findHintVisible(this.session),
 			hasRead: isToolActive("read", true),
 			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
 			// building a bare ToolSession lack the rebuild lifecycle, so fall back

@@ -45,6 +45,7 @@ function params(baseUrl?: string) {
 		credential: {
 			type: "oauth" as const,
 			accessToken: "oat-test",
+			refreshToken: "refresh-test",
 			accountId: "account_test",
 			email: "user@example.com",
 			expiresAt: Date.now() + 60_000,

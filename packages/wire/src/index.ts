@@ -266,7 +266,17 @@ export interface AgentProgress {
 	/** Intent the model attached to the current call; undefined when that call carried none. */
 	currentToolIntent?: string;
 	currentToolStartMs?: number;
-	recentTools: { tool: string; args: string; argsKey?: string; intent?: string; isError?: boolean; endMs: number }[];
+	recentTools: {
+		tool: string;
+		args: string;
+		argsKey?: string;
+		intent?: string;
+		isError?: boolean;
+		/** Lines an edit call added and removed, by its diff; absent for other calls and failed ones. */
+		added?: number;
+		removed?: number;
+		endMs: number;
+	}[];
 	recentOutput: string[];
 	toolCount: number;
 	requests: number;

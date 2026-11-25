@@ -633,15 +633,17 @@ async fn one_shot_completion_aborts_internal_background_jobs() {
 	);
 }
 
-/// A background builtin started in a subshell ends with the subshell, as an
-/// external one does. Left running it was out of reach — no process for
-/// `pkill`, no job for `kill %N` — and spun for the life of the host.
+/// A background builtin started in a subshell ends with the subshell. Left
+/// running it was out of reach — no process for `pkill`, no job for `kill
+/// %N` — and spun for the life of the host. The group keeps `yes` the
+/// builtin: a lone `yes &` runs `PATH`'s program, which runs on as its own
+/// process, as in bash.
 #[tokio::test(flavor = "multi_thread")]
 async fn subshell_exit_ends_its_background_builtins() {
 	let _guard = shell_test_lock().lock().await;
 	let output = tempfile::NamedTempFile::new().expect("output file");
 	let shell = Shell::new(None);
-	let command = format!("(yes > {} &)", quote_arg(&output.path().to_string_lossy()));
+	let command = format!("({{ yes; }} > {} &)", quote_arg(&output.path().to_string_lossy()));
 
 	shell
 		.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
@@ -652,13 +654,14 @@ async fn subshell_exit_ends_its_background_builtins() {
 }
 
 /// `kill %N` ends a background job running inside the shell, which has no
-/// process to deliver the signal to.
+/// process to deliver the signal to. The group keeps `yes` the builtin (a
+/// lone `yes &` runs `PATH`'s program).
 #[tokio::test(flavor = "multi_thread")]
 async fn kill_jobspec_ends_in_process_background_job() {
 	let _guard = shell_test_lock().lock().await;
 	let output = tempfile::NamedTempFile::new().expect("output file");
 	let shell = Shell::new(None);
-	let command = format!("yes > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
+	let command = format!("{{ yes; }} > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
 
 	let result = shell
 		.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
@@ -1009,7 +1012,10 @@ async fn errexit_and_cd_last_one_segmented_command() {
 	let start = root.path().to_string_lossy().into_owned();
 	let run = async |command: String| {
 		let options = ShellRunOptions { command, cwd: Some(start.clone()), ..Default::default() };
-		shell.run(options, None, CancelToken::default()).await.expect("run")
+		shell
+			.run(options, None, CancelToken::default())
+			.await
+			.expect("run")
 	};
 	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
 

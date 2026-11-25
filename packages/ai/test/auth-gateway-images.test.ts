@@ -285,7 +285,7 @@ describe("auth gateway images", () => {
 		expect(upstreamCalls).toBe(0);
 	});
 
-	it("preserves legal MIME punctuation through gateway edits", async () => {
+	it.each(["legacy", "OpenAI"])("preserves image bytes and MIME punctuation in %s JSON edits", async format => {
 		const model = imageModel("openai", "gpt-image-mime-test", "openai-images");
 		const mimeType = "image/x!$&^_.+-test";
 		const inlineImage = toDataUrl({ data: IMAGE_DATA, mimeType });
@@ -302,11 +302,12 @@ describe("auth gateway images", () => {
 			});
 		};
 		await withGateway([model], fetchStub, async url => {
-			const response = await gatewayRequest(url, "/v1/images/generations", {
-				model: model.id,
-				prompt: "paint",
-				input_references: [{ type: "image_url", url: inlineImage }],
-			});
+			const route = format === "legacy" ? "/v1/images/generations" : "/v1/images/edits";
+			const input =
+				format === "legacy"
+					? { input_references: [{ type: "image_url", url: inlineImage }] }
+					: { images: [{ image_url: inlineImage }] };
+			const response = await gatewayRequest(url, route, { model: model.id, prompt: "paint", ...input });
 			expect(response.status).toBe(200);
 			expect(upstreamCalls).toBe(1);
 			if (!(upstreamImage instanceof File)) throw new Error("Expected upstream image file");
