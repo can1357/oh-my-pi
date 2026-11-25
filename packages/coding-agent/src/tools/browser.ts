@@ -205,14 +205,14 @@ export function resolveBrowserKind(
 	}
 	if (app && !APP_KEYWORDS.includes(app)) {
 		const exe = resolveToCwd(app, session.cwd);
-		const args = resolveSpawnArgs(exe, params.argv, session.cwd);
+		const args = [...(params.argv ?? [])];
 		if (params.insecure && !args.includes("--ignore-certificate-errors")) {
 			args.push("--ignore-certificate-errors");
 		}
 		if (!args.includes("--allow-file-access-from-files")) {
 			args.push("--allow-file-access-from-files");
 		}
-		return { kind: "spawned", path: exe, args };
+		return { kind: "spawned", path: exe, args: resolveSpawnArgs(exe, args, session.cwd, params.headed) };
 	}
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app: "relay" wins over every setting; PI_BROWSER_RELAY stays the

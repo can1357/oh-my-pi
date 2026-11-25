@@ -238,6 +238,19 @@ export function isChromiumBrowserExecutable(exe: string): boolean {
 	return CHROMIUM_BROWSER_BASENAME.test(base) || Object.hasOwn(CHROMIUM_FLATPAK_IDS, base);
 }
 
+const HEADLESS_SWITCH = /^--?headless(?:=|$)/;
+const WINDOWS_HEADLESS_SWITCH = /^(?:--?|\/)headless(?:=|$)/i;
+
+function hasChromiumHeadlessSwitch(args: string[] | undefined): boolean {
+	if (!args) return false;
+	const switchPattern = process.platform === "win32" ? WINDOWS_HEADLESS_SWITCH : HEADLESS_SWITCH;
+	for (const arg of args) {
+		if (arg === "--") break;
+		if (switchPattern.test(arg)) return true;
+	}
+	return false;
+}
+
 /**
  * Launch argv for a spawned executable. Chrome 136+ silently ignores
  * `--remote-debugging-port` when the default user-data-dir is in use: the
@@ -254,10 +267,25 @@ export function isChromiumBrowserExecutable(exe: string): boolean {
  * macOS blocks on a "wants to use your confidential information" dialog for
  * every fresh binary. A caller-supplied profile keeps the real keystore; its
  * existing cookies are encrypted with that key and a mock one would corrupt them.
+ *
+ * Only an explicit display mode changes Chromium's headless argv; all other
+ * executables and calls without `headed` keep their existing launch mode.
  */
-export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
-	const args = appArgs ?? [];
+export function resolveSpawnArgs(
+	exe: string,
+	appArgs: string[] | undefined,
+	cwd = process.cwd(),
+	headed?: boolean,
+): string[] {
+	let args = appArgs ?? [];
 	if (!isChromiumBrowserExecutable(exe)) return args;
+	if (headed !== undefined) {
+		const hasHeadless = hasChromiumHeadlessSwitch(args);
+		if (headed && hasHeadless) {
+			throw new ToolError("headed: true conflicts with the Chromium headless switch in argv. Remove one of them.");
+		}
+		if (!headed && !hasHeadless) args = ["--headless=new", ...args];
+	}
 	const requestedProfile = findUserDataDirInArgs(args);
 	if (requestedProfile !== null) {
 		// Chromium accepts switch values as --name=value, not a separate argv
@@ -419,6 +447,7 @@ export async function findReusableCdp(
 	// for Chromium-family browsers on Linux.
 	const executablePath = await fs.realpath(exe).catch(() => exe);
 	const isChromium = isChromiumBrowserExecutable(exe);
+	const wantsHeadless = isChromium && hasChromiumHeadlessSwitch(options.appArgs);
 	const wrapperTarget = process.platform === "linux" && isChromium ? await resolveWrapperTarget(executablePath) : null;
 	const candidates = Process.fromPath(wrapperTarget ?? executablePath).filter(
 		candidate => candidate.status() === ProcessStatus.Running,
@@ -461,8 +490,13 @@ export async function findReusableCdp(
 			continue;
 		}
 		const port = findCdpPortInArgs(args);
-		if (port === null) continue;
+		if (port === null || (isChromium && args.some(arg => arg.startsWith("--type=")))) continue;
 		if (await probeCdpAt(port, options.signal)) {
+			if (isChromium && options.appArgs && hasChromiumHeadlessSwitch(args) !== wantsHeadless) {
+				throw new ToolError(
+					`Cannot launch ${path.basename(exe)} ${wantsHeadless ? "headless" : "headed"} because its profile ${requestedUserDataDir} is already in use in the opposite mode. Close that browser or choose another --user-data-dir.`,
+				);
+			}
 			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
 		}
 	}

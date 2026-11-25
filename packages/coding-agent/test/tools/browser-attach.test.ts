@@ -19,6 +19,7 @@ import {
 	findFreeCdpPort,
 	findReusableCdp,
 	gracefulKillTreeOnce,
+	isChromiumBrowserExecutable,
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
@@ -30,6 +31,7 @@ import {
 	loadPuppeteer,
 	privateTargetId,
 	RENDERER_PRIORITY_ARGS,
+	systemChromiumCandidatesForTest,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	acquireBrowser,
@@ -48,9 +50,21 @@ import {
 	TimeoutError,
 } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
-import { chromiumAvailable } from "./chromium-probe";
+import { chromiumAvailable, chromiumCdpAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+
+async function findChromeForSpawnTest(): Promise<string | undefined> {
+	const candidates = new Set(systemChromiumCandidatesForTest());
+	for (const candidate of candidates) {
+		if (!isChromiumBrowserExecutable(candidate) || !(await Bun.file(candidate).exists())) continue;
+		if (process.platform !== "linux" || (await chromiumCdpAvailable(candidate))) return candidate;
+	}
+	const fallback = CHROMIUM_AVAILABLE ? await ensureChromiumExecutable() : undefined;
+	return fallback && isChromiumBrowserExecutable(fallback) ? fallback : undefined;
+}
+
+const SPAWN_TEST_CHROME = await findChromeForSpawnTest();
 let sharedHeadless: BrowserHandle | undefined;
 
 function makeSession(): ToolSession {
@@ -804,6 +818,74 @@ describe("pickElectronTarget", () => {
 		30_000,
 	);
 
+	test.skipIf(!SPAWN_TEST_CHROME)(
+		"spawns explicit headless Chrome and delivers a trusted click with focus",
+		async () => {
+			const app = SPAWN_TEST_CHROME!;
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-chrome-click-"));
+			const argv = [
+				`--user-data-dir=${path.join(root, "profile")}`,
+				"--no-sandbox",
+				"--no-first-run",
+				"--no-default-browser-check",
+				"--use-mock-keychain",
+				"--password-store=basic",
+			];
+			const fixture = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: () =>
+					new Response(
+						`<!doctype html><main><h1>Distinct actions</h1>
+						<button id="save" style="width:20px;height:20px;padding:0"
+							onclick="document.body.dataset.outcome = event.isTrusted ? 'saved' : 'untrusted'">Save</button></main>`,
+						{ headers: { "content-type": "text/html" } },
+					),
+			});
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const invoke = (parameters: unknown) => prelude.invoke(parameters, { session, toolCallId: "headless-click" });
+			const name = `headless-click-${crypto.randomUUID()}`;
+			const mismatchedName = `${name}-headed`;
+			try {
+				await invoke({
+					action: "open",
+					app,
+					argv,
+					headed: false,
+					name,
+					url: fixture.url.href,
+					viewport: { width: 390, height: 800, deviceScaleFactor: 1.25 },
+				});
+				const opened = getTab(name);
+				if (opened?.backend !== "worker") throw new Error("Expected Chromium worker tab");
+				expect(opened.browser.subprocess).toBeDefined();
+				expect(await opened.browser.browser.userAgent()).toContain("HeadlessChrome/");
+
+				await expect(invoke({ action: "open", app, argv, headed: true, name: mismatchedName })).rejects.toThrow(
+					"already in use in the opposite mode",
+				);
+				const click = await invoke({
+					action: "run",
+					name,
+					code: `await tab.click("#save");
+						return await tab.evaluate(() => ({
+							outcome: document.body.dataset.outcome,
+							active: document.activeElement?.id,
+							viewport: [innerWidth, innerHeight],
+						}));`,
+				});
+				expect(click.details).toMatchObject({ value: { outcome: "saved", active: "save", viewport: [390, 800] } });
+			} finally {
+				await invoke({ action: "close", name: mismatchedName, kill: true }).catch(() => {});
+				await invoke({ action: "close", name, kill: true }).catch(() => {});
+				fixture.stop(true);
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"reports a connected browser's own viewport on open and observe, and applies one an open asks for",
 		async () => {
@@ -1168,6 +1250,20 @@ describe("resolveSpawnArgs", () => {
 			"/tmp",
 		);
 		expect(args).toEqual(["--incognito", `--user-data-dir=${path.resolve("/tmp", "profile")}`]);
+	});
+
+	test("honors explicit Chromium modes without changing unset argv or Electron launch flags", () => {
+		const chrome = "/usr/bin/google-chrome-stable";
+		const cwd = path.resolve("/tmp");
+		const argv = [`--user-data-dir=${path.join(cwd, "profile")}`];
+		const headless = ["--headless", ...argv];
+		expect(resolveSpawnArgs(chrome, argv, cwd)).toEqual(argv);
+		expect(resolveSpawnArgs(chrome, argv, cwd, true)).toEqual(argv);
+		expect(resolveSpawnArgs(chrome, argv, cwd, false)).toEqual(["--headless=new", ...argv]);
+		expect(resolveSpawnArgs(chrome, headless, cwd)).toEqual(headless);
+		expect(resolveSpawnArgs(chrome, headless, cwd, false)).toEqual(headless);
+		expect(() => resolveSpawnArgs(chrome, headless, cwd, true)).toThrow("conflicts with the Chromium headless switch");
+		expect(resolveSpawnArgs("/Applications/Slack.app/Contents/MacOS/Slack", [], cwd, false)).toEqual([]);
 	});
 
 	test("isolates a Flatpak Chromium launcher without treating unrelated apps as browsers", () => {
