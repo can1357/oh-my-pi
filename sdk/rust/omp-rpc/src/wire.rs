@@ -4640,6 +4640,12 @@ pub struct SelectUiRequest {
 	pub markable_count: Option<i64>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
+	/// True when this timed dialog accepts extension_ui_activity.
+	#[serde(rename = "supportsActivity", default, skip_serializing_if = "Option::is_none")]
+	pub supports_activity: Option<bool>,
+	/// The server deadline in milliseconds since Unix epoch.
+	#[serde(rename = "expiresAt", default, skip_serializing_if = "Option::is_none")]
+	pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4649,6 +4655,12 @@ pub struct ConfirmUiRequest {
 	pub message: String,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
+	/// True when this timed dialog accepts extension_ui_activity.
+	#[serde(rename = "supportsActivity", default, skip_serializing_if = "Option::is_none")]
+	pub supports_activity: Option<bool>,
+	/// The server deadline in milliseconds since Unix epoch.
+	#[serde(rename = "expiresAt", default, skip_serializing_if = "Option::is_none")]
+	pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4659,6 +4671,12 @@ pub struct InputUiRequest {
 	pub placeholder: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
+	/// True when this timed dialog accepts extension_ui_activity.
+	#[serde(rename = "supportsActivity", default, skip_serializing_if = "Option::is_none")]
+	pub supports_activity: Option<bool>,
+	/// The server deadline in milliseconds since Unix epoch.
+	#[serde(rename = "expiresAt", default, skip_serializing_if = "Option::is_none")]
+	pub expires_at: Option<i64>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub secret: Option<bool>,
 }
@@ -4680,6 +4698,12 @@ pub struct AskUiRequest {
 	pub questions: Vec<AskQuestion>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
+	/// True when this timed dialog accepts extension_ui_activity.
+	#[serde(rename = "supportsActivity", default, skip_serializing_if = "Option::is_none")]
+	pub supports_activity: Option<bool>,
+	/// The server deadline in milliseconds since Unix epoch.
+	#[serde(rename = "expiresAt", default, skip_serializing_if = "Option::is_none")]
+	pub expires_at: Option<i64>,
 }
 
 /// The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.
@@ -4689,6 +4713,12 @@ pub struct FormUiRequest {
 	pub html: String,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
+	/// True when this timed dialog accepts extension_ui_activity.
+	#[serde(rename = "supportsActivity", default, skip_serializing_if = "Option::is_none")]
+	pub supports_activity: Option<bool>,
+	/// The server deadline in milliseconds since Unix epoch.
+	#[serde(rename = "expiresAt", default, skip_serializing_if = "Option::is_none")]
+	pub expires_at: Option<i64>,
 }
 
 /// Close the dialog opened by request `targetId`; a later answer to it is ignored.
@@ -4846,7 +4876,7 @@ pub struct ConfirmUiResponse {
 	pub confirmed: bool,
 }
 
-/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults).
+/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its last data draft or defaults).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CancelUiResponse {
 	pub id: String,
@@ -4877,7 +4907,7 @@ pub enum ExtensionUiResponse {
 	ValueUiResponse(ValueUiResponse),
 	/// Answers a `confirm` request.
 	ConfirmUiResponse(ConfirmUiResponse),
-	/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults).
+	/// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its last data draft or defaults).
 	CancelUiResponse(CancelUiResponse),
 	/// Answers an `ask` request: one `AskAnswer` per question, in question order.
 	AnswersUiResponse(AnswersUiResponse),
@@ -4923,6 +4953,31 @@ impl<'de> Deserialize<'de> for ExtensionUiResponse {
 	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		Self::from_value(Value::deserialize(deserializer)?).map_err(D::Error::custom)
 	}
+}
+
+/// User activity on a timed dialog. reset defaults to true; data is a full form draft, not a patch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionUiActivity {
+	pub id: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub reset: Option<bool>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub data: Option<Map<String, Value>>,
+}
+
+/// Authoritative deadline after accepting a dialog activity reset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionUiState {
+	pub id: String,
+	#[serde(rename = "expiresAt")]
+	pub expires_at: i64,
+}
+
+/// Invalid activity; the dialog, its last valid draft and deadline remain unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionUiActivityError {
+	pub id: String,
+	pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5074,6 +5129,8 @@ impl<'de> Deserialize<'de> for RpcHostRequest {
 pub enum RpcInbound {
 	/// Host reply to an extension UI request; variants share `type` and differ by their payload key.
 	ExtensionUiResponse(ExtensionUiResponse),
+	/// User activity on a timed dialog. reset defaults to true; data is a full form draft, not a patch.
+	ExtensionUiActivity(ExtensionUiActivity),
 	/// Streams partial output of a pending host tool call.
 	HostToolUpdate(HostToolUpdate),
 	/// Completes a pending host tool call; `isError` surfaces the content as a tool error.
@@ -5087,6 +5144,7 @@ impl RpcInbound {
 	pub fn from_value(value: Value) -> Result<Self, serde_json::Error> {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("extension_ui_response") => |value| serde_json::from_value(value).map(Self::ExtensionUiResponse),
+			Some("extension_ui_activity") => |value| serde_json::from_value(value).map(Self::ExtensionUiActivity),
 			Some("host_tool_update") => |value| serde_json::from_value(value).map(Self::HostToolUpdate),
 			Some("host_tool_result") => |value| serde_json::from_value(value).map(Self::HostToolResult),
 			Some("host_uri_result") => |value| serde_json::from_value(value).map(Self::HostUriResult),
@@ -5102,6 +5160,7 @@ impl Serialize for RpcInbound {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		match self {
 			Self::ExtensionUiResponse(member) => member.serialize(serializer),
+			Self::ExtensionUiActivity(member) => serialize_tagged(member, &[("type", "extension_ui_activity")], serializer),
 			Self::HostToolUpdate(member) => serialize_tagged(member, &[("type", "host_tool_update")], serializer),
 			Self::HostToolResult(member) => serialize_tagged(member, &[("type", "host_tool_result")], serializer),
 			Self::HostUriResult(member) => serialize_tagged(member, &[("type", "host_uri_result")], serializer),
@@ -5190,6 +5249,10 @@ pub enum RpcNotification {
 	ExtensionError(ExtensionError),
 	/// Extension UI request, discriminated by `method`.
 	ExtensionUiRequest(ExtensionUiRequest),
+	/// Authoritative deadline after accepting a dialog activity reset.
+	ExtensionUiState(ExtensionUiState),
+	/// Invalid activity; the dialog, its last valid draft and deadline remain unchanged.
+	ExtensionUiActivityError(ExtensionUiActivityError),
 	/// Slash-command catalog, pushed at startup and whenever command metadata changes.
 	AvailableCommandsUpdate(AvailableCommandsUpdateEvent),
 	/// A subagent started or ended; sent at subscription level "progress" or "events".
@@ -5238,6 +5301,8 @@ impl RpcNotification {
 			Some("session_settled") => |value| serde_json::from_value(value).map(Self::SessionSettled),
 			Some("extension_error") => |value| serde_json::from_value(value).map(Self::ExtensionError),
 			Some("extension_ui_request") => |value| serde_json::from_value(value).map(Self::ExtensionUiRequest),
+			Some("extension_ui_state") => |value| serde_json::from_value(value).map(Self::ExtensionUiState),
+			Some("extension_ui_activity_error") => |value| serde_json::from_value(value).map(Self::ExtensionUiActivityError),
 			Some("available_commands_update") => |value| serde_json::from_value(value).map(Self::AvailableCommandsUpdate),
 			Some("subagent_lifecycle") => |value| serde_json::from_value(value).map(Self::SubagentLifecycle),
 			Some("subagent_progress") => |value| serde_json::from_value(value).map(Self::SubagentProgress),
@@ -5270,6 +5335,8 @@ impl Serialize for RpcNotification {
 			Self::SessionSettled(member) => serialize_tagged(member, &[("type", "session_settled")], serializer),
 			Self::ExtensionError(member) => serialize_tagged(member, &[("type", "extension_error")], serializer),
 			Self::ExtensionUiRequest(member) => member.serialize(serializer),
+			Self::ExtensionUiState(member) => serialize_tagged(member, &[("type", "extension_ui_state")], serializer),
+			Self::ExtensionUiActivityError(member) => serialize_tagged(member, &[("type", "extension_ui_activity_error")], serializer),
 			Self::AvailableCommandsUpdate(member) => serialize_tagged(member, &[("type", "available_commands_update")], serializer),
 			Self::SubagentLifecycle(member) => serialize_tagged(member, &[("type", "subagent_lifecycle")], serializer),
 			Self::SubagentProgress(member) => serialize_tagged(member, &[("type", "subagent_progress")], serializer),
@@ -5318,7 +5385,7 @@ impl RpcServerFrame {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("response") => |value| serde_json::from_value(value).map(Self::Response),
 			Some("host_tool_call" | "host_tool_cancel" | "host_uri_request" | "host_uri_cancel") => |value| serde_json::from_value(value).map(Self::RpcHostRequest),
-			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "dictation_state" | "dictation_transcript" | "dictation_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
+			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "extension_ui_state" | "extension_ui_activity_error" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "dictation_state" | "dictation_transcript" | "dictation_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "manual_compaction_start" | "manual_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)

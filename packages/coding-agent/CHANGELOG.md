@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Timed RPC dialogs accept user activity to refresh their inactivity deadline, and form timeouts retain the latest valid data draft.
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

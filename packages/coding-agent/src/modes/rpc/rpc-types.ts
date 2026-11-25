@@ -830,8 +830,19 @@ export type RpcExtensionUIRequest =
 			/** Leading options that get a marker; trailing ones are actions. */
 			markableCount?: number;
 			timeout?: number;
+			supportsActivity?: boolean;
+			expiresAt?: number;
 	  }
-	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "confirm";
+			title: string;
+			message: string;
+			timeout?: number;
+			supportsActivity?: boolean;
+			expiresAt?: number;
+	  }
 	| {
 			type: "extension_ui_request";
 			id: string;
@@ -839,6 +850,8 @@ export type RpcExtensionUIRequest =
 			title: string;
 			placeholder?: string;
 			timeout?: number;
+			supportsActivity?: boolean;
+			expiresAt?: number;
 			secret?: boolean;
 	  }
 	| {
@@ -856,9 +869,19 @@ export type RpcExtensionUIRequest =
 			method: "ask";
 			questions: RpcAskDialogQuestion[];
 			timeout?: number;
+			supportsActivity?: boolean;
+			expiresAt?: number;
 	  }
 	/** The whole HTML form of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required. */
-	| { type: "extension_ui_request"; id: string; method: "form"; html: string; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "form";
+			html: string;
+			timeout?: number;
+			supportsActivity?: boolean;
+			expiresAt?: number;
+	  }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {
 			type: "extension_ui_request";
@@ -1023,3 +1046,23 @@ export type RpcExtensionUIResponse =
 // ============================================================================
 
 export type RpcCommandType = RpcCommand["type"];
+
+/** A timed dialog's user activity; never settles the request. Draft data applies only to forms. */
+export interface RpcExtensionUIActivity {
+	type: "extension_ui_activity";
+	id: string;
+	reset?: boolean;
+	data?: Record<string, unknown>;
+}
+/** Authoritative deadline after the server accepts a timeout reset. */
+export interface RpcExtensionUIState {
+	type: "extension_ui_state";
+	id: string;
+	expiresAt: number;
+}
+/** Rejected activity leaves both the prior draft and the existing deadline unchanged. */
+export interface RpcExtensionUIActivityError {
+	type: "extension_ui_activity_error";
+	id: string;
+	error: string;
+}

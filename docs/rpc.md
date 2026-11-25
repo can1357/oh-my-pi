@@ -30,7 +30,7 @@ Behavior notes:
 - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-- Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog) and `set_ask_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
+- Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response`, `extension_ui_activity` (an extension may be waiting on a dialog), and `set_ask_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
 - When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
 
@@ -1385,6 +1385,51 @@ Example:
 }
 ```
 
+### Timed-dialog activity
+
+A timed `select`, `confirm`, `input`, `ask`, or `form` request now includes
+`supportsActivity: true` and `expiresAt` (the server's deadline, in milliseconds
+since Unix epoch). Untimed dialogs omit both fields. Older servers omit the
+capability; hosts must not send activity unless it is exactly `true`.
+
+A host can report actual user input, selection, or scrolling without answering:
+
+```json
+{"type":"extension_ui_activity","id":"123"}
+```
+
+Accepted input restarts the request's original timeout duration. The server
+responds with `{"type":"extension_ui_state","id":"123","expiresAt":...}`;
+use that authoritative deadline instead of starting a local-only countdown.
+These frames are processed immediately, outside the ordinary command queue,
+including while `session_start` is awaiting a dialog. No new state/error
+notifications are sent to a client that never sends activity.
+
+For `form` only, activity may include `data`, a **whole draft**, with the same
+field-name/value shapes as a submission. It is not a patch: omitted fields
+become unanswered. Unknown fields, disabled choices, duplicate choices, or
+invalid value shapes are rejected. Required/pattern constraints retain the
+current form behavior; input need not be a completed answer. A restore without
+new user input must use `reset:false`, so reconnecting does not extend time:
+
+```json
+{"type":"extension_ui_activity","id":"123","reset":false,"data":{"target":"prod","owner":"in progress"}}
+```
+
+On inactivity timeout the server returns the last valid draft as
+`{data, timedOut:true}`. A host-reported timeout uses the same snapshot. Without
+any draft activity, this remains the existing default-form result. This wire
+extension currently snapshots `data` only; it does not carry option notes or
+images. Cancellation and abort retain their existing meaning.
+
+Invalid activity emits `extension_ui_activity_error` with `id` and `error`,
+without changing the last valid draft or current deadline. Activity for an
+already-resolved/unknown id is ignored. Closed/aborted dialogs cannot be revived.
+The host must report user interaction, not a periodic keepalive.
+
+Python hosts can call `send_ui_activity(id, data=..., reset=False)` and listen
+with `on_extension_ui_state` / `on_extension_ui_activity_error`.
+
 ### Inbound response
 
 `RpcExtensionUIResponse` (`type: "extension_ui_response"`):
@@ -1400,7 +1445,7 @@ cancellation, timeout, or signal abort. Signal abort emits a `cancel` request
 with `targetId`. `editor` supports cancellation and signal abort but has no wire timeout.
 Presentation methods and `open_url` are fire-and-forget and require no response.
 
-If a dialog has a timeout, RPC mode resolves to a default value when timeout/abort fires, and emits
+If a dialog has a timeout, RPC mode resolves to a default value when timeout/abort fires (a timed-out form uses its last accepted data draft when present), and emits
 `{ method: "cancel", targetId }` so the host closes the dialog; a later answer to it is ignored. For `ask`, a timeout
 (omp's timer or a host `cancelled: true, timedOut: true` reply) answers every question with its recommended
 option, else its first.
@@ -1417,9 +1462,10 @@ option gives that one value like a lone checkbox; a text field gives its text, o
 `number`/`range` input (an absent text field counts as empty). A radio or checkbox group of two or more options,
 unless it already has an option labelled `Other`, takes one extra string that is not an option value as its "Other"
 answer. Hidden inputs keep the form's own values.
-Unknown names, disabled options, wrong types, and answers that break `required`, `min`/`max`,
-`minlength`/`maxlength`, `email`/`url` or `pattern` fail the `ask` tool call instead of guessing. A `form` timeout
-(omp's timer or a host `cancelled: true, timedOut: true` reply) submits the form's defaults. A form whose frame
+Unknown names, disabled options, and wrong value types fail the `ask` tool call instead of guessing.
+Constraints such as `required`, `min`/`max`, `minlength`/`maxlength`, `email`/`url`, and `pattern` remain form flags;
+the current RPC parser does not reject them, including for in-progress activity drafts. A `form` timeout
+(omp's timer or a host `cancelled: true, timedOut: true` reply) submits the last accepted data draft, or the form's defaults when none was received. A form whose frame
 exceeds the transport limit (1 MiB under protocol v1, 64 MiB after `negotiate_protocol` to v2) fails the `ask` tool
 call without being sent, instead of reaching the host truncated.
 

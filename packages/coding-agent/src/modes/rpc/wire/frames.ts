@@ -6,6 +6,10 @@ import { absentAs, doc, type WireDefs } from "./dsl";
 
 const JSON_OBJECT = "Record<string, unknown>";
 const UI = "'extension_ui_request'";
+const DIALOG_ACTIVITY = {
+	"supportsActivity?": doc("boolean", "True when this timed dialog accepts extension_ui_activity."),
+	"expiresAt?": doc("number.integer", "The server deadline in milliseconds since Unix epoch."),
+} as const;
 
 export const frameDefs = {
 	ReadyEvent: doc(
@@ -177,6 +181,7 @@ export const frameDefs = {
 			"Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set.",
 		),
 		"timeout?": "number.integer",
+		...DIALOG_ACTIVITY,
 	},
 	ConfirmUiRequest: {
 		type: UI,
@@ -185,6 +190,7 @@ export const frameDefs = {
 		title: "string",
 		message: "string",
 		"timeout?": "number.integer",
+		...DIALOG_ACTIVITY,
 	},
 	InputUiRequest: {
 		type: UI,
@@ -193,6 +199,7 @@ export const frameDefs = {
 		title: "string",
 		"placeholder?": "string",
 		"timeout?": "number.integer",
+		...DIALOG_ACTIVITY,
 		"secret?": "boolean",
 	},
 	EditorUiRequest: {
@@ -204,11 +211,18 @@ export const frameDefs = {
 		"promptStyle?": "boolean",
 	},
 	AskUiRequest: doc(
-		{ type: UI, id: "string", method: "'ask'", questions: "AskQuestion[]", "timeout?": "number.integer" },
+		{
+			type: UI,
+			id: "string",
+			method: "'ask'",
+			questions: "AskQuestion[]",
+			"timeout?": "number.integer",
+			...DIALOG_ACTIVITY,
+		},
 		"Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.",
 	),
 	FormUiRequest: doc(
-		{ type: UI, id: "string", method: "'form'", html: "string", "timeout?": "number.integer" },
+		{ type: UI, id: "string", method: "'form'", html: "string", "timeout?": "number.integer", ...DIALOG_ACTIVITY },
 		"The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.",
 	),
 	CancelUiRequest: doc(
@@ -265,7 +279,7 @@ export const frameDefs = {
 	),
 	CancelUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", cancelled: "true", "timedOut?": "boolean" },
-		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults).",
+		"Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its last data draft or defaults).",
 	),
 	AnswersUiResponse: doc(
 		{ type: "'extension_ui_response'", id: "string", answers: "AskAnswer[]" },
@@ -282,6 +296,19 @@ export const frameDefs = {
 	ExtensionUiResponse: doc(
 		"ValueUiResponse | ConfirmUiResponse | CancelUiResponse | AnswersUiResponse | DataUiResponse",
 		"Host reply to an extension UI request; variants share `type` and differ by their payload key.",
+	),
+
+	ExtensionUiActivity: doc(
+		{ type: "'extension_ui_activity'", id: "string", "reset?": "boolean", "data?": JSON_OBJECT },
+		"User activity on a timed dialog. reset defaults to true; data is a full form draft, not a patch.",
+	),
+	ExtensionUiState: doc(
+		{ type: "'extension_ui_state'", id: "string", expiresAt: "number.integer" },
+		"Authoritative deadline after accepting a dialog activity reset.",
+	),
+	ExtensionUiActivityError: doc(
+		{ type: "'extension_ui_activity_error'", id: "string", error: "string" },
+		"Invalid activity; the dialog, its last valid draft and deadline remain unchanged.",
 	),
 
 	HostToolCallRequest: {
@@ -337,7 +364,7 @@ export const frameDefs = {
 		"Server request for host-owned tools and URI schemes, discriminated by `type`.",
 	),
 	RpcInbound: doc(
-		"ExtensionUiResponse | HostToolUpdate | HostToolResult | HostUriResult",
+		"ExtensionUiResponse | ExtensionUiActivity | HostToolUpdate | HostToolResult | HostUriResult",
 		"Non-command frame the host sends, discriminated by `type`.",
 	),
 	RpcResponse: doc(

@@ -336,6 +336,7 @@ FAKE_SERVER = textwrap.dedent(
     auto_retry_enabled = True
     session_name = "Scratchpad"
     last_assistant_text = None
+    last_ui_activity = None
     last_ui_response = None
     goal_state = None
 
@@ -347,6 +348,12 @@ FAKE_SERVER = textwrap.dedent(
         command = json.loads(raw_line)
         command_type = command["type"]
         request_id = command.get("id")
+
+        if command_type == "extension_ui_activity":
+            last_ui_activity = command
+            if command.get("reset", True):
+                print(json.dumps({"type": "extension_ui_state", "id": command["id"], "expiresAt": 2000}), flush=True)
+            continue
 
         if command_type == "extension_ui_response":
             last_ui_response = command
@@ -542,6 +549,8 @@ FAKE_SERVER = textwrap.dedent(
                 print(json.dumps({"type": "queue_update", "steering": queued_messages["steering"], "followUp": queued_messages["followUp"]}), flush=True)
         elif command_type == "abort":
             respond(request_id, command_type, {})
+        elif command_type == "debug_last_ui_activity":
+            respond(request_id, command_type, last_ui_activity)
         elif command_type == "debug_last_ui_response":
             respond(request_id, command_type, last_ui_response)
         elif command_type == "goal":
@@ -602,6 +611,9 @@ FAKE_SERVER = textwrap.dedent(
                     ),
                     flush=True,
                 )
+                continue
+            if message == "needs timed form":
+                print(json.dumps({"type": "extension_ui_request", "id": "ui-timed-form", "method": "form", "html": "<form></form>", "timeout": 1000, "supportsActivity": True, "expiresAt": 1000}), flush=True)
                 continue
             if message == "needs form":
                 print(json.dumps({"type": "extension_ui_request", "id": "ui-form", "method": "form", "html": "<form></form>"}), flush=True)
@@ -1203,6 +1215,47 @@ class RpcClientTests(unittest.TestCase):
                 },
             )
 
+    def test_activity_sends_full_drafts_and_parses_authoritative_deadlines(
+        self,
+    ) -> None:
+        deadlines: list[int] = []
+        with self.make_client() as client:
+            client.on_extension_ui_state(
+                lambda state: deadlines.append(state.expires_at)
+            )
+            client.prompt("needs timed form")
+            request = client.next_ui_request(timeout=2.0)
+            self.assertTrue(request.supports_activity)
+            self.assertEqual(request.expires_at, 1000)
+            client.send_ui_activity(
+                request.id, data={"target": "prod", "checks": ("lint",)}, reset=False
+            )
+            self.assertEqual(
+                client.request_raw("debug_last_ui_activity"),
+                {
+                    "type": "extension_ui_activity",
+                    "id": request.id,
+                    "reset": False,
+                    "data": {"target": "prod", "checks": ["lint"]},
+                },
+            )
+            self.assertEqual(deadlines, [])
+            client.send_ui_activity(request.id)
+            self.assertEqual(
+                client.request_raw("debug_last_ui_activity"),
+                {"type": "extension_ui_activity", "id": request.id, "reset": True},
+            )
+            self.assertEqual(deadlines, [2000])
+            client.send_ui_data(request.id, {"target": "prod"})
+            client.wait_for_idle(timeout=2.0)
+
+    def test_activity_rejects_non_json_drafts_and_non_boolean_reset(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(ValueError):
+                client.send_ui_activity("ui-form", data={"replicas": float("nan")})
+            with self.assertRaises(TypeError):
+                client.send_ui_activity("ui-form", reset="false")
+
     def test_form_data_rejects_booleans_before_sending(self) -> None:
         with self.make_client() as client:
             with self.assertRaises(TypeError):
@@ -1345,7 +1398,7 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(client.get_state().queued_message_count, 1)
 
     def test_remove_queued_message_rejects_missing_result(self) -> None:
-        server = FAKE_SERVER.replace('{"removed": removed}', '{}')
+        server = FAKE_SERVER.replace('{"removed": removed}', "{}")
         with self.make_client(server) as client:
             with self.assertRaises(ValueError):
                 client.remove_queued_message("missing", "steering")
@@ -1557,7 +1610,9 @@ class RpcClientTests(unittest.TestCase):
                     with self.make_client(server) as client:
                         target = Path("/tmp/unavailable-session")
                         before = client.get_state()
-                        change = client.open_session if command == "open_session" else client.switch_session
+                        change = (
+                            client.open_session if command == "open_session" else client.switch_session
+                        )
                         with self.assertRaises(RpcCommandError) as ctx:
                             change(target)
                         self.assertEqual(ctx.exception.command, command)

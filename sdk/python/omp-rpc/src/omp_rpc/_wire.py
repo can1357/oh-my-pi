@@ -1578,6 +1578,10 @@ class SelectUiRequest:
     markable_count: int | None = None
     """Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."""
     timeout: int | None = None
+    supports_activity: bool | None = None
+    """True when this timed dialog accepts extension_ui_activity."""
+    expires_at: int | None = None
+    """The server deadline in milliseconds since Unix epoch."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1588,6 +1592,10 @@ class ConfirmUiRequest:
     title: str
     message: str
     timeout: int | None = None
+    supports_activity: bool | None = None
+    """True when this timed dialog accepts extension_ui_activity."""
+    expires_at: int | None = None
+    """The server deadline in milliseconds since Unix epoch."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1598,6 +1606,10 @@ class InputUiRequest:
     title: str
     placeholder: str | None = None
     timeout: int | None = None
+    supports_activity: bool | None = None
+    """True when this timed dialog accepts extension_ui_activity."""
+    expires_at: int | None = None
+    """The server deadline in milliseconds since Unix epoch."""
     secret: bool | None = None
 
 
@@ -1619,6 +1631,10 @@ class AskUiRequest:
     method: Literal["ask"] = "ask"
     questions: tuple[AskQuestion, ...]
     timeout: int | None = None
+    supports_activity: bool | None = None
+    """True when this timed dialog accepts extension_ui_activity."""
+    expires_at: int | None = None
+    """The server deadline in milliseconds since Unix epoch."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1629,6 +1645,10 @@ class FormUiRequest:
     method: Literal["form"] = "form"
     html: str
     timeout: int | None = None
+    supports_activity: bool | None = None
+    """True when this timed dialog accepts extension_ui_activity."""
+    expires_at: int | None = None
+    """The server deadline in milliseconds since Unix epoch."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1713,6 +1733,10 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
     markable_count: int | None = None
     """Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."""
     timeout: int | None = None
+    supports_activity: bool | None = None
+    """True when this timed dialog accepts extension_ui_activity."""
+    expires_at: int | None = None
+    """The server deadline in milliseconds since Unix epoch."""
     message: str | None = None
     placeholder: str | None = None
     secret: bool | None = None
@@ -1740,6 +1764,22 @@ class AskAnswer:
     id: str
     selected_options: tuple[str, ...]
     custom_input: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ExtensionUiState:
+    """Authoritative deadline after accepting a dialog activity reset."""
+    type: Literal["extension_ui_state"] = "extension_ui_state"
+    id: str
+    expires_at: int
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ExtensionUiActivityError:
+    """Invalid activity; the dialog, its last valid draft and deadline remain unchanged."""
+    type: Literal["extension_ui_activity_error"] = "extension_ui_activity_error"
+    id: str
+    error: str
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1810,7 +1850,7 @@ RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | Tu
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
-RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
+RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | ExtensionUiState | ExtensionUiActivityError | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
 """Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`."""
 
 
@@ -3133,6 +3173,8 @@ def parse_select_ui_request(value: object, path: str = "SelectUiRequest") -> Sel
         checked_indices=optional(payload, "checkedIndices", array(decode_int), path),
         markable_count=optional(payload, "markableCount", decode_int, path),
         timeout=optional(payload, "timeout", decode_int, path),
+        supports_activity=optional(payload, "supportsActivity", decode_bool, path),
+        expires_at=optional(payload, "expiresAt", decode_int, path),
     )
 
 
@@ -3145,6 +3187,8 @@ def parse_confirm_ui_request(value: object, path: str = "ConfirmUiRequest") -> C
         title=required(payload, "title", decode_str, path),
         message=required(payload, "message", decode_str, path),
         timeout=optional(payload, "timeout", decode_int, path),
+        supports_activity=optional(payload, "supportsActivity", decode_bool, path),
+        expires_at=optional(payload, "expiresAt", decode_int, path),
     )
 
 
@@ -3157,6 +3201,8 @@ def parse_input_ui_request(value: object, path: str = "InputUiRequest") -> Input
         title=required(payload, "title", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
         timeout=optional(payload, "timeout", decode_int, path),
+        supports_activity=optional(payload, "supportsActivity", decode_bool, path),
+        expires_at=optional(payload, "expiresAt", decode_int, path),
         secret=optional(payload, "secret", decode_bool, path),
     )
 
@@ -3181,6 +3227,8 @@ def parse_ask_ui_request(value: object, path: str = "AskUiRequest") -> AskUiRequ
         id=required(payload, "id", decode_str, path),
         questions=required(payload, "questions", array(parse_ask_question), path),
         timeout=optional(payload, "timeout", decode_int, path),
+        supports_activity=optional(payload, "supportsActivity", decode_bool, path),
+        expires_at=optional(payload, "expiresAt", decode_int, path),
     )
 
 
@@ -3192,6 +3240,8 @@ def parse_form_ui_request(value: object, path: str = "FormUiRequest") -> FormUiR
         id=required(payload, "id", decode_str, path),
         html=required(payload, "html", decode_str, path),
         timeout=optional(payload, "timeout", decode_int, path),
+        supports_activity=optional(payload, "supportsActivity", decode_bool, path),
+        expires_at=optional(payload, "expiresAt", decode_int, path),
     )
 
 
@@ -3285,6 +3335,8 @@ def parse_extension_ui_request(value: object, path: str = "ExtensionUiRequest") 
         checked_indices=optional(payload, "checkedIndices", array(decode_int), path),
         markable_count=optional(payload, "markableCount", decode_int, path),
         timeout=optional(payload, "timeout", decode_int, path),
+        supports_activity=optional(payload, "supportsActivity", decode_bool, path),
+        expires_at=optional(payload, "expiresAt", decode_int, path),
         message=optional(payload, "message", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
         secret=optional(payload, "secret", decode_bool, path),
@@ -3312,6 +3364,24 @@ def parse_ask_answer(value: object, path: str = "AskAnswer") -> AskAnswer:
         id=required(payload, "id", decode_str, path),
         selected_options=required(payload, "selectedOptions", array(decode_str), path),
         custom_input=optional(payload, "customInput", decode_str, path),
+    )
+
+
+def parse_extension_ui_state(value: object, path: str = "ExtensionUiState") -> ExtensionUiState:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["extension_ui_state"]]', literal(frozenset({"extension_ui_state"}))), path)
+    return ExtensionUiState(
+        id=required(payload, "id", decode_str, path),
+        expires_at=required(payload, "expiresAt", decode_int, path),
+    )
+
+
+def parse_extension_ui_activity_error(value: object, path: str = "ExtensionUiActivityError") -> ExtensionUiActivityError:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["extension_ui_activity_error"]]', literal(frozenset({"extension_ui_activity_error"}))), path)
+    return ExtensionUiActivityError(
+        id=required(payload, "id", decode_str, path),
+        error=required(payload, "error", decode_str, path),
     )
 
 
@@ -3441,6 +3511,8 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "session_settled": parse_session_settled_event,
         "extension_error": parse_extension_error,
         "extension_ui_request": parse_extension_ui_request,
+        "extension_ui_state": parse_extension_ui_state,
+        "extension_ui_activity_error": parse_extension_ui_activity_error,
         "available_commands_update": parse_available_commands_update_event,
         "subagent_lifecycle": parse_subagent_lifecycle_event,
         "subagent_progress": parse_subagent_progress_event,
@@ -3990,6 +4062,14 @@ class WireClient:
         """Subscribe to `extension_ui_request`: Extension UI request, discriminated by `method`."""
         return self._listen("extension_ui_request", listener)
 
+    def on_extension_ui_state(self, listener: Callable[[ExtensionUiState], None]) -> Callable[[], None]:
+        """Subscribe to `extension_ui_state`: Authoritative deadline after accepting a dialog activity reset."""
+        return self._listen("extension_ui_state", listener)
+
+    def on_extension_ui_activity_error(self, listener: Callable[[ExtensionUiActivityError], None]) -> Callable[[], None]:
+        """Subscribe to `extension_ui_activity_error`: Invalid activity; the dialog, its last valid draft and deadline remain unchanged."""
+        return self._listen("extension_ui_activity_error", listener)
+
     def on_available_commands_update(self, listener: Callable[[AvailableCommandsUpdateEvent], None]) -> Callable[[], None]:
         """Subscribe to `available_commands_update`: Slash-command catalog, pushed at startup and whenever command metadata changes."""
         return self._listen("available_commands_update", listener)
@@ -4264,8 +4344,10 @@ __all__ = [
     "EditorUiRequest",
     "Effort",
     "ExtensionError",
+    "ExtensionUiActivityError",
     "ExtensionUiMethod",
     "ExtensionUiRequest",
+    "ExtensionUiState",
     "FallbackContent",
     "FastModeResult",
     "FileMentionItem",
@@ -4462,7 +4544,9 @@ __all__ = [
     "parse_dictation_transcript_event",
     "parse_editor_ui_request",
     "parse_extension_error",
+    "parse_extension_ui_activity_error",
     "parse_extension_ui_request",
+    "parse_extension_ui_state",
     "parse_fallback_content",
     "parse_fast_mode_result",
     "parse_file_mention_item",

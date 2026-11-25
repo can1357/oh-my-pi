@@ -5836,6 +5836,10 @@ type SelectUiRequest struct {
 	// Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set.
 	MarkableCount *int64 `json:"markableCount,omitempty"`
 	Timeout       *int64 `json:"timeout,omitempty"`
+	// True when this timed dialog accepts extension_ui_activity.
+	SupportsActivity *bool `json:"supportsActivity,omitempty"`
+	// The server deadline in milliseconds since Unix epoch.
+	ExpiresAt *int64 `json:"expiresAt,omitempty"`
 }
 
 func (v *SelectUiRequest) UnmarshalJSON(data []byte) error {
@@ -5856,6 +5860,8 @@ func (v *SelectUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("checkedIndices", &out.CheckedIndices)
 	d.optional("markableCount", &out.MarkableCount)
 	d.optional("timeout", &out.Timeout)
+	d.optional("supportsActivity", &out.SupportsActivity)
+	d.optional("expiresAt", &out.ExpiresAt)
 	if d.err != nil {
 		return d.err
 	}
@@ -5893,6 +5899,10 @@ type ConfirmUiRequest struct {
 	Title   string `json:"title"`
 	Message string `json:"message"`
 	Timeout *int64 `json:"timeout,omitempty"`
+	// True when this timed dialog accepts extension_ui_activity.
+	SupportsActivity *bool `json:"supportsActivity,omitempty"`
+	// The server deadline in milliseconds since Unix epoch.
+	ExpiresAt *int64 `json:"expiresAt,omitempty"`
 }
 
 func (v *ConfirmUiRequest) UnmarshalJSON(data []byte) error {
@@ -5908,6 +5918,8 @@ func (v *ConfirmUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("title", &out.Title)
 	d.required("message", &out.Message)
 	d.optional("timeout", &out.Timeout)
+	d.optional("supportsActivity", &out.SupportsActivity)
+	d.optional("expiresAt", &out.ExpiresAt)
 	if d.err != nil {
 		return d.err
 	}
@@ -5925,7 +5937,11 @@ type InputUiRequest struct {
 	Title       string  `json:"title"`
 	Placeholder *string `json:"placeholder,omitempty"`
 	Timeout     *int64  `json:"timeout,omitempty"`
-	Secret      *bool   `json:"secret,omitempty"`
+	// True when this timed dialog accepts extension_ui_activity.
+	SupportsActivity *bool `json:"supportsActivity,omitempty"`
+	// The server deadline in milliseconds since Unix epoch.
+	ExpiresAt *int64 `json:"expiresAt,omitempty"`
+	Secret    *bool  `json:"secret,omitempty"`
 }
 
 func (v *InputUiRequest) UnmarshalJSON(data []byte) error {
@@ -5941,6 +5957,8 @@ func (v *InputUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("title", &out.Title)
 	d.optional("placeholder", &out.Placeholder)
 	d.optional("timeout", &out.Timeout)
+	d.optional("supportsActivity", &out.SupportsActivity)
+	d.optional("expiresAt", &out.ExpiresAt)
 	d.optional("secret", &out.Secret)
 	if d.err != nil {
 		return d.err
@@ -5991,6 +6009,10 @@ type AskUiRequest struct {
 	ID        string        `json:"id"`
 	Questions []AskQuestion `json:"questions"`
 	Timeout   *int64        `json:"timeout,omitempty"`
+	// True when this timed dialog accepts extension_ui_activity.
+	SupportsActivity *bool `json:"supportsActivity,omitempty"`
+	// The server deadline in milliseconds since Unix epoch.
+	ExpiresAt *int64 `json:"expiresAt,omitempty"`
 }
 
 func (v *AskUiRequest) UnmarshalJSON(data []byte) error {
@@ -6005,6 +6027,8 @@ func (v *AskUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("method", "ask")
 	d.required("questions", &out.Questions)
 	d.optional("timeout", &out.Timeout)
+	d.optional("supportsActivity", &out.SupportsActivity)
+	d.optional("expiresAt", &out.ExpiresAt)
 	if d.err != nil {
 		return d.err
 	}
@@ -6022,6 +6046,10 @@ type FormUiRequest struct {
 	ID      string `json:"id"`
 	HTML    string `json:"html"`
 	Timeout *int64 `json:"timeout,omitempty"`
+	// True when this timed dialog accepts extension_ui_activity.
+	SupportsActivity *bool `json:"supportsActivity,omitempty"`
+	// The server deadline in milliseconds since Unix epoch.
+	ExpiresAt *int64 `json:"expiresAt,omitempty"`
 }
 
 func (v *FormUiRequest) UnmarshalJSON(data []byte) error {
@@ -6036,6 +6064,8 @@ func (v *FormUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("method", "form")
 	d.required("html", &out.HTML)
 	d.optional("timeout", &out.Timeout)
+	d.optional("supportsActivity", &out.SupportsActivity)
+	d.optional("expiresAt", &out.ExpiresAt)
 	if d.err != nil {
 		return d.err
 	}
@@ -6414,7 +6444,7 @@ func (v ConfirmUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_response"`, nil)
 }
 
-// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults).
+// Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its last data draft or defaults).
 type CancelUiResponse struct {
 	ID       string `json:"id"`
 	TimedOut *bool  `json:"timedOut,omitempty"`
@@ -6519,6 +6549,92 @@ func (DataUiResponse) isExtensionUiResponse()    {}
 
 func (v ExtensionUiResponse) MarshalJSON() ([]byte, error) {
 	return encodeVariant("ExtensionUiResponse", v.Value)
+}
+
+// User activity on a timed dialog. reset defaults to true; data is a full form draft, not a patch.
+type ExtensionUiActivity struct {
+	ID    string                     `json:"id"`
+	Reset *bool                      `json:"reset,omitempty"`
+	Data  map[string]json.RawMessage `json:"data,omitempty"`
+}
+
+func (v *ExtensionUiActivity) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ExtensionUiActivity", v.decodeFrom)
+}
+
+func (v *ExtensionUiActivity) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ExtensionUiActivity
+	d := fieldDecoder{raw: raw, owner: "ExtensionUiActivity"}
+	d.constant("type", "extension_ui_activity")
+	d.required("id", &out.ID)
+	d.optional("reset", &out.Reset)
+	d.optional("data", &out.Data)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ExtensionUiActivity) MarshalJSON() ([]byte, error) {
+	type plain ExtensionUiActivity
+	return encodeObject(plain(v), `"type":"extension_ui_activity"`, nil)
+}
+
+// Authoritative deadline after accepting a dialog activity reset.
+type ExtensionUiState struct {
+	ID        string `json:"id"`
+	ExpiresAt int64  `json:"expiresAt"`
+}
+
+func (v *ExtensionUiState) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ExtensionUiState", v.decodeFrom)
+}
+
+func (v *ExtensionUiState) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ExtensionUiState
+	d := fieldDecoder{raw: raw, owner: "ExtensionUiState"}
+	d.constant("type", "extension_ui_state")
+	d.required("id", &out.ID)
+	d.required("expiresAt", &out.ExpiresAt)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ExtensionUiState) MarshalJSON() ([]byte, error) {
+	type plain ExtensionUiState
+	return encodeObject(plain(v), `"type":"extension_ui_state"`, nil)
+}
+
+// Invalid activity; the dialog, its last valid draft and deadline remain unchanged.
+type ExtensionUiActivityError struct {
+	ID    string `json:"id"`
+	Error string `json:"error"`
+}
+
+func (v *ExtensionUiActivityError) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ExtensionUiActivityError", v.decodeFrom)
+}
+
+func (v *ExtensionUiActivityError) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ExtensionUiActivityError
+	d := fieldDecoder{raw: raw, owner: "ExtensionUiActivityError"}
+	d.constant("type", "extension_ui_activity_error")
+	d.required("id", &out.ID)
+	d.required("error", &out.Error)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ExtensionUiActivityError) MarshalJSON() ([]byte, error) {
+	type plain ExtensionUiActivityError
+	return encodeObject(plain(v), `"type":"extension_ui_activity_error"`, nil)
 }
 
 type HostToolCallRequest struct {
@@ -6864,14 +6980,15 @@ type RpcInboundVariant interface {
 	isRpcInbound()
 }
 
-func (ValueUiResponse) isRpcInbound()   {}
-func (ConfirmUiResponse) isRpcInbound() {}
-func (CancelUiResponse) isRpcInbound()  {}
-func (AnswersUiResponse) isRpcInbound() {}
-func (DataUiResponse) isRpcInbound()    {}
-func (HostToolUpdate) isRpcInbound()    {}
-func (HostToolResult) isRpcInbound()    {}
-func (HostUriResult) isRpcInbound()     {}
+func (ValueUiResponse) isRpcInbound()     {}
+func (ConfirmUiResponse) isRpcInbound()   {}
+func (CancelUiResponse) isRpcInbound()    {}
+func (AnswersUiResponse) isRpcInbound()   {}
+func (DataUiResponse) isRpcInbound()      {}
+func (ExtensionUiActivity) isRpcInbound() {}
+func (HostToolUpdate) isRpcInbound()      {}
+func (HostToolResult) isRpcInbound()      {}
+func (HostUriResult) isRpcInbound()       {}
 
 func (v RpcInbound) MarshalJSON() ([]byte, error) {
 	return encodeVariant("RpcInbound", v.Value)
@@ -7009,6 +7126,8 @@ func (PromptResultEvent) isRpcNotification()            {}
 func (SessionSettledEvent) isRpcNotification()          {}
 func (ExtensionError) isRpcNotification()               {}
 func (ExtensionUiRequest) isRpcNotification()           {}
+func (ExtensionUiState) isRpcNotification()             {}
+func (ExtensionUiActivityError) isRpcNotification()     {}
 func (AvailableCommandsUpdateEvent) isRpcNotification() {}
 func (SubagentLifecycleEvent) isRpcNotification()       {}
 func (SubagentProgressEvent) isRpcNotification()        {}
@@ -7083,6 +7202,10 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[ExtensionError](raw)
 	case "extension_ui_request":
 		value, err = decodeVariant[ExtensionUiRequest](raw)
+	case "extension_ui_state":
+		value, err = decodeVariant[ExtensionUiState](raw)
+	case "extension_ui_activity_error":
+		value, err = decodeVariant[ExtensionUiActivityError](raw)
 	case "available_commands_update":
 		value, err = decodeVariant[AvailableCommandsUpdateEvent](raw)
 	case "subagent_lifecycle":
@@ -7214,6 +7337,8 @@ func (PromptResultEvent) isRpcServerFrame()            {}
 func (SessionSettledEvent) isRpcServerFrame()          {}
 func (ExtensionError) isRpcServerFrame()               {}
 func (ExtensionUiRequest) isRpcServerFrame()           {}
+func (ExtensionUiState) isRpcServerFrame()             {}
+func (ExtensionUiActivityError) isRpcServerFrame()     {}
 func (AvailableCommandsUpdateEvent) isRpcServerFrame() {}
 func (SubagentLifecycleEvent) isRpcServerFrame()       {}
 func (SubagentProgressEvent) isRpcServerFrame()        {}
@@ -7298,6 +7423,10 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[ExtensionError](raw)
 	case "extension_ui_request":
 		value, err = decodeVariant[ExtensionUiRequest](raw)
+	case "extension_ui_state":
+		value, err = decodeVariant[ExtensionUiState](raw)
+	case "extension_ui_activity_error":
+		value, err = decodeVariant[ExtensionUiActivityError](raw)
 	case "available_commands_update":
 		value, err = decodeVariant[AvailableCommandsUpdateEvent](raw)
 	case "subagent_lifecycle":

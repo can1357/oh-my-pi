@@ -206,7 +206,7 @@ describe("dispatchRpcInputFrame", () => {
 });
 
 describe("RpcInputDispatcher", () => {
-	test("control frames resolve extension UI requests while an ordinary command is active", async () => {
+	test("control frames handle activity and answers while an ordinary command awaits a dialog", async () => {
 		const { deps, outputs } = makeDeps(async command => {
 			if (command.type !== "get_state") throw new Error(`unexpected command type: ${command.type}`);
 			const response = await requestExtensionInput(depsRef, "ui-active", "Continue?");
@@ -232,6 +232,16 @@ describe("RpcInputDispatcher", () => {
 				message: "Continue?",
 			},
 		]);
+
+		const active = deps.pendingExtensionRequests.get("ui-active")!;
+		let activitySeen = false;
+		active.activity = () => {
+			activitySeen = true;
+		};
+		dispatcher.dispatch({ type: "extension_ui_activity", id: "ui-active" });
+		await flushMicrotasks();
+		expect(activitySeen).toBe(true);
+		expect(outputs).toHaveLength(1);
 
 		dispatcher.dispatch({ type: "extension_ui_response", id: "ui-active", value: "continue" });
 		await dispatcher.drain();

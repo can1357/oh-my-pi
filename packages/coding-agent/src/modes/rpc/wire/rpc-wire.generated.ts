@@ -1356,6 +1356,10 @@ export interface SelectUiRequest {
 	/** Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set. */
 	markableCount?: number;
 	timeout?: number;
+	/** True when this timed dialog accepts extension_ui_activity. */
+	supportsActivity?: boolean;
+	/** The server deadline in milliseconds since Unix epoch. */
+	expiresAt?: number;
 }
 
 export interface ConfirmUiRequest {
@@ -1365,6 +1369,10 @@ export interface ConfirmUiRequest {
 	title: string;
 	message: string;
 	timeout?: number;
+	/** True when this timed dialog accepts extension_ui_activity. */
+	supportsActivity?: boolean;
+	/** The server deadline in milliseconds since Unix epoch. */
+	expiresAt?: number;
 }
 
 export interface InputUiRequest {
@@ -1374,6 +1382,10 @@ export interface InputUiRequest {
 	title: string;
 	placeholder?: string;
 	timeout?: number;
+	/** True when this timed dialog accepts extension_ui_activity. */
+	supportsActivity?: boolean;
+	/** The server deadline in milliseconds since Unix epoch. */
+	expiresAt?: number;
 	secret?: boolean;
 }
 
@@ -1393,6 +1405,10 @@ export interface AskUiRequest {
 	method: "ask";
 	questions: AskQuestion[];
 	timeout?: number;
+	/** True when this timed dialog accepts extension_ui_activity. */
+	supportsActivity?: boolean;
+	/** The server deadline in milliseconds since Unix epoch. */
+	expiresAt?: number;
 }
 
 /** The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required. */
@@ -1402,6 +1418,10 @@ export interface FormUiRequest {
 	method: "form";
 	html: string;
 	timeout?: number;
+	/** True when this timed dialog accepts extension_ui_activity. */
+	supportsActivity?: boolean;
+	/** The server deadline in milliseconds since Unix epoch. */
+	expiresAt?: number;
 }
 
 /** Close the dialog opened by request `targetId`; a later answer to it is ignored. */
@@ -1485,7 +1505,7 @@ export interface ConfirmUiResponse {
 	confirmed: boolean;
 }
 
-/** Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults). */
+/** Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its last data draft or defaults). */
 export interface CancelUiResponse {
 	type: "extension_ui_response";
 	id: string;
@@ -1510,6 +1530,28 @@ export interface DataUiResponse {
 
 /** Host reply to an extension UI request; variants share `type` and differ by their payload key. */
 export type ExtensionUiResponse = ValueUiResponse | ConfirmUiResponse | CancelUiResponse | AnswersUiResponse | DataUiResponse;
+
+/** User activity on a timed dialog. reset defaults to true; data is a full form draft, not a patch. */
+export interface ExtensionUiActivity {
+	type: "extension_ui_activity";
+	id: string;
+	reset?: boolean;
+	data?: Record<string, unknown>;
+}
+
+/** Authoritative deadline after accepting a dialog activity reset. */
+export interface ExtensionUiState {
+	type: "extension_ui_state";
+	id: string;
+	expiresAt: number;
+}
+
+/** Invalid activity; the dialog, its last valid draft and deadline remain unchanged. */
+export interface ExtensionUiActivityError {
+	type: "extension_ui_activity_error";
+	id: string;
+	error: string;
+}
 
 export interface HostToolCallRequest {
 	type: "host_tool_call";
@@ -1583,7 +1625,7 @@ export interface HostUriResult {
 export type RpcHostRequest = HostToolCallRequest | HostToolCancelRequest | HostUriRequest | HostUriCancelRequest;
 
 /** Non-command frame the host sends, discriminated by `type`. */
-export type RpcInbound = ExtensionUiResponse | HostToolUpdate | HostToolResult | HostUriResult;
+export type RpcInbound = ExtensionUiResponse | ExtensionUiActivity | HostToolUpdate | HostToolResult | HostUriResult;
 
 /** Response to a command, correlated by `id`. */
 export interface RpcResponse {
@@ -1620,7 +1662,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | ExtensionUiState | ExtensionUiActivityError | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;

@@ -5412,6 +5412,14 @@
 				},
 				"timeout": {
 					"type": "integer"
+				},
+				"supportsActivity": {
+					"type": "boolean",
+					"description": "True when this timed dialog accepts extension_ui_activity."
+				},
+				"expiresAt": {
+					"type": "integer",
+					"description": "The server deadline in milliseconds since Unix epoch."
 				}
 			},
 			"required": [
@@ -5442,6 +5450,14 @@
 				},
 				"timeout": {
 					"type": "integer"
+				},
+				"supportsActivity": {
+					"type": "boolean",
+					"description": "True when this timed dialog accepts extension_ui_activity."
+				},
+				"expiresAt": {
+					"type": "integer",
+					"description": "The server deadline in milliseconds since Unix epoch."
 				}
 			},
 			"required": [
@@ -5472,6 +5488,14 @@
 				},
 				"timeout": {
 					"type": "integer"
+				},
+				"supportsActivity": {
+					"type": "boolean",
+					"description": "True when this timed dialog accepts extension_ui_activity."
+				},
+				"expiresAt": {
+					"type": "integer",
+					"description": "The server deadline in milliseconds since Unix epoch."
 				},
 				"secret": {
 					"type": "boolean"
@@ -5533,6 +5557,14 @@
 				},
 				"timeout": {
 					"type": "integer"
+				},
+				"supportsActivity": {
+					"type": "boolean",
+					"description": "True when this timed dialog accepts extension_ui_activity."
+				},
+				"expiresAt": {
+					"type": "integer",
+					"description": "The server deadline in milliseconds since Unix epoch."
 				}
 			},
 			"required": [
@@ -5560,6 +5592,14 @@
 				},
 				"timeout": {
 					"type": "integer"
+				},
+				"supportsActivity": {
+					"type": "boolean",
+					"description": "True when this timed dialog accepts extension_ui_activity."
+				},
+				"expiresAt": {
+					"type": "integer",
+					"description": "The server deadline in milliseconds since Unix epoch."
 				}
 			},
 			"required": [
@@ -5881,7 +5921,7 @@
 				"id",
 				"cancelled"
 			],
-			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults)."
+			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its last data draft or defaults)."
 		},
 		"AnswersUiResponse": {
 			"type": "object",
@@ -5948,6 +5988,70 @@
 				}
 			],
 			"description": "Host reply to an extension UI request; variants share `type` and differ by their payload key."
+		},
+		"ExtensionUiActivity": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "extension_ui_activity"
+				},
+				"id": {
+					"type": "string"
+				},
+				"reset": {
+					"type": "boolean"
+				},
+				"data": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
+				}
+			},
+			"required": [
+				"type",
+				"id"
+			],
+			"description": "User activity on a timed dialog. reset defaults to true; data is a full form draft, not a patch."
+		},
+		"ExtensionUiState": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "extension_ui_state"
+				},
+				"id": {
+					"type": "string"
+				},
+				"expiresAt": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"expiresAt"
+			],
+			"description": "Authoritative deadline after accepting a dialog activity reset."
+		},
+		"ExtensionUiActivityError": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "extension_ui_activity_error"
+				},
+				"id": {
+					"type": "string"
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"error"
+			],
+			"description": "Invalid activity; the dialog, its last valid draft and deadline remain unchanged."
 		},
 		"HostToolCallRequest": {
 			"type": "object",
@@ -6186,6 +6290,9 @@
 					"$ref": "#/$defs/ExtensionUiResponse"
 				},
 				{
+					"$ref": "#/$defs/ExtensionUiActivity"
+				},
+				{
 					"$ref": "#/$defs/HostToolUpdate"
 				},
 				{
@@ -6308,6 +6415,12 @@
 				},
 				{
 					"$ref": "#/$defs/ExtensionUiRequest"
+				},
+				{
+					"$ref": "#/$defs/ExtensionUiState"
+				},
+				{
+					"$ref": "#/$defs/ExtensionUiActivityError"
 				},
 				{
 					"$ref": "#/$defs/AvailableCommandsUpdateEvent"
