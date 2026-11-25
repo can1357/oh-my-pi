@@ -335,7 +335,7 @@ it("scrolls the focused Git commit diff with arrow and page keys without switchi
 
 	ui.type("\r");
 	await settle();
-	for (const key of ["\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[6~", "\x1b[5~"]) {
+	for (const key of ["\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[6~", "\x1b[5~", "G", "g"]) {
 		ui.type(key);
 		await settle();
 	}
@@ -345,6 +345,8 @@ it("scrolls the focused Git commit diff with arrow and page keys without switchi
 		[diff.id, "page-down"],
 		[diff.id, "page-down"],
 		[diff.id, "page-up"],
+		[diff.id, "end"],
+		[diff.id, "start"],
 	]);
 	expect(ui.node("diff").p.path).toBe("a.txt");
 

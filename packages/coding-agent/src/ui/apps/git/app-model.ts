@@ -582,10 +582,14 @@ export class GitAppModel {
 				return (this.pane.scrollLeftBy(8), true);
 			case "home":
 			case "g":
-				return (this.pane.cursorToEdge("start"), true);
+				this.pane.cursorToEdge("start");
+				if (this.pane.doc) this.pane.requestScroll("start");
+				return true;
 			case "end":
 			case "shift+g":
-				return (this.pane.cursorToEdge("end"), true);
+				this.pane.cursorToEdge("end");
+				if (this.pane.doc) this.pane.requestScroll("end");
+				return true;
 			case "enter":
 				return (this.jumpHunkOrFile(1), true);
 			case "space": {
