@@ -34,6 +34,7 @@ import {
 	LineDecoder,
 	LineWriter,
 	type PeerMessage,
+	parsePeerMessage,
 	parseRoster,
 	type Receipt,
 	type Roster,
@@ -256,7 +257,7 @@ export default async function urlSchemeBridge(pi: ExtensionAPI): Promise<void> {
 		// or while an attempt is still in flight: the new attempt supersedes that one.
 		if (!active || shuttingDown || suspended || socket) return;
 		const attempt = ++attempts;
-		const decoder = new LineDecoder<PeerMessage>((line, error) =>
+		const decoder = new LineDecoder(parsePeerMessage, (line, error) =>
 			pi.logger.warn("url-scheme-bridge: dropped malformed peer line", { line, error: String(error) }),
 		);
 		const path = roster.socket;

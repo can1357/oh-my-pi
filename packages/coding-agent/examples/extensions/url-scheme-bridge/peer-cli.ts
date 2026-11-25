@@ -21,7 +21,15 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { type BridgeMessage, LineDecoder, LineWriter, type PeerMessage, parseRoster, type Roster } from "./protocol";
+import {
+	type BridgeMessage,
+	LineDecoder,
+	LineWriter,
+	type PeerMessage,
+	parseBridgeMessage,
+	parseRoster,
+	type Roster,
+} from "./protocol";
 
 const { values } = parseArgs({
 	options: {
@@ -112,7 +120,7 @@ const handleBridgeMessage = (message: BridgeMessage): void => {
 };
 
 const newDecoder = (): LineDecoder<BridgeMessage> =>
-	new LineDecoder<BridgeMessage>((line, error) =>
+	new LineDecoder(parseBridgeMessage, (line, error) =>
 		console.error(`dropped malformed bridge line: ${line} (${String(error)})`),
 	);
 // One decoder per connection, so a partial line buffered from a replaced session never prefixes

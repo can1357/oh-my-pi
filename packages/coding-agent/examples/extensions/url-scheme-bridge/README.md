@@ -116,9 +116,10 @@ Newline-delimited JSON; the peer listens, the bridge connects (one connection pe
 | peer → bridge | `{type:"inbound", id, from, body, expectsReply}`       | `from` is a bare rostered name; injected as `[@<namespace>/<from>] …`.    |
 | bridge → peer | `{type:"receipt", id, receipt}`                        | Sent once that inbound message reaches omp's transcript (`delivered`), or `failed` for an unrostered sender; a message dropped before admission gets none. |
 
-Trust model: the socket is a user-owned local path and both ends are the same user's processes, so
-peer lines are parsed as JSON and used without shape validation (only the roster file is validated).
-A bridge that crosses a trust boundary must validate every line and authenticate the peer.
+Trust model: the socket is a user-owned local path and both ends are the same user's processes. Each
+side still checks every line against the record shapes above (`parsePeerMessage`,
+`parseBridgeMessage`) and skips one that is not JSON or not a valid record, as it skips a malformed
+line. A bridge that crosses a trust boundary must also authenticate the peer.
 
 ## What it deliberately does not do
 

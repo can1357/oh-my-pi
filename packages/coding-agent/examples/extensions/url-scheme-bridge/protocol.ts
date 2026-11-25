@@ -39,15 +39,19 @@ export function encodeLine(message: BridgeMessage | PeerMessage): string {
 }
 
 /**
- * Accumulates socket chunks and yields complete JSON lines. A malformed line is skipped and
- * reported through `onError` rather than tearing the connection down. One decoder per connection:
- * UTF-8 is decoded in streaming mode so a multi-byte character split across two chunks survives.
+ * Accumulates socket chunks and yields complete records. A line that is not JSON, or whose JSON is
+ * not a record of the expected shape (`parse` throws), is skipped and reported through `onError`
+ * rather than tearing the connection down. One decoder per connection: UTF-8 is decoded in
+ * streaming mode so a multi-byte character split across two chunks survives.
  */
 export class LineDecoder<T> {
 	#buffer = "";
 	readonly #utf8 = new TextDecoder();
 
-	constructor(private readonly onError: (line: string, error: unknown) => void) {}
+	constructor(
+		private readonly parse: (value: unknown) => T,
+		private readonly onError: (line: string, error: unknown) => void,
+	) {}
 
 	push(chunk: Uint8Array | string): T[] {
 		this.#buffer += typeof chunk === "string" ? chunk : this.#utf8.decode(chunk, { stream: true });
@@ -58,7 +62,7 @@ export class LineDecoder<T> {
 			this.#buffer = this.#buffer.slice(newline + 1);
 			if (line.trim().length > 0) {
 				try {
-					messages.push(JSON.parse(line) as T);
+					messages.push(this.parse(JSON.parse(line)));
 				} catch (error) {
 					this.onError(line, error);
 				}
@@ -66,6 +70,79 @@ export class LineDecoder<T> {
 			newline = this.#buffer.indexOf("\n");
 		}
 		return messages;
+	}
+}
+
+type JsonObject = Record<string, unknown>;
+
+function asObject(value: unknown, what: string): JsonObject {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error(`${what} must be a JSON object`);
+	}
+	return value as JsonObject;
+}
+
+function stringField(record: JsonObject, key: string): string {
+	const value = record[key];
+	if (typeof value !== "string") throw new Error(`${String(record.type)} record: ${key} must be a string`);
+	return value;
+}
+
+function booleanField(record: JsonObject, key: string): boolean {
+	const value = record[key];
+	if (typeof value !== "boolean") throw new Error(`${String(record.type)} record: ${key} must be a boolean`);
+	return value;
+}
+
+function receiptField(record: JsonObject): Receipt {
+	const receipt = asObject(record.receipt, `${String(record.type)} record: receipt`);
+	const { outcome, error } = receipt;
+	if (outcome !== "delivered" && outcome !== "failed") {
+		throw new Error(`${String(record.type)} record: receipt.outcome must be "delivered" or "failed"`);
+	}
+	if (error === undefined) return { outcome };
+	if (typeof error !== "string") throw new Error(`${String(record.type)} record: receipt.error must be a string`);
+	return { outcome, error };
+}
+
+/** One bridge → peer record, checked field by field; throws naming what is wrong. */
+export function parseBridgeMessage(value: unknown): BridgeMessage {
+	const record = asObject(value, "a record");
+	switch (record.type) {
+		case "hello":
+			return { type: "hello", agentId: stringField(record, "agentId"), namespace: stringField(record, "namespace") };
+		case "outbound":
+			return {
+				type: "outbound",
+				id: stringField(record, "id"),
+				from: stringField(record, "from"),
+				to: stringField(record, "to"),
+				body: stringField(record, "body"),
+				expectsReply: booleanField(record, "expectsReply"),
+			};
+		case "receipt":
+			return { type: "receipt", id: stringField(record, "id"), receipt: receiptField(record) };
+		default:
+			throw new Error(`unknown bridge record type ${JSON.stringify(record.type)}`);
+	}
+}
+
+/** One peer → bridge record, checked field by field; throws naming what is wrong. */
+export function parsePeerMessage(value: unknown): PeerMessage {
+	const record = asObject(value, "a record");
+	switch (record.type) {
+		case "inbound":
+			return {
+				type: "inbound",
+				id: stringField(record, "id"),
+				from: stringField(record, "from"),
+				body: stringField(record, "body"),
+				expectsReply: booleanField(record, "expectsReply"),
+			};
+		case "ack":
+			return { type: "ack", id: stringField(record, "id"), receipt: receiptField(record) };
+		default:
+			throw new Error(`unknown peer record type ${JSON.stringify(record.type)}`);
 	}
 }
 

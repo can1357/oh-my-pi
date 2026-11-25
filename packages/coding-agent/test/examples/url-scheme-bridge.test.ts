@@ -33,6 +33,8 @@ import {
 	LineDecoder,
 	LineWriter,
 	type PeerMessage,
+	parseBridgeMessage,
+	parsePeerMessage,
 	type Roster,
 } from "../../examples/extensions/url-scheme-bridge/protocol";
 
@@ -48,6 +50,8 @@ const emptyWorkspaceTree = (cwd: string): WorkspaceTree => ({
 interface TestPeer {
 	next: <T extends BridgeMessage["type"]>(type: T) => Promise<Extract<BridgeMessage, { type: T }>>;
 	send: (message: PeerMessage) => void;
+	/** Write `text` to the bridge as is (no encoding, no shape check). */
+	sendRaw: (text: string) => void;
 	/** Connections currently open from the bridge. */
 	openConnections: () => number;
 	/** Resolves when the current bridge connection closes. */
@@ -63,7 +67,7 @@ function startPeer(socketPath: string): TestPeer {
 	let bridge: Bun.Socket | undefined;
 	let onClose = Promise.withResolvers<void>();
 	let stopped = false;
-	const decoder = new LineDecoder<BridgeMessage>((line, error) => {
+	const decoder = new LineDecoder(parseBridgeMessage, (line, error) => {
 		throw new Error(`peer: malformed bridge line ${line}: ${String(error)}`);
 	});
 	const deliver = (message: BridgeMessage): void => {
@@ -117,6 +121,10 @@ function startPeer(socketPath: string): TestPeer {
 		send: message => {
 			if (!bridge) throw new Error("peer: bridge not connected");
 			bridge.write(encodeLine(message));
+		},
+		sendRaw: text => {
+			if (!bridge) throw new Error("peer: bridge not connected");
+			bridge.write(text);
 		},
 		openConnections: () => sockets.size,
 		closed: () => onClose.promise,
@@ -401,6 +409,19 @@ describe("examples/extensions/url-scheme-bridge", () => {
 		expect(await peer.next("receipt")).toEqual({ type: "receipt", id: "peer-2", receipt: { outcome: "delivered" } });
 	});
 
+	it("skips a peer record of the wrong shape and keeps serving the connection", async () => {
+		const harness = await bridgeSession();
+		const { peer } = harness;
+		await harness.start();
+		await peer.next("hello");
+		harness.deliverInjected();
+		// Valid JSON, but not a peer record: neither may reach the bridge's handler.
+		peer.sendRaw('null\n{"type":"inbound","id":"peer-0","from":"leia"}\n');
+		peer.send({ type: "inbound", id: "peer-1", from: "leia", body: "still here", expectsReply: false });
+		expect(await peer.next("receipt")).toEqual({ type: "receipt", id: "peer-1", receipt: { outcome: "delivered" } });
+		expect(peer.openConnections()).toBe(1);
+	});
+
 	it("disconnects while a live disable suspends it, and reconnects with its scheme on resume", async () => {
 		const harness = await bridgeSession();
 		const { peer, runner } = harness;
@@ -503,13 +524,32 @@ describe("examples/extensions/url-scheme-bridge", () => {
 
 describe("url-scheme-bridge LineDecoder", () => {
 	it("reassembles a UTF-8 character split across socket chunks", () => {
-		const decoder = new LineDecoder<{ body: string }>((line, error) => {
+		const decoder = new LineDecoder(parsePeerMessage, (line, error) => {
 			throw new Error(`malformed ${line}: ${String(error)}`);
 		});
-		const bytes = new TextEncoder().encode('{"body":"héllo €"}\n');
+		const record: PeerMessage = { type: "inbound", id: "p1", from: "leia", body: "héllo €", expectsReply: false };
+		const bytes = new TextEncoder().encode(encodeLine(record));
 		// Cut inside the two-byte "é" (C3 A9): a per-chunk decode would yield replacement characters.
-		expect(decoder.push(bytes.slice(0, 11))).toEqual([]);
-		expect(decoder.push(bytes.slice(11))).toEqual([{ body: "héllo €" }]);
+		const cut = bytes.indexOf(0xc3) + 1;
+		expect(decoder.push(bytes.slice(0, cut))).toEqual([]);
+		expect(decoder.push(bytes.slice(cut))).toEqual([record]);
+	});
+
+	it("skips and reports each line that is not a record of the expected shape, and keeps decoding", () => {
+		const dropped: string[] = [];
+		const decoder = new LineDecoder(parsePeerMessage, line => dropped.push(line));
+		const valid: PeerMessage = { type: "ack", id: "m1", receipt: { outcome: "delivered" } };
+		const invalid = [
+			"null",
+			"[1]",
+			'{"type":"bogus","id":"m0"}',
+			'{"type":"ack","id":"m0"}',
+			'{"type":"ack","id":"m0","receipt":{"outcome":"maybe"}}',
+			'{"type":"inbound","id":"p0","from":"leia","body":7,"expectsReply":false}',
+			"not json",
+		];
+		expect(decoder.push(`${invalid.join("\n")}\n${encodeLine(valid)}`)).toEqual([valid]);
+		expect(dropped).toEqual(invalid);
 	});
 });
 
