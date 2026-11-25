@@ -2,13 +2,26 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import {
+	deleteManagedSkill,
+	getManagedSkillsDir,
+	getProjectManagedSkillsDir,
+	writeManagedSkill,
+} from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import "@oh-my-pi/pi-coding-agent/discovery";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { managedSkillToolLocation } from "@oh-my-pi/pi-coding-agent/tools/managed-skill-location";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { $ } from "bun";
 import { restoreEnvValue } from "./helpers/settings-test-state";
+
+async function initRepo(dir: string): Promise<void> {
+	await fs.mkdir(dir, { recursive: true });
+	await $`git init -q`.cwd(dir).quiet();
+}
 
 async function writeSkill(dir: string, name: string, description: string): Promise<void> {
 	const file = path.join(dir, name, "SKILL.md");
@@ -19,6 +32,7 @@ async function writeSkill(dir: string, name: string, description: string): Promi
 describe("managed-skills discovery", () => {
 	let tempHome: string;
 	let tempCwd: string;
+	const sessionLocation = () => managedSkillToolLocation({ cwd: tempCwd, settings: Settings.isolated() });
 	let managedDir: string;
 	let authoredDir: string;
 	let originalClaudeConfigDir: string | undefined;
@@ -194,5 +208,130 @@ describe("managed-skills discovery", () => {
 		const { skills, warnings } = await loadSkills({ cwd: tempCwd });
 		expect(skills.some(s => s.source === "omp-managed:user")).toBe(false);
 		expect(warnings.some(w => w.message.includes("managed-skills"))).toBe(false);
+	});
+
+	it("loads a project-managed skill only in its own repository, from any subdirectory", async () => {
+		const repoA = path.join(tempHome, "repo-a");
+		const repoB = path.join(tempHome, "repo-b");
+		await initRepo(repoA);
+		await initRepo(repoB);
+		const subdir = path.join(repoA, "packages", "app");
+		await fs.mkdir(subdir, { recursive: true });
+		await writeManagedSkill(
+			{ action: "create", name: "deploy-a", description: "Deploy repo A.", body: "# Deploy" },
+			{ scope: "project", cwd: subdir },
+		);
+
+		const inRepoA = await loadSkills({ cwd: repoA });
+		expect(inRepoA.skills.find(s => s.name === "deploy-a")?.source).toBe("omp-managed:project");
+		const inRepoB = await loadSkills({ cwd: repoB });
+		expect(inRepoB.skills.some(s => s.name === "deploy-a")).toBe(false);
+		// The store is omp-owned; nothing lands in the repository.
+		expect(await fs.readdir(repoA)).not.toContain(".omp");
+	});
+
+	it("keeps global managed skills visible when the project's Git pointer is unreadable", async () => {
+		await fs.writeFile(path.join(tempCwd, ".git"), Uint8Array.of(0xff));
+		await writeSkill(managedDir, "available", "Global skill.");
+		const { skills, warnings } = await loadSkills({ cwd: tempCwd });
+		expect(skills.find(s => s.name === "available")?.source).toBe("omp-managed:user");
+		expect(warnings.some(w => w.message.includes("Failed to discover project managed skills"))).toBe(true);
+	});
+
+	it("refuses to delete a visible linked project skill without touching its global twin", async () => {
+		const project = getProjectManagedSkillsDir(tempCwd);
+		const external = path.join(tempHome, "external");
+		await writeSkill(external, "shared", "Linked project skill.");
+		await writeSkill(managedDir, "shared", "Global twin.");
+		await fs.mkdir(project, { recursive: true });
+		await fs.symlink(path.join(external, "shared"), path.join(project, "shared"), "dir");
+		const { skills } = await loadSkills({ cwd: tempCwd });
+		expect(skills.find(s => s.name === "shared")?.description).toBe("Linked project skill.");
+		await expect(deleteManagedSkill("shared", sessionLocation())).rejects.toThrow(/symlink/);
+		expect(await Bun.file(path.join(managedDir, "shared", "SKILL.md")).text()).toContain("Global twin.");
+		expect(await Bun.file(path.join(external, "shared", "SKILL.md")).text()).toContain("Linked project skill.");
+	});
+
+	it("refuses to delete a visible skill with a differently cased directory name", async () => {
+		const visible = Bun.file(path.join(managedDir, "Demo", "SKILL.md"));
+		const canonical = Bun.file(path.join(managedDir, "demo", "SKILL.md"));
+		const alias = "---\nname: demo\ndescription: Visible alias.\n---\nKeep the alias.";
+		await Bun.write(visible, alias);
+		// On a case-sensitive volume, the lowercase directory holds a separate, hidden skill.
+		if (!(await canonical.exists())) await writeSkill(managedDir, "demo", "Hidden twin.");
+		const before = await canonical.text();
+		const { skills } = await loadSkills({ cwd: tempCwd });
+		expect(skills.find(s => s.name === "demo")?.description).toBe("Visible alias.");
+		await expect(deleteManagedSkill("demo", sessionLocation())).rejects.toThrow(/under that name/);
+		expect(await visible.text()).toBe(alias);
+		expect(await canonical.text()).toBe(before);
+	});
+
+	it("skips a linked project store and refuses to mutate either copy through it", async () => {
+		const project = getProjectManagedSkillsDir(tempCwd);
+		const external = path.join(tempHome, "external");
+		await writeSkill(external, "guard", "Outside the project store.");
+		await writeSkill(managedDir, "guard", "Visible global.");
+		await fs.mkdir(path.dirname(project), { recursive: true });
+		await fs.symlink(external, project, "dir");
+		expect((await loadSkills({ cwd: tempCwd })).skills.find(s => s.name === "guard")?.description).toBe(
+			"Visible global.",
+		);
+		await expect(deleteManagedSkill("guard", sessionLocation())).rejects.toThrow(/root is a symlink/);
+		expect(await Bun.file(path.join(managedDir, "guard", "SKILL.md")).exists()).toBe(true);
+		expect(await Bun.file(path.join(external, "guard", "SKILL.md")).exists()).toBe(true);
+	});
+
+	it("updates the visible global copy when project frontmatter disables its twin", async () => {
+		const projectFile = path.join(getProjectManagedSkillsDir(tempCwd), "demo", "SKILL.md");
+		const disabled = "---\nenabled: false\ndescription: Disabled.\n---\nHidden project content.";
+		await Bun.write(projectFile, disabled);
+		await writeSkill(managedDir, "demo", "Global copy.");
+		expect((await loadSkills({ cwd: tempCwd })).skills.find(s => s.name === "demo")?.description).toBe(
+			"Global copy.",
+		);
+		const updated = await writeManagedSkill(
+			{ action: "update", name: "demo", description: "New.", body: "Updated global content." },
+			sessionLocation(),
+		);
+		expect(await Bun.file(updated.path).text()).toContain("Updated global content.");
+		expect(await Bun.file(projectFile).text()).toBe(disabled);
+	});
+
+	it("lets a project-managed skill shadow a same-named global one, and an authored skill beat both", async () => {
+		const repo = path.join(tempHome, "repo");
+		await initRepo(repo);
+		await writeSkill(managedDir, "dup", "Global dup.");
+		await writeManagedSkill(
+			{ action: "create", name: "dup", description: "Project dup.", body: "# dup" },
+			{ scope: "project", cwd: repo },
+		);
+
+		const inRepo = (await loadSkills({ cwd: repo })).skills.filter(s => s.name === "dup");
+		expect(inRepo.map(s => s.description)).toEqual(["Project dup."]);
+		const elsewhere = (await loadSkills({ cwd: tempCwd })).skills.filter(s => s.name === "dup");
+		expect(elsewhere.map(s => s.description)).toEqual(["Global dup."]);
+
+		await writeSkill(path.join(repo, ".omp", "skills"), "dup", "Authored dup.");
+		const withAuthored = (await loadSkills({ cwd: repo })).skills.filter(s => s.name === "dup");
+		expect(withAuthored.map(s => [s.description, s.source])).toEqual([["Authored dup.", "native:project"]]);
+	});
+
+	it("shares a project-managed skill between a repository's primary checkout and its linked worktrees", async () => {
+		const primary = path.join(tempHome, "primary");
+		const worktree = path.join(tempHome, "linked");
+		await initRepo(primary);
+		await $`git -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init`.cwd(primary).quiet();
+		await $`git worktree add -q ${worktree}`.cwd(primary).quiet();
+		// Learned in an (ephemeral) linked worktree, the skill must still reach the primary checkout.
+		await writeManagedSkill(
+			{ action: "create", name: "shared-skill", description: "Learned in a worktree.", body: "# s" },
+			{ scope: "project", cwd: worktree },
+		);
+
+		expect((await loadSkills({ cwd: primary })).skills.some(s => s.name === "shared-skill")).toBe(true);
+		expect((await loadSkills({ cwd: worktree })).skills.some(s => s.name === "shared-skill")).toBe(true);
+		await initRepo(tempCwd);
+		expect((await loadSkills({ cwd: tempCwd })).skills.some(s => s.name === "shared-skill")).toBe(false);
 	});
 });

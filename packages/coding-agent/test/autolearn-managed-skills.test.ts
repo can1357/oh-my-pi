@@ -5,7 +5,10 @@ import * as path from "node:path";
 import {
 	deleteManagedSkill,
 	getManagedSkillsDir,
+	getProjectManagedSkillsBaseDir,
+	getProjectManagedSkillsDir,
 	MAX_MANAGED_SKILL_BYTES,
+	type ManagedSkillLocation,
 	sanitizeSkillName,
 	toSkillFrontmatter,
 	writeManagedSkill,
@@ -274,6 +277,53 @@ describe("managed-skills primitives", () => {
 				await expect(deleteManagedSkill("linked")).rejects.toThrow(/symlink/);
 				// The symlink target's contents are untouched.
 				expect(await Bun.file(path.join(outside, "keep.txt")).exists()).toBe(true);
+			} finally {
+				await removeWithRetries(outside);
+			}
+		});
+	});
+
+	describe("project scope", () => {
+		let project: ManagedSkillLocation;
+		let projectSkillFile: (name: string) => string;
+
+		beforeEach(async () => {
+			const cwd = path.join(tempHome, "work");
+			await fs.mkdir(cwd, { recursive: true });
+			project = { scope: "project", cwd };
+			projectSkillFile = name => path.join(getProjectManagedSkillsDir(cwd), name, "SKILL.md");
+		});
+
+		const bodyOf = async (file: string) => parseFrontmatter(await Bun.file(file).text(), { source: "test" }).body;
+
+		it("keeps the project store independent of the global store across create, update, and delete", async () => {
+			await writeManagedSkill({ action: "create", name: "same", description: "Global.", body: "global body" });
+			// A same-named global skill must not block a project create.
+			await writeManagedSkill({ action: "create", name: "same", description: "Project.", body: "v1" }, project);
+			await writeManagedSkill({ action: "update", name: "same", description: "Project.", body: "v2" }, project);
+			expect(await bodyOf(projectSkillFile("same"))).toContain("v2");
+			expect(await bodyOf(skillFile("same"))).toContain("global body");
+
+			await deleteManagedSkill("same", project);
+			expect(await Bun.file(projectSkillFile("same")).exists()).toBe(false);
+			expect(await Bun.file(skillFile("same")).exists()).toBe(true);
+
+			// update/delete never fall back to the other store.
+			await expect(
+				writeManagedSkill({ action: "update", name: "same", description: "d", body: "b" }, project),
+			).rejects.toThrow(/does not exist in the project scope/);
+			await expect(deleteManagedSkill("same", project)).rejects.toThrow(/does not exist in the project scope/);
+		});
+
+		it("refuses to write when the project-store parent is a symlink", async () => {
+			const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-project-root-"));
+			try {
+				await fs.mkdir(path.dirname(getProjectManagedSkillsBaseDir()), { recursive: true });
+				await fs.symlink(outside, getProjectManagedSkillsBaseDir());
+				await expect(
+					writeManagedSkill({ action: "create", name: "demo", description: "d", body: "b" }, project),
+				).rejects.toThrow(/parent is a symlink/);
+				expect(await fs.readdir(outside)).toEqual([]);
 			} finally {
 				await removeWithRetries(outside);
 			}

@@ -558,7 +558,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		if (admit(skill, body, frontmatter, namespace) !== undefined) realPathSet.add(resolvedPath);
 	}
 
-	// Managed (auto-learn) skills resolve dead-last with first-wins. Source from
+	// Managed (auto-learn) skills resolve dead-last with first-wins; the provider
+	// lists the project store before the global one, so project wins. Source from
 	// result.all (pre-dedup): capability-level dedup runs BEFORE isSourceEnabled,
 	// so a managed skill can be shadowed by a higher-priority authored skill that
 	// is itself disabled here — managed must stay visible regardless of toggles.

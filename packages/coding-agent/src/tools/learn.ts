@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
+import { writeManagedSkill } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { localBackend } from "../memory-backend/local-backend";
@@ -11,10 +11,14 @@ import type { ToolSession } from ".";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { isGlobalMemoryScopeAvailable } from "../memory-backend/global-scope";
 import { cfgMemoryBackend } from "../memory-backend/settings";
+import { managedSkillToolLocation } from "./managed-skill-location";
 
 const learnSkillSchema = type({
 	action: "'create' | 'update'",
 	name: type("string").describe("kebab-case skill name"),
+	"scope?": type("'project' | 'global'").describe(
+		"where the skill lives: global (every session) or project (only this repository); omitted: create → global, update → the visible copy",
+	),
 	description: type("string").describe("one-line description of when to use the skill"),
 	body: type("string").describe("the SKILL.md body in markdown (no frontmatter)"),
 }).describe("also create or enhance a managed skill in the same call");
@@ -76,13 +80,11 @@ export class LearnTool implements AgentTool<LearnSchema> {
 		return new LearnTool(session);
 	}
 
-	async execute(toolCallId: string, params: LearnParams): Promise<AgentToolResult> {
-		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
+	async #persistLesson(toolCallId: string, params: LearnParams): Promise<string> {
 		const backend = cfgMemoryBackend.get(this.session.settings);
 		if (params.scope === "global" && backend !== "mnemopi" && backend !== "hindsight") {
 			throw new Error(`Global memory scope is not available with the ${backend} memory backend.`);
 		}
-		let memoryMessage = "Lesson stored";
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {
@@ -135,58 +137,60 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			await state.enqueueRetain(toolCallId, [
 				{ content: params.memory, context: params.context, scope: params.scope },
 			]);
-			memoryMessage = "Lesson queued for retention";
+			return "Lesson queued for retention";
 		}
 
-		// 2) Optionally mint/enhance a managed skill. A failure here is surfaced
-		// as a partial outcome — the lesson is already stored or queued.
-		if (params.skill) {
-			// A managed skill resolves below any authored skill of the same name, so
-			// minting one under a claimed name writes a file that never surfaces. The
-			// lesson is already stored/queued; refuse the skill rather than report a
-			// false "Created" (mirrors ManageSkillTool).
-			let safeSkillName: string | undefined;
-			try {
-				safeSkillName = sanitizeSkillName(params.skill.name);
-			} catch {
-				safeSkillName = undefined;
-			}
-			if (params.skill.action === "create" && safeSkillName && isNameClaimedByAuthoredSkill(safeSkillName)) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `${memoryMessage}. Did not create managed skill "${params.skill.name}": an authored skill of that name already exists, and managed skills cannot override authored ones. Choose a different name.`,
-						},
-					],
-					isError: true,
-					details: { skill: null, shadowed: true },
-				};
-			}
-			try {
-				await writeManagedSkill(params.skill);
-			} catch (err) {
-				const reason = err instanceof Error ? err.message : String(err);
-				throw new Error(`${memoryMessage}, but the managed skill could not be written: ${reason}`);
-			}
-			const verb = params.skill.action === "create" ? "Created" : "Updated";
-			try {
-				await this.session.refreshSkills?.();
-			} catch (err) {
-				const reason = err instanceof Error ? err.message : String(err);
-				throw new Error(
-					`${memoryMessage}. ${verb} managed skill "${params.skill.name}", but refreshing session skills failed: ${reason}`,
-				);
-			}
+		return "Lesson stored";
+	}
+
+	async execute(toolCallId: string, params: LearnParams): Promise<AgentToolResult> {
+		const lesson = this.#persistLesson(toolCallId, params);
+		const skill = params.skill;
+		if (!skill) {
 			return {
-				content: [{ type: "text", text: `${memoryMessage}. ${verb} managed skill "${params.skill.name}".` }],
-				details: { skill: params.skill.name },
+				content: [{ type: "text", text: `${await lesson}.` }],
+				details: { skill: null },
 			};
 		}
 
+		// Queue by name before awaiting storage. A later edit cannot pass this one,
+		// and a failed lesson never changes the skill.
+		const write = writeManagedSkill(skill, managedSkillToolLocation(this.session, skill.scope), async name => {
+			await lesson;
+			return skill.action !== "create" || !isNameClaimedByAuthoredSkill(name);
+		});
+		const [memoryMessage, result] = await Promise.all([lesson, write]).catch(async err => {
+			// Invalid names can fail before storage finishes. Report a partial outcome
+			// only if the lesson actually made it to the backend.
+			const stored = await lesson;
+			const reason = err instanceof Error ? err.message : String(err);
+			throw new Error(`${stored}, but the managed skill could not be written: ${reason}`);
+		});
+		if (!result) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${memoryMessage}. Did not create managed skill "${skill.name}": an authored skill of that name already exists, and managed skills cannot override authored ones. Choose a different name.`,
+					},
+				],
+				isError: true,
+				details: { skill: null, shadowed: true },
+			};
+		}
+		const { scope } = result;
+		const verb = skill.action === "create" ? "Created" : "Updated";
+		try {
+			await this.session.refreshSkills?.();
+		} catch (err) {
+			const reason = err instanceof Error ? err.message : String(err);
+			throw new Error(
+				`${memoryMessage}. ${verb} ${scope} managed skill "${skill.name}", but refreshing session skills failed: ${reason}`,
+			);
+		}
 		return {
-			content: [{ type: "text", text: `${memoryMessage}.` }],
-			details: { skill: null },
+			content: [{ type: "text", text: `${memoryMessage}. ${verb} ${scope} managed skill "${skill.name}".` }],
+			details: { skill: skill.name, scope },
 		};
 	}
 }

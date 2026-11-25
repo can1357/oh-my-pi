@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import { getManagedSkillsDir, getProjectManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
@@ -188,6 +188,98 @@ describe("manage_skill execute", () => {
 		expect(text).not.toContain("Created");
 		// Nothing was written, so the managed skill can never surface.
 		expect(await Bun.file(path.join(getManagedSkillsDir(), "demo", "SKILL.md")).exists()).toBe(false);
+
+		// An authored skill can also shadow a managed copy that already existed.
+		const hidden = path.join(getManagedSkillsDir(), "demo", "SKILL.md");
+		await Bun.write(hidden, "---\ndescription: Hidden copy.\n---\nManaged content.");
+		const fixed = new ManageSkillTool(makeSession({}, { skills: [authored] }));
+		await expect(fixed.execute("d", { action: "delete", name: "demo" })).rejects.toThrow(/visible skill/i);
+		expect(await Bun.file(hidden).text()).toContain("Managed content.");
+	});
+
+	it("scope project writes the session project's store and leaves the global store alone", async () => {
+		const cwd = path.join(tempHome, "work");
+		await fs.mkdir(cwd, { recursive: true });
+		const projectTool = ManageSkillTool.createIf(makeSession({ "autolearn.enabled": true }, { cwd }))!;
+		await projectTool.execute("p1", {
+			action: "create",
+			name: "local",
+			scope: "project",
+			description: "Repo-only procedure.",
+			body: "# Local",
+		});
+		expect(await Bun.file(path.join(getProjectManagedSkillsDir(cwd), "local", "SKILL.md")).exists()).toBe(true);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "local", "SKILL.md")).exists()).toBe(false);
+		// Explicit scope acts only on that store.
+		await expect(projectTool.execute("p2", { action: "delete", name: "local", scope: "global" })).rejects.toThrow(
+			/does not exist in the global scope/,
+		);
+	});
+
+	it("unscoped update/delete target the visible project copy, never a hidden global twin", async () => {
+		const cwd = path.join(tempHome, "work");
+		await fs.mkdir(cwd, { recursive: true });
+		const t = ManageSkillTool.createIf(makeSession({ "autolearn.enabled": true }, { cwd }))!;
+		const globalFile = path.join(getManagedSkillsDir(), "dup", "SKILL.md");
+		const projectFile = path.join(getProjectManagedSkillsDir(cwd), "dup", "SKILL.md");
+		await t.execute("g", { action: "create", name: "dup", description: "Global.", body: "# global" });
+		await t.execute("p", { action: "create", name: "dup", scope: "project", description: "Proj.", body: "# p" });
+
+		await t.execute("u", { action: "update", name: "dup", description: "Proj v2.", body: "# edited" });
+		expect(await Bun.file(projectFile).text()).toContain("# edited");
+		expect(await Bun.file(globalFile).text()).not.toContain("# edited");
+
+		await t.execute("d", { action: "delete", name: "dup" });
+		expect(await Bun.file(projectFile).exists()).toBe(false);
+		expect(await Bun.file(globalFile).exists()).toBe(true);
+		// With no project copy left, an unscoped update reaches the global skill.
+		await t.execute("u2", { action: "update", name: "dup", description: "Global v2.", body: "# global2" });
+		expect(await Bun.file(globalFile).text()).toContain("# global2");
+	});
+
+	it("refuses unscoped edits to an ignored skill but lets a manual skill remain addressable", async () => {
+		const session = makeSession(
+			{ "skills.ignoredSkills": ["private-*"], "skills.manualSkills": ["manual-*"] },
+			{ cwd: tempHome, skillRediscoveryHost: () => ({ skills: [], refreshSkills: async () => [] }) },
+		);
+		const t = new ManageSkillTool(session);
+		for (const name of ["private-recipe", "manual-recipe"]) {
+			await t.execute("c", { action: "create", scope: "global", name, description: "Recipe.", body: "original" });
+		}
+		await expect(t.execute("d", { action: "delete", name: "private-recipe" })).rejects.toThrow(
+			/visible managed skill/i,
+		);
+		const ignoredFile = Bun.file(path.join(getManagedSkillsDir(), "private-recipe", "SKILL.md"));
+		expect(await ignoredFile.text()).toContain("original");
+		await t.execute("u", { action: "update", name: "manual-recipe", description: "Manual.", body: "updated" });
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "manual-recipe", "SKILL.md")).text()).toContain("updated");
+		// An embedder's fixed list is authoritative even when the on-disk skill matches default settings.
+		const fixed = new ManageSkillTool(makeSession({}, { cwd: tempHome, skills: [] }));
+		await expect(fixed.execute("d", { action: "delete", name: "manual-recipe" })).rejects.toThrow(
+			/visible managed skill/i,
+		);
+	});
+
+	it("does not let a later explicit global delete overtake an unscoped update", async () => {
+		const t = tool();
+		await t.execute("c", { action: "create", name: "ordered", description: "Original.", body: "old" });
+		const [updated, deleted] = await Promise.all([
+			t.execute("u", { action: "update", name: "ordered", description: "Updated.", body: "new" }),
+			t.execute("d", { action: "delete", name: "ordered", scope: "global" }),
+		]);
+		expect(updated.details).toMatchObject({ action: "update", scope: "global" });
+		expect(deleted.details).toMatchObject({ action: "delete", scope: "global" });
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "ordered", "SKILL.md")).exists()).toBe(false);
+	});
+
+	it("an unscoped update ignores a project directory that holds no SKILL.md", async () => {
+		const cwd = path.join(tempHome, "work");
+		const t = ManageSkillTool.createIf(makeSession({ "autolearn.enabled": true }, { cwd }))!;
+		await t.execute("g", { action: "create", name: "stray", description: "Global.", body: "# global" });
+		// e.g. an interrupted project create left an empty directory behind.
+		await fs.mkdir(path.join(getProjectManagedSkillsDir(cwd), "stray"), { recursive: true });
+		await t.execute("u", { action: "update", name: "stray", description: "Global v2.", body: "# global2" });
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "stray", "SKILL.md")).text()).toContain("# global2");
 	});
 });
 
@@ -196,7 +288,7 @@ describe("learn execute", () => {
 	let remembered: string[];
 	let originalAgentDir: string;
 
-	function learnSession(): ToolSession {
+	function learnSession(cwd = "/tmp/test"): ToolSession {
 		const fakeState = {
 			sessionId: "sess-1",
 			session: { sessionManager: { getCwd: () => "/tmp/work" } },
@@ -207,7 +299,7 @@ describe("learn execute", () => {
 		};
 		return makeSession(
 			{ "autolearn.enabled": true, "memory.backend": "mnemopi" },
-			{ getMnemopiSessionState: () => fakeState as unknown as MnemopiSessionState },
+			{ cwd, getMnemopiSessionState: () => fakeState as unknown as MnemopiSessionState },
 		);
 	}
 
@@ -266,10 +358,29 @@ describe("learn execute", () => {
 				},
 			}),
 		).rejects.toThrow(
-			/Lesson stored\. Created managed skill "worker-host", but refreshing session skills failed: prompt rebuild failed/,
+			/Lesson stored\. Created global managed skill "worker-host", but refreshing session skills failed: prompt rebuild failed/,
 		);
 		expect(remembered).toHaveLength(1);
 		expect(await Bun.file(path.join(getManagedSkillsDir(), "worker-host", "SKILL.md")).exists()).toBe(true);
+	});
+
+	it("mints a skill.scope project skill into the session project's store", async () => {
+		const cwd = path.join(tempHome, "work");
+		await fs.mkdir(cwd, { recursive: true });
+		await new LearnTool(learnSession(cwd)).execute("2p", {
+			memory: "Deploy through the staging gate.",
+			skill: {
+				action: "create",
+				name: "staging-gate",
+				scope: "project",
+				description: "Deploy via staging.",
+				body: "# Staging",
+			},
+		});
+		expect(await Bun.file(path.join(getProjectManagedSkillsDir(cwd), "staging-gate", "SKILL.md")).exists()).toBe(
+			true,
+		);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "staging-gate", "SKILL.md")).exists()).toBe(false);
 	});
 
 	it("surfaces a partial-outcome error when the skill name is invalid", async () => {
@@ -281,6 +392,25 @@ describe("learn execute", () => {
 		).rejects.toThrow(/Lesson stored, but the managed skill could not be written/);
 		// The memory half still ran.
 		expect(remembered).toHaveLength(1);
+	});
+
+	it("reports the stored lesson when resolving an unscoped skill update fails", async () => {
+		const cwd = path.join(tempHome, "work");
+		await fs.mkdir(cwd, { recursive: true });
+		const store = getProjectManagedSkillsDir(cwd);
+		await fs.mkdir(store, { recursive: true });
+		await fs.chmod(store, 0o000); // lstat inside the store fails with EACCES
+		try {
+			await expect(
+				new LearnTool(learnSession(cwd)).execute("3r", {
+					memory: "lesson",
+					skill: { action: "update", name: "demo", description: "d", body: "b" },
+				}),
+			).rejects.toThrow(/Lesson stored, but the managed skill could not be written/);
+			expect(remembered).toHaveLength(1);
+		} finally {
+			await fs.chmod(store, 0o755);
+		}
 	});
 
 	it("reports Hindsight lessons as queued rather than stored", async () => {
