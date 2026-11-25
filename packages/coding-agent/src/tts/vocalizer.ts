@@ -42,7 +42,7 @@
  */
 import type { Api, ApiKeyResolver, Model } from "@oh-my-pi/pi-ai";
 import { isSpeechApi, speechModelSupportsFormat } from "@oh-my-pi/pi-ai/speech";
-import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import type { ModelBrowserRegistry } from "../modes/view-model/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { resolveRoleChain } from "../config/model-resolver";

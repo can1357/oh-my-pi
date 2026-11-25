@@ -1,0 +1,22 @@
+# Perl corpus: sort. Format and regeneration: crates/builtins/src/perl/tests.rs.
+array-in-place	my @a=(3,1,2); @a=sort {$a<=>$b} @a; print "@a\n";	1 2 3␊
+ascending-numeric	print join('|',sort {$a<=>$b} 9,100,20,2),"\n";	2|9|20|100␊
+casefold	print join('|',sort {lc($a) cmp lc($b)} qw(Zebra apple Apricot banana)),"\n";	apple|Apricot|banana|Zebra␊
+default	print join('|',sort qw(z abc Abc a aa)),"\n";	Abc|a|aa|abc|z␊
+descending-numeric	print join('|',sort {$b<=>$a} 9,100,20,2),"\n";	100|20|9|2␊
+empty	my @a=sort (); print scalar(@a),"\n";	0␊
+explicit-cmp	print join('|',sort {$a cmp $b} qw(z a b)),"\n";	a|b|z␊
+lexical-numbers	print join('|',sort 9,100,20,2),"\n";	100|2|20|9␊
+multi-key	print join('|',sort {length($a)<=>length($b) || $a cmp $b} qw(cat dog r fox a bb cc)),"\n";	a|r|bb|cc|cat|dog|fox␊
+named-prototype	sub compare($$) {$_[1] <=> $_[0]} print join('|',sort compare 9,100,2),"\n";	100|9|2␊
+named	sub compare { $a <=> $b } print join('|',sort compare 9,100,2),"\n";	2|9|100␊
+negative-values	print join('|',sort {$a<=>$b} -5,20,-12,2.5),"\n";	-12|-5|2.5|20␊
+package-comparator	package Sorter; sub cmpnum {$a<=>$b} package main; print join('|',sort Sorter::cmpnum 9,100,2),"\n";	9|100|2␊
+refs	my @r=sort {$a->[0]<=>$b->[0]} ([2,'b'],[1,'a'],[2,'c']); print join('|', map {$_->[1]} @r),"\n";	a|b|c␊
+reverse-cmp	print join('|',sort {$b cmp $a} qw(z a b)),"\n";	z|b|a␊
+reverse-default	print join('|',reverse sort qw(a c b)),"\n";	c|b|a␊
+scalar-coderef	my $cmp=sub {$a<=>$b}; print join('|',sort $cmp 9,100,2),"\n";	2|9|100␊
+scalar-name	sub compare {$a<=>$b} my $cmp='compare'; print join('|',sort $cmp 9,100,2),"\n";	2|9|100␊
+single	print join('|',sort 'only'),"\n";	only␊
+stable-identical	print join('|',sort {0} qw(e a d b c)),"\n";	e|a|d|b|c␊
+stable-length	print join('|',sort {length($a)<=>length($b)} qw(cat dog r fox a bb cc)),"\n";	r|a|bb|cc|cat|dog|fox␊

@@ -1,13 +1,18 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
 	BUILTIN_SLASH_COMMANDS,
 	executeBuiltinSlashCommand,
 	type BuiltinSlashCommandRuntime,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
-import { Editor } from "@oh-my-pi/pi-tui/components/editor";
-import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
+import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/autocomplete/autocomplete";
+import { createRoot } from "@oh-my-pi/pi-tui";
+import { Composer } from "../../src/ui/composer";
+import { key, sendKey } from "../ui/composer/harness";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function createRuntime() {
 	const handleForkCommand = vi.fn(async (_placement?: "pane" | "window") => undefined);
@@ -16,84 +21,79 @@ function createRuntime() {
 	const runtime = {
 		ctx: {
 			handleForkCommand,
-			editor: { setText },
+			composer: { setText },
 			showError,
 		} as unknown as InteractiveModeContext,
 	} as BuiltinSlashCommandRuntime;
 	return { handleForkCommand, setText, showError, runtime };
 }
 
-function createForkEditor(): Editor {
-	const editor = new Editor({
-		...getEditorTheme(),
-		hintStyle: text => `\x1b[2m${text}\x1b[0m`,
+interface ForkComposer {
+	readonly composer: Composer;
+	readonly submitted: string[];
+	/** Type `text` one key at a time, or press a key by raw sequence (`\r`, `\t`). */
+	press(text: string): void;
+}
+
+function createForkComposer(): ForkComposer {
+	return createRoot(() => {
+		const submitted: string[] = [];
+		const composer = new Composer({
+			autocomplete: new CombinedAutocompleteProvider([...BUILTIN_SLASH_COMMANDS], process.cwd()),
+			onSubmit: text => submitted.push(text.trim()),
+		});
+		return {
+			composer,
+			submitted,
+			press(text) {
+				if (text === "\r" || text === "\t") sendKey(composer.node, composer.field, key(text));
+				else for (const ch of text) sendKey(composer.node, composer.field, key(ch));
+			},
+		};
 	});
-	editor.setAutocompleteProvider(new CombinedAutocompleteProvider([...BUILTIN_SLASH_COMMANDS], process.cwd()));
-	return editor;
 }
 
-async function untilRendered(editor: Editor, predicate: (frame: string) => boolean): Promise<string> {
-	while (true) {
-		const frame = editor.render(80).join("\n");
-		if (predicate(frame)) return frame;
-		await nextAutocompleteUpdate(editor);
-	}
-}
-
-function nextAutocompleteUpdate(editor: Editor): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const previous = editor.onAutocompleteUpdate;
-	editor.onAutocompleteUpdate = () => {
-		editor.onAutocompleteUpdate = previous;
-		previous?.();
-		resolve();
-	};
-	return promise;
-}
-
-function captureSubmissions(editor: Editor): string[] {
-	const submitted: string[] = [];
-	editor.onSubmit = text => {
-		submitted.push(text.trim());
-	};
-	return submitted;
+/** Let the provider's pending suggestion requests answer. */
+async function settleCompletions(): Promise<void> {
+	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
 describe("/fork slash command", () => {
 	it("submits bare /fork on Enter after a typed trailing space", async () => {
-		const editor = createForkEditor();
-		const submitted = captureSubmissions(editor);
-		for (const character of "/fork ") editor.handleInput(character);
-		await nextAutocompleteUpdate(editor);
+		const editor = createForkComposer();
+		editor.press("/fork ");
+		await settleCompletions();
 
-		editor.handleInput("\r");
-		expect(submitted).toEqual(["/fork"]);
+		editor.press("\r");
+		expect(editor.submitted).toEqual(["/fork"]);
 	});
 
 	it("submits bare /fork on Enter after Tab accepts the command name", async () => {
-		const editor = createForkEditor();
-		const submitted = captureSubmissions(editor);
-		for (const character of "/fork") editor.handleInput(character);
-		await untilRendered(editor, () => editor.isShowingAutocomplete());
+		const editor = createForkComposer();
+		editor.press("/fork");
+		await settleCompletions();
+		expect(editor.composer.completing()).toBe(true);
 
-		editor.handleInput("\t");
-		expect(editor.getText()).toBe("/fork ");
+		editor.press("\t");
+		expect(editor.composer.text()).toBe("/fork ");
 		// Accepting a command name chains an argument-completion request; let it settle.
-		await nextAutocompleteUpdate(editor);
+		await settleCompletions();
 
-		editor.handleInput("\r");
-		expect(submitted).toEqual(["/fork"]);
+		editor.press("\r");
+		expect(editor.submitted).toEqual(["/fork"]);
 	});
 
-	it("renders the remaining window suffix for a partial prefix and accepts it with Tab", async () => {
-		const editor = createForkEditor();
-		for (const character of "/fork w") editor.handleInput(character);
+	it("completes a partial placement prefix to the window placement with Tab", async () => {
+		const editor = createForkComposer();
+		editor.press("/fork w");
+		// Tab asks for the argument's completions; the popup lists the matching placement.
+		editor.press("\t");
+		await settleCompletions();
+		expect(editor.composer.completing()).toBe(true);
+		expect(editor.composer.text()).toBe("/fork w");
 
-		await untilRendered(editor, value => editor.isShowingAutocomplete() && value.includes("\x1b[2mindow\x1b[0m"));
-		expect(editor.getText()).toBe("/fork w");
-
-		editor.handleInput("\t");
-		expect(editor.getText()).toBe("/fork window ");
+		editor.press("\t");
+		expect(editor.composer.text()).toBe("/fork window ");
 	});
 
 	it("keeps bare /fork on the in-process fork path", async () => {

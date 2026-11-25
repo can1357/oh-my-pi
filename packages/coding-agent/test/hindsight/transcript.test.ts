@@ -18,15 +18,15 @@ describe("countUserTurns", () => {
 			timestamp: new Date(0).toISOString(),
 			message,
 		};
-		const session = { getEntries: () => [entry] };
+		const entries = [entry];
 
-		const before = countUserTurns(session);
-		expect(before).toBe(extractMessages(session).filter(m => m.role === "user").length);
+		const before = countUserTurns(entries);
+		expect(before).toBe(extractMessages(entries).filter(m => m.role === "user").length);
 
 		expect(stripImagesFromMessage(message)).toBe(1);
 
-		const userCount = extractMessages(session).filter(m => m.role === "user").length;
+		const userCount = extractMessages(entries).filter(m => m.role === "user").length;
 		expect(userCount).toBe(1);
-		expect(countUserTurns(session)).toBe(userCount);
+		expect(countUserTurns(entries)).toBe(userCount);
 	});
 });

@@ -43,12 +43,14 @@ async function store(empty = false) {
 }
 
 describe("agy conversation checkpoints", () => {
-	it("copies committed WAL rows and truncates only a new fork at recorded high-water marks", async () => {
+	it("forks WAL history at recorded marks after agy compacts an earlier generation", async () => {
 		const state = await store();
+		state.db.run("UPDATE gen_metadata SET data = zeroblob(4096) WHERE idx = 0");
 		const checkpoint = readConversationCheckpoint(state.dir, state.id, digest);
 		expect(checkpoint).toEqual({ steps: 2, generations: 1, executions: 1 });
 		state.db.run("INSERT INTO steps VALUES (2, 'user'), (3, 'answer 77')");
 		state.db.run("INSERT INTO gen_metadata VALUES (1, 'later generation')");
+		state.db.run("UPDATE gen_metadata SET data = x'01' WHERE idx = 0");
 		state.db.run("INSERT INTO executor_metadata VALUES (1, 'later execution')");
 		state.db.run("INSERT INTO parent_references VALUES (3, 'later parent')");
 		const forkId = forkConversation(state.dir, state.id, checkpoint, digest);
@@ -59,7 +61,7 @@ describe("agy conversation checkpoints", () => {
 				{ data: "user" },
 				{ data: "answer 41" },
 			]);
-			expect(fork.query("SELECT count(*) AS count FROM gen_metadata").get()).toEqual({ count: 1 });
+			expect(fork.query("SELECT hex(data) AS data FROM gen_metadata ORDER BY idx").all()).toEqual([{ data: "01" }]);
 			expect(fork.query("SELECT count(*) AS count FROM executor_metadata").get()).toEqual({ count: 1 });
 			expect(fork.query("SELECT idx FROM parent_references").all()).toEqual([{ idx: 1 }]);
 			expect(fork.query("SELECT cascade_id FROM trajectory_meta").get()).toEqual({ cascade_id: forkId });

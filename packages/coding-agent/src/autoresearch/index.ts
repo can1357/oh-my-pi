@@ -1,14 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
+import type { AutocompleteItem } from "../autocomplete/autocomplete";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions";
+import { shouldShowDashboard } from "../ui/apps/autoresearch/model";
 import commandResumeTemplate from "./command-resume.md" with { type: "text" };
-import { createDashboardController } from "@oh-my-pi/pi-tui/apps/autoresearch-dashboard";
-import { currentResults, findBaselineMetric, findBaselineRunNumber } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
+import { createDashboardController } from "./dashboard";
+import { currentResults, findBaselineMetric, findBaselineRunNumber } from "./results-data";
 import { ensureAutoresearchBranch } from "./git";
-import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { formatNum } from "./tool-details";
 import promptTemplate from "./prompt.md" with { type: "text" };
 import setupPromptTemplate from "./prompt-setup.md" with { type: "text" };
 import resumeMessageTemplate from "./resume-message.md" with { type: "text" };
@@ -25,7 +26,7 @@ import { createLogExperimentTool } from "./tools/log-experiment";
 import { createRunExperimentTool } from "./tools/run-experiment";
 import { createUpdateNotesTool } from "./tools/update-notes";
 import type { AutoresearchRuntime, PendingRunSummary } from "./types";
-import type { ExperimentResult } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type { ExperimentResult } from "./tool-details";
 
 const EXPERIMENT_TOOL_NAMES = ["init_experiment", "run_experiment", "log_experiment", "update_notes"];
 
@@ -228,10 +229,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		description: "Toggle autoresearch dashboard",
 		handler(ctx): void {
 			const runtime = getRuntime(ctx);
-			if (runtime.state.results.length === 0 && !runtime.runningExperiment) {
-				ctx.ui.notify("No autoresearch results yet", "info");
-				return;
-			}
+			if (!shouldShowDashboard(runtime)) return;
 			runtime.dashboardExpanded = !runtime.dashboardExpanded;
 			dashboard.updateWidget(ctx, runtime);
 		},

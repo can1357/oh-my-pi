@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { OmpErrors, type } from "@oh-my-pi/omptype";
 import type { ProviderFileReference } from "@oh-my-pi/pi-ai";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { errorMessage, isEnoent } from "@oh-my-pi/pi-utils";
 import type { RemoteDeleteAction } from "./publication";
 
 /** Model providers whose official APIs support reusable uploaded-file references. */
@@ -178,10 +178,6 @@ function normalizeContentHash(contentHash: string): string {
 		throw new Error("Provider file content hash must be a lowercase or uppercase SHA-256 hex digest");
 	}
 	return normalized;
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function containsCredential(value: string, credential: string): boolean {

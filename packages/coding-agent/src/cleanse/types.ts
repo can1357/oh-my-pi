@@ -54,7 +54,7 @@ export interface CleanseAssignment {
 	weight: number;
 }
 
-export type { CleanseTargetChoice } from "@oh-my-pi/pi-tui/apps/cleanse-picker";
+export type { CleanseTargetChoice } from "../modes/view-model/apps/cleanse-picker";
 
 /** Terminal status of one cleanse run. */
 export type CleanseRunStatus = "clean" | "unresolved" | "unsupported" | "cancelled";

@@ -961,7 +961,9 @@ impl Shell {
 								)
 								| None => {},
 							}
-							if state.stage == Stage::Lookup && state.target == Some(Target::Search) {
+							if state.stage == Stage::Lookup
+								&& state.target.as_ref().is_some_and(Target::is_path_search)
+							{
 								report.reissued_fs += 1;
 							}
 							state

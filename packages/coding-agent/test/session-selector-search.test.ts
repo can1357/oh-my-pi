@@ -1,14 +1,14 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { rankSessionSearchMatches, SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { rankSessionSearchMatches } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/session-selector";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { SessionSelector } from "../src/ui/overlays/pickers/session-selector";
+import { firstOfKind, type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 /**
- * Contracts of the session picker's incremental search engine: a keystroke
- * synchronously surfaces literal matches, background fuzzy chunks converge to
- * exactly the synchronous reference ranking, stale scans are orphaned by a
- * query change, and the prompt-history SQLite lookup is debounced off the
- * keystroke path.
+ * Contracts of the session picker's search: a keystroke ranks every session
+ * exactly like the reference ranking, and the prompt-history SQLite lookup is
+ * debounced off the keystroke path, merged once typing pauses, skipped once the
+ * user moves the selection, and cancelled when the picker closes.
  */
 
 function makeSession(id: string, overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -26,11 +26,7 @@ function makeSession(id: string, overrides: Partial<SessionInfo> = {}): SessionI
 	};
 }
 
-/**
- * 400 sessions, newest last; every fifth carries the "zzmarker" token. Large
- * enough that the non-literal remainder (320) overflows the inline fuzzy
- * budget (100) and must complete through async chunks.
- */
+/** 400 sessions, newest last; every fifth carries the "zzmarker" token. */
 function makeCorpus(): SessionInfo[] {
 	const sessions: SessionInfo[] = [];
 	for (let i = 0; i < 400; i++) {
@@ -45,109 +41,78 @@ function makeCorpus(): SessionInfo[] {
 }
 
 interface Harness {
-	selector: SessionSelectorComponent<SessionInfo>;
+	selector: LayerTerminal;
 	type: (text: string) => void;
-	/** Sessions currently in the filtered list, probed through the public selection surface. */
-	filtered: () => SessionInfo[];
-	renders: () => number;
+	/** Session ids in the picker's list, in order. */
+	filtered: () => string[];
 }
 
+const open: LayerTerminal[] = [];
+
 function makeHarness(sessions: SessionInfo[], historyMatcher?: (query: string) => string[]): Harness {
-	let renders = 0;
-	const selector = new SessionSelectorComponent(
-		sessions,
-		() => {},
-		() => {},
-		() => {},
-		historyMatcher ? { historyMatcher } : {},
+	const selector = mountLayer(() =>
+		SessionSelector({
+			sessions,
+			onSelect: () => {},
+			onCancel: () => {},
+			...(historyMatcher ? { historyMatcher } : {}),
+		}),
 	);
-	selector.setOnRequestRender(() => renders++);
-	const list = selector.getSessionList();
-	const filtered = (): SessionInfo[] => {
-		const out: SessionInfo[] = [];
-		list.onSelect = session => {
-			out.push(session);
-		};
-		for (let i = 0; ; i++) {
-			const before = out.length;
-			list.selectAndConfirm(i);
-			if (out.length === before) break;
-		}
-		list.onSelect = undefined;
-		return out;
+	open.push(selector);
+	const filtered = (): string[] => {
+		const layer = selector.term.surface.layer()[0];
+		const picker = layer ? firstOfKind(layer, "picker") : null;
+		const order = (picker?.props() as { order?: readonly string[] } | undefined)?.order ?? [];
+		return order.map(path => path.replace(/\.jsonl$/, ""));
 	};
 	return {
 		selector,
 		type: text => {
-			for (const ch of text) list.handleInput(ch);
+			for (const ch of text) selector.handleInput(ch);
 		},
 		filtered,
-		renders: () => renders,
 	};
 }
 
 const ids = (sessions: SessionInfo[]): string[] => sessions.map(s => s.id);
-
-beforeAll(async () => {
-	await initTheme(false);
-});
 
 beforeEach(() => {
 	vi.useFakeTimers();
 });
 
 afterEach(() => {
+	for (const selector of open.splice(0)) selector.dispose();
 	vi.useRealTimers();
 });
 
-describe("session picker incremental search", () => {
-	it("surfaces literal matches synchronously and converges async fuzzy chunks to the reference ranking", () => {
+describe("session picker search", () => {
+	it("ranks literal and typo queries exactly like the reference ranking within the keystroke", () => {
 		const sessions = makeCorpus();
 		const harness = makeHarness(sessions);
 
-		// Literal query: complete and recency-ranked within the keystroke itself.
 		harness.type("zzmarker");
 		const literalReference = rankSessionSearchMatches(sessions, "zzmarker");
 		expect(literalReference.length).toBe(80);
-		expect(ids(harness.filtered())).toEqual(ids(literalReference));
-		expect(harness.filtered()[0]!.id).toBe("s-395");
+		expect(harness.filtered()).toEqual(ids(literalReference));
+		expect(harness.filtered()[0]).toBe("s-395");
 
-		// Typo query: no literal hits, so results accumulate through fuzzy chunks.
 		harness.type("\x7f\x7f"); // "zzmarker" -> "zzmark"
 		harness.type("r"); // "zzmarkr"
 		const reference = rankSessionSearchMatches(sessions, "zzmarkr");
 		expect(reference.length).toBe(80);
-		// The inline slice covers only part of the corpus; the rest is pending.
-		expect(harness.filtered().length).toBeLessThan(reference.length);
-
-		vi.runAllTimers(); // drain the zero-delay chunk chain
-		expect(ids(harness.filtered())).toEqual(ids(reference));
+		expect(harness.filtered()).toEqual(ids(reference));
 	});
 
-	it("publishes a multi-chunk fuzzy scan as one re-render, not one per chunk", () => {
-		const harness = makeHarness(makeCorpus());
-
-		// No literal hits: 300 of 400 sessions spill past the inline slice into two chunks, both with matches.
-		harness.type("zzmarkr");
-		const rendersBefore = harness.renders();
-		vi.runAllTimers();
-
-		// Each re-render reorders the native picker's list, which replays its row-arrival animation.
-		expect(harness.renders() - rendersBefore).toBe(1);
-	});
-
-	it("orphans in-flight fuzzy chunks when the query changes mid-scan", () => {
+	it("follows the latest query when it changes mid-typing", () => {
 		const sessions = makeCorpus();
 		const harness = makeHarness(sessions);
 
-		harness.type("zzmarkr"); // schedules chunks for the typo query
-		harness.type("\x7f"); // "zzmark" — new scan generation while chunks are pending
+		harness.type("zzmarkr");
+		harness.type("\x7f"); // "zzmark"
 		harness.type("er"); // "zzmarker"
 		vi.runAllTimers();
 
-		// A leaked stale chunk would append fuzzy duplicates of sessions already
-		// ranked literally, so exact equality proves the generation guard held.
-		expect(ids(harness.filtered())).toEqual(ids(rankSessionSearchMatches(sessions, "zzmarker")));
+		expect(harness.filtered()).toEqual(ids(rankSessionSearchMatches(sessions, "zzmarker")));
 	});
 
 	it("debounces the prompt-history lookup off the keystroke path and promotes its matches once typing pauses", () => {
@@ -161,66 +126,92 @@ describe("session picker incremental search", () => {
 		harness.type("zzmarker");
 		// The SQLite-backed matcher must never run inside a keystroke.
 		expect(calls).toEqual([]);
-		const rendersBefore = harness.renders();
 
 		vi.advanceTimersByTime(149);
 		expect(calls).toEqual([]);
 		vi.advanceTimersByTime(1);
 		expect(calls).toEqual(["zzmarker"]);
 
-		// History match leads the ranking and the merge requested a re-render.
-		expect(harness.filtered()[0]!.id).toBe("s-105");
-		expect(harness.renders()).toBeGreaterThan(rendersBefore);
+		// The history match leads the ranking.
+		expect(harness.filtered()[0]).toBe("s-105");
 	});
 
 	it("keeps title matches in canonical order before and after history arrives", () => {
 		const sessions = [
 			makeSession("body", { firstMessage: "dashboard", modified: new Date(5) }),
-			makeSession("partial-new", { title: "Dashboard notes", modified: new Date(4) }),
-			makeSession("partial-old", { title: "Old dashboard", modified: new Date(3) }),
-			makeSession("exact-c", { title: "dashboard", modified: new Date(2), created: new Date(2) }),
-			makeSession("exact-a", { title: "  DASHBOARD  ", modified: new Date(2), created: new Date(2) }),
-			makeSession("exact-b", { title: "dashboard", modified: new Date(2), created: new Date(1) }),
+			makeSession("partial-new", {
+				title: "Dashboard notes",
+				modified: new Date(4),
+			}),
+			makeSession("partial-old", {
+				title: "Old dashboard",
+				modified: new Date(3),
+			}),
+			makeSession("exact-c", {
+				title: "dashboard",
+				modified: new Date(2),
+				created: new Date(2),
+			}),
+			makeSession("exact-a", {
+				title: "  DASHBOARD  ",
+				modified: new Date(2),
+				created: new Date(2),
+			}),
+			makeSession("exact-b", {
+				title: "dashboard",
+				modified: new Date(2),
+				created: new Date(1),
+			}),
 			makeSession("history"),
 		];
 		const harness = makeHarness(sessions, () => ["history", "exact-a", "body"]);
 		harness.type("dashboard");
-		const before = ids(harness.filtered());
+		const before = harness.filtered();
 		expect(before).toEqual(["exact-c", "exact-a", "exact-b", "partial-new", "partial-old", "body"]);
 		expect(ids(rankSessionSearchMatches(sessions, "dashboard"))).toEqual(before);
 		vi.runAllTimers();
-		expect(ids(harness.filtered())).toEqual([...before.slice(0, 5), "history", "body"]);
-		harness.selector.dispose();
+		expect(harness.filtered()).toEqual([...before.slice(0, 5), "history", "body"]);
 	});
 
 	it("preserves imported exact and partial title ties in source order", () => {
 		const sessions = [
-			makeSession("a-partial", { title: "Dashboard notes", created: new Date(1) }),
+			makeSession("a-partial", {
+				title: "Dashboard notes",
+				created: new Date(1),
+			}),
 			makeSession("b-exact", { title: "dashboard", created: new Date(1) }),
-			makeSession("c-partial", { title: "Old dashboard", created: new Date(2) }),
+			makeSession("c-partial", {
+				title: "Old dashboard",
+				created: new Date(2),
+			}),
 			makeSession("d-exact", { title: "dashboard", created: new Date(2) }),
 		];
 		// Codex lists equal-mtime sessions by ID ascending, regardless of creation time.
 		const harness = makeHarness(sessions);
 		harness.type("dashboard");
 		const expected = ["b-exact", "d-exact", "a-partial", "c-partial"];
-		expect(ids(harness.filtered())).toEqual(expected);
+		expect(harness.filtered()).toEqual(expected);
 		expect(ids(rankSessionSearchMatches(sessions, "dashboard"))).toEqual(expected);
-		harness.selector.dispose();
 	});
 
 	it("prioritizes titles containing every query token even without a full-title match", () => {
 		const sessions = [
-			makeSession("body", { title: "textcom", firstMessage: "dashboard", modified: new Date(3) }),
-			makeSession("title", { title: "Textcom-dashboard", modified: new Date(1) }),
+			makeSession("body", {
+				title: "textcom",
+				firstMessage: "dashboard",
+				modified: new Date(3),
+			}),
+			makeSession("title", {
+				title: "Textcom-dashboard",
+				modified: new Date(1),
+			}),
 			makeSession("history"),
 		];
 		const harness = makeHarness(sessions, () => ["history", "body"]);
 		harness.type("  TEXTCOM   dashb ");
-		expect(ids(harness.filtered())).toEqual(["title", "body"]);
+		expect(harness.filtered()).toEqual(["title", "body"]);
 		vi.runAllTimers();
-		expect(ids(harness.filtered())).toEqual(["title", "history", "body"]);
-		harness.selector.dispose();
+		expect(harness.filtered()).toEqual(["title", "history", "body"]);
 	});
 
 	it("skips the history merge after the user moves the selection", () => {
@@ -232,28 +223,25 @@ describe("session picker incremental search", () => {
 		});
 
 		harness.type("zzmarker");
-		const before = ids(harness.filtered());
-		harness.selector.getSessionList().handleInput("\x1b[B"); // arrow down
+		const before = harness.filtered();
+		harness.selector.handleInput("\x1b[B"); // arrow down
 		vi.runAllTimers();
 
 		expect(calls).toEqual([]);
-		expect(ids(harness.filtered())).toEqual(before);
+		expect(harness.filtered()).toEqual(before);
 	});
 
-	it("dispose cancels pending fuzzy chunks and the history merge", () => {
-		const sessions = makeCorpus();
+	it("closing the picker cancels the pending history merge", () => {
 		const calls: string[] = [];
-		const harness = makeHarness(sessions, query => {
+		const harness = makeHarness(makeCorpus(), query => {
 			calls.push(query);
 			return ["s-105"];
 		});
 
-		harness.type("zzmarkr"); // partial fuzzy scan + scheduled history merge
-		const partial = harness.filtered().length;
+		harness.type("zzmarkr");
 		harness.selector.dispose();
 		vi.runAllTimers();
 
 		expect(calls).toEqual([]);
-		expect(harness.filtered().length).toBe(partial);
 	});
 });

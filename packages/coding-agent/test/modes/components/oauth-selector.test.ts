@@ -1,22 +1,61 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { OAuthSelectorComponent } from "@oh-my-pi/pi-tui/overlays/oauth-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { OAuthSelector, type OAuthSelectorAuthSource } from "../../../src/ui/overlays/pickers/oauth-selector";
+import { mountOverlay } from "../../helpers/overlay-terminal";
 
 import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await initTheme();
-});
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const authStorage = {
 	credentials: { has: (_providerId: string) => false },
 	keys: { source: (_providerId: string) => undefined },
-} as unknown as AuthStorage;
+} as unknown as OAuthSelectorAuthSource;
 
-describe("OAuthSelectorComponent", () => {
+/**
+ * Type `query` into the selector, then press Enter when `confirm`; answers the screen before the
+ * Enter and the providers picked.
+ */
+function search(
+	mode: "login" | "logout",
+	auth: OAuthSelectorAuthSource,
+	query: string,
+	options: { confirm?: boolean; disabledProviders?: readonly string[] } = {},
+): { rendered: string; selected: string[] } {
+	const selected: string[] = [];
+	const term = mountOverlay(
+		() =>
+			OAuthSelector({
+				mode,
+				auth,
+				...(options.disabledProviders ? { disabledProviders: options.disabledProviders } : {}),
+				onSelect: providerId => selected.push(providerId),
+				onCancel: () => {},
+			}),
+		{ columns: 80 },
+	);
+	try {
+		term.type(query);
+		const rendered = term.screen().join("\n");
+		if (options.confirm) term.press("enter");
+		return { rendered, selected };
+	} finally {
+		term.dispose();
+	}
+}
+
+/** Auth with a stored OpenCode Go key. */
+const storedOpencodeGo = {
+	credentials: { has: (providerId: string) => providerId === "opencode-go" },
+	keys: {
+		source: (providerId: string) => (providerId === "opencode-go" ? { kind: "api_key", concrete: true } : undefined),
+	},
+} as unknown as OAuthSelectorAuthSource;
+
+describe("OAuth selector", () => {
 	it("fuzzy-filters overflowing provider lists from typed input", () => {
 		const providers = getOAuthProviders();
 		expect(providers.length).toBeGreaterThan(10);
@@ -27,87 +66,31 @@ describe("OAuthSelectorComponent", () => {
 		expect(target).toBeDefined();
 		if (!target) return;
 
-		const selected: string[] = [];
-		const component = new OAuthSelectorComponent(
-			"login",
-			authStorage,
-			providerId => selected.push(providerId),
-			() => {},
-		);
-
-		for (const char of target.id) {
-			component.handleInput(char);
-		}
-
-		const rendered = component
-			.render(80)
-			.map(line => Bun.stripANSI(line))
-			.join("\n");
+		const { rendered, selected } = search("login", authStorage, target.id, { confirm: true });
 		expect(rendered).toContain(target.name);
-		expect(rendered).toContain(`Search: ${target.id}`);
-
-		component.handleInput("\n");
+		expect(rendered).toContain(target.id);
 		expect(selected).toEqual([target.id]);
 	});
 
 	it("does not offer env-only providers as logout targets", () => {
-		const selected: string[] = [];
-		const component = new OAuthSelectorComponent(
-			"logout",
-			{
-				credentials: { has: (_providerId: string) => false },
-				keys: {
-					source: (providerId: string) =>
-						providerId === "opencode-go" || providerId === "opencode-zen"
-							? { kind: "api_key", concrete: true }
-							: undefined,
-				},
-			} as unknown as AuthStorage,
-			providerId => selected.push(providerId),
-			() => {},
-		);
-
-		for (const char of "opencode-go") {
-			component.handleInput(char);
-		}
-
-		const rendered = component
-			.render(80)
-			.map(line => Bun.stripANSI(line))
-			.join("\n");
+		const auth = {
+			credentials: { has: (_providerId: string) => false },
+			keys: {
+				source: (providerId: string) =>
+					providerId === "opencode-go" || providerId === "opencode-zen"
+						? { kind: "api_key", concrete: true }
+						: undefined,
+			},
+		} as unknown as OAuthSelectorAuthSource;
+		const { rendered, selected } = search("logout", auth, "opencode-go", { confirm: true });
 		expect(rendered).toContain("No stored provider credentials to log out");
-
-		component.handleInput("\n");
 		expect(selected).toEqual([]);
 	});
 
 	it("offers stored providers as logout targets", () => {
-		const selected: string[] = [];
-		const component = new OAuthSelectorComponent(
-			"logout",
-			{
-				credentials: { has: (providerId: string) => providerId === "opencode-go" },
-				keys: {
-					source: (providerId: string) =>
-						providerId === "opencode-go" ? { kind: "api_key", concrete: true } : undefined,
-				},
-			} as unknown as AuthStorage,
-			providerId => selected.push(providerId),
-			() => {},
-		);
-
-		for (const char of "opencode-go") {
-			component.handleInput(char);
-		}
-
-		const rendered = component
-			.render(80)
-			.map(line => Bun.stripANSI(line))
-			.join("\n");
+		const { rendered, selected } = search("logout", storedOpencodeGo, "opencode-go", { confirm: true });
 		expect(rendered).toContain("OpenCode Go");
 		expect(rendered).toContain("logged in");
-
-		component.handleInput("\n");
 		expect(selected).toEqual(["opencode-go"]);
 	});
 
@@ -128,20 +111,9 @@ describe("OAuthSelectorComponent", () => {
 			resetSettingsForTest();
 			await Settings.init({ inMemory: true, overrides: { disabledProviders: [victim.id] } });
 
-			const component = new OAuthSelectorComponent(
-				"login",
-				authStorage,
-				() => {},
-				() => {},
-				{ disabledProviders: cfgDisabledProviders.get(settings) },
-			);
-			for (const char of victim.id) {
-				component.handleInput(char);
-			}
-			const rendered = component
-				.render(80)
-				.map(line => Bun.stripANSI(line))
-				.join("\n");
+			const { rendered } = search("login", authStorage, victim.id, {
+				disabledProviders: cfgDisabledProviders.get(settings),
+			});
 			expect(rendered).not.toContain(victim.name);
 		});
 
@@ -154,20 +126,9 @@ describe("OAuthSelectorComponent", () => {
 			resetSettingsForTest();
 			await Settings.init({ inMemory: true, overrides: { disabledProviders: ["openai-codex"] } });
 
-			const component = new OAuthSelectorComponent(
-				"login",
-				authStorage,
-				() => {},
-				() => {},
-				{ disabledProviders: cfgDisabledProviders.get(settings) },
-			);
-			for (const char of alias.id) {
-				component.handleInput(char);
-			}
-			const rendered = component
-				.render(80)
-				.map(line => Bun.stripANSI(line))
-				.join("\n");
+			const { rendered } = search("login", authStorage, alias.id, {
+				disabledProviders: cfgDisabledProviders.get(settings),
+			});
 			expect(rendered).not.toContain(alias.name);
 		});
 
@@ -175,27 +136,9 @@ describe("OAuthSelectorComponent", () => {
 			resetSettingsForTest();
 			await Settings.init({ inMemory: true, overrides: { disabledProviders: ["opencode-go"] } });
 
-			const selected: string[] = [];
-			const component = new OAuthSelectorComponent(
-				"logout",
-				{
-					credentials: { has: (providerId: string) => providerId === "opencode-go" },
-					keys: {
-						source: (providerId: string) =>
-							providerId === "opencode-go" ? { kind: "api_key", concrete: true } : undefined,
-					},
-				} as unknown as AuthStorage,
-				providerId => selected.push(providerId),
-				() => {},
-				{ disabledProviders: cfgDisabledProviders.get(settings) },
-			);
-			for (const char of "opencode-go") {
-				component.handleInput(char);
-			}
-			const rendered = component
-				.render(80)
-				.map(line => Bun.stripANSI(line))
-				.join("\n");
+			const { rendered } = search("logout", storedOpencodeGo, "opencode-go", {
+				disabledProviders: cfgDisabledProviders.get(settings),
+			});
 			expect(rendered).toContain("OpenCode Go");
 		});
 	});

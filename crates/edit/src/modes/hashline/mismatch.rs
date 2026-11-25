@@ -1,17 +1,13 @@
 //! Snapshot-tag mismatch diagnostics.
 
-use std::sync::LazyLock;
-
-use regex::Regex;
-
 use super::{
 	format::HL_FILE_HASH_EXAMPLES,
 	messages::{format_anchored_context, json_quote},
 };
-use crate::error::{EditError, Rejection};
-
-static LINE_REF_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\s*[>+\-*]*\s*(\d+)(?::.*)?\s*$").expect("valid regex"));
+use crate::{
+	error::{EditError, Rejection},
+	scan,
+};
 
 /// Context needed to explain a stale or unrecognized snapshot tag.
 pub struct MismatchDetails {
@@ -38,20 +34,31 @@ pub fn format_full_anchor_requirement(raw: Option<&str>) -> String {
 	)
 }
 
+/// Parse a decorated bare line number such as `>> 16: context`.
+fn parse_line_ref(reference: &str) -> Option<u32> {
+	let reference = reference
+		.trim_start()
+		.trim_start_matches(['>', '+', '-', '*']);
+	let (number, rest) = scan::digits(reference.trim_start())?;
+	let rest = rest.trim_end();
+	if let Some(context) = rest.strip_prefix(':') {
+		if context.contains('\n') {
+			return None;
+		}
+	} else if !rest.is_empty() {
+		return None;
+	}
+	number.parse().ok()
+}
+
 /// Parse a decorated bare line-number reference.
 pub fn parse_tag(reference: &str) -> Result<u32, EditError> {
-	let Some(captures) = LINE_REF_RE.captures(reference) else {
+	let Some(line) = parse_line_ref(reference) else {
 		return Err(EditError::parse(format!(
 			"Invalid line reference. Expected {}.",
 			format_full_anchor_requirement(Some(reference))
 		)));
 	};
-	let line = captures[1].parse::<u32>().map_err(|_| {
-		EditError::parse(format!(
-			"Invalid line reference. Expected {}.",
-			format_full_anchor_requirement(Some(reference))
-		))
-	})?;
 	if line < 1 {
 		return Err(EditError::parse(format!(
 			"Line number must be >= 1, got {line} in \"{reference}\"."

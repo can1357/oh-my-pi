@@ -831,6 +831,13 @@ export declare class Shell {
    */
   liveBackgroundJobCount(): Promise<number>
   /**
+   * Every live external this shell session holds, whether a run is in
+   * flight or not: background jobs (`cmd &`, `nohup cmd &`) earlier runs
+   * left running included. Each is unreaped while held, so its pid names
+   * it. Empty once the session is gone.
+   */
+  heldProcesses(): Array<HeldProcess>
+  /**
    * Pids of the still-alive processes spawned by this session's in-flight
    * `run`, in spawn order: foreground commands, pipeline stages, and `&`
    * jobs started by that run. Builtins run in-process and never appear.
@@ -1049,6 +1056,8 @@ export declare class VcsGitRepo {
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Publish a private-index commit after preparing the shared index. */
+  commitReconciled(message: string, options: VcsCommitOptions, selection: string, signal?: unknown | undefined | null): Promise<VcsReconciledCommit>
   /**
    * Write a commit object for `tree` on `parents` without moving any ref or
    * touching the index/worktree (`git commit-tree`).
@@ -2856,6 +2865,17 @@ export declare enum HeldFileKind {
   Locked = 'locked'
 }
 
+/** A live external a shell session holds ([`Shell::held_processes`]). */
+export interface HeldProcess {
+  /** OS process id. */
+  pid: number
+  /**
+   * It runs in a detached tree: started under the shell's `nohup`, which
+   * does not mask `SIGHUP`, so this is how such a process is told apart.
+   */
+  detached: boolean
+}
+
 /**
  * Highlight code and return ANSI-colored lines.
  *
@@ -3122,6 +3142,26 @@ export declare enum KeyEventType {
 }
 
 /**
+ * SIGKILL every process of the family of `pids`; returns the number
+ * signalled.
+ *
+ * One process-table snapshot, the ppid walk plus every group/session a
+ * member leads, then SIGCONT the stopped ones. With `spareHangupIgnoring`,
+ * members ignoring SIGHUP and everything descended (ppid chain) from them
+ * are left alone. Windows kills each pid's tree.
+ */
+export declare function killProcessFamily(pids: Array<number>, options?: KillProcessFamilyOptions | undefined | null): number
+
+/** Options for [`kill_process_family`]. */
+export interface KillProcessFamilyOptions {
+  /**
+   * Leave members ignoring SIGHUP (`nohup`) and everything descended from
+   * them alive.
+   */
+  spareHangupIgnoring?: boolean
+}
+
+/**
  * Matches of one [`LineMatcher::match_lines`] call, column-wise.
  *
  * Match `i` is on line `lines[i]` for pattern `rules[i]`, and its named
@@ -3146,6 +3186,18 @@ export interface LineRange {
   /** 1-indexed inclusive last visible line. */
   endLine: number
 }
+
+/**
+ * Live processes (never the caller) whose environment contains exactly
+ * `name=value`.
+ *
+ * Reads the environment each process was exec'd with: only
+ * the caller's user's processes are readable, others are skipped. macOS
+ * also withholds the environment of Apple platform binaries (`/bin/sh`,
+ * `/bin/sleep`, …) even from the same user, so those never match there.
+ * Empty on platforms without a readable process environment (Windows).
+ */
+export declare function listProcessesWithEnv(name: string, value: string): Array<TaggedProcess>
 
 /**
  * Walk the workspace once and return tree entries plus AGENTS.md candidates.
@@ -3689,6 +3741,25 @@ export interface PredictedWord {
   confidence: number
 }
 
+/**
+ * The record of each of `pids` that is alive (zombies and unknown pids
+ * skipped), from one process-table scan. Empty on Windows.
+ */
+export declare function processInfo(pids: Array<number>): Array<TaggedProcess>
+
+/**
+ * Regular files a process's stdout/stderr (fd 1/2) point at; a field is
+ * undefined when that descriptor is not a regular file (pipe, terminal,
+ * socket, deleted file) or unreadable.
+ */
+export declare function processOutputFiles(pid: number): ProcessOutputFiles
+
+/** Regular files a process's stdout/stderr point at. */
+export interface ProcessOutputFiles {
+  stdout?: string
+  stderr?: string
+}
+
 /** Current state of a process reference. */
 export declare enum ProcessStatus {
   /** The referenced process is still running. */
@@ -3879,6 +3950,16 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
+ * Repairs `\` continuations after here-document operators in `script`.
+ *
+ * Drops the `\` after each `<<EOF &&` (or `||`, `|`, `|&`) so the
+ * here-document body starts on the next line; `null` when nothing needs
+ * repair or the result would not parse. omp's bash tool runs commands
+ * through it.
+ */
+export declare function repairHeredocContinuations(script: string): string | null
+
+/**
  * Put back a stdin console mode `enableConsoleVtInput` returned. False when
  * stdin is no longer a console or refuses the mode; always false off Windows.
  */
@@ -3972,6 +4053,12 @@ export interface ShellCommandRequest {
    * otherwise.
    */
   stdin: string
+  /**
+   * Arguments that are job specs (`%1`, `%%`, `%name`) naming a job of the
+   * invoking shell that runs a program, mapped to that program's OS pid;
+   * absent when no argument is one.
+   */
+  jobs?: Record<string, number>
 }
 
 /** Shell-composable response of a session command. */
@@ -4428,6 +4515,16 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+  /**
+   * The command ended in another directory than it started in (a `cd` in
+   * it); a later run that passes `cwd` starts there instead.
+   */
+  movedCwd: boolean
+  /**
+   * The command ended with `errexit` (`set -e`) on; the next run starts
+   * with it off.
+   */
+  errexit: boolean
 }
 
 /** The application's speech synthesizer, injected into a shell run. */
@@ -4707,6 +4804,19 @@ export interface SvgCell {
   heightPx: number
 }
 
+/** A live process whose environment carries a given `NAME=value` entry. */
+export interface TaggedProcess {
+  pid: number
+  ppid: number
+  /** ms since the epoch */
+  startedAt: number
+  /** full command line, args joined by spaces */
+  command: string
+  /** SIGHUP is ignored (nohup) */
+  ignoresHangup: boolean
+  stopped: boolean
+}
+
 /** Options for [`TextPredictor::new`]. */
 export interface TextPredictorOptions {
   /** Engine: `ngram`, `smollm`, or `apple`. */
@@ -4719,6 +4829,252 @@ export interface TextPredictorOptions {
   showThreshold?: number
 }
 
+/** A tool call with its result and the reasoning before it. */
+export interface TranscriptCall {
+  /** Index of the transcript in `files`. */
+  file: number
+  /** Session entry id of the assistant message holding the call. */
+  entry?: string
+  /** Unix milliseconds; 0 when the line carries no time. */
+  at: number
+  callId: string
+  tool: string
+  /**
+   * Arguments as a JSON object; strings longer than 4,003 characters keep
+   * their first and last 2,000.
+   */
+  args: string
+  /** Result text; longer than 1,003 characters keeps its first and last 500. */
+  result?: string
+  /** UTF-16 length of the whole result text. */
+  resultChars?: number
+  isError?: boolean
+  /** The last 4,000 characters of the thinking and reply before the call. */
+  reasoning?: string
+  model?: string
+  /** omp version that recorded the call. */
+  version?: string
+}
+
+/** Which tool calls count; omitted fields match every call. */
+export interface TranscriptCallFilter {
+  /** Tool names. */
+  tools?: Array<string>
+  /** Regex matching some string inside the arguments. */
+  args?: string
+  /** Regex matching the whole result text. */
+  result?: string
+  /**
+   * `true` keeps failed calls, `false` succeeded ones; a call without a
+   * result matches neither.
+   */
+  error?: boolean
+}
+
+/**
+ * The newest `limit` tool calls of `files` matching the filter, with their
+ * results and reasoning.
+ *
+ * # Errors
+ * Rejects when cancelled; a regex that compiles in neither engine falls back
+ * to literal text, as in the grep tool.
+ */
+export declare function transcriptCalls(options: TranscriptCallsOptions): Promise<TranscriptCallsResult>
+
+/** Options for [`transcript_calls`]. */
+export interface TranscriptCallsOptions {
+  files: Array<TranscriptFile>
+  /** Unix milliseconds; calls made earlier are skipped. */
+  since?: number
+  /** Unix milliseconds; calls made at or after it are skipped. */
+  until?: number
+  filter: TranscriptCallFilter
+  flags?: TranscriptRegexFlags
+  /** Newest calls returned at most. */
+  limit: number
+  signal?: unknown
+}
+
+/** What [`transcript_calls`] found. */
+export interface TranscriptCallsResult {
+  /** Newest first. */
+  calls: Array<TranscriptCall>
+  /** Headers of the transcripts read. */
+  headers: Array<TranscriptHeader>
+}
+
+/** A transcript to scan. */
+export interface TranscriptFile {
+  /** JSONL file. */
+  path: string
+  /**
+   * Unix milliseconds of its newest activity (its mtime): capped scans read
+   * files newest first and skip those older than every hit they keep.
+   */
+  newest: number
+}
+
+/**
+ * The newest `limit` matches of `pattern` in `sources` of `files`.
+ *
+ * # Errors
+ * Rejects when cancelled.
+ */
+export declare function transcriptGrep(options: TranscriptGrepOptions): Promise<TranscriptGrepResult>
+
+/** One place a grep pattern matched. */
+export interface TranscriptGrepHit {
+  file: number
+  entry?: string
+  at: number
+  source: TranscriptSource
+  /** Tool whose arguments or result matched. */
+  tool?: string
+  callId?: string
+  /** Snippet around the match, whitespace collapsed. */
+  text: string
+  /** The matched text. */
+  matched: string
+}
+
+/** Options for [`transcript_grep`]. */
+export interface TranscriptGrepOptions {
+  files: Array<TranscriptFile>
+  since?: number
+  until?: number
+  pattern: string
+  flags?: TranscriptRegexFlags
+  sources: Array<TranscriptSource>
+  /** Tools whose arguments and results are searched; all when omitted. */
+  tools?: Array<string>
+  limit: number
+  signal?: unknown
+}
+
+/** What [`transcript_grep`] found. */
+export interface TranscriptGrepResult {
+  /** Newest first. */
+  hits: Array<TranscriptGrepHit>
+  headers: Array<TranscriptHeader>
+}
+
+/** Session header of a scanned transcript. */
+export interface TranscriptHeader {
+  /** Index of the transcript in `files`. */
+  file: number
+  id: string
+  cwd: string
+}
+
+/**
+ * The newest `limit` records of `kinds` in one transcript, whole, oldest
+ * first.
+ *
+ * # Errors
+ * Rejects when the file cannot be read or the scan is cancelled.
+ */
+export declare function transcriptMessages(options: TranscriptMessagesOptions): Promise<Array<TranscriptRecord>>
+
+/** Options for [`transcript_messages`]. */
+export interface TranscriptMessagesOptions {
+  path: string
+  /** Kinds kept; all when omitted. */
+  kinds?: Array<TranscriptRecordKind>
+  since?: number
+  until?: number
+  /** Newest records returned at most. */
+  limit: number
+  signal?: unknown
+}
+
+/** One transcript record, whole. */
+export interface TranscriptRecord {
+  entry?: string
+  at: number
+  kind: TranscriptRecordKind
+  /** Message or result text; `null` for calls. */
+  text?: string
+  tool?: string
+  callId?: string
+  /** Arguments of a call as a JSON object. */
+  args?: string
+  isError?: boolean
+}
+
+/** Kind of a transcript record. */
+export declare enum TranscriptRecordKind {
+  User = 'user',
+  Assistant = 'assistant',
+  Thinking = 'thinking',
+  Call = 'call',
+  Result = 'result'
+}
+
+/**
+ * Regex dialect of a scan: the grep tool's (Rust `regex`, PCRE2 for
+ * look-around and back-references).
+ */
+export interface TranscriptRegexFlags {
+  /** Case-insensitive matching. */
+  ignoreCase?: boolean
+  /** `.` matches newlines and matches may span lines. */
+  dotAll?: boolean
+}
+
+/** Text a grep searches. */
+export declare enum TranscriptSource {
+  User = 'user',
+  Assistant = 'assistant',
+  Thinking = 'thinking',
+  Args = 'args',
+  Result = 'result'
+}
+
+/** Calls of one transcript counted under one key. */
+export interface TranscriptStat {
+  file: number
+  /** `null` when the fact is unknown, and for `by: "none"`. */
+  key?: string
+  calls: number
+  errors: number
+}
+
+/**
+ * Calls of `files` matching the filter, counted per transcript by `by`.
+ *
+ * # Errors
+ * Rejects when cancelled.
+ */
+export declare function transcriptStats(options: TranscriptStatsOptions): Promise<TranscriptStatsResult>
+
+/** Call fact [`transcript_stats`] counts by within each transcript. */
+export declare enum TranscriptStatsKey {
+  Tool = 'tool',
+  Model = 'model',
+  Version = 'version',
+  /** Local calendar day, `YYYY-MM-DD`. */
+  Day = 'day',
+  /** One count per transcript. */
+  PerTranscript = 'none'
+}
+
+/** Options for [`transcript_stats`]. */
+export interface TranscriptStatsOptions {
+  files: Array<TranscriptFile>
+  since?: number
+  until?: number
+  filter: TranscriptCallFilter
+  flags?: TranscriptRegexFlags
+  by: TranscriptStatsKey
+  signal?: unknown
+}
+
+/** What [`transcript_stats`] counted. */
+export interface TranscriptStatsResult {
+  stats: Array<TranscriptStat>
+  headers: Array<TranscriptHeader>
+}
+
 /**
  * Translate a kitty CSI-u Alt/Ctrl+Alt chord into the text `AltGr` produced
  * on the active keyboard layout; `null` when the sequence is not an `AltGr`
@@ -4728,6 +5084,19 @@ export interface TextPredictorOptions {
  * active: other hosts report the produced text themselves.
  */
 export declare function translateWindowsAltGrSequence(data: string): string | null
+
+/**
+ * UTF-16 code-unit length of the longest prefix of `input` within
+ * `max_tokens` `Jev` tokens (as `countTokens(_, Encoding.Jev)` counts),
+ * never ending on half a surrogate pair. `Jev` only.
+ *
+ * Merging stops at the piece that crosses the budget; the rest of the input
+ * is still read for the NFC quick-check.
+ *
+ * Slice the original JS string with `input.slice(0, len)` (or keep `input`
+ * unchanged when `len === input.length`).
+ */
+export declare function truncateToTokens(input: string, maxTokens: number): number
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.
@@ -4894,6 +5263,14 @@ export interface VcsPushOptions {
   remote?: string
   refspec?: string
   forceWithLease?: boolean
+}
+
+/** Published private-index commit and any shared-index entries left staged. */
+export interface VcsReconciledCommit {
+  /** Published commit's object ID. */
+  sha: string
+  /** Staged changes left in the shared index or publication warnings. */
+  indexNotes: Array<string>
 }
 
 /** Restore options. */

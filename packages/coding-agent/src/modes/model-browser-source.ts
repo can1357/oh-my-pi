@@ -1,12 +1,10 @@
 import { type Model, resolveModelServiceTier, type ServiceTier, shouldSendServiceTier } from "@oh-my-pi/pi-ai";
-import type { ModelHubSource } from "@oh-my-pi/pi-tui/overlays/model-hub";
 import { findActiveModelPreset, getModelPresetNames } from "../config/model-presets";
 import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { describeModelCompactionPoint } from "../session/model-compaction-threshold";
-
 import {
 	cfgCycleOrder,
 	cfgDisabledProviders,
@@ -20,6 +18,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 } from "../session/settings";
+import type { ModelHubSource } from "./view-model/overlays/model-hub";
 
 /**
  * Supply live model-overlay preferences and runtime resolution from the host.
@@ -36,6 +35,7 @@ export function createModelBrowserSource(
 		get revision() {
 			return settings.revision;
 		},
+		preferences: settings,
 		get defaultThinkingLevel() {
 			return cfgDefaultThinkingLevel.get(settings);
 		},
