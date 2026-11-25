@@ -4,6 +4,7 @@ import {
 	isOfficialAnthropicApiUrl,
 	resolveAnthropicApiVersion,
 } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isKimiCodeEndpoint } from "@oh-my-pi/pi-catalog/compat/kimi-code";
 import { hostMatchesUrl, isVertexRawPredictUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -12,7 +13,6 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
-import { isKimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
 import {
 	$env,
 	$flag,
@@ -5392,8 +5392,9 @@ function buildParams(
 	const metadataUserId = resolveAnthropicMetadataUserId(
 		rebindAnthropicMetadataUserId(
 			readAnthropicMetadataString(options?.metadata, "user_id") ??
-				// Deliberately share the normalized affinity identity across Kimi's two transports.
-				(isKimiCodeProvider(model.provider) ? getOpenAIPromptCacheKey(options) : undefined),
+				// Deliberately share the normalized affinity identity across Kimi's two
+				// transports (`kimi-code-endpoint` axis).
+				(isKimiCodeEndpoint(model) ? getOpenAIPromptCacheKey(options) : undefined),
 			isOAuthToken ? servingAccountId : undefined,
 		),
 		isOAuthToken,

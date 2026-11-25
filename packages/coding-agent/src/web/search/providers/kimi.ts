@@ -11,7 +11,7 @@
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
-import { KIMI_CODE_BASE_URLS, type KimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
+import { providerBaseUrl } from "@oh-my-pi/pi-catalog/compat/providers";
 
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -24,7 +24,7 @@ import { classifyProviderHttpError, withHardTimeout } from "./utils";
 type SearchParamsWithFetch = SearchParams & { fetch?: FetchImpl };
 
 /** Stored Kimi Code logins searched in order; mainland first keeps pre-split behavior. */
-const KIMI_SEARCH_PROVIDERS: readonly KimiCodeProvider[] = ["kimi-code", "kimi-code-global"];
+const KIMI_SEARCH_PROVIDERS: readonly string[] = ["kimi-code", "kimi-code-global"];
 
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 20;
@@ -94,14 +94,14 @@ async function resolveKey(
 ): Promise<{ key: ApiKey; url: string } | undefined> {
 	const urlOverride = asTrimmed($env.MOONSHOT_SEARCH_BASE_URL) ?? asTrimmed($env.KIMI_SEARCH_BASE_URL);
 	const envKey = asTrimmed($env.MOONSHOT_SEARCH_API_KEY) ?? asTrimmed($env.KIMI_SEARCH_API_KEY);
-	if (envKey) return { key: envKey, url: urlOverride ?? `${KIMI_CODE_BASE_URLS["kimi-code"]}/search` };
+	if (envKey) return { key: envKey, url: urlOverride ?? `${providerBaseUrl("kimi-code")}/search` };
 
 	for (const provider of KIMI_SEARCH_PROVIDERS) {
 		const stored = await authStorage.keys.get(provider, sessionId, { signal });
 		if (stored) {
 			return {
 				key: authStorage.keys.resolver(provider, { sessionId }),
-				url: urlOverride ?? `${KIMI_CODE_BASE_URLS[provider]}/search`,
+				url: urlOverride ?? `${providerBaseUrl(provider)}/search`,
 			};
 		}
 	}

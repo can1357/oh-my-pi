@@ -1,3 +1,4 @@
+import { providerEntry } from "../compat/providers";
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_BASE_URL } from "../wire/codex";
 import { getCodexClientVersion } from "../wire/codex-version";
@@ -5,7 +6,6 @@ import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 import { decodeKiroCredential, kiroCredentialCacheScope } from "../wire/kiro";
-import { KIMI_CODE_BASE_URLS } from "../wire/kimi-code";
 import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
@@ -85,10 +85,6 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 	switch (providerId) {
 		case "charm-hyper":
 			return CHARM_HYPER_API_BASE_URL;
-		case "kimi-code":
-			return KIMI_CODE_BASE_URLS["kimi-code"];
-		case "kimi-code-global":
-			return KIMI_CODE_BASE_URLS["kimi-code-global"];
 		case "meta":
 		case "muse-code":
 			return "https://api.meta.ai/v1";
@@ -113,7 +109,7 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		default:
-			return undefined;
+			return providerEntry(providerId)?.baseUrl;
 	}
 }
 

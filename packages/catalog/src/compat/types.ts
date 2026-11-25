@@ -722,6 +722,10 @@ export interface CompiledProvider {
 	automaticDefault?: boolean;
 	/** Env vars consulted, in order, for the runtime API-key fallback. */
 	envVars?: string[];
+	/** The provider's own managed API base URL when its deployment has one (chat, discovery, usages, search). */
+	baseUrl?: string;
+	/** Env var naming an alternate base URL for that deployment; consumers keep override resolution in code. */
+	baseUrlEnv?: string;
 	/** The runtime creates a model manager even without a valid API key. */
 	allowUnauthenticated?: boolean;
 	/** Successful runtime discovery replaces bundled provider models instead of merging. */

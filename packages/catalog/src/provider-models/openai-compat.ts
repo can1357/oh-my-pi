@@ -14,7 +14,7 @@ import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
-import { providerEntries, providerEntry, seedModels } from "../compat/providers";
+import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
@@ -60,7 +60,6 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
-import { KIMI_CODE_BASE_URLS, type KimiCodeProvider } from "../wire/kimi-code";
 import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
@@ -4333,10 +4332,10 @@ export const KIMI_CODE_DEFAULT_MAX_TOKENS = 32_000;
  * rule-owned (`runtime/behavior.kdl` model-limits), everything else ->
  * `fallback`.
  */
-export function kimiCodeMaxTokens(provider: KimiCodeProvider, modelId: string, fallback?: number): number;
-export function kimiCodeMaxTokens(provider: KimiCodeProvider, modelId: string, fallback: number | null): number | null;
+export function kimiCodeMaxTokens(provider: string, modelId: string, fallback?: number): number;
+export function kimiCodeMaxTokens(provider: string, modelId: string, fallback: number | null): number | null;
 export function kimiCodeMaxTokens(
-	provider: KimiCodeProvider,
+	provider: string,
 	modelId: string,
 	fallback: number | null = KIMI_CODE_DEFAULT_MAX_TOKENS,
 ): number | null {
@@ -4345,10 +4344,15 @@ export function kimiCodeMaxTokens(
 
 export function kimiCodeModelManagerOptions(
 	config?: KimiCodeModelManagerConfig,
-	provider: KimiCodeProvider = "kimi-code",
+	provider: string = "kimi-code",
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? KIMI_CODE_BASE_URLS[provider];
+	// The managed `/coding/v1` base URL is rule-owned (`base-url` node in
+	// `providers/<id>.kdl`); both Kimi Code provider entries declare one.
+	const baseUrl = config?.baseUrl ?? providerBaseUrl(provider);
+	if (!baseUrl) {
+		throw new Error(`provider \`${provider}\` declares no managed base URL (\`base-url\` in providers/<id>.kdl)`);
+	}
 	return {
 		providerId: provider,
 		cacheProviderId: resolveModelCacheProviderId(provider, { apiKey, baseUrl }),

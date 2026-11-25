@@ -8,6 +8,16 @@ provider "kimi-code-global" {
 	// keys, so this provider owns a dedicated env var; runtime resolution and
 	// discovery select this provider's regional base URL.
 	env "KIMI_CODE_GLOBAL_API_KEY"
+	// Managed `/coding/v1` base URL (chat, models, usages, search); mirrors the
+	// official client's region profile. The global deployment has no base URL
+	// override env (the official client's `KIMI_BASE_URL` fork only rewrites the
+	// mainland api.kimi.com deployment).
+	base-url "https://api.kimi.ai/coding/v1"
+	// Kimi Code managed endpoint: the dedicated Kimi stream dispatcher handles
+	// its streams, requests carry the shared Kimi CLI client headers, and both
+	// transports (OpenAI completions, Anthropic messages) share one prompt-cache
+	// affinity identity.
+	kimi-code-endpoint #true
 	discovery label="Kimi Code (Global)"
 
 	class "kimi" {

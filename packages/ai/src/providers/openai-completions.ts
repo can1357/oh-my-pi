@@ -1,10 +1,10 @@
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { isKimiCodeEndpoint } from "@oh-my-pi/pi-catalog/compat/kimi-code";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
-import { isKimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
 import {
 	$env,
 	isRecord,
@@ -2115,11 +2115,12 @@ function createRequestSetup(
 		parentSessionId,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
-		// Provider auth/header overlay: Kimi-code hosts require shared client
-		// attribution headers prepended before caller headers. Kept here (not in
-		// the shared helper) because it is provider-specific request setup.
+		// Provider auth/header overlay: Kimi Code managed endpoints (`kimi-code-endpoint`
+		// axis) require shared client attribution headers prepended before caller
+		// headers. Kept here (not in the shared helper) because it is
+		// provider-specific request setup.
 		// ClinePass sends the mirrored Cline CLI identity; documented in wire/cline-pass.ts.
-		prependHeaders: isKimiCodeProvider(model.provider)
+		prependHeaders: isKimiCodeEndpoint(model)
 			? getKimiCommonHeaders
 			: model.provider === "cline-pass"
 				? () => clinePassClientHeaders(promptCacheSessionId)

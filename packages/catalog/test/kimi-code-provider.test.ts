@@ -4,7 +4,6 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { kimiCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import { KIMI_CODE_BASE_URLS, type KimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { applyGeneratedModelPolicies } from "../scripts/generated-policies";
@@ -76,13 +75,13 @@ describe("Kimi Code provider catalog", () => {
 	});
 	it("keeps mainland and global discovery identity, endpoints, and caches separate", async () => {
 		await using temp = await TempDir.create("@kimi-code-regional-cache-");
-		const providers: readonly KimiCodeProvider[] = ["kimi-code", "kimi-code-global"];
+		type Provider = "kimi-code" | "kimi-code-global";
 
-		const requests: Record<KimiCodeProvider, string[]> = {
+		const requests: Record<Provider, string[]> = {
 			"kimi-code": [],
 			"kimi-code-global": [],
 		};
-		const optionsFor = (provider: KimiCodeProvider, id: string) => ({
+		const optionsFor = (provider: Provider, id: string) => ({
 			...kimiCodeModelManagerOptions(
 				{
 					apiKey: "shared-kimi-code-key",
@@ -98,8 +97,8 @@ describe("Kimi Code provider catalog", () => {
 			cacheDbPath: temp.join("models.db"),
 		});
 		const regionalOptions = {
-			"kimi-code": optionsFor(providers[0]!, "mainland-probe"),
-			"kimi-code-global": optionsFor(providers[1]!, "global-probe"),
+			"kimi-code": optionsFor("kimi-code", "mainland-probe"),
+			"kimi-code-global": optionsFor("kimi-code-global", "global-probe"),
 		};
 
 		const mainland = await resolveProviderModels(regionalOptions["kimi-code"], "online-if-uncached");
@@ -107,12 +106,12 @@ describe("Kimi Code provider catalog", () => {
 		expect(mainland.models[0]).toMatchObject({
 			id: "mainland-probe",
 			provider: "kimi-code",
-			baseUrl: KIMI_CODE_BASE_URLS["kimi-code"],
+			baseUrl: "https://api.kimi.com/coding/v1",
 		});
 		expect(global.models[0]).toMatchObject({
 			id: "global-probe",
 			provider: "kimi-code-global",
-			baseUrl: KIMI_CODE_BASE_URLS["kimi-code-global"],
+			baseUrl: "https://api.kimi.ai/coding/v1",
 		});
 		expect(requests).toEqual({
 			"kimi-code": ["https://api.kimi.com/coding/v1/models"],

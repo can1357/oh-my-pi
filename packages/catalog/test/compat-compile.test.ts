@@ -503,6 +503,29 @@ describe("provider catalog grammar", () => {
 		);
 	});
 
+	test("provider base-url compiles with an optional environment override", () => {
+		const compiled = compileProviders([
+			{
+				file: "providers/p.kdl",
+				text: provider("p", [
+					'\tdefault-model "m"',
+					'\tbase-url "https://api.example/v1" {\n\t\tenv "P_BASE_URL"\n\t}',
+				]),
+			},
+			{
+				file: "providers/q.kdl",
+				text: provider("q", ['\tdefault-model "m"', '\tbase-url "https://other.example/v1"']),
+			},
+		]);
+
+		expect(compiled.p).toMatchObject({
+			baseUrl: "https://api.example/v1",
+			baseUrlEnv: "P_BASE_URL",
+		});
+		expect(compiled.q).toMatchObject({ baseUrl: "https://other.example/v1" });
+		expect(compiled.q.baseUrlEnv).toBeUndefined();
+	});
+
 	test("runner seeds and per-kind APIs compile without entering the cascade", () => {
 		const model = (id: string, name: string, api?: string) =>
 			[

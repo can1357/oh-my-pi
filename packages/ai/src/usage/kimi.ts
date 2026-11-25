@@ -1,5 +1,5 @@
+import { providerBaseUrl, providerBaseUrlEnv } from "@oh-my-pi/pi-catalog/compat/providers";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { KIMI_CODE_BASE_URLS, type KimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
 import { $env } from "@oh-my-pi/pi-utils";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import type {
@@ -264,7 +264,7 @@ function parseUsagePayload(payload: unknown, nowMs: number): { rows: KimiUsageRo
 	return { rows, raw: data };
 }
 
-function createKimiUsageProvider(id: KimiCodeProvider): UsageProvider {
+function createKimiUsageProvider(id: string): UsageProvider {
 	return {
 		id,
 		supports(params: UsageFetchParams): boolean {
@@ -293,9 +293,18 @@ function createKimiUsageProvider(id: KimiCodeProvider): UsageProvider {
 				return null;
 			}
 
-			// KIMI_CODE_BASE_URL is the official client's override for the mainland deployment only.
-			const envBase = id === "kimi-code" ? $env.KIMI_CODE_BASE_URL?.trim() : undefined;
-			const baseUrl = (params.baseUrl?.trim() || envBase || KIMI_CODE_BASE_URLS[id]).replace(/\/+$/, "");
+			// Base URL and its override env come from the compiled provider entry
+			// (`base-url` node in `providers/kimi-code*.kdl`; the env child is
+			// declared on the mainland entry only — the official client's override
+			// does not fork the global deployment).
+			const overrideEnv = providerBaseUrlEnv(id);
+			const envBase = overrideEnv ? $env[overrideEnv]?.trim() : undefined;
+			const managedBase = providerBaseUrl(id);
+			if (!managedBase) {
+				ctx.logger?.warn("Kimi usage provider has no managed base URL", { provider: params.provider });
+				return null;
+			}
+			const baseUrl = (params.baseUrl?.trim() || envBase || managedBase).replace(/\/+$/, "");
 			const url = buildUsageUrl(baseUrl);
 			let payload: unknown;
 			try {

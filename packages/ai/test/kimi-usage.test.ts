@@ -255,6 +255,26 @@ describe("kimi usage provider", () => {
 		}
 	});
 
+	it("honors the mainland base URL override without redirecting global usage", async () => {
+		Bun.env.KIMI_CODE_BASE_URL = "https://override.example/coding/v1/";
+		const payload = { usage: { limit: "100", used: "28", remaining: "72" }, limits: [] };
+		const requests: { url: string; authorization: string | null }[] = [];
+
+		await kimiUsageProvider.fetchUsage!(
+			{ provider: "kimi-code", credential: { type: "api_key", apiKey: "mainland-key" } },
+			makeRequestCtx(payload, requests),
+		);
+		await kimiGlobalUsageProvider.fetchUsage!(
+			{ provider: "kimi-code-global", credential: { type: "api_key", apiKey: "global-key" } },
+			makeRequestCtx(payload, requests),
+		);
+
+		expect(requests).toEqual([
+			{ url: "https://override.example/coding/v1/usages", authorization: "Bearer mainland-key" },
+			{ url: "https://api.kimi.ai/coding/v1/usages", authorization: "Bearer global-key" },
+		]);
+	});
+
 	it("does not probe either regional usage endpoint when a credential has no bearer token", async () => {
 		const cases = [
 			{ id: "kimi-code", provider: kimiUsageProvider },

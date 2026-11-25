@@ -1239,7 +1239,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/kilo
 
 ## Kimi Code (`kimi-code`, `kimi-code-global`)
 
-Kimi Code provides subscription-backed access to Kimi models (`kimi-for-coding`, `k3`) via Moonshot AI's `/coding/v1` API endpoints. Moonshot runs two independent regional deployments with region-scoped accounts and tokens, so each is its own provider: `kimi-code` is mainland China (`auth.kimi.com`, `api.kimi.com`) and `kimi-code-global` is global (`auth.kimi.ai`, `api.kimi.ai`). Region endpoints live in `packages/catalog/src/wire/kimi-code.ts`; both providers share every transport, compat, and usage path below. It rides the [Kimi Code](#kimi-code) transport pipeline, delegating request execution to `streamKimi` (`packages/ai/src/providers/kimi.ts`) and `streamOpenAIAnthropicShim` (`packages/ai/src/providers/openai-anthropic-shim.ts`).
+Kimi Code provides subscription-backed access to Kimi models (`kimi-for-coding`, `k3`) via Moonshot AI's `/coding/v1` API endpoints. Moonshot runs two independent regional deployments with region-scoped accounts and tokens, so each is its own provider: `kimi-code` is mainland China (`auth.kimi.com`, `api.kimi.com`) and `kimi-code-global` is global (`auth.kimi.ai`, `api.kimi.ai`). Region endpoints are declared as compiled provider-catalog `base-url` facts in `packages/catalog/src/compat/rules/providers/kimi-code.kdl` and `kimi-code-global.kdl` and consumed via `providerBaseUrl(...)` (`packages/catalog/src/compat/providers.ts`); both providers share every transport, compat, and usage path below. It rides the [Kimi Code](#kimi-code) transport pipeline, delegating request execution to `streamKimi` (`packages/ai/src/providers/kimi.ts`) and `streamOpenAIAnthropicShim` (`packages/ai/src/providers/openai-anthropic-shim.ts`).
 
 ### Special casings
 
@@ -1249,11 +1249,11 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/kimi
 - For class kimi: `thinkingFormat="zai"`.
 - For class unknown: `reasoningContentField="reasoning_content"`, `supportsDeveloperRole=false`, `thinkingFormat="kimi"`, `thinking.efforts=["minimal","low","medium","high"]`.
 - For models kimi-for*: `reasoningContentField="reasoning_content"`, `supportsDeveloperRole=false`, `thinkingFormat="zai"`, `thinking.efforts=["minimal","low","medium","high"]`.
-- Provider defaults: `kimiApiFormat="anthropic"`, `supportsPromptCacheKey=true`, `thinking.mode="effort"`, `streamMarkupHealingPattern="kimi"`.
+- Provider defaults: `kimiApiFormat="anthropic"`, `supportsPromptCacheKey=true`, `thinking.mode="effort"`, `streamMarkupHealingPattern="kimi"`, `kimiCodeEndpoint=true` (catalog axis `kimi-code-endpoint`).
 
-- **Prompt Cache Key Sharing**: `isKimiCodeProvider` (`packages/catalog/src/wire/kimi-code.ts`) gates prompt caching; Anthropic-compatible (`packages/ai/src/providers/anthropic.ts`) and OpenAI-compatible (`packages/ai/src/providers/openai-completions.ts`) requests both attach `prompt_cache_key` derived via `getOpenAIPromptCacheKey` to share affinity identity across transport switches.
-- **Common Header Prepending**: `prependHeaders` in `packages/ai/src/providers/openai-completions.ts` injects `getKimiCommonHeaders()` (`packages/ai/src/registry/oauth/kimi.ts`) into all `kimi-code` / `kimi-code-global` requests.
-- **Reasoning Guard**: `stream.ts` checks `isKimiCodeProvider` before execution, disabling unsupported reasoning configurations on K3 (`packages/ai/src/providers/openai-completions.ts`).
+- **Prompt Cache Key Sharing**: `isKimiCodeEndpoint` (`packages/catalog/src/compat/kimi-code.ts`, backed by the provider-root `kimi-code-endpoint #true` rule in both Kimi Code KDL files) gates prompt caching; Anthropic-compatible (`packages/ai/src/providers/anthropic.ts`) and OpenAI-compatible (`packages/ai/src/providers/openai-completions.ts`) requests both attach `prompt_cache_key` derived via `getOpenAIPromptCacheKey` to share affinity identity across transport switches.
+- **Common Header Prepending**: `prependHeaders` in `packages/ai/src/providers/openai-completions.ts` injects `getKimiCommonHeaders()` (`packages/ai/src/registry/oauth/kimi.ts`) into all requests whose model resolves the `kimi-code-endpoint` capability.
+- **Reasoning Guard**: `stream.ts` checks `isKimiCodeEndpoint` before execution, disabling unsupported reasoning configurations on K3 (`packages/ai/src/providers/openai-completions.ts`).
 
 ### Auth & usage
 

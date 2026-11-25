@@ -18,7 +18,8 @@ import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
 import { isExcludedModel, isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
-import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
+import { isKimiCodeEndpoint } from "../src/compat/kimi-code";
+import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../src/compat/providers";
 import type { CompiledProvider } from "../src/compat/types";
 import { encodeModelCatalog } from "../src/model-catalog-format";
 import { createModelManager } from "../src/model-manager";
@@ -46,7 +47,6 @@ import {
 	stripFireworksDeepSeekThinkingToggle,
 } from "../src/provider-models/openai-compat";
 import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
-import { isKimiCodeProvider, KIMI_CODE_BASE_URLS } from "../src/wire/kimi-code";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
 import { mergeCopilotApiHeaders } from "../src/wire/github-copilot";
@@ -438,7 +438,7 @@ function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
  */
 function applyKimiCodeMaxTokens(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
-		if (!isKimiCodeProvider(model.provider)) return model;
+		if (!isKimiCodeEndpoint(model)) return model;
 		const capped = kimiCodeMaxTokens(model.provider, model.id, model.maxTokens);
 		return capped === model.maxTokens ? model : { ...model, maxTokens: capped };
 	});
@@ -452,9 +452,14 @@ function applyKimiCodeMaxTokens(models: readonly ModelSpec[]): ModelSpec[] {
  * roster. A live global `/models` snapshot is authoritative and is kept as-is.
  */
 function projectKimiCodeGlobalModels(models: ModelSpec[]): ModelSpec[] {
+	// The global host is rule-owned (`base-url` node in providers/kimi-code-global.kdl).
+	const globalBaseUrl = providerBaseUrl("kimi-code-global");
+	if (!globalBaseUrl) {
+		throw new Error("kimi-code-global declares no managed base URL (`base-url` in providers/kimi-code-global.kdl)");
+	}
 	const projected = models
 		.filter(model => model.provider === "kimi-code")
-		.map(model => ({ ...model, provider: "kimi-code-global", baseUrl: KIMI_CODE_BASE_URLS["kimi-code-global"] }));
+		.map(model => ({ ...model, provider: "kimi-code-global", baseUrl: globalBaseUrl }));
 	return [...models, ...projected];
 }
 
