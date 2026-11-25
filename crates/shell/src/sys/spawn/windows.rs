@@ -1232,7 +1232,8 @@ impl ExtProc for WinProc {
 			GetProcessTimes(process, &raw mut created, &raw mut exited, &raw mut kernel, &raw mut user)
 		} != 0;
 		// 100 ns ticks.
-		let ns = |t: FILETIME| ((u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)) * 100;
+		let ns =
+			|t: FILETIME| ((u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)) * 100;
 		let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
 		let mut memory = PROCESS_MEMORY_COUNTERS { cb: size, ..PROCESS_MEMORY_COUNTERS::default() };
 		// SAFETY: our process handle; `memory` is a writable struct of `size`.
@@ -1243,8 +1244,16 @@ impl ExtProc for WinProc {
 		Some(ProcUsage {
 			user_ns: if timed { ns(user) } else { 0 },
 			sys_ns: if timed { ns(kernel) } else { 0 },
-			max_rss: if counted { memory.PeakWorkingSetSize as u64 } else { 0 },
-			minor_faults: if counted { u64::from(memory.PageFaultCount) } else { 0 },
+			max_rss: if counted {
+				memory.PeakWorkingSetSize as u64
+			} else {
+				0
+			},
+			minor_faults: if counted {
+				u64::from(memory.PageFaultCount)
+			} else {
+				0
+			},
 			..ProcUsage::default()
 		})
 	}

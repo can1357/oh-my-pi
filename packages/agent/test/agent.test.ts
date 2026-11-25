@@ -1611,6 +1611,48 @@ describe("Agent", () => {
 		]);
 	});
 
+	it("lets a running tool detach before a detaching abort, even in wait mode", async () => {
+		// Interrupt-and-send must background a running bash/eval job, not kill it:
+		// the tool sees the cooperative steering signal before the abort lands.
+		const schema = type({});
+		const started = Promise.withResolvers<void>();
+		let steeringSignal: AbortSignal | undefined;
+		const work: AgentTool<typeof schema, Record<string, never>> = {
+			name: "work",
+			label: "Work",
+			description: "Foreground work that backgrounds itself on steering",
+			parameters: schema,
+			async execute(_toolCallId, _params, signal) {
+				const outcome = Promise.withResolvers<string>();
+				steeringSignal?.addEventListener("abort", () => outcome.resolve("detached"), { once: true });
+				signal?.addEventListener("abort", () => outcome.resolve("killed"), { once: true });
+				started.resolve();
+				return { content: [{ type: "text", text: await outcome.promise }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [{ content: [{ type: "toolCall", id: "call-1", name: "work", arguments: {} }] }],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [work], messages: [] },
+			interruptMode: "wait",
+			streamFn: mock.stream,
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return {};
+			},
+		});
+
+		const running = agent.prompt("start");
+		await started.promise;
+		agent.abort("Interrupted by user", { detachTools: true });
+		await running;
+
+		const result = agent.state.messages.find(message => message.role === "toolResult");
+		expect(result?.isError).toBe(false);
+		expect(result?.content).toEqual([{ type: "text", text: "detached" }]);
+	});
+
 	it("keeps the reserved result when the transformer rejects", async () => {
 		// `cursorOnToolResult` is a supported option returning a Promise, and the
 		// provider dispatches decoded messages with `void handleServerMessage(...)`.

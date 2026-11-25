@@ -6,6 +6,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
+	type HeldProcess,
 	type MinimizerOptions,
 	type PipeStreams,
 	PtySession,
@@ -307,8 +308,9 @@ const shellSessionsInUse = new Set<string>();
  * dropped once its last
  * background job exits (reaped by the poll loop below). Children stay
  * kill-on-drop, so they still die when the harness tears the Shell down on exit.
+ * Each maps to the session key it ran under, for {@link heldShellProcesses}.
  */
-const retainedShells = new Set<Shell>();
+const retainedShells = new Map<Shell, string>();
 const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
@@ -360,7 +362,7 @@ export async function drainAbortedShells(agentSessionKey: string | undefined): P
 }
 
 /** Keeps `shell` alive while it has live background jobs; whether it had any. */
-async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<boolean> {
+async function retainShellWithLiveBackgroundJobs(shell: Shell, sessionKey: string): Promise<boolean> {
 	let live: number;
 	try {
 		live = await shell.liveBackgroundJobCount();
@@ -368,7 +370,7 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<boolean>
 		return false;
 	}
 	if (live <= 0) return false;
-	retainedShells.add(shell);
+	retainedShells.set(shell, sessionKey);
 	const interval = setInterval(() => {
 		void shell
 			.liveBackgroundJobCount()
@@ -438,7 +440,7 @@ async function releasePersistentShell(
 	// reaped once its last job exits and still dies with the harness. A reset
 	// session tears down.
 	if (!reset) {
-		await retainShellWithLiveBackgroundJobs(shell);
+		await retainShellWithLiveBackgroundJobs(shell, sessionKey);
 	}
 }
 
@@ -494,8 +496,25 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
 	for (const [key, shell] of shellSessions) {
 		if (!isShellSessionOwnedBy(key, agentSessionKey)) continue;
 		shellSessions.delete(key);
-		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
+		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell, key);
 	}
+}
+
+/**
+ * Every live external the shells of an agent session hold, in or between runs (`&`/`nohup &`
+ * jobs left running included), with whether the shell's `nohup` started it: its persistent
+ * shells, its per-job `:async:` shells, and the shells retained for their background jobs.
+ * Covers what the `OMP_BASH_SESSION` environment scan cannot see (macOS hides platform
+ * binaries' env), and tells the shell's `nohup` (which does not mask SIGHUP) apart.
+ */
+export function heldShellProcesses(agentSessionKey: string | undefined): HeldProcess[] {
+	if (!agentSessionKey) return [];
+	const asyncPrefix = `${agentSessionKey}:async:`;
+	const owned = (key: string) => isShellSessionOwnedBy(key, agentSessionKey) || key.startsWith(asyncPrefix);
+	const held: HeldProcess[] = [];
+	for (const [key, shell] of shellSessions) if (owned(key)) held.push(...shell.heldProcesses());
+	for (const [shell, key] of retainedShells) if (owned(key)) held.push(...shell.heldProcesses());
+	return held;
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {
@@ -902,7 +921,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const settleFork = async (): Promise<{ fork?: ShellForkOutcome }> => {
 		if (!sessionBusy) return {};
 		const carried = busyShell?.adopt(executionShell) ?? false;
-		const jobs = await retainShellWithLiveBackgroundJobs(executionShell);
+		const jobs = await retainShellWithLiveBackgroundJobs(executionShell, sessionKey);
 		return { fork: { carried, jobs } };
 	};
 	const userSignal = options?.signal;
