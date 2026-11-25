@@ -131,9 +131,11 @@ export type TspText = string | readonly TspSpan[];
 
 /**
  * What a pointer gesture on a node does. `zoom` shows an `image` (and the images
- * beside it) large in the terminal's viewer; it is an image's click by default.
+ * beside it) large in the terminal's viewer; it is an image's click by default. `annotate` opens an `image`
+ * (with a `blob`) in the terminal's annotator when `hello` lists `"annotate"`; Done sends the annotated
+ * picture back as a `change` event.
  */
-export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
+export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | "annotate" | (string & {});
 
 /**
  * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
@@ -1367,6 +1369,17 @@ export type TspReply =
 	  }
 	| { r: "blobs"; have: readonly string[] };
 
+/**
+ * An encoded picture a terminal hands back (an annotated `image`): standard base64 `data` of a
+ * `mime` image, `w`×`h` pixels.
+ */
+export interface TspPicture {
+	mime: "image/png" | "image/jpeg";
+	data: string;
+	w: number;
+	h: number;
+}
+
 /** Verb `e`: terminal → program events. */
 export type TspEvent =
 	| { ev: "ack"; sf: string; s: number }
@@ -1401,6 +1414,12 @@ export type TspEvent =
 			item: string;
 			value: boolean | number | string | readonly string[] | null;
 	  }
+	/**
+	 * The user finished annotating `image` node `id` (one whose `actions.click` is `"annotate"`; sent only
+	 * on Done, only when `hello` lists `"annotate"`): `value` is the annotated picture, at its new size (a crop
+	 * makes it smaller).
+	 */
+	| { ev: "change"; sf: string; id: string; value: TspPicture }
 	/** The user edited a `doc` (~300 ms after typing pauses, and when editing ends): `text` is its full new source. */
 	| { ev: "change"; sf: string; id: string; text: string }
 	/**

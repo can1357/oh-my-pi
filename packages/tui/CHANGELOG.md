@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `change` UI event for an image's annotated picture, delivered to the node's `onChange` without an `item`.
+
 ## [19.2.0] - 2026-11-25
 
 ### Added
