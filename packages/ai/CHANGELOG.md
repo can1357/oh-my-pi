@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Auth-gateway hosts can set `fallbackModels` to retry failed JSON requests with other models ([#18406](https://github.com/can1357/oh-my-pi/pull/18406) by [@enieuwy](https://github.com/enieuwy))
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

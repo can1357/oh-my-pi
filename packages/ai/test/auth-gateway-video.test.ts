@@ -42,7 +42,7 @@ function model(id: string, api: Api = "openrouter-video", kind: "video" | undefi
 	} satisfies ModelSpec<Api>);
 }
 
-async function boot(): Promise<Harness> {
+async function boot(failedModelFallback?: Model<Api>): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-video-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.keys.setRuntime("openrouter", "openrouter-secret");
@@ -60,6 +60,7 @@ async function boot(): Promise<Harness> {
 			...(body !== undefined && { body }),
 		});
 		if (url.endsWith("/videos") && method === "POST") {
+			if (failedModelFallback && body.model === video.id) return new Response("unavailable", { status: 503 });
 			return Response.json(
 				{
 					id: "job-upstream-123",
@@ -96,6 +97,7 @@ async function boot(): Promise<Harness> {
 			return undefined;
 		},
 		version: "test",
+		fallbackModels: failedModelFallback && (() => [failedModelFallback]),
 		fetch: fetchImpl,
 	});
 	return { url: handle.url, storage, upstream, handle, dir };
@@ -141,6 +143,14 @@ describe("auth-gateway asynchronous video generation", () => {
 	afterEach(async () => {
 		await close(harness);
 		harness = undefined;
+	});
+
+	it("does not submit a fallback video job that the stateless poll route cannot resolve", async () => {
+		harness = await boot(model("fallback-only"));
+		const { response, body } = await submit(harness);
+		expect(response.status).toBe(503);
+		expect(body).not.toHaveProperty("polling_url");
+		expect(harness.upstream).toHaveLength(1);
 	});
 
 	it("submits with the broker credential and returns a stateless gateway job id", async () => {

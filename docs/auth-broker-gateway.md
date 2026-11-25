@@ -82,7 +82,7 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/credential/:id/block`   | bearer | Upsert a provider/scope rate-limit block                           |
 | `DELETE` | `/v1/credential/:id/block`   | bearer | Delete one block named by body `providerKey` and `blockScope`      |
 | `DELETE` | `/v1/credential/:id/blocks`  | bearer | Delete all rate-limit blocks for a credential                      |
-| `GET`    | `/v1/usage`                  | bearer | Current `UsageReport[]`; optional `provider` query filter           |
+| `GET`    | `/v1/usage`                  | bearer | Current `UsageReport[]`; optional `provider` query filter          |
 | `GET`    | `/v1/usage/history`          | bearer | Persisted usage history; optional `sinceMs` and `provider` filters |
 | `POST`   | `/v1/usage/observed`         | bearer | Record usage observed by a broker client                           |
 | `GET`    | `/v1/usage/clients`          | bearer | Summarize client-observed usage since optional `sinceMs`           |
@@ -151,7 +151,7 @@ The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using
 ### CLI
 
 ```
-omp auth-gateway serve   [--bind=host:port] [--no-auth] [--trust-proxy-headers] [--clients=<file>]
+omp auth-gateway serve   [--bind=host:port] [--no-auth] [--trust-proxy-headers] [--clients=<file>] [--model-fallback]
 omp auth-gateway stdio
 omp auth-gateway token   [--regenerate] [--json]
 omp auth-gateway status  [--json]
@@ -162,6 +162,27 @@ omp auth-gateway check   [--strict] [--json]
 - Logs attribute requests to the socket peer address. Behind a trusted reverse proxy, pass `--trust-proxy-headers` to use `X-Forwarded-For` / `X-Real-IP` for authenticated requests; unauthorized requests are always logged with the socket peer. An authenticated request that also carries the gateway token, or its own client token, in its URL or in a forwarded, logged, or identity header is rejected with `400` before any credential lookup. Each `auth-gateway request` log line carries the broker `credentialId` the request started on, and `client` for a [client token](#client-tokens).
 - `token` manages the token file; `--regenerate` requires a running gateway to restart before accepting the replacement. `status` checks the local token file and an authenticated broker snapshot; it does not probe the gateway listener.
 - `check` constructs its own broker-backed store and probes the credentials the gateway would use, without calling a running gateway. Without `--strict` it uses provider usage probes. `--strict` additionally tries suitable bundled chat models and can consume quota; providers with no suitable candidate (including pi-native forwarding, Bedrock, Vertex, and Cursor transports) cannot be completion-probed.
+
+### Model fallback
+
+`serve --model-fallback` retries a failed request with models from the gateway host's `retry.fallbackChains`. Without the flag, `serve` uses only the requested model. For example, this chain gives a TypeSafe SDK client a second provider if the first one fails:
+
+```yaml
+retry:
+   fallbackChains:
+      typesafe/jev-latest:
+         - openrouter/~typesafe/jev-latest
+```
+
+- `serve` reads the settings once at startup, so restart it to apply a chain change. With the flag it prints how many `retry.fallbackChains` entries it read, or why fallback stays off (`retry.modelFallback: false`, or no chains). The count is of configured entries; it does not check that any chain resolves to a served model.
+- The chain key is looked up as for an omp session: an exact `provider/id` key, else the longest matching `provider/*` key, else the chain of a chat role assigned that model, else `default`. Model-kind roles such as `judge` never match by model, so key a judge chain by its model. Each fallback's own chain continues the walk, and an entry's `@upstream` pin is kept. Session-only policy does not apply: `retry.fallbackOn`, `retry.rateLimitWalksChain` and context-fit checks play no part, keys are matched without the request's effort, and an entry's thinking suffix does not change the resent request.
+- Only JSON POST requests with a top-level `model` can use fallback: the three chat routes, `/v1/systemone`, `/alpha/decisions`, images, speech, transcriptions, embeddings, and rerank. Multipart requests and `/v1/pi/stream` do not use fallback. Clients of `/v1/pi/stream` walk their own chains. Video jobs stay on the requested model so the gateway can resolve later polls and downloads.
+- Fallback requires a positive `Content-Length` of at most 32 MiB. The gateway also counts the bytes it reads. If a body that qualifies for fallback exceeds 32 MiB, the gateway returns `413` without retrying. Each route still enforces its own limit.
+- The gateway retries HTTP `402` (for example, exhausted provider credits), `429`, and `5xx`, including connection failures that the gateway reports as `502`. This rule applies to every attempt. The first success answers. Any other error or a client disconnect stops further attempts. If no fallback succeeds, the client gets the requested model's error.
+- The gateway answers a `stream: true` chat request with `200` before the upstream replies. Only failures before that point can trigger fallback. The gateway forwards errors within the stream to the client.
+- The gateway remembers no fallback between requests: each request tries the model it names first. In a multi-turn chat, a turn that a fallback answered returns to the requested model in the next request's history, and that model's provider may reject content another model produced, such as thinking signatures. Fallback suits single-shot requests such as judgments, embeddings and images best.
+- A fallback must be a served model of the requested model's kind. A request with a [client token](#client-tokens) also skips fallbacks outside that client's `models` and `accounts`.
+- Once on, fallback applies to every caller. The gateway logs `auth-gateway model failed; trying fallbacks` with the failed model, its status and the fallbacks, then `auth-gateway fallback model failed` for each fallback that fails, with `client` for a client token.
 
 ### Client tokens
 
@@ -335,13 +356,13 @@ Broker-backed credential storage is **off** unless `OMP_AUTH_BROKER_URL` (or `au
 
 ### Environment variables
 
-| Variable                            | Purpose                                                                                                                                                                                               | Required when                                                                                                             |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `OMP_AUTH_BROKER_URL`               | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`). Selecting this puts the client in broker mode — local SQLite holds only [logins the broker does not serve](#logins-the-broker-does-not-serve).                                                    | Any time the omp client should resolve credentials through a broker (and required by `omp auth-gateway serve`).           |
-| `OMP_AUTH_BROKER_TOKEN`             | Bearer token used for every broker endpoint except `/v1/healthz`.                                                                                                                                     | When `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`. |
-| `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local snapshot cache. Default `3600000` (1 h); `0` disables cache reads and writes.                                                                                | Optional in broker mode.                                                                                                  |
-| `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path override for the encrypted local snapshot cache. Default `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent).                                                                      | Optional in broker mode.                                                                                                  |
-| `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | JSON file of per-provider visibility rules for broker credentials (OAuth `identityKey` lists, API-key toggle, `"*"` default for unlisted providers). Parsed once; invalid files abort initialization. | Optional in broker mode.                                                                                                  |
+| Variable                            | Purpose                                                                                                                                                                                                                 | Required when                                                                                                             |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `OMP_AUTH_BROKER_URL`               | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`). Selecting this puts the client in broker mode — local SQLite holds only [logins the broker does not serve](#logins-the-broker-does-not-serve). | Any time the omp client should resolve credentials through a broker (and required by `omp auth-gateway serve`).           |
+| `OMP_AUTH_BROKER_TOKEN`             | Bearer token used for every broker endpoint except `/v1/healthz`.                                                                                                                                                       | When `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`. |
+| `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local snapshot cache. Default `3600000` (1 h); `0` disables cache reads and writes.                                                                                                  | Optional in broker mode.                                                                                                  |
+| `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path override for the encrypted local snapshot cache. Default `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent).                                                                                        | Optional in broker mode.                                                                                                  |
+| `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | JSON file of per-provider visibility rules for broker credentials (OAuth `identityKey` lists, API-key toggle, `"*"` default for unlisted providers). Parsed once; invalid files abort initialization.                   | Optional in broker mode.                                                                                                  |
 
 Resolution order in `resolveAuthBrokerConfig()`:
 

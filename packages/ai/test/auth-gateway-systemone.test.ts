@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { NativeJudge, type ImageContent, type JudgmentRequest } from "@oh-my-pi/pi-ai";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { type AuthGatewayRouteOptions, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { buildGatewayApiKeyResolver } from "@oh-my-pi/pi-ai/auth-gateway/dispatch";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -64,7 +64,10 @@ function openaiDecisionModel(id: string, input: ("text" | "image")[]) {
 	} as ModelSpec<"openai-decisions">);
 }
 
-async function boot(respond: (init: RequestInit | undefined) => Response): Promise<Harness> {
+async function boot(
+	respond: (init: RequestInit | undefined) => Response,
+	fallbackModels?: AuthGatewayRouteOptions["fallbackModels"],
+): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-systemone-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.keys.setRuntime("typesafe", "ts-secret");
@@ -109,6 +112,7 @@ async function boot(respond: (init: RequestInit | undefined) => Response): Promi
 		},
 		version: "test",
 		fetch: fetchStub,
+		fallbackModels,
 	});
 	return {
 		url: handle.url,
@@ -462,7 +466,8 @@ describe("auth-gateway POST /v1/systemone", () => {
 	});
 
 	it("rejects image input for a model without image capability before credential lookup", async () => {
-		harness = await boot(() => Response.json(OPENAI_ANSWER));
+		const fallbacks = vi.fn(() => [openaiDecisionModel("openai-vision", ["text", "image"])]);
+		harness = await boot(() => Response.json(OPENAI_ANSWER), fallbacks);
 		const credentialLookup = vi.spyOn(harness.storage.keys, "getWithCredential");
 		const response = await post(harness.url, "/v1/systemone", {
 			model: "openai-text-only",
@@ -476,6 +481,7 @@ describe("auth-gateway POST /v1/systemone", () => {
 			error: { type: "invalid_request_error", message: expect.stringContaining("does not support image inputs") },
 		});
 		expect(credentialLookup).not.toHaveBeenCalled();
+		expect(fallbacks).not.toHaveBeenCalled();
 		expect(harness.upstream).toHaveLength(0);
 	});
 

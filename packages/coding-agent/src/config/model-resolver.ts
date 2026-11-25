@@ -349,9 +349,13 @@ function resolveBedrockInferenceProfileReference(
 	return resolveBedrockInferenceProfileModelId(modelId, availableModels);
 }
 
-/** OpenRouter and Vercel AI Gateway are the aggregators that honor per-request upstream routing. */
+/** Decisions supports an upstream pin on any host. Other APIs require an aggregator host. */
 function supportsUpstreamRouting(model: Model<Api>): boolean {
-	return modelMatchesHost(model, "openrouter") || modelMatchesHost(model, "vercelAIGateway");
+	return (
+		model.api === "openrouter-decisions" ||
+		modelMatchesHost(model, "openrouter") ||
+		modelMatchesHost(model, "vercelAIGateway")
+	);
 }
 
 /** Pin a resolved aggregator model to a single upstream provider via its compat routing block. */
@@ -361,9 +365,10 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	const routing = { only: [upstream] };
 	return buildModel({
 		...model,
-		compat: modelMatchesHost(model, "vercelAIGateway")
-			? { ...aggregatorModel.compatConfig, vercelGatewayRouting: routing }
-			: { ...aggregatorModel.compatConfig, openRouterRouting: routing },
+		compat:
+			model.api !== "openrouter-decisions" && modelMatchesHost(model, "vercelAIGateway")
+				? { ...aggregatorModel.compatConfig, vercelGatewayRouting: routing }
+				: { ...aggregatorModel.compatConfig, openRouterRouting: routing },
 	} as ModelSpec<Api>);
 }
 

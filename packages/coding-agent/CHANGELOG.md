@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp auth-gateway serve --model-fallback` retries failed requests with models from the gateway host's `retry.fallbackChains` ([#18406](https://github.com/can1357/oh-my-pi/pull/18406) by [@enieuwy](https://github.com/enieuwy))
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes
