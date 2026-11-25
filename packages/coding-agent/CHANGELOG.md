@@ -122,7 +122,7 @@
 - Hindsight forks now retain only turns added by the fork, rather than the inherited parent transcript.
 ### Fixed
 
-- Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 
 ## [19.1.1] - 2026-11-23
 
