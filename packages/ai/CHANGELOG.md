@@ -11,19 +11,14 @@
 - Added ProviderSlotBroker support through configureProviderSlotBroker(broker), allowing hosts such as coding-agent to coordinate maxInFlightRequests limits across processes.
 - Added AssistantMessage.errorFromAgentLoop to distinguish errors caused by the agent loop from errors returned by the provider.
 - OpenAI- and Anthropic-compatible requests to custom hosts now include an x-session-id header when the host does not provide its own session header, preserving conversation affinity through gateways and proxies. Official OpenAI, Anthropic, and Codex APIs are unchanged.
-- Added an "Anthropic (Claude Pro/Max, 1-year token)" login that issues a token valid for a year, so the account no longer needs a re-login every 30 days; the token never refreshes and needs a new login after a year. Usage tracking keeps working; image uploads to Anthropic's Files API stay with the regular login. Logging in with either Anthropic login replaces the other for that account.
+- Added an "Anthropic (Claude Pro/Max, 1-year token)" login that lasts a year instead of 30 days and never refreshes; image uploads to Anthropic's Files API stay with the regular login.
 - Added regional and custom endpoint selection to /login otari, storing non-US endpoints with the account so EU and self-hosted deployments do not need OTARI_BASE_URL configured separately.
 
 ### Changed
 
-- Changed token request handling to preserve numeric parameters as numbers
-- Changed usage reporting for Anthropic long-lived logins to rely on rate-limit headers and skip usage endpoint probes
 - Requests waiting for maxInFlightRequests capacity now begin immediately when capacity is released, rather than relying on periodic polling.
 - omp auth-gateway now preserves Codex session and thread headers and uses Claude Code and OpenCode session identifiers for prompt-cache affinity, improving cache reuse through the gateway.
-- Anthropic (Claude Pro/Max) logins now refresh the way Claude Code 2.1.332 does: at platform.claude.com with Claude Code's scopes, within 5 minutes of the token's real expiry. A login is disabled only when Anthropic rejects its refresh token with `invalid_grant`, not on other refusals or account holds.
-- A failed background token refresh no longer fails requests while the current access token is still valid; the token stays in use and the refresh is retried shortly after.
-- A 403 "OAuth token has been revoked" from Anthropic now refreshes the same login first, as a 401 does, instead of switching accounts.
-- Anthropic logins now store the refresh-token expiry Anthropic reports (`refreshExpires`); like Claude Code, a later refresh can only move it earlier.
+- Anthropic (Claude Pro/Max) logins now refresh the way Claude Code 2.1.332 does and are disabled only when Anthropic rejects the refresh token with `invalid_grant`; a failed background refresh no longer fails requests while the access token is still valid, and a 403 "OAuth token has been revoked" refreshes the same login before switching accounts.
 
 ### Fixed
 

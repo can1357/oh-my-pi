@@ -22,8 +22,7 @@
 
 ### Changed
 
-- Changed re-login deadline messages to consider long-lived token expiry for Anthropic accounts
-- `omp usage` now times Anthropic re-login warnings by the refresh-token expiry Anthropic reports at login, falling back to the ~30-day estimate for logins made before this release
+- `omp usage` times Anthropic re-login warnings by the expiry Anthropic reports at login, including 1-year logins, and falls back to the ~30-day estimate for older logins.
 - Rebuilt the interactive UI on `@oh-my-pi/pi-tui` while preserving the existing appearance and layout, and restored configured key mappings throughout dialogs, pickers, forms, and settings.
 - Eval-defined tools are now disabled by default; enable them with `eval.tools.enabled`. Cross-instance agent messaging is now enabled by default and can be disabled with `task.crossInstance`.
 - Vim mode now starts each new prompt according to `tui.vimStartMode` (Insert by default), and plain `y` no longer copies to the system clipboard unless `tui.vimYankToClipboard` is enabled; use `"+y` or `"*y` for explicit clipboard yanks.
@@ -36,11 +35,10 @@
 - `/wt` now identifies ovnfs checkouts explicitly, and `--offline` keeps routing, image descriptions, and related auxiliary operations on the active provider.
 - Selective commits preserve the drafted contents and Git filtering for large, binary, and non-text files, while avoiding overwrites when the file changed concurrently.
 - The daemon and package now use less idle memory by loading catalogs, browser relay support, and prompt perturbation data only when needed.
-- The prompt bubble’s Edit & resend button stops the current response, discards queued input, and rewinds the transcript to before the selected prompt. The prompt stays in the composer until you send it.
+- The prompt bubble’s Edit & resend button now stops the current response, discards queued input, and rewinds the transcript to before the selected prompt.
 
 ### Fixed
 
-- Fixed a race that could leave skill and MCP routing hints uncached when two omp processes opened a new hint database at the same time.
 - Fixed image handling across model switches: vision models receive images, text-only models receive reusable descriptions, and compaction, branching, resumes, and advisor reviews preserve the appropriate representation.
 - Fixed numerous Tern and terminal UI regressions, including missing attachment thumbnails and icons, media viewers, prompt-cache details, ask/approval controls, autocomplete placement, key hints, symbol presets, tight layout, subagent navigation, draft selection, clipboard input, and copy/expand behavior.
 - Fixed submission and interaction failures so failed submissions restore the draft instead of exiting, queued input and attachments are not lost or misapplied, pending approvals can be edited safely, and keyboard and pointer actions work across forms and views.
