@@ -8854,8 +8854,10 @@ function mapArkaneCloudThinkingConfig(value: unknown): ThinkingConfig | undefine
 		return undefined;
 	}
 	const thinking: ThinkingConfig = { mode: "effort", efforts };
-	if (value.can_disable === false) {
-		thinking.requiresEffort = true;
+	// Published both ways so a model-identity default (e.g. a `-thinking` id
+	// read as reasoning-locked) cannot override what the row says.
+	if (typeof value.can_disable === "boolean") {
+		thinking.requiresEffort = !value.can_disable;
 	}
 	return thinking;
 }
@@ -8871,35 +8873,23 @@ function mapArkaneCloudModel(
 	const capabilities = isRecord(entry.capabilities) ? entry.capabilities : {};
 	const reasoning = isRecord(entry.reasoning) ? entry.reasoning : undefined;
 	const thinking = mapArkaneCloudThinkingConfig(entry.reasoning);
+	// The host-wide wire shape (`reasoning: { enabled: false }` to switch off,
+	// top-level `reasoning_effort` for intensity) lives in arkanecloud.kdl; only
+	// what each row publishes is mapped here.
 	const compat: OpenAICompat | undefined = reasoning
 		? {
 				// Reasons but publishes no effort ladder: never send an
 				// identity-derived `reasoning_effort` it never advertised.
 				...(thinking === undefined && { supportsReasoningEffort: false }),
-				// Thinking-off rides the documented `reasoning: { enabled: false }`
-				// switch. Without it the `openai` dialect falls back to
-				// `lowest-effort`, which keeps reasoning ON at the bottom of the
-				// ladder — so asking for no thinking still pays for thinking. The
-				// enum value is named after OpenRouter but encodes exactly the
-				// generic `reasoning: { enabled: false }` body ArkaneCloud documents.
-				// `=== true` is deliberate: absent or malformed metadata must not
-				// produce a disable switch the route never advertised.
-				...(reasoning.can_disable === true && {
-					reasoningDisableMode: "openrouter-enabled-false",
+				// Only an explicit `can_disable: true` may send the disable switch;
+				// otherwise thinking-off clamps to the lowest published effort
+				// (nothing is sent when there is no ladder).
+				...(reasoning.can_disable !== true && { reasoningDisableMode: "lowest-effort" }),
+				// A default-off model needs an explicit switch-on, or picking a
+				// thinking level would leave it silently not reasoning.
+				...(reasoning.enabled_by_default === false && {
+					whenThinking: { extraBody: { reasoning: { enabled: true } } },
 				}),
-				// The thinking-engaged variant has to exist whenever the base mode is
-				// set above: enabled requests read `whenThinking`, and inheriting
-				// `openrouter-enabled-false` there would move intensity into
-				// `reasoning: { effort }` instead of the top-level `reasoning_effort`
-				// ArkaneCloud documents.
-				whenThinking: {
-					reasoningDisableMode: "lowest-effort",
-					// A default-off model needs an explicit switch-on, or picking a
-					// thinking level would leave it silently not reasoning.
-					...(reasoning.enabled_by_default === false && {
-						extraBody: { reasoning: { enabled: true } },
-					}),
-				},
 			}
 		: undefined;
 	return {

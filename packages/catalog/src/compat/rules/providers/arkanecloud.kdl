@@ -9,4 +9,8 @@ provider "arkanecloud" {
 	// Qwen takes the same `reasoning_effort` field as every other family here,
 	// not its native `enable_thinking`.
 	thinking-format "openai"
+	// Thinking-off is `reasoning: { enabled: false }`; intensity stays on the
+	// top-level `reasoning_effort`. Rows that cannot disable clamp to their
+	// lowest effort instead (`lowest-effort`, set per row by discovery).
+	reasoning-disable-mode "cline-enabled-false"
 }

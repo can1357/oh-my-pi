@@ -132,12 +132,11 @@ describe("ArkaneCloud provider discovery", () => {
 		});
 		// `tool_calling: true` is the upstream default, so nothing is stamped.
 		expect(flash?.supportsTools).toBeUndefined();
-		// `can_disable: true` maps to the `reasoning: { enabled: false }` switch
-		// ArkaneCloud documents; the thinking-engaged variant keeps intensity on the
-		// top-level `reasoning_effort` field instead of inheriting that shape.
-		expect(flash?.compat?.reasoningDisableMode).toBe("openrouter-enabled-false");
-		expect(flash?.compat?.whenThinking?.reasoningDisableMode).toBe("lowest-effort");
-		expect(flash?.thinking).toEqual({ mode: "effort", efforts: [Effort.High, Effort.XHigh] });
+		expect(flash?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.High, Effort.XHigh],
+			requiresEffort: false,
+		});
 	});
 
 	test("keeps a reasoning model without an effort dial reasoning-capable and ladder-free", async () => {
@@ -166,20 +165,6 @@ describe("ArkaneCloud provider discovery", () => {
 		expect(llama?.supportsTools).toBe(false);
 		expect(llama?.contextWindow).toBe(128_000);
 		expect(llama?.maxTokens).toBe(64_000);
-	});
-
-	test("leaves mandatory-reasoning models on the effort-clamping default", async () => {
-		// `can_disable: false` withholds the disable switch — there is nothing to
-		// switch off — and surfaces as `requiresEffort` instead, which clamps a
-		// thinking-off request to the lowest effort the model does accept.
-		const payload = arkaneCloudModelsPayload() as { data: Array<Record<string, unknown>> };
-		payload.data[0].reasoning = { can_disable: false, enabled_by_default: true, supported_efforts: ["high"] };
-		const { fetch } = arkaneCloudModelsFetch(payload);
-		const models = await arkaneCloudModelManagerOptions({ apiKey: "ak_test", fetch }).fetchDynamicModels?.();
-
-		const flash = models?.find(model => model.id === "deepseek-ai/DeepSeek-V4-Flash");
-		expect(flash?.compat?.reasoningDisableMode).toBeUndefined();
-		expect(flash?.thinking).toEqual({ mode: "effort", efforts: [Effort.High], requiresEffort: true });
 	});
 
 	test("drops image-generation rows, which are not served by chat completions", async () => {

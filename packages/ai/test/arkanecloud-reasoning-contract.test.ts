@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -175,8 +176,9 @@ describe("ArkaneCloud inference request routing", () => {
 
 	test("clamps instead of switching off when reasoning is mandatory", async () => {
 		// `can_disable: false` must never produce the switch — there is nothing to
-		// switch off. An id outside every known family keeps the published ladder,
-		// so the clamp target is ArkaneCloud's own lowest advertised effort.
+		// switch off. The clamp is the stream layer's `requiresEffort` contract, so
+		// this goes through `streamSimple`. An id outside every known family keeps
+		// the published ladder, so the clamp target is the lowest advertised effort.
 		const model = await discoverModel(
 			{ can_disable: false, enabled_by_default: true, supported_efforts: ["high"] },
 			{ id: "arkane/mandatory-reasoner", name: "Mandatory Reasoner" },
@@ -184,10 +186,27 @@ describe("ArkaneCloud inference request routing", () => {
 		const { body, fetch } = captureBody();
 		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
 
-		await streamOpenAICompletions(model, context, { apiKey: "ak_test", disableReasoning: true, fetch }).result();
+		await streamSimple(model, context, { apiKey: "ak_test", disableReasoning: true, fetch }).result();
 
 		expect(body().reasoning).toBeUndefined();
 		expect(body().reasoning_effort).toBe("high");
+	});
+
+	test("switches off a disableable model whose id reads as reasoning-locked", async () => {
+		// A `-thinking` id is treated as mandatory-reasoning by identity; the
+		// published `can_disable: true` must win, or thinking-off keeps reasoning
+		// at the lowest effort.
+		const model = await discoverModel(
+			{ can_disable: true, enabled_by_default: true, supported_efforts: ["low", "high"] },
+			{ id: "Qwen/Qwen3-235B-A22B-Thinking-2507", name: "Qwen3 235B A22B Thinking 2507" },
+		);
+		const { body, fetch } = captureBody();
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
+
+		await streamSimple(model, context, { apiKey: "ak_test", disableReasoning: true, fetch }).result();
+
+		expect(body().reasoning).toEqual({ enabled: false });
+		expect(body().reasoning_effort).toBeUndefined();
 	});
 
 	test("omits identity-derived efforts for a model without an effort dial", async () => {
@@ -245,8 +264,7 @@ describe("ArkaneCloud inference request routing", () => {
 
 	test("clamps a mandatory-reasoning Qwen model instead of sending native enable_thinking", async () => {
 		// Without `thinking-format "openai"` in arkanecloud.kdl, a Qwen id falls
-		// back to Qwen's own dialect, which turns thinking off with
-		// `enable_thinking: false` instead of clamping.
+		// back to Qwen's own dialect and sends `enable_thinking`.
 		const model = await discoverModel(
 			{ can_disable: false, enabled_by_default: true, supported_efforts: ["high"] },
 			{ id: "Qwen/Qwen3.6-35B-A3B", name: "Qwen3.6 35B A3B" },
@@ -254,7 +272,7 @@ describe("ArkaneCloud inference request routing", () => {
 		const { body, fetch } = captureBody();
 		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
 
-		await streamOpenAICompletions(model, context, { apiKey: "ak_test", disableReasoning: true, fetch }).result();
+		await streamSimple(model, context, { apiKey: "ak_test", disableReasoning: true, fetch }).result();
 
 		expect(body().enable_thinking).toBeUndefined();
 		expect(body().reasoning_effort).toBe("high");
