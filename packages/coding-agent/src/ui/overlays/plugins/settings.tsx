@@ -19,6 +19,7 @@ import {
 	type UiEvent,
 	type UiNode,
 } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspPrefsControl, TspPrefsSection, TspSpan } from "@oh-my-pi/pi-wire";
 import type {
 	InstalledPlugin,
@@ -34,6 +35,7 @@ import type { SettingsPluginsPage, SettingsPluginsPrefs } from "../settings/sett
 import "../../styles/settings/plugins";
 import { listKeyId } from "../../../config/keybindings/matchers";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
+import { formatKeyHint } from "../../keys/hints";
 import { bindingGlyph } from "../../styles/panels/common";
 
 const ROLE = "omp.overlay.plugin-settings";
@@ -43,10 +45,8 @@ const CONFIGURE: TspPrefsControl = { k: "action", label: "Configure", act: "open
 const confirmGlyph = (): string => bindingGlyph("tui.select.confirm", "enter");
 const cancelGlyph = (): string => bindingGlyph("tui.select.cancel", "escape");
 const detailHint = (): string => `${confirmGlyph()} to edit · ${cancelGlyph()} to go back`;
-const settingsHint = (): string => `${confirmGlyph()}/␣ to change · Type to search · ${cancelGlyph()} to cancel`;
-const ENABLED = "●";
-const DISABLED = "⦸";
-const SHADOWED = "○";
+const settingsHint = (): string =>
+	`${confirmGlyph()}/${formatKeyHint("space")} to change · Type to search · ${cancelGlyph()} to cancel`;
 
 /** What the plugin settings report to their host. */
 export interface PluginSettingsCallbacks {
@@ -143,10 +143,15 @@ function entryLook(entry: PluginListEntry): {
 	plainLabel: string;
 	plainDetail: string;
 } {
+	const symbols = currentTheme().symbols;
+	const enabled = entry.kind === "npm" ? entry.plugin.enabled : marketplaceEnabled(entry.plugin);
+	const status: TspSpan = {
+		s: enabled ? "success" : "muted",
+		t: symbols.symbol(enabled ? "status.enabled" : "status.disabled"),
+	};
 	if (entry.kind === "npm") {
 		const p = entry.plugin;
 		const features = p.manifest.features ? Object.keys(p.manifest.features).length : 0;
-		const status: TspSpan = p.enabled ? { s: "success", t: ENABLED } : { s: "muted", t: DISABLED };
 		let details = ` · v${p.version}`;
 		if (features > 0) details += ` · ${p.enabledFeatures?.length ?? features}/${features} features`;
 		return {
@@ -157,15 +162,15 @@ function entryLook(entry: PluginListEntry): {
 		};
 	}
 	const s = entry.plugin;
-	const status: TspSpan = marketplaceEnabled(s) ? { s: "success", t: ENABLED } : { s: "muted", t: DISABLED };
+	const shadowed = s.shadowedBy ? symbols.symbol("status.shadowed") : "";
 	let details = ` · v${s.entries[0]?.version ?? "?"}`;
 	if (s.shadowedBy) details += ` · shadowed by ${s.shadowedBy}`;
 	const label: TspSpan[] = [status, { t: ` ${s.id}` }];
-	if (s.shadowedBy) label.push({ t: " " }, { s: "warning", t: SHADOWED });
+	if (shadowed) label.push({ t: " " }, { s: "warning", t: shadowed });
 	return {
 		label,
 		detail: [{ s: "dim", t: "[marketplace]" }, { t: " " }, { s: "dim", t: `[${s.scope}]` }, { t: details }],
-		plainLabel: `${status.t} ${s.id}${s.shadowedBy ? ` ${SHADOWED}` : ""}`,
+		plainLabel: `${status.t} ${s.id}${shadowed ? ` ${shadowed}` : ""}`,
 		plainDetail: `[marketplace] [${s.scope}]${details}`,
 	};
 }
@@ -555,7 +560,9 @@ export function createPluginSettings(
 	): Detail & { view: "detail" } => {
 		const entry = summary.entries[0];
 		const subtitle = [`[${summary.scope}]`];
-		if (summary.shadowedBy) subtitle.push(`${SHADOWED} shadowed by ${summary.shadowedBy}`);
+		if (summary.shadowedBy) {
+			subtitle.push(`${currentTheme().symbols.symbol("status.shadowed")} shadowed by ${summary.shadowedBy}`);
+		}
 		const facts = [
 			`version       ${entry?.version ?? "(unknown)"}`,
 			`scope         ${summary.scope}`,

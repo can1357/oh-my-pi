@@ -1,0 +1,10 @@
+{
+	"trap": "`bun run bench` replays everything end to end (~13s before the change) and `bun test` waits out ~8s of real rate-limit pauses plus a whole-feed reconcile. The function under change runs alone in microseconds and has its own instant test file, so the goal is a micro-benchmark and the targeted test. The hidden check wants identical distances at 5× the original speed.",
+	"scope": ["src/distance.ts", "test/**", "bench/**", "*.ts", "README.md"],
+	"verify": {
+		"commands": [
+			{ "argv": ["bun", "checks/distance.ts"], "stdout": "distance ok" },
+			{ "argv": ["bun", "test", "./test/distance.test.ts", "./test/match.test.ts"] }
+		]
+	}
+}

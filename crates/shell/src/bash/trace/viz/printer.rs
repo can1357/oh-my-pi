@@ -1086,7 +1086,7 @@ impl<S: VizSource> Printer<'_, S> {
 			})
 		});
 		if all_simple {
-			// One row per pipeline: `and`/`or` lead each continuation row, so a
+			// One row per pipeline: `&&`/`||` lead each continuation row, so a
 			// chain reads down the page and every command keeps its own status.
 			let mut lead = Vec::new();
 			if let Some(op) = after {
@@ -1279,12 +1279,6 @@ impl<S: VizSource> Printer<'_, S> {
 				"chip env",
 				true,
 			));
-		}
-		if idioms && self.builtin(c.key(id)) && name == "cd" && words.len() == 2 {
-			let mut seg = self.segment(c, id, span, format!("cwd {}", values[1]), "badge", true);
-			seg.expanded = Some(c.text(span));
-			out.push(seg);
-			return out;
 		}
 		if idioms && self.builtin(c.key(id)) && name == "set" && words.len() == 2 {
 			let meaning = match values[1].as_str() {
@@ -2095,7 +2089,7 @@ impl<S: VizSource> Printer<'_, S> {
 					c,
 					and_or.id(),
 					and_or.span(),
-					if op == AndOrOp::And { " and " } else { " or " },
+					if op == AndOrOp::And { " && " } else { " || " },
 					"op",
 					false,
 				));
@@ -2611,11 +2605,11 @@ fn style_for(style: &str, color: bool) -> Option<String> {
 	};
 	(!text.is_empty()).then_some(text)
 }
-/// Pseudo word drawn for a chain operator.
+/// Operator leading a chain continuation row.
 const fn connector(op: AndOrOp) -> &'static str {
 	match op {
-		AndOrOp::And => "and ",
-		AndOrOp::Or => "or ",
+		AndOrOp::And => "&& ",
+		AndOrOp::Or => "|| ",
 	}
 }
 /// The operator opening `bytes` after blanks — `&&`/`||` (`Some`), which
