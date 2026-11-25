@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- The Bash interceptor no longer redirects read-only Perl commands mentioning `-i` to `edit`, and now recognizes clustered in-place switches such as `perl -lpi` ([#20558](https://github.com/can1357/oh-my-pi/issues/20558)).
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ## [19.2.1] - 2026-11-25
