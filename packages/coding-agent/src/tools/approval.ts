@@ -6,7 +6,7 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
-import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt, relativePathWithinNormalizedRoot, sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "../utils/text-width";
 import { shortenPath } from "../utils/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
@@ -493,10 +493,7 @@ function resolvePolicy(
 
 /** Whether `candidate` is `root` or lies below it; both are cache keys, so equally normalized. */
 function isWithinFolder(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	if (relative === "") return true;
-	// `..name` is a child, not an escape: only a `..` segment leaves the root.
-	return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+	return relativePathWithinNormalizedRoot(root, candidate) !== null;
 }
 
 /**

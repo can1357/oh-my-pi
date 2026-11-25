@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, pathIsWithinLexical } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
@@ -132,11 +132,6 @@ async function readMarketplaceRootManifest(root: ClaudePluginRoot): Promise<Clau
 	return null;
 }
 
-function isWithinPluginRoot(rootPath: string, targetPath: string): boolean {
-	const relative = path.relative(rootPath, targetPath);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
 /**
  * Resolve manifest-declared component paths within a plugin root.
  *
@@ -194,7 +189,7 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 	}
 	for (const { entryPath, key } of configured) {
 		const resolved = path.resolve(root.path, entryPath);
-		if (!isWithinPluginRoot(root.path, resolved)) {
+		if (!pathIsWithinLexical(root.path, resolved)) {
 			warnings.push(
 				`[claude-plugins] Ignoring ${String(key)} path outside plugin root for ${root.id}: ${entryPath}`,
 			);
@@ -519,7 +514,7 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 			const configured = pointer.trim();
 			if (configured.length === 0) continue;
 			const resolved = path.resolve(root.path, configured);
-			if (!isWithinPluginRoot(root.path, resolved)) {
+			if (!pathIsWithinLexical(root.path, resolved)) {
 				return {
 					path: null,
 					inlineServers: null,

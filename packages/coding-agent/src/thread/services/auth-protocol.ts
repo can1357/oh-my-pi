@@ -41,6 +41,7 @@ import type {
 	DisabledCredentialSummary,
 	InvalidateCredentialMatchingOptions,
 	ListResetCreditsOptions,
+	MarkServiceTierUnavailableOptions,
 	MarkUsageLimitOptions,
 	Model,
 	ModelUsageHealth,
@@ -61,6 +62,7 @@ import type {
 	ResetCreditRedeemOutcome,
 	ResolvedApiKey,
 	RotateCredentialOptions,
+	ServiceTier,
 	StoredAuthCredential,
 	StoredCredentialBlock,
 	UsageHistoryEntry,
@@ -268,6 +270,11 @@ export type AuthStorageProtocol = {
 		[provider: string, sessionId: string | undefined, options?: RotateCredentialOptions],
 		CredentialRotation
 	>;
+	"limits.markServiceTierUnavailable": RpcMethod<
+		[provider: string, options: MarkServiceTierUnavailableOptions],
+		boolean
+	>;
+	"limits.rearmServiceTier": RpcMethod<[provider: string, serviceTier: ServiceTier, modelId: string], void>;
 	"limits.invalidateMatching": RpcMethod<
 		[provider: string, apiKey: string, options?: InvalidateCredentialMatchingOptions],
 		boolean

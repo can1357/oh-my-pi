@@ -1,22 +1,111 @@
 //! GitLab CLI (glab) output filters.
 
-use std::{fmt::Write as _, sync::LazyLock};
-
-use regex::Regex;
+use std::{borrow::Cow, fmt::Write as _};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
-/// Match GitLab CI section markers: `section_start/end:timestamp:name` followed
-/// by bracket code.
-static SECTION_MARKER_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"section_(?:start|end):\d+:[a-z0-9_]+\[[\d;]*[A-Za-z]").unwrap());
+/// Rewrite each identified span and preserve the intervening text.
+fn rewrite_spans<'a>(
+	input: &'a str,
+	mut next: impl FnMut(&str) -> Option<(usize, usize)>,
+	replacement: &str,
+) -> Cow<'a, str> {
+	let Some((start, end)) = next(input) else {
+		return input.into();
+	};
+	let mut output = String::with_capacity(input.len());
+	output.push_str(&input[..start]);
+	output.push_str(replacement);
+	let mut remaining = &input[end..];
+	while let Some((start, end)) = next(remaining) {
+		output.push_str(&remaining[..start]);
+		output.push_str(replacement);
+		remaining = &remaining[end..];
+	}
+	output.push_str(remaining);
+	output.into()
+}
 
-/// Match bare bracket ANSI-like codes without ESC prefix: `[0K`, `[0;m`,
-/// `[36;1m`, etc.
-static BARE_ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[\d;]+[A-Za-z]").unwrap());
+/// Lengths of a bracket code's parameter run and its complete body.
+fn bracket_code_lengths(input: &str) -> Option<(usize, usize)> {
+	let body = input
+		.bytes()
+		.take_while(|&b| b.is_ascii_digit() || b == b';')
+		.count();
+	input
+		.as_bytes()
+		.get(body)
+		.filter(|b| b.is_ascii_alphabetic())?;
+	Some((body, body + 1))
+}
 
-/// Multiple consecutive blank lines (3+ newlines) collapsed to double newline.
-static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+/// Length of the section marker after `section_`.
+fn section_end(input: &str) -> Option<usize> {
+	let fields = input
+		.strip_prefix("start:")
+		.or_else(|| input.strip_prefix("end:"))?;
+	let timestamp = fields.bytes().take_while(u8::is_ascii_digit).count();
+	if timestamp == 0 {
+		return None;
+	}
+	let name = fields[timestamp..].strip_prefix(':')?;
+	let len = name
+		.bytes()
+		.take_while(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+		.count();
+	if len == 0 {
+		return None;
+	}
+	let bracket = name[len..].strip_prefix('[')?;
+	let (_, end) = bracket_code_lengths(bracket)?;
+	Some(input.len() - bracket.len() + end)
+}
+
+/// Remove GitLab CI section markers, including their bracket codes.
+fn strip_section_markers(input: &str) -> Cow<'_, str> {
+	rewrite_spans(
+		input,
+		|text| {
+			text.match_indices("section_").find_map(|(start, marker)| {
+				let after = start + marker.len();
+				Some((start, after + section_end(&text[after..])?))
+			})
+		},
+		"",
+	)
+}
+
+/// Remove bare ANSI codes such as `[36;1m`.
+fn strip_bare_ansi(input: &str) -> Cow<'_, str> {
+	rewrite_spans(
+		input,
+		|text| {
+			text.match_indices('[').find_map(|(start, _)| {
+				let (body, end) = bracket_code_lengths(&text[start + 1..])?;
+				(body > 0).then_some((start, start + 1 + end))
+			})
+		},
+		"",
+	)
+}
+
+/// Keep at most two consecutive newlines.
+fn collapse_blank_lines(input: &str) -> Cow<'_, str> {
+	rewrite_spans(
+		input,
+		|text| {
+			let start = xutf::find::<xutf::Utf8>(text.as_bytes(), b"\n\n\n")?;
+			let end = start
+				+ 3
+				+ text.as_bytes()[start + 3..]
+					.iter()
+					.take_while(|&&b| b == b'\n')
+					.count();
+			Some((start, end))
+		},
+		"\n\n",
+	)
+}
 
 #[must_use]
 pub fn supports(subcommand: Option<&str>) -> bool {
@@ -92,10 +181,9 @@ fn preserves_raw_mode(ctx: &MinimizerCtx<'_>) -> bool {
 /// Filter `glab ci trace` output: strip section markers, bare ANSI codes,
 /// and runner boilerplate. Keep warnings, errors, and build output.
 fn filter_ci_trace(input: &str) -> String {
-	// Strip section markers first (they contain bracket codes), then bare ANSI
-	// codes
-	let cleaned = SECTION_MARKER_RE.replace_all(input, "");
-	let cleaned = BARE_ANSI_RE.replace_all(&cleaned, "");
+	// Strip section markers first: they include bracket codes.
+	let cleaned = strip_section_markers(input);
+	let cleaned = strip_bare_ansi(&cleaned);
 
 	let mut filtered = String::new();
 	let mut previous_blank = false;
@@ -281,8 +369,10 @@ fn filter_release_view(input: &str) -> String {
 		filtered.push('\n');
 	}
 
-	// Collapse multiple blank lines
-	MULTI_BLANK_RE.replace_all(&filtered, "\n\n").to_string()
+	match collapse_blank_lines(&filtered) {
+		Cow::Borrowed(_) => filtered,
+		Cow::Owned(output) => output,
+	}
 }
 
 #[cfg(test)]

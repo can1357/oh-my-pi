@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, isEnotdir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { errorMessage, formatBytes, getWorktreeDir, isEnoent, isEnotdir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { patchSectionPaths, splitPatchSections } from "../utils/git-diff-paths";
@@ -660,10 +660,6 @@ export interface IsolationHandle {
  * caller learns about that through `IsolationHandle.fellBack` +
  * `fallbackReason`.
  */
-
-function errorMessage(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
 
 /**
  * Deterministic task-isolation dir of one run (`repoRoot` + agent id) under the
