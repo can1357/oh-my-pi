@@ -2140,19 +2140,28 @@ export class SelectorController {
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		let modelFallbackWarning: string | undefined;
-		if (
-			(await this.ctx.session.switchSession(target.sessionPath, {
+		// Shown after the re-render below, which would clear it; a switch that does not
+		// commit renders nothing more, so a rollback's warning shows at once.
+		let memoryWarning: string | undefined;
+		let switched = false;
+		try {
+			switched = await this.ctx.session.switchSession(target.sessionPath, {
 				onCwdChange: async (newCwd, sourceCwd) => {
 					if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
-					return this.ctx.applyCwdChange(newCwd);
+					return this.ctx.applyCwdChange(newCwd, {
+						onWarning: warning => {
+							memoryWarning = warning;
+						},
+					});
 				},
 				onModelFallback: warning => {
 					modelFallbackWarning = warning;
 				},
-			})) === false
-		) {
-			return false;
+			});
+		} finally {
+			if (!switched && memoryWarning) this.ctx.showWarning(memoryWarning);
 		}
+		if (!switched) return false;
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
@@ -2179,6 +2188,7 @@ export class SelectorController {
 		}
 		if (continuation) this.ctx.showWarning(formatSessionContinuationNotice(continuation));
 		if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
+		if (memoryWarning) this.ctx.showWarning(memoryWarning);
 		return true;
 	}
 

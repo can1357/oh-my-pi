@@ -10,7 +10,11 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { hindsightBackend, rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
+import {
+	hindsightBackend,
+	memoryBeforeCwdMove,
+	rebindMemoryBackendForCwd,
+} from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-backend/tool-names";
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
@@ -24,6 +28,7 @@ import { BUILTIN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { getProjectAgentDir, getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "../src/utils/render-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
@@ -359,17 +364,19 @@ describe("AgentSession memory backend lifecycle", () => {
 		await current.applyMemoryBackend();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
 
+		const leavingSource = await memoryBeforeCwdMove(current);
 		cfgHindsightApiUrl.override(settings, "");
 		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
-		await rebindMemoryBackendForCwd(current);
+		await rebindMemoryBackendForCwd(current, leavingSource);
 
 		expect(current.getHindsightSessionState()).toBeUndefined();
 		expect(current.getAllToolNames()).toEqual(["read"]);
 		expect(current.getActiveToolNames()).toEqual(["read"]);
 
+		const leavingDestination = await memoryBeforeCwdMove(current);
 		cfgHindsightApiUrl.override(settings, apiUrl);
 		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
-		await rebindMemoryBackendForCwd(current);
+		await rebindMemoryBackendForCwd(current, leavingDestination);
 		expect(current.getHindsightSessionState()).toBeDefined();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
 	});
@@ -425,10 +432,11 @@ describe("AgentSession memory backend lifecycle", () => {
 		await current.applyMemoryBackend();
 
 		const destinationCwd = path.join(tempDir.path(), "destination");
+		const before = await memoryBeforeCwdMove(current);
 		current.sessionManager.setCwdWithoutRelocation(destinationCwd);
 		cfgMemoryBackend.override(settings, destination);
 		await settings.reloadForCwd(destinationCwd);
-		await rebindMemoryBackendForCwd(current);
+		await rebindMemoryBackendForCwd(current, before);
 
 		const state = getMnemopiSessionState(current);
 		if (destination === "mnemopi") {
@@ -620,6 +628,119 @@ describe("AgentSession memory backend lifecycle", () => {
 		},
 	);
 
+	// Startup is best-effort; a move that makes memory no worse must not fail over it either.
+	it("headless /move commits with memory off and a warning when Mnemopi had not started", async () => {
+		const sourceCwd = tempDir.path();
+		const destinationCwd = path.join(sourceCwd, "destination");
+		// An existing directory is not a SQLite database, so Mnemopi fails in both projects.
+		const config = Bun.YAML.stringify({
+			memory: { backend: "mnemopi" },
+			mnemopi: { scoping: "global", autoRetain: false, noEmbeddings: true, llmMode: "none", dbPath: sourceCwd },
+		});
+		await Promise.all(
+			[sourceCwd, destinationCwd].map(cwd => Bun.write(path.join(getProjectAgentDir(cwd), "config.yml"), config)),
+		);
+		settings = await Settings.loadIsolated({ cwd: sourceCwd, agentDir: path.join(sourceCwd, "agent") });
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getMnemopiSessionState()).toBeUndefined();
+		const output: string[] = [];
+		const originalProjectDir = getProjectDir();
+		try {
+			await executeAcpBuiltinSlashCommand("/move " + destinationCwd, {
+				session: current,
+				sessionManager: current.sessionManager,
+				settings,
+				cwd: sourceCwd,
+				output: text => {
+					output.push(text);
+				},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {},
+			});
+		} finally {
+			setProjectDir(originalProjectDir);
+		}
+		expect({ cwd: current.sessionManager.getCwd(), disposed: current.isDisposed }).toEqual({
+			cwd: destinationCwd,
+			disposed: false,
+		});
+		expect(output.join("\n")).not.toContain("Move failed");
+		expect(output).toContainEqual(expect.stringContaining("Mnemopi"));
+		expect(current.getMnemopiSessionState()).toBeUndefined();
+	});
+
+	// The refused move already stopped the source's Mnemopi, so the rollback reads its own state: no memory ran. It
+	// takes the session back to its directory with memory off, even when the source's Mnemopi cannot start again.
+	it("headless /move keeps the session in its directory with one warning when the rollback cannot restart Mnemopi", async () => {
+		const sourceCwd = tempDir.path();
+		const destinationCwd = path.join(sourceCwd, "destination");
+		const sourceDbPath = path.join(sourceCwd, "source.db");
+		const mnemopi = { scoping: "global", autoRetain: false, noEmbeddings: true, llmMode: "none" };
+		await Bun.write(
+			path.join(getProjectAgentDir(sourceCwd), "config.yml"),
+			Bun.YAML.stringify({ memory: { backend: "mnemopi" }, mnemopi: { ...mnemopi, dbPath: sourceDbPath } }),
+		);
+		// An existing directory is not a SQLite database, so Mnemopi fails in the destination.
+		await Bun.write(
+			path.join(getProjectAgentDir(destinationCwd), "config.yml"),
+			Bun.YAML.stringify({ memory: { backend: "mnemopi" }, mnemopi: { ...mnemopi, dbPath: sourceCwd } }),
+		);
+		settings = await Settings.loadIsolated({ cwd: sourceCwd, agentDir: path.join(sourceCwd, "agent") });
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
+		// From here no Mnemopi start installs a state: neither the destination's nor the source's in the rollback.
+		spyOn(mnemopiBackend, "start").mockImplementation(async () => {});
+		const output: string[] = [];
+		const originalProjectDir = getProjectDir();
+		try {
+			await executeAcpBuiltinSlashCommand("/move " + destinationCwd, {
+				session: current,
+				sessionManager: current.sessionManager,
+				settings,
+				cwd: sourceCwd,
+				output: text => {
+					output.push(text);
+				},
+				refreshCommands: () => {},
+				reloadPlugins: async () => {},
+			});
+		} finally {
+			setProjectDir(originalProjectDir);
+		}
+		expect({ cwd: current.sessionManager.getCwd(), disposed: current.isDisposed }).toEqual({
+			cwd: sourceCwd,
+			disposed: false,
+		});
+		expect(output).toContainEqual(expect.stringMatching(/Move failed:.*Mnemopi backend failed to initialise/));
+		expect(output.filter(line => line.includes("Memory is off"))).toEqual([
+			`Memory is off: Mnemopi did not start in ${shortenPath(sourceCwd)}. The omp log has the cause.`,
+		]);
+		expect(current.getMnemopiSessionState()).toBeUndefined();
+	});
+
+	// What a cwd move counts as memory that ran, read before the destination's settings load: Hindsight by its live
+	// state, `local` and `sharpshooter` always (they keep no state to check), `off` never. Mnemopi, by its live state,
+	// is covered by the /move and /resume tests.
+	it.each([
+		["memory.backend off", false, "off", undefined],
+		["local", true, "local", undefined],
+		["sharpshooter", true, "sharpshooter", undefined],
+		["Hindsight with no server URL, which starts no state", false, "hindsight", ""],
+		["Hindsight with a server URL, which starts a state", true, "hindsight", "http://127.0.0.1:1"],
+	] as const)("a cwd move counts %s as memory that ran: %p", async (_label, ran, backend, apiUrl) => {
+		cfgMemoryBackend.override(settings, backend);
+		if (apiUrl !== undefined) {
+			cfgHindsightApiUrl.override(settings, apiUrl);
+			cfgHindsightMentalModelsEnabled.override(settings, false);
+		}
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		if (backend === "hindsight") expect(current.getHindsightSessionState() !== undefined).toBe(ran);
+		expect(await memoryBeforeCwdMove(current)).toEqual({ memoryRan: ran });
+	});
+
 	// The re-scope's settings listener starts the backend switch; the rebind must
 	// judge the destination only once that switch settled, however many
 	// microtasks separate the reload from the rebind.
@@ -759,8 +880,9 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getHindsightSessionState()).toBeDefined();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "recall", "retain"]));
 
+		const before = await memoryBeforeCwdMove(current);
 		cfgMemoryBackend.override(settings, "off");
-		await rebindMemoryBackendForCwd(current);
+		await rebindMemoryBackendForCwd(current, before);
 
 		expect(current.getHindsightSessionState()).toBeUndefined();
 		expect(current.getActiveToolNames()).toEqual(["read"]);
@@ -778,10 +900,11 @@ describe("AgentSession memory backend lifecycle", () => {
 
 		await current.applyMemoryBackend();
 		expect(current.getHindsightSessionState()).toBeDefined();
+		const before = await memoryBeforeCwdMove(current);
 		cfgMemoryBackend.override(settings, "off");
 		failToolBuild = true;
 		if (coalesced) await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
 
-		await expect(rebindMemoryBackendForCwd(current)).rejects.toThrow("destination memory tools unavailable");
+		await expect(rebindMemoryBackendForCwd(current, before)).rejects.toThrow("destination memory tools unavailable");
 	});
 });

@@ -2591,8 +2591,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * active session's working directory changed (`/move` relocation or resuming
 	 * a session from another project). The SessionManager's cwd MUST already
 	 * reflect `newCwd` before this is called.
+	 *
+	 * A move that commits without memory reports it through `onWarning`, shown
+	 * at once when absent; a host that re-renders the transcript afterwards
+	 * passes it to show the warning after the re-render.
 	 */
-	async applyCwdChange(newCwd: string): Promise<boolean> {
+	async applyCwdChange(newCwd: string, options?: { onWarning?: (warning: string) => void }): Promise<boolean> {
+		const onWarning = options?.onWarning ?? ((warning: string) => this.showWarning(warning));
 		const previousCwd = getProjectDir();
 		try {
 			setProjectDir(newCwd);
@@ -2606,8 +2611,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// fails, undo the chdir so `false` reliably means "nothing committed";
 		// callers roll back their own session/manager state on false.
 		const scopedSettings = isSettingsInitialized() ? settings : undefined;
+		const rescope = async (cwd: string): Promise<void> => {
+			const warning = await rescopeSessionToCwd(this.session, scopedSettings, cwd);
+			if (warning) onWarning(warning);
+		};
 		try {
-			await rescopeSessionToCwd(this.session, scopedSettings, newCwd);
+			await rescope(newCwd);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
 			// cwd-derived state (memory, plugin roots, agents, extensions, custom
@@ -2616,12 +2625,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.setCwdWithoutRelocation(previousCwd);
 			try {
 				setProjectDir(previousCwd);
-				await rescopeSessionToCwd(this.session, scopedSettings, previousCwd);
+				await rescope(previousCwd);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
 					setProjectDir(actual);
-					await rescopeSessionToCwd(this.session, scopedSettings, actual);
+					await rescope(actual);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,

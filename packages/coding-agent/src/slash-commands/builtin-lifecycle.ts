@@ -845,6 +845,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 ];
 async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
 	setProjectDir(cwd);
-	await rescopeSessionToCwd(runtime.session, runtime.settings, cwd);
+	const memoryWarning = await rescopeSessionToCwd(runtime.session, runtime.settings, cwd);
+	if (memoryWarning) await runtime.output(memoryWarning);
 	await runtime.refreshCommands?.();
 }
