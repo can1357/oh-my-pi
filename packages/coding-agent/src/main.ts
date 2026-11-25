@@ -2883,9 +2883,9 @@ export async function runRootCommand(
 			if (!isInteractive) session.validateRetryFallbackChains();
 			// The preset's thinking level seeds the session the way `/modelpreset switch`
 			// applies it, past the model's own default. An explicit `--thinking` or selector
-			// level already set `sessionOptions.thinkingLevel`, and a resumed or imported
-			// session keeps the effort it saved, so seed only a fresh session.
-			if (presetThinkingLevel !== undefined && !explicitSessionSelection) {
+			// level already set `sessionOptions.thinkingLevel`; a resumed, imported or
+			// auto-resumed session keeps the effort it saved. Seed only a fresh session.
+			if (presetThinkingLevel !== undefined && !explicitSessionSelection && !autoResumed) {
 				applyPresetLaunchThinkingLevel(session, presetThinkingLevel, sessionOptions.thinkingLevel);
 			}
 
