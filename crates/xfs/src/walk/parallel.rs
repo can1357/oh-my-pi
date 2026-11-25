@@ -218,6 +218,9 @@ pub(super) struct Shared {
 	/// panicked, the output channel closed, or the caller set the [`Stop`]
 	/// it kept a clone of.
 	halt:      Stop,
+	/// The [`Stop::scope`] the walk started under, read but never set: it
+	/// is shared with every other walk in that scope.
+	scoped:    Option<Stop>,
 	/// A visitor panicked.
 	panicked:  AtomicBool,
 	errors:    Mutex<Vec<DirError>>,
@@ -240,7 +243,7 @@ impl Shared {
 	}
 
 	fn halted(&self) -> bool {
-		self.halt.stopped()
+		self.halt.stopped() || self.scoped.as_ref().is_some_and(Stop::stopped)
 	}
 
 	fn halt(&self) {
@@ -573,8 +576,11 @@ pub(super) async fn start<K: Sink>(
 ) -> Result<Started<K>, WalkError> {
 	// The caller's flag when it kept a clone, so dropping it ends the walk in
 	// the caller's own frame rather than when a worker next polls this task.
-	let shared =
-		Arc::new(Shared { halt: opts.stop.clone().unwrap_or_default(), ..Shared::default() });
+	let shared = Arc::new(Shared {
+		halt: opts.stop.clone().unwrap_or_default(),
+		scoped: Stop::scoped(),
+		..Shared::default()
+	});
 	let halt = Halt(Arc::clone(&shared));
 	let (fs, given, opts) = (fs.clone(), root.to_path_buf(), opts.clone());
 	let begun = tokio::spawn(async move {

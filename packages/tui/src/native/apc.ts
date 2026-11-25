@@ -200,6 +200,7 @@ const EVENT_SHAPES = {
 	motion: [{ reduce: isBoolean }],
 	features: [{ features: isStrings }],
 	visible: [{ sf: optional(isId), visible: isBoolean }],
+	checkout: [{ sf: optional(isId), shown: isBoolean }],
 	toggle: [
 		{ ...UI, collapsed: isBoolean, key: optional(isString), open: absent },
 		{ ...UI, open: isBoolean, item: optional(isString) },

@@ -1377,8 +1377,9 @@ impl RunningCommand {
 ///
 /// Either way, environment changes, [`ShellCommand::current_dir`] and
 /// [`ShellCommand::stdin`] apply the same way. Stdin defaults to the null
-/// device, as GNU `xargs` and `find -exec` give their children; stdout and
-/// stderr are the utility's own.
+/// device, as GNU `xargs` and `find -exec` give their children. Stdout and
+/// stderr are the utility's own unless overridden with
+/// [`ShellCommand::stdout`] and [`ShellCommand::stderr`].
 pub struct ShellCommand {
 	argv:    Vec<OsString>,
 	argv0:   Option<OsString>,
@@ -1386,6 +1387,8 @@ pub struct ShellCommand {
 	line:    Option<OsString>,
 	cwd:     Option<PathBuf>,
 	stdin:   Option<Fd>,
+	stdout:  Option<Fd>,
+	stderr:  Option<Fd>,
 	env:     Vec<EnvChange>,
 	/// Signal numbers to deliver to the command while it runs.
 	signals: Option<flume::Receiver<i32>>,
@@ -1407,7 +1410,17 @@ impl ShellCommand {
 	/// A command running `argv`; `argv[0]` names the builtin or program.
 	#[must_use]
 	pub fn new(argv: Vec<OsString>) -> Self {
-		Self { argv, argv0: None, line: None, cwd: None, stdin: None, env: Vec::new(), signals: None }
+		Self {
+			argv,
+			argv0: None,
+			line: None,
+			cwd: None,
+			stdin: None,
+			stdout: None,
+			stderr: None,
+			env: Vec::new(),
+			signals: None,
+		}
 	}
 
 	/// A command line `source` for the invoking shell to parse and run in a
@@ -1420,6 +1433,8 @@ impl ShellCommand {
 			line: Some(source.into()),
 			cwd: None,
 			stdin: None,
+			stdout: None,
+			stderr: None,
 			env: Vec::new(),
 			signals: None,
 		}
@@ -1462,6 +1477,16 @@ impl ShellCommand {
 	/// Takes the command's stdin; `None` means the null device.
 	pub fn take_stdin(&mut self) -> Option<Fd> {
 		self.stdin.take()
+	}
+
+	/// Takes the command's stdout; `None` means the utility's stdout.
+	pub fn take_stdout(&mut self) -> Option<Fd> {
+		self.stdout.take()
+	}
+
+	/// Takes the command's stderr; `None` means the utility's stderr.
+	pub fn take_stderr(&mut self) -> Option<Fd> {
+		self.stderr.take()
 	}
 
 	/// Takes the channel of signals for the command
@@ -1518,6 +1543,18 @@ impl ShellCommand {
 	/// Feeds `stdin` to the command as fd 0.
 	pub fn stdin(mut self, stdin: Fd) -> Self {
 		self.stdin = Some(stdin);
+		self
+	}
+
+	/// Sends the command's fd 1 to `stdout` instead of the utility's stdout.
+	pub fn stdout(mut self, stdout: Fd) -> Self {
+		self.stdout = Some(stdout);
+		self
+	}
+
+	/// Sends the command's fd 2 to `stderr` instead of the utility's stderr.
+	pub fn stderr(mut self, stderr: Fd) -> Self {
+		self.stderr = Some(stderr);
 		self
 	}
 
@@ -1595,8 +1632,10 @@ fn cancelled_command() -> io::Error {
 /// writing to the utility's descriptors. The runner itself is dropped when the
 /// invocation is cancelled or ends.
 ///
-/// A command runs with the utility's stdout and stderr, its own
-/// [`ShellCommand::take_stdin`] (else the null device), receiving the signals
+/// A command runs with its own [`ShellCommand::take_stdin`] (else the null
+/// device), its own [`ShellCommand::take_stdout`] (else the utility's stdout),
+/// and its own [`ShellCommand::take_stderr`] (else the utility's stderr),
+/// receiving the signals
 /// of [`ShellCommand::take_signals`], in
 /// [`ShellCommand::dir`] (else the invocation's working directory), with
 /// [`ShellCommand::env_changes`] applied to that command only. A command line
@@ -3389,10 +3428,22 @@ mod testing {
 		cwd: &std::path::Path,
 		env: &[(&str, &str)],
 	) -> (i32, String, String) {
+		let (code, stdout, stderr) = run_extra_bytes(argv, stdin.as_bytes(), cwd, env).await;
+		(code, String::from_utf8_lossy_owned(stdout), String::from_utf8_lossy_owned(stderr))
+	}
+
+	/// [`run_extra`] with raw byte streams: `stdin` in, stdout and stderr out
+	/// unconverted.
+	pub(crate) async fn run_extra_bytes(
+		argv: &[&str],
+		stdin: &[u8],
+		cwd: &std::path::Path,
+		env: &[(&str, &str)],
+	) -> (i32, Vec<u8>, Vec<u8>) {
 		use std::io::Seek;
 
 		let mut input = tempfile::tempfile().expect("stdin file");
-		input.write_all(stdin.as_bytes()).expect("write stdin");
+		input.write_all(stdin).expect("write stdin");
 		input.rewind().expect("rewind stdin");
 		let output = tempfile::tempfile().expect("stdout file");
 		let error = tempfile::tempfile().expect("stderr file");
@@ -3419,10 +3470,10 @@ mod testing {
 		let code = crate::extras::run(invocation).await;
 
 		let read = |mut file: std::fs::File| {
-			let mut text = String::new();
+			let mut bytes = Vec::new();
 			file.rewind().expect("rewind capture");
-			file.read_to_string(&mut text).expect("read capture");
-			text
+			file.read_to_end(&mut bytes).expect("read capture");
+			bytes
 		};
 		(code, read(output), read(error))
 	}
@@ -3514,7 +3565,7 @@ mod testing {
 			&mut self,
 			mut command: super::ShellCommand,
 		) -> futures::future::BoxFuture<'static, io::Result<super::CommandStatus>> {
-			use super::{CommandStatus, EnvChange};
+			use super::{CommandStatus, EnvChange, Fd};
 
 			let prepared = (|| {
 				let mut runner = self.dup()?;
@@ -3543,6 +3594,26 @@ mod testing {
 						_ => crate::extras::Fd::Closed,
 					},
 				};
+				match command.take_stdout() {
+					Some(Fd::File(file)) => runner.stdout = file,
+					Some(Fd::Closed) => match openfile::null()? {
+						OpenFile::File(file) => {
+							runner.stdout = Arc::try_unwrap(file).map_err(|_| io::Error::other("shared null device"))?;
+						},
+						_ => return Err(io::Error::other("null device without a native descriptor")),
+					},
+					Some(Fd::Vfs(_)) | None => {},
+				}
+				match command.take_stderr() {
+					Some(Fd::File(file)) => runner.stderr = file,
+					Some(Fd::Closed) => match openfile::null()? {
+						OpenFile::File(file) => {
+							runner.stderr = Arc::try_unwrap(file).map_err(|_| io::Error::other("shared null device"))?;
+						},
+						_ => return Err(io::Error::other("null device without a native descriptor")),
+					},
+					Some(Fd::Vfs(_)) | None => {},
+				}
 				Ok::<_, io::Error>((runner, stdin))
 			})();
 			// Outside the engine, a command line runs as `sh -c <source>`.
@@ -4255,7 +4326,9 @@ mod testing {
 
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
-pub(crate) use testing::{Capture, TestRunner, run_async_util, run_extra, run_proc, run_util};
+pub(crate) use testing::{
+	Capture, TestRunner, run_async_util, run_extra, run_extra_bytes, run_proc, run_util,
+};
 #[cfg(all(test, unix, feature = "util.grep"))]
 pub(crate) use testing::tree_with_sparse_file;
 

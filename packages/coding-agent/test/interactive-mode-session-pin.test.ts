@@ -1,5 +1,4 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -76,7 +75,6 @@ describe("InteractiveMode session pin indicator", () => {
 			undefined,
 			createModeTerminal().frame,
 		);
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 		cleanups.push(() => mode.stop());
 		await mode.init();
 
@@ -119,7 +117,6 @@ describe("InteractiveMode session pin indicator", () => {
 
 		const term = createModeTerminal({ columns: 80, rows: 24, settings });
 		const mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 		cleanups.push(async () => {
 			mode.stop();
 			await mode.shell.stop();

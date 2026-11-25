@@ -1,11 +1,13 @@
 /**
- * The shared spinner clock (`tui.spinnerInterval`): one period and one phase for every spinner the
- * TUI draws and for the host's terminal-title spinner. Dependency-free: the host's flag table
+ * An explicit `tui.spinnerInterval` sets the cadence of both TUI and title spinners. Dependency-free: the host's flag table
  * imports it during CLI bootstrap.
  */
 
 /** Default spinner period, in milliseconds (the historical cadence). */
 export const DEFAULT_SPINNER_INTERVAL_MS = 80;
+
+/** The terminal title has its own timer and write; animate it less frequently by default. */
+export const DEFAULT_TITLE_SPINNER_INTERVAL_MS = 250;
 
 /** Interval value for a static spinner: frame 0 is drawn and no spinner timer runs. */
 export const SPINNER_INTERVAL_STATIC = 0;
