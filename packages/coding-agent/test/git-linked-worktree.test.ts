@@ -67,9 +67,12 @@ describe("git linked worktree resolution", () => {
 	it("runs a .git/info/attributes filter when a linked worktree falls back to a plain checkout", async () => {
 		const repo = path.join(tempRoot, "repo");
 		const filter = path.join(tempRoot, "filter.sh");
-		fs.writeFileSync(filter, `#!/bin/sh
+		fs.writeFileSync(
+			filter,
+			`#!/bin/sh
 if [ "$1" = smudge ]; then sed 's/TOKEN/REAL/'; else sed 's/REAL/TOKEN/'; fi
-`);
+`,
+		);
 		await $`git init -q -b main ${repo}`.quiet();
 		await $`git -C ${repo} config filter.t.smudge ${`sh '${filter}' smudge`}`.quiet();
 		await $`git -C ${repo} config filter.t.clean ${`sh '${filter}' clean`}`.quiet();
