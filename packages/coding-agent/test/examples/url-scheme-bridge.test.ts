@@ -57,6 +57,8 @@ interface TestPeer {
 	openConnections: () => number;
 	/** Resolves when the current bridge connection closes. */
 	closed: () => Promise<void>;
+	/** End the current bridge connection but keep listening, so the bridge reconnects. */
+	drop: () => void;
 	stop: () => void;
 }
 
@@ -129,6 +131,9 @@ function startPeer(socketPath: string): TestPeer {
 		},
 		openConnections: () => sockets.size,
 		closed: () => onClose.promise,
+		drop: () => {
+			bridge?.end();
+		},
 		stop: () => {
 			if (stopped) return;
 			stopped = true;
@@ -490,6 +495,38 @@ describe("examples/extensions/url-scheme-bridge", () => {
 		peer.send({ type: "inbound", id: "peer-1", from: "leia", body: "still here", expectsReply: false });
 		expect(await peer.next("receipt")).toEqual({ type: "receipt", id: "peer-1", receipt: { outcome: "delivered" } });
 		expect(peer.openConnections()).toBe(1);
+	});
+
+	it("ignores a message admitted after its connection dropped: no receipt on the new one, no question settled", async () => {
+		const harness = await bridgeSession();
+		const { peer, session, runner } = harness;
+		await harness.start();
+		await peer.next("hello");
+		// The steer is queued; it reaches the transcript (`message_start`) only when the test says so.
+		const queued = Promise.withResolvers<() => Promise<void>>();
+		vi.spyOn(session, "sendCustomMessage").mockImplementation(async payload => {
+			const message = normalizeCustomMessagePayload(payload);
+			queued.resolve(async () => {
+				await runner.emit({
+					type: "message_start",
+					message: { role: "custom", ...message, timestamp: Date.now() },
+				});
+			});
+			return true;
+		});
+		peer.send({ type: "inbound", id: "peer-1", from: "leia", body: "before the drop", expectsReply: false });
+		const admit = await queued.promise;
+
+		// The connection drops and the bridge reconnects; the session asks leia a new question there.
+		peer.drop();
+		expect(await peer.next("hello")).toMatchObject({ agentId: "Main" });
+		expect(await writeAcked(harness, "demo://leia", "new question")).toBe("delivered");
+
+		// Only now does the old message reach the transcript.
+		await admit();
+		expect(await harness.waitBlocks()).toBe(true);
+		const receipt = await Promise.race([peer.next("receipt"), Bun.sleep(300).then(() => undefined)]);
+		expect(receipt).toBeUndefined();
 	});
 
 	it("disconnects while a live disable suspends it, and reconnects with its scheme on resume", async () => {

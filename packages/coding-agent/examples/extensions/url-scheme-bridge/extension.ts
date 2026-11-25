@@ -58,6 +58,12 @@ export interface PeerMessageDetails {
 	expectsReply: boolean;
 	/** Id of the peer's inbound record, receipted once the message reaches the transcript. */
 	id: string;
+	/**
+	 * The bridge connection the record arrived on (see `connection` in the extension). Its receipt
+	 * and the question it answers belong to that connection only: a peer that reconnects, or a
+	 * restarted peer CLI reusing the same ids, never sees either.
+	 */
+	connection: number;
 }
 
 export default async function urlSchemeBridge(pi: ExtensionAPI): Promise<void> {
@@ -79,6 +85,12 @@ export default async function urlSchemeBridge(pi: ExtensionAPI): Promise<void> {
 	let active = false;
 	/** Counts connection attempts: only the latest may attach, so a superseded one closes on `open`. */
 	let attempts = 0;
+	/**
+	 * Counts attached connections; the current one's number. A message from a peer carries the
+	 * number it arrived on, so an admission that comes after the connection changed sends no
+	 * receipt and settles no question.
+	 */
+	let connection = 0;
 	let shuttingDown = false;
 	/** Set while a live `disabledExtensions` edit has this load suspended. */
 	let suspended = false;
@@ -248,7 +260,7 @@ export default async function urlSchemeBridge(pi: ExtensionAPI): Promise<void> {
 		}
 		const from = displayId(message.from);
 		const hint = message.expectsReply ? ` (answer with \`write ${roster.namespace}://${message.from}\`)` : "";
-		const details: PeerMessageDetails = { from, expectsReply: message.expectsReply, id: message.id };
+		const details: PeerMessageDetails = { from, expectsReply: message.expectsReply, id: message.id, connection };
 		pi.sendMessage(
 			{ customType: PEER_MESSAGE_TYPE, content: `[${from}]${hint} ${message.body}`, display: true, details },
 			{ deliverAs: "steer", triggerTurn: true },
@@ -280,6 +292,7 @@ export default async function urlSchemeBridge(pi: ExtensionAPI): Promise<void> {
 					}
 					socket = connected;
 					writer.attach(connected);
+					connection++;
 					reconnectDelay = RECONNECT_MIN_MS;
 					writer.write({ type: "hello", agentId, namespace: roster.namespace } satisfies BridgeMessage);
 					pi.logger.info("url-scheme-bridge: connected", { socket: path });
@@ -334,8 +347,11 @@ export default async function urlSchemeBridge(pi: ExtensionAPI): Promise<void> {
 		const message = event.message;
 		if (message.role !== "custom" || message.customType !== PEER_MESSAGE_TYPE) return;
 		const details = typeof message.details === "object" && message.details !== null ? message.details : undefined;
-		const from: unknown = details ? Reflect.get(details, "from") : undefined;
-		const id: unknown = details ? Reflect.get(details, "id") : undefined;
+		// Admitted after its connection dropped: the questions it could answer were released with that
+		// connection, its id may name a different message on the current one, and its sender is gone.
+		if (!details || Reflect.get(details, "connection") !== connection) return;
+		const from: unknown = Reflect.get(details, "from");
+		const id: unknown = Reflect.get(details, "id");
 		if (typeof from === "string") answered(from.slice(`@${roster.namespace}/`.length));
 		if (typeof id === "string") writer.write({ type: "receipt", id, receipt: { outcome: "delivered" } });
 	});
