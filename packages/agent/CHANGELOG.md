@@ -6,6 +6,10 @@
 
 - Added `Agent.continue(signal, { queuedOnly: true })` so hosts can start an idle turn with queued input without making a separate model call on the current context.
 
+### Fixed
+
+- Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [19.2.0] - 2026-11-25
 
 ### Added
@@ -18,10 +22,6 @@
 
 ### Fixed
 
-- Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed DeepSeek DSML markup leaking into tool-call arguments (e.g. a `</｜DSML｜ parameter>` tail on an edit or bash command) being executed and replayed; the leaked tail is now cut before the call runs
-- Fixed DSML markup removed from a DeepSeek turn's text and reasoning still being sent back to the model on OpenRouter's Responses route, which replays the turn's original output items
-- Fixed the loop aborting an unmet soft tool requirement without answering that turn's tool calls, so continuing the run (as a retry does) executed a call the requirement had refused ([#20338](https://github.com/can1357/oh-my-pi/pull/20338) by [@baekjosh](https://github.com/baekjosh))
 - Fixed DeepSeek DSML markup leaking into tool-call arguments and being executed or replayed.
 - Fixed DeepSeek DSML markup being incorrectly included in conversation history on OpenRouter Responses requests.
 - Fixed unmet soft tool requirements leaving tool calls unanswered when a run was continued or retried.
