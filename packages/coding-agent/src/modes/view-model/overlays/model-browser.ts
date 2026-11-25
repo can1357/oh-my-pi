@@ -254,6 +254,19 @@ export function buildSearchAffinity(
 
 // ─── Role assignments ───────────────────────────────────────────────────────
 
+// A new catalog/availability snapshot or role predicate gets a new filtered pool.
+// Reusing the pool also reuses the model resolver's indexes on that array.
+const kEligiblePools = Symbol("model-browser.eligiblePools");
+type RolePool = ReadonlyArray<Model> & { [kEligiblePools]?: Map<ModelBrowserRoleInfo["accepts"], Model[]> };
+
+function eligible(pool: RolePool, accepts: ModelBrowserRoleInfo["accepts"]): Model[] {
+	if (!pool[kEligiblePools] && !Object.isExtensible(pool)) return pool.filter(accepts);
+	const byAccepts = (pool[kEligiblePools] ??= new Map());
+	let models = byAccepts.get(accepts);
+	if (!models) byAccepts.set(accepts, (models = pool.filter(accepts)));
+	return models;
+}
+
 /**
  * Resolve every known role to its display assignment: configured role values
  * resolve against `allModels`; unconfigured roles fall back to auto-selection
@@ -282,38 +295,25 @@ function* roleAssignmentsWork(
 			return parseConfiguredThinkingLevel(settings.defaultThinkingLevel) ?? ThinkingLevel.Inherit;
 		return ThinkingLevel.Inherit;
 	};
-	// Roles sharing an `accepts` predicate share one filtered pool.
-	const eligible = (
-		pool: ReadonlyArray<Model>,
-		byAccepts: Map<ModelBrowserRoleInfo["accepts"], Model[]>,
-		role: string,
-	): Model[] => {
-		const accepts = settings.getRoleInfo(role).accepts;
-		let models = byAccepts.get(accepts);
-		if (!models) {
-			models = pool.filter(accepts);
-			byAccepts.set(accepts, models);
-		}
-		return models;
-	};
 
 	const roles: RoleAssignments = {};
 	const configured = new Set<string>();
-	const catalogPools = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
 	for (const role of settings.knownRoleIds) {
 		const value = settings.getModelRole(role);
 		if (!value) continue;
 		configured.add(role);
-		const resolved = settings.resolveRoleValue(value, eligible(allModels, catalogPools, role));
+		const resolved = settings.resolveRoleValue(value, eligible(allModels, settings.getRoleInfo(role).accepts));
 		if (resolved.model)
 			roles[role] = { model: resolved.model, thinkingLevel: levelOf(role, resolved), autoSelected: false };
 		yield;
 	}
 	if (autoCandidates.length > 0) {
-		const candidatePools = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
 		for (const role of settings.knownRoleIds) {
 			if (configured.has(role)) continue;
-			const resolved = settings.resolveRoleValue(`pi/${role}`, eligible(autoCandidates, candidatePools, role));
+			const resolved = settings.resolveRoleValue(
+				`pi/${role}`,
+				eligible(autoCandidates, settings.getRoleInfo(role).accepts),
+			);
 			if (resolved.model)
 				roles[role] = { model: resolved.model, thinkingLevel: levelOf(role, resolved), autoSelected: true };
 			yield;

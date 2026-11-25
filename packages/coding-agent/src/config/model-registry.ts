@@ -27,7 +27,7 @@ import type {
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
-import { setRuntimeProviderRule } from "@oh-my-pi/pi-catalog/compat/cascade";
+import { cascadeRulesRevision, setRuntimeProviderRule } from "@oh-my-pi/pi-catalog/compat/cascade";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
 	clampCodexContextWindow,
@@ -62,7 +62,7 @@ import { withThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability
 import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
-import { resolveProviderModelReference } from "../config/model-resolver";
+import { groupModelCandidates, resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
 import { redactUrlForLog } from "../utils/redact-url";
@@ -241,6 +241,15 @@ interface RuntimeDiscoveryLanding {
 	/** Every provider whose runtime layer the pass rewrites. */
 	touchedProviders: Set<string>;
 }
+
+/** References resolved during this discovery pass, never shared with another in-flight pass. */
+interface PreparedDiscoveryReferences {
+	ruleRevision: number;
+	pools: Map<string, Model<Api>[]>;
+	matches: Map<Model<Api>, Model<Api> | undefined>;
+}
+
+const emptyReferencePool: Model<Api>[] = [];
 
 /** Both context-window resolutions of one row, and its tiers when the extended window is larger. */
 interface ContextWindowResolution {
@@ -1807,14 +1816,15 @@ export class ModelRegistry {
 	 * projections. Referencing a projected or previously discovered row would
 	 * nest its header resolver one level deeper on every refresh.
 	 */
-	#composeDiscoveryReferenceModels(providerFilter: ReadonlySet<string>): Model<Api>[] {
-		return this.#mergeCustomModels(
+	#composeDiscoveryReferencePools(providerFilter: ReadonlySet<string>): Map<string, Model<Api>[]> {
+		const rows = this.#mergeCustomModels(
 			this.#mergeCustomModels(
 				this.#composeCachedBaseModels(providerFilter),
 				selectProviderModels(this.#customModelOverlays, providerFilter),
 			),
 			selectProviderModels(this.#runtimeModelOverlays, providerFilter),
 		);
+		return groupModelCandidates(rows, "provider");
 	}
 
 	/** Applies custom overlays and every override projection to a `#baseModels` stage. */
@@ -2584,11 +2594,12 @@ export class ModelRegistry {
 		// A pass whose fetch finished while an earlier one still prepares lands after it,
 		// preserving the land order of fetch completion.
 		const precedingLanding = this.#discoveryLandingTail;
+		const references: PreparedDiscoveryReferences = { ruleRevision: -1, pools: new Map(), matches: new Map() };
 		const preparing = precedingLanding
 			? undefined
-			: this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery);
+			: this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery, references);
 		if (!precedingLanding && !preparing) {
-			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter);
+			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references);
 			return;
 		}
 		const { promise: landing, resolve: landed } = Promise.withResolvers<void>();
@@ -2596,11 +2607,11 @@ export class ModelRegistry {
 		try {
 			if (precedingLanding) {
 				await precedingLanding;
-				await this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery);
+				await this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery, references);
 			} else {
 				await preparing;
 			}
-			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter);
+			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references);
 		} finally {
 			if (this.#discoveryLandingTail === landing) this.#discoveryLandingTail = undefined;
 			landed();
@@ -2644,19 +2655,21 @@ export class ModelRegistry {
 	#prepareRuntimeDiscoveryLanding(
 		configuredDiscoveryResults: readonly ConfiguredDiscoveryPassResult[],
 		builtInDiscovery: BuiltInDiscoveryResult,
+		references: PreparedDiscoveryReferences,
 	): Promise<void> | undefined {
 		const { discovered, touchedProviders } = this.#runtimeDiscoveryLanding(
 			configuredDiscoveryResults,
 			builtInDiscovery,
 		);
 		if (touchedProviders.size === 0) return undefined;
-		return runSlicedWork(this.#runtimeDiscoveryMergeWork(discovered, touchedProviders));
+		return runSlicedWork(this.#runtimeDiscoveryMergeWork(discovered, touchedProviders, references));
 	}
 
 	/** The work of {@link #prepareRuntimeDiscoveryLanding}; it may pause at every `yield`. */
 	*#runtimeDiscoveryMergeWork(
 		discovered: readonly Model<Api>[],
 		touchedProviders: ReadonlySet<string>,
+		references: PreparedDiscoveryReferences,
 	): Generator<void, void, undefined> {
 		// Loaded before the first pause, where the unsliced land loaded them: loading
 		// a slice records its provider's discovery state, which must not overwrite a
@@ -2673,14 +2686,14 @@ export class ModelRegistry {
 				yield;
 			}
 		}
-		const referenceModels = this.#composeDiscoveryReferenceModels(touchedProviders);
+		references.pools = this.#composeDiscoveryReferencePools(touchedProviders);
+		references.ruleRevision = cascadeRulesRevision();
 		yield;
 		for (const model of discovered) {
-			const merged = this.#mergeDiscoveredModelMemoized(
-				model,
-				resolveProviderModelReference(model.provider, model.id, referenceModels),
-				this.#providerOverrides.get(model.provider),
-			);
+			const pool = references.pools.get(model.provider.trim().toLowerCase()) ?? emptyReferencePool;
+			const reference = resolveProviderModelReference(model.provider, model.id, pool);
+			references.matches.set(model, reference);
+			const merged = this.#mergeDiscoveredModelMemoized(model, reference, this.#providerOverrides.get(model.provider));
 			if (!merged.contextWindowAuthoritative) this.#contextWindowResolution(merged, now);
 			yield;
 		}
@@ -2694,6 +2707,7 @@ export class ModelRegistry {
 		configuredDiscoveryResults: readonly ConfiguredDiscoveryPassResult[],
 		builtInDiscovery: BuiltInDiscoveryResult,
 		providerFilter: ReadonlySet<string> | undefined,
+		references: PreparedDiscoveryReferences,
 	): void {
 		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
 		const { discovered, replacedConfiguredProviders, touchedProviders } = this.#runtimeDiscoveryLanding(
@@ -2708,15 +2722,27 @@ export class ModelRegistry {
 		) {
 			return;
 		}
-		const referenceModels = this.#composeDiscoveryReferenceModels(touchedProviders);
+		// Recomposition sees live overrides, settings and dated price cards after a
+		// yield. Only providers whose ordered candidate rows changed need fresh lookups.
+		const pools = this.#composeDiscoveryReferencePools(touchedProviders);
+		const reusable = new Set<string>();
+		if (references.ruleRevision === cascadeRulesRevision()) {
+			for (const provider of touchedProviders) {
+				const key = provider.trim().toLowerCase();
+				const before = references.pools.get(key) ?? emptyReferencePool;
+				const after = pools.get(key) ?? emptyReferencePool;
+				if (before.length === after.length && before.every((model, i) => model === after[i])) reusable.add(key);
+			}
+		}
 		const discoveredModels = this.#applyHardcodedModelPolicies(
-			discovered.map(model =>
-				this.#mergeDiscoveredModelMemoized(
-					model,
-					resolveProviderModelReference(model.provider, model.id, referenceModels),
-					this.#providerOverrides.get(model.provider),
-				),
-			),
+			discovered.map(model => {
+				const key = model.provider.trim().toLowerCase();
+				const reference =
+					reusable.has(key) && references.matches.has(model)
+						? references.matches.get(model)
+						: resolveProviderModelReference(model.provider, model.id, pools.get(key) ?? emptyReferencePool);
+				return this.#mergeDiscoveredModelMemoized(model, reference, this.#providerOverrides.get(model.provider));
+			}),
 		);
 		const authoritativeProviders = providersWithAuthoritativeProjectCatalog(discoveredModels);
 		for (const provider of builtInDiscovery.authoritativeProviders) {

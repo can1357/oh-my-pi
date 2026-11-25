@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "bun:test";
 import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { setRuntimeProviderRule } from "@oh-my-pi/pi-catalog/compat/cascade";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -2813,6 +2814,27 @@ describe("provider routing selector (@upstream)", () => {
 		expect(
 			parseModelPattern("custom/claude-opus-4-8", [vertexModel("claude-opus-4-8@default", "custom")]).model,
 		).toBeUndefined();
+	});
+
+	test("unpinning respects the policy provider, catalog order and live rule changes on the same pool", () => {
+		const provider = "test-revision-suffix";
+		const pool = ["FOO@PIN", "foo@pin"].map(id => ({
+			...mockModels[0],
+			provider: "gateway",
+			providerType: provider,
+			id,
+		}));
+		const lookup = (id: string) => resolveProviderModelReference("gateway", id, pool);
+		expect(lookup("foo")).toBeUndefined();
+		try {
+			setRuntimeProviderRule(provider, { "selector-revision-suffix": "@pin" });
+			expect(lookup("foo")).toBe(pool[0]);
+			expect(lookup("Foo@pin")).toBeUndefined(); // ambiguous raw id
+			expect(lookup("foo@pin")).toBe(pool[1]); // exact case still wins
+		} finally {
+			setRuntimeProviderRule(provider, undefined);
+		}
+		expect(lookup("foo")).toBeUndefined();
 	});
 
 	test("a selector naming a catalog provider missing from the pool never matches another provider's raw ids", () => {

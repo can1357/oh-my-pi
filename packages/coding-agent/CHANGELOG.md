@@ -8,6 +8,9 @@
 ### Changed
 
 - Model hub search prepares its index between input turns and shares fuzzy matches with the provider sidebar.
+### Changed
+
+- Reduced repeated model lookups during catalog discovery and model-role selection.
 
 ## [19.2.0] - 2026-11-25
 
