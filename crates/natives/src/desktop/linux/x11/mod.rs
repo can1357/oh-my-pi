@@ -5,6 +5,7 @@ mod keyboard_state;
 mod keymap;
 pub(crate) mod listener;
 mod mpx;
+mod release_watcher;
 mod text_mapping;
 mod toolkit;
 mod uinput;

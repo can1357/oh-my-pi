@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed X11 takeover and desktop input leaving a key or mouse button held for the whole X session when omp was killed mid-call, such as Shift during `holdKeys` or the left button during a drag; a watcher process the session starts releases them ([#19531](https://github.com/can1357/oh-my-pi/pull/19531) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added
