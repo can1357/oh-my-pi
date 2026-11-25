@@ -544,6 +544,17 @@ describe("IME-safe cursor layout", () => {
 		expect(rows.slice(-2)).toEqual(["│  hi", `╰${"─".repeat(18)}╯`]);
 	});
 
+	test("drops the right chrome of the last row in the filled shapes", () => {
+		for (const [shape, cap] of [
+			["field", "▐"],
+			["rail", "▎"],
+		] as const) {
+			const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true, shape });
+			const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+			expect(plainRows([...painted.rows]).at(-1)).toBe(`${cap} hi`);
+		}
+	});
+
 	test("keeps the merged bottom border when the caret is drawn", () => {
 		const { composer } = make({ text: "hi", caret: "drawn", imeSafeCursor: true });
 		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);

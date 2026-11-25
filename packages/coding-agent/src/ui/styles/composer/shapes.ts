@@ -74,7 +74,10 @@ export interface ComposerRowContext extends ComposerChromeContext {
 	readonly last: boolean;
 	/** Cells an end-of-row caret took from the right chrome's padding. */
 	readonly overflow: number;
-	/** The last row of a side-bordered shape when the IME-safe layout is on: the bottom border moves to its own row. */
+	/**
+	 * The last row of a side-bordered shape when the IME-safe layout is on: nothing is drawn right of the
+	 * text (the box moves its bottom border to its own row), so IME preedit cannot push chrome onto the next row.
+	 */
 	readonly imeSafeCursorTail?: boolean;
 }
 
@@ -315,6 +318,7 @@ const field: ComposerShape = {
 	paddingX: 1,
 	sideWidth: paddingX => paddingX + 1,
 	row(cx) {
+		if (cx.imeSafeCursorTail) return [cx.accent("▐") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}`)];
 		const interior = `${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}${cx.pad}${" ".repeat(rightCells(cx) - 1)}`;
 		return [cx.accent("▐") + cx.surface(interior) + cx.accent("▌")];
 	},
@@ -332,6 +336,7 @@ const rail: ComposerShape = {
 	paddingX: 1,
 	sideWidth: paddingX => paddingX + 1,
 	row(cx) {
+		if (cx.imeSafeCursorTail) return [cx.accent("▎") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}`)];
 		const fill = Math.max(0, cx.paddingX + 1 - cx.overflow);
 		return [
 			cx.accent("▎") + cx.surface(`${" ".repeat(cx.paddingX)}${cx.gutter}${cx.text}${cx.pad}${" ".repeat(fill)}`),
