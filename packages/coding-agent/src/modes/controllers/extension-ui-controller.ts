@@ -1121,7 +1121,8 @@ export class ExtensionUiController {
 	/**
 	 * A guest's run through the form: every named field in order, each choice
 	 * group as a select (defaults preselected), each text field as an editor
-	 * prefilled with its value and re-asked until it passes the form's rules.
+	 * prefilled with its value. An answer breaking the form's rules is asked
+	 * again with the reason; sending the same text again keeps it.
 	 */
 	async #runGuestForm(
 		host: CollabHost,
@@ -1193,8 +1194,6 @@ export class ExtensionUiController {
 		}
 		let other: string | undefined;
 		while (true) {
-			// Mirror the local form's required check: Next appears once something is checked.
-			const canSubmit = !field.required || checked.size > 0 || other !== undefined;
 			const checkedIndices = enabled.flatMap((index, row) => (checked.has(index) ? [row] : []));
 			if (other !== undefined) checkedIndices.push(labels.length);
 			const choice = await this.#requestGuestUiString(
@@ -1202,11 +1201,11 @@ export class ExtensionUiController {
 				{
 					kind: "select",
 					title: question,
-					options: canSubmit ? [...rows, ASK_NEXT_OPTION] : rows,
+					options: [...rows, ASK_NEXT_OPTION],
 					selectionMarker: "checkbox",
 					checkedIndices,
 					markableCount: rows.length,
-					helpText: guestAskHelpText("toggle", canSubmit ? `${ASK_NEXT_OPTION} continue  ` : ""),
+					helpText: guestAskHelpText("toggle", `${ASK_NEXT_OPTION} continue  `),
 				},
 				signal,
 			);
@@ -1251,8 +1250,11 @@ export class ExtensionUiController {
 			);
 			if (input.kind !== "answered") return input;
 			// A single-line input cannot hold line breaks.
-			text = field.multiline ? input.value : input.value.replace(/[\r\n]+/g, " ");
-			const value = textValue(field, text);
+			const next = field.multiline ? input.value : input.value.replace(/[\r\n]+/g, " ");
+			const value = textValue(field, next);
+			// The reason is shown once; the same text sent back over it stands.
+			if (error !== undefined && next === text) return { kind: "answered", value };
+			text = next;
 			error = fieldError(field, value);
 			if (!error) return { kind: "answered", value };
 		}
@@ -1470,15 +1472,8 @@ export class ExtensionUiController {
 				const checkedIndices = question.options
 					.map((option, index) => (selected.has(option.label) ? index : -1))
 					.filter(index => index >= 0);
-				// Mirror the local dialog's Next gating: omit the Next option until
-				// at least one option is checked or a custom answer exists, so a
-				// guest cannot submit an empty multi-select result
-				// (PRRT_kwDOQxs0bc6OFbDW). The remote select has no "disabled" row
-				// concept, so we omit rather than dim it.
-				const hasAnswer = selected.size > 0 || customInput !== undefined;
-				const options = [...baseOptions, ASK_OTHER_OPTION];
-				if (hasAnswer) options.push(ASK_NEXT_OPTION);
-				options.push(ASK_CHAT_OPTION);
+				// Next is always offered: an empty answer is the guest's to give, as in the local dialog.
+				const options = [...baseOptions, ASK_OTHER_OPTION, ASK_NEXT_OPTION, ASK_CHAT_OPTION];
 				const choice = await this.#requestGuestUiString(
 					host,
 					{
@@ -1488,7 +1483,7 @@ export class ExtensionUiController {
 						selectionMarker: "checkbox",
 						checkedIndices,
 						markableCount: question.options.length,
-						helpText: guestAskHelpText("toggle", hasAnswer ? "Next → continue  " : ""),
+						helpText: guestAskHelpText("toggle", `${ASK_NEXT_OPTION} continue  `),
 					},
 					signal,
 				);
