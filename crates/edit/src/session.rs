@@ -59,7 +59,7 @@ pub struct WriteRequest {
 	pub absolute:     PathBuf,
 	pub display:      String,
 	pub op:           FileOp,
-	/// Destination disk path or hosted key; the host writes `content` there
+	/// Absolute destination for a rename; the host writes `content` there
 	/// and deletes `absolute`.
 	pub move_to:      Option<PathBuf>,
 	/// Final bytes as text; `None` for deletes.

@@ -153,7 +153,7 @@ fn canonical_snapshot_key_resolves_missing_tail_against_existing_ancestor() {
 #[cfg(unix)]
 #[test]
 fn canonical_snapshot_keys_fuse_symlink_equivalent_paths() {
-	use omp_edit::EditStore;
+	use omp_edit::{EditStore, Location};
 
 	let root = tempfile::tempdir().expect("tempdir");
 	let real = root.path().join("real");
@@ -169,6 +169,13 @@ fn canonical_snapshot_keys_fuse_symlink_equivalent_paths() {
 	assert_eq!(alias_key, real_key);
 
 	let store = EditStore::new();
-	let hash = store.record(&real_key, "x\n", None);
-	assert_eq!(store.by_hash(&alias_key, &hash).unwrap().text.as_ref(), "x\n");
+	let hash = store.record(&Location::Disk(real_key), "x\n", None);
+	assert_eq!(
+		store
+			.by_hash(&Location::Disk(alias_key), &hash)
+			.unwrap()
+			.text
+			.as_ref(),
+		"x\n"
+	);
 }

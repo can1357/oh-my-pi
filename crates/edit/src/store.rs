@@ -39,7 +39,7 @@ const CARRY_MAX_EDITS: usize = 1024;
 /// One full-file version observed at a point in time.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-	/// Canonical disk path or hosted identity this version belongs to.
+	/// Canonical location this version belongs to.
 	pub path:       Location,
 	/// Full LF-normalized, BOM-stripped text.
 	pub text:       Arc<str>,

@@ -1733,9 +1733,8 @@ fn preview_entry(
 		diff:               Some(diff.diff),
 		first_changed_line: diff.first_changed_line,
 		error:              None,
-
-		op:     Some(engine_op(input.op)),
-		rename: entry.move_to.map(|value| value.display),
+		op:                 Some(engine_op(input.op)),
+		rename:             entry.move_to.map(|value| value.display),
 	})
 }
 
