@@ -16,8 +16,8 @@
 //!
 //! Where direnv prints a map in Go's random order (`export`, `dump`), this
 //! prints in name order. An external program asked to hand its environment
-//! back (`use nix`, `use flox`, `use guix`) runs the `direnv` found on
-//! `PATH`, or `env -0` when there is none; `apply_dump` reads both.
+//! back (`use nix`, `use flox`, `use guix`) writes `env -0`; `apply_dump`
+//! reads both that format and direnv's native dump.
 
 mod dotenv;
 mod shells;
@@ -40,7 +40,7 @@ use sha2::{Digest as _, Sha256};
 
 use self::shells::{Change, SHELL_NAMES, Shell, bash_escape, json_map, json_string, json_value};
 use crate::{
-	host::{CommandStatus, Host, ShellCommand, Utility, strip_errno},
+	host::{CommandStatus, Host, ShellCommand, SourceSnapshot, Utility, strip_errno},
 	time_zone::shell_time_zone,
 };
 
@@ -50,17 +50,8 @@ const VERSION: &str = "2.38.2";
 /// with the three places that hand `direnv dump` to an external program
 /// reading it from `__direnv_dump`.
 const STDLIB: &str = include_str!("direnv-stdlib.txt");
-/// What the stdlib's `direnv=` line holds until [`Run::stdlib`] names direnv.
+/// What the stdlib's `direnv=` line holds until the caller names direnv.
 const STDLIB_SELF: &str = "\"$(command -v direnv)\"";
-/// What the stdlib's `__direnv_dump=` line holds until [`Run::stdlib`] picks
-/// the command.
-const STDLIB_DUMP: &str = "(\"$direnv\" dump)";
-/// The dump command for an external program on a host without direnv.
-const ENV_DUMP: &str = "(sh -c 'env -0 >\"$DIRENV_DUMP_FILE_PATH\"')";
-/// Shell state a subshell of the caller sheds before it evaluates an
-/// `.envrc`, which a new shell would not have.
-const SUBSHELL_RESET: &str = "set +o errexit +o nounset +o pipefail +o noglob +o noclobber +o \
-                              xtrace +o verbose\nIFS=$' \\t\\n'\n";
 
 const ERROR_COLOR: &str = "\x1b[31m";
 const CLEAR_COLOR: &str = "\x1b[0m";
@@ -293,12 +284,14 @@ enum AllowStatus {
 	Denied     = 2,
 }
 
-/// An `.envrc` or `.env` file and its place in the allow and deny lists.
+/// An `.envrc` or `.env` snapshot and its place in the allow and deny lists.
 struct Rc {
 	path:       String,
 	allow_path: String,
 	deny_path:  String,
 	times:      FileTimes,
+	bytes:      Vec<u8>,
+	allowed:    AllowStatus,
 }
 
 /// What direnv knew about one watched file when it loaded.
@@ -307,6 +300,8 @@ struct FileTime {
 	path:    String,
 	modtime: i64,
 	exists:  bool,
+	/// Approved inputs are content-pinned; upstream ignores this extra key.
+	hash:    Option<String>,
 }
 
 /// The watch list (`DIRENV_WATCHES`): a change to any entry reloads.
@@ -318,7 +313,14 @@ impl FileTimes {
 	fn set(&mut self, path: String, modtime: i64, exists: bool) {
 		match self.0.iter_mut().find(|time| time.path == path) {
 			Some(time) => (time.modtime, time.exists) = (modtime, exists),
-			None => self.0.push(FileTime { path, modtime, exists }),
+			None => self.0.push(FileTime { path, modtime, exists, hash: None }),
+		}
+	}
+
+	/// Records an approved input's fingerprint alongside its watch timestamp.
+	fn pin(&mut self, path: &str, hash: String) {
+		if let Some(time) = self.0.iter_mut().find(|time| time.path == path) {
+			time.hash = Some(hash);
 		}
 	}
 
@@ -330,7 +332,12 @@ impl FileTimes {
 			}
 			json.push_str("{\"path\":");
 			json_string(&mut json, &time.path);
-			let _ = write!(json, ",\"modtime\":{},\"exists\":{}}}", time.modtime, time.exists);
+			let _ = write!(json, ",\"modtime\":{},\"exists\":{}", time.modtime, time.exists);
+			if let Some(hash) = &time.hash {
+				json.push_str(",\"hash\":");
+				json_string(&mut json, hash);
+			}
+			json.push('}');
 		}
 		json.push(']');
 		gzenv_encode(&json)
@@ -347,6 +354,7 @@ impl FileTimes {
 						path:    item["path"].as_str().unwrap_or_default().to_owned(),
 						modtime: item["modtime"].as_i64().unwrap_or_default(),
 						exists:  item["exists"].as_bool().unwrap_or_default(),
+						hash:    item["hash"].as_str().map(str::to_owned),
 					});
 				}
 			},
@@ -524,6 +532,16 @@ fn lossy(path: &Path) -> String {
 	path.to_string_lossy().into_owned()
 }
 
+/// Path for the Bash stdlib's slash-based helpers. A backslash is a valid
+/// filename character on Unix, not a separator.
+fn shell_path(path: &str) -> std::borrow::Cow<'_, str> {
+	if cfg!(windows) && path.contains('\\') {
+		path.replace('\\', "/").into()
+	} else {
+		path.into()
+	}
+}
+
 /// `base/name`, lexically cleaned.
 fn join(base: &str, name: &str) -> String {
 	lossy(&omp_vfs::normalize_lexically(&Path::new(base).join(name)))
@@ -564,6 +582,12 @@ fn os_error(err: &io::Error) -> String {
 /// `op path: why`, Go's `*PathError` text.
 fn path_error(op: &str, path: &str, err: &io::Error) -> String {
 	format!("{op} {path}: {}", os_error(err))
+}
+
+/// The hex SHA-256 of the absolute path, newline and exact approved bytes.
+fn content_hash(path: &str, bytes: &[u8]) -> String {
+	let hash = Sha256::new().chain_update(path).chain_update("\n").chain_update(bytes);
+	format!("{:x}", hash.finalize())
 }
 
 /// The hex SHA-256 of `path` and a newline: a file's deny-list name.
@@ -789,6 +813,9 @@ impl Run<'_> {
 			self.help(false);
 			return Ok(0);
 		};
+		if name == "dotenv-snapshot" {
+			return self.dotenv_snapshot().map(|()| 0);
+		}
 		let Some(command) = COMMANDS
 			.iter()
 			.find(|command| command.name == name || command.aliases.contains(&name.as_str()))
@@ -817,7 +844,7 @@ impl Run<'_> {
 			"status" => self.status(args),
 			"stdlib" => {
 				let cfg = self.config()?;
-				let stdlib = self.stdlib(&cfg);
+				let stdlib = STDLIB.replacen(STDLIB_SELF, &bash_escape(&cfg.self_path), 1);
 				self.print(&stdlib);
 				self.print("\n");
 				Ok(())
@@ -904,7 +931,7 @@ impl Run<'_> {
 	}
 
 	/// Records the current state of `path` in `times`.
-	fn watch_path(&self, times: &mut FileTimes, path: &str) -> Outcome {
+	fn watch_path(&self, times: &mut FileTimes, path: &str) -> Outcome<bool> {
 		let path = self.abs(path);
 		let (modtime, exists) = match self.latest_mtime(&path) {
 			Ok(modtime) => (modtime, true),
@@ -912,7 +939,7 @@ impl Run<'_> {
 			Err(err) => return Err(path_error("stat", &path, &err)),
 		};
 		times.set(path, modtime, exists);
-		Ok(())
+		Ok(exists)
 	}
 
 	/// Fails with what changed when `time` no longer describes its file.
@@ -930,6 +957,11 @@ impl Run<'_> {
 			},
 			Ok(_) => {},
 		}
+		if let Some(hash) = &time.hash
+			&& self.file_hash(&time.path)? != *hash
+		{
+			return Err(format!("File {:?} has changed", time.path));
+		}
 		Ok(())
 	}
 
@@ -946,8 +978,7 @@ impl Run<'_> {
 	fn file_hash(&self, path: &str) -> Outcome<String> {
 		let path = self.abs(path);
 		let content = self.host.fs().read(&path).map_err(|err| path_error("open", &path, &err))?;
-		let hash = Sha256::new().chain_update(&path).chain_update("\n").chain_update(content);
-		Ok(format!("{:x}", hash.finalize()))
+		Ok(content_hash(&path, &content))
 	}
 
 	/// The first of `names` found in `dir` or the nearest directory above it.
@@ -1002,7 +1033,7 @@ impl Run<'_> {
 			data_dir: self.xdg_dir("XDG_DATA_HOME", ".local/share", "data")?,
 			self_path: match self.var("DIRENV_EXE_PATH") {
 				"" => "direnv".to_owned(),
-				path => path.replace('\\', "/"),
+				path => shell_path(path).into_owned(),
 			},
 			bash_path: String::new(),
 			hide_env_diff: false,
@@ -1103,13 +1134,28 @@ impl Run<'_> {
 	// ── .envrc files ─────────────────────────────────────────────────────
 
 	fn rc_from_path(&self, path: &str, cfg: &Config) -> Outcome<Rc> {
-		let allow_path = join(&cfg.allow_dir(), &self.file_hash(path)?);
-		let deny_path = join(&cfg.deny_dir(), &path_hash(&self.abs(path)));
+		let absolute = self.abs(path);
+		let bytes = self.host.fs().read(&absolute).map_err(|err| path_error("open", &absolute, &err))?;
+		let hash = content_hash(&absolute, &bytes);
+		let allow_path = join(&cfg.allow_dir(), &hash);
+		let deny_path = join(&cfg.deny_dir(), &path_hash(&absolute));
 		let mut times = FileTimes::default();
-		self.watch_path(&mut times, path)?;
-		self.watch_path(&mut times, &allow_path)?;
-		self.watch_path(&mut times, &deny_path)?;
-		Ok(Rc { path: path.to_owned(), allow_path, deny_path, times })
+		self.watch_path(&mut times, &absolute)?;
+		times.pin(&absolute, hash);
+		let listed = self.watch_path(&mut times, &allow_path)?;
+		let denied = self.watch_path(&mut times, &deny_path)?;
+		// Use the very marker observations the exported watch list records.
+		let allowed = if denied {
+			AllowStatus::Denied
+		} else if listed
+			|| cfg.whitelist_exact.contains(&absolute)
+			|| cfg.whitelist_prefix.iter().any(|prefix| absolute.starts_with(prefix.as_str()))
+		{
+			AllowStatus::Allowed
+		} else {
+			AllowStatus::NotAllowed
+		};
+		Ok(Rc { path: absolute, allow_path, deny_path, times, bytes, allowed })
 	}
 
 	/// The file the environment says is loaded, with the watch list it was
@@ -1119,30 +1165,13 @@ impl Run<'_> {
 		if path.is_empty() {
 			return None;
 		}
-		let allow_path = join(&cfg.allow_dir(), &self.file_hash(path).ok()?);
-		let times = FileTimes::unmarshal(self.var(DIRENV_WATCHES)).ok()?;
-		let deny_path = join(&cfg.deny_dir(), &path_hash(&self.abs(path)));
-		Some(Rc { path: path.to_owned(), allow_path, deny_path, times })
+		let mut rc = self.rc_from_path(path, cfg).ok()?;
+		rc.times = FileTimes::unmarshal(self.var(DIRENV_WATCHES)).ok()?;
+		Some(rc)
 	}
 
 	fn find_rc(&self, dir: &str, cfg: &Config) -> Outcome<Option<Rc>> {
 		self.find_env_up(dir, cfg).map(|path| self.rc_from_path(&path, cfg)).transpose()
-	}
-
-	fn allowed(&self, rc: &Rc, cfg: &Config) -> AllowStatus {
-		let exists = |path: &str| self.host.fs().metadata(path).is_ok();
-		if exists(&rc.deny_path) {
-			return AllowStatus::Denied;
-		}
-		let path = self.abs(&rc.path);
-		if exists(&rc.allow_path)
-			|| cfg.whitelist_exact.contains(&path)
-			|| cfg.whitelist_prefix.iter().any(|prefix| path.starts_with(prefix.as_str()))
-		{
-			AllowStatus::Allowed
-		} else {
-			AllowStatus::NotAllowed
-		}
 	}
 
 	/// Writes the one-line list entry `file` naming `rc_path`.
@@ -1179,78 +1208,84 @@ impl Run<'_> {
 		})
 	}
 
-	/// The stdlib an `.envrc` runs with, naming direnv and the command an
-	/// external program dumps its environment with.
-	fn stdlib(&self, cfg: &Config) -> String {
-		let (head, rest) = STDLIB.split_once(STDLIB_SELF).unwrap_or((STDLIB, ""));
-		let (middle, tail) = rest.split_once(STDLIB_DUMP).unwrap_or((rest, ""));
-		let mut stdlib = String::with_capacity(STDLIB.len() + 256);
-		stdlib.push_str(head);
-		stdlib.push_str(&bash_escape(&cfg.self_path));
-		stdlib.push_str(middle);
-		if cfg.self_path.contains('/') {
-			stdlib.push_str(STDLIB_DUMP);
-		} else if let Some(program) = self.look_path("direnv") {
-			let _ = write!(stdlib, "({} dump)", bash_escape(&program));
-		} else {
-			stdlib.push_str(ENV_DUMP);
-		}
-		stdlib.push_str(tail);
-		stdlib
-	}
 
 	/// Evaluates `rc` on top of `previous` and returns the environment it
 	/// leaves, direnv's bookkeeping variables set, with whether the load
 	/// succeeded. A file that may not load, or fails, leaves `previous` plus
 	/// the bookkeeping, so it is not retried until it changes.
-	fn load(&mut self, rc: &Rc, cfg: &Config, previous: &Env) -> (Env, Outcome) {
+	fn load(&mut self, rc: Rc, cfg: &Config, previous: &Env) -> (Env, Outcome) {
 		let mut env = previous.clone();
 		env.insert(DIRENV_WATCHES.to_owned(), rc.times.marshal());
-		let outcome = match self.allowed(rc, cfg) {
+		let outcome = match rc.allowed {
 			AllowStatus::NotAllowed => {
 				Err(format!("{} is blocked. Run `direnv allow` to approve its content", rc.path))
 			},
 			AllowStatus::Denied => Ok(()),
-			AllowStatus::Allowed => self.evaluate(rc, cfg, &env).map(|loaded| {
-				if let Some(loaded) = loaded {
-					env = loaded;
+			AllowStatus::Allowed => self.evaluate(&rc.path, rc.bytes, cfg, &env).map(|mut loaded| {
+				// A stdlib helper can extend the watches but cannot re-snapshot
+				// the root or its authorization after startup. If a program wiped
+				// the watch list entirely, there is no safe result to cache.
+				if loaded.get(DIRENV_WATCHES) != env.get(DIRENV_WATCHES) {
+					match FileTimes::from_env(&loaded) {
+						Ok(mut child) if !child.0.is_empty() => {
+							let mut times = rc.times;
+							child.0.retain(|t| !times.0.iter().any(|root| root.path == t.path));
+							times.0.extend(child.0);
+							loaded.insert(DIRENV_WATCHES.to_owned(), times.marshal());
+						},
+						_ => {
+							loaded.remove(DIRENV_WATCHES);
+						},
+					}
 				}
+				env = loaded;
 			}),
 		};
 		env.insert(DIRENV_DIR.to_owned(), format!("-{}", dirname(&rc.path)));
-		env.insert(DIRENV_FILE.to_owned(), rc.path.clone());
+		env.insert(DIRENV_FILE.to_owned(), rc.path);
 		env.insert(DIRENV_DIFF.to_owned(), EnvDiff::between(previous, &env).serialize());
 		(env, outcome)
 	}
 
-	/// Runs `rc` in a new shell started with `env` and returns the exported
-	/// environment the shell ended with; `None` when it dumped nothing.
-	fn evaluate(&mut self, rc: &Rc, cfg: &Config, env: &Env) -> Outcome<Option<Env>> {
+	/// Runs the approved input in a new Bash and returns its exported environment.
+	fn evaluate(&mut self, path: &str, bytes: Vec<u8>, cfg: &Config, env: &Env) -> Outcome<Env> {
 		let scratch = tempfile::Builder::new()
 			.prefix("direnv-")
 			.tempdir()
 			.map_err(|err| os_error(&err))?;
 		let dump = scratch.path().join("dump");
-		let loader = if rc.path.ends_with("/.env") { "dotenv" } else { "source_env" };
+		let loader = if Path::new(path).file_name().is_some_and(|name| name == ".env") {
+			"__direnv_dotenv_snapshot"
+		} else {
+			"__direnv_source_snapshot"
+		};
 		// stdout is the dump's: the stdlib sends everything an `.envrc`
 		// prints to stderr and writes the final environment last.
-		// An `sh` or zsh caller starts the file as `sh`: bash's posix mode,
-		// which the stdlib is not written for.
 		let mut script = format!(
-			"exec >{}\nset +o posix 2>/dev/null\n",
-			bash_escape(&lossy(&dump).replace('\\', "/"))
+			"[[ $(type -t direnv) == builtin ]] || exit 127\nexec >{} || exit 1\nset +o posix\n",
+			bash_escape(&shell_path(&dump.to_string_lossy()))
 		);
+		script.reserve(STDLIB.len() + path.len() + 128);
 		if cfg.strict_env {
 			script.push_str("set -euo pipefail\n");
 		}
-		script.push_str(&self.stdlib(cfg));
+		let (head, tail) = STDLIB.split_once(STDLIB_SELF).expect("stdlib names direnv");
+		script.push_str(head);
+		script.push_str("direnv");
+		script.push_str(tail);
 		// The explicit `exit` is what fires the stdlib's dump-at-exit trap.
 		let _ = writeln!(
 			script,
 			"\n__main__ {loader} {}\nexit",
-			bash_escape(&rc.path.replace('\\', "/"))
+			bash_escape(&shell_path(path))
 		);
-		let mut command = with_env(script_command(scratch.path(), script).map_err(|err| os_error(&err))?, &self.env, env);
+		// The bare `bash` script invocation is an in-engine fresh shell even
+		// on Windows or a noexec temp mount; its script needs no execute bit.
+		let script_path = scratch.path().join("envrc");
+		std::fs::write(&script_path, script).map_err(|err| os_error(&err))?;
+		let command = ShellCommand::new(vec!["bash".into(), "--".into(), script_path.into_os_string()])
+			.source_snapshot(SourceSnapshot { path: path.to_owned(), bytes });
+		let mut command = with_env(command, &self.env, env);
 		if !cfg.disable_stdin
 			&& let Ok(stdin) = self.host.stdin.file().to_fd()
 		{
@@ -1262,12 +1297,9 @@ impl Run<'_> {
 			CommandStatus::Exited(code) => return Err(format!("exit status {code}")),
 			CommandStatus::Signaled(signal) => return Err(format!("signal: {signal}")),
 		}
-		let dumped = std::fs::read(&dump).unwrap_or_default();
-		if dumped.is_empty() {
-			return Ok(None);
-		}
+		let dumped = std::fs::read(&dump).map_err(|err| os_error(&err))?;
 		let value: Value = serde_json::from_slice(&dumped).map_err(|err| err.to_string())?;
-		string_map(Some(&value)).map(Some)
+		string_map(Some(&value))
 	}
 
 	/// The environment before the loaded `.envrc` applied.
@@ -1412,7 +1444,7 @@ impl Run<'_> {
 		let env = match self.find_env_up(&dir, &cfg) {
 			Some(path) => {
 				let rc = self.rc_from_path(&path, &cfg)?;
-				let (env, outcome) = self.load(&rc, &cfg, &previous);
+				let (env, outcome) = self.load(rc, &cfg, &previous);
 				outcome?;
 				env
 			},
@@ -1442,16 +1474,21 @@ impl Run<'_> {
 		}
 		let shell =
 			Shell::detect(target).ok_or_else(|| format!("unknown target shell '{target}'"))?;
-		let loaded = self.loaded_rc(&cfg);
 		let to_load = self.find_env_up(&self.work_dir, &cfg);
-		let current = match (&to_load, &loaded) {
-			(None, None) if self.var(DIRENV_DIFF).is_empty() => return Ok(()),
-			(Some(path), Some(loaded)) => {
-				loaded.path == *path
-					&& self.check_times(&loaded.times).is_ok()
+		let current = match &to_load {
+			None if self.var(DIRENV_DIFF).is_empty() => return Ok(()),
+			Some(path) => {
+				self.var(DIRENV_FILE) == path
 					&& self.var(DIRENV_REQUIRED).is_empty()
+					&& FileTimes::unmarshal(self.var(DIRENV_WATCHES))
+						.is_ok_and(|times| {
+							// Upgrade watches inherited from upstream/older shells before
+							// relying on their whole-second timestamps for an approved rc.
+							times.0.iter().any(|t| t.path == *path && t.hash.is_some())
+								&& self.check_times(&times).is_ok()
+						})
 			},
-			_ => false,
+			None => false,
 		};
 		if current {
 			return Ok(());
@@ -1470,7 +1507,7 @@ impl Run<'_> {
 			},
 			Some(path) => {
 				let rc = self.rc_from_path(&path, &cfg)?;
-				self.load(&rc, &cfg, &previous)
+				self.load(rc, &cfg, &previous)
 			},
 		};
 		let summary = EnvDiff::between(&previous, &env).status();
@@ -1500,7 +1537,7 @@ impl Run<'_> {
 		let Some(rc) = self.find_rc(&self.work_dir, &cfg)? else {
 			return Err(".envrc not found".to_owned());
 		};
-		if self.allowed(&rc, &cfg) == AllowStatus::Denied {
+		if rc.allowed == AllowStatus::Denied {
 			return Err(format!("{} is blocked. Run `direnv allow` to approve its content", rc.path));
 		}
 		self.host
@@ -1510,7 +1547,7 @@ impl Run<'_> {
 	}
 
 	/// The lines `direnv status` prints for `rc`.
-	fn describe_rc(&self, text: &mut String, label: &str, rc: &Rc, cfg: &Config) {
+	fn describe_rc(&self, text: &mut String, label: &str, rc: &Rc) {
 		let dir = dirname(&rc.path);
 		let zone = shell_time_zone(self.host);
 		let _ = writeln!(text, "{label} RC path {}", rc.path);
@@ -1532,7 +1569,7 @@ impl Run<'_> {
 				);
 			let _ = writeln!(text, "{label} watch: {:?} - {stamp}", relative_to(&dir, &time.path));
 		}
-		let _ = writeln!(text, "{label} RC allowed {}", self.allowed(rc, cfg) as u8);
+		let _ = writeln!(text, "{label} RC allowed {}", rc.allowed as u8);
 		let _ = writeln!(text, "{label} RC allowPath {}", rc.allow_path);
 	}
 
@@ -1544,7 +1581,7 @@ impl Run<'_> {
 		if matches!(args.first().map(String::as_str), Some("-json" | "--json")) {
 			let rc = |rc: &Option<Rc>| {
 				rc.as_ref().map_or(Value::Null, |rc| {
-					serde_json::json!({ "allowed": self.allowed(rc, &cfg) as u8, "path": rc.path })
+					serde_json::json!({ "allowed": rc.allowed as u8, "path": rc.path })
 				})
 			};
 			let status = serde_json::json!({
@@ -1569,11 +1606,11 @@ impl Run<'_> {
 				exact.join(" "),
 			);
 			match &loaded {
-				Some(rc) => self.describe_rc(&mut text, "Loaded", rc, &cfg),
+				Some(rc) => self.describe_rc(&mut text, "Loaded", rc),
 				None => text.push_str("No .envrc or .env loaded\n"),
 			}
 			match &found {
-				Some(rc) => self.describe_rc(&mut text, "Found", rc, &cfg),
+				Some(rc) => self.describe_rc(&mut text, "Found", rc),
 				None => text.push_str("No .envrc or .env found\n"),
 			}
 		}
@@ -1870,10 +1907,19 @@ impl Run<'_> {
 		let target = if target.is_empty() { ".env" } else { target };
 		let path = self.abs(target);
 		let data = self.host.fs().read(&path).map_err(|err| path_error("open", target, &err))?;
+		self.export_dotenv(shell, &path, &data)
+	}
+
+	fn dotenv_snapshot(&mut self) -> Outcome {
+		let snapshot = self.host.source_snapshot.clone().ok_or("no dotenv snapshot for this command")?;
+		self.export_dotenv(Shell::Bash, &snapshot.path, &snapshot.bytes)
+	}
+
+	fn export_dotenv(&mut self, shell: Shell, path: &str, data: &[u8]) -> Outcome {
 		// `$PWD` in a `.env` file is the file's own directory.
-		let dir = dirname(&path);
+		let dir = dirname(path);
 		let lookup = |name: &str| if name == "PWD" { Some(dir.as_str()) } else { self.env.get(name).map(String::as_str) };
-		let vars = dotenv::parse(&String::from_utf8_lossy(&data), &lookup)?;
+		let vars = dotenv::parse(&String::from_utf8_lossy(data), &lookup)?;
 		let changes: Vec<Change<'_>> =
 			vars.iter().map(|(name, value)| (name.as_str(), Some(value.as_str()))).collect();
 		let mut text = shell.export(&changes)?;
@@ -2000,6 +2046,7 @@ impl Run<'_> {
 		let envrc = self.abs(envrc);
 		let envrc_dir = dirname(&envrc);
 		let approved_dir = join(&cfg.allowed_required_dir(), &path_hash(&envrc));
+		let mut times = FileTimes::from_env(&self.env)?;
 		let mut missing: Vec<&str> = Vec::new();
 		for relative in paths {
 			let refusal = if Path::new(relative).is_absolute() {
@@ -2014,13 +2061,21 @@ impl Run<'_> {
 				self.print(&format!("log_error {message};\nexit 1;\n"));
 				return Ok(());
 			}
-			let approved = self
-				.file_hash(&join(&envrc_dir, relative))
-				.is_ok_and(|hash| self.host.fs().metadata(join(&approved_dir, &hash)).is_ok());
+			let path = join(&envrc_dir, relative);
+			let exists = self.watch_path(&mut times, &path)?;
+			let approved = if exists {
+				let hash = self.file_hash(&path)?;
+				let marker = join(&approved_dir, &hash);
+				times.pin(&path, hash);
+				self.watch_path(&mut times, &marker)?
+			} else {
+				false
+			};
 			if !approved {
 				missing.push(relative);
 			}
 		}
+		self.print_watches(shell, &times)?;
 		if missing.is_empty() {
 			return Ok(());
 		}
@@ -2060,39 +2115,7 @@ fn hex(bytes: &[u8]) -> String {
 	text
 }
 
-/// Whether files under `dir` cannot be executed whatever their mode.
-#[cfg(unix)]
-fn mounted_noexec(dir: &Path) -> bool {
-	#[cfg(any(target_os = "linux", target_os = "android"))]
-	{
-		rustix::fs::statvfs(dir)
-			.is_ok_and(|stat| stat.f_flag.contains(rustix::fs::StatVfsMountFlags::NOEXEC))
-	}
-	#[cfg(not(any(target_os = "linux", target_os = "android")))]
-	{
-		let _ = dir;
-		false
-	}
-}
 
-/// The command that runs `script` in a new shell of the engine: an
-/// executable text file without `#!`, which the shell runs itself as bash
-/// does. Where no such file can run (no execute permission to give, a
-/// `noexec` temporary directory), a subshell of the caller reads the script
-/// instead, after dropping the options an `.envrc` must not inherit.
-fn script_command(dir: &Path, script: String) -> io::Result<ShellCommand> {
-	#[cfg(unix)]
-	if !mounted_noexec(dir) {
-		use std::os::unix::fs::PermissionsExt as _;
-
-		let path = dir.join("envrc");
-		std::fs::write(&path, script)?;
-		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
-		return Ok(ShellCommand::new(vec![path.into_os_string()]));
-	}
-	let _ = dir;
-	Ok(ShellCommand::line(format!("{SUBSHELL_RESET}{script}")))
-}
 
 #[cfg(test)]
 mod tests;

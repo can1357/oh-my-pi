@@ -59,9 +59,12 @@ const PHDR: usize = 56;
 /// File offset of the code: after the header and the two program headers.
 const CODE_AT: usize = EHDR + 2 * PHDR;
 
-/// The `struct rusage` the helper writes (step 4).
-const RUSAGE: usize = size_of::<libc::rusage>();
-const _: () = assert!(RUSAGE == 144, "the helper writes the 64-bit kernel rusage");
+/// Bytes of the kernel's 64-bit `struct rusage`, which the helper writes
+/// (step 4). libc's type starts with the same fields; musl appends a
+/// reserved tail.
+const RUSAGE: usize = 144;
+const _: () =
+	assert!(size_of::<libc::rusage>() >= RUSAGE, "libc's rusage starts with the kernel's");
 
 #[cfg(target_arch = "x86_64")]
 std::arch::global_asm!(
@@ -669,9 +672,10 @@ impl Report {
 /// The program's `rusage` the helper reported through `reader` before it
 /// exited; `None` when it ended before the program did.
 pub(super) fn usage(mut reader: File) -> Option<libc::rusage> {
-	let mut raw = [0u8; RUSAGE];
-	reader.read_exact(&mut raw).ok()?;
-	// SAFETY: `raw` holds the kernel's `struct rusage`, plain data of
-	// exactly this size.
+	let mut raw = [0u8; size_of::<libc::rusage>()];
+	reader.read_exact(&mut raw[..RUSAGE]).ok()?;
+	// SAFETY: `raw` starts with the kernel's `struct rusage`, the prefix
+	// libc's type shares; any tail (musl's reserved fields) stays zero. Plain
+	// data.
 	Some(unsafe { raw.as_ptr().cast::<libc::rusage>().read_unaligned() })
 }
