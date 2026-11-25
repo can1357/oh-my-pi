@@ -1190,8 +1190,11 @@ function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
 	if (client.proc.sharedMux || client.config.watchFiles === false) return undefined;
 	client.watchedFiles ??= new WatchedFilesForwarder({
 		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
+		// Changes made by other processes keep the server current but are not use
+		// of it: stamping `lastActivity` here would let any busy workspace pin an
+		// otherwise idle server past `idleTimeoutMs` (issue #20451).
 		send: changes =>
-			sendNotification(
+			writeNotification(
 				client,
 				WATCHED_FILES_METHOD,
 				{ changes },
@@ -2795,7 +2798,8 @@ function sendRequestOnce(
 }
 
 /**
- * Send an LSP notification (no response expected).
+ * Send an LSP notification (no response expected) and count it as activity
+ * for the idle timeout.
  * `signal` bounds the underlying `sink.flush()` — without it a server that
  * stops draining stdin blocks every future write on the client's write queue.
  */
@@ -2805,14 +2809,21 @@ export async function sendNotification(
 	params: unknown,
 	signal?: AbortSignal,
 ): Promise<void> {
+	client.lastActivity = Date.now();
+	await writeNotification(client, method, params, signal);
+}
+
+/**
+ * Write an LSP notification without counting it as activity: for traffic omp
+ * relays rather than initiates, such as forwarded watched-file changes.
+ */
+function writeNotification(client: LspClient, method: string, params: unknown, signal?: AbortSignal): Promise<void> {
 	const notification: LspJsonRpcNotification = {
 		jsonrpc: "2.0",
 		method,
 		params,
 	};
-
-	client.lastActivity = Date.now();
-	await queueWriteMessage(client, notification, signal);
+	return queueWriteMessage(client, notification, signal);
 }
 
 /**
