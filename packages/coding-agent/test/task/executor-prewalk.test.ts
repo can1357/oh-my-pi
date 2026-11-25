@@ -582,6 +582,17 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 		expect(session.getActiveToolNames()).toContain("todo");
 	});
 
+	it("hands a subagent off to the default target under @initial, since a subagent has no planner switch to undo", async () => {
+		stubJudge([PREWALK]);
+		const f = createFixture({ auto: { task: "on" }, autoTarget: "@initial", tools: ["read", "todo", "yield"] });
+		f.settings.setModelRole("smol", `${target.provider}/${target.id}`);
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk?.target.id).toBe(target.id);
+	});
+
 	it("fails open without a native judge credential and asks nothing", async () => {
 		const calls = stubJudge([PREWALK]);
 		const f = createFixture({ auto: { task: "on" }, autoTarget: `${target.provider}/${target.id}`, judge: false });

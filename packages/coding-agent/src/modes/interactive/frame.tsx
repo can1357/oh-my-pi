@@ -208,9 +208,8 @@ export class AppFrame {
 			this.composer.setSlots({});
 			return;
 		}
-		const nerd = () => currentTheme().symbols.preset === "nerd";
 		const placement = computed(() => shapePlacement(composerShape(this.#shape()), this.composer.completing()));
-		const line = createStatusLine({ settings: statusLine.settings, facts: statusLine.facts, placement, nerd });
+		const line = createStatusLine({ settings: statusLine.settings, facts: statusLine.facts, placement });
 		this.composer.setStatus(line.chrome.composerStatus);
 		this.#statusPreview = line.preview;
 		this.#statusPanel.set(line.panel);
@@ -218,7 +217,12 @@ export class AppFrame {
 		const facts = composerFacts({ settings: statusLine.settings, facts: statusLine.facts, click });
 		this.composer.setSlots({
 			context: facts.context,
-			chips: <ComposerChips composer={this.composer} />,
+			chips: (
+				<ComposerChips
+					composer={this.composer}
+					annotate={() => this.shell.native() && this.shell.host?.feature("annotate") === true}
+				/>
+			),
 			// The model chip. With `statusLine.compactThinkingLevel` the effort ring stands in for its icon
 			// (it keeps its own tooltip and click); otherwise the level gets a chip of its own.
 			model: (

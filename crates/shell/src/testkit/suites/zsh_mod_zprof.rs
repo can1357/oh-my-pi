@@ -5,8 +5,6 @@
 //! numbers masked and the lines compared as a multiset. Expected output
 //! comes from `/bin/zsh -f -c` 5.9 piped through the same masking.
 
-use regex::Regex;
-
 use crate::{
 	bash::{ModeId, Script, ShellInit},
 	testkit::{FakeHost, Fault, Rig, fault::skeleton_init},
@@ -26,11 +24,96 @@ fn zsh(src: &str) -> (String, String, i32) {
 
 /// The listing with times masked and spaces squeezed.
 fn mask(s: &str) -> String {
-	let times = Regex::new(r"[0-9]+\.[0-9]+|nan|-?inf").unwrap();
-	let spaces = Regex::new(r" +").unwrap();
-	spaces
-		.replace_all(&times.replace_all(s, "#"), " ")
-		.into_owned()
+	let mut output = String::with_capacity(s.len());
+	let mut remaining = s.as_bytes();
+	let mut copied = 0;
+	while let Some(at) = remaining
+		.iter()
+		.position(|&byte| matches!(byte, b' ' | b'0'..=b'9' | b'n' | b'i' | b'-'))
+	{
+		let start = s.len() - remaining.len() + at;
+		let tail = &remaining[at..];
+		let (len, replacement) = match tail[0] {
+			b' ' => (tail.iter().take_while(|&&b| b == b' ').count(), " "),
+			b'n' if tail.starts_with(b"nan") => (3, "#"),
+			b'i' if tail.starts_with(b"inf") => (3, "#"),
+			b'-' if tail.starts_with(b"-inf") => (4, "#"),
+			b'0'..=b'9' => {
+				let integer = tail.iter().take_while(|b| b.is_ascii_digit()).count();
+				let fraction = if tail.get(integer) == Some(&b'.') {
+					tail[integer + 1..]
+						.iter()
+						.take_while(|b| b.is_ascii_digit())
+						.count()
+				} else {
+					0
+				};
+				if fraction == 0 {
+					remaining = &tail[integer..];
+					continue;
+				}
+				(integer + 1 + fraction, "#")
+			},
+			_ => {
+				remaining = &tail[1..];
+				continue;
+			},
+		};
+		output.push_str(&s[copied..start]);
+		output.push_str(replacement);
+		copied = start + len;
+		remaining = &tail[len..];
+	}
+	output.push_str(&s[copied..]);
+	output
+}
+
+/// Mask the entry number at the start of a line and return the remaining text.
+fn mask_entry_number<'a>(line: &'a str, output: &mut String) -> &'a str {
+	let number = line.strip_prefix(' ').unwrap_or(line);
+	let digits = number.bytes().take_while(u8::is_ascii_digit).count();
+	if digits > 0
+		&& let Some(tail) = number[digits..].strip_prefix(')')
+	{
+		output.push_str("N)");
+		return tail;
+	}
+	line
+}
+
+/// Mask a leading entry number and every bracketed index.
+fn mask_all_indices(line: &str) -> String {
+	let mut output = String::with_capacity(line.len());
+	let rest = mask_entry_number(line, &mut output);
+	let mut copied = 0;
+	for (start, _) in rest.match_indices('[') {
+		let index = &rest[start + 1..];
+		let digits = index.bytes().take_while(u8::is_ascii_digit).count();
+		if digits > 0 && index.as_bytes().get(digits) == Some(&b']') {
+			output.push_str(&rest[copied..start]);
+			output.push_str("[N]");
+			copied = start + digits + 2;
+		}
+	}
+	output.push_str(&rest[copied..]);
+	output
+}
+
+/// Mask a leading entry number and the trailing bracketed index.
+fn mask_trailing_index(line: &str) -> String {
+	let mut output = String::with_capacity(line.len());
+	let rest = mask_entry_number(line, &mut output);
+	if let Some(head) = rest.strip_suffix(']')
+		&& let Some((prefix, index)) = head.rsplit_once('[')
+		&& !index.is_empty()
+		&& index.bytes().all(|b| b.is_ascii_digit())
+	{
+		output.push_str(prefix);
+		output.push_str("[N]");
+	} else {
+		output.push_str(rest);
+	}
+	output
 }
 
 const RULE: &str =
@@ -74,15 +157,7 @@ fn zsh_mod_zprof_lists_callers_and_callees() {
 	let (out, err, st) = zsh("zmodload zsh/zprof; f() { g; g }; g() { :; }; f; f; zprof");
 	assert_eq!(err, "");
 	assert_eq!(st, 0);
-	let num = Regex::new(r"^ ?[0-9]+\)").unwrap();
-	let idx = Regex::new(r"\[[0-9]+\]").unwrap();
-	let mut lines: Vec<String> = mask(&out)
-		.lines()
-		.map(|l| {
-			idx.replace_all(&num.replace_all(l, "N)"), "[N]")
-				.into_owned()
-		})
-		.collect();
+	let mut lines: Vec<String> = mask(&out).lines().map(mask_all_indices).collect();
 	lines.sort();
 	let mut want: Vec<String> = [
 		"",
@@ -110,15 +185,7 @@ fn zsh_mod_zprof_lists_callers_and_callees() {
 /// The listing masked with entry numbers masked too, as a sorted multiset
 /// of lines.
 fn masked_lines(out: &str) -> Vec<String> {
-	let num = Regex::new(r"^ ?[0-9]+\)").unwrap();
-	let idx = Regex::new(r"\[[0-9]+\]$").unwrap();
-	let mut lines: Vec<String> = mask(out)
-		.lines()
-		.map(|l| {
-			idx.replace_all(&num.replace_all(l, "N)"), "[N]")
-				.into_owned()
-		})
-		.collect();
+	let mut lines: Vec<String> = mask(out).lines().map(mask_trailing_index).collect();
 	lines.sort();
 	lines
 }

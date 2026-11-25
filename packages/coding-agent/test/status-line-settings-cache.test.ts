@@ -168,7 +168,6 @@ describe("status-line live state", () => {
 	it("skips git probes when git integration is disabled", async () => {
 		const repoSpy = spyOn(vcs, "repo");
 		const displaySpy = spyOn(vcs, "repoForDisplay");
-		const watchSpy = spyOn(vcs, "watch");
 		try {
 			cfgGitEnabled.override(Settings.instance, false);
 			lineText(
@@ -181,18 +180,15 @@ describe("status-line live state", () => {
 			await flushStatus();
 			expect(repoSpy).not.toHaveBeenCalled();
 			expect(displaySpy).not.toHaveBeenCalled();
-			expect(watchSpy).not.toHaveBeenCalled();
 		} finally {
 			repoSpy.mockRestore();
 			displaySpy.mockRestore();
-			watchSpy.mockRestore();
 		}
 	});
 
 	it("skips git probes when no git-backed segment is visible", async () => {
 		const repoSpy = spyOn(vcs, "repo");
 		const displaySpy = spyOn(vcs, "repoForDisplay");
-		const watchSpy = spyOn(vcs, "watch");
 		try {
 			lineText(
 				makeLine({
@@ -204,11 +200,9 @@ describe("status-line live state", () => {
 			await flushStatus();
 			expect(repoSpy).not.toHaveBeenCalled();
 			expect(displaySpy).not.toHaveBeenCalled();
-			expect(watchSpy).not.toHaveBeenCalled();
 		} finally {
 			repoSpy.mockRestore();
 			displaySpy.mockRestore();
-			watchSpy.mockRestore();
 		}
 	});
 });

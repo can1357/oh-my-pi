@@ -2,14 +2,14 @@
  * Terminal looks of transcript notices.
  *
  * - `row` `omp.notice.*`: a line notice is a blank row, then `Warning: …` /
- *   `Error: …` one cell in, wrapped, in the tone's color; a notice with its
+ *   `Error: …` with the standard inset, wrapped, in the tone's color; a notice with its
  *   own terminal rows (`term.alt`) draws those.
  * - `col` `omp.status-block`: each status row's parts joined by spaces,
  *   wrapped under the row's indent.
- * - `toast` / `col` `omp.toast.status`: a blank row, then the message one cell in (the `col` is a
+ * - `toast` / `col` `omp.toast.status`: a blank row, then the inset message (the `col` is a
  *   status kept out of native toasts).
  * - `row` `omp.recap`: a blank row, then a dim italic `※ recap: …`.
- * - `text` `omp.tool.elided`: the dim italic note one cell in.
+ * - `text` `omp.tool.elided`: the dim italic note with the standard inset.
  * - `card` / `section` / `checklist` `omp.notice.*` boxed notices: a blank
  *   row (unless `leadingSpace` is off), then a box one row and one cell in on
  *   every side, filled inverse in the severity color (or on a background):
@@ -19,6 +19,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { stack } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { padTo, replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { terminalPaddingX } from "../terminal-padding";
 import type { NoticeBox, StatusRow } from "../../transcript/messages/notices";
 import { fillRow, paddedText, propsOf, termOf } from "./fill";
 
@@ -51,7 +52,7 @@ export function statusRows(cx: PaintContext, row: Pick<StatusRow, "parts" | "ind
 	);
 	if (parts.length === 0) return [];
 	// The indent pads both sides.
-	const indent = " ".repeat(row.indent ?? 1);
+	const indent = " ".repeat(terminalPaddingX(row.indent));
 	return wrap(replaceTabs(parts.join(" ")), Math.max(1, cx.width - 2 * indent.length)).map(line => indent + line);
 }
 
