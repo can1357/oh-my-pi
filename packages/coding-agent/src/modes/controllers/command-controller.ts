@@ -1794,7 +1794,10 @@ export class CommandController {
 			this.ctx.showWorking("maintenance", { label: `Creating worktree on ${branchName}…`, startedAt: Date.now() });
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
+				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, {
+					...options,
+					session: this.ctx.sessionManager.getSessionId(),
+				});
 			} catch (err) {
 				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
