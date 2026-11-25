@@ -850,15 +850,32 @@ async function listTargets(
 	details.browser = kind.kind;
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const listSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	// The step in flight when the deadline fires. Kept current at every await so a
+	// timeout names the backend it was driving and the phase that stalled — relay
+	// readiness or acquisition, CDP/Tern connection, target listing, or the release
+	// that follows — instead of only the tool the caller invoked. `endpoint` is the
+	// address that phase was talking to, with any credentials, query or fragment
+	// stripped so an error never leaks them.
+	let phase = "resolving the browser backend";
+	let endpoint: string | undefined;
 	try {
 		if (kind.kind === "connected") {
 			const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
+			endpoint = nonsecretEndpoint(cdpUrl);
+			phase = "connecting to the CDP endpoint and listing its /json pages";
 			const targets = await untilAborted(listSignal, () => listCdpTargets(cdpUrl, listSignal));
 			details.value = targets;
 			return toolResult(details)
 				.text(describeCdpTargets(targets, `Pages at ${cdpUrl}`))
 				.done();
 		}
+if (kind.kind === "relay") {
+	endpoint = nonsecretEndpoint(normalizeConnectedCdpUrl(kind.cdpUrl));
+	phase = "probing the relay and acquiring its backend (readiness probe of /json/version and the extension handshake)";
+} else {
+	endpoint = kind.socketPath;
+	phase = "connecting to the Tern pane";
+}
 		const browser = await untilAborted(listSignal, () =>
 			acquireBrowser(kind, { cwd: session.cwd, signal: listSignal }),
 		);
@@ -867,9 +884,11 @@ async function listTargets(
 			let targets: TernTarget[] | CdpTarget[];
 			let text: string;
 			if (kind.kind === "relay") {
+				phase = "listing Chrome pages from the relay's /json endpoint";
 				targets = await untilAborted(listSignal, () => listCdpTargets(kind.cdpUrl, listSignal));
 				text = describeCdpTargets(targets, "Chrome pages via the relay");
 			} else if ("tern" in browser) {
+				phase = "listing the Tern window's browser blocks";
 				const blocks = await listTernBlocks(browser.tern, { timeoutMs, signal: listSignal });
 				const taken = ternBlocksTaken();
 				targets = ternTargets(blocks, taken);
@@ -880,11 +899,19 @@ async function listTargets(
 			details.value = targets;
 			return toolResult(details).text(text).done();
 		} finally {
+			phase = "releasing the browser after listing";
 			await releaseBrowser(browser, { kill: false });
 		}
 	} catch (error) {
 		if (signal?.aborted) throw error instanceof ToolAbortError ? error : new ToolAbortError();
-		if (timeoutSignal.aborted) throw new ToolError(`Listing browser targets timed out after ${timeoutMs}ms`);
+if (timeoutSignal.aborted) {
+	// An acquisition error that already named its cause and remedy (an unreachable
+	// relay, a relay whose extension never connected, an outdated relay or
+	// extension) is what the caller needs, so a deadline that merely raced it must
+	// not overwrite it with a bare timeout.
+	if (error instanceof ToolError && !(error instanceof ToolAbortError)) throw error;
+	throw new ToolError(targetsTimeoutError(kind, phase, endpoint, timeoutMs));
+}
 		throw error;
 	}
 }
@@ -1042,6 +1069,42 @@ function ternNotes(tab: TernTabSession, requested: { width: number; height: numb
 		);
 	}
 	return notes;
+}
+
+/**
+ * The deadline error `targets` raises when the phase in flight is what stalled.
+ * It names the backend, the nonsecret endpoint and the phase, so a caller can
+ * tell relay readiness, connection, listing and cleanup apart instead of
+ * searching unrelated browser tools for a remedy. The wording deliberately does
+ * not read a stopped socket as a missing browser or an unloaded extension.
+ */
+function targetsTimeoutError(
+	kind: BrowserKind,
+	phase: string,
+	endpoint: string | undefined,
+	timeoutMs: number,
+): string {
+	const where = endpoint === undefined ? "" : ` at ${endpoint}`;
+	return `Listing browser targets timed out after ${timeoutMs}ms (backend: ${kind.kind}) while ${phase}${where}. The endpoint stopped answering before the deadline, which on its own does not mean the browser is missing or its extension is unloaded; retry, or raise the timeout for a slow relay.`;
+}
+
+/**
+ * A URL safe to print in an error: credentials, query and fragment removed. The
+ * discovery endpoints omp talks to carry none of those, but a caller-supplied
+ * `browser.relayUrl` or `browser.cdpUrl` could, and an error must never leak them.
+ */
+function nonsecretEndpoint(url: string): string {
+	try {
+		const parsed = new URL(url);
+		parsed.username = "";
+		parsed.password = "";
+		parsed.search = "";
+		parsed.hash = "";
+		return parsed.toString().replace(/\/$/, "");
+	} catch {
+		// A unix socket path (Tern) is not a URL and carries no credentials.
+		return url;
+	}
 }
 
 function describeKind(kind: BrowserKind): string {

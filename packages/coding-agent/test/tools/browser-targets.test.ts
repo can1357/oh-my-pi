@@ -247,3 +247,70 @@ describe("browser targets with the relay", () => {
 		);
 	}, 20_000);
 });
+describe("browser targets timeout diagnostics", () => {
+	it("keeps the relay and the stalled readiness/acquisition phase when the relay never answers its probe", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		// Accepts the connection and never answers: a socket that stopped answering,
+		// which is not the same evidence as a missing browser.
+		const server = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+		try {
+			const app = `http://127.0.0.1:${server.port}`;
+			const started = Date.now();
+			const failure = await invoke(session({ "browser.relayUrl": app }), {
+				action: "targets",
+				timeout: 1,
+				app: "relay",
+			}).catch((error: unknown) => error);
+			const elapsed = Date.now() - started;
+			const message = String(failure);
+			expect(message).toMatch(/timed out after 1000ms/);
+			expect(message).toMatch(/relay/i);
+			expect(message).toMatch(/(probe|acquir|connect|\/json)/i);
+			expect(message).toContain(app);
+			expect(message).toContain("does not mean the browser is missing");
+			// The reported deadline is the requested one, not an internal probe timeout.
+			expect(elapsed).toBeLessThan(4_000);
+		} finally {
+			server.stop(true);
+		}
+	}, 20_000);
+
+	it("keeps the relay's own unreachable remedy instead of replacing it with a timeout", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		const app = `http://127.0.0.1:${await findFreeCdpPort()}`;
+		const failure = await invoke(session({ "browser.relayUrl": app }), {
+			action: "targets",
+			timeout: 5,
+			app: "relay",
+		}).catch((error: unknown) => error);
+		const message = String(failure);
+		expect(message).toContain("not reachable");
+		expect(message).toContain("browser-relay");
+		expect(message).not.toMatch(/timed out after/);
+	}, 20_000);
+
+	it("names the target-listing phase when an endpoint answers /json/version but stalls its /json list", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		// The relay lists its pages through this same /json call.
+		const server = Bun.serve({
+			port: 0,
+			fetch: request =>
+				new URL(request.url).pathname === "/json" ? new Promise<Response>(() => {}) : Response.json({}),
+		});
+		try {
+			const app = `http://127.0.0.1:${server.port}`;
+			const started = Date.now();
+			const failure = await invoke(session(), { action: "targets", timeout: 1, app }).catch(
+				(error: unknown) => error,
+			);
+			const elapsed = Date.now() - started;
+			const message = String(failure);
+			expect(message).toMatch(/timed out after 1000ms/);
+			expect(message).toContain("listing its /json pages");
+			expect(message).toContain(app);
+			expect(elapsed).toBeLessThan(4_000);
+		} finally {
+			server.stop(true);
+		}
+	}, 20_000);
+});
