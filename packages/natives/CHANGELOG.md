@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PsHost`, a persistent PowerShell host sidecar with a shared runspace, streamed output, cancellation, and graceful process-tree shutdown. The sidecar never inherits `PSModulePath` from its parent process — never the bash-tainted value a parent Git Bash/WSL/MSYS shell left behind — resetting it instead to the true OS-persisted value: on Windows, the Machine and User `PSModulePath` read straight from the registry (the same two sources Windows merges for any normally spawned process); elsewhere, or when neither registry value is set, the variable is left unset so pwsh rebuilds its own default module search path at startup. The host runs on PowerShell 5.1+, so Windows PowerShell (`powershell.exe`) works as `powershell.shellPath`, not only `pwsh` ([#13233](https://github.com/can1357/oh-my-pi/pull/13233) by [@HeyItsGilbert](https://github.com/HeyItsGilbert))
+
 ### Fixed
 
 - Fixed open PTY sessions and `reapChild()` waits each holding a native blocking-pool thread, which stalled new PTY starts and other native blocking work once 8 terminals were open on Windows (512 elsewhere) ([#20283](https://github.com/can1357/oh-my-pi/pull/20283) by [@iliaal](https://github.com/iliaal))
