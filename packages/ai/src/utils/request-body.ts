@@ -1,3 +1,5 @@
+import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
+
 /**
  * Bytes of a request body as the server reads them: the `gzip`/`zstd`
  * `Content-Encoding` applied by request compression is undone, any other
@@ -18,6 +20,8 @@ export function decodeRequestBodyBytes(bytes: Uint8Array, contentEncoding: strin
  * Read a request body of at most `maxBytes`, rejecting on the declared
  * `Content-Length` before reading and cancelling the stream once the limit is
  * crossed. `tooLarge` builds the caller's own error.
+ *
+ * @internal Shared by the endpoint servers; not part of the SDK surface.
  */
 export async function readBoundedRequestBody(
 	req: Request,
@@ -29,28 +33,10 @@ export async function readBoundedRequestBody(
 		const declared = Number(contentLength);
 		if (Number.isFinite(declared) && declared > maxBytes) throw tooLarge();
 	}
-	const reader = req.body?.getReader();
-	if (!reader) return new Uint8Array();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		total += value.byteLength;
-		if (total > maxBytes) {
-			await reader.cancel();
-			throw tooLarge();
-		}
-		chunks.push(value);
-	}
-	if (chunks.length === 1) return chunks[0]!;
-	const bytes = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return bytes;
+	const body = await readBoundedBody(req, maxBytes);
+	if (!body) return new Uint8Array();
+	if (body.truncated) throw tooLarge();
+	return body.bytes;
 }
 
 /**
