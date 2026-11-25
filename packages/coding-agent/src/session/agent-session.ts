@@ -15070,32 +15070,45 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Create a branch from a specific entry.
-	 * Emits before_branch/branch session events to hooks.
+	 * Move the live session onto a new session file holding the conversation before a user
+	 * request (a prompt, or a user-invoked skill/collab prompt); the current file stays on disk
+	 * unchanged. Emits before_branch/branch session events to hooks. The new file carries the
+	 * artifact spills too, since kept tool results may cite `local://N.log`.
 	 *
-	 * @param entryId ID of the entry to branch from
+	 * @param entryId ID of the user request to branch before
+	 * @param options.requireIdle Refuse with {@link SessionBusyError} unless the session is idle
 	 * @returns Object with:
-	 *   - selectedText: The text of the selected user message (for editor pre-fill)
-	 *   - selectedImages: Image attachments of the selected user message (for editor draft restore)
+	 *   - selectedText: The request's editable text (for editor pre-fill)
+	 *   - selectedImages: Image attachments of the request (for editor draft restore)
 	 *   - cancelled: True if a hook cancelled the branch
+	 * @throws Error when `entryId` is not a user request
 	 */
-	async branch(entryId: string): Promise<{
+	async branch(
+		entryId: string,
+		options?: { requireIdle?: boolean },
+	): Promise<{
 		selectedText: string;
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
-		const queued = this.#enterSessionTransition(() => this.branch(entryId));
+		const queued = this.#enterSessionTransition(() => this.branch(entryId, options));
 		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		const selectedEntry = this.sessionManager.getEntry(entryId);
-
-		if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "user") {
+		if (!selectedEntry || !isTranscriptEntry(selectedEntry) || !isUserRequestEntry(selectedEntry)) {
 			throw new Error("Invalid entry ID for branching");
 		}
 
-		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
-		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
-		const completed = await this.#branchIntoNewSession("branch", entryId, selectedEntry.parentId);
+		const selectedText = userTurnDraft(selectedEntry) ?? "";
+		const request = transcriptEntryMessage(selectedEntry);
+		const selectedImages =
+			request && (request.role === "user" || request.role === "custom")
+				? this.#extractUserMessageImages(request.content)
+				: [];
+		const completed = await this.#branchIntoNewSession("branch", entryId, selectedEntry.parentId, {
+			copyArtifacts: true,
+			requireIdleFor: options?.requireIdle ? "branch the session" : undefined,
+		});
 		return { selectedText, selectedImages, cancelled: !completed };
 	}
 

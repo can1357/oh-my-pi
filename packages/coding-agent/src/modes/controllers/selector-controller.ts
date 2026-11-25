@@ -1434,16 +1434,15 @@ export class SelectorController {
 	}
 
 	/**
-	 * Complete an esc-esc rewind in place via `navigateTree`: the session tree
-	 * keeps the old path as a sibling branch instead of forking a child
-	 * session. A user-request target (plain prompt, user-invoked skill/collab
-	 * prompt) rewinds PAST itself (leaf moves to its parent) and its draft
-	 * replaces the editor text, so it is a real move even when it is the
-	 * current leaf; every other target lands the leaf on the entry. `done`
-	 * closes the fullscreen selector after the transcript is rebuilt so the
-	 * alternate screen never flashes a stale transcript. Edit and Retry stop the
-	 * old run and rebuild from the surviving branch. Retry submits instead of leaving the prompt in
-	 * the editor; otherwise the status toast offers Undo ({@link #undoRewind}).
+	 * Complete an esc-esc rewind by branching: the session moves onto a new file holding the
+	 * conversation up to the target, and the file it leaves stays on disk unchanged. A
+	 * user-request target (plain prompt, user-invoked skill/collab prompt) branches before
+	 * itself and its draft replaces the editor text, so it is a real move even when it is the
+	 * current leaf; every other target branches through the entry (`AgentSession.fork`). Work
+	 * still running in the abandoned conversation stops first. `done` closes the fullscreen
+	 * selector after the transcript is rebuilt so the alternate screen never flashes a stale
+	 * transcript. Retry submits instead of leaving the prompt in the editor; otherwise the
+	 * status toast offers Undo ({@link #undoRewind}).
 	 */
 	async #rewindFromTranscript(
 		target: string | SubmittedUserInput,
@@ -1452,7 +1451,7 @@ export class SelectorController {
 	): Promise<void> {
 		const draft = { text: this.ctx.composer.text(), images: [...this.ctx.composer.pendingImages] };
 		try {
-			if (turn) {
+			if (turn || this.ctx.session.isBusyForSnapshot) {
 				if (this.ctx.loopModeEnabled) this.ctx.pauseLoop();
 				this.ctx.cancelGoalContinuation();
 				this.ctx.cancelPendingSubmission();
@@ -1499,10 +1498,17 @@ export class SelectorController {
 			const at = branch.findIndex(e => e.id === entryId);
 			const dropped =
 				at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
-			const result = await this.ctx.session.navigateTree(entryId, { summarize: false, requireIdle: !!turn });
+			// Undo resumes the file the rewind leaves; an unpersisted session has none to return to.
+			const sourceFile = this.ctx.sessionManager.isSessionOnDisk()
+				? this.ctx.sessionManager.getSessionFile()
+				: undefined;
+			await this.ctx.prepareSessionSwitch();
+			const result = isUserTarget
+				? await this.ctx.session.branch(entryId, { requireIdle: true })
+				: { cancelled: !(await this.ctx.session.fork(entryId)) };
 			if (result.cancelled) {
 				done();
-				this.ctx.showStatus("Navigation cancelled");
+				this.ctx.showStatus("Rewind cancelled");
 				return;
 			}
 			const fastRewind =
@@ -1515,24 +1521,29 @@ export class SelectorController {
 				if (!fastRewind) await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 			}
-			if (result.editorText !== undefined && (isUserTarget || !this.ctx.composer.text().trim())) {
-				this.ctx.composer.setDraft(result.editorText, result.editorImages);
-				if (turn === "retry" && isUserTarget) this.ctx.composer.submit();
+			this.ctx.statusLine.refresh();
+			if ("selectedText" in result) {
+				this.ctx.composer.setDraft(result.selectedText, result.selectedImages);
+				if (turn === "retry") this.ctx.composer.submit();
 			}
 			done();
 			if (turn === "retry") {
 				this.ctx.showStatus("Retrying the turn");
 				return;
 			}
+			const rewound =
+				dropped > 0 ? `Rewound ${dropped} turn${dropped === 1 ? "" : "s"}` : "Rewound to selected point";
 			this.ctx.showStatus(
-				dropped > 0 ? `Rewound ${dropped} turn${dropped === 1 ? "" : "s"}` : "Rewound to selected point",
-				{
-					action: {
-						act: "undo",
-						label: "Undo",
-						run: () => void this.#undoRewind(realLeafId, isUserTarget ? draft : undefined),
-					},
-				},
+				`${rewound} in a new session`,
+				sourceFile
+					? {
+							action: {
+								act: "undo",
+								label: "Undo",
+								run: () => void this.#undoRewind(sourceFile, isUserTarget ? draft : undefined),
+							},
+						}
+					: undefined,
 			);
 		} catch (error) {
 			done();
@@ -1548,22 +1559,12 @@ export class SelectorController {
 	}
 
 	/**
-	 * Undo of a transcript rewind: the leaf goes back to `leafId`, where it was (the rewind kept that path as a
-	 * branch), and `draft`, what the editor held before the rewind put a prompt there, comes back.
+	 * Undo of a transcript rewind: resumes `sessionFile`, the session the rewind branched from (left unchanged
+	 * on disk), and brings back `draft`, what the editor held before the rewind put a prompt there.
 	 */
-	async #undoRewind(
-		leafId: string | null,
-		draft: { text: string; images: ImageContent[] } | undefined,
-	): Promise<void> {
-		if (!leafId) return;
+	async #undoRewind(sessionFile: string, draft: { text: string; images: ImageContent[] } | undefined): Promise<void> {
 		try {
-			const result = await this.ctx.session.navigateTree(leafId, { summarize: false });
-			if (result.cancelled) {
-				this.ctx.showStatus("Navigation cancelled");
-				return;
-			}
-			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-			await this.ctx.reloadTodos();
+			if (!(await this.handleResumeSession(sessionFile))) return;
 			if (draft) this.ctx.composer.setDraft(draft.text, draft.images);
 			this.ctx.showStatus("Rewind undone");
 		} catch (error) {
@@ -1573,9 +1574,9 @@ export class SelectorController {
 
 	/**
 	 * A transcript turn's hold-menu action on `message`, found on the current branch by role and timestamp:
-	 * `rewind` opens the rewind selector on it; `edit` rewinds past the turn's prompt and puts it in the editor,
-	 * as Esc Esc does; `retry` rewinds past the prompt and sends it again; `fork` moves onto a new session
-	 * holding the conversation up to the message, the old one kept on disk.
+	 * `rewind` opens the rewind selector on it; `edit` branches a new session before the turn's prompt and puts
+	 * it in the editor, as Esc Esc does; `retry` branches the same way and sends the prompt again; `fork` moves
+	 * onto a new session holding the conversation up to the message. Each keeps the old session on disk.
 	 */
 	async runTurnAction(turn: TurnAct, message: TurnMessage, pending?: SubmittedUserInput): Promise<void> {
 		if (turn === "retry" && (this.ctx.composer.text().trim() || this.ctx.composer.pendingImages.length > 0)) {
