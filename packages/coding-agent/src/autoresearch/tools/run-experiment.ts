@@ -5,7 +5,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
 import { formatBytes, procmgr } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
-import { executeBash } from "../../exec/bash-executor";
+import { executeBash, sessionShellEnv } from "../../exec/bash-executor";
 import type { ToolDefinition } from "../../extensibility/extensions";
 
 import {
@@ -131,6 +131,10 @@ export function createRunExperimentTool(
 				execution = await executeProcess({
 					command: await resolveHarnessExecLine(),
 					cwd: ctx.cwd,
+					env: sessionShellEnv({
+						id: ctx.sessionManager.getSessionId(),
+						file: ctx.sessionManager.getSessionFile(),
+					}),
 					logPath: benchmarkLogPath,
 					timeoutMs,
 					signal,
@@ -260,6 +264,8 @@ async function resolveHarnessExecLine(): Promise<string> {
 async function executeProcess(opts: {
 	command: string;
 	cwd: string;
+	/** Session identity for the command ({@link sessionShellEnv}). */
+	env: Record<string, string>;
 	logPath: string;
 	timeoutMs: number;
 	signal?: AbortSignal;
@@ -302,6 +308,7 @@ async function executeProcess(opts: {
 	try {
 		const result = await executeBash(opts.command, {
 			cwd: opts.cwd,
+			env: opts.env,
 			sessionKey: `autoresearch:${opts.cwd}`,
 			timeout: opts.timeoutMs > 0 ? opts.timeoutMs : 2_147_000_000,
 			signal: opts.signal,

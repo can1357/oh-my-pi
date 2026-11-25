@@ -80,7 +80,10 @@ describe("/shake dispatch (TUI)", () => {
 	});
 });
 describe("CommandController /shake", () => {
-	it("reports thinking-only drops and rebuilds the transcript", async () => {
+	it.each([
+		{ thinkingBlocksDropped: 2, interruptedThinkingNotesDropped: 0, description: "2 thinking blocks" },
+		{ thinkingBlocksDropped: 0, interruptedThinkingNotesDropped: 1, description: "1 interrupted-thinking note" },
+	])("reports $description and rebuilds the transcript", async ({ description, ...counts }) => {
 		const rebuildChatFromMessages = vi.fn();
 		const refresh = vi.fn();
 		const replayHistory = vi.fn();
@@ -91,7 +94,7 @@ describe("CommandController /shake", () => {
 					mode: "thinking" as const,
 					toolResultsDropped: 0,
 					blocksDropped: 0,
-					thinkingBlocksDropped: 2,
+					...counts,
 					tokensFreed: 0,
 				})),
 			},
@@ -107,7 +110,7 @@ describe("CommandController /shake", () => {
 		expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
 		expect(refresh).toHaveBeenCalledTimes(1);
 		expect(replayHistory).toHaveBeenCalledTimes(1);
-		expect(showStatus).toHaveBeenCalledWith("Dropped 2 thinking blocks from this session.");
+		expect(showStatus).toHaveBeenCalledWith(`Dropped ${description} from this session.`);
 	});
 
 	it("reports kept thinking without rebuilding the transcript", async () => {

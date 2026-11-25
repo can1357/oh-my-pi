@@ -1,4 +1,4 @@
-import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { errorMessage, isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { PromptParams, SetModelParams } from "../../../coding-agent/src/modes/rpc/wire/rpc-wire.generated";
 import {
 	type PanelSettings,
@@ -97,10 +97,6 @@ function recurrence(schedule: Schedule | undefined): string | undefined {
 async function readShortcuts(): Promise<Shortcut[]> {
 	const { [SHORTCUTS_KEY]: shortcuts = [] }: Record<string, Shortcut[]> = await chrome.storage.local.get(SHORTCUTS_KEY);
 	return shortcuts;
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 type ScheduledCommand = (({ type: "prompt" } & PromptParams) | ({ type: "set_model" } & SetModelParams)) & {

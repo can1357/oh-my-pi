@@ -28,7 +28,7 @@ export interface ModelHubRegistry extends ModelBrowserRegistry {
 		  }
 		| undefined;
 	find(provider: string, id: string): Model | undefined;
-	refresh(strategy: "online"): Promise<void>;
+	refreshIfStale(): Promise<boolean>;
 	refreshProvider(
 		provider: string,
 		strategy: "online",

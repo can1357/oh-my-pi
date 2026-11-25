@@ -337,16 +337,10 @@ export class AskDialogModel {
 		if (state.noteRowKey !== undefined && state.noteRowKey !== rowKey) clearNote(state);
 	}
 
-	submitOrOpenUnanswered(): void {
-		const unanswered = this.states.findIndex(state => !isAnswered(state));
-		if (unanswered < 0 || unanswered === this.current) this.finishSubmit();
-		else this.openAt(unanswered);
-	}
-
 	advance(): void {
 		const current = this.current;
 		if (current + 1 < this.questions.length) this.openAt(current + 1);
-		else this.submitOrOpenUnanswered();
+		else this.finishSubmit();
 	}
 
 	/** Enter (`enter`) or a multi-select Space on a row. */
@@ -453,7 +447,7 @@ export class AskDialogModel {
 		if (act === "cancel") return this.finishCancel();
 		if (act === "submit") {
 			this.resetCountdown();
-			this.submitOrOpenUnanswered();
+			this.finishSubmit();
 		} else if (act === "note") this.#noteFromPointer(keypath);
 		else {
 			const open = /^open:(\d+)$/.exec(act);
