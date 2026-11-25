@@ -8,10 +8,14 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
+	AskRequestedEvent,
+	AskResolvedEvent,
+	ExtensionAskAnswer,
 	ExtensionFormDialogResult,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { PendingInteractions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/pending-interactions";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, recoverAskHtml } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
@@ -844,5 +848,132 @@ describe("AskTool option note images", () => {
 
 			expect(result.content.slice(1)).toEqual([image]);
 		});
+	});
+});
+
+describe("AskTool answered by an extension", () => {
+	type Channel = NonNullable<AgentToolContext["extensionAsk"]>;
+	const channel = (answerOnOpen?: ExtensionAskAnswer) => {
+		const pending = new PendingInteractions();
+		const requested: AskRequestedEvent[] = [];
+		const resolved: AskResolvedEvent[] = [];
+		const extensionAsk: Channel = {
+			async open(event, accept) {
+				const prompt = pending.openAsk(event, accept);
+				requested.push(event);
+				if (answerOnOpen !== undefined) pending.resolveAsk(event.askId, answerOnOpen);
+				return prompt;
+			},
+			async resolved(event) {
+				resolved.push(event);
+			},
+		};
+		return { pending, requested, resolved, extensionAsk };
+	};
+	const withChannel = (context: AgentToolContext, extensionAsk: Channel, notify = vi.fn()): AgentToolContext => {
+		context.extensionAsk = extensionAsk;
+		(context.ui as { notify?: unknown }).notify = notify;
+		return context;
+	};
+
+	it("reports the form's fields and closes the open dialog when the extension answers first", async () => {
+		const ext = channel();
+		const opened = Promise.withResolvers<AbortSignal | undefined>();
+		const select = vi.fn<Select>(async (_title, _options, dialogOptions) => {
+			opened.resolve(dialogOptions?.signal);
+			await new Promise<void>(resolve => dialogOptions?.signal?.addEventListener("abort", () => resolve()));
+			return undefined;
+		});
+		const notify = vi.fn();
+		const outcome = new AskTool(createSession()).execute(
+			"call-ext-ask",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			withChannel(createContext({ select }), ext.extensionAsk, notify),
+		);
+		const signal = await opened.promise;
+
+		expect(ext.requested[0]?.fields).toEqual([
+			{
+				name: "store",
+				kind: "choice",
+				question: "Session store",
+				required: false,
+				multi: false,
+				other: true,
+				options: [
+					{ value: "sqlite", label: "SQLite", disabled: false },
+					{ value: "redis", label: "Redis", disabled: false },
+				],
+			},
+			{ name: "ttl", kind: "text", question: "Lifetime (days)", required: false, type: "number", value: "30" },
+		]);
+		// Data the form cannot take is refused and leaves the form open.
+		expect(ext.pending.resolveAsk("call-ext-ask", { data: { missing: "x" } })).toBe(false);
+		expect(ext.pending.resolveAsk("call-ext-ask", { data: { ttl: "soon" } })).toBe(false);
+		expect(ext.pending.resolveAsk("call-ext-ask", { data: { store: "redis" } })).toBe(true);
+		const result = await outcome;
+
+		expect(signal?.aborted).toBe(true);
+		expect(notify).toHaveBeenCalledWith("Question answered by extension", "info");
+		// Fields the extension left out keep their defaults.
+		expect(text(result)).toBe(`User answers:\n${JSON.stringify({ store: "redis", ttl: 30 }, null, 2)}`);
+		expect(ext.resolved).toEqual([
+			{
+				type: "ask_resolved",
+				sessionId: "",
+				askId: "call-ext-ask",
+				toolCallId: "call-ext-ask",
+				answered: true,
+				by: "extension",
+			},
+		]);
+		expect(ext.pending.resolveAsk("call-ext-ask", { data: {} })).toBe(false);
+	});
+
+	it("an answer given while handling the request skips the dialog", async () => {
+		const ext = channel({ data: { store: "mongo", ttl: 7 } });
+		const result = await new AskTool(createSession()).execute(
+			"call-ext-early",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			withChannel(createContext({}), ext.extensionAsk),
+		);
+		// "mongo" is not an option: it is the field's Other answer.
+		expect(text(result)).toBe(`User answers:\n${JSON.stringify({ store: "mongo", ttl: 7 }, null, 2)}`);
+		expect(ext.resolved[0]).toMatchObject({ answered: true, by: "extension" });
+	});
+
+	it("an extension's cancel cancels like the user's", async () => {
+		const ext = channel("cancel");
+		const abort = vi.fn();
+		await expect(
+			new AskTool(createSession()).execute(
+				"call-ext-cancel",
+				{ html: DB_FORM },
+				undefined,
+				undefined,
+				withChannel(createContext({ abort }), ext.extensionAsk),
+			),
+		).rejects.toBeInstanceOf(ToolAbortError);
+		expect(abort).toHaveBeenCalled();
+		expect(ext.resolved[0]).toMatchObject({ answered: false, by: "extension" });
+	});
+
+	it("once the user answers, the extension can no longer", async () => {
+		const ext = channel();
+		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 1 } }));
+		await new AskTool(createSession()).execute(
+			"call-user-ask",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			withChannel(createContext({ formDialog }), ext.extensionAsk),
+		);
+		expect(ext.resolved[0]).toMatchObject({ answered: true, by: "user" });
+		expect(ext.pending.resolveAsk("call-user-ask", { data: {} })).toBe(false);
+		expect(ext.pending.pendingAsks()).toEqual([]);
 	});
 });

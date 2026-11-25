@@ -22,17 +22,27 @@ import {
 	fieldError,
 	formAnswers,
 	type HtmlFormData,
+	type HtmlFormValue,
+	isArrayChoice,
 	type OptionNote,
 	OTHER_LABEL,
 	textValue,
 } from "./html-form/data";
-import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "./html-form/parse";
+import {
+	type ChoiceField,
+	type FormField,
+	type HtmlForm,
+	parseHtmlForm,
+	spansText,
+	type TextField,
+} from "./html-form/parse";
 import { shiftImageMarkers } from "../modes/view-model/prompt/composer-attachments";
 import { disambiguateDisplayLabels } from "../utils/render-utils";
 import type { AskToolDetails } from "./details/ask";
 import { ToolError } from "./tool-errors";
 import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type {
+	AskFieldSummary,
 	ExtensionFormDialogResult,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -410,6 +420,89 @@ async function askFieldByField(
 }
 
 // =============================================================================
+// Extension answers
+// =============================================================================
+
+/** The form's named controls as `ask_requested` reports them. */
+function askFieldSummaries(form: HtmlForm, questions: Map<FormField, string>): AskFieldSummary[] {
+	return form.fields.flatMap((field): AskFieldSummary[] => {
+		if (!field.name) return [];
+		const question = questions.get(field) ?? field.name;
+		if (field.kind === "text") {
+			return [
+				{
+					name: field.name,
+					kind: "text",
+					question,
+					required: field.required,
+					type: field.type,
+					value: field.value,
+				},
+			];
+		}
+		return [
+			{
+				name: field.name,
+				kind: "choice",
+				question,
+				required: field.required,
+				multi: isArrayChoice(field),
+				other: field.other,
+				options: field.options.map(option => ({
+					value: option.value,
+					label: spansText(option.label).replace(/\s+/g, " ").trim() || option.value,
+					disabled: option.disabled,
+				})),
+			},
+		];
+	});
+}
+
+/** A choice field's value from an extension, or `undefined` when the field cannot take it. */
+function extensionChoiceValue(field: ChoiceField, value: unknown): HtmlFormValue | undefined {
+	const enabled = new Set(field.options.flatMap(option => (option.disabled ? [] : [option.value])));
+	const all = new Set(field.options.map(option => option.value));
+	// "Other" text: one answer outside the options, when the field offers it.
+	const fits = (values: string[]): boolean =>
+		values.filter(item => !enabled.has(item)).every(item => field.other && !all.has(item) && item.trim() !== "") &&
+		values.filter(item => !enabled.has(item)).length <= 1;
+	if (isArrayChoice(field)) {
+		if (!Array.isArray(value) || !value.every(item => typeof item === "string")) return undefined;
+		const values = [...new Set(value)];
+		return fits(values) ? values : undefined;
+	}
+	if (typeof value !== "string") return undefined;
+	return fits([value]) ? value : undefined;
+}
+
+/**
+ * The data `form` submits for an extension's answer: its defaults with `data`'s fields applied.
+ * `undefined` when `data` names no such field, gives a value the field cannot take, or leaves the
+ * form invalid (a required field empty, failed text validation).
+ */
+function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlFormData | undefined {
+	const submitted = defaultFormData(form);
+	const named = new Map(form.fields.flatMap(field => (field.name ? [[field.name, field] as const] : [])));
+	for (const [name, value] of Object.entries(data)) {
+		const field = named.get(name);
+		if (!field) return undefined;
+		if (field.kind === "choice") {
+			const choice = extensionChoiceValue(field, value);
+			if (choice === undefined) return undefined;
+			if (Array.isArray(choice) && choice.length === 0) delete submitted[name];
+			else submitted[name] = choice;
+			continue;
+		}
+		if (typeof value !== "string" && typeof value !== "number") return undefined;
+		submitted[name] = textValue(field, String(value));
+	}
+	for (const field of named.values()) {
+		if (fieldError(field, submitted[field.name]) !== undefined) return undefined;
+	}
+	return submitted;
+}
+
+// =============================================================================
 // Tool Class
 // =============================================================================
 
@@ -497,7 +590,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: AskParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AskToolDetails>,
@@ -580,26 +673,74 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			vocalizer.speak(named.map(field => questions.get(field) ?? field.name).join("\n"));
 		}
 
+		// Extensions may answer the form too; the first answer wins and closes the other.
+		const sessionId = this.session.getSessionId?.() ?? "";
+		const pending = await context.extensionAsk?.open(
+			{
+				type: "ask_requested",
+				sessionId,
+				askId: toolCallId,
+				toolCallId,
+				html,
+				fields: askFieldSummaries(form, questions),
+			},
+			data => extensionFormData(form, data),
+		);
+		let by: "user" | "extension" = "user";
 		let answered: { data: HtmlFormData; notes?: OptionNote[]; timedOut?: boolean } | undefined;
 		try {
-			if (extensionUi.formDialog) {
-				const formDialog = extensionUi.formDialog.bind(extensionUi);
-				answered = await untilAborted(dialogSignal, () =>
-					formDialog(html, {
-						timeout,
-						signal: dialogSignal,
-						acceptImages: true,
-						onAbandon: partial => {
-							given = partial;
-						},
-					}),
-				);
+			const early = pending?.given();
+			if (early !== undefined) {
+				by = "extension";
+				answered = early === "cancel" ? undefined : { data: early.data };
 			} else {
-				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
+				const extensionClose = new AbortController();
+				const formSignal = AbortSignal.any([dialogSignal, extensionClose.signal]);
+				const fromUser = (async () => {
+					if (extensionUi.formDialog) {
+						const formDialog = extensionUi.formDialog.bind(extensionUi);
+						return untilAborted(formSignal, () =>
+							formDialog(html, {
+								timeout,
+								signal: formSignal,
+								acceptImages: true,
+								onAbandon: partial => {
+									given = partial;
+								},
+							}),
+						);
+					}
+					return askFieldByField(extensionUi, form, timeout, formSignal);
+				})().then(value => ({ by: "user" as const, value }));
+				const fromExtension = pending?.answer.then(value => ({ by: "extension" as const, value }));
+				const first = await (fromExtension ? Promise.race([fromUser, fromExtension]) : fromUser);
+				if (first.by === "extension") {
+					by = "extension";
+					extensionClose.abort();
+					// The closed dialog settles (cancel or abort) with nobody to read it.
+					fromUser.catch(() => {});
+					extensionUi.notify("Question answered by extension", "info");
+					answered = first.value === "cancel" ? undefined : { data: first.value.data };
+				} else {
+					answered = first.value;
+				}
 			}
 		} catch (error) {
 			if (error instanceof Error && error.name === "AbortError") throw abortError();
 			throw error;
+		} finally {
+			pending?.close();
+			const settled = answered;
+			await context.extensionAsk?.resolved({
+				type: "ask_resolved",
+				sessionId,
+				askId: toolCallId,
+				toolCallId,
+				answered:
+					settled !== undefined &&
+					!(settled.timedOut && named.some(field => fieldError(field, settled.data[field.name!]) !== undefined)),
+				by,
+			});
 		}
 		if (!answered) return cancelAsk();
 		// A timeout submits what the form holds; with a required field still empty that is no answer, not data.

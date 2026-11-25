@@ -48,6 +48,7 @@ import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-wr
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
+import { PendingInteractions } from "./pending-interactions";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import { sanitizeDisplayLine } from "../inventory/display-text";
@@ -618,6 +619,8 @@ export class ExtensionRunner {
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
 	#sessionApprovals = new Set<string>();
+	/** Tool approvals and `ask` forms open right now, which extensions may answer. */
+	readonly pendingInteractions = new PendingInteractions();
 	#trackUserWait?: UserWaitTracker;
 	#errorListeners: Set<ExtensionErrorListener> = new Set();
 	#getModel: () => Model | undefined = () => undefined;
@@ -1984,6 +1987,10 @@ export class ExtensionRunner {
 			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
 			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
 			openPlanReview: () => this.#openPlanReviewFn(),
+			resolveToolApproval: (toolCallId, answer) => this.pendingInteractions.resolveApproval(toolCallId, answer),
+			getPendingToolApprovals: () => this.pendingInteractions.pendingApprovals(),
+			resolveAsk: (askId, answer) => this.pendingInteractions.resolveAsk(askId, answer),
+			getPendingAsks: () => this.pendingInteractions.pendingAsks(),
 			// Live: a context saved before or across a host rebind sees the current controls.
 			get sessionModes() {
 				return getSessionModes();

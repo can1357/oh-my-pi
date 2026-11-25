@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions can answer pending tool approvals and `ask` questions: `ctx.resolveToolApproval` / `ctx.getPendingToolApprovals` and `ctx.resolveAsk` / `ctx.getPendingAsks`, with the rendered prompt on `tool_approval_requested`, new `ask_requested` / `ask_resolved` events, and `by: "user" | "extension"` on the resolved events; the first answer wins and closes the host's dialog.
+
 ### Changed
 
 - `/fast` and `/fast ultra` now route to an account or stored API key that offers the tier, without pinning one by hand; once it hits its limits the other accounts serve as usual at standard speed, and the fast one takes over again when it recovers.

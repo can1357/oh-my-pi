@@ -18,7 +18,8 @@ import {
 	approvalRestrictions,
 	denyError,
 	recordApprovalGrant,
-	requestApproval,
+	buildApprovalPrompt,
+	presentApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
 	sessionApprovalScope,
@@ -31,8 +32,15 @@ import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { recordToolApprovalRequested, recordToolApprovalResolved } from "../../session/tool-approval-records";
 import { applyToolProxy } from "../tool-proxy";
+import type { ExtensionAskChannel } from "./pending-interactions";
 import type { ExtensionRunner } from "./runner";
-import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
+import type {
+	ExtensionAgentIdentity,
+	ExtensionApprovalAnswer,
+	RegisteredTool,
+	ToolApprovalRequestedEvent,
+	ToolCallEventResult,
+} from "./types";
 
 /**
  * Second `renderCall` argument that satisfies both the omp and the upstream-pi
@@ -237,6 +245,28 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		applyToolProxy(tool, this);
 	}
 
+	/** Offers an `ask` form to extensions: pending before `ask_requested` runs, so a handler can answer at once. */
+	get #askChannel(): ExtensionAskChannel {
+		const runner = this.runner;
+		return {
+			async open(event, accept) {
+				const pending = runner.pendingInteractions.openAsk(event, accept);
+				if (runner.hasHandlers("ask_requested")) {
+					try {
+						await runner.emit(event);
+					} catch (err) {
+						pending.close();
+						throw err;
+					}
+				}
+				return pending;
+			},
+			async resolved(event) {
+				if (runner.hasHandlers("ask_resolved")) await runner.emit(event);
+			},
+		};
+	}
+
 	/**
 	 * Forward browser mode changes when available.
 	 */
@@ -433,18 +463,41 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				approvalMode,
 				...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
 			});
+			const safetyAppendix =
+				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
+			const approvalPrompt = await buildApprovalPrompt(this.tool, resolvedArgs, {
+				reason: approvalCheck.reason,
+				appendix: safetyAppendix,
+				sessionSubject: sessionScope?.subject,
+				grants: cacheTargets,
+			});
+			const requestedEvent: ToolApprovalRequestedEvent = {
+				type: "tool_approval_requested",
+				sessionId,
+				toolName: this.tool.name,
+				toolCallId,
+				...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+				approvalMode,
+				prompt: approvalPrompt,
+				safetyChecks: pendingSafetyChecks.length > 0,
+			};
+			// Provider safety checks are confirmed by the user at this host only: an extension never answers them.
+			// Opened before the event, so a handler can answer at once.
+			const pending = requestedEvent.safetyChecks
+				? undefined
+				: this.runner.pendingInteractions.openApproval(requestedEvent);
 			if (hasApprovalHandlers) {
-				await this.runner.emit({
-					type: "tool_approval_requested",
-					sessionId,
-					toolName: this.tool.name,
-					toolCallId,
-					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
-					approvalMode,
-				});
+				try {
+					await this.runner.emit(requestedEvent);
+				} catch (err) {
+					pending?.close();
+					throw err;
+				}
 			}
+			const extensionAnswer = pending?.given();
 
-			const emitApprovalResolved = async (approved: boolean, reason?: string) => {
+			const emitApprovalResolved = async (approved: boolean, by: "user" | "extension", reason?: string) => {
+				pending?.close();
 				await recordToolApprovalResolved(this.runner.approvalRecords, {
 					toolCallId,
 					toolName: this.tool.name,
@@ -459,14 +512,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					toolCallId,
 					approved,
 					...(reason ? { reason } : {}),
+					by,
 				});
 			};
 
 			// Provider safety checks fail closed without an interactive prompt. Unlike
-			// ordinary tier approval, no setting or yolo mode may bypass this gate.
-			if (!this.runner.hasUI()) {
+			// ordinary tier approval, no setting or yolo mode may bypass this gate. Without a
+			// UI only an answer an extension gave while handling the request can approve.
+			if (!this.runner.hasUI() && extensionAnswer === undefined) {
 				const reason = "no interactive UI available";
-				await emitApprovalResolved(false, reason);
+				await emitApprovalResolved(false, "user", reason);
 				cancelPreflight();
 				if (pendingSafetyChecks.length > 0) {
 					throw new Error(
@@ -490,36 +545,55 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const uiContext = this.runner.getUIContext();
-			const safetyAppendix =
-				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
 			let approved: boolean;
+			let by: "user" | "extension" = "user";
 			try {
-				context?.onApprovalPrompt?.();
-				// The call's signal closes the prompt: aborting the turn (Esc, a session switch) must not
-				// wait on an approval the user can no longer see or answer.
-				const answer = await untilAborted(signal, () =>
-					requestApproval(uiContext, this.tool, resolvedArgs, {
-						reason: approvalCheck.reason,
-						appendix: safetyAppendix,
-						sessionSubject: sessionScope?.subject,
-						grants: cacheTargets,
-						signal,
-					}),
-				);
+				let answer: ExtensionApprovalAnswer;
+				if (extensionAnswer !== undefined) {
+					answer = extensionAnswer;
+					by = "extension";
+				} else {
+					context?.onApprovalPrompt?.();
+					// The call's signal closes the prompt: aborting the turn (Esc, a session switch) must not
+					// wait on an approval the user can no longer see or answer. An extension's answer closes it too.
+					const dialogClose = new AbortController();
+					const dialogSignal = signal ? AbortSignal.any([signal, dialogClose.signal]) : dialogClose.signal;
+					const fromUser = untilAborted(signal, () =>
+						presentApproval(uiContext, approvalPrompt, dialogSignal),
+					).then(value => ({ by: "user" as const, value }));
+					const fromExtension = pending?.answer.then(value => ({ by: "extension" as const, value }));
+					const first = await (fromExtension ? Promise.race([fromUser, fromExtension]) : fromUser);
+					if (first.by === "extension") {
+						by = "extension";
+						dialogClose.abort();
+						// The closed dialog settles (deny or abort) with nobody to read it.
+						fromUser.catch(() => {});
+						uiContext.notify(`Approval for ${this.tool.name} answered by extension`, "info");
+					}
+					answer = first.value;
+				}
 				approved = answer !== "deny";
 				if (answer === "session" && sessionScope) this.runner.grantSessionApproval(sessionScope.key);
 				if (typeof answer === "object" && approvalGrants) {
 					recordApprovalGrant(this.tool, resolvedArgs, approvalGrants, resolved.tier, answer);
 				}
 			} catch (err) {
-				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
+				await emitApprovalResolved(false, "user", err instanceof Error ? err.message : "approval aborted");
 				cancelPreflight();
 				throw err;
 			}
-			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
+			await emitApprovalResolved(
+				approved,
+				by,
+				approved ? undefined : by === "extension" ? "denied by extension" : "denied by user",
+			);
 			if (!approved) {
 				cancelPreflight();
-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				throw new Error(
+					by === "extension"
+						? `Tool call denied by extension: ${this.tool.name}`
+						: `Tool call denied by user: ${this.tool.name}`,
+				);
 			}
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) {
@@ -534,6 +608,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
 
+		if (context) context.extensionAsk = this.#askChannel;
 		try {
 			// Name the owning session for process-wide file-mutation fallbacks and
 			// expose its settings to registered tools and any fallback handlers they

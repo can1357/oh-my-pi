@@ -2990,11 +2990,11 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			// No abort signal reached the call, so the prompt gets no dialog options.
+			// Even without a turn signal the prompt gets one: an extension's answer closes it.
 			expect(select).toHaveBeenCalledWith(
 				expect.stringContaining("Allow tool: dangerous_tool"),
 				["Approve", "Approve dangerous_tool for this session", "Deny"],
-				undefined,
+				{ signal: expect.any(AbortSignal) },
 			);
 			delete globalState.__approvalEvents;
 		});
@@ -3031,7 +3031,9 @@ describe("ExtensionRunner", () => {
 			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
 			select.mockImplementationOnce(async () => "Approve");
 			await run(critical, "call-critical");
-			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], undefined);
+			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], {
+				signal: expect.any(AbortSignal),
+			});
 			// A new session starts without the grant.
 			await sessionManager.newSession();
 			await run(approvalTool, "call-new-session");
@@ -3413,6 +3415,139 @@ describe("ExtensionRunner", () => {
 				},
 			]);
 			delete globalState.__partialContextApprovalEvents;
+		});
+
+		describe("answered by an extension", () => {
+			type Seen = {
+				requested: Array<{ toolCallId: string; prompt: { session?: string }; safetyChecks: boolean }>;
+				resolved: Array<{ approved: boolean; by: string; reason?: string }>;
+				ctx?: {
+					resolveToolApproval(id: string, answer: unknown): boolean;
+					getPendingToolApprovals(): Array<{ toolCallId: string }>;
+				};
+				/** Answer given inside the requested handler, if any. */
+				inHandler?: unknown;
+				inHandlerResult?: boolean;
+			};
+			const globalState = globalThis as typeof globalThis & { __extApproval?: Seen };
+			afterEach(() => {
+				delete globalState.__extApproval;
+			});
+
+			const setup = async (options: { ui?: boolean; select?: Parameters<typeof initializeRunner>[1] } = {}) => {
+				const seen: Seen = { requested: [], resolved: [] };
+				globalState.__extApproval = seen;
+				fs.writeFileSync(
+					path.join(extensionsDir, "ext-approval.ts"),
+					`export default function(pi) {
+						pi.on("tool_approval_requested", (event, ctx) => {
+							const seen = globalThis.__extApproval;
+							seen.requested.push(event);
+							seen.ctx = ctx;
+							if (seen.inHandler !== undefined) seen.inHandlerResult = ctx.resolveToolApproval(event.toolCallId, seen.inHandler);
+						});
+						pi.on("tool_approval_resolved", event => {
+							globalThis.__extApproval.resolved.push({ approved: event.approved, by: event.by, reason: event.reason });
+						});
+					}`,
+				);
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				if (options.ui !== false) initializeRunner(runner, options.select ?? (async () => "Approve"));
+				const executed = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }] }));
+				const wrapper = new ExtensionToolWrapper({ ...approvalTool, execute: executed }, runner);
+				const run = (id: string) =>
+					(wrapper as ExtensionToolWrapper<any>).execute(id, {}, undefined, undefined, {
+						sessionManager,
+						modelRegistry,
+						model: undefined,
+						isIdle: () => true,
+						hasQueuedMessages: () => false,
+						abort: () => {},
+						settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+					});
+				return { seen, runner, executed, run };
+			};
+
+			it("reports the rendered prompt and closes the open dialog when the extension answers first", async () => {
+				let dialogSignal: AbortSignal | undefined;
+				const opened = Promise.withResolvers<void>();
+				const select = vi.fn(
+					async (_title: string, _options: string[], dialogOptions?: ExtensionUIDialogOptions) => {
+						dialogSignal = dialogOptions?.signal;
+						opened.resolve();
+						await new Promise<void>(resolve => dialogSignal?.addEventListener("abort", () => resolve()));
+						return undefined;
+					},
+				);
+				const { seen, executed, run } = await setup({ select });
+				const execution = run("call-ext-first");
+				await opened.promise;
+
+				expect(seen.requested[0]).toMatchObject({
+					toolCallId: "call-ext-first",
+					safetyChecks: false,
+					prompt: { session: "Approve dangerous_tool for this session" },
+				});
+				expect(seen.ctx!.getPendingToolApprovals().map(pending => pending.toolCallId)).toEqual(["call-ext-first"]);
+				// A grant scope this prompt does not offer is refused and leaves the call pending.
+				expect(seen.ctx!.resolveToolApproval("call-ext-first", { grant: "folder", always: false })).toBe(false);
+				expect(seen.ctx!.resolveToolApproval("call-ext-first", "once")).toBe(true);
+				await execution;
+
+				expect(dialogSignal?.aborted).toBe(true);
+				expect(executed).toHaveBeenCalledTimes(1);
+				expect(seen.resolved).toEqual([{ approved: true, by: "extension", reason: undefined }]);
+				// First answer wins: the call is no longer pending.
+				expect(seen.ctx!.resolveToolApproval("call-ext-first", "deny")).toBe(false);
+				expect(seen.ctx!.getPendingToolApprovals()).toEqual([]);
+			});
+
+			it("an extension's deny fails the call as denied by the extension", async () => {
+				const { seen, executed, run } = await setup();
+				seen.inHandler = "deny";
+				await expect(run("call-ext-deny")).rejects.toThrow("Tool call denied by extension: dangerous_tool");
+				expect(seen.inHandlerResult).toBe(true);
+				expect(executed).not.toHaveBeenCalled();
+				expect(seen.resolved).toEqual([{ approved: false, by: "extension", reason: "denied by extension" }]);
+			});
+
+			it("a session answer from the extension approves later calls of the tool without asking", async () => {
+				const select = vi.fn(async () => "Deny");
+				const { seen, executed, run } = await setup({ select });
+				seen.inHandler = "session";
+				await run("call-ext-session-1");
+				seen.inHandler = undefined;
+				await run("call-ext-session-2");
+				expect(select).not.toHaveBeenCalled();
+				expect(seen.requested).toHaveLength(1);
+				expect(executed).toHaveBeenCalledTimes(2);
+			});
+
+			it("once the user answers, the extension can no longer", async () => {
+				const { seen, run } = await setup({ select: async () => "Approve" });
+				await run("call-user-first");
+				expect(seen.resolved).toEqual([{ approved: true, by: "user", reason: undefined }]);
+				expect(seen.ctx!.resolveToolApproval("call-user-first", "deny")).toBe(false);
+			});
+
+			it("without a UI, only an answer given while handling the request approves", async () => {
+				const headless = await setup({ ui: false });
+				headless.seen.inHandler = "once";
+				await headless.run("call-headless-answered");
+				expect(headless.executed).toHaveBeenCalledTimes(1);
+				expect(headless.seen.resolved).toEqual([{ approved: true, by: "extension", reason: undefined }]);
+
+				headless.seen.inHandler = undefined;
+				await expect(headless.run("call-headless-unanswered")).rejects.toThrow("no interactive UI available");
+				expect(headless.seen.ctx!.getPendingToolApprovals()).toEqual([]);
+			});
 		});
 	});
 
