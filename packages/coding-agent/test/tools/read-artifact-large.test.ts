@@ -58,6 +58,76 @@ describe("read tool large spill handling", () => {
 		await fs.rm(testDir, { recursive: true, force: true });
 	});
 
+	it("preserves a single-line JSON spill within the byte budget in default and raw reads while capping non-spill local files", async () => {
+		const json = JSON.stringify({ payload: "x".repeat(15_000), tail: "complete-json" });
+		await Bun.write(path.join(artifactDir, "0.log"), json);
+		await Bun.write(path.join(artifactDir, "notes.txt"), json);
+
+		const defaultResult = await tool.execute("call-json-default", { path: "local://0.log" });
+		const defaultOutput = getTextOutput(defaultResult);
+		expect(defaultOutput).toContain(json);
+		expect(defaultResult.details?.meta?.truncation).toBeUndefined();
+
+		const rawResult = await tool.execute("call-json-raw", { path: "local://0.log:raw" });
+		expect(getTextOutput(rawResult)).toBe(json);
+		expect(rawResult.details?.meta?.truncation).toBeUndefined();
+
+		const scratchResult = await tool.execute("call-scratch-default", { path: "local://notes.txt" });
+		expect(getTextOutput(scratchResult)).not.toContain("complete-json");
+		expect(scratchResult.details?.meta?.limits?.columnTruncated?.maxColumn).toBeGreaterThan(0);
+	});
+
+	it("preserves distinct long JSON lines in a multi-range spill read", async () => {
+		const first = JSON.stringify({ payload: "a".repeat(15_000), tail: "first-json-tail" });
+		const last = JSON.stringify({ payload: "z".repeat(15_000), tail: "last-json-tail" });
+		await Bun.write(path.join(artifactDir, "0.log"), `${first}\nmiddle\n${last}`);
+
+		const result = await tool.execute("call-json-multi-range", { path: "local://0.log:1-1,3-3" });
+		const output = getTextOutput(result);
+		expect(output).toContain(first);
+		expect(output).toContain(last);
+		expect(result.details?.meta?.truncation).toBeUndefined();
+	});
+
+	it("bounds oversized selected lines in buffered multi-range spills and reports omission", async () => {
+		await Bun.write(path.join(artifactDir, "0.log"), `${"a".repeat(1_900_000)}\nmiddle\n${"z".repeat(1_900_000)}`);
+
+		const result = await tool.execute("call-budget-multi", { path: "local://0.log:1-1,3-3" });
+		const output = getTextOutput(result);
+		expect(Buffer.byteLength(output)).toBeLessThan(110_000);
+		expect(output).toContain("Line 1");
+		expect(output).toContain("Line 3");
+		expect(output).toContain("50.0KB");
+		expect(output).toContain("local://0.log:raw:1-1");
+		expect(output).toContain("local://0.log:raw:3-3");
+		const truncation = result.details?.meta?.truncation;
+		expect(truncation).toBeDefined();
+		expect(truncation?.nextOffset).toBeUndefined();
+		if (!truncation) throw new Error("expected truncation metadata");
+		expect(formatTruncationMetaNotice(truncation)).not.toContain("to continue");
+	});
+
+	it("clips oversized enclosing context without clipping selected spill lines", async () => {
+		const selected = JSON.stringify({ item: "x".repeat(15_000), tail: "selected-tail" });
+		await Bun.write(
+			path.join(artifactDir, "0.log"),
+			[
+				`{"payload":"${"p".repeat(1_000_000)}","items":[`,
+				...Array.from({ length: 520 }, (_, index) => (index === 519 ? `${selected},` : `{"item":${index}},`)),
+				"{}]}",
+			].join("\n"),
+		);
+
+		for (const selector of ["520-522", "2-2,521-522"]) {
+			const result = await tool.execute(`call-budget-context-${selector}`, { path: `local://0.log:${selector}` });
+			const output = getTextOutput(result);
+			expect(Buffer.byteLength(output)).toBeLessThan(50_000);
+			expect(output).toContain(selected);
+			expect(output).toContain('{"payload":"');
+			expect(result.details?.meta?.limits?.columnTruncated?.maxColumn).toBeGreaterThan(0);
+		}
+	});
+
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
 		const result = await tool.execute("call-raw", { path: "local://0.log:raw" });
 		const output = getTextOutput(result);
