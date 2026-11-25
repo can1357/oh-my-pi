@@ -983,6 +983,12 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(403, "Forbidden")).toBe(false);
 	});
 
+	it("does not rotate on a per-minute throttle worded like Devin's allowance refusal", () => {
+		const perMinute = "Usage quota has been exhausted for this per minute window. Please retry in 30 seconds.";
+		expect(isUsageLimitOutcome(429, perMinute)).toBe(false);
+		expect(isUsageLimit(perMinute)).toBe(false);
+	});
+
 	// A statusless per-minute reset-window transient ("Rate limit will reset in
 	// 30 seconds") is ordinary throttling (RATE_LIMIT_EXCEEDED), not an account
 	// usage cap. The reset-window alternative is gated on account scope so it stays
