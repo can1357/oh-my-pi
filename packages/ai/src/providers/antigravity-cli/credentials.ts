@@ -146,13 +146,13 @@ export function agyCredentialVersion(apiKey: string): string {
 
 /**
  * Apply ONLY to agy's subprocess, never omp or host-executed tools.
- * agy has no file-storage flag. Its native sshDetector checks SSH_TTY for a
- * nonempty value (it does not open the path), selecting file-only storage for
- * the process lifetime. This explicit headless marker prevents both reads and
- * writes of the user's global keychain, including during login and refresh.
+ * Selects file-only token storage for the process lifetime, so login and
+ * refresh never read or write the user's global keychain. agy 1.5.16 ignores
+ * SSH_TTY on macOS and honors only AGY_CLI_FORCE_FILE_TOKEN_STORAGE; earlier
+ * builds (reachable through PI_AGY_PATH) have only the SSH_TTY detector.
  */
 export function agyCredentialEnv(): Record<string, string> {
-	return { SSH_TTY: "omp-agy-file-auth" };
+	return { AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1", SSH_TTY: "omp-agy-file-auth" };
 }
 
 /**

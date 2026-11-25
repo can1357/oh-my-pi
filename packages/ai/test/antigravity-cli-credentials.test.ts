@@ -216,9 +216,9 @@ describe("Antigravity CLI credential ownership", () => {
 	it("never stages the broker's refresh sentinel or mutates the parent environment", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agy-broker-"));
 		directories.push(directory);
-		const before = process.env.SSH_TTY;
-		expect(agyCredentialEnv()).toEqual({ SSH_TTY: "omp-agy-file-auth" });
-		expect(process.env.SSH_TTY).toBe(before);
+		const before = { ...process.env };
+		expect(agyCredentialEnv()).toEqual({ AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "1", SSH_TTY: "omp-agy-file-auth" });
+		expect(process.env).toEqual(before);
 		await stageAgyCredentials(JSON.stringify({ ...JSON.parse(apiKey), refreshToken: "__remote__" }), directory);
 		const contents = await fs.readFile(path.join(directory, "antigravity-cli", "antigravity-oauth-token"), "utf8");
 		expect(contents).not.toContain("__remote__");
@@ -270,9 +270,10 @@ describe("Antigravity CLI login handoff", () => {
 				`#!${process.execPath}
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-if (process.env.SSH_TTY !== "omp-agy-file-auth") process.exit(9);
+if (process.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE !== "1") process.exit(9);
 const args = process.argv.slice(2);
-const appData = args[args.indexOf("--app-data-dir") + 1];
+if (args.includes("--app-data-dir")) process.exit(10);
+const appData = path.join(args[args.indexOf("--gemini-dir") + 1], "antigravity-cli");
 process.stdout.write("https://accounts.google.com/o/oauth2/v2/auth?client_id=${AGY_OAUTH_CLIENT_ID}&state=fixture\\n");
 const code = (await Bun.stdin.text()).trim();
 if (code !== "fixture-code") process.exit(8);

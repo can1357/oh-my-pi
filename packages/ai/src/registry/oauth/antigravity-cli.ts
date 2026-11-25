@@ -168,23 +168,14 @@ export async function loginAntigravityCli(ctrl: OAuthController): Promise<OAuthC
 	let exported = false;
 	try {
 		if (signal.aborted) throw new AIError.LoginCancelledError("Antigravity CLI sign-in cancelled");
-		const process = Bun.spawn(
-			[
-				binary,
-				"acp",
-				"--login",
-				"--gemini-dir",
-				directory,
-				"--app-data-dir",
-				path.join(directory, "antigravity-cli"),
-			],
-			{
-				stdin: "pipe",
-				stdout: "pipe",
-				stderr: "pipe",
-				env: { ...Bun.env, ...agyCredentialEnv(), AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
-			},
-		);
+		// agy 1.5.16 nests an absolute --app-data-dir under --gemini-dir, so rely on
+		// its default app-data-dir, the same antigravity-cli subdirectory the host uses.
+		const process = Bun.spawn([binary, "acp", "--login", "--gemini-dir", directory], {
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...Bun.env, ...agyCredentialEnv(), AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
+		});
 		child = process;
 		const onAbort = () => process.kill("SIGKILL");
 		signal.addEventListener("abort", onAbort, { once: true });

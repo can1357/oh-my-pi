@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- `antigravity-cli` sign-in no longer fails with "did not write its isolated credential file" on agy 1.5.16 or saves the Google grant to the macOS login keychain ([#20363](https://github.com/can1357/oh-my-pi/issues/20363), [#20371](https://github.com/can1357/oh-my-pi/pull/20371) by [@wtfsayo](https://github.com/wtfsayo))
 - Codex requests no longer send a service tier to an account whose own plan does not offer it.
 ### Fixed
 
