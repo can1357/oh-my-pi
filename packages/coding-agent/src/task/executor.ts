@@ -4278,14 +4278,14 @@ async function driveFollowUpTurn(
 	// As in a first run: this turn's monitor would take a wake turn's answer
 	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
 	const releaseIrcWakes = session.holdIrcWakes();
-	const parentId = AgentRegistry.global().get(id)?.parentId;
+	const parentId = registry.get(id)?.parentId;
 	try {
 		try {
 			outcome = await driveSessionToResult(session, monitor, message, {
 				structured,
 				restore: options.restore,
 				steps: options.steps,
-				stepReports: parentId ? { from: id, to: parentId } : undefined,
+				stepReports: parentId ? { from: id, to: parentId, registry } : undefined,
 				onPromptBusy: async () => {
 					attemptUnsubscribe();
 					logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
@@ -5482,7 +5482,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			registry.syncSessionStatus(id, session);
 			// Messages parked while this agent waited for a spawn slot or was starting.
-			const bus = IrcBus.existing();
+			const bus = IrcBus.existing(registry);
 			for (let parked = bus?.take(id); parked; parked = bus?.take(id)) await session.deliverIrcMessage(parked);
 			const runRef = registry.get(id);
 			if (runRef) {
@@ -5648,7 +5648,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				solutionSpace: options.solutionSpace,
 				structured,
 				steps: options.steps?.length ? { prompts: options.steps, sent: 1 } : undefined,
-				stepReports: options.parentAgentId ? { from: id, to: options.parentAgentId } : undefined,
+				stepReports: options.parentAgentId ? { from: id, to: options.parentAgentId, registry } : undefined,
 			});
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left

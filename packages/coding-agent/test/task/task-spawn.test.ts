@@ -906,6 +906,40 @@ describe("task spawn routing", () => {
 		expect(secondJob.status).toBe("cancelled");
 	});
 
+	it("drops the messages held for a spawn of an isolated registry that is cancelled while queued", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const gate = deferred();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			await gate.promise;
+			return makeResult(options.id ?? "?");
+		});
+		const isolated = new AgentRegistry();
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({ manager, settings: { "task.maxConcurrency": 1 }, agentRegistry: isolated }),
+		);
+
+		const first = await tool.execute("tc-1", { agent: "task", name: "First", task: "Work A." } as TaskParams);
+		const second = await tool.execute("tc-2", { agent: "task", name: "Second", task: "Work B." } as TaskParams);
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+		const secondId = secondJob.agentId!;
+		expect(secondJob.queued).toBe(true);
+		const bus = IrcBus.forRegistry(isolated);
+		bus.park({ from: "Main", to: secondId, body: "use v2" });
+
+		expect(manager.cancel(secondJob.id)).toBe(true);
+		// The spawn's own settle handler, registered first, has run by the time this await resumes.
+		await secondJob.promise.catch(() => {});
+
+		// A later spawn of the same id in this registry must not take the cancelled spawn's mail.
+		expect(bus.take(secondId)).toBeUndefined();
+		gate.resolve();
+		await manager.getJob(first.details!.async!.jobId)!.promise;
+	});
+
 	it("keeps the concurrency cap intact when a queued spawn is cancelled (no permit leak)", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],

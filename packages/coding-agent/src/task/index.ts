@@ -1688,8 +1688,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// queued, or failed before its session opened) never takes the messages
 		// held for it; drop them so none reach a later agent of the same id.
 		const dropHeld = () => {
-			if (AgentRegistry.global().get(agentId)) return;
-			const bus = IrcBus.existing();
+			if (registry.get(agentId)) return;
+			const bus = IrcBus.existing(registry);
 			let held = bus?.take(agentId);
 			while (held) held = bus?.take(agentId);
 		};

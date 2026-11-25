@@ -221,7 +221,7 @@ function watchedAgentBlockedOnCaller(messaging: WaitMessaging, jobs: readonly As
 	const agents = jobs.flatMap(job => (job.agentId ? [job.agentId] : []));
 	if (agents.length === 0 || agents.length !== jobs.length) return undefined;
 	const { registry, senderId } = messaging;
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	for (const id of agents) {
 		const via = registry.awaits.blockedVia(id, senderId, bus.lastMessageAt(senderId, id) ?? 0);
 		if (via) return { id, via };

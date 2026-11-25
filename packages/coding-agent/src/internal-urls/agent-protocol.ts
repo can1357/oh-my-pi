@@ -389,7 +389,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				? undefined
 				: session.asyncJobManager?.getJob(to);
 		if (startingJob?.agentId === to && startingJob.status === "running") {
-			IrcBus.global().park({ from: senderId, to, body: content, ...(progress ? { progress: true } : {}) });
+			IrcBus.forRegistry(registry).park({
+				from: senderId,
+				to,
+				body: content,
+				...(progress ? { progress: true } : {}),
+			});
 			return {
 				content: [{ type: "text", text: `Queued for ${to} (not started yet; delivered when it starts).` }],
 				details: { message: { op: "send", from: senderId, to } },

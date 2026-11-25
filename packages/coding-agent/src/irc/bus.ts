@@ -157,9 +157,9 @@ export class IrcBus implements IrcBusApi {
 		return IrcBus.#global;
 	}
 
-	/** The process-global bus if one exists; never creates it (no bus means no message was ever held). */
-	static existing(): IrcBusApi | undefined {
-		return IrcBus.#global;
+	/** The bus serving `registry` if one exists; never creates it (no bus means no message was ever held). */
+	static existing(registry: AgentRegistryApi = AgentRegistry.global()): IrcBusApi | undefined {
+		return registry === AgentRegistry.global() ? IrcBus.#global : IrcBus.#buses.get(registry);
 	}
 
 	/** The bus serving `registry`: the global bus for the global registry (the root session and its
@@ -206,8 +206,7 @@ export class IrcBus implements IrcBusApi {
 	 * no bus yet no message was ever sent, so there is nothing to answer.
 	 */
 	static recordReply(from: string, to: string, registry: AgentRegistryApi = AgentRegistry.global()): void {
-		const bus = registry === AgentRegistry.global() ? IrcBus.#global : IrcBus.#buses.get(registry);
-		bus?.recordReply(from, to);
+		IrcBus.existing(registry)?.recordReply(from, to);
 	}
 
 	readonly #registry: AgentRegistryApi;

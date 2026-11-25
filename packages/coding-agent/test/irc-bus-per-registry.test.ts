@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { stalledWaiters } from "@oh-my-pi/pi-coding-agent/session/stalled-waiters";
 
 describe("IrcBus.forRegistry (per-registry isolation)", () => {
 	beforeEach(() => {
@@ -41,6 +42,24 @@ describe("IrcBus.forRegistry (per-registry isolation)", () => {
 		const inB = await IrcBus.localForRegistry(b).deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi-b" });
 		expect(inB.receipt.outcome).toBe("failed");
 		expect(inB.receipt.error).toMatch(/Unknown agent "Main"/);
+	});
+
+	it("finds a promised reply in the waiter's isolated registry", async () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
+		const bus = IrcBus.forRegistry(registry);
+		bus.park({ from: "Main", to: "Worker", body: "Can you check?" });
+		const progress = bus.wait("Main", { from: "Worker" }, 1000);
+		await bus.send({ from: "Worker", to: "Main", body: "Checking", progress: true });
+		await progress;
+		const release = registry.awaits.hold("Main", ["Worker"], { interruptible: true, message: true });
+		try {
+			expect(stalledWaiters(registry, "Worker")).toMatchObject([
+				{ id: "Main", ask: "Can you check?", promise: "Checking" },
+			]);
+		} finally {
+			release();
+		}
 	});
 
 	it("routes a namespaced send only on the registry that installed the transport", async () => {

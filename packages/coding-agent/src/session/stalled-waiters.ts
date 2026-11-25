@@ -39,7 +39,7 @@ export interface StalledWaiter {
 export function stalledWaiters(
 	registry: AgentRegistryApi,
 	agentId: string,
-	bus: IrcBusApi = IrcBus.global(),
+	bus: IrcBusApi = IrcBus.forRegistry(registry),
 ): StalledWaiter[] {
 	const blocked = registry.awaits.waitersOn(agentId);
 	const direct = new Map<string, StalledWaiter>();

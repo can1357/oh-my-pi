@@ -159,6 +159,32 @@ describe("write agent:// messaging", () => {
 		}
 	});
 
+	it("holds a message for a spawned agent of an isolated registry on that registry's bus", async () => {
+		registry = new AgentRegistry();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null });
+		const manager = new AsyncJobManager({});
+		const start = Promise.withResolvers<string>();
+		manager.register("task", "Queued", async () => start.promise, {
+			id: "Queued",
+			agentId: "Queued",
+			ownerId: "Main",
+			queued: true,
+		});
+		const session = { ...makeSession(), asyncJobManager: manager } as ToolSession;
+		try {
+			const result = await new WriteTool(session).execute("early", { path: "agent://Queued", content: "use v2" });
+			expect(result.isError).toBeFalsy();
+			const bus = IrcBus.forRegistry(registry);
+			// The caller's `wait` reads this bus: the held message is owed a reply there.
+			expect(bus.unansweredSends("Main", 0)).toMatchObject([{ to: "Queued" }]);
+			expect(bus.take("Queued")).toMatchObject({ from: "Main", to: "Queued", body: "use v2" });
+			expect(IrcBus.existing()?.take("Queued")).toBeUndefined();
+		} finally {
+			start.resolve("done");
+			await manager.dispose();
+		}
+	});
+
 	it("reports unknown and stopped recipients without delivering", async () => {
 		const tool = new WriteTool(makeSession());
 		const unknown = await tool.execute("unknown", { path: "agent://Missing", content: "hello" });
