@@ -152,6 +152,8 @@ MV lib/welcome.py
 
 For a whole multiline construct, put the action and the opening-line prefix on one line: `*** Replace Block: opener`, `*** Delete Block: opener`, `*** Cut Block: opener`, or `*** Paste Before Block: opener` / `*** Paste After Block: opener`. The header only locates the old block. Replace takes the complete final code, including the opening line if it stays; the other block actions take no body. An unresolved syntax block, shared closing line, or ambiguous opener is rejected. Use a text Find with distinctive context instead. `Delete Block` also accepts two adjacent byte-identical copies: it keeps the first and removes the separator and second copy.
 
+A sloppy tool call can recover `*** Update File: path` followed by `*** Find`. It also accepts update-only patches with bare `@@` hunks and a final `*** End Patch`. Each hunk's old/context lines must match exactly once. Recovery does not guess a missing target or accept file creation, deletion, or moves.
+
 The mode prompts in `crates/edit/prompts/` define the full syntax.
 
 `apply_patch` matches complete old/context lines in this order: exact, trailing

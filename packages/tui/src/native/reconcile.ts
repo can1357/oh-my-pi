@@ -12,8 +12,9 @@
  *   (a deferred delete, a moved node) gets a `~n` suffix. A record keeps its
  *   id while its node lives, wherever it moves.
  * - Children match by node identity first; a node replacing a retired one
- *   at the same key/index with the same kind takes over its record (`set`
- *   of what differs). Matched children that left the longest stable run are
+ *   at the key/index it was last placed at with the same kind takes over its
+ *   record (`set` of what differs), whatever id the record was born with.
+ *   Matched children that left the longest stable run are
  *   `move`d before their next sibling; new ones are `add`ed whole.
  * - `set` carries changed props only (`null` removes one). A primary-text
  *   kind's `text` travels as `text append` when it extends, else `replace`.
@@ -93,6 +94,11 @@ interface Placement {
 
 interface Rec {
 	readonly id: string;
+	/**
+	 * Where it was last placed: its structural parent's id, `/`, then its key or index (`^` before
+	 * it when hoisted). Its `id` keeps where it was first placed; a node replacing it here takes it over.
+	 */
+	slot: string;
 	/** Null for the three region records. */
 	node: UiNode | null;
 	readonly kind: TspKind;
@@ -441,6 +447,7 @@ export class Reconciler {
 	#region(id: RegionId): Rec {
 		return {
 			id,
+			slot: id,
 			node: null,
 			kind: "col",
 			owner: null,
@@ -746,7 +753,7 @@ export class Reconciler {
 		let vacant: Map<string, Rec> | undefined;
 		for (const kid of old) {
 			if (kid.node?.disposed && kid.parent === rec && !slots.includes(kid))
-				(vacant ??= new Map()).set(`${kid.kind}\0${kid.id}`, kid);
+				(vacant ??= new Map()).set(`${kid.kind}\0${kid.slot}`, kid);
 		}
 		for (let i = 0; i < placements.length; i++) {
 			const placement = placements[i]!;
@@ -755,9 +762,9 @@ export class Reconciler {
 				continue;
 			}
 			let kid = slots[i];
+			const slot = this.#childId(placement, false);
 			if (!kid && vacant) {
-				const id = this.#childId(placement, false);
-				const key = `${this.#kindOf(placement.node)}\0${id}`;
+				const key = `${this.#kindOf(placement.node)}\0${slot}`;
 				const candidate = vacant.get(key);
 				if (candidate) {
 					vacant.delete(key);
@@ -773,6 +780,7 @@ export class Reconciler {
 				fresh.add(kid);
 			}
 			kid.placed = this.#frame;
+			kid.slot = slot;
 			next.push(kid);
 			structural.push(kid);
 		}
@@ -840,6 +848,7 @@ export class Reconciler {
 
 	#create(placement: Placement, parent: Rec): Rec {
 		const node = placement.node;
+		const slot = this.#childId(placement, false);
 		const id = this.#childId(placement, true);
 		// A node still described elsewhere (moved into a new subtree) gets a fresh record; the old one is deleted.
 		const previous = this.#byNode.get(node);
@@ -849,6 +858,7 @@ export class Reconciler {
 		}
 		const rec: Rec = {
 			id,
+			slot,
 			node,
 			kind: this.#kindOf(node),
 			owner: placement.owner,

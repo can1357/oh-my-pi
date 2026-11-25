@@ -27,7 +27,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "19.1.1"
+version = "19.2.0"
 edition = "2024"
 rust-version = "1.101"
 license = "MIT"
@@ -96,7 +96,10 @@ codegen-units = 16
 
 [profile.local]
 inherits = "release"
-lto = "thin"
+# No LTO: the local addon is rebuilt on every edit, and thin LTO made each
+# rebuild spend minutes in a silent link of the cdylib while defeating
+# incremental. Shipped addons build through Bazel; `ci` keeps thin LTO.
+lto = false
 codegen-units = 16
 incremental = true
 strip = false
@@ -109,6 +112,9 @@ codegen-units = 16
 # `cargo build --profile profiling`.
 [profile.profiling]
 inherits = "release"
+# Pinned rather than inherited: a user-global config may turn `release` LTO
+# off, and profiles must match what ships.
+lto = "fat"
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 strip = false
