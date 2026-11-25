@@ -32,6 +32,7 @@ export interface KeybindingConflict {
 const YIELDING_DEFAULTS: Partial<Record<Keybinding, KeyId>> = {
 	"app.message.followUp": "ctrl+q",
 	"app.message.dequeue": "shift+up",
+	"app.editor.stash": "ctrl+s",
 };
 
 /** Chords lowercased (config chords are case-insensitive) and deduplicated, in configured order. */
@@ -147,7 +148,13 @@ export class KeybindingsManager {
 			const definition: KeybindingDefinition = KEYBINDINGS[action];
 			let keys = normalizeKeys(userKeys ?? definition.defaultKeys);
 			const yielding = YIELDING_DEFAULTS[action];
-			if (userKeys === undefined && yielding !== undefined && claims.has(yielding)) {
+			const claimants = yielding !== undefined ? claims.get(yielding) : undefined;
+			// The session selector owns its own key scope: an explicit sort binding
+			// does not claim that chord in the prompt editor. A Hub remap still does.
+			const claimed =
+				claimants !== undefined &&
+				claimants.some(claimant => !(action === "app.editor.stash" && claimant === "app.session.toggleSort"));
+			if (userKeys === undefined && yielding !== undefined && claimed) {
 				keys = keys.filter(key => key !== yielding);
 			}
 			this.#keys.set(action, keys);

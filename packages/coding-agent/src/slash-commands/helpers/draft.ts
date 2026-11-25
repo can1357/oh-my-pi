@@ -1,4 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ModeCommandResult } from "../../modes/types";
 import { shiftImageMarkers } from "../../modes/view-model/prompt/composer-attachments";
 import type { Composer } from "../../ui/composer/composer";
 import type { ParsedSlashCommand, TuiSlashCommandRuntime } from "../types";
@@ -45,25 +46,42 @@ export function refuseImages(command: ParsedSlashCommand, runtime: TuiSlashComma
 export async function runWithDetachedDraft(
 	command: ParsedSlashCommand,
 	runtime: TuiSlashCommandRuntime,
-	run: () => Promise<boolean>,
+	run: () => Promise<ModeCommandResult>,
 	options?: { restoreText?: boolean },
-): Promise<void> {
+): Promise<boolean> {
 	const { composer } = runtime.ctx;
+	// Detached submissions may have the same text as a newer draft.
 	if (!runtime.draftDetached) composer.clearDraft();
 	try {
 		const submitted = await run();
 		const hasAttachments = (runtime.input?.images?.length ?? 0) > 0 || (runtime.input?.imageLinks?.length ?? 0) > 0;
-		if (submitted || !(hasAttachments || options?.restoreText)) return;
+		if (submitted !== true && runtime.draftDetached && hasAttachments) {
+			restoreDetachedDraft(composer, command.text, runtime.input?.images, runtime.input?.imageLinks);
+			return false;
+		}
+		if (submitted !== false) return submitted === true;
+		if (
+			runtime.input?.onAccepted &&
+			!options?.restoreText &&
+			!composer.text() &&
+			composer.pendingImages.length === 0 &&
+			!runtime.draftDetached
+		)
+			composer.setText(command.text);
+		if (!(hasAttachments || options?.restoreText || (runtime.draftDetached && runtime.input?.onAccepted)))
+			return false;
 		if (runtime.draftDetached || options?.restoreText) {
 			// Newer typing may already sit in the editor: merge the submission
 			// back beside it so each draft's image markers keep their images.
 			restoreDetachedDraft(composer, command.text, runtime.input?.images, runtime.input?.imageLinks);
-			return;
+			return false;
 		}
 		composer.pendingImages.unshift(...(runtime.input?.images ?? []));
 		composer.pendingImageLinks.unshift(
 			...(runtime.input?.imageLinks ?? runtime.input?.images?.map(() => undefined) ?? []),
 		);
+		composer.relinkImages();
+		return false;
 	} catch (error) {
 		if (runtime.draftDetached) {
 			// The caller already took this draft out of the editor before
@@ -77,7 +95,9 @@ export async function runWithDetachedDraft(
 			composer.setText(command.text);
 			composer.pendingImages.push(...(runtime.input?.images ?? []));
 			composer.pendingImageLinks.push(...(runtime.input?.imageLinks ?? []));
+			composer.relinkImages();
 		}
 		runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+		return false;
 	}
 }

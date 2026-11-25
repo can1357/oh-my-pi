@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Replaced the `app.session.observe` keybinding action with `app.agents.hub`; saved observer shortcuts migrate automatically, and API consumers must use the new action ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 - `/fast`, `/ultrafast`, and `/computer` toggle without arguments and accept explicit `on` or `off`. Check their status with `/session info`. The legacy `/fast ultra` still enables Ultrafast.
 - Snapcompact uses one installed font for the whole transcript. If no installed font covers it, automatic and default manual compaction try the next configured method, and inline content stays as text. The `silver16-bw` frame layout is now `cjk16-bw`.
 - Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
@@ -18,6 +19,7 @@
 
 ### Added
 
+- Added the `app.editor.stash` (`Ctrl+S`) shortcut and composer draft snapshot APIs to stash, restore, or swap rich drafts (text, cursor position, Vim mode, collapsed pastes, and image attachments), with a brief muted confirmation in the empty composer ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 - Added `--prepaint=on|off|force` to control the composer drawn before startup finishes: `off` waits for the full interface, `force` draws it even for flags that would change it
 - Todo backends can define an optional `apply`: the selected backend is asked before the model's `todo` call commits, and returning `{ block: true, reason }` refuses the call with the list unchanged ([#20355](https://github.com/can1357/oh-my-pi/pull/20355) by [@Dangerboi](https://github.com/Dangerboi))
 - `models.yml` `compat.neutralizeDeepseekSpecialTokens` turns DeepSeek chat-template token breaking on or off per model (on by default for DeepSeek-class models on chat-completions) ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
@@ -79,6 +81,7 @@
 
 ### Changed
 
+- `Ctrl+S` now stashes or restores a prompt draft instead of opening Agent Hub; `Alt+A` still opens the Hub, and explicit Hub remaps to `Ctrl+S` take precedence over the stash default. Mode prompts queued during compaction dispatch once without replaying the slash command or parking their loop continuation ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 - Clarified in `/settings` and the settings reference that `statusLine.separator` applies to built-in `box` and `band` composer layouts (and `top-border`/`top-band` attachments) and is ignored by other layouts ([#20890](https://github.com/can1357/oh-my-pi/pull/20890) by [@5UM-4N](https://github.com/5UM-4N)).
 - The model picker pins only the `default`, `smol`, `slow` and `plan` role models to the top; models holding background roles (`tiny`, `memory`, `commit`, `vision`, …) sort by recent use
 - Launches with `--config` draw the composer before startup finishes unless an overlay sets a setting that frame shows (`tui.screen`, theme, symbols, composer shape, vim mode, quiet startup); `PI_CONFIG_FILES` overlays that set one now skip it too
@@ -133,6 +136,7 @@
 
 ### Fixed
 
+- Preserve restored rich drafts when a submitted prompt fails after acceptance, and return mode-command attachments when an input hook fails before admission.
 - Background job results delivered while the agent is idle are freed once delivered, not kept in memory until the whole turn they started ends ([#20886](https://github.com/can1357/oh-my-pi/pull/20886) by [@sjawhar](https://github.com/sjawhar))
 - Kept the prompt at the bottom when `/compact` shortens a long session or a cancelled submission restores the draft and rebuilds the same transcript ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
 - In fullscreen mode, the terminal can select and copy text in `/session` info, the background jobs sheet, and command reports (`/context`, `/changelog`, `/tools`, …), which there always open as a full-screen page instead of above the editor.

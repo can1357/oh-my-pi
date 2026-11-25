@@ -51,7 +51,6 @@ const NAME_MIGRATIONS = {
 	tree: "app.session.tree",
 	fork: "app.session.fork",
 	resume: "app.session.resume",
-	observeSessions: "app.session.observe",
 	toggleSTT: "app.stt.toggle",
 	cursorUp: "tui.editor.cursorUp",
 	cursorDown: "tui.editor.cursorDown",
@@ -112,13 +111,33 @@ function migrateNames(raw: unknown): { config: KeybindingsConfig; migrated: bool
 	const parsed = toKeybindingsConfig(raw);
 	for (const key in parsed) {
 		const value = parsed[key];
-		if (Object.hasOwn(NAME_MIGRATIONS, key)) {
+		if (key === "observeSessions" || key === "app.session.observe") {
+			migrated = true;
+		} else if (Object.hasOwn(NAME_MIGRATIONS, key)) {
 			config[NAME_MIGRATIONS[key as keyof typeof NAME_MIGRATIONS]] = value;
 			migrated = true;
 		} else {
 			config[key] = value;
 		}
 	}
+
+	// Retire both persisted observe names without keeping a runtime action.
+	// Keep the Hub default when only the old observer was customized; an
+	// explicitly configured Hub binding still replaces its default.
+	if (parsed.observeSessions !== undefined || parsed["app.session.observe"] !== undefined) {
+		const keys = new Set<KeyId>();
+		if (parsed["app.agents.hub"] === undefined) {
+			const defaults = KEYBINDINGS["app.agents.hub"].defaultKeys;
+			for (const key of Array.isArray(defaults) ? defaults : [defaults]) keys.add(key);
+		}
+		for (const name of ["app.agents.hub", "app.session.observe", "observeSessions"] as const) {
+			const binding = parsed[name];
+			if (typeof binding === "string") keys.add(binding);
+			else if (binding) for (const key of binding) keys.add(key);
+		}
+		config["app.agents.hub"] = [...keys];
+	}
+
 	return { config, migrated };
 }
 

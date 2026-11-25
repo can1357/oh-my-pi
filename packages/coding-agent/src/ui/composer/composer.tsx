@@ -97,7 +97,7 @@ import {
 	inSubmittedSlashContext,
 } from "./autocomplete";
 import type { VimMode } from "./vim";
-import { UndoHistory, type UndoStacks, VimEditor } from "./vim-editor";
+import { UndoHistory, type UndoStacks, VimEditor, type VimModeSnapshot } from "./vim-editor";
 import { holdText, SpaceHoldGesture, type SpaceHoldHandler } from "../../config/keybindings/space-hold";
 import { MAIN_AGENT_ID } from "../../registry/agent-hub-types";
 import { actionKbd, actionKey, formatTooltipKey } from "../keys/hints";
@@ -356,6 +356,18 @@ interface StashedDraft {
 	readonly cursor: number;
 	readonly state: DraftState;
 	readonly undo: UndoStacks;
+}
+
+/** A local composer draft snapshot, including chips, attachments, counters, undo, and Vim mode. */
+export interface ComposerDraftSnapshot {
+	readonly text: string;
+	readonly cursor: number;
+	readonly atoms: readonly Atom[];
+	readonly counts: Readonly<Record<ChipKind, number>>;
+	readonly images: readonly DraftImage[];
+	readonly links: readonly (string | undefined)[];
+	readonly undo: UndoStacks;
+	readonly vim: VimModeSnapshot | null;
 }
 
 /** Resolves links (file paths, URLs) for attached images that have none; `undefined` where there is none. */
@@ -871,6 +883,11 @@ export class Composer {
 		this.#passthrough.set(on);
 	}
 
+	/** The hint an empty draft shows in the terminal (reactive). */
+	get placeholder(): Accessor<TspText | undefined> {
+		return this.#placeholder;
+	}
+
 	/** The hint an empty draft shows in the terminal (`undefined`: none). */
 	setPlaceholder(placeholder: TspText | undefined): void {
 		this.#placeholder.set(placeholder);
@@ -1128,6 +1145,53 @@ export class Composer {
 		const text = this.#text();
 		if (options?.recall !== false && text.trim() !== "") this.#remember({ text, state: this.#draftState(text) });
 		this.#resetDraft();
+	}
+
+	/** Snapshot the full editable draft (text, cursor, chips, attachments, counters, undo, and Vim mode). */
+	captureDraft(): ComposerDraftSnapshot {
+		const text = this.#text();
+		return {
+			text,
+			cursor: this.#cursor(),
+			atoms: this.#atoms.peek().filter(atom => text.includes(atom.label)),
+			counts: { ...this.#counts },
+			images: [...this.pendingImages],
+			links: [...this.pendingImageLinks],
+			undo: this.#history.save(),
+			vim: this.#vim?.captureMode() ?? null,
+		};
+	}
+
+	/** Restore an isolated draft without adding it to prompt history. */
+	restoreDraft(snapshot: ComposerDraftSnapshot): void {
+		this.#jump = undefined;
+		this.#typingAt = -1;
+		this.#historyIndex = -1;
+		this.#historyDraft = null;
+		this.#vimBrowse = null;
+		this.#vimEdits.clear();
+		this.#closeCompletion();
+		this.#recalledState = false;
+		this.#revision++;
+		batch(() => {
+			this.#atoms.set([...snapshot.atoms]);
+			for (const kind of ["paste", "image", "video"] as const) {
+				this.#counts[kind] = Math.max(
+					snapshot.counts[kind],
+					...snapshot.atoms.filter(atom => atom.kind === kind).map(atom => atom.n),
+				);
+			}
+			this.pendingImages.splice(0, this.pendingImages.length, ...snapshot.images);
+			this.pendingImageLinks.splice(0, this.pendingImageLinks.length, ...snapshot.links);
+			this.#text.set(snapshot.text);
+			this.#cursor.set(Math.max(0, Math.min(snapshot.text.length, snapshot.cursor)));
+		});
+		this.#history.restore(snapshot.undo);
+		this.relinkImages();
+		if (this.#vim) {
+			if (snapshot.vim) this.#vim.restoreMode(snapshot.vim);
+			else this.#vim.begin();
+		}
 	}
 
 	/**
