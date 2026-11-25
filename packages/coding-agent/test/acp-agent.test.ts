@@ -28,7 +28,11 @@ import type {
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	type CustomMessage,
+	SILENT_ABORT_MARKER,
+	USER_INTERRUPT_LABEL,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -175,7 +179,7 @@ class FakeAgentSession {
 		}
 		return true;
 	}
-	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
+	customMessages: Array<{ customType: string; content: CustomMessage["content"]; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
@@ -318,7 +322,7 @@ class FakeAgentSession {
 	}
 
 	async promptCustomMessage(
-		message: { customType: string; content: string; details?: unknown },
+		message: { customType: string; content: CustomMessage["content"]; details?: unknown },
 		options?: { streamingBehavior?: "steer" | "followUp"; queueChipText?: string },
 	): Promise<void> {
 		this.customMessages.push(message);
