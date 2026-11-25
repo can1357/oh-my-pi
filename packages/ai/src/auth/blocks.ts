@@ -31,11 +31,18 @@ export function scopedBackoffKey(providerKey: string, blockScope: string | undef
 
 /** Authentication backoffs apply to every model and cannot be healed by quota evidence. */
 export const AUTH_BLOCK_SCOPE = "auth";
+/** Refresh failures block every model until the credential refreshes or the backoff expires. */
+export const OAUTH_REFRESH_FAILURE_BLOCK_SCOPE = "oauth-refresh-failure";
 /** Account-policy backoffs apply to every model and survive quota resets. */
 export const ACCOUNT_POLICY_BLOCK_SCOPE = "account-policy";
 /** An organization refused OAuth for this login; even last-resort routing must skip it. */
 export const OAUTH_ORG_POLICY_BLOCK_SCOPE = "oauth-org-policy";
-const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE, OAUTH_ORG_POLICY_BLOCK_SCOPE] as const;
+const PROTECTED_BLOCK_SCOPES = [
+	AUTH_BLOCK_SCOPE,
+	OAUTH_REFRESH_FAILURE_BLOCK_SCOPE,
+	ACCOUNT_POLICY_BLOCK_SCOPE,
+	OAUTH_ORG_POLICY_BLOCK_SCOPE,
+] as const;
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
 
@@ -389,6 +396,7 @@ export class CredentialBlocks implements BlocksApi {
 			} else {
 				const authOrPolicyBlock =
 					this.#exactBlockedUntil(id, providerKey, AUTH_BLOCK_SCOPE, scopes) !== undefined ||
+					this.#exactBlockedUntil(id, providerKey, OAUTH_REFRESH_FAILURE_BLOCK_SCOPE, scopes) !== undefined ||
 					this.#exactBlockedUntil(id, providerKey, ACCOUNT_POLICY_BLOCK_SCOPE, scopes) !== undefined ||
 					requestScopes.some(
 						scope =>
@@ -520,7 +528,7 @@ export class CredentialBlocks implements BlocksApi {
 		}
 	}
 
-	/** Clear exactly one quota scope, preserving unrelated account and model blocks. */
+	/** Clear exactly one block scope, preserving unrelated account and model blocks. */
 	clearScope(provider: string, credentialId: number, providerKey: string, blockScope: string | undefined): boolean {
 		// A damaged store neither holds nor reads persisted rows; memory is the whole block.
 		if (this.#deps.health.damaged) {
@@ -539,6 +547,14 @@ export class CredentialBlocks implements BlocksApi {
 				blockScope,
 			});
 			return false;
+		}
+	}
+
+	/** A successful exchange lifts refresh backoff, not provider rejection or quota blocks. */
+	clearOAuthRefreshFailure(provider: string, credentialId: number): void {
+		const providerKey = providerTypeKey(provider, "oauth");
+		if (this.#exactBlockedUntil(credentialId, providerKey, OAUTH_REFRESH_FAILURE_BLOCK_SCOPE) !== undefined) {
+			this.clearScope(provider, credentialId, providerKey, OAUTH_REFRESH_FAILURE_BLOCK_SCOPE);
 		}
 	}
 

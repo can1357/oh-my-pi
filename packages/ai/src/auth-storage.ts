@@ -322,17 +322,18 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 				affinity.clearProvider(provider);
 			},
 		});
-		const refresher = new OAuthRefresher({
-			store,
-			pool,
-			override: options.refreshOAuthCredential,
-			overrideMints: options.refreshOAuthCredentialMints,
-		});
 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
 		// Key reports by the effective provider (runtime extension override first), so an
 		// override's `cacheVersion` separates its rows from other processes sharing the store.
 		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
+		const refresher = new OAuthRefresher({
+			store,
+			pool,
+			blocks,
+			override: options.refreshOAuthCredential,
+			overrideMints: options.refreshOAuthCredentialMints,
+		});
 		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
 		const usage = new UsageService({
 			store,
