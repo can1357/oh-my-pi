@@ -1411,3 +1411,99 @@ describe("IndexedSessionStorage atomic readback", () => {
 		expect(storage.statSync(sessionPath).size).toBe(Buffer.byteLength(newerBody));
 	});
 });
+
+/** Holds the next `updateSessionTitle` until the test opens it: a title change waiting on its slot update. */
+class HeldTitleStorage extends MemorySessionStorage {
+	hold: { reached: PromiseWithResolvers<void>; open: PromiseWithResolvers<void> } | undefined;
+
+	override async updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void> {
+		const hold = this.hold;
+		this.hold = undefined;
+		if (hold) {
+			hold.reached.resolve();
+			await hold.open.promise;
+		}
+		return super.updateSessionTitle(path, update);
+	}
+}
+
+describe("SessionManager restoreState while a title change is in flight", () => {
+	const reply = () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model");
+		return {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "a reply" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: Date.now(),
+		};
+	};
+
+	// A failed session switch restores the manager's earlier state (as AgentSession does). The control restores with
+	// no title change in flight.
+	for (const titleInFlight of [false, true]) {
+		it(`keeps the restored draft's file a session (title in flight: ${titleInFlight})`, async () => {
+			const storage = new HeldTitleStorage();
+			// Session B on storage, with its title slot.
+			const writer = SessionManager.create("/cwd", "/sessions", storage);
+			writer.appendMessage({ role: "user", content: "b", timestamp: 1 });
+			writer.appendMessage(reply());
+			await writer.setSessionName("b title", "user");
+			await writer.flush();
+			const bFile = writer.getSessionFile();
+			await writer.close();
+			if (!bFile) throw new Error("Expected session file");
+
+			// The manager starts on a new draft session A, which has no file yet, and switches to B.
+			const manager = SessionManager.create("/cwd", "/sessions", storage);
+			const aFile = manager.getSessionFile();
+			const aId = manager.getSessionId();
+			if (!aFile) throw new Error("Expected session file");
+			const draft = manager.captureState();
+			await manager.setSessionFile(bFile);
+			if (titleInFlight) {
+				storage.hold = { reached: Promise.withResolvers(), open: Promise.withResolvers() };
+				const { reached, open } = storage.hold;
+				const title = manager.setSessionName("renamed b", "user");
+				await reached.promise;
+				manager.restoreState(draft);
+				open.resolve();
+				await title;
+			} else {
+				manager.restoreState(draft);
+			}
+
+			// Back on A: a draft holds its entries until its first reply, then writes the whole session.
+			manager.appendMessage({ role: "user", content: "first entry after the restore", timestamp: 2 });
+			await manager.flush();
+			expect(storage.existsSync(aFile)).toBe(false);
+			manager.appendMessage(reply());
+			await manager.flush();
+			await manager.close();
+
+			const reopened = await SessionManager.open(aFile, "/sessions", storage);
+			try {
+				expect(reopened.getSessionId()).toBe(aId);
+				expect(
+					reopened
+						.getEntries()
+						.filter(entry => entry.type === "message")
+						.map(entry => entry.message.role),
+				).toEqual(["user", "assistant"]);
+			} finally {
+				await reopened.close();
+			}
+		});
+	}
+});

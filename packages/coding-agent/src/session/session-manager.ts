@@ -2879,6 +2879,10 @@ export class SessionManager {
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
 		this.#closeWriterEventually();
+		// The restored state replaces the current one: disk work still in flight for it (a title change awaiting its
+		// slot update or its fallback rewrite) checks the epoch, so it must not mark the restored session's file
+		// current, which would send the restored session's next entry to a file that has no header.
+		this.#diskEpoch++;
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 
