@@ -8,6 +8,7 @@ fix/eval-names-top-level-only-tip
 fix/force-cli-verify
 relay/zys-10234-3ff86e7ac4
 fix/chat-completions-claude-demoted-reasoning
+feat/session-info-meta
 chore/fork-safe-compat-01a20e96
 fix/extension-dependency-refresh
 feat/composer-draft-stash
@@ -20,5 +21,4 @@ relay/zys-11208-be2e668361
 relay/zys-11249-f263658b73-tests
 reauth-persistent
 feat/fork-release-updates
-feat/session-info-meta
 feat/stop-obligations
