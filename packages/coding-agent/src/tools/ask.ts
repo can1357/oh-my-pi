@@ -750,6 +750,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				by,
 			});
 		}
+		// `ask_resolved` handlers are awaited: an abort or interrupting message during them wins over the answer.
+		if (dialogSignal.aborted) throw abortError();
 		if (!answered) return cancelAsk();
 		// A timeout submits what the form holds; with a required field still empty that is no answer, not data.
 		if (answered.timedOut && named.some(field => fieldError(field, answered.data[field.name!]) !== undefined)) {

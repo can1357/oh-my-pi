@@ -1040,6 +1040,25 @@ describe("AskTool answered by an extension", () => {
 		});
 	});
 
+	it("a call aborted while its answer is being reported takes the abort path", async () => {
+		const ext = channel({ data: { store: "redis" } });
+		const turn = new AbortController();
+		const reported = ext.extensionAsk.resolved;
+		ext.extensionAsk.resolved = async event => {
+			await reported(event);
+			turn.abort();
+		};
+		await expect(
+			new AskTool(createSession()).execute(
+				"call-ext-reported",
+				{ html: DB_FORM },
+				turn.signal,
+				undefined,
+				withChannel(createContext({}), ext.extensionAsk),
+			),
+		).rejects.toThrow("Ask input was cancelled");
+	});
+
 	it("a timeout is reported as unanswered even when the form's values are valid", async () => {
 		const ext = channel();
 		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 30 }, timedOut: true }));

@@ -3531,6 +3531,8 @@ describe("ExtensionRunner", () => {
 				afterHandler?: () => void;
 				/** The requested handler awaits this before returning, like a remote round-trip. */
 				hold?: Promise<void>;
+				/** Runs in the resolved handler. */
+				onResolved?: () => void;
 				/** Runs first in the requested handler, with the event it received. */
 				mutate?: (event: { prompt: { full: string; session?: string; grants?: unknown[] } }) => void;
 				/** When set, the handler answers the moment the call's signal aborts, and stores the result. */
@@ -3562,6 +3564,7 @@ describe("ExtensionRunner", () => {
 						});
 						pi.on("tool_approval_resolved", event => {
 							globalThis.__extApproval.resolved.push({ approved: event.approved, by: event.by, reason: event.reason });
+							globalThis.__extApproval.onResolved?.();
 						});
 					}`,
 				);
@@ -3753,6 +3756,16 @@ describe("ExtensionRunner", () => {
 				await second.run("call-mutated-answer");
 				expect(second.seen.inHandlerResult).toBe(true);
 				expect(second.executed).toHaveBeenCalledTimes(1);
+			});
+
+			it("a call aborted while its approval is being reported does not run", async () => {
+				const { seen, executed, run } = await setup();
+				const turn = new AbortController();
+				seen.inHandler = "once";
+				seen.onResolved = () => turn.abort();
+				await expect(run("call-aborted-after", { signal: turn.signal })).rejects.toThrow(/Aborted/);
+				expect(seen.resolved).toEqual([{ approved: true, by: "extension", reason: undefined }]);
+				expect(executed).not.toHaveBeenCalled();
 			});
 
 			it("a call aborted while its prompt is built requests nothing", async () => {

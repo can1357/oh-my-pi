@@ -620,6 +620,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						: `Tool call denied by user: ${this.tool.name}`,
 				);
 			}
+			// Recording the resolution and its handlers are awaited: an abort during them still stops the call.
+			try {
+				await untilAborted(signal, Promise.resolve());
+			} catch (err) {
+				cancelPreflight();
+				throw err;
+			}
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) {
 					cancelPreflight();
