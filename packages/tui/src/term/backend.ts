@@ -51,10 +51,10 @@ import {
 import { type WidgetContext, widgetContext, widgetFor } from "./widgets";
 import "./painters";
 
-/** Options of a {@link TermBackend}. */
-/** Tick of a block drawing smooth motion (a shimmer sweep), ms: 30 Hz. */
-const SMOOTH_TICK_MS = 1000 / 30;
+/** Tick of a block drawing smooth motion (a shimmer sweep), ms. */
+const SMOOTH_TICK_MS = 1000 / 20;
 
+/** Options of a {@link TermBackend}. */
 export interface TermBackendOptions {
 	readonly surface: Surface;
 	readonly driver: TerminalDriver;
@@ -294,21 +294,18 @@ export class TermBackend {
 	readonly #driver: TerminalDriver;
 	readonly #options: TermBackendOptions;
 	readonly #env: PaintEnvironment;
-	readonly #clock: Signal<number> = signal(Date.now());
+	// A content frame can absorb a tick in the same millisecond as the last sample. Clock readers
+	// still have to run to renew their request for ticks, even if the wall time hasn't changed.
+	readonly #clock: Signal<number> = signal(Date.now(), { equals: false });
 	readonly #reduceMotion: Signal<boolean> = signal(false);
 	/** The hit under the pointer, from the last mouse report. */
 	readonly #hover: Signal<PointerHover | null> = signal<PointerHover | null>(null);
 	readonly #hyperlinks: Signal<boolean>;
 	readonly #textSizing: Signal<boolean>;
-	/**
-	 * A painter read the clock since the last frame. Cleared after each frame, not before: a
-	 * cached block repaints the moment what it read changes, which may be between frames (an
-	 * intro starting), and the frame after must still keep the clock ticking.
-	 */
-	#animated = false;
-	/** A block drawn this frame asked for smooth motion: the next tick comes at 30 Hz. */
-	#smooth = false;
 	#tick: Timer | undefined;
+	#tickDelay = 0;
+	#inTick = false;
+	#frameRequested = false;
 	#frame: Timer | undefined;
 	#lastFrame = 0;
 	/** Main nodes whose rows are in terminal history: always a prefix of `main` (the commit frontier). */
@@ -366,8 +363,7 @@ export class TermBackend {
 		this.#env = {
 			theme: options.theme,
 			clock: smooth => {
-				this.#animated = true;
-				if (smooth) this.#smooth = true;
+				this.#scheduleTick(smooth === true);
 				return (options.clock ?? this.#clock)();
 			},
 			focus: options.surface.focused,
@@ -383,6 +379,7 @@ export class TermBackend {
 	start(): void {
 		if (this.#running) return;
 		this.#running = true;
+		this.#clock.set(Date.now());
 		// Restarted (after a suspend): what the terminal holds is unknown, history is written again.
 		if (this.#committed.size > 0 || this.#emitted.size > 0) this.#requestReplay();
 		this.#unsubscribe.push(
@@ -413,6 +410,7 @@ export class TermBackend {
 		clearTimeout(this.#tick);
 		this.#frame = undefined;
 		this.#tick = undefined;
+		this.#frameRequested = false;
 		for (const off of this.#unsubscribe.splice(0)) off();
 		this.#disposeWatch?.();
 		this.#disposeWatch = undefined;
@@ -446,18 +444,31 @@ export class TermBackend {
 
 	/** Schedule a frame (coalesced, at most one per frame interval). */
 	requestRender(): void {
-		if (!this.#running || this.#frame) return;
+		if (!this.#running || this.#frameRequested) return;
+		this.#frameRequested = true;
+		if (this.#inTick) return;
 		const interval = untrack(() => read(this.#options.frameInterval ?? 16));
 		const wait = Math.max(0, this.#lastFrame + interval - performance.now());
-		this.#frame = setTimeout(() => {
-			this.#frame = undefined;
-			this.renderNow();
-		}, wait);
+		this.#frame = setTimeout(() => this.renderNow(), wait);
 	}
 
 	/** Paint and present a frame now. */
 	renderNow(): void {
 		if (!this.#running) return;
+		if (this.#tick !== undefined) {
+			// This frame carries the animation too. Drop the old watcher before updating the clock:
+			// only the *new* visible blocks should repaint and ask for the next tick.
+			clearTimeout(this.#tick);
+			this.#tick = undefined;
+			this.#disposeWatch?.();
+			this.#disposeWatch = undefined;
+			this.#clock.set(Date.now());
+		}
+		this.#present();
+	}
+
+	#present(): void {
+		this.#frameRequested = false;
 		clearTimeout(this.#frame);
 		this.#frame = undefined;
 		this.#lastFrame = performance.now();
@@ -489,9 +500,6 @@ export class TermBackend {
 			// What became eligible while the batch waited retires in the next frame.
 			this.requestRender();
 		}
-		if (this.#animated) this.#scheduleTick(this.#smooth);
-		this.#animated = false;
-		this.#smooth = false;
 	}
 
 	/**
@@ -513,16 +521,27 @@ export class TermBackend {
 	}
 
 	#scheduleTick(smooth: boolean): void {
-		if (this.#tick || this.#options.clock) return;
-		this.#tick = setTimeout(
-			() => {
-				this.#tick = undefined;
-				this.#clock.set(Date.now());
-				this.renderNow();
-			},
-			smooth ? SMOOTH_TICK_MS : (this.#options.tickInterval ?? 80),
-		);
+		if (!this.#running || this.#options.clock) return;
+		const delay = smooth ? SMOOTH_TICK_MS : (this.#options.tickInterval ?? 80);
+		if (this.#tick !== undefined) {
+			if (this.#tickDelay <= delay) return;
+			clearTimeout(this.#tick);
+		}
+		this.#tickDelay = delay;
+		this.#tick = setTimeout(this.#onTick, delay);
 	}
+
+	readonly #onTick = (): void => {
+		this.#tick = undefined;
+		this.#inTick = true;
+		try {
+			// A clock read renews the tick even when equal output keeps the frame watcher clean.
+			this.#clock.set(Date.now());
+		} finally {
+			this.#inTick = false;
+		}
+		if (this.#frameRequested) this.#present();
+	};
 
 	#paint(node: UiNode, width: number, height?: number): Block {
 		return paintNode(this.#env, node, width, height);

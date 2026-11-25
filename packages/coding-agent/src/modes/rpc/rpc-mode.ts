@@ -43,7 +43,6 @@ import {
 import {
 	choiceValue,
 	defaultFormData,
-	fieldError,
 	type HtmlFormData,
 	type HtmlFormValue,
 	isArrayChoice,
@@ -1311,7 +1310,7 @@ function parseFormDialogResponse(
 	// One entry answers every field of its name, as in HTML form data. Each field that can carry the entry takes it;
 	// a same-name field of another shape (a radio group beside a checkbox group, a group without "Other" beside a
 	// text input) counts as unanswered, as it would in the TUI where the last field wins. At least one field must
-	// carry the entry, and every field must pass the rules the form dialogs apply on submit.
+	// carry the entry. Rules such as `required` or `pattern` are not checked: the form dialogs only flag them.
 	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
 	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
 	const hidden = new Map(form.hidden);
@@ -1336,9 +1335,7 @@ function parseFormDialogResponse(
 			}
 		});
 		if (!values.some(({ carried }) => carried)) throw mismatch;
-		for (const { field, value, carried } of values) {
-			const problem = fieldError(field, value);
-			if (problem) throw new Error(`Form field ${JSON.stringify(name)}: ${problem}`);
+		for (const { value, carried } of values) {
 			if (carried && value !== undefined) data[name] = value;
 		}
 	}
@@ -2296,7 +2293,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				const restored = session.clearQueue({ forInterrupt: true });
 				goalController.stopForHostAbort();
 				abortBuiltinCommands("RPC command aborted by host");
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await session.abort({
+					reason: USER_INTERRUPT_LABEL,
+					detachTools: restored.steering.length + restored.followUp.length > 0,
+				});
 				return fitAbortAndRestoreQueueResponse(id, restored, frameEncoder.maxIntactFrameBytes);
 			}
 
@@ -2307,7 +2307,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					if (!inputGate.isCurrent(command) || !session.isStreaming || !session.hasInterruptibleInput) {
 						return false;
 					}
-					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true, detachTools: true });
 					return true;
 				});
 				return success(id, "abort_and_deliver_queue", { aborted });

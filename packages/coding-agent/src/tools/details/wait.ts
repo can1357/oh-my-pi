@@ -24,6 +24,8 @@ export interface JobSnapshot {
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */
 	intent?: string;
 	durationMs: number;
+	/** Epoch ms for the visible elapsed clock; only a running job in a live wait update carries it. */
+	startedAtMs?: number;
 	/**
 	 * When the run settled (epoch ms); absent while it is still running. Lets a
 	 * snapshot tell a result that finished during the call from one recovered
@@ -119,6 +121,8 @@ export interface CoordinationDetails {
 	op: CoordinationOp;
 	from?: string;
 	to?: string;
+	/** Session title of a recipient in another omp instance, shown in place of its pid `to`. */
+	toLabel?: string;
 	receipts?: IrcDeliveryReceipt[];
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];

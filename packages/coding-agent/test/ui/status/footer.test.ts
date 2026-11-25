@@ -3,7 +3,11 @@
  * thinking and extension-status changes.
  */
 import * as os from "node:os";
-import { jsx, signal } from "@oh-my-pi/pi-tui";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createRoot, jsx, resolveChildren, signal } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { Footer, type FooterFacts } from "../../../src/ui/status/footer";
 import "../../../src/ui/styles/status";
 import { stagedSuite } from "./corpus-suite";
@@ -45,6 +49,38 @@ function footerFacts(mock: FooterMock): FooterFacts {
 		statuses: [],
 	};
 }
+
+describe("footer symbols", () => {
+	let restoreTheme: () => void;
+	beforeEach(() => {
+		const theme = currentTheme();
+		restoreTheme = () => setCurrentTheme(theme);
+	});
+	afterEach(() => restoreTheme());
+
+	test("draws subscription, auto-compaction and pending thinking marks with the active preset", () => {
+		const facts = footerFacts({
+			model: { id: "model", contextWindow: 200_000, thinking: true },
+			auto: true,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 },
+			sub: true,
+		});
+		const theme = loadThemeSync("dark", { symbolPreset: "nerd" });
+		const { symbols } = theme;
+		setCurrentTheme(theme);
+		createRoot(dispose => {
+			try {
+				const [footer] = resolveChildren(jsx(Footer, { facts: () => facts }))();
+				if (!footer) throw new Error("Expected the footer");
+				const stats = Bun.stripANSI(paintNode(staticEnvironment(theme), footer, 100).rows[1] ?? "");
+				expect(stats).toContain(`${symbols.icon("subscription")} 0.0%/200K ${symbols.icon("auto")} `);
+				expect(stats).toEndWith(`model • ${symbols.symbol("thinking.autoPending")} auto`);
+			} finally {
+				dispose();
+			}
+		});
+	});
+});
 
 stagedSuite("composer/footer", corpusCase => {
 	const inputs = corpusCase.inputs as { session: FooterMock };
