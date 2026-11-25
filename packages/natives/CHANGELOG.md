@@ -11,6 +11,10 @@
 - Added `renderHtml` for Markdown and plain-text rendering. Both `renderHtml` and `Reader` default to reader content selection (`mode: "auto"`), support `mode: "full"` to keep all visible content, and share hidden-content options.
 - Added `Reader` for step-by-step URL reading with host-provided HTTP and browser I/O.
 
+### Fixed
+
+- The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added
