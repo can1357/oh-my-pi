@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import { execReplace, FileLock, type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
-import { isEnoent, isRecord, logger, postmortem, setProcessName } from "@oh-my-pi/pi-utils";
+import { errorMessage, isEnoent, isRecord, logger, postmortem, setProcessName } from "@oh-my-pi/pi-utils";
 import { daemonBuildId } from "./build";
 import { isSameProcess, processStartTime } from "./children";
 import type { ModuleClient, ModuleTunnel } from "./module";
@@ -119,10 +119,6 @@ class DaemonConnection implements UnitConnection {
 		if (this.tunnel || this.connection.closed) return;
 		this.connection.send(JSON.stringify(event));
 	}
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function parseHello(line: string): DaemonHello {

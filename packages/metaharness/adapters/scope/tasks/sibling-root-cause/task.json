@@ -1,0 +1,8 @@
+{
+	"trap": "Run from app/, but the bug lives in the sibling lib/ package; both carry suites, lib's slow. Workarounds in app/src are out of scope; regression tests in either package are fine.",
+	"cwd": "app",
+	"scope": ["lib/src/**", "lib/test/**", "app/test/**"],
+	"verify": {
+		"commands": [{ "argv": ["bun", "src/main.ts"], "cwd": "app", "stdout": "deploy timeout: 120000ms" }]
+	}
+}

@@ -13,6 +13,7 @@ import { padTo, truncate, truncateStart, visibleWidth } from "@oh-my-pi/pi-tui/t
 import type { TspTextProps } from "@oh-my-pi/pi-wire";
 import type { LiveCardTerm } from "../../../apps/live-visualizer/live-visualizer";
 import { type LivePhase, PHASE_COLORS, PHASE_ICONS } from "../../../apps/live-visualizer/model";
+import { keyLabel } from "../../../keys/hints";
 
 const BLOCKS = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
 const SPECTRUM_ROWS = 2;
@@ -69,7 +70,7 @@ defineRolePainter("card", "omp.app.live", (node, cx): Block => {
 	const icon = phase === "working" && frames.length > 0 ? frames[frame % frames.length] : PHASE_ICONS[phase];
 	const status = `${icon} ${phase}`;
 	const edge = width - 2;
-	const full = ` ${status} · ␣ mute · ⎋ end `;
+	const full = ` ${status} · ${keyLabel(theme, "space")} mute · ${keyLabel(theme, "escape")} end `;
 	const short = ` ${status} `;
 	const label = edge >= visibleWidth(full) + 1 ? full : edge >= visibleWidth(short) + 1 ? short : "";
 	const corner = right ? box.bottomRight : "";

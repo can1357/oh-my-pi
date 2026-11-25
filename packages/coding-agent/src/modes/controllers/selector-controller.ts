@@ -8,13 +8,13 @@ import { type JSXNode, type KeyEvent, signal, type UiNode, untrack } from "@oh-m
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { actionKey, formatKeyHint } from "../../ui/keys/hints";
 import { getAgentDir, getProjectDir, logger, normalizePathForComparison, sanitizeText } from "@oh-my-pi/pi-utils";
+import { ADVISOR_DEFAULT_TOOL_NAMES } from "../../advisor/advise-tool";
 import {
-	ADVISOR_DEFAULT_TOOL_NAMES,
 	discoverAdvisorConfigs,
 	loadWatchdogConfigFile,
 	resolveAdvisorConfigEditPath,
 	saveWatchdogConfigFile,
-} from "../../advisor";
+} from "../../advisor/config";
 import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "../../advisor/advisor-config-types";
 import { showGitOverlay } from "../../cli/git-tui";
@@ -43,7 +43,12 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
-import type { AgentHubOpenOptions, InteractiveModeContext, ResumeSessionOptions } from "../../modes/types";
+import type {
+	AgentHubOpenOptions,
+	InteractiveModeContext,
+	ResumeSessionOptions,
+	SubmittedUserInput,
+} from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import { credentialStoreLabel } from "../../session/auth-broker-config";
@@ -123,7 +128,7 @@ import { HistorySearch } from "../../ui/overlays/pickers/history-search";
 import { LogoutAccountSelector } from "../../ui/overlays/pickers/logout-account-selector";
 import { ModelHub, type ModelHubProps } from "../../ui/overlays/pickers/model-hub";
 import type { ModelHubState } from "../../ui/overlays/pickers/model-hub-state";
-import { ModelPicker, type ModelPickerProps } from "../../ui/overlays/pickers/model-picker";
+import { ModelPicker, type ModelPickerProps, prewarmModelPicker } from "../../ui/overlays/pickers/model-picker";
 import { type OAuthAuthState, OAuthSelector } from "../../ui/overlays/pickers/oauth-selector";
 import { ResetUsageSelector } from "../../ui/overlays/pickers/reset-usage-selector";
 import { RewindSelector, rewindTargets } from "../../ui/overlays/pickers/rewind-selector";
@@ -729,6 +734,25 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * Builds what the first alt+p reads ahead of it, in background slices
+	 * ({@link prewarmModelPicker}), once the startup model discovery settled:
+	 * composing the catalog earlier would make each discovery land recompose it.
+	 */
+	async warmModelPicker(signal: AbortSignal): Promise<void> {
+		const registry = this.ctx.session.modelRegistry;
+		await registry.awaitInitialBackgroundRefresh(signal);
+		if (signal.aborted) return;
+		const viewed = this.ctx.viewSession;
+		await prewarmModelPicker({
+			source: createModelBrowserSource(this.ctx.settings, model => viewed.effectiveServiceTier(model)),
+			registry,
+			scopedModels: this.ctx.session.scopedModels.map(entry => entry.model),
+			currentContextTokens: viewed.getContextUsage()?.tokens ?? 0,
+			signal,
+		});
 	}
 
 	/**
@@ -1410,69 +1434,116 @@ export class SelectorController {
 	}
 
 	/**
-	 * Complete an esc-esc rewind in place via `navigateTree`: the session tree
-	 * keeps the old path as a sibling branch instead of forking a child
-	 * session. A user-request target (plain prompt, user-invoked skill/collab
-	 * prompt) rewinds PAST itself (leaf moves to its parent) and its draft
-	 * replaces the editor text, so it is a real move even when it is the
-	 * current leaf; every other target lands the leaf on the entry. `done`
-	 * closes the fullscreen selector after the transcript is rebuilt so the
-	 * alternate screen never flashes a stale transcript. `resend` sends a user
-	 * target's prompt again at once (a turn's Retry) instead of leaving it in
-	 * the editor; otherwise the status toast offers Undo ({@link #undoRewind}).
+	 * Complete an esc-esc rewind by branching: the session moves onto a new file holding the
+	 * conversation up to the target, and the file it leaves stays on disk unchanged. A
+	 * user-request target (plain prompt, user-invoked skill/collab prompt) branches before
+	 * itself and its draft replaces the editor text, so it is a real move even when it is the
+	 * current leaf; every other target branches through the entry (`AgentSession.fork`). Work
+	 * still running in the abandoned conversation stops first. `done` closes the fullscreen
+	 * selector after the transcript is rebuilt so the alternate screen never flashes a stale
+	 * transcript. Retry submits instead of leaving the prompt in the editor; otherwise the
+	 * status toast offers Undo ({@link #undoRewind}).
 	 */
-	async #rewindFromTranscript(entryId: string, done: () => void, resend = false): Promise<void> {
-		const entry = this.ctx.sessionManager.getEntry(entryId);
-		if (!entry || !isTranscriptEntry(entry)) {
-			done();
-			return;
-		}
-
-		const isUserTarget = isUserRequestEntry(entry);
-		const realLeafId = this.ctx.sessionManager.getLeafId();
-		if (entryId === realLeafId && !isUserTarget) {
-			done();
-			this.ctx.showStatus("Already at this point");
-			return;
-		}
-		const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
-		const branch = this.ctx.sessionManager.getBranch();
-		const at = branch.findIndex(e => e.id === entryId);
-		const dropped = at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
+	async #rewindFromTranscript(
+		target: string | SubmittedUserInput,
+		done: () => void,
+		turn?: "edit" | "retry",
+	): Promise<void> {
 		const draft = { text: this.ctx.composer.text(), images: [...this.ctx.composer.pendingImages] };
 		try {
-			const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
+			if (turn || this.ctx.session.isBusyForSnapshot) {
+				if (this.ctx.loopModeEnabled) this.ctx.pauseLoop();
+				this.ctx.cancelGoalContinuation();
+				this.ctx.cancelPendingSubmission();
+				this.ctx.yieldCompaction = undefined;
+				this.ctx.compactionQueueOrigin = undefined;
+				this.ctx.compactionQueuedMessages = [];
+				this.ctx.updatePendingMessagesDisplay();
+				await this.ctx.session.abortForRewind();
+			}
+			// Before the first token the bubble exists, but the session may only record
+			// its user entry as the abort unwinds. Never substitute another turn by text.
+			const entry =
+				typeof target === "string"
+					? this.ctx.sessionManager.getEntry(target)
+					: this.ctx.sessionManager
+							.getBranch()
+							.findLast(
+								e =>
+									e.type === "message" &&
+									e.message.role === "user" &&
+									e.message.timestamp === target.submittedAt,
+							);
+			if (!entry || !isTranscriptEntry(entry)) {
+				if (typeof target !== "string") {
+					// Cancelled before dispatch: there is no persisted turn to rewind past.
+					await this.#rebuildEditedTranscript();
+					this.ctx.composer.setDraft(target.text, target.images);
+					if (turn === "retry") this.ctx.composer.submit();
+				}
+				done();
+				return;
+			}
+			const entryId = entry.id;
+			const isUserTarget = isUserRequestEntry(entry);
+			// Undo must return to the settled leaf, including any interrupted tool result or partial answer.
+			const realLeafId = this.ctx.sessionManager.getLeafId();
+			if (entryId === realLeafId && !isUserTarget) {
+				done();
+				this.ctx.showStatus("Already at this point");
+				return;
+			}
+			const treeRewind = turn ? undefined : this.#treeRewindBoundary(entryId, realLeafId);
+			const branch = this.ctx.sessionManager.getBranch();
+			const at = branch.findIndex(e => e.id === entryId);
+			const dropped =
+				at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
+			// Undo resumes the file the rewind leaves; an unpersisted session has none to return to.
+			const sourceFile = this.ctx.sessionManager.isSessionOnDisk()
+				? this.ctx.sessionManager.getSessionFile()
+				: undefined;
+			await this.ctx.prepareSessionSwitch();
+			const result = isUserTarget
+				? await this.ctx.session.branch(entryId, { requireIdle: true })
+				: { cancelled: !(await this.ctx.session.fork(entryId)) };
 			if (result.cancelled) {
 				done();
-				this.ctx.showStatus("Navigation cancelled");
+				this.ctx.showStatus("Rewind cancelled");
 				return;
 			}
 			const fastRewind =
 				treeRewind !== undefined &&
 				this.ctx.sessionManager.getLeafId() === treeRewind.expectedLeafId &&
 				this.ctx.truncateTranscriptFromMessage(treeRewind.message);
-			if (!fastRewind) {
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+			if (turn) {
+				await this.#rebuildEditedTranscript();
+			} else {
+				if (!fastRewind) await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.reloadTodos();
 			}
-			await this.ctx.reloadTodos();
-			if (result.editorText && (isUserTarget || !this.ctx.composer.text().trim())) {
-				this.ctx.composer.setDraft(result.editorText, result.editorImages);
-				if (resend && isUserTarget) this.ctx.composer.submit();
+			this.ctx.statusLine.refresh();
+			if ("selectedText" in result) {
+				this.ctx.composer.setDraft(result.selectedText, result.selectedImages);
+				if (turn === "retry") this.ctx.composer.submit();
 			}
 			done();
-			if (resend) {
+			if (turn === "retry") {
 				this.ctx.showStatus("Retrying the turn");
 				return;
 			}
+			const rewound =
+				dropped > 0 ? `Rewound ${dropped} turn${dropped === 1 ? "" : "s"}` : "Rewound to selected point";
 			this.ctx.showStatus(
-				dropped > 0 ? `Rewound ${dropped} turn${dropped === 1 ? "" : "s"}` : "Rewound to selected point",
-				{
-					action: {
-						act: "undo",
-						label: "Undo",
-						run: () => void this.#undoRewind(realLeafId, isUserTarget ? draft : undefined),
-					},
-				},
+				`${rewound} in a new session`,
+				sourceFile
+					? {
+							action: {
+								act: "undo",
+								label: "Undo",
+								run: () => void this.#undoRewind(sourceFile, isUserTarget ? draft : undefined),
+							},
+						}
+					: undefined,
 			);
 		} catch (error) {
 			done();
@@ -1480,23 +1551,20 @@ export class SelectorController {
 		}
 	}
 
+	async #rebuildEditedTranscript(): Promise<void> {
+		this.ctx.eventController.resetTranscriptAnchors();
+		this.ctx.clearTransientSessionUi();
+		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.ctx.reloadTodos();
+	}
+
 	/**
-	 * Undo of a transcript rewind: the leaf goes back to `leafId`, where it was (the rewind kept that path as a
-	 * branch), and `draft`, what the editor held before the rewind put a prompt there, comes back.
+	 * Undo of a transcript rewind: resumes `sessionFile`, the session the rewind branched from (left unchanged
+	 * on disk), and brings back `draft`, what the editor held before the rewind put a prompt there.
 	 */
-	async #undoRewind(
-		leafId: string | null,
-		draft: { text: string; images: ImageContent[] } | undefined,
-	): Promise<void> {
-		if (!leafId) return;
+	async #undoRewind(sessionFile: string, draft: { text: string; images: ImageContent[] } | undefined): Promise<void> {
 		try {
-			const result = await this.ctx.session.navigateTree(leafId, { summarize: false });
-			if (result.cancelled) {
-				this.ctx.showStatus("Navigation cancelled");
-				return;
-			}
-			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-			await this.ctx.reloadTodos();
+			if (!(await this.handleResumeSession(sessionFile))) return;
 			if (draft) this.ctx.composer.setDraft(draft.text, draft.images);
 			this.ctx.showStatus("Rewind undone");
 		} catch (error) {
@@ -1506,17 +1574,25 @@ export class SelectorController {
 
 	/**
 	 * A transcript turn's hold-menu action on `message`, found on the current branch by role and timestamp:
-	 * `rewind` opens the rewind selector on it; `edit` rewinds past the turn's prompt and puts it in the editor,
-	 * as Esc Esc does; `retry` rewinds past the prompt and sends it again; `fork` moves onto a new session
-	 * holding the conversation up to the message, the old one kept on disk.
+	 * `rewind` opens the rewind selector on it; `edit` branches a new session before the turn's prompt and puts
+	 * it in the editor, as Esc Esc does; `retry` branches the same way and sends the prompt again; `fork` moves
+	 * onto a new session holding the conversation up to the message. Each keeps the old session on disk.
 	 */
-	async runTurnAction(turn: TurnAct, message: TurnMessage): Promise<void> {
+	async runTurnAction(turn: TurnAct, message: TurnMessage, pending?: SubmittedUserInput): Promise<void> {
+		if (turn === "retry" && (this.ctx.composer.text().trim() || this.ctx.composer.pendingImages.length > 0)) {
+			this.ctx.showStatus("Send or clear the draft to retry this turn");
+			return;
+		}
 		const branch = this.ctx.sessionManager.getBranch();
 		const index = branch.findLastIndex(
 			e => e.type === "message" && e.message.role === message.role && e.message.timestamp === message.at,
 		);
 		const entry = branch[index];
 		if (!entry) {
+			if (message.role === "user" && pending?.submittedAt === message.at && (turn === "edit" || turn === "retry")) {
+				await this.#rewindFromTranscript(pending, () => {}, turn);
+				return;
+			}
 			this.ctx.showStatus("That message is no longer on this branch");
 			return;
 		}
@@ -1534,12 +1610,7 @@ export class SelectorController {
 			this.ctx.showStatus("No prompt to resend before this answer");
 			return;
 		}
-		// Retry sends the prompt through the editor, which holds the user's unsent draft.
-		if (turn === "retry" && (this.ctx.composer.text().trim() || this.ctx.composer.pendingImages.length > 0)) {
-			this.ctx.showStatus("Send or clear the draft to retry this turn");
-			return;
-		}
-		await this.#rewindFromTranscript(prompt.id, () => {}, turn === "retry");
+		await this.#rewindFromTranscript(prompt.id, () => {}, turn);
 	}
 
 	/** Fork from here: the session moves onto a new file holding the conversation up to `entryId`. */
@@ -2592,6 +2663,7 @@ export class SelectorController {
 					actions: transcriptActions,
 					hour12: this.ctx.shell.hour12,
 					inspectShell: source => presentShellInspector(this.ctx.shell, source),
+					settings: this.ctx.settings,
 				});
 				viewer = this.ctx.shell.overlays.show(
 					() => fullscreenMenuView("agent-transcript", AgentTranscriptViewer({ model })),

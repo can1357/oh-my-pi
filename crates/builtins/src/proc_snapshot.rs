@@ -132,19 +132,37 @@ fn macos_pid_buffer_size(reported: i32) -> Option<(usize, i32)> {
 /// of the list.
 #[cfg(any(target_os = "macos", test))]
 fn parse_procargs2(buffer: &[u8]) -> Vec<String> {
-	let Some((argc, rest)) = buffer.split_first_chunk::<4>() else {
+	let Some((argc, strings)) = procargs2_strings(buffer) else {
 		return Vec::new();
 	};
-	let argc = usize::try_from(i32::from_ne_bytes(*argc)).unwrap_or(0);
-	let exec_path_end = rest.iter().position(|byte| *byte == 0).unwrap_or(rest.len());
-	let rest = &rest[exec_path_end..];
-	let argv_start = rest.iter().position(|byte| *byte != 0).unwrap_or(rest.len());
-	rest[argv_start..]
-		.split(|byte| *byte == 0)
+	strings
 		.take(argc)
 		.take_while(|arg| !arg.is_empty())
 		.map(|arg| String::from_utf8_lossy(arg).into_owned())
 		.collect()
+}
+
+/// The environment in a `KERN_PROCARGS2` buffer: the `NAME=value` strings
+/// after the argc arguments, up to the empty string that ends them (the
+/// loader's `apple[]` strings follow it).
+#[cfg(any(target_os = "macos", test))]
+fn procargs2_env(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
+	procargs2_strings(buffer)
+		.into_iter()
+		.flat_map(|(argc, strings)| strings.skip(argc))
+		.take_while(|var| !var.is_empty())
+}
+
+/// argc and the NUL-separated strings from argv on in a `KERN_PROCARGS2`
+/// buffer; `None` without a header or with a negative argc.
+#[cfg(any(target_os = "macos", test))]
+fn procargs2_strings(buffer: &[u8]) -> Option<(usize, impl Iterator<Item = &[u8]>)> {
+	let (argc, rest) = buffer.split_first_chunk::<4>()?;
+	let argc = usize::try_from(i32::from_ne_bytes(*argc)).ok()?;
+	let exec_path_end = rest.iter().position(|byte| *byte == 0).unwrap_or(rest.len());
+	let rest = &rest[exec_path_end..];
+	let argv_start = rest.iter().position(|byte| *byte != 0).unwrap_or(rest.len());
+	Some((argc, rest[argv_start..].split(|byte| *byte == 0)))
 }
 
 /// Linux process primitives: procfs and pidfds.
@@ -226,6 +244,40 @@ pub mod sys {
 				.map(|part| String::from_utf8_lossy(part).into_owned())
 				.collect(),
 		)
+	}
+
+	/// Whether the environment `pid` was exec'd with (`/proc/<pid>/environ`)
+	/// holds exactly `entry` (`NAME=value`); `false` when unreadable (another
+	/// user's process, a kernel thread, a zombie).
+	pub fn has_env_entry(pid: i32, entry: &[u8]) -> bool {
+		fs::read(format!("/proc/{pid}/environ"))
+			.is_ok_and(|environ| environ.split(|byte| *byte == 0).any(|var| var == entry))
+	}
+
+	/// Whether `pid` ignores `SIGHUP` (the `SigIgn` mask of
+	/// `/proc/<pid>/status`), as `nohup` leaves it; `None` when unreadable.
+	pub fn ignores_hangup(pid: i32) -> Option<bool> {
+		let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+		let mask = status
+			.lines()
+			.find_map(|line| line.strip_prefix("SigIgn:"))?
+			.trim();
+		let mask = u64::from_str_radix(mask, 16).ok()?;
+		Some(mask & (1 << (libc::SIGHUP - 1)) != 0)
+	}
+
+	/// The regular file descriptor `fd` of `pid` is open on, by path; `None`
+	/// when it is not a regular file, was deleted, or is unreadable.
+	pub fn output_file(pid: i32, fd: i32) -> Option<std::path::PathBuf> {
+		use std::os::unix::fs::MetadataExt;
+
+		let link = format!("/proc/{pid}/fd/{fd}");
+		// The magic link resolves to the open file itself, even a renamed one.
+		let meta = fs::metadata(&link).ok()?;
+		if !meta.is_file() || meta.nlink() == 0 {
+			return None;
+		}
+		fs::read_link(&link).ok()
 	}
 }
 
@@ -652,38 +704,103 @@ pub mod sys {
 		(actual >= size_of::<libc::proc_bsdinfo>() as i32).then_some(info)
 	}
 
-	/// BSD `ps` reads this record to get start times even when libproc denies
-	/// full BSD info for another user's process.
-	pub(super) fn bsd_start_time(pid: i32) -> Option<(u64, u64)> {
-		// Darwin's 64-bit `kinfo_proc` (arm64 and x86_64) starts with
-		// `kp_proc.p_un.__p_starttime`. sysctl requires room for the full record.
-		#[repr(C)]
-		struct KinfoProc {
-			start: libc::timeval,
-			rest:  [u8; 648 - size_of::<libc::timeval>()],
-		}
+	/// Darwin's 64-bit `struct kinfo_proc` (arm64 and x86_64) as raw bytes;
+	/// only fields at the `KP_*` offsets are read. sysctl requires room for
+	/// the full record.
+	#[repr(C, align(8))]
+	struct KinfoProc([u8; 648]);
+	/// Offset of `kp_proc.p_un.__p_starttime` (a `timeval`).
+	const KP_STARTTIME: usize = 0;
+	/// Offset of `kp_proc.p_sigignore` (a `sigset_t`).
+	const KP_SIGIGNORE: usize = 232;
 
+	/// `pid`'s `kinfo_proc` from `sysctl(KERN_PROC_PID)`, readable for any
+	/// user's process.
+	fn kinfo_proc(pid: i32) -> Option<KinfoProc> {
 		let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
-		let mut info = MaybeUninit::<KinfoProc>::uninit();
+		let mut info = KinfoProc([0; 648]);
 		let mut size = size_of::<KinfoProc>();
 		// SAFETY: info is writable for the exact capacity supplied in size.
 		let status = unsafe {
 			libc::sysctl(
 				mib.as_mut_ptr(),
 				4,
-				info.as_mut_ptr().cast(),
+				(&raw mut info).cast(),
 				&raw mut size,
 				ptr::null_mut(),
 				0,
 			)
 		};
-		if status != 0 || size != size_of::<KinfoProc>() {
+		(status == 0 && size == size_of::<KinfoProc>()).then_some(info)
+	}
+
+	/// BSD `ps` reads this record to get start times even when libproc denies
+	/// full BSD info for another user's process.
+	pub(super) fn bsd_start_time(pid: i32) -> Option<(u64, u64)> {
+		let info = kinfo_proc(pid)?;
+		// SAFETY: the record holds a timeval at this offset; the read does not
+		// rely on the byte array's alignment.
+		let start = unsafe {
+			ptr::read_unaligned(info.0[KP_STARTTIME..].as_ptr().cast::<libc::timeval>())
+		};
+		Some((u64::try_from(start.tv_sec).ok()?, u64::try_from(start.tv_usec).ok()?))
+	}
+
+	/// Whether `pid` ignores `SIGHUP` (`kp_proc.p_sigignore`), as `nohup`
+	/// leaves it; `None` when the process is gone.
+	pub fn ignores_hangup(pid: i32) -> Option<bool> {
+		let info = kinfo_proc(pid)?;
+		let mask: [u8; 4] = info.0[KP_SIGIGNORE..KP_SIGIGNORE + 4].try_into().ok()?;
+		Some(u32::from_ne_bytes(mask) & (1 << (libc::SIGHUP - 1)) != 0)
+	}
+
+	/// The regular file descriptor `fd` of `pid` is open on, by path
+	/// (`proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)`); `None` when it is not a
+	/// regular file, was deleted, or is unreadable.
+	pub fn output_file(pid: i32, fd: i32) -> Option<std::path::PathBuf> {
+		use std::os::unix::ffi::OsStrExt;
+
+		/// `struct proc_fileinfo` (`<sys/proc_info.h>`).
+		#[repr(C)]
+		#[allow(dead_code, reason = "C layout; only the vnode record after it is read")]
+		struct ProcFileInfo {
+			openflags:  u32,
+			status:     u32,
+			offset:     i64,
+			kind:       i32,
+			guardflags: u32,
+		}
+		/// `struct vnode_fdinfowithpath` (`<sys/proc_info.h>`).
+		#[repr(C)]
+		#[allow(dead_code, reason = "C layout; only the vnode record is read")]
+		struct VnodeFdInfoWithPath {
+			pfi:  ProcFileInfo,
+			pvip: libc::vnode_info_path,
+		}
+		const _: () = assert!(size_of::<VnodeFdInfoWithPath>() == 1200);
+		const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+		let mut info = MaybeUninit::<VnodeFdInfoWithPath>::zeroed();
+		let size = size_of::<VnodeFdInfoWithPath>() as i32;
+		// SAFETY: info is writable for the exact supplied size; a descriptor
+		// that is not a vnode (pipe, socket) fails the call.
+		let got = unsafe {
+			libc::proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, info.as_mut_ptr().cast(), size)
+		};
+		if got < size {
 			return None;
 		}
-		// SAFETY: a complete record was returned. Read only the timeval at
-		// its start; none of the remaining fields need a Rust representation.
-		let start = unsafe { (&raw const (*info.as_ptr()).start).read() };
-		Some((u64::try_from(start.tv_sec).ok()?, u64::try_from(start.tv_usec).ok()?))
+		// SAFETY: the record is plain C integers, zero-initialised and filled.
+		let info = unsafe { info.assume_init() };
+		let stat = &info.pvip.vip_vi.vi_stat;
+		if stat.vst_mode & libc::S_IFMT != libc::S_IFREG || stat.vst_nlink == 0 {
+			return None;
+		}
+		let path = info.pvip.vip_path.as_flattened();
+		// SAFETY: `c_char` and `u8` have the same size and alignment.
+		let path: &[u8] = unsafe { std::slice::from_raw_parts(path.as_ptr().cast(), path.len()) };
+		let path = std::ffi::CStr::from_bytes_until_nul(path).ok()?.to_bytes();
+		(!path.is_empty()).then(|| std::ffi::OsStr::from_bytes(path).into())
 	}
 
 	/// The executable path libproc reports for `pid`, read into `buffer`.
@@ -697,6 +814,20 @@ pub mod sys {
 
 	/// The argument vector of `pid` from `KERN_PROCARGS2`; empty when unreadable.
 	pub fn args(pid: i32) -> Vec<String> {
+		procargs2(pid).map_or_else(Vec::new, |buffer| super::parse_procargs2(&buffer))
+	}
+
+	/// Whether the environment `pid` was exec'd with (from `KERN_PROCARGS2`)
+	/// holds exactly `entry` (`NAME=value`); `false` when unreadable (another
+	/// user's process, a zombie). The kernel withholds the environment of
+	/// Apple platform binaries (`/bin/sh`, `/bin/sleep`, …) even from the
+	/// same user, so those never match.
+	pub fn has_env_entry(pid: i32, entry: &[u8]) -> bool {
+		procargs2(pid).is_some_and(|buffer| super::procargs2_env(&buffer).any(|var| var == entry))
+	}
+
+	/// `pid`'s `KERN_PROCARGS2` buffer: argc, exec path, argv, environment.
+	fn procargs2(pid: i32) -> Option<Vec<u8>> {
 		let mut mib = [libc::CTL_KERN, KERN_PROCARGS2, pid];
 		let mut size = 0usize;
 		// SAFETY: a null old-value buffer is the sysctl sizing form.
@@ -704,7 +835,7 @@ pub mod sys {
 			libc::sysctl(mib.as_mut_ptr(), 3, ptr::null_mut(), &raw mut size, ptr::null_mut(), 0)
 		} != 0 || size <= size_of::<libc::c_int>()
 		{
-			return Vec::new();
+			return None;
 		}
 		let mut buffer = vec![0u8; size];
 		// SAFETY: buffer is writable for size bytes.
@@ -719,10 +850,10 @@ pub mod sys {
 			)
 		} != 0
 		{
-			return Vec::new();
+			return None;
 		}
 		buffer.truncate(size);
-		super::parse_procargs2(&buffer)
+		Some(buffer)
 	}
 }
 
@@ -2090,7 +2221,7 @@ impl HostProcesses {
 mod tests {
 	use super::{HostProcesses, ProcInfo};
 
-	use super::{ChainNode, macos_pid_buffer_size, parse_procargs2};
+	use super::{ChainNode, macos_pid_buffer_size, parse_procargs2, procargs2_env};
 
 	#[test]
 	fn macos_pid_buffer_size_preserves_count_and_checks_byte_capacity() {
@@ -2113,6 +2244,102 @@ mod tests {
 		let negative = [&(-1i32).to_ne_bytes()[..], b"/bin/sleep\0sleep\0"].concat();
 		assert!(parse_procargs2(&negative).is_empty());
 		assert!(parse_procargs2(&[1, 0]).is_empty(), "a truncated header has no arguments");
+	}
+
+	/// The environment is what follows exactly argc arguments (an empty one
+	/// included), and ends at the empty string before the loader's `apple[]`
+	/// strings.
+	#[test]
+	fn procargs2_env_skips_argv_and_stops_before_apple_strings() {
+		let buffer = [
+			&3i32.to_ne_bytes()[..],
+			b"/bin/sh\0\0\0sh\0\0-c\0A=1\0OMP_X=y\0\0\0executable_path=/bin/sh\0",
+		]
+		.concat();
+		assert_eq!(procargs2_env(&buffer).collect::<Vec<_>>(), [&b"A=1"[..], b"OMP_X=y"]);
+		let negative = [&(-1i32).to_ne_bytes()[..], b"/bin/sh\0sh\0A=1\0"].concat();
+		assert_eq!(procargs2_env(&negative).count(), 0);
+		assert_eq!(procargs2_env(&[1, 0]).count(), 0);
+	}
+
+	/// The environment, `SIGHUP` disposition and output file of a live child
+	/// are read back: what tells a session's leftover processes apart.
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	#[test]
+	fn sys_reads_env_hangup_disposition_and_output_file_of_a_child() {
+		use std::{
+			os::unix::process::CommandExt,
+			process::{Child, Command, Stdio},
+		};
+
+		use super::sys;
+
+		struct Reap(Child);
+		impl Drop for Reap {
+			fn drop(&mut self) {
+				let _ = self.0.kill();
+				let _ = self.0.wait();
+			}
+		}
+
+		// The child is this test binary running `sleeper` alone: macOS
+		// withholds the environment of Apple platform binaries (`/bin/sleep`).
+		fn spawn(hangup: libc::sighandler_t, stdout: Stdio) -> Reap {
+			let mut command = Command::new(std::env::current_exe().expect("test binary path"));
+			command
+				.args([SLEEPER_TEST, "--exact", "--ignored"])
+				.env(SLEEPER, "1")
+				.env("OMP_PROC_SYS_TEST", "tagged")
+				.stdin(Stdio::null())
+				.stdout(stdout)
+				.stderr(Stdio::null());
+			// SAFETY: signal(2) is async-signal-safe.
+			unsafe {
+				command.pre_exec(move || {
+					libc::signal(libc::SIGHUP, hangup);
+					Ok(())
+				});
+			}
+			Reap(command.spawn().expect("spawn sleeper"))
+		}
+
+		let dir = tempfile::tempdir().expect("temp dir");
+		let log = dir.path().join("out.log");
+		let ignoring = spawn(libc::SIG_IGN, Stdio::from(std::fs::File::create(&log).unwrap()));
+		let default = spawn(libc::SIG_DFL, Stdio::piped());
+		let (ignoring_pid, default_pid) = (ignoring.0.id() as i32, default.0.id() as i32);
+
+		assert!(sys::has_env_entry(ignoring_pid, b"OMP_PROC_SYS_TEST=tagged"));
+		assert!(!sys::has_env_entry(ignoring_pid, b"OMP_PROC_SYS_TEST=other"));
+		assert!(!sys::has_env_entry(ignoring_pid, b"OMP_PROC_SYS_TEST"), "a name alone is no entry");
+		assert_eq!(sys::ignores_hangup(ignoring_pid), Some(true));
+		assert_eq!(sys::ignores_hangup(default_pid), Some(false));
+		assert_eq!(
+			sys::output_file(ignoring_pid, 1).map(|path| path.canonicalize().unwrap()),
+			Some(log.canonicalize().unwrap())
+		);
+		assert_eq!(sys::output_file(default_pid, 1), None, "a pipe is no output file");
+		drop(ignoring);
+		drop(default);
+		assert!(!sys::has_env_entry(ignoring_pid, b"OMP_PROC_SYS_TEST=tagged"), "reaped");
+	}
+
+	/// Set in [`sleeper`]'s environment when a test spawns it.
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	const SLEEPER: &str = "OMP_PROC_SYS_TEST_SLEEPER";
+	/// [`sleeper`]'s libtest name.
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	const SLEEPER_TEST: &str = "proc_snapshot::tests::sleeper";
+
+	/// The child process of the test above: this test binary re-run for this
+	/// test alone.
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	#[test]
+	#[ignore = "a child process of another test; idles only when it spawns it"]
+	fn sleeper() {
+		if std::env::var_os(SLEEPER).is_some() {
+			std::thread::sleep(std::time::Duration::from_secs(60));
+		}
 	}
 
 	#[cfg(target_os = "macos")]
