@@ -449,6 +449,7 @@ fn fresh_shell(
 		Vproc::new(vpid, Some(vp.vpid), vp.fds.clone(), vp.cwd.clone(), Some(image), true);
 	child.rlimits.clone_from(&vp.rlimits);
 	child.lineage = vp.lineage;
+	child.source_snapshot.clone_from(&vp.source_snapshot);
 	// A new shell's options, then the invocation's.
 	state::reset_options(&mut k.root, cx.store, &mut child);
 	for opt in [OptId::LoginShell, OptId::RestrictedShell] {

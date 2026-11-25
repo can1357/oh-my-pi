@@ -10,6 +10,7 @@ import { ExtensionUiController } from "../../../src/modes/controllers/extension-
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "../../../src/modes/types";
 import { initTheme } from "../../../src/ui/theme/service";
+import * as externalEditor from "../../../src/utils/external-editor";
 import {
 	disposeProgramStatus,
 	initProgramStatus,
@@ -311,6 +312,41 @@ describe("ExtensionUiController image paste into prompts", () => {
 });
 
 describe("ExtensionUiController editor UI", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("hands the terminal to the external editor from an editor dialog and takes its text back", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		let suspended = false;
+		harness.ctx.suspend = async run => {
+			suspended = true;
+			try {
+				return await run();
+			} finally {
+				suspended = false;
+			}
+		};
+		let ranSuspended: boolean | undefined;
+		spyOn(externalEditor, "getEditorCommand").mockReturnValue("vim");
+		const openInEditor = spyOn(externalEditor, "openInEditor").mockImplementation(async (_command, text) => {
+			ranSuspended = suspended;
+			return `${text} world`;
+		});
+
+		const pending = ui.editor("Focus", "hello");
+		await flushMicrotasks();
+		harness.term.press("ctrl+g");
+		await flushMicrotasks();
+		expect(openInEditor).toHaveBeenCalledWith("vim", "hello");
+		// omp must not draw over the editor or read its keys while it runs.
+		expect(ranSuspended).toBe(true);
+
+		harness.term.press("ctrl+q");
+		expect(await pending).toBe("hello world");
+	});
+
 	it("pastes and sets the composer's text for extensions", async () => {
 		const harness = makeHarness();
 		const ui = await harness.init();

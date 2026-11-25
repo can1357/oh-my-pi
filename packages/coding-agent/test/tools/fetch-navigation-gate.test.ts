@@ -1,14 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
-import { mockFetch } from "../helpers/fetch-mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { renderHtmlToText } from "@oh-my-pi/pi-coding-agent/tools/fetch";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
+import { fetchReadUrl } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import * as scraperUtils from "@oh-my-pi/pi-coding-agent/web/scrapers/utils";
+import { mockFetch } from "../helpers/fetch-mock";
 
-// An API reference page: its markdown is mostly short lines (table rows, code, list items), none of them navigation.
 const PARAMETERS = Array.from(
 	{ length: 12 },
 	(_, i) => `<tr><td><code>option_${i}</code></td><td>int</td><td>${i}</td></tr>`,
@@ -24,116 +20,84 @@ print(r.time)</code></pre>
 <h2>Returns</h2><ul><li>ok: bool</li><li>time: float</li><li>log: str</li></ul>
 <p>LAST_NEEDLE: the result object is immutable.</p></main></body></html>`;
 
-// A landing page around a PDF: a few short metadata lines and the download link.
-const REPORT_ITEMS = ["Annual report", "Fiscal year 2025", "Published March 2026", "48 pages", "English"]
+const REPORT_ITEMS = [
+	"Annual report",
+	"Fiscal year 2025",
+	"Published March 2026",
+	"48 pages",
+	"English",
+	"Financial statements",
+	"Audited",
+	"Reviewed by the board",
+	"Public edition",
+	"Print-ready",
+	"Version 2",
+	"Indexed",
+]
 	.map(item => `<li>${item}</li>`)
 	.join("");
 const WRAPPER_PAGE = `<!doctype html><html><head><title>Annual report</title></head><body><main>
-<h1>Annual report 2025</h1><ul>${REPORT_ITEMS}${REPORT_ITEMS}</ul>
+<h1>Annual report 2025</h1><ul>${REPORT_ITEMS}</ul>
 <p><a href="/report.pdf">Download PDF</a></p></main></body></html>`;
-describe("read URL: a reader's short-line markdown is not taken for navigation", () => {
-	const servers: Bun.Server<undefined>[] = [];
-	afterEach(() => {
-		vi.restoreAllMocks();
-		for (const server of servers) server.stop(true);
-		servers.length = 0;
+
+function htmlResponse(html: string): Response {
+	return new Response(html, { headers: { "content-type": "text/html" } });
+}
+
+function readPage(pages: Record<string, () => Response>) {
+	const requests: string[] = [];
+	const session: ToolSession = {
+		cwd: process.cwd(),
+		hasUI: false,
+		settings: Settings.isolated({ "providers.fetch": "local" }),
+		getSessionFile: () => null,
+		getSessionSpawns: () => null,
+		fetch: mockFetch(input => {
+			const url = new URL(String(input));
+			requests.push(url.href);
+			return pages[url.pathname]?.() ?? new Response(null, { status: 404 });
+		}),
+	};
+	return { requests, result: fetchReadUrl(session, { path: "https://example.com/page" }) };
+}
+
+describe("read URL: short-line documentation and linked documents", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("keeps a short-line API reference instead of treating it as navigation", async () => {
+		const { requests, result } = readPage({ "/page": () => htmlResponse(DOCS_PAGE) });
+		const page = await result;
+
+		expect(page.content).toContain("option_11");
+		expect(page.content).toContain("LAST_NEEDLE");
+		expect(page.details.notes.join("\n")).not.toContain("mostly navigation");
+		expect(requests.every(url => new URL(url).origin === "https://example.com")).toBe(true);
 	});
 
-	function stubFallbacks() {
-		const ensureTool = vi.spyOn(toolsManager, "ensureTool").mockResolvedValue(undefined);
-		const remote = vi.fn(() => new Response("unavailable", { status: 503 }));
-		return { ensureTool, remote, fetch: mockFetch(remote) };
-	}
-
-	it("keeps the native rendering of an API reference page without trying other readers", async () => {
-		const { ensureTool, remote, fetch } = stubFallbacks();
-
-		const result = await renderHtmlToText(
-			"https://docs.example.com/run",
-			DOCS_PAGE,
-			5,
-			Settings.isolated(),
-			undefined,
-			null,
-			fetch,
-		);
-
-		expect(result.method).toBe("native");
-		expect(result.content).toContain("option_11");
-		expect(result.content).toContain("LAST_NEEDLE");
-		expect(ensureTool).not.toHaveBeenCalled();
-		expect(remote).not.toHaveBeenCalled();
-	});
-
-	async function readLocal(pages: Record<string, () => Response>) {
-		const { fetch } = stubFallbacks();
-		const server = Bun.serve({
-			port: 0,
-			fetch: request => pages[new URL(request.url).pathname]?.() ?? new Response("not found", { status: 404 }),
-		});
-		servers.push(server);
-		const cwd = process.cwd();
-		const artifactsDir = path.join(cwd, ".fetch-navigation-gate-artifacts");
-		const session: ToolSession = {
-			cwd,
-			hasUI: false,
-			getSessionFile: () => path.join(cwd, "session.jsonl"),
-			getArtifactsDir: () => artifactsDir,
-			getSessionSpawns: () => null,
-			allocateOutputArtifact: async () => ({
-				id: "test",
-				path: path.join(artifactsDir, `test.log`),
-			}),
-			settings: Settings.isolated({ "fetch.enabled": true }),
-			fetch,
-		};
-		const result = await new ReadTool(session).execute("call", { path: `http://127.0.0.1:${server.port}/page` });
-		return { method: result.details?.method, text: result.content.find(block => block.type === "text")?.text ?? "" };
-	}
-
-	it("reads the page without the 'mostly navigation' note", async () => {
-		const { method, text } = await readLocal({
-			"/page": () => new Response(DOCS_PAGE, { headers: { "content-type": "text/html" } }),
-		});
-
-		expect(method).toBe("native");
-		expect(text).toContain("LAST_NEEDLE");
-		expect(text).not.toContain("mostly navigation");
-	});
-
-	it("still reads the document a short wrapper page links to", async () => {
+	it("reads the document a short wrapper page links to", async () => {
 		vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
 			ok: true,
 			content: `# Annual report 2025\n\n${"DOCUMENT_ONLY_MARKER revenue and costs by segment. ".repeat(20)}`,
 		});
-
-		const { method, text } = await readLocal({
-			"/page": () => new Response(WRAPPER_PAGE, { headers: { "content-type": "text/html" } }),
+		const { result } = readPage({
+			"/page": () => htmlResponse(WRAPPER_PAGE),
 			"/report.pdf": () => new Response("%PDF-1.4 stub", { headers: { "content-type": "application/pdf" } }),
 		});
 
-		expect(method).toBe("extracted-document");
-		expect(text).toContain("DOCUMENT_ONLY_MARKER");
+		expect((await result).content).toContain("DOCUMENT_ONLY_MARKER");
 	});
 
 	it("keeps the page when only its footer links a document", async () => {
-		const convert = vi.spyOn(scraperUtils, "convertWithMarkit").mockResolvedValue({
-			ok: true,
-			content: `# Terms of service\n\n${"TERMS_ONLY_MARKER you agree to these terms. ".repeat(60)}`,
-		});
 		const page = DOCS_PAGE.replace(
 			"</main>",
 			'</main><footer><a href="/legal/terms.pdf">Terms of service</a></footer>',
 		);
-
-		const { method, text } = await readLocal({
-			"/page": () => new Response(page, { headers: { "content-type": "text/html" } }),
+		const { requests, result } = readPage({
+			"/page": () => htmlResponse(page),
 			"/legal/terms.pdf": () => new Response("%PDF-1.4 stub", { headers: { "content-type": "application/pdf" } }),
 		});
 
-		expect(method).toBe("native");
-		expect(text).toContain("LAST_NEEDLE");
-		expect(text).not.toContain("TERMS_ONLY_MARKER");
-		expect(convert).not.toHaveBeenCalled();
+		expect((await result).content).toContain("LAST_NEEDLE");
+		expect(requests).not.toContain("https://example.com/legal/terms.pdf");
 	});
 });

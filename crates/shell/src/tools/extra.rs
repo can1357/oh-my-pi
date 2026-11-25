@@ -157,6 +157,7 @@ impl Extra {
 				turn.config,
 			);
 			invocation.cancel = Some(cancel.clone());
+			invocation.source_snapshot = call.source_snapshot;
 			let lookup = Lookup {
 				path:   invocation.env.get("PATH").cloned(),
 				cwd:    invocation.cwd.clone(),
@@ -355,6 +356,7 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	let mut script = Script::command(source);
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
+	script.source_snapshot = command.take_source_snapshot();
 	script.args = Some(args);
 	// The working directory is logical, as after `cd`: `-execdir` hands over
 	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`.
