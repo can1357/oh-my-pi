@@ -60,6 +60,7 @@ export function GitDiffPane(props: { readonly model: DiffPaneModel; readonly nod
 			path={() => pane.doc?.filePath}
 			mode={() => (pane.mode === "split" ? "split" : "unified")}
 			wrap={() => pane.wrap}
+			scroll={() => pane.nativeScroll}
 			text={() => (pane.doc ? unifiedText(pane.doc, pane.mode === "file") : "")}
 			term={{ pane }}
 		/>
