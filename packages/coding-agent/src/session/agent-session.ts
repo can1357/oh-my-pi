@@ -84,8 +84,9 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import { type Effort, SERVICE_TIER_UNAVAILABLE_FEATURE, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { clearAnthropicFastModeFallback } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isPromptPerturbationEnabled, perturbPromptText } from "@oh-my-pi/pi-ai/prompts/perturbation";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
@@ -322,7 +323,12 @@ import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener, WakeSources } from "./agent-session-events";
-import { type AgentViewSession, isLocalAgentSession } from "./agent-session-handle";
+import {
+	type AgentModelChange,
+	type AgentModelSelectionState,
+	type AgentViewSession,
+	isLocalAgentSession,
+} from "./agent-session-handle";
 import {
 	asyncJobSnapshot,
 	asyncJobTree,
@@ -2441,6 +2447,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelRegistry: this.#modelRegistry,
 			sessionManager: this.sessionManager,
 			providerSessionState: this.#providerSessionState,
+			assertDispatchModel: config.assertDispatchModel,
 			model: () => this.model,
 			sessionId: () => this.sessionId,
 			promptGeneration: () => this.#promptGeneration,
@@ -5231,17 +5238,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						assistantMsg.serviceTier,
 					);
 				}
-				if (
-					assistantMsg.disabledFeatures?.includes("priority") &&
-					this.serviceTierByFamily.anthropic === "priority"
-				) {
-					this.setServiceTierFamily("anthropic", undefined);
-					this.emitNotice(
-						"warning",
-						"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
-						"priority",
-					);
-				}
+				await this.#settleServiceTier(assistantMsg);
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
 				if (speculativeHandoff) {
@@ -13245,6 +13242,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		await this.#models.setModelTemporary(model, thinkingLevel, options);
 	}
 
+	/** Apply an agent URL change using the same session-only controls as the model and effort pickers. */
+	async applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState> {
+		if (this.#isDisposed) throw new Error("Agent session is closed.");
+		if ("effort" in change) {
+			if (!this.model) throw new Error("Agent session has no active model.");
+			this.setThinkingLevel(change.effort);
+		} else {
+			const generation = this.#sessionGeneration;
+			await this.#models.selectAgentModel(change, () => !this.#isDisposed && generation === this.#sessionGeneration);
+		}
+		const model = this.model;
+		if (!model) throw new Error("Agent session has no active model.");
+		return { model: formatModelStringWithRouting(model), effort: this.configuredThinkingLevel() };
+	}
+
 	/** Cycles the scoped model set, or all available models when no scope exists. */
 	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
 		return this.#models.cycleModel(direction);
@@ -13388,6 +13400,59 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Toggles priority service for the active model family. */
 	toggleFastMode(): boolean {
 		return this.#models.toggleFastMode();
+	}
+
+	/**
+	 * Account for a turn whose service tier did not reach the wire.
+	 *
+	 * A provider refusal (Anthropic rejected fast mode and the turn was retried
+	 * without it) is recorded against the credential that served it, so later
+	 * turns go to an account or API key that offers the tier, or run at
+	 * standard speed, while `/fast` stays on. Only a refusal that cannot be
+	 * recorded switches the tier off. A tier that credential selection withheld
+	 * up front is announced once per transition.
+	 */
+	async #settleServiceTier(message: AssistantMessage): Promise<void> {
+		if (message.disabledFeatures?.includes("priority") && this.serviceTierByFamily.anthropic === "priority") {
+			let recorded = false;
+			try {
+				recorded = await this.#modelRegistry.authStorage.limits.markServiceTierUnavailable(message.provider, {
+					credentialId: message.credentialId,
+					serviceTier: "priority",
+					modelId: message.model,
+				});
+			} catch (error) {
+				logger.warn("Failed to record a refused service tier", { provider: message.provider, error });
+			}
+			if (recorded) {
+				// Credential selection now keeps fast mode away from this account; the
+				// provider's session-wide latch would silence the accounts that offer it too.
+				clearAnthropicFastModeFallback(this.#providerSessionState);
+				this.emitNotice(
+					"warning",
+					"Fast mode was refused for the account serving this turn; retried without it. Later turns use an account or API key that offers it, else standard speed.",
+					"priority",
+				);
+			} else {
+				this.setServiceTierFamily("anthropic", undefined);
+				this.emitNotice(
+					"warning",
+					"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
+					"priority",
+				);
+			}
+			return;
+		}
+		const model = this.model;
+		if (!model || model.provider !== message.provider || model.id !== message.model) return;
+		const withheld = message.disabledFeatures?.includes(SERVICE_TIER_UNAVAILABLE_FEATURE) === true;
+		if (this.#models.noteServiceTierWithheld(model, withheld) && withheld) {
+			this.emitNotice(
+				"info",
+				"No available account offers the selected service tier for this model; running at standard speed until one does.",
+				"priority",
+			);
+		}
 	}
 
 	/** Reports whether `/fast ultra` (the OpenAI `ultrafast` tier) is selected for the active model. */

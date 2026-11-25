@@ -426,7 +426,11 @@ impl Launcher {
 			self.route_text(&mut spec, relays, self.decoding.is_none())?;
 		}
 		let lineage = spec.lineage;
-		let mut child = self.spawner.spawn(spec)?;
+		let mut child = if self.spawns.measured(lineage.label) {
+			self.spawner.spawn_measured(spec)?
+		} else {
+			self.spawner.spawn(spec)?
+		};
 		if let Some(relays) = relays {
 			child = relays.wrap(child);
 		}

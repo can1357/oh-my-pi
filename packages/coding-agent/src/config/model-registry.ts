@@ -10,6 +10,7 @@ import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-co
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { serviceTierOffersByAccount } from "@oh-my-pi/pi-ai/types";
 import type {
 	Api,
 	Context,
@@ -561,7 +562,8 @@ export class ModelRegistry {
 	/** Findings copied from {@link #publishedModelsLoad}, replaced when a new load is published. */
 	#publishedModelsFileWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
-	#lastStaticLoadMtime: number | null = null;
+	/** `null` means no config file; `undefined` invalidates the static snapshot. */
+	#lastStaticLoadMtime: number | null | undefined;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -1175,7 +1177,7 @@ export class ModelRegistry {
 
 	async #runPolicyReapply(): Promise<void> {
 		try {
-			this.#lastStaticLoadMtime = null;
+			this.#lastStaticLoadMtime = undefined;
 			await this.refresh("offline");
 		} finally {
 			this.#policyReapply = undefined;
@@ -1539,8 +1541,7 @@ export class ModelRegistry {
 	#reloadStaticModels(options?: { force?: boolean; preserveRuntimeDiscovery?: boolean }): void {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		const staticConfigUnchanged = currentMtime === this.#lastStaticLoadMtime;
-		if (!options?.force && currentMtime !== null && staticConfigUnchanged) {
-			// Models config unchanged since last load; reloading would be redundant.
+		if (!options?.force && staticConfigUnchanged) {
 			return;
 		}
 		// Inside a runtime-change entry point the mirror replays the reload with the change itself.
@@ -4719,11 +4720,14 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
-		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
+		const model = options?.modelId ? this.find(provider, options.modelId) : undefined;
+		const accountAccess = model?.accountAccess;
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
 			accountIds: accountAccess && Object.keys(accountAccess),
+			serviceTier: options?.serviceTier,
+			serviceTierAccounts: model && serviceTierOffersByAccount(model, options?.serviceTier),
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
 			rejectedAccessToken: options?.rejectedAccessToken,

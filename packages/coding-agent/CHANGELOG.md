@@ -2,9 +2,30 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/fast` and `/fast ultra` now route to an account or stored API key that offers the tier, without pinning one by hand; once it hits its limits the other accounts serve as usual at standard speed, and the fast one takes over again when it recovers.
+- A refused Claude fast-mode request no longer turns `/fast` off when another credential can still be tried; run `/fast` again to re-check an account after enabling usage credits.
+- `history://<id>` renders through the same transcript view as `archive.transcript`: turns are numbered, back-to-back reads and searches group, and `?budget=`, `?detail=`, and `?turns=` compact or narrow the transcript.
+
+### Fixed
+
+- A broadcast from the main agent that arrives while a subagent is finishing no longer replaces that subagent's report; the subagent answers it in a separate turn, and the broadcast still interrupts a waiting subagent.
+- On Linux, `time -l` and `time -v` in the bash tool report the program's own maximum resident set size instead of at least omp's.
+
 ### Added
 
 - Timed RPC dialogs accept user activity to refresh their inactivity deadline, and form timeouts retain the latest valid data draft ([#20471](https://github.com/can1357/oh-my-pi/pull/20471) by [@tingQian](https://github.com/tingQian)).
+- Added `archive.transcript(id, {detail, budget, turns})` in eval: renders a past session within a character budget, compacting prompts, replies, thinking, and tool calls by kind until it fits, and dropping from the middle of the conversation as a last resort; calls are counted per tool, and back-to-back `read`/`glob`/`grep`/`find` calls list their paths merged by shared prefix; `detail` and `turns` zoom in.
+### Fixed
+
+- Fixed ACP `session/load` and `session/resume` rejecting saved Copilot 1M models during a background catalog refresh ([#20467](https://github.com/can1357/oh-my-pi/issues/20467)).
+### Fixed
+
+- `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` now apply to assistant replies, thinking, user prompts, extension messages, summaries and tool output, not only plain Markdown blocks ([#20468](https://github.com/can1357/oh-my-pi/issues/20468))
+### Fixed
+
+- Fixed rules from extension packages listed in a config overlay's `extensions:` (`PI_CONFIG_FILES`/`--config`) disappearing after the system prompt is rebuilt, e.g. after `setActiveTools`, `/new`, or `/clear` ([#20475](https://github.com/can1357/oh-my-pi/issues/20475))
 
 ## [19.2.0] - 2026-11-25
 

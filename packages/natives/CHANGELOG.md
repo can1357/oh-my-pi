@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed timed-out or aborted `glob`, `grep`, `fuzzyFind` and `astGrep` calls continuing to walk the tree in the background when several ran at once, pinning CPUs and stalling every later filesystem call in the process.
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

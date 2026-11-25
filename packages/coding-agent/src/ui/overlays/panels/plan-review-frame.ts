@@ -5,6 +5,7 @@
  * model slider and the options, then the key hints, the note editor or the
  * note chooser. Also where clicks land (option, Contents and body rows).
  */
+import { markdownLook } from "@oh-my-pi/pi-tui/text/markdown/look";
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/render";
 import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
@@ -80,7 +81,8 @@ export function sectionRows(raw: string, width: number, theme: Theme): string[] 
 	const holder = theme as Theme & ThemeWithRows;
 	holder[kRendered] ??= new Map();
 	const cache = holder[kRendered];
-	const key = `${width}\u0000${raw}`;
+	const look = markdownLook();
+	const key = `${width}\u0000${look.colorful}\u0000${look.mermaid}\u0000${raw}`;
 	let rows = cache.get(key);
 	if (!rows) {
 		rows = renderMarkdown(raw, width, { theme, paddingX: 1 });

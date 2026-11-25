@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Requests that ask for a fast service tier now prefer a credential that offers it: Codex accounts whose plan advertises the tier (Ultrafast), Claude accounts with fast mode available, or a stored or environment API key. Such an account keeps serving on paid overage and inside its reserve, and ordinary balancing across the rest takes over once it is blocked or refused the tier.
+
+### Fixed
+
+- Codex requests no longer send a service tier to an account whose own plan does not offer it.
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

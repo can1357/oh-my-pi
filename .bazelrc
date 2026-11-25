@@ -111,13 +111,6 @@ build:cache-rw --remote_retries=2
 build:cache-ro --remote_retries=2
 build:cache-rw --remote_timeout=60s
 build:cache-ro --remote_timeout=60s
-# The node's LRU can evict CAS blobs while action-cache entries still name
-# them. Without the bytes, Bazel trusts such a hit and later fails with "Lost
-# inputs no longer available remotely", and its eviction retries hit the same
-# entry again. Downloading every output on a hit turns a missing blob into a
-# cache miss: the action runs locally and (cache-rw) re-uploads.
-build:cache-rw --remote_download_outputs=all
-build:cache-ro --remote_download_outputs=all
 
 # --- Local development ---------------------------------------------------------
 # Optional user overrides (remote cache endpoint, disk cache, etc.).
