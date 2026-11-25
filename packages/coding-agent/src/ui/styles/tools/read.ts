@@ -15,7 +15,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ReadTerm } from "../../tools/read";
 import { codeCellRows, markdownCellRows } from "./code-cell";
 import { fileLink } from "./file-common";
-import { frameInner, frameRows, outcomeBg, statusIcon, statusLine } from "./frame";
+import { bracketed, frameInner, frameRows, outcomeBg, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
 
 /** Display lines of untrusted text: CR progress collapsed to its last segment, tabs expanded. */
@@ -58,7 +58,9 @@ function paintRead(node: UiNode, cx: PaintContext): Block {
 		};
 	}
 	const correction = term?.correctedFrom ? ` ${theme.fg("dim", `(corrected from ${term.correctedFrom})`)}` : "";
-	const warnings = (term?.warnings ?? []).map(warning => theme.fg(warning.color, warning.text));
+	const warnings = (term?.warnings ?? []).map(warning =>
+		theme.fg(warning.color, bracketed(theme, replaceTabs(sanitizeText(warning.text)))),
+	);
 	const expanded = isExpanded(props);
 	if (phase === "image") {
 		const details = term?.content ? displayLines(term.content).map(line => theme.fg("toolOutput", line)) : [];
