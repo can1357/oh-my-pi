@@ -2036,7 +2036,10 @@ export class TernTab implements InProcessRunTab {
 					last = { reason: "missing", count: 0 };
 				} else if (resolved.state === "ok") {
 					if (!resolved.point || !resolved.node) {
-						throw new TernError("protocol", `${this.product} answered dom resolve \`ok\` without a point and node`);
+						throw new TernError(
+							"protocol",
+							`${this.product} answered dom resolve \`ok\` without a point and node`,
+						);
 					}
 					if (!enabled || !resolved.node.states?.includes("disabled")) {
 						if (Date.now() >= deadline) break;
@@ -2076,7 +2079,11 @@ export class TernTab implements InProcessRunTab {
 				}
 				const now = Date.now();
 				if (now + delay >= deadline) break;
-				if (last.reason === "missing" && explicitTimeout === undefined && now - started >= ZERO_MATCH_FAIL_FAST_MS) {
+				if (
+					last.reason === "missing" &&
+					explicitTimeout === undefined &&
+					now - started >= ZERO_MATCH_FAIL_FAST_MS
+				) {
 					break;
 				}
 				await untilAborted(this.#signal, () => Bun.sleep(delay));

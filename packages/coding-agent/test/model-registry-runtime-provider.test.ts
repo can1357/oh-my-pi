@@ -1110,7 +1110,8 @@ describe("ModelRegistry runtime provider registration", () => {
 		const mirror = new ModelRegistry(authStorage, modelsJsonPath, { owner: registry });
 		const { snapshot, unsubscribe } = registry.subscribeMirror(batch => mirror.applyMirrorBatch(batch));
 		mirror.applyMirrorBatch(snapshot);
-		const anthropicNames = (catalog: ModelRegistry) => catalog.getProviderModels("anthropic").map(model => model.name);
+		const anthropicNames = (catalog: ModelRegistry) =>
+			catalog.getProviderModels("anthropic").map(model => model.name);
 
 		// Without credentials the hook cannot run, so the lookup stays provider-scoped and untouched.
 		const before = anthropicNames(registry);
@@ -1455,7 +1456,8 @@ describe("ModelRegistry runtime provider registration", () => {
 					getApiKey: credentials => credentials.access,
 					modifyModels: models => {
 						return models.map(model =>
-							model.provider === "changing-provider" || (model.provider === "anthropic" && model.id === anthropicId)
+							model.provider === "changing-provider" ||
+							(model.provider === "anthropic" && model.id === anthropicId)
 								? { ...model, name: projectedName }
 								: model,
 						);
