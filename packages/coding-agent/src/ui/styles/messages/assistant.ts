@@ -116,7 +116,7 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 	const paddingX = terminalPaddingX();
 	const textStyle = thinking
 		? "thinkingText em"
-		: props.tone ?? (theme.has("assistantMessageText") ? "assistantMessageText" : undefined);
+		: (props.tone ?? (theme.has("assistantMessageText") ? "assistantMessageText" : undefined));
 	const schemes = thinking ? undefined : routedLinkSchemes();
 	const links = thinking ? undefined : term.links;
 	// A host link resolver can change its targets in place.
@@ -124,10 +124,16 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 	if (cacheable) {
 		const last = child[kCompleted];
 		if (
-			last && last.source === source && last.width === width && last.theme === theme &&
-			last.paddingX === paddingX && last.hyperlinks === hyperlinks &&
-			last.textStyle === textStyle && last.schemes === schemes
-		) return last.frame;
+			last &&
+			last.source === source &&
+			last.width === width &&
+			last.theme === theme &&
+			last.paddingX === paddingX &&
+			last.hyperlinks === hyperlinks &&
+			last.textStyle === textStyle &&
+			last.schemes === schemes
+		)
+			return last.frame;
 	}
 	let frame: ReplyFrame = renderMarkdownFrame(source, width, {
 		theme,

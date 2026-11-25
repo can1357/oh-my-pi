@@ -68,9 +68,9 @@ fn own_checkout_hint(ovnfs: Option<&str>) -> Cow<'static, str> {
 				 clean commit or branch. Commit its work there; {command} land <name> brings the \
 				 commits onto the branch checked out here, files included (--rebase when that branch \
 				 moved), or {command} apply <name> brings all its changes as uncommitted edits. Use \
-				 {command} run --rev HEAD -- <command> for a clean-commit \
-				 check without touching this checkout; --take SRC:PATH mixes in paths from the folder \
-				 (.), the index (empty SRC), or another revision."
+				 {command} run --rev HEAD -- <command> for a clean-commit check without touching this \
+				 checkout; --take SRC:PATH mixes in paths from the folder (.), the index (empty SRC), \
+				 or another revision."
 			))
 		},
 		None => Cow::Borrowed(OWN_WORKTREE),

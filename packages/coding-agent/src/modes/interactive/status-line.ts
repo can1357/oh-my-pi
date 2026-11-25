@@ -905,4 +905,3 @@ export class SessionStatusLine implements StatusLineModel {
 		}
 	}
 }
-

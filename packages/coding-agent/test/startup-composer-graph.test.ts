@@ -57,7 +57,11 @@ describe("startup composer prepaint graph", () => {
 			/task\/persisted-revive\.ts$/,
 		];
 		const main = await importedModules("src/main.ts");
-		expectGraphExcludes(main, [...featureOnly, /coding-agent\/src\/sdk\.ts$/, /coding-agent\/src\/tools\/index\.ts$/]);
+		expectGraphExcludes(main, [
+			...featureOnly,
+			/coding-agent\/src\/sdk\.ts$/,
+			/coding-agent\/src\/tools\/index\.ts$/,
+		]);
 		expectGraphExcludes(await importedModules("src/sdk.ts"), featureOnly);
 		expectGraphExcludes(await importedModules("src/cursor.ts"), [/coding-agent\/src\/(sdk|tools\/index)\.ts$/]);
 	});

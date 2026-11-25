@@ -2915,10 +2915,16 @@ describe("provider routing selector (@upstream)", () => {
 		const registry = {
 			getAvailable: () => allModels,
 			getProviderModels: (provider: string) => allModels.filter(model => model.provider === provider),
-			getAll: (): never => { throw new Error("composed full catalog"); },
+			getAll: (): never => {
+				throw new Error("composed full catalog");
+			},
 		};
 		const settings = Settings.isolated({ modelRoles: { smol: "openrouter/z-ai/glm-4.7:high" } });
-		const expected = resolveCliModel({ cliModel, settings, modelRegistry: { ...registry, getProviderModels: undefined, getAll: () => allModels } });
+		const expected = resolveCliModel({
+			cliModel,
+			settings,
+			modelRegistry: { ...registry, getProviderModels: undefined, getAll: () => allModels },
+		});
 		expect(expected.configuredRole).toBe("smol");
 		expect(expected.thinkingLevel).toBe(Effort.High);
 		expect(resolveCliModel({ cliModel, settings, modelRegistry: registry })).toEqual(expected);

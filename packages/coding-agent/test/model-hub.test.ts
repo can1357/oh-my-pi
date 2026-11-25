@@ -202,12 +202,16 @@ describe("ModelHub", () => {
 				}
 				expect(state.searchCounts).toEqual(counts);
 				const provider = state.activeEntry().providerId;
-				const ranked = rankModelItems(query, items.filter(item => !provider || item.provider === provider), {
-					roles: {},
-					mruOrder: [],
-					affinity: buildSearchAffinity(source.modelProviderOrder, {}, []),
-				});
-				expect(state.browser.visible.flatMap(row => isSeparator(row) ? [] : [row.selector])).toEqual(
+				const ranked = rankModelItems(
+					query,
+					items.filter(item => !provider || item.provider === provider),
+					{
+						roles: {},
+						mruOrder: [],
+						affinity: buildSearchAffinity(source.modelProviderOrder, {}, []),
+					},
+				);
+				expect(state.browser.visible.flatMap(row => (isSeparator(row) ? [] : [row.selector]))).toEqual(
 					ranked.map(item => item.selector),
 				);
 			}
@@ -285,7 +289,10 @@ describe("ModelHub", () => {
 			const chat = makeModel("test", "chat");
 			const image = makeModel("test", "image", 128_000, undefined, "image");
 			const settings = Settings.isolated({ modelRoles: { image: "test/image" } });
-			const registry = Object.assign(makeRegistry(() => [chat, image]), { prewarmCatalog: () => undefined });
+			const registry = Object.assign(
+				makeRegistry(() => [chat, image]),
+				{ prewarmCatalog: () => undefined },
+			);
 			await prewarmModelPicker({ source: createModelBrowserSource(settings), registry, scopedModels: [chat] });
 
 			const source = createModelBrowserSource(settings);

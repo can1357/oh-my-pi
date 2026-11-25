@@ -5406,8 +5406,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return advisorAvailableToolNames;
 			},
 			create: granted => {
-				const { createBridgeEditTool, createBridgeGrepFactory }: typeof CursorBridgeTools =
-					require("./cursor-bridge-tools");
+				const {
+					createBridgeEditTool,
+					createBridgeGrepFactory,
+				}: typeof CursorBridgeTools = require("./cursor-bridge-tools");
 				const advisorSession = createAdvisorToolSession();
 				// Descriptions, schemas, and execute-time gates read this live. A name
 				// is active only once its factory returns a tool, so a grant for an

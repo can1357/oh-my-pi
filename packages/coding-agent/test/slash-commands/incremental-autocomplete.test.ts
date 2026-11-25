@@ -3,11 +3,7 @@ import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/autocomp
 
 test("narrowing retains hidden skills while approaching the namespace or competing with an alias", async () => {
 	const provider = new CombinedAutocompleteProvider(
-		[
-			{ name: "tool", aliases: ["job"] },
-			{ name: "skill:find-jobs", iconName: "search" },
-			{ name: "skill:sketch" },
-		],
+		[{ name: "tool", aliases: ["job"] }, { name: "skill:find-jobs", iconName: "search" }, { name: "skill:sketch" }],
 		process.cwd(),
 	);
 	const values = (query: string) => provider.trySyncSlashCompletion(query)?.items.map(item => item.value);

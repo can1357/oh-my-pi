@@ -109,10 +109,15 @@ describe("wait", () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		let progress!: (stage: string) => Promise<void>;
-		const id = manager.register("task", "build", async ctx => {
-			progress = stage => ctx.reportProgress("", { progress: [{ id: ctx.jobId, stage }] });
-			return build.promise;
-		}, { ownerId: "Main" });
+		const id = manager.register(
+			"task",
+			"build",
+			async ctx => {
+				progress = stage => ctx.reportProgress("", { progress: [{ id: ctx.jobId, stage }] });
+				return build.promise;
+			},
+			{ ownerId: "Main" },
+		);
 		const updates: CoordinationDetails[] = [];
 		const waiting = new WaitTool(session(manager)).execute("wait", {}, undefined, update => {
 			if (update.details) updates.push(update.details);

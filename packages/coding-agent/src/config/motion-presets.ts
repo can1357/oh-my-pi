@@ -1,6 +1,10 @@
 // The `tui.motion` presets. Free of coding-agent imports so the flag table can import it during CLI
 // bootstrap; the derivation that applies them lives beside the setting handles in `modes/settings.ts`.
-import { DEFAULT_SPINNER_INTERVAL_MS, DEFAULT_TITLE_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "./spinner-interval";
+import {
+	DEFAULT_SPINNER_INTERVAL_MS,
+	DEFAULT_TITLE_SPINNER_INTERVAL_MS,
+	SPINNER_INTERVAL_STATIC,
+} from "./spinner-interval";
 
 export const MOTION_MODES = ["full", "reduced", "none"] as const;
 export type MotionMode = (typeof MOTION_MODES)[number];
@@ -10,9 +14,16 @@ export type MotionMode = (typeof MOTION_MODES)[number];
  * (shimmer, blink, fade, `fx`) runs.
  */
 export const MOTION_PRESETS: Readonly<
-	Record<MotionMode, { readonly spinnerInterval: number; readonly titleSpinnerInterval: number; readonly effects: boolean }>
+	Record<
+		MotionMode,
+		{ readonly spinnerInterval: number; readonly titleSpinnerInterval: number; readonly effects: boolean }
+	>
 > = {
-	full: { spinnerInterval: DEFAULT_SPINNER_INTERVAL_MS, titleSpinnerInterval: DEFAULT_TITLE_SPINNER_INTERVAL_MS, effects: true },
+	full: {
+		spinnerInterval: DEFAULT_SPINNER_INTERVAL_MS,
+		titleSpinnerInterval: DEFAULT_TITLE_SPINNER_INTERVAL_MS,
+		effects: true,
+	},
 	reduced: { spinnerInterval: 250, titleSpinnerInterval: 250, effects: false },
 	none: { spinnerInterval: SPINNER_INTERVAL_STATIC, titleSpinnerInterval: SPINNER_INTERVAL_STATIC, effects: false },
 };

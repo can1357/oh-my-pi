@@ -15,14 +15,29 @@ describe("tui.motion", () => {
 	it("fills an unset spinner interval from the preset, keeps one the user set, and silences shimmer below full", () => {
 		const settings = Settings.isolated();
 		cfgDisplayShimmer.override(settings, "kitt");
-		expect(cfgMotionResolved.get(settings)).toEqual({ spinnerInterval: 80, titleSpinnerInterval: 250, shimmer: "kitt", effects: true });
+		expect(cfgMotionResolved.get(settings)).toEqual({
+			spinnerInterval: 80,
+			titleSpinnerInterval: 250,
+			shimmer: "kitt",
+			effects: true,
+		});
 
 		cfgTuiMotion.override(settings, "none");
-		expect(cfgMotionResolved.get(settings)).toEqual({ spinnerInterval: 0, titleSpinnerInterval: 0, shimmer: "disabled", effects: false });
+		expect(cfgMotionResolved.get(settings)).toEqual({
+			spinnerInterval: 0,
+			titleSpinnerInterval: 0,
+			shimmer: "disabled",
+			effects: false,
+		});
 
 		cfgTuiSpinnerInterval.override(settings, 80);
 		cfgTuiMotion.override(settings, "reduced");
-		expect(cfgMotionResolved.get(settings)).toEqual({ spinnerInterval: 80, titleSpinnerInterval: 80, shimmer: "disabled", effects: false });
+		expect(cfgMotionResolved.get(settings)).toEqual({
+			spinnerInterval: 80,
+			titleSpinnerInterval: 80,
+			shimmer: "disabled",
+			effects: false,
+		});
 	});
 
 	describe("loaded from a config file", () => {

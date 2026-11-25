@@ -757,7 +757,8 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// explicit terminal-ownership path, releases the latch.
 	const hadOverride = terminalTitleRuntime.extensionOverride !== undefined;
 	terminalTitleRuntime.extensionOverride = undefined;
-	if (hadOverride && terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+	if (hadOverride && terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled)
+		startTerminalTitleSpinner();
 	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
 	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();

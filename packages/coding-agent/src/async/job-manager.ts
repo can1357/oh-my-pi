@@ -518,7 +518,11 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	onJobsChanged(listener: () => void, ids?: readonly string[]): () => void {
-		const notify = ids ? (id: string) => { if (ids.includes(id)) listener(); } : listener;
+		const notify = ids
+			? (id: string) => {
+					if (ids.includes(id)) listener();
+				}
+			: listener;
 		this.#changeListeners.add(notify);
 		return () => {
 			this.#changeListeners.delete(notify);

@@ -1372,7 +1372,8 @@ describe("ModelRegistry runtime provider registration", () => {
 					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
 					refreshToken: async credentials => credentials,
 					getApiKey: credentials => credentials.access,
-					modifyModels: models => models.map(model => model.provider === provider ? { ...model, id: "@smol" } : model),
+					modifyModels: models =>
+						models.map(model => (model.provider === provider ? { ...model, id: "@smol" } : model)),
 				},
 			},
 			"ext://oauth",

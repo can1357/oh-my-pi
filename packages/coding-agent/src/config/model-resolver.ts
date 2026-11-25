@@ -546,7 +546,10 @@ function revisionSuffixMatch(pool: ModelsWithProviderIndex, provider: string, id
 }
 
 /** Partition resolver candidates without changing the order of duplicates in any bucket. */
-export function groupModelCandidates(models: readonly Model<Api>[], field: "id" | "provider"): Map<string, Model<Api>[]> {
+export function groupModelCandidates(
+	models: readonly Model<Api>[],
+	field: "id" | "provider",
+): Map<string, Model<Api>[]> {
 	const groups = new Map<string, Model<Api>[]>();
 	for (const model of models) {
 		const key = model[field].toLowerCase();
