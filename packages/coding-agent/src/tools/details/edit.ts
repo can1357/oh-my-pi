@@ -85,6 +85,17 @@ export interface EditToolDetails {
 	sourcePath?: string;
 }
 
+/** Added and removed lines of an edit's diff ({@link EditToolDetails.diff}). */
+export function diffStats(diff: string): { added: number; removed: number } {
+	let added = 0;
+	let removed = 0;
+	for (const line of diff ? diff.split("\n") : []) {
+		if (line.startsWith("+")) added++;
+		else if (line.startsWith("-")) removed++;
+	}
+	return { added, removed };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // TUI Renderer
 // ═══════════════════════════════════════════════════════════════════════════

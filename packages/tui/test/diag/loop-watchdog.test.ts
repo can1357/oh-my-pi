@@ -555,6 +555,10 @@ function fakeSampler() {
 			starts++;
 		},
 		stop() {},
+		discard() {
+			drains++;
+			pending = [];
+		},
 		drain() {
 			drains++;
 			const out = pending;

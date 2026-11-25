@@ -525,7 +525,12 @@ export class IrcBus implements IrcBusApi {
 			customType: "irc:relay",
 			content: `[IRC \`${message.from}\` → \`${message.to}\`]\n\n${message.body}`,
 			display: true,
-			details: { from: message.from, to: message.to, body: message.body },
+			details: {
+				from: message.from,
+				...(message.fromLabel ? { fromLabel: message.fromLabel } : {}),
+				to: message.to,
+				body: message.body,
+			},
 			attribution: "agent",
 			timestamp: message.ts,
 		};

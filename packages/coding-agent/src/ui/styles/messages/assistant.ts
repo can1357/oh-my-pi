@@ -24,7 +24,12 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
 import { routedLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
-import { renderMarkdownFrame, takeExtensionLinks } from "@oh-my-pi/pi-tui/text/markdown/index";
+import {
+	type MarkdownLook,
+	markdownLook,
+	renderMarkdownFrame,
+	takeExtensionLinks,
+} from "@oh-my-pi/pi-tui/text/markdown/index";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatNumber } from "@oh-my-pi/pi-utils";
@@ -85,50 +90,81 @@ export function errorRows(theme: Theme, message: string, width: number, maxRows:
 	];
 }
 
-/**
- * The reply's prose. Links of a scheme the host routes (an extension's) draw their label alone,
- * each label a mouse hit on the `md` node whose item is the href, as the stock `md` painter does.
- */
-function proseRows(
-	child: UiNode,
-	cx: PaintContext,
-): { rows: readonly string[]; stable: number; hits?: readonly Hit[] } {
-	const props = propsOf<{ text: string; stream: boolean; tone: string }>(child);
-	const term = termOf<ProseTerm>(child);
-	const links = term.links;
-	const schemes = routedLinkSchemes();
-	const frame = renderMarkdownFrame(term.source ?? props.text ?? "", cx.width, {
-		theme: cx.theme,
-		paddingX: terminalPaddingX(),
-		codeIndent: 0,
-		textStyle: props.tone ?? (cx.theme.has("assistantMessageText") ? "assistantMessageText" : undefined),
-		stream: props.stream === true,
-		hyperlinks: cx.hyperlinks,
-		linkTarget: links && links.size > 0 ? href => links.get(href) : undefined,
-		linkSchemes: schemes.length > 0 ? schemes : undefined,
-	});
-	if (schemes.length === 0) return frame;
-	const hits: Hit[] = [];
-	const rows = frame.rows.map((line, row) => {
-		const taken = takeExtensionLinks(line);
-		for (const link of taken.links)
-			hits.push({ row, col: link.start, width: link.end - link.start, height: 1, node: child, item: link.href });
-		return taken.row;
-	});
-	return { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
+interface ReplyFrame {
+	readonly rows: readonly string[];
+	readonly stable: number;
+	readonly hits?: readonly Hit[];
 }
 
-function thinkingRows(section: UiNode, cx: PaintContext): { rows: readonly string[]; stable: number } {
-	const body = section.children().find(child => child.kind === "md");
-	if (!body) return { rows: [], stable: 0 };
-	const props = propsOf<{ text: string; stream: boolean }>(body);
-	return renderMarkdownFrame(termOf<ProseTerm>(body).source ?? props.text ?? "", cx.width, {
-		theme: cx.theme,
-		paddingX: terminalPaddingX(),
-		textStyle: "thinkingText em",
+// The markdown renderer already reuses the settled paragraphs of the open block. Earlier message
+// blocks (often the entire thinking trace) are *not* streams: keep their final render with the node.
+const kCompleted = Symbol("omp.assistant.completed-markdown");
+
+interface MarkdownNode extends UiNode {
+	[kCompleted]?: {
+		source: string;
+		width: number;
+		theme: Theme;
+		paddingX: number;
+		hyperlinks: boolean;
+		textStyle: string | undefined;
+		schemes: readonly string[] | undefined;
+		look: MarkdownLook;
+		frame: ReplyFrame;
+	};
+}
+
+function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean): ReplyFrame {
+	const props = propsOf<{ text: string; stream: boolean; tone: string }>(child);
+	const term = termOf<ProseTerm>(child);
+	const source = term.source ?? props.text ?? "";
+	const { width, theme, hyperlinks } = cx;
+	const paddingX = terminalPaddingX();
+	const textStyle = thinking
+		? "thinkingText em"
+		: (props.tone ?? (theme.has("assistantMessageText") ? "assistantMessageText" : undefined));
+	const schemes = thinking ? undefined : routedLinkSchemes();
+	const look = markdownLook();
+	const links = thinking ? undefined : term.links;
+	// A host link resolver can change its targets in place.
+	const cacheable = !props.stream && !links?.size;
+	if (cacheable) {
+		const last = child[kCompleted];
+		if (
+			last &&
+			last.source === source &&
+			last.width === width &&
+			last.theme === theme &&
+			last.paddingX === paddingX &&
+			last.hyperlinks === hyperlinks &&
+			last.textStyle === textStyle &&
+			last.schemes === schemes &&
+			last.look === look
+		)
+			return last.frame;
+	}
+	let frame: ReplyFrame = renderMarkdownFrame(source, width, {
+		theme,
+		paddingX,
+		codeIndent: thinking ? undefined : 0,
+		textStyle,
 		stream: props.stream === true,
-		hyperlinks: cx.hyperlinks,
+		hyperlinks,
+		linkTarget: links?.size ? href => links.get(href) : undefined,
+		linkSchemes: schemes?.length ? schemes : undefined,
 	});
+	if (schemes?.length) {
+		const hits: Hit[] = [];
+		const rows = frame.rows.map((line, row) => {
+			const taken = takeExtensionLinks(line);
+			for (const link of taken.links)
+				hits.push({ row, col: link.start, width: link.end - link.start, height: 1, node: child, item: link.href });
+			return taken.row;
+		});
+		frame = { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
+	}
+	if (cacheable) child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, look, frame };
+	return frame;
 }
 
 function pulseRow(cx: PaintContext, dots: { tokens: number; rate: number }): string {
@@ -195,7 +231,7 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 		const role = propsOf<{ role: string }>(child).role ?? "";
 		const key = child.key() ?? "";
 		if (child.kind === "md") {
-			const frame = proseRows(child, cx);
+			const frame = markdownRows(child, cx, false);
 			for (const hit of frame.hits ?? []) hits.push({ ...hit, row: rows.length + hit.row });
 			streamed(frame, propsOf<{ stream: boolean }>(child).stream === true);
 			rendered ||= frame.rows.length > 0;
@@ -203,9 +239,11 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 			const term = termOf<SectionTerm>(child);
 			if (term.hidden) continue;
 			const body = child.children().find(c => c.kind === "md");
-			const frame = thinkingRows(child, cx);
-			streamed(frame, body !== undefined && propsOf<{ stream: boolean }>(body).stream === true);
-			rendered ||= frame.rows.length > 0;
+			if (body) {
+				const frame = markdownRows(body, cx, true);
+				streamed(frame, propsOf<{ stream: boolean }>(body).stream === true);
+				rendered ||= frame.rows.length > 0;
+			}
 			if (term.spaceAfter) rows.push("");
 		} else if (role === "omp.thinking.extension") {
 			// Extension thinking renderers draw under their thinking block.
