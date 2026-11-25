@@ -5,6 +5,7 @@
 ### Fixed
 
 - Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
+- Browser tool now lists and adopts pages from every running relay when the omp extension runs in several Chrome profiles ([#20293](https://github.com/can1357/oh-my-pi/pull/20293) by [@xiaolikt](https://github.com/xiaolikt))
 
 ## [19.2.0] - 2026-11-25
 
@@ -88,7 +89,6 @@
 - OpenRouter's 402 "would exceed your available credits given your current in-flight requests" now auto-retries after the provider's `retry-after-ms` instead of stopping the turn as an out-of-credit error.
 - A `set -e` in one bash tool call no longer stays on for later calls, where the first failing command silently skipped the rest of an unrelated call.
 - A bash tool call that ends after a `cd` or with `set -e` on now says so in its result (`Reset before the next call: cwd → …, set -e off.`), so the agent no longer assumes either carries over.
-- Browser tool now lists and adopts pages from every running relay when the omp extension runs in several Chrome profiles ([#20293](https://github.com/can1357/oh-my-pi/pull/20293) by [@xiaolikt](https://github.com/xiaolikt))
 - `!command` values in `models.yml` (`apiKey`, `headers`) can now read variables defined in `~/.env` or `~/.omp/agent/.env` on macOS and Windows; previously the command saw an empty value.
 - The bash tool's visualization now draws a script run by `bash file.sh`, `source`, or `eval "$var"` as one block under the command that ran it, instead of repeating a “built at runtime” header above every line of the script.
 - Fixed `RpcClient.onSessionEvent` silently dropping the `config_warnings_changed`, `advisor_cost_changed`, and `advisor_yielded` session events emitted over RPC ([#20254](https://github.com/can1357/oh-my-pi/pull/20254) by [@eggpeat](https://github.com/eggpeat))
