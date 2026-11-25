@@ -66,6 +66,7 @@
 
 ### Fixed
 
+- Python eval cells no longer fail with `TypeError: 'str' object can't be awaited` when they `await` `sh`, `read`, `write`, `output` or `wait` as JavaScript cells do; the `await` is ignored
 - `ctrl+x` is silent outside autoresearch instead of toasting "No autoresearch results yet", and expands the dashboard as soon as the mode is on, before the first result
 - `/shake thinking` now clears saved interruption notes as well as reasoning blocks. Switching models or resuming an older session no longer replays those notes to models that reject quoted reasoning.
 - `/fork pane` inside Tern now opens the fork in a new Tern pane, and `/fork window`/`/fork tab` in a new Tern tab, instead of failing with "No terminal multiplexer was detected"
