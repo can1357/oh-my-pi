@@ -1282,7 +1282,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(secondSwitched.switched).toBe(false);
 	});
 
-	test("organization denial keeps the credential out of rotation for new sessions past one minute", async () => {
+	test("account-wide policy denial keeps the credential out of rotation for new sessions past one minute", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		const now = Date.now();
 		await authStorage.credentials.set("anthropic", [
@@ -1302,18 +1302,16 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			},
 		]);
 
-		const deniedKey = await authStorage.keys.get("anthropic", "sess-org-denied-first");
+		const deniedKey = await authStorage.keys.get("anthropic", "sess-account-denied-first");
 		expect(deniedKey).toBe("denied-access");
-		const switched = await authStorage.limits.rotate("anthropic", "sess-org-denied-first", {
-			error: new ProviderHttpError("OAuth authentication is currently not allowed for this organization.", 403, {
-				code: "oauth_not_allowed_for_organization",
-			}),
+		const switched = await authStorage.limits.rotate("anthropic", "sess-account-denied-first", {
+			error: new ProviderHttpError("This request was blocked by cyber_policy.", 403),
 			apiKey: deniedKey,
 		});
 		expect(switched.switched).toBe(true);
 
 		vi.spyOn(Date, "now").mockReturnValue(now + 61_000);
-		expect(await authStorage.keys.get("anthropic", "sess-org-denied-later")).toBe("healthy-access");
+		expect(await authStorage.keys.get("anthropic", "sess-account-denied-later")).toBe("healthy-access");
 	});
 
 	test("a new restricted session does not reuse a login rejected by its organization", async () => {
