@@ -510,10 +510,6 @@
 - Cross-instance agent messaging (`task.crossInstance`) is now on by default: other omp instances in the same folder can read your agents' outputs and message them; turn the setting off to opt out
 - Interrupting while a message is queued (Enter on an empty prompt, or Esc, which returns the message to the editor) moves a running bash command (or eval cell) into a background job instead of cancelling it, also with `interruptMode: wait`; Esc with nothing queued still cancels
 - Messages to and from agents of other omp instances show that instance's session title instead of its pid (`IRC ⟵ Fix login flow`, `Fix login flow/Reviewer` for its subagents); untitled sessions still show the pid. `agent://peers` lists each instance's session title next to its pid
-
-### Changed
-
-- The interactive UI is rebuilt on `@oh-my-pi/pi-tui`: Tern draws the same view tree natively that other terminals get as rows, so both render one layout. Screens look as before.
 - Quitting writes the blocks still on screen (running tools, the last reply) into terminal history instead of clearing them.
 - The model picker spans the full terminal width.
 - Pasting text and pressing Enter in the same keystroke burst submits the pasted text.
@@ -525,7 +521,6 @@
 - `ctrl+x` is silent outside autoresearch instead of toasting "No autoresearch results yet", and expands the dashboard as soon as the mode is on, before the first result
 - `/shake thinking` now clears saved interruption notes as well as reasoning blocks. Switching models or resuming an older session no longer replays those notes to models that reject quoted reasoning.
 - An ACP prompt that runs a `/skill:` command keeps its image blocks, so the skill's turn sees the images ([#20445](https://github.com/can1357/oh-my-pi/issues/20445))
-- SIGTERM or SIGHUP during an `omp acp` turn records `Previous OMP process exited before completing the turn.` The turn resumes with `omp --restore`.
 - SIGTERM or SIGHUP during an `omp acp` turn records `Previous OMP process exited before completing the turn.` That turn resumes with `omp --restore` ([#20446](https://github.com/can1357/oh-my-pi/pull/20446) by [@nick-maderight](https://github.com/nick-maderight)).
 - `/fork pane` inside Tern now opens the fork in a new Tern pane, and `/fork window`/`/fork tab` in a new Tern tab, instead of failing with "No terminal multiplexer was detected"
 - A language server that times out during startup now reports the resolved executable and stops the launcher and its process group instead of leaving them running ([#20436](https://github.com/can1357/oh-my-pi/issues/20436)).
