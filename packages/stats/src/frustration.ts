@@ -20,7 +20,7 @@ import { type Judge, judgeQuestions, type Model } from "@oh-my-pi/pi-ai";
 import { compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/compat/revision";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
-import { logger } from "@oh-my-pi/pi-utils";
+import { errorMessage, logger } from "@oh-my-pi/pi-utils";
 import { getTimeRangeConfig } from "./aggregator";
 import {
 	type FrustrationModelRow,
@@ -117,10 +117,6 @@ function loadJudge(provider: StatsJudgeProvider): Promise<StatsJudge> {
 		if (judgePromise === promise) judgePromise = undefined;
 	});
 	return promise;
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 /** Snapshot of the current run's progress. */

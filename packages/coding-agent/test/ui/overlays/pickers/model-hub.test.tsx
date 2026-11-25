@@ -61,7 +61,7 @@ const registry: ModelHubRegistry = {
 	getDiscoverableProviders: () => [],
 	getProviderDiscoveryState: () => undefined,
 	find: (provider, id) => models.find(model => model.provider === provider && model.id === id),
-	refresh: async () => {},
+	refreshIfStale: async () => false,
 	refreshProvider: async () => {},
 };
 

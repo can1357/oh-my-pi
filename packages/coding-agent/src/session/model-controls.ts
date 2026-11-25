@@ -17,14 +17,17 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	disabledProviderIds,
 	filterAvailableModelsByEnabledPatterns,
 	findScopedModelIndex,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveImplicitDefaultRole,
+	resolveModelOverride,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { buildServiceTierByFamily } from "../config/service-tier";
@@ -37,6 +40,7 @@ import {
 	automaticThinkingLevel,
 	clampAutoThinkingEffort,
 	clampThinkingLevelToCeiling,
+	modelSupportsEffortCeiling,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -45,6 +49,7 @@ import {
 import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { AgentKindModelChange } from "./agent-session-handle";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE, TEMPORARY_MODEL_CHANGE_ROLE } from "./session-entries";
@@ -146,6 +151,7 @@ export interface ModelControlsHost {
 	modelRegistry: ModelRegistry;
 	sessionManager: SessionManager;
 	providerSessionState: Map<string, ProviderSessionState>;
+	assertDispatchModel?: (model: Model) => void;
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
@@ -170,6 +176,8 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	/** Families whose latest turn ran without its tier because the serving account does not offer it. */
+	#withheldTierFamilies = new Set<ServiceTierFamily>();
 
 	constructor(
 		host: ModelControlsHost,
@@ -387,6 +395,44 @@ export class ModelControls {
 		return isCurrent?.() !== false && landed;
 	}
 
+	/** Select the first usable configured model for an authorized agent kind. */
+	async selectAgentModel(change: AgentKindModelChange, isCurrent: () => boolean): Promise<void> {
+		const { settings, modelRegistry, assertDispatchModel } = this.#host;
+		const offline = cfgOffline.get(settings);
+		const provider = this.#model?.provider;
+		const disabled = disabledProviderIds(settings);
+		const ceiling = this.#thinkingLevelCeiling;
+		const models = modelRegistry
+			.getAvailable()
+			.filter(
+				model =>
+					!disabled.has(model.provider) &&
+					(!offline || model.provider === provider) &&
+					(ceiling === undefined || modelSupportsEffortCeiling(model, ceiling)),
+			);
+		const lookup = { getAvailable: () => models };
+		let refused: unknown;
+		for (const pattern of change.patterns) {
+			const selection = resolveModelOverride([pattern], lookup, settings);
+			if (!selection.model) continue;
+			try {
+				assertDispatchModel?.(selection.model);
+			} catch (error) {
+				refused ??= error;
+				continue;
+			}
+			const level =
+				change.thinkingLevel ??
+				(selection.explicitThinkingLevel ? selection.thinkingLevel : change.defaultThinkingLevel);
+			if (!(await this.setModelTemporary(selection.model, level, undefined, "explicit", isCurrent))) {
+				throw new Error("Agent model change was superseded.");
+			}
+			return;
+		}
+		if (refused) throw refused;
+		throw new Error(`Agent kind "${change.kind}" has no available model for this session.`);
+	}
+
 	/**
 	 * Cycle to next/previous model.
 	 * Uses scoped models (from --models flag) if available, otherwise all available models.
@@ -589,10 +635,11 @@ export class ModelControls {
 		const wasAuto = this.#autoThinking;
 		this.#autoThinking = false;
 		this.#autoResolvedLevel = undefined;
-		const effectiveLevel = resolveThinkingLevelForModel(
-			this.#model,
-			clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
-		);
+		const model = this.#model;
+		const ceiling = this.#thinkingLevelCeiling;
+		const resolved = resolveThinkingLevelForModel(model, clampThinkingLevelToCeiling(model, level, ceiling));
+		const effectiveLevel =
+			resolved === ThinkingLevel.Off ? resolved : clampThinkingLevelToCeiling(model, resolved, ceiling);
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.
@@ -817,6 +864,8 @@ export class ModelControls {
 	isFastModeActive(): boolean {
 		const model = this.#model;
 		if (!model || !this.#realizesFastTier(model, this.#serviceTierByFamily)) return false;
+		const family = serviceTierFamily(model);
+		if (family && this.#withheldTierFamilies.has(family)) return false;
 		return (
 			model.provider !== "anthropic" || !isAnthropicFastModeFallbackDisabled(this.#host.providerSessionState, model)
 		);
@@ -858,8 +907,34 @@ export class ModelControls {
 		return Object.keys(this.#serviceTierByFamily).length > 0 ? this.#serviceTierByFamily : null;
 	}
 
+	/**
+	 * Record whether the latest turn on `model` ran without its service tier
+	 * because the account that served it does not offer one. Returns whether
+	 * that is a change, so the session announces each transition once.
+	 */
+	noteServiceTierWithheld(model: Model, withheld: boolean): boolean {
+		const family = serviceTierFamily(model);
+		if (!family || this.#withheldTierFamilies.has(family) === withheld) return false;
+		if (withheld) this.#withheldTierFamilies.add(family);
+		else this.#withheldTierFamilies.delete(family);
+		return true;
+	}
+
+	/**
+	 * Forget the provider refusals recorded for `tier` on `model`, so turning a
+	 * fast tier on again probes every credential afresh instead of waiting out
+	 * a cooldown the user may have just fixed (usage credits enabled, plan
+	 * upgraded).
+	 */
+	#rearmServiceTier(model: Model, tier: ServiceTier): void {
+		void this.#host.modelRegistry.authStorage.limits.rearmServiceTier(model.provider, tier, model.id).catch(error => {
+			logger.debug("Service tier re-arm failed", { provider: model.provider, tier, error: String(error) });
+		});
+	}
+
 	/** Set one family's tier (or clear it with `undefined`); persists the change. */
 	setServiceTierFamily(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
+		this.#withheldTierFamilies.delete(family);
 		if (this.#serviceTierByFamily[family] === tier) return;
 		const next: ServiceTierByFamily = { ...this.#serviceTierByFamily };
 		if (tier) next[family] = tier;
@@ -913,6 +988,7 @@ export class ModelControls {
 		if (family === "anthropic" && this.#serviceTierByFamily.anthropic === "priority") {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
+		this.#rearmServiceTier(model, "priority");
 		this.setServiceTierFamily(family, "priority");
 		return true;
 	}
@@ -933,6 +1009,7 @@ export class ModelControls {
 			this.#host.emitNotice("info", "The current model does not offer the Ultrafast service tier.", "priority");
 			return false;
 		}
+		this.#rearmServiceTier(model, "ultrafast");
 		this.setServiceTierFamily("openai", "ultrafast");
 		return true;
 	}

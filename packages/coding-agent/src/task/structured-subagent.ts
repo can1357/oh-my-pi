@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "../utils/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -60,8 +60,8 @@ import {
 import { generateTaskName, sanitizeAgentId } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { ovnfsWorkspace } from "./ovnfs";
-import { resolveSpawnPolicy } from "./spawn-policy";
-import { type AgentDefinition, canSpawnAtDepth } from "./types";
+import { resolveSpawnPolicy, spawnDenial } from "./spawn-policy";
+import type { AgentDefinition } from "./types";
 import type {
 	AgentProgress,
 	SingleResult,
@@ -82,7 +82,6 @@ import {
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
-	cfgTaskMaxRecursionDepth,
 	cfgTaskPerCallModel,
 	ovnfsCommand,
 	perCallModelEnabled,
@@ -346,31 +345,6 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	}
 }
 
-function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
-	const taskDepth = request.session.taskDepth ?? 0;
-	const maxDepth = cfgTaskMaxRecursionDepth.get(request.session.settings);
-	if (!canSpawnAtDepth(maxDepth, taskDepth)) {
-		throw new StructuredSubagentError(
-			"preflight",
-			`Cannot spawn another agent at task depth ${taskDepth}; maximum depth is ${maxDepth}.`,
-		);
-	}
-	const blockedAgent = request.blockedAgent ?? $env.PI_BLOCKED_AGENT;
-	if (blockedAgent && blockedAgent === agentName) {
-		throw new StructuredSubagentError(
-			"preflight",
-			`Cannot spawn ${blockedAgent} agent from within itself (recursion prevention). Use a different agent type.`,
-		);
-	}
-	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
-	if (!spawnPolicy.enabled || (spawnPolicy.allowedAgents !== null && !spawnPolicy.allowedAgents.includes(agentName))) {
-		throw new StructuredSubagentError(
-			"preflight",
-			`Cannot spawn '${agentName}'. Allowed: ${spawnPolicy.allowedErrorText}`,
-		);
-	}
-}
-
 /** The per-call gate's refusal for `invocationKind` calls, or `undefined` when `task.perCallModel` allows them. */
 function perCallModelDisabledReason(settings: Settings, invocationKind: "task" | "eval"): string | undefined {
 	if (perCallModelEnabled(settings, invocationKind)) return undefined;
@@ -528,7 +502,8 @@ export async function resolveEffectiveSubagentPolicy(
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	assertPlanControlsAllowed(request, planMode);
-	assertDepthAndSpawnAllowed(request, agentName);
+	const denial = spawnDenial(request.session, agentName, request.blockedAgent);
+	if (denial) throw new StructuredSubagentError("preflight", denial);
 
 	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
 	const sessionAgents = request.session.getSessionAgents?.() ?? [];
@@ -852,6 +827,7 @@ function buildExecutorOptions(
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
+		parentSessionKey: session.getAgentSession?.()?.instanceKey,
 		parentPromptCacheKey: session.getPromptCacheKey?.(),
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};

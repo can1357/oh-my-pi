@@ -35,7 +35,7 @@ export interface ShellVisualizerHost extends ShellInspectorSource {
 export function shellVizEventAction(event: UiEvent, preferences: ShellVizPreferences): string | undefined {
 	if (event.type === "action") return event.act === "shell-viz" ? event.value : undefined;
 	if (event.type === "select") return event.item.startsWith("select:") ? event.item : `select:${event.item}`;
-	if (event.type !== "change") return undefined;
+	if (event.type !== "change" || !("item" in event)) return undefined;
 	const { item, value } = event;
 	if ((item === "select" || item === "expand") && isShellVizNode(value)) return `${item}:${value}`;
 	if (typeof value === "string" && value.includes(":")) return value;

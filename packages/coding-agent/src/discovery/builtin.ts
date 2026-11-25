@@ -34,6 +34,7 @@ import {
 	isForeignUserConfigRoot,
 	isUserConfigRoot,
 	loadFilesFromDir,
+	mergeLoadResults,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -330,10 +331,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	});
 
 	const results = await Promise.all([...projectScans, userScan]);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // Managed skills (auto-learn) are a SEPARATE provider at the lowest skill

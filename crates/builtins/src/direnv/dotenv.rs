@@ -5,20 +5,67 @@
 //! `$VAR` / `${VAR}` / `${VAR:-default}` references to earlier keys or the
 //! environment. Ported from direnv 2.38.2 (`pkg/dotenv/parse.go`).
 
-use std::{collections::BTreeMap, sync::LazyLock};
+use std::collections::BTreeMap;
 
-use regex::Regex;
+/// The whitespace permitted around a dotenv assignment.
+fn dotenv_space(c: char) -> bool {
+	matches!(c, '\t' | '\n' | '\x0c' | '\r' | ' ')
+}
 
-/// One line: nothing, a comment, or `[export] KEY(=|: )[VALUE] [# comment]`.
-static LINE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(concat!(
-		r"\A[\t\n\f\r ]*(?:|#.*|(?:export[\t\n\f\r ]+)?([0-9A-Za-z_.]+)",
-		r"(?:[\t\n\f\r ]*=[\t\n\f\r ]*|:[\t\n\f\r ]+?)",
-		r#"('(?:'|[^'])*'|"(?:"|[^"])*"|[^\t\n\f\r #]+)?"#,
-		r"[\t\n\f\r ]*(?:#.*)?)\z",
-	))
-	.expect("the .env line pattern is valid")
-});
+/// A byte permitted in a dotenv key.
+fn key_byte(b: u8) -> bool {
+	b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')
+}
+
+/// Parses `[export] KEY=VALUE`, a comment or an empty line; `None` is invalid syntax.
+fn parse_line(line: &str) -> Option<Option<(&str, &str)>> {
+	let line = line.trim_start_matches(dotenv_space);
+	if line.is_empty() || line.starts_with('#') && !line.contains('\n') {
+		return Some(None);
+	}
+	let line = if let Some(after_export) = line.strip_prefix("export") {
+		let key = after_export.trim_start_matches(dotenv_space);
+		if key.len() < after_export.len() && key.as_bytes().first().copied().is_some_and(key_byte) {
+			key
+		} else {
+			line
+		}
+	} else {
+		line
+	};
+	let end = line.bytes().take_while(|&b| key_byte(b)).count();
+	if end == 0 {
+		return None;
+	}
+	let (key, rest) = line.split_at(end);
+	let value = if let Some(value) = rest.strip_prefix(':') {
+		let trimmed = value.trim_start_matches(dotenv_space);
+		if trimmed.len() == value.len() {
+			return None;
+		}
+		trimmed
+	} else {
+		rest.trim_start_matches(dotenv_space).strip_prefix('=')?.trim_start_matches(dotenv_space)
+	};
+	if let Some(&quote @ (b'\'' | b'"')) = value.as_bytes().first() {
+		let mut last_line_len = None;
+		for close in memchr::memrchr_iter(quote, &value.as_bytes()[1..]) {
+			let end = close + 2;
+			let tail = value[end..].trim_start_matches(dotenv_space);
+			if tail.is_empty()
+				|| tail.starts_with('#')
+					&& tail.len() <= *last_line_len.get_or_insert_with(|| {
+						value.rsplit_once('\n').map_or(value.len(), |(_, line)| line.len())
+					})
+			{
+				return Some(Some((key, &value[..end])));
+			}
+		}
+	}
+	let end = value.bytes().take_while(|b| !matches!(b, b'\t'..=b'\n' | b'\x0c' | b'\r' | b' ' | b'#')).count();
+	let tail = value[end..].trim_start_matches(dotenv_space);
+	(tail.is_empty() || tail.starts_with('#') && !tail.contains('\n')).then_some(Some((key, &value[..end])))
+}
 
 /// The variables `data` defines, each value expanded against the keys before
 /// it and then `lookup` (the environment).
@@ -40,12 +87,9 @@ pub(super) fn parse<'a>(
 			value.push('\n');
 			value.push_str(line);
 			if line.trim().ends_with(*quote) {
-				if let Some(found) = LINE.captures(value)
-					&& let Some(key) = found.get(1)
-				{
-					let raw = found.get(2).map_or("", |value| value.as_str());
+				if let Some(Some((key, raw))) = parse_line(value) {
 					let value = unquote(raw, &vars, lookup);
-					vars.insert(key.as_str().to_owned(), value);
+					vars.insert(key.to_owned(), value);
 				}
 				open = None;
 			}
@@ -62,13 +106,12 @@ pub(super) fn parse<'a>(
 				continue;
 			}
 		}
-		let Some(found) = LINE.captures(line) else {
+		let Some(assignment) = parse_line(line) else {
 			return Err(format!("invalid line: {line}"));
 		};
-		if let Some(key) = found.get(1) {
-			let raw = found.get(2).map_or("", |value| value.as_str());
+		if let Some((key, raw)) = assignment {
 			let value = unquote(raw, &vars, lookup);
-			vars.insert(key.as_str().to_owned(), value);
+			vars.insert(key.to_owned(), value);
 		}
 	}
 	if open.is_some() {
