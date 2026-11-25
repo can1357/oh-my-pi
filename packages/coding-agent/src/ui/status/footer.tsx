@@ -9,7 +9,7 @@
  * row with the model right-aligned).
  */
 import { type Accessor, computed, For, type JSXNode, Show } from "@oh-my-pi/pi-tui";
-import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { sanitizeStatusText } from "../../modes/view-model/chrome/shared";
@@ -47,10 +47,9 @@ export interface FooterSeg {
 	readonly tone?: TspTone;
 }
 
-const UNICODE = presetSymbols("unicode");
-
 /** The footer bar's segments for `facts`. */
 export function footerSegs(facts: FooterFacts): FooterSeg[] {
+	const symbols = currentTheme().symbols;
 	const segs: FooterSeg[] = [];
 	const path: TspSpan[] = [{ t: shortenPath(facts.cwd, facts.home), s: "path dim" }];
 	if (facts.branch) path.push({ t: ` (${facts.branch})`, s: "dim" });
@@ -73,7 +72,7 @@ export function footerSegs(facts: FooterFacts): FooterSeg[] {
 			premiumRequests: usage.premiumRequests,
 			digits: 3,
 		},
-		{ nerd: false, subscription: UNICODE["icon.subscription"] ?? "", advisor: UNICODE["icon.advisor"] ?? "" },
+		symbols,
 	);
 	if (billing) segs.push({ key: "cost", side: "left", priority: 3, spans: [{ t: billing, s: "dim" }] });
 	const window = facts.context?.window ?? facts.model?.contextWindow ?? 0;
@@ -82,14 +81,14 @@ export function footerSegs(facts: FooterFacts): FooterSeg[] {
 	const context: TspSpan[] = [
 		{ t: formatContextUsage(percent, window, facts.context?.tokens ?? 0), s: contextColor(level) },
 	];
-	const auto = UNICODE["icon.auto"];
+	const auto = symbols.icon("auto");
 	if (facts.autoCompact && auto) context.push({ t: ` ${auto}`, s: "dim" });
 	const tone = contextTone(level);
 	segs.push({ key: "context", side: "left", priority: 4, icon: "context", spans: context, ...(tone ? { tone } : {}) });
 	let model = facts.model?.id || "no-model";
 	if (facts.model?.thinking) {
 		const level = facts.autoThinking
-			? (facts.autoResolvedLevel ?? `${UNICODE["thinking.autoPending"] ?? ""} auto`)
+			? (facts.autoResolvedLevel ?? `${symbols.symbol("thinking.autoPending")} auto`)
 			: (facts.thinkingLevel ?? "off");
 		model += ` • ${level}`;
 	}

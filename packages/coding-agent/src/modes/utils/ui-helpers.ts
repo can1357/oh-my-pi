@@ -23,6 +23,7 @@ import { ServedModelTracker } from "../../session/transcript/served-model-marker
 import {
 	isSettledJobFrame,
 	parksAsBackground,
+	readMediaPath,
 	settleWithJobFrame,
 	toolRenderName,
 } from "../../session/transcript/tool-execution";
@@ -673,10 +674,10 @@ export class UiHelpers {
 					const images: ImageContent[] = message.content.filter(
 						(content): content is ImageContent => content.type === "image",
 					);
-					if (images.length > 0 && assistant) {
-						const next = new Map(assistant.toolResultImages.peek());
-						next.set(message.toolCallId, images);
-						assistant.toolResultImages.set(next);
+					const mediaPath = readMediaPath(message.details);
+					if (images.length > 0 || mediaPath)
+						assistant?.setToolResultMedia(message.toolCallId, { images, mediaPath });
+					if (assistant && images.length > 0) {
 						const hasText = message.content.some(content => content.type === "text");
 						if (!hasText && cfgTerminalShowImages.get(settings)) {
 							if (pendingRead) {
