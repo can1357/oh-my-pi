@@ -1411,4 +1411,9 @@ describe("wait", () => {
 		const result = await waiting;
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "done after two hours" });
 	});
+
+	test("wait.maxMs rejects negative and oversized values instead of changing the cap silently", () => {
+		expect(() => Settings.isolated({ "wait.maxMs": -1 })).toThrow(/Invalid wait\.maxMs/);
+		expect(() => Settings.isolated({ "wait.maxMs": 2_147_483_648 })).toThrow(/Invalid wait\.maxMs/);
+	});
 });

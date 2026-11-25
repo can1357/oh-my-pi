@@ -1120,6 +1120,16 @@ export const cfgWaitMaxMs = register({
 			{ value: "7200000", label: "2 hours" },
 		],
 	},
+	// 0 is the explicit no-cap escape; anything else must be a real delay the timer can take
+	// (setTimeout overflows past 2^31-1 ms and fires immediately, and a negative would read as 0).
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 2_147_483_647) {
+			throw new Error(
+				`Invalid wait.maxMs: expected 0 (no cap) or a positive number of milliseconds up to 2147483647, got ${Bun.inspect(raw)}.`,
+			);
+		}
+	},
 });
 
 // Print mode is single-shot by default: it disposes after the last prompt, cancelling the
