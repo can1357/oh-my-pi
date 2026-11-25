@@ -164,6 +164,7 @@ export const transcriptGrep = nativeBindings.transcriptGrep ?? missingNativeExpo
 export const transcriptMessages = nativeBindings.transcriptMessages ?? missingNativeExport("transcriptMessages");
 export const transcriptStats = nativeBindings.transcriptStats ?? missingNativeExport("transcriptStats");
 export const translateWindowsAltGrSequence = nativeBindings.translateWindowsAltGrSequence ?? missingNativeExport("translateWindowsAltGrSequence");
+export const truncateToTokens = nativeBindings.truncateToTokens ?? missingNativeExport("truncateToTokens");
 export const truncateToWidth = nativeBindings.truncateToWidth ?? missingNativeExport("truncateToWidth");
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir ?? missingNativeExport("vcsDetachGitDir");
 export const vcsDiscover = nativeBindings.vcsDiscover ?? missingNativeExport("vcsDiscover");

@@ -39,6 +39,7 @@ class FakeInput implements TerminalInput {
 	readonly log: string[] = [];
 	readonly #port: TerminalPort;
 	readonly #resize = new Set<(columns: number, rows: number) => void>();
+	#input: ((event: InputEvent) => void) | undefined;
 
 	constructor(port: TerminalPort) {
 		this.#port = port;
@@ -54,8 +55,15 @@ class FakeInput implements TerminalInput {
 		this.#port.write("<restore>");
 	}
 
-	onInput(_listener: (event: InputEvent) => void): () => void {
-		return () => {};
+	onInput(listener: (event: InputEvent) => void): () => void {
+		this.#input = listener;
+		return () => {
+			this.#input = undefined;
+		};
+	}
+
+	input(event: InputEvent): void {
+		this.#input?.(event);
 	}
 
 	onResize(listener: (columns: number, rows: number) => void): () => void {
@@ -152,6 +160,26 @@ describe("createTerminalDriver", () => {
 		driver.present({ viewport: ["live"], cursor: null });
 		expect(output()).toContain("\x1b[?1049h<kbd-in>");
 		expect(output()).toContain("<kbd-out>\x1b[?1049l<kbd-after>");
+	});
+
+	it("delivers an input event only to listeners subscribed before it and still subscribed at their turn", async () => {
+		const { driver, input } = setup();
+		await driver.start();
+		const seen: string[] = [];
+		const label = (event: InputEvent) => (event.type === "osc" ? event.raw : event.type);
+		// The first listener opens a page (a new listener) and closes another, as Esc Esc's rewind does.
+		let unsubscribeLate: () => void = () => {};
+		driver.onInput(event => {
+			seen.push(`opener:${label(event)}`);
+			if (label(event) !== "first") return;
+			driver.onInput(next => seen.push(`page:${label(next)}`));
+			unsubscribeLate();
+		});
+		unsubscribeLate = driver.onInput(event => seen.push(`closed:${label(event)}`));
+		input.input({ type: "osc", raw: "first" });
+		input.input({ type: "osc", raw: "second" });
+		expect(seen).toEqual(["opener:first", "opener:second", "page:second"]);
+		await driver.stop();
 	});
 
 	it("forwards resizes and asks replay listeners for the ledger after a display reset", async () => {

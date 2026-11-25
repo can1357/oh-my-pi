@@ -17,6 +17,7 @@
  */
 import type { Model } from "@oh-my-pi/pi-ai";
 import { computed, type JSXNode, type KeyEvent, signal, type UiEvent, untrack } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type {
 	TspKvProps,
 	TspPickerAction,
@@ -813,13 +814,17 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 		const action = chip.action;
 		switch (action.kind) {
 			case "toggle":
-				return chip.label === "enable" ? [span("● enable", "success")] : [span("⦸ disable", "dim")];
+				return chip.label === "enable"
+					? [span(`${currentTheme().symbols.symbol("status.enabled")} enable`, "success")]
+					: [span(`${currentTheme().symbols.symbol("status.disabled")} disable`, "dim")];
 			case "property":
 				return [span(action.property, "accent"), span(`: ${propertySummary(agent, action.property)}`, "dim")];
 			case "set": {
 				if (action.property === "model") return [span(chip.label, "warning")];
 				const current = property ? overrideFor(agent, property)?.toLowerCase() : undefined;
-				return current === action.value ? [span(`● ${chip.label}`, "accent")] : [span(chip.label, "muted")];
+				return current === action.value
+					? [span(`${currentTheme().symbols.symbol("status.enabled")} ${chip.label}`, "accent")]
+					: [span(chip.label, "muted")];
 			}
 			case "pick":
 				return [span(chip.label, "accent")];
@@ -991,7 +996,10 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 			<item
 				key={rowId({ kind: "agent", agent })}
 				label={[
-					agent.disabled ? span("⦸ ", "dim") : span("● ", "success"),
+					span(
+						`${currentTheme().symbols.symbol(agent.disabled ? "status.disabled" : "status.enabled")} `,
+						agent.disabled ? "dim" : "success",
+					),
 					span(agent.name, agent.disabled ? "dim" : "strong"),
 				]}
 				detail={[span(SOURCE_LABEL[agent.source].toLowerCase(), "dim")]}
@@ -1200,7 +1208,10 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 						<item
 							key={item.id}
 							label={[
-								span(`${item.kind === "all" ? "⬢" : item.kind === "new" ? "+" : "●"} `, "muted"),
+								span(
+									`${item.kind === "new" ? "+" : currentTheme().symbols.symbol(item.kind === "all" ? "icon.model" : "status.enabled")} `,
+									"muted",
+								),
 								span(item.label),
 							]}
 							value={item.annotation ?? ""}

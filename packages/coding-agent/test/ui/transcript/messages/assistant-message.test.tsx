@@ -8,7 +8,7 @@ import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import type { TurnUsageSummary } from "../../../../src/modes/view-model/overlays/usage-row";
 import type { CacheInvalidation } from "../../../../src/session/transcript/cache-invalidation-marker";
 import type { ServedModelMismatch } from "../../../../src/session/transcript/served-model-marker";
-import { AssistantMessageBlock } from "../../../../src/ui/transcript/messages/assistant-message";
+import { AssistantMessageBlock, type ToolResultMedia } from "../../../../src/ui/transcript/messages/assistant-message";
 import { screenSuite, single } from "./harness";
 
 /** The 1×1 PNG the capture used (`"1x1 png"` in the inputs). */
@@ -103,7 +103,7 @@ screenSuite("assistant-message", (corpusCase, env) => {
 	const expandThinking = signal(false);
 	const showImages = signal(true);
 	const showToolResultImages = signal(true);
-	const toolResultImages = signal<ReadonlyMap<string, readonly ImageContent[]>>(new Map());
+	const toolResultMedia = signal<ReadonlyMap<string, ToolResultMedia>>(new Map());
 	const linkTargets = signal<ReadonlyMap<string, string>>(new Map());
 	const errorExpanded = signal(false);
 	const errorPinned = signal(false);
@@ -121,7 +121,7 @@ screenSuite("assistant-message", (corpusCase, env) => {
 				expandThinking,
 				showImages,
 				showToolResultImages,
-				toolResultImages,
+				toolResultMedia,
 				linkTargets,
 				errorExpanded,
 				errorPinned,
@@ -170,11 +170,11 @@ screenSuite("assistant-message", (corpusCase, env) => {
 					servedModelMismatch.set(undefined);
 					return;
 				case "tool result image":
-					return toolResultImages.set(
+					return toolResultMedia.set(
 						new Map(
 							Object.entries(inputs.toolResultImages ?? {}).map(([id, images]) => [
 								id,
-								withPng(images) as ImageContent[],
+								{ images: withPng(images) as ImageContent[] },
 							]),
 						),
 					);
