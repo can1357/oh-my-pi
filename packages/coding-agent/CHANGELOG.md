@@ -24,6 +24,9 @@
 
 ### Fixed
 
+- Fixed LSP diagnostics failing to load when imported before the LSP tool.
+- Model lookups now reflect catalog changes from an extension provider’s OAuth login, including in mirrored registries.
+- Tern browser actions now report the last observed reason a target was not actionable and discard target coordinates received after the deadline.
 - Fixed checkout and workspace detection for paths inside directories whose names begin with `..`, so scoped settings, plugin roots, and folder restrictions apply correctly.
 - Fixed broadcasts arriving while a subagent is finishing so they no longer replace the subagent's final report.
 - On Linux, bash `time -l` and `time -v` now report the measured program's peak memory usage rather than the agent process's usage.
