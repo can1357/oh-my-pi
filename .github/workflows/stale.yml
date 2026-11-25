@@ -37,9 +37,10 @@ jobs:
               stale-pr-label: stale
               exempt-issue-labels: prio:p0,prio:p1,backlog,proposal
               close-issue-reason: not_planned
-              # ~3 API calls per stale mark; 300 per 6-hour run spreads the
-              # initial backlog over about a week instead of one notification burst.
-              operations-per-run: 300
+              # Each stale mark costs 4 operations, so 400 per 6-hour run marks
+              # ~90 items and spreads the initial backlog over about a week
+              # instead of one notification burst.
+              operations-per-run: 400
               debug-only: ${{ inputs.dry-run == true }}
               stale-issue-message: >-
                  This issue has had no activity for 45 days and is now marked `stale`.
