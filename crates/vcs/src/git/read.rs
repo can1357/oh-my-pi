@@ -499,32 +499,33 @@ impl GitRepo {
 		}
 		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
 			.map_err(|e| Error::backend("git config", e))?;
+		let mut wt_has_worktree = false;
+		if matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true))) {
+			let worktree_cfg = common_dir.join("config.worktree");
+			match std::fs::metadata(&worktree_cfg) {
+				Ok(_) => {
+					let wt = gix::config::File::from_path_no_includes(
+						worktree_cfg,
+						gix::config::Source::Local,
+					)
+					.map_err(|e| Error::backend("git config", e))?;
+					match wt.boolean("core.bare") {
+						Some(Ok(bare)) => return Ok(bare),
+						Some(Err(err)) => return Err(Error::backend("git config", err)),
+						None => {},
+					}
+					wt_has_worktree = wt.string("core.worktree").is_some();
+				},
+				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
+				Err(err) => return Err(Error::backend("git config", err)),
+			}
+		}
 		match config.boolean("core.bare") {
 			Some(Ok(bare)) => Ok(bare),
 			Some(Err(err)) => Err(Error::backend("git config", err)),
-			None => {
-				if matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true))) {
-					let worktree_cfg = common_dir.join("config.worktree");
-					match std::fs::metadata(&worktree_cfg) {
-						Ok(_) => {
-							let wt = gix::config::File::from_path_no_includes(
-								worktree_cfg,
-								gix::config::Source::Local,
-							)
-							.map_err(|e| Error::backend("git config", e))?;
-							match wt.boolean("core.bare") {
-								Some(Ok(bare)) => return Ok(bare),
-								Some(Err(err)) => return Err(Error::backend("git config", err)),
-								None => {},
-							}
-						},
-						Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
-						Err(err) => return Err(Error::backend("git config", err)),
-					}
-				}
-				Ok(config.string("core.worktree").is_none()
-					&& common_dir.file_name().is_none_or(|n| n != ".git"))
-			},
+			None => Ok(!wt_has_worktree
+				&& config.string("core.worktree").is_none()
+				&& common_dir.file_name().is_none_or(|n| n != ".git")),
 		}
 	}
 
@@ -2010,6 +2011,12 @@ mod tests {
 			"main",
 		])?;
 		assert!(GitRepo::require(&bare_dot_git_linked)?.is_common_repo_bare()?);
+
+		// `extensions.worktreeConfig = true`: `config.worktree` overrides common
+		// `core.bare`.
+		git(&separate_worktree, &["config", "extensions.worktreeConfig", "true"])?;
+		fs::write(separate_git_dir.join("config.worktree"), "[core]\n\tbare = true\n")?;
+		assert!(GitRepo::require(&sep_linked)?.is_common_repo_bare()?);
 		Ok(())
 	}
 }
