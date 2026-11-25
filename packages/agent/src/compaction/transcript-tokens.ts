@@ -3,10 +3,9 @@
  *
  * Local tokenization is the expensive way to answer "how big is this
  * conversation?" — and usually the wrong one, because the provider already
- * answered it. Every settled assistant turn carries `usage` covering the exact
- * prompt it was sent: the system prompt, the tool schemas, and every message up
- * to and including itself. The only genuinely unaccounted-for text is the tail
- * appended *after* that turn.
+ * answered it. A usable `usage` report covers the system prompt, tool schemas,
+ * and transcript through the anchoring assistant turn. Only messages the
+ * report doesn't already cover need local tokenization.
  *
  * These helpers locate the newest trustworthy usage report and tokenize only
  * that tail, so a long session pays counting proportional to one turn instead
@@ -128,17 +127,20 @@ export function findRequestUsageAnchor(messages: readonly Message[]): Transcript
  * Whether `anchor`'s usage already counts `message`, which follows it.
  *
  * Usage normally covers the prompt up to the anchor only. Cursor is the
- * exception: it runs exec-channel tools server-side mid-turn and reports
- * `contextTokens` from the conversation checkpoint, which already holds every
- * result the turn consumed, while the host appends those results after the
- * assistant message. Such a result pairs with a call in the anchor and was
- * produced before the stream finished (`timestamp + duration`); results the
- * client runs for the same turn are produced after it. Timing is the test
- * because the live `kCursorExecResolved` marker does not survive a reload.
+ * exception: its conversation checkpoint reports `contextTokens` for the
+ * conversation including the results it consumed mid-turn. The host appends
+ * those results after the assistant message. Match them by call ID and turn
+ * timing, since `kCursorExecResolved` does not survive a reload. Prefer the
+ * provider's end time to avoid covering client work that starts before the
+ * session records completion. A result in the same millisecond as the end
+ * remains in the tail because the order is ambiguous.
  */
 export function isAnchorCoveredMessage(anchor: AssistantMessage, message: AgentMessage): boolean {
-	if (anchor.api !== "cursor-agent" || anchor.duration === undefined || message.role !== "toolResult") return false;
-	if (message.timestamp > anchor.timestamp + anchor.duration) return false;
+	if (anchor.api !== "cursor-agent" || (anchor.usage.contextTokens ?? 0) <= 0 || message.role !== "toolResult") {
+		return false;
+	}
+	const end = anchor.duration === undefined ? anchor.completedAt : anchor.timestamp + anchor.duration;
+	if (end === undefined || !(message.timestamp >= anchor.timestamp && message.timestamp < end)) return false;
 	return anchor.content.some(block => block.type === "toolCall" && block.id === message.toolCallId);
 }
 

@@ -112,6 +112,35 @@ describe("fitOutputTokensToContextWindow", () => {
 		);
 	});
 
+	test("preserves output room after a Cursor turn with large server-resolved results", () => {
+		const model = { ...getBundledModel("cursor", "gemini-4-neon"), contextWindow: 300_000 };
+		const anchor = reported(183_384, 2);
+		anchor.api = model.api;
+		anchor.provider = model.provider;
+		anchor.model = model.id;
+		anchor.usage.contextTokens = 183_384;
+		anchor.completedAt = 4;
+		anchor.content.push({ type: "toolCall", id: "t1", name: "bash", arguments: {} });
+		const context: Context = {
+			messages: [
+				userOf(100, 1),
+				anchor,
+				{
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "bash",
+					content: [{ type: "text", text: "x".repeat(500_000) }],
+					timestamp: 3,
+					isError: false,
+				},
+				userOf(100, 5),
+			],
+		};
+		expect(fitOutputTokensToContextWindow(model, context, 120_000, tokenizer)).toBe(
+			300_000 - (183_384 + 110 + MESSAGE_FRAMING_TOKENS) - OUTPUT_FIT_HEADWAY_TOKENS,
+		);
+	});
+
 	test("ignores reports made before a history rewrite", () => {
 		// Compaction committed at 10 replaced the 950k prefix the kept turn (5)
 		// measured. A natively replayed summary predates its thinking marker

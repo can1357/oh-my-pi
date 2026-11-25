@@ -144,15 +144,16 @@ describe("estimateTranscriptTokens", () => {
 			isError: false,
 			timestamp,
 		});
-		const turn = (api: AssistantMessage["api"]): AgentMessage[] => [
+		const turn = (overrides: Partial<AssistantMessage>): AgentMessage[] => [
 			user("go"),
 			assistant("done", {
-				api,
+				api: "cursor-agent",
 				provider: "cursor",
 				timestamp: start,
 				duration: 400_000,
 				content: [...calls, { type: "text", text: "done" }],
 				usage: usage({ contextTokens: 183_384 }),
+				...overrides,
 			}),
 			result("srv-1", start + 1_000),
 			result("srv-2", start + 2_000),
@@ -161,18 +162,29 @@ describe("estimateTranscriptTokens", () => {
 			user("follow-up"),
 		];
 
-		test("are not re-counted on top of the provider report", () => {
-			const messages = turn("cursor-agent");
+		test("does not charge server results again but counts a client result after the stream", () => {
+			const messages = turn({ stopReason: "toolUse", completedAt: start + 401_000 });
 			expect(estimateTranscriptTokens(messages, tokenizer)).toBe(
 				183_384 + tokenizer.countMessages(messages.slice(4)),
 			);
 		});
 
-		test("other providers still count every result after the anchor", () => {
-			const messages = turn("anthropic-messages");
-			const anchorTokens = findTranscriptUsageAnchor(messages)?.tokens ?? 0;
+		test("uses the persisted completion time when stream duration is absent", () => {
+			const messages = turn({ duration: undefined, completedAt: start + 400_000 });
 			expect(estimateTranscriptTokens(messages, tokenizer)).toBe(
-				anchorTokens + tokenizer.countMessages(messages.slice(2)),
+				183_384 + tokenizer.countMessages(messages.slice(4)),
+			);
+		});
+
+		test("counts results locally when Cursor reports only billable usage, not checkpoint occupancy", () => {
+			const messages = turn({ usage: usage() });
+			expect(estimateTranscriptTokens(messages, tokenizer)).toBe(1_200 + tokenizer.countMessages(messages.slice(2)));
+		});
+
+		test("other providers still count every result after the anchor", () => {
+			const messages = turn({ api: "anthropic-messages", provider: "anthropic" });
+			expect(estimateTranscriptTokens(messages, tokenizer)).toBe(
+				183_384 + tokenizer.countMessages(messages.slice(2)),
 			);
 		});
 	});
