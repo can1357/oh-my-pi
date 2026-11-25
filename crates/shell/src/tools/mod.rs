@@ -6,8 +6,8 @@
 //!   ([`ShellApi::run_subshell_in`]), signals that tree at the deadline
 //!   ([`SigTarget::Label`](crate::bash::SigTarget::Label)), waits for it and
 //!   the externals it started, and escalates to `KILL` after `-k`.
-//! - `time` with options (`-l`, `-v`, `-p`): runs its command in a subshell
-//!   and reports the times and resource usage of the externals it waited for
+//! - `time` with options (`-l`, `-v`, `-p`): runs its command in a subshell and
+//!   reports the times and resource usage of the externals it waited for
 //!   ([`crate::bash::ProcUsage`]), as macOS and GNU `/usr/bin/time` do.
 //! - `nohup`: runs its command in a detached tree ([`Lineage::detached`]): the
 //!   shell's cancel spares it and the spawner leaves its externals running when
@@ -66,13 +66,8 @@ const TIME: ToolRef = ToolRef(6);
 
 /// pi's tools other than the extras, by name; [`ToolConfig::lookup`] offers
 /// `nohup` and `git` only when the session's switches turn them on.
-const TOOLS: [(&str, ToolRef); 5] = [
-	("time", TIME),
-	("timeout", TIMEOUT),
-	("urlmap", URLMAP),
-	("nohup", NOHUP),
-	("git", GIT),
-];
+const TOOLS: [(&str, ToolRef); 5] =
+	[("time", TIME), ("timeout", TIMEOUT), ("urlmap", URLMAP), ("nohup", NOHUP), ("git", GIT)];
 
 /// The switch that hands `nohup` to the system binary.
 const NOHUP_OFF: &str = "PI_DISABLE_NOHUP_BUILTIN";

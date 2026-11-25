@@ -1569,22 +1569,22 @@ fn proc_usage(ru: &libc::rusage, apple: Option<&libc::rusage_info_v4>) -> ProcUs
 	// Linux and the BSDs count kilobytes; macOS bytes.
 	let rss_unit = if cfg!(target_os = "macos") { 1 } else { 1024 };
 	ProcUsage {
-		user_ns: ns(ru.ru_utime),
-		sys_ns: ns(ru.ru_stime),
-		max_rss: count(ru.ru_maxrss) * rss_unit,
-		minor_faults: count(ru.ru_minflt),
-		major_faults: count(ru.ru_majflt),
-		swaps: count(ru.ru_nswap),
-		block_in: count(ru.ru_inblock),
-		block_out: count(ru.ru_oublock),
-		msgs_sent: count(ru.ru_msgsnd),
-		msgs_received: count(ru.ru_msgrcv),
-		signals: count(ru.ru_nsignals),
-		voluntary_switches: count(ru.ru_nvcsw),
+		user_ns:              ns(ru.ru_utime),
+		sys_ns:               ns(ru.ru_stime),
+		max_rss:              count(ru.ru_maxrss) * rss_unit,
+		minor_faults:         count(ru.ru_minflt),
+		major_faults:         count(ru.ru_majflt),
+		swaps:                count(ru.ru_nswap),
+		block_in:             count(ru.ru_inblock),
+		block_out:            count(ru.ru_oublock),
+		msgs_sent:            count(ru.ru_msgsnd),
+		msgs_received:        count(ru.ru_msgrcv),
+		signals:              count(ru.ru_nsignals),
+		voluntary_switches:   count(ru.ru_nvcsw),
 		involuntary_switches: count(ru.ru_nivcsw),
-		instructions: apple.map_or(0, |ri| ri.ri_instructions),
-		cycles: apple.map_or(0, |ri| ri.ri_cycles),
-		peak_footprint: apple.map_or(0, |ri| ri.ri_lifetime_max_phys_footprint),
+		instructions:         apple.map_or(0, |ri| ri.ri_instructions),
+		cycles:               apple.map_or(0, |ri| ri.ri_cycles),
+		peak_footprint:       apple.map_or(0, |ri| ri.ri_lifetime_max_phys_footprint),
 	}
 }
 

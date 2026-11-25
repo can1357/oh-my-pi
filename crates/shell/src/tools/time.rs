@@ -136,7 +136,8 @@ fn bsd_report(out: &mut String, opts: &Options, ended: &Ended) {
 	let [(real, real_c), (user, user_c), (sys, sys_c)] =
 		[ended.real_ns, u.user_ns, u.sys_ns].map(centis);
 	if opts.posix {
-		let _ = write!(out, "real {real}.{real_c:02}\nuser {user}.{user_c:02}\nsys {sys}.{sys_c:02}\n");
+		let _ =
+			write!(out, "real {real}.{real_c:02}\nuser {user}.{user_c:02}\nsys {sys}.{sys_c:02}\n");
 	} else {
 		let _ = writeln!(
 			out,
@@ -200,19 +201,23 @@ fn gnu_report(out: &mut String, command: &[BString], ended: &Ended, page: u64) {
 		format!("{}:{:02}.{secs_c:02}", secs / 60, secs % 60)
 	};
 	let line = command.join(&b' ').to_str_lossy().into_owned();
-	let exit = if ended.signal.is_some() { 0 } else { ended.status };
+	let exit = if ended.signal.is_some() {
+		0
+	} else {
+		ended.status
+	};
 	let _ = write!(
 		out,
 		"\tCommand being timed: \"{line}\"\n\tUser time (seconds): {user}.{user_c:02}\n\tSystem \
 		 time (seconds): {sys}.{sys_c:02}\n\tPercent of CPU this job got: {percent}\n\tElapsed \
 		 (wall clock) time (h:mm:ss or m:ss): {elapsed}\n\tAverage shared text size (kbytes): \
 		 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage \
-		 total size (kbytes): 0\n\tMaximum resident set size (kbytes): {}\n\tAverage resident \
-		 set size (kbytes): 0\n\tMajor (requiring I/O) page faults: {}\n\tMinor (reclaiming a \
-		 frame) page faults: {}\n\tVoluntary context switches: {}\n\tInvoluntary context \
-		 switches: {}\n\tSwaps: {}\n\tFile system inputs: {}\n\tFile system outputs: {}\n\tSocket \
-		 messages sent: {}\n\tSocket messages received: {}\n\tSignals delivered: {}\n\tPage size \
-		 (bytes): {page}\n\tExit status: {exit}\n",
+		 total size (kbytes): 0\n\tMaximum resident set size (kbytes): {}\n\tAverage resident set \
+		 size (kbytes): 0\n\tMajor (requiring I/O) page faults: {}\n\tMinor (reclaiming a frame) \
+		 page faults: {}\n\tVoluntary context switches: {}\n\tInvoluntary context switches: \
+		 {}\n\tSwaps: {}\n\tFile system inputs: {}\n\tFile system outputs: {}\n\tSocket messages \
+		 sent: {}\n\tSocket messages received: {}\n\tSignals delivered: {}\n\tPage size (bytes): \
+		 {page}\n\tExit status: {exit}\n",
 		u.max_rss / 1024,
 		u.major_faults,
 		u.minor_faults,
@@ -370,7 +375,7 @@ mod tests {
 	fn ended() -> Ended {
 		Ended {
 			real_ns: 3_723_456_789_000,
-			usage: ProcUsage {
+			usage:   ProcUsage {
 				user_ns: 1_239_000_000,
 				sys_ns: 50_000_000,
 				max_rss: 981_614_592,
@@ -380,8 +385,8 @@ mod tests {
 				involuntary_switches: 16,
 				..ProcUsage::default()
 			},
-			status: 3,
-			signal: None,
+			status:  3,
+			signal:  None,
 		}
 	}
 
@@ -391,7 +396,10 @@ mod tests {
 	fn bsd_layouts() {
 		let e = ended();
 		let plain = Options::default();
-		assert_eq!(report(&plain, &e, 4096), "     3723.45 real         1.23 user         0.05 sys\n");
+		assert_eq!(
+			report(&plain, &e, 4096),
+			"     3723.45 real         1.23 user         0.05 sys\n"
+		);
 		let posix = Options { posix: true, ..Options::default() };
 		assert_eq!(report(&posix, &e, 4096), "real 3723.45\nuser 1.23\nsys 0.05\n");
 		let rusage = Options { rusage: true, ..Options::default() };
@@ -413,9 +421,9 @@ mod tests {
 			text,
 			"Command exited with non-zero status 3\n\tCommand being timed: \"prog -x\"\n\tUser time \
 			 (seconds): 1.23\n\tSystem time (seconds): 0.05\n\tPercent of CPU this job got: \
-			 0%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 1:02:03\n\tAverage shared text \
-			 size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size \
-			 (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): \
+			 0%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 1:02:03\n\tAverage shared text size \
+			 (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): \
+			 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): \
 			 958608\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: \
 			 2\n\tMinor (reclaiming a frame) page faults: 19461\n\tVoluntary context switches: \
 			 7\n\tInvoluntary context switches: 16\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile \

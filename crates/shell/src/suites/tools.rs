@@ -304,8 +304,7 @@ async fn dd_rss(s: &mut Session, command: &str) -> u64 {
 async fn time_reports_a_programs_peak_memory() {
 	let mut s = session();
 	let dd = "/bin/dd if=/dev/zero of=/dev/null bs=67108864 count=1";
-	for command in
-		[format!("time -l {dd}"), format!("time -l sh -c '{dd} 2>/dev/null | cat; true'")]
+	for command in [format!("time -l {dd}"), format!("time -l sh -c '{dd} 2>/dev/null | cat; true'")]
 	{
 		let rss = dd_rss(&mut s, &command).await;
 		assert!((64 << 20..1 << 30).contains(&rss), "{command}: {rss}");
