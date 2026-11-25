@@ -1,6 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
+import type { ServiceTier } from "../types";
 import { extractProviderRetryHint } from "../utils/retry-after";
 import type { CredentialRankingContext, CredentialRankingStrategy } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
@@ -13,20 +14,23 @@ import {
 	modelAccountPolicyBlockScope,
 	OAUTH_ORG_POLICY_BLOCK_SCOPE,
 	providerTypeKey,
+	serviceTierBlockScope,
 } from "./blocks";
 import type { CredentialBlocks } from "./blocks";
 import type { KeyOverrides } from "./cascade";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
 import type { AuthCredentialStore } from "./store";
-import type {
-	AuthCredential,
-	CredentialRotation,
-	InvalidateCredentialMatchingOptions,
-	LimitsApi,
-	MarkUsageLimitOptions,
-	RotateCredentialOptions,
-	UsageLimitMarkResult,
+import {
+	type AuthCredential,
+	type CredentialRotation,
+	type InvalidateCredentialMatchingOptions,
+	type LimitsApi,
+	type MarkServiceTierUnavailableOptions,
+	type MarkUsageLimitOptions,
+	type RotateCredentialOptions,
+	SERVICE_TIER_BLOCK_MS,
+	type UsageLimitMarkResult,
 } from "./types";
 import type { UsageService } from "./usage";
 import {
@@ -388,6 +392,43 @@ export class RateLimits implements LimitsApi {
 			...(reportResetAtMs === undefined ? {} : { reportResetAtMs }),
 		};
 	}
+	async markServiceTierUnavailable(provider: string, options: MarkServiceTierUnavailableOptions): Promise<boolean> {
+		const blockScope = serviceTierBlockScope(options.serviceTier, options.modelId);
+		if (blockScope === undefined) return false;
+		const blockedUntilMs = Date.now() + (options.retryAfterMs ?? SERVICE_TIER_BLOCK_MS);
+		// A refusal already on record means selection knew and the request went
+		// to this credential with the tier regardless: recording it again changes
+		// nothing, so the caller has to stop asking.
+		if (options.credentialId === undefined) {
+			if (this.#deps.blocks.isUnstoredKeyRefused(provider, blockScope)) return false;
+			this.#deps.blocks.markUnstoredKeyRefused(provider, blockScope, blockedUntilMs);
+			return true;
+		}
+		await this.#deps.pool.adoptExternalChanges();
+		const entries = this.#deps.pool.entries(provider);
+		const index = entries.findIndex(entry => entry.id === options.credentialId);
+		const entry = entries[index];
+		if (!entry) return false;
+		const providerKey = providerTypeKey(provider, entry.credential.type);
+		if (this.#deps.blocks.isScopeBlocked(provider, providerKey, index, blockScope)) return false;
+		this.#deps.blocks.mark(
+			provider,
+			providerKey,
+			index,
+			blockedUntilMs,
+			blockScope,
+			options.retryAfterMs !== undefined,
+		);
+		return true;
+	}
+
+	async rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void> {
+		const blockScope = serviceTierBlockScope(serviceTier, modelId);
+		if (blockScope === undefined) return;
+		await this.#deps.pool.adoptExternalChanges();
+		this.#deps.blocks.clearServiceTierRefusals(provider, blockScope);
+	}
+
 	#extractStructuredApiKeyToken(apiKey: string): string | undefined {
 		if (!apiKey.startsWith("{")) return undefined;
 		try {

@@ -577,7 +577,21 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).toHaveBeenCalledTimes(1);
 		// The Esc interrupt threads a user-facing reason so the aborted turn and its
 		// synthetic tool results read as a deliberate interrupt, not "Request was aborted".
-		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		// Nothing was queued, so running tools are cancelled rather than backgrounded.
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, detachTools: false });
+	});
+
+	it("backgrounds running tools when Esc interrupts a turn with a message queued", () => {
+		const { ctx, editor, spies } = createContext();
+		Object.assign(ctx, { working: "turn" });
+		spies.clearQueue.mockReturnValue({ steering: [{ text: "use tabs instead" }], followUp: [] });
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		controller.handleInterrupt();
+
+		expect(editor.expandedText()).toContain("use tabs instead");
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL, detachTools: true });
 	});
 
 	it("suspends a streaming loop iteration and pauses the loop", () => {

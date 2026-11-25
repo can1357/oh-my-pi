@@ -10,6 +10,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { displayLines } from "@oh-my-pi/pi-tui/text/sanitize";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ReadTerm } from "../../tools/read";
@@ -17,14 +18,6 @@ import { codeCellRows, markdownCellRows } from "./code-cell";
 import { fileLink } from "./file-common";
 import { bracketed, frameInner, frameRows, outcomeBg, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
-
-/** Display lines of untrusted text: CR progress collapsed to its last segment, tabs expanded. */
-function displayLines(text: string): string[] {
-	return text.split(/\r?\n/).map(line => {
-		const at = line.lastIndexOf("\r");
-		return replaceTabs(sanitizeText(at < 0 ? line : line.slice(at + 1)));
-	});
-}
 
 function paintRead(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);

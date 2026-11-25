@@ -10,7 +10,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as readline from "node:readline/promises";
-import { formatAge, formatNumber } from "@oh-my-pi/pi-utils";
+import { errorMessage, formatAge, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	SKILLS_ROUTES,
@@ -613,10 +613,6 @@ export function formatInstalledSkills(skills: InstalledSkillInfo[], paint: Skill
 
 // ─── CLI entry points (exit codes) ────────────────────────────────────────────
 
-function describeError(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 async function confirmScriptsOnTty(request: ScriptApprovalRequest): Promise<boolean> {
 	const listing = formatScriptApproval(request);
 	if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -643,7 +639,7 @@ async function withClient(run: (client: SkillshareClient) => Promise<number>): P
 		client = await SkillshareClient.create();
 		return await run(client);
 	} catch (error) {
-		process.stderr.write(`${chalk.red("error")} ${describeError(error)}\n`);
+		process.stderr.write(`${chalk.red("error")} ${errorMessage(error)}\n`);
 		return 1;
 	} finally {
 		client?.close();
@@ -679,7 +675,7 @@ export async function uninstallSkills(opts: { names: string[]; global: boolean; 
 		for (const id of removed) process.stdout.write(`- ${ANSI_PAINT.name(id)}\n`);
 		return 0;
 	} catch (error) {
-		process.stderr.write(`${chalk.red("error")} ${describeError(error)}\n`);
+		process.stderr.write(`${chalk.red("error")} ${errorMessage(error)}\n`);
 		return 1;
 	}
 }
