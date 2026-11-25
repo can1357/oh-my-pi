@@ -3,6 +3,8 @@
  * snapshot, recomputed when the viewed session emits an event, when the app
  * moves a mode or a badge, when a background read (git, usage quota, pull
  * request) lands, and on the wall clock while a segment shows time.
+ * Streaming deltas only refresh context usage, token rate and the prompt-cache
+ * forecast; compaction policy is reused while the context window stays put.
  *
  * Git/jj facts are read again when a run starts (edits made while idle) and
  * when a turn ends (what its tools did), and after a user `!`/`$` command
@@ -110,6 +112,7 @@ interface VcsSnapshot {
 /** See the module docs. */
 export class SessionStatusLine implements StatusLineModel {
 	readonly #revision = signal(0);
+	readonly #streamRevision = signal(0);
 	/** Wall clock, advanced once a second while a segment shows time. */
 	readonly #clock = signal(Date.now());
 	readonly #saved: Signal<StatusLineSettings>;
@@ -176,7 +179,34 @@ export class SessionStatusLine implements StatusLineModel {
 
 	readonly settings: Accessor<StatusLineSettings> = computed(() => ({ ...this.#saved(), ...this.#preview() }));
 
-	readonly facts: Accessor<StatusFacts> = computed(() => this.#build());
+	readonly #sessionFacts = computed(() => this.#buildSessionFacts());
+	readonly #context = computed(() => this.#readContext());
+	// Compaction boundaries depend on capacity, not on the growing token count.
+	readonly #contextWindow = computed(() => this.#context().window);
+	readonly #boundaries = computed(() => {
+		if (!this.#sessionFacts().autoCompact) return null;
+		const contextWindow = this.#contextWindow();
+		const session = this.#session;
+		return contextWindow > 0
+			? statusLineHost.computeCompactionBoundaries(session, contextWindow, session.state.model ?? session.model)
+			: null;
+	});
+
+	readonly facts: Accessor<StatusFacts> = computed(() => {
+		const sessionFacts = this.#sessionFacts();
+		const context = this.#context();
+		const boundaries = this.#boundaries();
+		const settings = this.settings();
+		return {
+			...sessionFacts,
+			context,
+			...(boundaries ? { compaction: boundaries } : {}),
+			tokensPerSecond: this.#tokensPerSecond(this.#modes()),
+			...(settings.leftSegments?.includes("cache") || settings.rightSegments?.includes("cache")
+				? { promptCache: this.#session.getPromptCacheStatus?.(sessionFacts.now, context.tokens) }
+				: {}),
+		};
+	});
 
 	constructor(session: AgentViewSession) {
 		this.#session = session;
@@ -200,6 +230,8 @@ export class SessionStatusLine implements StatusLineModel {
 	}
 
 	refresh(): void {
+		clearTimeout(this.#streamBump);
+		this.#streamBump = undefined;
 		this.#revision.set(this.#revision.peek() + 1);
 	}
 
@@ -429,7 +461,7 @@ export class SessionStatusLine implements StatusLineModel {
 		if (this.#streamBump) return;
 		this.#streamBump = setTimeout(() => {
 			this.#streamBump = undefined;
-			this.#queueBump();
+			this.#streamRevision.set(this.#streamRevision.peek() + 1);
 		}, STREAM_REFRESH_MS);
 		this.#streamBump.unref?.();
 	}
@@ -451,16 +483,12 @@ export class SessionStatusLine implements StatusLineModel {
 		}
 	}
 
-	#build(): StatusFacts {
-		this.#revision();
-		const now = this.#clock();
+	#readContext(): StatusFacts["context"] {
+		// Also re-read on full refreshes: a settings edit may change live tool metadata.
+		this.#sessionFacts();
+		this.#streamRevision();
 		const session = this.#session;
-		const settings = this.settings();
-		const modes = this.#modes();
 		const model = session.state.model ?? session.model;
-		const segments = [...(settings.leftSegments ?? []), ...(settings.rightSegments ?? [])];
-		const stats = session.sessionManager.getUsageStatistics();
-
 		const usage = session.getContextUsage();
 		let contextWindow = usage?.contextWindow ?? model?.contextWindow ?? 0;
 		let tokens = usage?.tokens ?? 0;
@@ -473,11 +501,20 @@ export class SessionStatusLine implements StatusLineModel {
 			tokens = override.tokens ?? tokens;
 			percent = override.percent ?? percent;
 		}
+		return { tokens, window: contextWindow, percent };
+	}
+
+	#buildSessionFacts(): Omit<StatusFacts, "context" | "compaction" | "tokensPerSecond" | "promptCache"> {
+		this.#revision();
+		const now = this.#clock();
+		const session = this.#session;
+		const settings = this.settings();
+		const modes = this.#modes();
+		const model = session.state.model ?? session.model;
+		const segments = [...(settings.leftSegments ?? []), ...(settings.rightSegments ?? [])];
+		const stats = session.sessionManager.getUsageStatistics();
+		const collab = this.#collab();
 		const autoCompact = this.#autoCompact();
-		const boundaries =
-			autoCompact && contextWindow > 0
-				? statusLineHost.computeCompactionBoundaries(session, contextWindow, model)
-				: null;
 
 		const advisorOverview = session.getAdvisorStatusOverview?.();
 		const advisorStatuses = advisorOverview?.configured ? advisorOverview.advisors.map(a => a.status) : [];
@@ -554,10 +591,7 @@ export class SessionStatusLine implements StatusLineModel {
 				? { advisorCost: { cost: advisorCost, usingSubscription: session.isAdvisorUsingSubscription() } }
 				: {}),
 			...(model?.cost ? { pricingPeriod: getTimeBasedPricingPeriod(model.cost, now) } : {}),
-			tokensPerSecond: this.#tokensPerSecond(modes),
-			context: { tokens, window: contextWindow, percent },
 			autoCompact,
-			...(boundaries ? { compaction: boundaries } : {}),
 			speculation: session.compactionSpeculation,
 			cwd: getProjectDir(),
 			home: os.homedir(),
@@ -591,7 +625,6 @@ export class SessionStatusLine implements StatusLineModel {
 			...(this.#awaiting() ? { awaitingAnswer: true } : {}),
 			...(this.#focusedAgentId === undefined ? { treePosition: this.#treePosition() } : {}),
 			...(this.#quota() ? { quota: this.#quota() } : {}),
-			...(segments.includes("cache") ? { promptCache: session.getPromptCacheStatus?.(now, tokens) } : {}),
 			hooks: [...this.#hooks()].sort(([a], [b]) => a.localeCompare(b)).map(([, text]) => text),
 		};
 	}

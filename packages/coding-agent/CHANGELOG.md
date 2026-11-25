@@ -17,6 +17,9 @@
 ### Changed
 
 - The terminal welcome animation now waits until the composer is ready for input.
+### Changed
+
+- The working terminal title now updates four times per second by default; an explicit spinner interval still controls both the title and the TUI.
 
 ## [19.2.0] - 2026-11-25
 

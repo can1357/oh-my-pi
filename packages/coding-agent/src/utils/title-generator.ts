@@ -27,7 +27,7 @@ import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "
 import { cfgRetryModelFallback } from "../session/settings";
 import { isLowSignalTitleInput, isNoTitleSentinel, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
-import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "../config/spinner-interval";
+import { DEFAULT_TITLE_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "../config/spinner-interval";
 import { createRoot, effect, nativeRendering, untrack } from "@oh-my-pi/pi-tui";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -939,7 +939,7 @@ const terminalTitleRuntime: {
 	frame: 0,
 	enabled: true,
 	style: "braille",
-	intervalMs: DEFAULT_SPINNER_INTERVAL_MS,
+	intervalMs: DEFAULT_TITLE_SPINNER_INTERVAL_MS,
 	timer: undefined,
 	extensionOverride: undefined,
 	disposed: false,
