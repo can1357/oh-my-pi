@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `compaction.idleMethodOrder` to select methods for idle compaction. An empty list inherits `compaction.methodOrder` ([#19533](https://github.com/can1357/oh-my-pi/pull/19533) by [@enieuwy](https://github.com/enieuwy))
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

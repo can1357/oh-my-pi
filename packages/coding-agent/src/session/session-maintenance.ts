@@ -5646,7 +5646,11 @@ export class SessionMaintenance {
 		// were being persisted), drop the stale request rather than fall through
 		// to ordinary summary compaction: no summary-provider request was agreed.
 		if (explicitNewContextRequest) return COMPACTION_CHECK_NONE;
-		const methods = resolveCompactionMethodOrder(compactionSettings.methodOrder);
+		// Idle passes may use their own order (e.g. a remote summary while the user is away, with a
+		// local method first for in-turn passes); an empty idle order inherits `methodOrder`.
+		const idleMethods = reason === "idle" ? resolveCompactionMethodOrder(compactionSettings.idleMethodOrder) : [];
+		const methods =
+			idleMethods.length > 0 ? idleMethods : resolveCompactionMethodOrder(compactionSettings.methodOrder);
 		if (methods.length === 0) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
@@ -5712,9 +5716,14 @@ export class SessionMaintenance {
 		// returned only when still valid for the current branch/model/settings.
 		// Snapcompact is local and instant, so an armed LLM summary (possible
 		// only when settings/model changed since arming) never overrides it.
+		// Speculation arms from `methodOrder`. An explicit idle order can reuse
+		// that result only when the selected method matches.
 		const claimedSpec =
 			bridgeSpec ?? this.#claimArmedSpeculation(options.triggerContextTokens, options.pendingContextTokens);
-		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
+		const armedSpec =
+			method === "snapcompact" || (idleMethods.length > 0 && claimedSpec?.method !== method)
+				? undefined
+				: claimedSpec;
 
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;
