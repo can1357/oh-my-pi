@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- A queued or steered message keeps its queue pill until it appears in the transcript, instead of vanishing while its request is still being prepared.
 - Fixed LSP diagnostics failing to load when imported before the LSP tool.
 - Model lookups now reflect catalog changes from an extension provider’s OAuth login, including in mirrored registries.
 - Tern browser actions now report the last observed reason a target was not actionable and discard target coordinates received after the deadline.

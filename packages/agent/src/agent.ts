@@ -1221,9 +1221,9 @@ export class Agent {
 			suppress(message, controller);
 			for (const context of additional ?? []) suppress(context, controller);
 		}
-		// Every snapshot counts live-steered messages as pending, so clearing
+		// Every snapshot counts live-steered and delivering messages as pending, so clearing
 		// them is a queue change even when the caller re-queues them right after.
-		const hadLiveSteered = this.#liveSteered.length > 0;
+		const hadUndelivered = this.#liveSteered.length > 0 || this.#queuedMessageDeliveries.size > 0;
 		this.#liveSteered = [];
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
@@ -1234,7 +1234,7 @@ export class Agent {
 		if (withdrawn.steering.length > 0 || withdrawn.followUp.length > 0) {
 			this.queuedMessageGate?.release([...withdrawn.steering, ...withdrawn.followUp]);
 		}
-		if (hadLiveSteered) this.#emitQueueChanged();
+		if (hadUndelivered) this.#emitQueueChanged();
 		return withdrawn;
 	}
 
@@ -1483,6 +1483,8 @@ export class Agent {
 		for (const delivery of this.#queuedMessageDeliveries) {
 			if (delivery.messages[delivery.next] !== m) continue;
 			if (++delivery.next === delivery.messages.length) this.#queuedMessageDeliveries.delete(delivery);
+			// It stops showing as on its way ({@link peekDeliveringMessages}) now that it is recorded.
+			this.#emitQueueChanged();
 			break;
 		}
 	}
@@ -1598,8 +1600,16 @@ export class Agent {
 	 *  requeues them, so the session's empty-submit interrupt counts them as
 	 *  pending input even though {@link peekSteeringQueue} no longer does. */
 	peekUndeliveredQueuedMessages(): AgentMessage[] {
-		const messages = this.peekLiveSteeredMessages();
+		return [...this.peekLiveSteeredMessages(), ...this.peekDeliveringMessages()];
+	}
+
+	/** Messages dequeued from `queue` (both queues when omitted) for the next model request that the
+	 *  transcript has not recorded yet, oldest first. Their events only emit once the request opens,
+	 *  so queue displays keep listing them until then. */
+	peekDeliveringMessages(queue?: QueuedMessageQueue): AgentMessage[] {
+		const messages: AgentMessage[] = [];
 		for (const delivery of this.#queuedMessageDeliveries) {
+			if (queue !== undefined && delivery.queue !== queue) continue;
 			for (let i = delivery.next; i < delivery.messages.length; i++) messages.push(delivery.messages[i]);
 		}
 		return messages;
