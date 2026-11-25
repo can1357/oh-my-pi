@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as net from "node:net";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { logger } from "@oh-my-pi/pi-utils";
 
 // Larger than loopback socket buffers on both ends, so a server that stops
 // reading early leaves part of the body queued in the client.
@@ -136,6 +137,18 @@ describe("transportFetch connection lost before a response", () => {
 		expect((error as Error).message).toMatch(
 			/^Connection error: connection lost after .+ while uploading the 32\.\dMB request body; no response received \(ECONNRESET\)\.$/,
 		);
+	});
+
+	it("hands first-party Anthropic's large body to the cowork transport whole", async () => {
+		const debug = spyOn(logger, "debug");
+		try {
+			const fetch = transportFetch(testModel("anthropic", "anthropic-messages"), undefined);
+			// Nothing listens on port 1: the request fails at connect, after the transport is chosen.
+			await fetch("https://127.0.0.1:1/v1/messages", { method: "POST", headers: {}, body: BODY }).catch(() => {});
+			expect(debug.mock.calls.filter(([message]) => message === "cowork transport bypassed")).toEqual([]);
+		} finally {
+			debug.mockRestore();
+		}
 	});
 
 	it("follows a 307 by uploading the body to the new location, still naming how far it got", async () => {
