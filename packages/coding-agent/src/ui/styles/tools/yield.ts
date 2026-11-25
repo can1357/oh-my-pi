@@ -10,7 +10,7 @@ import { displayLines } from "@oh-my-pi/pi-tui/text/sanitize";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { boxTint, liveMark, nodePlain, nodeStyle, styledLines, tintBox } from "./agent-common";
-import { expandHint, moreLinesHint } from "./frame";
+import { bracketed, expandHint, moreLinesHint } from "./frame";
 import { COLLAPSED_TREE, EXPANDED_TREE, jsonTreeRows } from "./json-tree";
 import { defineToolLook, isExpanded, type ToolProps, toolProps } from "./look";
 
@@ -22,7 +22,7 @@ export function statusHead(cx: PaintContext, props: ToolProps, mark = liveMark(c
 	const theme = cx.theme;
 	let head = `${mark} ${theme.fg("accent", styledText(theme, props.title))}`;
 	if (props.target !== undefined) head += `: ${theme.fg("muted", styledText(theme, props.target))}`;
-	for (const badge of props.badges ?? []) head += ` ${theme.fg(badge.tone ?? "muted", `⟦${badge.text}⟧`)}`;
+	for (const badge of props.badges ?? []) head += ` ${theme.fg(badge.tone ?? "muted", bracketed(theme, badge.text))}`;
 	if (props.meta && props.meta.length > 0)
 		head += ` ${theme.fg("dim", props.meta.map(fact => styledText(theme, fact)).join(" "))}`;
 	return head;

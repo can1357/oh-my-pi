@@ -140,8 +140,11 @@ export function createTerminalDriver(
 	const capabilities: Signal<TerminalCapabilities> = signal(terminal.capabilities);
 	const replayListeners = new Set<() => void>();
 	const inputListeners = new Set<(event: InputEvent) => void>();
+	// DOM dispatch semantics: a listener subscribed while an event is delivered waits for the next
+	// one, and one unsubscribed before its turn is skipped. A key that opens a page (Esc Esc's
+	// rewind) starts that page's backend mid-dispatch; a live Set would hand it the same key.
 	const deliver = (event: InputEvent): void => {
-		for (const listener of inputListeners) listener(event);
+		for (const listener of Array.from(inputListeners)) if (inputListeners.has(listener)) listener(event);
 	};
 	terminal.onInput(deliver);
 	const resizeListeners = new Set<(columns: number, rows: number) => void>();

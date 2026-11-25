@@ -15,11 +15,13 @@
 
 ### Added
 
+- `prewalk.auto: escalate` plans a front-loaded task on `prewalk.from` before handing off, and returns to the starting model at the next task; `prewalk.autoTarget: "@initial"` hands back to the model and thinking level the task started on. `suggest` reports the planner `escalate` would move to ([#16243](https://github.com/can1357/oh-my-pi/pull/16243) by [@taibenvenuti](https://github.com/taibenvenuti))
 - The subagents HUD mutes the status mark, and tray cards mark, subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so they stand apart from subagents doing work
 - Retry fallbacks now record why they switched models on the fallback's `model_change` entry: the model left, the trigger (`request-error`, `agent-loop`, `usage-preflight`, or `missing-credential`), and the error or condition. A fallback after the agent loop stopped a turn itself, such as a soft tool requirement the model never met, is announced as `Turn stopped: …` instead of `Request failed: …` ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
 - The bash tool now runs `cmd <<'EOF' && \` as meant: the stray `\` that pushed the heredoc body below the next line (running that line as a command) is dropped, with a notice, when the result parses
 - Tray cards now mark subagents that are only waiting on their own agents or jobs (`wait`, `vibe_wait`), so Tern shows them apart from subagents doing work
 - The shell's `tail -r` builtin now takes `-c`, `-b`, and `+N` counts like BSD `tail`, and `tail -b N` selects 512-byte blocks; `-r` with `-f` is BSD's usage error instead of a "pipe through tac" refusal
+- The bash tool's `time -l`, `time -v` and `command time` report a command's peak memory, page faults and context switches like macOS and GNU `/usr/bin/time`, on every platform, written to `time`'s own stderr so a pipe can read them; plain `time` and `time -p` stay bash's keyword
 - The shell's `stat` builtin now supports every BSD option and format directive, including `-l`, `-F`, `-r`, and `%Y`, `%Z`, `%f`, `%v`
 - The shell's `ast-grep` builtin now runs `ast-grep test` (with snapshots, `--update-all`, `--filter`, and `--skip-snapshot-tests`), scaffolding with `ast-grep new -y`, and `--inspect` on `run`/`scan`; `lsp`, `completions`, and `--interactive` remain unsupported
 - The shell's `fd` builtin now runs commands for its results with `-x`/`--exec` and `-X`/`--exec-batch` (with `--batch-size`), lists them with `-l`/`--list-details`, and matches whole names with `--exact`; these options used to fail
@@ -37,7 +39,10 @@
 
 ### Changed
 
-- The agent matches verification to the request: questions get answers without running anything, plain edits skip test suites, typecheckers and builds nobody asked for, and changes to a function's output run that package's tests
+- A subagent spawned with a single step receives that step as written, without the `Complete assignment thoroughly:` and `# Step 1 of 1` framing
+- Shell command previews show chained commands with their real `&&`/`||` operators instead of `and`/`or`, and `cd dir` as written instead of a `cwd dir` badge
+- Asked to verify, optimize, or measure something, the agent keeps its checks to the code in question: that code's tests and its callers' instead of the whole suite, and a micro-benchmark or a scaled-down input instead of the full benchmark or the full slow case, which it runs once at the end
+- The agent works statically and verifies each code change once, after its last edit, before replying: the project's static check for renames and other behavior-preserving edits, the named or narrowest test for behavior changes, and nothing for questions. Its reply names that check and the result. It no longer runs checks between edits
 - The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - With Vim editing mode on, `y` no longer copies to the system clipboard; use `"+y` / `"*y`, or turn on `tui.vimYankToClipboard` to get the old behavior ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
 - With Vim editing mode on, the prompt after a message you send starts in **Vim Start Mode** (Insert by default) instead of staying in the mode you sent it from ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
@@ -55,10 +60,35 @@
 
 ### Fixed
 - ACP terminal commands that a signal ends now report exit code 128 plus the signal's number (SIGTERM is 143) instead of 137 for every signal ([#20400](https://github.com/can1357/oh-my-pi/pull/20400) by [@JamieJ5926](https://github.com/JamieJ5926))
+
+- `/fork pane` inside Tern now opens the fork in a new Tern pane, and `/fork window`/`/fork tab` in a new Tern tab, instead of failing with "No terminal multiplexer was detected"
+- A language server that times out during startup now reports the resolved executable and stops the launcher and its process group instead of leaving them running ([#20436](https://github.com/can1357/oh-my-pi/issues/20436)).
 - Images reach each request as the receiving model needs them: after switching to a text-only model, queued and earlier images are described by the vision model (once per image, reused across turns and resumes); after switching to a vision model, they are sent as images again with no stale description. Compaction and branch summaries and advisor reviews carry the descriptions whenever their model or the session's cannot see images, and a failed description is retried instead of sticking ([#20369](https://github.com/can1357/oh-my-pi/pull/20369) by [@taibenvenuti](https://github.com/taibenvenuti))
+- A large paste always collapses to the same text chip (`📄 #1`, with its card): one pasted with Tern's or kitty's paste key no longer lands as a `[Paste #1, +90 lines]` marker, and it opens the large-paste menu and attaches pasted image paths like any other paste
 - Edit cards in hashline, sloppy and magic modes name their target file again instead of `…`: while a call streams, and in the Agent Hub transcript of a subagent
+- In Tern, viewing a subagent shows the composer's `Viewing` header again, so the tray marks that agent's card (amber, with an eye) and its MAIN bar leads back to the main session
+- Attachment chips show the symbol preset's icon again instead of an emoji (a Nerd Font glyph in Tern): in the draft, on the chip's card and in sent prompts; skill and model chips of sent prompts follow the preset too
+- Image and video attachment cards show the picture and its pixel size again: in Tern, and as a thumbnail in terminals that draw Kitty Unicode placeholders
+- In Tern, a draft that would skip a pending question shows the composer's `skips ask` chip and its `Skip & send` button again
+- In Tern, hovering the prompt-cache indicator shows its card again: whether the next message reads the cache and until when, or why not and what it re-sends
+- Web search results without a synthesized answer show each source's excerpt again (one line collapsed, up to three expanded; under the source in Tern) instead of a warning with the raw source listing
+- The background jobs panel shows a subagent's name as a heading above its jobs again
+- Expand hints on tool cards, notices, summaries, error banners, approvals and the rewind and copy pickers name the key bound to `app.tools.expand` in the active symbol preset (`Ctrl+O` off macOS) instead of a fixed `⌃O`
+- Key hints in terminal dialogs, pickers and full-screen views (model and agent hubs, session tree, history search, plan save, pause, plugin settings, log viewer, raw SSE, git help, autoresearch, live, ps) follow the symbol preset and your key bindings again instead of fixed Unicode keycaps
+- Glyphs follow the symbol preset again where they had become fixed Unicode ones: bullets and tree guides in argument trees, memory lists and the session tree, IRC arrows, accept and reject marks, badge brackets, the service PID icon, selection cursors, radio and checkbox marks, and the status marks of `/btw`, `/cleanse`, `/omfg`, the agent hubs and plugin settings (in Tern too)
+- The status line's cost segment follows the ASCII preset and the classic footer follows every preset; the session-tree segment shows its icon again, `pi.showProfile: false` hides the profile tag again, and the autocomplete popup marks its selection with the preset's cursor
+- Failed `find`, `glob` and memory calls no longer read `Error: Error: …`
+- `tui.maxInlineImageColumns` and `tui.maxInlineImageRows` limit transcript pictures again, and a change applies to the pictures already on screen
+- Terminals that draw images show the picture of an image `read` and of a user-run command's output again instead of only its placeholder
+- In Tern, reading a media file (image, PDF, video, audio, 3D model) opens it in the media viewer again, capped at the inline image height, for single and grouped reads
+- Tight Layout (`tui.tight`) works again and applies at once: assistant prose, notices, command output, Read and search rows and the dock's rows give up their one-cell side padding, so they share one left edge; user bubbles and framed tool cards keep theirs
+- `omp gallery` draws aliased tool samples with their real tool's look, and its path and status segment samples match the status line
 - Extensions importing `@oh-my-pi/omptype` resolve to the host's copy, so they load offline and after Bun prunes the package's cached registry manifest; the bare import used to fall back to the install cache and fail the extension load
+- After plan mode is paused or disabled without approving a plan, the agent no longer refuses edits by citing plan mode's read-only rules; those rules leave the model context when plan mode ends and are not restored on resume ([#20375](https://github.com/can1357/oh-my-pi/issues/20375))
+- Fixed judged TTSR rules seeing less of a long assistant output than fits their 32,000-token Jev budget: the text sent is now the longest prefix that fits, found natively instead of by a bisection that could stop short of a fitting word ([#20384](https://github.com/can1357/oh-my-pi/pull/20384) by [@iliaal](https://github.com/iliaal))
 - `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
+- Restricted subagents report which OAuth accounts are usage-limited or rejected by org policy instead of showing only the provider’s 403; `omp usage` also lists rejected logins and when they can be tried again ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
+- Fixed the `/usage` and Tern Activity heatmap failing to sync session history in npm installs ([#20377](https://github.com/can1357/oh-my-pi/issues/20377)).
 - Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
 - The `ask` tool returns a prefilled `<textarea>` value unchanged: text such as `<name>` or `<tag attr="x">…</tag>` is no longer dropped from it ([#20299](https://github.com/can1357/oh-my-pi/issues/20299))
@@ -128,6 +158,9 @@
 
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - `--offline` (`models.offline`) now also keeps image descriptions for text-only models, `read` image questions, skill and MCP routing hints, job widgets and eval `completion()` on the active model's provider; each could pick a model from any provider before ([#20268](https://github.com/can1357/oh-my-pi/pull/20268) by [@Dangerboi](https://github.com/Dangerboi))
+### Fixed
+
+- Fixed models committing (or running `git init` to commit) without being asked when the selective `commit` helper is enabled.
 
 ## [19.1.1] - 2026-11-23
 

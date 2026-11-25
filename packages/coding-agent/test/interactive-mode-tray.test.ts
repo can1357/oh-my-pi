@@ -297,11 +297,16 @@ describe("InteractiveMode tray", () => {
 		);
 	}
 
-	/** An action Tern raises on the tray (a card's click, a peek), routed as the host routes it. */
+	/** An action Tern raises on `node` (a card's click, a peek, a composer control), routed as the host routes it. */
+	function hostAction(node: UiNode, act: string, value?: string): void {
+		node.handlers.onAction?.(act, { type: "action", key: "", act, value, mods: [] } as never);
+	}
+
+	/** An action Tern raises on the tray. */
 	function trayAction(act: string, value: string): void {
 		const node = mode.shell.dock.slot("tray").view();
 		if (!isUiNode(node)) throw new Error("no tray in the dock");
-		node.handlers.onAction?.(act, { type: "action", key: "", act, value, mods: [] } as never);
+		hostAction(node, act, value);
 	}
 
 	/** The tray node the dock sends. */
@@ -560,6 +565,65 @@ describe("InteractiveMode tray", () => {
 			await traySynced();
 			expect(model()).toBe("claude-sonnet-4-6 · high");
 		} finally {
+			await agent.dispose();
+		}
+	});
+
+	it("names the viewed agent, its lineage and the way back in the composer's viewing header, which the host's tray reads", async () => {
+		const models = new ModelRegistry(authStorage);
+		const model = models.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 in the registry");
+		const agent = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: models,
+		});
+		/** The header as the host receives it: Tern marks the card whose `ref` its agent names, and goes back by its exit. */
+		const header = (): NativeNode | undefined =>
+			describeDock(mode)
+				.flatMap(nodes)
+				.find(node => role(node) === "omp.composer.focus");
+		const part = (name: string): NativeNode | undefined => {
+			const shown = header();
+			return shown && nodes(shown).find(node => role(node) === name);
+		};
+		try {
+			const registry = AgentRegistry.global();
+			registry.register({
+				id: "TrayOld",
+				displayName: "TrayOld",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+				status: "idle",
+			});
+			registry.register({
+				id: "TrayNext",
+				displayName: "TrayNext",
+				kind: "sub",
+				parentId: "TrayOld",
+				session: agent,
+				status: "running",
+			});
+			// The main session shows no header: the tray's MAIN bar is where the user is.
+			expect(header()).toBeUndefined();
+
+			await mode.focusAgentSession("TrayNext");
+			expect(part("omp.composer.agent")?.p).toMatchObject({ text: "TrayNext" });
+			// The level between the agent and the main session is a link to it.
+			expect(part("omp.composer.crumb")?.p).toMatchObject({ text: "TrayOld", actions: { click: "focus:TrayOld" } });
+			const exit = part("omp.composer.exit")?.p?.actions;
+			expect(exit).toEqual({ click: "focus:Main" });
+
+			// The exit's click, as the tray's MAIN bar runs it: back on the main session, the header goes.
+			const unfocus = spyOn(SessionFocusController.prototype, "unfocus");
+			hostAction(mode.composer.node, "focus:Main");
+			await unfocus.mock.results[0]?.value;
+			expect(mode.focusedAgentId).toBeUndefined();
+			expect(header()).toBeUndefined();
+		} finally {
+			await mode.unfocusSession();
 			await agent.dispose();
 		}
 	});

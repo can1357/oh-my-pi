@@ -10,6 +10,7 @@ import {
 	type UsageResetCredit,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
 import {
@@ -1885,7 +1886,7 @@ describe("omp usage accounts", () => {
 	});
 });
 
-describe("omp usage --json account policy", () => {
+describe("omp usage account policy", () => {
 	let tempDir: TempDir;
 
 	beforeEach(() => {
@@ -1977,6 +1978,80 @@ describe("omp usage --json account policy", () => {
 		expect(codex).toBeDefined();
 		expect(codex).not.toHaveProperty("policy");
 		expect(stdout.includes("main@example.test")).toBe(!redact);
+	});
+
+	it.each([
+		{ json: false, redact: false },
+		{ json: false, redact: true },
+		{ json: true, redact: false },
+		{ json: true, redact: true },
+	])("shows active org policy rejections without usage or reserve policy (%p)", async ({ json, redact }) => {
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageFetch: Object.assign(async () => new Response("not found", { status: 404 }), {
+				preconnect: fetch.preconnect,
+			}),
+		});
+		const now = Date.now();
+		const blockedUntilMs = now + HOUR;
+		const email = "shared@example.test";
+		const orgName = "Restricted Workspace";
+		const oauth = (orgId: string): OAuthCredential => ({
+			type: "oauth",
+			access: `token-for-${orgId}`,
+			refresh: `refresh-for-${orgId}`,
+			expires: now + HOUR,
+			email,
+			orgId,
+			...(orgId === "restricted-org" ? { orgName } : {}),
+		});
+		await authStorage.credentials.set("anthropic", [
+			oauth("restricted-org"),
+			oauth("expired-org"),
+			oauth("meter-limited-org"),
+		]);
+		for (const { id, credential } of authStorage.credentials.list("anthropic")) {
+			if (credential.type !== "oauth") throw new Error("Expected OAuth credential");
+			authStorage.blocks.upsert({
+				credentialId: id,
+				providerKey: "anthropic:oauth",
+				blockScope: credential.orgId === "meter-limited-org" ? "tier:fable" : OAUTH_ORG_POLICY_BLOCK_SCOPE,
+				blockedUntilMs: credential.orgId === "expired-org" ? now - 1 : blockedUntilMs,
+			});
+		}
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated({}));
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+
+		await runUsageCommand({ json, redact, noExtensions: true });
+
+		expect(stdout.match(/rejected by org policy/g)).toHaveLength(1);
+		expect(stdout.includes(email)).toBe(!redact);
+		expect(stdout.includes(orgName)).toBe(!redact);
+		expect(stdout).not.toContain("token-for-restricted-org");
+		if (json) {
+			const payload = JSON.parse(stdout);
+			expect(payload.reports).toEqual([]);
+			expect(payload.orgPolicyRejectedAccounts).toEqual([
+				{
+					provider: "anthropic",
+					type: "oauth",
+					email: redact ? "sh*" : email,
+					orgId: redact ? "re*" : "restricted-org",
+					orgName: redact ? "Re*" : orgName,
+					status: "rejected by org policy",
+					eligible: false,
+					blockedUntilMs,
+				},
+			]);
+		} else {
+			const text = stripVTControlCharacters(stdout);
+			expect(text).toContain("no usage data");
+			expect(text).toContain(`${redact ? "sh* · Re*" : `${email} · ${orgName}`} — rejected by org policy`);
+		}
 	});
 });
 
