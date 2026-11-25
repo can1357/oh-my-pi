@@ -69,6 +69,7 @@ import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { resolveAutoCompactionThresholdTokens } from "../../session/model-compaction-threshold";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -2887,6 +2888,7 @@ export class AcpAgent implements Agent {
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
 			const cost = await this.#sessionTreeCost(record);
+			const thresholdTokens = resolveAutoCompactionThresholdTokens(record.session.settings, record.session.model);
 			await this.#connection.sessionUpdate({
 				sessionId,
 				update: {
@@ -2894,6 +2896,8 @@ export class AcpAgent implements Agent {
 					size: contextUsage.contextWindow,
 					used: contextUsage.tokens ?? 0,
 					cost: cost > 0 ? { amount: cost, currency: "USD" } : undefined,
+					// Where omp auto-compacts now, so clients can show it beside the full window.
+					_meta: thresholdTokens !== undefined ? { compaction: { thresholdTokens } } : undefined,
 				},
 			});
 		}

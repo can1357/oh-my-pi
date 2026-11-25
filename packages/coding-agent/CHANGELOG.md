@@ -19,6 +19,7 @@
 - URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
 - URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
 - Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
+- ACP `usage_update` now carries the context size at which omp will auto-compact under `_meta.compaction.thresholdTokens`, so clients can show it beside the full window
 
 ### Fixed
 

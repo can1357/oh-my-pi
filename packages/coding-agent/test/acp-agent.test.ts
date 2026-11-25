@@ -61,6 +61,7 @@ import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp"
 
 import { cfgMcpStartupTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import { cfgPlanAutosave, cfgPlanAutosaveDir, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+import { cfgCompactionEnabled, cfgCompactionThresholdTokens } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
 function expectAcpStructure(schema: Validator<unknown>, value: unknown): void {
@@ -1897,6 +1898,32 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("reports the resolved auto-compaction point in usage_update _meta", async () => {
+		const harness = await createHarness();
+		const live = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(live.sessionId)!;
+		(session as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 200_000, tokens: 10 });
+		const lastUsage = () =>
+			harness.updates
+				.filter(update => update.sessionId === live.sessionId && update.update.sessionUpdate === "usage_update")
+				.at(-1)?.update as { size: number; _meta?: { compaction?: { thresholdTokens: number } } } | undefined;
+
+		try {
+			cfgCompactionThresholdTokens.set(Settings.instance, 64_000);
+			await harness.agent.prompt({ sessionId: live.sessionId, prompt: [{ type: "text", text: "ping" }] });
+			expect(lastUsage()?.size).toBe(200_000);
+			expect(lastUsage()?._meta?.compaction).toEqual({ thresholdTokens: 64_000 });
+
+			cfgCompactionEnabled.set(Settings.instance, false);
+			await harness.agent.prompt({ sessionId: live.sessionId, prompt: [{ type: "text", text: "ping" }] });
+			expect(lastUsage()?.size).toBe(200_000);
+			expect(lastUsage()?._meta?.compaction).toBeUndefined();
+		} finally {
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("counts a loaded session's persisted background subagent spend (#19102)", async () => {
