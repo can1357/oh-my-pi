@@ -17586,6 +17586,24 @@
 				"- **Every check and measurement runs in seconds, on the code in question alone:** its tests and its callers', a micro-benchmark, a scaled-down input. NEVER the whole suite, the full benchmark, or the full slow case when one of those answers the question. A reported slowness is the baseline, not a thing to reproduce.",
 				"- **Every check and measurement runs in seconds, on the code in question alone:** its tests and its callers', a micro-benchmark, a scaled-down input. NEVER the whole suite, the full benchmark, or the full slow case when one of those answers the question. A reported slowness is the baseline, not something you reproduce."
 			]
+		},
+		{
+			"source": "- `details()` is synchronous and prints nothing: it returns the draft's raw record — the `id` you would pass to the bridge, the `head` commit it started from, and the `scope` of agents it covers. `commit(...)` returns the same record for the commit it made, with the draft that remains under `remaining`.",
+			"origin": "tools/commit.md",
+			"variants": [
+				"- `details()` runs synchronously and outputs nothing: it hands back the draft's raw record — the `id` you would pass to the bridge, the `head` commit it started from, and the `scope` of agents it covers. `commit(...)` gives back the same record for the commit it made, with the draft that remains under `remaining`.",
+				"- `details()` is synchronous and prints nothing: it yields the draft's raw record — the `id` you would pass to the bridge, the `head` commit it started from, and the `scope` of agents it covers. `commit(...)` returns that same record for the commit it made, with the draft that remains under `remaining`.",
+				"- `details()` is synchronous and prints nothing: it returns the draft's raw record — the `id` you would pass to the bridge, the `head` commit it started from, and the `scope` of agents it covers. `commit(...)` hands back the same record for the commit it made, with the draft that remains under `remaining`."
+			]
+		},
+		{
+			"source": "- Every method is async and prints its result; `silent=True` skips printing. `details()` is the exception (synchronous, prints nothing). `print(d)` repeats the current summary.",
+			"origin": "tools/commit.md",
+			"variants": [
+				"- Each method is async and prints its result; `silent=True` skips printing. `details()` is the exception (synchronous, prints nothing). `print(d)` repeats the current summary.",
+				"- Every method is async and prints its result; `silent=True` skips printing. `details()` is the exception (synchronous, prints nothing). `print(d)` reprints the current summary.",
+				"- All methods are async and print their result; `silent=True` skips printing. `details()` is the exception (synchronous, prints nothing). `print(d)` repeats the current summary."
+			]
 		}
 	]
 }
