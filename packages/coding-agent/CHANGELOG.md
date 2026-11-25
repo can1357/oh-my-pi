@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The eval `commit` draft exposes its record as the synchronous `details()` method instead of a `details` field.
+
 ### Fixed
 
 - A broadcast from the main agent now interrupts its waiting subagents: it reaches them as a parent steer (or interrupt) instead of sitting queued until their current `wait` window elapses. Broadcasts between peers still queue without interrupting.
