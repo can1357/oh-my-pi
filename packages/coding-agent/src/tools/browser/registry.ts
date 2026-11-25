@@ -4,7 +4,17 @@ import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
 import { ToolError } from "../tool-errors";
-import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, resolveSpawnArgs, waitForCdp } from "./attach";
+import {
+	applySpawnMode,
+	assertChromiumReuseMode,
+	findFreeCdpPort,
+	findReusableCdp,
+	gracefulKillTreeOnce,
+	hasChromiumHeadlessSwitch,
+	isChromiumBrowserExecutable,
+	resolveSpawnArgs,
+	waitForCdp,
+} from "./attach";
 import { type CmuxKind, CmuxUnavailableError } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
@@ -56,6 +66,8 @@ export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	cdpUrl?: string;
 	/** The browser's main process, which owns its windows on screen; unknown for connected endpoints and the relay. */
 	pid?: number;
+	/** The running mode of a Chromium reached through an executable path, including reused processes. */
+	spawnedHeaded?: boolean;
 	/** OMP-owned temp Chromium profile directory removed on dispose (process-local headless launches). */
 	userDataDir?: string;
 	/** Daemon unit backing this handle; dispose disconnects instead of closing, kill routes to the daemon. */
@@ -118,6 +130,7 @@ export function browserKey(kind: BrowserKind): string {
 		case "headless":
 			return `headless:${kind.headless ? "1" : "0"}:${kind.insecure ? "tls" : ""}`;
 		case "spawned":
+			// The caller's argv identifies the browser; `headed` constrains its running mode separately.
 			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
 			return `connected:${kind.cdpUrl}`;
@@ -136,12 +149,19 @@ export interface AcquireBrowserOptions {
 	cwd: string;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	signal?: AbortSignal;
+	/** Explicit mode request for a spawned Chromium, not a default for reuse. */
+	headed?: boolean;
 	/** Ask a relay served by an older omp to restart from the installed one. Default true. */
 	restartRelay?: boolean;
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
-	if (kind.kind === "spawned") kind = { ...kind, args: resolveSpawnArgs(kind.path, kind.args, opts.cwd) };
+	let spawnArgs: string[] | undefined;
+	if (kind.kind === "spawned") {
+		const args = resolveSpawnArgs(kind.path, kind.args, opts.cwd);
+		spawnArgs = applySpawnMode(kind.path, args, opts.headed);
+		kind = { ...kind, args };
+	}
 	const key = browserKey(kind);
 	for (;;) {
 		const existing = browsers.get(key);
@@ -154,6 +174,9 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 						? existing.webkit.client.connected
 						: existing.browser.connected
 			) {
+				if (kind.kind === "spawned" && "browser" in existing) {
+					assertChromiumReuseMode(kind.path, kind.args, opts.headed, existing.spawnedHeaded);
+				}
 				return existing;
 			}
 			browsers.delete(key);
@@ -174,7 +197,7 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 			await untilAborted(opts.signal, () => pending.settled);
 			continue;
 		}
-		const open = openBrowserHandle(kind, opts);
+		const open = openBrowserHandle(kind, opts, spawnArgs);
 		const settled = Promise.withResolvers<void>();
 		const entry = { settled: settled.promise };
 		// An open whose caller aborted is disposed below, never published, so it
@@ -231,7 +254,11 @@ export function normalizeConnectedCdpUrl(rawCdpUrl: string): string {
 	return cdpUrl;
 }
 
-async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
+async function openBrowserHandle(
+	kind: BrowserKind,
+	opts: AcquireBrowserOptions,
+	spawnArgs?: string[],
+): Promise<BrowserHandle> {
 	if (kind.kind === "cmux") {
 		const client = new CmuxSocketClient({ socketPath: kind.socketPath, password: kind.password });
 		await client.connect().catch((error: unknown) => {
@@ -361,15 +388,17 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			`app must be an absolute executable path (got ${JSON.stringify(exe)}). Pass the binary inside Foo.app/Contents/MacOS/, not the .app bundle.`,
 		);
 	}
-	const appArgs = kind.args ?? [];
-	const reused = await findReusableCdp(exe, { signal: opts.signal, appArgs });
+	const appArgs = spawnArgs ?? kind.args ?? [];
+	const reused = await findReusableCdp(exe, { signal: opts.signal, appArgs, headed: opts.headed });
 	let cdpUrl: string;
 	let pid: number;
+	let spawnedHeaded: boolean | undefined;
 	let subprocess: Subprocess | undefined;
 	if (reused) {
 		logger.debug("Reusing existing CDP endpoint for attach", { exe, pid: reused.pid, cdpUrl: reused.cdpUrl });
 		cdpUrl = reused.cdpUrl;
 		pid = reused.pid;
+		spawnedHeaded = reused.headed;
 	} else {
 		const port = await findFreeCdpPort();
 		const launchArgs = [...appArgs, `--remote-debugging-port=${port}`];
@@ -383,6 +412,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		subprocess = child;
 		pid = child.pid;
 		cdpUrl = `http://127.0.0.1:${port}`;
+		if (isChromiumBrowserExecutable(exe)) spawnedHeaded = !hasChromiumHeadlessSwitch(appArgs);
 		try {
 			await waitForCdp(cdpUrl, 30_000, opts.signal);
 		} catch (err) {
@@ -412,6 +442,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		wsEndpoint: browser.wsEndpoint(),
 		cdpUrl,
 		pid,
+		spawnedHeaded,
 		subprocess,
 		refCount: 0,
 		stealth: { browserSession: null, override: null },

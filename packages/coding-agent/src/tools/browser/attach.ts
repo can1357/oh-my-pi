@@ -241,7 +241,7 @@ export function isChromiumBrowserExecutable(exe: string): boolean {
 const HEADLESS_SWITCH = /^--?headless(?:=|$)/;
 const WINDOWS_HEADLESS_SWITCH = /^(?:--?|\/)headless(?:=|$)/i;
 
-function hasChromiumHeadlessSwitch(args: string[] | undefined): boolean {
+export function hasChromiumHeadlessSwitch(args: string[] | undefined): boolean {
 	if (!args) return false;
 	const switchPattern = process.platform === "win32" ? WINDOWS_HEADLESS_SWITCH : HEADLESS_SWITCH;
 	for (const arg of args) {
@@ -249,6 +249,16 @@ function hasChromiumHeadlessSwitch(args: string[] | undefined): boolean {
 		if (switchPattern.test(arg)) return true;
 	}
 	return false;
+}
+
+/** Only an explicit display mode changes the launch argv of a Chromium executable. */
+export function applySpawnMode(exe: string, args: string[], headed: boolean | undefined): string[] {
+	if (headed === undefined || !isChromiumBrowserExecutable(exe)) return args;
+	const hasHeadless = hasChromiumHeadlessSwitch(args);
+	if (headed && hasHeadless) {
+		throw new ToolError("headed: true conflicts with the Chromium headless switch in argv. Remove one of them.");
+	}
+	return !headed && !hasHeadless ? ["--headless=new", ...args] : args;
 }
 
 /**
@@ -267,25 +277,10 @@ function hasChromiumHeadlessSwitch(args: string[] | undefined): boolean {
  * macOS blocks on a "wants to use your confidential information" dialog for
  * every fresh binary. A caller-supplied profile keeps the real keystore; its
  * existing cookies are encrypted with that key and a mock one would corrupt them.
- *
- * Only an explicit display mode changes Chromium's headless argv; all other
- * executables and calls without `headed` keep their existing launch mode.
  */
-export function resolveSpawnArgs(
-	exe: string,
-	appArgs: string[] | undefined,
-	cwd = process.cwd(),
-	headed?: boolean,
-): string[] {
-	let args = appArgs ?? [];
+export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
+	const args = appArgs ?? [];
 	if (!isChromiumBrowserExecutable(exe)) return args;
-	if (headed !== undefined) {
-		const hasHeadless = hasChromiumHeadlessSwitch(args);
-		if (headed && hasHeadless) {
-			throw new ToolError("headed: true conflicts with the Chromium headless switch in argv. Remove one of them.");
-		}
-		if (!headed && !hasHeadless) args = ["--headless=new", ...args];
-	}
 	const requestedProfile = findUserDataDirInArgs(args);
 	if (requestedProfile !== null) {
 		// Chromium accepts switch values as --name=value, not a separate argv
@@ -428,6 +423,20 @@ async function findProfileLockOwner(
 		: null;
 }
 
+/** An omitted mode accepts the running Chromium mode; other executables have no known mode. */
+export function assertChromiumReuseMode(
+	exe: string,
+	appArgs: string[] | undefined,
+	requestedHeaded: boolean | undefined,
+	runningHeaded: boolean | undefined,
+): void {
+	if (requestedHeaded === undefined || runningHeaded === undefined || requestedHeaded === runningHeaded) return;
+	const profile = findUserDataDirInArgs(appArgs);
+	throw new ToolError(
+		`Cannot launch ${path.basename(exe)} ${requestedHeaded ? "headed" : "headless"} because its profile ${profile} is already in use in the opposite mode. Close that browser or choose another --user-data-dir.`,
+	);
+}
+
 /**
  * Return a reusable CDP endpoint for `exe`, or null when no instance is
  * running. Refuse to replace an occupied instance unless the caller can
@@ -435,8 +444,8 @@ async function findProfileLockOwner(
  */
 export async function findReusableCdp(
 	exe: string,
-	options: { signal?: AbortSignal; appArgs?: string[] } = {},
-): Promise<{ cdpUrl: string; pid: number } | null> {
+	options: { signal?: AbortSignal; appArgs?: string[]; headed?: boolean } = {},
+): Promise<{ cdpUrl: string; pid: number; headed?: boolean } | null> {
 	const requestedUserDataDir = findUserDataDirInArgs(options.appArgs);
 	const normalizedRequestedUserDataDir =
 		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
@@ -447,7 +456,6 @@ export async function findReusableCdp(
 	// for Chromium-family browsers on Linux.
 	const executablePath = await fs.realpath(exe).catch(() => exe);
 	const isChromium = isChromiumBrowserExecutable(exe);
-	const wantsHeadless = isChromium && hasChromiumHeadlessSwitch(options.appArgs);
 	const wrapperTarget = process.platform === "linux" && isChromium ? await resolveWrapperTarget(executablePath) : null;
 	const candidates = Process.fromPath(wrapperTarget ?? executablePath).filter(
 		candidate => candidate.status() === ProcessStatus.Running,
@@ -492,12 +500,9 @@ export async function findReusableCdp(
 		const port = findCdpPortInArgs(args);
 		if (port === null || (isChromium && args.some(arg => arg.startsWith("--type=")))) continue;
 		if (await probeCdpAt(port, options.signal)) {
-			if (isChromium && options.appArgs && hasChromiumHeadlessSwitch(args) !== wantsHeadless) {
-				throw new ToolError(
-					`Cannot launch ${path.basename(exe)} ${wantsHeadless ? "headless" : "headed"} because its profile ${requestedUserDataDir} is already in use in the opposite mode. Close that browser or choose another --user-data-dir.`,
-				);
-			}
-			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
+			const headed = isChromium ? !hasChromiumHeadlessSwitch(args) : undefined;
+			assertChromiumReuseMode(exe, options.appArgs, options.headed, headed);
+			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid, ...(headed === undefined ? {} : { headed }) };
 		}
 	}
 	const canLaunchIsolatedProfile =

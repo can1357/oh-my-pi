@@ -15,11 +15,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import {
+	applySpawnMode,
 	attachPageWithTimeout,
 	findFreeCdpPort,
 	findReusableCdp,
 	gracefulKillTreeOnce,
-	isChromiumBrowserExecutable,
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
@@ -31,7 +31,6 @@ import {
 	loadPuppeteer,
 	privateTargetId,
 	RENDERER_PRIORITY_ARGS,
-	systemChromiumCandidatesForTest,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	acquireBrowser,
@@ -50,21 +49,9 @@ import {
 	TimeoutError,
 } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
-import { chromiumAvailable, chromiumCdpAvailable } from "./chromium-probe";
+import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
-
-async function findChromeForSpawnTest(): Promise<string | undefined> {
-	const candidates = new Set(systemChromiumCandidatesForTest());
-	for (const candidate of candidates) {
-		if (!isChromiumBrowserExecutable(candidate) || !(await Bun.file(candidate).exists())) continue;
-		if (process.platform !== "linux" || (await chromiumCdpAvailable(candidate))) return candidate;
-	}
-	const fallback = CHROMIUM_AVAILABLE ? await ensureChromiumExecutable() : undefined;
-	return fallback && isChromiumBrowserExecutable(fallback) ? fallback : undefined;
-}
-
-const SPAWN_TEST_CHROME = await findChromeForSpawnTest();
 let sharedHeadless: BrowserHandle | undefined;
 
 function makeSession(): ToolSession {
@@ -170,9 +157,12 @@ interface DisposableExecutable {
 	close(): Promise<void>;
 }
 
-async function spawnDisposableExecutable(args: string[] = []): Promise<DisposableExecutable> {
+async function spawnDisposableExecutable(
+	args: string[] = [],
+	name = path.basename(process.execPath),
+): Promise<DisposableExecutable> {
 	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-app-path-"));
-	const executablePath = path.join(tempDir, path.basename(process.execPath));
+	const executablePath = path.join(tempDir, name);
 	await Bun.write(executablePath, Bun.file(process.execPath));
 	if (process.platform !== "win32") await fs.chmod(executablePath, 0o755);
 	const executable = await fs.realpath(executablePath);
@@ -601,6 +591,27 @@ describe("pickElectronTarget", () => {
 		}
 	});
 
+	test("reuses a headless Chromium profile unless headed mode is explicitly requested", async () => {
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		const profile = path.join(os.tmpdir(), `omp-cdp-profile-${crypto.randomUUID()}`);
+		const appArgs = [`--user-data-dir=${profile}`];
+		const existing = await spawnDisposableExecutable(
+			["--headless=new", ...appArgs, `--remote-debugging-port=${cdp.port}`],
+			process.platform === "win32" ? "chrome.exe" : "chrome",
+		);
+		try {
+			const endpoint = { cdpUrl: `http://127.0.0.1:${cdp.port}`, pid: existing.pid, headed: false };
+			expect(await findReusableCdp(existing.path, { appArgs })).toEqual(endpoint);
+			expect(await findReusableCdp(existing.path, { appArgs, headed: false })).toEqual(endpoint);
+			await expect(findReusableCdp(existing.path, { appArgs, headed: true })).rejects.toThrow(
+				"already in use in the opposite mode",
+			);
+		} finally {
+			await existing.close();
+			cdp.stop(true);
+		}
+	});
+
 	test.skipIf(process.platform !== "linux")("reuses Chromium launched through a distro wrapper", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-wrapper-"));
 		const wrapper = path.join(root, "google-chrome");
@@ -628,6 +639,7 @@ describe("pickElectronTarget", () => {
 			expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
 				cdpUrl: `http://127.0.0.1:${cdp.port}`,
 				pid: child.pid,
+				headed: true,
 			});
 		} finally {
 			child.kill();
@@ -671,6 +683,7 @@ describe("pickElectronTarget", () => {
 				expect(await findReusableCdp(launcher, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
 					cdpUrl: `http://127.0.0.1:${cdp.port}`,
 					pid: child.pid,
+					headed: true,
 				});
 				// Another Chromium-family browser holding the profile is refused, not adopted.
 				await expect(
@@ -818,10 +831,11 @@ describe("pickElectronTarget", () => {
 		30_000,
 	);
 
-	test.skipIf(!SPAWN_TEST_CHROME)(
-		"spawns explicit headless Chrome and delivers a trusted click with focus",
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"spawns explicit headless Chrome, delivers a trusted click, and keeps the mode on reuse",
 		async () => {
-			const app = SPAWN_TEST_CHROME!;
+			const app = await ensureChromiumExecutable();
+			if (!app) throw new Error("Expected a Chromium executable");
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-chrome-click-"));
 			const argv = [
 				`--user-data-dir=${path.join(root, "profile")}`,
@@ -830,6 +844,7 @@ describe("pickElectronTarget", () => {
 				"--no-default-browser-check",
 				"--use-mock-keychain",
 				"--password-store=basic",
+				...RENDERER_PRIORITY_ARGS,
 			];
 			const fixture = Bun.serve({
 				hostname: "127.0.0.1",
@@ -846,6 +861,7 @@ describe("pickElectronTarget", () => {
 			const prelude = createBrowserPrelude(session);
 			const invoke = (parameters: unknown) => prelude.invoke(parameters, { session, toolCallId: "headless-click" });
 			const name = `headless-click-${crypto.randomUUID()}`;
+			const reuseName = `${name}-reuse`;
 			const mismatchedName = `${name}-headed`;
 			try {
 				await invoke({
@@ -860,11 +876,18 @@ describe("pickElectronTarget", () => {
 				const opened = getTab(name);
 				if (opened?.backend !== "worker") throw new Error("Expected Chromium worker tab");
 				expect(opened.browser.subprocess).toBeDefined();
+				expect(opened.ownsPage).toBe(true);
 				expect(await opened.browser.browser.userAgent()).toContain("HeadlessChrome/");
 
-				await expect(invoke({ action: "open", app, argv, headed: true, name: mismatchedName })).rejects.toThrow(
-					"already in use in the opposite mode",
-				);
+				await expect(
+					invoke({
+						action: "open",
+						app,
+						argv: [...argv, "--disable-extensions"],
+						headed: true,
+						name: mismatchedName,
+					}),
+				).rejects.toThrow("already in use in the opposite mode");
 				const click = await invoke({
 					action: "run",
 					name,
@@ -876,7 +899,33 @@ describe("pickElectronTarget", () => {
 						}));`,
 				});
 				expect(click.details).toMatchObject({ value: { outcome: "saved", active: "save", viewport: [390, 800] } });
+
+				await invoke({ action: "open", app, argv, name });
+				const reopened = getTab(name);
+				if (reopened?.backend !== "worker") throw new Error("Expected the reopened Chromium worker tab");
+				expect(reopened.targetId).toBe(opened.targetId);
+				await expect(invoke({ action: "open", app, argv, headed: true, name })).rejects.toThrow(
+					"already in use in the opposite mode",
+				);
+				for (const changedArgs of [
+					[...argv, "--disable-extensions"],
+					argv.map(arg =>
+						arg.startsWith("--user-data-dir=") ? `--user-data-dir=${path.join(root, "other")}` : arg,
+					),
+				]) {
+					await expect(invoke({ action: "open", app, argv: changedArgs, name })).rejects.toThrow(
+						"bound to a different browser",
+					);
+				}
+
+				await invoke({ action: "open", app, argv, name: reuseName, url: fixture.url.href });
+				const reused = getTab(reuseName);
+				if (reused?.backend !== "worker") throw new Error("Expected another Chromium worker tab");
+				expect(reused.ownsPage).toBe(true);
+				expect(reused.browser).toBe(opened.browser);
+				expect(reused.targetId).not.toBe(opened.targetId);
 			} finally {
+				await invoke({ action: "close", name: reuseName }).catch(() => {});
 				await invoke({ action: "close", name: mismatchedName, kill: true }).catch(() => {});
 				await invoke({ action: "close", name, kill: true }).catch(() => {});
 				fixture.stop(true);
@@ -1254,16 +1303,15 @@ describe("resolveSpawnArgs", () => {
 
 	test("honors explicit Chromium modes without changing unset argv or Electron launch flags", () => {
 		const chrome = "/usr/bin/google-chrome-stable";
-		const cwd = path.resolve("/tmp");
-		const argv = [`--user-data-dir=${path.join(cwd, "profile")}`];
+		const argv = [`--user-data-dir=${path.resolve("/tmp", "profile")}`];
 		const headless = ["--headless", ...argv];
-		expect(resolveSpawnArgs(chrome, argv, cwd)).toEqual(argv);
-		expect(resolveSpawnArgs(chrome, argv, cwd, true)).toEqual(argv);
-		expect(resolveSpawnArgs(chrome, argv, cwd, false)).toEqual(["--headless=new", ...argv]);
-		expect(resolveSpawnArgs(chrome, headless, cwd)).toEqual(headless);
-		expect(resolveSpawnArgs(chrome, headless, cwd, false)).toEqual(headless);
-		expect(() => resolveSpawnArgs(chrome, headless, cwd, true)).toThrow("conflicts with the Chromium headless switch");
-		expect(resolveSpawnArgs("/Applications/Slack.app/Contents/MacOS/Slack", [], cwd, false)).toEqual([]);
+		expect(applySpawnMode(chrome, argv, undefined)).toEqual(argv);
+		expect(applySpawnMode(chrome, argv, true)).toEqual(argv);
+		expect(applySpawnMode(chrome, argv, false)).toEqual(["--headless=new", ...argv]);
+		expect(applySpawnMode(chrome, headless, undefined)).toEqual(headless);
+		expect(applySpawnMode(chrome, headless, false)).toEqual(headless);
+		expect(() => applySpawnMode(chrome, headless, true)).toThrow("conflicts with the Chromium headless switch");
+		expect(applySpawnMode("/Applications/Slack.app/Contents/MacOS/Slack", [], false)).toEqual([]);
 	});
 
 	test("isolates a Flatpak Chromium launcher without treating unrelated apps as browsers", () => {

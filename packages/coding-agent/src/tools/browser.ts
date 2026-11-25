@@ -212,7 +212,7 @@ export function resolveBrowserKind(
 		if (!args.includes("--allow-file-access-from-files")) {
 			args.push("--allow-file-access-from-files");
 		}
-		return { kind: "spawned", path: exe, args: resolveSpawnArgs(exe, args, session.cwd, params.headed) };
+		return { kind: "spawned", path: exe, args: resolveSpawnArgs(exe, args, session.cwd) };
 	}
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app: "relay" wins over every setting; PI_BROWSER_RELAY stays the
@@ -743,6 +743,7 @@ async function openOnKind(
 				cwd: session.cwd,
 				viewport: params.viewport ? puppeteerViewport(params.viewport) : undefined,
 				signal: openSignal,
+				headed: params.headed,
 			}),
 		);
 
