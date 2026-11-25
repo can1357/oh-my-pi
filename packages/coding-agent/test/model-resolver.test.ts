@@ -2911,6 +2911,19 @@ describe("provider routing selector (@upstream)", () => {
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
 	});
 
+	test.each(["@smol", "pi/smol"])("%s resolves an authenticated exact role before composing the catalog", cliModel => {
+		const registry = {
+			getAvailable: () => allModels,
+			getProviderModels: (provider: string) => allModels.filter(model => model.provider === provider),
+			getAll: (): never => { throw new Error("composed full catalog"); },
+		};
+		const settings = Settings.isolated({ modelRoles: { smol: "openrouter/z-ai/glm-4.7:high" } });
+		const expected = resolveCliModel({ cliModel, settings, modelRegistry: { ...registry, getProviderModels: undefined, getAll: () => allModels } });
+		expect(expected.configuredRole).toBe("smol");
+		expect(expected.thinkingLevel).toBe(Effort.High);
+		expect(resolveCliModel({ cliModel, settings, modelRegistry: registry })).toEqual(expected);
+	});
+
 	test("resolveCliModel keeps a role alias's upstream pin in the selector", () => {
 		const registry = { getAll: () => allModels, getAvailable: () => allModels };
 		const settings = Settings.isolated({ modelRoles: { smol: "openrouter/z-ai/glm-4.7@cerebras" } });

@@ -2480,15 +2480,32 @@ export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult
 	// can resolve directly from that single provider's chat catalog without
 	// materializing the full ~5k-model snapshot via `getAll()` / `getAvailable()`.
 	// Any miss, ambiguity, or non-exact selector falls through to the full path.
+	let available = preferredModels;
 	if (modelRegistry.getProviderModels) {
 		const fastResult = tryResolveExplicitProviderCliModel(cliProvider, cliModel, modelRegistry, disabled);
 		if (fastResult) return fastResult;
+
+		const alias = cliModel.trim();
+		const role = !cliProvider && alias !== DEFAULT_MODEL_ROLE_ALIAS && getModelRoleAlias(alias, settings);
+		const pattern = role && settings?.getModelRole(role)?.trim();
+		if (pattern && !/[,*?[\]]/.test(pattern) && modelRoleAliasPrefixLength(pattern) === undefined) {
+			const target = tryResolveExplicitProviderCliModel(undefined, pattern, modelRegistry, disabled)?.model;
+			if (target) {
+				// An authenticated flat id named "@role" or "pi/role" beats the
+				// role. Resolve in the preferred pool first, preserving that rule,
+				// role metadata, routing and model-specific thinking normalization.
+				available ??= modelRegistry.getAvailable();
+				const enabled = disabled.size ? available.filter(model => !disabled.has(model.provider)) : available;
+				const result = resolveCliModelInScope({ ...options, cliModel }, { all: enabled, available: enabled });
+				if (result.model) return result;
+			}
+		}
 	}
 
 	const scoped = { ...options, cliModel };
 	const scope: CliModelScope = {
 		all: modelRegistry.getAll(),
-		available: preferredModels ?? modelRegistry.getAvailable(),
+		available: available ?? modelRegistry.getAvailable(),
 	};
 	if (disabled.size === 0) return resolveCliModelInScope(scoped, scope);
 

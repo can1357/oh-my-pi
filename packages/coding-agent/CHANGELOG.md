@@ -11,6 +11,9 @@
 ### Changed
 
 - Reduced repeated model lookups during catalog discovery and model-role selection.
+### Changed
+
+- Startup can resolve `--model @role` and `--model pi/role` without composing the full catalog when the role names an available provider/model.
 
 ## [19.2.0] - 2026-11-25
 
