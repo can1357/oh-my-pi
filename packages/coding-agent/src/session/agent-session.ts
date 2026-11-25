@@ -1393,7 +1393,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#lazyContextRefreshed = new Set<string>();
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
-	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#reloadOwnedMcpServers: (() => Promise<MCPLoadResult | undefined>) | undefined;
 	#projectScopeRefresher: (() => Promise<void>) | undefined;
@@ -2794,7 +2793,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return thunks;
 		});
-		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.getToolCommandEntries = config.getToolCommandEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -2883,7 +2881,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			imageDescriptions: config.imageDescriptions,
 			transformContext: (messages, signal) => this.#transformContext(messages, signal),
-			convertToLlm: messages => this.#convertToLlm(messages),
+			convertToLlm: config.convertToLlm ?? convertToLlm,
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
@@ -3046,7 +3044,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 			preserveAdvisorCard: card => this.#preserveAdvisorCard(card),
 			hasPendingNextTurnMessages: () => this.#pendingNextTurnMessages.length > 0,
-			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
+			convertToLlmForSideRequest: (messages, reader) => this.#providerBoundary.convertToLlmForSideRequest(messages, reader),
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
 			resolveContextPromotionTarget: (model, contextWindow, signal) =>
 				this.#maintenance.resolveContextPromotionTarget(model, contextWindow, signal),
@@ -3149,8 +3147,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const message = this.#buildEvalStateContextMessage([]);
 				if (message) this.sessionManager.appendMessage(message);
 			},
-			convertToLlmForSideRequest: (messages, withImageDescriptions) =>
-				this.#convertToLlmForSideRequest(messages, withImageDescriptions),
+			convertToLlmForSideRequest: (messages, reader, options) =>
+				this.#providerBoundary.convertToLlmForSideRequest(messages, reader, options),
 			imageDescriptionModel: reader => this.#providerBoundary.imageDescriptionModel(reader),
 			prepareImageDescriptions: (messages, model, signal) =>
 				this.#providerBoundary.prepareImageDescriptions(messages, model, signal),
@@ -8505,18 +8503,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#providerBoundary.deobfuscateDelta(text);
 	}
 
-	#convertToLlmForSideRequest(messages: AgentMessage[], withImageDescriptions?: boolean): Message[] {
-		return this.#providerBoundary.convertToLlmForSideRequest(messages, withImageDescriptions);
-	}
-
 	/**
 	 * Convert session messages using the same pre-LLM pipeline as the active
 	 * session, for a request to `model` (the active model by default): each
-	 * snapcompact archive is the view that model may read, swapped in a copy.
+	 * snapcompact archive is the view that model may read, swapped in a copy;
+	 * interrupted-thinking quotes convert only for an eligible reader.
 	 */
 	async convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal, model = this.model): Promise<Message[]> {
 		const readable = model ? await this.#maintenance.messagesForModel(messages, model) : messages;
-		return await this.#providerBoundary.convertMessagesToLlm(readable, signal);
+		return await this.#providerBoundary.convertMessagesToLlm(readable, model, signal);
 	}
 
 	/** Apply session-level stream hooks to a direct side request. */
@@ -14337,7 +14332,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const usageReporter =
 			args.onUsage ?? (args.purpose ? journalCompletion(this.sessionManager, { purpose: args.purpose }) : undefined);
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText, history, promptImages, args.conversationKey);
-		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal, model);
 		assertEphemeralTurnReady();
 		const sideContext = await this.agent.buildSideRequestContext(llmMessages, undefined, args.signal);
 		const toolHistory = sideContext.messages.some(
@@ -15523,7 +15518,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
 				reserveTokens: cfgBranchSummaryReserveTokens.get(this.settings),
 				metadata: this.agent.metadataForProvider(model.provider),
-				convertToLlm: messages => this.#convertToLlmForSideRequest(messages, describeFor !== undefined),
+				convertToLlm: messages =>
+					this.#providerBoundary.convertToLlmForSideRequest(messages, model, { withImageDescriptions: !!describeFor }),
 				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
 				// Same per-provider concurrency cap rationale as the compaction
 				// path above (chatgpt-codex review on #3751).

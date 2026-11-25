@@ -538,7 +538,7 @@ export interface SessionAdvisorsHost {
 	dropPendingAdvisorCards(): void;
 	preserveAdvisorCard(card: CustomMessage): void;
 	hasPendingNextTurnMessages(): boolean;
-	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
+	convertToLlmForSideRequest(messages: AgentMessage[], reader: Model): Message[];
 	effectiveServiceTier(model: Model): ServiceTier | undefined;
 	resolveContextPromotionTarget(
 		currentModel: Model,
@@ -1537,7 +1537,7 @@ export class SessionAdvisors {
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
 				// default converter drops custom roles and would discard their replay.
-				convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+				convertToLlm: (messages, reader) => this.#host.convertToLlmForSideRequest(messages, reader),
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
@@ -2688,7 +2688,7 @@ export class SessionAdvisors {
 					signal,
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
-						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages, candidate),
 						isUserAuthored: isUserAuthoredMessage,
 						telemetry,
 						tools: agent.state.tools,

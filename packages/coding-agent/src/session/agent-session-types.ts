@@ -375,8 +375,8 @@ export interface AgentSessionConfig {
 	onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	/** Per-session raw SSE diagnostic buffer. */
 	rawSseDebugBuffer?: RawSseDebugBuffer;
-	/** Current session message-to-LLM conversion pipeline. */
-	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	/** Current session message-to-LLM conversion pipeline, for the destination receiving the request. */
+	convertToLlm?: (messages: AgentMessage[], model: Model | undefined) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
 	rebuildSystemPrompt?: SystemPromptRebuilder;
 	/** Sources of the initial base prompt, as returned by `buildSystemPrompt`. */

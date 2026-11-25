@@ -106,6 +106,7 @@ import {
 	assistantTurnDelivered,
 	convertToLlm,
 	invalidateConvertToLlmArrayCache,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isUserAuthoredMessage,
 	stripImagesFromMessage,
 } from "./messages";
@@ -127,6 +128,7 @@ import {
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { HandoffGenerationOptions } from "./session-handoff";
 import type { SessionManager } from "./session-manager";
+import type { SessionProviderBoundary } from "./session-provider-boundary";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
@@ -530,7 +532,7 @@ export interface SessionMaintenanceHost {
 	/** Preserve the eval runtime snapshot at the history rewrite boundary for replay. */
 	persistEvalStateContext(): void;
 	/** With `withImageDescriptions`, images are replaced by the descriptions {@link prepareImageDescriptions} made. */
-	convertToLlmForSideRequest(messages: AgentMessage[], withImageDescriptions?: boolean): Message[];
+	convertToLlmForSideRequest: SessionProviderBoundary["convertToLlmForSideRequest"];
 	/** The model to describe images for when `reader` gets history as text; undefined when none is needed. */
 	imageDescriptionModel(reader: Model): Model | undefined;
 	/** Describe the images of `messages` for `model`, a model that cannot see them. */
@@ -847,7 +849,7 @@ export class SessionMaintenance {
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				cacheWarmSuffixTokens: model?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
-				convertToLlm,
+				convertToLlm: messages => convertToLlm(messages, model),
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -897,7 +899,7 @@ export class SessionMaintenance {
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				suffixTokenLimit: model?.thinking?.prefixBinding === true ? 0 : undefined,
 				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
-				convertToLlm,
+				convertToLlm: messages => convertToLlm(messages, model),
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -1011,8 +1013,8 @@ export class SessionMaintenance {
 	 * Surgically reduce context by dropping heavy content ("shake").
 	 *
 	 * - `images` delegates to {@link dropImages}.
-	 * - `thinking` removes assistant reasoning blocks without replacement text
-	 *   and credits their tokens. A turn whose native payload the request
+	 * - `thinking` removes assistant reasoning blocks and their interrupted-thinking
+	 *   continuity quotes without replacement text. A turn whose native payload the request
 	 *   replays is left untouched instead: those blocks are not on the wire, so
 	 *   removing them would change nothing the model receives and would credit
 	 *   tokens that stay billed. Kept blocks are reported through
@@ -1025,7 +1027,7 @@ export class SessionMaintenance {
 	 * cache message identity — same rewrite contract as {@link dropImages}.
 	 *
 	 * No-op (zero counts) when nothing is eligible, and a `thinking` run whose
-	 * every turn is replayed returns without rewriting anything at all.
+	 * every turn is replayed and which has no quotes to clear rewrites nothing.
 	 */
 	async shake(
 		mode: ShakeMode,
@@ -1050,64 +1052,77 @@ export class SessionMaintenance {
 			const anchorIndex = findUsageAnchorIndex(branchEntries, compactionIndex);
 			let removed = 0;
 			let replayedBlocks = 0;
+			let notesDropped = 0;
 			let tokensFreed = 0;
 			let anchoredTokensRemoved = 0;
 			const countOptions = { excludeEncryptedReasoning: true } as const;
 			const model = this.#host.model();
 			const nativeHistoryReplay = openAIResponsesReplaysNativeHistory(model, this.#host.providerSessionState);
 			for (const [index, entry] of branchEntries.entries()) {
-				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-				const message = entry.message;
-				const isReasoning = (block: (typeof message.content)[number]) =>
-					block.type === "thinking" || block.type === "redactedThinking";
-				const dropped = message.content.filter(isReasoning).length;
-				if (dropped === 0) continue;
-				// Native Responses replay uses the stored payload instead of content.
-				// Leave those blocks intact: stripping them cannot save wire tokens
-				// and needlessly invalidates the provider's prompt cache. They are
-				// reported as kept, and a run that only keeps blocks rewrites nothing.
-				if (this.#replaysNativeHistory(message, nativeHistoryReplay)) {
-					replayedBlocks += dropped;
-					continue;
+				let saved: number;
+				if (entry.type === "message" && entry.message.role === "assistant") {
+					const message = entry.message;
+					let dropped = 0;
+					for (const block of message.content) {
+						if (block.type === "thinking" || block.type === "redactedThinking") dropped++;
+					}
+					if (dropped === 0) continue;
+					// The native payload still supplies this turn; removing its typed
+					// blocks would not change what the provider receives.
+					if (this.#replaysNativeHistory(message, nativeHistoryReplay)) {
+						replayedBlocks += dropped;
+						continue;
+					}
+					// Conversion already strips the unsigned run from an interrupted
+					// assistant. Only the continuity note can reclaim those tokens.
+					const before =
+						message.stopReason === "aborted"
+							? this.#tokenizer.countMessages(convertToLlm([message], model), countOptions)
+							: this.#tokenizer.countMessage(message, countOptions);
+					message.content = message.content.filter(block => block.type !== "thinking" && block.type !== "redactedThinking");
+					invalidateMessageCache(message);
+					saved = Math.max(0, before - this.#tokenizer.countMessage(message, countOptions));
+					removed += dropped;
+				} else {
+					const note =
+						entry.type === "custom_message"
+							? entry
+							: entry.type === "message" && entry.message.role === "custom"
+								? entry.message
+								: undefined;
+					if (note?.customType !== INTERRUPTED_THINKING_MESSAGE_TYPE) continue;
+					if (note.content === "" && note.excludeFromContext) continue;
+					const projected = "role" in note ? note : customMessageEntryMessage(note);
+					saved = projected ? this.#tokenizer.countMessages(convertToLlm([projected], model), countOptions) : 0;
+					// Keep the ID for forks and compaction cutoffs, and the marker
+					// for its aborted assistant; never emit the emptied note itself.
+					note.content = "";
+					note.excludeFromContext = true;
+					if ("role" in note) invalidateMessageCache(note);
+					notesDropped++;
 				}
-				const kept = message.content.filter(block => !isReasoning(block));
-				// Match the stored-context floor: opaque signatures and encrypted
-				// reasoning bytes do not have a reliable provider-token equivalent.
-				const before = this.#tokenizer.countMessage(message, countOptions);
-				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
-				message.content = kept;
-				invalidateMessageCache(message);
-				const saved = Math.max(0, before - this.#tokenizer.countMessage(message, countOptions));
 				tokensFreed += saved;
 				if (index < anchorIndex && (!hasRemoteReplacementHistory || index > compactionIndex)) {
 					anchoredTokensRemoved += saved;
 				}
-				removed += dropped;
 			}
-			if (removed === 0) {
-				return {
-					mode,
-					toolResultsDropped: 0,
-					blocksDropped: 0,
-					thinkingBlocksDropped: 0,
-					thinkingBlocksKept: replayedBlocks,
-					tokensFreed: 0,
-				};
-			}
+			const result: ShakeResult = {
+				mode,
+				toolResultsDropped: 0,
+				blocksDropped: 0,
+				thinkingBlocksDropped: removed,
+				thinkingBlocksKept: replayedBlocks,
+				interruptedThinkingNotesDropped: notesDropped,
+				tokensFreed,
+			};
+			if (removed === 0 && notesDropped === 0) return result;
 			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 			await this.#host.sessionManager.rewriteEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 			this.#host.resetAdvisorRuntimes("shake");
 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
-			return {
-				mode,
-				toolResultsDropped: 0,
-				blocksDropped: 0,
-				thinkingBlocksDropped: removed,
-				thinkingBlocksKept: replayedBlocks,
-				tokensFreed,
-			};
+			return result;
 		}
 
 		const assertCurrent = () => {
@@ -4109,7 +4124,7 @@ export class SessionMaintenance {
 				signal,
 			);
 		}
-		return messages => this.#host.convertToLlmForSideRequest(messages, describeFor !== undefined);
+		return messages => this.#host.convertToLlmForSideRequest(messages, candidate, { withImageDescriptions: !!describeFor });
 	}
 
 	async #compactWithFallbackModel(
@@ -4641,7 +4656,7 @@ export class SessionMaintenance {
 		return (
 			nativeHistoryTokens +
 			this.#tokenizer.countMessages(archives, options) +
-			this.#tokenizer.countMessages(convertToLlm(rest), options)
+			this.#tokenizer.countMessages(convertToLlm(rest, this.#model), options)
 		);
 	}
 

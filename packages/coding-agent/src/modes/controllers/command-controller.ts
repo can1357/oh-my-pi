@@ -2181,9 +2181,8 @@ export class CommandController {
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content,
 	 * `images` strips image blocks, and `thinking` drops the thinking blocks the
-	 * request rebuilds from them, keeping the turns it replays natively (they
-	 * are reported as kept and the transcript is left alone). Rebuilds the chat
-	 * and reports counts.
+	 * request rebuilds and clears interrupted-thinking notes, keeping the turns
+	 * it replays natively. Rebuilds the chat and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -2198,7 +2197,8 @@ export class CommandController {
 			result.toolResultsDropped +
 			result.blocksDropped +
 			(result.imagesDropped ?? 0) +
-			(result.thinkingBlocksDropped ?? 0);
+			(result.thinkingBlocksDropped ?? 0) +
+			(result.interruptedThinkingNotesDropped ?? 0);
 		if (dropped === 0) {
 			// Replayed thinking was left in place: nothing to rebuild, but say so.
 			this.ctx.showStatus((result.thinkingBlocksKept ?? 0) > 0 ? formatShakeSummary(result) : "Nothing to shake.");
