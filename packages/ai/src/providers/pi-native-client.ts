@@ -132,8 +132,15 @@ function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<str
 		"x-omp-app": getAppName(),
 		...model.headers,
 	};
-	if (apiKey && !headers.Authorization) {
-		headers.Authorization = `Bearer ${apiKey}`;
+	if (apiKey) {
+		let authHeader = "Authorization";
+		for (const name in model.headers) {
+			if (name.toLowerCase() === "authorization") {
+				authHeader = name;
+				break;
+			}
+		}
+		if (!headers[authHeader]) headers[authHeader] = `Bearer ${apiKey}`;
 	}
 	return headers;
 }

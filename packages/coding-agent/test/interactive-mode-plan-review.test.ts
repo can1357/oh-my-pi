@@ -1392,6 +1392,44 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(mode.planModeEnabled).toBe(true);
 	});
 
+	it("saves a typed path and shows the destination without dismissing the review", async () => {
+		const planFilePath = "local://PLAN.md";
+		const planContent = "# Draft plan\n\nSave a copy.\n";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			planContent,
+		);
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "generateTitle").mockResolvedValue("Draft");
+
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "Draft" });
+		try {
+			await term.waitFor(rows => rows.some(row => row.includes("Plan mode - next step")));
+			for (let i = 0; i < 3; i++) term.press("down");
+			term.press("enter");
+			await term.waitFor(rows => rows.some(row => row.includes("Save plan")));
+			const fileName = "custom-review.md";
+			term.type(fileName);
+			term.press("enter");
+
+			await term.waitFor(rows => rows.some(row => row.includes("Saved plan to") && row.includes(fileName)));
+			expect(await Bun.file(path.join(tempDir.path(), fileName)).text()).toBe(planContent);
+			const screen = term.screen().join("\n");
+			expect(screen).toContain("Plan mode - next step");
+			expect(screen).not.toContain("Save plan");
+			pressKey(mode.shell, "escape");
+			await approval;
+			expect(mode.shell.overlays.open()).toBe(false);
+		} finally {
+			mode.stop();
+			await approval;
+		}
+	});
+
 	it("carries pre-approval local artifacts into the fresh approve-and-execute session", async () => {
 		const planFilePath = "local://handoff-plan.md";
 		const localOptions = {

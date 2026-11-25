@@ -4,17 +4,41 @@
  * (`session/session-worktree.ts`).
  *
  * @example
- * const reply = await callOvnfs<NewReply>("ovnfs", "new", { dir: repoRoot, name: "wt-fix-1a2b3c4" });
+ * const reply = await newCheckout("ovnfs", { dir: repoRoot, name: "wt-fix-1a2b3c4", session: sessionId });
  * await removeCheckout("ovnfs", reply.checkout.name);
  */
-import { callSocket, OvnfsError } from "./client";
+import { callSocket, OvnfsError, socketFeatures } from "./client";
 import { forgetDaemon, startDaemon } from "./daemon";
+
+/** The fields of ovnfs's `new` (`api.NewArgs`) omp sends. */
+export interface NewArgs {
+	/** Folder to capture; exactly one of `dir` and `base`. */
+	dir?: string;
+	/** Capture id, or a checkout standing for its capture, to open on as it was taken. */
+	base?: string;
+	name: string;
+	/** Commit or local branch to start at; folder only. */
+	rev?: string;
+	/** Agent session opening the checkout, which `ovnfs ls` shows as SESSION. */
+	session?: string;
+}
 
 /** The parts of ovnfs's `new` reply omp reads. */
 export interface NewReply {
 	checkout: { name: string; path: string; base: string; created: string };
 	/** How the folder was captured; absent for a checkout from a snapshot. */
 	capture?: { root: string; repos: string[] | null };
+}
+
+/**
+ * Open a checkout (`new`) on the daemon `command` manages. A daemon refuses
+ * fields it does not know, so one without the `new.session` feature gets
+ * `args` without `session`.
+ */
+export async function newCheckout(command: string, args: NewArgs): Promise<NewReply> {
+	const { session, ...rest } = args;
+	const recorded = session && (await socketFeatures((await startDaemon(command)).socket)).has("new.session");
+	return callOvnfs<NewReply>(command, "new", recorded ? args : rest);
 }
 
 /** One operation on the daemon `command` manages, starting it again once if it went away. */
