@@ -27,7 +27,7 @@ import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "
 import { cfgRetryModelFallback } from "../session/settings";
 import { isLowSignalTitleInput, isNoTitleSentinel, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
-import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "../config/spinner-interval";
+import { DEFAULT_TITLE_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "../config/spinner-interval";
 import { createRoot, effect, nativeRendering, untrack } from "@oh-my-pi/pi-tui";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -755,7 +755,10 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// cancel. Releasing here would let the emit below, and a re-armed spinner,
 	// write into the parent shell's tab. Only `initTerminalTitleState()`, the
 	// explicit terminal-ownership path, releases the latch.
+	const hadOverride = terminalTitleRuntime.extensionOverride !== undefined;
 	terminalTitleRuntime.extensionOverride = undefined;
+	if (hadOverride && terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled)
+		startTerminalTitleSpinner();
 	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
 	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();
@@ -855,6 +858,8 @@ export function setExtensionTerminalTitle(title: string): void {
 	// "releases its claim" means the same thing here as it does at the sink, and
 	// so the stored override is the value that will actually render.
 	terminalTitleRuntime.extensionOverride = sanitizeTerminalTitlePart(title);
+	if (terminalTitleRuntime.extensionOverride !== undefined) stopTerminalTitleSpinner();
+	else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	emitTerminalTitle();
 }
 
@@ -939,7 +944,7 @@ const terminalTitleRuntime: {
 	frame: 0,
 	enabled: true,
 	style: "braille",
-	intervalMs: DEFAULT_SPINNER_INTERVAL_MS,
+	intervalMs: DEFAULT_TITLE_SPINNER_INTERVAL_MS,
 	timer: undefined,
 	extensionOverride: undefined,
 	disposed: false,
@@ -1041,6 +1046,7 @@ function startTerminalTitleSpinner(): void {
 		isStaticTitleHost() ||
 		terminalTitleRuntime.disposed ||
 		terminalTitleRuntime.timer ||
+		terminalTitleRuntime.extensionOverride !== undefined ||
 		terminalTitleRuntime.nativeTitleFailed ||
 		terminalTitleRuntime.intervalMs === SPINNER_INTERVAL_STATIC ||
 		!process.stdout.isTTY
@@ -1050,8 +1056,7 @@ function startTerminalTitleSpinner(): void {
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame =
 			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
-		// An extension override is frame-independent; the sink would dedupe it anyway.
-		if (terminalTitleRuntime.extensionOverride === undefined) emitTerminalTitle();
+		emitTerminalTitle();
 	}, terminalTitleRuntime.intervalMs);
 	// Never keep the event loop alive for a cosmetic animation.
 	terminalTitleRuntime.timer.unref?.();

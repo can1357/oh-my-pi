@@ -16,6 +16,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { effect, type JSXNode, type Reactive, read, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import { readImageHeaderDimensions } from "../../../utils/image-resize";
 import { closePartialSvg, type FigureRaster, PX_PER_ROW, trackFigureWork } from "./svg";
 import { type FigureOptions, SvgRaster } from "./svg-figure";
@@ -129,10 +130,6 @@ async function fetchSource(src: string, host: EmbedHost | undefined): Promise<{ 
 	return { bytes: await fs.readFile(file) };
 }
 
-function message(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 /** See the module docs. */
 export function EmbedFigure(
 	props: {
@@ -161,7 +158,7 @@ export function EmbedFigure(
 					capture(embed.src).then(
 						bytes =>
 							settle(picture(bytes, "image/png") ?? { status: "failed", error: "couldn't capture: no image" }),
-						error => settle({ status: "failed", error: `couldn't capture: ${message(error)}` }),
+						error => settle({ status: "failed", error: `couldn't capture: ${errorMessage(error)}` }),
 					),
 				);
 				return;
@@ -181,7 +178,7 @@ export function EmbedFigure(
 						}
 						settle(picture(bytes, mime) ?? { status: "failed", error: "couldn't decode the image" });
 					},
-					error => settle({ status: "failed", error: `couldn't load: ${message(error)}` }),
+					error => settle({ status: "failed", error: `couldn't load: ${errorMessage(error)}` }),
 				),
 			);
 		});

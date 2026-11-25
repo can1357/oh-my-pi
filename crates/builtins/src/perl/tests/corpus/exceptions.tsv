@@ -1,0 +1,25 @@
+# Perl corpus: exceptions. Format and regeneration: crates/builtins/src/perl/tests.rs.
+block-eval-clears-error	eval {die 'old'}; eval {1}; print length($@),"\n";	0␊
+block-eval-die	my $x=eval {die "stop\n"}; print defined($x)?1:0,"|$@";	0|stop␊
+block-eval-empty	my $x=eval {}; print defined($x)?1:0,"|$@\n";	0|␊
+block-eval-failed-list	my @x=eval {die "stop\n"}; print scalar(@x),"|$@";	0|stop␊
+block-eval-list	my @x=eval {(1,2,3)}; print "@x|$@\n";	1 2 3|␊
+block-eval-nested	eval {eval {die "inner\n"}; die "outer\n"}; print $@;	outer␊
+block-eval-value	my $x=eval {7}; print "$x|$@\n";	7|␊
+die-concatenate	die 'bad', ' ', 7;		stderr=bad 7 at die-concatenate.pl line 1.␊	status=255
+die-default	eval {die}; print $@;	Died at die-default.pl line 1.␊
+die-hook-replace	local $SIG{__DIE__}=sub {die "replacement\n"}; eval {die "initial\n"}; print $@;	replacement␊
+die-hook	local $SIG{__DIE__}=sub {print "hook:$_[0]"}; eval {die "stop\n"}; print "caught:$@";	hook:stop␊caught:stop␊
+die-location	die 'oops';		stderr=oops at die-location.pl line 1.␊	status=255
+die-newline	die "oops\n";		stderr=oops␊	status=255
+die-number	eval {die 0}; print $@;	0 at die-number.pl line 1.␊
+die-object	my $o=bless {reason=>'bad'},'Problem'; eval {die $o}; print ref($@),"|$@->{reason}|",$@==$o?1:0,"\n";	Problem|bad|1␊
+die-restores-topic	$_='original'; eval {local $_='changed'; die "oops\n"}; print "$_|$@";	original|oops␊
+die-rethrow	eval {eval {die "original\n"}; die $@}; print $@;	original␊
+exit-status	print "bye\n"; exit 7;	bye␊	status=7
+warn-concatenate	warn 'bad', ' ', 7;		stderr=bad 7 at warn-concatenate.pl line 1.␊
+warn-hook-original	local $SIG{__WARN__}=sub {warn uc($_[0])}; warn "warning\n";		stderr=WARNING␊
+warn-hook	local $SIG{__WARN__}=sub {print "hook:$_[0]"}; warn "warning\n";	hook:warning␊
+warn-location	warn 'careful'; print "ok\n";	ok␊	stderr=careful at warn-location.pl line 1.␊
+warn-newline	warn "careful\n"; print "ok\n";	ok␊	stderr=careful␊
+warn-uses-topic	local $_='topic'; warn;		stderr=Warning: something's wrong at warn-uses-topic.pl line 1.␊

@@ -124,6 +124,8 @@ export class TspConnection {
 	readonly dark: Signal<boolean>;
 	readonly reduceMotion: Signal<boolean>;
 	readonly visible: Signal<boolean>;
+	/** The window reads and shows this pane's checkout itself (the `checkout` event): no git or pull-request read here. */
+	readonly checkout: Signal<boolean>;
 	readonly #features: Signal<ReadonlySet<string>>;
 	readonly #reader = new TspChunkReader();
 	readonly #listeners = new Set<EventListener>();
@@ -154,6 +156,7 @@ export class TspConnection {
 		this.dark = signal(hello.dark ?? driver.capabilities.dark);
 		this.reduceMotion = signal(hello.reduceMotion === true);
 		this.visible = signal(true);
+		this.checkout = signal(false);
 		this.#features = signal<ReadonlySet<string>>(new Set(hello.features ?? []));
 		this.#kinds = signal<ReadonlySet<string>>(new Set(hello.kinds));
 		this.#unsubscribe = driver.onInput(event => this.#onInput(event));
@@ -401,6 +404,9 @@ export class TspConnection {
 			case "visible":
 				// `sf` names the pane's live surface; the visibility is that of the pane.
 				this.visible.set(event.visible);
+				break;
+			case "checkout":
+				this.checkout.set(event.shown);
 				break;
 			case "gone":
 				for (const id of event.ids) {
