@@ -91,6 +91,11 @@ export interface UnitSnapshot {
 	cwd?: string;
 	/** False for `external` units and re-adopted detached units the daemon cannot wait on. */
 	supervised: boolean;
+	/**
+	 * A `proc` unit over a process the daemon did not launch (`o2ctl services add`): it has no launch
+	 * command, its output is the file the process writes to, and it is never restarted.
+	 */
+	adopted?: boolean;
 }
 
 /**

@@ -2911,6 +2911,7 @@ export class TurnRecovery {
 			if (reasonBackoffMs > delayMs) delayMs = reasonBackoffMs;
 		}
 		let switchedCredential = false;
+		let poolUnavailableReason: string | undefined;
 		let switchedModel = false;
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
@@ -3060,15 +3061,19 @@ export class TurnRecovery {
 			this.#retryAbortController?.abort();
 			this.#retryAbortController = rotateAbortController;
 			try {
-				switchedCredential = (
-					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
-						error: errorMessage,
+				const rotation = await this.#host.modelRegistry.authStorage.limits.rotate(
+					currentModel.provider,
+					this.#host.sessionId(),
+					{
+						error: message.errorClassificationMessage ?? errorMessage,
 						modelId: currentModel.id,
 						baseUrl: currentModel.baseUrl,
 						signal: rotateAbortController.signal,
 						waitForSibling: rotationsRemaining > 0,
-					})
-				).switched;
+					},
+				);
+				switchedCredential = rotation.switched;
+				poolUnavailableReason = rotation.poolUnavailableReason;
 				// Rotation is advisory: expired blocks or a repeatedly offered sibling
 				// must not retry beyond one pool traversal in this saga.
 				switchedCredential &&= rotationsRemaining > 0;
@@ -3281,6 +3286,8 @@ export class TurnRecovery {
 			}
 		}
 
+		const terminalError = poolUnavailableReason ? `${errorMessage}\n\n${poolUnavailableReason}` : errorMessage;
+
 		if (retryBudgetExhausted && staleUsageLimit) {
 			// The spent attempts and their backoff belong to the replaced provider.
 			// Give the selected model its first request without inheriting the old
@@ -3290,9 +3297,9 @@ export class TurnRecovery {
 		} else if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
-				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
+				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${terminalError}`;
 				await this.#closeRetrySaga(
-					{ success: false, attempt, finalError: errorMessage },
+					{ success: false, attempt, finalError: terminalError },
 					{ terminalTurn: message, retryErrors: { status: "superseded" } },
 				);
 				return false;
@@ -3312,6 +3319,7 @@ export class TurnRecovery {
 			!stripDemotedReasoning &&
 			!resampleMidStreamRefusal
 		) {
+			if (poolUnavailableReason) message.errorMessage = terminalError;
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this
@@ -3321,7 +3329,7 @@ export class TurnRecovery {
 			// an announcement that never resolves.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{ success: false, attempt: this.#retryAttempt - 1, finalError: terminalError },
 					{ terminalTurn: message },
 				);
 			}

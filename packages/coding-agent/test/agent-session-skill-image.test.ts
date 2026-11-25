@@ -1,16 +1,20 @@
 import { afterEach, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
+import type { Message } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
-import { ONE_PIXEL_PNG as PNG, VISION_DESCRIPTION_SSE } from "./helpers/skill-image-vision";
+import { createTestImageDescriptions } from "./helpers/image-description";
+
+const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 const skill: Pick<CustomMessage, "customType" | "content" | "display" | "attribution" | "details"> = {
 	customType: "skill-prompt",
@@ -28,7 +32,8 @@ afterEach(async () => {
 	for (const dispose of cleanup.splice(0)) await dispose();
 });
 
-function setup(options: { responses?: MockResponseSource; beforeVisionReply?: () => Promise<void> } = {}) {
+/** A session on the text-only `zai/glm-5.3`, with the vision role describing images as "A red square." */
+function setup() {
 	const tempDir = TempDir.createSync("@skill-image-");
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("zai", "test-key");
@@ -37,7 +42,13 @@ function setup(options: { responses?: MockResponseSource; beforeVisionReply?: ()
 		"compaction.enabled": false,
 		modelRoles: { vision: "zai/glm-5.3-flash:max", default: "zai/glm-5.3:max" },
 	});
-	const mock = createMockModel({ responses: options.responses, handler: () => ({ content: ["done"] }) });
+	const descriptions = createTestImageDescriptions({
+		modelRegistry: registry,
+		settings,
+		artifactsDir: tempDir.path(),
+		description: "A red square.",
+	});
+	const mock = createMockModel({ handler: () => ({ content: ["done"] }) });
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
@@ -48,6 +59,7 @@ function setup(options: { responses?: MockResponseSource; beforeVisionReply?: ()
 		},
 		convertToLlm,
 		streamFn: mock.stream,
+		transformProviderContext: descriptions.transform,
 	});
 	const session = new AgentSession({
 		agent,
@@ -56,118 +68,66 @@ function setup(options: { responses?: MockResponseSource; beforeVisionReply?: ()
 		modelRegistry: registry,
 		toolRegistry: new Map(),
 	});
-	const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-		Object.assign(
-			async (input: string | URL | Request) => {
-				// Only the vision role (openai-completions) is gated; unrelated side requests
-				// such as auto-title generation on the anthropic endpoint pass straight through.
-				const url = input instanceof Request ? input.url : String(input);
-				if (url.endsWith("/chat/completions")) await options.beforeVisionReply?.();
-				return new Response(VISION_DESCRIPTION_SSE, {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				});
-			},
-			{ preconnect: fetch.preconnect },
-		),
-	);
 	cleanup.push(async () => {
-		fetchSpy.mockRestore();
 		await session.dispose();
 		authStorage.close();
 		tempDir.removeSync();
 	});
-	const visionCalls = () =>
-		fetchSpy.mock.calls.filter(([input]) =>
-			(input instanceof Request ? input.url : String(input)).endsWith("/chat/completions"),
-		).length;
-	return { session, mock, visionCalls };
+	return { session, mock, visionCalls: descriptions.calls };
 }
 
-function expectDescriptionBeforeSkill(messages: { role: string; content: unknown }[]) {
-	const description = messages.findIndex(
-		message => message.role === "developer" && JSON.stringify(message.content).includes("A red square."),
-	);
-	const prompt = messages.findIndex(
-		message => message.role === "user" && JSON.stringify(message.content).includes("Expanded skill."),
-	);
-	expect(description).toBeGreaterThanOrEqual(0);
-	expect(prompt).toBeGreaterThan(description);
+/** The skill prompt in the request the text-only model received, with its image replaced by the description. */
+function expectDescribedSkill(messages: readonly Message[] | undefined) {
+	const prompt = messages?.find(message => JSON.stringify(message.content).includes("Expanded skill."));
+	expect(prompt).toBeDefined();
+	expect(JSON.stringify(prompt?.content)).toContain("A red square.");
+	expect(JSON.stringify(prompt?.content)).not.toContain('"type":"image"');
 }
 
-it("describes a pasted image in an idle user-invoked skill before the main model call", async () => {
+it("describes a pasted image in an idle user-invoked skill for the text-only model", async () => {
 	const { session, mock, visionCalls } = setup();
 	await session.promptCustomMessage(skill);
-	expect(visionCalls()).toBe(1);
-	expectDescriptionBeforeSkill(mock.calls[0]?.context.messages ?? []);
+	expect(visionCalls).toHaveLength(1);
+	expectDescribedSkill(mock.calls[0]?.context.messages);
+	// The transcript keeps the image itself.
+	expect(session.messages.at(0)).toMatchObject({
+		role: "custom",
+		content: [{ type: "text" }, { type: "image" }],
+	});
 });
 
-it("describes a queued user-invoked skill image before delivery", async () => {
+it("drops an image-bearing skill when aborted while its image is normalized", async () => {
+	const { session, mock, visionCalls } = setup();
+	const started = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const hold = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+		if (!images?.length) return images;
+		started.resolve();
+		await release.promise;
+		return images;
+	});
+	cleanup.push(async () => hold.mockRestore());
+
+	const dispatched = session.promptCustomMessage(skill);
+	await started.promise;
+	await session.abort();
+	release.resolve();
+	await dispatched;
+	await session.waitForIdle();
+
+	expect(mock.calls).toHaveLength(0);
+	expect(visionCalls).toHaveLength(0);
+	expect(session.messages).toHaveLength(0);
+});
+
+it("describes a queued user-invoked skill image when it is delivered", async () => {
 	const { session, mock, visionCalls } = setup();
 	await session.promptCustomMessage(skill, { streamingBehavior: "followUp", queueOnly: true });
 	await session.prompt("kickoff");
 	await session.waitForIdle();
-	expect(visionCalls()).toBe(1);
+	expect(visionCalls).toHaveLength(1);
 	const skillRequest = mock.calls.find(call =>
 		call.context.messages.some(message => JSON.stringify(message.content).includes("Expanded skill.")),
 	);
-	expectDescriptionBeforeSkill(skillRequest?.context.messages ?? []);
-});
-
-it("queues an image-bearing skill when another turn starts during vision preprocessing", async () => {
-	const visionStarted = Promise.withResolvers<void>();
-	const releaseVision = Promise.withResolvers<void>();
-	const otherStarted = Promise.withResolvers<void>();
-	const releaseOther = Promise.withResolvers<void>();
-	const { session, mock, visionCalls } = setup({
-		beforeVisionReply: async () => {
-			visionStarted.resolve();
-			await releaseVision.promise;
-		},
-		responses: [
-			async () => {
-				otherStarted.resolve();
-				await releaseOther.promise;
-				return { content: ["other done"] };
-			},
-		],
-	});
-	const skillDispatch = session.promptCustomMessage(skill, { streamingBehavior: "followUp" });
-	await visionStarted.promise;
-	const otherTurn = session.prompt("other turn");
-	await otherStarted.promise;
-	releaseVision.resolve();
-	// Queued into the running turn, the skill settles while that turn is still blocked;
-	// dispatching it as its own turn would wait for the other turn and never settle here.
-	await skillDispatch;
-	expect(session.agent.state.isStreaming).toBe(true);
-	releaseOther.resolve();
-	await otherTurn;
-	await session.waitForIdle();
-	expect(visionCalls()).toBe(1);
-	const skillRequest = mock.calls.find(call =>
-		call.context.messages.some(message => JSON.stringify(message.content).includes("Expanded skill.")),
-	);
-	expect(JSON.stringify(skillRequest?.context.messages)).toContain("other turn");
-	expectDescriptionBeforeSkill(skillRequest?.context.messages ?? []);
-});
-
-it("drops an image-bearing skill when aborted during vision preprocessing", async () => {
-	const visionStarted = Promise.withResolvers<void>();
-	const releaseVision = Promise.withResolvers<void>();
-	const { session, mock, visionCalls } = setup({
-		beforeVisionReply: async () => {
-			visionStarted.resolve();
-			await releaseVision.promise;
-		},
-	});
-	const skillDispatch = session.promptCustomMessage(skill);
-	await visionStarted.promise;
-	await session.abort();
-	releaseVision.resolve();
-	await skillDispatch;
-	await session.waitForIdle();
-	expect(visionCalls()).toBe(1);
-	expect(mock.calls.length).toBe(0);
-	expect(session.messages.length).toBe(0);
+	expectDescribedSkill(skillRequest?.context.messages);
 });
