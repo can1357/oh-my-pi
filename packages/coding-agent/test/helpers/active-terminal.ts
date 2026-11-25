@@ -5,8 +5,8 @@ export interface ActiveTerminalHarness {
 	readonly routed: string[];
 	/** Chunks written straight to `process.stdout.write`, bypassing the driver. */
 	readonly direct: string[];
-	/** Stop the driver, so no driver owns the terminal any more; drops its teardown escapes. */
-	stop(): void;
+	/** Stop the driver and wait until it has handed the terminal back; drops its teardown escapes. */
+	stop(): Promise<void>;
 	/** Stop the driver if still running and restore `process.stdout`. */
 	dispose(): void;
 }
@@ -52,12 +52,9 @@ export async function startActiveTerminal(): Promise<ActiveTerminalHarness> {
 	// Drop the start-up escapes so assertions see only what the test writes.
 	term.output.length = 0;
 
-	let running = true;
-	const stop = (): void => {
-		if (!running) return;
-		running = false;
-		// The driver releases the terminal and writes its restore bytes before its first await.
-		void term.driver.stop();
+	// The driver keeps its claim on the terminal while it drains input on the way out, then releases it.
+	const stop = async (): Promise<void> => {
+		await term.driver.stop();
 		term.output.length = 0;
 	};
 	return {
@@ -65,7 +62,7 @@ export async function startActiveTerminal(): Promise<ActiveTerminalHarness> {
 		direct,
 		stop,
 		dispose() {
-			stop();
+			void stop();
 			restoreStdout();
 		},
 	};

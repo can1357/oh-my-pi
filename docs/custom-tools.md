@@ -55,6 +55,8 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 2. Enabled installed plugin manifests (user `~/.omp/plugins` and the active project `.omp/plugins` registry via the plugin loader; project packages shadow same-named user packages)
 3. Explicit configured paths passed to the loader
 
+`discoverCustomToolPaths(..., { ambient: false })` skips sources 1–2 except OMP package roots, which then list only explicit extension roots. Sessions with `disableExtensionDiscovery` (CLI `--no-extensions`) discover this way.
+
 ### Important behavior
 
 - Foreign user directories are opt-in via `enabledProviders` (for example `"claude"` or `"codex"`); project directories remain discoverable unless the whole provider is disabled. `CLAUDE_CONFIG_DIR` also opts in the Claude user source.

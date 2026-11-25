@@ -16,7 +16,7 @@ import { readJobResult } from "./runner";
 export type RunStatus = "running" | "complete" | "failed" | "cancelled";
 
 /** Benchmark implementation that produced a run. */
-export type BenchmarkKind = "harbor" | "edit" | "snapcompact";
+export type BenchmarkKind = "harbor" | "edit" | "snapcompact" | "scope";
 
 /** How a run relates to its experiment's question. */
 export type RunRole = "baseline" | "variant" | "";

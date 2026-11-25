@@ -87,6 +87,10 @@ pub struct Vproc {
 	/// Host lineage, inherited from the parent (set by
 	/// [`super::ShellApi::run_subshell_in`]) and passed to externals.
 	pub lineage:       crate::bash::host::Lineage,
+	/// Resource usage of the externals this vproc waited for and of its
+	/// ended child vprocs ([`crate::bash::ProcUsage`]); boxed on the first
+	/// one, so an idle vproc pays a pointer. Not imaged.
+	pub usage:         Option<Box<crate::bash::host::ProcUsage>>,
 	/// `set -x` nesting this vproc starts at, beyond the first level (bash's
 	/// `indirection_level`): its parent's, plus one in a command
 	/// substitution.
@@ -247,6 +251,12 @@ impl VprocZsh {
 }
 
 impl Vproc {
+	/// Count `usage` (a waited-for external's, an ended child's) into
+	/// [`Self::usage`].
+	pub fn count_usage(&mut self, usage: &crate::bash::host::ProcUsage) {
+		self.usage.get_or_insert_default().add(usage);
+	}
+
 	/// zsh's current sticky emulation.
 	pub fn sticky(&self) -> Option<&crate::bash::store::Sticky> {
 		self.zsh.as_ref().and_then(|z| z.sticky.as_ref())

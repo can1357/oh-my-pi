@@ -204,6 +204,11 @@ impl Lifecycle {
 		self.status.is_some()
 	}
 
+	/// Whether [`Lifecycle::poll`] handed the exit to the engine.
+	pub const fn collected(&self) -> bool {
+		self.collected
+	}
+
 	/// Pending KILL deadline; `None` once exited, killed or never scheduled.
 	pub const fn kill_due(&self) -> Option<Instant> {
 		if self.status.is_some() {

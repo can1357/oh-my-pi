@@ -29,6 +29,7 @@ import {
 	For,
 	type JSXNode,
 	nativeRendering,
+	nativeSupports,
 	onCleanup,
 	type Reactive,
 	read,
@@ -41,12 +42,7 @@ import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { TurnUsageSummary } from "../../../modes/view-model/overlays/usage-row";
 import type { CacheInvalidation } from "../../../session/transcript/cache-invalidation-marker";
-import {
-	chartFence,
-	hasChartTable,
-	lookupTableChart,
-	splitTableCharts,
-} from "../../../session/transcript/table-chart";
+import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "../../../session/transcript/table-chart";
 import { splitReaction } from "../../../session/transcript/reaction";
 import type { ServedModelMismatch } from "../../../session/transcript/served-model-marker";
 import {
@@ -57,13 +53,20 @@ import {
 import { resolveAssistantErrorPresentation } from "../../../session/transcript/transcript-render-helpers";
 import type { AssistantTextRenderer, AssistantThinkingRenderer } from "../../../extensibility/extensions/render-types";
 import { extensionTheme, renderExtension } from "../../extensions/render-output";
-import { ImageNode } from "./image";
+import { settledRevision } from "../../shell/transcript";
+import { ImageNode, InlineMedia } from "./image";
 import { rewriteLinkDestinations } from "./links";
 import { CacheMissMarker, ServedModelMarker } from "./markers";
 import { turnHoldEntries } from "./turn-actions";
 
 /** Wrapped rows an error keeps while collapsed. */
 export const ERROR_PREVIEW_ROWS = 8;
+
+/** Media from one grouped read, whether it returned image bytes, a file path, or both. */
+export interface ToolResultMedia {
+	readonly images: readonly ImageContent[];
+	readonly mediaPath?: string;
+}
 
 /** What an assistant block shows. Every field may be a signal the host moves. */
 export interface AssistantMessageModel {
@@ -85,8 +88,8 @@ export interface AssistantMessageModel {
 	readonly showToolResultImages?: Reactive<boolean>;
 	/** Tables get charts (default false; a focused subagent's do not): Tern is sent each chart after its table. */
 	readonly tableCharts?: Reactive<boolean>;
-	/** Images grouped reads produced, by tool call id. */
-	readonly toolResultImages?: Reactive<ReadonlyMap<string, readonly ImageContent[]>>;
+	/** Media grouped reads produced, by tool call id. */
+	readonly toolResultMedia?: Reactive<ReadonlyMap<string, ToolResultMedia>>;
 	/** Session-resolved destinations of relative prose links. */
 	readonly linkTargets?: Reactive<ReadonlyMap<string, string>>;
 	/** Tone of the reply's prose (`/live`'s spoken reply reads in the accent); undefined keeps the theme's text. */
@@ -179,7 +182,8 @@ type Part =
 			thinkingIndex: number;
 			text: string;
 	  }
-	| { kind: "image"; image: ImageContent; tool: boolean }
+	| { kind: "image"; image: ImageContent; tool: boolean; path?: string }
+	| { kind: "media"; path: string }
 	| { kind: "error"; error: ErrorPart };
 
 /** The turn-ending error part. */
@@ -403,7 +407,14 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 					}
 					const chart = lookupTableChart(segment.table);
 					if (chart instanceof Promise) awaitChart(chart);
-					else if (chart) out.set(slot, { kind: "text", source: "", native: chartFence(chart), stream: false, links: undefined });
+					else if (chart)
+						out.set(slot, {
+							kind: "text",
+							source: "",
+							native: chartFence(chart),
+							stream: false,
+							links: undefined,
+						});
 				});
 			} else if (content.type === "thinking") {
 				// A display message's thinking (`rawThinking` set) is already formatted: formatting it again
@@ -445,16 +456,34 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 				out.set(`i${i}`, { kind: "image", image: content, tool: false });
 			}
 		}
-		if (showImages && flag(model.showToolResultImages, true)) {
-			for (const [id, images] of read(model.toolResultImages) ?? new Map<string, readonly ImageContent[]>()) {
+		const toolMedia = read(model.toolResultMedia);
+		if (toolMedia?.size && showImages && flag(model.showToolResultImages, true)) {
+			const showByPath = nativeSupports("media");
+			const shown = showByPath ? new Set<string>() : undefined;
+			if (shown) {
+				for (const [id, { mediaPath }] of toolMedia) {
+					if (!mediaPath || shown.has(mediaPath)) continue;
+					shown.add(mediaPath);
+					out.set(`r${id}`, { kind: "media", path: mediaPath });
+				}
+			}
+			for (const [id, { images, mediaPath }] of toolMedia) {
+				if (mediaPath && showByPath) continue;
 				images.forEach((image, n) => {
-					if (image.data && image.mimeType) out.set(`r${id}:${n}`, { kind: "image", image, tool: true });
+					if (image.data && image.mimeType)
+						out.set(`r${id}:${n}`, { kind: "image", image, tool: true, path: mediaPath });
 				});
 			}
 		}
 		const error = errorPart(displayed, model);
 		if (error) out.set("error", { kind: "error", error });
 		return out;
+	});
+
+	// Grouped reads may finish after the assistant's block has settled in the native host.
+	const revise = settledRevision();
+	effect(() => {
+		if (read(model.toolResultMedia)?.size) untrack(revise);
 	});
 
 	const answered = (): boolean => reply()?.answer.content.some(hasVisibleText) ?? false;
@@ -598,7 +627,8 @@ function ReplyPart(props: {
 	tone: () => TspTone | undefined;
 	thinkingRenderers: () => readonly AssistantThinkingRenderer[];
 }): JSXNode {
-	const kind = untrack(props.part)?.kind;
+	const initial = untrack(props.part);
+	const kind = initial?.kind;
 	const slot = props.slot;
 	if (kind === "text") {
 		const text = (): Extract<Part, { kind: "text" }> | undefined => {
@@ -699,15 +729,28 @@ function ReplyPart(props: {
 			</col>
 		);
 	}
-	if (kind === "image") {
-		const part = untrack(props.part);
-		if (part?.kind !== "image") return undefined;
+	if (initial?.kind === "media") {
+		return (
+			<InlineMedia
+				nodeKey={slot}
+				path={() => {
+					const part = props.part();
+					return part?.kind === "media" ? part.path : initial.path;
+				}}
+			/>
+		);
+	}
+	if (initial?.kind === "image") {
 		return (
 			<ImageNode
-				image={part.image}
+				image={initial.image}
 				nodeKey={slot}
-				alt={part.image.mimeType}
-				term={{ tool: part.tool, mime: part.image.mimeType }}
+				alt={initial.image.mimeType}
+				path={() => {
+					const current = props.part();
+					return current?.kind === "image" ? current.path : undefined;
+				}}
+				term={{ tool: initial.tool, mime: initial.image.mimeType }}
 			/>
 		);
 	}

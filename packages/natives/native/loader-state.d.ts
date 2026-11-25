@@ -93,7 +93,10 @@ export interface ExtractEmbeddedAddonsInput {
 	targetDir: string;
 }
 
-/** Decompress each manifest addon to its `embedded-<hash>/<filename>` path unless that build is already there; returns the paths written. */
+/**
+ * Decompress each manifest addon to its `embedded-<hash>/<filename>` path unless that build is already there; returns the paths written.
+ * Creates and touches `targetDir` first; failing that (read-only or foreign-owned directory) throws only if an addon is missing.
+ */
 export function extractEmbeddedAddons(input: ExtractEmbeddedAddonsInput): string[];
 
 /** Where `extractEmbeddedAddons` puts `file`: `<targetDir>/embedded-<hash>/<filename>`. */

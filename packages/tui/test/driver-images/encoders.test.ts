@@ -20,6 +20,7 @@ import {
 	kittyVirtualPlace,
 } from "@oh-my-pi/pi-tui/driver/images/kitty";
 import { sixelBackground } from "@oh-my-pi/pi-tui/driver/images/sixel";
+import { CORPUS_DIR, hasCorpus } from "@oh-my-pi/pi-tui/testing/corpus";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 
 const tmux = (payload: string) => `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
@@ -211,8 +212,8 @@ describe("anchored sequences", () => {
 	});
 });
 
-describe("corpus: id-less kitty images", () => {
-	const corpus = path.join(import.meta.dir, "..", "corpus");
+describe.skipIf(!hasCorpus())("corpus: id-less kitty images", () => {
+	const corpus = CORPUS_DIR;
 	const IMAGE_ROW = /^(?:\x1b7\x1b\[(\d+)A)?\x1b_Ga=T,f=100,q=2,C=1,c=(\d+),r=(\d+)/;
 
 	it("reproduces every transmit-and-display image the corpus captured", async () => {

@@ -2776,6 +2776,69 @@ describe("AgentSession retry delay cap", () => {
 		},
 	);
 
+	it.each([0, 1])("explains a restricted OAuth pool denial with retry.maxRetries=%d", async maxRetries => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const providerSessionId = `restricted-org-policy-${maxRetries}`;
+		const identity = "email:denied@example.test|org:denied-org";
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "denied-access",
+				refresh: "denied-refresh",
+				expires: Date.now() + 3_600_000,
+				email: "denied@example.test",
+				orgId: "denied-org",
+			},
+		]);
+		const lease = authStorage.sessions.restrict("anthropic", providerSessionId, [identity]);
+		try {
+			registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
+			const providerError =
+				'403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}},"request_id":"req_org_policy_test"}';
+			const requestedKeys: string[] = [];
+			const mock = createMockModel({
+				id: model.id,
+				provider: model.provider,
+				handler: (_context, options) => {
+					requestedKeys.push(resolveInitialApiKey(options?.apiKey));
+					return { stopReason: "error", errorMessage: providerError };
+				},
+			});
+			const agent = new Agent({
+				getApiKey: model => modelRegistry.getApiKey(model, providerSessionId),
+				sessionId: providerSessionId,
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (_model, context, options) => aiStream.streamSimple(mock.model, context, options),
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"retry.maxRetries": maxRetries,
+					"retry.modelFallback": false,
+				}),
+				modelRegistry,
+				providerSessionId,
+			});
+
+			await session.prompt("Test restricted organization policy denial");
+			await session.waitForIdle();
+
+			expect(requestedKeys).toEqual(["denied-access"]);
+			expect(session.isRetrying).toBe(false);
+			const terminal = lastAssistant(session);
+			expect(terminal.stopReason).toBe("error");
+			expect(terminal.errorMessage).toContain(providerError);
+			expect(terminal.errorMessage).toContain("session OAuth account pool");
+			expect(terminal.errorMessage).toContain(`${identity} rejected by org policy`);
+			expect(terminal.errorMessage?.startsWith("Retry budget exhausted")).toBe(maxRetries === 0);
+		} finally {
+			authStorage.sessions.unrestrict("anthropic", providerSessionId, lease);
+		}
+	});
+
 	it("skips a short sibling wait after account-policy exhaustion", async () => {
 		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!primaryModel) throw new Error("Expected bundled primary test model to exist");

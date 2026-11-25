@@ -826,6 +826,7 @@ function makeAskHostContext(): InteractiveModeContext {
 		keybindings: ui.keybindings,
 		showEditorAreaDialog: ui.showEditorAreaDialog,
 		interceptInput: ui.interceptInput,
+		dialogVim: ui.dialogVim,
 		closeLinkBrowser: () => {},
 		statusLine: { ...base.statusLine, setAwaitingAnswer: () => {} },
 	};

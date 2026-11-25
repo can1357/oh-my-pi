@@ -6,7 +6,17 @@
  * the original look and skips (from the full list it goes back to the
  * curated choices).
  */
-import { batch, computed, For, type JSXNode, type KeyEvent, Show, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
+import {
+	batch,
+	computed,
+	For,
+	type JSXNode,
+	type KeyEvent,
+	Show,
+	type Signal,
+	signal,
+	untrack,
+} from "@oh-my-pi/pi-tui";
 import { loadTheme } from "@oh-my-pi/pi-tui/theme/loader";
 import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";

@@ -164,7 +164,7 @@ tar = { version = "0.4.46", default-features = false }
 
 [target."cfg(any(unix, windows))".dependencies.tokio]
 version = "1.50.0"
-features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync"]
+features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"]
 
 [target.'cfg(target_family = "wasm")'.dependencies.tokio]
 version = "1.52.1"
@@ -188,7 +188,7 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 
 # `open`: D-Bus activation, the desktop portal and the file manager.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"], optional = true }
+zbus = { version = "5.19", default-features = false, features = ["tokio"], optional = true }
 
 [target."cfg(windows)".dependencies]
 notify = "=8.2.0"

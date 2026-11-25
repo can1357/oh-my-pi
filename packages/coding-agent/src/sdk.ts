@@ -211,6 +211,7 @@ import {
 	type Prewalk,
 } from "./session/agent-session";
 import type { AgentSessionDisposeOptions } from "./session/agent-session-types";
+import { isLegacyImageDescription } from "./session/queued-messages";
 import type { AdvisorToolFactory } from "./session/session-advisors";
 import {
 	applyUnpausedProviders,
@@ -380,6 +381,7 @@ import { ttsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
+import { ImageDescriptions } from "./utils/image-vision-fallback";
 import { formatLocalCalendarDate } from "./utils/local-date";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { buildNamedToolChoice } from "./utils/tool-choice";
@@ -2252,7 +2254,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? undefined
 			: options.preloadedCustomToolPaths !== undefined
 				? Promise.resolve(options.preloadedCustomToolPaths)
-				: logger.time("discoverCustomToolPaths", () => discoverCustomToolPaths([], cwd, agentDir));
+				: logger.time("discoverCustomToolPaths", () =>
+						discoverCustomToolPaths([], cwd, agentDir, {
+							// Explicit-only sessions keep tools of explicit extension roots only, like custom commands.
+							ambient: !(options.extensionRoots
+								? options.extensionRoots().mode === "explicit-only"
+								: options.disableExtensionDiscovery),
+						}),
+					);
 	customToolPathsPromise?.catch(() => {});
 
 	const sessionManager =
@@ -2649,6 +2658,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			sessionId: () => sessionManager.getSessionId(),
 			costGate: currentCostGate,
 			telemetry: () => agent?.telemetry,
+			getSessionProvider: () => (agent?.state.model ?? model)?.provider,
 			obfuscate: () => (obfuscator?.hasSecrets() ? text => obfuscator?.obfuscate(text) ?? text : undefined),
 		};
 		asyncJobManager.widgets = new JobWidgets({
@@ -2749,6 +2759,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					session?.getSkillHintVisible() ??
 					(cfgSkillful.get(settings) === true && (session?.skills ?? skills).length > 0)
 				);
+			},
+			/** `find` hints frozen with the primary prompt; see `SessionTools.findHintVisible`. */
+			get findHintVisible() {
+				return session?.getFindHintVisible();
 			},
 			restrictToolNames,
 			get hasEditTool() {
@@ -4410,6 +4424,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				: openSessionSkillDescriptionStore(agentDir);
 		const hintCompressorOptions = {
 			getCostGate: currentCostGate,
+			getSessionProvider: () => (agent?.state.model ?? model)?.provider,
 			usageLedger: sessionManager,
 			getTelemetry: () =>
 				agent
@@ -4918,7 +4933,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const transformContext = async (messages: AgentMessage[], signal?: AbortSignal) => {
-			const withContext = await extensionRunner.emitContext(messages, signal);
+			// Descriptions recorded by older versions were made for the model active back then; the provider
+			// transform describes each image for the model actually receiving it.
+			const current = messages.some(isLegacyImageDescription)
+				? messages.filter(message => !isLegacyImageDescription(message))
+				: messages;
+			const withContext = await extensionRunner.emitContext(current, signal);
 			return wrapSteeringForModel(withContext);
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
@@ -4956,13 +4976,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// only when a provider fetches them, never held as pixels here.
 			blobBroker,
 		);
+		// Shared by every conversation, so an image is described once for the session.
+		const imageDescriptions = new ImageDescriptions(() => ({
+			modelRegistry,
+			settings,
+			localProtocolOptions,
+			telemetryConfig: agent?.telemetry,
+			sessionId: sessionManager.getSessionId(),
+			costGate: currentCostGate(),
+			usageLedger: sessionManager,
+		}));
 		// One transform per conversation: the date/cwd reminder remembers what each
 		// conversation was sent, so the main loop and every advisor get their own.
 		// Only the main loop journals its reminders in the session.
 		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
 			const dateCwdReminder = new DateCwdReminderInjector(journal);
-			return async (context: Context, transformModel: Model): Promise<Context> => {
-				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			return async (context: Context, transformModel: Model, signal?: AbortSignal): Promise<Context> => {
+				// First, so the obfuscator also redacts secrets a description read off an image.
+				let transformed = await imageDescriptions.transform(context, transformModel, signal);
+				transformed = obfuscator ? obfuscateProviderContext(obfuscator, transformed) : transformed;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
 				transformed = capArchiveFrameBytes(transformed, transformModel);
 				transformed = await snapcompactInline.transform(transformed, transformModel);
@@ -5357,6 +5389,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skillHintVisible() {
 				return toolSession.skillHintVisible;
 			},
+			// The advisor's own roster decides its `find` hints (`isToolActive`), not the primary's prompt.
+			findHintVisible: undefined,
 			// Live, not the spread's copy: a rediscovery after a plugin upgrade replaces the primary's list.
 			get skills() {
 				return toolSession.skills;
@@ -5554,6 +5588,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return mcpManager.getTools();
 					}
 				: undefined,
+			restrictToolNames,
 			memoryEnabled: !restrictToolNames,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
@@ -5576,6 +5611,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformContext,
 			transformProviderContext,
 			createAdvisorTransformProviderContext: () => createTransformProviderContext(),
+			imageDescriptions,
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
@@ -5858,8 +5894,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const loadCustomToolGeneration = async (
 				scopeCwd: string,
 				scopeKey: string,
+				roots: EffectiveExtensionRoots,
 			): Promise<Extension | undefined> => {
-				const paths = await discoverCustomToolPaths([], scopeCwd, agentDir);
+				const paths = await discoverCustomToolPaths([], scopeCwd, agentDir, {
+					ambient: roots.mode !== "explicit-only",
+					extensionRoots: roots,
+				});
 				const loaded = await loadCustomTools(paths, scopeCwd, builtInToolNames, action =>
 					queueResolveHandler(toolSession, action),
 				);
@@ -5977,7 +6017,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 				if (!restrictToolNames && !customToolGenerations.has(scopeKey)) {
-					const generation = await loadCustomToolGeneration(cwdNow, scopeKey);
+					const generation = await loadCustomToolGeneration(cwdNow, scopeKey, roots);
 					if (generation) added.push(generation);
 				}
 				if (session.isDisposed) return;

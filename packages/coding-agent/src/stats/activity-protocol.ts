@@ -11,10 +11,8 @@ import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
 
 export { STATS_ACTIVITY_WORKER_ARG } from "../cli/worker-selectors";
 
-export type StatsActivityWorkerInbound =
-	| { type: "ping"; id: string }
-	/** Push cached activity, run an incremental session sync, push again, then `done`. */
-	| { type: "load"; id: string };
+/** Push cached activity, run an incremental session sync, push again, then `done`. */
+export type StatsActivityWorkerInbound = { type: "load"; id: string };
 
 export type StatsActivityWorkerLog = {
 	type: "log";
@@ -24,7 +22,6 @@ export type StatsActivityWorkerLog = {
 };
 
 export type StatsActivityWorkerOutbound =
-	| { type: "pong"; id: string }
 	| { type: "activity"; id: string; points: DailyActivityPoint[] }
 	| { type: "done"; id: string }
 	| { type: "error"; id: string; error: string }
