@@ -34,6 +34,41 @@ const INDEX_WRITE: gix::index::write::Options = gix::index::write::Options {
 	extensions: gix::index::write::Extensions::None,
 	skip_hash:  false,
 };
+
+/// Retries `attempt` across transient `packed-refs.lock` contention.
+///
+/// Loose-ref lock errors (`LockAcquire`) and precondition failures are never
+/// retried; `core.packedRefsTimeout = 0` disables retries.
+fn retry_packed_refs_lock<T>(
+	repo: &gix::Repository,
+	mut attempt: impl FnMut() -> std::result::Result<T, gix::reference::edit::Error>,
+) -> std::result::Result<T, gix::reference::edit::Error> {
+	const BACKOFF_MS: [u64; 4] = [50, 100, 200, 400];
+	let allow_retry = repo.config_snapshot().integer("core.packedRefsTimeout") != Some(0);
+	let mut retries = BACKOFF_MS.iter();
+	loop {
+		match attempt() {
+			Err(err)
+				if allow_retry
+					&& matches!(
+						err,
+						gix::reference::edit::Error::FileTransactionPrepare(
+							gix::refs::file::transaction::prepare::Error::PackedTransactionAcquire(
+								gix::lock::acquire::Error::PermanentlyLocked { .. },
+							),
+						)
+					) =>
+			{
+				let Some(&delay_ms) = retries.next() else {
+					return Err(err);
+				};
+				std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+			},
+			result => return result,
+		}
+	}
+}
+
 /// Apply a ref update, synthesizing a committer for the reflog entry when no
 /// identity is configured. Reflog lines require a signature, but git never
 /// fails branch/reset/stash ref updates over missing identity — only
@@ -77,8 +112,7 @@ pub(crate) fn update_reference(
 		);
 		gix::actor::SignatureRef { name: "omp".into(), email: "omp@localhost".into(), time: &now }
 	};
-	repo
-		.edit_references_as(Some(edit), Some(committer))
+	retry_packed_refs_lock(repo, || repo.edit_references_as(Some(edit.clone()), Some(committer)))
 		.map_err(|err| Error::backend(op, err))?;
 	Ok(())
 }
@@ -409,7 +443,7 @@ impl GitRepo {
 			.map_or(gix::refs::transaction::PreviousValue::MustNotExist, |old| {
 				gix::refs::transaction::PreviousValue::MustExistAndMatch(old.into())
 			});
-		let edit = repo.edit_reference(gix::refs::transaction::RefEdit {
+		let ref_edit = gix::refs::transaction::RefEdit {
 			change: gix::refs::transaction::Change::Update {
 				log: gix::refs::transaction::LogChange {
 					mode:                gix::refs::transaction::RefLog::AndReference,
@@ -428,7 +462,8 @@ impl GitRepo {
 				.try_into()
 				.map_err(|err| Error::backend("git commit", err))?,
 			deref:  true,
-		});
+		};
+		let edit = retry_packed_refs_lock(&repo, || repo.edit_reference(ref_edit.clone()));
 		if let Err(err) = edit {
 			// HEAD moved after the check above, inside the hook/signing window:
 			// the swap lost, which is the `HeadMoved` this option documents, not
@@ -572,7 +607,7 @@ impl GitRepo {
 				.map_err(|err| Error::backend("git branch", err))?,
 			deref:  false,
 		};
-		Ok(repo.edit_reference(edit).is_ok())
+		Ok(retry_packed_refs_lock(&repo, || repo.edit_reference(edit.clone())).is_ok())
 	}
 
 	/// Create a branch at HEAD and switch to it without touching files.
@@ -4197,5 +4232,39 @@ mod tests {
 				 prefix neighbors"
 			);
 		}
+	}
+
+	#[test]
+	fn retry_packed_refs_lock_recovers_from_transient_contention_and_fails_when_held() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "packed-a"]);
+		git(temp.path(), &["branch", "packed-b"]);
+		git(temp.path(), &["pack-refs", "--all"]);
+		git(temp.path(), &["config", "core.packedRefsTimeout", "30"]);
+
+		let lock_path = temp.path().join(".git/packed-refs.lock");
+		fs::write(&lock_path, "").unwrap();
+		let release_path = lock_path.clone();
+		let releaser = std::thread::spawn(move || {
+			std::thread::sleep(std::time::Duration::from_millis(90));
+			let _ = fs::remove_file(release_path);
+		});
+		assert!(repo.delete_branch("packed-a", true).unwrap());
+		releaser.join().unwrap();
+		assert!(
+			git(temp.path(), &["branch", "--list", "packed-a"]).is_empty(),
+			"packed-a should have been deleted after transient lock cleared"
+		);
+
+		git(temp.path(), &["config", "core.packedRefsTimeout", "10"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		fs::write(&lock_path, "").unwrap();
+		let deleted = repo.delete_branch("packed-b", true).unwrap();
+		let _ = fs::remove_file(&lock_path);
+		assert!(!deleted, "permanent packed-refs.lock must fail after retries");
+		assert!(
+			!git(temp.path(), &["branch", "--list", "packed-b"]).is_empty(),
+			"packed-b should still exist when lock never cleared"
+		);
 	}
 }

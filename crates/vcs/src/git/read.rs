@@ -253,6 +253,9 @@ impl GitRepo {
 			if git_dir.join(marker).exists() {
 				return Ok(Some(kind));
 			}
+			if git_dir.join("sequencer/todo").exists() {
+				return Ok(Some("sequencer"));
+			}
 		}
 		if self.is_reftable() {
 			return Ok((!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty())
@@ -468,6 +471,50 @@ impl GitRepo {
 		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
 			.map_err(|e| Error::backend("git config", e))?;
 		Ok(config.string(key).is_some())
+	}
+
+	/// Whether the repository's common git directory is configured as bare
+	/// (`core.bare = true`), without includes, global configuration, or
+	/// environment overrides. Never invokes git.
+	pub fn is_common_repo_bare(&self) -> Result<bool> {
+		let common_dir = &self.info().common_dir;
+		let path = common_dir.join("config");
+		match std::fs::metadata(&path) {
+			Ok(_) => {},
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+				return Ok(common_dir.file_name().is_none_or(|n| n != ".git"));
+			},
+			Err(err) => return Err(Error::backend("git config", err)),
+		}
+		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+			.map_err(|e| Error::backend("git config", e))?;
+		match config.boolean("core.bare") {
+			Some(Ok(bare)) => Ok(bare),
+			Some(Err(err)) => Err(Error::backend("git config", err)),
+			None => {
+				if matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true))) {
+					let worktree_cfg = common_dir.join("config.worktree");
+					match std::fs::metadata(&worktree_cfg) {
+						Ok(_) => {
+							let wt = gix::config::File::from_path_no_includes(
+								worktree_cfg,
+								gix::config::Source::Local,
+							)
+							.map_err(|e| Error::backend("git config", e))?;
+							match wt.boolean("core.bare") {
+								Some(Ok(bare)) => return Ok(bare),
+								Some(Err(err)) => return Err(Error::backend("git config", err)),
+								None => {},
+							}
+						},
+						Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
+						Err(err) => return Err(Error::backend("git config", err)),
+					}
+				}
+				Ok(config.string("core.worktree").is_none()
+					&& common_dir.file_name().is_none_or(|n| n != ".git"))
+			},
+		}
 	}
 
 	/// Read a scalar git config value.
@@ -1885,6 +1932,62 @@ mod tests {
 		// resolved locations rather than spellings.
 		assert_eq!(worktrees[1].path.canonicalize()?, linked.canonicalize()?);
 		assert_eq!(worktrees[1].branch.as_deref(), Some("refs/heads/linked-branch"));
+		Ok(())
+	}
+
+	#[test]
+	fn is_common_repo_bare_distinguishes_separate_git_dir_from_bare_dot_git() -> TestResult {
+		let (dir, normal) = repo()?;
+		commit(dir.path(), "tracked", "tracked\n", "initial")?;
+		assert!(!normal.is_common_repo_bare()?);
+
+		let parent = tempfile::tempdir()?;
+		let separate_worktree = parent.path().join("sep-main");
+		let separate_git_dir = parent.path().join("sep-git");
+		git(parent.path(), &[
+			"init",
+			"-b",
+			"main",
+			"--separate-git-dir",
+			&separate_git_dir.to_string_lossy(),
+			&separate_worktree.to_string_lossy(),
+		])?;
+		git(&separate_worktree, &["config", "user.name", "Test User"])?;
+		git(&separate_worktree, &["config", "user.email", "test@example.com"])?;
+		commit(&separate_worktree, "tracked", "tracked\n", "initial")?;
+		let sep_linked = parent.path().join("sep-linked");
+		git(&separate_worktree, &["worktree", "add", "-b", "topic", &sep_linked.to_string_lossy()])?;
+		assert!(!GitRepo::require(&sep_linked)?.is_common_repo_bare()?);
+
+		let bare = parent.path().join("bare.git");
+		git(parent.path(), &[
+			"clone",
+			"--bare",
+			&dir.path().to_string_lossy(),
+			&bare.to_string_lossy(),
+		])?;
+		let bare_linked = parent.path().join("bare-linked");
+		git(&bare, &["worktree", "add", &bare_linked.to_string_lossy(), "main"])?;
+		assert!(GitRepo::require(&bare_linked)?.is_common_repo_bare()?);
+
+		let bare_dot_git = parent.path().join("bare-holder/.git");
+		fs::create_dir_all(&bare_dot_git)?;
+		git(parent.path(), &[
+			"clone",
+			"--bare",
+			&dir.path().to_string_lossy(),
+			&bare_dot_git.to_string_lossy(),
+		])?;
+		let bare_dot_git_linked = parent.path().join("bare-dot-git-linked");
+		git(&bare_dot_git, &[
+			"worktree",
+			"add",
+			"-b",
+			"other",
+			&bare_dot_git_linked.to_string_lossy(),
+			"main",
+		])?;
+		assert!(GitRepo::require(&bare_dot_git_linked)?.is_common_repo_bare()?);
 		Ok(())
 	}
 }

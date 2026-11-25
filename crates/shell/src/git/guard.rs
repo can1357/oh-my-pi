@@ -29,7 +29,13 @@
 //! - `checkout` of paths and working-tree `restore`, unless a merge, rebase,
 //!   cherry-pick, or revert is underway, where they pick conflict sides — and
 //!   even then not forced (`-f`, `--force`, `--discard-changes`) or over the
-//!   whole tree (`.`, `:/`, `*`).
+//!   whole tree (`.`, `:/`, `*`);
+//! - `rebase`, `merge`, `pull`, `cherry-pick`, and `revert` (except
+//!   `--continue`, `--abort`, `--skip`, `--quit`, and `rebase --edit-todo`
+//!   while that operation is already underway, or `rebase
+//!   --show-current-patch`);
+//! - `commit --amend` (except dry-run forms);
+//! - `clean` (except `-n` / `--dry-run`).
 //!
 //! Index-only commands always run: `reset [<path>…]` and `restore --staged`
 //! only unstage. Git started by path (`/usr/bin/git`) or by another program
@@ -202,10 +208,7 @@ fn is_private(repo: &GitRepo) -> bool {
 	}
 	let info = repo.info();
 	if repo.is_linked_worktree() {
-		return info
-			.common_dir
-			.file_name()
-			.is_some_and(|name| name == ".git");
+		return matches!(repo.is_common_repo_bare(), Ok(false));
 	}
 	// A submodule's `.git` is a file pointing into its superproject's.
 	info.git_entry_path.is_file()
@@ -241,6 +244,16 @@ fn in_shared(place: &Place, sub: Sub, verdict: Verdict, dir: &Path) -> Option<Re
 				outside_conflict(repo, sub)
 			}
 		},
+		Verdict::HistoryRewrite => Some(Refusal::HistoryRewrite(sub)),
+		Verdict::InProgressOnly => {
+			if repo.is_some_and(|repo| matches_in_progress(repo, sub)) {
+				None
+			} else {
+				Some(Refusal::HistoryRewrite(sub))
+			}
+		},
+		Verdict::CommitAmend => Some(Refusal::CommitAmend),
+		Verdict::Clean => Some(Refusal::Clean),
 	}
 }
 
@@ -249,7 +262,13 @@ fn in_shared(place: &Place, sub: Sub, verdict: Verdict, dir: &Path) -> Option<Re
 /// branch's stash entry or the save fails.
 fn in_private(repo: &GitRepo, sub: Sub, verdict: Verdict, site: &Site) -> Decision {
 	match verdict {
-		Verdict::Allow | Verdict::Stash(Stash::Saves) | Verdict::BranchMove => Decision::Run,
+		Verdict::Allow
+		| Verdict::Stash(Stash::Saves)
+		| Verdict::BranchMove
+		| Verdict::HistoryRewrite
+		| Verdict::InProgressOnly
+		| Verdict::CommitAmend
+		| Verdict::Clean => Decision::Run,
 		Verdict::Stash(Stash::Takes(op, entry)) => foreign_stash(repo, op, entry.as_deref())
 			.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message(None))),
 		Verdict::Stash(Stash::Clear) => foreign_stash(repo, "clear", None)
@@ -284,6 +303,18 @@ fn outside_conflict(repo: Option<&GitRepo>, sub: Sub) -> Option<Refusal> {
 		.then_some(Refusal::OutsideConflict(sub))
 }
 
+/// Whether `repo` currently has an in-progress operation matching `sub`.
+fn matches_in_progress(repo: &GitRepo, sub: Sub) -> bool {
+	match repo.operation_kind() {
+		Ok(Some("rebase")) => sub == Sub::Rebase,
+		Ok(Some("merge")) => sub == Sub::Merge,
+		Ok(Some("cherry-pick")) => sub == Sub::CherryPick,
+		Ok(Some("revert")) => sub == Sub::Revert,
+		Ok(Some("sequencer")) => matches!(sub, Sub::CherryPick | Sub::Revert),
+		_ => false,
+	}
+}
+
 /// Records `repo`'s uncommitted changes on [`DISCARDED_REF`] before the command
 /// at `site` discards them. When git cannot write them, a `targeted` command
 /// still runs mid-operation, where it picks a conflict side: git cannot record
@@ -311,12 +342,26 @@ fn save_then_run(repo: &GitRepo, sub: Sub, site: &Site, targeted: bool) -> Decis
 	if let Err(err) = repo.record_ref(DISCARDED_REF, &id, &format!("before git {}", site.command)) {
 		return Decision::Refuse(Refusal::Unsaved(sub, err.to_string()).message(None));
 	}
-	let short = repo.short_id(&id).unwrap_or(id);
+	let short = repo
+		.short_id(&id)
+		.map_or_else(|_| unambiguous_short_id(&id, &id), |s| unambiguous_short_id(&s, &id));
 	Decision::RunNoted(format!(
 		"git {}: saved your uncommitted changes as {short} on {DISCARDED_REF} first; git stash \
 		 apply --index {short} brings them back.\n",
 		sub.name()
 	))
+}
+
+/// Extends an all-digit `short` hash past its first hex letter from `full` (or
+/// appends `^0`) so `git stash apply` does not parse it as `stash@{n}`.
+fn unambiguous_short_id(short: &str, full: &str) -> String {
+	if !short.bytes().all(|b| b.is_ascii_digit()) {
+		return short.to_owned();
+	}
+	if let Some(pos) = full.bytes().position(|b| !b.is_ascii_digit()) {
+		return full[..(pos + 1).max(short.len())].to_owned();
+	}
+	format!("{full}^0")
 }
 
 /// Whether git recurses into submodules: as `option` says when given, else as
@@ -435,10 +480,19 @@ fn saved_on(subject: &str) -> Saver<'_> {
 /// any other name as a branch to create from a remote-tracking one, through
 /// whatever fetch refspec maps it, or fails on its own; and `A...B`, `A...`,
 /// or `...B` as their merge base, even beside a file of that name.
+fn is_magic_pathspec(operand: &str) -> bool {
+	operand.starts_with(":(")
+		|| operand
+			.strip_prefix(':')
+			.is_some_and(|rest| rest.starts_with(['/', '!', '^']))
+}
+
 fn names_path(repo: &GitRepo, dir: &Path, operand: &str) -> bool {
 	!operand.contains("...")
 		&& matches!(repo.resolve_ref(operand), Ok(None))
-		&& (operand.contains(['*', '?', '[', '\\']) || dir.join(operand).symlink_metadata().is_ok())
+		&& (is_magic_pathspec(operand)
+			|| operand.contains(['*', '?', '[', '\\'])
+			|| dir.join(operand).symlink_metadata().is_ok())
 }
 
 /// A git subcommand the guard judges.
@@ -449,6 +503,13 @@ enum Sub {
 	Checkout,
 	Switch,
 	Restore,
+	Rebase,
+	Merge,
+	Pull,
+	CherryPick,
+	Revert,
+	Commit,
+	Clean,
 }
 
 impl Sub {
@@ -459,6 +520,13 @@ impl Sub {
 			"checkout" => Self::Checkout,
 			"switch" => Self::Switch,
 			"restore" => Self::Restore,
+			"rebase" => Self::Rebase,
+			"merge" => Self::Merge,
+			"pull" => Self::Pull,
+			"cherry-pick" => Self::CherryPick,
+			"revert" => Self::Revert,
+			"commit" => Self::Commit,
+			"clean" => Self::Clean,
 			_ => return None,
 		})
 	}
@@ -470,6 +538,13 @@ impl Sub {
 			Self::Checkout => "checkout",
 			Self::Switch => "switch",
 			Self::Restore => "restore",
+			Self::Rebase => "rebase",
+			Self::Merge => "merge",
+			Self::Pull => "pull",
+			Self::CherryPick => "cherry-pick",
+			Self::Revert => "revert",
+			Self::Commit => "commit",
+			Self::Clean => "clean",
 		}
 	}
 
@@ -493,6 +568,75 @@ impl Sub {
 				"unified",
 				"inter-hunk-context",
 			]),
+			Self::Rebase => (&['C', 's', 'X', 'x'], &[
+				"onto",
+				"trailer",
+				"whitespace",
+				"empty",
+				"exec",
+				"strategy",
+				"strategy-option",
+			]),
+			Self::Merge => (&['s', 'X', 'm', 'F'], &[
+				"cleanup",
+				"strategy",
+				"strategy-option",
+				"message",
+				"file",
+				"into-name",
+			]),
+			Self::Pull => (&['s', 'X', 'o'], &[
+				"cleanup",
+				"strategy",
+				"strategy-option",
+				"upload-pack",
+				"depth",
+				"shallow-since",
+				"shallow-exclude",
+				"deepen",
+				"refmap",
+				"server-option",
+				"negotiation-tip",
+			]),
+			Self::CherryPick => {
+				(&['m', 'X'], &["cleanup", "mainline", "strategy", "strategy-option", "empty"])
+			},
+			Self::Revert => (&['m', 'X'], &["cleanup", "mainline", "strategy", "strategy-option"]),
+			Self::Commit => (&['F', 'm', 'c', 'C', 't', 'U'], &[
+				"file",
+				"author",
+				"date",
+				"message",
+				"reedit-message",
+				"reuse-message",
+				"fixup",
+				"squash",
+				"trailer",
+				"template",
+				"cleanup",
+				"unified",
+				"inter-hunk-context",
+				"pathspec-from-file",
+			]),
+			Self::Clean => (&['e'], &["exclude"]),
+		}
+	}
+
+	/// Short options that accept an optional attached value (e.g. `-S<key>`):
+	/// never consumes the next argument, but stops scanning the bundle so
+	/// characters of the attached value are not read as flags.
+	const fn short_optional_valued(self) -> &'static [char] {
+		match self {
+			Self::Rebase => &['S', 'r'],
+			Self::Merge | Self::CherryPick | Self::Revert => &['S'],
+			Self::Pull => &['r', 'S', 'j'],
+			Self::Commit => &['S', 'u'],
+			Self::Stash
+			| Self::Reset
+			| Self::Checkout
+			| Self::Switch
+			| Self::Restore
+			| Self::Clean => &[],
 		}
 	}
 
@@ -504,6 +648,8 @@ impl Sub {
 			Self::Reset => &[
 				"auto-advance",
 				"hard",
+				"help",
+				"help-all",
 				"intent-to-add",
 				"inter-hunk-context",
 				"keep",
@@ -524,6 +670,8 @@ impl Sub {
 				"detach",
 				"force",
 				"guess",
+				"help",
+				"help-all",
 				"ignore-other-worktrees",
 				"ignore-skip-worktree-bits",
 				"inter-hunk-context",
@@ -550,6 +698,8 @@ impl Sub {
 				"force",
 				"force-create",
 				"guess",
+				"help",
+				"help-all",
 				"ignore-other-worktrees",
 				"merge",
 				"orphan",
@@ -561,6 +711,8 @@ impl Sub {
 			],
 			Self::Restore => &[
 				"conflict",
+				"help",
+				"help-all",
 				"ignore-skip-worktree-bits",
 				"ignore-unmerged",
 				"inter-hunk-context",
@@ -579,6 +731,215 @@ impl Sub {
 				"unified",
 				"worktree",
 			],
+			Self::Rebase => &[
+				"abort",
+				"apply",
+				"autosquash",
+				"autostash",
+				"committer-date-is-author-date",
+				"continue",
+				"edit-todo",
+				"empty",
+				"exec",
+				"ff",
+				"force-rebase",
+				"fork-point",
+				"gpg-sign",
+				"help",
+				"help-all",
+				"ignore-whitespace",
+				"interactive",
+				"keep-base",
+				"merge",
+				"onto",
+				"quiet",
+				"quit",
+				"reapply-cherry-picks",
+				"rebase-merges",
+				"rerere-autoupdate",
+				"reschedule-failed-exec",
+				"reset-author-date",
+				"root",
+				"show-current-patch",
+				"signoff",
+				"skip",
+				"stat",
+				"strategy",
+				"strategy-option",
+				"trailer",
+				"update-refs",
+				"verbose",
+				"verify",
+				"whitespace",
+			],
+			Self::Merge => &[
+				"abort",
+				"allow-unrelated-histories",
+				"autostash",
+				"cleanup",
+				"commit",
+				"compact-summary",
+				"continue",
+				"edit",
+				"ff",
+				"ff-only",
+				"file",
+				"gpg-sign",
+				"help",
+				"help-all",
+				"into-name",
+				"log",
+				"message",
+				"overwrite-ignore",
+				"progress",
+				"quiet",
+				"quit",
+				"rerere-autoupdate",
+				"signoff",
+				"squash",
+				"stat",
+				"strategy",
+				"strategy-option",
+				"summary",
+				"verbose",
+				"verify",
+				"verify-signatures",
+			],
+			Self::Pull => &[
+				"all",
+				"allow-unrelated-histories",
+				"append",
+				"autostash",
+				"cleanup",
+				"commit",
+				"compact-summary",
+				"deepen",
+				"depth",
+				"dry-run",
+				"edit",
+				"ff",
+				"ff-only",
+				"force",
+				"gpg-sign",
+				"help",
+				"help-all",
+				"ipv4",
+				"ipv6",
+				"jobs",
+				"keep",
+				"log",
+				"negotiation-tip",
+				"progress",
+				"prune",
+				"quiet",
+				"rebase",
+				"recurse-submodules",
+				"refmap",
+				"server-option",
+				"set-upstream",
+				"shallow-exclude",
+				"shallow-since",
+				"show-forced-updates",
+				"signoff",
+				"squash",
+				"stat",
+				"strategy",
+				"strategy-option",
+				"tags",
+				"unshallow",
+				"update-shallow",
+				"upload-pack",
+				"verbose",
+				"verify",
+				"verify-signatures",
+			],
+			Self::CherryPick => &[
+				"abort",
+				"allow-empty",
+				"allow-empty-message",
+				"cleanup",
+				"commit",
+				"continue",
+				"edit",
+				"empty",
+				"ff",
+				"gpg-sign",
+				"help",
+				"help-all",
+				"keep-redundant-commits",
+				"mainline",
+				"quit",
+				"rerere-autoupdate",
+				"signoff",
+				"skip",
+				"strategy",
+				"strategy-option",
+			],
+			Self::Revert => &[
+				"abort",
+				"cleanup",
+				"commit",
+				"continue",
+				"edit",
+				"gpg-sign",
+				"help",
+				"help-all",
+				"mainline",
+				"quit",
+				"reference",
+				"rerere-autoupdate",
+				"signoff",
+				"skip",
+				"strategy",
+				"strategy-option",
+			],
+			Self::Commit => &[
+				"ahead-behind",
+				"all",
+				"allow-empty",
+				"allow-empty-message",
+				"amend",
+				"author",
+				"branch",
+				"cleanup",
+				"date",
+				"dry-run",
+				"edit",
+				"file",
+				"fixup",
+				"gpg-sign",
+				"help",
+				"help-all",
+				"include",
+				"inter-hunk-context",
+				"interactive",
+				"long",
+				"message",
+				"null",
+				"only",
+				"patch",
+				"pathspec-file-nul",
+				"pathspec-from-file",
+				"porcelain",
+				"post-rewrite",
+				"quiet",
+				"reedit-message",
+				"reset-author",
+				"reuse-message",
+				"short",
+				"signoff",
+				"squash",
+				"status",
+				"template",
+				"trailer",
+				"unified",
+				"untracked-files",
+				"verbose",
+				"verify",
+			],
+			Self::Clean => {
+				&["dry-run", "exclude", "force", "help", "help-all", "interactive", "quiet"]
+			},
 		}
 	}
 }
@@ -658,9 +1019,9 @@ impl<'a> Invocation<'a> {
 /// One subcommand argument, read the way git's parse-options reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arg<'a> {
-	/// `--name` or `--name=value`, by name; an abbreviation by the name it
-	/// stands for.
-	Long(&'a str),
+	/// `--name` or `--name=value`, by name and optional inline value; an
+	/// abbreviation by the name it stands for.
+	Long(&'a str, Option<&'a str>),
 	/// `--no-name`, by the name it negates.
 	Negated(&'a str),
 	/// One letter of a short-option bundle: `-qf` yields `q`, then `f`.
@@ -690,17 +1051,17 @@ fn scan(sub: Sub, args: &[String]) -> Vec<Arg<'_>> {
 		} else if let Some(long) = arg.strip_prefix("--") {
 			let (spelled, inline) = long
 				.split_once('=')
-				.map_or((long, false), |(name, _)| (name, true));
+				.map_or((long, None), |(name, value)| (name, Some(value)));
 			match super::long_option(sub.long_options(), spelled) {
 				Some((name, true)) => scanned.push(Arg::Negated(name)),
 				Some((name, false)) => {
-					if !inline && long_valued.contains(&name) {
+					if inline.is_none() && long_valued.contains(&name) {
 						args.next();
 					}
-					scanned.push(Arg::Long(name));
+					scanned.push(Arg::Long(name, inline));
 				},
 				// Unknown or ambiguous: git refuses it on its own.
-				None => scanned.push(Arg::Long(spelled)),
+				None => scanned.push(Arg::Long(spelled, inline)),
 			}
 		} else if let Some(bundle) = arg.strip_prefix('-').filter(|bundle| !bundle.is_empty()) {
 			for (at, flag) in bundle.char_indices() {
@@ -710,6 +1071,9 @@ fn scan(sub: Sub, args: &[String]) -> Vec<Arg<'_>> {
 					if at + flag.len_utf8() == bundle.len() {
 						args.next();
 					}
+					break;
+				}
+				if sub.short_optional_valued().contains(&flag) {
 					break;
 				}
 			}
@@ -737,6 +1101,15 @@ enum Verdict {
 	/// `checkout` with one operand and no pathspec: git switches to it when it
 	/// names a commit and restores it as a path otherwise.
 	CheckoutOne(String),
+	/// Rewrites history or working tree (`rebase`, `merge`, `pull`,
+	/// `cherry-pick`, `revert`).
+	HistoryRewrite,
+	/// Continues, aborts, skips, or quits an already-running operation.
+	InProgressOnly,
+	/// `commit --amend` without dry-run flags.
+	CommitAmend,
+	/// `clean` without `-n` / `--dry-run`.
+	Clean,
 }
 
 /// What a `stash` subcommand does to the working tree and the stash list.
@@ -752,11 +1125,83 @@ enum Stash {
 	Clear,
 }
 
+fn is_help(args: &[Arg<'_>]) -> bool {
+	args
+		.iter()
+		.any(|arg| matches!(arg, Arg::Short('h') | Arg::Long("help" | "help-all", None)))
+}
+
 fn classify(sub: Sub, args: &[String]) -> Verdict {
 	match sub {
 		Sub::Stash => classify_stash(args),
 		Sub::Reset => classify_reset(&scan(sub, args)),
 		Sub::Checkout | Sub::Switch | Sub::Restore => classify_tree_write(sub, &scan(sub, args)),
+		Sub::Rebase => {
+			let scanned = scan(sub, args);
+			let flags = Flags::of(sub, &scanned);
+			if is_help(&scanned) || flags.on("show-current-patch") {
+				Verdict::Allow
+			} else if flags.any(&["continue", "abort", "skip", "quit", "edit-todo"]) {
+				Verdict::InProgressOnly
+			} else {
+				Verdict::HistoryRewrite
+			}
+		},
+		Sub::Merge => {
+			let scanned = scan(sub, args);
+			let flags = Flags::of(sub, &scanned);
+			if is_help(&scanned) {
+				Verdict::Allow
+			} else if flags.any(&["continue", "abort", "quit"]) {
+				Verdict::InProgressOnly
+			} else {
+				Verdict::HistoryRewrite
+			}
+		},
+		Sub::Pull => {
+			let scanned = scan(sub, args);
+			if is_help(&scanned) {
+				Verdict::Allow
+			} else {
+				Verdict::HistoryRewrite
+			}
+		},
+		Sub::CherryPick | Sub::Revert => {
+			let scanned = scan(sub, args);
+			let flags = Flags::of(sub, &scanned);
+			if is_help(&scanned) {
+				Verdict::Allow
+			} else if flags.any(&["continue", "abort", "skip", "quit"]) {
+				Verdict::InProgressOnly
+			} else {
+				Verdict::HistoryRewrite
+			}
+		},
+		Sub::Commit => {
+			let scanned = scan(sub, args);
+			let flags = Flags::of(sub, &scanned);
+			let status_format = flags
+				.0
+				.iter()
+				.rev()
+				.find(|(flag, _)| matches!(*flag, "short" | "porcelain" | "long"))
+				.is_some_and(|&(_, on)| on);
+			let dry_run = flags.on("dry-run") || flags.on("null") || status_format;
+			if !is_help(&scanned) && flags.on("amend") && !dry_run {
+				Verdict::CommitAmend
+			} else {
+				Verdict::Allow
+			}
+		},
+		Sub::Clean => {
+			let scanned = scan(sub, args);
+			let flags = Flags::of(sub, &scanned);
+			if is_help(&scanned) || flags.on("dry-run") {
+				Verdict::Allow
+			} else {
+				Verdict::Clean
+			}
+		},
 	}
 }
 
@@ -764,7 +1209,10 @@ fn classify(sub: Sub, args: &[String]) -> Verdict {
 /// neither is given.
 fn recurse_option(sub: Sub, args: &[String]) -> Option<bool> {
 	scan(sub, args).iter().rev().find_map(|arg| match arg {
-		Arg::Long("recurse-submodules") => Some(true),
+		Arg::Long("recurse-submodules", value) => Some(!matches!(
+			value.map(str::to_ascii_lowercase).as_deref(),
+			Some("false" | "no" | "off" | "0")
+		)),
 		Arg::Negated("recurse-submodules") => Some(false),
 		_ => None,
 	})
@@ -774,7 +1222,7 @@ fn recurse_option(sub: Sub, args: &[String]) -> Option<bool> {
 fn classify_stash(args: &[String]) -> Verdict {
 	// `branch <name> [<stash>]` names its entry second.
 	let (op, entry_at) = match args.first().map(String::as_str) {
-		Some("list" | "show" | "create") => return Verdict::Allow,
+		Some("list" | "show" | "create" | "-h" | "--help" | "--help-all") => return Verdict::Allow,
 		Some("clear") => return Verdict::Stash(Stash::Clear),
 		Some("pop") => ("pop", 0),
 		Some("apply") => ("apply", 0),
@@ -786,7 +1234,7 @@ fn classify_stash(args: &[String]) -> Verdict {
 		.into_iter()
 		.filter_map(|arg| match arg {
 			Arg::Operand(operand) | Arg::Pathspec(operand) => Some(operand.to_owned()),
-			Arg::Long(_) | Arg::Negated(_) | Arg::Short(_) => None,
+			Arg::Long(..) | Arg::Negated(_) | Arg::Short(_) => None,
 		})
 		.nth(entry_at);
 	Verdict::Stash(Stash::Takes(op, entry))
@@ -796,6 +1244,9 @@ fn classify_stash(args: &[String]) -> Verdict {
 /// and no pathspec. With paths, a pathspec file, or `--patch` it rewrites index
 /// entries only.
 fn classify_reset(args: &[Arg<'_>]) -> Verdict {
+	if is_help(args) {
+		return Verdict::Allow;
+	}
 	let flags = Flags::of(Sub::Reset, args);
 	let mut operands = Vec::new();
 	let mut pathspec = false;
@@ -803,7 +1254,7 @@ fn classify_reset(args: &[Arg<'_>]) -> Verdict {
 		match *arg {
 			Arg::Pathspec(_) => pathspec = true,
 			Arg::Operand(operand) => operands.push(operand),
-			Arg::Long(_) | Arg::Negated(_) | Arg::Short(_) => {},
+			Arg::Long(..) | Arg::Negated(_) | Arg::Short(_) => {},
 		}
 	}
 	let index_only = pathspec || flags.any(&["patch", "pathspec-from-file"]);
@@ -822,7 +1273,7 @@ fn classify_reset(args: &[Arg<'_>]) -> Verdict {
 /// branches — except `restore --staged` without `--worktree`, which only
 /// unstages, and a bare `checkout`, which only reports.
 fn classify_tree_write(sub: Sub, args: &[Arg<'_>]) -> Verdict {
-	if sub == Sub::Checkout && args.is_empty() {
+	if (sub == Sub::Checkout && args.is_empty()) || is_help(args) {
 		return Verdict::Allow;
 	}
 	let flags = Flags::of(sub, args);
@@ -875,7 +1326,7 @@ impl<'a> Flags<'a> {
 			args
 				.iter()
 				.filter_map(|arg| match (sub, *arg) {
-					(_, Arg::Long(name)) => Some((name, true)),
+					(_, Arg::Long(name, _)) => Some((name, true)),
 					(_, Arg::Negated(name)) => Some((name, false)),
 					(Sub::Reset | Sub::Checkout | Sub::Restore, Arg::Short('p')) => {
 						Some(("patch", true))
@@ -887,6 +1338,8 @@ impl<'a> Flags<'a> {
 					(Sub::Checkout | Sub::Switch, Arg::Short('t')) => Some(("track", true)),
 					(Sub::Restore, Arg::Short('S')) => Some(("staged", true)),
 					(Sub::Restore, Arg::Short('W')) => Some(("worktree", true)),
+					(Sub::Clean, Arg::Short('n')) => Some(("dry-run", true)),
+					(Sub::Commit, Arg::Short('z')) => Some(("null", true)),
 					_ => None,
 				})
 				.collect(),
@@ -920,11 +1373,23 @@ impl<'a> Flags<'a> {
 /// Whether `spec` covers everything under the working directory or the
 /// repository root: `.`, `*`, `:/`, or a path climbing out with `..`.
 fn is_whole_tree(spec: &str) -> bool {
-	let rest = spec
-		.strip_prefix(":/")
-		.or_else(|| spec.strip_prefix(":(top)"))
-		.unwrap_or(spec);
-	rest == "*" || rest.split('/').all(|part| matches!(part, "" | "." | ".."))
+	if spec.starts_with(":!") || spec.starts_with(":^") {
+		return true;
+	}
+	let mut rest = if let Some(after) = spec.strip_prefix(":(")
+		&& let Some((magic, path)) = after.split_once(')')
+	{
+		if magic.split(',').any(|attr| attr == "exclude") {
+			return true;
+		}
+		path
+	} else {
+		spec.strip_prefix(":/").unwrap_or(spec)
+	};
+	while let Some(tail) = rest.strip_prefix("./") {
+		rest = tail;
+	}
+	matches!(rest, "*" | "**") || rest.split('/').all(|part| matches!(part, "" | "." | ".."))
 }
 
 /// Why the guard refuses a command.
@@ -934,6 +1399,9 @@ enum Refusal {
 	CommitMove,
 	BranchMove(Sub),
 	OutsideConflict(Sub),
+	HistoryRewrite(Sub),
+	CommitAmend,
+	Clean,
 	Redirected(Sub),
 	/// `stash <op>` of `entry`, whose `subject` names its saver when read, in
 	/// a worktree on branch `here` (`None` when detached).
@@ -981,10 +1449,11 @@ impl Refusal {
 				"git {} to another branch or commit is blocked by workspace policy — do not work \
 				 around it.\nOther sessions may be using this checkout (it is not a private \
 				 checkout); switching branches moves HEAD and the working tree under them. A merge or \
-				 rebase in progress does not make it safe. While resolving conflicts, git checkout -- \
-				 <path> and git restore <path> still run; put -- before a path that shares its name \
-				 with a branch. Inspect other revisions read-only with git show <rev>:<path> / git \
-				 diff / git log.\n{}\n",
+				 rebase in progress does not make it safe. Do not fall back to committing on the \
+				 current branch or working around this with plumbing (commit-tree, read-tree, branch \
+				 -f). While resolving conflicts, git checkout -- <path> and git restore <path> still \
+				 run; put -- before a path that shares its name with a branch. Inspect other \
+				 revisions read-only with git show <rev>:<path> / git diff / git log.\n{}\n",
 				sub.name(),
 				own_checkout_hint(ovnfs)
 			),
@@ -1003,9 +1472,42 @@ impl Refusal {
 				"git {} is blocked: the guard judges the checkout found from the working directory, \
 				 and this command points git elsewhere (--git-dir / --work-tree / GIT_DIR / \
 				 GIT_WORK_TREE / GIT_INDEX_FILE), so it cannot tell whose checkout it changes.\nRun \
-				 it from inside the target checkout (cd or git -C) without overriding git's \
+				 it with the target checkout as the working directory, without overriding git's \
 				 repository location.\n",
 				sub.name()
+			),
+			Self::HistoryRewrite(sub) => {
+				let resume = match sub {
+					Sub::Pull => "",
+					Sub::Merge => {
+						" While an operation is already underway, --continue, --abort, and --quit still \
+						 run."
+					},
+					_ => {
+						" While an operation is already underway, --continue, --abort, --skip, and \
+						 --quit still run."
+					},
+				};
+				format!(
+					"git {} is blocked by workspace policy — do not work around it.\nOther sessions \
+					 may be using this checkout (it is not a private checkout); it moves HEAD and \
+					 rewrites the working tree under them.{resume}\n{}\n",
+					sub.name(),
+					own_checkout_hint(ovnfs)
+				)
+			},
+			Self::CommitAmend => format!(
+				"git commit --amend is blocked by workspace policy — do not work around it.\nOther \
+				 sessions may be using this checkout (it is not a private checkout); amending \
+				 rewrites HEAD under them. Make a new commit instead (prefer eval's commit.draft() in \
+				 a shared checkout), or amend in a separate checkout.\n{}\n",
+				own_checkout_hint(ovnfs)
+			),
+			Self::Clean => format!(
+				"git clean is blocked by workspace policy — do not work around it.\nOther sessions \
+				 may be using this checkout (it is not a private checkout); clean deletes untracked \
+				 files they may rely on. Preview with git clean -n / --dry-run.\n{}\n",
+				own_checkout_hint(ovnfs)
 			),
 			Self::ForeignStash { op, entry, subject, here } => {
 				let saver = match subject.as_deref().map(saved_on) {
@@ -1034,8 +1536,8 @@ impl Refusal {
 			},
 			Self::Unsaved(sub, error) => format!(
 				"git {} is blocked: it would discard uncommitted changes, and saving them first \
-				 failed: {}\nCommit them or save a patch first (git diff > <file>); a merge or rebase \
-				 in progress ends with git merge --abort or git rebase --abort.\n",
+				 failed: {}\nCommit them or save a patch first (git diff --output=<file>); a merge or \
+				 rebase in progress ends with git merge --abort or git rebase --abort.\n",
 				sub.name(),
 				error.trim()
 			),
@@ -1043,7 +1545,8 @@ impl Refusal {
 				"git {} is blocked: it recurses into submodules (--recurse-submodules or \
 				 submodule.recurse), and uncommitted changes it discards there cannot be saved \
 				 first.\nRun it without recursing (--no-recurse-submodules), or commit or save a \
-				 patch of each submodule's changes first (git -C <submodule> diff > <file>).\n",
+				 patch of each submodule's changes first (run git diff --output=<file> inside each \
+				 submodule).\n",
 				sub.name()
 			),
 		}
@@ -1152,6 +1655,52 @@ mod tests {
 			("restore --staged --worktree *", "Destructive"),
 			// `--source`'s value is a tree, not a pathspec.
 			("restore --source . tracked.txt", "ConflictOnly"),
+			// New subcommands: rebase, merge, pull, cherry-pick, revert, commit,
+			// clean.
+			("rebase main", "HistoryRewrite"),
+			("rebase --onto main topic", "HistoryRewrite"),
+			("rebase --show-current-patch", "Allow"),
+			("rebase --continue", "InProgressOnly"),
+			("rebase --abort", "InProgressOnly"),
+			("rebase --skip", "InProgressOnly"),
+			("rebase --quit", "InProgressOnly"),
+			("rebase -x --continue main", "HistoryRewrite"),
+			("rebase -h", "Allow"),
+			("merge side", "HistoryRewrite"),
+			("merge --abort", "InProgressOnly"),
+			("merge --abort --no-abort side", "HistoryRewrite"),
+			("pull", "HistoryRewrite"),
+			("pull --dry-run", "HistoryRewrite"),
+			("pull --help", "Allow"),
+			("cherry-pick abc123", "HistoryRewrite"),
+			("cherry-pick --continue", "InProgressOnly"),
+			("cherry-pick -s abc123", "HistoryRewrite"),
+			("revert abc123", "HistoryRewrite"),
+			("revert --abort", "InProgressOnly"),
+			("commit -m hello", "Allow"),
+			("commit --amend", "CommitAmend"),
+			("commit --amend --no-amend", "Allow"),
+			("commit --amend --dry-run", "Allow"),
+			("commit --amend --short", "Allow"),
+			("commit --amend --porcelain", "Allow"),
+			("commit -m --amend", "Allow"),
+			("commit -- --amend", "Allow"),
+			("commit --amend --no-edit -S/home/user/key", "CommitAmend"),
+			("commit --amend --long", "Allow"),
+			("commit --amend -z", "Allow"),
+			("commit --amend --short --no-porcelain", "CommitAmend"),
+			("checkout --help", "Allow"),
+			("reset --hard --help", "Allow"),
+			("checkout :(literal).", "Destructive"),
+			("checkout :!foo", "Destructive"),
+			("checkout **", "Destructive"),
+			("clean -fd", "Clean"),
+			("clean -n", "Allow"),
+			("clean -dn", "Allow"),
+			("clean -n --no-dry-run -f", "Clean"),
+			("clean -e -n -f", "Clean"),
+			("clean -f -- --help", "Clean"),
+			("clean -h", "Allow"),
 		] {
 			assert_eq!(judged(line), expected, "git {line}");
 		}
@@ -1200,6 +1749,9 @@ mod tests {
 			("-c Submodule.Recurse=off restore tracked.txt", Some(false)),
 			("--config-env submodule.recurse=RECURSE reset --hard", Some(true)),
 			("--config-env=submodule.recurse=RECURSE reset --hard", Some(true)),
+			("checkout --recurse-submodules=false main", Some(false)),
+			("checkout --recurse-submodules=0 main", Some(false)),
+			("checkout --recurse-submodules=on-demand main", Some(true)),
 		] {
 			let args: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
 			let invocation = Invocation::parse(&args).expect("guarded");
@@ -1291,7 +1843,7 @@ mod tests {
 		assert_eq!(std::fs::read_to_string(repo.join("tracked.txt")).expect("read"), "uncommitted\n");
 
 		git(&repo, &["checkout", "-q", "--", "tracked.txt"]);
-		let (code, output) = guarded(&repo, "git merge -q side").await;
+		let (code, output) = run_with(&repo, "git merge -q side", &[]).await;
 		assert_eq!(code, Some(1), "the merge conflicts: {output}");
 
 		let (code, output) = guarded(&repo, "git checkout --theirs .").await;
@@ -1724,5 +2276,185 @@ mod tests {
 				.count(),
 			1
 		);
+	}
+
+	#[test]
+	fn unambiguous_short_id_extends_all_digit_prefixes() {
+		assert_eq!(unambiguous_short_id("1234a56", "1234a56789"), "1234a56");
+		assert_eq!(
+			unambiguous_short_id("1234567", "123456789abcdef0123456789abcdef012345678"),
+			"123456789a"
+		);
+		assert_eq!(
+			unambiguous_short_id("12345678", "1234567a9bcdef0123456789abcdef0123456789"),
+			"1234567a"
+		);
+		let all_digits = "1234567890123456789012345678901234567890";
+		assert_eq!(unambiguous_short_id("1234567", all_digits), format!("{all_digits}^0"));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn shared_checkouts_block_history_rewrites_amend_and_clean() {
+		let (_temp, repo) = fixture();
+		let parent = repo.parent().expect("fixture parent").to_owned();
+		let worktree = parent.join("wt");
+		git(&repo, &["checkout", "-qb", "side"]);
+		std::fs::write(repo.join("side.txt"), "side\n").expect("write side");
+		git(&repo, &["add", "side.txt"]);
+		git(&repo, &["commit", "-qm", "side"]);
+		git(&repo, &["checkout", "-q", "main"]);
+		std::fs::write(repo.join("tracked.txt"), "main-edit\n").expect("write main");
+		git(&repo, &["commit", "-qam", "main-edit"]);
+		git(&repo, &["worktree", "add", "-q", "-b", "topic", &worktree.to_string_lossy()]);
+
+		let side_sha = git(&repo, &["rev-parse", "side"]).trim().to_owned();
+		std::fs::write(repo.join("untracked.txt"), "keep\n").expect("write untracked");
+		for command in [
+			"git rebase side",
+			"git merge side",
+			"git pull",
+			&format!("git cherry-pick {side_sha}"),
+			"git revert HEAD",
+			"git commit --amend --no-edit",
+			"git clean -fd",
+		] {
+			let (code, output) = guarded(&repo, command).await;
+			assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{command}: {output}");
+			assert!(output.contains("blocked by workspace policy"), "{command}: {output}");
+		}
+		assert!(repo.join("untracked.txt").exists());
+
+		// Allowed read-only / dry-run / non-amend forms in shared checkouts.
+		let (code, output) = guarded(&repo, "git clean -n").await;
+		assert_eq!(code, Some(0), "{output}");
+		assert!(repo.join("untracked.txt").exists());
+		let (code, output) = guarded(&repo, "git commit --allow-empty -qm plain").await;
+		assert_eq!(code, Some(0), "{output}");
+
+		// Mid-operation --abort/--continue allowed ONLY when that operation is
+		// underway.
+		let (code, output) = guarded(&repo, "git merge --abort").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
+		let (code, output) = run_with(&repo, "git merge -q --no-commit --no-ff side", &[]).await;
+		assert_eq!(code, Some(0), "{output}");
+		let (code, output) = guarded(&repo, "git rebase --continue").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "rebase --continue during merge: {output}");
+		let (code, output) = guarded(&repo, "git merge --abort").await;
+		assert_eq!(code, Some(0), "{output}");
+		// Sequencer state (`sequencer/todo` without `CHERRY_PICK_HEAD`) still
+		// allows --continue/--abort.
+		std::fs::create_dir_all(repo.join(".git/sequencer")).expect("sequencer dir");
+		std::fs::write(repo.join(".git/sequencer/todo"), "pick deadbeef\n").expect("sequencer todo");
+		let (_code, output) = guarded(&repo, "git cherry-pick --abort").await;
+		assert!(!output.contains("blocked by workspace policy"), "{output}");
+		let _ = std::fs::remove_dir_all(repo.join(".git/sequencer"));
+
+		// All of them run in a linked worktree.
+		std::fs::write(worktree.join("untracked.txt"), "drop\n").expect("write wt untracked");
+		let (code, output) = guarded(&worktree, "git clean -fd").await;
+		assert_eq!(code, Some(0), "{output}");
+		assert!(!worktree.join("untracked.txt").exists());
+		let (code, output) = guarded(&worktree, "git commit --allow-empty --amend -qm amended").await;
+		assert_eq!(code, Some(0), "{output}");
+		let (code, output) = guarded(&worktree, "git merge -q --no-edit side").await;
+		assert_eq!(code, Some(0), "{output}");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn magic_pathspecs_and_separate_git_dir_work_and_hints_stay_clean() {
+		let (_temp, repo) = fixture();
+		let parent = repo.parent().expect("fixture parent").to_owned();
+		let worktree = parent.join("wt");
+		git(&repo, &["worktree", "add", "-q", "-b", "topic", &worktree.to_string_lossy()]);
+
+		// Magic pathspec is recognized as a pathspec (refused outside conflict in
+		// shared, saved in private).
+		std::fs::write(repo.join("tracked.txt"), "shared-edit\n").expect("edit shared");
+		let (code, output) = guarded(&repo, "git checkout ':(literal)tracked.txt'").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
+		assert!(output.contains("not in one"), "{output}");
+
+		std::fs::write(worktree.join("tracked.txt"), "wt-edit\n").expect("edit wt");
+		let (code, output) = guarded(&worktree, "git checkout ':(literal)tracked.txt'").await;
+		assert_eq!(code, Some(0), "{output}");
+		assert!(output.contains("saved your uncommitted changes as"), "{output}");
+		assert_eq!(read(&worktree), "tracked\n");
+
+		// Refusal hints avoid `git -C` and `> <file>`.
+		let redirected = Refusal::Redirected(Sub::Checkout).message(None);
+		assert!(!redirected.contains("git -C"), "{redirected}");
+		let unsaved = Refusal::Unsaved(Sub::Checkout, "boom".into()).message(None);
+		assert!(!unsaved.contains("> <file>"), "{unsaved}");
+		let recursive = Refusal::Recursive(Sub::Reset).message(None);
+		assert!(!recursive.contains("git -C"), "{recursive}");
+		assert!(!recursive.contains("> <file>"), "{recursive}");
+
+		// `--separate-git-dir` linked worktree is private; bare repo named `.git`
+		// stays guarded.
+		let sep_wt = parent.join("sep-main");
+		let sep_git = parent.join("sep-git");
+		git(&parent, &[
+			"init",
+			"-q",
+			"-b",
+			"main",
+			"--separate-git-dir",
+			&sep_git.to_string_lossy(),
+			&sep_wt.to_string_lossy(),
+		]);
+		git(&sep_wt, &["config", "user.name", "Test"]);
+		git(&sep_wt, &["config", "user.email", "test@example.com"]);
+		std::fs::write(sep_wt.join("tracked.txt"), "tracked\n").expect("write");
+		git(&sep_wt, &["add", "tracked.txt"]);
+		git(&sep_wt, &["commit", "-qm", "init"]);
+		let sep_linked = parent.join("sep-linked");
+		git(&sep_wt, &["worktree", "add", "-q", "-b", "t", &sep_linked.to_string_lossy()]);
+		std::fs::write(sep_linked.join("tracked.txt"), "mine\n").expect("edit");
+		let (code, output) = guarded(&sep_linked, "git checkout tracked.txt").await;
+		assert_eq!(code, Some(0), "{output}");
+
+		let bare_dot_git = parent.join("bare-holder/.git");
+		std::fs::create_dir_all(&bare_dot_git).expect("mkdir");
+		git(&parent, &[
+			"clone",
+			"-q",
+			"--bare",
+			&repo.to_string_lossy(),
+			&bare_dot_git.to_string_lossy(),
+		]);
+		let bare_linked = parent.join("bare-linked");
+		git(&bare_dot_git, &["worktree", "add", "-q", &bare_linked.to_string_lossy(), "main"]);
+		std::fs::write(bare_linked.join("tracked.txt"), "mine\n").expect("edit");
+		let (code, output) = guarded(&bare_linked, "git checkout tracked.txt").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recurse_submodules_false_runs_in_private_worktree() {
+		let (_temp, repo) = fixture();
+		let parent = repo.parent().expect("fixture parent").to_owned();
+		let (library, worktree) = (parent.join("library"), parent.join("wt"));
+		git(&parent, &["clone", "-q", &repo.to_string_lossy(), "library"]);
+		let file = ["-c", "protocol.file.allow=always"];
+		git(
+			&repo,
+			&[&file[..], &["submodule", "add", "-q", &library.to_string_lossy(), "lib"]].concat(),
+		);
+		git(&repo, &["commit", "-qm", "lib"]);
+		git(&repo, &["worktree", "add", "-q", "-b", "topic", &worktree.to_string_lossy()]);
+		git(&worktree, &[&file[..], &["submodule", "update", "-q", "--init"]].concat());
+		git(&repo, &["config", "submodule.recurse", "true"]);
+
+		std::fs::write(worktree.join("tracked.txt"), "mine\n").expect("edit");
+		let (code, output) =
+			guarded(&worktree, "git checkout --recurse-submodules=false tracked.txt").await;
+		assert_eq!(code, Some(0), "{output}");
+		assert_eq!(read(&worktree), "tracked\n");
+		let (code, output) =
+			guarded(&worktree, "git checkout --recurse-submodules tracked.txt").await;
+		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
 	}
 }
