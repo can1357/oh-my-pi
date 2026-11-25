@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Processes a bash call leaves running (`cmd &`, `(cmd &)`, `nohup cmd &`) no longer leak: the agent is reminded of them when it stops so it can register them as services or kill them, and the `&` ones are killed when the session ends (`nohup` ones never are). Turn off with `bash.reapBackground`; RPC mode never reaps.
+- New `o2ctl services` command in the bash tool's shell: `o2ctl services add <name> <pid|%job>` keeps an already-running process as a named service without restarting it (listed, supervised and stopped like any other; when its stdout or stderr goes to a file such as `nohup.out`, that file is the service's output), `o2ctl services ls` lists services and `o2ctl services stop <name>` stops one.
+
 ### Changed
 
 - `/fast` and `/fast ultra` now route to an account or stored API key that offers the tier, without pinning one by hand; once it hits its limits the other accounts serve as usual at standard speed, and the fast one takes over again when it recovers.

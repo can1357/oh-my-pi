@@ -567,6 +567,7 @@ const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
 import { StallGuard, stalledWaiters } from "./stalled-waiters";
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { AutoParallelCoordinator } from "./auto-parallel";
+import { LeftoverProcessTracker } from "./leftover-processes";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
@@ -1245,6 +1246,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
+	readonly #leftoverProcesses: LeftoverProcessTracker;
 	readonly #autoParallel: AutoParallelCoordinator;
 	readonly #modelMentions: ModelMentionRegistry;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
@@ -2416,6 +2418,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			phasesChanged: () => this.#mirrorTodoPhases(),
 		};
 		this.#todo = new TodoTracker(todoHost);
+		this.#leftoverProcesses = new LeftoverProcessTracker({
+			agent: this.agent,
+			sessionManager: this.sessionManager,
+			settings: this.settings,
+			agentKind: () => this.#agentKind,
+			asyncJobManager: () => this.#asyncJobManager,
+			toolSession: () => this.#evalToolSession,
+		});
 		this.#autoParallel = new AutoParallelCoordinator({
 			settings: this.settings,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
@@ -5698,6 +5708,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					endLoop({ continuing: true });
 					return;
 				}
+				if (await this.#leftoverProcesses.remind()) {
+					this.#scheduleAgentContinue({ source: "leftover-processes", generation: this.#promptGeneration });
+					endLoop({ continuing: true });
+					return;
+				}
 				// Ahead of the wake-source pause and the stop hooks: agents blocked on this one stay
 				// blocked once nothing wakes it (a subagent's job that waits on it included).
 				if (this.#continueForStalledWaiters()) {
@@ -7318,6 +7333,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			logger.warn("Session dispose: Sharpshooter release failed", { error: String(error) });
 		}
 		const advisorRecorderClosed = this.#advisors.recorderClosed();
+		// The `&` processes the session's bash calls left behind, while its shells still hold
+		// them: `releaseShellSessions` below hands those shells off.
+		try {
+			await this.#leftoverProcesses.reap();
+		} catch (error) {
+			logger.warn("Session dispose: leftover process reaping failed", { error: String(error) });
+		}
 		releaseShellSessions(this.sessionManager.getSessionId());
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),

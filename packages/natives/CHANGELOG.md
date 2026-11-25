@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Shell.heldProcesses()`: every live external a shell session holds, in or between runs (`&`/`nohup &` jobs left running included), with whether its `nohup` started it.
+- Added `listProcessesWithEnv(name, value)`, `processInfo(pids)`, `processOutputFiles(pid)` and `killProcessFamily(pids, { spareHangupIgnoring })` for finding processes by an inherited environment tag, describing live processes, locating the file a process writes its output to, and killing a process family while sparing `nohup`'d members.
+
 ### Fixed
 
 - Fixed a timed-out or cancelled shell command, or a terminated PTY run, leaving behind descendants in a process group or session of their own (a debugger's stopped inferior, a `setsid` daemon): the termination now snapshots the command's whole process family before the first signal (parent links plus every group and session a member leads), sends TERM to the members outside the command's own group, and KILLs the family after the grace, continuing stopped members.
