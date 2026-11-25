@@ -6,6 +6,7 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import { cfgBareExitOnEmptySession, cfgBareSlashCommands } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import {
 	isQueuedMessageList,
+	queueShorthandMarks,
 	splitQueuedMessages,
 } from "@oh-my-pi/pi-coding-agent/modes/view-model/prompt/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -492,5 +493,13 @@ describe("yield queue list parsing", () => {
 		expect(splitQueuedMessages("1. first\n3. third")).toEqual(["1. first\n3. third"]);
 		expect(isQueuedMessageList("1. first\n2. second\n3. third\n4.")).toBe(true);
 		expect(splitQueuedMessages("1. first\n2. second\n3. third\n4.")).toEqual(["first", "second", "third"]);
+	});
+
+	it("locates the prefix and list markers in the draft across a padded body and CRLF breaks", () => {
+		const text = "->  a) first\r\nb) second";
+		const marks = queueShorthandMarks(text);
+		expect(marks?.prefix).toEqual({ from: 0, to: 2 });
+		expect(marks?.markers.map(({ from, to }) => text.slice(from, to))).toEqual(["a)", "b)"]);
+		expect(queueShorthandMarks("a) first\nb) second")).toBeUndefined();
 	});
 });

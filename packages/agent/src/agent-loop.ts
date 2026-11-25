@@ -22,6 +22,7 @@ import {
 	type ToolResultProviderMetadata,
 	type TSchema,
 	toolWireSchema,
+	withRequestServiceTier,
 	type UserMessage,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -2040,7 +2041,10 @@ function openLiveSteering(
 			const transformed = config.transformContext
 				? await config.transformContext(messages, bound(signal))
 				: messages;
-			const converted = normalizeMessagesForProvider(await config.convertToLlm(transformed), prepared.model);
+			const converted = normalizeMessagesForProvider(
+				await config.convertToLlm(transformed, prepared.model),
+				prepared.model,
+			);
 			const userMessages: UserMessage[] = [];
 			for (const message of converted) {
 				if (message.role !== "user") return undefined;
@@ -2065,7 +2069,7 @@ async function prepareProviderCall(
 		messages = await config.transformContext(messages, signal);
 	}
 
-	const llmMessages = await config.convertToLlm(messages);
+	const llmMessages = await config.convertToLlm(messages, model);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect: Dialect | undefined =
 		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
@@ -2097,7 +2101,7 @@ async function prepareProviderCall(
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, standbyTools);
 	}
 	if (config.transformProviderContext) {
-		llmContext = await config.transformProviderContext(llmContext, model);
+		llmContext = await config.transformProviderContext(llmContext, model, signal);
 	}
 
 	let promptToolWireTools: Context["tools"];
@@ -2174,7 +2178,11 @@ async function streamAssistantResponse(
 			: providerAbortSignals.length === 1
 				? providerAbortSignals[0]!
 				: AbortSignal.any(providerAbortSignals);
-	const requestApiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
+	// The credential is chosen for the tier this request will ask for.
+	const requestApiKey = withRequestServiceTier(
+		(config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey,
+		effectiveServiceTier,
+	);
 	let resolvedCredential: ApiKeyResolution;
 	const resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal, resolved => {
 		resolvedCredential = resolved;
@@ -2282,6 +2290,9 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			if (model.api === "cursor-agent" && !config.cursorExecHandlers && config.loadCursorExecHandlers) {
+				config.cursorExecHandlers = await config.loadCursorExecHandlers();
+			}
 			onProviderStart?.();
 			let response = await streamFunction(model, llmContext, {
 				...config,
@@ -3982,6 +3993,12 @@ async function executeToolCalls(
 				}
 			})()
 		: undefined;
+	// The host detaching tools ahead of an abort raises the cooperative signal
+	// in either interruptMode; tools see it before the abort that follows.
+	const detachSignal = config.detachSignal;
+	const onDetach = (): void => steeringSoftController.abort("user");
+	if (detachSignal?.aborted) onDetach();
+	else detachSignal?.addEventListener("abort", onDetach, { once: true });
 	// IRC interrupt records and background completions live in session-owned
 	// queues with no wake callback. Keep the timer fallback when either peek is
 	// present; system steering uses the event-driven path above and does not poll.
@@ -4040,6 +4057,7 @@ async function executeToolCalls(
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);
+		detachSignal?.removeEventListener("abort", onDetach);
 	}
 
 	for (const record of records) {

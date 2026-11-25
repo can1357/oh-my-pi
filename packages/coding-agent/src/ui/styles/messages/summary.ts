@@ -1,6 +1,6 @@
 /**
  * History-collapse summaries (`section` roles `omp.compaction`,
- * `omp.handoff`, `omp.branch`): a blank row, the label and `· ⌃O` hint
+ * `omp.handoff`, `omp.branch`): a blank row, the label and expansion hint
  * centered between dim rules (the bare muted label when the width leaves
  * fewer than four rule cells), a blank row; expanded, the detail Markdown in
  * a `customMessageBg` box one row and one cell in.
@@ -10,14 +10,15 @@ import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-t
 import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { SummaryTerm } from "../../transcript/messages/summaries";
-import { EXPAND_KEY, fillRow, propsOf, termOf } from "./fill";
+import { expandKeyLabel } from "../../keys/hints";
+import { fillRow, propsOf, termOf } from "./fill";
 
 function dividerRow(cx: PaintContext, term: Partial<SummaryTerm>): string {
 	const theme = cx.theme;
 	const glyph = term.glyph ? theme.symbols.icon(term.glyph) : "";
 	let label = glyph ? `${glyph} ${term.label ?? ""}` : (term.label ?? "");
 	if (term.warning) label += ` ${theme.fg("warning", theme.symbols.icon("status.warning"))}`;
-	const hint = `· ${EXPAND_KEY}`;
+	const hint = `${theme.symbols.symbol("sep.dot").trim()} ${expandKeyLabel(theme)}`;
 	const remaining = cx.width - visibleWidth(`${label} ${hint}`) - 2;
 	if (remaining < 4) return theme.fg("muted", label);
 	const left = Math.floor(remaining / 2);

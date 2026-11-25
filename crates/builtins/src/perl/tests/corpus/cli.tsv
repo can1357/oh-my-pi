@@ -1,0 +1,41 @@
+# Perl corpus: cli. Format and regeneration: crates/builtins/src/perl/tests.rs.
+autosplit		bar␊green␊	arg=-lane	arg=print $F[1];	stdin=foo bar baz␊red green blue␊
+diamond-eof		one:2␊two:3␊	arg=-n	arg=-e	arg=print "$ARGV:$.\n" if eof;	arg=one	arg=two	file:one=x␊x␊	file:two=x␊
+diamond-files		1|one|x␊2|one|x␊3|two|x␊	arg=-n	arg=-e	arg=print "$.|$ARGV|$_";	arg=one	arg=two	file:one=x␊x␊	file:two=x␊
+extract-matches		id=2␊id=7␊id=8␊	arg=-n	arg=-e	arg=while (m/(id=\d+)/g) { print "$1\n" }	stdin=id=2 junk id=7␊none␊id=8␊
+extract-script	text outside Perl␊#!/usr/bin/perl␊print "inside\n";␊__END__␊not Perl	inside␊	arg=-x
+feature-state		1␊2␊	arg=-E	arg=sub n {state $n=0; ++$n} say n(); say n();
+features		cat:dog␊	arg=-E	arg=say join ":", qw(cat dog);
+field-pattern		bar␊green␊	arg=-F:	arg=-lane	arg=print $F[1];	stdin=foo:bar:baz␊red:green:blue␊
+field-regex		a|b|c␊␊d|e|f␊␊	arg=-F/[,:]/	arg=-an	arg=-e	arg=print "$F[0]|$F[1]|$F[2]\n";	stdin=a:b,c␊d,e:f␊
+filter		red␊infrared␊	arg=-ne	arg=print if /red/;	stdin=red␊blue␊infrared␊green␊
+in-place-backup-glob			arg=-i*-old	arg=-p	arg=-e	arg=s/x/y/g;	arg=file.txt	file:file.txt=x␊	after:file.txt=y␊	after:file.txt-old=x␊
+in-place-backup			arg=-i.bak	arg=-pe	arg=s/x/y/g;	arg=file.txt	file:file.txt=x ax␊zx␊	after:file.txt=y ay␊zy␊	after:file.txt.bak=x ax␊zx␊
+in-place-multiline			arg=-0pi	arg=-e	arg=s/START.*?END/changed/gs;	arg=file.txt	file:file.txt=left␊START␊a␊b␊END␊right␊	after:file.txt=left␊changed␊right␊
+in-place-multiple			arg=-i.orig	arg=-p	arg=-e	arg=s/x/y/g;	arg=one	arg=two	file:one=ax␊	file:two=bx␊	after:one=ay␊	after:one.orig=ax␊	after:two=by␊	after:two.orig=bx␊
+in-place-slurp			arg=-0777	arg=-pi	arg=-e	arg=s/first\nsecond/combined/;	arg=file.txt	file:file.txt=first␊second␊	after:file.txt=combined␊
+in-place			arg=-pi	arg=-e	arg=s/x/y/g;	arg=file.txt	file:file.txt=x ax␊zx␊	after:file.txt=y ay␊zy␊
+include-path	use CorpusLocal (); print CorpusLocal::value(),"\n";	42␊	arg=-I	arg=lib	file:lib/CorpusLocal.pm=package CorpusLocal; our $VERSION="1.25"; our $loads++; sub value {42} 1;␊
+inline-syntax			arg=-e	arg=my $x = ;	stderr=syntax error at -e line 1, near "= ;"␊Execution of -e aborted due to compilation errors.␊	status=255
+inline		hello␊	arg=-e	arg=print "hello\n";
+line-endings-octal		<aa>␍<>␍<bb>␍	arg=-l015	arg=-n	arg=-e	arg=print "<$_>";	stdin=aa␊␊bb
+line-endings		<aa>␊<>␊<bb>␊	arg=-l	arg=-n	arg=-e	arg=print "<$_>";	stdin=aa␊␊bb
+line-range-numeric		b␊c␊	arg=-n	arg=-e	arg=print if 2..3;	stdin=a␊b␊c␊d␊
+line-range		b␊c␊d␊	arg=-n	arg=-e	arg=print if $. == 2 .. $. == 4;	stdin=a␊b␊c␊d␊e␊
+module-default		2␊	arg=-MPOSIX	arg=-e	arg=print floor(2.9),"\n";
+module-import		1␊	arg=-MTime::HiRes=time	arg=-e	arg=printf "%d\n", time > 0;
+module-no-import		3|0␊	arg=-mPOSIX	arg=-e	arg=print POSIX::ceil(2.1),"|",defined(&ceil)?1:0,"\n";
+no-warnings	use warnings; my $x; print "value=$x\n";	value=␊	arg=-X
+null-record		[aa][bb][cc]	arg=-0	arg=-n	arg=-e	arg=chomp; print "[$_]";	stdin=aa␀bb␀cc
+paragraph		[aa␊bb][cc]	arg=-00	arg=-n	arg=-e	arg=chomp; print "[$_]";	stdin=␊␊aa␊bb␊␊␊cc␊␊
+print-loop-file	s/x/y/g;	y ay␊zy␊	arg=-p	stdin=x ax␊zx␊
+print-loop		y ay␊zy␊	arg=-p	arg=-e	arg=s/x/y/g;	stdin=x ax␊zx␊
+script-switches		1|value|residual␊	arg=-s	arg=-e	arg=print "$flag|$name|@ARGV\n";	arg=--	arg=-flag	arg=-name=value	arg=residual
+slurp		3	arg=-0777	arg=-n	arg=-e	arg=print scalar split /\n/;	stdin=aa␊bb␊cc
+syntax-check-begin	BEGIN {print "begin\n"}␊print "not executed\n";	begin␊	arg=-c	stderr=syntax-check-begin.pl syntax OK␊
+syntax-check	print "not executed\n";		arg=-c	stderr=syntax-check.pl syntax OK␊
+two-inline		8␊	arg=-e	arg=my $x=8;	arg=-e	arg=print "$x\n";
+utf8-all		ÉSS☺␊	arg=-CIO	arg=-n	arg=-e	arg=print uc($_);	stdin=éß☺␊
+utf8-input	my $x=<STDIN>; chomp $x; print length($x),"\n";	2␊	arg=-CI	stdin=é☺␊
+utf8-output	print "\x{263A}\n";	☺␊	arg=-CO
+warnings	my $x; print "value=$x\n";	value=␊	arg=-w	stderr=Use of uninitialized value $x in concatenation (.) or string at warnings.pl line 1.␊

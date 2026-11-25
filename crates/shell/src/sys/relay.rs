@@ -42,7 +42,7 @@ use std::{
 };
 
 use crate::{
-	bash::{ExitStatus, ExtProc, OsHandle, ProcEvent, Signal},
+	bash::{ExitStatus, ExtProc, OsHandle, ProcEvent, ProcUsage, Signal},
 	sys::pump::{
 		BUF, BURST, End, PollIo, orphan,
 		os::{self, OsPipe, Timer},
@@ -374,6 +374,10 @@ impl ExtProc for Relayed {
 
 	fn cont(&mut self) -> io::Result<()> {
 		self.child.cont()
+	}
+
+	fn usage(&mut self) -> Option<ProcUsage> {
+		self.child.usage()
 	}
 }
 

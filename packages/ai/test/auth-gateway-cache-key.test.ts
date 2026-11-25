@@ -23,6 +23,15 @@ describe("resolvePromptCacheKey", () => {
 		expect(resolvePromptCacheKey({ metadata: { conversation_id: "conv-1" } }, undefined)).toBe("conv-1");
 	});
 
+	it("falls back to the session inside Claude Code's metadata.user_id", () => {
+		const userId = JSON.stringify({ device_id: "device", account_uuid: "account", session_id: "cc-session" });
+		expect(resolvePromptCacheKey({ metadata: { user_id: userId } }, undefined)).toBe("cc-session");
+	});
+
+	it("does not key on an opaque metadata.user_id shared by every conversation of a user", () => {
+		expect(resolvePromptCacheKey({ metadata: { user_id: "user-123" } }, new Headers())).toBeUndefined();
+	});
+
 	it("prefers explicit metadata.prompt_cache_key over session/conversation ids", () => {
 		expect(
 			resolvePromptCacheKey(
@@ -36,9 +45,21 @@ describe("resolvePromptCacheKey", () => {
 		expect(resolvePromptCacheKey({}, new Headers({ "x-prompt-cache-key": "hdr-pck" }))).toBe("hdr-pck");
 	});
 
-	it("falls back to codex session_id / conversation_id headers", () => {
-		expect(resolvePromptCacheKey({}, new Headers({ session_id: "codex-sid" }))).toBe("codex-sid");
-		expect(resolvePromptCacheKey({}, new Headers({ conversation_id: "codex-cid" }))).toBe("codex-cid");
+	it("falls back to Claude Code and OpenCode session headers", () => {
+		expect(resolvePromptCacheKey({}, new Headers({ "x-claude-code-session-id": "cc-sid" }))).toBe("cc-sid");
+		expect(resolvePromptCacheKey({}, new Headers({ "x-session-affinity": "oc-sid" }))).toBe("oc-sid");
+	});
+
+	it("falls back to codex session and thread headers in either spelling", () => {
+		expect(resolvePromptCacheKey({}, new Headers({ "session-id": "codex-sid" }))).toBe("codex-sid");
+		expect(resolvePromptCacheKey({}, new Headers({ "thread-id": "codex-tid" }))).toBe("codex-tid");
+		expect(resolvePromptCacheKey({}, new Headers({ session_id: "legacy-sid" }))).toBe("legacy-sid");
+		expect(resolvePromptCacheKey({}, new Headers({ conversation_id: "legacy-cid" }))).toBe("legacy-cid");
+	});
+
+	it("keys on codex-rs session-id over the per-thread id sent alongside it", () => {
+		const headers = new Headers({ "thread-id": "subagent-thread", "session-id": "root-session" });
+		expect(resolvePromptCacheKey({}, headers)).toBe("root-session");
 	});
 
 	it("falls back to vendor-neutral x-session-id / x-conversation-id headers", () => {
