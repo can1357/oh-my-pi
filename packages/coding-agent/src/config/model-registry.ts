@@ -948,6 +948,9 @@ export class ModelRegistry {
 			case "reload":
 				this.#reloadStaticModels({ force: true });
 				return;
+			case "invalidateProjections":
+				this.#dropComposedCatalog();
+				return;
 			case "invalidateCommands":
 				// Local caches only: forwarding to the owner would echo the invalidation back.
 				if (change.provider === undefined) invalidateAllCommandConfigs();
@@ -997,18 +1000,19 @@ export class ModelRegistry {
 		const previous = this.#mirroredDiscovery;
 		this.#mirroredDiscovery = current;
 		let discovery: ModelRegistryDiscoveryLayer | undefined = current;
-		// A replayed change resets the mirror's layer (static reloads do), so it always gets the full layer.
-		// Otherwise only what moved crosses: re-running discovery over unchanged caches rebuilds equal
-		// states and rows, which must not cost every mirror a recompose.
-		if (changes.length === 0 && previous?.catalog && current.catalog) {
+		// Projection invalidation leaves the discovery layer intact. Other replayed
+		// changes may reset it (static reloads do), so resend the layer with those.
+		if (changes.every(change => change.kind === "invalidateProjections") && previous?.catalog && current.catalog) {
 			const catalogUnchanged =
 				sameItems(previous.catalog.metricRows, current.catalog.metricRows) &&
 				sameItems(previous.catalog.authoritativeProviders, current.catalog.authoritativeProviders) &&
 				sameItems(previous.catalog.replacedCacheProviders, current.catalog.replacedCacheProviders) &&
 				sameDiscoveredRows(previous.catalog.models, current.catalog.models);
 			const statesUnchanged = sameItems(previous.states, current.states);
-			if (catalogUnchanged && statesUnchanged) return;
-			discovery = catalogUnchanged ? { states: current.states } : current;
+			if (catalogUnchanged) {
+				if (statesUnchanged && changes.length === 0) return;
+				discovery = statesUnchanged ? undefined : { states: current.states };
+			}
 		}
 		const batch: ModelRegistryMirrorBatch = { seq: this.#mirrorSeq, changes, discovery };
 		for (const listener of this.#mirrorListeners) {
@@ -1055,12 +1059,7 @@ export class ModelRegistry {
 		this.#catalogMetrics = new CatalogMetricsIndex(catalog.metricRows);
 		this.#catalogMetricRows = catalog.metricRows;
 		const recompose = this.#hasFullSnapshot;
-		this.#models = [];
-		this.#unprojectedModels = [];
-		this.#baseModels = [];
-		this.#hasFullSnapshot = false;
-		this.#internedStaticModels.clear();
-		this.#providerLookupSnapshots.clear();
+		this.#dropComposedCatalog();
 		// Like the owner after a discovery pass: a composed catalog is rebuilt as the update
 		// lands, not on the next session's model resolution.
 		if (recompose) this.#ensureFullSnapshot();
@@ -1542,6 +1541,13 @@ export class ModelRegistry {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		const staticConfigUnchanged = currentMtime === this.#lastStaticLoadMtime;
 		if (!options?.force && staticConfigUnchanged) {
+			// The loaded inputs still hold, but whole-catalog modifiers read live OAuth
+			// credentials (a login since the last composition, a rotated account).
+			// Recompose lazily so the next lookup reruns them, as a reload would.
+			if (this.#runtimeModelModifiers.size > 0) {
+				this.#dropComposedCatalog();
+				this.#recordMirrorChange({ kind: "invalidateProjections" });
+			}
 			return;
 		}
 		// Inside a runtime-change entry point the mirror replays the reload with the change itself.
@@ -1738,20 +1744,25 @@ export class ModelRegistry {
 		this.authStorage.usage.replaceConfiguredProviders(providers);
 	}
 
-	#resetStaticComposition(): void {
-		this.#startupCatalog = undefined;
+	/** Discard the composed catalog and its lookup memos; the next reader recomposes from the loaded inputs. */
+	#dropComposedCatalog(): void {
 		this.#models = [];
 		this.#unprojectedModels = [];
 		this.#baseModels = [];
 		this.#hasFullSnapshot = false;
+		this.#internedStaticModels.clear();
+		this.#providerLookupSnapshots.clear();
+	}
+
+	#resetStaticComposition(): void {
+		this.#startupCatalog = undefined;
+		this.#dropComposedCatalog();
 		this.#cachedStandardModelsByProvider.clear();
 		this.#pendingStandardCacheProviders.clear();
 		this.#cachedAuthoritativeProviders.clear();
 		this.#replacedCacheProviders.clear();
 		this.#runtimeDiscoveredModels = [];
 		this.#runtimeAuthoritativeProviders.clear();
-		this.#internedStaticModels.clear();
-		this.#providerLookupSnapshots.clear();
 		this.#commandConfigsByProvider.clear();
 		this.#hydratedCredentialSignatures.clear();
 	}
@@ -5285,6 +5296,8 @@ type ModelRegistryMirrorChangeInput =
 	| { readonly kind: "syncSources"; readonly activeSourceIds: readonly string[] }
 	/** A static (models.yml + cache) reload outside the other changes. */
 	| { readonly kind: "reload" }
+	/** A refresh invalidated credential-dependent projections without reloading the static or discovery inputs. */
+	| { readonly kind: "invalidateProjections" }
 	/** Owner dropped cached `!command` results (one provider's, or all when `provider` is undefined). */
 	| { readonly kind: "invalidateCommands"; readonly provider: string | undefined };
 

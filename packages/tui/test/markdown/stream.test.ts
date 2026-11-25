@@ -61,6 +61,63 @@ const DOCUMENTS = [
 		"",
 		"Final words.",
 	].join("\n"),
+	[
+		"Code that wraps at narrow widths:",
+		"",
+		"```ts",
+		"const greeting = `a template literal",
+		"that spans lines`; // and a comment long enough to wrap at twenty columns",
+		"/* a block comment",
+		"   across lines */",
+		"function add(a: number, b: number): number {",
+		"\treturn a + b;",
+		"}",
+		"```",
+		"",
+		"~~~py",
+		"def f():",
+		'    return """doc',
+		'string"""',
+		"~~~~",
+		"",
+		"````md",
+		"```",
+		"a nested fence stays code",
+		"```",
+		"````",
+		"",
+		"```",
+		"bare fence content",
+		"more bare content",
+		"```",
+		"",
+		"```mermaid",
+		"graph TD",
+		"A-->B",
+		"```",
+		"",
+		"```svg",
+		'<svg width="10" height="10">',
+		'<rect width="10" height="10"/>',
+		"</svg>",
+		"```",
+		"",
+		"Done.",
+	].join("\n"),
+	["```js", "console.log('a document that opens with a fence');", "console.log(2);", "```", "", "After."].join("\n"),
+	// A fence that interrupts the paragraph before it, with no blank line between them.
+	["Here is the code, right below this line:", "```ts", "const a = 1;", "const b = 2;", "```", "Done."].join("\n"),
+	[
+		"A reply that ends inside its code:",
+		"",
+		"```rust",
+		"fn main() {",
+		'    let s = "a string long enough to wrap at narrow widths";',
+		'    println!("{}", s);',
+		"}",
+	].join("\n"),
+	// A bare fence after prose, then a heading and a table: the finished document drops it as an orphan closer.
+	["Report follows.", "", "```", "## Summary", "", "| a | b |", "|---|---|", "| 1 | 2 |"].join("\n"),
 ];
 
 describe("stable prefix", () => {
@@ -94,6 +151,33 @@ describe("stable prefix", () => {
 
 	it("does not settle a paragraph a following line could still turn into a heading", () => {
 		expect(renderMarkdownFrame("Title\n=", 40, stream).stable).toBe(0);
+	});
+
+	it("settles the finished lines of a fenced code block being written", () => {
+		const frame = renderMarkdownFrame("Intro.\n\n```ts\nconst a = 1;\nconst b = 2;\nconst c", 40, stream);
+		expect(plainRows(frame.rows)).toEqual([
+			" Intro.",
+			"",
+			" ```ts",
+			"   const a = 1;",
+			"   const b = 2;",
+			"   const c",
+			" ```",
+		]);
+		expect(frame.stable).toBe(5);
+		expect(renderMarkdownFrame("```ts\nconst a = 1;\nconst b", 40, stream).stable).toBe(2);
+		expect(renderMarkdownFrame("```ts", 40, stream).stable).toBe(0);
+		// A fence that interrupts a paragraph ends it: the paragraph and the blank row after it settle too.
+		expect(renderMarkdownFrame("Intro.\n```ts\nconst a = 1;\nconst b", 40, stream).stable).toBe(4);
+		expect(renderMarkdownFrame("Intro.\n```ts", 40, stream).stable).toBe(0);
+	});
+
+	it("does not settle a fence whose finished form may draw differently", () => {
+		for (const opener of ["```", "```mermaid", "```svg"]) {
+			expect(renderMarkdownFrame(`${opener}\na\nb\nc`, 40, { ...stream, mermaid: true }).stable).toBe(0);
+		}
+		// The finished document may drop a bare fence and join the paragraph with the text after it.
+		expect(renderMarkdownFrame("Report follows.\n```\nmore of the report", 40, stream).stable).toBe(0);
 	});
 
 	it("counts the top padding as stable and nothing without streaming", () => {
