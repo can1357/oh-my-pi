@@ -71,6 +71,13 @@ export interface VocalizerRegistry extends ModelBrowserRegistry {
 	readonly authStorage: { readonly credentials: { readonly generation: number } };
 }
 
+/** Permanently failed cloud models and the configuration they failed under. */
+interface CloudExclusions {
+	readonly catalog: object | undefined;
+	readonly credentials: number;
+	readonly labels: Set<string>;
+}
+
 export interface VocalizerModelSource {
 	settings: Settings;
 	registry: VocalizerRegistry;
@@ -151,14 +158,11 @@ export class Vocalizer {
 	/** Live per-session settings and registry used to resolve the speech role. */
 	#modelSource: VocalizerModelSource | null = null;
 	/**
-	 * Cloud speech models (`provider/id`) that failed permanently in this session.
-	 * Reset with the model source, and when the registry's catalog or credentials
-	 * change after they were recorded.
+	 * Cloud speech models (`provider/id`) that failed permanently in this session,
+	 * with the catalog revision and credential generation they failed under.
+	 * Reset with the model source, and when either of those changes.
 	 */
-	#cloudExcluded = new Set<string>();
-	/** Catalog revision and credential generation {@link #cloudExcluded} was recorded against. */
-	#excludedCatalog: object | undefined;
-	#excludedCredentials: number | undefined;
+	#cloudExclusions: CloudExclusions | null = null;
 	/** Fires when the delta stream goes quiet mid-sentence; speaks the partial. */
 	#idleTimer: NodeJS.Timeout | null = null;
 	/** Abort controllers of every not-yet-finished utterance; all aborted on {@link clear}. */
@@ -189,26 +193,23 @@ export class Vocalizer {
 	setModelSource(source: VocalizerModelSource | null): void {
 		this.clear();
 		this.#modelSource = source;
-		this.#cloudExcluded = new Set();
-		this.#excludedCatalog = undefined;
-		this.#excludedCredentials = undefined;
+		this.#cloudExclusions = null;
 	}
 
 	/**
-	 * Permanent-failure exclusions still valid for `registry`: a catalog reload
-	 * (fixed `models.yml`) or a credential change (login, new key) can repair a
-	 * model, so either one starts a fresh set. Checked on every lookup and
-	 * insert, so a change during an utterance is seen by the next one.
+	 * Permanent-failure exclusions for the registry's current configuration: a
+	 * catalog reload (fixed `models.yml`) or a credential change (login, new key)
+	 * can repair a model, so either one starts a fresh set. The returned object is
+	 * also the epoch token a request records before it is sent.
 	 */
-	#validExclusions(registry: VocalizerRegistry): Set<string> {
+	#currentExclusions(registry: VocalizerRegistry): CloudExclusions {
 		const catalog = registry.catalogRevision;
 		const credentials = registry.authStorage.credentials.generation;
-		if (catalog !== this.#excludedCatalog || credentials !== this.#excludedCredentials) {
-			if (this.#cloudExcluded.size > 0) this.#cloudExcluded = new Set();
-			this.#excludedCatalog = catalog;
-			this.#excludedCredentials = credentials;
-		}
-		return this.#cloudExcluded;
+		const current = this.#cloudExclusions;
+		if (current && current.catalog === catalog && current.credentials === credentials) return current;
+		const next: CloudExclusions = { catalog, credentials, labels: new Set() };
+		this.#cloudExclusions = next;
+		return next;
 	}
 
 	/** Stop any active local synthesis when the session provider no longer permits it. */
@@ -472,9 +473,12 @@ export class Vocalizer {
 						localVoice: voice,
 						localSpeed: speed,
 						excluded: {
-							has: label => this.#validExclusions(source.registry).has(label),
-							add: label => {
-								this.#validExclusions(source.registry).add(label);
+							has: label => this.#currentExclusions(source.registry).labels.has(label),
+							epoch: () => this.#currentExclusions(source.registry),
+							add: (label, epoch) => {
+								// A failure sent under an older configuration says nothing about the repaired one.
+								const current = this.#currentExclusions(source.registry);
+								if (current === epoch) current.labels.add(label);
 							},
 						},
 						signal: abort.signal,

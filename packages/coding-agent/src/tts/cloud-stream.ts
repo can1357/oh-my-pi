@@ -41,7 +41,10 @@ export interface CloudSpeechStreamOptions {
 /** Speech models skipped after a permanent failure, keyed by `provider/id`. */
 export interface SpeechModelExclusions {
 	has(label: string): boolean;
-	add(label: string): void;
+	/** Token for the configuration (catalog and credentials) a request is sent under. */
+	epoch(): object;
+	/** Exclude `label` unless the configuration changed since `epoch`, which may have repaired it. */
+	add(label: string, epoch: object): void;
 }
 
 /** Thrown when a candidate answered with audio the vocalizer cannot decode. */
@@ -82,6 +85,7 @@ export function createCloudSpeechStream(options: CloudSpeechStreamOptions): TtsS
 			const label = `${model.provider}/${model.id}`;
 			if (excluded.has(label)) continue;
 			attempted = true;
+			const epoch = excluded.epoch();
 			try {
 				if (model.api === "local-inference") {
 					const audio = await ttsClient.synthesize(model.id, text, {
@@ -106,7 +110,7 @@ export function createCloudSpeechStream(options: CloudSpeechStreamOptions): TtsS
 				if (signal.aborted) return null;
 				const message = error instanceof Error ? error.message : String(error);
 				if (model.api !== "local-inference" && isPermanentSpeechFailure(error)) {
-					excluded.add(label);
+					excluded.add(label, epoch);
 					logger.warn("vocalizer: speech model failed permanently; skipping it for this session", {
 						model: label,
 						error: message,

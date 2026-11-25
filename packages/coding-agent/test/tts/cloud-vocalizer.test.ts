@@ -321,6 +321,38 @@ describe("cloud speech vocalizer", () => {
 		expect(recording.written.length).toBe(1);
 	});
 
+	test("does not exclude a model for a failure sent before credentials changed", async () => {
+		const settings = Settings.isolated({
+			"speech.enabled": true,
+			"speech.cloud": true,
+			modelRoles: { speech: "gw/eleven" },
+			"retry.fallbackChains": { speech: [] },
+		});
+		const registry = gatewayRegistry(settings);
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const requests: string[] = [];
+		spyOn(speech, "synthesizeSpeech").mockImplementation(async model => {
+			requests.push(model.id);
+			if (requests.length === 1) {
+				// The user logs in while the stale request is still in flight.
+				await authStorage.credentials.set("gw", [{ type: "api_key", key: "gw-fixed-key" }]);
+				throw new ProviderHttpError("gw/eleven speech API failed (401)", 401);
+			}
+			return wavResult([0.25], 24_000);
+		});
+		const recording = recordingPlayer();
+		const vocalizer = new Vocalizer(() => recording.player);
+		vocalizer.setModelSource({ settings, registry });
+
+		vocalizer.speak("Hello there.");
+		await vocalizer.idle();
+		vocalizer.speak("Logged in now.");
+		await vocalizer.idle();
+
+		expect(requests).toEqual(["eleven", "eleven"]);
+		expect(recording.written.length).toBe(1);
+	});
+
 	test("lifts a permanent exclusion when the model catalog is reloaded", async () => {
 		const settings = Settings.isolated({
 			"speech.enabled": true,
