@@ -1030,6 +1030,62 @@ pub(super) fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
 	line.push('"');
 }
 
+/// The longest text a number control takes. Every value it can spell lies
+/// inside `f32`'s normal range, below 1e32 and, when nonzero, at least 1e-30
+/// (`f32` holds 1.2e-38 to 3.4e38), so a control that keeps a `Float` neither
+/// overflows nor underflows on it; and it still spells any `i64` and more
+/// significant digits than an `f64` keeps.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const NUMBER_TEXT_MAX: usize = 32;
+
+/// Whether `text` is plain decimal: an optional sign, digits, and optionally a
+/// point and digits, at most [`NUMBER_TEXT_MAX`] characters. `Some(true)` when
+/// it names a whole number: no fraction, or a fraction of zeros.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn plain_decimal(text: &str) -> Option<bool> {
+	if text.len() > NUMBER_TEXT_MAX {
+		return None;
+	}
+	let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+	let (integer, fraction) = unsigned
+		.split_once('.')
+		.map_or((unsigned, None), |(integer, fraction)| (integer, Some(fraction)));
+	let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+	(digits(integer) && fraction.is_none_or(digits))
+		.then(|| fraction.is_none_or(|fraction| fraction.bytes().all(|byte| byte == b'0')))
+}
+
+/// Plain decimal `text` reduced to what decides its value: whether it is
+/// negative, its integer digits without leading zeros, and its fraction
+/// without trailing zeros. Zero is never negative.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn decimal_value(text: &str) -> (bool, &str, &str) {
+	let (negative, unsigned) = match text.strip_prefix('-') {
+		Some(unsigned) => (true, unsigned),
+		None => (false, text.strip_prefix('+').unwrap_or(text)),
+	};
+	let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+	let integer = integer.trim_start_matches('0');
+	let fraction = fraction.trim_end_matches('0');
+	(negative && !(integer.is_empty() && fraction.is_empty()), integer, fraction)
+}
+
+/// Whether a control that reads back `read` holds the number `target`. It
+/// may be within a few `f64` ulps of it, for an app's own arithmetic, which
+/// never spans two decimals of 15 significant digits, but never a quarter
+/// away, so a whole number apart never passes this way; and with no absolute
+/// floor, so an unchanged 0 never passes for 5e-8. Or it may be `target`
+/// rounded to `f32`, which is what a control keeping its value in a `Float`
+/// reads back (0.3 as 0.30000001192092896), where that `f32` still reads as
+/// `target`: a clamp or step that lands on a coarser `f32` (100 for
+/// 100.000001, 16777216 for 16777217, 0 for 1e-50) does not pass for it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn real_reached(target: f64, read: f64) -> bool {
+	let rounded = target as f32;
+	(read - target).abs() <= (target.abs() * 4.0 * f64::EPSILON).min(0.25)
+		|| (read == f64::from(rounded) && rounded.to_string().parse() == Ok(target))
+}
+
 /// `14230` as `14,230`.
 fn grouped(count: usize) -> String {
 	let digits = count.to_string();

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows `setValue` to set a WPF slider to a number in its range (at most 15 significant digits) or a combo box/list to the exact name of an exposed item, then read it back. The app must already be in front; these writes are refused behind other windows ([#20178](https://github.com/can1357/oh-my-pi/pull/20178) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added
