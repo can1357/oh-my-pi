@@ -1007,6 +1007,54 @@ describe("native pacing and transport", () => {
 		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "ab" });
 	});
 
+	it("reopens a lost surface and redraws it, ignoring late errors for frames from the old surface", async () => {
+		const text = signal("before");
+		const h = await mount(() => ({ main: <text>{text}</text> }));
+		h.tern.docs.delete("s:t");
+		text.set("after");
+		h.settle();
+		const error = { ev: "error", sf: "s:t", s: h.tern.frames.at(-1)!.s, msg: "unknown surface s:t" } as const;
+		h.tern.event(error);
+		h.settle();
+		const recovered = h.tern.doc("s:t");
+		expect(recovered.shape("main")).toEqual([{ k: "text", p: { text: "after" } }]);
+		h.tern.event(error);
+		text.set("later");
+		h.settle();
+		expect(recovered.shape("main")).toEqual([{ k: "text", p: { text: "later" } }]);
+	});
+
+	it("stops sending after a rejected reopen, even across credit resets, until a new surface is requested", async () => {
+		const text = signal("before");
+		const h = await mount(() => ({ main: <text>{text}</text> }), { credits: 1, autoAck: false });
+		h.tern.ackAll();
+		h.settle();
+		h.tern.docs.delete("s:t");
+		text.set("lost");
+		h.settle();
+		const rejected = h.tern.frames.at(-1)!.s;
+		h.tern.event({ ev: "error", sf: "s:t", s: rejected, msg: "unknown surface s:t" });
+		h.settle();
+		const retry = h.tern.frames.at(-1)!.s;
+		expect(retry).toBeGreaterThan(rejected);
+
+		h.tern.docs.delete("s:t");
+		h.tern.event({ ev: "ack", sf: "s:t", s: rejected });
+		h.tern.event({ ev: "error", sf: "s:t", s: retry, msg: "unknown surface s:t" });
+		h.settle();
+		for (const value of ["while blocked", "latest"]) {
+			text.set(value);
+			h.clock.advance(5000);
+			h.settle();
+		}
+		expect(h.tern.frames.at(-1)!.s).toBe(retry);
+		expect(h.tern.docs.has("s:t")).toBe(false);
+
+		h.tern.event({ ev: "gone", ids: ["s:t"] });
+		h.settle();
+		expect(regions(h, "main")).toEqual([{ k: "text", p: { text: "latest" } }]);
+	});
+
 	it("redraws a large replacement transcript in UTF-8-bounded frames", async () => {
 		const replace = signal(false);
 		const block = "界".repeat(3 * 1024 * 1024);

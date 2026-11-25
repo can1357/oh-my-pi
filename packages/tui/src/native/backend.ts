@@ -4,9 +4,9 @@
  *
  * Lifecycle: {@link NativeBackend.start} opens the surface (`o`) on a
  * negotiated {@link TspConnection}, adopting it when this backend opened it
- * before and the terminal lists `adopt` (a `gone` for the surface reopens it
- * fresh and describes everything again); {@link NativeBackend.stop} sends
- * any pending change and closes it (`x`).
+ * before and the terminal lists `adopt`. A `gone` or the first unknown-surface
+ * error reopens it fresh; another rejection before an ack pauses frames until
+ * `gone` or restart. {@link NativeBackend.stop} closes a known surface (`x`).
  *
  * Frames: large reconciliations go out as ordered, byte-bounded batches.
  * Each batch spends a credit and gets its own sequence number. Changes made
@@ -155,6 +155,8 @@ export class NativeBackend {
 	#reconciler: Reconciler | undefined;
 	#running = false;
 	#opened = false;
+	#surfaceState: "open" | "reopening" | "lost" = "open";
+	#openedAfter = 0;
 	#seq = 0;
 	#pending: PendingOps | undefined;
 	#unacked: { readonly s: number; readonly sentAt: number }[] = [];
@@ -171,7 +173,7 @@ export class NativeBackend {
 		this.#framePrefix = `{"sf":${JSON.stringify(this.id)},"s":`;
 	}
 
-	/** Whether the surface is open and rendering. */
+	/** Whether the backend is started, including while waiting for surface recovery. */
 	get running(): boolean {
 		return this.#running;
 	}
@@ -205,7 +207,7 @@ export class NativeBackend {
 			() => this.requestFrame(),
 		);
 		this.#running = true;
-		this.#unacked = [];
+		this.#surfaceState = "open";
 		this.#unsubscribe.push(
 			connection.onEvent(event => this.#onEvent(event)),
 			connection.driver.onInput(event => {
@@ -229,7 +231,7 @@ export class NativeBackend {
 			if (keep) this.#send(true);
 		} finally {
 			try {
-				this.#connection!.sendJson("x", { id: this.id, keep });
+				if (this.#opened) this.#connection!.sendJson("x", { id: this.id, keep });
 			} finally {
 				this.#halt();
 			}
@@ -250,7 +252,7 @@ export class NativeBackend {
 
 	/** Schedule a frame. */
 	requestFrame(): void {
-		if (!this.#running || this.#cancelFrame) return;
+		if (!this.#running || this.#surfaceState === "lost" || this.#cancelFrame) return;
 		this.#cancelFrame = this.#clock!.setTimeout(() => {
 			this.#cancelFrame = undefined;
 			this.flush();
@@ -267,12 +269,19 @@ export class NativeBackend {
 
 	#halt(): void {
 		this.#running = false;
+		this.#clearFrames();
+		for (const off of this.#unsubscribe.splice(0)) off();
+	}
+
+	#clearFrames(): void {
 		this.#pending = undefined;
 		this.#cancelFrame?.();
 		this.#cancelFrame = undefined;
 		this.#cancelStall?.();
 		this.#cancelStall = undefined;
-		for (const off of this.#unsubscribe.splice(0)) off();
+		this.#unacked = [];
+		this.#stalledSince = undefined;
+		this.#stallResets = 0;
 	}
 
 	#open(adopt: boolean): void {
@@ -283,16 +292,30 @@ export class NativeBackend {
 			...(this.#options.role === undefined ? {} : { role: this.#options.role }),
 			...(adopt ? { adopt: true } : {}),
 		};
-		this.#connection!.sendJson("o", open);
+		this.#openedAfter = this.#seq;
 		this.#opened = true;
+		this.#connection!.sendJson("o", open);
+	}
+
+	#reopen(): void {
+		this.#clearFrames();
+		this.#reconciler!.reset();
+		this.#open(false);
+		this.flush();
+	}
+
+	#isCurrentFrame(s: number): boolean {
+		return this.#openedAfter < s && s <= this.#seq;
 	}
 
 	#send(force: boolean): boolean {
+		if (this.#surfaceState === "lost") return false;
 		const reconciler = this.#reconciler!;
 		const active = this.#options.active?.() !== false;
 		if ((!active && !force) || (!this.#pending && (!active || !reconciler.dirty))) return false;
 		if (!force && !this.#hasCredit()) return false;
 		const connection = this.#connection!;
+		const openedAfter = this.#openedAfter;
 		let sent = false;
 		let reconciled = false;
 		do {
@@ -302,10 +325,16 @@ export class NativeBackend {
 				if (ops.length === 0) break;
 				this.#pending = { ops, start: 0, overflow: undefined };
 				connection.ensureBlobs(blobs);
+				if (!this.#pending) break; // Input on the write stack can invalidate the batch.
 			}
 			this.#writeFrame(connection, this.#pending);
 			sent = true;
-		} while ((this.#pending || (force && active && !reconciled && reconciler.dirty)) && (force || this.#hasCredit()));
+		} while (
+			this.#opened &&
+			this.#openedAfter === openedAfter &&
+			(this.#pending || (force && active && !reconciled && reconciler.dirty)) &&
+			(force || this.#hasCredit())
+		);
 		return sent;
 	}
 
@@ -405,7 +434,8 @@ export class NativeBackend {
 	#onEvent(event: TspEvent): void {
 		switch (event.ev) {
 			case "ack": {
-				if (event.sf !== this.id) return;
+				if (event.sf !== this.id || !this.#isCurrentFrame(event.s) || this.#surfaceState === "lost") return;
+				this.#surfaceState = "open";
 				this.#unacked = this.#unacked.filter(frame => frame.s > event.s);
 				if (this.#stalledSince !== undefined) {
 					logger.debug("TSP: terminal acknowledges frames again", {
@@ -427,12 +457,24 @@ export class NativeBackend {
 					if (event.sf === this.id) this.#forget(event.ids);
 					return;
 				}
-				// The terminal no longer has the surface: open it fresh and describe everything again.
-				this.#reconciler!.reset();
-				this.#pending = undefined;
-				this.#unacked = [];
-				this.#open(false);
-				this.flush();
+				this.#surfaceState = "open";
+				this.#reopen();
+				return;
+			case "error":
+				if (
+					(event.sf !== undefined && event.sf !== this.id) ||
+					event.msg !== `unknown surface ${this.id}` ||
+					(event.s !== undefined && !this.#isCurrentFrame(event.s))
+				)
+					return;
+				if (this.#surfaceState === "open") {
+					this.#surfaceState = "reopening";
+					this.#reopen();
+				} else if (this.#surfaceState === "reopening") {
+					this.#surfaceState = "lost";
+					this.#opened = false;
+					this.#clearFrames();
+				}
 				return;
 			case "resize":
 			case "theme":
@@ -440,7 +482,6 @@ export class NativeBackend {
 			case "features":
 			case "visible":
 			case "checkout":
-			case "error":
 				return;
 		}
 		if (event.sf !== this.id) return;
