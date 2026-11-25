@@ -92,6 +92,11 @@
       "import": "./native/vcs.js",
       "default": "./native/vcs.js"
     },
+    "./file-poll": {
+      "types": "./native/file-poll.d.ts",
+      "import": "./native/file-poll.js",
+      "default": "./native/file-poll.js"
+    },
     "./sqlite-locks": {
       "types": "./native/sqlite-locks.d.ts",
       "import": "./native/sqlite-locks.js",

@@ -6,6 +6,10 @@
 
 - Added `@oh-my-pi/pi-tui`, the terminal UI that replaces `@oh-my-pi/pi-tui`: one tree of Tern Surface Protocol nodes drawn natively by Tern and as terminal rows elsewhere, with signals and a compiler-free JSX runtime, role-based painters and widgets, a terminal driver (input, capabilities, multiplexers, images, resize policies, notifications), Markdown and text utilities, themes, and test utilities (`testing/terminal`, `testing/cells`)
 
+### Changed
+
+- Custom theme files are polled every 500ms instead of watched, so live reload keeps working after editors save by renaming a new file over the theme.
+
 ### Fixed
 
 - In Tern, a key that opens a page no longer reaches that page too: Esc Esc opens the rewind view again instead of flashing it shut.
