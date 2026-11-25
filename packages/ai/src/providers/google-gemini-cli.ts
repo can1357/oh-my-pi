@@ -528,7 +528,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			const parsedCredentials = parseGeminiCliCredentials(apiKeyRaw);
 			const { accessToken, projectId } = parsedCredentials;
 			// AuthStorage already refreshed credentials before threading them
-			// here (see {@link OAUTH_REFRESH_SKEW_MS}). If the credential lands
+			// here (see {@link oauthRefreshSkewMs}). If the credential lands
 			// expired we bail rather than POSTing a stale token; the next call
 			// — driven by AuthStorage's invalidate+retry path — will carry a
 			// fresh credential.

@@ -41,6 +41,7 @@ import type {
 	KeysApi,
 	LimitsApi,
 	ListResetCreditsOptions,
+	MarkServiceTierUnavailableOptions,
 	MarkUsageLimitOptions,
 	ModelUsageHealth,
 	ModelUsageHealthOptions,
@@ -62,6 +63,7 @@ import type {
 	ResetsApi,
 	ResolvedApiKey,
 	RotateCredentialOptions,
+	ServiceTier,
 	SessionRestrictionLease,
 	SessionsApi,
 	StoredAuthCredential,
@@ -578,6 +580,12 @@ class RemoteLimits implements LimitsApi {
 		options?: RotateCredentialOptions,
 	): Promise<CredentialRotation> {
 		return this.#remote.call("limits.rotate", provider, sessionId, options);
+	}
+	markServiceTierUnavailable(provider: string, options: MarkServiceTierUnavailableOptions): Promise<boolean> {
+		return this.#remote.call("limits.markServiceTierUnavailable", provider, options);
+	}
+	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void> {
+		return this.#remote.call("limits.rearmServiceTier", provider, serviceTier, modelId);
 	}
 	invalidateMatching(
 		provider: string,

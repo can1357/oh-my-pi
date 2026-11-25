@@ -1,9 +1,8 @@
 /**
- * Large-paste menu: a marker-sized paste into the composer routes through
- * `InputController.handleLargePaste`; once it reaches the configured `paste.largeMenuThreshold`
- * line count the menu offers to attach the text as an `<attachment>` block, save it to a
- * `local://` file, or paste it inline. Below the threshold (or when disabled) the paste is staged
- * as a text-attachment chip.
+ * Large-paste menu: once a paste big enough to collapse reaches the configured
+ * `paste.largeMenuThreshold` line count, the menu offers to attach the text as an `<attachment>`
+ * block, save it to a `local://` file, or paste it inline. Below the threshold (or when disabled)
+ * the paste is staged as a text-attachment chip.
  */
 
 import { afterEach, describe, expect, it, vi } from "bun:test";
@@ -71,29 +70,29 @@ afterEach(() => {
 });
 
 describe("InputController.handleLargePaste gate", () => {
-	it("declines and skips the menu below the threshold", () => {
+	it("stages a chip and skips the menu below the threshold", () => {
 		const { controller, spies } = createContext({ threshold: 100 });
 		const menu = vi.spyOn(controller, "presentLargePasteMenu").mockResolvedValue();
 
-		expect(controller.handleLargePaste("x", 50)).toBe(true);
+		controller.handleLargePaste("x", 50);
 		expect(menu).not.toHaveBeenCalled();
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("x");
 	});
 
-	it("declines when disabled (threshold 0), even for a huge paste", () => {
+	it("stages a chip when disabled (threshold 0), even for a huge paste", () => {
 		const { controller, spies } = createContext({ threshold: 0 });
 		const menu = vi.spyOn(controller, "presentLargePasteMenu").mockResolvedValue();
 
-		expect(controller.handleLargePaste("x", 5000)).toBe(true);
+		controller.handleLargePaste("x", 5000);
 		expect(menu).not.toHaveBeenCalled();
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("x");
 	});
 
-	it("intercepts and presents the menu at the threshold", () => {
+	it("presents the menu at the threshold", () => {
 		const { controller, spies } = createContext({ threshold: 100 });
 		const menu = vi.spyOn(controller, "presentLargePasteMenu").mockResolvedValue();
 
-		expect(controller.handleLargePaste("payload", 100)).toBe(true);
+		controller.handleLargePaste("payload", 100);
 		expect(menu).toHaveBeenCalledWith("payload", 100);
 		expect(spies.insertTextAttachment).not.toHaveBeenCalled();
 	});
@@ -104,7 +103,7 @@ describe("InputController.handleLargePaste gate", () => {
 		wireInput(ctx, controller, composer);
 		const payload = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join("\n");
 
-		expect(input.paste(ctx, payload)).toBe("intercepted");
+		input.paste(ctx, payload);
 		expect(menu).not.toHaveBeenCalled();
 		await Promise.resolve();
 
@@ -147,7 +146,7 @@ describe("InputController.handleLargePaste gate", () => {
 });
 
 describe("InputController.presentLargePasteMenu actions", () => {
-	it("wraps the paste in attachment XML collapsed to a marker", async () => {
+	it("wraps the paste in attachment XML collapsed to a chip", async () => {
 		const { controller, spies } = createContext({ choice: "Attach as a wrapped block" });
 
 		await controller.presentLargePasteMenu("payload", 1);

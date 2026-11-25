@@ -56,8 +56,18 @@ interface WaitPaint {
 	readonly theme: Theme;
 	readonly width: number;
 	readonly expanded: boolean;
+	/** A partial result's elapsed clocks keep time even with animations disabled. */
+	readonly partial: boolean;
 	/** Spinners turn (the result still streams). */
 	readonly live: boolean;
+}
+
+function duration(paint: WaitPaint, job: JobSnapshot): string {
+	return formatDuration(
+		paint.partial && job.status === "running" && job.startedAtMs !== undefined
+			? Math.max(0, paint.cx.now() - job.startedAtMs)
+			: job.durationMs,
+	);
 }
 
 /** A job's status glyph: a running one spins while live, else `⟳`. */
@@ -136,19 +146,20 @@ function jobItem(paint: WaitPaint, job: JobSnapshot, term: WaitTermJobs, rowWidt
 		running && job.completionPercent !== undefined
 			? `${sep(theme)}${theme.fg("accent", `${job.completionPercent}%`)}`
 			: "";
-	const duration = `${completion}${sep(theme)}${theme.fg("dim", formatDuration(job.durationMs))}`;
+	const age = duration(paint, job);
+	const durationText = `${completion}${sep(theme)}${theme.fg("dim", age)}`;
 	const prefix = `${icon} ${type} `;
 	const continuation = Math.max(0, rowWidth - 2);
 	if (job.widget?.state === "live") {
 		const meta = [
 			running && job.completionPercent !== undefined ? theme.fg("accent", `${job.completionPercent}%`) : undefined,
-			theme.fg("dim", formatDuration(job.durationMs)),
+			theme.fg("dim", age),
 		]
 			.filter(Boolean)
 			.join(" ");
 		rows.push(...jobTileRows(theme, jobTile(job, live), rowWidth, { lead: prefix, meta, full: expanded }));
 	} else {
-		const id = truncate(oneLine(job.id), Math.max(0, rowWidth - visibleWidth(`${icon} ${type} ${duration}`)));
+		const id = truncate(oneLine(job.id), Math.max(0, rowWidth - visibleWidth(`${icon} ${type} ${durationText}`)));
 		const label = rowLabel(job);
 		const labelLines = (label || "(no label)").split(/\r?\n/);
 		const maxLines = expanded ? LABEL_LINES_EXPANDED : LABEL_LINES_COLLAPSED;
@@ -167,14 +178,14 @@ function jobItem(paint: WaitPaint, job: JobSnapshot, term: WaitTermJobs, rowWidt
 			? styledModelBadge(
 					theme,
 					model,
-					Math.min(FEED_MODEL_BADGE_WIDTH, rowWidth - visibleWidth(`${prefix}${id}${duration}`) - 1),
+					Math.min(FEED_MODEL_BADGE_WIDTH, rowWidth - visibleWidth(`${prefix}${id}${durationText}`) - 1),
 				)
 			: "";
 		let row = `${prefix}${modelBadge ? `${modelBadge} ` : ""}${head}`;
 		const distinct = label.trim() !== job.id;
-		const inline = distinct && visibleWidth(`${row} ${shown[0] ?? ""}${duration}`) <= rowWidth;
+		const inline = distinct && visibleWidth(`${row} ${shown[0] ?? ""}${durationText}`) <= rowWidth;
 		if (inline) row += ` ${theme.fg("toolOutput", shown[0] ?? "")}`;
-		row += duration;
+		row += durationText;
 		rows.push(truncate(row, rowWidth, ""));
 		for (let i = distinct && !inline ? 0 : 1; i < shown.length; i++)
 			rows.push(`  ${theme.fg("toolOutput", truncate(shown[i]!, continuation))}`);
@@ -263,7 +274,7 @@ function compactRows(paint: WaitPaint, term: WaitTermJobs, sorted: readonly JobS
 	for (const job of shownWidgets) {
 		const meta = [
 			job.completionPercent !== undefined ? theme.fg("accent", `${job.completionPercent}%`) : undefined,
-			theme.fg("dim", formatDuration(job.durationMs)),
+			theme.fg("dim", duration(paint, job)),
 		]
 			.filter(Boolean)
 			.join(" ");
@@ -337,6 +348,7 @@ function paintWait(node: UiNode, cx: PaintContext): Block {
 		theme,
 		width,
 		expanded: term.expanded === true,
+		partial: term.spinning === true,
 		live: term.spinning === true && !cx.reduceMotion,
 	};
 	return { rows: jobsRows(paint, wait) };

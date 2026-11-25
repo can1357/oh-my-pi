@@ -2,7 +2,7 @@
 /**
  * History-collapse points: compaction, handoff and branch summaries. Each is
  * a collapsible `section` headed by its label with the summary under it; a
- * text terminal draws a slim labeled rule (`─── 📷 compacted · ⌃O ───`) and,
+ * text terminal draws a slim labeled rule with the expansion hint and,
  * expanded, the summary in a filled box below it.
  *
  * Terminal look: `omp.compaction` / `omp.handoff` / `omp.branch`

@@ -18,7 +18,7 @@ import type { TspCardStatus, TspTone } from "@oh-my-pi/pi-wire";
 import type { MinimizedMeta, TruncationMeta } from "../../tools/output-meta-format";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice } from "../../tools/output-meta-format";
 import { formatMinimized, RunBox, RunFoot, RunInput, RunOutput, type RunState } from "../tools/run";
-import { imageBlob } from "./messages/image";
+import { imageBlob, inlineImageTerm } from "./messages/image";
 import { imagePlaceholder, imageSize } from "./tool-block";
 import { ptyKeyBytes } from "../overlays/panels/pty-console";
 import { PtyReplay, styleReplayedRow } from "./pty-replay";
@@ -331,6 +331,7 @@ export function ExecRunBlock(props: { readonly run: ExecRun }): JSXNode {
 						images().show ? (
 							<image
 								key={`img${index}`}
+								term={inlineImageTerm()}
 								blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
 								alt={image.mimeType}
 								w={imageSize(image.data)?.w}

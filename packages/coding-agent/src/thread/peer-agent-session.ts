@@ -15,6 +15,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { IrcMessage } from "../irc/irc-types";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type {
+	AgentModelChange,
+	AgentModelSelectionState,
 	AgentSessionAdvisorOverview,
 	AgentSessionHandle,
 	AgentSessionLoopHandle,
@@ -223,6 +225,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 
 	abort(options?: SessionAbortOptions): Promise<void> {
 		return mainBridge().remote.call("abort", this, options);
+	}
+
+	applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState> {
+		return mainBridge().remote.call("applyAgentModelChange", this, change);
 	}
 
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void> {
