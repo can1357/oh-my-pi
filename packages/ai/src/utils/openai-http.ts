@@ -198,9 +198,12 @@ export async function readOpenAIErrorEnvelope(
 	const { error, message } = bodyJson;
 	const topMessage = typeof message === "string" && message.length > 0 ? message : undefined;
 	if (isRecord(error)) {
-		// A nested envelope with an empty message says nothing; a top-level
-		// message, when there is one, is the next best text.
-		return error.message === "" ? { detail: topMessage ?? "", code: parsed.code } : parsed;
+		// A nested envelope without usable text: a top-level message is the next
+		// best thing. Failing that, an empty message reports no detail and a
+		// missing one keeps the raw body.
+		if (typeof error.message === "string" && error.message.length > 0) return parsed;
+		if (topMessage !== undefined) return { detail: topMessage, code: parsed.code };
+		return error.message === "" ? { detail: "", code: parsed.code } : parsed;
 	}
 	// Flat shapes. `parseEnvelope` drops their machine code, which credential
 	// rotation reads (`insufficient_quota`), so carry it through.

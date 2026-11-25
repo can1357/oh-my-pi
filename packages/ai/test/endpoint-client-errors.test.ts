@@ -71,10 +71,16 @@ describe("endpoint client errors", () => {
 		await expect(poll).rejects.toThrow("video API error (400): Bad Request");
 	});
 
-	it("a usable top-level message wins over an empty error", async () => {
+	it("a usable top-level message wins over an error that carries no text", async () => {
 		await expect(embedWith('{"error":"","message":"The input file is unsupported"}')).rejects.toThrow(
 			"embeddings API error (400): The input file is unsupported",
 		);
+		await expect(
+			embedWith('{"error":{"code":"bad_input","message":null},"message":"The input file is unsupported"}'),
+		).rejects.toMatchObject({
+			message: "openrouter/text-embedding-3-small embeddings API error (400): The input file is unsupported",
+			code: "bad_input",
+		});
 	});
 
 	it("a flat quota rejection keeps its code, so the request moves to a sibling credential", async () => {
