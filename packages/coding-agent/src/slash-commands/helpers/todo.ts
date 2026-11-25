@@ -1,4 +1,4 @@
-import type { TodoPhase } from "../../tools/details/todo";
+import type { TodoItem, TodoPhase } from "../../tools/details/todo";
 import {
 	applyOpsToPhases,
 	getLatestTodoPhasesFromEntries,
@@ -12,7 +12,7 @@ import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
 type TodoMutationVerb = "done" | "drop" | "rm";
 
 interface TodoTaskMatch {
-	task: { content: string; status: string };
+	task: TodoItem;
 	phase: TodoPhase;
 }
 
