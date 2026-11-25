@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows `computer` `press()` on a WPF button or check box behind other windows being refused: it now requests the control's default action without bringing the window forward; a check box changes state without running its `Click` handler ([#20179](https://github.com/can1357/oh-my-pi/pull/20179) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

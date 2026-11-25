@@ -1,4 +1,7 @@
-use std::ptr::with_exposed_provenance_mut;
+use std::{
+	ptr::with_exposed_provenance_mut,
+	time::{Duration, Instant},
+};
 
 use uiautomation::{
 	UIAutomation, UIElement,
@@ -11,7 +14,10 @@ use uiautomation::{
 };
 use windows_sys::Win32::{
 	Foundation::{HWND, POINT},
-	UI::WindowsAndMessaging::{GA_PARENT, GetAncestor, GetDesktopWindow, IsWindow, WindowFromPoint},
+	UI::{
+		Input::KeyboardAndMouse::IsWindowEnabled,
+		WindowsAndMessaging::{GA_PARENT, GetAncestor, GetDesktopWindow, IsWindow, WindowFromPoint},
+	},
 };
 
 use super::{
@@ -22,6 +28,7 @@ use super::{
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
+	delivery::is_wpf_class,
 	window,
 };
 
@@ -113,11 +120,23 @@ impl Win32Ax {
 	}
 
 	fn contained_root(root: Option<HWND>, call: impl FnOnce() -> CoreResult<()>) -> CoreResult<()> {
+		Self::contained_or(root, |_, refusal| Err(refusal), call)
+	}
+
+	/// [`Self::contained_root`], with containment's refusal handed to
+	/// `refused`, which returns it or takes another route.
+	fn contained_or(
+		root: Option<HWND>,
+		refused: impl FnOnce(HWND, DesktopError) -> CoreResult<()>,
+		call: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
 		let root = root.ok_or_else(|| {
 			DesktopError::ax_failed("cannot establish the native window hosting this UIA element")
 		})?;
-		window::ensure_pattern_safe(root)?;
-		call()
+		match window::ensure_pattern_safe(root) {
+			Ok(()) => call(),
+			Err(refusal) => refused(root, refusal),
+		}
 	}
 
 	/// Presses the control under a physical screen point through UI
@@ -254,6 +273,124 @@ fn press_button(element: &UIElement, button: HWND, top: HWND) -> CoreResult<()> 
 			"the check box processed its click and may have changed, but its state could not be read \
 			 afterwards ({error}); inspect the target before pressing again"
 		))),
+	}
+}
+
+/// How long a WPF check box pressed through `LegacyIAccessible` is given to
+/// show its new state: WPF runs the action from its dispatcher after the call
+/// returns.
+const LEGACY_READBACK: Duration = Duration::from_millis(500);
+
+/// Whether `root` is a WPF window, where UI Automation's control patterns
+/// bring the window to the front while `LegacyIAccessible`'s actions leave it
+/// behind. A Chromium/`WebView2` child HWND excludes the window; visually
+/// hosted `WebView2` composition controls have no child HWND and are not
+/// detected. Web elements are excluded by framework ID. XAML hosts stay
+/// refused.
+fn legacy_window(root: HWND) -> bool {
+	is_wpf_class(&window::class_name(root)) && !window::has_chromium_descendant(root)
+}
+
+/// A WPF button's `Invoke` or check box's `Toggle` through
+/// `LegacyIAccessible`'s default action, for a [`legacy_window`] that
+/// [`window::ensure_pattern_safe`] refused.
+struct LegacyPress {
+	action: UILegacyIAccessiblePattern,
+	toggle: Option<UITogglePattern>,
+}
+
+impl LegacyPress {
+	/// `None` where the window or element does not qualify, so the caller
+	/// keeps its refusal: only a button's or check box's default action is
+	/// that same press (a list item's may be "Double Click", a combo box's
+	/// "Open"). Nothing is sent here.
+	fn prepare(element: &UIElement, root: HWND) -> Option<Self> {
+		if !legacy_window(root) {
+			return None;
+		}
+		let kind = element.get_control_type().ok()?;
+		if !matches!(kind, ControlType::Button | ControlType::CheckBox)
+			|| element.get_framework_id().ok()? != "WPF"
+		{
+			return None;
+		}
+		let toggle = if kind == ControlType::CheckBox {
+			Some(element.get_pattern::<UITogglePattern>().ok()?)
+		} else {
+			element.get_pattern::<UIInvokePattern>().ok()?;
+			None
+		};
+		let action = element.get_pattern::<UILegacyIAccessiblePattern>().ok()?;
+		if action.get_default_action().ok()?.trim().is_empty() {
+			return None;
+		}
+		Some(Self { action, toggle })
+	}
+
+	/// Sends the default action, unless the host stopped qualifying during the
+	/// provider reads (`refusal` stands) or a modal dialog disabled it. A check
+	/// box is polled for its new state for at most [`LEGACY_READBACK`] within
+	/// the call's deadline; a change not seen by then reports the sent action
+	/// as unconfirmed. A read already in flight is not interrupted.
+	fn run(self, element: &UIElement, root: HWND, refusal: DesktopError) -> CoreResult<()> {
+		if !element.is_enabled().map_err(ax_error)? {
+			return Err(DesktopError::input_failed(
+				"the WPF control is disabled; nothing was pressed",
+			));
+		}
+		let before = self
+			.toggle
+			.as_ref()
+			.map(UITogglePattern::get_toggle_state)
+			.transpose()
+			.map_err(ax_error)?;
+		// After the provider reads, which run app code: a Chromium child
+		// attached meanwhile takes the window out of this route, and a modal
+		// dialog disables the host window, not the control.
+		if !legacy_window(root) {
+			return Err(refusal);
+		}
+		// SAFETY: IsWindowEnabled only queries the handle.
+		if unsafe { IsWindowEnabled(root) } == 0 {
+			return Err(DesktopError::input_failed(format!(
+				"window {} is disabled (behind a dialog, for instance); nothing was pressed",
+				root.expose_provenance()
+			)));
+		}
+		control::check()?;
+		control::dispatching()?;
+		self.action.do_default_action().map_err(ax_error)?;
+		let (Some(toggle), Some(before)) = (self.toggle, before) else {
+			return Ok(());
+		};
+		let until = Instant::now()
+			+ control::time_left().map_or(LEGACY_READBACK, |left| left.min(LEGACY_READBACK));
+		loop {
+			if Instant::now() >= until {
+				return Err(DesktopError::ax_unconfirmed(
+					"the check box's default action was sent but no change of its state was seen in \
+					 time; the app may manage it itself, have refused it or not have applied it yet; \
+					 inspect the target before pressing again",
+				));
+			}
+			// Not `AxUnconfirmed`: naming the target would query the same,
+			// possibly unresponsive, provider again.
+			let after = toggle.get_toggle_state().map_err(|error| {
+				DesktopError::input_failed(format!(
+					"the check box's default action was sent and may have changed it, but its state \
+					 could not be read afterwards ({error}); inspect the target before pressing again"
+				))
+			})?;
+			// A read answered after the window closed confirms nothing.
+			if after != before && Instant::now() < until {
+				return Ok(());
+			}
+			control::wait(
+				until
+					.saturating_duration_since(Instant::now())
+					.min(Duration::from_millis(20)),
+			)?;
+		}
 	}
 }
 
@@ -525,7 +662,17 @@ impl AxBackend for Win32Ax {
 			}
 		}
 		let root = walker.and_then(|walker| Self::host_root_from(element, &walker, direct));
-		Self::contained_root(root, || match action.as_str() {
+		// Where containment refuses the window, a WPF button or check box takes
+		// its default action instead; anything else keeps the refusal.
+		let refused = |root: HWND, refusal: DesktopError| {
+			if action == "press"
+				&& let Some(press) = LegacyPress::prepare(element, root)
+			{
+				return press.run(element, root, refusal);
+			}
+			Err(refusal)
+		};
+		Self::contained_or(root, refused, || match action.as_str() {
 			"press" => {
 				if let Some(pattern) = positionless_press(element) {
 					control::dispatching()?;
@@ -786,6 +933,241 @@ mod tests {
 		assert_eq!(fixture.run(|| (clicks(), click_messages())), (2, 2));
 		// SAFETY: the fixture thread owns the window.
 		fixture.run(move || unsafe { DestroyWindow(parent_id as HWND) });
+	}
+
+	/// A WPF window with buttons, check boxes, a disabled button and a list
+	/// row, and an unrelated window of the same app placed beside it, in its
+	/// own `PowerShell` process as an app's would be. It prints `ready` and the
+	/// two windows' handles once both show, then what its controls do
+	/// (`checked` when the check box's state changes, `clicked` for its
+	/// `Click`, which a UI Automation toggle does not raise), `activated`
+	/// whenever the window becomes active, `mark` for each mark posted to it,
+	/// and `modal` once the dialog [`PRESS_MODAL`] opens over it shows.
+	const WPF_PRESS: &str = r#"
+Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml,UIAutomationProvider,UIAutomationTypes -TypeDefinition @'
+using System;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Controls.Primitives;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Threading;
+public class StickyBox : CheckBox {
+	protected override void OnToggle() { Console.Out.WriteLine("sticky"); Console.Out.Flush(); }
+}
+public static class Fixture {
+	static Window window, other;
+	static int bumps, checks;
+	static void Say(string line) { Console.Out.WriteLine(line); Console.Out.Flush(); }
+	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
+		if (message == 0x8007) window.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => {
+			Say("counts " + bumps + " " + checks);
+			Say("mark");
+		}));
+		else if (message == 0x8008) window.Dispatcher.BeginInvoke(new Action(() => {
+			// A window without content never raises ContentRendered.
+			var dialog = new Window { Owner = window, Title = "omp test: wpf modal", Width = 200, Height = 100, Content = "modal" };
+			dialog.ContentRendered += (sender, e) => Say("modal");
+			dialog.ShowDialog();
+		}));
+		return IntPtr.Zero;
+	}
+	static IntPtr Handle(Window window) { return new WindowInteropHelper(window).Handle; }
+	static T Named<T>(T element, string name) where T : FrameworkElement {
+		AutomationProperties.SetName(element, name);
+		return element;
+	}
+	public static void Run() {
+		var bump = Named(new Button { Content = "Bump" }, "Bump");
+		bump.Click += (sender, e) => { bumps++; Say("bumped"); };
+		var check = Named(new CheckBox { Content = "Check" }, "Check");
+		check.Checked += (sender, e) => { checks++; Say("checked True"); };
+		check.Unchecked += (sender, e) => { checks++; Say("checked False"); };
+		check.Click += (sender, e) => Say("clicked");
+		var off = Named(new Button { Content = "Off", IsEnabled = false }, "Off");
+		off.Click += (sender, e) => Say("clicked off");
+		var nonqualifying = Named(new ToggleButton { Content = "Disabled toggle", IsEnabled = false }, "Disabled toggle");
+		nonqualifying.Click += (sender, e) => Say("clicked disabled toggle");
+		var sticky = Named(new StickyBox { Content = "Sticky" }, "Sticky");
+		var row = Named(new ListBoxItem { Content = "Row" }, "Row");
+		row.Selected += (sender, e) => Say("selected row");
+		row.MouseDoubleClick += (sender, e) => Say("opened row");
+		var list = new ListBox();
+		list.Items.Add(row);
+		var panel = new StackPanel();
+		foreach (UIElement child in new UIElement[] { bump, check, off, nonqualifying, sticky, list }) panel.Children.Add(child);
+		window = new Window { Title = "omp test: wpf press", Left = 40, Top = 40, Width = 300, Height = 240, Content = panel };
+		other = new Window { Title = "omp test: wpf other", Left = 500, Top = 40, Width = 240, Height = 160 };
+		window.SourceInitialized += (sender, e) => HwndSource.FromHwnd(Handle(window)).AddHook(Hook);
+		window.ContentRendered += (sender, e) => {
+			other.Show();
+			window.Activated += (s, a) => Say("activated");
+			Say("ready " + Handle(window) + " " + Handle(other));
+			if (other.IsActive) Say("other activated");
+			else other.Activated += (s, a) => Say("other activated");
+		};
+		window.ShowDialog();
+	}
+}
+'@
+[Fixture]::Run()
+"#;
+
+	struct WpfPress {
+		host:   std::process::Child,
+		output: flume::Receiver<String>,
+		window: HWND,
+	}
+
+	impl WpfPress {
+		fn line(&self) -> String {
+			self.output.recv().expect("the WPF fixture closed")
+		}
+
+		/// The lines the window prints until `line`.
+		fn until(&self, line: &str) -> Vec<String> {
+			let mut lines = Vec::new();
+			loop {
+				match self.line() {
+					found if found == line => return lines,
+					other => lines.push(other),
+				}
+			}
+		}
+
+		/// Posts `message` to the window.
+		fn post(&self, message: u32) {
+			use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+			// SAFETY: a plain message to a window this test's fixture owns.
+			let posted = unsafe { PostMessageW(self.window, message, 0, 0) };
+			assert_ne!(posted, 0, "fixture post failed");
+		}
+
+		/// Events before an idle-priority dispatcher barrier, which a press's
+		/// default action, run from the window's dispatcher after the call
+		/// returns, precedes; with event counts.
+		fn printed(&self, bumps: u32, checks: u32) -> Vec<String> {
+			self.post(PRESS_MARK);
+			let mut lines = self.until("mark");
+			assert_eq!(lines.pop(), Some(format!("counts {bumps} {checks}")));
+			lines
+		}
+	}
+
+	impl Drop for WpfPress {
+		fn drop(&mut self) {
+			let _ = self.host.kill();
+			let _ = self.host.wait();
+		}
+	}
+
+	/// Posted to the WPF window: it prints `mark` when it reads it.
+	const PRESS_MARK: u32 = 0x8007;
+	/// Posted to the WPF window: it opens a modal dialog it owns, which
+	/// disables it.
+	const PRESS_MODAL: u32 = 0x8008;
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn press_acts_on_a_wpf_window_behind_another_and_leaves_it_there() {
+		use std::{process::Stdio, sync::Arc};
+
+		use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+		use crate::desktop::{
+			Request, Response, Worker,
+			control::{self, CancellationSource},
+			error::ErrorCode,
+			types::{AxQuery, DisplaySelector, Target},
+		};
+
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let mut host = std::process::Command::new("powershell")
+			.args(["-NoProfile", "-Command", WPF_PRESS])
+			.stdout(Stdio::piped())
+			.spawn()
+			.unwrap();
+		let stdout = host.stdout.take().unwrap();
+		let (send, output) = flume::unbounded();
+		// From here a failed assertion still closes the windows and the pipe.
+		let mut app = WpfPress { host, output, window: std::ptr::null_mut() };
+		std::thread::spawn(move || {
+			use std::io::BufRead;
+			for line in std::io::BufReader::new(stdout).lines() {
+				let Ok(line) = line else { break };
+				if send.send(line.trim().to_string()).is_err() {
+					break;
+				}
+			}
+		});
+		let ready = app.line();
+		let words = ready.split(' ').collect::<Vec<_>>();
+		assert_eq!(words[0], "ready");
+		let handle = |word: &str| with_exposed_provenance_mut(word.parse::<usize>().unwrap());
+		let (window, other): (HWND, HWND) = (handle(words[1]), handle(words[2]));
+		app.window = window;
+		app.until("other activated");
+		let mut worker = Worker::new(DisplaySelector::Active, Arc::default(), Arc::default());
+		let token = CancellationSource::default().token();
+		let target = Target::Window(window.expose_provenance().to_string());
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let foreground = || unsafe { GetForegroundWindow() };
+		let press = |worker: &mut Worker, name: &str| {
+			let query = AxQuery { title: Some(name.to_string()), ..AxQuery::default() };
+			let request =
+				Request::AxQuery { target: target.clone(), query, reply: flume::unbounded().0 };
+			let Response::Nodes(nodes) = worker.execute(&request, &token).unwrap() else {
+				panic!("AxQuery returns nodes");
+			};
+			let request = Request::AxPerform {
+				reference: nodes[0].ref_.clone(),
+				action:    "press".to_string(),
+				menu:      None,
+				reply:     flume::unbounded().0,
+			};
+			worker.execute(&request, &token).map(drop)
+		};
+
+		// Behind the app's other window, a button and a check box press
+		// through their default action, and the window stays behind.
+		press(&mut worker, "Bump").unwrap();
+		assert_eq!(app.printed(1, 0), ["bumped"]);
+		press(&mut worker, "Check").unwrap();
+		assert_eq!(app.printed(1, 1), ["checked True"]);
+		// A row's default action is not its press (it may open the row), and a
+		// disabled button takes none: neither sends anything.
+		let error = press(&mut worker, "Row").unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		let error = press(&mut worker, "Off").unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
+		let error = press(&mut worker, "Disabled toggle").unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		assert_eq!(app.printed(1, 1), Vec::<String>::new());
+		let error = press(&mut worker, "Sticky").unwrap_err();
+		let printed = app.printed(1, 1);
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed, "{error}; fixture events: {printed:?}");
+		assert_eq!(printed, ["sticky"], "{error}; fixture events: {printed:?}");
+		let id = window.expose_provenance().to_string();
+		assert!(
+			error
+				.message
+				.split(|c: char| c.is_whitespace() || matches!(c, ';' | '(' | ')'))
+				.any(|word| word == id),
+			"{error}"
+		);
+		assert_eq!(foreground(), other);
+
+		// Behind its own modal dialog the window is disabled while its controls
+		// still report themselves enabled: nothing is sent.
+		app.post(PRESS_MODAL);
+		assert_eq!(app.until("modal"), Vec::<String>::new());
+		for name in ["Bump", "Check"] {
+			let error = press(&mut worker, name).unwrap_err();
+			assert_eq!(error.code, ErrorCode::InputFailed, "{name}: {error}");
+			assert!(error.message.contains("behind a dialog"), "{name}: {error}");
+		}
+		assert_eq!(app.printed(1, 1), Vec::<String>::new());
 	}
 
 	#[test]
