@@ -281,8 +281,10 @@ terminal's acknowledgements instead of the render cadence. A frame that echoes
 user input (a key, a paste, an `edit`, `undo` or `send` event) may run two
 frames past the credits, counting only frames unacknowledged for less than
 250 ms, so a controlled editor keeps echoing typing while Tern is slow to
-acknowledge a streaming transcript; other frames wait for an ack or the 5 s
-stall reset. None of this
+acknowledge a streaming transcript. The allowance is a rate, not a total: while
+Tern stays silent, typing sends at most `credits + 2` frames per 250 ms until
+the 5 s stall reset, and each echo carries every change held behind the
+credits. Other frames wait for an ack or that reset. None of this
 document's history, viewport, resize-replay or CPR machinery runs on that path;
 SIGWINCH only refreshes the width used by `rows` fallback nodes. While a surface
 is live the nerd symbol preset is forced process-locally, and icon glyphs are

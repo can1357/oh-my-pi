@@ -323,8 +323,11 @@ export class NativeBackend {
 			this.#writeFrame(connection, this.#pending);
 			sent = true;
 		} while ((this.#pending || (force && active && !reconciled && reconciler.dirty)) && (force || this.#hasCredit()));
-		// Everything reconciled went out, and the echo of any input with it.
-		if (!this.#pending) this.#inputPending = false;
+		if (!this.#pending) {
+			// A split can finish with input routed during it still unsent: its echo goes next.
+			if (!reconciler.dirty) this.#inputPending = false;
+			else if (this.#inputPending) this.requestFrame();
+		}
 		return sent;
 	}
 

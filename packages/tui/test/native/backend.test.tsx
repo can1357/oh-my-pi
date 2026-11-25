@@ -1149,6 +1149,52 @@ describe("native pacing and transport", () => {
 		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "one two three" });
 	});
 
+	it("echoes a key typed while a split redraw is in flight once the split is out", async () => {
+		const replace = signal(false);
+		const block = "界".repeat(3 * 1024 * 1024);
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => {
+				const a = <text key="a">{block}</text>;
+				const b = <text key="b">{block}</text>;
+				const c = <text key="c">{block}</text>;
+				return {
+					main: () => (replace() ? [a, b, c] : []),
+					dock: (
+						<editor
+							ref={n => (field = n)}
+							text={text}
+							onEdit={e => {
+								if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+							}}
+						/>
+					),
+				};
+			},
+			{ credits: 1, autoAck: false },
+		);
+		h.surface.focus(field!);
+		for (let i = 0; i < 2; i++) {
+			h.tern.ackAll();
+			h.settle();
+		}
+		const sent = h.tern.frames.length;
+		// A redraw over the frame limit goes out in two frames; the second waits for the first's ack.
+		replace.set(true);
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		// A key typed meanwhile waits behind the split.
+		h.tern.input({ type: "key", key: { id: "h", text: "h", kind: "press", raw: "h" } });
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		// The ack releases the rest of the split, and the echo follows it without waiting for another ack.
+		h.tern.ackAll();
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 3);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "h" } }]);
+	});
+
 	it("redraws a large replacement transcript in UTF-8-bounded frames", async () => {
 		const replace = signal(false);
 		const block = "界".repeat(3 * 1024 * 1024);
