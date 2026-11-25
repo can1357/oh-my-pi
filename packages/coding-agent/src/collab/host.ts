@@ -1242,7 +1242,7 @@ export class CollabHost {
 		if (!session.isStreaming || !session.hasInterruptibleInput) return;
 		const name = peer.name;
 		void session
-			.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true })
+			.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true, detachTools: true })
 			.then(() => {
 				if (!this.#guestTrafficAllowed()) return;
 				this.#ctx.updatePendingMessagesDisplay();

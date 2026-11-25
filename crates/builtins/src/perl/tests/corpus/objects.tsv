@@ -1,0 +1,25 @@
+# Perl corpus: objects. Format and regeneration: crates/builtins/src/perl/tests.rs.
+autoload	package Box; our $AUTOLOAD; sub AUTOLOAD {print $AUTOLOAD,'|',$_[1],"\n"} sub DESTROY {} package main; my $o=bless {},'Box'; $o->missing(8);	Box::missing|8␊
+bless-default	package Thing; my $o=bless {}; print ref($o),"\n";	Thing␊
+bless-explicit	my $o=bless [],'Thing'; print ref($o),"\n";	Thing␊
+bless-scalar	my $n=7; my $o=bless \$n,'Thing'; print ref($o),"|$$o\n";	Thing|7␊
+can	package Box; sub get {$_[0]{x}} package main; my $o=bless {x=>4},'Box'; my $fn=$o->can('get'); print $fn->($o),'|',defined($o->can('absent'))?1:0,"\n";	4|0␊
+class-method	package Box; sub name { $_[0] } package main; print Box->name(),"\n";	Box␊
+class-trailing-separator	package Demo; sub show {$_[0]} package main; print Demo::->show(),"\n";	Demo␊
+constructor	package Box; sub new {my ($c,$v)=@_; bless {v=>$v},$c} package main; my $b=Box->new(7); print ref($b),"|$b->{v}\n";	Box|7␊
+destroy-block	package Box; sub DESTROY {print $_[0]{x}} package main; {my $x=bless {x=>'end'},'Box'; print 'start|'} print "|after\n";	start|end|after␊
+destroy-last-reference	package Box; sub DESTROY {print "destroy|"} package main; my $a=bless {},'Box'; my $b=$a; undef $a; print 'still|'; undef $b; print "gone\n";	still|destroy|gone␊
+destroy-order	package Box; sub DESTROY {print $_[0]{x}} package main; {my $a=bless {x=>'a'},'Box'; {my $b=bless {x=>'b'},'Box'; print 'start|'} print '|inner|'} print "|outer\n";	start|b|inner|a|outer␊
+does	my $o=bless {},'Box'; print $o->DOES('Box')?1:0,"\n";	1␊
+isa	package Base; package Box; our @ISA=('Base'); package main; my $o=bless {},'Box'; print join('|', map {$o->isa($_)?1:0} qw(Box Base Other UNIVERSAL)),"\n";	1|1|0|1␊
+method-code	my $o=bless {x=>5},'Box'; my $m=sub {$_[0]{x}+$_[1]}; print $o->$m(3),"\n";	8␊
+method-inherited	package Base; sub get { $_[0]{x} } package Box; our @ISA=('Base'); package main; my $o=bless {x=>11},'Box'; print $o->get(),"\n";	11␊
+method-override	package Base; sub get {1} package Box; our @ISA=('Base'); sub get {2} package main; print Box->get(),"\n";	2␊
+method-super	package Base; sub get {$_[0]{x}} package Box; our @ISA=('Base'); sub get {$_[0]->SUPER::get()+1} package main; my $o=bless {x=>11},'Box'; print $o->get(),"\n";	12␊
+method-variable	package Box; sub get { $_[0]{x} } package main; my $o=bless {x=>8},'Box'; my $m='get'; print $o->$m(),"\n";	8␊
+object-method	package Box; sub get { $_[0]{x} } package main; my $o=bless {x=>7},'Box'; print $o->get(),"\n";	7␊
+overload-binary	package Box; use overload '-'=>sub {$_[2] ? $_[1]-$_[0]{x} : $_[0]{x}-$_[1]}; package main; my $o=bless {x=>8},'Box'; print $o-3,'|',3-$o,"\n";	5|-5␊
+overload-bool	package Box; use overload bool=>sub {0}; package main; my $o=bless {},'Box'; print $o?'true':'false',"\n";	false␊
+overload-number	package Box; use overload '0+'=>sub {$_[0]{x}}, fallback=>1; package main; my $o=bless {x=>8},'Box'; print $o+3,"\n";	11␊
+overload-string	package Box; use overload '""'=>sub {$_[0]{x}}; package main; my $o=bless {x=>'custom'},'Box'; print "$o\n";	custom␊
+rebless	my $o=bless {},'Old'; my $p=bless $o,'New'; print ref($o),'|',ref($p),"\n";	New|New␊

@@ -163,7 +163,7 @@ interface TrackedJobLike {
 	agentOutputPublished?: boolean;
 }
 
-export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
+export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[], live = false): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
 		const current = session.asyncJobManager?.getJob(j.id);
@@ -223,6 +223,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			label: latest.label,
 			...(latest.intent ? { intent: latest.intent } : {}),
 			durationMs: Math.max(0, (latest.endTime ?? now) - latest.startTime),
+			...(live && running ? { startedAtMs: latest.startTime } : {}),
 			...(latest.endTime !== undefined ? { settledAtMs: latest.endTime } : {}),
 			...(exitCode !== undefined ? { exitCode } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),

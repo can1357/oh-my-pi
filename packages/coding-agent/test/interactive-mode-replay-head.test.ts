@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -44,7 +43,6 @@ describe("InteractiveMode transcript replay", () => {
 			settings: Settings.isolated({ "startup.quiet": false }),
 		});
 		mode = new InteractiveMode(session, "9.9.9", undefined, undefined, undefined, undefined, term.frame);
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 	});
 
 	afterEach(async () => {
