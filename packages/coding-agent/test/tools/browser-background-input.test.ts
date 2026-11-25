@@ -11,10 +11,6 @@ import {
 	type BrowserKind,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import {
-	unpackedExtensionId,
-	writeRelayExtension,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import {
@@ -24,8 +20,8 @@ import {
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import puppeteer, { type Browser, type Page, type WebWorker } from "puppeteer-core";
+import { type FixtureRelayExtension, prepareRelayExtension } from "./browser-relay-fixture";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -105,43 +101,49 @@ interface RelayFixture {
 
 /** Headless Chromium running the real relay extension against a relay on a free port, with the tabs of {@link openTabs}. */
 async function withRelay(run: (fixture: RelayFixture) => Promise<void>): Promise<void> {
-	const port = await findFreeCdpPort();
-	const server = startRelayServer({ port, group: false });
-	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-background-"));
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-background-"));
+	const server = startRelayServer({
+		port: 0,
+		group: false,
+		installRegistryFile: path.join(root, "omp", "installs.json"),
+	});
 	let browser: Browser | undefined;
+	let install: FixtureRelayExtension | undefined;
 	try {
-		await writeRelayExtension(extensionDir, VERSION);
-		const backgroundPath = path.join(extensionDir, "background.js");
-		const background = await Bun.file(backgroundPath).text();
-		// Point the disposable extension at this relay before its code can dial a user's default relay.
-		await Bun.write(backgroundPath, `chrome.storage.local.set({ port: ${port} }).then(() => {\n${background}\n});`);
-		const extensionId = await unpackedExtensionId(extensionDir);
-		if (!extensionId) throw new Error("Missing relay extension directory");
+		install = await prepareRelayExtension(root, server.port);
+		const userDataDir = path.join(root, "profile");
+		await install.configureProfile(userDataDir);
 		browser = await puppeteer.launch({
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
 			pipe: true,
-			enableExtensions: [extensionDir],
+			enableExtensions: true,
+			userDataDir,
+			env: { ...process.env, PI_CODING_AGENT_DIR: path.join(root, "omp") },
 			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
 		});
+		await browser.installExtension(install.dir);
+		const workerUrl = `chrome-extension://${install.id}/background.js`;
 		const extension = await (
-			await browser.waitForTarget(
-				target =>
-					target.type() === "service_worker" && target.url() === `chrome-extension://${extensionId}/background.js`,
-				{ timeout: 15_000 },
-			)
+			await browser.waitForTarget(target => target.type() === "service_worker" && target.url() === workerUrl, {
+				timeout: 15_000,
+			})
 		).worker();
 		if (!extension) throw new Error("Missing relay extension worker");
-		const cdpUrl = `http://127.0.0.1:${port}`;
+		const cdpUrl = `http://127.0.0.1:${server.port}`;
 		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
 		const target = await openTabs(browser, url =>
 			extension.evaluate(`chrome.tabs.create({ url: ${JSON.stringify(url)}, active: false })`),
 		);
 		await run({ cdpUrl, extension, target });
 	} finally {
-		await browser?.close();
-		server.stop();
-		await fs.rm(extensionDir, { recursive: true, force: true });
+		try {
+			await browser?.close();
+		} finally {
+			server.stop();
+			await install?.dispose();
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	}
 }
 

@@ -33,7 +33,8 @@ describe("text-mode command reports on a real terminal core", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-command-report-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		// An async branch lookup can repaint the footer independently of the report.
+		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "git.enabled": false } });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");

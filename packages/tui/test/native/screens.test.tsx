@@ -4,7 +4,14 @@
  * what the terminal's focus names, and who sees the keys and events.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { createSurface, type KeyEvent, type Surface, type SurfaceTemplate, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import {
+	createSurface,
+	type KeyEvent,
+	type Surface,
+	type SurfaceTemplate,
+	signal,
+	type UiNode,
+} from "@oh-my-pi/pi-tui";
 import { TspConnection } from "@oh-my-pi/pi-tui/native/connection";
 import { NativeSurfaces } from "@oh-my-pi/pi-tui/native/screens";
 import { FakeTern, type FakeTernOptions, ManualClock } from "./fake-tern";

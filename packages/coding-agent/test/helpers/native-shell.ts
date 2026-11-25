@@ -32,8 +32,8 @@ export interface NativePage {
 }
 
 /** Start the app's shell on a byte stream with a Tern peer and inspect its negotiated native document. */
-export async function nativeShell(shell = new Shell()) {
-	const tern = new FakeTern({ features: ["aside", "settle"], autoAck: false });
+export async function nativeShell(shell = new Shell(), options?: { readonly kinds?: readonly string[] }) {
+	const tern = new FakeTern({ features: ["aside", "settle"], autoAck: false, kinds: options?.kinds });
 	const term = memoryTerminal({
 		columns: tern.columns,
 		rows: tern.rows,

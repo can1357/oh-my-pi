@@ -9,6 +9,7 @@ import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
 import { stripControl } from "@oh-my-pi/pi-tui/text/sanitize";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { formatKeyHint, formatKeyHints } from "../../keys/hints";
 import { ViewerFrameModel } from "../viewer-frame";
 import { LOG_CHUNK, LogEntries, logCopyPayload } from "./entries";
 
@@ -329,10 +330,22 @@ export class LogViewerModel {
 		const filter = `${theme.fg("muted", "filter")} ${query}  ${pid}${loading}`;
 		const status = this.#status
 			? theme.fg("success", this.#status)
-			: theme.fg("dim", "⏎ loads older when highlighted; printable keys update filter");
+			: theme.fg("dim", `${formatKeyHint("enter")} loads older when highlighted; printable keys update filter`);
 		const controls = theme.fg(
 			"dim",
-			"⎋ close · ⌃C copy · ↑/↓/wheel move · PgUp/PgDn page · Home/End first/last · click toggle · ⇧↑/⇧↓ select · ←/→ collapse/expand · ⌃A all · ⌃O older · ⌃P pid",
+			[
+				`${formatKeyHint("escape")} close`,
+				`${formatKeyHint("ctrl+c")} copy`,
+				`${formatKeyHints(["up", "down"])}/wheel move`,
+				`${formatKeyHints(["pageUp", "pageDown"])} page`,
+				`${formatKeyHints(["home", "end"])} first/last`,
+				"click toggle",
+				`${formatKeyHints(["shift+up", "shift+down"])} select`,
+				`${formatKeyHints(["left", "right"])} collapse/expand`,
+				`${formatKeyHint("ctrl+a")} all`,
+				`${formatKeyHint("ctrl+o")} older`,
+				`${formatKeyHint("ctrl+p")} pid`,
+			].join(" · "),
 		);
 		return {
 			header: [summary, filter],

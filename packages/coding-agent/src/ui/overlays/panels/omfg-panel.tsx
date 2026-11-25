@@ -9,7 +9,8 @@
  * {@link OmfgPanelState} holds what the controller drives.
  */
 import { type JSXNode, signal, untrack } from "@oh-my-pi/pi-tui";
-import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { TspTone } from "@oh-my-pi/pi-wire";
 import { sanitizeDisplayText } from "../../../extensibility/inventory/display-text";
 import "../../styles/panels/omfg";
 import { Hints } from "./common";
@@ -65,10 +66,10 @@ export class OmfgPanelState {
 	}
 }
 
-const ENDINGS: Readonly<Record<OmfgEnd, { readonly tone: TspTone; readonly status: TspSpan }>> = {
-	rejected: { tone: "warning", status: { s: "warning", t: "⚠ Not saved" } },
-	aborted: { tone: "warning", status: { s: "warning", t: "⚠ Cancelled" } },
-	error: { tone: "error", status: { s: "error", t: "✘ Error" } },
+const ENDINGS: Readonly<Record<OmfgEnd, { readonly tone: TspTone; readonly label: string }>> = {
+	rejected: { tone: "warning", label: "Not saved" },
+	aborted: { tone: "warning", label: "Cancelled" },
+	error: { tone: "error", label: "Error" },
 };
 
 export interface OmfgPanelProps {
@@ -110,7 +111,10 @@ export function OmfgPanel(props: OmfgPanelProps): JSXNode {
 					return <text wrap="word" spans={[{ s: "error", t: sanitizeDisplayText(state.error()).trim() }]} />;
 				}
 				const candidate = sanitizeDisplayText(state.candidate()).trim();
-				if (!candidate) return <text spans={[{ s: "dim", t: "⏳ Waiting for candidate rule…" }]} />;
+				if (!candidate) {
+					const pending = currentTheme().symbols.symbol("status.pending");
+					return <text spans={[{ s: "dim", t: `${pending} Waiting for candidate rule…` }]} />;
+				}
 				return <md text={candidate} stream={!state.end() && state.work() === "generating"} />;
 			}}
 			{() => {
@@ -118,7 +122,9 @@ export function OmfgPanel(props: OmfgPanelProps): JSXNode {
 				if (!end) return <Hints hints={[{ keys: interruptKbd(), label: "cancel /omfg" }]} />;
 				return (
 					<row align="center" gap="md" wrap>
-						<text spans={[end.status]} />
+						<text
+							spans={[{ s: end.tone, t: `${currentTheme().symbols.symbol(`status.${end.tone}`)} ${end.label}` }]}
+						/>
 						<Hints hints={[{ keys: interruptKbd(), label: "dismiss" }]} />
 					</row>
 				);

@@ -492,3 +492,40 @@ export function fuzzyRank<T>(items: readonly T[], query: string, getText: (item:
 export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => string): T[] {
 	return fuzzyRank(items, query, getText).map(result => result.item);
 }
+
+/**
+ * Hit ranges of `query` in `label`: each whitespace token marks its first
+ * case-insensitive substring, else its characters as a greedy in-order
+ * subsequence. Undefined when nothing matches.
+ */
+export function fuzzyHits(label: string, query: string): [number, number][] | undefined {
+	const tokens = query
+		.toLowerCase()
+		.split(/\s+/)
+		.filter(token => token.length > 0);
+	if (tokens.length === 0) return undefined;
+	const lower = label.toLowerCase();
+	const marked = new Uint8Array(lower.length);
+	for (const token of tokens) {
+		const at = lower.indexOf(token);
+		if (at >= 0) {
+			marked.fill(1, at, at + token.length);
+			continue;
+		}
+		let from = 0;
+		for (const ch of token) {
+			const index = lower.indexOf(ch, from);
+			if (index < 0) break;
+			marked[index] = 1;
+			from = index + ch.length;
+		}
+	}
+	const ranges: [number, number][] = [];
+	for (let i = 0; i < marked.length; i++) {
+		if (!marked[i]) continue;
+		const start = i;
+		while (i < marked.length && marked[i]) i++;
+		ranges.push([start, i]);
+	}
+	return ranges.length > 0 ? ranges : undefined;
+}
