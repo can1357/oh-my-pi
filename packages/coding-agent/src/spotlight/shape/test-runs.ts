@@ -4,9 +4,9 @@
  * counted marker into the saved full log. Kept lines are structure (`s`), short runs between them shown as context
  * (`c`), the noise folded (`f`).
  */
-import type { SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightReason } from "../../tools/details/spotlight";
 import { alignedTo, bump, noteWhy, type Run, shifted } from "./run";
-import { readCall } from "./view";
+import { type LineRun, readCall, rebasePeaks, type SourcePeak } from "./view";
 
 /** Shorter logs are shown as printed. */
 const MIN_LINES = 40;
@@ -23,7 +23,7 @@ const SUMMARY_LINE =
 const KEEP_LINE = /^(?:diff --git|@@|\+\+\+|---)|:\d+:\d+:|^\[exit code/;
 
 /** Which lines of a test log stay; undefined when the log is too short or shaping would hide too little. */
-function keptLines(lines: readonly string[]): Uint8Array | undefined {
+function keptLines(lines: readonly string[], peaks?: readonly SourcePeak[]): Uint8Array | undefined {
 	if (lines.length < MIN_LINES) return undefined;
 	const keep = new Uint8Array(lines.length);
 	let inFail = false;
@@ -42,6 +42,10 @@ function keptLines(lines: readonly string[]): Uint8Array | undefined {
 		}
 	}
 	for (let i = Math.max(0, lines.length - TAIL); i < lines.length; i++) keep[i] = 1;
+	for (const p of peaks ?? []) {
+		keep.fill(1, p.head, p.headEnd + 1);
+		keep.fill(1, Math.max(0, p.line - 1), p.line + 2);
+	}
 	let hidden = 0;
 	for (let i = 0; i < lines.length;) {
 		if (keep[i]) {
@@ -57,12 +61,13 @@ function keptLines(lines: readonly string[]): Uint8Array | undefined {
 }
 
 /** A test log cut to failures plus summary, gaps pointing into the saved log; undefined when not worth it. */
-export async function shapeTestRun(run: Run, text: string): Promise<string | undefined> {
+export async function shapeTestRun(run: Run, text: string, peaks?: SourcePeak[]): Promise<string | undefined> {
 	const lines = text.split("\n");
-	const keep = keptLines(lines);
+	const keep = keptLines(lines, peaks);
 	if (!keep) return undefined;
 	const log = await run.sink.save(text, run.input.tool);
 	const out: string[] = [];
+	const folds: LineRun[] | undefined = peaks?.length ? [] : undefined;
 	const why = Array.from<SpotlightReason>({ length: lines.length }).fill("s");
 	let hidden = 0;
 	for (let i = 0; i < lines.length;) {
@@ -78,12 +83,14 @@ export async function shapeTestRun(run: Run, text: string): Promise<string | und
 			continue;
 		}
 		why.fill("f", i, j);
+		folds?.push({ from: i, to: j - 1 });
 		out.push(`… [${j - i} lines: ${readCall(log, i + 1, j)}]`);
 		hidden += j - i;
 		i = j;
 	}
 	// Until another step rewrites it, the log is the result's own text: its lines are base lines from the first.
 	noteWhy(run, text === run.input.text ? shifted(0) : alignedTo(run, lines), why);
+	if (peaks && folds) rebasePeaks(peaks, folds);
 	bump(run, "testShaped");
 	bump(run, "testHiddenLines", hidden);
 	return out.join("\n");

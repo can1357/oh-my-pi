@@ -9,7 +9,7 @@
 - Key collaborators:
    - `packages/coding-agent/src/web/search/provider.ts` — lazy provider registry; availability chain.
    - `packages/coding-agent/src/web/search/types.ts` — unified `SearchResponse` / `SearchProviderError` types.
-   - `packages/tui/src/tools/web-search.ts` / `web-search-types.ts` — transcript rendering and shared response/provider types.
+   - `packages/coding-agent/src/ui/tools/web-search.tsx` / `packages/coding-agent/src/web/search/provider-types.ts` — transcript rendering and shared response/provider types.
    - `packages/coding-agent/src/web/search/providers/base.ts` — provider interface and shared params contract.
    - `packages/coding-agent/src/web/search/providers/utils.ts` — credential lookup; source normalization.
    - `packages/coding-agent/src/web/search/providers/browser-headers.ts` — shared Chromium navigation headers for scrape providers.
@@ -54,7 +54,7 @@
 | Field                | Type                                   | Required | Description                                                                                                                                                                                                                                                                                                            |
 | -------------------- | -------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `query`              | `string`                               | Yes      | Raw query. The parser recognizes `site:`/`-site:`, `after:`/`before:`, `inurl:`, `intitle:`, `intext:`, `filetype:`, `lang:`/`language:`, quoted phrases, exclusions, `OR`, and directive aliases. Providers map these to native filters or supported syntax; body/language directives are not central source filters. |
-| `recency`            | `"day" \| "week" \| "month" \| "year"` | No       | Relative time filter. Implemented by Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Keenable, Sofya, Firecrawl, DuckDuckGo, Startpage, Google, Mojeek, and Hacker News. Public Web forwards it to its engines; other adapters ignore it.                                                                |
+| `recency`            | `"day" \| "week" \| "month" \| "year"` | No       | Relative time filter. Implemented by Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Keenable, Sofya, Firecrawl, DuckDuckGo, Startpage, Google, Mojeek, Hacker News (`created_at_i` lower bound), and xAI (`x_search` `from_date` when no `after:`/`before:` bound is given). Public Web forwards it to its engines; other adapters ignore it.                                                                |
 | `limit`              | `number`                               | No       | Max results to return. Usually becomes the provider request's result-count parameter when `num_search_results` is absent. TinyFish uses it for paginated fetches before slicing. xAI uses the collapsed value only as a local cap on parsed sources/citations, defaulting to `10` and max `30`.                        |
 | `max_tokens`         | `number`                               | No       | Token cap passed through by Anthropic, Gemini, OpenAI Responses, xAI, and Perplexity API-key mode. Ignored by the other providers.                                                                                                                                                                                     |
 | `temperature`        | `number`                               | No       | Passed through only by Anthropic models that support sampling parameters, Gemini, xAI, and Perplexity API-key mode. Ignored or omitted by the other provider/model paths.                                                                                                                                              |
@@ -109,7 +109,8 @@ Each provider search transport receives a hard timeout from `providers.webSearch
    - `limit`, `recency`, `temperature`, `maxOutputTokens`, `numSearchResults`,
    - `timeoutMs`, derived from `providers.webSearchTimeoutSeconds`,
    - `systemPrompt` from `packages/coding-agent/src/prompts/system/web-search.md`,
-   - the parsed structured query, including recognized directives and date/domain/title/URL/filetype constraints.
+   - the parsed structured query, including recognized directives and date/domain/title/URL/filetype constraints,
+   - the candidate's thinking level (a `:<level>` selector suffix such as `openai-codex/gpt-6-luna:xhigh`). Codex and OpenAI API send it as `reasoning.effort`, clamped to the model's supported levels as chat does, and omit the field when the level is unset, `auto`, or `off`. Gemini clamps it the same way to pick an effort-routed wire model id. xAI always sends effort `low`. Other adapters ignore it.
 6. After a provider responds, `applyQueryConstraints()` leniently post-filters its sources for constraints not guaranteed upstream. It applies each filterable dimension in turn; any dimension that would eliminate every remaining result is relaxed and a leading `Note: no results matched ...` is emitted. Answer/citation text is not rewritten.
 7. Grounded chat responses must contain sources or citations; answer-only completions are rejected with status `204`. Any response with no renderable content is also rejected. The first acceptable response is formatted into one text block.
 8. If a provider throws, `executeSearch()` records the error and tries the next provider. There is no provider-level parallel fan-out; fallback is sequential.
@@ -148,9 +149,9 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - `num_search_results` controls upstream API breadth only in API-key mode. `limit` is preserved separately as `num_results` and slices returned `sources` after parsing in both auth modes.
       - Output may include `answer`, `sources`, `citations`, `usage`, `model`, `requestId`, `authMode`.
    - **Gemini** — `packages/coding-agent/src/web/search/providers/gemini.ts`
-      - Availability: OAuth credentials in `agent.db` for `google-gemini-cli` / `google-antigravity`, or a Google Developer API key.
+      - Availability: OAuth credentials in `agent.db` for `google-antigravity`, or a Google Developer API key.
       - Querying: SSE `streamGenerateContent` with Google Search grounding at the selected model's endpoint. Cloud Code Assist auth uses `withOAuthAccess`; developer API auth uses the model-registry resolver. HTTP retries use up to four attempts with exponential/server-provided delays capped at five minutes, bounded by the transport signal.
-      - Model: the selected `web` candidate (`google/…`, `google-antigravity/…`, or `google-gemini-cli/…` chat model).
+      - Model: the selected `web` candidate (`google/…` or `google-antigravity/…` chat model).
       - `max_tokens` and `temperature` pass through as `generationConfig.maxOutputTokens` / `generationConfig.temperature`.
       - `limit` and `num_search_results` are collapsed together before dispatch.
       - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage`, `model`.
@@ -163,13 +164,13 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage.searchRequests`, `model`, `requestId`.
    - **Codex** — `packages/coding-agent/src/web/search/providers/codex.ts`
       - Availability: OAuth credential for `openai-codex` in `agent.db`, or `OPENAI_CODEX_OAUTH_TOKEN` in the environment when no stored row exists; refresh is lazy during search. This uses ChatGPT/Codex OAuth, not OpenAI API billing. Custom model-registry endpoints may instead use a configured API-key/command credential, but official OAuth/env credentials are refused for custom endpoints.
-      - Querying: streams the Codex Responses endpoint with hosted `web_search` and `search_context_size: "high"`. Google-style directives are re-emitted in the query.
+      - Querying: streams the Codex Responses endpoint with hosted `web_search`, `search_context_size: "high"`, and `reasoning.effort` from the candidate's thinking level when one is set. Google-style directives are re-emitted in the query.
       - Model: the selected `web` candidate. A completion without a `web_search_call` is rejected rather than presented as searched content.
       - Ignores `recency`, `max_tokens`, and `temperature`. `num_search_results ?? limit` slices parsed sources locally.
       - Output may include `answer`, `sources`, `usage`, `model`, `requestId`. If the stream has no `url_citation` annotations, the adapter falls back to markdown links and bare URLs from the answer.
    - **OpenAI API** — `packages/coding-agent/src/web/search/providers/openai.ts`
       - Availability: non-OAuth credentials for the selected model provider. It uses the model-registry resolver and explicitly rejects OAuth; it does not borrow `openai-codex` credentials.
-      - Querying: sends a non-streaming JSON POST to the selected model's Responses endpoint (`<model.baseUrl>/responses`; the standard OpenAI base URL is `https://api.openai.com/v1`) with hosted `web_search`.
+      - Querying: sends a non-streaming JSON POST to the selected model's Responses endpoint (`<model.baseUrl>/responses`; the standard OpenAI base URL is `https://api.openai.com/v1`) with hosted `web_search`. `reasoning.effort` comes from the candidate's thinking level when one is set; catalog Pro aliases also send `reasoning.mode`.
       - Model: catalog `openai`-class GPT-5+ models on the `openai-responses` API declare this grounding, including compatible proxy hosts. Models without catalog grounding are not `web` candidates.
       - A generated answer is rejected unless the response includes an actual `web_search_call`. `usage.searchRequests` counts `search` actions, not `open_page` or `find_in_page`, and is omitted when there are none.
       - `site:` hosts map to `filters.allowed_domains`; other directives are re-emitted in the query. `max_tokens` passes through as `max_output_tokens`. Ignores `recency` and `temperature`.
@@ -358,7 +359,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - The model-facing schema does not expose a provider or model; CLI/internal callers can pin one through `SearchQueryParams.model`.
 - `executeSearch()` loads provider modules lazily as the chain reaches them. Provider instances are cached per id (`packages/coding-agent/src/web/search/provider.ts`), and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
-- `recency` has native or engine-query mappings in Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Keenable, Sofya, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute query dates as hints but ignores the separate recency field; Ecosia ignores it. Public Web forwards the request to its engines.
-- `SEARCH_PROVIDER_LABELS` in `packages/tui/src/tools/web-search-types.ts` is the id→label registry for every search implementation (engines and groundings); provider ids, `SearchResponse`, and the transcript renderer all derive from it. Selection itself lives only in the `web` model role.
+- `recency` has native or engine-query mappings in Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Keenable, Sofya, Firecrawl, DuckDuckGo, Startpage, Google, Mojeek, Hacker News (`created_at_i` lower bound), and xAI (`x_search` `from_date` when no `after:`/`before:` bound is given). Ecosia ignores it. Public Web forwards the request to its engines.
+- `SEARCH_PROVIDER_LABELS` in `packages/coding-agent/src/web/search/provider-types.ts` is the id→label registry for every search implementation (engines and groundings); provider ids, `SearchResponse`, and the transcript renderer all derive from it. Selection itself lives only in the `web` model role.
 - The credential-free scrapers close the auto chain: Startpage and DuckDuckGo precede the browser-backed Ecosia, Google, and Mojeek paths; `public` is listed last and never auto-selected.
 - `/login exa` stores the pasted key in AuthStorage; Exa resolves stored or environment credentials before the unauthenticated `https://mcp.exa.ai/mcp` fallback.

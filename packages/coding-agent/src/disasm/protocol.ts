@@ -6,8 +6,8 @@
  * omp processes speak NDJSON {@link HostRequest}s to it over an attached daemon tunnel.
  */
 import { type } from "@oh-my-pi/omptype";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { DisasmBackendId } from "./backend";
+import { ToolError } from "../tools/tool-errors";
+import { DISASM_BACKEND_IDS, type DisasmBackendId } from "./backend";
 
 /** Daemon unit kind and module name. */
 export const DISASM_UNIT_KIND = "disasm";
@@ -60,8 +60,9 @@ export function parseDatabaseHandle(value: string): DatabaseHandle | undefined {
 		throw new ToolError("Invalid dsm handle; pass the string returned by db.handle().");
 	}
 	const parts = url.pathname.split("/");
+	const backend = DISASM_BACKEND_IDS.find(id => id === url.hostname);
 	if (
-		(url.hostname !== "ida" && url.hostname !== "ghidra") ||
+		backend === undefined ||
 		url.username ||
 		url.password ||
 		url.port ||
@@ -73,7 +74,7 @@ export function parseDatabaseHandle(value: string): DatabaseHandle | undefined {
 	) {
 		throw new ToolError("Invalid dsm handle; pass the string returned by db.handle().");
 	}
-	return { backend: url.hostname, id: parts[1], instance: parts[2] };
+	return { backend, id: parts[1], instance: parts[2] };
 }
 
 /** RPC methods an omp process may forward to the worker through `call`. */
@@ -185,7 +186,7 @@ const locationSchema = type({
 });
 
 const unitParamsSchema = type({
-	backend: "'ida' | 'ghidra'",
+	backend: type.enumerated(...DISASM_BACKEND_IDS),
 	loc: locationSchema,
 	runtime: { pythonPath: "string", env: "Record<string, string>" },
 	/** Idle time before an unreferenced database is saved and closed; 0 keeps it open. */

@@ -244,6 +244,11 @@ export interface TspColProps {
 	ref?: string;
 	/** On `omp.tray.card`: the item's state. */
 	status?: TspTrayStatus;
+	/**
+	 * On an agent's `omp.tray.card` while `running`: the call it is in only waits on its own agents or
+	 * jobs (`wait`, `vibe_wait`), so it does no work of its own until that call returns.
+	 */
+	waiting?: boolean;
 	/** On an agent's `omp.tray.card`: epoch ms of its last operation (its latest tool call start, or when it settled). */
 	acted?: number;
 	/** On `omp.tray.card`: `false` when its closer look would add nothing to its face (`tray.peek` on it is ignored). */
@@ -1191,6 +1196,18 @@ export interface TspShellProps {
 	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first visible line.
 	 */
 	preview?: { lines: number };
+	/**
+	 * Step mode: every segment with an execution node (`executionNode ?? node ?? row.node`) is a click target
+	 * (pointer, `role=button`, Enter/Space) sending the `shell-viz` action `select:<executionNode>`; hovering one
+	 * highlights every segment of that step. Chips with `expanded` keep sending `expand:<node>` only. No details
+	 * panel and no gutter Inspect command button; effect chips and annotations keep their text as a tooltip.
+	 */
+	steps?: boolean;
+	/**
+	 * Execution-node keys of the step whose output the host shows now: every segment drawn under one of them is
+	 * marked focused, re-applied whenever this changes even when the rows did not.
+	 */
+	focus?: readonly string[];
 }
 
 /** Kind-specific props, indexed by kind. */
@@ -1356,8 +1373,14 @@ export type TspEvent =
 	| { ev: "resize"; sf?: string; cols: number; cell?: { w: number; h: number }; visible?: boolean }
 	| { ev: "theme"; dark: boolean }
 	| { ev: "motion"; reduce: boolean }
+	/** The terminal's features changed (a setting: Tern's Agents tray drops `tray`); the list replaces `hello.features`. */
+	| { ev: "features"; features: readonly string[] }
 	| { ev: "visible"; sf?: string; visible: boolean }
+	/** The window reads and shows this pane's checkout (branch, changes, pull request) itself: show them from `shown` and read none of it yourself while `true`. */
+	| { ev: "checkout"; sf?: string; shown: boolean }
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
+	/** Menu opening/closing; a toggle of a named sub-item also reports its id. */
+	| { ev: "toggle"; sf: string; id: string; open: boolean; item?: string }
 	| { ev: "select"; sf: string; id: string; item: string }
 	| { ev: "activate"; sf: string; id: string; item: string }
 	/** A click action; a `menu` check or radio row adds its new `checked` state. */
@@ -1419,4 +1442,5 @@ export type TspEvent =
 	 */
 	| { ev: "focus"; sf: string; id: string }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
+	/** A lost surface, or (scoped to `sf`) settled main children dropped under the retention budget. */
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

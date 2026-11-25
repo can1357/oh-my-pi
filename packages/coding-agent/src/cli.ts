@@ -27,6 +27,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 
+import { materializeDatalessFiles } from "@oh-my-pi/pi-utils/dataless-files";
 import { raiseInteractiveQos } from "@oh-my-pi/pi-utils/process-qos";
 import {
 	declareWorkerHostEntry,
@@ -43,6 +44,7 @@ import {
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
+	TRANSCRIPT_INDEX_WORKER_ARG,
 } from "./cli/worker-selectors";
 import { DAEMON_WORKER_ARG } from "./daemon/protocol";
 import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
@@ -102,7 +104,33 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-title": true,
 	"--no-prewalk": true,
 	"--no-pty": true,
+	// `-e`/`--extension` only registers a local extension path; the extension
+	// loads later, so the speculative first frame stays valid (issue #20158).
+	// These take a value, so they are handled by `isPrepaintSafeArgv`.
 };
+
+/**
+ * Flags in `PREPAINT_SAFE_FLAGS` whose single value follows as the next argv
+ * token. `--extension=value` needs no special handling: it is one token that
+ * matches the flag directly.
+ */
+const PREPAINT_SAFE_VALUE_FLAGS: ReadonlySet<string> = new Set(["-e", "--extension"]);
+
+/** True when every token in `argv` still yields a valid speculative first frame. */
+export function isPrepaintSafeArgv(argv: readonly string[]): boolean {
+	for (let index = 0; index < argv.length; index++) {
+		const arg = argv[index]!;
+		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg)) {
+			// The path value belongs to the flag; skip it. A missing value is
+			// a usage error the regular parse reports later.
+			index++;
+			continue;
+		}
+		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg.split("=", 1)[0]!)) continue;
+		if (PREPAINT_SAFE_FLAGS[arg] !== true) return false;
+	}
+	return true;
+}
 
 /** Complete the OS-visible process-name setup after speculative first paint. */
 async function setFullProcessName(): Promise<void> {
@@ -138,8 +166,7 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
 	}
 }
 /**
- * Smoke-test entry. Spawns bundled workers, serves the stats dashboard once,
- * pings everything, then exits.
+ * Smoke-test entry. Exercises bundled workers and serves the stats dashboard once.
  *
  * Purpose: catch the silent worker-load and bundled-asset regressions that hit
  * compiled binaries and the npm CLI bundle. Version/help paths do not spawn
@@ -155,6 +182,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
 	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
 	const { smokeTestStatsActivityWorker } = await import("./stats/activity-client");
+	const { smokeTestTranscriptIndexWorker } = await import("./session/transcript-index-client");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { isolateDaemonForSmokeTest, smokeTestDaemon } = await import("./daemon/client");
@@ -165,6 +193,7 @@ async function runSmokeTest(): Promise<void> {
 		await smokeTestSyncWorker();
 		await smokeTestSpotlightWorker();
 		await smokeTestStatsActivityWorker();
+		await smokeTestTranscriptIndexWorker();
 
 		const statsServer = await startServer(0);
 		try {
@@ -295,6 +324,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
 		await import("./stats/activity-worker");
+		return true;
+	}
+	if (arg === TRANSCRIPT_INDEX_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		await import("./session/transcript-index-worker");
 		return true;
 	}
 	if (arg === PARENT_WATCHDOG_WORKER_ARG) {
@@ -493,29 +528,23 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
-	// Declare this module as the worker-host entry now that the active profile
-	// is resolved. The worker-host module is side-effect-free; importing
-	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
-	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
-	// worker host. Worker-thread re-entry has `!Bun.isMainThread` (isProcessEntry === false),
-	// and importers (`runCli` in profile-CLI tests, SDK embedding) have `import.meta.main === false`
-	// — declaring there would poison `workerHostEntry()` for the whole test process, forcing eval/stats/
-	// browser workers onto the same-realm inline fallback.
-	// This must run before worker selector dispatch so that worker subprocesses
-	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
-	if (isProcessEntry) declareWorkerHostEntry();
+	const workerSelector = resolvedArgv[0];
+	const isWorker = isWorkerHostSelector(workerSelector);
+	// A worker thread re-entering the CLI still hosts nested workers, even
+	// though Bun reports import.meta.main as false. SDK importers are not hosts.
+	if (isProcessEntry || (!Bun.isMainThread && isWorker)) declareWorkerHostEntry();
 
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
 	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
 	// worker's parked initial messages as soon as the entry module's
 	// top-level evaluation finishes.
-	if (isWorkerHostSelector(resolvedArgv[0])) {
+	if (isWorker) {
 		// Invoke dispatch first so its inbox is installed before asynchronous
 		// process-name setup yields; neither dependency belongs in prepaint.
-		const [dispatched] = await Promise.all([runWorkerEntrypoint(resolvedArgv[0]), setFullProcessName()]);
+		const [dispatched] = await Promise.all([runWorkerEntrypoint(workerSelector), setFullProcessName()]);
 		if (!dispatched) {
-			process.stderr.write(`Error: unknown worker selector: ${resolvedArgv[0]}\n`);
+			process.stderr.write(`Error: unknown worker selector: ${workerSelector}\n`);
 			process.exitCode = 1;
 		}
 		return;
@@ -525,6 +554,9 @@ export async function runCli(argv: string[]): Promise<void> {
 	// workers: on macOS its main thread runs above the default class a busy
 	// machine's builds compete in.
 	if (isProcessEntry) raiseInteractiveQos();
+	// Before anything is spawned: worker subprocesses, shells and tools
+	// inherit the policy, so reads of cloud-only files download everywhere.
+	if (isProcessEntry) materializeDatalessFiles();
 
 	if (resolvedArgv[0] === "--license") {
 		// Command boundary: bundled notices are read only when requested.
@@ -549,7 +581,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		!process.env.PI_TIMING &&
 		process.stdin.isTTY === true &&
 		process.stdout.isTTY === true &&
-		resolvedArgv.every(arg => PREPAINT_SAFE_FLAGS[arg] === true)
+		isPrepaintSafeArgv(resolvedArgv)
 	) {
 		// Intentional exception to the static-import convention: this latency boundary
 		// keeps the TUI graph out of worker, subcommand, help, and version launches.

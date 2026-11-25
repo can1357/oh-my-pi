@@ -11,19 +11,19 @@ import {
 	PtySession,
 	RunTrace,
 	Shell,
+	type ShellCommands,
 	type ShellFilesystem,
 	type ShellRunResult,
 	type ShellSpeech,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
-import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatRawOutputNotice } from "../tools/output-meta-format";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
-import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import type { MinimizedMeta } from "../tools/output-meta-format";
+import { type ArtifactAllocator, OutputSink, type OutputSummary } from "../tools/streaming-output";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -31,10 +31,12 @@ import {
 } from "../tools/output-meta";
 import { quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
+import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
+import { appendImageLinks } from "../utils/image-temp";
 import { loadDirenvEnv } from "./direnv";
+import { attachShellTrace } from "../tools/shell-viz";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
-
 import {
 	cfgBashDirenv,
 	cfgBashDirenvLoadTimeoutMs,
@@ -83,6 +85,8 @@ export interface BashExecutorOptions {
 	filesystem?: ShellFilesystem;
 	/** Speech synthesizer the embedded shell's `say` speaks through when the session has one set up. */
 	speech?: ShellSpeech;
+	/** Session tool commands the embedded shell resolves during this run. Other shells never see them. */
+	commands?: ShellCommands;
 	/**
 	 * Receives a copy of every byte crossing the command's pipes in the
 	 * embedded shell (`proc://<id>/streams`). The user-shell paths ignore it.
@@ -111,9 +115,8 @@ export interface BashExecutorOptions {
 	 * experiment shapes the output instead. Default: the setting decides.
 	 */
 	minimize?: boolean;
-	/** Artifact path/id for full output storage */
-	artifactPath?: string;
-	artifactId?: string;
+	/** Claims the spill file for output that overflows the inline view. */
+	allocateArtifact?: ArtifactAllocator;
 	/**
 	 * Invoked when the native minimizer rewrote the command's output, giving
 	 * the caller a chance to persist the lossless original capture (typically
@@ -151,6 +154,10 @@ export interface BashResult extends OutputSummary {
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;
+	/** The command ended in another directory than it started in (a `cd` in it); the next command starts in its own `cwd`. */
+	movedCwd?: boolean;
+	/** The command ended with `set -e` on; the next command starts with it off. */
+	errexit?: boolean;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
 	/**
@@ -186,7 +193,8 @@ const TRACE_POLL_MS = 80;
 
 /**
  * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
- * forwards each changed snapshot; `stop()` takes the final one.
+ * forwards each changed snapshot, bound to the run so a card presents the
+ * run itself; `stop()` takes the final one.
  *
  * An invalid snapshot is logged once and skipped: the poll runs from a timer,
  * where a throw would escape as an uncaught exception and end the session,
@@ -668,6 +676,7 @@ async function executeUserShellPty(run: {
 	dump: (notice?: string) => Promise<OutputSummary & { images?: ImageContent[] }>;
 }): Promise<BashResult> {
 	const session = new PtySession();
+	const newlines = new StreamNewlineNormalizer();
 	const result = await session.startArgv(
 		{
 			application: run.shell,
@@ -685,7 +694,7 @@ async function executeUserShellPty(run: {
 			// Preserve raw bytes for the terminal display, but extract graphics
 			// before the transcript sink sanitizes or truncates the clean text.
 			const clean = run.graphics.push(chunk);
-			if (clean) run.sink.push(clean.replace(/\r\n?/gu, "\n"));
+			if (clean) run.sink.push(newlines.push(clean));
 		},
 		err => {
 			if (err) return;
@@ -789,8 +798,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 						onPreview?.(sink.preview());
 					}
 				: undefined,
-		artifactPath: options?.artifactPath,
-		artifactId: options?.artifactId,
+		allocateArtifact: options?.allocateArtifact,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
@@ -815,8 +823,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (tail) sink.push(tail);
 			decodedImages = await graphics.images();
 		}
+		const summary = await sink.dump(notice);
+		const output = await appendImageLinks(summary.output, decodedImages);
 		return {
-			...(await sink.dump(notice)),
+			...summary,
+			output,
 			...(decodedImages.length > 0 ? { images: decodedImages } : {}),
 		};
 	};
@@ -972,6 +983,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
 				speech: options?.speech,
+				commands: options?.commands,
 				streams: options?.streams,
 				trace: runTrace,
 			},
@@ -1091,6 +1103,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			...(winner.result.movedCwd ? { movedCwd: true } : {}),
+			...(winner.result.errexit ? { errexit: true } : {}),
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await settleFork()),

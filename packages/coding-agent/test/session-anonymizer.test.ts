@@ -181,6 +181,27 @@ describe("SessionAnonymizer", () => {
 		expect(at(toolResult, "message", "details")).toEqual({ matchCount: 1, searchPath: cwd });
 	});
 
+	test("keeps a retry fallback's models and trigger but redacts its reason like a provider error", () => {
+		const entry = new SessionAnonymizer().entry({
+			type: "model_change",
+			id: "a1b2c3d4",
+			parentId: null,
+			timestamp: "2026-09-22T15:12:03.629Z",
+			model: "openai/gpt-4o-mini",
+			role: "fallback",
+			resolvedModelIsFallback: true,
+			fallback: {
+				from: "anthropic/claude-sonnet-4-5:high",
+				trigger: "request-error",
+				reason: "400 prompt contained password=hunter2 for user alice@example.com",
+			},
+		});
+		expect(at(entry, "model")).toBe("openai/gpt-4o-mini");
+		expect(at(entry, "fallback", "from")).toBe("anthropic/claude-sonnet-4-5:high");
+		expect(at(entry, "fallback", "trigger")).toBe("request-error");
+		expect(at(entry, "fallback", "reason")).toMatch(/^400 \[redacted #\d+: \d+ chars, 1 line\]$/);
+	});
+
 	test("keeps a journaled side channel's measurements and none of its content", () => {
 		const stateId = "3fa9c1d2e4b5a6978877665544332211ffeeddccbbaa99887766554433221100";
 		const anonymizer = new SessionAnonymizer();
@@ -246,7 +267,7 @@ describe("SessionAnonymizer", () => {
 		});
 	});
 
-	test("keeps a session_init's mounted-device list beside its tool list", () => {
+	test("keeps a session_init's mounted tool-command list beside its tool list", () => {
 		const anonymizer = new SessionAnonymizer();
 		const result = anonymizer.entry({
 			type: "session_init",

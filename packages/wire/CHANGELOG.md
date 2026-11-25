@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added a TSP checkout event to indicate when a pane displays its checkout view.
+- Added a waiting state for agent tray cards when an agent is running but waiting on its own agents or jobs.
+- Extended the TSP toggle event to support the open state used by menus and selectable controls, including the selected item ID when available.
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added `toolIntentLabel` for displaying the brief prefix of a structured tool-call intent.
+- Added clickable shell-command steps with output selection and visual highlighting of the currently displayed step.
+- Added a terminal `features` event for notifying clients when terminal settings change.
+- Added collaboration guest support for resuming sessions and delivering queued messages, plus `followUp` prompts.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

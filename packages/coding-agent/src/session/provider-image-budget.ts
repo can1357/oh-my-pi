@@ -21,12 +21,17 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { declaredTools } from "../utils/tool-declarations";
-import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { imageDecodeFailureReason } from "../utils/image-input";
 
 const IMAGE_OMISSION: TextContent = {
 	type: "text",
 	text: "[image omitted: provider image limit]",
 };
+
+/** Says `count` images were dropped from a message that keeps other content. */
+function omittedImages(count: number): TextContent {
+	return { type: "text", text: `[${count} image${count === 1 ? "" : "s"} omitted: provider image limit]` };
+}
 
 /**
  * Body bytes added after the clamp sees the context: injected reminders, the provider's own system prompt, and
@@ -157,10 +162,7 @@ function clampContent(
 	// zero-block messages, silently losing the turn (e.g. an oversized pasted image).
 	if (clamped.length === 0) return [IMAGE_OMISSION];
 	// Kept text must not read as the whole result: say images were there.
-	clamped.push({
-		type: "text",
-		text: `[${dropped} image${dropped === 1 ? "" : "s"} omitted: provider image limit]`,
-	});
+	clamped.push(omittedImages(dropped));
 	return clamped;
 }
 
@@ -185,9 +187,10 @@ const COMPUTER_FALLBACK_TEXT_CHARS = 16_000;
 
 /**
  * Where the route sends a computer result's metadata screenshot, the result is that one image, never its content:
- * evicting it drops the metadata (and the unsent content images), and the result goes out as its remaining text, as
- * for an unreadable screenshot in {@link dropUnreadableContextImages}; the bytes of that newly sent text accrue to
- * `state.fallbackTextBytes`. Elsewhere the content is what is sent and clamped, and the unsent metadata stays.
+ * evicting it drops the metadata (and the unsent content images), and the result goes out as its remaining text led by
+ * the omission note, as for an unreadable screenshot in {@link dropUnreadableContextImages}; the bytes of that newly
+ * sent text accrue to `state.fallbackTextBytes`. Elsewhere the content is what is sent and clamped, and the unsent
+ * metadata stays.
  */
 function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
 	if (!needsImageDrop(state)) return message;
@@ -201,15 +204,17 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetSt
 	if (state.remainingDrops > 0) state.remainingDrops--;
 	state.inlineBytes -= bytes;
 	const text = message.content.filter(part => part.type === "text");
+	// The note leads: the route sends this text truncated from the end.
+	const content = text.length > 0 ? [omittedImages(1), ...text] : [IMAGE_OMISSION];
 	if (state.fallbackTextBytes !== undefined) {
-		const sent = text
+		const sent = content
 			.map(part => part.text)
 			.join("\n")
 			.slice(0, COMPUTER_FALLBACK_TEXT_CHARS);
 		// The note's prefix, call id and truncation marker.
 		state.fallbackTextBytes += Buffer.byteLength(JSON.stringify(sent)) + 256;
 	}
-	return { ...message, content: text.length > 0 ? text : [IMAGE_OMISSION], providerMetadata: undefined };
+	return { ...message, content, providerMetadata: undefined };
 }
 
 function clampImages(context: Context, state: ImageBudgetState): Context {

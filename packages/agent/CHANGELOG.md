@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added customizable notices for unmet soft tool requirements, allowing hosts to specify the text shown when a required tool call does not satisfy its requirement.
+- Added `AgentLoopError` and turn-level error metadata so hosts can distinguish an agent loop that ended because a soft tool requirement was not met from a failed request.
+- Added abort-signal support to provider-context transformation and side-request context building.
+- Added optional tool detachment when aborting an agent run, allowing tools that support background execution to continue instead of being terminated.
+- Agents can accept an asynchronous Cursor handler factory; a session opens its execution bridge on the first Cursor request, including after a model switch.
+
+### Fixed
+
+- Fixed DeepSeek DSML markup leaking into tool-call arguments and being executed or replayed.
+- Fixed DeepSeek DSML markup being incorrectly included in conversation history on OpenRouter Responses requests.
+- Fixed unmet soft tool requirements leaving tool calls unanswered when a run was continued or retried.
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- Prevented oversized handoffs from reaching the provider by detecting when prepared context exceeds the target model’s context window.
+- Preserved provider error status, error identifiers, retry classification, and cancellation markers on failed or cancelled assistant turns.
+- Fixed speculative tool calls hanging when discarded or aborted before execution completed.
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added standby tools support through `Agent.setStandbyTools()` and `AgentContext.standbyTools`, allowing tools to remain inactive until a request explicitly enables tool use.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

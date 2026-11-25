@@ -17,7 +17,7 @@ import {
 	type HostStatus,
 	parseHostRequest,
 } from "../../src/disasm/protocol";
-import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
+import { disposeAllVmContexts, resetVmContext } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { invokeEvalPrelude } from "../../src/eval/preludes";
 import { disposeAllKernelSessions, executePython } from "../../src/eval/py/executor";
@@ -333,6 +333,30 @@ describe("dsm host capability", () => {
 		});
 	});
 
+	it("rejects another backend's database file by naming its owner", async () => {
+		const f = await fixture();
+		const binjaDatabase = path.join(f.dir, "existing.bndb");
+		await Bun.write(binjaDatabase, "database");
+		await Bun.write(path.join(f.dir, "existing.i64"), "database");
+		await expect(f.invoke({ action: "open", path: "existing.bndb" })).rejects.toThrow(
+			"Binary Ninja database existing.bndb cannot be opened with the active IDA backend; set disassembler.backend to binja.",
+		);
+		f.setBackend("ghidra");
+		await expect(f.invoke({ action: "open", path: "existing.i64" })).rejects.toThrow(
+			"IDA database existing.i64 cannot be opened with the active Ghidra backend; set disassembler.backend to ida.",
+		);
+		f.setBackend("binja");
+		await expect(f.invoke({ action: "open", path: "existing.i64" })).rejects.toThrow(
+			"IDA database existing.i64 cannot be opened with the active Binary Ninja backend; set disassembler.backend to ida.",
+		);
+		expect(f.acquire).not.toHaveBeenCalled();
+		await f.invoke({ action: "open", path: "existing.bndb" });
+		expect(f.acquire).toHaveBeenLastCalledWith(f.session, "binja", binjaDatabase, {
+			arch: undefined,
+			signal: undefined,
+		});
+	});
+
 	it("keeps closed references invalid across a reopen or host replacement", async () => {
 		const f = await fixture();
 		const handle = await f.getHandle();
@@ -486,6 +510,9 @@ describe("dsm in real eval runtimes", () => {
 							`Path(${JSON.stringify(reportPath)}).write_text(json.dumps(result), encoding="utf-8")`,
 						].join("\n");
 			const sessionId = `dsm-${language}-${crypto.randomUUID()}`;
+			// afterEach removes the fixture directory before afterAll disposes the
+			// VM contexts; stop this session's worker first so it releases the dir.
+			if (language === "js") cleanups.unshift(() => resetVmContext(sessionId));
 			const result =
 				language === "js"
 					? await executeJs(code, { cwd: f.dir, sessionId, session: f.session })

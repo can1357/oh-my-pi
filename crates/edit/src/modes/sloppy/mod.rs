@@ -1,10 +1,13 @@
-//! `sloppy` mode: `*** Find` anchors with `*** Replace` replacements or
-//! `*** Insert Before`/`*** Insert After` insertions inside `*** Edit File:`
-//! file sections, with tolerant matching.
+//! `sloppy` mode: tolerant-match edits inside `*** Edit File:` sections.
+//!
+//! Supports `*** Find` anchors with `*** Replace` replacements,
+//! `*** Insert Before`/`*** Insert After` insertions, and `*** Cut` with
+//! `*** Paste Before`/`*** Paste After` moves.
 
 pub mod apply;
 pub mod parse;
 pub mod types;
+mod update_patch;
 
 pub use types::{InlineSloppyRegion, SloppySection};
 
@@ -14,13 +17,50 @@ use self::{
 	types::PARTIAL_NOTICE,
 };
 use crate::{
-	diff_string::{BlockContextSource, generate_diff_string},
+	diff_string::{BlockContextSource, DiffOutput, generate_diff_string},
 	engine::{EditMode, FileOp, Inspection, ModeEngine, PreviewFile, StagedFile},
 	error::EditError,
-	files::FileSource,
+	files::{FileRead, FileSource},
 	store::EditStore,
 	stream_json::ArgSnapshot,
 };
+
+fn update_diff(read: &FileRead, after: &str, streaming: bool) -> DiffOutput {
+	generate_diff_string(&read.text, after, None, &BlockContextSource {
+		path: Some(&read.resolved.display),
+		lang: None,
+		streaming,
+	})
+}
+
+fn preview_update(read: &FileRead, after: &str, streaming: bool) -> PreviewFile {
+	let output = update_diff(read, after, streaming);
+	PreviewFile {
+		display: read.resolved.display.clone(),
+		diff: Some(output.diff),
+		first_changed_line: output.first_changed_line,
+		op: Some(FileOp::Update),
+		..PreviewFile::default()
+	}
+}
+
+fn staged_file(read: &FileRead, op: FileOp) -> StagedFile {
+	let mut file =
+		StagedFile::new(read.resolved.display.clone(), read.resolved.absolute.clone(), op);
+	file.before_raw = Some(read.raw.clone());
+	file.before.clone_from(&read.text);
+	file
+}
+
+fn stage_update(read: &FileRead, text: String) -> Result<StagedFile, EditError> {
+	let output = update_diff(read, &text, false);
+	let mut file = staged_file(read, FileOp::Update);
+	file.persisted = Some(read.persist(&text)?);
+	file.after = text;
+	file.diff = output.diff;
+	file.first_changed_line = output.first_changed_line;
+	Ok(file)
+}
 
 pub struct SloppyEngine {
 	/// Retained for the mode-neutral constructor; sloppy owns its matching
@@ -41,7 +81,7 @@ impl SloppyEngine {
 		} else {
 			input
 		};
-		split_sloppy_sections(input)
+		parse::split_sloppy_sections_for_preview(input, streaming)
 	}
 
 	fn missing_target(args: &ArgSnapshot) -> bool {
@@ -65,6 +105,19 @@ impl ModeEngine for SloppyEngine {
 		store: &EditStore,
 	) -> Vec<PreviewFile> {
 		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
+		if let Some(result) = args.input.as_deref().and_then(update_patch::parse) {
+			return match result.and_then(|updates| {
+				update_patch::map_files(&updates, files, |read, after| {
+					Ok(preview_update(read, &after, streaming))
+				})
+			}) {
+				Ok(previews) => previews,
+				Err(_) if streaming => Vec::new(),
+				Err(error) => {
+					vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }]
+				},
+			};
+		}
 		let sections = match Self::sections(args, streaming) {
 			Ok(sections) => sections,
 			Err(error) => {
@@ -111,19 +164,7 @@ impl ModeEngine for SloppyEngine {
 					streaming,
 				}) {
 					Ok(Applied::Changed { text: after, .. }) => {
-						let output =
-							generate_diff_string(&read.text, &after, None, &BlockContextSource {
-								path: Some(&read.resolved.display),
-								lang: None,
-								streaming,
-							});
-						Some(PreviewFile {
-							display: read.resolved.display.clone(),
-							diff: Some(output.diff),
-							first_changed_line: output.first_changed_line,
-							op: Some(FileOp::Update),
-							..PreviewFile::default()
-						})
+						Some(preview_update(&read, &after, streaming))
 					},
 					Ok(Applied::Unchanged(_)) | Err(_) if streaming => None,
 					Ok(Applied::Unchanged(error)) | Err(error) => Some(PreviewFile {
@@ -145,6 +186,9 @@ impl ModeEngine for SloppyEngine {
 	) -> Result<Vec<StagedFile>, EditError> {
 		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
 		let input = args.input.as_deref().unwrap_or_default();
+		if let Some(result) = update_patch::parse(input) {
+			return update_patch::map_files(&result?, files, stage_update);
+		}
 		let sections = split_sloppy_sections(input)?;
 		if sections.is_empty() {
 			return Err(EditError::parse(
@@ -180,31 +224,17 @@ impl ModeEngine for SloppyEngine {
 					error
 				}
 			})?;
-			let mut file = StagedFile::new(
-				read.resolved.display.clone(),
-				read.resolved.absolute.clone(),
-				FileOp::Update,
-			);
-			file.before_raw = Some(read.raw.clone());
-			file.before.clone_from(&read.text);
-			match applied {
+			let file = match applied {
 				Applied::Changed { text, rejected } => {
-					let output = generate_diff_string(&read.text, &text, None, &BlockContextSource {
-						path:      Some(&read.resolved.display),
-						lang:      None,
-						streaming: false,
-					});
-					file.persisted = Some(read.persist(&text)?);
-					file.after = text;
-					file.diff = output.diff;
-					file.first_changed_line = output.first_changed_line;
+					let mut file = stage_update(&read, text)?;
 					file.after_preview = notes;
 					file
 						.after_preview
 						.extend(rejected.map(|error| format!("{PARTIAL_NOTICE}\n{error}")));
+					file
 				},
 				Applied::Unchanged(error) => {
-					file.op = FileOp::Noop;
+					let mut file = staged_file(&read, FileOp::Noop);
 					file.after.clone_from(&read.text);
 					file
 						.after_preview
@@ -214,8 +244,9 @@ impl ModeEngine for SloppyEngine {
 					} else {
 						error
 					});
+					file
 				},
-			}
+			};
 			staged.push(file);
 		}
 		let changed = staged.iter().any(|file| file.op != FileOp::Noop);
@@ -227,10 +258,13 @@ impl ModeEngine for SloppyEngine {
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
-		// An unparseable payload targets nothing; `preview` and `stage` surface
-		// the error.
-		let sections =
-			split_sloppy_sections(args.input.as_deref().unwrap_or_default()).unwrap_or_default();
+		let input = args.input.as_deref().unwrap_or_default();
+		if let Some(result) = update_patch::parse(input) {
+			return update_patch::inspect(input, result);
+		}
+		let Ok(sections) = parse::all_sections(input, false) else {
+			return Inspection { paths: parse::declared_paths(input), ..Inspection::default() };
+		};
 		Inspection {
 			paths:    sections
 				.iter()
@@ -238,6 +272,7 @@ impl ModeEngine for SloppyEngine {
 				.collect(),
 			entries:  sections
 				.into_iter()
+				.filter(|section| !section.body.is_empty())
 				.map(|section| (section.path, section.body))
 				.collect(),
 			file_ops: Vec::new(),

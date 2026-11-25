@@ -78,7 +78,15 @@ use std::{
 	path::{Path, PathBuf},
 };
 
+#[cfg(target_os = "macos")]
+use std::{
+	io,
+	os::{darwin::fs::MetadataExt, fd::AsRawFd},
+};
+
 use indicatif::ProgressBar;
+#[cfg(target_os = "macos")]
+use nix::{NixPath, errno::Errno};
 use uucore::{display::Quotable, safe_traversal::{DirFd, SymlinkBehavior}};
 
 use super::{
@@ -178,6 +186,83 @@ fn native_entry(host: &Host, path: &Path) -> Option<(PathBuf, OsString)> {
 	Some((parent, name))
 }
 
+#[cfg(target_os = "macos")]
+fn is_dataless(_path: &Path, flags: u32) -> bool {
+	// SF_DATALESS in sys/stat.h is not exposed by the libc crate.
+	const SF_DATALESS: u32 = 0x4000_0000;
+	#[cfg(test)]
+	if TEST_DATALESS_PATH.with(|path| path.borrow().as_deref() == Some(_path)) {
+		return true;
+	}
+	flags & SF_DATALESS != 0
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+	pub(super) static TEST_DATALESS_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn is_dataless_directory(path: &Path, metadata: &omp_vfs::Metadata) -> bool {
+	metadata.native().is_some_and(|metadata| is_dataless(path, metadata.st_flags()))
+}
+
+#[cfg(target_os = "macos")]
+fn unlink_dataless_at(parent: libc::c_int, name: &OsStr) -> io::Result<()> {
+	// Apple's rm uses this flag from XNU's sys/fcntl_private.h. The kernel
+	// validates that nonempty directories are still dataless before removing.
+	const AT_REMOVEDIR_DATALESS: libc::c_int = 0x0100;
+	name.with_nix_path(|name| {
+		let unlink = |flags| {
+			// SAFETY: name is a valid C string and parent is AT_FDCWD or a live directory fd.
+			Errno::result(unsafe { libc::unlinkat(parent, name.as_ptr(), flags) }).map(|_| ())
+		};
+		match unlink(AT_REMOVEDIR_DATALESS) {
+			Err(Errno::EINVAL) => unlink(libc::AT_REMOVEDIR),
+			result => result,
+		}
+	})?
+	.map_err(io::Error::from)
+}
+
+#[cfg(target_os = "macos")]
+fn remove_dataless_dir(
+	host: &mut Host,
+	parent_fd: libc::c_int,
+	name: &OsStr,
+	path: &Path,
+	options: &Options,
+	progress_bar: Option<&ProgressBar>,
+) -> bool {
+	match unlink_dataless_at(parent_fd, name) {
+		Ok(()) => {
+			if let Some(pb) = progress_bar {
+				pb.inc(1);
+			}
+			verbose_removed_directory(host, path, options);
+			false
+		},
+		Err(error) if is_missing_under_force(&error, options) => false,
+		Err(error) => show_removal_error(host, error, path),
+	}
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn remove_dataless_operand(
+	host: &mut Host,
+	resolved: &Path,
+	path: &Path,
+	metadata: &omp_vfs::Metadata,
+	options: &Options,
+	progress_bar: Option<&ProgressBar>,
+) -> bool {
+	if !prompt_dir_with_mode(host, path, metadata.permissions().mode() as libc::mode_t, options) {
+		return false;
+	}
+	host.fs().note_change(resolved);
+	remove_dataless_dir(host, libc::AT_FDCWD, resolved.as_os_str(), path, options, progress_bar)
+}
+
 /// Remove a single file using safe traversal.
 ///
 /// Returns `None` when `path` is not a native host path, so the caller
@@ -189,6 +274,8 @@ pub fn safe_remove_file(host: &mut Host,
 ) -> Option<bool> {
 	let (parent, file_name) = native_entry(host, path)?;
 	let dir_fd = DirFd::open(&parent, SymlinkBehavior::Follow).ok()?;
+	// The unlink below bypasses the filesystem facade.
+	host.fs().note_change(parent.join(&file_name));
 
 	match dir_fd.unlink_at(&file_name, false) {
 		Ok(_) => {
@@ -315,6 +402,9 @@ pub fn safe_remove_dir_recursive(host: &mut Host,
 			return show_removal_error(host, e, path);
 		},
 	};
+
+	// The traversal below unlinks by descriptor, bypassing the filesystem facade.
+	host.fs().note_change(&path_fs);
 
 	// Try to open the directory using DirFd for secure traversal
 	let dir_fd = match DirFd::open(&path_fs, SymlinkBehavior::Follow) {
@@ -555,6 +645,15 @@ pub fn safe_remove_dir_recursive_impl(host: &mut Host, path: &Path, mut cur_fd: 
 			if ancestors.contains(&entry_id) {
 				show_cycle_error(host, path_of(&path_buf));
 				error = true;
+				break 'entry false;
+			}
+
+			#[cfg(target_os = "macos")]
+			if is_dataless(path_of(&path_buf), entry_stat.st_flags) {
+				let path = path_of(&path_buf);
+				if prompt_dir_with_mode(host, path, entry_stat.st_mode, options) {
+					error |= remove_dataless_dir(host, cur_fd.as_raw_fd(), &entry_name, path, options, None);
+				}
 				break 'entry false;
 			}
 
@@ -1220,6 +1319,11 @@ fn count_files(host: &mut Host, paths: &[&OsStr], recursive: bool) -> u64 {
 		if let Ok(md) = host.fs().symlink_metadata(&host.resolve(path)) {
 			if md.is_dir() && !is_symlink_dir(&md.file_type()) {
 				if recursive {
+					#[cfg(target_os = "macos")]
+					if platform::is_dataless_directory(path, &md) {
+						total += 1;
+						continue;
+					}
 					total += count_files_in_directory(host, path);
 				}
 			} else {
@@ -1246,7 +1350,17 @@ fn count_files_in_directory(host: &mut Host, p: &Path) -> u64 {
 			break;
 		}
 		entries_count += match entry.file_type() {
-			Ok(ft) if ft.is_dir() => count_files_in_directory(host, &entry.path()),
+			Ok(ft) if ft.is_dir() => {
+				let child_path = entry.path();
+				#[cfg(target_os = "macos")]
+				if entry.native().is_some()
+					&& entry.metadata().is_ok_and(|md| platform::is_dataless_directory(&child_path, &md))
+				{
+					entries_count += 1;
+					continue;
+				}
+				count_files_in_directory(host, &child_path)
+			},
 			Ok(_) => 1,
 			Err(_) => 0,
 		};
@@ -1409,15 +1523,17 @@ fn remove_dir_recursive(host: &mut Host,
 	// avoids an infinite recursion in the case of a link to the current
 	// directory, like `ln -s . link`.
 	let fs_path = host.resolve(path);
-	if !host
-		.fs()
-		.symlink_metadata(&fs_path)
-		.is_ok_and(|metadata| metadata.is_dir())
+	if let Ok(metadata) = host.fs().symlink_metadata(&fs_path)
+		&& metadata.is_dir()
 	{
-		return remove_file(host, path, options, progress_bar);
+		#[cfg(target_os = "macos")]
+		if platform::is_dataless_directory(path, &metadata) && host.fs().is_native_local(&fs_path) {
+			return platform::remove_dataless_operand(host, &fs_path, path, &metadata, options, progress_bar);
+		}
+		remove_dir_tree(host, path, options, progress_bar)
+	} else {
+		remove_file(host, path, options, progress_bar)
 	}
-
-	remove_dir_tree(host, path, options, progress_bar)
 }
 
 /// Removes the directory `path`, known not to be a symlink to one, and
@@ -1953,6 +2069,49 @@ mod tests {
 
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(!cwd.path().join("tree").exists());
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn recursive_remove_unlinks_dataless_operand_and_child() {
+		let cwd = tempdir().unwrap();
+		std::fs::create_dir(cwd.path().join("operand")).unwrap();
+		std::fs::create_dir_all(cwd.path().join("tree/placeholder")).unwrap();
+
+		for (operand, placeholder, expected) in [
+			("operand", "operand", "removed directory 'operand'\n"),
+			("tree", "tree/placeholder", "removed directory 'tree/placeholder'\nremoved directory 'tree'\n"),
+		] {
+			super::platform::TEST_DATALESS_PATH.set(Some(placeholder.into()));
+			let (code, capture) = run_util::<Rm>(&["-rfv", operand], "", cwd.path());
+			super::platform::TEST_DATALESS_PATH.set(None);
+			assert_eq!(code, 0, "{}", capture.err());
+			assert_eq!(capture.out(), expected);
+			assert!(!cwd.path().join(operand).exists());
+		}
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn recursive_remove_does_not_descend_into_dataless_directory() {
+		let cwd = tempdir().unwrap();
+		let placeholder = cwd.path().join("tree/placeholder");
+		std::fs::create_dir_all(&placeholder).unwrap();
+		let child = placeholder.join("child");
+		std::fs::write(&child, "data").unwrap();
+
+		// Simulate a directory that materialized after stat: unlinkat must
+		// fail rather than traverse the children of what was a placeholder.
+		for operand in ["tree/placeholder", "tree"] {
+			super::platform::TEST_DATALESS_PATH.set(Some("tree/placeholder".into()));
+			let (code, capture) = run_util::<Rm>(&["-rfv", operand], "", cwd.path());
+			super::platform::TEST_DATALESS_PATH.set(None);
+
+			assert_eq!(code, 1);
+			assert!(capture.err().contains("Directory not empty"), "{}", capture.err());
+			assert_eq!(capture.out(), "");
+			assert!(child.is_file());
+		}
 	}
 
 	#[test]

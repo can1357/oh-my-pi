@@ -1,4 +1,4 @@
-import type { AstGrepToolDetails } from "@oh-my-pi/pi-tui/tools/ast-grep";
+import type { AstGrepToolDetails } from "./details/ast-grep";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
@@ -18,23 +18,23 @@ import { ensureGrammar, missingGrammarsNote, rerunWithGrammars } from "../utils/
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
-import { createFileRecorder, formatResultPath, resultSnapshotPath, targetResultBase } from "./file-recorder";
-import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
-import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
+import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
+import { type FileMatchSection, formatFileMatches } from "./grouped-file-output";
+import { formatMatchLine } from "./match-line-format";
 
 import {
 	parseSearchPath,
 	relativeSearchResultPath,
-	resolveSearchResultPath,
+	resolveTargetResultPath,
 	resolveToolSearchScope,
 	searchPathTier,
 } from "./path-utils";
 import { searchApprovalCacheTargets } from "./search-approval-targets";
-import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
+import { toPathList } from "../utils/render-utils";
 import { isRawSelector } from "./read-selector";
-import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { singleLine } from "@oh-my-pi/pi-tui/utils";
+import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "../utils/render-utils";
+import { ToolError } from "./tool-errors";
+import { singleLine } from "../utils/text-width";
 import { toolResult } from "./tool-result";
 
 import { cfgTaskDisabledAgents } from "../task/settings";
@@ -76,7 +76,7 @@ function retainAstFindMatch(matches: AstFindMatch[], capacity: number, candidate
 }
 
 async function runMultiTargetAstGrep(
-	targets: Array<{ basePath: string; glob?: string }>,
+	targets: Array<{ basePath: string; glob?: string; isDirectory: boolean }>,
 	options: {
 		patterns: string[];
 		commonBasePath: string;
@@ -121,9 +121,8 @@ async function runMultiTargetAstGrep(
 		limitReached = limitReached || targetResult.limitReached;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
-		const resultBase = await targetResultBase(target.basePath);
 		for (const match of targetResult.matches) {
-			const absolute = resolveSearchResultPath(resultBase, match.path);
+			const absolute = resolveTargetResultPath(target, match.path);
 			const rebased = relativeSearchResultPath(options.commonBasePath, absolute);
 			retainAstFindMatch(retainedMatches, retainedCapacity, { ...match, path: rebased });
 		}
@@ -381,16 +380,18 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			outputLines.push(...matchOutput.model);
 			displayLines.push(...matchOutput.display);
 
+			const nextSkip = result.limitReached ? skip + result.matches.length : undefined;
 			const details: AstGrepToolDetails = {
 				...baseDetails,
+				...(nextSkip === undefined ? {} : { nextSkip }),
 				fileMatches: fileList.map(filePath => ({
 					path: filePath,
 					count: fileMatchCounts.get(filePath) ?? 0,
 				})),
 				displayContent: displayLines.join("\n"),
 			};
-			if (result.limitReached) {
-				outputLines.push("", "Result limit reached; narrow path or use skip to page through results.");
+			if (nextSkip !== undefined) {
+				outputLines.push("", `Result limit reached; narrow path or use skip=${nextSkip} for the next page.`);
 			}
 			if (cappedParseErrors.length) {
 				outputLines.push("", ...formatParseErrors(cappedParseErrors, parseErrorsTotal));

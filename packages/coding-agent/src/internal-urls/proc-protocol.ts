@@ -1,5 +1,6 @@
-import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import { collapseCommand } from "../cli/ps-model";
+import { formatDuration } from "@oh-my-pi/pi-utils";
+import type { UnitSnapshot } from "../daemon/daemon-types";
 import { formatBytes, logger, sanitizeText, spillUrl, truncate } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async";
 import {
@@ -23,7 +24,8 @@ import {
 	serviceUnitLogPath,
 	stopService,
 } from "../launch/services";
-import type { ProcReadDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
+import { AGENT_KILL_LABEL } from "../session/messages";
+import type { ProcReadDetails } from "../tools/details/proc-render";
 import procPromptDoc from "../prompts/internal-urls/proc.md" with { type: "text" };
 import procReferenceDoc from "../prompts/internal-urls/proc-reference.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -42,7 +44,7 @@ import { cfgLaunchEnabled } from "../tools/settings";
 
 type ProcTarget =
 	| { id: string; action: "stdin" | "mode" | "kill" }
-	/** `proc://<id>/streams` lists a bash job's pipe streams; `/streams/<n>` reads one. */
+	/** `proc://<id>/streams` lists a bash job's streams (pipes, redirected files); `/streams/<n>` reads one. */
 	| { id: string; action: "streams"; stream?: number };
 
 const STREAMS_PATH = /^\/streams(?:\/(\d+))?\/?$/;
@@ -124,8 +126,9 @@ function textResource(
 /**
  * `proc://<id>/streams[/<n>]`: the bytes crossing a bash job's pipes, which a
  * later stage (`| tail`, `| grep`) may still be holding back from the job's own
- * output. A stream read is decoded, carriage-return progress becomes lines,
- * and control sequences are stripped, as for the job's output.
+ * output, and the files its commands redirect their output into (`> log`),
+ * which never reach it. A stream read is decoded, carriage-return progress
+ * becomes lines, and control sequences are stripped, as for the job's output.
  */
 async function streamsResource(
 	url: InternalUrl,
@@ -142,29 +145,27 @@ async function streamsResource(
 				  (await listServicesTolerant(session, signal)).services.some(service => service.key === id)
 				? "a service"
 				: undefined;
-		if (kind) throw new Error(`${id} is ${kind}; it has no pipe streams. Read proc://${id} for its output.`);
+		if (kind) throw new Error(`${id} is ${kind}; it has no streams. Read proc://${id} for its output.`);
 		const evicted = session.asyncJobManager?.getEvictedJob(id, { ownerId: session.getAgentId?.() ?? undefined });
-		throw new Error(
-			evicted ? `No pipe streams kept: ${describeEvictedJob(evicted)}` : `Background job not found: ${id}`,
-		);
+		throw new Error(evicted ? `No streams kept: ${describeEvictedJob(evicted)}` : `Background job not found: ${id}`);
 	}
 	const streams = job.process?.streams;
 	if (!streams)
 		throw new Error(
-			`proc://${id} has no pipe streams: only bash jobs with \`|\` stages record them. Read proc://${id} for its output.`,
+			`proc://${id} has no streams: only bash jobs record their \`|\` stages and redirected files. Read proc://${id} for its output.`,
 		);
 	if (stream === undefined) {
 		const rows = streams.list().map(info => {
-			// Stage source spans lines (`for …; do …; done`); a row shows each on one line.
-			const [producer, consumer] = [info.producer, info.consumer].map(stage =>
-				truncate(stage.replace(/\s+/g, " ").trim(), 80),
-			);
-			return `proc://${id}/streams/${info.id} ${info.open ? "open" : "closed"} ${formatBytes(info.total)} — ${producer} → ${consumer}`;
+			// Stage source spans lines (`for …; do …; done`); a row shows each on one line. A file's path stays whole.
+			const producer = truncate(collapseCommand(info.producer), 80);
+			const consumer = info.file ? info.consumer : truncate(collapseCommand(info.consumer), 80);
+			const state = info.file ? "file" : info.open ? "open" : "closed";
+			return `proc://${id}/streams/${info.id} ${state} ${formatBytes(info.total)} — ${producer} → ${consumer}`;
 		});
 		return textResource(
 			url,
 			rows.join("\n") ||
-				`${id} has piped nothing between \`|\` stages yet (a command without \`|\` never does). Read proc://${id} for its output.`,
+				`${id} has piped nothing between \`|\` stages and redirected nothing into a file yet. Read proc://${id} for its output.`,
 			undefined,
 			true,
 		);
@@ -387,7 +388,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			return { content: result.content, details: { proc: result.details } };
 		}
 		if (agent) {
-			const outcome = await cancelAgentRegistration(session, ownerId, id);
+			const outcome = await cancelAgentRegistration(session, ownerId, id, AGENT_KILL_LABEL);
 			return {
 				content: [{ type: "text", text: outcome.message }],
 				details: { proc: { op: "cancel", jobs: [], cancelled: [{ id, status: outcome.status }] } },

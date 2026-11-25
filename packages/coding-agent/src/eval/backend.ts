@@ -1,15 +1,17 @@
 import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
-import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { OutputArtifactError } from "../tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { BackendProbeOptions } from "./probe";
-import type { EvalLanguage, EvalStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalLanguage, EvalStatusEvent } from "../tools/details/eval";
 import type { EvalDisplayOutput } from "./types";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
 	cwd: string;
 	sessionId: string;
+	/** ID of the eval invocation, not the session or its reusable kernel. */
+	parentToolCallId?: string;
 	sessionFile: string | undefined;
 	kernelOwnerId: string | undefined;
 	signal?: AbortSignal;

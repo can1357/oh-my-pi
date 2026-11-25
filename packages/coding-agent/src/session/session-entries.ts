@@ -7,8 +7,8 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
-import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { StructuredSubagentSchemaMode } from "../task/task-details";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -21,6 +21,9 @@ export const SESSION_TITLE_SLOT_BYTES = 256;
 export const SESSION_TITLE_SLOT_ENTRY_TYPE = "title";
 
 export const TITLE_CHANGE_ENTRY_TYPE = "title_change";
+
+/** Marks the end of a `/tan` session's inherited history; data is the fork's session ID. */
+export const TAN_FORK_BOUNDARY_CUSTOM_TYPE = "tan-fork-boundary";
 
 export type SessionTitleSource = "auto" | "user";
 
@@ -54,6 +57,14 @@ export function modelRoleOf(role: string | undefined): string | undefined {
 		: role;
 }
 
+/** Client other than the terminal that started a session: `chrome` is the omp extension's side panel. */
+export type SessionOrigin = "chrome";
+
+/** `value` as a {@link SessionOrigin}; anything else (absent, unknown client) is the terminal's. */
+export function parseSessionOrigin(value: unknown): SessionOrigin | undefined {
+	return value === "chrome" ? value : undefined;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -62,6 +73,12 @@ export interface SessionHeader {
 	titleSource?: SessionTitleSource;
 	timestamp: string;
 	cwd: string;
+	/**
+	 * Set when another client started the session ({@link SessionOrigin}); only that client lists it, so the
+	 * terminal's resume picker, `--continue`, recent sessions and ACP listings skip it. An explicit
+	 * `--resume <id|path>` still opens it.
+	 */
+	origin?: SessionOrigin;
 	/**
 	 * Additional workspace directories beyond `cwd` (multi-root workspace).
 	 * Absolute, normalized, deduplicated. Absent on legacy single-cwd sessions.
@@ -211,6 +228,21 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	configured?: string | null;
 }
 
+/** Why a retry fallback moved the session off a model. */
+export interface ModelFallbackCause {
+	/** The model the session left, named as in `retry_fallback_applied.from` (`provider/modelId`, plus any `:thinking` level). */
+	from: string;
+	/**
+	 * - `request-error`: a request to `from` failed.
+	 * - `agent-loop`: the agent loop stopped the turn itself (e.g. an unmet soft tool requirement); no request failed.
+	 * - `usage-preflight`: usage health moved the request before it was sent.
+	 * - `missing-credential`: `from`'s provider had no usable credential.
+	 */
+	trigger: "request-error" | "agent-loop" | "usage-preflight" | "missing-credential";
+	/** The failed turn's error, or the usage or credential condition. */
+	reason?: string;
+}
+
 export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
 	/** Model in "provider/modelId" format */
@@ -219,6 +251,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	role?: string;
 	/** True when this transition selected a retry-fallback model rather than the configured model. */
 	resolvedModelIsFallback?: boolean;
+	/** Why the retry fallback that wrote this entry switched models. */
+	fallback?: ModelFallbackCause;
 }
 
 export interface ServiceTierChangeEntry extends SessionEntryBase {
@@ -350,7 +384,7 @@ export interface SessionInitEntry extends SessionEntryBase {
 	task: string;
 	/** Tools available to the agent */
 	tools: string[];
-	/** Names in `tools` presented as `xd://` devices instead of top-level tools (absent from older files). */
+	/** Names in `tools` presented as tool commands instead of top-level tools (absent from older files). */
 	mountedTools?: string[];
 	/** Agent definition name (for example `scout` or `reviewer`). */
 	agent?: string;

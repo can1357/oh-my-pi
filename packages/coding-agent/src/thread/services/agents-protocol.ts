@@ -2,7 +2,7 @@
  * Remote-object protocols of the main-owned agent singletons, as spoken by a
  * worker's proxies to the main thread's instances (see `./agents`).
  */
-import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/irc-types";
 import type { IrcWaitFilter, UnansweredSend } from "../../irc/bus";
 import type { AwaitHoldOptions, AwaitWaiter } from "../../registry/agent-awaits";
 import type { AdoptOptions, AgentReleaseOptions } from "../../registry/agent-lifecycle";
@@ -38,7 +38,7 @@ export type AgentRegistryProtocol = {
 	setStatus: RpcMethod<[id: string, status: AgentStatus, expected?: AgentRefExpectation], boolean>;
 	markResultAccepted: RpcMethod<[id: string, expected?: AgentRefExpectation, responseAt?: number], boolean>;
 	staleAcceptedRuns: RpcMethod<[], AgentRef[]>;
-	setActivity: RpcMethod<[id: string, activity: string], void>;
+	setActivity: RpcMethod<[id: string, activity: string, expected?: AgentRefExpectation], void>;
 	attachSession: RpcMethod<
 		[id: string, session: AgentSessionHandle, sessionFile?: string | null, expected?: AgentRefExpectation],
 		boolean

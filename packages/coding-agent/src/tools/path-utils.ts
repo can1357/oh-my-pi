@@ -1,8 +1,8 @@
 import type { ToolTier } from "@oh-my-pi/pi-agent-core";
 import { extractUriScheme } from "../internal-urls/parse";
-import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { splitPathAndSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
-import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
+import { type LineRange } from "./line-ranges";
+import { splitPathAndSel, isReadableUrlPath } from "./details/read";
+import { toPathList } from "../utils/render-utils";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
@@ -20,7 +20,7 @@ import {
 import { InternalUrlRouter } from "../internal-urls";
 import { type InternalUrlFilesystem, joinUrlPath, UrlFsError } from "../internal-urls/url-filesystem";
 import { ToolAbortError } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
@@ -561,6 +561,18 @@ export function resolveSearchResultPath(base: string, rel: string): string {
 	return router.canHandle(base) ? joinUrlPath(base, rel) : path.resolve(base, rel);
 }
 
+/**
+ * Absolute path of a native result for one resolved search target.
+ * Directory results are walk-relative and join onto `basePath`. A file
+ * target's display path is only its name, so the file is `basePath` itself.
+ */
+export function resolveTargetResultPath(
+	target: { basePath: string; isDirectory: boolean },
+	displayPath: string,
+): string {
+	return target.isDirectory ? resolveSearchResultPath(target.basePath, displayPath) : target.basePath;
+}
+
 /** `target` relative to the host directory `base` with `/` separators; `target` itself when either is an internal URL. */
 export function relativeSearchResultPath(base: string, target: string): string {
 	const router = InternalUrlRouter.instance();
@@ -893,6 +905,8 @@ export interface ResolvedSearchTarget {
 	basePath: string;
 	glob?: string;
 	bareGlob?: boolean;
+	/** `basePath` is a directory. A file target's native display path is only its name. */
+	isDirectory: boolean;
 }
 
 export interface ResolvedMultiSearchPath {
@@ -1185,6 +1199,7 @@ async function resolveSearchPathItems(
 					basePath: item.absoluteBasePath,
 					glob: item.parsedPath.glob ? combineSearchGlobs(item.parsedPath.glob, suffixGlob) : suffixGlob,
 					bareGlob: isBareSearchGlob(item.raw, item.parsedPath),
+					isDirectory: item.type === "directory",
 				}))
 			: undefined;
 

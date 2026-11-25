@@ -98,6 +98,36 @@ export function normalizeToolName(name: string): string {
 	return LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(lower) ?? (Object.hasOwn(CANONICAL_TOOL_NAMES, lower) ? lower : name);
 }
 
+/**
+ * Claude Code tool names (lowercased) and the omp built-in that covers each. Only names with a real
+ * equivalent are listed; Claude-only tools such as `ExitPlanMode` or `KillShell` have none.
+ */
+export const CLAUDE_CODE_TOOL_NAMES: ReadonlyMap<string, BuiltinToolName> = new Map([
+	["task", "task"],
+	["agent", "task"],
+	["bash", "bash"],
+	["read", "read"],
+	["notebookread", "read"],
+	["ls", "read"],
+	["webfetch", "read"],
+	["skill", "read"],
+	["write", "write"],
+	["edit", "edit"],
+	["multiedit", "edit"],
+	["notebookedit", "edit"],
+	["glob", "glob"],
+	["grep", "grep"],
+	["websearch", "web_search"],
+	["todowrite", "todo"],
+	["todoread", "todo"],
+	["askuserquestion", "ask"],
+]);
+
+/** Canonicalize a tool name written in the Claude Code dialect, falling back to {@link normalizeToolName}. */
+export function normalizeClaudeCodeToolName(name: string): string {
+	return CLAUDE_CODE_TOOL_NAMES.get(name.toLowerCase()) ?? normalizeToolName(name);
+}
+
 /** Normalize and deduplicate tool names while preserving first-seen order. */
 export function normalizeToolNames(names: Iterable<string>): string[] {
 	const out: string[] = [];
@@ -109,6 +139,18 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 		out.push(normalized);
 	}
 	return out;
+}
+
+/**
+ * Presentation order of an enabled tool set: built-ins keep their given order, then every other
+ * tool sorted by name. MCP servers connect and extensions register tools at arbitrary times, so
+ * arrival order would otherwise reach the provider tool array, `eval`'s tool-name list and the
+ * tool-command docs, and change the cached request prefix between launches (issue #20327).
+ * Applied by `SessionTools` on every tool-set change and by the SDK's initial presentation.
+ */
+export function presentationOrder(names: readonly string[], builtIns: ReadonlySet<string>): string[] {
+	const others = names.filter(name => !builtIns.has(name)).sort();
+	return [...names.filter(name => builtIns.has(name)), ...others];
 }
 
 /** The name the model calls tool `name` by (its custom wire name when it declares one), for prompts that reference it. */

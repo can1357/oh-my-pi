@@ -9,11 +9,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
-import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { type TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function createTool(name: string, execute: AgentTool["execute"]): AgentTool {
@@ -55,20 +53,6 @@ function createSession(tools: AgentTool[]): ToolSession {
 		settings: Settings.isolated(),
 		getToolByName: name => registry.get(name),
 	};
-}
-
-function createXdevSession(tools: AgentTool[]): { session: ToolSession; write: WriteTool } {
-	const xdev: XdevState = {
-		tools: new Map(tools.map(tool => [tool.name, tool])),
-		mountedNames: new Set(tools.map(tool => tool.name)),
-		builtInNames: new Set(tools.map(tool => tool.name)),
-		isActive: () => false,
-		resolve: name => resolveXdevTool(xdev, name),
-	};
-	const session = { ...createSession(tools), xdev };
-	const write = new WriteTool(session);
-	session.getToolByName = name => (name === "write" ? (write as unknown as AgentTool) : xdev.tools.get(name));
-	return { session, write };
 }
 
 describe("callSessionTool", () => {
@@ -1020,72 +1004,6 @@ describe("callSessionTool", () => {
 			);
 			expect(execute).not.toHaveBeenCalled();
 		}
-	});
-
-	it("rejects direct-event-only xd devices from eval without blocking direct writes", async () => {
-		for (const [name, deviceName] of [
-			["checkpoint", "checkpoint"],
-			["rewind", "rewind"],
-			["yield", "yield"],
-			["yield", "submit"],
-		]) {
-			const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "Result submitted." }] });
-			const tool = { ...createTool(name, execute), customWireName: deviceName };
-			const { session, write } = createXdevSession([tool]);
-			const args = { path: `xd://${deviceName}`, content: JSON.stringify({ data: { result: "done" } }) };
-
-			expect(await callSessionTool("write", args, { session })).toMatchObject({
-				hasError: true,
-				text: expect.stringContaining(`call the direct \`${name}\` tool`),
-			});
-			expect(execute).not.toHaveBeenCalled();
-
-			const direct = await write.execute("direct-device-write", args);
-			expect(direct.isError).not.toBe(true);
-			expect(execute).toHaveBeenCalledTimes(1);
-		}
-	});
-
-	it("keeps concurrent direct device calls outside an asynchronous eval dispatch", async () => {
-		const started = Promise.withResolvers<void>();
-		const resume = Promise.withResolvers<void>();
-		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "Result submitted." }] });
-		const { session, write } = createXdevSession([createTool("yield", execute)]);
-		const args = { path: "xd://yield", content: JSON.stringify({ data: { result: "done" } }) };
-		const nested = createTool("nested", async () => {
-			started.resolve();
-			await resume.promise;
-			return await write.execute("nested-device-write", args);
-		});
-		const getToolByName = session.getToolByName;
-		session.getToolByName = name => (name === "nested" ? nested : getToolByName?.(name));
-
-		const bridged = callSessionTool("nested", {}, { session });
-		await started.promise;
-		try {
-			const direct = await write.execute("concurrent-direct-device-write", args);
-			expect(direct.isError).not.toBe(true);
-			expect(execute).toHaveBeenCalledTimes(1);
-		} finally {
-			resume.resolve();
-		}
-		expect(await bridged).toMatchObject({
-			hasError: true,
-			text: expect.stringContaining("call the direct `yield` tool"),
-		});
-		expect(execute).toHaveBeenCalledTimes(1);
-	});
-
-	it("lets a session started inside an eval dispatch run its own direct-event devices", async () => {
-		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "Result submitted." }] });
-		const child = createXdevSession([createTool("yield", execute)]);
-		const args = { path: "xd://yield", content: JSON.stringify({ data: { result: "done" } }) };
-		// Stands in for `tool.task`: an in-process subagent whose model writes its own device.
-		const task = createTool("task", async () => await child.write.execute("subagent-device-write", args));
-		const { session } = createXdevSession([task]);
-
-		expect(await callSessionTool("task", {}, { session })).toMatchObject({ text: "Result submitted." });
-		expect(execute).toHaveBeenCalledTimes(1);
 	});
 
 	it("rejects a registry tool excluded from the eval bridge", async () => {

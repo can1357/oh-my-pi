@@ -1,4 +1,9 @@
-import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	type ArtifactAllocator,
+	DEFAULT_MAX_BYTES,
+	type OutputArtifactError,
+	OutputSink,
+} from "../../tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
 	resolveOutputMaxColumns,
@@ -32,6 +37,7 @@ export interface JsExecutorOptions {
 	onReply?: (text: string) => void;
 	signal?: AbortSignal;
 	sessionId: string;
+	parentToolCallId?: string;
 	/** Logical owner identifier; scopes retained-worker cleanup. */
 	kernelOwnerId?: string;
 	reset?: boolean;
@@ -42,8 +48,7 @@ export interface JsExecutorOptions {
 	packages?: string[];
 	/** Package target. Repository mutation requires explicit project selection. */
 	environment?: JsPackageEnvironmentMode;
-	artifactPath?: string;
-	artifactId?: string;
+	allocateArtifact?: ArtifactAllocator;
 	session: ToolSession;
 	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
 	localRoots?: Record<string, string>;
@@ -105,8 +110,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	const display = new DisplayOutputCollector();
 	const displayOutputs = display.outputs;
 	const outputSink = new OutputSink({
-		artifactPath: options.artifactPath,
-		artifactId: options.artifactId,
+		allocateArtifact: options.allocateArtifact,
 		spillThreshold: DEFAULT_MAX_BYTES,
 		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(options.session.settings),
@@ -182,6 +186,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			runState: {
 				signal,
 				onReply: options.onReply,
+				parentToolCallId: options.parentToolCallId,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {

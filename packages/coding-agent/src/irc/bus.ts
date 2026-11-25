@@ -9,7 +9,7 @@
  * boundary (see AgentSession.deliverIrcMessage).
  */
 
-import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { type IrcDeliveryReceipt, type IrcMessage } from "./irc-types";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -525,7 +525,12 @@ export class IrcBus implements IrcBusApi {
 			customType: "irc:relay",
 			content: `[IRC \`${message.from}\` → \`${message.to}\`]\n\n${message.body}`,
 			display: true,
-			details: { from: message.from, to: message.to, body: message.body },
+			details: {
+				from: message.from,
+				...(message.fromLabel ? { fromLabel: message.fromLabel } : {}),
+				to: message.to,
+				body: message.body,
+			},
 			attribution: "agent",
 			timestamp: message.ts,
 		};

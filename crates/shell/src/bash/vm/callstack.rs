@@ -100,6 +100,15 @@ fn has_main(store: &mut dyn StateStore, vp: &Vproc) -> Result<bool, StoreError> 
 	))
 }
 
+/// Nested shells keep their script name in their own image, not the parent
+/// kernel.
+fn main_file(k: &Kernel, store: &mut dyn StateStore, vp: &Vproc) -> Result<BString, StoreError> {
+	Ok(match state::record(store, vp, Key::Misc(MiscKey::Argv0))? {
+		Some(Record::Misc(name)) => name.clone(),
+		_ => k.argv0.clone(),
+	})
+}
+
 /// One of bash's call-stack arrays as `vp` sees it, innermost level first
 /// (`FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`).
 /// `None` for another name, and for `FUNCNAME` outside any function (bash
@@ -145,7 +154,7 @@ pub fn array(
 				})
 				.collect();
 			if has_main(store, vp)? {
-				files.push(k.argv0.clone());
+				files.push(main_file(k, store, vp)?);
 			}
 			files
 		},
@@ -232,7 +241,10 @@ pub fn listed(
 	}
 	vars.push((BString::from("DIRSTACK"), indexed(Vec::new())));
 	let funcname = array(k, store, vp, b"FUNCNAME")?.map_or_else(
-		|| Var { attrs: Attrs::INDEXED.with(Attrs::INVISIBLE), value: VarValue::Indexed(Vec::new()) },
+		|| Var {
+			attrs: Attrs::INDEXED.with(Attrs::INVISIBLE),
+			value: VarValue::Indexed(Default::default()),
+		},
 		indexed,
 	);
 	vars.push((BString::from("FUNCNAME"), funcname));
@@ -259,7 +271,7 @@ pub fn definition_file(
 		return Ok(file.clone());
 	}
 	if has_main(store, vp)? {
-		return Ok(k.argv0.clone());
+		return main_file(k, store, vp);
 	}
 	state::dollar0(store, vp, &k.argv0)
 }

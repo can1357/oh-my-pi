@@ -13,10 +13,10 @@ import {
 	createOAuthProvenance,
 	NO_AUTH_SENTINEL,
 	type ResolvedApiKey,
+	refreshReasonFor,
 	resolveAfterRotation,
 } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
-import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { getProviderDefinition } from "../registry";
 import type { Api, FetchImpl, Model, Usage } from "../types";
@@ -53,7 +53,7 @@ export interface AuthGatewayRouteOptions {
 	 * dependency in `pi-ai`).
 	 */
 	resolveModel: ModelResolver;
-	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
+	/** Optional supplier for the `/v1/models` and `/v1/pi/models` listings. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
 	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
 	excludeProviders?: ReadonlySet<string>;
@@ -250,7 +250,7 @@ export function buildGatewayApiKeyResolver(
 				{
 					...modelKeyOptions(model, sig),
 					forceRefresh: true,
-					refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+					refreshReason: refreshReasonFor(error),
 					rejectedAccessToken,
 				},
 			);

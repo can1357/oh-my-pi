@@ -266,7 +266,17 @@ export interface AgentProgress {
 	/** Intent the model attached to the current call; undefined when that call carried none. */
 	currentToolIntent?: string;
 	currentToolStartMs?: number;
-	recentTools: { tool: string; args: string; argsKey?: string; intent?: string; isError?: boolean; endMs: number }[];
+	recentTools: {
+		tool: string;
+		args: string;
+		argsKey?: string;
+		intent?: string;
+		isError?: boolean;
+		/** Lines an edit call added and removed, by its diff; absent for other calls and failed ones. */
+		added?: number;
+		removed?: number;
+		endMs: number;
+	}[];
 	recentOutput: string[];
 	toolCount: number;
 	requests: number;
@@ -339,9 +349,14 @@ export type GuestFrame =
 			 */
 			writeToken?: string;
 	  }
-	| { t: "prompt"; text: string; images?: ImageContent[] }
+	/** `followUp`: wait for the running turn to finish instead of steering it (the TUI's Ctrl+Enter). */
+	| { t: "prompt"; text: string; images?: ImageContent[]; followUp?: true }
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
+	/** The `.`/`c` continue shortcut: resume the agent, interrupting a running turn first. */
+	| { t: "resume" }
+	/** Empty Enter: interrupt a run that has queued input and continue it with that input. */
+	| { t: "deliver-queue" }
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
 	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number };
 
@@ -405,6 +420,12 @@ export const COLLAB_PROTO = 3;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";
+
+/** Activity label before the first colon-space in a tool intent; preserves bare labels and embedded URL or file:line references. */
+export function toolIntentLabel(intent: string): string {
+	const separator = intent.search(/:(?=\s|$)/);
+	return separator > 0 ? intent.slice(0, separator).trim() || intent : intent;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Envelope & link constants

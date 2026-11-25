@@ -10,7 +10,7 @@ import { runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type ConfigHeaderResolver, type ConfigHeaderSource, createConfigHeaderResolver } from "./resolve-config-value";
 import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig } from "./model-patch";
-import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { parseModelString } from "./model-selector";
 import type { ModelOverride, ProviderAuthMode } from "./models-config-schema";
 export interface CustomModelDefinitionLike extends ModelPatch {
 	id: string;
@@ -89,6 +89,7 @@ export function buildCustomModelOverlay(
 		input: modelDef.input,
 		imageInputDecoder: modelDef.imageInputDecoder,
 		imageCountBudget: modelDef.imageCountBudget,
+		snapcompactShape: modelDef.snapcompactShape,
 		tokenizer: modelDef.tokenizer,
 		supportsTools: modelDef.supportsTools,
 		cost: modelDef.cost,
@@ -130,11 +131,13 @@ export function finalizeCustomModel(resolvedModel: CustomModelOverlay, options: 
 		input: input as ("text" | "image")[],
 		imageInputDecoder: resolvedModel.imageInputDecoder,
 		imageCountBudget: resolvedModel.imageCountBudget,
+		snapcompactShape: resolvedModel.snapcompactShape,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,
 		promptCache: resolvedModel.promptCache,
 		promptCacheConfig: resolvedModel.promptCache,
 		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
+		maxContextWindow: resolvedModel.maxContextWindow,
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
 		headers: resolvedModel.headers,
 		resolveHeaders: resolvedModel.resolveHeaders,

@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { shortenPath, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
+import * as piUtils from "@oh-my-pi/pi-utils";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { clearWorktrees, listWorktrees } from "../../src/cli/worktree-cli";
 import { Settings } from "../../src/config/settings";
@@ -18,6 +20,7 @@ import {
 	planWorktreeExit,
 	removeExitWorktrees,
 	removeSessionWorktree,
+	runSessionWorktreeHook,
 	type SessionWorktreeState,
 	type WorktreeExitAction,
 	type WorktreeExitPolicy,
@@ -87,6 +90,14 @@ const commitFile = async (cwd: string, name: string) => {
 	git(cwd, "commit", "-q", "-m", `add ${name}`);
 };
 
+/** Gives `repo` its own hooks directory, so the host's global hooks never run, with `script` as `post-checkout`. */
+const installHook = async (repo: string, script: string) => {
+	const hooks = path.join(path.dirname(repo), "hooks");
+	await Bun.write(path.join(hooks, "post-checkout"), `#!/bin/sh\n${script}\n`);
+	await fs.chmod(path.join(hooks, "post-checkout"), 0o755);
+	git(repo, "config", "core.hooksPath", hooks);
+};
+
 describe("session worktree helpers (real git)", () => {
 	let root: string;
 	let repo: string;
@@ -110,6 +121,7 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		process.chdir(savedCwd);
 		setWorktreesDir(undefined);
 		if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
@@ -321,6 +333,112 @@ describe("session worktree helpers (real git)", () => {
 		expect(messages).toEqual([`Failed to remove worktree ${wt.path}; branch '${branch}' kept.`]);
 		expect(branchSha(repo, branch)).toBe(wt.baseCommit);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"runs post-checkout in the new worktree with git's new-worktree arguments before the rescan",
+		async () => {
+			await installHook(repo, 'printf "%s\\n" "$PWD" "$1" "$2" "$3" > .hook-ran');
+			const wt = await create();
+			let seenByRescan = "";
+			const warnings = await runSessionWorktreeHook(wt, {
+				isDisposed: false,
+				refreshSkillsAndCommands: async () => {
+					seenByRescan = await Bun.file(path.join(wt.path, ".hook-ran")).text();
+				},
+			});
+			expect(warnings).toEqual([]);
+			expect(seenByRescan.trim().split("\n")).toEqual([
+				wt.path,
+				"0".repeat(wt.baseCommit.length),
+				wt.baseCommit,
+				"1",
+			]);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"keeps the worktree and reports a failing hook as one clean, bounded warning",
+		async () => {
+			await installHook(repo, "printf 'copying files\\n\\033[31mcp:\\tcannot stat %0200d\\033[0m\\n' 0 >&2; exit 1");
+			const wt = await create();
+			let rescans = 0;
+			const warnings = await runSessionWorktreeHook(wt, {
+				isDisposed: false,
+				refreshSkillsAndCommands: async () => {
+					rescans++;
+				},
+			});
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toStartWith("Worktree created, but post-checkout hook exited with 1: cp:");
+			expect(warnings[0]).toContain("cannot stat");
+			expect(warnings[0]).not.toMatch(/[\x00-\x1f\x7f]/);
+			expect(Bun.stringWidth(warnings[0])).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LONG);
+			expect(rescans).toBe(1);
+			expect(worktreePaths(repo)).toContain(wt.path);
+		},
+	);
+
+	it("reports a rescan that throws as a warning", async () => {
+		await installHook(repo, "exit 0");
+		const wt = await create();
+		const warnings = await runSessionWorktreeHook(wt, {
+			isDisposed: false,
+			refreshSkillsAndCommands: async () => {
+				throw new Error("bad skill file");
+			},
+		});
+		expect(warnings).toEqual(["Worktree created, but skill and command rescan failed: bad skill file"]);
+	});
+
+	it("does not rescan a session that ended while the hook ran", async () => {
+		const wt = await create();
+		let ended = false;
+		let rescans = 0;
+		vi.spyOn(vcs, "runPostCheckoutHook").mockImplementation(async () => {
+			ended = true;
+			return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() };
+		});
+		await runSessionWorktreeHook(wt, {
+			get isDisposed() {
+				return ended;
+			},
+			refreshSkillsAndCommands: async () => {
+				rescans++;
+			},
+		});
+		expect(rescans).toBe(0);
+	});
+
+	it("reports a hook that could not be started and still rescans", async () => {
+		const wt = await create();
+		await fs.rm(wt.path, { recursive: true, force: true });
+		let rescans = 0;
+		const warnings = await runSessionWorktreeHook(wt, {
+			isDisposed: false,
+			refreshSkillsAndCommands: async () => {
+				rescans++;
+			},
+		});
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toStartWith("Worktree created, but post-checkout hook could not run: ");
+		expect(rescans).toBe(1);
+	});
+
+	it.skipIf(process.platform === "win32")("runs nothing and reports nothing when no git is found", async () => {
+		await installHook(repo, "touch .hook-ran");
+		const wt = await create();
+		vi.spyOn(piUtils, "$which").mockReturnValue(null);
+		let rescans = 0;
+		const warnings = await runSessionWorktreeHook(wt, {
+			isDisposed: false,
+			refreshSkillsAndCommands: async () => {
+				rescans++;
+			},
+		});
+		expect(warnings).toEqual([]);
+		expect(await exists(path.join(wt.path, ".hook-ran"))).toBe(false);
+		expect(rescans).toBe(0);
+	});
 });
 
 describe("session worktree helpers (ovnfs checkout)", () => {
@@ -437,6 +555,21 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 		expect(plan).toEqual([]);
 		expect(warnings).toEqual(["ovnfs start failed"]);
 		expect(await exists(wt.path)).toBe(true);
+	});
+
+	it.skipIf(process.platform === "win32")("runs post-checkout in an ovnfs checkout, then rescans", async () => {
+		await installHook(repo, 'printf "%s\\n" "$PWD" "$1" "$2" "$3" > .hook-ran');
+		const wt = await createSessionWorktree(repo, settings, branch);
+		let seenByRescan = "";
+		const warnings = await runSessionWorktreeHook(wt, {
+			isDisposed: false,
+			refreshSkillsAndCommands: async () => {
+				seenByRescan = await Bun.file(path.join(wt.path, ".hook-ran")).text();
+			},
+		});
+		expect(warnings).toEqual([]);
+		expect(seenByRescan.trim().split("\n")).toEqual([wt.path, "0".repeat(wt.baseCommit.length), wt.baseCommit, "1"]);
+		expect(await exists(path.join(repo, ".hook-ran"))).toBe(false);
 	});
 
 	it("lists mixed worktrees, clears through their owners, and resumes a removed ovnfs session", async () => {

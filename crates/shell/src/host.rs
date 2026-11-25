@@ -28,9 +28,10 @@ use parking_lot::Mutex;
 use crate::{
 	bash::{
 		Deadline, Event, ExitStatus, ExtProc, FdRef, File, FileKind, Fs, IntrinsicId, Invocation,
-		ModeId, NativeRef, OsHandle, ResolveCtx, Resolved, Rlimit, Signal, SpawnFuture, SpawnSpec,
-		StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict,
+		ModeId, NativeRef, OsHandle, ProcUsage, ResolveCtx, Resolved, Rlimit, Signal, SpawnFuture,
+		SpawnSpec, StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict,
 	},
+	commands::{self, SessionCommands},
 	output_decode,
 	sys::{End, Exits, NativeSpawner, OutputDecoding, Relays, Sessions, SpawnConfig, StdFile},
 	tools::{SpawnLog, ToolConfig},
@@ -534,6 +535,13 @@ impl PiHost {
 		self.tools.speech.set(speech);
 	}
 
+	/// Resolve the names of `commands` for the commands run from now on,
+	/// after pi's extras and before shell functions, aliases and `PATH`;
+	/// `None`: no session commands.
+	pub fn set_commands(&self, commands: Option<SessionCommands>) {
+		self.tools.commands.set(commands);
+	}
+
 	/// The standard streams the shell's fds 0, 1 and 2 forward to.
 	pub const fn streams(&self) -> &StdStreams {
 		&self.launcher.streams
@@ -564,7 +572,9 @@ impl crate::bash::Host for PiHost {
 	/// pi's order ([`crate::extras`]): the engine's intrinsics (`suspend`
 	/// withheld), the tools (`timeout`, `nohup`, `git`, the extras that run
 	/// command lines), the other extras, the shells the engine runs itself
-	/// (`sh`, `bash`, `zsh`: [`loopback`]), then `PATH`. A name with a slash
+	/// (`sh`, `bash`, `zsh`: [`loopback`]), the run's session commands
+	/// ([`crate::commands`], which the engine asks for before functions and
+	/// aliases: [`Self::preempts_functions`]), then `PATH`. A name with a slash
 	/// is only ever a path; `exec` searches `PATH` without asking.
 	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		if why.has_slash {
@@ -586,16 +596,20 @@ impl crate::bash::Host for PiHost {
 		if crate::sys::shebang::is_self_shell(name) {
 			return Resolved::SelfShell;
 		}
+		if let Some(command) = self.tools.commands.lookup(name) {
+			return Resolved::Device(command);
+		}
 		Resolved::NotFound
 	}
 
 	/// On Windows, a utility written in the syntax of the System32 program it
 	/// shadows (`find /c /v ""`, `sort /r`, `timeout /t 5`, `whoami /all`)
 	/// goes to `PATH`'s program of that name ([`crate::cmd_dialect`]).
-	/// Elsewhere, an extra given an option it does not implement (`ps --forest`,
-	/// `tar --hard-dereference`) goes to `PATH`'s program, which may have it;
-	/// with none there the extra runs and reports the option. Windows' `PATH`
-	/// programs of those names are System32's, a different command language.
+	/// Elsewhere, an extra or tool given an option it does not implement (`ps
+	/// --forest`, `tar --hard-dereference`, `time -o`) goes to `PATH`'s
+	/// program, which may have it; with none there the builtin runs and
+	/// reports the option. Windows' `PATH` programs of those names are
+	/// System32's, a different command language.
 	/// A shell command line the engine's own shell does not stand in for
 	/// (`bash -i`, restricted mode) goes to `PATH`'s shell
 	/// ([`loopback::needs_program`]).
@@ -606,21 +620,52 @@ impl crate::bash::Host for PiHost {
 		(cfg!(windows)
 			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default()))
 			|| (!cfg!(windows)
-				&& omp_builtins::extras::lacks_option(
-					&name.to_str_lossy(),
-					argv
-						.iter()
-						.map(|arg| arg.to_str_lossy().into_owned())
-						.collect(),
-				))
+				&& (crate::tools::lacks_option(name, argv)
+					|| omp_builtins::extras::lacks_option(
+						&name.to_str_lossy(),
+						argv
+							.iter()
+							.map(|arg| arg.to_str_lossy().into_owned())
+							.collect(),
+					)))
 	}
 
-	/// Runs the extra `cmd` names on the runtime ([`crate::extras::ExtraTask`]),
-	/// or refuses `suspend`.
+	/// Only extras whose whole effect is a process lifetime (`sleep`, `yes`,
+	/// `timeout`) give way to `PATH`'s program in a lone `&` job, so `$!`
+	/// names a pid OS tools see. Any other extra keeps its own dialect and the
+	/// `scheme://` paths only builtins open. `nohup` stays the tool: only it
+	/// detaches its operand from the cancel and the teardown (`PATH`'s
+	/// `nohup` would die with them), and its `$!` already names the
+	/// operand's process.
+	fn prefers_background_program(&mut self, name: &BStr, resolved: &Resolved) -> bool {
+		const PROGRAMS: [&[u8]; 3] = [b"sleep", b"timeout", b"yes"];
+		// A GNU-style invocation must not acquire System32's incompatible
+		// grammar just because it has an `&` (notably `timeout N COMMAND`).
+		if cfg!(windows) && crate::cmd_dialect::shadows_windows_program(name) {
+			return false;
+		}
+		matches!(resolved, Resolved::Native(_) | Resolved::Tool(_))
+			&& PROGRAMS.contains(&name.as_bytes())
+	}
+
+	/// The run's session commands ([`crate::commands`]) come before shell
+	/// functions and aliases of their names, so nothing the persistent shell
+	/// defined earlier stands in for one.
+	fn preempts_functions(&mut self, name: &BStr) -> bool {
+		self.tools.commands.lookup(name).is_some()
+	}
+
+	/// Runs the extra `cmd` names on the runtime ([`crate::extras::ExtraTask`])
+	/// or the run's session command it names ([`crate::commands`]), or refuses
+	/// `suspend`.
 	fn start(&mut self, cmd: &NativeRef, inv: Invocation<'_>) -> io::Result<Box<dyn Task>> {
 		if *cmd == crate::extras::SUSPEND {
 			let [_, _, stderr] = inv.stdio;
 			return Ok(Box::new(crate::extras::Refusal::new(b"suspend", stderr)));
+		}
+		if commands::is_command(*cmd) {
+			let commands = self.tools.commands.get().ok_or(io::ErrorKind::NotFound)?;
+			return Ok(Box::new(commands.start(&self.runtime, *cmd, inv)?));
 		}
 		let name = crate::extras::native_name(*cmd).ok_or(io::ErrorKind::NotFound)?;
 		let mut invocation = crate::extras::invocation(
@@ -956,6 +1001,10 @@ impl ExtProc for Observed {
 
 	fn cont(&mut self) -> io::Result<()> {
 		self.child.cont()
+	}
+
+	fn usage(&mut self) -> Option<ProcUsage> {
+		self.child.usage()
 	}
 }
 

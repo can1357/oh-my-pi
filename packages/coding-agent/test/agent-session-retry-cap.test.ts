@@ -21,6 +21,7 @@ import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/util
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -196,6 +197,111 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("error");
 		expect(last.errorMessage).toContain("rate_limit_error");
 		expect(session.isRetrying).toBe(false);
+	});
+
+	it.each([
+		{ name: "waits for an in-cap reset", maxDelayMs: 3_000_000, outcome: "wait" },
+		{ name: "reports the actual over-cap reset and configured cap", maxDelayMs: 1_500_000, outcome: "fail" },
+		{ name: "waits for an over-cap reset when opted in", maxDelayMs: 1_500_000, outcome: "opt-in" },
+		{
+			name: "tries the usage-limit model fallback before failing an over-cap reset",
+			maxDelayMs: 1_500_000,
+			outcome: "fallback",
+		},
+	])("Antigravity $name", async ({ maxDelayMs, outcome }) => {
+		// Antigravity is paused in its auth rules; its retry handling stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
+		const model = getBundledModel("google-antigravity", "gemini-3.7-flash");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!model || !fallbackModel) {
+			throw new Error("Expected bundled Antigravity and OpenAI fallback test models to exist");
+		}
+		const primarySelector = `${model.provider}/${model.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		authStorage.keys.setRuntime(model.provider, "google-antigravity-test-key");
+		authStorage.keys.setRuntime(fallbackModel.provider, "openai-test-key");
+
+		const quotaError = `Cloud Code Assist API error (429): ${JSON.stringify({
+			error: {
+				code: 429,
+				status: "RESOURCE_EXHAUSTED",
+				message: "Resets in 2s.",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+						reason: "RATE_LIMIT_EXCEEDED",
+						domain: "cloudcode-pa.googleapis.com",
+						metadata: { quotaResetDelay: "30m" },
+					},
+				],
+			},
+		})}`;
+
+		const mock = createMockModel({
+			responses: [{ throw: quotaError }, { content: ["Recovered"] }],
+		});
+		const requests: Array<{ selector: string; atMs: number }> = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requests.push({ selector: `${requestedModel.provider}/${requestedModel.id}`, atMs: Date.now() });
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": maxDelayMs,
+			"retry.maxRetries": 1,
+			"retry.waitForUsageReset": outcome === "opt-in",
+			"retry.modelFallback": outcome === "fallback",
+			"retry.fallbackOn": "usage-limit",
+			"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger Antigravity quota error");
+		await session.waitForIdle();
+
+		if (outcome === "fail") {
+			expect(requests.map(request => request.selector)).toEqual([primarySelector]);
+			expect(retryStartEvents).toHaveLength(0);
+			expect(retryEndEvents).toEqual([
+				expect.objectContaining({
+					success: false,
+					finalError: `Provider requested 1800000ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${quotaError}`,
+				}),
+			]);
+			return;
+		}
+
+		expect(requests.map(request => request.selector)).toEqual(
+			outcome === "fallback" ? [primarySelector, fallbackSelector] : [primarySelector, primarySelector],
+		);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0]).toMatchObject({ delayMs: outcome === "fallback" ? 0 : 1_800_000 });
+		if (outcome !== "fallback") {
+			expect(requests[1].atMs - requests[0].atMs).toBeGreaterThanOrEqual(1_800_000);
+		}
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "Recovered" });
 	});
 
 	it("waits past retry.maxDelayMs for a usage-limit reset when retry.waitForUsageReset is set", async () => {
@@ -601,7 +707,7 @@ describe("AgentSession retry delay cap", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
-			"retry.maxDelayMs": 100,
+			"retry.maxDelayMs": 3_000_000,
 			"retry.modelFallback": false,
 			"retry.waitForUsageReset": true,
 		});
@@ -2669,6 +2775,69 @@ describe("AgentSession retry delay cap", () => {
 			}
 		},
 	);
+
+	it.each([0, 1])("explains a restricted OAuth pool denial with retry.maxRetries=%d", async maxRetries => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const providerSessionId = `restricted-org-policy-${maxRetries}`;
+		const identity = "email:denied@example.test|org:denied-org";
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "denied-access",
+				refresh: "denied-refresh",
+				expires: Date.now() + 3_600_000,
+				email: "denied@example.test",
+				orgId: "denied-org",
+			},
+		]);
+		const lease = authStorage.sessions.restrict("anthropic", providerSessionId, [identity]);
+		try {
+			registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
+			const providerError =
+				'403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}},"request_id":"req_org_policy_test"}';
+			const requestedKeys: string[] = [];
+			const mock = createMockModel({
+				id: model.id,
+				provider: model.provider,
+				handler: (_context, options) => {
+					requestedKeys.push(resolveInitialApiKey(options?.apiKey));
+					return { stopReason: "error", errorMessage: providerError };
+				},
+			});
+			const agent = new Agent({
+				getApiKey: model => modelRegistry.getApiKey(model, providerSessionId),
+				sessionId: providerSessionId,
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (_model, context, options) => aiStream.streamSimple(mock.model, context, options),
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"retry.maxRetries": maxRetries,
+					"retry.modelFallback": false,
+				}),
+				modelRegistry,
+				providerSessionId,
+			});
+
+			await session.prompt("Test restricted organization policy denial");
+			await session.waitForIdle();
+
+			expect(requestedKeys).toEqual(["denied-access"]);
+			expect(session.isRetrying).toBe(false);
+			const terminal = lastAssistant(session);
+			expect(terminal.stopReason).toBe("error");
+			expect(terminal.errorMessage).toContain(providerError);
+			expect(terminal.errorMessage).toContain("session OAuth account pool");
+			expect(terminal.errorMessage).toContain(`${identity} rejected by org policy`);
+			expect(terminal.errorMessage?.startsWith("Retry budget exhausted")).toBe(maxRetries === 0);
+		} finally {
+			authStorage.sessions.unrestrict("anthropic", providerSessionId, lease);
+		}
+	});
 
 	it("skips a short sibling wait after account-policy exhaustion", async () => {
 		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");

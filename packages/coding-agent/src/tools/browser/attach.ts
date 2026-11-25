@@ -7,7 +7,7 @@ import { getBrowserProfilesDir, isRecord, untilAborted } from "@oh-my-pi/pi-util
 import type { Socket } from "bun";
 import type { Browser, Page, Target } from "puppeteer-core";
 import { throwIfAborted } from "../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { isPuppeteerTimeout } from "./launch";
 
 const ATTACH_TARGET_SKIP_PATTERN =
@@ -488,7 +488,7 @@ export async function findReusableCdp(
 
 export interface PickTargetOptions {
 	matcher?: string;
-	/** Relay /json endpoint (e.g. http://127.0.0.1:9224); enables metadata-first target selection. */
+	/** Relay /json endpoint; enables metadata-first target selection. */
 	relayJson?: string;
 	signal?: AbortSignal;
 }

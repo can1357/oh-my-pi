@@ -1,3 +1,8 @@
+import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { mapOpenAIReasoningEffort } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { concreteThinkingLevel, toReasoningEffort } from "../../../thinking/levels";
 import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
 import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
@@ -72,6 +77,23 @@ export const SEARCH_HARD_TIMEOUT_MS = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000
 export function withHardTimeout(signal: AbortSignal | undefined, ms: number = SEARCH_HARD_TIMEOUT_MS): AbortSignal {
 	const timeout = AbortSignal.timeout(ms);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/**
+ * Wire `reasoning.effort` for an OpenAI-style hosted-search request (Codex,
+ * OpenAI Responses) from the web role's thinking level. Clamps to the model's
+ * ladder and applies its effort map, as chat requests do. `undefined` — omit
+ * the field and keep the server default — when the level is unset, `auto`,
+ * `off`, or `inherit`, or the model does not reason.
+ */
+export function searchReasoningEffort(
+	model: Model<Api>,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+): string | undefined {
+	const effort = clampThinkingLevelForModel(model, toReasoningEffort(concreteThinkingLevel(thinkingLevel)));
+	if (effort === undefined) return undefined;
+	const compat = model.compat && "reasoningEffortMap" in model.compat ? model.compat : undefined;
+	return mapOpenAIReasoningEffort(model, compat, effort);
 }
 
 /**

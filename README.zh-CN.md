@@ -245,7 +245,7 @@ _[观看录屏 ↗](https://omp.sh/clips/conflict.mp4)_
 
 ### 19 · 先预览，再接受。
 
-`ast_edit` 会返回一张带替换数量的 _（proposed）_ 卡片，修改处于暂存状态。智能体向 `xd://resolve` 写入一行理由；TUI 将其变为 **Accept** 卡片，随后才真正写入磁盘——原子操作，要么全部成功，要么全部不做。
+`ast_edit` 会返回一张带替换数量的 _（proposed）_ 卡片，修改处于暂存状态。智能体运行 `resolve "<reason>"`；TUI 将其变为 **Accept** 卡片，随后才真正写入磁盘——原子操作，要么全部成功，要么全部不做。
 
 ![omp TUI：✓ AST Edit: console.log($X)（proposed）3 处替换 · 1 个文件，然后 ✓ Accept: 1 个文件中 3 处替换（AST Edit），接着是 “Applied 3 replacements in src/auth.ts.”](https://omp.sh/clips/codemod-poster.webp)
 
@@ -261,7 +261,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 ## 任务需要什么，_早已内置_。
 
-核心工具与 `read` 和 `bash` 位于同一命名空间。用 `--tools read,edit,bash,…` 固定启用的工具集；不常用的工具则通过 `xd://` 设备按需发现。`read xd://` 会列出它们，启用 `tools.xdev` 后可用 `write xd://<tool>` 运行。
+核心工具与 `read` 和 `bash` 位于同一命名空间。用 `--tools read,edit,bash,…` 固定启用的工具集；启用 `tools.commands` 后，不常用的可发现工具会挂载为 bash 命令——用 bash 工具运行 `<tool> <args>`，用 `<tool> --help` 获取由 schema 派生的用法，而无需在每次请求中附带 schema。
 
 **文件与搜索**
 
@@ -343,19 +343,19 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 直连 API 和网关。可按角色混用不同提供商。
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · Chutes · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
 
 ### 编程套餐
 
 走订阅额度。用 `/login` 登录后即可在会话中使用。
 
-Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
+Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kiro `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
 
 ### 本地部署
 
 兼容 OpenAI 的 `/v1/models`。本地实例无需密钥。
 
-Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM
+Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM · Bifrost
 
 ### 自定义 OpenAI 兼容提供商
 
@@ -658,7 +658,7 @@ bun dev -- --version
 | **[@oh-my-pi/pi-catalog](packages/catalog)**                                  | 模型目录：内置模型数据库、提供商描述符和模型身份识别       |
 | **[@oh-my-pi/pi-agent-core](packages/agent)**                                 | 支持工具调用和状态管理的智能体运行时                       |
 | **[@oh-my-pi/pi-coding-agent](packages/coding-agent)**                        | 交互式编程智能体 CLI 和 SDK                                |
-| **[@oh-my-pi/pi-tui](packages/tui)**                                          | 支持差分渲染的终端 UI 库                                   |
+| **[@oh-my-pi/pi-tui](packages/tui)**                                            | 终端 UI 库：同一组件树，渲染为终端行或原生 TSP             |
 | **[@oh-my-pi/pi-natives](packages/natives)**                                  | 用于 grep、shell、图像、文本、语法高亮等功能的 N-API 绑定  |
 | **[@oh-my-pi/omp-stats](packages/stats)**                                     | AI 使用统计的本地可观测性面板                              |
 | **[@oh-my-pi/omptype](packages/omptype)**                                     | 兼容 ArkType、带惰性 JIT 编译的 schema 校验库              |

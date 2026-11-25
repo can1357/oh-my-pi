@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,7 +6,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { parseSel, resolveTailSelector } from "@oh-my-pi/pi-coding-agent/tools/read-selector";
-import { splitInternalUrlSel, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { splitInternalUrlSel } from "@oh-my-pi/pi-coding-agent/tools/details/read";
+import { splitPathAndSel } from "@oh-my-pi/pi-coding-agent/tools/details/read";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -145,6 +150,24 @@ describe("read tool head+tail selectors", () => {
 
 	afterEach(async () => {
 		await fs.rm(testDir, { recursive: true, force: true });
+	});
+
+	it("diagnoses a colon between line numbers only when the underlying path exists", async () => {
+		const read = (input: string) => tool.execute("read", { path: input });
+		await expect(read(`${filePath}:1:2`)).rejects.toThrow(":1-2");
+		// A compiler-style line:column must not be offered as a range that fails as reversed.
+		await expect(read(`${filePath}:3:1`)).rejects.toThrow("Use :3 for a single line.");
+		await expect(read(`${filePath}.missing:1:2`)).rejects.toThrow("not found");
+		if (process.platform !== "win32") {
+			await Bun.write(`${filePath}:1`, "literal first\nliteral second\n");
+			expect(getTextOutput(await read(`${filePath}:1:2`))).toContain("literal second");
+		}
+	});
+
+	it("diagnoses a colon between line numbers when the path resolves only by unique suffix", async () => {
+		await Bun.write(path.join(testDir, "nested", "deep.txt"), rows(5));
+
+		await expect(tool.execute("read", { path: "deep.txt:1:2" })).rejects.toThrow(":1-2");
 	});
 
 	for (const selector of ["1-3,-3", "1-3,:-3", "1-3,:-3:raw", "raw:1-3,:-3"]) {

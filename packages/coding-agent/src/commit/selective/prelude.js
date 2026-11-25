@@ -42,10 +42,14 @@
 	};
 	class Draft {
 		#text;
+		#details;
 		constructor(details, text) {
 			this.id = details.id;
-			this.details = details;
+			this.#details = details;
 			this.#text = text;
+		}
+		details() {
+			return this.#details;
 		}
 		toString() {
 			return this.#text;
@@ -82,7 +86,9 @@
 		}
 		async diff(...args) {
 			const [, { silent }] = parse("diff", args, ["silent"], 0);
-			return (await this.#run("diff", {}, silent)).text;
+			const { text, details } = await this.#run("diff", {}, silent);
+			// What printed may show long edited lines as word rows; the patch is returned as it is.
+			return details?.patch ?? text;
 		}
 		async commit(...args) {
 			const [[subject, body], options] = parse("commit", args, ["body", "fixes", "amend", "noVerify", "silent"], 2);
@@ -100,7 +106,7 @@
 			);
 			// The committed draft is gone; continue with what remains.
 			this.id = response.details.remaining.id;
-			this.details = response.details.remaining;
+			this.#details = response.details.remaining;
 			this.#text = response.text;
 			return response.details;
 		}

@@ -10,6 +10,7 @@ pub enum ErrorCode {
 	UserIntervened,
 	BackgroundUnavailable,
 	WindowNotFound,
+	WindowUnavailable,
 	InvalidTarget,
 	InvalidKey,
 	InvalidCoordinateFrame,
@@ -36,6 +37,7 @@ impl ErrorCode {
 			Self::UserIntervened => "UserIntervened",
 			Self::BackgroundUnavailable => "BackgroundUnavailable",
 			Self::WindowNotFound => "WindowNotFound",
+			Self::WindowUnavailable => "WindowUnavailable",
 			Self::InvalidTarget => "InvalidTarget",
 			Self::InvalidKey => "InvalidKey",
 			Self::InvalidCoordinateFrame => "InvalidCoordinateFrame",
@@ -97,6 +99,10 @@ impl DesktopError {
 		Self::new(ErrorCode::WindowNotFound, message)
 	}
 
+	pub(crate) fn window_unavailable(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::WindowUnavailable, message)
+	}
+
 	pub(crate) fn invalid_target(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::InvalidTarget, message)
 	}
@@ -121,7 +127,7 @@ impl DesktopError {
 		Self::new(ErrorCode::AxFailed, message)
 	}
 
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "windows"))]
 	pub(crate) fn ax_unconfirmed(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::AxUnconfirmed, message)
 	}

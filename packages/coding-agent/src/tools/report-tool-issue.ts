@@ -1,17 +1,17 @@
 /**
  * report_issue — automated QA backend for tracking unexpected tool behavior.
  *
- * No model-facing tool schema anymore: the write tool dispatches plain text to
- * `xd://report_issue`, and the system prompt tells the model to write
- * `<tool>: <concise description>` there when auto-QA is enabled.
+ * The `report_issue` tool takes one string, `report`, in the form
+ * `<tool>: <concise description>`; the system prompt tells the model to run
+ * `report_issue '<tool>: <concise description>'` when auto-QA is enabled.
  *
  * Enabled by default (`dev.autoqa` defaults to true); `PI_AUTO_QA=0` or an
  * explicit `dev.autoqa: false` short-circuits injection entirely. When the
  * user is only enabled by default (never configured `dev.autoqa` themselves),
  * a persisted `dev.autoqaConsent: "denied"` also disables injection so a "No"
  * in the consent dialog fully turns the feature off.
- * Records grievances to a local SQLite database; never throws from the device
- * dispatch path.
+ * Records grievances to a local SQLite database; never throws from the tool's
+ * execution path.
  *
  * Nothing is written until consent resolves. If the user has never been asked
  * (`dev.autoqaConsent === "unset"`) the process-global consent handler —
@@ -27,39 +27,35 @@
  * pushed on HTTP 2xx. Rows the collector permanently refuses (400/413/422) are
  * isolated by bisecting the batch and parked with the server's error, so a
  * single bad row can't block the queue. `PI_AUTO_QA_PUSH=1` forces push in
- * non-interactive environments where the consent dialog never fires. Device
+ * non-interactive environments where the consent dialog never fires. Tool
  * execution is never blocked on the network and never throws.
  */
+import { type } from "@oh-my-pi/omptype";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { $env, $flag, getAutoQaDbPath, getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
 import type { Settings } from "..";
-import type { ToolSession } from "./index";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { Tool, ToolSession } from "./index";
+import { ToolError } from "./tool-errors";
 import { BUILTIN_TOOL_NAMES, isMCPToolName } from "./builtin-names";
-import type { XdevDispatch } from "./xdev";
+import { toolCommandCallName } from "./tool-commands";
 
-import { REPORT_ISSUE_DEVICE_NAME, REPORT_ISSUE_DEVICE_PATH } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
-import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { REPORT_ISSUE_COMMAND_NAME } from "./report-issue-command";
+import { truncateHeadBytes } from "./streaming-output";
 
 import { cfgDevAutoqa, cfgDevAutoqaConsent, cfgDevAutoqaPushEndpoint, cfgDevAutoqaPushToken } from "./settings";
 
-/** Usage text for `read xd://report_issue`. */
-export function reportIssueDeviceUsage(): string {
-	return `Write \`<tool>: <concise description>\` as plain text to ${REPORT_ISSUE_DEVICE_PATH}. A two-line fallback also works: tool name on line 1, report body below.`;
-}
+/** Accepted `report` shapes, appended to format errors. */
+const REPORT_ISSUE_USAGE =
+	"Expected `<tool>: <concise description>`, or the tool name on line 1 with the report body below.";
 
-/** Whether a tool call writes to `xd://report_issue`. */
+/** Whether a tool call runs `report_issue`, directly or as a `bash` command. */
 export function isReportIssueToolCall(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
-	if (toolCall.name !== "write") return false;
-	const args = toolCall.arguments;
-	const path =
-		typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : undefined;
-	return path === REPORT_ISSUE_DEVICE_PATH || path === `${REPORT_ISSUE_DEVICE_PATH}/`;
+	return (toolCommandCallName(toolCall) ?? toolCall.name) === REPORT_ISSUE_COMMAND_NAME;
 }
 
 /**
@@ -124,43 +120,10 @@ function normalizeGrievance(rawTool: string, rawReport: string): { tool: string;
 	return { tool: truncateHeadBytes(tool, MAX_TOOL_BYTES).text, report: `${tool}\n${report}` };
 }
 
-const JSON_TOOL_KEYS = ["tool", "toolName", "tool_name", "name"] as const;
-const JSON_REPORT_KEYS = ["report", "description", "issue", "error", "message", "problem", "details", "body"] as const;
-
-function firstString(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
-	for (const key of keys) {
-		const value = record[key];
-		if (typeof value === "string" && value.trim()) return value.trim();
-	}
-	return undefined;
-}
-
-/** A JSON body (`{"tool": "read", "description": "…"}`), as agents write to every other device. */
-function parseJsonReportBody(body: string): { tool: string; report: string } | undefined {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(body);
-	} catch {
-		return undefined;
-	}
-	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-		throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
-	}
-	const record = parsed as Record<string, unknown>;
-	const tool = firstString(record, JSON_TOOL_KEYS);
-	const report = firstString(record, JSON_REPORT_KEYS);
-	if (!tool || !report) throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
-	return normalizeGrievance(tool, report);
-}
-
 function parseReportIssueBody(text: string): { tool: string; report: string } {
 	const body = text.trim();
 	if (!body) {
-		throw new ToolError(`Empty report. ${reportIssueDeviceUsage()}`);
-	}
-	if (body.startsWith("{") || body.startsWith("[")) {
-		const json = parseJsonReportBody(body);
-		if (json) return json;
+		throw new ToolError(`Empty report. ${REPORT_ISSUE_USAGE}`);
 	}
 	const firstNewline = body.indexOf("\n");
 	if (firstNewline >= 0) {
@@ -168,7 +131,7 @@ function parseReportIssueBody(text: string): { tool: string; report: string } {
 		const report = body.slice(firstNewline + 1).trim();
 		if (tool && report) return normalizeGrievance(tool, report);
 	}
-	// Only a colon followed by whitespace separates, so a URI (`xd://tui`) or an
+	// Only a colon followed by whitespace separates, so a URI (`help://read/sources`) or an
 	// unspaced argument (`{name:'x'}`) in the tool name stays in the tool name.
 	const colon = body.search(/:\s/);
 	if (colon > 0) {
@@ -176,7 +139,7 @@ function parseReportIssueBody(text: string): { tool: string; report: string } {
 		const report = body.slice(colon + 1).trim();
 		if (tool && report) return normalizeGrievance(tool, report);
 	}
-	throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
+	throw new ToolError(`Invalid report format. ${REPORT_ISSUE_USAGE}`);
 }
 
 const BUILTIN_TOOL_NAME_SET: ReadonlySet<string> = new Set(BUILTIN_TOOL_NAMES);
@@ -186,7 +149,7 @@ const BUILTIN_TOOL_NAME_SET: ReadonlySet<string> = new Set(BUILTIN_TOOL_NAMES);
  * `builtin`, `eval:<namespace>`, `mcp:<server>`, `extension`, or `unknown` (CLIs, guesses).
  */
 function resolveToolSource(session: ToolSession, tool: string): string {
-	const name = tool.replace(/^xd:\/\//, "").replace(/^proxy_/, "");
+	const name = tool.replace(/^proxy_/, "");
 	const registered = session.getToolByName?.(name);
 	const server =
 		registered && "mcpServerName" in registered && typeof registered.mcpServerName === "string"
@@ -244,7 +207,7 @@ let consentHandler: AutoQaConsentHandler | null = null;
  * Persistent settings instance supplied by the consent-handler registrant.
  * Subagents have in-memory `Settings` snapshots that don't write to disk;
  * we persist the decision through this disk-backed reference so a grant
- * survives across runs even when triggered from a subagent device write.
+ * survives across runs even when triggered from a subagent's report.
  */
 let persistentConsentSettings: Settings | null = null;
 /**
@@ -411,14 +374,14 @@ export interface FlushResult {
 /**
  * Optional per-flush controls. Used by `omp grievances push` to surface
  * progress to a TTY and to skip the user-facing consent gate (manual
- * pushes are the user's explicit intent, not a side effect of a device write).
+ * pushes are the user's explicit intent, not a side effect of a model report).
  */
 export interface FlushOptions {
 	/**
 	 * Skip the `dev.autoqaConsent === "granted"` gate in
 	 * {@link resolvePushConfig}. Endpoint configuration is still required.
 	 * Reserved for explicit user-driven pushes (CLI `grievances push`,
-	 * future debug recipes); never set from the device's auto-flush path.
+	 * future debug recipes); never set from the tool's auto-flush path.
 	 */
 	bypassConsent?: boolean;
 	/**
@@ -695,7 +658,7 @@ export function __awaitAutoQaRecordPipelineForTests(): Promise<void> {
 /**
  * Queue a grievance for recording. The consent → insert → flush pipeline is
  * fire-and-forget: nothing is written until the user grants consent (or
- * `PI_AUTO_QA_PUSH=1` forces headless recording), and the device result
+ * `PI_AUTO_QA_PUSH=1` forces headless recording), and the tool result
  * returns immediately so the model never waits on the dialog or the network.
  */
 function recordToolIssue(session: ToolSession, tool: string, report: string): void {
@@ -717,15 +680,13 @@ function recordToolIssue(session: ToolSession, tool: string, report: string): vo
 	})();
 }
 
-/**
- * Execute `write xd://report_issue`. `text` must be either:
- * - `<tool>: <concise description>` on one line, or
- * - tool name on the first line with the report body below.
- */
-export async function dispatchReportIssueDevice(
-	session: ToolSession,
-	text: string,
-): Promise<{ result: AgentToolResult<unknown>; xdev: XdevDispatch }> {
+const reportIssueSchema = type({
+	report: type("string").describe("Report in `<tool>: <concise description>` form."),
+	"+": "reject",
+});
+
+/** Record one tool issue for Auto-QA; acknowledges immediately whether or not consent ends up granted. */
+async function reportToolIssue(session: ToolSession, text: string): Promise<AgentToolResult<unknown>> {
 	try {
 		if (isAutoQaEnabled(session.settings)) {
 			const { tool, report } = parseReportIssueBody(text);
@@ -735,8 +696,24 @@ export async function dispatchReportIssueDevice(
 		if (error instanceof ToolError) throw error;
 		logger.error("Failed to record tool issue", { error });
 	}
-	return {
-		result: { content: [{ type: "text", text: "Noted, thanks!" }] },
-		xdev: { tool: REPORT_ISSUE_DEVICE_NAME, mode: "execute", args: { report: text.trim() } },
+	return { content: [{ type: "text", text: "Noted, thanks!" }] };
+}
+
+/** The `report_issue` tool: `report_issue '<tool>: <concise description>'` files an Auto-QA report. */
+export function createReportIssueTool(session: ToolSession): Tool {
+	const tool: AgentTool<typeof reportIssueSchema> = {
+		name: REPORT_ISSUE_COMMAND_NAME,
+		label: "Report Tool Issue",
+		summary: "Report unexpected tool behavior for automated QA",
+		description:
+			"Report unexpected tool behavior for automated QA as `<tool>: <concise description>`. A two-line form also works: tool name on line 1, report body below.",
+		parameters: reportIssueSchema,
+		strict: true,
+		intent: "omit",
+		approval: "write",
+		async execute(_toolCallId, params) {
+			return reportToolIssue(session, params.report);
+		},
 	};
+	return tool;
 }

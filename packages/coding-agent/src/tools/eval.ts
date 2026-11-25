@@ -7,14 +7,10 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
-import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
-import {
-	replaceTabs,
-	shortenEmbeddedPaths,
-	TRUNCATE_LENGTHS,
-	truncateToWidth,
-} from "@oh-my-pi/pi-tui/render/render-utils";
-import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { formatBackgroundNotice } from "./details/bash";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { parseConfiguredThinkingLevel } from "../thinking/levels";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
@@ -32,38 +28,26 @@ import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { EvalShadowCellSession } from "../eval/speculation/cell-session";
 import { runWithEvalShadowCell } from "../eval/speculation/runtime-context";
-import type {
-	EvalCellResult,
-	EvalLanguage,
-	EvalStatusEvent,
-	EvalToolDetails,
-	EvalViewEntry,
-} from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails, EvalViewEntry } from "./details/eval";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { type EvalToolDescriptionOptions, evalTemplateContext, getEvalDocTopics } from "./eval-doc-topics";
-import {
-	DEFAULT_MAX_BYTES,
-	findColumnCapped,
-	OutputSink,
-	type OutputSummary,
-	TailBuffer,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, findColumnCapped, OutputSink, type OutputSummary, TailBuffer } from "./streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { canSpawnAtDepth } from "../task/types";
-import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { webpExclusionForModel } from "../utils/image-input";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveAdvertisedEvalBackends, resolveEvalBackends } from "./eval-backends";
-import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/eval";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { recordStatusEvent, type StatusEventLog } from "./details/eval";
+import { formatOutputNotice } from "./output-meta-format";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { hasWaitTool } from "./wait";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
-import { docTopicsReadable } from "./xdev";
+import { docTopicsReadable } from "./doc-topics";
 
 import {
 	cfgEvalAutoBackgroundEnabled,
@@ -125,12 +109,14 @@ const evalCellCommonFields = {
 
 function evalTimeoutSchema(maxTimeout?: number) {
 	const { min, max } = TOOL_TIMEOUTS.eval;
+	// The deadline an omitted `timeout` resolves to, after any configured ceiling.
+	const defaultTimeout = clampTimeout("eval", undefined, maxTimeout);
 	const configured =
 		maxTimeout !== undefined && maxTimeout > 0
 			? ` Configured tools.maxTimeout: ${maxTimeout}s (effective ceiling ${clampTimeout("eval", max, maxTimeout)}s).`
 			: "";
 	return type("number").describe(
-		`Cell deadline in seconds; nonzero values clamp to ${min}–${max}; 0 disables it.${configured}`,
+		`Cell deadline in seconds (default ${defaultTimeout}); nonzero values clamp to ${min}–${max}; 0 disables it.${configured}`,
 	);
 }
 
@@ -305,7 +291,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	}
 
 	/**
-	 * `xd://eval/<topic>` docs follow the live prelude set so a prelude announced
+	 * `help://eval/<topic>` docs follow the live prelude set so a prelude announced
 	 * by the mid-session notice is readable before the description catches up.
 	 */
 	docTopics(): Record<string, string> {
@@ -348,6 +334,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			perCallModel,
 			perCallModelAdvertisement,
 			toolNames: session.getAdvertisedEvalToolNames?.(),
+			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
 		};
 	}
 
@@ -551,6 +538,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const execution = runWithEvalShadowCell(activeShadowCell, () =>
 				this.#runCells({
 					session,
+					parentToolCallId: _toolCallId,
 					cells,
 					languages,
 					notice,
@@ -758,6 +746,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	 */
 	async #runCells(options: {
 		session: ToolSession;
+		parentToolCallId: string;
 		cells: ResolvedEvalCell[];
 		languages: EvalLanguage[];
 		notice: string | undefined;
@@ -862,11 +851,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 			const sessionFile = session.getSessionFile?.() ?? undefined;
 			const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? undefined;
-			const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.()) ?? {};
-			session.assertEvalExecutionAllowed?.();
 			outputSink = new OutputSink({
-				artifactPath,
-				artifactId,
+				allocateArtifact: session.allocateOutputArtifact,
 				headBytes: resolveOutputSinkHeadBytes(session.settings),
 				artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(session.settings),
 				maxColumns: resolveOutputMaxColumns(session.settings),
@@ -917,6 +903,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					result = await backend.execute(cell.code, {
 						cwd: session.cwd,
 						sessionId,
+						parentToolCallId: options.parentToolCallId,
 						sessionFile: sessionFile ?? undefined,
 						kernelOwnerId,
 						signal: combinedSignal,

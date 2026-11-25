@@ -9,8 +9,8 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { AgentBusyError, extractIntent, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessageEvent, Model, ServiceTierByFamily, ToolCall, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -31,14 +31,10 @@ import {
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
-import {
-	previewLine,
-	replaceTabs,
-	shortenToolArgumentPaths,
-	TRUNCATE_LENGTHS,
-} from "@oh-my-pi/pi-tui/render/render-utils";
-import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
+import { formatModelSelectorValue } from "../config/model-selector";
+import { previewLine, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { replaceTabs } from "../utils/text-width";
+import { diffStats, type EditMode, getEditInputPaths } from "../tools/details/edit";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
@@ -100,21 +96,21 @@ import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
 import type { CompletionJournal } from "../session/model-usage-journal";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
-import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { truncateTail } from "../tools/streaming-output";
 import {
 	AUTO_THINKING,
 	assertModelSupportsEffortCeiling,
-	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../irc/messaging";
-import { LIST_STATUS_ORDER } from "@oh-my-pi/pi-tui/tools/irc";
-import { DEFAULT_PEER_ROSTER_LIMIT } from "@oh-my-pi/pi-tui/tools/irc";
+import { LIST_STATUS_ORDER } from "../irc/irc-types";
+import { DEFAULT_PEER_ROSTER_LIMIT } from "../irc/irc-types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -148,16 +144,17 @@ import {
 } from "./types";
 import {
 	type AgentProgress,
+	type AgentStreaming,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
 	type TaskToolDetails,
 	type YieldItem,
-} from "@oh-my-pi/pi-tui/tools/task";
+} from "./task-details";
 import { yieldSectionShapes } from "./yield-assembly";
 import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
-import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { assembleYieldResult } from "./yield-sections";
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
@@ -181,6 +178,7 @@ import {
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
 	cfgPrewalkAutoTarget,
+	PREWALK_INITIAL_TARGET,
 } from "../session/settings";
 import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
@@ -193,7 +191,7 @@ import {
 	cfgCompactionThresholdTokens,
 } from "../session/context-settings";
 
-export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+export type { YieldItem } from "./task-details";
 
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
@@ -263,6 +261,10 @@ function formatSalvageSnippet(text: string, maxLength = 500): string {
 	const flattened = text.replace(/\s+/g, " ").trim();
 	return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1)}…` : flattened;
 }
+
+/** The model reasons, or writes prose: the stream states without a payload, shared by every snapshot. */
+const STREAMING_THINKING: AgentStreaming = { kind: "thinking" };
+const STREAMING_TEXT: AgentStreaming = { kind: "text" };
 
 /** Events the run monitor tracks: the core loop events plus the session's `agent_pause`. */
 type MonitoredEvent = AgentEvent | Extract<AgentSessionEvent, { type: "agent_pause" }>;
@@ -940,6 +942,17 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
 }
 
+/** Whether `toolName` edits files by a payload naming them (`edit`, `apply_patch`). */
+function isEditTool(toolName: string): boolean {
+	return toolName === "edit" || toolName === "apply_patch";
+}
+
+/** Lines an edit call's result added and removed, by its diff; undefined when it changed nothing. */
+function editResultStats(result: unknown): { added: number; removed: number } | undefined {
+	const details = isRecord(result) ? result.details : undefined;
+	return isRecord(details) && typeof details.diff === "string" && details.diff ? diffStats(details.diff) : undefined;
+}
+
 function formatToolArgsPreview(value: string, key: string): { value: string; key: string } {
 	const safe = shortenToolArgumentPaths(replaceTabs(sanitizeText(value)), key);
 	return { value: previewLine(safe, TRUNCATE_LENGTHS.CONTENT), key };
@@ -957,7 +970,7 @@ function extractToolArgsPreview(
 ): { value: string; key: string } | undefined {
 	// Priority order for preview
 	const previewKeys = ["command", "file_path", "path", "pattern", "query", "url", "task", "prompt"];
-	const isEdit = toolName === "edit" || toolName === "apply_patch";
+	const isEdit = isEditTool(toolName);
 	if (isEdit && typeof args.input === "string") {
 		const paths = getEditInputPaths(args.input, editMode);
 		if (paths.length > 0) return formatToolArgsPreview(paths.join(", "), "path");
@@ -1024,7 +1037,7 @@ function getUsageTokens(usage: unknown): number {
 /**
  * Create proxy tools that reuse the parent's MCP connections, as `scope` sees them.
  *
- * Each proxy delegates to the current source `MCPTool`/`DeferredMCPTool` rather
+ * Each proxy delegates to the current source `MCPTool` rather
  * than rebuilding a raw `tools/call` request, so the Task/subagent path shares
  * the source tool's authoritative outbound boundary: harness-intent (`i`)
  * stripping, optional-placeholder pruning, local-URL resolution, reconnect
@@ -1771,13 +1784,49 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		progress.recentOutput = filtered.slice(-8).reverse();
 	};
 
+	/**
+	 * The tool call the model is writing, by its newest stream snapshot. Its preview is taken at the
+	 * emit boundary, as recentOutput is: a large edit's patch parses at most once per emit, not per delta.
+	 */
+	let streamingCall: ToolCall | undefined;
+	let streamingCallDirty = false;
+	const refreshStreamingCall = () => {
+		if (!streamingCallDirty || !streamingCall) return;
+		streamingCallDirty = false;
+		const { intent, strippedArgs } = extractIntent(isRecord(streamingCall.arguments) ? streamingCall.arguments : {});
+		const preview = previewToolArgs(streamingCall.name, strippedArgs);
+		progress.streaming = {
+			kind: "call",
+			tool: streamingCall.name,
+			args: preview?.value,
+			argsKey: preview?.key,
+			intent,
+		};
+	};
+	/** What the model now produces, other than a call it is writing; undefined once nothing streams. */
+	const setStreaming = (state: AgentStreaming | undefined) => {
+		streamingCall = undefined;
+		streamingCallDirty = false;
+		progress.streaming = state;
+	};
+
+	/** A call's argument preview, read as its tool reads it (an edit tool's mode decides its paths). */
+	const previewToolArgs = (toolName: string, args: Record<string, unknown>) => {
+		const editMode =
+			toolName === "apply_patch"
+				? "apply_patch"
+				: ((activeSession?.getToolByName(toolName) as { mode?: EditMode } | undefined)?.mode ?? undefined);
+		return extractToolArgsPreview(args, toolName, editMode);
+	};
+
 	const emitProgressNow = () => {
 		refreshRecentOutput();
+		refreshStreamingCall();
 		progress.durationMs = Date.now() - startTime;
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
-		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
+		if (activityGist && activeSession) AgentRegistry.global().setActivity(id, activityGist, activeSession);
 		const progressPayload = {
 			index,
 			agent: agent.name,
@@ -1997,6 +2046,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			case "message_start":
 				if (event.message?.role === "assistant") {
 					assistantStreaming = true;
+					setStreaming(undefined);
 					resetRecentOutput();
 				}
 				// An async-result follow-up injected after a recorded yield
@@ -2028,12 +2078,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				} else if (isRecord(event.args)) {
 					startArgs = event.args;
 				}
-				const editMode =
-					event.toolName === "apply_patch"
-						? "apply_patch"
-						: ((activeSession?.getToolByName(event.toolName) as { mode?: EditMode } | undefined)?.mode ??
-							undefined);
-				const preview = extractToolArgsPreview(startArgs, event.toolName, editMode);
+				const preview = previewToolArgs(event.toolName, startArgs);
+				// The running call takes over from the one being written; calls written after it wait their turn.
+				setStreaming(undefined);
 				progress.currentToolArgs = preview?.value;
 				progress.currentToolArgsKey = preview?.key;
 				progress.currentToolStartMs = now;
@@ -2070,12 +2117,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const finished = activeTools.get(event.toolCallId);
 				activeTools.delete(event.toolCallId);
 				if (finished) {
+					const changed = !event.isError && isEditTool(event.toolName) ? editResultStats(event.result) : undefined;
 					progress.recentTools.unshift({
 						tool: finished.tool,
 						args: finished.args ?? "",
 						argsKey: finished.argsKey,
 						intent: finished.intent,
 						isError: event.isError,
+						...changed,
 						endMs: now,
 					});
 					// Keep only last 5
@@ -2236,22 +2285,41 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 			case "message_update": {
 				if (event.message?.role !== "assistant") break;
-				const assistantEvent = (
-					event as AgentEvent & {
-						assistantMessageEvent?: { type?: string; delta?: string };
+				// Optional at runtime: a replayed content update carries no stream event.
+				const update: AssistantMessageEvent | undefined = event.assistantMessageEvent;
+				if (!update) {
+					const updateContent =
+						getMessageContent(event.message) || (event as AgentEvent & { content?: unknown }).content;
+					if (updateContent && Array.isArray(updateContent)) {
+						replaceRecentOutputFromContent(updateContent);
 					}
-				).assistantMessageEvent;
-				if (assistantEvent?.type === "text_delta" && typeof assistantEvent.delta === "string") {
-					appendRecentOutputTail(assistantEvent.delta);
 					break;
 				}
-				if (assistantEvent && assistantEvent.type !== "text_delta") {
-					break;
-				}
-				const updateContent =
-					getMessageContent(event.message) || (event as AgentEvent & { content?: unknown }).content;
-				if (updateContent && Array.isArray(updateContent)) {
-					replaceRecentOutputFromContent(updateContent);
+				switch (update.type) {
+					case "text_delta":
+						appendRecentOutputTail(update.delta);
+						setStreaming(STREAMING_TEXT);
+						break;
+					case "text_start":
+						setStreaming(STREAMING_TEXT);
+						break;
+					case "thinking_start":
+					case "thinking_delta":
+						setStreaming(STREAMING_THINKING);
+						break;
+					case "toolcall_start":
+					case "toolcall_delta": {
+						const block = update.partial.content[update.contentIndex];
+						if (block?.type === "toolCall" && block.name) {
+							streamingCall = block;
+							streamingCallDirty = true;
+						}
+						break;
+					}
+					case "toolcall_end":
+						streamingCall = update.toolCall;
+						streamingCallDirty = true;
+						break;
 				}
 				break;
 			}
@@ -2261,6 +2329,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const role = event.message?.role;
 				if (role === "assistant") {
 					assistantStreaming = false;
+					// Reasoning and prose end with the response; a call it wrote stays until it runs.
+					if (!streamingCall) setStreaming(undefined);
 					sawAssistantMessage = true;
 					progress.requests += 1;
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
@@ -2357,6 +2427,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// vanished after a pause ends with that paused loop's messages again.
 				const resent = event.type === "agent_end" && pausedLoopCollected;
 				pausedLoopCollected = event.type === "agent_pause";
+				setStreaming(undefined);
 				// Extract final content from assistant messages only (not user prompts).
 				if (!resent && Array.isArray(event.messages)) {
 					for (const msg of event.messages) {
@@ -5104,10 +5175,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
 					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
 					: undefined;
+			const autoTarget = cfgPrewalkAutoTarget.get(settings);
 			const autoPattern = autoEntry
 				? resolveAgentPrewalkPattern({
 						settingsOverride: autoEntry,
-						agentPrewalk: cfgPrewalkAutoTarget.get(settings),
+						// A subagent never moves to a planner, so there is no starting model to hand back to.
+						agentPrewalk: autoTarget === PREWALK_INITIAL_TARGET ? cfgPrewalkAutoTarget.default : autoTarget,
 					})
 				: undefined;
 			const prewalkPattern = unconditionalPattern ?? autoPattern;
@@ -5435,7 +5508,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				systemPrompt: session.agent.state.systemPrompt,
 				task,
 				tools: persistedSubagentTools,
-				mountedTools: session.getMountedXdevToolNames(),
+				mountedTools: session.getMountedToolCommandNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,

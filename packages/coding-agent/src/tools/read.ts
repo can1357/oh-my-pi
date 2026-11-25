@@ -1,4 +1,4 @@
-import { isReadableUrlPath, type ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath, type ReadToolDetails } from "./details/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
@@ -32,13 +32,13 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
-import { cfgDisasmBackend, DISASM_BACKENDS, isExecutableFile } from "../disasm";
+import { cfgDisasmBackend, databaseOwner, isExecutableFile } from "../disasm";
 import { normalizeToLF } from "../edit/normalize";
 import { isRemoteTextWritable, writeRemoteMirror } from "../edit/remote-mirror";
 import { writeResourceBackingFile } from "../internal-urls/filesystem-resource";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
-import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
+import { isMarkdownPath } from "../utils/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -51,7 +51,7 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 	truncateLine,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+} from "./streaming-output";
 import {
 	buildLineEntriesWithBlockContext,
 	lineEntriesToPlainText,
@@ -72,7 +72,7 @@ import {
 	InvalidImageDataError,
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
-} from "@oh-my-pi/pi-tui/chat/image-loading";
+} from "../utils/image-input";
 import { askImageQuestion, resolveImageQuestionModel } from "../utils/image-question";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
@@ -106,8 +106,8 @@ import {
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
-import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { type LineRange } from "./line-ranges";
+import { splitPathAndSel } from "./details/read";
 import { readArchive, resolveArchiveReadPath } from "./read-archive";
 import {
 	appendReadNotice,
@@ -161,7 +161,7 @@ import {
 	type VideoMetadata,
 	type VideoPng,
 } from "../utils/video";
-import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { isVideoPath } from "../utils/video-preview";
 import {
 	isMultiRange,
 	isRawSelector,
@@ -171,8 +171,8 @@ import {
 	resolveTailSelector,
 	selToOffsetLimit,
 } from "./read-selector";
-import { splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import { formatSingleLine } from "@oh-my-pi/pi-tui/tools/read";
+import { splitAddressableFileLines } from "./hashline-format";
+import { formatSingleLine } from "./details/read";
 import {
 	nativeShapingOff,
 	type ShapePart,
@@ -195,10 +195,11 @@ import {
 	trySummarize,
 } from "./read-summary";
 import { isSqliteFile, parseSqlitePathCandidates } from "./sqlite-reader";
-import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { getToolConversationState, ToolConversationState } from "./tool-state";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 import {
@@ -1299,14 +1300,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly loadMode = "essential";
 	/** Rendered per access so the hashline guidance follows a live `edit.mode` change. */
 	get description(): string {
+		const displayMode = resolveFileDisplayMode(this.session);
 		return prompt.render(readDescription, {
-			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
+			IS_HL_MODE: displayMode.hashLines,
+			HAS_LINE_NUMBERS: displayMode.lineNumbers,
 			BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
 		});
 	}
 	/**
-	 * `xd://read/sources`: selector reference for the sources the description only names.
-	 * `xd://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
+	 * `help://read/sources`: selector reference for the sources the description only names.
+	 * `help://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
 	 */
 	docTopics(): Record<string, string> {
 		return {
@@ -2387,7 +2390,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 
 			const sqlitePath = await resolveSqliteReadPath(this.session, readPath, suffixCache, signal);
-			if (sqlitePath) {
+			// A disassembler database stored as SQLite (Binary Ninja `.bndb`) belongs to its backend:
+			// views take the disassembler route below and a bare read shows database metadata.
+			if (sqlitePath && !databaseOwner(sqlitePath.absolutePath)) {
 				return readSqlite(sqlitePath, signal);
 			}
 			// local:// locates backing files without its URL query;
@@ -2515,6 +2520,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!recoveredApprovedPlan && !suffixResolution) {
 					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
 					if (delimitedResult) return delimitedResult;
+					// A numeric pair can also be a literal filename plus a selector. Diagnose it only after lookup
+					// failed, and find the base the way a corrected read would: literally, else by unique suffix.
+					if (localTarget.sel && /^\d+$/.test(localTarget.sel)) {
+						const prefix = splitPathAndSel(localReadPath);
+						if (
+							prefix.sel &&
+							/^\d+$/.test(prefix.sel) &&
+							((await probeLiteralPathExists(prefix.path, this.session.cwd)) === "exists" ||
+								(!isRemoteMountPath(absolutePath) &&
+									(await findSuffixMatchCached(this.session, suffixCache, prefix.path, signal)) !== null))
+						) {
+							// `file:10:5` is usually a line and column; a reversed range would only fail again.
+							const range =
+								Number(localTarget.sel) > Number(prefix.sel)
+									? ` or :${prefix.sel}-${localTarget.sel} for a range`
+									: "";
+							throw new ToolError(
+								`Invalid line selector ':${prefix.sel}:${localTarget.sel}'. Use :${prefix.sel} for a single line${range}.`,
+							);
+						}
+					}
 					throw new ToolError(`Path '${localReadPath}' not found`);
 				}
 			} else {
@@ -2597,7 +2623,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			!isRawSelector(parsed) &&
 			parsed.kind !== "image" &&
 			lexicalAbsolutePath === undefined &&
-			(DISASM_BACKENDS.ida.isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath)))
+			(databaseOwner(absolutePath) !== undefined || (await isExecutableFile(absolutePath)))
 		) {
 			const backend = cfgDisasmBackend.get(this.session.settings);
 			return readBinary(this.session, { backend, absolutePath, view: "" }, parsed, signal);

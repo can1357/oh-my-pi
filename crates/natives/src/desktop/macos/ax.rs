@@ -31,8 +31,8 @@ pub(super) use selection::select_dragged;
 use super::{
 	super::{
 		ax::{
-			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, confirm_read_as, normalize_role_macos,
-			performable_names, require_read_as, text_readback, truncate_chars,
+			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, bounded_number, confirm_read_as,
+			normalize_role_macos, performable_names, require_read_as, text_readback, truncate_chars,
 		},
 		backend::{AxBackend, DeliveryMode, KeyboardFocus, is_raise_action, native_action_name},
 		control,
@@ -785,6 +785,52 @@ fn element_at_point(x: f64, y: f64) -> Option<(libc::pid_t, CFRetained<AXUIEleme
 		return None;
 	}
 	Some((pid, element))
+}
+
+/// A retained window root can outlive its membership in `AXWindows`.
+pub(super) fn retained_minimized_owner(root: &AxHandle, wid: u32) -> Option<libc::pid_t> {
+	let element = mac_handle(root).ok()?;
+	if window_id(element) != Some(wid) || copy_bool(element, "AXMinimized") != Some(true) {
+		return None;
+	}
+	element_pid(element).ok()
+}
+
+/// Reads only the exact minimized AX window. A sibling can be key, have the
+/// same title, or occupy the same frame; none of those identifies this root.
+/// `None` unless the app lists that window and reports it minimized, so a
+/// window hidden for another reason keeps its "not found" error.
+pub(super) fn minimized_root(pid: libc::pid_t, wid: u32) -> CoreResult<Option<AxHandle>> {
+	ensure_trusted()?;
+	let Some(app) = probe_application(pid) else {
+		return Ok(None);
+	};
+	let windows = copy_elements(&app, "AXWindows")?;
+	let Some(element) = minimized_element(
+		wid,
+		windows,
+		|element| window_id(element),
+		|element| copy_bool(element, "AXMinimized"),
+	) else {
+		return Ok(None);
+	};
+	if element_pid(&element)? != pid {
+		return Ok(None);
+	}
+	set_timeout(&element)?;
+	Ok(Some(AxHandle::Mac(element)))
+}
+
+fn minimized_element<E>(
+	wid: u32,
+	windows: impl IntoIterator<Item = E>,
+	id_of: impl Fn(&E) -> Option<u32>,
+	minimized: impl FnOnce(&E) -> Option<bool>,
+) -> Option<E> {
+	let window = windows
+		.into_iter()
+		.find(|window| id_of(window) == Some(wid))?;
+	(minimized(&window) == Some(true)).then_some(window)
 }
 
 /// Raises a known window for explicit takeover or restoration.
@@ -1825,6 +1871,7 @@ fn activate_for_menu(
 		&window,
 		entry_front,
 		in_overlay,
+		input::KeyPurpose::Menu,
 		visit,
 	)?;
 	// The press that makes the window key waits in the application's event
@@ -3483,18 +3530,6 @@ fn stringify_number(number: &CFNumber) -> String {
 	text.unwrap_or_default()
 }
 
-/// A number as `Display` writes it, or in scientific notation where that would
-/// run past 24 characters (`f64::MAX` has 309 digits), the longest an `f64`
-/// takes in scientific notation: an extreme value an app publishes stays short.
-fn bounded_number<T: std::fmt::Display + std::fmt::LowerExp>(value: T) -> String {
-	let text = value.to_string();
-	if text.len() <= 24 {
-		text
-	} else {
-		format!("{value:e}")
-	}
-}
-
 fn nonempty(value: Option<String>) -> Option<String> {
 	value.filter(|value| !value.is_empty())
 }
@@ -3542,6 +3577,18 @@ mod tests {
 		target_window, value_kind, window_records_of, write_number,
 	};
 	use crate::desktop::error::{CoreResult, DesktopError, ErrorCode};
+
+	#[test]
+	fn a_minimized_root_requires_the_requested_id_not_its_visible_sibling() {
+		let windows = [(17, Some(false)), (42, Some(true)), (51, None)];
+		let root = |wid| {
+			super::minimized_element(wid, windows, |(id, _)| Some(*id), |(_, minimized)| *minimized)
+		};
+		assert_eq!(root(42), Some((42, Some(true))));
+		assert_eq!(root(17), None);
+		assert_eq!(root(51), None);
+		assert_eq!(root(99), None);
+	}
 
 	#[test]
 	fn an_unreadable_window_subrole_is_unknown_not_a_dialog() {

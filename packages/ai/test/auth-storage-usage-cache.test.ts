@@ -1581,3 +1581,81 @@ describe("AuthStorage usage cache: organization scope identity", () => {
 		expect(key).not.toBe(usageCacheIdentity({ ...credential, inferenceRegion: "global" }));
 	});
 });
+
+describe("AuthStorage usage cache: runtime usage provider registration", () => {
+	const noResolver = { usageProviderResolver: () => undefined };
+
+	function extensionRow(): StoredAuthCredential {
+		return { ...oauthRow(1, "a@example.com"), provider: "anthropic-2" };
+	}
+
+	function extensionProvider(onFetch: () => void): UsageProvider {
+		return {
+			id: "anthropic-2",
+			supports: params => params.provider === "anthropic-2",
+			async fetchUsage() {
+				onFetch();
+				return { ...makeReport("a@example.com"), provider: "anthropic-2" };
+			},
+		};
+	}
+
+	async function extensionReports(storage: AuthStorage): Promise<UsageReport[]> {
+		return ((await storage.usage.reports()) ?? []).filter(report => report.provider === "anthropic-2");
+	}
+
+	it("keeps another process's reports when an extension registers a provider with no other adapter", async () => {
+		const store = makeStore([extensionRow()]);
+		let calls = 0;
+		const first = new AuthStorage(store, noResolver);
+		await first.credentials.reload();
+		first.usage.setProvider(
+			"anthropic-2",
+			extensionProvider(() => calls++),
+		);
+		expect(await extensionReports(first)).toHaveLength(1);
+		first.close();
+
+		const second = new AuthStorage(store, noResolver);
+		await second.credentials.reload();
+		second.usage.setProvider(
+			"anthropic-2",
+			extensionProvider(() => calls++),
+		);
+		try {
+			expect(await extensionReports(second)).toHaveLength(1);
+			expect(calls).toBe(1);
+
+			await second.usage.invalidate("anthropic-2");
+			expect(await extensionReports(second)).toHaveLength(1);
+			expect(calls).toBe(2);
+		} finally {
+			second.close();
+		}
+	});
+
+	it("invalidates cached reports when an extension replaces the provider's adapter", async () => {
+		const store = makeStore([extensionRow()]);
+		let firstCalls = 0;
+		let secondCalls = 0;
+		const storage = new AuthStorage(store, noResolver);
+		await storage.credentials.reload();
+		try {
+			storage.usage.setProvider(
+				"anthropic-2",
+				extensionProvider(() => firstCalls++),
+			);
+			expect(await extensionReports(storage)).toHaveLength(1);
+
+			storage.usage.setProvider(
+				"anthropic-2",
+				extensionProvider(() => secondCalls++),
+			);
+			expect(await extensionReports(storage)).toHaveLength(1);
+			expect(firstCalls).toBe(1);
+			expect(secondCalls).toBe(1);
+		} finally {
+			storage.close();
+		}
+	});
+});

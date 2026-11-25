@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
+### Fixed
+
+- Fatal interactive errors now display a concise cause and the path to the full log after terminal cleanup, while piped stderr continues to include the stack trace.
+- Fixed HTML parsing so <textarea> and <title> content is treated as text, preserving literal angle-bracket content while still decoding entities.
+- Child processes created by ptree without an explicit environment now inherit the current Bun environment, including values loaded from .env files after startup, on all platforms.
+
+### Removed
+
+- Removed the public getProviderInFlightRoot() API; provider in-flight limits no longer rely on a lease directory.
+
+## [19.1.0] - 2026-11-21
+
+### Added
+
+- Added `LinearRegExp` (`@oh-my-pi/pi-utils/regex`), a JavaScript-compatible regular expression engine that avoids catastrophic backtracking, with support for scoped modifiers, Unicode modes and properties, Unicode set operations, large repetitions and literal dictionaries, fixed-width block counts, and additional character classes.
+- Added `RegexStream` for detecting regular-expression matches in text received incrementally in chunks.
+- Added `getCodexClientVersionPath()` to locate the Codex client version cache record under the initialized `$XDG_CACHE_HOME/omp` directory.
+
+### Changed
+
+- Improved `LinearRegExp` performance for scans and searches involving delimiters, word backreferences, required literals or suffixes, lookbehinds, and large character alphabets.
+
+### Fixed
+
+- Fixed RAR4 extraction stalling for seconds per filter on archives that declare an out-of-range delta filter channel count; such archives are now rejected as corrupt.
+- Fixed `formatAge` to display durations of one year or more in years, such as `23y ago`, instead of months.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

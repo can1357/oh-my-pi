@@ -1,7 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { MessageChannel, type MessagePort, receiveMessageOnPort } from "node:worker_threads";
+import type * as WorkerThreads from "node:worker_threads";
+import type { MessagePort } from "node:worker_threads";
+
+// Lazy loader: keeps node:worker_threads off CLI startup until the Bun Worker fallback spawns.
+let workerThreadsCache: typeof WorkerThreads | undefined;
+function workerThreads(): typeof WorkerThreads {
+	if (!workerThreadsCache) workerThreadsCache = require("node:worker_threads") as typeof WorkerThreads;
+	return workerThreadsCache;
+}
 import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
@@ -12,7 +20,7 @@ import {
 import { registerOnBoard } from "../../daemon/client";
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
@@ -30,7 +38,7 @@ import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
 import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
-import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
+import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/shadow-snapshot";
 import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
@@ -49,6 +57,7 @@ export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
 
 export interface VmRunState {
 	signal?: AbortSignal;
+	parentToolCallId?: string;
 	onText?: (chunk: string) => void;
 	onDisplay?: (output: EvalDisplayOutput) => void;
 	/** Shows the user `out://` replies of the run's bridged tool calls; absent, those calls are refused. */
@@ -245,6 +254,7 @@ export async function invokeJsTool(
 	options: {
 		sessionKey: string;
 		session: ToolSession;
+		parentToolCallId?: string;
 		signal?: AbortSignal;
 	},
 ): Promise<EvalToolInvokeResult | { ok: true; tools: EvalToolDescriptor[]; missing: string[] }> {
@@ -256,7 +266,7 @@ export async function invokeJsTool(
 	let envelope: unknown;
 	const pending: PendingRun = {
 		runId,
-		runState: { signal: options.signal },
+		runState: { signal: options.signal, parentToolCallId: options.parentToolCallId },
 		toolSession: options.session,
 		resolve,
 		reject,
@@ -857,6 +867,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 	try {
 		const value = await callSessionTool(msg.name, msg.args, {
 			session: pending.toolSession,
+			parentToolCallId: pending.runState.parentToolCallId,
 			signal: ctrl.signal,
 			cellTimeoutMs: pending.cellTimeoutMs,
 			identity: msg.identity,
@@ -1047,6 +1058,7 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 		const worker = hostEntry
 			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"] })
 			: new Worker(SOURCE_WORKER_ENTRY.href, { type: "module" });
+		const { MessageChannel } = workerThreads();
 		const channel = new MessageChannel();
 		const outbox: WorkerOutboxMessage = { type: "outbox", port: channel.port2 };
 		worker.postMessage(outbox, [channel.port2]);
@@ -1193,6 +1205,7 @@ function wrapBunWorker(worker: Worker, outbox: MessagePort): JsEvalWorkerHandle 
 			worker.terminate();
 			if (!outboxOpen) return;
 			outboxOpen = false;
+			const { receiveMessageOnPort } = workerThreads();
 			for (let received = receiveMessageOnPort(outbox); received; received = receiveMessageOnPort(outbox)) {
 				deliver(received.message);
 			}

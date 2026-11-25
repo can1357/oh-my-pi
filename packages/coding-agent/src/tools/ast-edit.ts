@@ -1,4 +1,4 @@
-import type { AstEditToolDetails } from "@oh-my-pi/pi-tui/tools/ast-edit";
+import type { AstEditToolDetails } from "./details/ast-edit";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -15,7 +15,7 @@ import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
-import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { formatHashlineHeader } from "./hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
 
@@ -25,18 +25,14 @@ import type { ToolSession } from ".";
 import { resolveToolTier, strictestApproval, truncateForPrompt } from "./approval";
 import { parseReadUrlTarget } from "./fetch";
 import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
-import { createFileRecorder, formatResultPath, resultSnapshotPath, targetResultBase } from "./file-recorder";
-import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
+import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
+import { formatGroupedFiles } from "./grouped-file-output";
 
-import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
-import {
-	capParseErrors,
-	formatCodeFrameLine,
-	formatCount,
-	formatParseErrors,
-} from "@oh-my-pi/pi-tui/render/render-utils";
+import { relativeSearchResultPath, resolveTargetResultPath, resolveToolSearchScope } from "./path-utils";
+import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "../utils/render-utils";
+import { formatCount } from "@oh-my-pi/pi-utils";
 import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 const astEditOpSchema = type({
@@ -75,7 +71,7 @@ interface AstEditAggregatedResult {
 }
 
 async function runAstEditTargets(
-	targets: Array<{ basePath: string; glob?: string }>,
+	targets: Array<{ basePath: string; glob?: string; isDirectory: boolean }>,
 	commonBasePath: string,
 	options: AstEditCallOptions,
 ): Promise<AstEditAggregatedResult> {
@@ -120,13 +116,12 @@ async function runAstEditTargets(
 		applied = applied && targetResult.applied;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
-		const resultBase = await targetResultBase(target.basePath);
 		for (const change of targetResult.changes) {
-			const absolute = resolveSearchResultPath(resultBase, change.path);
+			const absolute = resolveTargetResultPath(target, change.path);
 			aggregatedChanges.push({ ...change, path: relativeSearchResultPath(commonBasePath, absolute) });
 		}
 		for (const fileChange of targetResult.fileChanges) {
-			const absolute = resolveSearchResultPath(resultBase, fileChange.path);
+			const absolute = resolveTargetResultPath(target, fileChange.path);
 			const rebased = relativeSearchResultPath(commonBasePath, absolute);
 			fileCounts.set(rebased, (fileCounts.get(rebased) ?? 0) + fileChange.count);
 		}
@@ -149,7 +144,7 @@ async function runAstEditTargets(
 }
 
 function runAstEditOnce(
-	targets: Array<{ basePath: string; glob?: string }> | undefined,
+	targets: Array<{ basePath: string; glob?: string; isDirectory: boolean }> | undefined,
 	resolvedSearchPath: string,
 	globFilter: string | undefined,
 	options: AstEditCallOptions,
@@ -485,7 +480,6 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 								tool: "ast_edit",
 								before: before.text,
 								after: after.text,
-								beforeMtimeMs: before.mtimeMs,
 							});
 						}
 						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(

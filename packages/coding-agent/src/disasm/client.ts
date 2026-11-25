@@ -7,11 +7,11 @@
  * tunnel to each, and forwards NDJSON requests over it.
  */
 import { logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { daemonClient } from "../daemon/client";
 import { type DaemonTunnel, GLOBAL_SCOPE, type UnitSnapshot } from "../daemon/protocol";
 import type { ToolSession } from "../tools";
-import { DISASM_BACKENDS, type DisasmBackendId } from "./backend";
+import { DISASM_BACKEND_IDS, DISASM_BACKENDS, type DisasmBackendId } from "./backend";
 import {
 	type DatabaseHandle,
 	DISASM_UNIT_KIND,
@@ -50,8 +50,10 @@ const OPEN_WAIT_MS = 120_000;
 /** Find-or-start rounds before giving up on a unit that keeps closing under us. */
 const OPEN_ATTEMPTS = 3;
 
+/** Log and error label for the unit keyed `<backend>:<id>`. */
 function unitLabel(key: string): string {
-	return `${DISASM_BACKENDS[key.startsWith("ghidra:") ? "ghidra" : "ida"].label} database`;
+	const backend = DISASM_BACKEND_IDS.find(id => key.startsWith(`${id}:`));
+	return backend ? `${DISASM_BACKENDS[backend].label} database` : "Disassembler database";
 }
 
 function unitRef(key: string): { kind: string; scope: typeof GLOBAL_SCOPE; key: string } {

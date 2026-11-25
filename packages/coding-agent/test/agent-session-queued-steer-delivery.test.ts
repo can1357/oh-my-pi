@@ -23,13 +23,14 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { tagImageAttachmentSource } from "@oh-my-pi/pi-coding-agent/utils/image-source";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
@@ -346,6 +347,41 @@ describe("AgentSession queued steer delivery", () => {
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
 
+	it("rewinds a streaming prompt without delivering its queued input to the edited turn", async () => {
+		const started = Promise.withResolvers<void>();
+		const { session, sessionManager, mock } = await createSession([
+			() => {
+				started.resolve();
+				return { content: ["abandoned answer"], delayMs: 60_000 };
+			},
+			{ content: ["new answer"] },
+		]);
+		const pending = { text: "original", submittedAt: Date.now() - 100, started: true, cancelled: false };
+		const ctx = createInteractiveModeContext({
+			session,
+			sessionManager,
+			eventController: { resetTranscriptAnchors: () => {} },
+			cancelPendingSubmission: () => false,
+			cancelGoalContinuation: () => {},
+		});
+		const run = session.prompt(pending.text, { submittedAt: pending.submittedAt });
+		await started.promise;
+		await session.steer("abandoned steer");
+		await session.followUp("abandoned follow-up");
+
+		await new SelectorController(ctx).runTurnAction("edit", { role: "user", at: pending.submittedAt }, pending);
+		await run;
+		expect(ctx.composer.text()).toBe("original");
+		expect(sessionManager.getBranch().filter(e => e.type === "message" && e.message.role === "user")).toEqual([]);
+		expect(mock.calls).toHaveLength(1);
+
+		await session.prompt("replacement");
+		expect(mock.calls).toHaveLength(2);
+		expect(mock.calls[1]!.context.messages.filter(m => m.role === "user").map(m => m.content)).toEqual([
+			[{ type: "text", text: "replacement" }],
+		]);
+	});
+
 	it("drains steering left after aborting an auto-continued queued turn", async () => {
 		const { session, mock } = await createSession([
 			{ content: ["initial response"] },
@@ -456,11 +492,6 @@ describe("AgentSession queued steer delivery", () => {
 		const ctx = createInteractiveModeContext({
 			session,
 			sessionManager: session.sessionManager,
-			editor: {
-				pendingImages: [],
-				pendingImageLinks: [],
-				addToHistory: () => {},
-			},
 			withLocalSubmission: async (_text, submit) => submit(),
 			hasActiveBtw: () => false,
 			hasActiveOmfg: () => false,
@@ -470,8 +501,8 @@ describe("AgentSession queued steer delivery", () => {
 		const run = session.prompt("start");
 		try {
 			await withTimeout(toolStarted.promise, 2_000, "tool did not start");
-			await ctx.editor.onSubmit?.("change direction");
-			await ctx.editor.onSubmit?.("");
+			await ctx.composer.onSubmit?.("change direction");
+			await ctx.composer.onSubmit?.("");
 			await withTimeout(session.waitForIdle(), 2_000, "steer did not finish");
 			await run;
 			expect(mock.calls).toHaveLength(2);

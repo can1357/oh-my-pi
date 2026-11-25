@@ -13,9 +13,9 @@
    - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing (host paths and internal URLs) and multi-path resolution
    - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native ast-edit reads and writes through
    - `packages/coding-agent/src/tools/resolve.ts` — preview/apply queueing
-   - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
+   - `packages/coding-agent/src/utils/render-utils.ts` — parse-error dedupe and display caps
    - `packages/coding-agent/src/utils/file-display-mode.ts` — hashline vs line-number diff references
-   - `packages/tui/src/tools/hashline-format.ts` — stable hashline header formatting for preview anchors
+   - `packages/coding-agent/src/tools/hashline-format.ts` — stable hashline header formatting for preview anchors
    - `packages/natives/native/index.d.ts` — JS-visible native binding contract
 
 ## Inputs
@@ -37,7 +37,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 
 ## Outputs
 
-- Single-shot preview result from `ast_edit` itself. A non-empty proposal begins with `Staged as a proposal — files NOT modified yet...` and names the resolve/reject device paths.
+- Single-shot preview result from `ast_edit` itself. A non-empty proposal begins with `Staged as a proposal — files NOT modified yet...` and names the `resolve` and `reject` commands.
 - Model-facing `content` is one text block showing proposed edits, grouped by file for directory/multi-file runs.
    - Each change renders as two lines. Hashline mode uses `-LINE:before` / `+LINE:after` under a `[PATH#TAG]` header; plain mode uses `-LINE:COLUMN before` / `+LINE:COLUMN after`.
    - Only the first line of each `before`/`after` snippet is shown, truncated to 120 characters in the wrapper.
@@ -46,8 +46,8 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 - `details` includes aggregate preview metadata:
    - `totalReplacements`, `filesTouched`, `filesSearched`, `applied`, `limitReached`
    - optional `parseErrors`, `parseErrorsTotal`, `scopePath`, `files`, `fileReplacements`, `displayContent`, `searchPath`, `cwd`, `meta`
-- The tool always previews first (`applied: false` in the direct result). Actual file writes happen only later through a plain-text `write` to `xd://resolve`; the body is the reason.
-- When preview produced replacements, `ast_edit` also queues a pending resolve action. Successful apply returns a separate resolve dispatch result (on the `write` call), not another `ast_edit` result.
+- The tool always previews first (`applied: false` in the direct result). Actual file writes happen only later through the `resolve` command, whose argument is the one-sentence reason.
+- When preview produced replacements, `ast_edit` also queues a pending resolve action. Successful apply returns a separate resolve dispatch result (on the `resolve` invocation), not another `ast_edit` result.
 
 ## Flow
 
@@ -68,9 +68,9 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
    - compiles each rewrite for every discovered language; a rule that cannot parse in one language skips that language's files and reports parse issues,
    - parses each file, skips files with syntax-error trees, collects `replace_by(...)` edits for every match, enforces replacement and file caps, and returns textual before/after slices plus source ranges.
 7. The TS wrapper deduplicates and caps parse errors, groups changes by file, and renders preview diff lines.
-8. If preview found replacements and `applied` is false, `queueResolveHandler(...)` registers a non-forcing pending resolve invoker. While it is pending the session surfaces a `SoftToolRequirement` (`toolName: "write"` with an `xd://resolve` or `xd://reject` `satisfies` predicate) carrying the resolve reminder; the agent runtime injects the reminder and forces `write` only if the model declines that turn.
-9. On a `write xd://resolve` dispatch, the queued callback reruns the same rewrite set with `dryRun: false`, recomputes counts, and returns an error result if the live result no longer matches the preview (`stalePreview`). The current implementation compares replacement totals and per-file counts after the rerun; if the new run has already written different counts, the result is marked error.
-10.   On a non-stale apply, the callback returns `Applied N replacements in M files.` (in hashline mode followed by fresh `[path#tag]` snapshot headers re-recorded from the post-apply content); on discard (`write xd://reject`), the dispatch returns a discard message without mutating files.
+8. If preview found replacements and `applied` is false, `queueResolveHandler(...)` registers a non-forcing pending resolve invoker. While it is pending the session surfaces a `SoftToolRequirement` carrying the resolve reminder: its `toolName` is `bash` while tool commands are mounted and `resolve` otherwise, and its `satisfies` predicate is `isPreviewResolutionToolCall` (a bash command line starting with `resolve`/`reject`, or a direct `resolve`/`reject` call). The agent runtime injects the reminder and escalates to a forced call of that tool only if the model declines the turn.
+9. On a `resolve` invocation (`resolve <reason>` as a tool command, or the top-level `resolve` tool when tool commands are not mounted), the queued callback reruns the same rewrite set with `dryRun: false`, recomputes counts, and returns an error result if the live result no longer matches the preview (`stalePreview`). The current implementation compares replacement totals and per-file counts after the rerun; if the new run has already written different counts, the result is marked error.
+10.   On a non-stale apply, the callback returns `Applied N replacements in M files.` (in hashline mode followed by fresh `[path#tag]` snapshot headers re-recorded from the post-apply content); on discard (`reject <reason>`), the invocation returns a discard message without mutating files.
 
 ## Modes / Variants
 
@@ -79,7 +79,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 - Multiple explicit paths/globs: wrapper unions them into one synthetic scope or runs per-target native calls when paths only meet at root.
 - Internal URL inputs: only file-writable schemes (`local://`); read-only and handler-written schemes are refused upfront. Native preview and apply read and write them through the URL filesystem, which redirects to their host files; the apply pass builds its own filesystem (no call signal) at the same tier. Approval is the highest write tier among the targeted schemes; hits are named by full URL and hashline snapshots bind to the located host file.
 - Preview mode: always the direct `ast_edit` tool result.
-- Apply mode: only reachable through the queued resolve callback (a `write` to `xd://resolve` or `xd://reject`) after a preview.
+- Apply mode: only reachable through the queued resolve callback — `resolve <reason>` or `reject <reason>` as a tool command, or the top-level `resolve`/`reject` tools when tool commands are not mounted — after a preview.
 - Hashline output mode vs plain line/column mode: controlled by `resolveFileDisplayMode()`.
 
 ## Side Effects
@@ -89,10 +89,10 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
    - Each native apply pass stages its changed files in memory before writing; a compute/overlap failure in that pass cannot partially mutate earlier files. Write failures or cancellation during the write loop can still leave earlier writes applied. Multi-target calls run separate passes, so a later target's failure does not roll back earlier targets.
 - Session state (transcript, memory, jobs, checkpoints, registries)
    - Registers a non-forcing pending resolve invoker through `queueResolveHandler(...)`.
-   - Surfaces a `SoftToolRequirement` (with the resolve reminder) while pending; the agent runtime forces `write` only on non-compliance — no steering message and no per-preview forced tool choice.
+   - Surfaces a `SoftToolRequirement` (with the resolve reminder) while pending; the agent runtime escalates to a forced call of its `toolName` (`bash` while tool commands are mounted, `resolve` otherwise) only on non-compliance — no steering message and no per-preview forced tool choice.
 - User-visible prompts / interactive UI
    - Direct `ast_edit` results are previews.
-   - Follow-up apply/discard is exposed through writes to `xd://resolve` and `xd://reject`.
+   - Follow-up apply/discard is exposed through the `resolve` and `reject` commands (the top-level tools when tool commands are not mounted).
 - Background work / cancellation
    - Native preview/apply work runs on a blocking worker via `task::blocking(...)`.
    - Cancellation and optional native timeout are cooperative through `CancelToken::heartbeat()`.
@@ -102,7 +102,7 @@ Shared AST pattern grammar and language catalog: see [`ast_grep`](./ast-grep.md#
 - File cap exposed by the wrapper: `PI_MAX_AST_FILES`, default `1000`, in `packages/coding-agent/src/tools/ast-edit.ts`. The cap is passed to each native target independently, not enforced globally across multi-target calls.
 - Native `maxFiles` and `maxReplacements` are both clamped to at least `1` when provided in `crates/natives/src/ast.rs`.
 - The wrapper never sets `maxReplacements`; native behavior therefore defaults to effectively unbounded replacements for a run.
-- Parse issues are deduplicated and capped at `PARSE_ERRORS_LIMIT = 20` entries via `capParseErrors(...)` in `packages/tui/src/render/render-utils.ts`; `details.parseErrors` carries the capped list and `details.parseErrorsTotal` the pre-cap deduplicated count.
+- Parse issues are deduplicated and capped at `PARSE_ERRORS_LIMIT = 20` entries via `capParseErrors(...)` in `packages/coding-agent/src/utils/render-utils.ts`; `details.parseErrors` carries the capped list and `details.parseErrorsTotal` the pre-cap deduplicated count.
 - Directory scans use `include_hidden: true`, `use_gitignore: true`, and skip `node_modules` unless the glob text explicitly mentions `node_modules` in `crates/natives/src/ast.rs`.
 - No separate glob-expansion count cap exists. Candidate count is whatever the resolved path/glob expands to after gitignore filtering, then native `maxFiles` stops mutations after the configured number of touched files.
 - Preview text truncates each rendered `before` and `after` first line to 120 characters in `packages/coding-agent/src/tools/ast-edit.ts`.

@@ -1,6 +1,9 @@
 //! In-process `fd` builtin backed by `omp_xfs`, `globset`, and `regex`.
 //!
-//! Relocated from omp-shell's native implementation.
+//! Relocated from omp-shell's native implementation. `-x`, `-X`, and `-l`
+//! run their commands through the invoking shell ([`exec`]).
+
+mod exec;
 
 use std::{
 	borrow::Cow,
@@ -21,6 +24,7 @@ use omp_xfs::{
 use omp_vfs::Metadata;
 use regex::{Regex, RegexBuilder};
 
+use self::exec::{Exec, ExecArgs};
 use crate::host::{AsyncUtility, Host, forward_slash_display};
 
 #[derive(Parser, Debug)]
@@ -97,6 +101,11 @@ pub(crate) struct FdCli {
 	#[arg(short = 'F', long = "fixed-strings", alias = "literal")]
 	fixed_strings: bool,
 
+	/// Match the pattern literally against the whole file name (or the path
+	/// with `--full-path`).
+	#[arg(long = "exact", conflicts_with_all = ["glob", "fixed_strings"])]
+	exact: bool,
+
 	/// Add additional required search patterns.
 	#[arg(long = "and", value_name = "pattern", allow_hyphen_values = true)]
 	and_patterns: Vec<String>,
@@ -110,7 +119,14 @@ pub(crate) struct FdCli {
 	relative_path: bool,
 
 	/// Use a detailed listing format like `ls -l`.
-	#[arg(short = 'l', long = "list-details", hide = true)]
+	///
+	/// Runs `ls -l -h -d` with the search results as arguments, like
+	/// `--exec-batch`.
+	#[arg(
+		short = 'l',
+		long = "list-details",
+		conflicts_with_all = ["absolute_path", "print0", "format_template"]
+	)]
 	list_details: bool,
 
 	/// Follow symbolic links.
@@ -188,16 +204,13 @@ pub(crate) struct FdCli {
 	#[arg(long = "format", value_name = "fmt")]
 	format_template: Option<String>,
 
-	/// Execute a command for each search result.
-	#[arg(short = 'x', long = "exec", value_name = "cmd", num_args = 1.., allow_hyphen_values = true, hide = true)]
-	exec: Vec<OsString>,
+	/// `-x`/`--exec` and `-X`/`--exec-batch`.
+	#[command(flatten)]
+	exec: ExecArgs,
 
-	/// Execute a command once with all search results as arguments.
-	#[arg(short = 'X', long = "exec-batch", value_name = "cmd", num_args = 1.., allow_hyphen_values = true, hide = true)]
-	exec_batch: Vec<OsString>,
-
-	/// Maximum number of arguments to pass to the command given with -X.
-	#[arg(long = "batch-size", default_value_t = 0, hide = true)]
+	/// Maximum number of results to pass to each command run by `-X` (0: as
+	/// many as the system allows).
+	#[arg(long = "batch-size", value_name = "size", default_value_t = 0, requires = "exec_batch")]
 	batch_size: usize,
 
 	/// Add a custom ignore-file in `.gitignore` format.
@@ -221,15 +234,24 @@ pub(crate) struct FdCli {
 	threads: Option<usize>,
 
 	/// Limit the number of search results and quit immediately.
-	#[arg(long = "max-results", value_name = "count")]
+	#[arg(
+		long = "max-results",
+		value_name = "count",
+		conflicts_with_all = ["exec", "exec_batch", "list_details"]
+	)]
 	max_results: Option<usize>,
 
 	/// Limit the search to a single result and quit immediately.
-	#[arg(short = '1')]
+	#[arg(short = '1', conflicts_with_all = ["exec", "exec_batch", "list_details"])]
 	max_one_result: bool,
 
 	/// Do not print anything; return 0 if there is at least one match.
-	#[arg(short = 'q', long = "quiet", alias = "has-results")]
+	#[arg(
+		short = 'q',
+		long = "quiet",
+		alias = "has-results",
+		conflicts_with_all = ["exec", "exec_batch", "list_details"]
+	)]
 	quiet: bool,
 
 	/// Enable display of filesystem errors.
@@ -277,7 +299,9 @@ enum SearchMatcher {
 	All,
 	Regex(Vec<Regex>),
 	Glob(Vec<GlobMatcher>),
-	Fixed { patterns: Vec<String>, case_insensitive: bool },
+	/// `--fixed-strings` (substrings) and `--exact` (`whole` candidates);
+	/// case-insensitive patterns are already lowercase.
+	Fixed { patterns: Vec<String>, case_insensitive: bool, whole: bool },
 }
 
 impl SearchMatcher {
@@ -286,13 +310,19 @@ impl SearchMatcher {
 			Self::All => true,
 			Self::Regex(patterns) => patterns.iter().all(|pattern| pattern.is_match(candidate)),
 			Self::Glob(patterns) => patterns.iter().all(|pattern| pattern.is_match(candidate)),
-			Self::Fixed { patterns, case_insensitive } => {
-				if *case_insensitive {
-					let candidate = candidate.to_lowercase();
-					patterns.iter().all(|pattern| candidate.contains(pattern))
+			Self::Fixed { patterns, case_insensitive, whole } => {
+				let candidate = if *case_insensitive {
+					Cow::Owned(candidate.to_lowercase())
 				} else {
-					patterns.iter().all(|pattern| candidate.contains(pattern))
-				}
+					Cow::Borrowed(candidate)
+				};
+				patterns.iter().all(|pattern| {
+					if *whole {
+						*candidate == **pattern
+					} else {
+						candidate.contains(pattern.as_str())
+					}
+				})
 			},
 		}
 	}
@@ -472,26 +502,29 @@ impl Filter {
 /// What the search does with kept entries: the filters that need a metadata
 /// lookup, then printing.
 struct SearchConfig {
-	fs:             omp_vfs::Fs,
-	base_dir:       PathBuf,
-	absolute_roots: Vec<PathBuf>,
-	types:          TypeFilter,
-	owners:         Vec<OwnerMatcher>,
-	absolute_path:  bool,
-	separator:      String,
-	format:         Option<String>,
-	print0:         bool,
-	quiet:          bool,
-	show_errors:    bool,
+	fs:               omp_vfs::Fs,
+	types:            TypeFilter,
+	owners:           Vec<OwnerMatcher>,
+	/// Matches of the implicit `.` root print without its `./`
+	/// ([`shown_path`]).
+	strip_cwd_prefix: bool,
+	separator:        String,
+	format:           Option<Template>,
+	print0:           bool,
+	quiet:            bool,
+	show_errors:      bool,
 }
 
 struct SearchState {
-	matches:   usize,
-	had_error: bool,
+	matches:         usize,
+	had_error:       bool,
+	/// A command run for the matches failed or could not run.
+	commands_failed: bool,
 }
 
 impl AsyncUtility for FdCli {
 	const NAME: &'static str = "fd";
+	const RUNS_COMMANDS: bool = true;
 	const USAGE_ERROR: u8 = 2;
 
 	async fn run(mut self, host: &mut Host) -> i32 {
@@ -509,6 +542,8 @@ impl AsyncUtility for FdCli {
 			Ok(state) => {
 				if state.had_error {
 					2
+				} else if state.commands_failed {
+					1
 				} else if quiet {
 					i32::from(state.matches == 0)
 				} else {
@@ -527,25 +562,15 @@ impl AsyncUtility for FdCli {
 	}
 }
 
-/// Searches every path operand on the parallel walker, printing matches in
-/// path order as the walk settles them.
+/// Searches every path operand on the parallel walker, printing matches (or
+/// running [`Exec`]'s commands for them) in path order as the walk settles
+/// them.
 async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<SearchState> {
-	if cli.list_details || !cli.exec.is_empty() || !cli.exec_batch.is_empty() || cli.batch_size != 0
-	{
-		return Err(io::Error::new(
-			io::ErrorKind::InvalidInput,
-			"--list-details, --exec, and --exec-batch are not supported by the in-process fd builtin",
-		));
-	}
-	let _ = (cli.color, cli.hyperlink, cli.strip_cwd_prefix);
+	let _ = cli.hyperlink;
 
 	let fs = host.vfs();
 	let search_paths = resolve_search_paths(&cli, &base_dir, host)?;
-	let absolute_roots = search_paths
-		.iter()
-		.filter(|path| path.original.is_absolute() || omp_vfs::is_virtual_path(&path.original))
-		.map(|path| path.resolved.clone())
-		.collect::<Vec<_>>();
+	let mut exec = Exec::new(&cli, &base_dir)?;
 	let types = build_type_filter(&cli.types)?;
 	let filter = Arc::new(Filter {
 		fs: fs.blocking(),
@@ -573,13 +598,11 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 	});
 	let config = SearchConfig {
 		fs,
-		base_dir,
-		absolute_roots,
 		types,
 		owners: build_owner_filters(&cli.owners)?,
-		absolute_path: cli.absolute_path,
+		strip_cwd_prefix: strips_cwd_prefix(&cli),
 		separator: cli.path_separator.clone().unwrap_or_else(|| "/".to_string()),
-		format: cli.format_template.clone(),
+		format: cli.format_template.as_deref().map(Template::parse),
 		print0: cli.print0,
 		quiet: cli.quiet,
 		show_errors: cli.show_errors,
@@ -590,11 +613,15 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 		cli.max_results
 	};
 	let opts = fd_walk_options(&cli, &filter);
+	// Past `--max-results`, or once a batch command could not run.
+	let ended = move |state: &SearchState, exec: &Option<Exec>| {
+		max_results.is_some_and(|max| state.matches >= max) || exec.as_ref().is_some_and(Exec::stopped)
+	};
 
 	let mut out = host.stdout_writer();
-	let mut state = SearchState { matches: 0, had_error: false };
+	let mut state = SearchState { matches: 0, had_error: false, commands_failed: false };
 	for search_path in &search_paths {
-		if max_results.is_some_and(|max| state.matches >= max) {
+		if ended(&state, &exec) {
 			break;
 		}
 		let root = &search_path.resolved;
@@ -611,7 +638,7 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 		let mut complete = true;
 		let mut unflushed = false;
 		loop {
-			if max_results.is_some_and(|max| state.matches >= max) {
+			if ended(&state, &exec) {
 				complete = false;
 				break;
 			}
@@ -628,8 +655,14 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 				continue;
 			}
 			state.matches = state.matches.saturating_add(1);
-			if !config.quiet {
-				print_match(&config, &path, &mut out)?;
+			if config.quiet {
+				continue;
+			}
+			let path = layer.join(&search_path.display, entry.path);
+			if let Some(exec) = &mut exec {
+				exec.push(shown_path(&config, &path), host, &mut out).await?;
+			} else {
+				print_match(&config, &path, entry.file_type, &mut out)?;
 				let _ = host.pace_output(&mut pace).await;
 				unflushed = true;
 			}
@@ -640,6 +673,10 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 				let _ = writeln!(host.stderr, "fd: {}: {}", error.path.display(), error.error);
 			}
 		}
+	}
+	if let Some(exec) = &mut exec {
+		exec.finish(host).await?;
+		state.commands_failed = exec.failed();
 	}
 	out.flush()?;
 	let _ = host.flush_output().await;
@@ -709,14 +746,26 @@ async fn passes_lookups(config: &SearchConfig, path: &Path) -> bool {
 		&& (config.owners.is_empty() || matches_owner_filters(&config.owners, metadata))
 }
 
-/// Prints `path`, a match, as `--format`, the separators, and `-0` ask.
-fn print_match<W: Write>(config: &SearchConfig, path: &Path, out: &mut W) -> io::Result<()> {
-	let display = display_path(config, path);
-	let text = match config.format.as_deref() {
-		Some(format) => format_path(format, path, &display),
-		None => display,
-	};
-	out.write_all(text.as_bytes())?;
+/// Prints a match, spelled `path` under its root's [`SearchPath::display`],
+/// as `--format`, the separators, and `-0` ask; like fd, a directory (a
+/// followed link's target under `-L`) ends in the separator unless formatted.
+fn print_match<W: Write>(
+	config: &SearchConfig,
+	path: &Path,
+	file_type: FileType,
+	out: &mut W,
+) -> io::Result<()> {
+	let path = shown_path(config, path);
+	match &config.format {
+		Some(format) => out.write_all(format.render(path, &config.separator).to_string_lossy().as_bytes())?,
+		None => {
+			let mut text = display_text(path, &config.separator);
+			if file_type == FileType::Dir {
+				text.push_str(&config.separator);
+			}
+			out.write_all(text.as_bytes())?;
+		},
+	}
 	out.write_all(if config.print0 { b"\0" } else { b"\n" })
 }
 
@@ -833,14 +882,38 @@ fn resolve_search_paths(
 		.into_iter()
 		.map(|original| {
 			let resolved = host.resolve(omp_vfs::absolute_path(base_dir, &original));
-			SearchPath { original, resolved }
+			let display = if cli.absolute_path {
+				omp_vfs::normalize_lexically(&resolved)
+			} else if original == Path::new("-") {
+				PathBuf::from("./-")
+			} else {
+				original
+			};
+			SearchPath { display, resolved }
 		})
 		.collect())
 }
 
+/// One root to walk.
 struct SearchPath {
-	original: PathBuf,
+	/// Prefix its matches print under, like fd: the operand as given (`.`
+	/// gives `./x`; `-` is spelled `./-` so `-/x` cannot read as an option),
+	/// or the lexically normalized root under `--absolute-path`.
+	display:  PathBuf,
 	resolved: PathBuf,
+}
+
+/// Whether matches of the implicit `.` root drop its `./`: only with no
+/// path operand, and under `auto` only without `-0` or commands to run.
+fn strips_cwd_prefix(cli: &FdCli) -> bool {
+	let runs_commands = !cli.exec.each.is_empty() || !cli.exec.batch.is_empty() || cli.list_details;
+	cli.paths.is_empty()
+		&& cli.search_paths.is_empty()
+		&& match cli.strip_cwd_prefix.unwrap_or(When::Auto) {
+			When::Auto => !(cli.print0 || runs_commands),
+			When::Always => true,
+			When::Never => false,
+		}
 }
 
 
@@ -887,7 +960,7 @@ fn build_matcher(cli: &FdCli) -> io::Result<SearchMatcher> {
 		}
 		return Ok(SearchMatcher::Glob(matchers));
 	}
-	if cli.fixed_strings {
+	if cli.fixed_strings || cli.exact {
 		let patterns = if case_insensitive {
 			patterns
 				.into_iter()
@@ -896,7 +969,7 @@ fn build_matcher(cli: &FdCli) -> io::Result<SearchMatcher> {
 		} else {
 			patterns
 		};
-		return Ok(SearchMatcher::Fixed { patterns, case_insensitive });
+		return Ok(SearchMatcher::Fixed { patterns, case_insensitive, whole: cli.exact });
 	}
 	let mut regexes = Vec::with_capacity(patterns.len());
 	for pattern in patterns {
@@ -1151,24 +1224,25 @@ fn match_target<'p>(path: &'p Path, base_dir: &Path, full_path: bool) -> Cow<'p,
 	)
 }
 
-fn display_path(config: &SearchConfig, path: &Path) -> String {
-	let path = if config.absolute_path || root_was_absolute(path, &config.absolute_roots) {
-		path.to_path_buf()
+/// `path` as fd shows it: without a leading `./` when the config strips it,
+/// unless the rest starts with `-` and would read as an option.
+fn shown_path<'p>(config: &SearchConfig, path: &'p Path) -> &'p Path {
+	let stripped = strip_current_dir(path);
+	if config.strip_cwd_prefix && !stripped.as_os_str().as_encoded_bytes().starts_with(b"-") {
+		stripped
 	} else {
 		path
-			.strip_prefix(&config.base_dir)
-			.unwrap_or(path)
-			.to_path_buf()
-	};
-	let mut text = normalize_display_path(&path);
-	if config.separator != "/" {
-		text = text.replace('/', &config.separator);
 	}
-	text
 }
 
-fn root_was_absolute(path: &Path, roots: &[PathBuf]) -> bool {
-	roots.iter().any(|root| path.starts_with(root))
+fn strip_current_dir(path: &Path) -> &Path {
+	path.strip_prefix(".").unwrap_or(path)
+}
+
+/// `path` printed with `/` separators, each replaced by `--path-separator`.
+fn display_text(path: &Path, separator: &str) -> String {
+	let text = normalize_display_path(path);
+	if separator == "/" { text } else { text.replace('/', separator) }
 }
 
 fn normalize_display_path(path: &Path) -> String {
@@ -1183,73 +1257,167 @@ fn normalize_os_str(value: &OsStr) -> String {
 	normalize_display_path(Path::new(value))
 }
 
-fn format_path(template: &str, path: &Path, display: &str) -> String {
-	let basename = omp_vfs::file_name(path).map_or_default(|name| normalize_os_str(&name));
-	let parent = omp_vfs::parent_path(path)
-		.map_or_default(normalize_display_path);
-	let without_extension = remove_extension(display);
-	let basename_without_extension = remove_extension(&basename);
-	let mut output = String::new();
-	let mut chars = template.chars().peekable();
-	while let Some(ch) = chars.next() {
-		if ch != '{' {
-			output.push(ch);
-			continue;
-		}
-		match chars.peek().copied() {
-			Some('{') => {
-				chars.next();
-				output.push('{');
-			},
-			Some('}') => {
-				chars.next();
-				output.push_str(display);
-			},
-			Some('/') => {
-				chars.next();
-				match chars.next() {
-					Some('}') => output.push_str(&basename),
-					Some('.') if chars.next() == Some('}') => {
-						output.push_str(&basename_without_extension);
-					},
-					Some('/') if chars.next() == Some('}') => output.push_str(&parent),
-					_ => output.push('{'),
-				}
-			},
-			Some('.') => {
-				chars.next();
-				if chars.next() == Some('}') {
-					output.push_str(&without_extension);
-				} else {
-					output.push('{');
-				}
-			},
-			_ => output.push('{'),
-		}
-	}
-	output.replace("}}", "}")
+/// A `--format` or command-argument template, parsed as fd parses one:
+/// literal text (`{{` and `}}` are single braces) and placeholders filled
+/// from a match's shown path.
+#[derive(Clone)]
+struct Template(Vec<Piece>);
+
+#[derive(Clone)]
+enum Piece {
+	Text(String),
+	Placeholder(Placeholder),
 }
 
-fn remove_extension(value: &str) -> String {
-	let Some((base, extension)) = value.rsplit_once('.') else {
-		return value.to_string();
-	};
-	if extension.contains('/') || base.is_empty() {
-		value.to_string()
-	} else {
-		base.to_string()
+/// What a placeholder stands for, from the shown path.
+#[derive(Clone, Copy)]
+enum Placeholder {
+	/// `{}`: the path.
+	Path,
+	/// `{/}`: its name.
+	Name,
+	/// `{//}`: its [`dirname`].
+	Parent,
+	/// `{.}`: the path without the extension.
+	PathNoExt,
+	/// `{/.}`: the name without the extension.
+	NameNoExt,
+}
+
+/// fd's template tokens: the brace escapes (`None`) and the placeholders.
+const TOKENS: [(&str, Option<Placeholder>); 7] = [
+	("{{", None),
+	("}}", None),
+	("{}", Some(Placeholder::Path)),
+	("{/}", Some(Placeholder::Name)),
+	("{//}", Some(Placeholder::Parent)),
+	("{.}", Some(Placeholder::PathNoExt)),
+	("{/.}", Some(Placeholder::NameNoExt)),
+];
+
+impl Template {
+	/// Parses `source` like fd: tokens are taken earliest-ending first, and a
+	/// placeholder followed by `}` is literal text (`{}}` reads `{}`).
+	fn parse(source: &str) -> Self {
+		let mut pieces = Vec::new();
+		let mut text = String::new();
+		let mut rest = source;
+		while let Some((start, end, placeholder)) = next_token(rest) {
+			match placeholder {
+				// An escape keeps its first brace.
+				None => text.push_str(&rest[..=start]),
+				Some(_) if rest[end..].starts_with('}') => {
+					text.push_str(&rest[..end]);
+					rest = &rest[end + 1..];
+					continue;
+				},
+				Some(placeholder) => {
+					text.push_str(&rest[..start]);
+					if !text.is_empty() {
+						pieces.push(Piece::Text(std::mem::take(&mut text)));
+					}
+					pieces.push(Piece::Placeholder(placeholder));
+				},
+			}
+			rest = &rest[end..];
+		}
+		text.push_str(rest);
+		if !text.is_empty() {
+			pieces.push(Piece::Text(text));
+		}
+		Self(pieces)
 	}
+
+	/// `{}` alone: what fd appends to a command without placeholders.
+	fn path() -> Self {
+		Self(vec![Piece::Placeholder(Placeholder::Path)])
+	}
+
+	fn has_placeholder(&self) -> bool {
+		self.0.iter().any(|piece| matches!(piece, Piece::Placeholder(_)))
+	}
+
+	/// The template filled in from the shown `path`, every path in it
+	/// printed with `separator`.
+	fn render(&self, path: &Path, separator: &str) -> OsString {
+		let mut out = OsString::new();
+		for piece in &self.0 {
+			match piece {
+				Piece::Text(text) => out.push(text),
+				Piece::Placeholder(placeholder) => {
+					let filled: Cow<'_, Path> = match placeholder {
+						Placeholder::Path => Cow::Borrowed(path),
+						Placeholder::Name => match basename(path) {
+							Cow::Borrowed(name) => Cow::Borrowed(Path::new(name)),
+							Cow::Owned(name) => Cow::Owned(PathBuf::from(name)),
+						},
+						Placeholder::Parent => Cow::Borrowed(dirname(path)),
+						Placeholder::PathNoExt => Cow::Owned(remove_extension(path)),
+						Placeholder::NameNoExt => Cow::Owned(remove_extension(Path::new(&basename(path)))),
+					};
+					push_path(&mut out, &filled, separator);
+				},
+			}
+		}
+		out
+	}
+}
+
+/// The earliest-ending token in `text`: its byte range and placeholder.
+fn next_token(text: &str) -> Option<(usize, usize, Option<Placeholder>)> {
+	let bytes = text.as_bytes();
+	(2..=bytes.len()).find_map(|end| {
+		TOKENS.iter().find_map(|&(token, placeholder)| {
+			bytes[..end]
+				.ends_with(token.as_bytes())
+				.then(|| (end - token.len(), end, placeholder))
+		})
+	})
+}
+
+/// Appends `path` with `/` separators, each replaced by `separator`; only
+/// a replaced separator turns a non-Unicode name lossy.
+fn push_path(out: &mut OsString, path: &Path, separator: &str) {
+	if separator == "/" {
+		out.push(forward_slash_display(path).as_deref().unwrap_or(path));
+	} else {
+		out.push(display_text(path, separator));
+	}
+}
+
+/// The final component (raw, under a URL), or the whole path when it has none.
+fn basename(path: &Path) -> Cow<'_, OsStr> {
+	omp_vfs::file_name(path).unwrap_or(Cow::Borrowed(path.as_os_str()))
+}
+
+/// The parent, `.` for a bare name, or the path itself when it has none.
+fn dirname(path: &Path) -> &Path {
+	match omp_vfs::parent_path(path) {
+		Some(parent) if parent.is_empty() => Path::new("."),
+		Some(parent) => parent,
+		None => path,
+	}
+}
+
+/// `path` without its name's extension (`.hidden` has none) and, like fd,
+/// without a leading `./`.
+fn remove_extension(path: &Path) -> PathBuf {
+	let stem = path.file_stem().unwrap_or(path.as_os_str());
+	strip_current_dir(&dirname(path).join(stem)).to_path_buf()
 }
 
 
 #[cfg(test)]
 mod tests {
-	use std::fs;
+	use std::{
+		fs,
+		path::{Path, PathBuf},
+	};
 
 	use tempfile::{Builder, TempDir};
 
 	use super::FdCli;
-	use crate::host::run_async_util;
+	use crate::host::{run_async_util, run_extra};
 
 	/// A fresh temp directory holding a matchable file and a filler file.
 	fn seeded_tree(tag: &str) -> TempDir {
@@ -1300,6 +1468,98 @@ mod tests {
 		assert_eq!(found(&["-t", "f", "-E", "vendor", "--min-depth", "2"]).await, ["a/x.txt"]);
 		assert_eq!(found(&["-t", "f", "--size", "+2b"]).await, ["a/x.txt"]);
 		assert_eq!(found(&["-t", "f", "-u", "log"]).await, ["drop.log", "keep.log"]);
+		// `--exact` wants the whole name, smart case included.
+		assert_eq!(found(&["--exact", "a.txt"]).await, ["a.txt"]);
+		assert!(found(&["--exact", "A.txt"]).await.is_empty());
+		assert_eq!(found(&["--exact", "-i", "A.TXT"]).await, ["a.txt"]);
+	}
+
+	/// `a.txt`, `-dash/c.md`, and `sub/b.tar.gz` under a canonical root, so
+	/// a command's working directory compares equal.
+	fn exec_tree() -> (TempDir, PathBuf) {
+		let tree = Builder::new().prefix("fd-exec").tempdir().expect("tempdir");
+		let root = fs::canonicalize(tree.path()).expect("canonical root");
+		for path in ["a.txt", "-dash/c.md", "sub/b.tar.gz"] {
+			let path = root.join(path);
+			fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+			fs::write(path, "").expect("write");
+		}
+		(tree, root)
+	}
+
+	/// Runs `fd -t f <args>` in `root` through a command runner.
+	async fn fd_files(root: &Path, args: &[&str]) -> (i32, String, String) {
+		run_extra(&[&["fd", "-t", "f"][..], args].concat(), "", root, &[]).await
+	}
+
+	/// Like fd 10.4 (`-j1`): `-x` runs per match in path order on `./`
+	/// paths, fills placeholders (escapes included), and appends `{}` to a
+	/// command without one; repeated `-x` run in turn, a failure skips the
+	/// rest and makes the status 1; `-0` ends each match's output with NUL;
+	/// `-C` runs commands where the shown paths start.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn exec_runs_commands_per_match() {
+		let (_tree, root) = exec_tree();
+		let ok = |out: &str| (0, out.to_owned(), String::new());
+		assert_eq!(
+			fd_files(&root, &["-x", "echo"]).await,
+			ok("./-dash/c.md\n./a.txt\n./sub/b.tar.gz\n")
+		);
+		assert_eq!(
+			fd_files(&root, &["-x", "echo", "{/}", "{//}", "{.}", "{/.}", "L{{}}R", "{}}"]).await,
+			ok("c.md ./-dash -dash/c c L{}R {}\na.txt . a a L{}R {}\nb.tar.gz ./sub sub/b.tar b.tar L{}R {}\n")
+		);
+		assert_eq!(
+			fd_files(&root, &["-x", "echo", "1", ";", "-x", "false", ";", "-x", "echo", "2", ";", "a.txt"]).await,
+			(1, "1 ./a.txt\n".to_owned(), String::new())
+		);
+		assert_eq!(fd_files(&root, &["-0", "-x", "echo", ";", "b"]).await, ok("./sub/b.tar.gz\n\0"));
+		assert_eq!(
+			fd_files(&root, &["-C", "sub", "-x", "pwd"]).await,
+			ok(&format!("{}\n", root.join("sub").display()))
+		);
+		let (code, out, err) = fd_files(&root, &["-x", "no-such-command-here", ";", "c.md"]).await;
+		assert_eq!((code, out.as_str(), err.as_str()), (1, "", "fd: Command not found: \"no-such-command-here\"\n"));
+	}
+
+	/// `-X` runs each command once with every match in place of its one
+	/// placeholder argument, `--batch-size` at a time; a command that cannot
+	/// run is reported once, and misplaced placeholders are usage errors.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn exec_batch_passes_matches_as_arguments() {
+		let (_tree, root) = exec_tree();
+		let ok = |out: &str| (0, out.to_owned(), String::new());
+		assert_eq!(
+			fd_files(&root, &["-X", "echo", "a", "{}", "b", ";", "-X", "echo", "{/}"]).await,
+			ok("a ./-dash/c.md ./a.txt ./sub/b.tar.gz b\nc.md a.txt b.tar.gz\n")
+		);
+		assert_eq!(
+			fd_files(&root, &["--batch-size", "2", "-X", "echo"]).await,
+			ok("./-dash/c.md ./a.txt\n./sub/b.tar.gz\n")
+		);
+		let (code, _, err) = fd_files(&root, &["-X", "no-such-command-here"]).await;
+		assert_eq!((code, err.as_str()), (1, "fd: Command not found: \"no-such-command-here\"\n"));
+		let (code, _, err) = fd_files(&root, &["-X", "echo", "{}", "{/}"]).await;
+		assert_eq!((code, err.as_str()), (2, "fd: Only one placeholder allowed for batch commands\n"));
+		let (code, _, err) = fd_files(&root, &["-X", "{}", "x"]).await;
+		assert_eq!(
+			(code, err.as_str()),
+			(2, "fd: First argument of --exec-batch must be a fixed executable, not a placeholder\n")
+		);
+	}
+
+	/// `-l` lists the matches through `ls -l`.
+	#[cfg(all(unix, feature = "util.ls"))]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn list_details_runs_ls() {
+		let (_tree, root) = exec_tree();
+		let (code, out, err) = fd_files(&root, &["-l"]).await;
+		assert_eq!(code, 0, "stderr: {err}");
+		let lines: Vec<&str> = out.lines().collect();
+		assert_eq!(lines.len(), 3, "{out:?}");
+		for (line, path) in lines.iter().zip(["./-dash/c.md", "./a.txt", "./sub/b.tar.gz"]) {
+			assert!(line.starts_with("-rw") && line.ends_with(path), "{line:?}");
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -1317,6 +1577,36 @@ mod tests {
 		assert!(capture.err().is_empty(), "stderr should stay clean: {:?}", capture.stderr());
 	}
 
+	/// Like fd 10.5: matches print under the operand as given; only the
+	/// implicit `.` drops its `./` (not under `-0` or `--strip-cwd-prefix=never`),
+	/// and never from a name starting with `-`, which a consumer such as
+	/// `xargs rg x` would otherwise take for an option. `--format` placeholders
+	/// derive from the shown path; directories end in the separator unless
+	/// formatted.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn prints_paths_as_fd_spells_them() {
+		let tree = Builder::new().prefix("fd-spelling").tempdir().expect("tempdir");
+		for path in ["--a/x.txt", "sub/y.txt"] {
+			let path = tree.path().join(path);
+			fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+			fs::write(path, "").expect("write");
+		}
+		for (args, out) in [
+			(&["-t", "f"][..], "./--a/x.txt\nsub/y.txt\n"),
+			(&["-t", "f", ".", "."][..], "./--a/x.txt\n./sub/y.txt\n"),
+			(&["-t", "f", "-0"][..], "./--a/x.txt\0./sub/y.txt\0"),
+			(&["-t", "f", "--strip-cwd-prefix=never"][..], "./--a/x.txt\n./sub/y.txt\n"),
+			(&["-t", "f", ".", "sub"][..], "sub/y.txt\n"),
+			(&["-t", "f", "--format", "{//} {.} {/.}"][..], "./--a --a/x x\nsub sub/y y\n"),
+			(&["-t", "d", "--path-separator", "|"][..], ".|--a|\nsub|\n"),
+			(&["-t", "d", "--format", "{}"][..], "./--a\nsub\n"),
+		] {
+			let (code, capture) = run_async_util::<FdCli>(args, "", tree.path()).await;
+			assert_eq!(code, 0, "{args:?}: {:?}", capture.stderr());
+			assert_eq!(capture.out(), out, "{args:?}");
+		}
+	}
+
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn walks_a_symlinked_root_operand_but_not_nested_links() {
@@ -1328,17 +1618,18 @@ mod tests {
 		std::os::unix::fs::symlink("../real", tree.path().join("parent/inner")).expect("link");
 		let list = async |args: &[&str]| {
 			let (code, capture) = run_async_util::<FdCli>(args, "", tree.path()).await;
-			let mut lines: Vec<String> = capture.out().lines().map(|line| line.trim_end_matches('/').to_owned()).collect();
+			let mut lines: Vec<String> = capture.out().lines().map(str::to_owned).collect();
 			lines.sort();
 			(code, lines)
 		};
 
-		assert_eq!(list(&[".", "link"]).await, (0, vec!["link/a.txt".to_owned(), "link/sub".to_owned()]));
-		// Links met during the walk are listed, not entered, unless -L asks.
+		assert_eq!(list(&[".", "link"]).await, (0, vec!["link/a.txt".to_owned(), "link/sub/".to_owned()]));
+		// Links met during the walk are listed, not entered, unless -L asks;
+		// a followed link to a directory is listed as one.
 		assert_eq!(list(&[".", "parent"]).await, (0, vec!["parent/inner".to_owned()]));
 		assert_eq!(
 			list(&["-L", ".", "parent"]).await,
-			(0, vec!["parent/inner".to_owned(), "parent/inner/a.txt".to_owned(), "parent/inner/sub".to_owned()])
+			(0, vec!["parent/inner/".to_owned(), "parent/inner/a.txt".to_owned(), "parent/inner/sub/".to_owned()])
 		);
 	}
 }

@@ -35,7 +35,7 @@ import {
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
 import type { CredentialPool } from "./pool";
 import type { RankingStrategyResolver } from "../usage/registry";
-import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refresh";
+import { mergeRefreshedOrganizationScope, oauthRefreshSkewMs } from "./refresh";
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
@@ -180,13 +180,23 @@ export class UsageService implements UsageApi {
 	 *
 	 * Runtime overrides are checked before the configured resolver, including its
 	 * built-in fallback. Removing the override restores that resolver unchanged.
+	 *
+	 * Cached reports are invalidated when the override replaces another adapter,
+	 * like {@link replaceConfiguredProviders}. A provider gaining its first
+	 * adapter keeps them: an extension registers on every startup, and the
+	 * persisted reports were written by another process with that same
+	 * registration, under the same cache version.
 	 */
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void {
+		const before =
+			this.#runtimeUsageProviderOverrides.get(provider)?.provider ??
+			this.#configuredUsageProviders.get(provider) ??
+			this.#deps.usageProviders(provider);
 		this.#runtimeUsageProviderOverrides.set(provider, {
 			provider: usageProvider,
 			apiKey,
 		});
-		this.#deps.cache.invalidateForProvider(provider);
+		if (before !== undefined && before !== usageProvider) this.#deps.cache.invalidateForProvider(provider);
 	}
 	/** Carry runtime and configured registrations over from the service this one replaces (store swap). */
 	adoptRegistrations(previous: UsageService): void {
@@ -266,7 +276,7 @@ export class UsageService implements UsageApi {
 		if (
 			request.credential.type === "oauth" &&
 			request.credential.expiresAt !== undefined &&
-			Date.now() + OAUTH_REFRESH_SKEW_MS >= request.credential.expiresAt
+			Date.now() + oauthRefreshSkewMs(request.provider) >= request.credential.expiresAt
 		) {
 			const refreshableCredential = buildRefreshableOauthCredential(request.credential);
 			if (refreshableCredential) {

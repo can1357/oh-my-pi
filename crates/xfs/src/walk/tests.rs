@@ -281,6 +281,47 @@ async fn ancestor_rules_covering_the_root_are_dropped() {
 	assert!(paths(repo.path(), &opts).await.is_empty());
 }
 
+/// A linked worktree's `.git` file names its git dir, whose `commondir`
+/// names the repository's: that `info/exclude` applies as it does in the
+/// main worktree. A submodule's git dir has no `commondir`; its own exclude
+/// file applies. Both hold for a walk rooted at the worktree and below it,
+/// and for the tree walker with and without read-ahead.
+#[tokio::test(flavor = "multi_thread")]
+async fn linked_worktrees_and_submodules_honour_their_git_dirs_exclude() {
+	let tmp = make_tree("linked", &[
+		"main/.git/info/exclude=/sub/excluded.md\n",
+		"main/.git/worktrees/wt/commondir=../..\n",
+		"main/.git/modules/m/info/exclude=dropped.txt\n",
+		"main/sub/excluded.md",
+		"main/sub/kept.md",
+		"main/m/.git=gitdir: ../.git/modules/m\n",
+		"main/m/dropped.txt",
+		"main/m/kept.txt",
+		"wt/sub/excluded.md",
+		"wt/sub/kept.md",
+	]);
+	let git_dir = tmp.path().join("main/.git/worktrees/wt");
+	std::fs::write(tmp.path().join("wt/.git"), format!("gitdir: {}\r\n", git_dir.display()))
+		.expect("write .git file");
+	let opts = Options { gitignore: true, ..Default::default() };
+	let tree = TreeOptions { gitignore: true, hidden: false, skip_git: true, ..Default::default() };
+	let cases = [
+		("main", vec!["m", "m/kept.txt", "sub", "sub/kept.md"]),
+		("wt", vec!["sub", "sub/kept.md"]),
+		("wt/sub", vec!["kept.md"]),
+		("main/m", vec!["kept.txt"]),
+	];
+	for (root, want) in cases {
+		let root = tmp.path().join(root);
+		let want = sorted(want);
+		assert_eq!(paths(&root, &opts).await, want, "{}", root.display());
+		for workers in [1, 4] {
+			let tree = TreeOptions { workers: Some(workers), ..tree.clone() };
+			assert_eq!(tree_paths(&root, &tree).await, want, "{} tree", root.display());
+		}
+	}
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sorted_collect_matches_full_path_order() {
 	let tmp = make_tree("order", &["a/x", "a-b", "a.c", "B", "_", "a/y/z", "a0", "é"]);
@@ -313,6 +354,158 @@ async fn wide_trees_agree_on_every_worker_count() {
 		let opts = Options { workers: Some(workers), ..Default::default() };
 		assert_eq!(paths(tmp.path(), &opts).await, baseline, "workers={workers}");
 	}
+}
+
+/// Every walk ends, also when a waiting worker's wakeup is lost: flume
+/// 0.12's `recv_async` misses a message sent while it re-registers after
+/// another worker took the message it was woken for (zesterer/flume#177).
+/// Ending the walk with one stop message per worker left such a worker
+/// waiting forever, and its walk with it. The machine's CPU count caps the
+/// walk's workers and the runtime's threads, and with them the test's power:
+/// against the old stop it hung on 8 and 16 CPUs, and was not seen in 5 runs
+/// on 4. `stopping_a_walk_closes_its_job_queue` checks the same fix on any
+/// number of CPUs.
+#[tokio::test(flavor = "multi_thread")]
+async fn walks_end_when_a_waiting_worker_misses_a_wakeup() {
+	let tmp = make_tree("ends", &["a.txt", "d1/x", "d2/y", "d3/z", "d4/w", "d5/v/u"]);
+	let fs = Fs::native();
+	let opts = Options { workers: Some(8), ..Default::default() };
+	let (mut complete, mut root_failed, mut dir_failed) = (0, 0, 0);
+	for round in 0..20_000 {
+		let walked = drain(&fs, tmp.path(), &opts, |_, _, out: &mut Vec<()>| {
+			out.push(());
+			Action::Continue
+		});
+		let walked = tokio::time::timeout(Duration::from_secs(30), walked)
+			.await
+			.unwrap_or_else(|_| panic!("walk {round} did not end"));
+		// A walk that cannot open its root or a directory, as past the
+		// open-file limit while other tests in the process hold files, has
+		// still ended: it is counted and skipped.
+		let Ok((visited, errors)) = walked else {
+			root_failed += 1;
+			continue;
+		};
+		if !errors.is_empty() {
+			dir_failed += 1;
+			continue;
+		}
+		assert_eq!(visited.len(), 12, "walk {round}");
+		complete += 1;
+	}
+	// The 30 s limit catches the hang on every walk that runs; the floor
+	// fails a run in which more than 1,000 of the 20,000 walks could not open
+	// their root or a directory.
+	assert!(
+		complete >= 19_000,
+		"{complete} of 20,000 walks complete, fewer than 19,000; {root_failed} could not open the \
+		 root and {dir_failed} could not open a directory"
+	);
+}
+
+/// A visitor panic ends the walk on every worker: the panicking job never
+/// counts itself done, so only the queue's close (`Owned`'s drop) ends the
+/// other workers' waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_visitor_ends_the_walk_on_every_worker() {
+	let paths: Vec<String> = (0..24)
+		.flat_map(|d| (0..4).map(move |s| format!("mem://visitor-panics/dir/d{d:02}/s{s}/f")))
+		.collect();
+	let files: Vec<(&str, &str)> = paths.iter().map(|path| (path.as_str(), "")).collect();
+	let (_mem, blocking) = MemFs::with_files(&files);
+	let fs = Fs::Provider(blocking);
+	let opts = Options { workers: Some(8), ..Default::default() };
+	let run = tokio::spawn(async move {
+		drain(&fs, Path::new("mem://visitor-panics/dir"), &opts, |_, entry, out: &mut Vec<()>| {
+			assert_ne!(entry.path, b"d11/s2", "visitor boom");
+			out.push(());
+			Action::Continue
+		})
+		.await
+	});
+	let joined = tokio::time::timeout(Duration::from_secs(30), run)
+		.await
+		.expect("the walk did not end after a visitor panic");
+	let error = joined.expect_err("the visitor panic did not resume in the consumer");
+	assert!(error.is_panic(), "the walk task ended without the visitor's panic: {error:?}");
+}
+
+/// Stopping a walk closes its job queue, so every worker still waiting on it
+/// leaves, also one whose wakeup flume lost: flume 0.12's `recv_async` checks
+/// again for a closed queue after it re-registers to wait (`src/async.rs`,
+/// lines 432-446). One stop message per worker left the queue open, and such
+/// a worker waiting forever. Unlike the stress test, this needs no lost
+/// wakeup, so it fails against the old stop on any number of CPUs.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_walk_closes_its_job_queue() {
+	let (_mem, blocking) = MemFs::with_files(&[
+		("mem://stop-closes/dir/a.txt", ""),
+		("mem://stop-closes/dir/sub/b.txt", ""),
+	]);
+	let fs = Fs::Provider(blocking);
+	let keep = parallel::CollectSink::new(|_: &mut Worker<'_>, _: &mut Entry<'_>| Action::Continue);
+	let started = parallel::start(
+		&fs,
+		Path::new("mem://stop-closes/dir"),
+		&Options::default(),
+		keep,
+		false,
+		None,
+		None,
+	)
+	.await
+	.expect("walk");
+	tokio::time::timeout(Duration::from_secs(30), started.finished())
+		.await
+		.expect("the walk ends");
+	assert!(
+		started.queue_closed(),
+		"the job queue was still open after the walk stopped; an open queue leaves a worker still \
+		 waiting on it waiting forever"
+	);
+}
+
+/// A walk dropped before its seed worker's first poll frees no path another
+/// worker is reading. The seed's arena holds the root's children, which the
+/// queued jobs name; when the seed's scratch went with its never-polled task,
+/// a worker listing one of those jobs read freed memory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_walk_dropped_before_its_seed_runs_keeps_job_paths_alive() {
+	let fs = Fs::native();
+	let opts = Options { workers: Some(2), ..Default::default() };
+	// With one worker there is only the seed, and no other worker to read.
+	if opts.parallelism(&fs) < 2 {
+		return;
+	}
+	let tmp = make_tree("seed-held", &["seed-held-probe/x", "other/y"]);
+	let seed_dropped = parallel::seam::hold_seed(tmp.path());
+	let (paused, reached) = tokio::sync::oneshot::channel();
+	let (verdict, checked) = tokio::sync::oneshot::channel();
+	parallel::seam::before_listing("seed-held-probe", move |rel| {
+		let chunk = arena::seam::chunk_of(rel).expect("a job's path lives in an arena chunk");
+		let _ = paused.send(());
+		// Disconnects once the dropped walk's seed task is gone.
+		let _ = seed_dropped.recv();
+		let _ = verdict.send(arena::seam::is_live(chunk));
+	});
+	// Items for the root's entries make the seed settle the root, so every
+	// subdirectory job goes to the queue, for the other worker.
+	let walked = walk(&fs, tmp.path(), &opts, |_, _, out: &mut Vec<()>| {
+		out.push(());
+		Action::Continue
+	})
+	.await
+	.expect("walk");
+	tokio::time::timeout(Duration::from_secs(30), reached)
+		.await
+		.expect("a worker lists the probe directory")
+		.expect("the probe pauses");
+	drop(walked);
+	let live = tokio::time::timeout(Duration::from_secs(30), checked)
+		.await
+		.expect("the seed task is dropped")
+		.expect("the probe reports");
+	assert!(live, "a worker's job path was freed with the seed worker's task");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -769,6 +962,28 @@ async fn cache_follows_tree_changes() {
 			assert!(got.contains(&"a/b/c/new.txt".to_owned()), "{name}: {got:?}");
 		}
 	}
+}
+
+/// A linked worktree's exclude file lives in the shared git dir, outside the
+/// cached directory; creating it must still invalidate the cached root.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_revalidates_a_linked_worktrees_exclude() {
+	let tmp = make_tree("cache-linked", &[
+		"main/.git/info/",
+		"main/.git/worktrees/wt/commondir=../..\n",
+		"wt/a.txt",
+		"wt/b.txt",
+	]);
+	let git_dir = tmp.path().join("main/.git/worktrees/wt");
+	std::fs::write(tmp.path().join("wt/.git"), format!("gitdir: {}\n", git_dir.display()))
+		.expect("write .git file");
+	let root = tmp.path().join("wt");
+	let cache = leaked_cache(1 << 20);
+	let opts = Options { gitignore: true, ..Default::default() };
+	settle();
+	cached_matches_fresh(&root, cache, &opts).await;
+	std::fs::write(tmp.path().join("main/.git/info/exclude"), "a.txt\n").expect("write exclude");
+	assert_eq!(cached_matches_fresh(&root, cache, &opts).await, ["b.txt"]);
 }
 
 /// A change in the same timestamp tick as a listing leaves the directory's

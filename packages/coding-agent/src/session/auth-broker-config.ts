@@ -34,9 +34,10 @@ import {
 	openAuthCredentialStore,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
-import { getAgentDir, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getAgentDir, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { combine, effectsSettings, type ScopeLike } from "../config/registry";
 import { resolveConfigValue } from "../config/resolve-config-value";
@@ -130,6 +131,22 @@ export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null
 		}
 	});
 	return promise;
+}
+
+/**
+ * Where `provider`'s (credential-store id) logins are stored, for the "Credentials saved to …" /
+ * "Credential removed from …" lines after login and logout: the auth broker, or this machine's
+ * agent.db without a broker or for a provider the broker would not serve (see `HybridAuthCredentialStore`).
+ */
+export async function credentialStoreLabel(provider: string): Promise<string> {
+	const broker = await resolveAuthBrokerConfig();
+	if (!broker) return getAgentDbPath();
+	const local = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	try {
+		return local.listBrokerLocalProviders().includes(provider) ? getAgentDbPath() : `auth broker ${broker.url}`;
+	} finally {
+		local.close();
+	}
 }
 
 /** Settings a long-lived auth storage follows (see {@link createAuthStorageSettingsSync}). */
@@ -267,6 +284,40 @@ export function discoverAuthStorage(
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
+	});
+}
+
+/**
+ * Create an AuthStorage instance.
+ *
+ * Default: local SQLite store at `<agentDir>/agent.db`.
+ *
+ * Broker mode: when `OMP_AUTH_BROKER_URL` is set, credentials are pulled from
+ * a remote auth-broker over the wire. Refresh tokens never leave the broker;
+ * the client receives access tokens with `refresh = "__remote__"` and calls
+ * back into the broker through the {@link AuthStorageOptions.refreshOAuthCredential}
+ * override to re-mint access tokens when needed.
+ *
+ * Account routing (`auth.accountPolicies`, `retry.usageReservePct`) comes from
+ * effective settings: `options.settings` when given, else the matching global
+ * instance, else a read-only load for `options.cwd`; explicit option values win.
+ */
+export async function discoverSessionAuthStorage(
+	agentDir: string = getAgentDir(),
+	options: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver"> &
+		Omit<EffectiveSettingsScope, "agentDir"> = {},
+): Promise<AuthStorage> {
+	const { settings, cwd, ...discoveryOptions } = options;
+	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
+	applyUnpausedProviders(effective);
+	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effective });
+	return discoverAuthStorage(agentDir, {
+		...discoveryOptions,
+		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
+		authStorageOptions: {
+			...discoveryOptions.authStorageOptions,
+			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
+		},
 	});
 }
 

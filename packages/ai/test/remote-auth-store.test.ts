@@ -80,7 +80,8 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		const rotated = {
 			access: "server-access-rotated",
 			refresh: "server-refresh-rotated",
-			expires: Date.now() + 120_000,
+			// Outside Anthropic's 5-minute renewal window.
+			expires: Date.now() + 3_600_000,
 			accountId: "account-1",
 			email: "a@example.com",
 		};
@@ -991,13 +992,13 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			metadata: { email: "carol@example.com" },
 		};
 		const geminiReport: UsageReport = {
-			provider: "google-gemini-cli",
+			provider: "zai",
 			fetchedAt: now,
 			limits: [
 				{
-					id: "google-gemini-cli:pro",
+					id: "zai:pro",
 					label: "Pro",
-					scope: { provider: "google-gemini-cli", accountId: " account-dave " },
+					scope: { provider: "zai", accountId: " account-dave " },
 					amount: { usedFraction: 0.2, unit: "percent" },
 				},
 			],
@@ -1039,7 +1040,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 				{ email: "dave@example.com" },
 				{ email: "dave@example.com", accountId: " account-dave " },
 			]) {
-				const gemini = await remoteStore.getUsageReport("google-gemini-cli", credential(dave));
+				const gemini = await remoteStore.getUsageReport("zai", credential(dave));
 				expect(gemini?.metadata?.currentTierId).toBe("standard-tier");
 			}
 

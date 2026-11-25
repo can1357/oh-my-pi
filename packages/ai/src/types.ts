@@ -643,7 +643,8 @@ export interface StreamOptions {
 	 * prefix. Providers that keep per-conversation request controls (OpenAI
 	 * `configuration_update` effort baselines) plan the request against a copy
 	 * of that session's controls, never changing the parent's state; the Codex
-	 * backend also routes it with the parent's cache affinity (session headers).
+	 * backend and OpenCode (`x-opencode-session`) also route it with the
+	 * parent's cache affinity (session headers).
 	 */
 	parentSessionId?: string;
 	/**
@@ -709,7 +710,7 @@ export interface StreamOptions {
 	 * in the iterator while waiting for the first semantic stream event. Set to
 	 * `0` to disable both layers for this request. After the first semantic
 	 * event arrives, `streamIdleTimeoutMs` governs inter-event stalls. Falls
-	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 100s default.
+	 * back to `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and then to a 900s default.
 	 * OpenAI-family transports additionally honor
 	 * `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS` as the most-specific override and
 	 * floor the first-event budget at the resolved idle (per-call
@@ -728,7 +729,7 @@ export interface StreamOptions {
 	 * mid-stream stalls (broker dies, half-open socket, model produces no real
 	 * progress for too long). Set to `0` to disable. Falls back to
 	 * `PI_STREAM_IDLE_TIMEOUT_MS` (alias: `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`)
-	 * and then to a 120s default.
+	 * and then to a 900s default.
 	 */
 	streamIdleTimeoutMs?: number;
 	/**
@@ -1388,6 +1389,8 @@ export interface AssistantMessage {
 	contextSnapshot?: ContextSnapshot;
 	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/** Provider request id (Anthropic's `request-id` response header); provider support asks for it when a request is refused or fails. */
+	requestId?: string;
 	/**
 	 * Name of the upstream provider an aggregator routed this request to, as
 	 * reported in the response (e.g. OpenRouter's top-level `provider` field:
@@ -1433,6 +1436,11 @@ export interface AssistantMessage {
 	errorStatus?: number;
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
+	/**
+	 * True when the agent loop ended the turn with this error itself (for example, after the model
+	 * kept missing a soft tool requirement), so no provider request failed.
+	 */
+	errorFromAgentLoop?: boolean;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection
@@ -1791,7 +1799,10 @@ export interface Context {
 	systemPrompt?: string[];
 	messages: Message[];
 	tools?: Tool[];
-	/** Definitions of tools the transcript's latest Anthropic request declared but that are no longer in `tools`; only the Anthropic provider reads it. */
+	/**
+	 * Definitions of declared tools that are not in `tools`: those the transcript's latest Anthropic request declared,
+	 * or, before any request declared tools, those that may become active later. Only the Anthropic provider reads it.
+	 */
 	inactiveTools?: Tool[];
 }
 

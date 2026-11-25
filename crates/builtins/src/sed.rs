@@ -1,6 +1,10 @@
 //! `sed` builtin stream editor.
 //!
 //! Ported from uutils sed 0.1.1.
+//!
+//! Pattern and hold spaces preserve raw bytes. Regular expressions retain
+//! Unicode character semantics on valid UTF-8 and use single-byte C-locale
+//! matching on lines that are not valid UTF-8.
 
 // Program entry point and CLI processing
 //
@@ -81,7 +85,7 @@ pub struct ProcessingContext {
 	// command.
 	pub input_action: Option<InputAction>,
 	/// Hold space
-	pub hold:                 StringSpace,
+	pub hold:                 ByteSpace,
 	/// Nesting of { } at compile time
 	pub parsed_block_nesting: usize,
 	/// Command associated with each label
@@ -102,9 +106,9 @@ pub enum AppendElement {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-/// A space mirroring IOChunk, but only with a String
-pub struct StringSpace {
-	pub content:     String, // Line content without newline
+/// Owned hold space, with the line terminator stored separately.
+pub struct ByteSpace {
+	pub content:     Vec<u8>, // Line content without newline
 	pub has_newline: bool,   // True if \n-terminated
 }
 
@@ -166,18 +170,10 @@ impl ReplacementTemplate {
 		Self { parts, max_group_number: max_group_number.try_into().unwrap() }
 	}
 
-	/// Apply the template to the given RE captures.
-	/// Example:
-	/// let result = regex.replace_all(input, |caps: &Captures| {
-	///    template.apply_captures(&command, caps) });
-	/// Returns an error if a backreference in the template was not matched by
-	/// the RE.
-	pub fn apply_captures(&self, command: &Command, caps: &Captures) -> SedResult<String> {
-		let mut result = String::new();
-
-		// Invalid group numbers may end here through (unkown at compile time)
-		// reused REs.
-		if self.max_group_number > caps.len() - 1 {
+	/// Append the replacement for a match, using original bytes from its captures.
+	pub fn apply_captures(&self, command: &Command, caps: &Captures, result: &mut Vec<u8>) -> SedResult<()> {
+		// Invalid group numbers may come from a reused RE, unknown at compile time.
+		if self.max_group_number >= caps.len() {
 			return runtime_error(
 				&command.location,
 				format!("invalid reference \\{} on command's RHS", self.max_group_number),
@@ -186,38 +182,28 @@ impl ReplacementTemplate {
 
 		for part in &self.parts {
 			match part {
-				ReplacementPart::Literal(s) => result.push_str(s),
-
-				ReplacementPart::WholeMatch => {
-					result.push_str(caps.get(0)?.map_or_default(|m| m.as_str()));
-				},
-
+				ReplacementPart::Literal(s) => result.extend_from_slice(s.as_bytes()),
+				ReplacementPart::WholeMatch => result.extend_from_slice(caps.get(0).unwrap().as_bytes()),
 				ReplacementPart::Group(n) => {
-					let i: usize = (*n).try_into().unwrap();
-					result.push_str(caps.get(i)?.map_or_default(|m| m.as_str()));
+					if let Some(m) = caps.get(*n as usize) {
+						result.extend_from_slice(m.as_bytes());
+					}
 				},
 			}
 		}
 
-		Ok(result)
+		Ok(())
 	}
 
 	/// Apply the template to the given RE single match.
-	pub fn apply_match(&self, m: &Match) -> String {
-		let mut result = String::new();
-
+	pub fn apply_match(&self, m: &Match, result: &mut Vec<u8>) {
 		for part in &self.parts {
 			match part {
-				ReplacementPart::Literal(s) => result.push_str(s),
-
-				ReplacementPart::WholeMatch => result.push_str(m.as_str()),
-
-				ReplacementPart::Group(_) => {
-					panic!("unexpected Regex group replacement")
-				},
+				ReplacementPart::Literal(s) => result.extend_from_slice(s.as_bytes()),
+				ReplacementPart::WholeMatch => result.extend_from_slice(m.as_bytes()),
+				ReplacementPart::Group(_) => panic!("unexpected Regex group replacement"),
 			}
 		}
-		result
 	}
 }
 
@@ -344,7 +330,7 @@ pub struct InputAction {
 	/// Next command to execute (rather than commands from start)
 	pub next_command: Option<Rc<RefCell<Command>>>,
 	/// Data to prepend to the read contents
-	pub prepend:      String,
+	pub prepend:      Vec<u8>,
 }
 
 #[cfg(test)]
@@ -369,8 +355,9 @@ mod tests {
 		let caps = caps_for("foo", input);
 		let cmd = Command::default();
 
-		let result = template.apply_captures(&cmd, &caps).unwrap();
-		assert_eq!(result, "");
+		let mut result = Vec::new();
+		template.apply_captures(&cmd, &caps, &mut result).unwrap();
+		assert!(result.is_empty());
 	}
 
 	#[test]
@@ -381,8 +368,9 @@ mod tests {
 		let caps = caps_for("abc", input);
 		let cmd = Command::default();
 
-		let result = template.apply_captures(&cmd, &caps).unwrap();
-		assert_eq!(result, "hello");
+		let mut result = Vec::new();
+		template.apply_captures(&cmd, &caps, &mut result).unwrap();
+		assert_eq!(result, b"hello");
 	}
 
 	#[test]
@@ -396,8 +384,9 @@ mod tests {
 		let caps = caps_for(r"foo\d+", input);
 		let cmd = Command::default();
 
-		let result = template.apply_captures(&cmd, &caps).unwrap();
-		assert_eq!(result, "got: foo42");
+		let mut result = Vec::new();
+		template.apply_captures(&cmd, &caps, &mut result).unwrap();
+		assert_eq!(result, b"got: foo42");
 	}
 
 	#[test]
@@ -411,8 +400,9 @@ mod tests {
 		let caps = caps_for(r"foo(\d+)", input);
 		let cmd = Command::default();
 
-		let result = template.apply_captures(&cmd, &caps).unwrap();
-		assert_eq!(result, "number: 42");
+		let mut result = Vec::new();
+		template.apply_captures(&cmd, &caps, &mut result).unwrap();
+		assert_eq!(result, b"number: 42");
 	}
 
 	#[test]
@@ -428,8 +418,9 @@ mod tests {
 		let caps = caps_for(r"(\w+):(\d+)", input);
 		let cmd = Command::default();
 
-		let result = template.apply_captures(&cmd, &caps).unwrap();
-		assert_eq!(result, "key: x, value: 123");
+		let mut result = Vec::new();
+		template.apply_captures(&cmd, &caps, &mut result).unwrap();
+		assert_eq!(result, b"key: x, value: 123");
 	}
 
 	#[test]
@@ -445,7 +436,7 @@ mod tests {
 		let caps = caps_for(r"(\w+):(\d+)", input);
 		let cmd = Command::default();
 
-		let result = template.apply_captures(&cmd, &caps);
+		let result = template.apply_captures(&cmd, &caps, &mut Vec::new());
 		assert!(result.is_err());
 
 		let msg = result.unwrap_err().to_string();
@@ -1103,6 +1094,12 @@ fn parse_command_ending(
 	line: &mut ScriptCharProvider,
 	cmd: &mut Command,
 ) -> SedResult<()> {
+	line.eat_spaces();
+	// Leave a closing brace for compile_sequence to validate and close the group.
+	// GNU sed recognizes it at a command boundary even under --posix.
+	if !line.eol() && line.current() == '}' {
+		return Ok(());
+	}
 	if !line.eol() && line.current() == ';' {
 		line.advance();
 		return Ok(());
@@ -1136,20 +1133,16 @@ fn compile_regex(
 		return Ok(None);
 	}
 
-	// Convert basic to extended regular expression if needed. A BRE the
-	// dialect cannot express is a compilation error, matching real sed:
-	// `sed 's/\{1,3\}/X/'` reports an invalid RE rather than substituting.
 	let translated = if context.regex_extended {
-		None
+		crate::bre::ere_to_rust(pattern, false)
 	} else {
-		Some(
-			crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported).map_err(|e| {
-				compilation_error::<Regex>(lines, line, format!("invalid regex '{pattern}': {}", e.message()))
-					.unwrap_err()
-			})?,
-		)
-	};
-	let pattern = translated.as_deref().unwrap_or(pattern);
+		crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported).map(std::borrow::Cow::Owned)
+	}
+	.map_err(|e| {
+		compilation_error::<Regex>(lines, line, format!("invalid regex '{pattern}': {}", e.message()))
+			.unwrap_err()
+	})?;
+	let pattern = translated.as_ref();
 
 	let mut modifiers = String::new();
 	if icase {
@@ -1158,14 +1151,16 @@ fn compile_regex(
 	if multiline {
 		modifiers.push('m');
 	}
+	let with_modifiers;
 	let pattern = if modifiers.is_empty() {
-		pattern.to_string()
+		pattern
 	} else {
-		format!("(?{modifiers}){pattern}")
+		with_modifiers = format!("(?{modifiers}){pattern}");
+		&with_modifiers
 	};
 
 	// Compile into engine.
-	let compiled = Regex::new(&pattern).map_err(|e| {
+	let compiled = Regex::new(pattern).map_err(|e| {
 		compilation_error::<Regex>(lines, line, format!("invalid regex '{pattern}': {e}"))
 			.unwrap_err()
 	})?;
@@ -1480,7 +1475,7 @@ pub fn compile_subst_flags(
 				return Ok(()); // 'w' is the last flag allowed
 			},
 
-			';' | '\n' => break,
+			';' | '\n' | '}' => break,
 
 			other => {
 				return compilation_error(lines, line, format!("invalid substitute flag: '{other}'"));
@@ -1503,7 +1498,6 @@ fn compile_end_group_command(
 	}
 	context.parsed_block_nesting -= 1;
 	line.advance();
-	line.eat_spaces();
 	parse_command_ending(lines, line, cmd)?;
 	Ok(CommandHandling::Return)
 }
@@ -1533,8 +1527,6 @@ fn compile_empty_command(
 	_context: &mut ProcessingContext,
 ) -> SedResult<CommandHandling> {
 	line.advance(); // Skip the command character
-	line.eat_spaces(); // Skip any trailing whitespace
-
 	parse_command_ending(lines, line, cmd)?;
 	Ok(CommandHandling::Continue)
 }
@@ -1616,7 +1608,6 @@ fn compile_label_command(
 		cmd.data = CommandData::Label(Some(label));
 	}
 
-	line.eat_spaces(); // Skip any trailing whitespace
 	parse_command_ending(lines, line, cmd)?;
 	Ok(CommandHandling::Continue)
 }
@@ -1654,7 +1645,6 @@ fn compile_number_command(
 		},
 	}
 
-	line.eat_spaces(); // Skip any trailing whitespace
 	parse_command_ending(lines, line, cmd)?;
 	Ok(CommandHandling::Continue)
 }
@@ -2066,8 +2056,8 @@ mod tests {
 		let regex = compile_regex(&lines, &chars, "abc", &ctx(), false, false)
 			.unwrap()
 			.expect("regex should be present");
-		assert!(regex.is_match(&mut IOChunk::new_from_str("abc")).unwrap());
-		assert!(!regex.is_match(&mut IOChunk::new_from_str("ABC")).unwrap());
+		assert!(regex.is_match(&IOChunk::new_from_str("abc")).unwrap());
+		assert!(!regex.is_match(&IOChunk::new_from_str("ABC")).unwrap());
 	}
 
 	#[test]
@@ -2080,7 +2070,7 @@ mod tests {
 			.expect("regex should be present");
 		assert!(
 			regex
-				.is_match(&mut IOChunk::new_from_str("acaa\nccc"))
+				.is_match(&IOChunk::new_from_str("acaa\nccc"))
 				.unwrap()
 		);
 	}
@@ -2094,9 +2084,9 @@ mod tests {
 		let regex = compile_regex(&lines, &chars, r"^\+", &ctx(), false, false)
 			.unwrap()
 			.expect("regex should be present");
-		assert!(regex.is_match(&mut IOChunk::new_from_str("+added")).unwrap());
-		assert!(!regex.is_match(&mut IOChunk::new_from_str("alpha")).unwrap());
-		assert!(!regex.is_match(&mut IOChunk::new_from_str(" context")).unwrap());
+		assert!(regex.is_match(&IOChunk::new_from_str("+added")).unwrap());
+		assert!(!regex.is_match(&IOChunk::new_from_str("alpha")).unwrap());
+		assert!(!regex.is_match(&IOChunk::new_from_str(" context")).unwrap());
 	}
 
 	#[test]
@@ -2122,8 +2112,8 @@ mod tests {
 		let regex = compile_regex(&lines, &chars, r"\(^alpha\)", &ctx(), false, false)
 			.unwrap()
 			.expect("regex should be present");
-		assert!(regex.is_match(&mut IOChunk::new_from_str("alpha")).unwrap());
-		assert!(!regex.is_match(&mut IOChunk::new_from_str("xalpha")).unwrap());
+		assert!(regex.is_match(&IOChunk::new_from_str("alpha")).unwrap());
+		assert!(!regex.is_match(&IOChunk::new_from_str("xalpha")).unwrap());
 	}
 
 	#[test]
@@ -2132,9 +2122,9 @@ mod tests {
 		let regex = compile_regex(&lines, &chars, "abc", &ctx(), true, false)
 			.unwrap()
 			.expect("regex should be present");
-		assert!(regex.is_match(&mut IOChunk::new_from_str("abc")).unwrap());
-		assert!(regex.is_match(&mut IOChunk::new_from_str("ABC")).unwrap());
-		assert!(regex.is_match(&mut IOChunk::new_from_str("AbC")).unwrap());
+		assert!(regex.is_match(&IOChunk::new_from_str("abc")).unwrap());
+		assert!(regex.is_match(&IOChunk::new_from_str("ABC")).unwrap());
+		assert!(regex.is_match(&IOChunk::new_from_str("AbC")).unwrap());
 	}
 
 	#[test]
@@ -2152,7 +2142,7 @@ mod tests {
 			.expect("regex should be present");
 		assert!(
 			regex
-				.is_match(&mut IOChunk::new_from_str("foo\nbar"))
+				.is_match(&IOChunk::new_from_str("foo\nbar"))
 				.unwrap()
 		);
 	}
@@ -2165,7 +2155,7 @@ mod tests {
 			.expect("regex should be present");
 		assert!(
 			regex
-				.is_match(&mut IOChunk::new_from_str("foo\nbar"))
+				.is_match(&IOChunk::new_from_str("foo\nbar"))
 				.unwrap()
 		);
 	}
@@ -2201,7 +2191,7 @@ mod tests {
 			panic!("expected Address::Re(Some(_))");
 		};
 
-		assert!(re.is_match(&mut IOChunk::new_from_str("hello")).unwrap());
+		assert!(re.is_match(&IOChunk::new_from_str("hello")).unwrap());
 	}
 
 	#[test]
@@ -2211,7 +2201,7 @@ mod tests {
 
 		match addr {
 			Address::Re(Some(re)) => {
-				assert!(re.is_match(&mut IOChunk::new_from_str("hello")).unwrap());
+				assert!(re.is_match(&IOChunk::new_from_str("hello")).unwrap());
 			},
 			_ => panic!("expected Address::Re(Some(_))"),
 		}
@@ -2224,7 +2214,7 @@ mod tests {
 
 		match addr {
 			Address::Re(Some(re)) => {
-				assert!(!re.is_match(&mut IOChunk::new_from_str("helio")).unwrap());
+				assert!(!re.is_match(&IOChunk::new_from_str("helio")).unwrap());
 			},
 			_ => panic!("expected Address::Re(Some(_))"),
 		}
@@ -2237,7 +2227,7 @@ mod tests {
 
 		match addr {
 			Address::Re(Some(re)) => {
-				assert!(re.is_match(&mut IOChunk::new_from_str("hello")).unwrap());
+				assert!(re.is_match(&IOChunk::new_from_str("hello")).unwrap());
 			},
 			_ => panic!("expected Address::Re(Some(_))"),
 		}
@@ -2251,7 +2241,7 @@ mod tests {
 		match addr {
 			Address::Re(Some(re)) => {
 				// Case-insensitive
-				assert!(re.is_match(&mut IOChunk::new_from_str("HELLO")).unwrap());
+				assert!(re.is_match(&IOChunk::new_from_str("HELLO")).unwrap());
 			},
 			_ => panic!("expected Address::Re(Some(_))"),
 		}
@@ -2333,8 +2323,8 @@ mod tests {
 
 		match cmd.borrow().addr1.as_ref().unwrap() {
 			Address::Re(Some(re)) => {
-				assert!(re.is_match(&mut IOChunk::new_from_str("foo")).unwrap());
-				assert!(!re.is_match(&mut IOChunk::new_from_str("bar")).unwrap());
+				assert!(re.is_match(&IOChunk::new_from_str("foo")).unwrap());
+				assert!(!re.is_match(&IOChunk::new_from_str("bar")).unwrap());
 			},
 			_ => panic!("expected regex address"),
 		}
@@ -2350,16 +2340,16 @@ mod tests {
 
 		match cmd.borrow().addr1.as_ref().unwrap() {
 			Address::Re(Some(re)) => {
-				assert!(re.is_match(&mut IOChunk::new_from_str("foo")).unwrap());
-				assert!(!re.is_match(&mut IOChunk::new_from_str("bar")).unwrap());
+				assert!(re.is_match(&IOChunk::new_from_str("foo")).unwrap());
+				assert!(!re.is_match(&IOChunk::new_from_str("bar")).unwrap());
 			},
 			_ => panic!("expected regex address"),
 		}
 
 		match cmd.borrow().addr2.as_ref().unwrap() {
 			Address::Re(Some(re)) => {
-				assert!(re.is_match(&mut IOChunk::new_from_str("bar")).unwrap());
-				assert!(!re.is_match(&mut IOChunk::new_from_str("foo")).unwrap());
+				assert!(re.is_match(&IOChunk::new_from_str("bar")).unwrap());
+				assert!(!re.is_match(&IOChunk::new_from_str("foo")).unwrap());
 			},
 			_ => panic!("expected regex address"),
 		}
@@ -2375,8 +2365,8 @@ mod tests {
 
 		match cmd.borrow().addr1.as_ref().unwrap() {
 			Address::Re(Some(re)) => {
-				assert!(re.is_match(&mut IOChunk::new_from_str("FOO")).unwrap());
-				assert!(re.is_match(&mut IOChunk::new_from_str("foo")).unwrap());
+				assert!(re.is_match(&IOChunk::new_from_str("FOO")).unwrap());
+				assert!(re.is_match(&IOChunk::new_from_str("foo")).unwrap());
 			},
 			_ => panic!("expected regex address"),
 		}
@@ -3758,7 +3748,8 @@ pub fn parse_char_escape(line: &mut ScriptCharProvider) -> Option<char> {
 /// Parse a POSIX RE character class returning it as a string.
 /// This functionality is needed to avoid terminating delimited
 /// sequences when a delimiter appears within a character class.
-/// While at it, handle escaped characters for the sake of consistency.
+/// Also decode sed's recognized character escapes, but a POSIX bracket
+/// expression has no regex escape syntax of its own.
 fn parse_character_class(
 	lines: &ScriptLineProvider,
 	line: &mut ScriptCharProvider,
@@ -3805,7 +3796,6 @@ fn parse_character_class(
 				result.push('[');
 				result.push(marker);
 
-				let mut inner = String::new();
 				let mut terminated = false;
 
 				while !line.eol() {
@@ -3814,16 +3804,15 @@ fn parse_character_class(
 						line.advance();
 						if !line.eol() && line.current() == ']' {
 							line.advance();
-							result.push_str(&inner);
 							result.push(marker);
 							result.push(']');
 							terminated = true;
 							break;
 						}
 						// False alarm, just part of the inner name
-						inner.push(marker);
+						result.push(marker);
 					} else {
-						inner.push(c);
+						result.push(c);
 						line.advance();
 					}
 				}
@@ -3838,10 +3827,9 @@ fn parse_character_class(
 
 				continue;
 			}
-			// Not a POSIX construct — treat as literal
+			// The next character may itself be a closing bracket or the
+			// start of another bracket construct. Do not consume it here.
 			result.push('[');
-			result.push(marker);
-			line.advance();
 			continue;
 		}
 
@@ -3855,8 +3843,10 @@ fn parse_character_class(
 				result.push(decoded);
 			} else {
 				result.push('\\');
-				result.push(line.current());
-				line.advance();
+				if line.current() == '\\' {
+					result.push('\\');
+					line.advance();
+				}
 			}
 		} else {
 			result.push(ch);
@@ -4454,7 +4444,8 @@ mod tests {
 		let mut line = char_provider_from("[a\\]bc]");
 		let lines = test_lines();
 		let result = parse_character_class(&lines, &mut line).unwrap();
-		assert_eq!(result, "[a\\]bc]");
+		assert_eq!(result, "[a\\]");
+		assert_eq!(line.current(), 'b');
 	}
 
 	#[test]
@@ -5090,7 +5081,7 @@ use std::{
 #[cfg(unix)]
 use memchr::memchr;
 use omp_vfs::BlockingFs;
-use crate::{host::Host, sed::error_handling::SedError};
+use crate::host::Host;
 
 // Define two cursors for iterating over lines:
 // - SliceLineCursor over a file read whole into memory,
@@ -5154,31 +5145,28 @@ impl<'a> SliceLineCursor<'a> {
 /// Buffered line reader from any BufRead input.
 pub struct ReadLineCursor {
 	reader: Box<dyn BufRead>,
-	buffer: String,
+	buffer: Vec<u8>,
 }
 
 impl ReadLineCursor {
 	/// Construct from anything that implements `Read`.
 	fn new<R: Read + 'static>(r: R) -> Self {
 		let buf = BufReader::new(r);
-		Self { reader: Box::new(buf), buffer: String::new() }
+		Self { reader: Box::new(buf), buffer: Vec::new() }
 	}
 
 
 	/// If a line is available, return it and its \n termination.
-	fn get_line(&mut self) -> io::Result<Option<(String, bool)>> {
+	fn get_line(&mut self) -> io::Result<Option<(Vec<u8>, bool)>> {
 		self.buffer.clear();
-		// read_line *includes* the '\n' if present
-		let bytes_read = self.reader.read_line(&mut self.buffer)?;
-		if bytes_read == 0 {
+		if self.reader.read_until(b'\n', &mut self.buffer)? == 0 {
 			return Ok(None);
 		}
-		// O(1) check whether it ended in '\n'
-		let has_newline = self.buffer.ends_with('\n');
-		// strip it if you don’t want to expose it to the caller
-		if has_newline { self.buffer.pop(); }
-		let line = std::mem::take(&mut self.buffer);
-		Ok(Some((line, has_newline)))
+		let has_newline = self.buffer.last() == Some(&b'\n');
+		if has_newline {
+			self.buffer.pop();
+		}
+		Ok(Some((std::mem::take(&mut self.buffer), has_newline)))
 	}
 
 	/// Return true if the previously returned line was the last one.
@@ -5192,19 +5180,19 @@ impl ReadLineCursor {
 /// A chunk of data that is input and can be output, often very efficiently
 #[derive(Debug, PartialEq, Eq)]
 pub struct IOChunk<'a> {
-	utf8_verified: Cell<bool>, // True if the contents are valid UTF-8
+	utf8_valid: Cell<Option<bool>>,
 	content:       IOChunkContent<'a>,
 }
 
 impl<'a> IOChunk<'a> {
 	/// Construct an IOChunk from the given content
 	fn from_content(content: IOChunkContent<'a>) -> Self {
-		Self { utf8_verified: Cell::new(false), content }
+		Self { utf8_valid: Cell::new(None), content }
 	}
 
 	/// Clear the object's contents, converting it into Owned if needed.
 	pub fn clear(&mut self) {
-		self.utf8_verified.set(true);
+		self.utf8_valid.set(Some(true));
 		match &mut self.content {
 			IOChunkContent::Owned { content, has_newline, .. } => {
 				content.clear();
@@ -5212,7 +5200,7 @@ impl<'a> IOChunk<'a> {
 			},
 			#[cfg(unix)]
 			_ => {
-				self.content = IOChunkContent::new_owned(String::new(), false);
+				self.content = IOChunkContent::new_owned(Vec::new(), false);
 			},
 		}
 	}
@@ -5240,81 +5228,67 @@ impl<'a> IOChunk<'a> {
 	#[cfg(test)]
 	/// Create an Owned newline-terminated IOChunk from a string.
 	pub fn new_from_str(s: &str) -> Self {
-		IOChunk {
-			content:       IOChunkContent::new_owned(s.to_string(), true),
-			utf8_verified: Cell::new(false),
-		}
+		Self { content: IOChunkContent::new_owned(s.as_bytes().to_vec(), true), utf8_valid: Cell::new(Some(true)) }
 	}
 
-	/// Set the object's contents to the specified string.
-	/// Convert it into Owned if needed.
-	pub fn set_to_string(&mut self, new_content: String, add_newline: bool) {
-		self.utf8_verified.set(true);
+	/// Replace the pattern space, reusing an owned buffer when possible.
+	pub fn copy_bytes(&mut self, bytes: &[u8], has_newline: bool) {
+		self.utf8_valid.set(None);
 		match &mut self.content {
-			IOChunkContent::Owned { content, has_newline, .. } => {
-				*content = new_content;
-				*has_newline = add_newline;
+			IOChunkContent::Owned { content, has_newline: newline, .. } => {
+				content.clear();
+				content.extend_from_slice(bytes);
+				*newline = has_newline;
 			},
 			#[cfg(unix)]
-			_ => {
-				self.content = IOChunkContent::new_owned(new_content, add_newline);
+			IOChunkContent::SliceInput { .. } => {
+				self.content = IOChunkContent::new_owned(bytes.to_vec(), has_newline);
 			},
 		}
 	}
 
-	/// Return the content as a str.
-	pub fn as_str(&self) -> Result<&str, SedError> {
-		match &self.content {
-			#[cfg(unix)]
-			IOChunkContent::SliceInput { content, .. } => {
-				if self.utf8_verified.get() {
-					// Use cached result
-					Ok(unsafe { self.content.as_str_unchecked() })
-				} else {
-					let result = str::from_utf8(content);
-					self.utf8_verified.set(true);
-					result.map_err(|e| SedError::new(2, e.to_string()))
-				}
+	/// Replace the pattern space with raw bytes.
+	pub fn set_bytes(&mut self, content: Vec<u8>, has_newline: bool) {
+		self.utf8_valid.set(None);
+		self.content = IOChunkContent::new_owned(content, has_newline);
+	}
+
+	/// Borrow UTF-8 text only if the original bytes are valid.
+	pub fn as_str(&self) -> Option<&str> {
+		let bytes = self.as_bytes();
+		match self.utf8_valid.get() {
+			// SAFETY: the cache is set only after validation (or for known-valid
+			// data), and every mutation invalidates it before changing bytes.
+			Some(true) => Some(unsafe { str::from_utf8_unchecked(bytes) }),
+			Some(false) => None,
+			None => {
+				let text = str::from_utf8(bytes).ok();
+				self.utf8_valid.set(Some(text.is_some()));
+				text
 			},
-			IOChunkContent::Owned { content, .. } => Ok(content),
 		}
 	}
 
-	/// Return the raw byte content (always safe).
+	/// Return the raw byte content.
 	pub fn as_bytes(&self) -> &[u8] {
 		match &self.content {
 			#[cfg(unix)]
 			IOChunkContent::SliceInput { content, .. } => content,
-			IOChunkContent::Owned { content, .. } => content.as_bytes(),
+			IOChunkContent::Owned { content, .. } => content,
 		}
 	}
 
-	/// Convert content to the Owned variant if it's not already.
-	/// Fails if the conversion to UTF-8 fails.
-	pub fn ensure_owned(&mut self) -> Result<(), SedError> {
-		match &self.content {
-			IOChunkContent::Owned { .. } => Ok(()), // already owned
-			#[cfg(unix)]
-			IOChunkContent::SliceInput { content, full_span, .. } => match std::str::from_utf8(content) {
-				Ok(valid_str) => {
-					let has_newline = full_span.last().copied() == Some(b'\n');
-					self.content = IOChunkContent::new_owned(valid_str.to_string(), has_newline);
-					self.utf8_verified.set(true);
-					Ok(())
-				},
-				Err(e) => Err(SedError::new(2, e.to_string())),
-			},
+	/// Convert a borrowed snapshot line to owned bytes on the first mutation.
+	pub fn fields_mut(&mut self) -> (&mut Vec<u8>, &mut bool) {
+		#[cfg(unix)]
+		if let IOChunkContent::SliceInput { content, full_span } = &self.content {
+			self.content = IOChunkContent::new_owned(content.to_vec(), full_span.ends_with(b"\n"));
 		}
-	}
-
-	/// Return mutable access to the content and has_newline fields.
-	pub fn fields_mut(&mut self) -> Result<(&mut String, &mut bool), SedError> {
-		self.ensure_owned()?;
-
+		self.utf8_valid.set(None);
 		match &mut self.content {
-			IOChunkContent::Owned { content, has_newline, .. } => Ok((content, has_newline)),
-			#[allow(unreachable_patterns)]
-			_ => unreachable!("ensure_owned should convert to Owned"),
+			IOChunkContent::Owned { content, has_newline, .. } => (content, has_newline),
+			#[cfg(unix)]
+			_ => unreachable!("pattern space is owned after conversion"),
 		}
 	}
 }
@@ -5331,7 +5305,7 @@ enum IOChunkContent<'a> {
 		full_span: &'a [u8], // Line including original newline, if any
 	},
 	Owned {
-		content:     String, // Line content without newline
+		content:     Vec<u8>, // Line content without newline
 		has_newline: bool,   // True if \n-terminated
 		#[cfg(not(unix))]
 		_phantom:    PhantomData<&'a ()>, // Silence E0392 warning
@@ -5340,7 +5314,7 @@ enum IOChunkContent<'a> {
 
 impl IOChunkContent<'_> {
 	/// Construct a new Owned chunk.
-	pub fn new_owned(content: String, has_newline: bool) -> Self {
+	pub fn new_owned(content: Vec<u8>, has_newline: bool) -> Self {
 		#[cfg(unix)]
 		return IOChunkContent::Owned { content, has_newline };
 
@@ -5353,17 +5327,7 @@ impl IOChunkContent<'_> {
 		};
 	}
 
-	#[cfg(unix)]
-	unsafe fn as_str_unchecked(&self) -> &str {
-		match self {
-			IOChunkContent::SliceInput { content, .. } => unsafe {
-				std::str::from_utf8_unchecked(content)
-			},
-			IOChunkContent::Owned { content, .. } => content,
-		}
-	}
-
-	/// Return the content's length (in bytes or characters).
+	/// Return the content's length in bytes.
 	pub fn len(&self) -> usize {
 		match self {
 			#[cfg(unix)]
@@ -5393,9 +5357,7 @@ pub enum LineReader<'a> {
 
 /// Return a LineReader that uses the ReadInput method fot the specified file.
 fn line_reader_read_input(file: impl Read + 'static) -> io::Result<LineReader<'static>> {
-	let boxed: Box<dyn Read> = Box::new(file);
-	let reader = BufReader::new(boxed);
-	Ok(LineReader::ReadInput(ReadLineCursor::new(reader)))
+	Ok(LineReader::ReadInput(ReadLineCursor::new(file)))
 }
 
 /// Return a LineReader that serves all of `file`, read into memory up front.
@@ -5415,9 +5377,7 @@ impl<'a> LineReader<'a> {
 	pub fn open_with_host(path: &PathBuf, host: &mut Host) -> io::Result<Self> {
 		if path.as_os_str() == "-" {
 			// read the context stdin.
-			let boxed: Box<dyn Read> = Box::new(host.stdin.file().clone());
-			let reader = BufReader::new(boxed);
-			return Ok(LineReader::ReadInput(ReadLineCursor::new(reader)));
+			return line_reader_read_input(host.stdin.file().clone());
 		}
 
 		// input file operands resolve
@@ -5465,8 +5425,8 @@ impl<'a> LineReader<'a> {
 			},
 
 			LineReader::ReadInput(cursor) => {
-				if let Some((line, _has_newline)) = cursor.get_line()? {
-					let chunk = IOChunk::from_content(IOChunkContent::new_owned(line, _has_newline));
+				if let Some((line, has_newline)) = cursor.get_line()? {
+					let chunk = IOChunk::from_content(IOChunkContent::new_owned(line, has_newline));
 					Ok(Some(chunk))
 				} else {
 					Ok(None)
@@ -5475,6 +5435,17 @@ impl<'a> LineReader<'a> {
 
 			#[cfg(not(unix))]
 			LineReader::_Phantom(_) => unreachable!("_Phantom should never be constructed"),
+		}
+	}
+
+	/// Recover the last owned pattern as the buffer for the next input line.
+	pub fn recycle(&mut self, chunk: IOChunk<'a>) {
+		if let Self::ReadInput(cursor) = self {
+			match chunk.content {
+				IOChunkContent::Owned { content, .. } => cursor.buffer = content,
+				#[cfg(unix)]
+				IOChunkContent::SliceInput { .. } => unreachable!("streaming chunks are always owned"),
+			}
 		}
 	}
 
@@ -5566,14 +5537,37 @@ impl OutputBuffer {
 		}
 	}
 
-	/// Schedule the specified String or &str for eventual output
-	pub fn write_str<S: Into<String>>(&mut self, s: S) -> io::Result<()> {
-		let mut s = s.into();
-		let has_newline = s.ends_with('\n');
-		if has_newline {
-			s.truncate(s.len() - 1);
+	/// Schedule script text for output.
+	pub fn write_str(&mut self, s: impl AsRef<str>) -> io::Result<()> {
+		self.write_bytes(s.as_ref().as_bytes())
+	}
+
+	/// Schedule bytes for output without converting or taking ownership of them.
+	pub fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+		if let Some(content) = bytes.strip_suffix(b"\n") {
+			self.write_owned_content(content, true)
+		} else {
+			self.write_owned_content(bytes, false)
 		}
-		self.write_chunk(&IOChunk::from_content(IOChunkContent::new_owned(s, has_newline)))
+	}
+
+	pub(super) fn write_owned_content(&mut self, content: &[u8], has_newline: bool) -> io::Result<()> {
+		if content.is_empty() && !has_newline {
+			return Ok(());
+		}
+		#[cfg(unix)]
+		self.flush_slice(WriteRange::Complete)?;
+		if self.pending_newline {
+			self.out.write_all(b"\n")?;
+			self.flush_completed_line()?;
+		}
+		self.out.write_all(content)?;
+		if has_newline {
+			self.out.write_all(b"\n")?;
+			self.flush_completed_line()?;
+		}
+		self.pending_newline = !has_newline;
+		Ok(())
 	}
 
 	/// Copy the specified file, opened through `fs`, to the output.
@@ -5624,9 +5618,7 @@ impl OutputBuffer {
 /// Implementation of the std::io::Write trait
 impl Write for OutputBuffer {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		let s =
-			std::str::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-		self.write_str(s)?;
+		self.write_bytes(buf)?;
 		Ok(buf.len())
 	}
 
@@ -5647,6 +5639,9 @@ enum WriteRange {
 impl OutputBuffer {
 	/// Schedule the specified output chunk for eventual output
 	pub fn write_chunk(&mut self, new_chunk: &IOChunk) -> io::Result<()> {
+		if let IOChunkContent::Owned { content, has_newline, .. } = &new_chunk.content {
+			return self.write_owned_content(content, *has_newline);
+		}
 		if new_chunk.is_empty() && !new_chunk.is_newline_terminated() {
 			return Ok(());
 		}
@@ -5696,14 +5691,7 @@ impl OutputBuffer {
 				self.pending_newline = !new_chunk.is_newline_terminated();
 			},
 
-			IOChunkContent::Owned { content, has_newline, .. } => {
-				self.flush_slice(WriteRange::Complete)?;
-				self.out.write_all(content.as_bytes())?;
-				if *has_newline {
-					self.out.write_all(b"\n")?;
-				}
-				self.pending_newline = !has_newline;
-			},
+			IOChunkContent::Owned { .. } => unreachable!("owned content handled above"),
 		}
 
 		if self.line_buffered && new_chunk.is_newline_terminated() {
@@ -5758,29 +5746,7 @@ impl OutputBuffer {
 impl OutputBuffer {
 	/// Schedule the specified output chunk for eventual output
 	pub fn write_chunk(&mut self, chunk: &IOChunk) -> io::Result<()> {
-		if chunk.is_empty() && !chunk.is_newline_terminated() {
-			return Ok(());
-		}
-
-		if self.pending_newline {
-			self.out.write_all(b"\n")?;
-			self.pending_newline = false;
-			self.flush_completed_line()?;
-		}
-
-		match &chunk.content {
-			IOChunkContent::Owned { content, has_newline, .. } => {
-				self.out.write_all(content.as_bytes())?;
-				if *has_newline {
-					self.out.write_all(b"\n")?;
-				}
-				self.pending_newline = !has_newline;
-				if *has_newline {
-					self.flush_completed_line()?;
-				}
-				Ok(())
-			},
-		}
+		self.write_owned_content(chunk.as_bytes(), chunk.is_newline_terminated())
 	}
 
 	/// Write a deferred newline if the last output didn't end with one.
@@ -6096,14 +6062,14 @@ mod tests {
 		// Verify the reader's operation
 		if let Some(IOChunk {
 			content: IOChunkContent::Owned { content, has_newline, .. },
-			utf8_verified,
+			utf8_valid,
 			..
 		}) = reader.get_line()?
 		{
-			assert_eq!(content, "first line");
+			assert_eq!(content, b"first line");
 			assert_eq!(content.len(), 10);
 			assert!(has_newline);
-			assert!(!utf8_verified.get());
+			assert_eq!(utf8_valid.get(), None);
 			assert!(!reader.last_line().unwrap());
 		} else {
 			panic!("Expected IOChunkContent::Owned");
@@ -6112,7 +6078,7 @@ mod tests {
 		if let Some(IOChunk { content: IOChunkContent::Owned { content, has_newline, .. }, .. }) =
 			reader.get_line()?
 		{
-			assert_eq!(content, "second line");
+			assert_eq!(content, b"second line");
 			assert!(has_newline);
 			assert!(!reader.last_line().unwrap());
 		} else {
@@ -6145,14 +6111,14 @@ mod tests {
 		// Verify the reader's operation
 		if let Some(IOChunk {
 			content: IOChunkContent::SliceInput { content, full_span, .. },
-			utf8_verified,
+			utf8_valid,
 			..
 		}) = reader.get_line()?
 		{
 			assert_eq!(content, b"first line");
 			assert_eq!(content.len(), 10);
 			assert_eq!(full_span, b"first line\n");
-			assert!(!utf8_verified.get());
+			assert_eq!(utf8_valid.get(), None);
 			assert!(!reader.last_line().unwrap());
 		} else {
 			panic!("Expected IOChunkContent::SliceInput");
@@ -6160,13 +6126,13 @@ mod tests {
 
 		if let Some(IOChunk {
 			content: IOChunkContent::SliceInput { content, full_span, .. },
-			utf8_verified,
+			utf8_valid,
 			..
 		}) = reader.get_line()?
 		{
 			assert_eq!(content, b"second line");
 			assert_eq!(full_span, b"second line\n");
-			assert!(!utf8_verified.get());
+			assert_eq!(utf8_valid.get(), None);
 			assert!(!reader.last_line().unwrap());
 		} else {
 			panic!("Expected IOChunkContent::SliceInput");
@@ -6175,7 +6141,7 @@ mod tests {
 		if let Some(content) = reader.get_line()? {
 			assert_eq!(content.as_bytes(), b"last line");
 			assert_eq!(content.as_str().unwrap(), "last line");
-			assert!(content.utf8_verified.get());
+			assert_eq!(content.utf8_valid.get(), Some(true));
 			assert!(reader.last_line().unwrap());
 			// Cached version
 			assert_eq!(content.as_str().unwrap(), "last line");
@@ -6215,21 +6181,21 @@ mod tests {
 	// is_newline_terminated, is_empty
 	#[test]
 	fn test_owned_newline_terminated_non_empty() {
-		let chunk = IOChunk::from_content(IOChunkContent::new_owned("line".to_string(), true));
+		let chunk = IOChunk::from_content(IOChunkContent::new_owned(b"line".to_vec(), true));
 		assert!(chunk.is_newline_terminated());
 		assert!(!chunk.is_empty());
 	}
 
 	#[test]
 	fn test_owned_newline_terminated_empty() {
-		let chunk = IOChunk::from_content(IOChunkContent::new_owned(String::new(), true));
+		let chunk = IOChunk::from_content(IOChunkContent::new_owned(Vec::new(), true));
 		assert!(chunk.is_newline_terminated());
 		assert!(chunk.is_empty());
 	}
 
 	#[test]
 	fn test_owned_not_newline_terminated() {
-		let chunk = IOChunk::from_content(IOChunkContent::new_owned("line".to_string(), false));
+		let chunk = IOChunk::from_content(IOChunkContent::new_owned(b"line".to_vec(), false));
 		assert!(!chunk.is_newline_terminated());
 	}
 
@@ -6260,87 +6226,13 @@ mod tests {
 		assert!(!chunk.is_newline_terminated());
 	}
 
-	// ensure_owned()
-	#[test]
-	fn test_ensure_owned_on_owned() {
-		let mut chunk =
-			IOChunk::from_content(IOChunkContent::new_owned("already owned".to_string(), true));
-
-		let result = chunk.ensure_owned();
-		assert!(result.is_ok());
-
-		// Content must be unchanged
-		match &chunk.content {
-			IOChunkContent::Owned { content, has_newline, .. } => {
-				assert_eq!(content, "already owned");
-				assert!(*has_newline);
-			},
-			#[cfg(unix)]
-			_ => panic!("Expected Owned variant"),
-		}
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn test_ensure_owned_on_slice_valid_utf8() {
-		let content = b"slice string";
-		let full_span = b"slice string\n";
-
-		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
-
-		let result = chunk.ensure_owned();
-		assert!(result.is_ok());
-
-		match &chunk.content {
-			IOChunkContent::Owned { content, has_newline, .. } => {
-				assert_eq!(content, "slice string");
-				assert!(*has_newline);
-			},
-			_ => panic!("Expected Owned variant after ensure_owned"),
-		}
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn test_ensure_owned_on_slice_valid_utf8_no_newline() {
-		let content = b"no newline";
-		let full_span = b"no newline";
-
-		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
-
-		let result = chunk.ensure_owned();
-		assert!(result.is_ok());
-
-		match &chunk.content {
-			IOChunkContent::Owned { content, has_newline, .. } => {
-				assert_eq!(content, "no newline");
-				assert!(!*has_newline);
-			},
-			_ => panic!("Expected Owned variant after ensure_owned"),
-		}
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn test_ensure_owned_on_slice_invalid_utf8() {
-		let content = b"bad\xFFutf8";
-		let full_span = b"bad\xFFutf8\n";
-
-		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
-
-		let result = chunk.ensure_owned();
-		assert!(result.is_err());
-		let err_msg = format!("{}", result.unwrap_err());
-		assert!(err_msg.contains("invalid utf-8"), "Unexpected error message: {}", err_msg);
-	}
-
 	// fields_mut
 	#[test]
 	fn test_fields_mut_on_owned() {
-		let mut chunk = IOChunk::from_content(IOChunkContent::new_owned("hello".to_string(), false));
+		let mut chunk = IOChunk::from_content(IOChunkContent::new_owned(b"hello".to_vec(), false));
 
-		let (s, _) = chunk.fields_mut().unwrap();
-		s.push_str(" world");
+		let (s, _) = chunk.fields_mut();
+		s.extend_from_slice(b" world");
 
 		assert_eq!(chunk.as_str().unwrap(), "hello world");
 	}
@@ -6353,8 +6245,8 @@ mod tests {
 		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
 		{
-			let (s, _) = chunk.fields_mut().unwrap();
-			s.push_str("bar");
+			let (s, _) = chunk.fields_mut();
+			s.extend_from_slice(b"bar");
 		}
 
 		assert_eq!(chunk.as_str().unwrap(), "foobar");
@@ -6367,8 +6259,8 @@ mod tests {
 		let full_span = "Ζωντανά!\n".as_bytes();
 		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
-		let (s, _) = chunk.fields_mut().unwrap();
-		s.push_str(" Δεδομένα");
+		let (s, _) = chunk.fields_mut();
+		s.extend_from_slice(" Δεδομένα".as_bytes());
 
 		assert_eq!(chunk.as_str().unwrap(), "Ζωντανά! Δεδομένα");
 	}
@@ -6380,9 +6272,10 @@ mod tests {
 		let full_span = b"abc\xFF\n";
 		let mut chunk = IOChunk::from_content(new_content_slice_input(content, full_span));
 
-		let result = chunk.fields_mut();
-		assert!(result.is_err());
-		assert!(format!("{}", result.unwrap_err()).contains("invalid utf-8"));
+		assert_eq!(chunk.as_str(), None);
+		assert_eq!(chunk.as_str(), None);
+		chunk.fields_mut().0.extend_from_slice(b"def");
+		assert_eq!(chunk.as_bytes(), b"abc\xffdef");
 	}
 
 	///////////////////////////////
@@ -6406,17 +6299,14 @@ mod tests {
 
 	#[cfg(unix)]
 	fn make_slice_chunk(bytes: &'static [u8]) -> IOChunk<'static> {
-		IOChunk {
-			utf8_verified: Cell::new(true),
-			content:       IOChunkContent::SliceInput { content: bytes, full_span: bytes },
-		}
+		IOChunk::from_content(IOChunkContent::SliceInput { content: bytes, full_span: bytes })
 	}
 
 	fn make_owned_chunk(s: &str, has_nl: bool) -> IOChunk<'_> {
 		IOChunk {
-			utf8_verified: Cell::new(true),
+			utf8_valid: Cell::new(Some(true)),
 			content:       IOChunkContent::Owned {
-				content:                    s.to_string(),
+				content:                    s.as_bytes().to_vec(),
 				has_newline:                has_nl,
 				#[cfg(not(unix))]
 				_phantom:                   std::marker::PhantomData,
@@ -6567,10 +6457,7 @@ mod tests {
 }
 }
 pub mod fast_regex {
-// A unified interface to byte and fancy Regex
-//
-// This allows using byte Regex when possible, resorting to the
-// slower fancy_regex crate when needed.
+// Literal, Unicode and raw-byte regular expression matching.
 //
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 Diomidis Spinellis
@@ -6580,58 +6467,45 @@ pub mod fast_regex {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::{error::Error, sync::LazyLock};
+use std::{borrow::Cow, cell::OnceCell, error::Error, ops::ControlFlow};
 
-use fancy_regex::{
-	CaptureMatches as FancyCaptureMatches, Captures as FancyCaptures, Regex as FancyRegex,
-};
+use fancy_regex::{Captures as FancyCaptures, Regex as FancyRegex};
 use memchr::memmem;
-use regex::{
-	Regex as RustRegex,
-	bytes::{CaptureMatches as ByteCaptureMatches, Captures as ByteCaptures, Regex as ByteRegex},
-};
+use onig::{EncodedBytes, MatchParam, RegexOptions, Region, SearchOptions, Syntax};
+use regex::{Captures as UnicodeCaptures, Regex as RustRegex};
 use crate::sed::error_handling::{SedError, SedResult};
 
 use crate::sed::fast_io::IOChunk;
 
-/// REs requiring the fancy_regex capabilities rather than the
-/// faster regex::bytes engine
-// False positives only result in a small performance pessimization,
-// so this is just a maximally sensitive, good-enough approximation.
-// For example, r"\\1" and r"[\1]" will match, whereas only a number
-// after an odd number of backslashes and outside a character class
-// should match.
-static NEEDS_FANCY_RE: LazyLock<RustRegex> =
-	LazyLock::new(|| regex::Regex::new(r"\\[1-9]").unwrap());
+/// Detects `\1` through `\9`, conservatively including escaped backslashes.
+fn needs_backreferences(pattern: &str) -> bool {
+	let bytes = pattern.as_bytes();
+	memchr::memchr_iter(b'\\', bytes).any(|at| matches!(bytes.get(at + 1), Some(b'1'..=b'9')))
+}
 
-/// All characters signifying that the match must be handled by an RE
-/// rather than by plain string pattern matching.
-// These do not include the ^$ metacharacters, which we can easily handle.
-// Plain string fixed-string matching is currently faster than Regex
-// matching, because Regex always constructs an automaton and needs
-// to handle state transitions, whereas plain string matching can
-// use tailored CPU string or vectored instructions.
-static NEEDS_RE: LazyLock<RustRegex> = LazyLock::new(|| {
-	regex::Regex::new(
-		r"(?x) # Turn on verbose mode
-          ( ^                   # Non-escaped: i.e. at BOL
-             | ^[^\\]            # or after a BOL non \
-             | [^\\] {2}         # or after two non \ characters
-             | \\.               # or after a consumed or escaped \
-           )
-           (                     # A potentially incompatible match
-              [.?|+(\[{*]        # Any magic RE character
-                                 # Some are operators so illegal at
-                                 # BOL but they should error there,
-                                 # not use them as literals.
-             | \\[WwDdSsPp]      # Unicode classes
-             | \\[AzBb]          # Empty matches
-             | \\[0-9]           # Back-references
-           )
-        ",
-	)
-	.unwrap()
-});
+/// Detects metacharacters and escapes that require more than literal matching.
+fn needs_regex(pattern: &str) -> bool {
+	let bytes = pattern.as_bytes();
+	bytes.iter().enumerate().any(|(at, &b)| {
+		let special = match b {
+			b'.' | b'?' | b'|' | b'+' | b'(' | b'[' | b'{' | b'*' => true,
+			b'\\' => matches!(
+				bytes.get(at + 1),
+				Some(b'W' | b'w' | b'D' | b'd' | b'S' | b's' | b'P' | b'p' | b'A' | b'z' | b'B' | b'b' | b'0'..=b'9')
+			),
+			_ => false,
+		};
+		if !special || at == 0 {
+			return special;
+		}
+		// The preceding escape may consume a backslash, but not a newline.
+		match bytes[at - 1] {
+			b'\\' => at >= 2 && bytes[at - 2] == b'\\',
+			b'\n' => at < 2 || bytes[at - 2] != b'\\',
+			_ => true,
+		}
+	})
+}
 
 #[derive(Clone, Debug)]
 /// Types of literal string anchored matches
@@ -6710,38 +6584,24 @@ impl LiteralMatcher {
 	}
 
 	/// Return the position and contents of the matched needle.
-	pub fn find<'t>(&self, haystack: &'t [u8]) -> Option<(usize, usize, &'t str)> {
-		self.anchored_find(haystack).and_then(|start| {
+	pub fn find<'t>(&self, haystack: &'t [u8]) -> Option<(usize, usize, &'t [u8])> {
+		self.anchored_find(haystack).map(|start| {
 			let end = start + self.needle.len();
-			std::str::from_utf8(&haystack[start..end])
-				.ok()
-				.map(|s| (start, end, s))
+			(start, end, &haystack[start..end])
 		})
 	}
 
 	/// Return all positions and contents of the matched needle.
-	pub fn iter<'t>(
-		&'t self,
-		haystack: &'t [u8],
-	) -> Box<dyn Iterator<Item = (usize, usize, &'t str)> + 't> {
+	pub fn iter<'t>(&'t self, haystack: &'t [u8]) -> impl Iterator<Item = (usize, usize, &'t [u8])> + 't {
+		let free = matches!(self.match_type, AnchoredMatch::Free);
+		let anchored = if free { None } else { self.find(haystack) };
 		let needle = &self.needle;
-		let nlen = needle.len();
-
-		match self.match_type {
-			AnchoredMatch::Both | AnchoredMatch::Begin | AnchoredMatch::End => {
-				// At most one match; yield it if present
-				Box::new(self.find(haystack).into_iter())
-			},
-			AnchoredMatch::Free => {
-				// Multiple potential matches
-				Box::new(memmem::find_iter(haystack, needle).filter_map(move |start| {
-					let end = start + nlen;
-					std::str::from_utf8(&haystack[start..end])
-						.ok()
-						.map(|s| (start, end, s))
-				}))
-			},
-		}
+		let unanchored = free.then(|| memmem::find_iter(haystack, needle)).into_iter().flatten()
+			.map(move |start| {
+				let end = start + needle.len();
+				(start, end, &haystack[start..end])
+			});
+		anchored.into_iter().chain(unanchored)
 	}
 }
 
@@ -6765,12 +6625,53 @@ pub fn remove_escapes(pattern: &str) -> String {
 	result
 }
 
-#[derive(Clone, Debug)]
-/// A regular expression that can be implemented in diverse efficient ways
+#[derive(Debug)]
+/// Regexes use Unicode character semantics on UTF-8 and C-locale byte
+/// semantics on an ill-formed pattern space. Literal matches need no decoding.
 pub enum Regex {
-	Literal(LiteralMatcher), // Fastest: literal bytes
-	Byte(ByteRegex),         // Slower: byte-based RE
-	Fancy(FancyRegex),       // Slowest: RE supporting UTF-8 and back-references
+	Literal(LiteralMatcher),
+	Unicode(RustRegex, RawRegex),
+	Fancy(FancyRegex, RawRegex),
+}
+
+#[derive(Debug)]
+pub struct RawRegex {
+	pattern: Box<str>,
+	compiled: OnceCell<Result<onig::Regex, onig::Error>>,
+}
+
+impl RawRegex {
+	fn new(pattern: String) -> Self {
+		Self { pattern: pattern.into_boxed_str(), compiled: OnceCell::new() }
+	}
+
+	fn compiled(&self) -> SedResult<&onig::Regex> {
+		// Oniguruma's single-byte encoding works on arbitrary bytes and, unlike
+		// regex::bytes, also supports the backreferences sed accepts in a BRE.
+		self.compiled.get_or_init(|| {
+			onig::Regex::with_options_and_encoding(
+				EncodedBytes::ascii(self.pattern.as_bytes()),
+				RegexOptions::REGEX_OPTION_NONE,
+				Syntax::perl(),
+			)
+		}).as_ref().map_err(|e| SedError::new(2, e))
+	}
+}
+
+fn raw_search(
+	re: &onig::Regex,
+	text: &[u8],
+	at: usize,
+	region: Option<&mut Region>,
+) -> SedResult<bool> {
+	re.search_with_param(
+		EncodedBytes::ascii(text),
+		at,
+		text.len(),
+		SearchOptions::SEARCH_OPTION_NONE,
+		region,
+		MatchParam::default(),
+	).map(|m| m.is_some()).map_err(|e| SedError::new(2, e))
 }
 
 /// Ensure that a regex matches GNU sed's default semantics for `.`
@@ -6799,152 +6700,146 @@ pub fn ensure_dotall(pattern: &str) -> String {
 impl Regex {
 	/// Construct the most efficient RE-like matching engine possible.
 	pub fn new(pattern: &str) -> Result<Self, Box<dyn Error>> {
-		if NEEDS_FANCY_RE.is_match(pattern) {
-			Ok(Self::Fancy(FancyRegex::new(&ensure_dotall(pattern))?))
-		} else if NEEDS_RE.is_match(pattern) {
-			Ok(Self::Byte(ByteRegex::new(&ensure_dotall(pattern))?))
+		if needs_backreferences(pattern) {
+			let pattern = ensure_dotall(pattern);
+			Ok(Self::Fancy(FancyRegex::new(&pattern)?, RawRegex::new(pattern)))
+		} else if needs_regex(pattern) {
+			let pattern = ensure_dotall(pattern);
+			Ok(Self::Unicode(RustRegex::new(&pattern)?, RawRegex::new(pattern)))
 		} else {
 			Ok(Self::Literal(LiteralMatcher::new(&remove_escapes(pattern))))
 		}
 	}
 
-	/// Check if the regex matches the content of the IOChunk.
-	pub fn is_match(&self, chunk: &mut IOChunk) -> SedResult<bool> {
+	fn raw_for(&self, chunk: &IOChunk) -> SedResult<Option<&onig::Regex>> {
 		match self {
-			Regex::Literal(m) => Ok(m.is_match(chunk.as_bytes())),
-			Regex::Byte(re) => Ok(re.is_match(chunk.as_bytes())),
-			Regex::Fancy(re) => {
-				let text = chunk.as_str()?;
-				re.is_match(text)
-					.map_err(|e| SedError::new(2, e.to_string()))
+			Self::Unicode(_, raw) | Self::Fancy(_, raw) if chunk.as_str().is_none() => {
+				raw.compiled().map(Some)
 			},
+			_ => Ok(None),
 		}
 	}
 
-	/// Return an iterator over capture groups.
-	pub fn captures_iter<'t>(&'t self, chunk: &'t IOChunk) -> SedResult<CaptureMatches<'t>> {
+	/// Check if the regex matches the content of the IOChunk.
+	pub fn is_match(&self, chunk: &IOChunk) -> SedResult<bool> {
+		if let Some(re) = self.raw_for(chunk)? {
+			return raw_search(re, chunk.as_bytes(), 0, None);
+		}
+
 		match self {
-			Regex::Literal(m) => {
-				let haystack = chunk.as_bytes();
-				Ok(CaptureMatches::Literal(Box::new(
-					m.iter(haystack)
-						.map(|(start, end, text)| Ok(Captures::Literal(Match { start, end, text }))),
-				)))
+			Self::Literal(m) => Ok(m.is_match(chunk.as_bytes())),
+			Self::Unicode(re, _) => Ok(re.is_match(chunk.as_str().unwrap())),
+			Self::Fancy(re, _) => Ok(re.is_match(chunk.as_str().unwrap())?),
+		}
+	}
+
+	/// Visit matches until the callback stops. A byte-mode search reuses the
+	/// same capture region for every match, including matches of invalid bytes.
+	pub fn visit_captures(
+		&self,
+		chunk: &IOChunk,
+		mut visit: impl FnMut(Captures<'_>) -> SedResult<ControlFlow<()>>,
+	) -> SedResult<()> {
+		if let Some(re) = self.raw_for(chunk)? {
+			let text = chunk.as_bytes();
+			let mut region = Region::new();
+			let mut at = 0;
+			let mut previous_end = None;
+			while at <= text.len() && raw_search(re, text, at, Some(&mut region))? {
+				let (start, end) = region.pos(0).unwrap();
+				at = end + usize::from(start == end);
+				if start == end && previous_end == Some(end) {
+					continue;
+				}
+				previous_end = Some(end);
+				if visit(Captures::Raw(Cow::Borrowed(&region), text))?.is_break() {
+					break;
+				}
+			}
+			return Ok(());
+		}
+
+		match self {
+			Self::Literal(m) => {
+				for (start, end, text) in m.iter(chunk.as_bytes()) {
+					if visit(Captures::Literal(Match { start, end, text }))?.is_break() {
+						break;
+					}
+				}
 			},
-
-			Regex::Byte(re) => Ok(CaptureMatches::Byte(re.captures_iter(chunk.as_bytes()))),
-
-			Regex::Fancy(re) => {
-				let text = chunk.as_str()?;
-				Ok(CaptureMatches::Fancy(re.captures_iter(text)))
+			Self::Unicode(re, _) => {
+				for caps in re.captures_iter(chunk.as_str().unwrap()) {
+					if visit(Captures::Unicode(caps))?.is_break() {
+						break;
+					}
+				}
+			},
+			Self::Fancy(re, _) => {
+				for caps in re.captures_iter(chunk.as_str().unwrap()) {
+					if visit(Captures::Fancy(caps?))?.is_break() {
+						break;
+					}
+				}
 			},
 		}
+		Ok(())
 	}
 
 	/// Return the number of capture groups, including group 0.
 	pub fn captures_len(&self) -> usize {
 		match self {
-			Regex::Literal(_) => 1, // Only group 0
-			Regex::Byte(re) => re.captures_len(),
-			Regex::Fancy(re) => re.captures_len(),
+			Self::Literal(_) => 1,
+			Self::Unicode(re, _) => re.captures_len(),
+			Self::Fancy(re, _) => re.captures_len(),
 		}
 	}
 
 	/// Return the elements of the first capture.
 	pub fn captures<'t>(&self, chunk: &'t IOChunk) -> SedResult<Option<Captures<'t>>> {
+		let bytes = chunk.as_bytes();
+		if let Some(re) = self.raw_for(chunk)? {
+			let mut region = Region::new();
+			return Ok(raw_search(re, bytes, 0, Some(&mut region))?
+				.then_some(Captures::Raw(Cow::Owned(region), bytes)));
+		}
+
 		match self {
-			Regex::Literal(m) => {
-				let haystack = chunk.as_bytes();
-				match m.find(haystack) {
-					Some((start, end, text)) => Ok(Some(Captures::Literal(Match { start, end, text }))),
-					None => Ok(None),
-				}
-			},
-
-			Regex::Byte(re) => {
-				let bytes = chunk.as_bytes();
-				Ok(re.captures(bytes).map(Captures::Byte))
-			},
-
-			Regex::Fancy(re) => {
-				let text = chunk.as_str()?;
-				match re.captures(text) {
-					Ok(Some(caps)) => Ok(Some(Captures::Fancy(caps))),
-					Ok(None) => Ok(None),
-					Err(e) => Err(SedError::new(2, e.to_string())),
-				}
-			},
+			Self::Literal(m) => Ok(m.find(bytes)
+				.map(|(start, end, text)| Captures::Literal(Match { start, end, text }))),
+			Self::Unicode(re, _) => Ok(re.captures(chunk.as_str().unwrap()).map(Captures::Unicode)),
+			Self::Fancy(re, _) => Ok(re.captures(chunk.as_str().unwrap())?.map(Captures::Fancy)),
 		}
 	}
 
 	/// Return a non-capturing result for a single match.
 	pub fn find<'t>(&self, chunk: &'t IOChunk) -> SedResult<Option<Match<'t>>> {
+		let bytes = chunk.as_bytes();
+		if let Some(re) = self.raw_for(chunk)? {
+			let mut region = Region::new();
+			return if raw_search(re, bytes, 0, Some(&mut region))? {
+				let (start, end) = region.pos(0).unwrap();
+				Ok(Some(Match { start, end, text: &bytes[start..end] }))
+			} else {
+				Ok(None)
+			};
+		}
+
 		match self {
-			Regex::Literal(m) => {
-				let haystack = chunk.as_bytes();
-				match m.find(haystack) {
-					Some((start, end, text)) => Ok(Some(Match { start, end, text })),
-					None => Ok(None),
-				}
-			},
-
-			Regex::Byte(re) => {
-				let haystack = chunk.as_bytes();
-				if let Some(m) = re.find(haystack) {
-					// Attempt UTF-8 decode for the match region only
-					let text = std::str::from_utf8(&haystack[m.start()..m.end()])
-						.map_err(|e| SedError::new(2, e.to_string()))?;
-					Ok(Some(Match { start: m.start(), end: m.end(), text }))
-				} else {
-					Ok(None)
-				}
-			},
-
-			Regex::Fancy(re) => {
-				let text = chunk.as_str()?;
-				match re.find(text) {
-					Ok(Some(m)) => {
-						Ok(Some(Match { start: m.start(), end: m.end(), text: m.as_str() }))
-					},
-					Ok(None) => Ok(None),
-					Err(e) => Err(SedError::new(2, e.to_string())),
-				}
-			},
+			Self::Literal(m) => Ok(m.find(bytes).map(|(start, end, text)| Match { start, end, text })),
+			Self::Unicode(re, _) => Ok(re.find(chunk.as_str().unwrap())
+				.map(|m| Match { start: m.start(), end: m.end(), text: m.as_str().as_bytes() })),
+			Self::Fancy(re, _) => Ok(re.find(chunk.as_str().unwrap())?
+				.map(|m| Match { start: m.start(), end: m.end(), text: m.as_str().as_bytes() })),
 		}
 	}
 }
 
-/// Unified enum for holding either byte or fancy capture iterators.
-pub enum CaptureMatches<'t> {
-	Literal(Box<dyn Iterator<Item = SedResult<Captures<'t>>> + 't>),
-	Byte(ByteCaptureMatches<'t, 't>),
-	Fancy(FancyCaptureMatches<'t, 't>),
-}
-
-impl<'t> Iterator for CaptureMatches<'t> {
-	type Item = SedResult<Captures<'t>>;
-
-	fn next(&mut self) -> Option<Self::Item> {
-		match self {
-			CaptureMatches::Literal(iter) => iter.next(),
-			CaptureMatches::Byte(iter) => iter.next().map(|caps| Ok(Captures::Byte(caps))),
-			CaptureMatches::Fancy(iter) => match iter.next() {
-				Some(Ok(caps)) => Some(Ok(Captures::Fancy(caps))),
-				Some(Err(e)) => {
-					Some(Err(SedError::new(2, format!("error retrieving RE captures: {e}"))))
-				},
-				None => None,
-			},
-		}
-	}
-}
-
-#[derive(Clone, Debug)]
-/// Result type for RE capture get(n)
+#[derive(Clone, Copy, Debug)]
+/// Original pattern-space bytes and offsets of a match or capture.
 pub struct Match<'t> {
 	start: usize,   // Match start
 	end:   usize,   // Match end
-	text:  &'t str, // Actual match
+	text:  &'t [u8],
 }
 
 /// Provide interface compatible with Regex::Match.
@@ -6957,7 +6852,7 @@ impl<'t> Match<'t> {
 		self.end
 	}
 
-	pub fn as_str(&self) -> &'t str {
+	pub fn as_bytes(&self) -> &'t [u8] {
 		self.text
 	}
 }
@@ -6965,30 +6860,22 @@ impl<'t> Match<'t> {
 /// Provide interface compatible with Regex::Captures.
 pub enum Captures<'t> {
 	Literal(Match<'t>), // only group 0
-	Byte(ByteCaptures<'t>),
+	Unicode(UnicodeCaptures<'t>),
 	Fancy(FancyCaptures<'t>),
+	Raw(Cow<'t, Region>, &'t [u8]),
 }
 
 impl<'t> Captures<'t> {
-	/// Get capture group at index `i`
-	/// Returns Ok(None) if the group didn't match.
-	/// Returns Err if UTF-8 conversion fails (in Byte variant).
-	pub fn get(&self, i: usize) -> SedResult<Option<Match<'t>>> {
+	/// Get a capture by index, or None if that group didn't match.
+	pub fn get(&self, i: usize) -> Option<Match<'t>> {
 		match self {
-			Captures::Literal(m) => Ok(if i == 0 { Some(m.clone()) } else { None }),
-			Captures::Byte(caps) => match caps.get(i) {
-				Some(m) => Ok(Some(Match {
-					start: m.start(),
-					end:   m.end(),
-					text:  std::str::from_utf8(m.as_bytes())
-						.map_err(|e| SedError::new(1, e.to_string()))?,
-				})),
-				None => Ok(None),
-			},
-			Captures::Fancy(caps) => match caps.get(i) {
-				Some(m) => Ok(Some(Match { start: m.start(), end: m.end(), text: m.as_str() })),
-				None => Ok(None),
-			},
+			Self::Literal(m) => (i == 0).then_some(*m),
+			Self::Unicode(caps) => caps.get(i)
+				.map(|m| Match { start: m.start(), end: m.end(), text: m.as_str().as_bytes() }),
+			Self::Fancy(caps) => caps.get(i)
+				.map(|m| Match { start: m.start(), end: m.end(), text: m.as_str().as_bytes() }),
+			Self::Raw(region, bytes) => region.pos(i)
+				.map(|(start, end)| Match { start, end, text: &bytes[start..end] }),
 		}
 	}
 
@@ -6996,8 +6883,9 @@ impl<'t> Captures<'t> {
 	pub fn len(&self) -> usize {
 		match self {
 			Captures::Literal(_) => 1,
-			Captures::Byte(caps) => caps.len(),
+			Captures::Unicode(caps) => caps.len(),
 			Captures::Fancy(caps) => caps.len(),
+			Captures::Raw(region, _) => region.len(),
 		}
 	}
 
@@ -7007,7 +6895,6 @@ impl<'t> Captures<'t> {
 mod tests {
 	use super::*;
 
-	// FANCY_RE
 	#[test]
 	fn test_needs_fancy_re_matches() {
 		let should_match = [
@@ -7015,7 +6902,7 @@ mod tests {
 		];
 
 		for pat in &should_match {
-			assert!(NEEDS_FANCY_RE.is_match(pat), "Expected NEEDS_FANCY_RE to match: {pat:?}");
+			assert!(needs_backreferences(pat), "Expected needs_backreferences to match: {pat:?}");
 		}
 	}
 
@@ -7031,11 +6918,10 @@ mod tests {
 		];
 
 		for pat in &should_not_match {
-			assert!(!NEEDS_FANCY_RE.is_match(pat), "Expected NEEDS_FANCY_RE to NOT match: {pat:?}");
+			assert!(!needs_backreferences(pat), "Expected needs_backreferences to NOT match: {pat:?}");
 		}
 	}
 
-	// NEEDS_RE
 	#[test]
 	fn test_needs_re_matches() {
 		let should_match = [
@@ -7054,7 +6940,7 @@ mod tests {
 		];
 
 		for pat in &should_match {
-			assert!(NEEDS_RE.is_match(pat), "Expected NEEDS_RE to match: {pat:?}");
+			assert!(needs_regex(pat), "Expected needs_regex to match: {pat:?}");
 		}
 	}
 
@@ -7071,21 +6957,21 @@ mod tests {
 		];
 
 		for pat in &should_not_match {
-			assert!(!NEEDS_RE.is_match(pat), "Expected NEEDS_RE to NOT match: {pat:?}");
+			assert!(!needs_regex(pat), "Expected needs_regex to NOT match: {pat:?}");
 		}
 	}
 
 	// Regex::new
 	#[test]
-	fn assert_byte_selection() {
+	fn assert_unicode_selection() {
 		let re = Regex::new(r"x*").unwrap();
-		assert!(matches!(re, Regex::Byte(_)));
+		assert!(matches!(re, Regex::Unicode(..)));
 	}
 
 	#[test]
 	fn assert_fancy() {
 		let re = Regex::new(r"(.)\1").unwrap();
-		assert!(matches!(re, Regex::Fancy(_)));
+		assert!(matches!(re, Regex::Fancy(..)));
 	}
 
 	#[test]
@@ -7156,7 +7042,7 @@ mod tests {
 		let haystack = "contains ✓ unicode".as_bytes();
 		assert!(matcher.is_match(haystack));
 		let found = matcher.find(haystack).unwrap();
-		assert_eq!(found.2, "✓");
+		assert_eq!(found.2, "✓".as_bytes());
 	}
 
 	#[test]
@@ -7167,7 +7053,7 @@ mod tests {
 		assert!(result.is_some());
 		let (start, end, text) = result.unwrap();
 		assert_eq!((start, end), (3, 6));
-		assert_eq!(text, "abc");
+		assert_eq!(text, b"abc");
 	}
 
 	#[test]
@@ -7178,7 +7064,7 @@ mod tests {
 		assert!(result.is_some());
 		let (start, end, text) = result.unwrap();
 		assert_eq!((start, end), (3, 6));
-		assert_eq!(text, "abc");
+		assert_eq!(text, b"abc");
 	}
 
 	#[test]
@@ -7189,7 +7075,7 @@ mod tests {
 		assert_eq!(matches.len(), 3);
 
 		let strings: Vec<_> = matches.iter().map(|(_, _, s)| *s).collect();
-		assert_eq!(strings, ["test", "test", "test"]);
+		assert_eq!(strings, [b"test", b"test", b"test"]);
 	}
 
 	#[test]
@@ -7200,7 +7086,7 @@ mod tests {
 		assert_eq!(matches.len(), 1);
 
 		let strings: Vec<_> = matches.iter().map(|(_, _, s)| *s).collect();
-		assert_eq!(strings, ["test"]);
+		assert_eq!(strings, [b"test"]);
 	}
 
 	#[test]
@@ -7211,7 +7097,7 @@ mod tests {
 		assert_eq!(matches.len(), 1);
 
 		let strings: Vec<_> = matches.iter().map(|(_, _, s)| *s).collect();
-		assert_eq!(strings, ["test"]);
+		assert_eq!(strings, [b"test"]);
 	}
 
 	#[test]
@@ -7734,16 +7620,16 @@ impl NamedWriter {
 	/// `-i`, in which case `/dev/stdout` still means the real stdout.
 	pub fn write_line(
 		&mut self,
-		line: &str,
+		line: &[u8],
 		output: &mut OutputBuffer,
 		in_place: bool,
 		host: &mut Host,
 	) -> SedResult<()> {
 		let result = match &mut self.target {
-			Target::File(writer) => writeln!(writer, "{line}"),
-			Target::Stdout if in_place => writeln!(host.stdout, "{line}"),
-			Target::Stdout => output.write_str(format!("{line}\n")),
-			Target::Stderr => writeln!(host.stderr, "{line}"),
+			Target::File(writer) => write_line_to(writer, line),
+			Target::Stdout if in_place => write_line_to(&mut host.stdout, line),
+			Target::Stdout => output.write_owned_content(line, true),
+			Target::Stderr => write_line_to(&mut host.stderr, line),
 			Target::Closed => Err(std::io::Error::other("file already closed")),
 		};
 		result.map_err(|e| {
@@ -7772,6 +7658,11 @@ impl NamedWriter {
 			.unwrap_err()
 		})
 	}
+}
+
+fn write_line_to(writer: &mut impl Write, line: &[u8]) -> std::io::Result<()> {
+	writer.write_all(line)?;
+	writer.write_all(b"\n")
 }
 
 /// Flush buffered content to the files and close them, returning
@@ -7806,8 +7697,12 @@ pub mod processor {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::{borrow::Cow, cell::RefCell, io, path::PathBuf, process::Command as ProcessCommand, rc::Rc};
+use std::{
+	cell::RefCell, fmt::Write as _, io, ops::ControlFlow, path::PathBuf,
+	process::Command as ProcessCommand, rc::Rc,
+};
 
+use memchr::memchr;
 use omp_vfs::BlockingFs;
 use uucore::display::Quotable;
 
@@ -7840,7 +7735,7 @@ macro_rules! extract_variant {
 fn match_address(
 	addr: &Address,
 	reader: &mut LineReader,
-	pattern: &mut IOChunk,
+	pattern: &IOChunk,
 	context: &mut ProcessingContext,
 	location: &ScriptLocation,
 ) -> SedResult<bool> {
@@ -7872,7 +7767,7 @@ fn match_address(
 fn applies(
 	command: &mut Command,
 	reader: &mut LineReader,
-	pattern: &mut IOChunk,
+	pattern: &IOChunk,
 	context: &mut ProcessingContext,
 ) -> SedResult<bool> {
 	let linenum = context.line_number;
@@ -7993,9 +7888,11 @@ fn re_or_saved_re<'a>(
 }
 
 #[cfg(unix)]
-fn shell_command(cmd: &str, host: &Host) -> io::Result<ProcessCommand> {
+fn shell_command(cmd: &[u8], host: &Host) -> io::Result<ProcessCommand> {
+	use std::os::unix::ffi::OsStrExt as _;
+
 	let mut c = ProcessCommand::new("sh");
-	c.arg("-c").arg(cmd);
+	c.arg("-c").arg(std::ffi::OsStr::from_bytes(cmd));
 	// `output()` captures the child's stdio instead of inheriting the TUI's.
 	c.current_dir(host.native_cwd()?);
 	c.env_clear().envs(host.env());
@@ -8003,9 +7900,9 @@ fn shell_command(cmd: &str, host: &Host) -> io::Result<ProcessCommand> {
 }
 
 #[cfg(windows)]
-fn shell_command(cmd: &str, host: &Host) -> io::Result<ProcessCommand> {
+fn shell_command(cmd: &[u8], host: &Host) -> io::Result<ProcessCommand> {
 	let mut c = ProcessCommand::new("cmd.exe");
-	c.arg("/C").arg(cmd);
+	c.arg("/C").arg(std::str::from_utf8(cmd).map_err(io::Error::other)?);
 	c.current_dir(host.native_cwd()?);
 	c.env_clear().envs(host.env());
 	Ok(c)
@@ -8013,7 +7910,7 @@ fn shell_command(cmd: &str, host: &Host) -> io::Result<ProcessCommand> {
 
 // Fallback if the target OS is neither Windows nor UNIX-like
 #[cfg(not(any(unix, windows)))]
-fn shell_command(_cmd: &str, _host: &Host) -> io::Result<ProcessCommand> {
+fn shell_command(_cmd: &[u8], _host: &Host) -> io::Result<ProcessCommand> {
 	Err(omp_vfs::unsupported("the 'e' substitute flag requires a platform shell"))
 }
 
@@ -8026,169 +7923,115 @@ fn substitute(
 	host: &mut Host,
 ) -> SedResult<()> {
 	let sub = extract_variant!(command, Substitution);
-
-	let mut count = 0;
-	let mut last_end = 0;
-	let mut result = String::new();
-	let mut replaced = false;
-
-	let mut text: Option<&str> = None;
-
 	let regex = re_or_saved_re(sub.regex.as_ref(), context, &command.location)?;
+	let text = pattern.as_bytes();
 
-	// The following let block allows a common input_runtime_error to be
-	// called once in all cases, and most importantly, to finish the regex
-	// mutable borrowing of context, so as to reuse context in the error call.
-	let subst_result = match (sub.occurrence, sub.replacement.max_group_number) {
-		(1, 0) => {
-			// Example: s/foo/bar/: find() is enough.
-			match regex.find(pattern) {
-				Err(e) => Err(e),
-				Ok(Some(m)) => {
-					text = Some(pattern.as_str()?);
-					result.push_str(&text.unwrap()[last_end..m.start()]);
-
-					let replacement = sub.replacement.apply_match(&m);
-					result.push_str(&replacement);
-					replaced = true;
-					last_end = m.end();
-					Ok(())
-				},
-				Ok(None) => Ok(()), // No match
-			}
-		},
-
-		(1, _) => {
-			// Example: s/\(.\)\(.\)/\2\1/: captures() is enough.
-			match regex.captures(pattern) {
-				Err(e) => Err(e),
-				Ok(Some(caps)) => {
-					let m = caps.get(0)?.unwrap();
-					text = Some(pattern.as_str()?);
-					result.push_str(&text.unwrap()[last_end..m.start()]);
-
-					let replacement = sub.replacement.apply_captures(command, &caps)?;
-					result.push_str(&replacement);
-					replaced = true;
-					last_end = m.end();
-					Ok(())
-				},
-				Ok(None) => Ok(()), // No match
-			}
-		},
-
-		(..) => {
-			// Example: s/(.)(.)/\2\1/3: captures_iter() is needed.
-			// Iterate over multiple captures of the RE in the pattern.
-			'captures: {
-				for caps_result in regex.captures_iter(pattern)? {
-					let caps = match caps_result {
-						Ok(caps) => caps,
-						Err(e) => break 'captures Err(e),
-					};
-					let m = caps.get(0)?.unwrap();
-
-					// Always write the unmatched text before this match.
-					if text.is_none() {
-						text = Some(pattern.as_str()?);
-					}
-					// Byte regexes also match empty text inside a character; skip it.
-					if !text.unwrap().is_char_boundary(m.start()) {
-						continue;
-					}
-					count += 1;
-					result.push_str(&text.unwrap()[last_end..m.start()]);
-
-					if sub.occurrence == 0 || count == sub.occurrence {
-						let replacement = sub.replacement.apply_captures(command, &caps)?;
-						result.push_str(&replacement);
-						replaced = true;
-					} else {
-						// Not the target match — leave the match unchanged.
-						result.push_str(m.as_str());
-					}
-
-					last_end = m.end();
-
-					// Early exit if only a specific occurrence,
-					// (likely 1) needed replacing.
-					if count == sub.occurrence {
-						break 'captures Ok(());
-					}
-				}
-				break 'captures Ok(());
-			}
-		},
+	// Leave untouched lines borrowed. Copy unmatched spans only when a
+	// replacement is actually selected (not for every preceding match).
+	let mut result = Vec::new();
+	let mut last_end = 0;
+	let mut replaced = false;
+	let mut before_match = |result: &mut Vec<u8>, start: usize, end: usize| {
+		if !replaced {
+			result.reserve(text.len());
+			replaced = true;
+		}
+		result.extend_from_slice(&text[last_end..start]);
+		last_end = end;
 	};
 
-	// Handle errors.
+	let subst_result = if sub.occurrence == 1 && sub.replacement.max_group_number == 0 {
+		regex.find(pattern).map(|matched| {
+			if let Some(m) = matched {
+				before_match(&mut result, m.start(), m.end());
+				sub.replacement.apply_match(&m, &mut result);
+			}
+		})
+	} else if sub.occurrence == 1 {
+		regex.captures(pattern).and_then(|matched| {
+			if let Some(caps) = matched {
+				let m = caps.get(0).unwrap();
+				before_match(&mut result, m.start(), m.end());
+				sub.replacement.apply_captures(command, &caps, &mut result)?;
+			}
+			Ok(())
+		})
+	} else {
+		let mut count = 0;
+		regex.visit_captures(pattern, |caps| {
+			count += 1;
+			if sub.occurrence == 0 || count == sub.occurrence {
+				let m = caps.get(0).unwrap();
+				before_match(&mut result, m.start(), m.end());
+				sub.replacement.apply_captures(command, &caps, &mut result)?;
+			}
+			Ok(if count == sub.occurrence { ControlFlow::Break(()) } else { ControlFlow::Continue(()) })
+		})
+	};
 	if let Err(e) = subst_result {
 		return input_runtime_error(&command.location, context, e.to_string());
 	}
+	if !replaced {
+		return Ok(());
+	}
+	result.extend_from_slice(&text[last_end..]);
+	pattern.set_bytes(result, pattern.is_newline_terminated());
 
-	// Handle substitution success.
-	if replaced {
-		result.push_str(&text.unwrap()[last_end..]);
-
-		pattern.set_to_string(result, pattern.is_newline_terminated());
-
-		// Execute the pattern space as a shell command if the 'e' flag is set
-		if sub.execute {
-			let cmd_str = pattern.as_str()?.to_string();
-			let output_bytes = shell_command(&cmd_str, host).and_then(|mut command| command.output()).map_err(|e| {
+	if sub.execute {
+		let mut shell_out = shell_command(pattern.as_bytes(), host)
+			.and_then(|mut command| command.output())
+			.map_err(|e| {
 				input_runtime_error::<()>(
 					&command.location,
 					context,
 					format!("failed to execute shell command: {e}"),
 				)
 				.unwrap_err()
-			})?;
-			let mut shell_out = String::from_utf8_lossy_owned(output_bytes.stdout);
-			if shell_out.ends_with("\r\n") {
-				// On windows, both return carriage and newline characters are used
-				shell_out.truncate(shell_out.len() - 2);
-			} else if shell_out.ends_with('\n') {
-				// Strip the trailing newline, as GNU sed does
-				shell_out.pop();
-			}
-			pattern.set_to_string(shell_out, pattern.is_newline_terminated());
+			})?
+			.stdout;
+		if shell_out.ends_with(b"\r\n") {
+			shell_out.truncate(shell_out.len() - 2);
+		} else if shell_out.ends_with(b"\n") {
+			shell_out.pop();
 		}
-
-		if sub.print_flag {
-			write_chunk(output, context, pattern)?;
-		}
-
-		// Write to file if needed.
-		if let Some(writer) = &sub.write_file {
-			writer.borrow_mut().write_line(pattern.as_str()?, output, context.in_place, host)?;
-		}
-		context.substitution_made = true;
+		pattern.set_bytes(shell_out, pattern.is_newline_terminated());
 	}
 
+	if sub.print_flag {
+		write_chunk(output, context, pattern)?;
+	}
+	if let Some(writer) = &sub.write_file {
+		writer.borrow_mut().write_line(pattern.as_bytes(), output, context.in_place, host)?;
+	}
+	context.substitution_made = true;
 	Ok(())
 }
 
 /// Apply the specified transliteration in the provided pattern space.
-fn transliterate(pattern: &mut IOChunk, trans: &Transliteration) -> SedResult<()> {
-	let text = pattern.as_str()?;
-	let mut result = String::with_capacity(text.len());
-	let mut replaced = false;
-
-	// Perform the transliteration.
-	for ch in text.chars() {
-		let mapped = trans.lookup(ch);
-		if mapped != ch {
-			replaced = true;
+fn transliterate(pattern: &mut IOChunk, trans: &Transliteration) {
+	let bytes = pattern.as_bytes();
+	let mut result = Vec::new();
+	let mut chunk_start = 0;
+	let mut last_end = 0;
+	for chunk in bytes.utf8_chunks() {
+		for (offset, ch) in chunk.valid().char_indices() {
+			let mapped = trans.lookup(ch);
+			if mapped != ch {
+				if last_end == 0 {
+					result.reserve(bytes.len());
+				}
+				let start = chunk_start + offset;
+				result.extend_from_slice(&bytes[last_end..start]);
+				result.extend_from_slice(mapped.encode_utf8(&mut [0; 4]).as_bytes());
+				last_end = start + ch.len_utf8();
+			}
 		}
-		result.push(mapped);
+		chunk_start += chunk.valid().len() + chunk.invalid().len();
 	}
-
-	// Lazy replace.
-	if replaced {
-		pattern.set_to_string(result, pattern.is_newline_terminated());
+	if last_end != 0 {
+		result.extend_from_slice(&bytes[last_end..]);
+		pattern.set_bytes(result, pattern.is_newline_terminated());
 	}
-
-	Ok(())
 }
 
 /// Output any data queued for output at the end of the cycle.
@@ -8209,57 +8052,55 @@ fn flush_appends(output: &mut OutputBuffer, context: &mut ProcessingContext) -> 
 
 /// List the passed pattern space in unambiguous form.
 fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize) -> SedResult<()> {
-	// Special case for an empty pattern space
-	if line.is_empty() {
-		if line.is_newline_terminated() {
-			output.write_str("$\n")?;
-		}
+	if line.is_empty() && !line.is_newline_terminated() {
 		return Ok(());
 	}
 
-	let line = line.as_str()?;
-	let mut buff = String::new();
-	let mut line_width = 0;
-
-	for ch in line.chars() {
-		if ch == '\n' {
-			buff.push_str("$\n");
-			output.write_str(&buff)?;
-			line_width = 0;
-			continue;
+	let mut buffer = String::new();
+	let mut escape = String::new();
+	let mut push = |unit: Result<char, u8>| -> io::Result<()> {
+		if unit == Ok('\n') {
+			buffer.push_str("$\n");
+			output.write_str(&buffer)?;
+			buffer.clear();
+			return Ok(());
+		}
+		escape.clear();
+		match unit {
+			Ok('\x07') => escape.push_str(r"\a"),
+			Ok('\x08') => escape.push_str(r"\b"),
+			Ok('\x0b') => escape.push_str(r"\v"),
+			Ok('\x0c') => escape.push_str(r"\f"),
+			Ok('\\') => escape.push_str(r"\\"),
+			Ok('\r') => escape.push_str(r"\r"),
+			Ok('\t') => escape.push_str(r"\t"),
+			Ok(ch) if ch.is_ascii_control() => write!(escape, "\\{:03o}", ch as u8).unwrap(),
+			Ok(ch) if ch.is_ascii() => escape.push(ch),
+			Ok(ch) if (ch as u32) <= 0xffff => write!(escape, "\\u{:04X}", ch as u32).unwrap(),
+			Ok(ch) => write!(escape, "\\U{:08X}", ch as u32).unwrap(),
+			Err(byte) => write!(escape, "\\{byte:03o}").unwrap(),
 		}
 
-		let mut char_buff = [0u8; 1];
-		let out_str: Cow<str> = match ch {
-			'\x07' => Cow::Borrowed(r"\a"),
-			'\x08' => Cow::Borrowed(r"\b"),
-			'\x0b' => Cow::Borrowed(r"\v"),
-			'\x0c' => Cow::Borrowed(r"\f"),
-			'\\' => Cow::Borrowed(r"\\"),
-			'\r' => Cow::Borrowed(r"\r"),
-			'\t' => Cow::Borrowed(r"\t"),
-			c if c.is_ascii_control() => Cow::Owned(format!("\\{:03o}", ch as u8)),
-			c if c == ' ' || c.is_ascii_graphic() => Cow::Borrowed(ch.encode_utf8(&mut char_buff)),
-			c if (c as u32) <= 0xffff => Cow::Owned(format!("\\u{:04X}", c as u32)),
-			_ => Cow::Owned(format!("\\U{:08X}", ch as u32)),
-		};
-
-		// See if folding is required before adding out_str and terminator.
-		let out_len = out_str.len();
-		if line_width + out_len + 1 > max_width {
-			buff.push_str("\\\n");
-			output.write_str(&buff)?;
-			line_width = 0;
-			buff.clear();
+		if buffer.len() + escape.len() + 1 > max_width {
+			buffer.push_str("\\\n");
+			output.write_str(&buffer)?;
+			buffer.clear();
 		}
-		buff.push_str(out_str.as_ref());
-		line_width += out_len;
-	}
+		buffer.push_str(&escape);
+		Ok(())
+	};
 
-	if !buff.is_empty() {
-		buff.push_str("$\n");
-		output.write_str(buff)?;
+	if let Some(text) = line.as_str() {
+		for ch in text.chars() {
+			push(Ok(ch))?;
+		}
+	} else {
+		for &byte in line.as_bytes() {
+			push(if byte.is_ascii() { Ok(char::from(byte)) } else { Err(byte) })?;
+		}
 	}
+	buffer.push_str("$\n");
+	output.write_str(buffer)?;
 	Ok(())
 }
 
@@ -8316,12 +8157,11 @@ fn process_file(
 		let mut current: Option<Rc<RefCell<Command>>> =
 			if let Some(action) = context.input_action.take() {
 				// Continue processing the `N` command.
-				let current_line = pattern.as_str()?;
 				let mut combined_lines = action.prepend;
-				combined_lines.push('\n');
-				combined_lines.push_str(current_line);
+				combined_lines.push(b'\n');
+				combined_lines.extend_from_slice(pattern.as_bytes());
 
-				pattern.set_to_string(combined_lines, pattern.is_newline_terminated());
+				pattern.set_bytes(combined_lines, pattern.is_newline_terminated());
 				action.next_command
 			} else {
 				// Start from the script top.
@@ -8332,7 +8172,7 @@ fn process_file(
 		while let Some(command_rc) = current.take() {
 			let mut command = command_rc.borrow_mut();
 
-			if !applies(&mut command, reader, &mut pattern, context)? {
+			if !applies(&mut command, reader, &pattern, context)? {
 				// Advance to next command
 				current.clone_from(&command.next);
 				continue;
@@ -8383,8 +8223,8 @@ fn process_file(
 				},
 				'D' => {
 					// Delete up to \n and start a new cycle without new input.
-					if let Some(pos) = pattern.as_str()?.find('\n') {
-						let (s, _) = pattern.fields_mut()?;
+					if let Some(pos) = memchr(b'\n', pattern.as_bytes()) {
+						let (s, _) = pattern.fields_mut();
 						s.drain(..=pos);
 						current.clone_from(&commands);
 						continue;
@@ -8395,27 +8235,26 @@ fn process_file(
 				},
 				'g' => {
 					// Replace pattern with the contents of the hold space.
-					pattern.set_to_string(context.hold.content.clone(), context.hold.has_newline);
+					pattern.copy_bytes(&context.hold.content, context.hold.has_newline);
 				},
 				'G' => {
 					// Append to pattern \n followed by hold space contents.
-					let (pat_content, pat_has_newline) = pattern.fields_mut()?;
-					pat_content.push('\n');
-					pat_content.push_str(&context.hold.content);
+					let (pat_content, pat_has_newline) = pattern.fields_mut();
+					pat_content.push(b'\n');
+					pat_content.extend_from_slice(&context.hold.content);
 					*pat_has_newline = context.hold.has_newline;
 				},
 				'h' => {
 					// Replace hold with the contents of the pattern space, reusing
 					// the hold buffer.
-					let content = pattern.as_str()?;
 					context.hold.content.clear();
-					context.hold.content.push_str(content);
+					context.hold.content.extend_from_slice(pattern.as_bytes());
 					context.hold.has_newline = pattern.is_newline_terminated();
 				},
 				'H' => {
 					// Append to hold \n followed by pattern space contents.
-					context.hold.content.push('\n');
-					context.hold.content.push_str(pattern.as_str()?);
+					context.hold.content.push(b'\n');
+					context.hold.content.extend_from_slice(pattern.as_bytes());
 					context.hold.has_newline = pattern.is_newline_terminated();
 				},
 				'i' => {
@@ -8440,7 +8279,7 @@ fn process_file(
 					// copying the accumulated pattern space each time.
 					context.input_action = Some(InputAction {
 						next_command: command.next.clone(),
-						prepend:      std::mem::take(pattern.fields_mut()?.0),
+						prepend:      std::mem::take(pattern.fields_mut().0),
 					});
 					continue 'lines;
 				},
@@ -8448,9 +8287,9 @@ fn process_file(
 					write_chunk(output, context, &pattern)?;
 				},
 				'P' => {
-					let line = pattern.as_str()?;
-					if let Some(pos) = line.find('\n') {
-						output.write_str(&line[..=pos])?;
+					let line = pattern.as_bytes();
+					if let Some(pos) = memchr(b'\n', line) {
+						output.write_bytes(&line[..=pos])?;
 					} else {
 						write_chunk(output, context, &pattern)?;
 					}
@@ -8495,11 +8334,11 @@ fn process_file(
 				'w' => {
 					// Append the pattern space to the specified file.
 					let writer = extract_variant!(command, NamedWriter);
-					writer.borrow_mut().write_line(pattern.as_str()?, output, context.in_place, host)?;
+					writer.borrow_mut().write_line(pattern.as_bytes(), output, context.in_place, host)?;
 				},
 				'x' => {
 					// Exchange the contents of the pattern and hold spaces.
-					let (pat_content, pat_has_newline) = pattern.fields_mut()?;
+					let (pat_content, pat_has_newline) = pattern.fields_mut();
 
 					// Swap newline if hold space is logically non-empty.
 					if !context.hold.content.is_empty() || context.hold.has_newline {
@@ -8509,13 +8348,12 @@ fn process_file(
 				},
 				'y' => {
 					let trans = extract_variant!(command, Transliteration);
-					transliterate(&mut pattern, trans)?;
+					transliterate(&mut pattern, trans);
 				},
 				'z' => {
 					// Clear the pattern contents, but preserve newline state
 					// so automatic printing still emits an empty record.
-					let (pat_content, _) = pattern.fields_mut()?;
-					pat_content.clear();
+					pattern.copy_bytes(b"", pattern.is_newline_terminated());
 				},
 				':' => {
 					// Branch target; do nothing.
@@ -8536,6 +8374,7 @@ fn process_file(
 		}
 
 		flush_appends(output, context)?;
+		reader.recycle(pattern);
 
 		if context.stop_processing {
 			output.flush_pending_newline()?;
@@ -8549,8 +8388,8 @@ fn process_file(
 		&& let Some(action) = context.input_action.take()
 	{
 		let mut pending = action.prepend;
-		pending.push('\n');
-		output.write_str(pending)?;
+		pending.push(b'\n');
+		output.write_bytes(&pending)?;
 		if context.unbuffered {
 			output.flush()?;
 		}
@@ -8615,8 +8454,8 @@ pub fn process_all_files(
 			&& let Some(action) = context.input_action.take()
 		{
 			let mut pending = action.prepend;
-			pending.push('\n');
-			output.write_str(pending)?;
+			pending.push(b'\n');
+			output.write_bytes(&pending)?;
 		}
 
 		in_place.end()?;
@@ -9100,7 +8939,7 @@ use crate::host::{Host, ShellPaths, Utility, format_usage, matches_parser};
 use crate::sed::error_handling::{SedError, SedResult};
 
 use crate::sed::{
-	command::{ProcessingContext, StringSpace},
+	command::{ProcessingContext, ByteSpace},
 	processor::process_all_files,
 	script_line_provider::ScriptValue,
 };
@@ -9343,7 +9182,7 @@ fn build_context(matches: &ArgMatches, paths: &ShellPaths) -> ProcessingContext 
 		stop_processing:      false,
 		saved_regex:          None,
 		input_action:         None,
-		hold:                 StringSpace { content: String::new(), has_newline: true },
+		hold:                 ByteSpace { content: Vec::new(), has_newline: true },
 		parsed_block_nesting: 0,
 		label_to_command_map: HashMap::new(),
 		range_commands:       Vec::new(),
@@ -9597,6 +9436,57 @@ mod tests {
 	}
 
 	#[test]
+	fn builtin_processes_invalid_utf8_streams_without_reencoding() {
+		let input = b"ab\xffcd\n";
+		for (args, stdin, expected) in [
+			(&[""][..], &input[..], &input[..]),
+			(&["-n", "1,12p"], &b"ab\xff\ncd\xfe"[..], &b"ab\xff\ncd\xfe"[..]),
+			(&["s/a/X/"], &input[..], &b"Xb\xffcd\n"[..]),
+			(&["s/[bc]/X/g"], &input[..], &b"aX\xffXd\n"[..]),
+			(&[r"s/\(.\)c/\1X/"], &input[..], &b"ab\xffXd\n"[..]),
+			(&[r"s/\(.\)\1/X/g"], &b"a\xff\xffb\n"[..], &b"aXb\n"[..]),
+			(&["-n", "/c/p"], &input[..], &input[..]),
+			(&["-n", "/.cd/p"], &input[..], &input[..]),
+			(&["s/./X/g"], &input[..], &b"XXXXX\n"[..]),
+			(&["s/./X/g"], "é🙂\n".as_bytes(), &b"XX\n"[..]),
+			(&["s/./X/g"], &b"\xc3\xa9\xff\n"[..], &b"XXX\n"[..]),
+			(&["y/ad/XY/"], &input[..], &b"Xb\xffcY\n"[..]),
+			(&["-n", "l"], &b"ab\xff\t\\cd\x00\xfe\n"[..], &b"ab\\377\\t\\\\cd\\000\\376$\n"[..]),
+			(&["-n", "h;z;g;N;P"], &b"ab\xff\ncd\xfe\n"[..], &b"ab\xff\n"[..]),
+		] {
+			let (mut host, capture) = Host::for_test("sed", stdin, "/");
+			let status = Sed { matches: test_matches(args) }.run(&mut host);
+			assert_eq!(status, 0, "{args:?}: {}", capture.err());
+			assert_eq!(capture.stdout(), expected, "{args:?}");
+			assert!(capture.stderr().is_empty(), "{args:?}: {}", capture.err());
+		}
+	}
+
+	#[test]
+	fn builtin_edits_invalid_utf8_in_place() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("input");
+		std::fs::write(&path, b"ab\xffcd\nno\xfe match").unwrap();
+		let (code, capture) = crate::host::run_util::<Sed>(
+			&["-i", "s/[ac]/X/g", "input"], "", dir.path(),
+		);
+		assert_eq!(code, 0, "{}", capture.err());
+		assert!(capture.stdout().is_empty());
+		assert_eq!(std::fs::read(path).unwrap(), b"Xb\xffXd\nno\xfe mXtXh");
+	}
+
+	#[test]
+	fn builtin_substitutes_literal_posix_bracket_members() {
+		for (script, expected) in [
+			(r"s/[][\.^$*+?(){}|\\]/_/g", "a_b_c_\n"),
+			(r"s/[.^$*+?()[{|\\]/_/g", "a_b_c]\n"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(&["-E", script], "a.b[c]\n", "/");
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, expected, ""), "{script}");
+		}
+	}
+
+	#[test]
 	fn builtin_substitutes_only_plus_prefixed_lines() {
 		// THE OBSERVABLE DEFECT this change exists for, covered end to end:
 		// argument parsing, BRE compilation and substitution together.
@@ -9638,6 +9528,51 @@ mod tests {
 		let (code, capture) = crate::host::run_util::<Sed>(&["2q42"], "one\ntwo\nthree\n", "/");
 		assert_eq!(code, 42);
 		assert_eq!(capture.out(), "one\ntwo\n");
+	}
+
+	#[test]
+	fn builtin_group_closing_brace_terminates_commands() {
+		let swap = "1{h;d};2{G}";
+		for args in [&[swap][..], &["--posix", swap][..]] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, "one\ntwo\nthree\n", "/");
+			assert_eq!(code, 0, "{}", capture.err());
+			assert_eq!(capture.out(), "two\none\nthree\n");
+		}
+
+		// The first two escaped braces belong to the delimited arguments;
+		// only the final two unescaped braces after g close groups.
+		let nested = r"1{1{s}\}}x\}}g}};y/x/X/";
+		let (code, capture) = crate::host::run_util::<Sed>(&[nested], "}}\nx\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "X}X}\nX\n");
+
+		let (code, capture) = crate::host::run_util::<Sed>(&["1{a text }\n}"], "one\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "one\ntext }\n");
+	}
+
+	#[test]
+	fn builtin_group_ending_in_substitution_edits_file() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("input");
+		std::fs::write(&path, "skip\none\ntwo\nend\n").unwrap();
+		let (code, capture) = crate::host::run_util::<Sed>(
+			&["-i", r"2{N;s/\n/ /}", "input"],
+			"",
+			dir.path(),
+		);
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "");
+		assert_eq!(std::fs::read_to_string(path).unwrap(), "skip\none two\nend\n");
+	}
+
+	#[test]
+	fn builtin_group_ending_rejects_invalid_syntax() {
+		for script in ["1{dX}", "1{s/x/y/gX}", "1{p}p", "1{s/x/y/}}", "1{p"] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], "x\n", "/");
+			assert_ne!(code, 0, "{script}");
+			assert_eq!(capture.out(), "", "{script}");
+		}
 	}
 
 	#[test]

@@ -1,3 +1,4 @@
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { Api, AssistantMessage, Usage } from "../types";
 import { AwsCredentialsError } from "./aws";
@@ -166,7 +167,7 @@ function matchesPayloadRejectionText(text: string): boolean {
 	return true;
 }
 
-const TIMEOUT_PATTERN = /\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bstream stall\b/i;
+const TIMEOUT_PATTERN = /\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bstream stall(?:ed|s|ing)?\b/i;
 const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
 const TRANSIENT_ENVELOPE_TRUNCATION_PATTERN = /before message_(?:start|delta|stop)/i;
 export const STREAM_READ_ERROR_PATTERN = /stream[_ -]?read[_ -]?error/i;
@@ -341,6 +342,15 @@ const SCHEMA_COMPILE_PATTERN = /compil/i;
 const INVALID_REQUEST_PATTERN = /invalid_request_error/i;
 const STRUCTURED_OUTPUTS_PATTERN = /structured[_ -]?outputs?/i;
 const FEATURE_NOT_SUPPORTED_PATTERN = /not (?:supported|available|enabled)|unsupported|does(?: not|n'?t) support/i;
+// Claude on Vertex AI: a GCP organization policy
+// (`constraints/vertexai.allowedPartnerModelFeatures`) denies the partner
+// feature `structured_outputs` by default, so a request carrying `strict` tools
+// fails with `400 FAILED_PRECONDITION: ... attempting to use a disallowed
+// feature structured_outputs for Partner model ...`. The wording is a denial,
+// not "unsupported", so it never reaches FEATURE_NOT_SUPPORTED_PATTERN. Anchored
+// on the adjacent `disallowed feature structured_outputs` phrase so a 400 that
+// only mentions both words apart stays terminal.
+const VERTEX_STRUCTURED_OUTPUTS_POLICY_PATTERN = /\bdisallowed feature\s+structured[_ -]?outputs?\b/i;
 const ANTHROPIC_STRICT_FIELD_PATTERN = /\btools\.\d+\.custom\.strict\b/i;
 const EXTRA_INPUTS_NOT_PERMITTED_PATTERN = /extra inputs? (?:are|is) not permitted/i;
 // Upstream strict-schema validation surfaced through a translating gateway.
@@ -428,6 +438,7 @@ function matchesStrictToolsRejection(message: string, errorStatus: number | unde
 		return true;
 	}
 	if (STRUCTURED_OUTPUTS_PATTERN.test(message) && FEATURE_NOT_SUPPORTED_PATTERN.test(message)) return true;
+	if (VERTEX_STRUCTURED_OUTPUTS_POLICY_PATTERN.test(message)) return true;
 	if (STRICT_TOOL_SCHEMA_REJECTION_PATTERN.test(message)) return true;
 	if (!INVALID_REQUEST_PATTERN.test(message)) return false;
 	const grammarTooLarge = GRAMMAR_TOO_LARGE_PATTERN.test(message) && GRAMMAR_TOO_LARGE_DETAIL_PATTERN.test(message);
@@ -950,6 +961,36 @@ function isAnthropicModelNotFoundError(error: unknown, provider: string, modelId
 	);
 }
 
+const AGY_UNKNOWN_MODEL = /^Unknown model ID: (\S+)$/;
+
+/**
+ * Model id from agy's ACP `session/set_config_option` rejection. agy builds
+ * its `model` roster per signed-in account, so a catalog model the account's
+ * tier lacks fails with this exact message before any inference.
+ */
+function antigravityCliUnknownModelId(error: unknown, depth = 0): string | undefined {
+	if (depth > 6) return undefined;
+	if (typeof error === "string") return AGY_UNKNOWN_MODEL.exec(error.trim())?.[1];
+	if (!error || typeof error !== "object") return undefined;
+	for (const text of [
+		"errorMessage" in error ? error.errorMessage : undefined,
+		"message" in error ? error.message : undefined,
+	]) {
+		const id = typeof text === "string" ? AGY_UNKNOWN_MODEL.exec(text.trim())?.[1] : undefined;
+		if (id !== undefined) return id;
+	}
+	return "cause" in error ? antigravityCliUnknownModelId(error.cause, depth + 1) : undefined;
+}
+
+/** Whether agy rejected this request's model, bare or as its effort-suffixed roster value, for the signed-in account. */
+function isAntigravityCliUnknownModelError(error: unknown, provider: string, modelId: string | undefined): boolean {
+	if (provider !== "antigravity-cli" || !modelId) return false;
+	const denied = antigravityCliUnknownModelId(error);
+	if (denied === undefined || !denied.startsWith(modelId)) return false;
+	const suffix = denied.slice(modelId.length);
+	return suffix === "" || THINKING_EFFORTS.some(effort => suffix === `-${effort}`);
+}
+
 /** Whether Cursor returned a non-retryable plan entitlement denial for this account. */
 function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth = 0): boolean {
 	if (provider !== "cursor" || depth > 6) return false;
@@ -969,14 +1010,18 @@ function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth 
 /**
  * Flags for a rejection that denies this credential only the requested model
  * (Codex ChatGPT-account entitlement, Cursor plan, Anthropic model-not-found
- * 404), or 0. A denial that names a model must match `provider` and the
- * requested `modelId`, so provider-controlled text cannot block another model.
+ * 404, agy `Unknown model ID`), or 0. A denial that names a model must match
+ * `provider` and the requested `modelId`, so provider-controlled text cannot
+ * block another model.
  */
 export function modelEntitlementDenialKinds(error: unknown, provider: string, modelId: string | undefined): number {
 	if (isCodexChatGPTAccountPolicyError(error, provider, modelId) || isCursorPlanAccountPolicyError(error, provider)) {
 		return Flag.AccountPolicy | Flag.ContentBlocked;
 	}
-	return isAnthropicModelNotFoundError(error, provider, modelId) ? Flag.AccountPolicy : 0;
+	return isAnthropicModelNotFoundError(error, provider, modelId) ||
+		isAntigravityCliUnknownModelError(error, provider, modelId)
+		? Flag.AccountPolicy
+		: 0;
 }
 
 /** Whether a rejection denies this credential only the requested model; see {@link modelEntitlementDenialKinds}. */
@@ -994,7 +1039,9 @@ export function isMismatchedModelEntitlementDenial(
 	modelId: string | undefined,
 ): boolean {
 	const namesModel =
-		codexChatGPTAccountPolicyModel(error) !== undefined || anthropicModelNotFoundId(error) !== undefined;
+		codexChatGPTAccountPolicyModel(error) !== undefined ||
+		anthropicModelNotFoundId(error) !== undefined ||
+		(provider === "antigravity-cli" && antigravityCliUnknownModelId(error) !== undefined);
 	return namesModel && !isModelEntitlementDenial(error, provider, modelId);
 }
 
@@ -1212,7 +1259,7 @@ export function isTransientStreamParseError(error: unknown): boolean {
  * non-terminal status treat it as transient (#11805).
  */
 const STREAM_DROP_PATTERN =
-	/stream disconnected before completion|(?:stream|websocket) closed before response\.completed|stream was interrupted|stream ended before (?:terminal (?:chunk|completion event)|message_(?:start|delta|stop))|socket disconnected before secure tls connection/i;
+	/stream disconnected before completion|(?:stream|websocket) closed before response\.completed|stream (?:was )?interrupted|stream ended before (?:terminal (?:chunk|completion event)|message_(?:start|delta|stop))|socket disconnected before secure tls connection/i;
 
 /**
  * Transport stream-drop diagnostic (see {@link STREAM_DROP_PATTERN}). Unlike

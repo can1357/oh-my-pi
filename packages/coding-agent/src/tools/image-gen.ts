@@ -1,11 +1,10 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import {
 	type GeneratedImage,
 	generateImage,
+	type ImageContent,
 	type ImageGenerationRequest,
 	type ImageGenerationResult,
 	isImageGenerationApi,
@@ -13,18 +12,9 @@ import {
 	parseAntigravityCredentials,
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
-import {
-	isEnoent,
-	logger,
-	parseImageMetadata,
-	prompt,
-	ptree,
-	Snowflake,
-	truncate,
-	untilAborted,
-} from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, parseImageMetadata, prompt, ptree, truncate, untilAborted } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -34,6 +24,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { journalCompletion } from "../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../session/role-models";
+import { saveImagesToTemp } from "../utils/image-temp";
 import { resolveReadPath, specialFileKind } from "./path-utils";
 
 const IMAGE_TIMEOUT = 3 * 60 * 1000;
@@ -70,7 +61,6 @@ interface ImageGenToolDetails {
 	model: string;
 	imageCount: number;
 	imagePaths: string[];
-	images: GeneratedImage[];
 	responseText?: string;
 	usage?: ImageGenerationResult["usage"];
 }
@@ -130,26 +120,6 @@ async function resolveInputImage(input: ImageInput, cwd: string): Promise<{ data
 		return { data: normalized.data, mimeType };
 	}
 	throw new Error("input entries must include either path or data.");
-}
-
-function imageExtension(mimeType: string): string {
-	const extensions: Record<string, string> = {
-		"image/png": "png",
-		"image/jpeg": "jpg",
-		"image/gif": "gif",
-		"image/webp": "webp",
-	};
-	return extensions[mimeType] ?? "png";
-}
-
-async function saveImagesToTemp(images: ImageGenerationResult["images"]): Promise<string[]> {
-	return Promise.all(
-		images.map(async image => {
-			const filepath = path.join(os.tmpdir(), `omp-image-${Snowflake.next()}.${imageExtension(image.mimeType)}`);
-			await Bun.write(filepath, Buffer.from(image.data, "base64"));
-			return filepath;
-		}),
-	);
 }
 
 /**
@@ -250,14 +220,18 @@ async function buildToolResult(
 		lines.push(meta ? `  ${imagePath} (${meta})` : `  ${imagePath}`);
 	}
 	if (result.text) lines.push("", result.text.trim());
+	const images: ImageContent[] = result.images.map(image => ({
+		type: "image",
+		data: image.data,
+		mimeType: image.mimeType,
+	}));
 	return {
-		content: [{ type: "text", text: lines.join("\n") }],
+		content: [{ type: "text", text: lines.join("\n") }, ...images],
 		details: {
 			provider: model.provider,
 			model: ranModel,
 			imageCount: result.images.length,
 			imagePaths,
-			images: result.images,
 			responseText: result.text,
 			usage: result.usage,
 		},

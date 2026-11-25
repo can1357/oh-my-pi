@@ -1606,6 +1606,369 @@
      "a.ts": "before();\nliteral();\nafter();\n"
     }
    }
+  },
+  {
+   "name": "a Replace starting with a number and || is code, not a line number",
+   "files": {
+    "a.ts": "if (code !== 0 ?? !stdout.trim()) {\n  run();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n0 ?? !stdout\n*** Replace\n0 || !stdout\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "if (code !== 0 || !stdout.trim()) {\n  run();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "numbered rows copied into both Find and Replace lose their line numbers",
+   "files": {
+    "a.ts": "a();\nb();\nc();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n1:a();\n2:b();\n*** Replace\n1:a();\n2:B();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "a();\nB();\nc();\n"
+    }
+   }
+  },
+  {
+   "name": "a block range ends at the block's own closing line, not at } else {",
+   "files": {
+    "a.ts": "function f() {\n  if (x) {\n    a();\n  } else {\n    b();\n  }\n  done();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n  if (x) {\n\u2026\n  }\n*** Replace\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function f() {\n  done();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "a block range skips a nested closing line",
+   "files": {
+    "a.ts": "function f() {\n  if (x) {\n    if (y) {\n      a();\n    }\n    b();\n  }\n  done();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\n  if (x) {\n\u2026\n  }\n*** Replace\n  c();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function f() {\n  c();\n  done();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "a block range typed without indentation closes at the opening line's depth",
+   "files": {
+    "a.ts": "function f() {\n  if (x) {\n    if (y) {\n      a();\n    }\n    b();\n  }\n  done();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nif (x) {\n\u2026\n}\n*** Replace\n  c();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function f() {\n  c();\n  done();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "Find all changes every match of that operation only",
+   "files": {
+    "a.ts": "a = old;\nb = old;\nc = keep;\nd = keep;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find all\nold\n*** Replace\nnew\n*** Find\nc = keep\n*** Replace\nc = kept\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "a = new;\nb = new;\nc = kept;\nd = keep;\n"
+    }
+   }
+  },
+  {
+   "name": "all on a bare identifier renames whole words only",
+   "files": {
+    "a.ts": "const id = width;\nconst idx = id + 1;\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find all\nid\n*** Replace\nkey\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const key = width;\nconst idx = key + 1;\n"
+    }
+   }
+  },
+  {
+   "name": "an identifier rename with no whole-word match does not change longer names",
+   "files": {
+    "a.ts": "let nuinstallStep = 1;\nrun(nuinstallStep);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find all\nnuinstall\n*** Replace\nuninstall\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "let nuinstallStep = 1;\nrun(nuinstallStep);\n"
+    },
+    "error": "found 0 matches"
+   }
+  },
+  {
+   "name": "a lone all line under an ambiguous Replace is the every-match flag",
+   "files": {
+    "a.ts": "let nuinstall = 1;\nuse(nuinstall);\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nnuinstall\n*** Replace\nuninstall\n all\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "let uninstall = 1;\nuse(uninstall);\n"
+    },
+    "textContains": [
+     "every-match flag"
+    ]
+   }
+  },
+  {
+   "name": "a Find with no action is rejected instead of rewriting a neighbouring block",
+   "files": {
+    "a.ts": "a();\nb();\nc();\nd();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nb();\nc();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "a();\nb();\nc();\nd();\n"
+    },
+    "error": "has *** Find but no *** Replace"
+   }
+  },
+  {
+   "name": "Cut and Paste Before move a block and keep it apart from its neighbours",
+   "files": {
+    "a.ts": "function a() {\n  one();\n}\n\nfunction b() {\n  two();\n}\n\nfunction c() {\n  three();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction c() {\n\u2026\n}\n*** Cut\n*** Find\nfunction a() {\n*** Paste Before\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function c() {\n  three();\n}\n\nfunction a() {\n  one();\n}\n\nfunction b() {\n  two();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "Cut and Paste After move a block down past another",
+   "files": {
+    "a.ts": "function a() {\n  one();\n}\n\nfunction b() {\n  two();\n}\n\nfunction c() {\n  three();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction a() {\n\u2026\n}\n*** Cut\n*** Find\nfunction b() {\n\u2026\n}\n*** Paste After\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function b() {\n  two();\n}\n\nfunction a() {\n  one();\n}\n\nfunction c() {\n  three();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "Cut takes whole lines and Paste After keeps statements adjacent",
+   "files": {
+    "a.ts": "function f() {\n  first();\n  second();\n  third();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfirst()\n*** Cut\n*** Find\nthird()\n*** Paste After\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function f() {\n  second();\n  third();\n  first();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "a Paste with nothing cut is rejected",
+   "files": {
+    "a.ts": "a();\nb();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nb();\n*** Paste Before\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "a();\nb();\n"
+    },
+    "error": "nothing is cut"
+   }
+  },
+  {
+   "name": "a Cut that is never pasted is rejected",
+   "files": {
+    "a.ts": "a();\nb();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\na();\n*** Cut\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "a();\nb();\n"
+    },
+    "error": "has *** Cut but no *** Paste"
+   }
+  },
+  {
+   "name": "a Paste anchored inside the cut block is rejected",
+   "files": {
+    "a.ts": "function a() {\n  one();\n}\n\nfunction b() {\n  two();\n}\n\nfunction c() {\n  three();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction a() {\n\u2026\n}\n*** Cut\n*** Find\n  one();\n*** Paste After\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function a() {\n  one();\n}\n\nfunction b() {\n  two();\n}\n\nfunction c() {\n  three();\n}\n"
+    },
+    "error": "lies inside the block"
+   }
+  },
+  {
+   "name": "a failed Paste leaves the cut block in place while other operations apply",
+   "files": {
+    "a.ts": "a();\nb();\nc();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\na();\n*** Cut\n*** Find\nmissing();\n*** Paste After\n*** Find\nc();\n*** Replace\nd();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "a();\nb();\nd();\n"
+    },
+    "textContains": [
+     "Operation 2 did not match"
+    ]
+   }
+  },
+  {
+   "name": "a rename following a move updates references inside and outside the moved block",
+   "files": {
+    "a.ts": "export function stop(id: string) {\n  halt(id);\n}\n\nfunction helper(usre: User) {\n  return usre.id;\n}\n\nexport function run(usre: User, limit: number) {\n  if (limit > 1) {\n    helper(usre);\n  }\n  if (legacy) {\n    old(usre);\n  }\n  stop(usre.id);\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfunction helper(\n\u2026\n}\n*** Cut\n*** Find\nexport function stop(\n*** Paste Before\n*** Find\nlimit > 1\n*** Replace\nlimit > 0\n*** Find\n  if (legacy) {\n\u2026\n  }\n*** Replace\n*** Find all\nusre\n*** Replace\nuser\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function helper(user: User) {\n  return user.id;\n}\n\nexport function stop(id: string) {\n  halt(id);\n}\n\nexport function run(user: User, limit: number) {\n  if (limit > 0) {\n    helper(user);\n  }\n  stop(user.id);\n}\n"
+    }
+   }
+  },
+  {
+   "name": "an indented Replace for an unindented Find states the line's whole indentation",
+   "files": {
+    "a.ts": "function f() {\n    a();\n    b();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\na();\nb();\n*** Replace\n    x();\n    y();\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function f() {\n    x();\n    y();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "move a syntax block by its literal opener without quoting interior lines",
+   "files": {
+    "a.ts": "function main() {\n  run();\n}\nfunction f() {\n  if (x) {\n    return \"}\";\n  } else {\n    run();\n  }\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Cut Block: function f(\n*** Find\nfunction main(\n*** Paste Before\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function f() {\n  if (x) {\n    return \"}\";\n  } else {\n    run();\n  }\n}\nfunction main() {\n  run();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "deleting an identical neighbour by opener preserves one complete copy",
+   "files": {
+    "a.ts": "function g() {\n  run();\n}\nfunction g() {\n  run();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Delete Block: function g(\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function g() {\n  run();\n}\n"
+    }
+   }
+  },
+  {
+   "name": "different syntax blocks cannot be deleted by an ambiguous prefix",
+   "files": {
+    "a.ts": "function f() {\n  if (x) {\n    return \"}\";\n  } else {\n    run();\n  }\n}\nfunction g() {\n  run();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Delete Block: function\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "function f() {\n  if (x) {\n    return \"}\";\n  } else {\n    run();\n  }\n}\nfunction g() {\n  run();\n}\n"
+    },
+    "error": "more than one line"
+   }
+  },
+  {
+   "name": "block selectors cannot take a neighbouring statement on the closing line",
+   "files": {
+    "a.ts": "if (ok) {\n  go();\n} finish();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Delete Block: if (ok)\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "if (ok) {\n  go();\n} finish();\n"
+    },
+    "error": "standalone multiline syntax block"
+   }
+  },
+  {
+   "name": "block replacement text is not interpreted as a gap or an earlier deletion",
+   "files": {
+    "a.ts": "function g() {\n  run();\n}\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Replace Block: function g(\n/**\n\u2026\n\u00bb1\n*/\n"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "/**\n\u2026\n\u00bb1\n*/\n"
+    }
+   }
+  },
+  {
+   "name": "deleting a duplicate does not depend on whitespace outside the pair",
+   "files": {
+    "a.ts": "log();\n\nif (ok) {\n  f();\n}\n\nif (ok) {\n  f();\n}\nnext();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Delete Block: if (ok) {"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "log();\n\nif (ok) {\n  f();\n}\nnext();\n"
+    }
+   }
   }
  ]
 }

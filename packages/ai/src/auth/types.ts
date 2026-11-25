@@ -823,6 +823,8 @@ export type RotateCredentialOptions = {
 export interface CredentialRotation {
 	switched: boolean;
 	afterSiblingWait?: boolean;
+	/** Explanation when a restricted pool is blocked and includes an OAuth organization rejection. */
+	poolUnavailableReason?: string;
 }
 
 /** Filter saved reset credits by provider and session. */

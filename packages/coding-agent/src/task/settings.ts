@@ -12,8 +12,8 @@ import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
-import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
-import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+import { getThinkingLevelMetadata } from "../thinking/levels";
+import { setFeedModelBadgeEnabled } from "../utils/render-utils";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
@@ -188,9 +188,12 @@ export const cfgOvnfsPath = register({
  * or `undefined` when that binary is not found. Read by the system prompt (checkout
  * guidance), the bash git guard, and, when `isolation.backend` is auto, the task
  * runner (ovnfs-backed isolation) and `/wt` (ovnfs-backed session worktrees).
+ * Windows paths come back with forward slashes: the command is pasted into
+ * bash, which strips backslashes (`C:\Users\…` runs as `C:Users…`).
  */
 export function ovnfsCommand(settings?: Settings): string | undefined {
-	const command = (settings && cfgOvnfsPath.get(settings)?.trim()) || "ovnfs";
+	const configured = (settings && cfgOvnfsPath.get(settings)?.trim()) || "ovnfs";
+	const command = process.platform === "win32" ? configured.replaceAll("\\", "/") : configured;
 	return $which(command) ? command : undefined;
 }
 
@@ -509,7 +512,7 @@ export const cfgTaskEnableLsp = register({
 export const cfgTaskCrossInstance = register({
 	id: "task.crossInstance",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",

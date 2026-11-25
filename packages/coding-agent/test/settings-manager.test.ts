@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	__physicalTargetSegmentsForTesting,
@@ -47,7 +47,7 @@ import {
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
-	cfgToolsXdev,
+	cfgToolsCommands,
 	cfgTodoReminders,
 	cfgTodoRemindersMax,
 	cfgDevAutoqa,
@@ -59,6 +59,7 @@ import {
 	cfgGrepContextBefore,
 	cfgTodoEager,
 	cfgComputerEnabled,
+	cfgComputerTakeover,
 	cfgImagesQuestionTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import {
@@ -147,7 +148,6 @@ describe("Settings", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		clearCustomApis();
-		__providerInFlightForTesting.setRoot(undefined);
 		AgentStorage.close();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
@@ -1823,7 +1823,6 @@ describe("Settings", () => {
 		const MODEL_PRIO = roleDefaultModels();
 		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
-			"google-gemini-cli/gemini-2.5-flash",
 			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
@@ -2003,8 +2002,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 2)]).toEqual([
-				"google-gemini-cli/gemini-3.8-flash-high",
+			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 1)]).toEqual([
 				"google-antigravity/gemini-3.8-flash-high",
 				"google/gemini-3.8-flash-high",
 			]);
@@ -2221,6 +2219,28 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(cfgComputerEnabled.get(settings)).toBe(true);
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			expect((await readSettings()).computer).toEqual({ enabled: true });
+		});
+
+		it("carries a refusing computer.backgroundFallback over to computer.takeover", async () => {
+			await writeSettings({ computer: { backgroundFallback: "refuse", enabled: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgComputerTakeover.get(settings)).toBe("refuse");
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			expect((await readSettings()).computer).toEqual({ enabled: true, takeover: "refuse" });
+		});
+
+		it("keeps a computer.backgroundFallback of takeover on the same behaviour, the default fallback", async () => {
+			await writeSettings({ computer: { backgroundFallback: "takeover", enabled: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgComputerTakeover.get(settings)).toBe("fallback");
 			cfgDisplayShowTokenUsage.set(settings, true);
 			await settings.flush();
 			expect((await readSettings()).computer).toEqual({ enabled: true });
@@ -2574,7 +2594,7 @@ describe("Settings", () => {
 			expect(cfgTodoReminders.get(reloaded)).toBe(true);
 		});
 
-		it("drops dead BM25-discovery keys and leaves tools.xdev at its default", async () => {
+		it("drops dead BM25-discovery keys and leaves tools.commands at its default", async () => {
 			await writeSettings({
 				tools: { discoveryMode: "off", essentialOverride: ["read"] },
 				mcp: { discoveryMode: "auto", discoveryDefaultServers: ["gh"] },
@@ -2582,10 +2602,10 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			// No migration mapping: legacy discovery intent is discarded, xdev
-			// keeps its own default. An explicit xdev value is untouched.
-			expect(cfgToolsXdev.get(settings)).toBe(true);
-			expect(cfgToolsXdev.isConfigured(settings)).toBe(false);
+			// No migration mapping: legacy discovery intent is discarded, toolCommands
+			// keeps its own default. An explicit toolCommands value is untouched.
+			expect(cfgToolsCommands.get(settings)).toBe(true);
+			expect(cfgToolsCommands.isConfigured(settings)).toBe(false);
 		});
 
 		it("migrates from settings.json containing comments", async () => {
@@ -2769,7 +2789,6 @@ describe("Settings", () => {
 			it("applies the effective merged value as the process-wide limit", async () => {
 				const settings = Settings.isolated({ "providers.maxInFlightRequests": { openai: 1 } });
 				bindEffects(settings);
-				__providerInFlightForTesting.setRoot(tempDir.join("provider-inflight"));
 				registerMockApi();
 				const firstStarted = Promise.withResolvers<void>();
 				const releaseFirst = Promise.withResolvers<void>();

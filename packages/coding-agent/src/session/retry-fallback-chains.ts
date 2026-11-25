@@ -2,16 +2,17 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgModelRoles } from "../config/model-settings";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue, parseModelString } from "../config/model-selector";
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { AUTO_THINKING, concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import {
-	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
-	concreteThinkingLevel,
-	resolveThinkingLevelForModel,
-} from "@oh-my-pi/pi-tui/thinking";
-import { resolveConfiguredModelPatterns, resolveModelRoleValue, revisionSpellingKey } from "../config/model-resolver";
+	resolveConfiguredModelPatterns,
+	resolveModelRoleValue,
+	resolveRoutedModelSelector,
+	revisionSpellingKey,
+} from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
 import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySettings } from "./settings";
@@ -294,7 +295,7 @@ export function validateRetryFallbackChains(
 				if (!parsedKey) {
 					report(`Invalid model selector key in retry.fallbackChains: ${key}`);
 				} else if (
-					!modelRegistry.find(parsedKey.provider, parsedKey.id) &&
+					!resolveRoutedModelSelector(modelRegistry, parsedKey.raw) &&
 					!isDiscoveryPending(parsedKey.provider)
 				) {
 					report(`retry.fallbackChains key references unknown model: ${key}`);
@@ -351,7 +352,7 @@ export function validateRetryFallbackChains(
 				report(`Invalid fallback selector format in ${keyKind} '${key}': ${selectorStr}`);
 				continue;
 			}
-			if (!modelRegistry.find(parsed.provider, parsed.id) && !isDiscoveryPending(parsed.provider)) {
+			if (!resolveRoutedModelSelector(modelRegistry, parsed.raw) && !isDiscoveryPending(parsed.provider)) {
 				report(`Fallback chain for ${keyKind} '${key}' references unknown model: ${selectorStr}`);
 			}
 		}

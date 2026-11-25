@@ -11,17 +11,18 @@
  * behind Bun's `fs.watch` drops most changes of a burst there and costs a
  * core). Linux watches a tree one directory at a time: a recursive `fs.watch`
  * there puts an inotify watch on every directory below, package contents and
- * VCS object stores included, and can use up the user's inotify watch limit.
+ * VCS object stores included, and can use up the user's inotify watch limit;
+ * an {@link InotifyBudget} bounds what the trees of a process hold.
  * Elsewhere a recursive `fs.watch` is lossless and cheap.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { DirectoryChangeAction, type DirectoryChanges, DirectoryWatcher } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { hasFsCode, logger } from "@oh-my-pi/pi-utils";
 import { mapWithConcurrencyLimit } from "../task/parallel";
 import { FileChangeType, type FileEvent } from "./types";
-import { fileToUri, uriToFile } from "./utils";
+import { fileToUri, uriToFile } from "./uri";
 
 /** Method a server registers to have the client watch files for it. */
 export const WATCHED_FILES_METHOD = "workspace/didChangeWatchedFiles";
@@ -47,6 +48,10 @@ const REPORTED_TTL_MS = 10_000;
 const CLOCK_LAG_MAX_MS = 10 * 60_000;
 /** Directories read at once while walking a tree (each is a round trip on network drives). */
 const WALK_CONCURRENCY = 16;
+/** Share of the user's inotify watch limit one process's directory trees may hold; other programs keep the rest. */
+const INOTIFY_SHARE = 0.25;
+/** `fs.inotify.max_user_watches` when it cannot be read: the kernel default before Linux 5.11. */
+const DEFAULT_MAX_USER_WATCHES = 8192;
 
 /** Matches the servers' view: tsgo and friends treat Windows and macOS file names case-insensitively. */
 const caseInsensitive = process.platform === "win32" || process.platform === "darwin";
@@ -120,6 +125,8 @@ export interface WatchedFilesForwarderOptions {
 	roots: () => readonly string[];
 	/** Delivers one `workspace/didChangeWatchedFiles` batch to the server. */
 	send: (changes: FileEvent[]) => Promise<void> | void;
+	/** Bounds the Linux per-directory watches; defaults to the budget every forwarder of the process shares. */
+	inotifyBudget?: InotifyBudget;
 }
 
 /**
@@ -226,12 +233,12 @@ class PathMap<V> {
 		if (this.#values.delete(key) && !this.#children.has(key)) this.#unlink(key);
 	}
 
-	/** Remove `dir` and every key below it, passing each removed value to `removed`. */
-	deleteWithin(dir: string, removed?: (value: V) => void): void {
+	/** Remove `dir` and every key below it, passing each removed value and its key to `removed`. */
+	deleteWithin(dir: string, removed?: (value: V, key: string) => void): void {
 		const stack = [dir];
 		for (let key = stack.pop(); key !== undefined; key = stack.pop()) {
 			const value = this.#values.get(key);
-			if (value !== undefined && this.#values.delete(key)) removed?.(value);
+			if (value !== undefined && this.#values.delete(key)) removed?.(value, key);
 			const entries = this.#children.get(key);
 			if (!entries) continue;
 			this.#children.delete(key);
@@ -267,6 +274,94 @@ class PathMap<V> {
 			if (this.#values.has(parent)) return;
 		}
 	}
+}
+
+/** A directory tree's claim on its directory watches, which an {@link InotifyBudget} can take back. */
+interface WatchHolder {
+	/** Stop watching `key` because the budget sheds it; false keeps it (a tree root). */
+	shed(key: string): boolean;
+}
+
+/**
+ * The inotify watches of the Linux directory trees of a process, across all
+ * its forwarders. The kernel's watch limit is per user, so a process that used
+ * it up would break unrelated programs (`tail -f`, systemd, CI containers):
+ * trees stop adding watches once the budget is spent, and when the kernel
+ * refuses a watch anyway (other processes hold the rest), the budget halves and
+ * gives back its newest, deepest directories. Bun shares one inotify watch per
+ * path, so a directory counts once however many trees watch it.
+ */
+export class InotifyBudget {
+	/** Holders by watched directory, oldest first. */
+	readonly #held = new Map<string, Set<WatchHolder>>();
+	#limit: number;
+
+	/** At most `limit` directories are watched, tree roots aside. */
+	constructor(limit: number) {
+		this.#limit = limit;
+	}
+
+	/** Directories the budget allows. */
+	get limit(): number {
+		return this.#limit;
+	}
+
+	/** Claim a watch of `key` for `holder`; false when the budget is spent, unless `force` (a tree root). */
+	claim(key: string, holder: WatchHolder, options: { force: boolean }): boolean {
+		const holders = this.#held.get(key);
+		if (holders) {
+			holders.add(holder);
+			return true;
+		}
+		if (!options.force && this.#held.size >= this.#limit) return false;
+		this.#held.set(key, new Set([holder]));
+		return true;
+	}
+
+	/** Drop `holder`'s claim on `key`; the directory frees up once no tree watches it. */
+	release(key: string, holder: WatchHolder): void {
+		const holders = this.#held.get(key);
+		if (holders?.delete(holder) && holders.size === 0) this.#held.delete(key);
+	}
+
+	/**
+	 * The kernel refused a watch (`ENOSPC`): the user's limit is reached. Halve
+	 * what is held and shed the newest directories down to that, for good, so
+	 * other programs get watches again and the trees do not re-add them.
+	 */
+	exhausted(): void {
+		const held = this.#held.size;
+		this.#limit = Math.min(this.#limit, Math.floor(held / 2));
+		const keys = [...this.#held.keys()];
+		for (let i = keys.length - 1; i >= 0 && this.#held.size > this.#limit; i--) {
+			const holders = this.#held.get(keys[i]);
+			if (!holders) continue;
+			for (const holder of holders) if (holder.shed(keys[i])) holders.delete(holder);
+			if (holders.size === 0) this.#held.delete(keys[i]);
+		}
+		logger.warn("LSP watched-files hit the user's inotify watch limit; released watches", {
+			held,
+			released: held - this.#held.size,
+			limit: this.#limit,
+		});
+	}
+}
+
+let processBudget: InotifyBudget | undefined;
+
+/** The budget forwarders share by default: a share of `fs.inotify.max_user_watches`, read once. */
+function sharedInotifyBudget(): InotifyBudget {
+	if (processBudget) return processBudget;
+	let maxUserWatches = DEFAULT_MAX_USER_WATCHES;
+	try {
+		// Read synchronously: trees claim watches from synchronous callbacks, and only once per process.
+		const read = Number.parseInt(fs.readFileSync("/proc/sys/fs/inotify/max_user_watches", "utf8"), 10);
+		if (read > 0) maxUserWatches = read;
+	} catch {
+		// No procfs (some containers): assume the old kernel default.
+	}
+	processBudget = new InotifyBudget(Math.floor(maxUserWatches * INOTIFY_SHARE));
+	return processBudget;
 }
 
 function spec(base: string, pattern: string, kind: number): WatchSpec {
@@ -334,6 +429,7 @@ async function nearestDirectory(base: string, isDir: (target: string) => Promise
 export class WatchedFilesForwarder {
 	readonly #roots: () => readonly string[];
 	readonly #send: WatchedFilesForwarderOptions["send"];
+	readonly #inotifyBudget?: InotifyBudget;
 	/** Raw registerOptions by registration id, recompiled when roots change. */
 	readonly #registrations = new Map<string, unknown>();
 	#specs: WatchSpec[] = [];
@@ -372,6 +468,7 @@ export class WatchedFilesForwarder {
 	constructor(options: WatchedFilesForwarderOptions) {
 		this.#roots = options.roots;
 		this.#send = options.send;
+		this.#inotifyBudget = options.inotifyBudget;
 	}
 
 	/** Start watching for one `workspace/didChangeWatchedFiles` registration; settles once watched. */
@@ -638,19 +735,46 @@ export class WatchedFilesForwarder {
 	/**
 	 * Watch `root` and the directories below it one by one, skipping those no
 	 * spec wants anything below (Linux). Throws when `root` itself cannot be
-	 * watched; a subdirectory that cannot (the inotify watch limit) is skipped.
+	 * watched; a subdirectory that cannot (the inotify watch limit, or the
+	 * process's {@link InotifyBudget} is spent) is skipped. Directories are
+	 * claimed breadth first, so a spent budget leaves the deepest unwatched.
 	 * `armed` settles once the existing tree is watched.
 	 */
 	#openTree(root: string, ended: (error: unknown) => void): { watch: Watch; armed: Promise<void> } {
+		const budget = this.#inotifyBudget ?? sharedInotifyBudget();
+		const rootKey = foldCase(root);
 		const watchers = new PathMap<fs.FSWatcher>();
+		const holder: WatchHolder = {
+			shed: key => {
+				if (key === rootKey) return false;
+				watchers.get(key)?.close();
+				watchers.delete(key);
+				return true;
+			},
+		};
+		const drop = (watcher: fs.FSWatcher, key: string) => {
+			watcher.close();
+			budget.release(key, holder);
+		};
 		let skipped = false;
+		const skip = (dir: string, error: unknown) => {
+			if (skipped) return;
+			skipped = true;
+			logger.warn("LSP watched-files could not watch every directory; changes below them go unreported", {
+				dir,
+				error: String(error),
+			});
+		};
 		const watch = newWatch(() => {
-			for (const watcher of watchers.values()) watcher.close();
+			for (const [key, watcher] of watchers) drop(watcher, key);
 			watchers.clear();
 		});
 		const watchOne = (dir: string) => {
 			const key = foldCase(dir);
 			if (watch.closed || watchers.has(key)) return;
+			if (!budget.claim(key, holder, { force: key === rootKey })) {
+				return skip(dir, `the process's budget of ${budget.limit} inotify watches is spent`);
+			}
 			let watcher: fs.FSWatcher;
 			try {
 				watcher = fs.watch(dir, { persistent: false }, (eventType, filename) => {
@@ -658,27 +782,22 @@ export class WatchedFilesForwarder {
 					this.#fsEvent(watch, root, true, dir, eventType, filename, known);
 				});
 			} catch (error) {
-				if (dir === root) throw error;
-				if (!skipped) {
-					skipped = true;
-					logger.warn("LSP watched-files could not watch every directory; changes below them go unreported", {
-						dir,
-						error: String(error),
-					});
-				}
-				return;
+				budget.release(key, holder);
+				if (hasFsCode(error, "ENOSPC")) budget.exhausted();
+				if (key === rootKey) throw error;
+				return skip(dir, error);
 			}
 			watcher.on("error", error => {
-				watcher.close();
 				watchers.delete(key);
-				if (dir === root) ended(error);
+				drop(watcher, key);
+				if (key === rootKey) ended(error);
 			});
 			watchers.set(key, watcher);
 		};
 		watch.tree = {
 			watch: watchOne,
 			covers: dir => watchers.has(foldCase(path.dirname(dir))),
-			remove: dir => watchers.deleteWithin(foldCase(path.resolve(dir)), watcher => watcher.close()),
+			remove: dir => watchers.deleteWithin(foldCase(path.resolve(dir)), drop),
 			layout: treeLayout(this.#specs),
 			refresh: async () => {
 				const wanted = new Set<string>();
@@ -691,8 +810,8 @@ export class WatchedFilesForwarder {
 				});
 				for (const [key, watcher] of watchers) {
 					if (wanted.has(key)) continue;
-					watcher.close();
 					watchers.delete(key);
+					drop(watcher, key);
 				}
 			},
 		};

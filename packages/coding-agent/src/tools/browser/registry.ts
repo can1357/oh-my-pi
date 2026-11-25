@@ -3,7 +3,7 @@ import { isCompiledBinary, logger, untilAborted, workerHostEntry } from "@oh-my-
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, resolveSpawnArgs, waitForCdp } from "./attach";
 import { type CmuxKind, CmuxUnavailableError } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
@@ -18,9 +18,8 @@ import {
 	type UserAgentOverride,
 } from "./launch";
 import { reapOrphanSharedTargets, type SharedTargetScope } from "./orphan-registry";
-import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
-import { UPDATE_RELAY_EXTENSION, waitForRelayExtension } from "./relay/probe";
+import { requestRelayRestart, UPDATE_RELAY_EXTENSION, waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
@@ -61,7 +60,7 @@ export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	userDataDir?: string;
 	/** Daemon unit backing this handle; dispose disconnects instead of closing, kill routes to the daemon. */
 	sharedDaemon?: { name: string; projectDir: string };
-	/** Lease on the daemon unit (shared Chromium or relay) this handle uses; released on dispose. */
+	/** Lease on the shared Chromium daemon unit this handle uses; released on dispose. */
 	daemonLease?: UnitLease;
 	subprocess?: Subprocess;
 	stealth: { browserSession: CDPSession | null; override: UserAgentOverride | null };
@@ -137,8 +136,8 @@ export interface AcquireBrowserOptions {
 	cwd: string;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	signal?: AbortSignal;
-	/** Start, or replace an outdated, loopback relay daemon when a relay is not serving. Default true. */
-	startRelay?: boolean;
+	/** Ask a relay served by an older omp to restart from the installed one. Default true. */
+	restartRelay?: boolean;
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
@@ -307,74 +306,53 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		};
 	}
 	if (kind.kind === "relay") {
+		if (!kind.cdpUrl)
+			throw new ToolError(
+				"No local omp browser relay found. Open Chrome with the omp extension, or configure browser.relayUrl.",
+			);
 		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
-		// Loopback relays are global daemon units, auto-started on demand (the
-		// extension dials in on its own). Hosts without a CLI worker entry
-		// (bun test, SDK embedding) never start them. Remote relay URLs must
-		// already be serving.
-		const autoStart =
-			opts.startRelay !== false && isLoopbackRelayUrl(cdpUrl) && (isCompiledBinary() || workerHostEntry() !== null);
-		let lease = autoStart ? await ensureRelayDaemon({ cdpUrl, signal: opts.signal }) : null;
-		try {
-			// The relay answers /json/version with 503 until its extension dials in;
-			// the wait fails fast when nothing serves the port or the server has
-			// already outlived the window an installed extension needs to connect.
-			let outcome = await waitForRelayExtension(cdpUrl, opts.signal);
-			// A daemon-supervised relay outlives omp upgrades; replace an incompatible
-			// one with this version's once, and a compatible older one only while no
-			// CDP client uses it. A manually started relay is left to its owner.
-			if (outcome === "outdated-relay" && autoStart) {
-				const restart = await restartRelayDaemon({ cdpUrl, lease, signal: opts.signal });
-				lease = restart.lease;
-				if (restart.restarted) outcome = await waitForRelayExtension(cdpUrl, opts.signal);
-			} else if (outcome === "idle-older-relay" && autoStart) {
-				// Probe again even when it was kept: another omp may have replaced it since.
-				lease = (await restartRelayDaemon({ cdpUrl, lease, signal: opts.signal, idleOnly: true })).lease;
-				outcome = await waitForRelayExtension(cdpUrl, opts.signal);
-			}
-			if (outcome === "unreachable") {
-				throw new ToolError(
-					`omp browser relay is not reachable at ${cdpUrl}. Start it with \`omp browser-relay\` (or check the endpoint), and make sure the OMP Browser Relay extension is loaded in Chrome.`,
-				);
-			}
-			if (outcome === "no-extension") {
-				throw new ToolError(
-					`omp browser relay is serving at ${cdpUrl} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`,
-				);
-			}
-			if (outcome === "extension-gone") {
-				throw new ToolError(
-					`omp browser relay is serving at ${cdpUrl} but its extension disconnected and has not come back. Open Chrome with the OMP Browser Relay extension and check the toolbar badge shows "on".`,
-				);
-			}
-			if (outcome === "outdated-relay") {
-				throw new ToolError(
-					`The browser relay at ${cdpUrl} is out of date. Restart the relay under this OMP version, then retry.`,
-				);
-			}
-			if (outcome === "outdated-extension") {
-				throw new ToolError(`The OMP Browser Relay extension is out of date. ${UPDATE_RELAY_EXTENSION}`);
-			}
-			const puppeteer = await loadPuppeteer();
-			const browser = await connectPuppeteer(puppeteer, {
-				browserURL: cdpUrl,
-				defaultViewport: null,
-				protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
-			});
-			return {
-				key: browserKey(kind),
-				kind,
-				browser,
-				wsEndpoint: browser.wsEndpoint(),
-				cdpUrl,
-				daemonLease: lease ?? undefined,
-				refCount: 0,
-				stealth: { browserSession: null, override: null },
-			};
-		} catch (err) {
-			await lease?.release();
-			throw err;
+		// The omp extension's native host serves the relay while Chrome runs; nothing here starts it.
+		let outcome = await waitForRelayExtension(cdpUrl, opts.signal);
+		// A host from an older omp keeps serving across upgrades. Restart an incompatible one from the installed omp,
+		// and a compatible older one only while no CDP client uses it; an older one that stays is still usable.
+		if ((outcome === "outdated-relay" || outcome === "idle-older-relay") && opts.restartRelay !== false) {
+			const idleOnly = outcome === "idle-older-relay";
+			if (await requestRelayRestart(cdpUrl, { idleOnly, signal: opts.signal }))
+				outcome = await waitForRelayExtension(cdpUrl, opts.signal, { restarted: true });
 		}
+		if (outcome === "unreachable") {
+			throw new ToolError(
+				`Nothing serves the omp browser relay at ${cdpUrl}: Chrome is not running with the omp extension. Open Chrome; if the extension is loaded, run \`omp browser-relay install\` to register its native host.`,
+			);
+		}
+		if (outcome === "no-extension") {
+			throw new ToolError(
+				`The omp browser relay at ${cdpUrl} is up, but its browser never said hello. Reload the omp extension in Chrome.`,
+			);
+		}
+		if (outcome === "outdated-relay") {
+			throw new ToolError(
+				`The browser relay at ${cdpUrl} comes from an older omp. Run \`omp browser-relay install\` with this omp, then reload the omp extension in Chrome.`,
+			);
+		}
+		if (outcome === "outdated-extension") {
+			throw new ToolError(`The omp extension is out of date. ${UPDATE_RELAY_EXTENSION}`);
+		}
+		const puppeteer = await loadPuppeteer();
+		const browser = await connectPuppeteer(puppeteer, {
+			browserURL: cdpUrl,
+			defaultViewport: null,
+			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+		});
+		return {
+			key: browserKey(kind),
+			kind,
+			browser,
+			wsEndpoint: browser.wsEndpoint(),
+			cdpUrl,
+			refCount: 0,
+			stealth: { browserSession: null, override: null },
+		};
 	}
 
 	const exe = kind.path;

@@ -13,7 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
+import { MCPTool } from "../../src/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types";
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
@@ -287,7 +287,7 @@ describe("MCP fallback and prompt formatting", () => {
 		expect(formatApprovalPrompt(subject, {}, undefined)).toBe("Allow tool: mcp__server__safe");
 	});
 
-	it("shows decoded manifests through MCP registrations, MCP fallback, and device writes", () => {
+	it("shows decoded manifests through MCP registrations and MCP fallback", () => {
 		const args = {
 			context: "some-context",
 			resource: "apiVersion: v1\nkind: Pod\nmetadata:\n  name: probe\n  namespace: probe-ns",
@@ -295,8 +295,6 @@ describe("MCP fallback and prompt formatting", () => {
 		const definition: MCPToolDefinition = { name: "apply", inputSchema: { type: "object" } };
 		const connection = { name: "kubernetes" } as MCPServerConnection;
 		const eager = new MCPTool(connection, definition);
-		const deferred = new DeferredMCPTool("kubernetes", definition, async () => connection);
-		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
 		const expected = [
 			"Arguments:",
 			"{",
@@ -312,9 +310,7 @@ describe("MCP fallback and prompt formatting", () => {
 		].join("\n");
 		const cases: { subject: ApprovalTool; args: unknown }[] = [
 			{ subject: eager, args },
-			{ subject: deferred, args },
 			{ subject: tool(eager.name), args },
-			{ subject: writeTool, args: { path: `xd://${eager.name}`, content: JSON.stringify(args) } },
 		];
 		for (const entry of cases) {
 			expect(formatApprovalPrompt(entry.subject, entry.args)).toContain(expected);
@@ -353,14 +349,6 @@ describe("MCP fallback and prompt formatting", () => {
 		).toContain("Custom details");
 	});
 
-	it("shows empty and null JSON device payloads while omitting absent direct MCP arguments", () => {
-		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
-		for (const content of ["{}", "[]", "null"]) {
-			expect(formatApprovalPrompt(writeTool, { path: "XD://run", content })).toContain(`Arguments:\n${content}`);
-		}
-		expect(formatApprovalPrompt(tool("mcp__server__run"), undefined)).not.toContain("Arguments:");
-	});
-
 	it("regular file write keeps Path and Content lines unchanged", () => {
 		const session = { cwd: "." } as ToolSession;
 		const writeTool = new WriteTool(session);
@@ -371,17 +359,7 @@ describe("MCP fallback and prompt formatting", () => {
 		expect(details).toEqual(["Path: src/main.ts", 'Content:\n{"script":"first\\nsecond"}']);
 	});
 
-	it("falls back to raw Content for xd:// write with non-JSON content", () => {
-		const session = { cwd: "." } as ToolSession;
-		const writeTool = new WriteTool(session);
-		const details = writeTool.formatApprovalDetails({
-			path: "xd://some_device",
-			content: "not-json-content",
-		});
-		expect(details).toEqual(["Path: xd://some_device", "Content:\nnot-json-content"]);
-	});
-
-	it("caps large device argument payloads at prompt truncation limit", () => {
+	it("caps large argument payloads at prompt truncation limit", () => {
 		const longScript = "echo test\n".repeat(300);
 		const subject = tool("mcp__server__eval");
 		const prompt = formatApprovalPrompt(subject, { script: longScript });
@@ -443,56 +421,6 @@ describe("MCP fallback and prompt formatting", () => {
 		const input = sloppySection("src/config.go", "[local://notes]", "updated");
 		expect(editTool.approval?.({ input })).toBe("write");
 		expect(formatApprovalPrompt(editTool, { input })).toBe("Allow tool: edit\nFile: src/config.go");
-	});
-});
-
-describe("decision policyKey scopes user policy to a sub-tool", () => {
-	// The write tool reports this decision for an `xd://knowledge_search` dispatch:
-	// the tier comes from the mounted tool, and the policyKey makes the user
-	// override key on the device instead of the invoking `write` tool (#7923).
-	const dispatch = tool("write", { tier: "exec", policyKey: "knowledge_search" });
-
-	it("consults tools.approval.<policyKey> for the user override", () => {
-		expect(resolveApproval(dispatch, {}, "always-ask", { knowledge_search: "allow" })).toMatchObject({
-			policy: "allow",
-			source: "user",
-			policyKey: "knowledge_search",
-		});
-		expect(resolveApproval(dispatch, {}, "always-ask", { knowledge_search: "prompt" }).policy).toBe("prompt");
-		expect(resolveApproval(dispatch, {}, "always-ask", { knowledge_search: "deny" }).policy).toBe("deny");
-	});
-
-	it("falls back to the invoking tool's own policy when the keyed one is unset", () => {
-		expect(resolveApproval(dispatch, {}, "always-ask", { write: "allow" }).policy).toBe("allow");
-		expect(resolveApproval(dispatch, {}, "always-ask", { write: "prompt" }).policy).toBe("prompt");
-		expect(resolveApproval(dispatch, {}, "always-ask", { write: "deny" }).policy).toBe("deny");
-	});
-
-	it("device policy wins over the invoking tool's policy", () => {
-		expect(resolveApproval(dispatch, {}, "always-ask", { write: "prompt", knowledge_search: "allow" }).policy).toBe(
-			"allow",
-		);
-		expect(resolveApproval(dispatch, {}, "always-ask", { write: "allow", knowledge_search: "deny" }).policy).toBe(
-			"deny",
-		);
-	});
-
-	it("names the policy key in user-deny refusals", () => {
-		expect(() => requiresApproval(dispatch, {}, "always-ask", { knowledge_search: "deny" })).toThrow(
-			'Tool "knowledge_search" is blocked by user policy',
-		);
-		expect(() => requiresApproval(dispatch, {}, "always-ask", { knowledge_search: "deny" })).toThrow(
-			'remove "tools.approval.knowledge_search: deny"',
-		);
-		expect(() => requiresApproval(dispatch, {}, "always-ask", { write: "deny" })).toThrow(
-			'remove "tools.approval.write: deny"',
-		);
-	});
-
-	it("does not change resolution for tools without a policyKey", () => {
-		const plain = tool("write", "exec");
-		expect(resolveApproval(plain, {}, "always-ask", { write: "allow" }).policy).toBe("allow");
-		expect(resolveApproval(plain, {}, "always-ask", { knowledge_search: "allow" }).policy).toBe("prompt");
 	});
 });
 
@@ -776,6 +704,16 @@ describe("tool-owned dynamic approval declarations", () => {
 		]) {
 			expect(bashApproval(command, settingsOverrides)).toBe("exec");
 		}
+		expect(
+			bashApproval("LD_PRELOAD=/tmp/evil.so make", {
+				"bash.patterns": [{ match: "*", approval: "allow" }],
+			}),
+		).toBe("exec");
+		expect(
+			bashApproval("FOO=1 make build", {
+				"bash.patterns": [{ match: "FOO=1 make*", approval: "allow" }],
+			}),
+		).toEqual({ tier: "write", policy: "allow" });
 
 		// Leading env assignments cannot bypass deny or prompt rules.
 		for (const command of ["FOO=1 BAR=2 rm -rf build", "true && FOO=1 rm -rf build"]) {
@@ -792,6 +730,47 @@ describe("tool-owned dynamic approval declarations", () => {
 			policy: "prompt",
 			reason: "Prompt required by bash pattern: curl *",
 		});
+	});
+
+	it("allows leading environment assignments on compound && segments when permitted by bash.allowedEnvVars or rule.env", () => {
+		const settingsOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.allowedEnvVars": ["GOWORK", "GOOS", "GOARCH", "CGO_ENABLED", "CARGO_TARGET_DIR"],
+			"bash.patterns": [
+				{ match: "git status*", approval: "allow" },
+				{ match: "go tool golangci-lint*", approval: "allow" },
+				{ match: "go test*", approval: "allow" },
+				{ match: "go vet*", approval: "allow" },
+				{ match: "make lint*", approval: "allow" },
+				{ match: "bun run build:native*", approval: "allow", env: ["CMAKE_GENERATOR"] },
+			],
+		};
+
+		for (const command of [
+			"git status --short && GOWORK=off go vet ./tests/endpoints/... ./cmd/... ./api/... ./internal/... ./pkg/...",
+			"go tool golangci-lint fmt ./cmd/... ./tests/... && go test -race ./cmd/addr-api/controllers/... && GOWORK=off go vet ./tests/endpoints/... && make lint",
+			'CARGO_TARGET_DIR="/tmp/target dir" CMAKE_GENERATOR=Ninja bun run build:native && git status --short',
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+		}
+
+		// Unlisted env vars, bare assignments, subscripted/quoted assignment names, and assignments before
+		// stateful builtins or interpreters must not auto-allow in a compound chain.
+		for (const command of [
+			"git status --short && LD_PRELOAD=/tmp/evil.so go vet ./...",
+			"git status --short && GOWORK=off LD_PRELOAD=/tmp/evil.so go vet ./...",
+			"git status --short && CMAKE_GENERATOR=Ninja go vet ./...",
+			"GOWORK=off && go vet ./...",
+			"GOWORK=off : && go vet ./...",
+			"GOWORK=off cd /tmp && go vet ./...",
+			"GOWORK=off env go vet ./... && git status --short",
+			"'GOWORK'=off go vet ./... && git status --short",
+			"'BASH_CMDS[go]'=/tmp/evil go vet ./... && git status --short",
+			"git status --short && go vet GOWORK=off ./...",
+			"git -c alias.x='!touch /tmp/pwn; printf ok' x && git status --short",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		}
 	});
 
 	it("matches bash.allowedEnvVars entries as exact names, never as wildcards", () => {
@@ -886,6 +865,38 @@ describe("tool-owned dynamic approval declarations", () => {
 			"cargo bench --manifest-path layers/layer3/Cargo.toml --bench standardized_criterion -- --full '^layer3/write/file-wal/batch-(10|1000|10000)$'";
 
 		expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+	});
+
+	it("does not treat spaces inside quoted prose or hyphen-prefixed bullets as -c/-e reinterpret flags", () => {
+		const settingsOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "git add*", approval: "allow" },
+				{ match: "git commit*", approval: "allow" },
+			],
+		};
+
+		for (const command of [
+			'git commit -m "docs: note limit" -m "Caps rendering at 50 per page; replacing inline math keeps it clean."',
+			'git commit -m "fix(stats): address review" -m "Restore indexing (~18:30-18:37 UTC)"',
+			'git add -A && git commit -m "fix(stats): address review" -m "- Route fork upserts so new outcomes merge"',
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+		}
+
+		// Genuine short-option clusters containing -c/-e still block a matching allow rule when paired with shell control chars.
+		const permissiveGitOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [{ match: "git *", approval: "allow" }],
+		};
+		for (const command of [
+			"git -c alias.x='!touch /tmp/pwn; printf ok' x",
+			"git -ec alias.x='!touch /tmp/pwn; printf ok' x",
+			"git add -A && git -c alias.x='!touch /tmp/pwn; printf ok' x",
+			"git -\\\nc alias.x='!touch /tmp/pwn; printf ok' x",
+		]) {
+			expect(bashApproval(command, permissiveGitOverrides)).toBe("exec");
+		}
 	});
 
 	it("opts into per-segment allows for literal && chains, including quoted arguments", () => {
@@ -1288,6 +1299,32 @@ describe("tool-owned dynamic approval declarations", () => {
 			"Allow tool: bash",
 			"Command:",
 			"  ? echo hi > /tmp/out (requires approval)",
+			"  ✓ git status (allowed: git status*)",
+		]);
+
+		// Leading env assignments permitted by bash.allowedEnvVars or rule.env mark the segment covered,
+		// while unlisted leading env assignments prompt without tainting subsequent segments.
+		const envBash = createBashTool({
+			"bash.allowCompoundCommands": true,
+			"bash.allowedEnvVars": ["GOWORK"],
+			"bash.patterns": [
+				{ match: "git status*", approval: "allow" },
+				{ match: "go vet*", approval: "allow" },
+				{ match: "bun run build:native*", approval: "allow", env: ["CMAKE_GENERATOR"] },
+			],
+		});
+		expect(
+			formatApprovalPrompt(envBash, {
+				command:
+					"git status --short && GOWORK=off go vet ./tests/endpoints/... && CMAKE_GENERATOR=Ninja bun run build:native && UNLISTED=1 go vet ./cmd/... && git status",
+			}).split("\n"),
+		).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status --short (allowed: git status*)",
+			"  ✓ GOWORK=off go vet ./tests/endpoints/... (allowed: go vet*)",
+			"  ✓ CMAKE_GENERATOR=Ninja bun run build:native (allowed: bun run build:native*)",
+			"  ? UNLISTED=1 go vet ./cmd/... (requires approval)",
 			"  ✓ git status (allowed: git status*)",
 		]);
 

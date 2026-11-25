@@ -8,7 +8,8 @@
  */
 import { parentPort } from "node:worker_threads";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { getDailyActivity } from "@oh-my-pi/omp-stats/db";
+import { getDailyActivity, readDailyActivity } from "@oh-my-pi/omp-stats/db";
+import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
 import { consumeWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
 import type { StatsActivityWorkerInbound, StatsActivityWorkerOutbound } from "./activity-protocol";
 
@@ -20,11 +21,32 @@ function send(message: StatsActivityWorkerOutbound): void {
 	port.postMessage(message);
 }
 
+/**
+ * The stored rows, read through a connection that never writes so another
+ * process mid-write cannot hold back or fail the heatmap. Null when nothing is
+ * readable yet (no database, or a read that fails on a schema this build does
+ * not know); the sync's own open migrates it before the paint that follows.
+ */
+function readStoredActivity(): DailyActivityPoint[] | null {
+	try {
+		return readDailyActivity();
+	} catch (error) {
+		send({
+			type: "log",
+			level: "debug",
+			msg: "stats activity cached paint skipped",
+			meta: { error: error instanceof Error ? error.message : String(error) },
+		});
+		return null;
+	}
+}
+
 async function handleLoad(id: string): Promise<void> {
 	try {
-		// Whatever the DB already has paints first; the incremental sync then
-		// converges the heatmap on fresh session data.
-		send({ type: "activity", id, points: await getDailyActivity() });
+		// The stored rows paint first; the incremental sync then converges the
+		// heatmap on fresh session data.
+		const cached = readStoredActivity();
+		if (cached) send({ type: "activity", id, points: cached });
 		await syncAllSessions();
 		send({ type: "activity", id, points: await getDailyActivity() });
 		send({ type: "done", id });
@@ -36,9 +58,6 @@ async function handleLoad(id: string): Promise<void> {
 function handle(data: unknown): void {
 	const message = data as StatsActivityWorkerInbound;
 	switch (message.type) {
-		case "ping":
-			send({ type: "pong", id: message.id });
-			return;
 		case "load":
 			void handleLoad(message.id);
 			return;

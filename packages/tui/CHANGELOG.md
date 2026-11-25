@@ -2603,25 +2603,28 @@
 - Skipped native syntax highlighting for transient markdown streaming renders, including nested list code blocks, leaving code blocks plain until their content stabilizes to avoid main-thread highlighter spikes.
 
 ## [15.11.1] - 2026-06-11
+## [19.2.0] - 2026-11-25
 
 ### Added
 
-- Added `TUI.requestComponentRender(component)` to schedule component-scoped renders for self-contained updates
+- Added `@oh-my-pi/pi-tui`, a terminal UI with a unified Tern Surface Protocol node tree, native and terminal rendering, reactive signals, compiler-free JSX, role-based painters and widgets, terminal input and capability support, multiplexer and image handling, resize policies, notifications, Markdown and text utilities, themes, and terminal testing utilities.
+- Added checkout event support to TSP connections and hosts.
+- Added `label` to editor terminal decoration ranges: replacement text drawn in place of a range on rows where it fits and the caret is outside it.
 
 ### Changed
 
-- Changed the render pipeline to reuse only affected root subtrees for component-scoped updates, avoiding full-tree compose when animations or other isolated component changes occur
+- Hosts now report when the terminal displays the checkout itself through `checkoutShown`.
+- Theme files are polled for changes, keeping live reload working when editors replace files during save.
+- Terminal animations now skip unchanged frames and share redraws with streaming content; shimmer motion runs at 20 fps.
 
 ### Fixed
 
-- Fixed component-scoped renders to preserve prior live scrollback seam data for skipped root children, preventing duplicate or missing rows during spinner-only updates
-- Reported committed native scrollback row counts to interested child components so immutable history can be skipped without breaking live-region commit bookkeeping.
-- Fixed `ProcessTerminal` treating asynchronous stdout `EIO` errors as uncaught exceptions: stdout `error` events now mark the terminal dead, disable future renders, and keep the active session process alive ([#2284](https://github.com/can1357/oh-my-pi/issues/2284)).
-
-## [15.11.0] - 2026-06-10
-
-### Added
-
-- Added support for asynchronous `onSubmit` handlers by allowing the callback to return a `Promise<void>`
-
-Older entries are archived in [packages/tui/CHANGELOG.md@a95c0a0773af](https://github.com/can1357/oh-my-pi/blob/a95c0a0773afdfdc7f1f40ef21e79af46c86c11e/packages/tui/CHANGELOG.md).
+- Fixed streaming Tern content being unnecessarily redrawn as newly inserted when content above it changes.
+- Fixed keyboard events used to open a page from being delivered to the newly opened page as well.
+- Fixed detection of LaTeX blocks beginning with `\begin`.
+- Fixed Cmd+A selection in terminal-forwarded editors and inputs so typing, deletion, and paste replace the selected text.
+- Fixed native overlays losing alignment with their anchored fields when the fields move or share local keys.
+- Fixed native menu and tree interactions being delivered to the wrong control or branch, and prevented clicks behind modal sheets from moving focus outside the modal.
+- Fixed terminal-row modal sheets allowing interaction with the content behind them, incorrect click and hover targets after scrolling, and mouse settings not being restored after closing fullscreen views.
+- Fixed terminal replies leaking into the shell prompt after returning from a native session, including after fatal errors.
+- Improved handling of large Tern transcript redraws when resuming sessions or returning from a subagent view.

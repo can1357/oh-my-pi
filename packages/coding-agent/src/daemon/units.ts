@@ -10,14 +10,9 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import {
-	truncateHead,
-	truncateHeadBytes,
-	truncateTail,
-	truncateTailBytes,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import type { DaemonReadySpec } from "@oh-my-pi/pi-tui/tools/daemon";
-import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../tools/streaming-output";
+import type { DaemonReadySpec } from "./daemon-types";
+import { isEnoent, logger, sanitizeText, withTimeout } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
@@ -31,7 +26,6 @@ import {
 	DAEMON_OUTPUT_PATTERN_FLAGS,
 	DAEMON_PTY_COLUMNS,
 	DAEMON_PTY_ROWS,
-	DAEMON_RESUME_LEASE_GRACE_MS,
 	type DaemonCompletionEvent,
 	type DaemonEvent,
 	type DaemonLogs,
@@ -94,6 +88,8 @@ export interface UnitTableOptions {
 	modules: readonly DaemonModule[];
 	/** Started from a re-exec: restore `survive: "exec"` units and hold idle timers for the grace period. */
 	resumed: boolean;
+	/** How long dropped and restored leases are waited for before idle timers resume (`DAEMON_RESUME_LEASE_GRACE_MS` by default). */
+	leaseGraceMs: number;
 	/** Any unit became live or terminal; the server re-evaluates its own idle exit. */
 	onLivenessChange(): void;
 }
@@ -445,6 +441,7 @@ export class UnitTable {
 	readonly #modules = new Map<string, DaemonModule>();
 	readonly #contexts = new Map<string, ModuleContext>();
 	readonly #resumed: boolean;
+	readonly #leaseGraceMs: number;
 	readonly #onLivenessChange: () => void;
 	readonly #units = new Map<string, UnitEntry>();
 	readonly #byIdentity = new Map<string, UnitEntry>();
@@ -467,6 +464,7 @@ export class UnitTable {
 	constructor(options: UnitTableOptions) {
 		this.#store = options.store;
 		this.#resumed = options.resumed;
+		this.#leaseGraceMs = options.leaseGraceMs;
 		this.#onLivenessChange = options.onLivenessChange;
 		for (const module of options.modules) this.#modules.set(module.kind, module);
 	}
@@ -488,9 +486,9 @@ export class UnitTable {
 			}
 		}
 		if (this.#resumed) {
-			this.#holdIdleUntil = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
+			this.#holdIdleUntil = Date.now() + this.#leaseGraceMs;
 			// The daemon's own idle exit is held too; look again once the grace ends.
-			setTimeout(() => this.#onLivenessChange(), DAEMON_RESUME_LEASE_GRACE_MS + 50);
+			setTimeout(() => this.#onLivenessChange(), this.#leaseGraceMs + 50);
 			for (const fd of this.#readInheritedFds()) this.#inheritedFds.add(fd);
 		}
 		this.#store.setMeta(INHERITED_FDS_META, "[]");
@@ -588,6 +586,11 @@ export class UnitTable {
 		entry.lastUsed = Date.now();
 		let lease: string | undefined;
 		if (request.lease !== false) lease = this.#addLease(entry, connection);
+		// The connection closed while this open waited for the unit, so `disconnected` already ran without this lease.
+		if (lease !== undefined && connection.closed) {
+			this.#dropConnectionLeases(connection.client.connectionId);
+			lease = undefined;
+		}
 		if (request.awaitReady !== false) {
 			try {
 				if (entry.procRuntime && entry.proc?.ready) {
@@ -954,14 +957,7 @@ export class UnitTable {
 	disconnected(connection: UnitConnection): void {
 		const connectionId = connection.client.connectionId;
 		this.#watchers.delete(connection);
-		// A dropped connection is not a release: give its client time to reconnect and retake the lease.
-		const graceUntil = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
-		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
-			const entry = this.#leases.get(leaseId)?.entry;
-			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
-			this.#dropLease(leaseId);
-		}
-		this.#connectionLeases.delete(connectionId);
+		this.#dropConnectionLeases(connectionId);
 		for (const [owner, registration] of this.#ownerConnections) {
 			if (registration.connection.client.connectionId === connectionId) this.#ownerConnections.delete(owner);
 		}
@@ -1497,6 +1493,17 @@ export class UnitTable {
 		this.#evaluateIdle(entry);
 		this.#emit(entry);
 		return leaseId;
+	}
+
+	/** Drop a lost connection's leases. Not a release: each unit waits out the reconnect grace before idling. */
+	#dropConnectionLeases(connectionId: string): void {
+		const graceUntil = Date.now() + this.#leaseGraceMs;
+		for (const leaseId of this.#connectionLeases.get(connectionId) ?? []) {
+			const entry = this.#leases.get(leaseId)?.entry;
+			if (entry) entry.idleNotBefore = Math.max(entry.idleNotBefore ?? 0, graceUntil);
+			this.#dropLease(leaseId);
+		}
+		this.#connectionLeases.delete(connectionId);
 	}
 
 	#dropLease(leaseId: string): void {
@@ -2044,7 +2051,8 @@ export class UnitTable {
 			} catch (error) {
 				logger.warn("Module unit stop failed", { id: entry.snapshot.id, error: errorMessage(error) });
 			}
-			await Promise.race([unit.exited.catch(() => undefined), Bun.sleep(timeoutMs + 1_000)]);
+			// Not a bare sleep race: its pending timer would hold a shut-down daemon open for the full timeout.
+			await withTimeout(unit.exited, timeoutMs + 1_000, "module unit exit timed out").catch(() => {});
 			this.#settleModule(entry, unit, undefined, reason);
 			return;
 		}
@@ -2215,7 +2223,7 @@ export class UnitTable {
 			}
 			entry.snapshot.supervised = false;
 			// Its clients' leases died with the last daemon: give them time to reconnect and retake them.
-			entry.idleNotBefore = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
+			entry.idleNotBefore = Date.now() + this.#leaseGraceMs;
 			runtime.notify = this.#armNotify(entry);
 			if (proc.ready?.port !== undefined && entry.snapshot.state !== "ready") {
 				void this.#pollPort(entry, runtime.launch, proc.ready);

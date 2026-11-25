@@ -11,7 +11,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { readBinary } from "@oh-my-pi/pi-coding-agent/tools/read-binary";
 import { parseSel } from "@oh-my-pi/pi-coding-agent/tools/read-selector";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/read";
 
 /** One __TEXT segment, one section and LC_MAIN; arm64 and x86_64 share the same layout. */
 function macho(cpu = 0x0100000c): Buffer {
@@ -261,6 +261,18 @@ describe("on-disk executable metadata", () => {
 		);
 	});
 
+	it("labels a database file with its owning backend and extension", async () => {
+		const cases: Array<[string, string]> = [
+			["saved.i64", "IDA database (.i64)"],
+			["saved.IDB", "IDA database (.idb)"],
+			["saved.bndb", "Binary Ninja database (.bndb)"],
+		];
+		for (const [name, heading] of cases) {
+			const { text } = await readBinaryMetadata(await fixture(Buffer.alloc(8), name));
+			expect(text).toBe(`${heading}\nfile size 8 bytes; database not opened`);
+		}
+	});
+
 	const malformed: Array<[string, () => Buffer, string]> = [
 		["short ELF header", () => elf().subarray(0, 32), "truncated header"],
 		[
@@ -443,7 +455,7 @@ describe("read metadata and explicit analysis boundary", () => {
 				parseSel(undefined),
 			);
 			expect(textOutput(full)).toContain("sample.bin:overview");
-			expect(textOutput(full)).toContain("xd://eval/dsm");
+			expect(textOutput(full)).toContain("help://eval/dsm");
 			expect(acquire).not.toHaveBeenCalled();
 		} finally {
 			acquire.mockRestore();

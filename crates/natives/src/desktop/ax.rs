@@ -215,7 +215,7 @@ struct Registered {
 
 pub struct AxRegistry {
 	next_ref:    u64,
-	generations: HashMap<String, u64>,
+	generations: HashMap<String, WindowRefState>,
 	entries:     HashMap<u64, Registered>,
 	/// Ref of each element registered under each target, so an element read
 	/// again keeps its ref.
@@ -233,12 +233,50 @@ impl Default for AxRegistry {
 	}
 }
 
+#[derive(Default)]
+struct WindowRefState {
+	generation: u64,
+	minimized:  bool,
+	/// The ref to the last exact root, if that read registered it. This never
+	/// retains an AX object beyond the registry's normal lifetime.
+	root_ref:   Option<u64>,
+}
+
 impl AxRegistry {
+	fn window_read(&mut self, target: &str, snapshot: bool) -> &mut WindowRefState {
+		let read = self.generations.entry(target.to_owned()).or_default();
+		if snapshot {
+			read.generation = read.generation.saturating_add(1);
+		} else {
+			read.generation = read.generation.max(1);
+		}
+		read
+	}
+
+	/// A minimized read locks the window's refs at once; only
+	/// [`Self::finish_visible_read`] unlocks them, so a visible read that fails
+	/// or reads no tree leaves refs from the minimized read inspection-only.
+	fn begin_read(&mut self, window: &WindowRoot, snapshot: bool) -> u64 {
+		let read = self.window_read(&window.id, snapshot);
+		if matches!(window.state, RootState::Minimized) {
+			read.minimized = true;
+		}
+		read.generation
+	}
+
+	/// Marks `window`'s refs actionable after a visible read produced its tree.
+	fn finish_visible_read(&mut self, window: &WindowRoot) {
+		if !matches!(window.state, RootState::Minimized)
+			&& let Some(read) = self.generations.get_mut(&window.id)
+		{
+			read.minimized = false;
+		}
+	}
+
 	/// Starts a snapshot of `target`, returning its generation.
+	#[cfg(test)]
 	pub(crate) fn begin_snapshot(&mut self, target: &str) -> u64 {
-		let generation = self.generations.entry(target.to_string()).or_default();
-		*generation = generation.saturating_add(1);
-		*generation
+		self.window_read(target, true).generation
 	}
 
 	/// Ends `target`'s snapshot `generation` once it has registered its
@@ -251,7 +289,7 @@ impl AxRegistry {
 	}
 
 	pub(crate) fn current_generation(&mut self, target: &str) -> u64 {
-		*self.generations.entry(target.to_string()).or_insert(1)
+		self.window_read(target, false).generation
 	}
 
 	/// Returns the element's ref under `target`, minting one the first time it
@@ -346,6 +384,40 @@ impl AxRegistry {
 
 	pub(crate) fn target(&self, reference: &str) -> CoreResult<String> {
 		self.entry(reference).map(|entry| entry.target_key.clone())
+	}
+
+	fn remember_root(&mut self, window: &WindowRoot) {
+		if let Some(read) = self.generations.get_mut(&window.id) {
+			read.root_ref = self
+				.refs
+				.get(&window.id)
+				.and_then(|refs| refs.get(&window.element))
+				.copied();
+		}
+	}
+
+	pub(super) fn retained_root(&self, id: &str) -> Option<&AxHandle> {
+		let reference = self.generations.get(id)?.root_ref?;
+		Some(&self.entries.get(&reference)?.handle)
+	}
+
+	/// Child and parent refs inherit their window's target key too. A fresh
+	/// visible read, not an action through a minimized tree, makes them usable
+	/// for input again.
+	pub(super) fn require_actionable(&self, reference: &str) -> CoreResult<()> {
+		if let Ok(entry) = self.entry(reference)
+			&& self
+				.generations
+				.get(&entry.target_key)
+				.is_some_and(|read| read.minimized)
+		{
+			let target = &entry.target_key;
+			return Err(DesktopError::window_unavailable(format!(
+				"window '{target}' was read while minimized; restore it and read it again before \
+				 sending input"
+			)));
+		}
+		Ok(())
 	}
 
 	/// Whether `reference` was read with an identity that can name its
@@ -1087,10 +1159,42 @@ pub fn node_to_napi(reference: String, props: AxProps) -> AxNode {
 	}
 }
 
+/// The exact accessibility root for a read. A minimized root has an identity
+/// but no on-screen frame that could authorize pointer or keyboard input.
+pub struct WindowRoot {
+	pub id:      String,
+	pub app:     String,
+	pub state:   RootState,
+	pub element: AxHandle,
+}
+
+pub enum RootState {
+	Visible {
+		focused: bool,
+	},
+	#[cfg_attr(
+		not(target_os = "macos"),
+		allow(dead_code, reason = "only the macOS backend reads minimized windows")
+	)]
+	Minimized,
+}
+
+impl WindowRoot {
+	pub(super) fn listed(backend: &mut dyn AxBackend, window: DesktopWindow) -> CoreResult<Self> {
+		let element = backend.window_root(&window)?;
+		Ok(Self {
+			id: window.id,
+			app: window.app,
+			state: RootState::Visible { focused: window.focused },
+			element,
+		})
+	}
+}
+
 fn format_tree(
 	node: WalkNode,
 	depth: usize,
-	window: &DesktopWindow,
+	window: &WindowRoot,
 	focus: &mut AppFocus,
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -1103,9 +1207,13 @@ fn format_tree(
 	// The root's own AXFocused only reflects app-local focus; report the global
 	// roster flag instead.
 	let (app, focused) = if depth == 0 {
-		(Some(window.app.as_str()), window.focused)
+		(Some(window.app.as_str()), matches!(window.state, RootState::Visible { focused: true }))
 	} else {
-		(None, focus.holds(backend, &node.handle, &node.props))
+		(
+			None,
+			!matches!(window.state, RootState::Minimized)
+				&& focus.holds(backend, &node.handle, &node.props),
+		)
 	};
 	let reference =
 		identities.register(backend, registry, target, generation, node.handle, &node.props);
@@ -1114,6 +1222,9 @@ fn format_tree(
 	}
 	text.push_str(&"  ".repeat(depth));
 	write_line(text, &node.props, &reference, app, focused, node.writable);
+	if depth == 0 && matches!(window.state, RootState::Minimized) {
+		text.push_str(" (minimized)");
+	}
 	*nodes += 1;
 	for child in node.children {
 		format_tree(
@@ -1193,15 +1304,15 @@ pub fn element_line(
 	Ok(line)
 }
 
-pub fn snapshot(
+pub(super) fn snapshot(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
-	window: &DesktopWindow,
+	window: &WindowRoot,
 	options: &AxSnapshotOptions,
 ) -> CoreResult<AxSnapshot> {
 	let target = &window.id;
-	let generation = registry.begin_snapshot(target);
-	let root = backend.window_root(window)?;
+	let generation = registry.begin_read(window, true);
+	let root = &window.element;
 	let mut state = WalkState::new(
 		options.max_nodes.unwrap_or(800).max(1),
 		options.max_depth.unwrap_or(24),
@@ -1209,7 +1320,10 @@ pub fn snapshot(
 	)
 	.line_states();
 	let tree = walk_raw(backend, root.clone(), 0, false, &mut state)?;
-	let identities = ReadIdentities::new(&root, tree.as_ref(), &state);
+	if tree.is_some() {
+		registry.finish_visible_read(window);
+	}
+	let identities = ReadIdentities::new(root, tree.as_ref(), &state);
 	let root = tree.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
 	let mut text = String::new();
 	let mut node_count = 0;
@@ -1229,6 +1343,7 @@ pub fn snapshot(
 		);
 	}
 	registry.end_snapshot(target, generation);
+	registry.remember_root(window);
 	if state.truncated {
 		if !text.is_empty() {
 			text.push('\n');
@@ -1246,7 +1361,7 @@ pub fn snapshot(
 		}
 		let _ = write!(text, "… skipped {} unreadable nodes", state.skipped);
 	}
-	Ok(AxSnapshot { text, node_count, truncated: state.truncated })
+	Ok(AxSnapshot { text, node_count, truncated: state.truncated, covered: false })
 }
 
 /// How many elements `find()` reads; bounds its work.
@@ -1274,20 +1389,21 @@ fn matches_role(props: &AxProps, query: &str, compact: &str) -> bool {
 					.any(|&(alias, role)| compact == alias && printed == role)))
 }
 
-pub fn query(
+pub(super) fn query(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
-	window: &DesktopWindow,
+	window: &WindowRoot,
 	query: &AxQuery,
 ) -> CoreResult<Vec<AxNode>> {
 	let target = &window.id;
-	let generation = registry.current_generation(target);
-	let root = backend.window_root(window)?;
+	let generation = registry.begin_read(window, false);
+	let root = &window.element;
 	let mut state = WalkState::new(FIND_MAX_NODES, FIND_MAX_DEPTH, WalkBounds::Read);
 	let Some(tree) = walk_raw(backend, root.clone(), 0, false, &mut state)? else {
 		return Ok(Vec::new());
 	};
-	let identities = ReadIdentities::new(&root, Some(&tree), &state);
+	registry.finish_visible_read(window);
+	let identities = ReadIdentities::new(root, Some(&tree), &state);
 	let role = query.role.as_deref().map(str::to_lowercase);
 	let compact_role = role
 		.as_deref()
@@ -1310,7 +1426,8 @@ pub fn query(
 			&& contains(node.props.value.as_deref(), value.as_ref())
 		{
 			let mut props = node.props;
-			props.focused = focus.holds(backend, &node.handle, &props);
+			props.focused = !matches!(window.state, RootState::Minimized)
+				&& focus.holds(backend, &node.handle, &props);
 			let reference =
 				identities.register(backend, registry, target, generation, node.handle, &props);
 			result.push(node_to_napi(reference, props));
@@ -1319,6 +1436,7 @@ pub fn query(
 			}
 		}
 	}
+	registry.remember_root(window);
 	Ok(result)
 }
 
@@ -1846,6 +1964,19 @@ pub(crate) fn truncate_chars(value: String, max: usize) -> String {
 	result
 }
 
+/// A number as `Display` writes it, or in scientific notation where that would
+/// run past 24 characters (`f64::MAX` has 309 digits), the longest an `f64`
+/// takes in scientific notation: an extreme value an app publishes stays short.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn bounded_number<T: std::fmt::Display + std::fmt::LowerExp>(value: T) -> String {
+	let text = value.to_string();
+	if text.len() <= 24 {
+		text
+	} else {
+		format!("{value:e}")
+	}
+}
+
 /// Query aliases extend the vocabulary without changing printed roles or their
 /// substring matches.
 const ROLE_ALIASES: &[(&str, &str)] = &[("radiobutton", "radio")];
@@ -2019,6 +2150,26 @@ mod tests {
 	use std::collections::{HashMap, HashSet};
 
 	use super::*;
+
+	fn snapshot(
+		backend: &mut dyn AxBackend,
+		registry: &mut AxRegistry,
+		window: &DesktopWindow,
+		options: &AxSnapshotOptions,
+	) -> CoreResult<AxSnapshot> {
+		let root = WindowRoot::listed(backend, window.clone())?;
+		super::snapshot(backend, registry, &root, options)
+	}
+
+	fn query(
+		backend: &mut dyn AxBackend,
+		registry: &mut AxRegistry,
+		window: &DesktopWindow,
+		query: &AxQuery,
+	) -> CoreResult<Vec<AxNode>> {
+		let root = WindowRoot::listed(backend, window.clone())?;
+		super::query(backend, registry, &root, query)
+	}
 
 	#[derive(Default)]
 	struct Mock {

@@ -4,6 +4,7 @@ import type {
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
+	CursorExecHandlers,
 	Effort,
 	ImageContent,
 	Message,
@@ -120,6 +121,9 @@ export type AgentBeforeModelCall = (
 	signal?: AbortSignal,
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
 
+/** The tool-call shape a {@link SoftToolRequirement} inspects. */
+export type SoftToolCall = { name: string; arguments?: Record<string, unknown> };
+
 /**
  * A soft tool requirement: the host wants `toolName` called before the loop
  * runs other tools or yields, but WITHOUT paying the forced-`toolChoice` cost
@@ -145,10 +149,16 @@ export interface SoftToolRequirement {
 	/**
 	 * Per-call compliance check: a turn satisfies the requirement only when every
 	 * tool call passes. Defaults to `name === toolName`. Lets a host demand a
-	 * specific invocation shape (e.g. `write` targeting a virtual device path)
-	 * instead of any call to `toolName`. Escalation still forces `toolName`.
+	 * specific invocation shape (e.g. a `bash` call running a particular tool
+	 * command) instead of any call to `toolName`. Escalation still forces `toolName`.
 	 */
-	satisfies?(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean;
+	satisfies?(toolCall: SoftToolCall): boolean;
+	/**
+	 * Skipped-result text for a call to `toolName` that fails `satisfies`. Without
+	 * it, that call gets the generic notice asking for a `toolName` call, which
+	 * repeats the call the model just made instead of naming the invocation needed.
+	 */
+	unsatisfiedNotice?(toolCall: SoftToolCall): string;
 	/** Host-owned reminder messages, injected once per `id` activation. */
 	reminder: AgentMessage[];
 }
@@ -189,6 +199,8 @@ export interface SteeringQueueState {
  * Configuration for the agent loop.
  */
 export interface AgentLoopConfig extends SimpleStreamOptions {
+	/** Resolve the host bridge only when dispatching to the Cursor transport. */
+	loadCursorExecHandlers?: () => Promise<CursorExecHandlers>;
 	model: Model;
 
 	/** Reports whether this loop has reached a safe process-pause boundary. */
@@ -223,7 +235,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 
 	/**
-	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
+	 * Converts AgentMessage[] to LLM-compatible Message[] for the model receiving this call.
 	 *
 	 * Each AgentMessage must be converted to a UserMessage, AssistantMessage, or ToolResultMessage
 	 * that the LLM can understand. AgentMessages that cannot be converted (e.g., UI-only notifications,
@@ -245,7 +257,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * })
 	 * ```
 	 */
-	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	convertToLlm: (messages: AgentMessage[], model: Model) => Message[] | Promise<Message[]>;
 
 	/**
 	 * Optional transform applied to the context before `convertToLlm`.
@@ -271,7 +283,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * normalization, and append-only context handling, but before telemetry capture
 	 * and provider send.
 	 */
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 
 	/** Remembers sent tool definitions to fill {@link Context.inactiveTools}. */
 	sentToolDefinitions?: SentToolDefinitions;
@@ -326,6 +338,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * {@link getSteeringMessages}.
 	 */
 	waitForSteeringMessages?: (signal?: AbortSignal) => Promise<void>;
+
+	/**
+	 * Aborted just before the host aborts the run when running tools should keep
+	 * their work: raises the active tool batch's cooperative
+	 * {@link ToolCallContext.steeringSignal} (source `"user"`) in either
+	 * {@link interruptMode}, so a tool that can (auto-background bash/eval)
+	 * moves its work into a background job instead of being killed.
+	 */
+	detachSignal?: AbortSignal;
 
 	/**
 	 * Called when live steering dequeues messages via {@link getSteeringMessages}
@@ -452,8 +473,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Resolve a tool call whose name matched no advertised tool (including
 	 * `customWireName` aliases). Lets hosts route calls to tools they expose
-	 * through side transports (e.g. `xd://` device mounts) instead of failing
-	 * with "Tool not found". Returning `undefined` keeps the failure.
+	 * through a side transport (e.g. mounted tool commands run through `bash`)
+	 * instead of failing with "Tool not found". Returning `undefined` keeps the failure.
 	 *
 	 * `advertised` is the very snapshot exact-name dispatch just searched — the
 	 * set offered to THIS request. A host must resolve against it rather than
@@ -465,9 +486,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 	/**
 	 * Names reachable through {@link resolveFallbackTool} but absent from the
-	 * advertised set (e.g. `xd://` device mounts). Consulted only to name a
-	 * plausible target when a call misses, so a mis-transcribed device call is
-	 * recoverable; never a dispatch source.
+	 * advertised set (e.g. mounted tool commands run through `bash`). Consulted
+	 * only to name a plausible target when a call misses, so a mis-transcribed
+	 * command name is recoverable; never a dispatch source.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
 
@@ -634,6 +655,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * post-turn steering.
 	 */
 	onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
+	/** Called synchronously when the loop pushes `turn_end` onto the event stream. */
+	onTurnEndEmitted?: () => void;
 
 	/**
 	 * Called once an assistant message is finalized from the model stream, before
@@ -1087,9 +1110,9 @@ export type ToolTier = "read" | "write" | "exec";
 /**
  * How an enabled tool is presented to the model. `"essential"` tools are exposed
  * as normal top-level tools. `"discoverable"` tools are removed from the top-level
- * schema and either mounted under `xd://` device URLs (when that transport is
- * active) or surfaced through BM25 tool search — keeping their schemas off every
- * request. Selection (settings, `hidden`, `defaultInactive`, explicit `--tools`,
+ * schema and either mounted as a tool command in the `bash` tool (when that
+ * tool is active) or surfaced through BM25 tool search — keeping their schemas
+ * off every request. Selection (settings, `hidden`, `defaultInactive`, explicit `--tools`,
  * provider availability) decides whether a tool is enabled; `loadMode` only
  * decides how an enabled tool is presented.
  */
@@ -1112,11 +1135,6 @@ export type ToolApprovalDecision =
 			reason?: string;
 			override?: boolean;
 			policy?: "allow" | "deny" | "prompt";
-			/** User-policy key for this decision. When set, `tools.approval.<policyKey>`
-			 *  is consulted instead of `tools.approval.<tool.name>`. Lets a dispatcher
-			 *  tool (e.g. `write` for an `xd://` device call) scope user allow/deny/
-			 *  prompt policies to the tool it dispatches into. */
-			policyKey?: string;
 	  };
 export type ToolApproval = ToolApprovalDecision | ((args: unknown, context?: AgentToolContext) => ToolApprovalDecision);
 
@@ -1194,8 +1212,15 @@ export interface AgentTool<
 	 */
 	readonly delegationGuidance?: string;
 	/**
+	 * Whether `command` is traffic this tool must run itself rather than shell work: the transport
+	 * host (`bash`) answers true for a line made only of session tool commands, which nothing else
+	 * can dispatch. A same-name extension replacement routes such a call back here instead of
+	 * executing it, so mounted tools keep working behind an override that does not delegate.
+	 */
+	servesToolCommandLine?(command: string): boolean;
+	/**
 	 * On-demand documentation topics (`topic → markdown`), readable as
-	 * `xd://<tool>/<topic>`. Lets a tool keep large sub-surfaces out of its
+	 * `help://<tool>/<topic>`. Lets a tool keep large sub-surfaces out of its
 	 * description and advertise only a one-line pointer per topic.
 	 */
 	docTopics?(): Readonly<Record<string, string>>;
@@ -1318,6 +1343,12 @@ export interface AgentContext {
 	systemPrompt: string[];
 	messages: AgentMessage[];
 	tools?: AgentTool<any>[];
+	/**
+	 * Inactive tools that may become active later in the conversation. A provider that announces tool changes
+	 * in-band (Anthropic `tool_addition`) declares them from the first request, so activating one leaves the
+	 * cached prefix intact. See {@link SentToolDefinitions.withInactiveTools}.
+	 */
+	standbyTools?: AgentTool<any>[];
 }
 
 /**

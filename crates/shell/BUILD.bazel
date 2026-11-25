@@ -19,6 +19,7 @@ cargo_build_script(
 
 rust_library(
     name = "shell",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(
         ["src/**/*.rs"],
         exclude = ["src/bin/**"],
@@ -54,6 +55,7 @@ rust_library(
 # disposition it was started with.
 rust_binary(
     name = "obash",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/bin/obash/**/*.rs"]),
     aliases = aliases(),
     crate_name = "obash",
@@ -104,6 +106,14 @@ rust_test(
         ":shell",
         "//crates/vfs",
     ],
+)
+
+rust_test(
+    name = "session_commands_test",
+    srcs = ["tests/session_commands.rs"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True) + all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal = True) + all_crate_deps(normal_dev = True) + [":shell"],
 )
 
 rust_test(

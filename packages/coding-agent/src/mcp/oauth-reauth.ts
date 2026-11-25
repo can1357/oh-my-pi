@@ -24,6 +24,7 @@ import {
 	analyzeAuthError,
 	discoverOAuthEndpoints,
 	fetchResourceMetadataScopes,
+	insufficientScopeOf,
 	type OAuthEndpoints,
 } from "./oauth-discovery";
 import {
@@ -341,8 +342,10 @@ export async function reconnectMcpManagerServer(
 	if (!managerConfig) return undefined;
 	const pending = manager.updateServerConfig(name, clearMcpClientAuthSurface(managerConfig));
 	if (pending) await pending;
-	await manager.reconnectServer(name, { manual: true });
-	return manager.getConnectionStatus(name);
+	const connection = await manager.reconnectServer(name, { manual: true });
+	const state = manager.getConnectionStatus(name);
+	// The attempt's own outcome decides: a link that is attached again says nothing about a reconnect that failed.
+	return connection || state !== "connected" ? state : "disconnected";
 }
 
 /**
@@ -363,7 +366,8 @@ export async function probeMcpConnection(
 		resolvedConfig = await tempManager.prepareConfig(config, { oauth: options.oauth });
 	}
 
-	const connection = await connectToServer(`mcp_probe_${Date.now()}`, resolvedConfig);
+	// Live: a stored discovery would answer for a server that now refuses, or hide the challenge an anonymous probe is after.
+	const connection = await connectToServer(`mcp_probe_${Date.now()}`, resolvedConfig, { live: true });
 	await disconnectServer(connection);
 }
 
@@ -610,6 +614,7 @@ export async function runMcpOAuthFlow(opts: McpOAuthFlowRunOptions): Promise<OAu
 			clientSecret: flow.registeredClientSecret ?? resolvedClientSecret,
 			resource: flow.resource,
 			authorizationUrl: flow.authorizationUrl,
+			scope: flow.grantedScope,
 		};
 
 		await opts.authStorage.credentials.set(credentialId, oauthCredential);
@@ -697,7 +702,10 @@ export interface McpReauthOptions extends McpOAuthFlowPresentation {
 	authStorage: AuthStorage;
 	/** Host cancellation; wired before the anonymous probe so the whole reauth is abortable. */
 	signal?: AbortSignal;
-	/** Tool-level `_meta["mcp/www_authenticate"]` challenge that triggered an auto-reauth. */
+	/**
+	 * Challenge that refused a tool call and triggered an auto-reauth; an
+	 * `insufficient_scope` one adds its scopes to the grant (step-up).
+	 */
 	authChallenge?: MCPAuthChallenge;
 	/** Host's live manager, used to prepare the anonymous probe config. */
 	mcpManager?: MCPManager;
@@ -811,13 +819,25 @@ export async function reauthorizeMcpServer(
 	const oauthResource =
 		oauth.resource ?? currentAuthResource ?? ("url" in runtimeBaseConfig ? runtimeBaseConfig.url : undefined);
 	const oauthResourceIsFallback = !oauth.resource && !currentAuthResource;
+	const baseScopes = oauth.scopes || runtimeBaseConfig.oauth?.scope || "";
+	// Step-up (RFC 6750 §3.1): protected-resource metadata names only the
+	// baseline, so keep what the grant holds and add what the challenge asks for.
+	const stepUpScopes = opts.authChallenge ? insufficientScopeOf(opts.authChallenge.wwwAuthenticate) : undefined;
+	const scopes =
+		stepUpScopes === undefined
+			? baseScopes
+			: [
+					...new Set(
+						`${existingCredential?.scope ?? ""} ${baseScopes} ${stepUpScopes}`.split(/\s+/).filter(Boolean),
+					),
+				].join(" ");
 
 	const oauthResult = await runMcpOAuthFlow({
 		authUrl: oauth.authorizationUrl,
 		tokenUrl: oauth.tokenUrl,
 		clientId: flowClientId,
 		clientSecret: flowClientSecret,
-		scopes: oauth.scopes || runtimeBaseConfig.oauth?.scope || "",
+		scopes,
 		callbackPort: found.config.oauth?.callbackPort,
 		callbackPath: found.config.oauth?.callbackPath,
 		redirectUri: found.config.oauth?.redirectUri,

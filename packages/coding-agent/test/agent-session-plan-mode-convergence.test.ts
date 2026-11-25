@@ -1,5 +1,5 @@
 /**
- * Contract: plan mode converges on `ask`/`write xd://propose` regardless of how a turn
+ * Contract: plan mode converges on `ask`/`propose` regardless of how a turn
  * ends, and non-user producers cannot keep it spinning.
  *
  *  T1. An advisor concern in plan mode is recorded as a visible card but never
@@ -9,6 +9,8 @@
  *  T3. A plan-mode turn that stops without a decision tool call is reminded at the
  *      terminal settle, bounded by PLAN_MODE_REMINDER_MAX (then yields to the
  *      user), and either decision tool resets the counter.
+ *  T4. Leaving plan mode drops its read-only rules from model context, both live
+ *      and on session restore, so execution turns do not refuse edits.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
@@ -20,17 +22,18 @@ import {
 	type ToolApproval,
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
-import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockCall, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm, PLAN_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import type { ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import planModeReminderPrompt from "../src/prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
 
@@ -54,6 +57,24 @@ function makeTool(name: string): AgentTool {
 		parameters: type({}),
 		async execute() {
 			return { content: [{ type: "text" as const, text: "ok" }] };
+		},
+	};
+}
+
+/** The plan-submission tool: a call that leaves plan details on its result, so
+ *  a submission is observable as a convergence-counter reset. */
+function makeProposeTool(): AgentTool {
+	return {
+		name: "propose",
+		label: "propose",
+		description: "Submit the plan for approval",
+		parameters: type({}),
+		approval: "read",
+		async execute() {
+			return {
+				content: [{ type: "text" as const, text: "Plan ready for approval." }],
+				details: { planFilePath: "local://test-reset-plan.md", title: "test-reset", planExists: true },
+			};
 		},
 	};
 }
@@ -96,8 +117,6 @@ interface PlanHarness {
 	mock: MockModel;
 	advisorMock?: MockModel;
 	sideMock?: MockModel;
-	isDeviceOnlyWrite: () => boolean;
-	isPendingFullWriteDescription: () => boolean;
 }
 
 describe("AgentSession plan-mode convergence", () => {
@@ -139,9 +158,8 @@ describe("AgentSession plan-mode convergence", () => {
 			sideResponses?: MockResponse[];
 			planYolo?: boolean;
 			initialPlanTools?: string[];
-			xdev?: boolean;
+			toolCommands?: boolean;
 			rebuildGate?: { fail: boolean };
-			deviceOnlyWrite?: boolean;
 		},
 	): Promise<PlanHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -150,23 +168,32 @@ describe("AgentSession plan-mode convergence", () => {
 		const askTool = makeTool("ask");
 		const writeTool = makeTool("write");
 		const readTool = makeTool("read");
+		const proposeTool = makeProposeTool();
+		const bashTool = makeTool("bash");
 		const toolRegistry = new Map<string, AgentTool>([
 			["ask", askTool],
 			["write", writeTool],
 			["read", readTool],
+			["propose", proposeTool],
+			["bash", bashTool],
 		]);
-		const initialTools = options?.planYolo
+		const baseInitialTools = options?.planYolo
 			? options.initialPlanTools?.includes("write")
 				? [readTool, writeTool]
 				: [readTool]
 			: [askTool, writeTool, readTool];
-		let deviceOnlyWrite = options?.deviceOnlyWrite === true;
-		let pendingFullWriteDescription = false;
-		const xdev: XdevState | undefined = options?.xdev
+		// `propose` presents top-level while plan mode is on, and `bash` carries
+		// the tool-command transport, so a discoverable tool mounts only while it
+		// is active in the session.
+		const initialTools = options?.toolCommands
+			? [...baseInitialTools, proposeTool, bashTool]
+			: [...baseInitialTools, proposeTool];
+		const builtInToolNames = options?.toolCommands ? ["ask", "write", "read", "bash"] : ["ask", "write", "read"];
+		const toolCommands: ToolCommandState | undefined = options?.toolCommands
 			? {
 					tools: toolRegistry,
 					mountedNames: new Set<string>(),
-					builtInNames: new Set(["ask", "write", "read"]),
+					builtInNames: new Set(["ask", "write", "read", "bash"]),
 					isActive: name => currentAgent?.state.tools.some(tool => tool.name === name) ?? false,
 				}
 			: undefined;
@@ -181,6 +208,7 @@ describe("AgentSession plan-mode convergence", () => {
 				messages: [],
 			},
 			streamFn: mock.stream,
+			convertToLlm,
 		});
 		const currentAgent = agent;
 
@@ -207,18 +235,11 @@ describe("AgentSession plan-mode convergence", () => {
 			}),
 			modelRegistry,
 			toolRegistry,
-			builtInToolNames: ["ask", "write", "read"],
-			isDeviceOnlyWrite: () => deviceOnlyWrite,
-			setDeviceOnlyWrite: enabled => {
-				deviceOnlyWrite = enabled;
-			},
-			setPendingFullWriteDescription: enabled => {
-				pendingFullWriteDescription = enabled;
-			},
+			builtInToolNames,
 			advisorStreamFn,
 			sideStreamFn,
 			planYolo: options?.planYolo ? { target: model } : undefined,
-			xdev,
+			toolCommands,
 			rebuildSystemPrompt: options?.rebuildGate
 				? async () => {
 						if (options.rebuildGate?.fail) throw new Error("rebuild failed");
@@ -233,8 +254,6 @@ describe("AgentSession plan-mode convergence", () => {
 			mock,
 			advisorMock,
 			sideMock,
-			isDeviceOnlyWrite: () => deviceOnlyWrite,
-			isPendingFullWriteDescription: () => pendingFullWriteDescription,
 		};
 	}
 
@@ -291,6 +310,40 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(harness.mock.calls.length).toBe(0);
 	});
 
+	it("T4a: plan rules stop reaching the model once plan mode exits", async () => {
+		const harness = await createPlanSession([
+			{ content: [{ type: "toolCall", name: "ask", arguments: {} }] },
+			{ content: ["asked"] },
+			{ content: ["asked again"] },
+			{ content: ["editing"] },
+		]);
+		const requestText = (call: MockCall | undefined) => JSON.stringify(call?.context.messages);
+
+		await harness.session.prompt("plan a harmless edit");
+		await harness.session.waitForIdle();
+		harness.session.setPlanModeState(undefined);
+		await harness.session.prompt("plan mode is off; make the edit");
+		await harness.session.waitForIdle();
+
+		const execRequest = requestText(harness.mock.calls.at(-1));
+		expect(requestText(harness.mock.calls[0])).toContain("Plan mode active.");
+		expect(execRequest).toContain("plan mode is off; make the edit");
+		expect(execRequest).not.toContain("Plan mode active.");
+	});
+
+	it("T4b: persisted plan rules are not restored into model context", async () => {
+		const harness = await createPlanSession([]);
+		harness.session.sessionManager.appendCustomMessageEntry(
+			PLAN_MODE_CONTEXT_MESSAGE_TYPE,
+			"<critical>Plan mode active. stale</critical>",
+			false,
+		);
+
+		const restored = convertToLlm(harness.session.sessionManager.buildSessionContext().messages);
+
+		expect(JSON.stringify(restored)).not.toContain("Plan mode active.");
+	});
+
 	it("T3a: convergence reminders are bounded by the cap, then yield to the user", async () => {
 		const harness = await createPlanSession([
 			{ content: ["planning A"] },
@@ -312,18 +365,15 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
 	});
 
-	it("T3b: a propose write resets the convergence counter", async () => {
+	it("T3b: a propose call resets the convergence counter", async () => {
 		const harness = await createPlanSession([
 			{ content: ["planning A"] },
 			{
 				content: [
 					{
 						type: "toolCall",
-						name: "write",
-						arguments: {
-							path: "xd://propose",
-							content: "test-reset",
-						},
+						name: "propose",
+						arguments: { title: "test-reset" },
 					},
 				],
 			},
@@ -363,44 +413,23 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(harness.mock.calls.length).toBe(4);
 	});
 
-	it("keeps PlanYolo's internal write augmentation transport-only", async () => {
-		const harness = await createPlanSession(
-			[
-				{ content: ["planning A"] },
-				{ content: ["planning B"] },
-				{ content: ["planning C"] },
-				{ content: ["planning D"] },
-			],
-			{ planYolo: true, xdev: true, deviceOnlyWrite: true },
-		);
-
-		await harness.session.prompt("make a plan");
-		await harness.session.waitForIdle();
-
-		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
-		expect(harness.session.getActiveToolNames()).toContain("write");
-		expect(harness.isDeviceOnlyWrite()).toBe(true);
-		expect(harness.isPendingFullWriteDescription()).toBe(false);
-	});
-	it("rolls PlanYolo state back when transport activation fails", async () => {
+	it("rolls PlanYolo state back when the plan-phase prompt rebuild fails", async () => {
 		const rebuildGate = { fail: true };
 		const harness = await createPlanSession([{ content: ["planning"] }], {
 			planYolo: true,
-			xdev: true,
-			deviceOnlyWrite: true,
+			toolCommands: true,
 			rebuildGate,
 		});
 
 		await expect(harness.session.prompt("make a plan")).rejects.toThrow("rebuild failed");
 		expect(harness.session.getPlanModeState()).toBeUndefined();
-		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
-		expect(harness.isDeviceOnlyWrite()).toBe(true);
+		expect(harness.session.getActiveToolNames()).not.toContain("write");
 
 		rebuildGate.fail = false;
 		await harness.session.prompt("retry the plan");
 		await harness.session.waitForIdle();
 		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
-		expect(harness.isDeviceOnlyWrite()).toBe(true);
+		expect(harness.session.getActiveToolNames()).toContain("write");
 	});
 
 	it("restores the pre-plan tool set after PlanYolo approval", async () => {
@@ -431,10 +460,10 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
 	});
 
-	it("retains MCP devices discovered while PlanYolo is active", async () => {
+	it("retains MCP tools discovered while PlanYolo is active", async () => {
 		const harness = await createPlanSession(
 			[{ content: ["planning A"] }, { content: ["planning B"] }, { content: ["planning C"] }],
-			{ planYolo: true, initialPlanTools: ["read", "write"], xdev: true },
+			{ planYolo: true, initialPlanTools: ["read", "write"], toolCommands: true },
 		);
 		await harness.session.prompt("make a plan");
 		await harness.session.waitForIdle();
@@ -447,20 +476,23 @@ describe("AgentSession plan-mode convergence", () => {
 			"mcp__chrome_devtools_list_pages",
 		]);
 		expect(harness.session.getActiveToolNames()).toContain("mcp__context_query_docs");
-		expect(harness.session.getMountedXdevToolNames()).toContain("mcp__chrome_devtools_list_pages");
+		expect(harness.session.getMountedToolCommandNames()).toContain("mcp__chrome_devtools_list_pages");
 
-		const planPath = resolveLocalUrlToPath("local://mcp-devices-plan.md", {
+		const planPath = resolveLocalUrlToPath("local://mcp-tools-plan.md", {
 			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
 			getSessionId: () => harness.session.sessionManager.getSessionId(),
 		});
-		await Bun.write(planPath, "# MCP devices plan\n\nKeep the connected devices.\n");
+		await Bun.write(planPath, "# MCP tools plan\n\nKeep the connected tools.\n");
 		const handler = harness.session.peekPlanProposalHandler();
 		if (!handler) throw new Error("Expected PlanYolo proposal handler");
-		await handler("mcp-devices");
+		await handler("mcp-tools");
 
 		expect(harness.session.getPlanModeState()).toBeUndefined();
-		expect(harness.session.getActiveToolNames()).toEqual(["read", "write", "mcp__context_query_docs"]);
-		expect(harness.session.getMountedXdevToolNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
+		const restoredActive = harness.session.getActiveToolNames();
+		expect(restoredActive).toContain("read");
+		expect(restoredActive).toContain("write");
+		expect(restoredActive).toContain("mcp__context_query_docs");
+		expect(harness.session.getMountedToolCommandNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
 		expect(harness.session.getSelectedMCPToolNames()).toEqual([
 			"mcp__context_query_docs",
 			"mcp__chrome_devtools_list_pages",
@@ -470,7 +502,7 @@ describe("AgentSession plan-mode convergence", () => {
 	it("serializes PlanYolo restoration after a pending MCP refresh", async () => {
 		const harness = await createPlanSession(
 			[{ content: ["planning A"] }, { content: ["planning B"] }, { content: ["planning C"] }],
-			{ planYolo: true, initialPlanTools: ["read", "write"], xdev: true },
+			{ planYolo: true, initialPlanTools: ["read", "write"], toolCommands: true },
 		);
 		await harness.session.prompt("make a plan");
 		await harness.session.waitForIdle();
@@ -489,7 +521,7 @@ describe("AgentSession plan-mode convergence", () => {
 			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
 			getSessionId: () => harness.session.sessionManager.getSessionId(),
 		});
-		await Bun.write(planPath, "# Queued MCP plan\n\nKeep the connected device.\n");
+		await Bun.write(planPath, "# Queued MCP plan\n\nKeep the connected tool.\n");
 		const handler = harness.session.peekPlanProposalHandler();
 		if (!handler) throw new Error("Expected PlanYolo proposal handler");
 		const approval = handler("queued-mcp");
@@ -499,14 +531,14 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(harness.session.getPlanModeState()).toBeUndefined();
 		expect(harness.session.getActiveToolNames()).toContain("read");
 		expect(harness.session.getActiveToolNames()).toContain("write");
-		expect(harness.session.getMountedXdevToolNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
+		expect(harness.session.getMountedToolCommandNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
 		expect(harness.session.getSelectedMCPToolNames()).toContain("mcp__chrome_devtools_list_pages");
 	});
 
 	it("preserves late MCP selection without leaking plan-only write", async () => {
 		const harness = await createPlanSession(
 			[{ content: ["planning A"] }, { content: ["planning B"] }, { content: ["planning C"] }],
-			{ planYolo: true, xdev: true },
+			{ planYolo: true, toolCommands: true },
 		);
 		await harness.session.prompt("make a plan");
 		await harness.session.waitForIdle();
@@ -520,15 +552,15 @@ describe("AgentSession plan-mode convergence", () => {
 			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
 			getSessionId: () => harness.session.sessionManager.getSessionId(),
 		});
-		await Bun.write(planPath, "# Read-only MCP plan\n\nKeep the selected device.\n");
+		await Bun.write(planPath, "# Read-only MCP plan\n\nKeep the selected tool.\n");
 		const handler = harness.session.peekPlanProposalHandler();
 		if (!handler) throw new Error("Expected PlanYolo proposal handler");
 		await handler("read-only-mcp");
 
 		expect(harness.session.getPlanModeState()).toBeUndefined();
-		expect(harness.session.getActiveToolNames()).toEqual(["read", "mcp__chrome_devtools_list_pages"]);
+		expect(harness.session.getActiveToolNames()).toContain("read");
 		expect(harness.session.getActiveToolNames()).not.toContain("write");
-		expect(harness.session.getMountedXdevToolNames()).toEqual([]);
+		expect(harness.session.getMountedToolCommandNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
 		expect(harness.session.getSelectedMCPToolNames()).toEqual(["mcp__chrome_devtools_list_pages"]);
 		expect(harness.session.getToolByName("mcp__chrome_devtools_list_pages")).toBe(registeredTool);
 	});
@@ -546,14 +578,14 @@ describe("AgentSession plan-mode convergence", () => {
 		const handler = harness.session.peekPlanProposalHandler();
 		expect(handler).toBeDefined();
 		const activeBefore = harness.session.getActiveToolNames();
-		const mountedBefore = harness.session.getMountedXdevToolNames();
+		const mountedBefore = harness.session.getMountedToolCommandNames();
 		rebuildGate.fail = true;
 
 		await expect(handler!("retry")).rejects.toThrow("rebuild failed");
 		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
 		expect(harness.session.peekPlanProposalHandler()).toBe(handler);
 		expect(harness.session.getActiveToolNames()).toEqual(activeBefore);
-		expect(harness.session.getMountedXdevToolNames()).toEqual(mountedBefore);
+		expect(harness.session.getMountedToolCommandNames()).toEqual(mountedBefore);
 		rebuildGate.fail = false;
 		await handler!("retry");
 		expect(harness.session.getPlanModeState()).toBeUndefined();

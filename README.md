@@ -248,7 +248,7 @@ _[Watch the capture ↗](https://omp.sh/clips/conflict.mp4)_
 
 ### 19 · Preview, then accept.
 
-`ast_edit` returns a _(proposed)_ card with the replacement count. The change is staged. The agent writes a one-line reason to `xd://resolve`; the TUI turns it into an **Accept** card and the disk move happens — atomic, all or nothing.
+`ast_edit` returns a _(proposed)_ card with the replacement count. The change is staged. The agent runs `resolve "<reason>"`; the TUI turns it into an **Accept** card and the disk move happens — atomic, all or nothing.
 
 ![omp TUI: ✓ AST Edit: console.log($X) (proposed) 3 replacements · 1 file, then ✓ Accept: 3 replacements in 1 file (AST Edit), followed by 'Applied 3 replacements in src/auth.ts.'](https://omp.sh/clips/codemod-poster.webp)
 
@@ -264,7 +264,7 @@ Eval's `computer` helpers — `computer.window(...)`, `win.screenshot()`, `win.a
 
 ## Whatever the task needs, _it's already in the box_.
 
-Core tools live in the same namespace as `read` and `bash`. Pin the active set with `--tools read,edit,bash,…`; rarely used discoverable tools stay behind `xd://` devices. `read xd://` lists them, and `write xd://<tool>` runs one when `tools.xdev` is enabled.
+Core tools live in the same namespace as `read` and `bash`. Pin the active set with `--tools read,edit,bash,…`; rarely used discoverable tools mount as bash commands when `tools.commands` is enabled — run `<tool> <args>` with the bash tool, and `<tool> --help` for schema-derived usage instead of schemas shipped on every request.
 
 **Files & search**
 
@@ -666,7 +666,7 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[@oh-my-pi/pi-catalog](packages/catalog)**                                  | Model catalog: bundled model database, provider descriptors, and identity   |
 | **[@oh-my-pi/pi-agent-core](packages/agent)**                                 | Agent runtime with tool calling and state management                        |
 | **[@oh-my-pi/pi-coding-agent](packages/coding-agent)**                        | Interactive coding agent CLI and SDK                                        |
-| **[@oh-my-pi/pi-tui](packages/tui)**                                          | Terminal UI library with differential rendering                             |
+| **[@oh-my-pi/pi-tui](packages/tui)**                                            | Terminal UI library: one component tree, rendered as rows or natively (TSP) |
 | **[@oh-my-pi/pi-natives](packages/natives)**                                  | N-API bindings for grep, shell, image, text, syntax highlighting, and more  |
 | **[@oh-my-pi/omp-stats](packages/stats)**                                     | Local observability dashboard for AI usage statistics                       |
 | **[@oh-my-pi/omptype](packages/omptype)**                                     | ArkType-compatible schema validation with lazy JIT compilation              |

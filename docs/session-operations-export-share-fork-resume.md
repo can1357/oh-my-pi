@@ -33,7 +33,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `--fork <id\|path>`                       | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir                                                                                             | Copies source artifacts recursively by default                                      |
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
 | `--resume`                                | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                                                                                |
-| `--resume <id\|path>`                     | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory                                                                                   | None                                                                                |
+| `--resume <id\|path>`                     | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory (protocol modes open it in place, except a session from a removed worktree)       | None                                                                                |
 | `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; restores a materialized session (`--restore`), otherwise starts fresh                                                                             | None                                                                                |
 | `--continue`                              | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists                                                                                             | None                                                                                |
 
@@ -305,7 +305,13 @@ Placement commands autodetect tmux, Zellij, Herdr, CMUX, or Orca from the termin
 `/fork auto` is not a subcommand (valid arguments are `pane`, `window`, and
 `tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab, or a CMUX workspace.
 Plain terminals, `screen`, and `wmux` cannot host this fork placement and receive
-an explicit error; use bare `/fork` there instead.
+an explicit error; use bare `/fork` there instead. Inside a Tern pane with no
+multiplexer running in it, Tern opens the fork: `/fork pane` (like bare `/fork`
+there) in a new pane beside this one, `/fork window` and `/fork tab` in a new
+tab right after this one's, held to that tab's resource limits. A Tern whose
+session daemon predates fork tabs opens a pane instead, and omp says so. Where
+bare `/fork` would fall back to forking in place, a placement reports why Tern
+did not open the fork.
 
 ### Preconditions and immediate guards
 
@@ -451,6 +457,8 @@ Id/filename-prefix match behavior (local or global):
 - If the matched session's recorded directory no longer exists, CLI asks `Session's directory no longer exists (...). Move (re-root) it into the current directory? [Y/n]`.
    - On yes (default), `SessionManager.open()` is anchored at the missing source cwd with `initialCwd`, then `manager.moveTo(cwd, sessionDir)` re-roots the existing session without duplicating it.
    - On no, startup is cancelled. In non-TTY mode, startup fails with an error directing the user to run interactively.
+   - Under `--mode rpc`, `--mode rpc-ui` and `--mode acp` no question is asked, because the protocol owns standard input and standard output: the session opens where it is stored, with the launch directory as its working directory, as a path-valued resume does.
+   - A session recorded in a since-removed worktree of the launch checkout's repository is moved into the launch directory without a question, in every mode.
 - If the recorded directory still exists, the matched session is opened directly. Startup later changes the process/project scope to the resumed session's cwd and reloads cwd-scoped settings and plugin caches. It is not implicitly forked.
 
 Path-valued resume opens directly rather than using the missing-directory move

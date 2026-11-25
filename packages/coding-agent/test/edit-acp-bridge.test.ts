@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { hashlineFileHash } from "@oh-my-pi/pi-natives";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
-import { type EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
+import { type EditToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/edit";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";

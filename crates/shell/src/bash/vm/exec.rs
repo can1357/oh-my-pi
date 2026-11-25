@@ -24,10 +24,12 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey, assign_preview},
+	event::{
+		CompiledUnit, Construct, EventData, NodeKind, NodeRef, Origin, WaitKey, assign_preview,
+	},
 	fd::FdRef,
-	host::{ResolveCtx, Resolved, Via},
-	ids::{Dialect, ModeId, UnitId, Vpid},
+	host::{ResolveCtx, Resolved, TapSite, Via},
+	ids::{AstNodeId, Dialect, ModeId, UnitId, Vpid},
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
@@ -809,6 +811,12 @@ fn end_run(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>, run: &super::proc::Run) 
 	k.emit(cx, (vp.vpid, vp.mode), Some(run), EventData::RunEnd { status });
 	k.trace_sources.remove(&vp.vpid);
 	k.trace_unit_origins.remove(&vp.vpid);
+	// A subshell's vproc runs only its run: its usage is the run's.
+	if vp.transient
+		&& let Some(usage) = vp.usage.as_deref()
+	{
+		k.run_usage.insert(run.id, *usage);
+	}
 	k.done.push_back((run.id, status));
 }
 
@@ -927,27 +935,47 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
 	let depth = vp.frames.len();
 	if observed {
-		if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) {
-			origins.retain(|at, _| *at <= depth);
+		if let Some(sources) = k.trace_sources.get_mut(&vp.vpid) {
+			sources.retain(|at, _| *at <= depth);
 		}
-		if let Some(Frame { kind: FrameKind::Script { src, pos, what: ScriptKind::Eval, .. }, .. }) = vp.frames.last()
+		// A frame's first command: learn where its script came from, while
+		// `vp.command` is still the command that pushed it. A nested shell's
+		// own script was recorded when it started.
+		if let Some(Frame { kind: FrameKind::Script { src, pos, what, .. }, .. }) = vp.frames.last()
 			&& pos.0 == 0
-			&& let Some(origin) = literal_script_origin(vp, src, false)
+			&& !matches!(what, ScriptKind::Run)
 		{
-			if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
-				k.trace_sources.entry(vp.vpid).or_default().insert(depth, origin);
+			let source = match what {
+				ScriptKind::Eval => ScriptSource {
+					literal: literal_script_origin(vp, src, false),
+					runner:  command_origin(vp),
+				},
+				ScriptKind::Source | ScriptKind::Code(_) => {
+					ScriptSource { literal: None, runner: command_origin(vp) }
+				},
+				_ => ScriptSource::default(),
+			};
+			if source.literal.is_some() || source.runner.is_some() {
+				if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
+					k.trace_sources
+						.entry(vp.vpid)
+						.or_default()
+						.insert(depth, source);
+				}
+			} else if let Some(sources) = k.trace_sources.get_mut(&vp.vpid) {
+				sources.remove(&depth);
 			}
-		} else if vp.frames.last().is_some_and(|frame| matches!(&frame.kind, FrameKind::Script { pos, what: ScriptKind::Eval, .. } if pos.0 == 0))
-			&& let Some(origins) = k.trace_sources.get_mut(&vp.vpid) { origins.remove(&depth); }
+		}
 	}
-	let source_origin = observed
+	let source = observed
 		.then(|| {
 			k.trace_sources
 				.get(&vp.vpid)
-				.and_then(|origins| origins.get(&depth))
+				.and_then(|sources| sources.get(&depth))
 				.copied()
 		})
-		.flatten();
+		.flatten()
+		.unwrap_or_default();
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
 	let (snapped, snapshot) = match vp.frames.last().map(|f| &f.kind) {
@@ -1290,8 +1318,37 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		let now = cx.host.wall().secs;
 		builtins::history::remember(k, cx.store, vp, lines, now);
 	}
-	announce_at(k, cx, vp.vpid, vp.runs.front(), &unit, line, source_origin.as_ref());
+	announce_at(k, cx, vp.vpid, vp.runs.front(), &unit, line, source);
 	None
+}
+
+/// Where an observed script frame's text came from, by frame depth in
+/// [`Kernel::trace_sources`]: learned at the frame's first command, or when
+/// a nested shell starts.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScriptSource {
+	/// The literal argument that is the script ([`literal_script_origin`]).
+	pub literal: Option<crate::bash::event::SourceOrigin>,
+	/// The command running the script: `eval`, `.`, a builtin running code,
+	/// a nested shell ([`command_origin`]).
+	pub runner:  Option<crate::bash::event::SourceOrigin>,
+}
+
+/// The command `vp` runs, as the origin of a script it runs.
+pub(super) fn command_origin(vp: &Vproc) -> Option<crate::bash::event::SourceOrigin> {
+	let (unit, node) = vp.command.as_ref()?;
+	let span = unit.nodes.get(*node as usize)?;
+	Some(crate::bash::event::SourceOrigin {
+		vpid: vp.vpid,
+		node: *node,
+		span: crate::bash::event::SpanOwned {
+			unit: unit.id,
+			lo:   span.lo,
+			hi:   span.hi,
+			line: unit.line + span.line,
+			col:  span.col,
+		},
+	})
 }
 
 /// The literal argument that actually entered a native script. IR word ids
@@ -1386,7 +1443,7 @@ pub fn announce(
 		.get(&vpid)
 		.and_then(|origins| origins.get(&unit.id))
 		.copied();
-	announce_at(k, cx, vpid, run, unit, line, origin.as_ref());
+	announce_at(k, cx, vpid, run, unit, line, ScriptSource { literal: origin, runner: None });
 }
 
 fn announce_at(
@@ -1396,9 +1453,10 @@ fn announce_at(
 	run: Option<&Run>,
 	unit: &Unit,
 	line: u32,
-	parent: Option<&crate::bash::event::SourceOrigin>,
+	source: ScriptSource,
 ) {
 	if k.mask.contains(crate::bash::event::EventKind::UnitCompiled) && !unit.nodes.is_empty() {
+		let parent = source.literal.as_ref();
 		let key = (vpid, unit.id, parent.copied());
 		if let Some(parent) = parent {
 			record_source_origin(k, unit, vpid, *parent);
@@ -1420,7 +1478,12 @@ fn announce_at(
 				cx,
 				(vpid, unit.mode),
 				run,
-				EventData::UnitCompiled(CompiledUnit { unit, line, parent }),
+				EventData::UnitCompiled(CompiledUnit {
+					unit,
+					line,
+					parent,
+					runner: source.runner.as_ref(),
+				}),
 			);
 		}
 	}
@@ -4012,15 +4075,15 @@ fn retarget_bang(k: &mut Kernel, job_vproc: Vpid, unit: &Unit, stages: &[(Vpid, 
 	}
 }
 
-/// Source text of stage `i` of pipeline `info`, for a pipe tap: the node of
-/// the `SubExit` that ends the stage's code (just before the next stage's
-/// entry, or before the pipeline's end).
-fn stage_text(unit: &Unit, info: &ir::SpawnIr, i: usize) -> BString {
+/// Node of stage `i` of pipeline `info`, for a pipe tap: the node of the
+/// `SubExit` that ends the stage's code (just before the next stage's entry,
+/// or before the pipeline's end).
+fn stage_node(unit: &Unit, info: &ir::SpawnIr, i: usize) -> Option<u32> {
 	let end = info.stages.get(i + 1).map_or(info.end, |next| next.entry);
 	end.checked_sub(1)
 		.and_then(|pc| unit.ops.get(pc as usize))
 		.filter(|op| op.code == Opcode::SubExit)
-		.map_or_else(BString::default, |op| node_text(unit, op.node))
+		.map(|op| op.node)
 }
 
 /// `Spawn`: start children; wait for subshells and pipelines.
@@ -4087,7 +4150,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					// Known by its program's OS pid if the first command it runs
 					// spawns it (bash's subshell `exec`s a lone simple command):
 					// readers of the pid wait for that decision.
-					if let Some(stage) = bang_stage(unit, info.stages[0].entry) {
+					if let Some(mut stage) = bang_stage(unit, info.stages[0].entry) {
+						if stage == BangStage::Lone {
+							stage = BangStage::SimpleJob;
+						}
 						k.bangs.push(Bang { vproc: vpid, job: vpid, stage });
 					}
 					let job = k.job_id(cx.store);
@@ -4153,9 +4219,18 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					fds.set(0, stdin.take());
 					if i + 1 < n {
 						let mirror = tap.as_ref().and_then(|tap| {
-							let producer = stage_text(unit, info, i);
-							let consumer = stage_text(unit, info, i + 1);
-							tap.open(BStr::new(&producer), BStr::new(&consumer))
+							let text = |node: Option<u32>| {
+								node.map_or_else(BString::default, |node| node_text(unit, node))
+							};
+							let producer = stage_node(unit, info, i);
+							let producer_text = text(producer);
+							let consumer_text = text(stage_node(unit, info, i + 1));
+							let site = TapSite {
+								vpid: vp.vpid,
+								node: producer.map(|node| NodeRef { unit: unit.id, node: AstNodeId(node) }),
+								text: BStr::new(&producer_text),
+							};
+							tap.open(site, BStr::new(&consumer_text))
 						});
 						let (r, w) = match mirror {
 							Some(mirror) => mem::tapped_pipe(mirror),
