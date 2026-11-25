@@ -42,6 +42,25 @@ export interface LoadMCPConfigsResult {
 	dropped?: Record<string, MCPDroppedServer>;
 }
 
+/** User-level MCP server enable/disable override sets. */
+export interface McpServerOverrideLists {
+	disabledServers: ReadonlySet<string>;
+	enabledServers: ReadonlySet<string>;
+}
+
+/**
+ * Determine whether an MCP server entry is enabled after applying user-level
+ * denylist and force-enable overrides. The denylist always wins; the allowlist
+ * overrides only the entry's `enabled: false` flag.
+ */
+export function isMcpServerEnabled(
+	name: string,
+	config: Pick<MCPServerConfig, "enabled">,
+	lists: McpServerOverrideLists,
+): boolean {
+	return !lists.disabledServers.has(name) && (config.enabled !== false || lists.enabledServers.has(name));
+}
+
 /**
  * Convert canonical MCPServer to legacy MCPServerConfig.
  */
@@ -133,8 +152,10 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		logger.warn("Ignoring unreadable user MCP config for server lists", { path: userPath, error: String(error) });
 		userConfig = { mcpServers: {} };
 	}
-	const disabledServers = new Set(Array.isArray(userConfig.disabledServers) ? userConfig.disabledServers : []);
-	const forcedEnabled = new Set(Array.isArray(userConfig.enabledServers) ? userConfig.enabledServers : []);
+	const overrideLists: McpServerOverrideLists = {
+		disabledServers: new Set(Array.isArray(userConfig.disabledServers) ? userConfig.disabledServers : []),
+		enabledServers: new Set(Array.isArray(userConfig.enabledServers) ? userConfig.enabledServers : []),
+	};
 
 	// Scope exclusions drop entries entirely BEFORE deduplication: with project
 	// config disabled, a project entry must not shadow anything.
@@ -157,10 +178,8 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const suppressServer = (server: MCPServer & { _source: SourceMeta }): boolean => {
 		const owner = !claimed.has(server.name);
 		claimed.add(server.name);
-		if (disabledServers.has(server.name)) return true;
-		const forced = forcedEnabled.has(server.name);
-		if (server.enabled === false && !forced) return true;
-		if (!transformContext || forced || server.enabled === true) return false;
+		if (!isMcpServerEnabled(server.name, server, overrideLists)) return true;
+		if (!transformContext || overrideLists.enabledServers.has(server.name) || server.enabled === true) return false;
 		const drop = builtinDropFor(server, transformContext);
 		if (!drop) return false;
 		if (owner) {

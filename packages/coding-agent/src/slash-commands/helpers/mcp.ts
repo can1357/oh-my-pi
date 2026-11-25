@@ -1,5 +1,6 @@
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
+import { isMcpServerEnabled } from "../../mcp/config";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -89,16 +90,17 @@ async function readMcpConfigEntries(runtime: SlashCommandRuntime): Promise<McpCo
 		readMCPConfigFile(userPath),
 		enableProjectConfig ? readMCPConfigFile(projectPath) : Promise.resolve(null),
 	]);
-	const disabledServers = new Set(Array.isArray(userConfig.disabledServers) ? userConfig.disabledServers : []);
-	const enabledServers = new Set(Array.isArray(userConfig.enabledServers) ? userConfig.enabledServers : []);
+	const overrideLists = {
+		disabledServers: new Set(Array.isArray(userConfig.disabledServers) ? userConfig.disabledServers : []),
+		enabledServers: new Set(Array.isArray(userConfig.enabledServers) ? userConfig.enabledServers : []),
+	};
 	const entries: McpConfigEntry[] = [];
 	const seen = new Set<string>();
 	const addEntry = (name: string, config: MCPServerConfig, scope: AcpMcpScope): void => {
 		if (seen.has(name)) return;
-		// Disabled project entries still shadow same-named user entries. The user
-		// denylist wins; the allowlist overrides only the entry's enabled flag.
+		// Disabled project entries still shadow same-named user entries.
 		seen.add(name);
-		const enabled = !disabledServers.has(name) && (config.enabled !== false || enabledServers.has(name));
+		const enabled = isMcpServerEnabled(name, config, overrideLists);
 		entries.push({ name, config, scope, enabled });
 	};
 	for (const [name, config] of Object.entries(projectConfig?.mcpServers ?? {})) {

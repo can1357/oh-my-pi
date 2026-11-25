@@ -17,6 +17,7 @@
 
 - A broadcast from the main agent that arrives while a subagent is finishing no longer replaces that subagent's report; the subagent answers it in a separate turn, and the broadcast still interrupts a waiting subagent.
 - On Linux, `time -l` and `time -v` in the bash tool report the program's own maximum resident set size instead of at least omp's.
+- Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 
 ### Added
 
@@ -120,9 +121,6 @@
 
 - Removed `fileToUri`, `uriToFile`, and `EquivalentUriMap` from `@oh-my-pi/pi-coding-agent/lsp/utils`; import them from `@oh-my-pi/pi-coding-agent/lsp/uri` instead.
 - Hindsight forks now retain only turns added by the fork, rather than the inherited parent transcript.
-### Fixed
-
-- Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 
 ## [19.1.1] - 2026-11-23
 
