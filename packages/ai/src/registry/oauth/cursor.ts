@@ -271,16 +271,3 @@ function getTokenExpiry(token: string): number {
 	}
 	return Date.now() + 3600 * 1000;
 }
-
-export function isCursorTokenExpiringSoon(token: string, thresholdSeconds = 300): boolean {
-	try {
-		const decoded = decodeCursorAccessTokenPayload(token);
-		if (!decoded || typeof decoded !== "object" || !("exp" in decoded) || typeof decoded.exp !== "number") {
-			return true;
-		}
-		const currentTime = Math.floor(Date.now() / 1000);
-		return decoded.exp - currentTime < thresholdSeconds;
-	} catch {
-		return true;
-	}
-}

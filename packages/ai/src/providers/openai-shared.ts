@@ -1585,16 +1585,6 @@ function responseInputCallId(item: ResponseInput[number]): string | undefined {
 	return typeof item.call_id === "string" ? item.call_id : undefined;
 }
 
-export function collectKnownCallIds(messages: ResponseInput): Set<string> {
-	const knownCallIds = new Set<string>();
-	for (const item of messages) {
-		if (responsesToolCallKind(item.type) === undefined) continue;
-		const callId = responseInputCallId(item);
-		if (callId) knownCallIds.add(callId);
-	}
-	return knownCallIds;
-}
-
 /**
  * Recover executable tool-call blocks omitted from a turn's stored native Responses items.
  *
@@ -1633,28 +1623,6 @@ export function pickUnrecordedResponsesToolCalls(
 		missing.push(block);
 	}
 	return missing;
-}
-
-/** Scan replay items for call_ids that were originally custom tool calls. */
-export function collectCustomCallIds(messages: ResponseInput): Set<string> {
-	const customCallIds = new Set<string>();
-	for (const item of messages) {
-		if (item.type !== "custom_tool_call") continue;
-		const callId = responseInputCallId(item);
-		if (callId) customCallIds.add(callId);
-	}
-	return customCallIds;
-}
-
-/** Scan replay items for call_ids that were originally native computer calls. */
-export function collectComputerCallIds(messages: ResponseInput): Set<string> {
-	const computerCallIds = new Set<string>();
-	for (const item of messages) {
-		if (item.type !== "computer_call") continue;
-		const callId = responseInputCallId(item);
-		if (callId) computerCallIds.add(callId);
-	}
-	return computerCallIds;
 }
 
 /**
