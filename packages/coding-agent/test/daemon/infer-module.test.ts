@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { daemonClient } from "../../src/daemon/client";
-import type { InferParams } from "../../src/daemon/modules/infer";
+import { INFER_CONNECTION_CLOSED, InferConnection, type InferParams } from "../../src/daemon/modules/infer";
 import { type DaemonClient, type DaemonTunnel, GLOBAL_SCOPE, type UnitPolicy } from "../../src/daemon/protocol";
 import { IsolatedDaemon, isAlive, waitFor } from "../fixtures/daemon-harness";
 
@@ -265,6 +265,42 @@ describe("daemon infer module", () => {
 			expect((await tunnel.final("marker")).value).toBe("from-client");
 			// The daemon itself runs with OMP_DAEMON_DIR set; it must not leak into the worker.
 			expect((await tunnel.final("daemon-dir")).value).toBeNull();
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"issue #20452: an idle connection releases its lease, so the unit idle-stops while its owner lives",
+		async () => {
+			const client = await startDaemon();
+			const key = "embed:issue-20452";
+			const params: InferParams = { ...workerParams("embed"), idleMs: 200 };
+			const replies: Reply[] = [];
+			const { promise: closed, resolve: onClose } = Promise.withResolvers<Error>();
+			const connection = new InferConnection<{ type: "pid"; id: string }, Reply>(
+				async () => ({ key, params }),
+				message => replies.push(message),
+				onClose,
+			);
+			try {
+				connection.send({ type: "pid", id: "pid" });
+				const pid = (await waitFor(() => replies.find(reply => reply.id === "pid"), "pid reply")).pid!;
+				daemon.track(pid);
+
+				// The connection stays open in this process; the unit must still stop once idle.
+				await waitFor(
+					async () => {
+						const { units } = await client.request({ op: "list", kind: "infer" });
+						return !units.some(unit => unit.key === key);
+					},
+					"idle unit to leave the board",
+					10_000,
+				);
+				expect((await closed).message.startsWith(INFER_CONNECTION_CLOSED)).toBe(true);
+				await waitFor(() => !isAlive(pid), "worker child to exit");
+			} finally {
+				await connection.close();
+			}
 		},
 		TEST_TIMEOUT_MS,
 	);
