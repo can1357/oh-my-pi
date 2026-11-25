@@ -14,9 +14,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { $env, isRecord, logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
@@ -41,24 +40,22 @@ import {
 	type SkillPromptInput,
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
-import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	choiceValue,
 	defaultFormData,
-	fieldError,
 	type HtmlFormData,
 	type HtmlFormValue,
 	isArrayChoice,
 	textValue,
-} from "@oh-my-pi/pi-tui/html-form/data";
-import { type ChoiceField, type HtmlForm, parseHtmlForm, type TextField } from "@oh-my-pi/pi-tui/html-form/parse";
+} from "../../tools/html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, type TextField } from "../../tools/html-form/parse";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
 	type WordCompletionMethod,
 	type WordCompletionQuery,
 	wordCompletionQuery,
-} from "@oh-my-pi/pi-tui/prompt/word-completion";
+} from "../view-model/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
 import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
@@ -131,6 +128,10 @@ import type {
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { ExtensionTheme } from "../../extensibility/extensions/render-types";
+import { extensionTheme } from "../../ui/extensions/render-output";
 
 const INVALID_TEXT_CURSOR_ERROR = "cursor must be an integer UTF-16 offset within text";
 
@@ -1314,7 +1315,7 @@ function parseFormDialogResponse(
 	// One entry answers every field of its name, as in HTML form data. Each field that can carry the entry takes it;
 	// a same-name field of another shape (a radio group beside a checkbox group, a group without "Other" beside a
 	// text input) counts as unanswered, as it would in the TUI where the last field wins. At least one field must
-	// carry the entry, and every field must pass the rules the form dialogs apply on submit.
+	// carry the entry. Rules such as `required` or `pattern` are not checked: the form dialogs only flag them.
 	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
 	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
 	const hidden = new Map(form.hidden);
@@ -1339,9 +1340,7 @@ function parseFormDialogResponse(
 			}
 		});
 		if (!values.some(({ carried }) => carried)) throw mismatch;
-		for (const { field, value, carried } of values) {
-			const problem = fieldError(field, value);
-			if (problem) throw new Error(`Form field ${JSON.stringify(name)}: ${problem}`);
+		for (const { value, carried } of values) {
 			if (carried && value !== undefined) data[name] = value;
 		}
 	}
@@ -1888,15 +1887,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// Autocomplete provider composition is not supported in RPC mode
 		}
 
-		get theme(): Theme {
-			return theme;
+		get theme(): ExtensionTheme {
+			return extensionTheme(currentTheme());
 		}
 
 		getAllThemes(): Promise<{ name: string; path: string | undefined }[]> {
 			return Promise.resolve([]);
 		}
 
-		getTheme(_name: string): Promise<Theme | undefined> {
+		getTheme(_name: string): Promise<ExtensionTheme | undefined> {
 			return Promise.resolve(undefined);
 		}
 
@@ -1912,14 +1911,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 		setToolsExpanded(_expanded: boolean) {
 			// Tool expansion not supported in RPC mode - no TUI
-		}
-
-		setEditorComponent(): void {
-			// Custom editor components not supported in RPC mode
-		}
-
-		getEditorComponent() {
-			return undefined;
 		}
 	}
 
@@ -2307,7 +2298,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				const restored = session.clearQueue({ forInterrupt: true });
 				goalController.stopForHostAbort();
 				abortBuiltinCommands("RPC command aborted by host");
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await session.abort({
+					reason: USER_INTERRUPT_LABEL,
+					detachTools: restored.steering.length + restored.followUp.length > 0,
+				});
 				return fitAbortAndRestoreQueueResponse(id, restored, frameEncoder.maxIntactFrameBytes);
 			}
 
@@ -2318,7 +2312,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					if (!inputGate.isCurrent(command) || !session.isStreaming || !session.hasInterruptibleInput) {
 						return false;
 					}
-					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true, detachTools: true });
 					return true;
 				});
 				return success(id, "abort_and_deliver_queue", { aborted });

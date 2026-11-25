@@ -23,10 +23,10 @@ import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
 import type { SessionStorage } from "../session/session-storage";
 import type { ToolSession } from "../tools";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
-import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
-import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg-render";
-import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
+import type { CoordinationDetails } from "../tools/details/wait";
+import type { ProcReadDetails, ProcWriteDetails } from "../tools/details/proc-render";
+import type { CfgReadDetails, CfgWriteDetails } from "../tools/details/cfg-render";
+import type { SchemeWriteScope } from "./url-scheme";
 
 /** Render state and prewalk facts a handler write attaches to the `write` tool result. */
 export interface InternalWriteDetails {

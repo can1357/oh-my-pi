@@ -1,8 +1,8 @@
-import type { AgentHubDeps, AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import { type AgentCostSnapshot, aggregateCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-import type { AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
-import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
+import type { AgentRecordLike } from "../registry/agent-hub-types";
+import { type AgentCostSnapshot, aggregateCost } from "./view-model/overlays/agent-hub-projection";
+import type { AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
+import type { ObservableSession, SessionObserverRegistry } from "../task/session-observer-registry";
 import { AgentActivityIndex } from "../activity";
 import { getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -12,6 +12,7 @@ import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } fr
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 import { defaultSessionStorage, readSessionTextFrom, type SessionStorage } from "../session/session-storage";
+import type { AgentHubProps } from "../ui/overlays/pickers/agent-hub";
 
 /**
  * Transcript reads and parser used by local and host-backed transcript viewers.
@@ -40,7 +41,7 @@ function transcriptSource(storage: () => SessionStorage): AgentTranscriptSource 
 /** {@link transcriptSource} over the default session storage, for viewers without a session at hand. */
 export const agentTranscriptSource: AgentTranscriptSource = transcriptSource(defaultSessionStorage);
 
-/** Host services used by the roster, without exposing runtime implementation to tui. */
+/** Host services the Agent Hub reads (registry, lifecycle, IRC, activity), plus the transcript source its viewer reads. */
 export function createAgentHubRuntime(
 	options: {
 		registry?: AgentRegistryApi;
@@ -54,17 +55,9 @@ export function createAgentHubRuntime(
 		storage?: SessionStorage;
 	} = {},
 ): Pick<
-	AgentHubDeps<AgentRef>,
-	| "registry"
-	| "inSession"
-	| "lifecycle"
-	| "irc"
-	| "activity"
-	| "manageActivityLive"
-	| "transcript"
-	| "loadPersisted"
-	| "getRoleInfo"
-> {
+	AgentHubProps<AgentRef>,
+	"registry" | "inSession" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "loadPersisted" | "getRoleInfo"
+> & { transcript: AgentTranscriptSource } {
 	const registry = options.registry ?? AgentRegistry.global();
 	const { storage } = options;
 	const rootSessionFile = options.sessionFile?.endsWith(".jsonl") ? options.sessionFile : undefined;

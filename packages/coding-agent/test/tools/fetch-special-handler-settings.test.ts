@@ -5,7 +5,6 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { fetchReadUrl } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
 import * as parallelModule from "@oh-my-pi/pi-coding-agent/web/parallel";
 import { handleTwitter } from "@oh-my-pi/pi-coding-agent/web/scrapers/twitter";
 import { handleYouTube } from "@oh-my-pi/pi-coding-agent/web/scrapers/youtube";
@@ -57,13 +56,15 @@ describe("URL special handlers use their session settings", () => {
 		const settings = Settings.isolated({ "providers.fetch": "native" });
 		vi.spyOn(parallelModule, "findParallelApiKey").mockReturnValue("test-parallel-key");
 		const extractSpy = vi.spyOn(parallelModule, "extractWithParallel");
-		vi.spyOn(toolsManager, "ensureTool").mockResolvedValue(undefined);
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(() => Response.json({ videoDetails: { title: "Example video" } })),
+		);
 
 		const result = await fetchReadUrl(createSession(settings), {
 			path: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
 		});
 
-		expect(result.details.method).toBe("youtube-no-ytdlp");
+		expect(result.details.method).toBe("youtube");
 		expect(extractSpy).not.toHaveBeenCalled();
 	});
 
@@ -87,11 +88,13 @@ describe("URL special handlers use their session settings", () => {
 
 	it("uses safe defaults for a direct YouTube scrape without initialized global settings", async () => {
 		vi.spyOn(parallelModule, "findParallelApiKey").mockReturnValue(null);
-		vi.spyOn(toolsManager, "ensureTool").mockResolvedValue(undefined);
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(() => Response.json({ videoDetails: { title: "Example video" } })),
+		);
 
 		const result = await handleYouTube("https://youtu.be/dQw4w9WgXcQ", 10);
 
-		expect(result?.method).toBe("youtube-no-ytdlp");
+		expect(result?.method).toBe("youtube");
 	});
 
 	it("uses safe defaults for a direct X scrape without initialized global settings", async () => {

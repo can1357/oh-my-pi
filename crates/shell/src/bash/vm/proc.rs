@@ -87,6 +87,10 @@ pub struct Vproc {
 	/// Host lineage, inherited from the parent (set by
 	/// [`super::ShellApi::run_subshell_in`]) and passed to externals.
 	pub lineage:       crate::bash::host::Lineage,
+	/// Resource usage of the externals this vproc waited for and of its
+	/// ended child vprocs ([`crate::bash::ProcUsage`]); boxed on the first
+	/// one, so an idle vproc pays a pointer. Not imaged.
+	pub usage:         Option<Box<crate::bash::host::ProcUsage>>,
 	/// `set -x` nesting this vproc starts at, beyond the first level (bash's
 	/// `indirection_level`): its parent's, plus one in a command
 	/// substitution.
@@ -247,6 +251,12 @@ impl VprocZsh {
 }
 
 impl Vproc {
+	/// Count `usage` (a waited-for external's, an ended child's) into
+	/// [`Self::usage`].
+	pub fn count_usage(&mut self, usage: &crate::bash::host::ProcUsage) {
+		self.usage.get_or_insert_default().add(usage);
+	}
+
 	/// zsh's current sticky emulation.
 	pub fn sticky(&self) -> Option<&crate::bash::store::Sticky> {
 		self.zsh.as_ref().and_then(|z| z.sticky.as_ref())
@@ -725,8 +735,8 @@ impl Vproc {
 /// What may still settle a [`Bang`] with an OS pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BangStage {
-	/// The job's body is one simple command: its external is the program
-	/// (bash's subshell `exec`s it).
+	/// A simple pipeline stage or an exec-like callout's child: its external
+	/// is the program.
 	Lone,
 	/// Only an `exec`'d external is (`{ exec cmd; } &`, a function called
 	/// as the lone command).
@@ -739,6 +749,15 @@ pub enum BangStage {
 	/// The job's body is a pipeline: its last stage, once started, decides
 	/// as a job body of its own would (`$!` names the last process).
 	Pipeline,
+	/// The entire `&` job is one simple command. Its host may prefer an
+	/// external here so `$!` names a real process.
+	SimpleJob,
+}
+
+impl BangStage {
+	pub const fn is_lone(self) -> bool {
+		matches!(self, Self::Lone | Self::SimpleJob)
+	}
 }
 
 /// A running coprocess: its vproc, the variable naming it and the shell's
@@ -1628,9 +1647,25 @@ pub enum Target {
 		path: BString,
 		code: i32,
 	},
+	/// Prefer an executable on PATH, or run this in-process command.
+	SearchNative(NativeRef),
+	/// Prefer an executable on PATH, or run this callout.
+	SearchTool(ToolRef),
 }
 
 impl Target {
+	pub const fn is_path_search(&self) -> bool {
+		matches!(self, Self::Search | Self::SearchNative(_) | Self::SearchTool(_))
+	}
+
+	pub const fn search_fallback(&self) -> Option<Self> {
+		match *self {
+			Self::SearchNative(native) => Some(Self::Native(native)),
+			Self::SearchTool(tool) => Some(Self::Tool(tool)),
+			_ => None,
+		}
+	}
+
 	pub const fn kind(&self) -> ResolvedKind {
 		match self {
 			Self::Function(_) => ResolvedKind::Function,
@@ -1642,7 +1677,9 @@ impl Target {
 			Self::External(_) | Self::Script(_) | Self::Interp(_) | Self::Refused { .. } => {
 				ResolvedKind::External
 			},
-			Self::Search | Self::NotFound => ResolvedKind::NotFound,
+			Self::Search | Self::SearchNative(_) | Self::SearchTool(_) | Self::NotFound => {
+				ResolvedKind::NotFound
+			},
 		}
 	}
 }

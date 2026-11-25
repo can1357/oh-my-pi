@@ -20,12 +20,13 @@ import {
 	tryAcquireSessionLease,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
-import * as SessionSelector from "@oh-my-pi/pi-tui/overlays/session-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
+import { createRoot } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as SessionSelector from "../../../src/ui/overlays/pickers/session-selector";
 
-beforeAll(async () => {
-	await initTheme();
+beforeAll(() => {
+	initTheme();
 });
 
 describe("/resume picker rename lease", () => {
@@ -92,31 +93,27 @@ describe("/resume picker rename lease", () => {
 				sessions: listed,
 				complete: Promise.resolve(listed),
 			});
-			let options: SessionSelector.SessionSelectorOptions<SessionInfo> | undefined;
-			const OriginalSelector = SessionSelector.SessionSelectorComponent;
-			vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(((
-				sessions: SessionInfo[],
-				onSelect: (session: SessionInfo) => void,
-				onCancel: () => void,
-				onExit: () => void,
-				selectorOptions: SessionSelector.SessionSelectorOptions<SessionInfo>,
-			) => {
-				options = selectorOptions;
-				return new OriginalSelector<SessionInfo>(sessions, onSelect, onCancel, onExit, selectorOptions);
-			}) as never);
+			let options: SessionSelector.SessionSelectorProps | undefined;
+			vi.spyOn(SessionSelector, "SessionSelector").mockImplementation(props => {
+				options = props;
+				return [];
+			});
 			const ctx = {
 				sessionManager: manager,
 				settings: Settings.isolated(),
 				showStatus: vi.fn(),
 				showError: vi.fn(),
-				ui: {
-					requestRender: vi.fn(),
-					setFocus: vi.fn(),
-					terminal: { rows: 24 },
-					showOverlay: vi.fn(() => ({ hide: vi.fn(), setHidden: vi.fn(), isHidden: () => false })),
+				shell: {
+					focus: vi.fn(),
+					size: () => ({ columns: 80, rows: 24 }),
+					overlays: {
+						// Build the picker's view (in a root of its own) so the props reach the spy.
+						show: vi.fn((factory: () => unknown) => {
+							createRoot(factory);
+							return { node: {}, closed: false, close: vi.fn() };
+						}),
+					},
 				},
-				editor: {},
-				editorContainer: { children: [], clear: vi.fn(), addChild: vi.fn() },
 			} as unknown as InteractiveModeContext;
 			await new SelectorController(ctx).showSessionSelector();
 			const onRename = options?.onRename;

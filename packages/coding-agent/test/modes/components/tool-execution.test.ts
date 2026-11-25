@@ -1,115 +1,84 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { Settings, settings } from "../../../src/config/settings";
-import { renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
-import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
-import { ToolExecutionComponent, type ToolExecutionUi } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
+import type { MCPToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/mcp";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { Settings } from "../../../src/config/settings";
+import type { InteractiveModeContext } from "../../../src/modes/types";
+import { ToolCall } from "../../../src/ui/transcript/tool-block";
+import { createInteractiveModeContext, renderTranscript } from "../../helpers/interactive-mode-context";
+import { toolCallText } from "../../helpers/tool-text";
 
-import { cfgMcpRenderMarkdownResults } from "@oh-my-pi/pi-coding-agent/mcp/settings";
+const restoreTheme = currentTheme();
 
-class BoldTypeErrorComponent implements Component {
-	render(_width: number): readonly string[] {
+beforeAll(async () => {
+	await Settings.init({ inMemory: true });
+});
+
+afterAll(() => setCurrentTheme(restoreTheme));
+
+/** A context whose session owns no built-in tools (every call is an extension's). */
+function extensionContext(): InteractiveModeContext {
+	return createInteractiveModeContext({ session: { hasBuiltInTool: () => false } });
+}
+
+/** Present `tool`'s call (and `resultText`, when given) and return the transcript text. */
+function presentExtensionCall(tool: AgentTool, args: unknown, resultText?: string): string {
+	const ctx = extensionContext();
+	const pending = ctx.presentToolCall({ name: tool.name, args, tool, id: "call-1", cwd: process.cwd() });
+	pending.setArgsComplete("call-1");
+	pending.setExecutionStarted("call-1");
+	if (resultText !== undefined)
+		pending.updateResult({ content: [{ type: "text", text: resultText }] }, false, "call-1");
+	return renderTranscript(ctx, 80).join("\n");
+}
+
+/** A rows object whose painting throws (a renderer that broke at draw time). */
+const throwingRows = {
+	render(): readonly string[] {
 		throw new TypeError("th.bold is not a function");
-	}
-}
+	},
+};
 
-function visibleText(lines: readonly string[]): string {
-	let text = lines.join("\n");
-	text = text.replace(/\x1b\]8;[^\x1b\x07]*(?:\x07|\x1b\\)/g, "");
-	text = text.replace(/\x1b\[[0-9;]*m/g, "");
-	return text;
-}
-
-describe("ToolExecutionComponent custom renderer failures", () => {
-	beforeAll(async () => {
-		await Settings.init({ inMemory: true });
-		const loaded = await getThemeByName("dark");
-		if (!loaded) throw new Error("theme unavailable");
-		setThemeInstance(loaded);
-	});
-
-	afterEach(() => {
-		cfgMcpRenderMarkdownResults.set(settings, true);
-	});
-
-	it("falls back to the custom tool label when a renderCall child component throws during render", () => {
-		const tool: AgentTool = {
+describe("extension tool cards", () => {
+	it("keeps the card drawable when a renderCall rows object throws while painting", () => {
+		const tool = {
 			name: "graphify_graph",
 			label: "Graphify Graph",
 			description: "renders a graph",
 			parameters: { type: "object", additionalProperties: true },
-			renderCall() {
-				return new BoldTypeErrorComponent();
-			},
+			renderCall: () => throwingRows,
 			async execute() {
 				return { content: [{ type: "text", text: "ok" }] };
 			},
-		};
-		const ui: ToolExecutionUi = {
-			requestRender() {},
-			requestComponentRender(_component: Component) {},
-			resetDisplay() {},
-		};
-		const component = new ToolExecutionComponent(
-			"graphify_graph",
-			{},
-			{ showImages: false },
-			tool,
-			ui,
-			process.cwd(),
-		);
+		} as unknown as AgentTool;
 		let text = "";
-
 		expect(() => {
-			text = visibleText(component.render(80));
+			text = presentExtensionCall(tool, {});
 		}).not.toThrow();
-		expect(text).toContain("Graphify Graph");
+		expect(text).toContain("th.bold is not a function");
 	});
 
-	it("preserves raw result text when a renderResult child component throws during render", () => {
-		const rawResultText = "raw result survives child renderer failure";
-		const tool: AgentTool = {
+	it("keeps the card drawable when a renderResult rows object throws while painting", () => {
+		const tool = {
 			name: "crashy_result_renderer",
 			label: "Crashy Result Renderer",
 			description: "renders result output",
 			parameters: { type: "object", additionalProperties: true },
-			renderCall() {
-				return new Text(theme.fg("toolTitle", theme.bold("Crashy Result Renderer")), 0, 0);
-			},
-			renderResult() {
-				return new BoldTypeErrorComponent();
-			},
+			renderResult: () => throwingRows,
 			async execute() {
-				return { content: [{ type: "text", text: rawResultText }] };
+				return { content: [{ type: "text", text: "raw" }] };
 			},
-		};
-		const ui: ToolExecutionUi = {
-			requestRender() {},
-			requestComponentRender(_component: Component) {},
-			resetDisplay() {},
-		};
-		const component = new ToolExecutionComponent(
-			"crashy_result_renderer",
-			{},
-			{ showImages: false },
-			tool,
-			ui,
-			process.cwd(),
-		);
-		component.updateResult({ content: [{ type: "text", text: rawResultText }] }, false);
+		} as unknown as AgentTool;
 		let text = "";
-
 		expect(() => {
-			text = visibleText(component.render(80));
+			text = presentExtensionCall(tool, {}, "raw result");
 		}).not.toThrow();
-		expect(text).toContain(rawResultText);
+		expect(text).toContain("th.bold is not a function");
 	});
 
-	it("renders a same-named extension tool result with the generic renderer", () => {
+	it("renders a same-named extension tool result with the generic card, not the built-in's", () => {
 		const resultText = "recalled postgres memory";
-		const tool: AgentTool = {
+		const tool = {
 			name: "recall",
 			label: "Extension Recall",
 			description: "recalls external memory",
@@ -117,23 +86,9 @@ describe("ToolExecutionComponent custom renderer failures", () => {
 			async execute() {
 				return { content: [{ type: "text", text: resultText }] };
 			},
-		};
-		const ui: ToolExecutionUi = {
-			requestRender() {},
-			requestComponentRender(_component: Component) {},
-			resetDisplay() {},
-		};
-		const component = new ToolExecutionComponent(
-			"recall",
-			{ query: "project context" },
-			{ showImages: false, useBuiltInRenderer: false },
-			tool,
-			ui,
-			process.cwd(),
-		);
-		component.updateResult({ content: [{ type: "text", text: resultText }] }, false);
-
-		const rendered = visibleText(component.render(80));
+		} as unknown as AgentTool;
+		const rendered = presentExtensionCall(tool, { query: "project context" }, resultText);
+		expect(rendered).toContain("Extension Recall");
 		expect(rendered).toContain(resultText);
 		expect(rendered).not.toContain("no matches");
 	});
@@ -145,50 +100,34 @@ describe("MCP result Markdown rendering", () => {
 		mcpToolName: "ctx_search",
 	};
 
-	beforeAll(async () => {
-		await Settings.init({ inMemory: true });
-		const loaded = await getThemeByName("dark");
-		if (!loaded) throw new Error("theme unavailable");
-		setThemeInstance(loaded);
-	});
+	/** The expanded card of an MCP call returning `text`; `markdown`: `mcp.renderMarkdownResults`. */
+	function mcpText(text: string, markdown = true): string {
+		const call = new ToolCall({
+			id: "call-1",
+			name: "mcp__context-mode_ctx_search",
+			args: {},
+			mcpMarkdown: markdown,
+		});
+		call.setArgsComplete();
+		call.setExecutionStarted();
+		call.updateResult({ content: [{ type: "text", text }], details }, false);
+		call.setExpanded(true);
+		return toolCallText(call, 80);
+	}
 
-	afterEach(() => {
-		cfgMcpRenderMarkdownResults.set(settings, true);
-	});
-
-	it("renders inline Markdown by default", () => {
-		const component = renderMCPResult(
-			{ content: [{ type: "text", text: "**bold result** and `code`" }], details },
-			{ expanded: true, isPartial: false },
-			theme,
-		);
-		const rendered = visibleText(component.render(80));
-
+	it("renders inline Markdown when the setting is on", () => {
+		const rendered = mcpText("**bold result** and `code`");
 		expect(rendered).toContain("bold result and code");
 		expect(rendered).not.toContain("**bold result**");
 		expect(rendered).not.toContain("`code`");
 	});
 
 	it("keeps Markdown syntax literal when the setting is disabled", () => {
-		cfgMcpRenderMarkdownResults.set(settings, false);
-		const component = renderMCPResult(
-			{ content: [{ type: "text", text: "**bold result**" }], details },
-			{ expanded: true, isPartial: false },
-			theme,
-		);
-
-		expect(visibleText(component.render(80))).toContain("**bold result**");
+		expect(mcpText("**bold result**", false)).toContain("**bold result**");
 	});
 
 	it("preserves structured JSON rendering when Markdown is enabled", () => {
-		cfgMcpRenderMarkdownResults.set(settings, true);
-		const component = renderMCPResult(
-			{ content: [{ type: "text", text: '{"status":"**ok**"}' }], details },
-			{ expanded: true, isPartial: false },
-			theme,
-		);
-		const rendered = visibleText(component.render(80));
-
+		const rendered = mcpText('{"status":"**ok**"}');
 		expect(rendered).toContain("status");
 		expect(rendered).toContain("**ok**");
 	});

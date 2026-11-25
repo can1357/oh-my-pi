@@ -17,9 +17,11 @@ import {
 	setDefaultSessionStorage,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { AgentTranscriptViewer } from "../src/ui/overlays/panels/agent-transcript-viewer";
+import { AgentTranscriptViewerModel } from "../src/ui/overlays/panels/agent-transcript-viewer-model";
+import { mountLayer } from "./helpers/layer-terminal";
 
 const TS = "2026-11-02T00:00:00.000Z";
 const AGENT_ID = "Worker";
@@ -43,7 +45,7 @@ async function openStorage(kind: "file" | "sql"): Promise<{ storage: SessionStor
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
+	initTheme();
 });
 
 afterAll(() => {
@@ -54,7 +56,6 @@ describe("Agent Hub transcript viewer storage", () => {
 	const cleanups: (() => Promise<void> | void)[] = [];
 
 	afterEach(async () => {
-		vi.useRealTimers();
 		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	});
 
@@ -89,45 +90,40 @@ describe("Agent Hub transcript viewer storage", () => {
 				sessionFile,
 				status: "parked",
 			});
-			// The viewer asks for a render whenever loaded rows change: that is the signal to read the body.
-			const renderWaiters: (() => void)[] = [];
-			vi.useFakeTimers();
-			const viewer = new AgentTranscriptViewer({
+			const reads = vi.spyOn(agentTranscriptSource, "readFrom");
+			cleanups.push(() => reads.mockRestore());
+			const model = new AgentTranscriptViewerModel({
 				transcript: agentTranscriptSource,
 				agentId: AGENT_ID,
 				registry: agents,
-				ui: { requestRender: () => {}, requestComponentRender: () => {} } as never,
-				cwd: "/tmp",
+				terminalRows: () => 40,
 				expandKeys: ["ctrl+o"],
 				hubKeys: ["ctrl+s"],
-				requestRender: () => {
-					for (const resolve of renderWaiters.splice(0)) resolve();
-				},
 				onClose: () => {},
 				onHubClose: () => {},
+				// The test polls by hand.
+				pollMs: 3_600_000,
 			});
+			cleanups.push(() => model.dispose());
+			const viewer = mountLayer(() => AgentTranscriptViewer({ model }), { columns: 100, rows: 40 });
 			cleanups.push(() => viewer.dispose());
-			const body = () =>
-				viewer
-					.render(100)
-					.map(line => Bun.stripANSI(line))
-					.join("\n");
-			const untilBodyShows = async (marker: string) => {
-				while (!body().includes(marker)) {
-					const { promise, resolve } = Promise.withResolvers<void>();
-					renderWaiters.push(resolve);
-					await promise;
-				}
+			const body = () => viewer.text(100);
+			// Every read the viewer started has landed, including one a landed read chained.
+			// A read's own continuation registered first, so it has run when the await resumes.
+			const settleReads = async () => {
+				for (const result of reads.mock.results) await result.value;
 			};
 
-			await untilBodyShows("FIRSTVIEWMARKER");
+			await settleReads();
+			expect(body()).toContain("FIRSTVIEWMARKER");
 
 			const writer = storage.openWriter(sessionFile, { flags: "a" });
 			await writer.append(`${userLine("u2", "APPENDEDVIEWMARKER")}\n`);
 			await writer.close();
-			// One poll interval notices the growth.
-			vi.advanceTimersByTime(250);
-			await untilBodyShows("APPENDEDVIEWMARKER");
+			// One poll notices the growth.
+			model.poll();
+			await settleReads();
+			expect(body()).toContain("APPENDEDVIEWMARKER");
 			// The tail appends the new entry; it does not replay what was already shown.
 			expect(body().match(/FIRSTVIEWMARKER/g)).toHaveLength(1);
 		});

@@ -7,13 +7,11 @@
  * wording, and add-flow logic stay in the per-controller files because they
  * diverge in workflow.
  */
-import { Text } from "@oh-my-pi/pi-tui";
 import type { SourceMeta } from "../../capability/types";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
-import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { shortenPath } from "../../utils/render-utils";
 import { parseCommandArgs } from "../../utils/command-args";
 import type { InteractiveModeContext } from "../types";
+import { ruledTextView } from "./command-views";
 
 export type ScopeValue = "project" | "user";
 
@@ -96,14 +94,7 @@ export function* groupBySource<T>(
 	}
 }
 
-/**
- * Render a message block (DynamicBorder / Text / DynamicBorder) into the chat
- * container and request a render.
- */
+/** Show command output between two rules (deferred while a turn streams). */
 export function showCommandMessage(ctx: InteractiveModeContext, text: string): void {
-	const block = new TranscriptBlock();
-	block.addChild(new DynamicBorder());
-	block.addChild(new Text(text, 1, 1));
-	block.addChild(new DynamicBorder());
-	ctx.presentCommandOutput(block);
+	ctx.presentCommandOutput(() => ruledTextView(text));
 }

@@ -5,6 +5,7 @@
  */
 import { sessionTreeStorage } from "../session/session-storage";
 import type { ToolSession } from "../tools";
+import { owningSessionId } from "../tools/session-id";
 import { getExperimentalContextSession } from "../tools/context-notes";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { ResolveContext, WriteContext } from "./types";
@@ -51,7 +52,7 @@ export function sessionResolveContext(
 		storage: sessionTreeStorage(session),
 		experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(session.settings) === true,
 		getSessionBranch: () => getExperimentalContextSession(session).getBranch(),
-		sessionId: session.sessionManager?.getSessionId?.() ?? session.getSessionId?.() ?? undefined,
+		sessionId: owningSessionId(session),
 		agentRegistry: session.agentRegistry,
 		localProtocolOptions: contextLocalProtocolOptions(session),
 		skills: session.skills,

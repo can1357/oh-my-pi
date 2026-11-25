@@ -15,8 +15,8 @@ import {
 	setDefaultSessionStorage,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { fileUriForTerminal } from "@oh-my-pi/pi-coding-agent/utils/file-links";
+import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("history:// link targets storage", () => {
@@ -61,7 +61,7 @@ describe("history:// link targets storage", () => {
 			const targets = await resolveMarkdownLinkHrefs(["history://Linked"]);
 
 			expect(targets.get("history://Linked")).toBe(
-				kind === "file" ? fileUriForTerminal(sessionFile, undefined, TERMINAL.id) : undefined,
+				kind === "file" ? fileUriForTerminal(sessionFile, undefined, terminalIdentity().id) : undefined,
 			);
 		});
 	}

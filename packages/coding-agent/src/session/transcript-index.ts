@@ -22,7 +22,7 @@ import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { textContent } from "./transcript/transcript-entry";
 import {
 	getSessionsDir,
 	getTranscriptIndexDbPath,
@@ -48,6 +48,7 @@ import {
 	SESSION_READ_WINDOW_BYTES,
 	type SessionStorage,
 } from "./session-storage";
+import type { TimeWindow } from "./time-window";
 
 const TRANSCRIPT_INDEX_DDL = `
 PRAGMA journal_mode=WAL;
@@ -507,19 +508,21 @@ function parseLine(line: Uint8Array): unknown {
 
 /**
  * Ids of the sessions, of the project `cwd` or of every project, with a user or
- * assistant message matching `words`. Empty when the index is unavailable.
+ * assistant message matching `words`, sent within `window` when given. Empty
+ * when the index is unavailable.
  */
-export function transcriptSessionIds(words: WordQuery, cwd: string | undefined): Set<string> {
+export function transcriptSessionIds(words: WordQuery, cwd: string | undefined, window?: TimeWindow): Set<string> {
 	const db = openTranscriptIndex();
 	if (!db) return new Set();
 	try {
 		const rows = db
-			.query<{ session_id: string }, [string, string | null]>(`
+			.query<{ session_id: string }, [string, string | null, number | null, number | null]>(`
 SELECT DISTINCT f.session_id FROM messages_fts
 JOIN messages m ON m.id = messages_fts.rowid
 JOIN files f ON f.id = m.file
-WHERE messages_fts MATCH ?1 AND (?2 IS NULL OR f.cwd = ?2)`)
-			.all(words.match, cwd ?? null);
+WHERE messages_fts MATCH ?1 AND (?2 IS NULL OR f.cwd = ?2)
+	AND (?3 IS NULL OR m.at >= ?3) AND (?4 IS NULL OR m.at < ?4)`)
+			.all(words.match, cwd ?? null, window?.since ?? null, window?.until ?? null);
 		return new Set(rows.map(row => row.session_id));
 	} catch (error) {
 		logger.debug("Transcript index query failed", { error: String(error) });
@@ -593,27 +596,29 @@ function isLowSurrogate(code: number): boolean {
 
 /**
  * The newest `perSession` messages matching `words` in each of `sessionIds`,
- * newest first, each cut to a snippet around the hit. Empty when the index is
- * unavailable.
+ * sent within `window` when given, newest first, each cut to a snippet around
+ * the hit. Empty when the index is unavailable.
  */
 export function transcriptMatches(
 	words: WordQuery,
 	sessionIds: readonly string[],
 	perSession: number,
+	window?: TimeWindow,
 ): TranscriptMatch[] {
 	const db = openTranscriptIndex();
 	if (!db || sessionIds.length === 0) return [];
 	try {
 		const ids = db
-			.query<{ id: number }, [string, string, number]>(`
+			.query<{ id: number }, [string, string, number, number | null, number | null]>(`
 SELECT id FROM (
 	SELECT m.id, row_number() OVER (PARTITION BY f.session_id ORDER BY m.at DESC, m.id DESC) AS rank
 	FROM messages_fts
 	JOIN messages m ON m.id = messages_fts.rowid
 	JOIN files f ON f.id = m.file
 	WHERE messages_fts MATCH ?1 AND f.session_id IN (SELECT value FROM json_each(?2))
+		AND (?4 IS NULL OR m.at >= ?4) AND (?5 IS NULL OR m.at < ?5)
 ) WHERE rank <= ?3`)
-			.all(words.match, JSON.stringify(sessionIds), perSession)
+			.all(words.match, JSON.stringify(sessionIds), perSession, window?.since ?? null, window?.until ?? null)
 			.map(row => row.id);
 		// FTS5's snippet() re-evaluates the whole MATCH per row: seconds for a common word.
 		const rows = db

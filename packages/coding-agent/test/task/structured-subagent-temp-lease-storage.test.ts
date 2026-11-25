@@ -24,7 +24,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 
 const AGENT: AgentDefinition = {
 	name: "worker",

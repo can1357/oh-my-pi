@@ -1,0 +1,21 @@
+# Perl corpus: substitution. Format and regeneration: crates/builtins/src/perl/tests.rs.
+capture	my $s='ab12'; $s =~ s/(\D+)(\d+)/$2:$1/; print "$s\n";	12:ab␊
+case-insensitive	my $s='a A'; $s =~ s/a/z/gi; print "$s\n";	z z␊
+delete	my $s='a1b2'; $s =~ s/\d//g; print "$s\n";	ab␊
+evaluate-global	my $s='a1 b2'; $s =~ s/(\d)/$1*2/ge; print "$s\n";	a2 b4␊
+evaluate-side-effect	my $s='a1 b2'; my $n=0; $s =~ s/(\d)/++$n+$1/ge; print "$n|$s\n";	2|a2 b4␊
+evaluate-twice	my $s='a'; my $n=7; $s =~ s/a/'$n+1'/ee; print "$s\n";	8␊
+evaluate	my $s='38'; $s =~ s/(\d+)/$1+4/e; print "$s\n";	42␊
+global	my $s='a a'; my $n=$s =~ s/a/b/g; print "$n|$s\n";	2|b b␊
+interpolate-delimited	my $s='a.b'; my $x='.'; $s =~ s/\Q$x\E/!/; print "$s\n";	a!b␊
+keep-prefix	my $s='id=42'; $s =~ s/id=\K\d+/77/; print "$s\n";	id=77␊
+lookaround	my $s='a1 b2 a3'; $s =~ s/(?<=a)\d/!/g; print "$s\n";	a! b2 a!␊
+no-match	my $s='a a'; my $n=$s =~ s/x/y/g; print 0+$n,"|$s\n";	0|a a␊
+non-destructive-global	my $s='tea pea'; print $s =~ s/ea/oo/gr,"|$s\n";	too poo|tea pea␊
+non-destructive-literal	print 'abc' =~ s/a/A/r,"\n";	Abc␊
+non-destructive	my $s='abc'; my $out=$s =~ s/a/A/r; print "$s|$out\n";	abc|Abc␊
+paired-delimiters	my $s='ab'; $s =~ s{ab}[XY]; print "$s\n";	XY␊
+single-quoted	my $s='ab'; my $r='XY'; $s =~ s'ab'$r'; print "$s\n";	$r␊
+single	my $s='a a'; my $n=$s =~ s/a/b/; print "$n|$s\n";	1|b a␊
+variable	my $s='ab'; my $r='XY'; $s =~ s/ab/$r/; print "$s\n";	XY␊
+zero-width	my $s='abc'; $s =~ s/(?=.)/-/g; print "$s\n";	-a-b-c␊

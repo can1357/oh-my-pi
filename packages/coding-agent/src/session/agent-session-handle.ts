@@ -11,10 +11,10 @@
 import type { SessionStorage } from "./session-storage";
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort, ImageContent, Model, ServiceTier, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
+import type { IrcMessage } from "../irc/irc-types";
+import type { JobWidgetEntry } from "../tools/details/job-widget";
+import type { TodoPhase } from "../tools/details/todo";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
@@ -95,6 +95,23 @@ export interface AgentSessionAdvisorOverview {
 	advisors: AdvisorStatusOverviewEntry[];
 }
 
+/** Model patterns selected from an authorized task agent kind. */
+export interface AgentKindModelChange {
+	kind: string;
+	patterns: string[];
+	thinkingLevel?: ConfiguredThinkingLevel;
+	defaultThinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/** A session-only change authorized by the calling agent's URL write. */
+export type AgentModelChange = AgentKindModelChange | { effort: ConfiguredThinkingLevel };
+
+/** Model and configured effort after the home session applies a control write. */
+export interface AgentModelSelectionState {
+	model: string;
+	effort: ConfiguredThinkingLevel | undefined;
+}
+
 /** The surface other agents' code uses on a session obtained from the registry, lifecycle, or IRC delivery. */
 export interface AgentSessionHandle {
 	/** Cross-thread identity token: `${homeThreadId}:${snowflake}`, unique per session object. */
@@ -159,7 +176,10 @@ export interface AgentSessionHandle {
 		reason?: string;
 		preserveCompaction?: boolean;
 		deliverQueuedMessages?: boolean;
+		detachTools?: boolean;
 	}): Promise<void>;
+	/** Apply a validated agent URL change on the session's home thread. */
+	applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState>;
 	/** Replace the pooled-turn yield contract. */
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void>;
 	/** Dispose the session and release its resources. */

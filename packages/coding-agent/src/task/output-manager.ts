@@ -12,7 +12,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
+import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-names";
 import type { Settings } from "../config/settings";
 import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import { cfgTaskCrossInstance } from "./settings";

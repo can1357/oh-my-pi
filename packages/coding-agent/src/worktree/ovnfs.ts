@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { hashPath, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
-import { callOvnfs, checkoutStem, type NewReply, removeCheckout } from "../ovnfs/checkouts";
+import { checkoutStem, type NewReply, newCheckout, removeCheckout } from "../ovnfs/checkouts";
 import { callSocket, OvnfsError, socketFeatures } from "../ovnfs/client";
 import { runningDaemon, startDaemon } from "../ovnfs/daemon";
 import type { OvnfsCheckout, SessionWorktree, WorktreeBackend } from "./backend";
@@ -107,16 +107,17 @@ async function removeRecorded(record: OvnfsRecord, options: { keepCommits?: bool
 /** Private Git checkout implementation; discovery also uses previously recorded executables. */
 export function ovnfsWorktree(command?: string): WorktreeBackend {
 	return {
-		async create({ repository, branch, sourceCwd, baseCommit, keptChanges }) {
+		async create({ repository, branch, sourceCwd, baseCommit, keptChanges, session }) {
 			if (!command) throw new Error("ovnfs is not available");
 			const source = repository.info().repoRoot;
 			const name = checkoutName(branch, repository.primaryRoot());
 			let reply: NewReply;
 			try {
-				reply = await callOvnfs<NewReply>(command, "new", {
+				reply = await newCheckout(command, {
 					dir: source,
 					name,
 					rev: keptChanges ? undefined : baseCommit,
+					session,
 				});
 			} catch (err) {
 				if (err instanceof OvnfsError && err.code === "exists") {

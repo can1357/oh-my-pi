@@ -9,8 +9,8 @@
  *
  * Implementations: `daemon/modules/agents.ts` (room), `irc/mesh.ts` (instance).
  */
-import type { AgentStatus } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import type { IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools/irc";
+import type { AgentStatus } from "../registry/agent-hub-types";
+import type { IrcDeliveryReceipt } from "./irc-types";
 
 /** Daemon module kind and `caps` key. */
 export const AGENT_MESH_KIND = "agents";
@@ -32,6 +32,8 @@ export interface MeshState {
 	sessionFile: string | null;
 	status: AgentStatus | "unknown";
 	agents: MeshSubagent[];
+	/** Title of the root session; peers show it in place of the pid. */
+	title?: string;
 }
 
 /** One instance in the room, as the roster shows it. */

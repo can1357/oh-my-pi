@@ -19,10 +19,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { DirectoryChangeAction, type DirectoryChanges, DirectoryWatcher } from "@oh-my-pi/pi-natives";
-import { hasFsCode, logger } from "@oh-my-pi/pi-utils";
+import { hasFsCode, logger, relativePathWithinNormalizedRoot } from "@oh-my-pi/pi-utils";
 import { mapWithConcurrencyLimit } from "../task/parallel";
 import { FileChangeType, type FileEvent } from "./types";
-import { fileToUri, uriToFile } from "./utils";
+import { fileToUri, uriToFile } from "./uri";
 
 /** Method a server registers to have the client watch files for it. */
 export const WATCHED_FILES_METHOD = "workspace/didChangeWatchedFiles";
@@ -188,9 +188,7 @@ function foldCase(p: string): string {
 
 /** `target` relative to `dir` with `/` separators, or undefined when it lies outside `dir`. */
 function relativeWithin(dir: string, target: string): string | undefined {
-	const rel = path.relative(foldCase(dir), foldCase(target));
-	if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return undefined;
-	return rel.replaceAll("\\", "/");
+	return relativePathWithinNormalizedRoot(foldCase(dir), foldCase(target))?.replaceAll("\\", "/");
 }
 
 /**

@@ -9,7 +9,7 @@ import { installSessionStorageForCommand } from "../cli/session-arg";
 import type { StatsCommandArgs } from "../cli/stats-cli";
 import * as statsCli from "../cli/stats-cli";
 import { SessionStorageUnsupportedError } from "../session/session-storage-config";
-import * as theme from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 export default class Stats extends Command {
 	static description = commandHelp.description;
@@ -33,7 +33,7 @@ export default class Stats extends Command {
 			summary: flags.summary,
 		};
 
-		await theme.initTheme();
+		initTheme();
 		try {
 			await statsCli.runStatsCommand(cmd);
 		} catch (error) {

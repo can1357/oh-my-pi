@@ -698,7 +698,6 @@ export class CollabHost {
 		this.#socket?.close();
 		this.#socket = null;
 		this.#ctx.statusLine.setCollabStatus(null);
-		this.#ctx.ui.requestRender();
 		// A publication still being created when the room ended is withdrawn
 		// before stop() resolves: a successor room reuses this instance
 		// endpoint, and this room's late cleanup must never unlink the winner.
@@ -1164,7 +1163,6 @@ export class CollabHost {
 		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {
 			this.#ctx.updatePendingMessagesDisplay();
-			this.#ctx.ui.requestRender();
 			this.#scheduleStateBroadcast();
 		}
 		this.#ctx.session
@@ -1244,11 +1242,10 @@ export class CollabHost {
 		if (!session.isStreaming || !session.hasInterruptibleInput) return;
 		const name = peer.name;
 		void session
-			.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true })
+			.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true, detachTools: true })
 			.then(() => {
 				if (!this.#guestTrafficAllowed()) return;
 				this.#ctx.updatePendingMessagesDisplay();
-				this.#ctx.ui.requestRender();
 				session.emitNotice("info", `${name} interrupted`, "collab");
 			})
 			.catch(err => logger.warn("collab guest interrupt failed", { error: String(err) }));
@@ -1345,11 +1342,9 @@ export class CollabHost {
 
 	#buildState(): CollabSessionState {
 		const session = this.#ctx.session;
-		// Context numbers come from the status line's memoized breakdown so guests
-		// render exactly the same anchored, provider-real count the host's own
-		// status line shows.
-		const breakdown = this.#ctx.statusLine.getCachedContextBreakdown();
-		const tokens = breakdown.usedTokens ?? 0;
+		// Context numbers come from the status line's facts so guests render exactly
+		// the same anchored, provider-real count the host's own status line shows.
+		const context = this.#ctx.statusLine.facts().context;
 		return {
 			isStreaming: session.isStreaming,
 			isAborting: session.isAborting,
@@ -1359,9 +1354,9 @@ export class CollabHost {
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
 			contextUsage: {
-				tokens,
-				contextWindow: breakdown.contextWindow,
-				percent: breakdown.contextWindow > 0 ? (tokens / breakdown.contextWindow) * 100 : 0,
+				tokens: context.tokens,
+				contextWindow: context.window,
+				percent: context.window > 0 ? (context.tokens / context.window) * 100 : 0,
 			},
 			participants: this.participants,
 		};
@@ -1512,7 +1507,5 @@ export class CollabHost {
 
 	#updateStatusSegment(): void {
 		this.#ctx.statusLine.setCollabStatus({ role: "host", participantCount: this.#peers.size + 1 });
-		this.#ctx.statusLine.invalidate();
-		this.#ctx.ui.requestRender();
 	}
 }

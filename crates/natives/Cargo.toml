@@ -28,6 +28,8 @@ html-to-markdown-rs.workspace = true
 # Already in the graph via omp-builtins; git-ignore rules for the shell's file change reports.
 ignore.workspace = true
 image = { workspace = true, features = ["bmp"] }
+# Already in the graph via omp-shell; transcript timestamps and local days for archive scans.
+jiff.workspace = true
 resvg.workspace = true
 # Feature activation only (see workspace manifest): zune-jpeg needs `log` to compile.
 zune-jpeg.workspace = true
@@ -35,8 +37,6 @@ zune-jpeg.workspace = true
 tinyvec.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
-# Already in the graph via omp-builtins; wakes the OAuth callback wait.
-notify = "=8.2.0"
 log = "0.4"
 # Already in the graph via omp-builtins; SIMD newline search for IPC line framing.
 memchr = "2.7.4"

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { ReadToolDetails } from "./details/read";
+import { ToolError } from "./tool-errors";
 import {
 	cfgDisasmBackend,
 	DISASM_BACKEND_IDS,

@@ -177,6 +177,7 @@ function createContext(overrides?: {
 		flush: vi.fn(async () => {}),
 	} as unknown as InteractiveModeContext["sessionManager"];
 	const cloneManager = {
+		getSessionId: vi.fn(() => "tan-clone-session"),
 		getSessionFile: vi.fn(() => cloneFile),
 		appendCustomEntry: vi.fn(),
 	} as unknown as SessionManager;

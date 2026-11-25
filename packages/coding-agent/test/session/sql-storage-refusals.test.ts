@@ -39,8 +39,10 @@ import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client
 import * as ternPage from "@oh-my-pi/pi-coding-agent/tools/browser/tern/user-page";
 import * as openUtils from "@oh-my-pi/pi-coding-agent/utils/open";
 import { getAgentDir, postmortem, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
-import type { Component, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
-import * as theme from "@oh-my-pi/pi-tui/theme";
+import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
+import * as theme from "@oh-my-pi/pi-coding-agent/ui/theme/service";
+import * as usageDashboardModule from "../../src/ui/overlays/panels/usage-dashboard";
+import type { UsageDashboardModel } from "../../src/ui/overlays/panels/usage-dashboard-model";
 import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 import { rejectionOf } from "../helpers/rejection";
 
@@ -164,7 +166,7 @@ for (const kind of ["file", "sql"] as const) {
 	describe(`disk-only features on ${kind} storage`, () => {
 		test(`omp stats ${refuses ? "refuses before ingesting session files" : "ingests and prints the summary"}`, async () => {
 			await openFixture(kind);
-			vi.spyOn(theme, "initTheme").mockResolvedValue();
+			vi.spyOn(theme, "initTheme").mockImplementation(() => {});
 			const sync = vi.spyOn(stats, "syncAllSessions").mockResolvedValue({ processed: 0, files: 0 });
 			vi.spyOn(stats, "refreshRollups").mockResolvedValue();
 			vi.spyOn(stats, "getTotalMessageCount").mockResolvedValue(0);
@@ -185,11 +187,15 @@ for (const kind of ["file", "sql"] as const) {
 
 		test(`/usage ${refuses ? "shows quotas but refuses the activity heatmap" : "loads the activity heatmap"}`, async () => {
 			const fx = await openFixture(kind);
-			await theme.initTheme(false);
+			theme.initTheme();
 			const activity = vi.spyOn(activityClient, "loadDailyActivity").mockImplementation(async push => {
 				push([]);
 			});
-			const shown: Component[] = [];
+			const shown: UsageDashboardModel[] = [];
+			vi.spyOn(usageDashboardModule, "UsageDashboard").mockImplementation(props => {
+				shown.push(props.model);
+				return jsx("col", {});
+			});
 			const ctx = createInteractiveModeContext({
 				sessionManager: SessionManager.create(fx.cwd, path.dirname(fx.sessionFile), fx.storage),
 				session: {
@@ -204,12 +210,6 @@ for (const kind of ["file", "sql"] as const) {
 						},
 					},
 				},
-				ui: {
-					showOverlay: (component: Component, _options?: OverlayOptions): OverlayHandle => {
-						shown.push(component);
-						return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
-					},
-				},
 			});
 
 			// The dashboard starts its history load while it is built, so the outcome is known on return.
@@ -217,12 +217,13 @@ for (const kind of ["file", "sql"] as const) {
 
 			// The dashboard opens either way: provider quotas do not come from session files.
 			expect(shown).toHaveLength(1);
-			const rendered = Bun.stripANSI(shown[0]?.render(160).join("\n") ?? "");
+			expect(ctx.shell.overlays.open()).toBe(true);
+			const activityError = shown[0]?.activityError ?? "";
 			if (refuses) {
-				expect(rendered).toContain(`Usage history unavailable (/usage activity heatmap ${SQL_REFUSAL}`);
+				expect(activityError).toContain(`/usage activity heatmap ${SQL_REFUSAL}`);
 				expect(activity).not.toHaveBeenCalled();
 			} else {
-				expect(rendered).not.toContain("Usage history unavailable");
+				expect(activityError).toBe("");
 				expect(activity).toHaveBeenCalledTimes(1);
 			}
 		});

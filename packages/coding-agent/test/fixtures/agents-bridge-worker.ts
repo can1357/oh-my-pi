@@ -6,6 +6,7 @@
  */
 import { MessagePort, parentPort } from "node:worker_threads";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { Effort } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "../../src/config/model-registry";
@@ -36,15 +37,24 @@ export interface PeerReport {
 	casBySession: boolean;
 }
 
+/** Identity and run options of a test worker session. */
+export interface AgentsProbeOpenOptions {
+	sessionFile?: string;
+	gated?: boolean;
+	monitored?: boolean;
+	parentId?: string;
+	parentSessionKey?: string;
+}
+
 /** Operations the test drives on the worker. */
 export interface AgentsProbe {
 	threadId(): Promise<string>;
 	/** Build a real session (mock model) and register it as `id` in the (remote) registry. */
-	open(id: string, options: { sessionFile?: string; gated?: boolean; monitored?: boolean }): Promise<string>;
+	open(id: string, options: AgentsProbeOpenOptions): Promise<string>;
 	/** As {@link open}, but through `registerIfAvailable(…, null)`, the call a spawn on a worker makes. */
 	openAvailable(id: string, options: { sessionFile?: string }): Promise<string>;
-	/** Run a prompt on the local session to completion. */
-	prompt(id: string, text: string): Promise<void>;
+	/** Run a prompt and report the actual model and effort passed to its provider. */
+	prompt(id: string, text: string): Promise<ProviderSelection | undefined>;
 	/** Emit a tool call on a specific session, even after another session takes its id. */
 	toolCall(key: string, toolName: string): Promise<void>;
 	/** Let gated model calls answer. */
@@ -81,6 +91,12 @@ export interface AgentsProbeGlobals {
 const port = parentPort;
 if (!port) throw new Error("fixture must run in a worker");
 
+interface ProviderSelection {
+	model: string;
+	effort: Effort | undefined;
+}
+
+const selections = new Map<string, ProviderSelection>();
 const sessions = new Map<string, AgentSession>();
 const byKey = new Map<string, AgentSession>();
 const grabbed = new Map<string, AgentRef>();
@@ -102,7 +118,10 @@ async function makeSession(id: string, gated: boolean): Promise<AgentSession> {
 		getApiKey: () => "test-key",
 		initialState: { model, systemPrompt: ["Test"], tools: [] },
 		convertToLlm,
-		streamFn: mock.stream,
+		streamFn: (model, context, options) => {
+			selections.set(id, { model: model.id, effort: options?.reasoning });
+			return mock.stream(model, context, options);
+		},
 	});
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("anthropic", "test-key");
@@ -133,6 +152,8 @@ const probe: AgentsProbe = {
 			id,
 			displayName: id,
 			kind: "sub",
+			parentId: options.parentId,
+			parentSessionKey: options.parentSessionKey,
 			session,
 			sessionFile: options.sessionFile ?? null,
 			status: "idle",
@@ -157,7 +178,9 @@ const probe: AgentsProbe = {
 		return session.instanceKey;
 	},
 	prompt: async (id, text) => {
+		selections.delete(id);
 		await local(id).prompt(text);
+		return selections.get(id);
 	},
 	toolCall: async (key, toolName) => {
 		const session = byKey.get(key);

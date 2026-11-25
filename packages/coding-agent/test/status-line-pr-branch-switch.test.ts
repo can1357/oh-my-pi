@@ -8,14 +8,12 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/types";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
-import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { disposeStatusLines, flushStatus, lineText, statusLine, statusSession } from "./helpers/session-status-line";
 
 const originalProjectDir = getProjectDir();
 const root = "/repo/pr-branch-switch";
@@ -38,45 +36,19 @@ const repoInfo: VcsGitRepoInfo = {
 	isReftable: false,
 };
 
-const PR_7 = { exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" };
+const PR_7 = {
+	exitCode: 0,
+	stdout: '{"number":7,"url":"https://example.test/x/7"}',
+	stderr: "",
+};
 const NO_PR = { exitCode: 1, stdout: "", stderr: "no pull requests found" };
+/** The status line's least time between two git/jj reads (`VCS_READ_INTERVAL_MS`). */
+const READ_INTERVAL_MS = 5_000;
 
-function makeSession() {
-	return {
-		state: { messages: [], model: undefined },
-		messages: [],
-		model: undefined,
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isFastModeEnabled: () => false,
-		getGoalModeState: () => null,
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		modelRegistry: { isUsingSubscription: () => false },
-		sessionManager: {
-			getSessionName: () => "pr branch switch",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
-}
-
-async function flush(): Promise<void> {
-	for (let i = 0; i < 6; i++) await Promise.resolve();
-}
-
-/** A git checkout whose HEAD the test moves, as `!git checkout` would. */
-function mockCheckout(initial: VcsHeadState): { checkout(head: VcsHeadState): void } {
+/** A git checkout whose HEAD the test moves, as `git checkout` would. */
+function mockCheckout(initial: VcsHeadState): {
+	moveHead(head: VcsHeadState): void;
+} {
 	let head = initial;
 	const handle = {
 		headSync: () => head,
@@ -89,41 +61,62 @@ function mockCheckout(initial: VcsHeadState): { checkout(head: VcsHeadState): vo
 		asGit: () => handle,
 		asJj: () => null,
 		root: () => root,
-		watchTarget: () => `${root}/.git/HEAD`,
 		statusSummary: () => handle.statusSummary(),
 	} as unknown as VcsRepo;
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfo);
 	vi.spyOn(vcs, "git").mockReturnValue(handle);
 	vi.spyOn(vcs, "repo").mockReturnValue(repo);
 	vi.spyOn(vcs, "repoForDisplay").mockReturnValue(repo);
-	vi.spyOn(vcs, "watch").mockReturnValue(() => {});
 	return {
-		checkout(next) {
+		moveHead(next) {
 			head = next;
 		},
 	};
 }
 
+/** Paint once (a stale snapshot starts its refresh on read), then let the refresh land. */
+async function repaint(component: ReturnType<typeof statusLine>): Promise<string> {
+	lineText(component);
+	await flushStatus();
+	return lineText(component);
+}
+
 function branch(name: string): VcsHeadState {
-	return { kind: "ref", branch: name, refName: `refs/heads/${name}`, commit: undefined };
+	return {
+		kind: "ref",
+		branch: name,
+		refName: `refs/heads/${name}`,
+		commit: undefined,
+	};
 }
 
 async function startOnPrBranch(initial: VcsHeadState) {
-	const checkout = mockCheckout(initial);
-	const run = vi.spyOn(github, "run").mockResolvedValueOnce(PR_7);
-	const component = new StatusLineComponent(makeSession(), statusLineHost);
-	component.updateSettings(settings);
-	component.watchBranch(() => {});
-	component.getTopBorder(120);
-	await flush();
-	expect(component.getTopBorder(120).content).toContain("#7");
+	vi.useFakeTimers();
+	const { moveHead } = mockCheckout(initial);
+	const run = vi.spyOn(github, "run").mockResolvedValue(NO_PR).mockResolvedValueOnce(PR_7);
+	const component = statusLine(
+		statusSession({
+			sessionManager: { getSessionName: () => "pr branch switch" },
+		}),
+		settings,
+	);
+	lineText(component);
+	await flushStatus();
+	expect(lineText(component)).toContain("#7");
+	const checkout = {
+		/** `!git checkout`: the command's end re-reads the branch once the read interval allows. */
+		checkout(head: VcsHeadState) {
+			moveHead(head);
+			component.refreshVcs();
+			vi.advanceTimersByTime(READ_INTERVAL_MS);
+		},
+	};
 	return { checkout, run, component };
 }
 
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
 });
 
 afterAll(() => {
@@ -132,20 +125,19 @@ afterAll(() => {
 });
 
 afterEach(() => {
+	disposeStatusLines();
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
-describe("StatusLineComponent PR segment across branch switches", () => {
+describe("status line PR segment across branch switches", () => {
 	it("drops the PR after checking out the default branch", async () => {
-		const { checkout, run, component } = await startOnPrBranch(branch("feature/x"));
+		const { checkout, component } = await startOnPrBranch(branch("feature/x"));
 		try {
 			checkout.checkout(branch("main"));
-			component.invalidateGitCaches();
-			await flush();
-			const content = component.getTopBorder(120).content;
+			const content = await repaint(component);
 			expect(content).toContain("main");
 			expect(content).not.toContain("#7");
-			expect(run).toHaveBeenCalledTimes(1);
 		} finally {
 			component.dispose();
 		}
@@ -155,9 +147,7 @@ describe("StatusLineComponent PR segment across branch switches", () => {
 		const { checkout, component } = await startOnPrBranch(branch("feature/x"));
 		try {
 			checkout.checkout({ kind: "detached" });
-			component.invalidateGitCaches();
-			await flush();
-			expect(component.getTopBorder(120).content).not.toContain("#7");
+			expect(await repaint(component)).not.toContain("#7");
 		} finally {
 			component.dispose();
 		}
@@ -169,11 +159,11 @@ describe("StatusLineComponent PR segment across branch switches", () => {
 			const pending = Promise.withResolvers<typeof NO_PR>();
 			run.mockReturnValueOnce(pending.promise);
 			checkout.checkout(branch("feature/y"));
-			component.invalidateGitCaches();
-			expect(component.getTopBorder(120).content).not.toContain("#7");
+			// Branch and PR come from one snapshot: never the new branch beside the old PR.
+			const during = lineText(component);
+			expect(during.includes("feature/y") && during.includes("#7")).toBe(false);
 			pending.resolve(NO_PR);
-			await flush();
-			const content = component.getTopBorder(120).content;
+			const content = await repaint(component);
 			expect(content).toContain("feature/y");
 			expect(content).not.toContain("#7");
 		} finally {
@@ -186,10 +176,10 @@ describe("StatusLineComponent PR segment across branch switches", () => {
 		try {
 			const pending = Promise.withResolvers<typeof PR_7>();
 			run.mockReturnValueOnce(pending.promise);
-			component.invalidate();
-			expect(component.getTopBorder(120).content).toContain("#7");
+			component.refresh();
+			expect(lineText(component)).toContain("#7");
 			pending.resolve(PR_7);
-			await flush();
+			await flushStatus();
 		} finally {
 			component.dispose();
 		}

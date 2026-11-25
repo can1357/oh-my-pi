@@ -11,6 +11,7 @@ export type KnownProvider =
 	| "anthropic"
 	| "antigravity-cli"
 	| "apple"
+	| "arkanecloud"
 	| "azure"
 	| "baseten"
 	| "bedrock-mantle"
