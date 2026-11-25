@@ -648,30 +648,33 @@ describe("AgentSession shake", () => {
 			}
 		});
 
-		it.each([true, false])("credits the quote only if replayed, not the demoted copy (eligible: %s)", async eligible => {
-			const model = eligible ? bundled("openai", "gpt-5.2") : bundled("anthropic", "claude-sonnet-4-5");
-			session.agent.setModel(model);
-			const reasoning = "my unfinished thought ".repeat(40);
-			sessionManager.appendMessage({
-				role: "assistant",
-				content: [{ type: "thinking", thinking: reasoning }],
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				stopReason: "aborted",
-				errorMessage: USER_INTERRUPT_LABEL,
-				usage,
-				timestamp: Date.now(),
-			});
-			const quote = `Interrupted: ${reasoning}`;
-			sessionManager.appendCustomMessageEntry(INTERRUPTED_THINKING_MESSAGE_TYPE, quote, false);
+		it.each([true, false])(
+			"credits the quote only if replayed, not the demoted copy (eligible: %s)",
+			async eligible => {
+				const model = eligible ? bundled("openai", "gpt-5.2") : bundled("anthropic", "claude-sonnet-4-5");
+				session.agent.setModel(model);
+				const reasoning = "my unfinished thought ".repeat(40);
+				sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "thinking", thinking: reasoning }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					stopReason: "aborted",
+					errorMessage: USER_INTERRUPT_LABEL,
+					usage,
+					timestamp: Date.now(),
+				});
+				const quote = `Interrupted: ${reasoning}`;
+				sessionManager.appendCustomMessageEntry(INTERRUPTED_THINKING_MESSAGE_TYPE, quote, false);
 
-			const result = await session.shake("thinking");
+				const result = await session.shake("thinking");
 
-			expect(result.interruptedThinkingNotesDropped).toBe(1);
-			expect(result.thinkingBlocksDropped).toBe(1);
-			expect(result.tokensFreed).toBe(eligible ? session.agent.tokenizer.countTokens(quote) : 0);
-		});
+				expect(result.interruptedThinkingNotesDropped).toBe(1);
+				expect(result.thinkingBlocksDropped).toBe(1);
+				expect(result.tokensFreed).toBe(eligible ? session.agent.tokenizer.countTokens(quote) : 0);
+			},
+		);
 
 		it("does not inflate reported savings with opaque signature bytes", async () => {
 			const signed: AssistantMessage = {

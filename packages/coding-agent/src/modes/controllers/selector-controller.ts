@@ -1469,7 +1469,12 @@ export class SelectorController {
 					? this.ctx.sessionManager.getEntry(target)
 					: this.ctx.sessionManager
 							.getBranch()
-							.findLast(e => e.type === "message" && e.message.role === "user" && e.message.timestamp === target.submittedAt);
+							.findLast(
+								e =>
+									e.type === "message" &&
+									e.message.role === "user" &&
+									e.message.timestamp === target.submittedAt,
+							);
 			if (!entry || !isTranscriptEntry(entry)) {
 				if (typeof target !== "string") {
 					// Cancelled before dispatch: there is no persisted turn to rewind past.
@@ -1492,7 +1497,8 @@ export class SelectorController {
 			const treeRewind = turn ? undefined : this.#treeRewindBoundary(entryId, realLeafId);
 			const branch = this.ctx.sessionManager.getBranch();
 			const at = branch.findIndex(e => e.id === entryId);
-			const dropped = at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
+			const dropped =
+				at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
 			const result = await this.ctx.session.navigateTree(entryId, { summarize: false, requireIdle: !!turn });
 			if (result.cancelled) {
 				done();
