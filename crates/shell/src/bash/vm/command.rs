@@ -4563,6 +4563,14 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 					Poll::Pending => return Some(Flow::Block(WaitKey::Ext { pid })),
 				}
 			};
+			// Reaped now, before the drop below: what `time` reports.
+			let usage = match &mut scratch(vp).live {
+				Live::Ext(child) if exit.is_some() => child.usage(),
+				_ => None,
+			};
+			if let Some(usage) = usage {
+				vp.count_usage(&usage);
+			}
 			let killed = match exit {
 				Some(ExitStatus::Signaled(sig)) => Some(sig),
 				_ => None,

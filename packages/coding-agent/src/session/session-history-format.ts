@@ -19,6 +19,7 @@ import type {
 	HookMessage,
 	PythonExecutionMessage,
 } from "./messages";
+import { PLAN_MODE_CONTEXT_MESSAGE_TYPE } from "./messages";
 import { truncateMiddle } from "../tools/streaming-output";
 
 export interface HistoryFormatOptions {
@@ -432,7 +433,10 @@ function executionLine(
  * reviewer — and its constraints don't drive the file-write misreads this
  * targets.
  */
-export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
+export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set([
+	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
+	"plan-mode-reference",
+]);
 
 /**
  * Hidden non-primary custom messages whose content is needed to understand visible transcript entries:
