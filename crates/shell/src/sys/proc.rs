@@ -121,7 +121,9 @@ pub fn signal_pinned(p: &ProcInfo, sig: Signal) -> io::Result<bool> {
 }
 
 /// `roots` and every process descended from them in `table`, a snapshot of
-/// the process table: their children, the children's children, and so on,
+/// the process table.
+///
+/// Descendants are their children, the children's children, and so on,
 /// widened by every member of a process group or session a process of the
 /// set leads. The widening keeps what a dying parent leaves to init: a
 /// debugger's inferior in a group of its own, a `setsid` daemon, a job's
@@ -173,15 +175,18 @@ pub fn family(table: &[ProcInfo], roots: &[ProcInfo]) -> Vec<ProcInfo> {
 	table
 		.iter()
 		.zip(taken)
-		.filter_map(|(p, taken)| taken.then(|| p.clone()))
+		.filter(|&(_, taken)| taken)
+		.map(|(p, _)| p.clone())
 		.collect()
 }
 
 /// Send signal number `sig` to each of `procs` that still is the process
-/// scanned (zombies skipped), then `SIGCONT` to each one that was stopped: a
-/// stopped process acts on `TERM` only once continued, and one whose tracer
-/// is gone stays stopped forever. A process that refuses (`EPERM`, a setuid
-/// member) does not spare the rest. Returns the number of processes signalled.
+/// scanned; returns the number of processes signalled.
+///
+/// Zombies are skipped. Each stopped one then gets `SIGCONT`: a stopped
+/// process acts on `TERM` only once continued, and one whose tracer is gone
+/// stays stopped forever. A process that refuses (`EPERM`, a setuid member)
+/// does not spare the rest.
 pub fn signal_each<'a>(procs: impl IntoIterator<Item = &'a ProcInfo>, sig: i32) -> usize {
 	let mut sent = 0;
 	for p in procs.into_iter().filter(|p| p.state != ProcState::Zombie) {

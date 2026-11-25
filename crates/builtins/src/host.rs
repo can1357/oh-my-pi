@@ -207,6 +207,8 @@ pub(crate) struct Host {
 	/// The embedding application's speech synthesizer; `None` when it has
 	/// none.
 	speech:                Option<Arc<dyn SpeechHost>>,
+	/// Immutable input supplied by an enclosing command, if any.
+	pub(crate) source_snapshot: Option<Arc<SourceSnapshot>>,
 	/// The memory-backed stdout and stderr of an async utility; `None` for a
 	/// sync one, whose writers deliver on every write.
 	async_out:             Option<AsyncStreams>,
@@ -1364,6 +1366,24 @@ impl RunningCommand {
 	}
 }
 
+/// A file read once by a utility, for the child shell to use without
+/// reopening its path. This is input to the source loader, not a VFS mount.
+pub struct SourceSnapshot {
+	/// Absolute path the file was read from.
+	pub path:  String,
+	/// Exact bytes read from that path.
+	pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for SourceSnapshot {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("SourceSnapshot")
+			.field("path", &self.path)
+			.field("len", &self.bytes.len())
+			.finish()
+	}
+}
+
 /// A command a utility asks its [`CommandRunner`] to run, in one of two
 /// kinds:
 ///
@@ -1390,6 +1410,7 @@ pub struct ShellCommand {
 	stdout:  Option<Fd>,
 	stderr:  Option<Fd>,
 	env:     Vec<EnvChange>,
+	source_snapshot: Option<Arc<SourceSnapshot>>,
 	/// Signal numbers to deliver to the command while it runs.
 	signals: Option<flume::Receiver<i32>>,
 }
@@ -1419,6 +1440,7 @@ impl ShellCommand {
 			stdout: None,
 			stderr: None,
 			env: Vec::new(),
+			source_snapshot: None,
 			signals: None,
 		}
 	}
@@ -1436,6 +1458,7 @@ impl ShellCommand {
 			stdout: None,
 			stderr: None,
 			env: Vec::new(),
+			source_snapshot: None,
 			signals: None,
 		}
 	}
@@ -1487,6 +1510,18 @@ impl ShellCommand {
 	/// Takes the command's stderr; `None` means the utility's stderr.
 	pub fn take_stderr(&mut self) -> Option<Fd> {
 		self.stderr.take()
+	}
+
+	/// Supplies an immutable input to the child shell's snapshot loader.
+	#[must_use]
+	pub fn source_snapshot(mut self, file: SourceSnapshot) -> Self {
+		self.source_snapshot = Some(Arc::new(file));
+		self
+	}
+
+	/// Takes the snapshot before dispatching the child shell.
+	pub fn take_source_snapshot(&mut self) -> Option<Arc<SourceSnapshot>> {
+		self.source_snapshot.take()
 	}
 
 	/// Takes the channel of signals for the command
@@ -2250,6 +2285,8 @@ pub struct Invocation {
 	/// The embedding application's speech synthesizer, which `say` speaks
 	/// through; `None` leaves `say` to the system's.
 	pub speech:         Option<Arc<dyn SpeechHost>>,
+	/// Immutable input carried by the invoking shell, for the snapshot loader.
+	pub source_snapshot: Option<Arc<SourceSnapshot>>,
 }
 
 impl Invocation {
@@ -2269,6 +2306,7 @@ impl Invocation {
 			commands: None,
 			reported_error: None,
 			speech: None,
+			source_snapshot: None,
 		}
 	}
 
@@ -2287,6 +2325,7 @@ impl Invocation {
 			commands,
 			reported_error,
 			speech,
+			source_snapshot,
 		} = self;
 		Opened {
 			name: if name.is_empty() { default_name.to_string() } else { name },
@@ -2303,6 +2342,7 @@ impl Invocation {
 			commands,
 			reported_error,
 			speech,
+			source_snapshot,
 		}
 	}
 }
@@ -2320,6 +2360,7 @@ pub(crate) struct Opened {
 	pub cancel:         Option<CancellationToken>,
 	pub commands:       Option<Box<dyn CommandRunner>>,
 	pub reported_error: Option<Arc<AtomicBool>>,
+	pub source_snapshot: Option<Arc<SourceSnapshot>>,
 	pub speech:         Option<Arc<dyn SpeechHost>>,
 }
 
@@ -2629,6 +2670,7 @@ fn build_host(invocation: Opened, spec: Spec) -> Result<Host, i32> {
 		cancel: token,
 		reported_error,
 		speech,
+		source_snapshot,
 		..
 	} = invocation;
 	let (stdin, stdout, stderr_file) = match (or_null(stdin), or_null(stdout), or_null(stderr_file)) {
@@ -2734,6 +2776,7 @@ fn build_host(invocation: Opened, spec: Spec) -> Result<Host, i32> {
 		commands: None,
 		reported_error,
 		speech,
+		source_snapshot,
 		async_out,
 		stdin_source: None,
 	})
@@ -3229,6 +3272,7 @@ mod testing {
 				commands:              None,
 				reported_error:        None,
 				speech:                None,
+				source_snapshot:       None,
 				async_out,
 				stdin_source:          None,
 			};
