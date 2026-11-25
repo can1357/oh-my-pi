@@ -14,6 +14,10 @@
  * unanswered for {@link STALLED_ACK_MS}, the credits reset (one warning per stall).
  * Tern acknowledges a frame once it draws it and draws no hidden pane (a
  * background tab), so silence while the pane is hidden resets them without one.
+ * A frame that echoes user input (a key, a paste, an `edit`, `undo` or `send`)
+ * may overdraw them by {@link INPUT_OVERDRAFT}, and frames unanswered for
+ * {@link INPUT_STALLED_ACK_MS} stop counting against it, so typing stays live
+ * while the terminal is slow to acknowledge.
  *
  * Events: the terminal's UI events become {@link UiEvent}s delivered to the
  * node they name and bubbled to the nearest handler; keys and pastes the
@@ -37,6 +41,10 @@ import { Reconciler } from "./reconcile";
 
 /** How long the oldest unacknowledged frame may wait before the credits reset. */
 export const STALLED_ACK_MS = 5000;
+/** Frames past the credits a frame echoing user input may leave unacknowledged. */
+export const INPUT_OVERDRAFT = 2;
+/** How long an unacknowledged frame counts against a frame echoing user input. */
+export const INPUT_STALLED_ACK_MS = 250;
 
 // APC chunking is separate: Tern still applies and draws each reassembled frame as one unit.
 const MAX_FRAME_BYTES = 24 * 1024 * 1024;
@@ -162,6 +170,10 @@ export class NativeBackend {
 	#cancelStall: (() => void) | undefined;
 	#stalledSince: number | undefined;
 	#stallResets = 0;
+	/** Unsent changes echo user input (the next frame may overdraw the credits). */
+	#inputPending = false;
+	/** Input is being routed: whatever it changes is an echo. */
+	#echoing = false;
 	#unsubscribe: (() => void)[] = [];
 
 	constructor(options: NativeBackendOptions) {
@@ -202,7 +214,10 @@ export class NativeBackend {
 			this.#surface,
 			this.id,
 			{ cols: connection.cols, rows: () => connection.driver.rows, hasFeature: name => connection.hasFeature(name) },
-			() => this.requestFrame(),
+			() => {
+				if (this.#echoing) this.#inputPending = true;
+				this.requestFrame();
+			},
 		);
 		this.#running = true;
 		this.#unacked = [];
@@ -290,7 +305,12 @@ export class NativeBackend {
 	#send(force: boolean): boolean {
 		const reconciler = this.#reconciler!;
 		const active = this.#options.active?.() !== false;
-		if ((!active && !force) || (!this.#pending && (!active || !reconciler.dirty))) return false;
+		if (!active && !force) return false;
+		if (!this.#pending && (!active || !reconciler.dirty)) {
+			// Input that changed nothing has no echo to send.
+			this.#inputPending = false;
+			return false;
+		}
 		if (!force && !this.#hasCredit()) return false;
 		const connection = this.#connection!;
 		let sent = false;
@@ -306,6 +326,11 @@ export class NativeBackend {
 			this.#writeFrame(connection, this.#pending);
 			sent = true;
 		} while ((this.#pending || (force && active && !reconciled && reconciler.dirty)) && (force || this.#hasCredit()));
+		if (!this.#pending) {
+			// A split can finish with input routed during it still unsent: its echo goes next.
+			if (!reconciler.dirty) this.#inputPending = false;
+			else if (this.#inputPending) this.requestFrame();
+		}
 		return sent;
 	}
 
@@ -393,11 +418,24 @@ export class NativeBackend {
 			this.#unacked = [];
 			return true;
 		}
+		let wait = STALLED_ACK_MS - waited;
+		// A split reconciliation still waits for its retention events, input or not.
+		if (this.#inputPending && !this.#pending) {
+			// An echo counts only the frames younger than INPUT_STALLED_ACK_MS against
+			// `credits + INPUT_OVERDRAFT`. `#unacked` is in send order: the frame that
+			// many from the newest decides.
+			const deciding = this.#unacked.at(-(credits + INPUT_OVERDRAFT));
+			if (!deciding || now - deciding.sentAt >= INPUT_STALLED_ACK_MS) return true;
+			// Retry the held echo once that frame stops counting, not when the credits reset.
+			wait = Math.min(wait, deciding.sentAt + INPUT_STALLED_ACK_MS - now);
+			this.#cancelStall?.();
+			this.#cancelStall = undefined;
+		}
 		if (!this.#cancelStall) {
 			this.#cancelStall = this.#clock!.setTimeout(() => {
 				this.#cancelStall = undefined;
 				this.flush();
-			}, STALLED_ACK_MS - waited);
+			}, wait);
 		}
 		return false;
 	}
@@ -468,7 +506,8 @@ export class NativeBackend {
 		}
 		const reconciler = this.#reconciler!;
 		const ui = toUiEvent(event, keypathOf(path), item => reconciler.itemKey(event.id, item));
-		batch(() => {
+		// The field is controlled: it shows the change once a frame echoes it.
+		this.#route(event.ev === "edit" || event.ev === "undo" || event.ev === "send", () => {
 			// A native caret move/replacement ends a raw-key selection, even if
 			// the text and cursor happen to be unchanged (e.g. clicking its end).
 			const field = path.at(-1)!;
@@ -521,7 +560,7 @@ export class NativeBackend {
 
 	#onInput(event: InputEvent): void {
 		if (event.type === "key") {
-			batch(() => {
+			this.#route(true, () => {
 				const path = this.#focusPath();
 				if (bubbleKey(path, event.key)) return;
 				// Tern forwards keys raw (it leaves editing to the program): the focused node's widget
@@ -531,12 +570,23 @@ export class NativeBackend {
 				this.#options.onKey?.(event.key);
 			});
 		} else if (event.type === "paste") {
-			batch(() => {
+			this.#route(true, () => {
 				const path = this.#focusPath();
 				if (bubblePaste(path, event.paste)) return;
 				const focused = path.at(-1);
 				if (focused) widgetFor(focused)?.paste?.(focused, event.paste, this.#widgetContext(path));
 			});
+		}
+	}
+
+	/** Run `route` in one batch; with `echo`, whatever it changes is an echo that may overdraw the credits. */
+	#route(echo: boolean, route: () => void): void {
+		const outer = this.#echoing;
+		this.#echoing ||= echo;
+		try {
+			batch(route);
+		} finally {
+			this.#echoing = outer;
 		}
 	}
 

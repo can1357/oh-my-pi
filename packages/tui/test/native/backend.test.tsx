@@ -1007,6 +1007,194 @@ describe("native pacing and transport", () => {
 		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "ab" });
 	});
 
+	it("lets a keystroke echo overdraw stalled credits while transcript changes still wait", async () => {
+		const transcript = signal("");
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => ({
+				main: <text>{transcript}</text>,
+				dock: (
+					<editor
+						ref={n => (field = n)}
+						text={text}
+						onEdit={e => {
+							if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+						}}
+					/>
+				),
+			}),
+			{ credits: 1, autoAck: false },
+		);
+		h.surface.focus(field!);
+		for (let i = 0; i < 2; i++) {
+			h.tern.ackAll();
+			h.settle();
+		}
+		const type = (ch: string) => {
+			h.tern.input({ type: "key", key: { id: ch, text: ch, kind: "press", raw: ch } });
+			h.settle();
+		};
+		// A streaming transcript spends the only credit, and Tern stops acknowledging.
+		transcript.set("one");
+		h.settle();
+		const sent = h.tern.frames.length;
+		transcript.set("one two");
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent);
+		// The echo goes out at once, carrying the held transcript change with it.
+		type("h");
+		expect(h.tern.frames.length).toBe(sent + 1);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "h" } }]);
+		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "one two" });
+		// A transcript change alone still waits for an ack.
+		transcript.set("one two three");
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		// Echoes run two frames past the credit, then wait until the oldest stops counting (250 ms), not 5 s.
+		type("i");
+		expect(h.tern.frames.length).toBe(sent + 2);
+		type("!");
+		expect(h.tern.frames.length).toBe(sent + 2);
+		h.clock.advance(249);
+		expect(h.tern.frames.length).toBe(sent + 2);
+		h.clock.advance(1);
+		expect(h.tern.frames.length).toBe(sent + 3);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "hi!" } }]);
+	});
+
+	it("lets the echo of a Tern edit overdraw stalled credits", async () => {
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => ({
+				main: <text>streaming</text>,
+				dock: (
+					<editor
+						ref={n => (field = n)}
+						text={text}
+						onEdit={e => {
+							if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+						}}
+					/>
+				),
+			}),
+			{ credits: 1, autoAck: false },
+		);
+		// The first frame holds the only credit and is never acknowledged.
+		const sent = h.tern.frames.length;
+		h.tern.event({
+			ev: "edit",
+			sf: "s:t",
+			id: h.backend.idOf(field!)!,
+			from: 0,
+			to: 0,
+			text: "h",
+			cursor: 1,
+			len: 0,
+		});
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "h" } }]);
+	});
+
+	it("lends no overdraft to a transcript change after input that changed nothing", async () => {
+		const transcript = signal("");
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => ({
+				main: <text>{transcript}</text>,
+				dock: (
+					<editor
+						ref={n => (field = n)}
+						text={text}
+						onEdit={e => {
+							if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+						}}
+					/>
+				),
+			}),
+			{ credits: 1, autoAck: false },
+		);
+		h.surface.focus(field!);
+		for (let i = 0; i < 2; i++) {
+			h.tern.ackAll();
+			h.settle();
+		}
+		const left = () => {
+			h.tern.input({ type: "key", key: { id: "left", kind: "press", raw: "\x1b[D" } });
+			h.settle();
+		};
+		// A streaming transcript spends the only credit, and Tern stops acknowledging.
+		transcript.set("one");
+		h.settle();
+		const sent = h.tern.frames.length;
+		// Left at the start of an empty editor, and a Tern caret move to where the caret is, change nothing.
+		left();
+		h.tern.event({ ev: "edit", sf: "s:t", id: h.backend.idOf(field!)!, from: 0, to: 0, text: "", cursor: 0, len: 0 });
+		h.settle();
+		transcript.set("one two");
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent);
+		// Nor does a no-op key typed while that transcript change is held.
+		left();
+		transcript.set("one two three");
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent);
+		// A key that changes the editor still echoes at once, carrying the held transcript with it.
+		h.tern.input({ type: "key", key: { id: "h", text: "h", kind: "press", raw: "h" } });
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "one two three" });
+	});
+
+	it("echoes a key typed while a split redraw is in flight once the split is out", async () => {
+		const replace = signal(false);
+		const block = "界".repeat(3 * 1024 * 1024);
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => {
+				const a = <text key="a">{block}</text>;
+				const b = <text key="b">{block}</text>;
+				const c = <text key="c">{block}</text>;
+				return {
+					main: () => (replace() ? [a, b, c] : []),
+					dock: (
+						<editor
+							ref={n => (field = n)}
+							text={text}
+							onEdit={e => {
+								if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+							}}
+						/>
+					),
+				};
+			},
+			{ credits: 1, autoAck: false },
+		);
+		h.surface.focus(field!);
+		for (let i = 0; i < 2; i++) {
+			h.tern.ackAll();
+			h.settle();
+		}
+		const sent = h.tern.frames.length;
+		// A redraw over the frame limit goes out in two frames; the second waits for the first's ack.
+		replace.set(true);
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		// A key typed meanwhile waits behind the split.
+		h.tern.input({ type: "key", key: { id: "h", text: "h", kind: "press", raw: "h" } });
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		// The ack releases the rest of the split, and the echo follows it without waiting for another ack.
+		h.tern.ackAll();
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 3);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "h" } }]);
+	});
+
 	it("redraws a large replacement transcript in UTF-8-bounded frames", async () => {
 		const replace = signal(false);
 		const block = "界".repeat(3 * 1024 * 1024);

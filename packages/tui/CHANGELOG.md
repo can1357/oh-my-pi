@@ -20,6 +20,7 @@
 ### Fixed
 
 - Panes in a background Tern tab no longer log frame-acknowledgment stall warnings.
+- Typing in a Tern composer keeps echoing while an agent streams, instead of stalling for seconds when Tern is slow to acknowledge frames. ([#20463](https://github.com/can1357/oh-my-pi/pull/20463) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.2.0] - 2026-11-25
 
