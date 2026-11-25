@@ -4,6 +4,7 @@
  * these; hosts drive them with keys and calls (`setValue`, `submit`, …).
  */
 import { batch, computed, type KeyEvent, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import { fuzzyFilter } from "../../utils/fuzzy";
 import { editLine, type LineState } from "../overlays/settings/line-edit";
 import { listKeyId, matchesSelectCancel } from "../../config/keybindings/matchers";
@@ -16,10 +17,6 @@ const ERROR_MAX = 100;
 export function errorLine(message: string): string {
 	const flat = message.replaceAll("\t", "   ").replace(/\r?\n/g, " ");
 	return [...flat].length > ERROR_MAX ? `${[...flat].slice(0, ERROR_MAX - 1).join("")}…` : flat;
-}
-
-function messageOf(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 /** One masking bullet per character of a secret. */
@@ -98,7 +95,7 @@ export class TextFieldModel {
 			this.#options.onSubmit?.(value);
 			this.setError(undefined);
 		} catch (error) {
-			this.setError(messageOf(error));
+			this.setError(errorMessage(error));
 		}
 	}
 
@@ -234,7 +231,7 @@ export class SelectFieldModel {
 			this.#options.onSubmit?.(value);
 			this.error.set(undefined);
 		} catch (error) {
-			this.error.set(errorLine(messageOf(error)));
+			this.error.set(errorLine(errorMessage(error)));
 		}
 	}
 

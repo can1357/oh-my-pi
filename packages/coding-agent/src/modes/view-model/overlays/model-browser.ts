@@ -12,6 +12,7 @@ import {
 	modelsAreEqual,
 } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TspPickerColumn, TspPickerMark } from "@oh-my-pi/pi-wire";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../../thinking/levels";
 import { type FuzzyFilterResult, type FuzzyMatch, FuzzyQuery, FuzzyText, fuzzyRank } from "../../../utils/fuzzy";
@@ -560,17 +561,13 @@ interface SessionModelScopeInputs {
 	error: string | undefined;
 }
 
-function errorText(cause: unknown): string {
-	return cause instanceof Error ? cause.message : String(cause);
-}
-
 function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyArray<Model>): SessionModelScopeInputs {
 	if (scopedModels.length > 0) {
 		try {
 			const pool = scopedRolePool(scopedModels, registry);
 			return { scoped: scopedModels, allModels: pool, roleModels: pool, error: undefined };
 		} catch (cause) {
-			return { scoped: scopedModels, allModels: scopedModels, roleModels: scopedModels, error: errorText(cause) };
+			return { scoped: scopedModels, allModels: scopedModels, roleModels: scopedModels, error: errorMessage(cause) };
 		}
 	}
 	const loadError = registry.getError();
@@ -582,7 +579,7 @@ function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyA
 	try {
 		roleModels = registry.getAvailable("all");
 	} catch (cause) {
-		error = errorText(cause);
+		error = errorMessage(cause);
 		roleModels = [];
 	}
 	return { scoped: undefined, allModels, roleModels, error };
