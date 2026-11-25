@@ -2040,7 +2040,12 @@ mod tests {
 
 	#[test]
 	fn background_scroll_keeps_the_posted_wheel_range() {
-		for (delta, expected) in [(0.0, Some(0)), (27_300.0, Some(32_760)), (27_400.0, None)] {
+		for (delta, expected) in [
+			(0.0, Some(0)),
+			(27_300.0, Some(32_760)),
+			(27_400.0, None),
+			(f64::MAX, None),
+		] {
 			assert_eq!(
 				background_wheel(scroll_steps(delta)).map_err(|error| error.code),
 				expected.ok_or(super::super::super::error::ErrorCode::InputFailed),
