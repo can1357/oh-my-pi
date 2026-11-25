@@ -213,6 +213,30 @@ describe("agent-loop OTEL instrumentation", () => {
 		expect(openAiChat?.attributes["gen_ai.request.service_tier"]).toBeUndefined();
 	});
 
+	it("reports the model a router served as gen_ai.response.model", async () => {
+		const routed = createMockModel({
+			id: "group/fast",
+			provider: "magpie",
+			responses: [{ content: ["ok"], upstreamModel: "kimi-k3" }, { content: ["ok"] }],
+		});
+		for (let turn = 0; turn < 2; turn++) {
+			await runAndDrain(
+				agentLoop(
+					[createUserMessage("hi")],
+					{ systemPrompt: [], messages: [], tools: [] },
+					{ model: routed.model, convertToLlm: identityConverter, telemetry: {} },
+					undefined,
+					routed.stream,
+				),
+			);
+		}
+
+		const [served, unreported] = spansByName(exporter.getFinishedSpans(), "chat group/fast");
+		expect(served?.attributes[GenAIAttr.RequestModel]).toBe("group/fast");
+		expect(served?.attributes[GenAIAttr.ResponseModel]).toBe("kimi-k3");
+		expect(unreported?.attributes[GenAIAttr.ResponseModel]).toBe("group/fast");
+	});
+
 	it("emits execute_tool spans parented to invoke_agent (not chat) per semconv", async () => {
 		const mock = createMockModel({
 			...MOCK_IDENT,
