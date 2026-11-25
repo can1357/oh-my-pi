@@ -1007,6 +1007,19 @@ interface StagedRewrite {
 	landed(): void;
 }
 
+/** How `SessionManager.#runFencedAtomicRewrite` runs; each field is off when left out. */
+interface FencedRewriteOptions {
+	/** A queued write's conflict recovery: the rewrite's own conflicts recover the same way. */
+	queuedRecovery?: boolean;
+	/**
+	 * The rewrite stands in for a write that failed and latched its error (a queued write's recovery, a title change's
+	 * fallback): once its body lands, that error is over and is cleared while the fence still holds.
+	 */
+	clearsDiskError?: boolean;
+	/** A body other than the journal as it stands (see {@link StagedRewrite}). */
+	staged?: StagedRewrite;
+}
+
 /** The ids and stamp a discard's new entries take, fixed once so every publish pass writes the same entries. */
 interface DiscardIds {
 	usageId: string;
@@ -2007,7 +2020,7 @@ export class SessionManager {
 		const sessionFile = this.#sessionFile;
 		if (!sessionFile) return false;
 		if (back && (await this.#appendMissingEntries(sessionFile, back))) return true;
-		return this.#runFencedAtomicRewrite(this.#diskEpoch, true);
+		return this.#runFencedAtomicRewrite(this.#diskEpoch, { queuedRecovery: true, clearsDiskError: true });
 	}
 
 	/**
@@ -2306,7 +2319,7 @@ export class SessionManager {
 		await this.#scheduleDiskWork(
 			async () => {
 				try {
-					await this.#runFencedAtomicRewrite(startEpoch, false, staged);
+					await this.#runFencedAtomicRewrite(startEpoch, { staged });
 				} catch (error) {
 					if (!(error instanceof SessionWriteConflictError) || !this.#recoversQueuedConflicts()) throw error;
 					this.#fileIsCurrent = false;
@@ -2327,15 +2340,18 @@ export class SessionManager {
 	 * the writer close and the full-file replace, and loops on
 	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
 	 * is captured before the task resolves. Once the last body landed it marks
-	 * the file current while the fence still holds, so an entry recorded after
-	 * the fence ends takes the append path: marked by the caller after its
-	 * await, it fell in a gap where a queued recovery held its write back
-	 * (see {@link #rewriteSynchronously}) and nothing stored it. Returns
-	 * `false` when the disk epoch moved, with the file not marked; a body that
-	 * landed before that change still advances the durable byte record after
-	 * readback.
+	 * the file current, and for `clearsDiskError` clears the latched disk
+	 * error, while the fence still holds, so an entry recorded after the fence
+	 * ends takes the append path and a failure it latches stands. Done by the
+	 * caller after its await, each fell in a gap: an entry the marking missed
+	 * was never stored while a queued recovery held its write back (see
+	 * {@link #rewriteSynchronously}), and a failure the clear erased let
+	 * `flush()` resolve without the entry. Returns `false` when the disk epoch
+	 * moved, with the file not marked; a body that landed before that change
+	 * still advances the durable byte record after readback.
 	 */
-	async #runFencedAtomicRewrite(epoch: number, queuedRecovery = false, staged?: StagedRewrite): Promise<boolean> {
+	async #runFencedAtomicRewrite(epoch: number, options: FencedRewriteOptions = {}): Promise<boolean> {
+		const { queuedRecovery = false, clearsDiskError = false, staged } = options;
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
 		let recoveries = 0;
@@ -2397,8 +2413,8 @@ export class SessionManager {
 			this.#materializeBreadcrumb();
 			this.#rewriteRequired = false;
 			this.#hasTitleSlot = true;
-			// A recovery's publish holds every entry: the failure it recovered from is over.
-			if (queuedRecovery) this.#clearDiskError();
+			// The rewrite stands in for the write that failed: the error it latched is over.
+			if (clearsDiskError) this.#clearDiskError();
 			staged?.landed();
 			return true;
 		} finally {
@@ -2572,8 +2588,9 @@ export class SessionManager {
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
-					// The rewrite marks the file current inside its fence (see #runFencedAtomicRewrite).
-					if (await this.#runFencedAtomicRewrite(epoch)) this.#clearDiskError();
+					// The rewrite marks the file current and clears the error the failed append latched inside its
+					// fence (see #runFencedAtomicRewrite): cleared after the await, it erased a later entry's failure.
+					await this.#runFencedAtomicRewrite(epoch, { clearsDiskError: true });
 				}
 			},
 			{ epoch },
