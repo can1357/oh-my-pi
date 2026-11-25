@@ -75,7 +75,10 @@ export const launchHelp = {
 		models: Flags.string({
 			description: `Comma-separated model patterns for ${formatKey("ctrl+p", { preset: "ascii", platform: keyHintPlatform() })} cycling`,
 		}),
-		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
+		"no-tools": Flags.boolean({
+			description:
+				"Allow only the built-in tools named in --tools; load no MCP, LSP, extensions, custom tools or memory",
+		}),
 		"no-judge": Flags.boolean({ description: "Restrict judge calls to the active model's provider" }),
 		"no-spotlight": Flags.boolean({ description: "Restrict Spotlight calls to the active model's provider" }),
 		offline: Flags.boolean({
@@ -126,7 +129,7 @@ export const launchHelp = {
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
 		"spinner-interval": Flags.string({
 			description:
-				"Milliseconds between spinner frames (default 80; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
+				"Milliseconds between spinner frames (default 80, terminal title 250; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
 		}),
 		"max-fps": Flags.string({
 			description:

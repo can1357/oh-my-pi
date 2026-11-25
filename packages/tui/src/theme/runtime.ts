@@ -5,6 +5,7 @@
  * of custom theme files.
  */
 import * as fs from "node:fs";
+import { pollFile } from "@oh-my-pi/pi-natives/file-poll";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { TerminalCapabilities } from "../driver/contract";
 import { type Accessor, signal } from "../reactive";
@@ -55,6 +56,8 @@ export interface ThemeResult {
 const FALLBACK_THEME = "dark";
 /** Delay after the last change to a watched theme file before reloading it. */
 const RELOAD_DEBOUNCE_MS = 100;
+/** Stat-poll interval for the watched custom theme file. */
+const POLL_INTERVAL_MS = 500;
 
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -75,7 +78,7 @@ export class ThemeController {
 	#auto = true;
 	#name: string;
 	#request = 0;
-	#watcher: fs.FSWatcher | undefined;
+	#stopPoll: (() => void) | undefined;
 	#reloadTimer: NodeJS.Timeout | undefined;
 	#watching = false;
 	readonly #publish: (theme: ResolvedTheme, cause: ThemeChangeCause) => void;
@@ -242,8 +245,8 @@ export class ThemeController {
 	}
 
 	#unwatch(): void {
-		this.#watcher?.close();
-		this.#watcher = undefined;
+		this.#stopPoll?.();
+		this.#stopPoll = undefined;
 		clearTimeout(this.#reloadTimer);
 		this.#reloadTimer = undefined;
 	}
@@ -253,17 +256,19 @@ export class ThemeController {
 		const name = this.#name;
 		const file = customThemePath(name);
 		if (!fs.existsSync(file)) return;
-		try {
-			this.#watcher = fs.watch(file, () => {
+		// A poll, not `fs.watch`: editors that save by renaming a new file over
+		// the old one would leave an inode watch on the deleted file.
+		this.#stopPoll = pollFile(
+			file,
+			() => {
 				clearTimeout(this.#reloadTimer);
 				this.#reloadTimer = setTimeout(() => {
 					this.#reloadTimer = undefined;
 					void this.#reloadWatched(name);
 				}, RELOAD_DEBOUNCE_MS);
-			});
-		} catch (error) {
-			logger.debug("Theme watcher failed to start", { file, error: message(error) });
-		}
+			},
+			POLL_INTERVAL_MS,
+		);
 	}
 
 	async #reloadWatched(name: string): Promise<void> {

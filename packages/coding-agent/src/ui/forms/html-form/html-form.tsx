@@ -152,7 +152,7 @@ function OpenField(props: {
 	const { model, index } = props;
 	const field = model.field(index);
 	const answer = model.answer(index);
-	const error = model.errors().get(index);
+	const error = model.error(index);
 	const children: JSXNode[] = [];
 	if (field.label.length > 0) {
 		const spans = tspSpans(field.label);
@@ -291,7 +291,7 @@ function choiceControls(model: HtmlFormModel, index: number, field: ChoiceField)
 function Fold(props: { readonly model: HtmlFormModel; readonly index: number; readonly nodeKey: string }): JSXNode {
 	const { model, index, nodeKey } = props;
 	const field = model.field(index);
-	const error = model.errors().get(index);
+	const error = model.error(index);
 	const mark: TspSpan = error
 		? { s: "error", t: "!" }
 		: model.answered(index)
@@ -359,7 +359,13 @@ function Parts(props: PartsProps & { readonly parts: readonly FormPart[] }): JSX
 		const children: JSXNode[] = [];
 		if (start === 0 && section.title.length > 0)
 			children.push(
-				<text key={`l${s}`} motionKey={`l${s}`} role="omp.ask.legend" wrap="word" spans={tspSpans(section.title)} />,
+				<text
+					key={`l${s}`}
+					motionKey={`l${s}`}
+					role="omp.ask.legend"
+					wrap="word"
+					spans={tspSpans(section.title)}
+				/>,
 			);
 		for (let at = start; at < end; at++) {
 			const block = section.blocks[at]!;
@@ -411,10 +417,7 @@ function Actions(props: { readonly model: HtmlFormModel; readonly remaining?: nu
 	if (model.note())
 		return (
 			<row key="actions" motionKey="actions" role="omp.actions" align="center" gap="sm">
-				<text
-					role="omp.ask.note"
-					text={noteEditHint(model)}
-				/>
+				<text role="omp.ask.note" text={noteEditHint(model)} />
 				<ActionButton
 					id="cancel"
 					label="Keep"

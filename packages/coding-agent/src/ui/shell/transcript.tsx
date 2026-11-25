@@ -416,6 +416,9 @@ export class Transcript {
 /** Mark `block` final: its node, and the nodes Tern receives for it. */
 function settleBlock(block: TranscriptBlock): void {
 	settle(block.node);
+	// A retired block left the transcript: no native nodes to settle (like `buildTree`, never read
+	// a disposed node's children — a list that never resolved before disposal has no value).
+	if (block.node.disposed) return;
 	for (const node of block.native()) settle(node);
 }
 

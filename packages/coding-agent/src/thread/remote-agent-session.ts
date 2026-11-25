@@ -52,6 +52,8 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import {
+	type AgentModelChange,
+	type AgentModelSelectionState,
 	type AgentSessionAdvisorOverview,
 	type AgentViewLoop,
 	type AgentViewRuleSource,
@@ -831,6 +833,10 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#command("abort", options);
 	}
 
+	applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState> {
+		return this.#command("applyAgentModelChange", change);
+	}
+
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void> {
 		return this.#command("setWorkPoolYieldItems", items);
 	}
@@ -970,7 +976,7 @@ export class RemoteAgentSession implements AgentViewSession {
 				this.#state = { ...this.#state, streamMessage: event.message };
 				const delta = event.assistantMessageEvent;
 				if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
-					this.tokenRate.push(delta.delta);
+					this.tokenRate.push(delta.delta, delta.type);
 				}
 				return;
 			}

@@ -31,6 +31,7 @@ import type { PlanModeState } from "../plan-mode/state";
 import type { CallContext, SpotlightSession } from "../spotlight/types";
 import type { AgentLifecycleApi } from "../registry/agent-lifecycle";
 import type { AgentRegistryApi } from "../registry/agent-registry";
+import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { ArtifactManagerApi } from "../session/artifacts";
 import type { PromptCacheEntry } from "../session/cache-warmer";
 import type { AsyncNotifyEntry, AsyncNotifySource } from "../session/async-notify";
@@ -271,6 +272,14 @@ export interface ToolSession {
 	 * rebuilds (mid-session `/skillful` toggles ride the prompt, not the prefix).
 	 */
 	skillHintVisible?: boolean;
+	/**
+	 * Frozen `find` availability for the `grep`/`glob`/`bash` hints: snapshot
+	 * taken at the last system-prompt rebuild, so withdrawing `find` mid-session
+	 * (a judge rejection under `find.enabled: auto`) leaves the tool prefix
+	 * byte-stable. Undefined outside a managed session; tools then read
+	 * {@link isToolActive}.
+	 */
+	findHintVisible?: boolean;
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
 	/** The session as the holder `skill://` rediscovers through when a skill's files are gone. */
@@ -394,6 +403,8 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Owning session identity for operations that change a live agent's state. */
+	getAgentSession?: () => AgentSessionHandle | undefined;
 	/** Parent cache identity for sibling sharing; the child stores it independently of its initial model, and each request consumes it only when its own model opts in. */
 	getPromptCacheKey?: () => string | undefined;
 	/** Prompt cache entry the session's latest main-loop request wrote, while still current (see `AgentSession.promptCacheEntry`). */

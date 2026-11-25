@@ -16,6 +16,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { replaceTabs, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { terminalPaddingX } from "../terminal-padding";
 import type { TodoItem } from "../../../tools/details/todo";
 import { moreStages, nextTodo, type TodoHudModel, type TodoWindow } from "../../dock/todo";
 import { termOf } from "../messages/fill";
@@ -113,21 +114,23 @@ export function todoHudRows(theme: Theme, view: TodoWindow, width: number): stri
 	let filled = Math.round((view.closed / view.total) * path);
 	if (view.closed > 0) filled = Math.max(filled, 1);
 	if (view.closed < view.total) filled = Math.min(filled, path - 1);
-	const contentWidth = Math.max(1, width - 2);
-	const rows = ["", ` ${theme.style("strong", theme.fg("accent", "TODO"))}`];
+	const paddingX = terminalPaddingX();
+	const pad = " ".repeat(paddingX);
+	const contentWidth = Math.max(1, width - 2 * paddingX);
+	const rows = ["", `${pad}${theme.style("strong", theme.fg("accent", "TODO"))}`];
 	content.forEach((row, index) => {
 		const color = index < filled ? "accent" : "dim";
 		const spine = ` ${theme.fg(color, row.opens ? `${tree.symbol("tree.branch")} ` : `${vertical}  `)}`;
 		const spineHang = ` ${theme.fg(color, `${vertical}  `)}`;
 		const room = Math.max(1, contentWidth - visibleWidth(spine) - row.leadWidth);
 		wrap(row.body, room).forEach((line, at) => {
-			rows.push(` ${at === 0 ? spine : spineHang}${at === 0 ? row.lead : row.hang}${line}`);
+			rows.push(`${pad}${at === 0 ? spine : spineHang}${at === 0 ? row.lead : row.hang}${line}`);
 		});
 	});
 	const tailFilled = Math.max(0, Math.min(filled - content.length, TAIL));
 	const chars = [...tail];
 	rows.push(
-		`  ${theme.fg("accent", chars.slice(0, tailFilled).join(""))}${theme.fg("dim", chars.slice(tailFilled).join(""))}`,
+		`${pad} ${theme.fg("accent", chars.slice(0, tailFilled).join(""))}${theme.fg("dim", chars.slice(tailFilled).join(""))}`,
 	);
 	return rows;
 }

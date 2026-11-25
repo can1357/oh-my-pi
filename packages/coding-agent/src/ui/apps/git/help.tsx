@@ -5,11 +5,10 @@
  * terminal draws keycaps), then a `Close esc` action. The terminal draws it
  * as a titled list of `keys  description` rows (`omp.app.git.help` look).
  */
-import { type Accessor, type JSXNode, type KeyEvent, nativeRendering } from "@oh-my-pi/pi-tui";
+import type { Accessor, JSXNode, KeyEvent } from "@oh-my-pi/pi-tui";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import "../../styles/apps/git/help";
 import "../../styles/overlays/bare-sheet";
-import { formatKey } from "../../keys/format";
 import { ActionButton } from "../../overlays/panels/common";
 import { formatKeyHint } from "../../keys/hints";
 import type { SheetAttributes } from "../../overlays/sheet";
@@ -99,24 +98,16 @@ export interface GitHelpProps {
 	onClose(): void;
 }
 
-/**
- * Keycap glyphs of `keys` (`⌥↓` on macOS, `Alt+↓` elsewhere): unicode keycaps
- * in terminal rows, the theme's own glyphs where Tern draws the sheet.
- */
-const keySpans = (keys: readonly string[], native: boolean): TspSpan[] =>
-	keys.map(key => ({
-		s: "key",
-		t: native ? formatKeyHint(key) : formatKey(key, { preset: "unicode", platform: process.platform }),
-	}));
+/** The shortcut's keycaps for the native help table. */
+const keySpans = (keys: readonly string[]): TspSpan[] => keys.map(key => ({ s: "key", t: formatKeyHint(key) }));
 
 /** The shortcuts sheet (see the module docs). */
 export function GitHelp(props: GitHelpProps): JSXNode {
-	const native = nativeRendering();
 	return (
 		<col
 			role="omp.app.git.help"
 			gap="lg"
-			term={{ title: "Keyboard shortcuts", hint: "⎋ close" }}
+			term={{ groups: GIT_SHORTCUTS }}
 			onAction={act => {
 				if (act === "close") props.onClose();
 			}}
@@ -136,7 +127,7 @@ export function GitHelp(props: GitHelpProps): JSXNode {
 						]}
 						rows={group.rows.map((row, index) => ({
 							id: String(index),
-							cells: { keys: keySpans(row.keys, native), does: row.label },
+							cells: { keys: keySpans(row.keys), does: row.label },
 						}))}
 					/>
 				</section>

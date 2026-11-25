@@ -2,19 +2,44 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
-- Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
-- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
-- Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
+- Added `Shell.heldProcesses()`: every live external a shell session holds, in or between runs (`&`/`nohup &` jobs left running included), with whether its `nohup` started it.
+- Added `listProcessesWithEnv(name, value)`, `processInfo(pids)`, `processOutputFiles(pid)` and `killProcessFamily(pids, { spareHangupIgnoring })` for finding processes by an inherited environment tag, describing live processes, locating the file a process writes its output to, and killing a process family while sparing `nohup`'d members.
+- Added an in-process `perl` shell builtin: a Perl 5.34 interpreter covering the core language, regexes (via PCRE2), formats, `tie`, weak references, the common command-line switches (`-e -n -p -i -0 -l -a -F -M`), and commonly used core modules (List::Util, Scalar::Util, POSIX, Data::Dumper, JSON::PP, File::*, Getopt::Long, Time::*, Digest::*, Encode, Storable, …). File and command I/O runs through the shell, so `scheme://` paths and other builtins work from Perl code.
+
+### Fixed
+
+- Fixed a timed-out or cancelled shell command, or a terminated PTY run, leaving behind descendants in a process group or session of their own (a debugger's stopped inferior, a `setsid` daemon): the termination now snapshots the command's whole process family before the first signal (parent links plus every group and session a member leads), sends TERM to the members outside the command's own group, and KILLs the family after the grace, continuing stopped members.
+- Fixed timed-out or aborted `glob`, `grep`, `fuzzyFind` and `astGrep` calls continuing to walk the tree in the background when several ran at once, pinning CPUs and stalling every later filesystem call in the process.
+
+## [19.2.0] - 2026-11-25
+
+### Breaking Changes
+
+- Removed the `watch` and `HEAD_WATCH_INTERVAL_MS` exports from `@oh-my-pi/pi-natives/vcs`; reread repository state when needed instead.
+
+### Added
+
+- Added `@oh-my-pi/pi-natives/file-poll` with `pollFile(file, onChange, intervalMs)` for detecting file metadata changes, including atomic saves and symlink retargets.
+- Added `truncateToTokens(input, maxTokens)` for safely truncating text to a token budget without splitting UTF-16 surrogate pairs.
+- Added `repairHeredocContinuations(script)` to repair supported shell here-document continuations.
+- Added `commitReconciled()` for publishing private-index commits safely when the shared index is locked.
+- Added transcript analysis APIs—`transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`—for inspecting tool calls, reasoning, message content, matches, and call statistics across session transcripts.
 
 ### Changed
 
-- A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
-- `ShellRunResult` now reports `movedCwd` (the command ended in another directory than it started in) and `errexit` (it ended with `set -e` on)
+- OAuth callback handling now polls for callbacks at regular intervals instead of relying on directory watching.
+- Improved `tail -f` reliability for moved files, symlinks, network drives, and file-watcher failures by combining event-driven updates with polling fallback.
+- Persistent shell sessions no longer carry `set -e` into subsequent commands; other shell options continue to persist.
+- `ShellRunResult` now reports whether a command changed the working directory (`movedCwd`) or left errexit enabled (`errexit`).
+
+### Fixed
+
+- Fixed PTY sessions and child-process cleanup consuming native blocking-pool threads, which could prevent new terminals and other blocking operations from starting after enough terminals were open.
+- Fixed the Linux shell `open` command creating an excessive D-Bus thread pool on first use.
+- Fixed Windows Chromium and Electron captures and accessibility trees incorrectly reporting fully covered windows as current when covered by popup, tool, or click-through windows.
+- Fixed standalone binaries failing to start when the natives directory was read-only or owned by another user despite already containing the extracted addon.
 
 ## [19.1.1] - 2026-11-23
 

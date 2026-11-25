@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { cellGrid, firstCellDiff, plainRows } from "../../src/testing/cells";
-import { type CorpusCase, listCases, loadCase, stageNative } from "../../src/testing/corpus";
+import { type CorpusCase, hasCorpus, listCases, loadCase, stageNative } from "../../src/testing/corpus";
 import { type MarkdownOptions, renderMarkdown } from "../../src/text/markdown";
 import { loadThemeSync } from "../../src/theme";
 
@@ -67,6 +67,8 @@ describe("markdown samples", () => {
 });
 
 describe("markdown streaming sample", async () => {
+	// Bun runs a skipped describe's callback too: return before reading the absent corpus.
+	if (!hasCorpus("markdown/streaming")) return;
 	const corpusCase = await loadCase("markdown/streaming/growing-prefixes.dark");
 	const prefixes = (corpusCase.inputs as SampleInputs).prefixes!;
 	const options = sampleOptions(corpusCase);

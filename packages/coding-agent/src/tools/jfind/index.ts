@@ -68,6 +68,15 @@ export function isFindEnabled(session: ToolSession): boolean {
 	);
 }
 
+/**
+ * Whether sibling tool descriptions (`grep`, `glob`, `bash`) point at `find`:
+ * the prompt-frozen {@link ToolSession.findHintVisible} in a managed session,
+ * else the live roster, else the setting.
+ */
+export function findHintVisible(session: ToolSession): boolean {
+	return session.findHintVisible ?? session.isToolActive?.("find") ?? isFindEnabled(session);
+}
+
 /** Semantic search tool: describe a behavior, get files and line ranges that implement it. */
 export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	readonly name = "find";

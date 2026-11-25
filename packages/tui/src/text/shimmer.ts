@@ -1,6 +1,6 @@
 /**
  * The shimmer as a text terminal draws it: a soft band of light travelling
- * 30 cells a second along the text (`classic`), entering and leaving through
+ * 20 cells a second along the text (`classic`), entering and leaving through
  * a margin, or a scanner head bouncing between its ends with a fading trail
  * (`kitt`). Each grapheme falls in one of three tiers (low, mid, high) by the
  * band's intensity over it; the caller styles the tiers.
@@ -20,7 +20,7 @@ export interface ShimmerTiers {
 export type ShimmerMode = "classic" | "kitt";
 
 /** Band travel in cells per second, whatever the text's length. */
-const SPEED = 30;
+const SPEED = 20;
 /** Cells the classic band travels beyond each end of the text. */
 const PADDING = 10;
 /** Half-width of the classic band's cosine profile, in cells. */

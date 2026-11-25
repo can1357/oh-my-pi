@@ -62,6 +62,13 @@ function renderLines(browser: ModelBrowserState, width: number): string[] {
 	}
 }
 
+/** The browser's first list row at `width`: the first painted row below the search input. */
+function firstRow(browser: ModelBrowserState, width: number): string {
+	const lines = renderLines(browser, width);
+	const search = lines.findIndex(line => line.includes(currentTheme().symbols.symbol("icon.search")));
+	return lines.slice(search + 1).find(line => line.trim() !== "") ?? "";
+}
+
 /** Model rows the browser shows (separators excluded). */
 function visibleCount(browser: ModelBrowserState): number {
 	return browser.visible.filter(row => !isSeparator(row)).length;
@@ -483,9 +490,9 @@ describe("ModelBrowser perf display", () => {
 	test("row perf column scales with width: off, TPS-only, TTFT+TPS", () => {
 		const browser = makePerfBrowser();
 
-		expect(renderPlain(browser, 70)[2]).not.toContain("t/s");
-		expect(renderPlain(browser, 80)[2]).toContain("118t/s");
-		const wideRow = renderPlain(browser, 120)[2];
+		expect(firstRow(browser, 70)).not.toContain("t/s");
+		expect(firstRow(browser, 80)).toContain("118t/s");
+		const wideRow = firstRow(browser, 120);
 		expect(wideRow).toContain("0.9s 118t/s");
 	});
 
@@ -497,17 +504,17 @@ describe("ModelBrowser perf display", () => {
 		const browser = new ModelBrowserState(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([model]));
 
-		const wide = renderPlain(browser, 100)[2];
+		const wide = firstRow(browser, 100);
 		expect(wide).toContain("gpt-5-codex-mini");
 		expect(wide).toContain("128k");
 		expect(wide).toContain("$100/0.001");
 
-		const narrow = renderPlain(browser, 34)[2];
+		const narrow = firstRow(browser, 34);
 		expect(narrow).toContain("gpt-5-codex-mini");
 		expect(narrow).toContain("128k");
 		expect(narrow).not.toContain("$100");
 
-		const tiny = renderPlain(browser, 16)[2];
+		const tiny = firstRow(browser, 16);
 		expect(tiny).toContain("gpt-5");
 		expect(tiny).not.toContain("128k");
 	});
@@ -524,8 +531,9 @@ describe("ModelBrowser perf display", () => {
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
 
 		const lines = renderPlain(browser, 120);
-		expect(lines[2]).toContain(`${currentTheme().symbols.symbol("icon.intelligence")} 45`);
-		expect(lines[2]).toContain("~83t/s");
+		const row = firstRow(browser, 120);
+		expect(row).toContain(`${currentTheme().symbols.symbol("icon.intelligence")} 45`);
+		expect(row).toContain("~83t/s");
 		expect(lines[lines.length - 1]).toContain(`${currentTheme().symbols.symbol("icon.intelligence")} 45 · ~83t/s`);
 	});
 
@@ -534,7 +542,7 @@ describe("ModelBrowser perf display", () => {
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
 		browser.setPerfStats(new Map([["openai/gpt-5", { samples: 12, tps: 118.4, ttftMs: 930 }]]));
 
-		const row = renderPlain(browser, 120)[2];
+		const row = firstRow(browser, 120);
 		expect(row).toContain("118t/s");
 		expect(row).not.toContain("~83t/s");
 	});
@@ -543,7 +551,7 @@ describe("ModelBrowser perf display", () => {
 		const browser = new ModelBrowserState(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
-		const row = renderPlain(browser, 120)[2];
+		const row = firstRow(browser, 120);
 		expect(row).not.toContain("t/s");
 		expect(row).not.toContain(currentTheme().symbols.symbol("icon.intelligence"));
 	});
@@ -597,8 +605,8 @@ describe("ModelBrowser native model metadata", () => {
 			pricingStatus: "variable",
 		});
 		const browser = makeBrowser([variable], []);
+		expect(firstRow(browser, 160)).toContain("varies");
 		const lines = renderLines(browser, 160);
-		expect(lines[2]).toContain("varies");
 		expect(lines[lines.length - 1]).toContain("price varies");
 		// A router priced per request is not free, so the `free` filter skips it.
 		browser.setQuery("free");
@@ -907,7 +915,7 @@ describe("serviceTierFor", () => {
 						["openai/gpt-6-astra@ultrafast", { samples: 2, tps: 300, ttftMs: null }],
 					]),
 				);
-				const row = () => renderLines(browser, 120)[2] ?? "";
+				const row = () => firstRow(browser, 120);
 
 				expect(row()).toContain("25t/s");
 				expect(row()).not.toContain("ultrafast");

@@ -21,6 +21,7 @@ import {
 	hashPath,
 	isPidAlive,
 	normalizePathForComparison,
+	pathExists,
 	readLines,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
@@ -401,16 +402,6 @@ function codeOf(error: unknown): string | undefined {
 	return typeof error === "object" && error !== null && "code" in error
 		? String((error as { code?: unknown }).code)
 		: undefined;
-}
-
-async function pathExists(target: string): Promise<boolean> {
-	try {
-		await fs.stat(target);
-		return true;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return false;
-		throw error;
-	}
 }
 
 async function statIfPresent(target: string) {

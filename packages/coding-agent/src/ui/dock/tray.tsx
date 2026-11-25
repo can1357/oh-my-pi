@@ -3,9 +3,9 @@
  * The tray (`tray` slot, native only): on a host whose `hello` advertises
  * `tray`, a row of live cards over the composer — one per subagent and
  * background job, and a done card standing for finished agents without a
- * card of their own — in place of the HUD pills. Tern owns selection, order,
- * paging and motion; omp owns the words and which card is looked at closer
- * (the peek).
+ * card of their own — in place of the HUD pills. Tern owns selection, paging
+ * and motion; omp owns the words, the cards' order and which card is looked
+ * at closer (the peek).
  *
  * The cards are flat faces ({@link TrayItem}) the controller builds from the
  * agent registry, the observer sessions and the job manager. An agent that
@@ -19,7 +19,7 @@
  */
 import { For, type JSXNode, signal, untrack } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { TspTrayMain, TspTrayStatus } from "@oh-my-pi/pi-wire";
+import type { TspSpan, TspTrayMain, TspTrayStatus } from "@oh-my-pi/pi-wire";
 import type { JobWidgetView } from "../../tools/details/job-widget";
 import { previewLine, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { replaceTabs } from "../../utils/text-width";
@@ -40,17 +40,30 @@ interface TrayFace {
 	readonly look: boolean;
 }
 
+/**
+ * An agent card's second line: the call it runs or last made (`Edit tray.tsx`) with what that
+ * call changed (`+42 −12`) or that it failed, else plain text (`Queued`, its outcome).
+ */
+export interface TrayDoing {
+	/** The call's tool as a verb (`Edit`); empty when the line is plain text. */
+	readonly tool: string;
+	/** What the call acts on (file names, a pattern, a command), else the plain text. */
+	readonly text: string;
+	/** Lines the finished call added and removed (an edit's diff); 0 for none. */
+	readonly added: number;
+	readonly removed: number;
+	/** The finished call failed. */
+	readonly callFailed: boolean;
+}
+
 /** A subagent's card. */
-export interface TrayAgentItem extends TrayFace {
+export interface TrayAgentItem extends TrayFace, TrayDoing {
 	readonly item: "agent";
 	/** Epoch ms of its latest tool call start, or of the moment it settled. */
 	readonly acted: number;
 	/** Running, but only waiting on its own agents or jobs (`isWaitingOnOwnWork` of its progress). */
 	readonly waiting: boolean;
 	readonly unread: number;
-	/** The call's tool name; empty when the line is plain text. */
-	readonly tool: string;
-	readonly text: string;
 	/** Its agent type, when it says more than the name (closer look and aria only). */
 	readonly type: string;
 	readonly model: string;
@@ -211,6 +224,51 @@ function cardProps(item: TrayItem) {
 	} as const;
 }
 
+/** The call's verb and subject, else the plain text. */
+function callSpans(doing: TrayDoing): TspSpan[] {
+	if (!doing.tool) return [{ t: doing.text }];
+	const verb: TspSpan = { t: doing.tool, s: "strong" };
+	return doing.text ? [verb, { t: ` ${doing.text}` }] : [verb];
+}
+
+/** `+42 −12`, or `failed`: what the finished call changed, or that it failed; empty for neither. */
+function outcomeSpans(doing: TrayDoing): TspSpan[] {
+	if (doing.callFailed) return [{ t: "failed", s: "error" }];
+	const spans: TspSpan[] = [];
+	if (doing.added > 0) spans.push({ t: `+${doing.added}`, s: "success mono" });
+	if (doing.removed > 0) {
+		if (spans.length > 0) spans.push({ t: " " });
+		spans.push({ t: `−${doing.removed}`, s: "error mono" });
+	}
+	return spans;
+}
+
+/** An agent card's second line in words (`Edit tray.tsx +42 −12`), for its aria. */
+export function trayDoingText(doing: TrayDoing): string {
+	return [callSpans(doing), outcomeSpans(doing)]
+		.map(spans => spans.map(span => span.t).join(""))
+		.filter(Boolean)
+		.join(" ");
+}
+
+/** An agent card's second line: the call (it gives way first), then what it changed at the right. */
+function DoingRow(props: { readonly item: TrayAgentItem }): JSXNode {
+	const item = props.item;
+	const outcome = outcomeSpans(item);
+	return (
+		<row
+			key="doing"
+			role="omp.tray.doing"
+			gap="sm"
+			align="center"
+			tone={item.status === "failed" ? "error" : undefined}
+		>
+			<text key="call" role="omp.tray.call" spans={callSpans(item)} wrap="none" truncate="end" grow={1} shrink={1} />
+			{outcome.length > 0 && <text key="outcome" role="omp.tray.outcome" spans={outcome} wrap="none" shrink={0} />}
+		</row>
+	);
+}
+
 function AgentCard(props: { readonly item: TrayAgentItem; readonly now: number }): JSXNode {
 	const item = props.item;
 	return (
@@ -227,16 +285,7 @@ function AgentCard(props: { readonly item: TrayAgentItem; readonly now: number }
 					</row>
 				)}
 			</row>
-			<text
-				key="doing"
-				role="omp.tray.doing"
-				spans={
-					item.tool ? [{ t: item.tool, s: "dim" }, { t: " · ", s: "dim" }, { t: item.text }] : [{ t: item.text }]
-				}
-				wrap="none"
-				truncate="end"
-				tone={item.status === "failed" ? "error" : undefined}
-			/>
+			<DoingRow item={item} />
 			<row key="meta" role="omp.tray.meta" gap="sm" align="center">
 				{item.model !== "" && (
 					<text

@@ -107,6 +107,26 @@ describe("TerminalImages: kitty", () => {
 		expect(frame(images, [block]).sequences).toBe("");
 	});
 
+	it("draws a cells-only request as placeholders, and without them shows the fallback and sends the terminal nothing", () => {
+		const { images, placeholders } = rig();
+		const request = { maxColumns: 3, maxRows: 2, fallback: "[a]", cells: true };
+		const block = paint(images, image("a"), request);
+		// Placements address the screen: nothing can share their rows, so the caller draws its own fallback.
+		const direct = frame(images, [block]);
+		expect(direct.rows[0]).toEqual({ rows: ["[a]"], columns: 3, state: "fallback" });
+		expect(direct.sequences).toBe("");
+
+		placeholders.set(true);
+		const placed = frame(images, [block]);
+		expect(placed.rows[0]!.state).toBe("image");
+		expect(placed.rows[0]!.rows.every(row => row.includes("\u{10EEEE}"))).toBe(true);
+		expect(ids(placed.sequences, "t")).toHaveLength(1);
+
+		// An anchored sequence (iTerm2, SIXEL) is no cell of text either.
+		const iterm = rig({ images: "iterm" });
+		expect(frame(iterm.images, [paint(iterm.images, image("a"), request)]).rows[0]!.state).toBe("fallback");
+	});
+
 	it("switches placement style when placeholder support changes", () => {
 		const { images, placeholders } = rig();
 		const block = paint(images, image("a"), { maxColumns: 2, maxRows: 2, fallback: "[a]" });

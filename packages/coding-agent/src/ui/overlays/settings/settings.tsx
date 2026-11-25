@@ -972,7 +972,7 @@ export function SettingsWindow(props: {
 				activate(event.item);
 				return;
 			case "change":
-				applyChange(event.item, event.value);
+				if ("item" in event) applyChange(event.item, event.value);
 				return;
 			default:
 				return;

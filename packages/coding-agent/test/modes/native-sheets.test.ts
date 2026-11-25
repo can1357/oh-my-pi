@@ -12,10 +12,10 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { SpotlightDetails, SpotlightOriginal } from "@oh-my-pi/pi-coding-agent/tools/details/spotlight";
 import { nativeRendering, signal } from "@oh-my-pi/pi-tui";
-import { loadCase } from "@oh-my-pi/pi-tui/testing/corpus";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createDashboardController } from "../../src/autoresearch/dashboard";
+import { createExperimentState } from "../../src/autoresearch/state";
 import type { AutoresearchDashboardRuntime } from "../../src/ui/apps/autoresearch";
 import { presentFullscreen } from "../../src/ui/apps/fullscreen";
 import { GitHelp, gitHelpSheet } from "../../src/ui/apps/git";
@@ -435,8 +435,13 @@ describe("sheets Tern draws", () => {
 
 	it("titles the autoresearch sheet by the experiment and closes it on q", async () => {
 		await using ui = await nativeShell(mode.shell);
-		const recorded = await loadCase("apps/autoresearch-dashboard/overlay-running-with-last-summary.dark");
-		const runtime = (recorded.inputs as { runtime: AutoresearchDashboardRuntime }).runtime;
+		const runtime: AutoresearchDashboardRuntime = {
+			autoresearchMode: true,
+			dashboardExpanded: false,
+			state: { ...createExperimentState(), name: "Speed up the parser" },
+			lastRunSummary: { runNumber: 1, passed: true, parsedPrimary: 120 },
+			runningExperiment: { startedAt: Date.now(), command: "bun run bench" },
+		};
 		let shown: Promise<void> | undefined;
 		const closed = await overDraft(ui, async () => {
 			shown = createDashboardController().showOverlay(
