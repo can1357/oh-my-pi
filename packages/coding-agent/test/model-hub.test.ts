@@ -56,7 +56,7 @@ function makeModel(
 }
 
 interface RegistryOverrides {
-	refresh?: (mode: string) => Promise<void>;
+	refreshIfStale?: () => Promise<boolean>;
 	refreshProvider?: ModelRegistry["refreshProvider"];
 	getAvailable?: (kind?: ModelKind | "all") => Model[];
 	getAll?: () => Model[];
@@ -68,7 +68,7 @@ interface RegistryOverrides {
 function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}): ModelRegistry {
 	const getAll = overrides.getAll ?? models;
 	return {
-		refresh: overrides.refresh ?? (async () => {}),
+		refreshIfStale: overrides.refreshIfStale ?? (async () => false),
 		refreshProvider: overrides.refreshProvider ?? (async () => {}),
 		getError: () => undefined,
 		getAvailable: overrides.getAvailable ?? models,
@@ -128,6 +128,7 @@ function createHub(options: {
 		cfgRetryFallbackChains.override(settings, chains);
 	});
 	const callbacks: ModelHubCallbacks = {
+		onCatalogRefreshed: options.callbacks?.onCatalogRefreshed,
 		onAssign: options.callbacks?.onAssign ?? onAssign,
 		onUnassign: options.callbacks?.onUnassign ?? onUnassign,
 		onLoginRequest: options.callbacks?.onLoginRequest ?? onLoginRequest,
@@ -1940,6 +1941,15 @@ describe("ModelHub", () => {
 	});
 
 	describe("provider refresh lifecycle", () => {
+		test("a fresh catalog opens without forcing discovery or reloading the session scope", async () => {
+			const refreshIfStale = vi.fn(async () => false);
+			const onCatalogRefreshed = vi.fn(async () => undefined);
+			createHub({ models: [], registry: { refreshIfStale }, callbacks: { onCatalogRefreshed } });
+			await Bun.sleep(0);
+			expect(refreshIfStale).toHaveBeenCalledTimes(1);
+			expect(onCatalogRefreshed).not.toHaveBeenCalled();
+		});
+
 		test("auto-refreshes a provider once per process; F5 forces a re-fetch", async () => {
 			const model = makeModel("prov-a", "model-a");
 			const refreshProvider = vi.fn<ModelRegistry["refreshProvider"]>(async () => {});

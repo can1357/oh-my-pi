@@ -258,7 +258,7 @@ export class ModelHubState {
 	#scheduledRefreshes = new Map<string, Timer>();
 	#pendingCredentialRefreshes = new Set<string>();
 	#currentSelector: string | undefined;
-	/** The opening online refresh is in flight (an empty scope shows as loading). */
+	/** The opening freshness check is in flight (an empty scope shows as loading). */
 	#catalogRefreshing = false;
 
 	constructor(
@@ -289,12 +289,14 @@ export class ModelHubState {
 			initial && this.#entries.some(entry => entry.providerId === initial) ? `provider:${initial}` : "all",
 		);
 
-		// Online discovery only (no credential helpers); a --models scope does not depend on it.
+		// An explicit --models scope does not depend on catalog freshness.
 		if (this.#scopedModels.length === 0) {
 			this.#catalogRefreshing = true;
 			this.registry
-				.refresh("online")
-				.then(() => this.#afterRegistryRefresh())
+				.refreshIfStale()
+				.then(changed => {
+					if (changed) return this.#afterRegistryRefresh();
+				})
 				.catch(error => {
 					this.#configError = errorText(error);
 				})
@@ -991,7 +993,9 @@ export class ModelHubState {
 	}
 
 	async #afterRegistryRefresh(providerId?: string): Promise<void> {
+		if (this.#disposed) return;
 		const scope = await this.callbacks.onCatalogRefreshed?.(providerId);
+		if (this.#disposed) return;
 		if (scope) this.#scopedModels = scope;
 		this.#sync();
 	}
