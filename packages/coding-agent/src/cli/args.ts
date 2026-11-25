@@ -474,6 +474,14 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 	}
 
+	// A --no-tools session loads no extensions; an explicit one would be silently ignored.
+	if (
+		result.noTools &&
+		((result.extensions?.length ?? 0) > 0 || (result.hooks?.length ?? 0) > 0 || trustedFlagCount > 0)
+	) {
+		throw new CliUsageError("--no-tools cannot be combined with --extension, -e, --hook, or --trusted-extension");
+	}
+
 	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {
 		throw new CliUsageError("--system-prompt and --system-prompt-template cannot be combined");
 	}

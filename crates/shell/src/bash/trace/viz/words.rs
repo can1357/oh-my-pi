@@ -3,7 +3,7 @@
 //! to rows.
 use super::{analysis::Analysis, model::Layers};
 use crate::bash::syntax::{
-	AndOrOp, CaseMode, ComsubKind, PrintStyle, ReplaceMode, Sep, Special, print,
+	AndOrOp, CaseMode, ComsubKind, PrintStyle, ReplaceMode, Sep, Special, print, zsh_text,
 	tree::{
 		ArrayElem, Assign, AssignValue, CommandKind, Cond, CondExpr, List, Param, ParamName, ParamOp,
 		Part, Pipeline, Seq, Subscript, Word, WordPart,
@@ -89,7 +89,13 @@ impl WordPrinter<'_> {
 				|value| value.to_string(),
 			),
 			Part::Compound(e) => self.elements(e),
-			Part::BadSubst(v) | Part::Zsh(v) => text(v),
+			Part::BadSubst(v) => text(v),
+			// Token bytes (0x83..) are not UTF-8; show the source text they stand for.
+			Part::Zsh(v) => {
+				let mut out = Vec::new();
+				zsh_text(v, &mut out);
+				String::from_utf8_lossy_owned(out)
+			},
 			Part::BadComsub(c) => text(c.text()),
 			Part::DroppedQuote => "\"".into(),
 		}

@@ -9,6 +9,7 @@
  * sends them as spans (identity colours are terminal-only). Widths are
  * cells; `Infinity` leaves rows whole.
  */
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { formatDuration, formatNumber, pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { toolIntentLabel, type TspSpan, type TspText } from "@oh-my-pi/pi-wire";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
@@ -63,6 +64,7 @@ export type Glyph = (key: string) => string;
 /** What rows are built against. */
 export interface RowContext {
 	readonly glyph: Glyph;
+	readonly expandKey: () => string;
 	readonly expanded: boolean;
 	/** The transcript clock (ms) time-derived rows sample. */
 	readonly nowMs: number;
@@ -144,13 +146,9 @@ function textLines(text: TspText): Line[] {
 	return lines;
 }
 
-function flatten(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
-
 /** `text` on one line, cut to `width` cells. */
 function previewLine(text: string, width: number): string {
-	return truncate(flatten(text), width);
+	return truncate(flattenLine(text), width);
 }
 
 /** Cut to `width` only while collapsed (expanded rows wrap whole). */
@@ -167,9 +165,9 @@ function bracket(cx: RowContext, label: string): string {
 	return `${cx.glyph("format.bracketLeft")}${label}${cx.glyph("format.bracketRight")}`;
 }
 
-/** `⟦⌃O: Expand⟧`, dim. */
+/** The bracketed hint to expand the task, dim. */
 function expandHint(cx: RowContext): Seg {
-	return seg(bracket(cx, "⌃O: Expand"), "dim");
+	return seg(bracket(cx, `${cx.expandKey()}: Expand`), "dim");
 }
 
 type IconStatus = "success" | "error" | "warning" | "pending" | "running" | "aborted";
@@ -676,7 +674,7 @@ export function resultRows(
 			...cp,
 			icon(cx, "aborted"),
 			seg(" "),
-			seg(clip(flatten(sanitizeText(result.abortReason)), 80, cx.expanded), "dim"),
+			seg(clip(flattenLine(sanitizeText(result.abortReason)), 80, cx.expanded), "dim"),
 		]);
 	}
 	const review = reviewVerdict(yieldRecords(result.extractedToolData?.yield));
@@ -743,7 +741,7 @@ export function resultRows(
 	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
 		lines.push([
 			...cp,
-			seg(clip(flatten(sanitizeText(result.error)), 70, cx.expanded), mergeFailed ? "warning" : "error"),
+			seg(clip(flattenLine(sanitizeText(result.error)), 70, cx.expanded), mergeFailed ? "warning" : "error"),
 		]);
 	}
 	return lines;
@@ -970,7 +968,7 @@ function nestedLines(
 
 // ─── Card body ──────────────────────────────────────────────────────────────
 
-/** `… 21 more agents (18 pending · 3 done) ⟦⌃O: Expand⟧`: live rows folded above the visible ones. */
+/** Count of live rows folded above the visible ones, with the tool expansion hint. */
 function hiddenProgressLine(cx: RowContext, hidden: readonly AgentProgress[]): Line {
 	const counts = { completed: 0, running: 0, pending: 0, failed: 0, aborted: 0 };
 	for (const p of hidden) counts[p.status]++;

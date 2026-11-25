@@ -14,6 +14,7 @@ import {
 	isCompiledBinary,
 	isRecord,
 	logger,
+	relativePathWithinNormalizedRoot,
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
@@ -830,6 +831,7 @@ const PI_PACKAGE_NAMES = [
 	"pi-natives",
 	"pi-tui",
 	"pi-utils",
+	"omptype",
 ] as const;
 
 /**
@@ -1328,8 +1330,7 @@ async function resolveRelativeCommonJsRequire(specifier: string, importerPath: s
 }
 
 function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
-	const relative = path.relative(rootPath, candidatePath);
-	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+	return relativePathWithinNormalizedRoot(rootPath, candidatePath) !== null;
 }
 
 async function resolvePackageSourceTarget(packageRoot: string, targetPath: string): Promise<string | null> {

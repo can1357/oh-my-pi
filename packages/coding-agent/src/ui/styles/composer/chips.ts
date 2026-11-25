@@ -4,13 +4,16 @@
  * rounded border in the chip's color, two cells apart, as many as fit. The
  * top border carries the chip's token, the bottom one its caption, both
  * bold and centred. A text chip shows its first lines muted; an image or
- * video chip its glyph centred.
+ * video chip its picture centred, where the terminal draws images as cells
+ * of text (kitty Unicode placeholders, the only form that fits between the
+ * card's borders), else its glyph.
  */
-import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { TspImageProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { pictureRows } from "@oh-my-pi/pi-tui/term/painters/image";
 import { fgSgr } from "@oh-my-pi/pi-tui/theme/color";
-import { padTo, replaceTabs, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { replaceTabs, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { fileLink } from "../tools/file-common";
 
 /** Terminal-only facts of a chip card (its `term` prop). */
@@ -32,6 +35,18 @@ function plain(text: TspText | undefined): string {
 function textOf(node: UiNode | undefined): string {
 	const p = (node?.props() ?? {}) as { text?: string; spans?: readonly TspSpan[] };
 	return p.spans ? plain(p.spans) : (p.text ?? "");
+}
+
+/** `rows` (each `columns` cells) centred in the card's interior. */
+function centred(rows: readonly string[], columns: number): string[] {
+	const top = Math.floor((INNER_ROWS - rows.length) / 2);
+	const pad = Math.max(0, INNER_COLS - columns);
+	return Array.from({ length: INNER_ROWS }, (_, i) => {
+		const row = rows[i - top];
+		return row === undefined
+			? " ".repeat(INNER_COLS)
+			: `${" ".repeat(Math.floor(pad / 2))}${row}${" ".repeat(Math.ceil(pad / 2))}`;
+	});
 }
 
 /** One card's six rows. */
@@ -64,11 +79,14 @@ function paintCard(node: UiNode, cx: PaintContext): string[] {
 			return `${line ? theme.fg("muted", line) : ""}${" ".repeat(INNER_COLS - visibleWidth(line))}`;
 		});
 	} else {
-		const glyph = theme.symbols.symbol(`chip.${kind}`);
-		const left = Math.floor((INNER_COLS - visibleWidth(glyph)) / 2);
-		interior = Array.from({ length: INNER_ROWS }, (_, i) =>
-			i === 1 ? padTo(`${" ".repeat(left)}${glyph}`, INNER_COLS) : " ".repeat(INNER_COLS),
-		);
+		const picture = children.find(child => child.kind === "image");
+		const drawn = picture && pictureRows(picture.props() as TspImageProps, cx, { label: "", cells: true });
+		if (drawn?.state === "image") {
+			interior = centred(drawn.rows, drawn.columns);
+		} else {
+			const glyph = theme.symbols.symbol(`chip.${kind}`);
+			interior = centred([theme.fg("muted", glyph)], visibleWidth(glyph));
+		}
 	}
 	const side = ink(box.vertical);
 	const href = typeof props.head === "string" ? undefined : props.head?.find(span => span.href)?.href;
