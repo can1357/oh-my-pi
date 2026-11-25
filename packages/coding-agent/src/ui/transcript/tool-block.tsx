@@ -48,25 +48,23 @@ import { mcpPresenter } from "../tools/mcp";
 import { toolPresenter } from "../tools/registry";
 import { settledRevision } from "../shell/transcript";
 import { presentShellScript, presentShellTrace } from "../tools/shell-viz";
-import { imageBlob } from "./messages/image";
+import { imageBlob, inlineImageTerm } from "./messages/image";
+import { presenterRows } from "./figures/presented-block";
 import { RESULT_IMAGE_ROLE } from "./image-links";
 import { ShellVizState } from "./shell-viz-state";
 import type { ToolCommandResolver } from "../tools/tool-command";
+
+/** An extension presenter's own compact row: its label and the rows below it (theme-token spans kept). */
+export interface CompactRow {
+	readonly label?: TspText;
+	readonly rows?: readonly TspText[];
+}
 
 /**
  * How an extension transcript presenter wants a call shown: as usual, as a
  * compact line (optionally with its own label and rows), or not at all.
  */
-export type ToolPresentation =
-	| "full"
-	| "compact"
-	| "hidden"
-	| {
-			readonly compact: {
-				readonly label?: string;
-				readonly rows?: readonly string[];
-			};
-	  };
+export type ToolPresentation = "full" | "compact" | "hidden" | { readonly compact: CompactRow };
 
 /** A tool result as the transcript receives it (images included). */
 export interface ToolCallResult extends ToolResult {
@@ -590,6 +588,8 @@ export interface ToolNodeInput {
 	/** The presenter streams its body while live: the block stays open while pending/running. */
 	readonly streamsBody?: boolean;
 	readonly args?: unknown;
+	/** Whether the terminal draws inline result pictures. */
+	readonly showImages?: boolean;
 	/** The result's image placeholders and the images they link to. */
 	readonly imageLinks?: readonly ImagePlaceholderLink[];
 }
@@ -712,6 +712,7 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 			...(input.activity ? { activity: input.activity } : {}),
 			...(input.running ? { running: true } : {}),
 			...(view?.inline ? { inline: true } : {}),
+			...(input.showImages === false ? { showImages: false } : {}),
 			...(input.imageLinks ? { imageLinks: input.imageLinks } : {}),
 		},
 	};
@@ -724,7 +725,7 @@ function imageNodes(result: ToolCallResult | undefined): JSXNode {
 		return (
 			<image
 				key={`img${index}`}
-				term={{ role: RESULT_IMAGE_ROLE }}
+				term={inlineImageTerm({ role: RESULT_IMAGE_ROLE })}
 				blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType ?? "image/png")}
 				alt={image.mimeType}
 				w={size?.w}
@@ -739,8 +740,7 @@ function compactBody(presentation: ToolPresentation): JSXNode {
 	if (typeof presentation !== "object") return undefined;
 	const rows = presentation.compact.rows ?? [];
 	if (rows.length === 0) return undefined;
-	const spans = rows.flatMap((row, i) => (i === 0 ? [{ t: row }] : [{ t: "\n" }, { t: row }]));
-	return <text spans={spans} wrap="none" />;
+	return <text spans={presenterRows(rows)} wrap="none" />;
 }
 
 /** The transcript tool block of `call`. */
@@ -752,7 +752,13 @@ export function ToolBlock(props: { readonly call: ToolCall }): JSXNode {
 		if (typeof presentation === "object") return compactBody(presentation);
 		const view = call.view();
 		// Result images show under the body unless the view draws them itself.
-		const drawsImages = flattenNodes(view?.body).some(node => isUiNode(node) && node.kind === "image");
+		const drawsImages = flattenNodes(view?.body).some(node => {
+			if (!isUiNode(node)) return false;
+			if (node.kind === "image") return true;
+			if (node.kind !== "media") return false;
+			const props = untrack(node.props);
+			return "path" in props && props.path === readMediaPath(facts.result()?.details);
+		});
 		const images = facts.showImages() && !drawsImages ? imageNodes(facts.result()) : undefined;
 		return [view?.body, images];
 	});
@@ -783,6 +789,7 @@ export function ToolBlock(props: { readonly call: ToolCall }): JSXNode {
 			hasBody: bodyNodes().length > 0,
 			streamsBody: call.presenter.streamsBody,
 			args: facts.args(),
+			showImages: facts.showImages(),
 			imageLinks: imageLinks(),
 		});
 	});

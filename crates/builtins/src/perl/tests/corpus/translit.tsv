@@ -1,0 +1,18 @@
+# Perl corpus: translit. Format and regeneration: crates/builtins/src/perl/tests.rs.
+complement-delete	my $s='aA1bB2'; $s =~ tr/a-z//cd; print "$s\n";	ab␊
+complement	my $s='aA1bB2'; $s =~ tr/a-z/?/c; print "$s\n";	a??b??␊
+count-only	my $s='aza'; my $n=$s =~ tr/a//; print "$n|$s\n";	2|aza␊
+delete-excess	my $s='abcabc'; my $n=$s =~ tr/abc/X/d; print "$n|$s\n";	6|XX␊
+deletion	my $s='abc123'; $s =~ tr/0-9//d; print "$s\n";	abc␊
+duplicate	my $s='aa'; $s =~ tr/aa/XY/; print "$s\n";	XX␊
+hex-range	my $s='ABCD'; $s =~ tr/\x41-\x43/012/; print "$s\n";	012D␊
+map	my $s='abca'; my $n=$s =~ tr/abc/XYZ/; print "$n|$s\n";	4|XYZX␊
+no-interpolation	my $x='a'; my $s='x$a'; $s =~ tr/$x/Z/; print "$s\n";	ZZa␊
+paired	my $s='a-b'; $s =~ tr{a\-b}[XYZ]; print "$s\n";	XYZ␊
+range	my $s='cAz1'; $s =~ tr/a-z/A-Z/; print "$s\n";	CAZ1␊
+return-copy	my $s='ab'; my $out=$s =~ tr/ab/XY/r; print "$s|$out\n";	ab|XY␊
+short-replacement	my $s='abc'; $s =~ tr/abc/Z/; print "$s\n";	ZZZ␊
+squeeze-count	my $s='aabb'; my $n=$s =~ tr/ab/x/s; print "$n|$s\n";	4|x␊
+squeeze-unmatched	my $s='ZZaaZZ'; $s =~ tr/a/Z/s; print "$s\n";	ZZZZZ␊
+squeeze	my $s='aabbba--aa'; $s =~ tr/ab/a/s; print "$s\n";	a--a␊
+y-synonym	my $s='ab'; $s =~ y/a/z/; print "$s\n";	zb␊

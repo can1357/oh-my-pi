@@ -8,6 +8,7 @@ import {
 	drainAbortedShells,
 	executeBash as executeBashCommand,
 	releaseShellSessions,
+	sessionShellEnv,
 } from "../exec/bash-executor";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { outputMeta } from "../tools/output-meta";
@@ -139,7 +140,10 @@ export class BashRunner {
 					cwd,
 					timeout: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.#host.settings)) * 1000,
 					onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),
-					env: shellEnv,
+					env: {
+						...shellEnv,
+						...sessionShellEnv({ id: target.sessionId, file: this.#host.sessionManager.getSessionFile() }),
+					},
 					useUserShell: options?.useUserShell,
 					pty: options?.pty,
 				});

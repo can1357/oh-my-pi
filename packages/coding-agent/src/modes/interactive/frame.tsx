@@ -68,6 +68,8 @@ export interface AppFrameOptions {
 	readonly autocompleteMaxVisible?: number;
 	/** `showHardwareCursor`: the terminal's cursor marks the caret (else the composer draws one). */
 	readonly hardwareCursor?: boolean;
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	readonly imeSafeCursor?: boolean;
 	/**
 	 * The terminal the frame starts on, whoever starts it (headless hosts and tests hand the
 	 * interactive mode an unstarted frame on in-memory streams); {@link AppFrameStartOptions} add to it.
@@ -129,6 +131,7 @@ export class AppFrame {
 			shape: options.shape,
 			vim: options.vim === true,
 			caret: options.hardwareCursor === false ? "drawn" : "terminal",
+			imeSafeCursor: options.imeSafeCursor === true,
 			dictating: () => {
 				const state = this.dictation();
 				return state === "recording" || state === "transcribing";
@@ -196,6 +199,11 @@ export class AppFrame {
 		this.composer.setShape(id);
 	}
 
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	setImeSafeCursor(enabled: boolean): void {
+		this.composer.setImeSafeCursor(enabled);
+	}
+
 	/** Draw the bar. A startup prediction has no session routes, so it advertises no click actions. */
 	setStatusLine(
 		statusLine: StatusLineView | undefined,
@@ -208,9 +216,8 @@ export class AppFrame {
 			this.composer.setSlots({});
 			return;
 		}
-		const nerd = () => currentTheme().symbols.preset === "nerd";
 		const placement = computed(() => shapePlacement(composerShape(this.#shape()), this.composer.completing()));
-		const line = createStatusLine({ settings: statusLine.settings, facts: statusLine.facts, placement, nerd });
+		const line = createStatusLine({ settings: statusLine.settings, facts: statusLine.facts, placement });
 		this.composer.setStatus(line.chrome.composerStatus);
 		this.#statusPreview = line.preview;
 		this.#statusPanel.set(line.panel);
@@ -218,7 +225,12 @@ export class AppFrame {
 		const facts = composerFacts({ settings: statusLine.settings, facts: statusLine.facts, click });
 		this.composer.setSlots({
 			context: facts.context,
-			chips: <ComposerChips composer={this.composer} />,
+			chips: (
+				<ComposerChips
+					composer={this.composer}
+					annotate={() => this.shell.native() && this.shell.host?.feature("annotate") === true}
+				/>
+			),
 			// The model chip. With `statusLine.compactThinkingLevel` the effort ring stands in for its icon
 			// (it keeps its own tooltip and click); otherwise the level gets a chip of its own.
 			model: (

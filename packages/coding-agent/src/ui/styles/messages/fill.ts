@@ -5,9 +5,7 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { padTo, replaceTabs, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
-
-/** The key that expands and collapses transcript blocks, as hints name it. */
-export const EXPAND_KEY = "⌃O";
+import { terminalPaddingX } from "../terminal-padding";
 
 const BG_RESET = /\x1b\[(?:0|49)m/g;
 
@@ -85,12 +83,12 @@ export function hexFg(hex: string, text: string): string {
 }
 
 /**
- * `text` (styled, may span lines) wrapped to `width` with `paddingX` blank
- * cells on both sides, every row padded to the full width (a classic padded
- * text block).
+ * Styled text wrapped with the terminal's standard horizontal padding,
+ * every row padded to the full width.
  */
-export function paddedText(text: string, width: number, paddingX = 1): string[] {
+export function paddedText(text: string, width: number): string[] {
 	if (text === "") return [];
+	const paddingX = terminalPaddingX();
 	const inner = Math.max(1, width - paddingX * 2);
 	const pad = " ".repeat(paddingX);
 	return wrap(replaceTabs(text), inner).map(line => padTo(`${pad}${line}`, width));

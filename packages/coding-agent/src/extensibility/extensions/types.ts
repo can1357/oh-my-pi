@@ -85,7 +85,12 @@ import type { ComposerDecorator, SubmitTransform } from "../../ui/composer/compo
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "../custom-commands/bundled/annotate/annotation-types";
 export type { ComposerDecoration, ComposerDecorator, SubmitTransform } from "../../ui/composer/composer";
-export type { ComposerChromeContext, ComposerRowContext, ComposerShape } from "../../ui/styles/composer/shapes";
+export type {
+	ComposerChromeContext,
+	ComposerRowContext,
+	ComposerRowRender,
+	ComposerShape,
+} from "../../ui/styles/composer/shapes";
 import type { ModelRegistry, ProviderConfigInput } from "../../config/model-registry";
 import type { EditToolDetails } from "../../tools/details/edit";
 import type { PythonResult } from "../../eval/py/executor";
@@ -489,7 +494,7 @@ export interface ExtensionUIContext {
 	/**
 	 * Paste text into the core input editor.
 	 *
-	 * Interactive mode should route through the editor's paste handling (e.g. large paste markers).
+	 * Interactive mode should route through the editor's paste handling (e.g. large pastes collapse into a chip).
 	 * Non-interactive modes may fall back to replacing the editor text.
 	 */
 	pasteToEditor(text: string): void;

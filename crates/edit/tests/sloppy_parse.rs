@@ -78,6 +78,113 @@ fn accepts_begin_patch_and_trims_or_quotes_ambiguous_paths() {
 }
 
 #[test]
+fn explicit_tool_headers_recover_only_with_a_sloppy_selector() {
+	for (header, end) in [
+		("*** Begin Patch\n*** Update File:", "\n*** End Patch"),
+		("*** Update File:", "\n*** End"),
+		("*** Begin Edit File:", ""),
+		("*** Begin File:", ""),
+		("*** Input - File:", ""),
+		("*** Patch File:", ""),
+		("*** Begin\n*** Edit File:", ""),
+		("*** Input\n*** Edit File:", ""),
+		("*** Start Patch\n*** Edit File:", ""),
+	] {
+		let input = format!("{header} a.ts\n*** Find\nold\n*** Replace\nnew{end}");
+		let sections = split_sloppy_sections(&input).unwrap();
+		assert_eq!(sections.len(), 1, "{header}");
+		assert_eq!(sections[0].path, "a.ts");
+		let ops = parse_operations(&sections[0].body, "old\n", "a.ts").unwrap();
+		assert_eq!(ops.len(), 1);
+		assert_eq!(ops[0].pattern_text, "old");
+		assert_eq!(ops[0].rewrite, OperationRewrite::Explicit { text: "new".to_owned() });
+	}
+}
+
+#[tokio::test]
+async fn per_replacement_end_markers_do_not_hide_later_operations_on_a_recovered_path() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "one\ntwo\n");
+	let input = "*** Update File: a.txt\n*** Find\none\n*** Replace\nONE\n*** End Patch\n*** \
+	             Find\ntwo\n*** Insert After\nthree\n*** End Patch";
+	workspace
+		.apply_raw(input, &DiskWriter::default())
+		.await
+		.unwrap();
+	assert_eq!(workspace.read("a.txt").as_deref(), Some("ONE\ntwo\nthree\n"));
+}
+
+#[tokio::test]
+async fn recovered_multi_file_edits_expose_the_same_paths_they_update() {
+	let first = "*** Update File: a all\n*** Find\nfirst\n*** Replace\none\n";
+	let second = "*** Patch File: b";
+	let engine = SloppyEngine { allow_fuzzy: false, fuzzy_threshold: 0.95 };
+	for suffix in ["", "\n*** Replace Block: function second() {\nfunction changed() {}"] {
+		let args =
+			ArgSnapshot { input: Some(format!("{first}{second}{suffix}")), ..Default::default() };
+		assert_eq!(engine.inspect(&args).paths, ["a all", "b"]);
+	}
+
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a all", "first\n");
+	workspace.write("b", "second\n");
+	let input = format!("{first}{second}\n*** Find\nsecond\n*** Replace\ntwo");
+	workspace
+		.apply_raw(&input, &DiskWriter::default())
+		.await
+		.unwrap();
+	assert_eq!(workspace.read("a all").as_deref(), Some("one\n"));
+	assert_eq!(workspace.read("b").as_deref(), Some("two\n"));
+}
+
+#[test]
+fn canonical_find_and_replacement_keep_literal_file_header_spellings() {
+	let source = "*** Update File: example\n*** Begin File: example\n*** Input - File: example";
+	let target = "*** Begin Edit File: example\n*** Patch File: example\n*** Begin";
+	let input = format!("*** Edit File: only.txt\n*** Find\n{source}\n*** Replace\n{target}");
+	let sections = split_sloppy_sections(&input).unwrap();
+	assert_eq!(sections.len(), 1);
+	assert_eq!(sections[0].path, "only.txt");
+	let ops = parse_operations(&sections[0].body, source, "only.txt").unwrap();
+	assert_eq!(ops.len(), 1);
+	assert_eq!(ops[0].pattern_text, source);
+	assert_eq!(ops[0].rewrite, OperationRewrite::Explicit { text: target.to_owned() });
+	let patch = "*** Update File: example\n@@\n-old\n+new";
+	let input = format!("*** Edit File: only.txt\n*** Find\nanchor\n*** Insert After\n{patch}");
+	let sections = split_sloppy_sections(&input).unwrap();
+	let ops = parse_operations(&sections[0].body, "anchor\n", "only.txt").unwrap();
+	assert_eq!(operation_payload(&ops[0], "only.txt", false, None), format!("{input}\n"));
+	assert!(
+		extract_inline_sloppy_regions("example:\n*** Update File: x\n*** Find\na\n*** Replace\nb")
+			.is_empty()
+	);
+}
+
+#[test]
+fn recovered_headers_do_not_hide_other_targets_or_incomplete_actions() {
+	for input in [
+		"*** Begin\n*** Find\na\n*** Replace\nb",
+		"*** Patch File:\n*** Find\na\n*** Replace\nb",
+		"*** Update File: a\n@@\n-old\n+new",
+		"*** Update File: a\n*** Find\none\n*** Replace\ntwo\n@@\n-three\n+four",
+		"*** Edit File: a\n*** Find\none\n*** Replace\ntwo\n*** Update File: b\n\n@@\n-x\n+y",
+		"*** Update File: a\n*** Find\none\n*** Replace\ntwo\n*** Add File: b\n+new",
+		"*** Begin File: a\n*** Find\nold\n*** Replace\nnew\n*** End\ntrailing body",
+		"*** Update File: a\n*** Find\nold\n*** Replace\nnew\n*** Edit File: b",
+		"*** Update File: a\n*** Find\nold\n*** Replace\nnew\n*** Edit File:\n*** Find\nx\n*** \
+		 Replace\ny",
+		"*** Patch File: a\n*** Find\nold\n*** Replace\nnew\n*** Insert After\nagain",
+		"*** Patch File: a\n*** Find\nold\n*** Cut\n*** Replace\nstray",
+		"*** Input - File: a\n*** Find\n*** Replace\nnew",
+		"*** Begin Edit File: a\n*** Find\nold",
+	] {
+		assert!(split_sloppy_sections(input).is_err(), "{input}");
+	}
+	let prose = "Here is a patch:\n*** Update File: a\n*** Find\none\n*** Replace\ntwo";
+	assert!(split_sloppy_sections(prose).unwrap().is_empty());
+}
+
+#[test]
 fn headers_are_boundaries_only_when_the_whole_trimmed_line_is_recognized() {
 	let input = concat!(
 		"*** Edit File: src/a.ts\n*** Find\n",

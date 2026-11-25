@@ -6,10 +6,19 @@ import { describe, expect, test } from "bun:test";
 import { createRoot, signal } from "@oh-my-pi/pi-tui";
 import { bubbleEvent, pathTo } from "@oh-my-pi/pi-tui/dispatch";
 import { corpusEnvironment } from "@oh-my-pi/pi-tui/testing/corpus";
-import { paintNode } from "@oh-my-pi/pi-tui/term/paint";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { plainRows } from "@oh-my-pi/pi-tui/testing/cells";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { getKeybindings, KeybindingsManager, setKeybindings } from "../../../src/config/keybindings/keybindings";
-import { Composer, type ComposerOptions, composerShape, registerComposerShape } from "../../../src/ui/composer";
+import {
+	Composer,
+	type ComposerOptions,
+	chipLabel,
+	composerShape,
+	registerComposerShape,
+} from "../../../src/ui/composer";
+import { composerShapePreviewRows } from "../../../src/ui/styles/overlays/composer-shape-preview";
 import { key, sendKey, sendPaste } from "./harness";
 
 function make(options: ComposerOptions = {}): { composer: Composer; type(...keys: string[]): void } {
@@ -36,13 +45,14 @@ describe("submission", () => {
 		const { composer, type } = make({ onSubmit: text => sent.push(text) });
 		type("see ");
 		sendPaste(composer.node, composer.field, Array.from({ length: 12 }, (_, i) => `l${i}`).join("\n"));
-		expect(composer.text()).toBe("see [Paste #1, +12 lines]");
+		// The paste collapses into a text chip, staged with the space after it.
+		expect(composer.text()).toBe(`see ${chipLabel("paste", 1)} `);
 		composer.setSubmitTransform(text => text.toUpperCase());
 		type("\r");
-		expect(sent).toEqual([`SEE ${Array.from({ length: 12 }, (_, i) => `L${i}`).join("\n")}`]);
+		expect(sent).toEqual([`SEE ${Array.from({ length: 12 }, (_, i) => `L${i}`).join("\n")} `]);
 		expect(composer.text()).toBe("");
 		type("\x1b[A");
-		expect(composer.text()).toBe("see [Paste #1, +12 lines]");
+		expect(composer.text()).toBe(`see ${chipLabel("paste", 1)} `);
 	});
 	test("a transform returning undefined keeps the draft", () => {
 		const { composer, type } = make({ onSubmit: () => {} });
@@ -118,9 +128,9 @@ describe("raw field selection", () => {
 		type("\x1b[97;9u");
 		const pasted = Array.from({ length: 14 }, (_, i) => `line ${i}`).join("\n");
 		sendPaste(composer.node, composer.field, pasted);
-		expect(composer.expandedText()).toBe(pasted);
+		expect(composer.expandedText()).toBe(`${pasted} `);
 		type("!");
-		expect(composer.expandedText()).toBe(`${pasted}!`);
+		expect(composer.expandedText()).toBe(`${pasted} !`);
 	});
 	test("a push-to-talk candidate types over the selection before a hold is recognized", () => {
 		const { composer, type } = make({ text: "draft" });
@@ -167,6 +177,42 @@ describe("extension hooks", () => {
 		const { composer, type } = make({ shape: "test-bracket" });
 		type("hi");
 		expect(plainRows([...paintNode(corpusEnvironment("dark"), composer.node, 10).rows])).toEqual(["[hi▏     ]"]);
+	});
+	test("a custom shape keeps the hardware caret on its text row after leading padding", () => {
+		const remove = registerComposerShape({
+			id: "test-padded",
+			sideBorders: true,
+			paddingX: 1,
+			sideWidth: paddingX => paddingX + 1,
+			top: ({ width }) => `╭${"─".repeat(width - 2)}╮`,
+			row: ({ first, last, width, text, pad }) => {
+				const blank = `│${" ".repeat(width - 2)}│`;
+				return {
+					rows: [...(first ? [blank] : []), `│ ${text}${pad} │`, ...(last ? [blank] : [])],
+					textRow: first ? 1 : 0,
+				};
+			},
+			bottom: ({ width }) => `╰${"─".repeat(width - 2)}╯`,
+		});
+		const { composer } = make({ shape: "test-padded", caret: "terminal" });
+		const theme = loadThemeSync("dark");
+		const term = createTestTerminal(() => ({ dock: composer.node }), { columns: 24, rows: 8, theme });
+		try {
+			term.focus(composer.field);
+			term.type("hello");
+			const blank = `│${" ".repeat(22)}│`;
+			const top = `╭${"─".repeat(22)}╮`;
+			const bottom = `╰${"─".repeat(22)}╯`;
+			const screen = term.screen();
+			expect(screen.slice(-5)).toEqual([top, blank, `│ hello${" ".repeat(16)}│`, blank, bottom]);
+			expect(term.cursor()).toEqual({ row: screen.length - 3, col: 7 });
+
+			const preview = plainRows(composerShapePreviewRows(theme, "test-padded", 24));
+			expect(preview).toEqual([top, blank, expect.stringContaining("Ask anything"), blank, bottom]);
+		} finally {
+			term.dispose();
+			remove();
+		}
 	});
 });
 
@@ -268,7 +314,7 @@ describe("history recall with attachments", () => {
 		expect(composer.text()).toStartWith("[Image #1] ");
 		expect(composer.pendingImages).toEqual([IMAGE]);
 		expect(composer.pendingImageLinks).toEqual(["/tmp/shot.png"]);
-		expect(composer.chips().map(chip => chip.kind)).toEqual(["image", "paste"]);
+		expect(composer.chips().map(chip => chip.kind)).toEqual(["image", "paste", "paste"]);
 		type("\r");
 		expect(sent[1]).toBe(sent[0]);
 		expect(sent[1]).toContain("attached text");
@@ -457,6 +503,24 @@ describe("the completion popup's items", () => {
 		expect(popupItems(composer)[0]).toMatchObject({ label: [{ s: "mark", t: "notes.md" }] });
 	});
 
+	test("draws the selected completion with the terminal preset's cursor", async () => {
+		const { composer, type } = make({ autocomplete });
+		type("/tmp/work/n");
+		await settle();
+		for (const preset of ["nerd", "ascii"] as const) {
+			const theme = loadThemeSync("dark", { symbolPreset: preset });
+			const popup = composer.node.children().find(node => node.kind === "overlay");
+			if (!popup) throw new Error("Expected the completion popup");
+			const [selected, unselected] = paintNode(staticEnvironment(theme), popup, 80).rows.map(row =>
+				Bun.stripANSI(row),
+			);
+			expect(selected).toStartWith(`${theme.symbols.symbol("nav.cursor")} `);
+			expect(selected).toContain("notes.md");
+			expect(unselected).toStartWith("  ");
+			expect(unselected).toContain("notes.model");
+		}
+	});
+
 	test("keep the provider's description in terminal rows", async () => {
 		const { composer, type } = make({ autocomplete });
 		type("/tmp/work/n");
@@ -499,5 +563,42 @@ describe("a `?` draft", () => {
 		expect(chip?.children()[0]?.props()).toMatchObject({ spans: [{ s: "btwMode", t: "btw" }] });
 		expect(field?.props()).toMatchObject({ decor: [{ from: 0, to: 2, s: "hide" }] });
 		expect(field?.props()).not.toHaveProperty("lang", expect.anything());
+	});
+});
+
+describe("IME-safe cursor layout", () => {
+	test("moves the box bottom border to its own row when the hardware cursor is active", () => {
+		const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true });
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.slice(-2)).toEqual(["│  hi", `╰${"─".repeat(18)}╯`]);
+	});
+
+	test("keeps the separate bottom border when the caret is not at the end", () => {
+		const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true });
+		composer.setCursor(1);
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.slice(-2)).toEqual(["│  hi", `╰${"─".repeat(18)}╯`]);
+	});
+
+	test("drops the right chrome of the last row in the filled shapes", () => {
+		for (const [shape, cap] of [
+			["field", "▐"],
+			["rail", "▎"],
+		] as const) {
+			const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true, shape });
+			const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+			expect(plainRows([...painted.rows]).at(-1)).toBe(`${cap} hi`);
+		}
+	});
+
+	test("keeps the merged bottom border when the caret is drawn", () => {
+		const { composer } = make({ text: "hi", caret: "drawn", imeSafeCursor: true });
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.at(-1)?.startsWith("╰─")).toBe(true);
+		expect(rows.at(-1)).toContain("hi");
+		expect(rows.at(-1)).not.toBe(`╰${"─".repeat(18)}╯`);
 	});
 });

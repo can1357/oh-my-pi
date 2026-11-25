@@ -131,9 +131,11 @@ export type TspText = string | readonly TspSpan[];
 
 /**
  * What a pointer gesture on a node does. `zoom` shows an `image` (and the images
- * beside it) large in the terminal's viewer; it is an image's click by default.
+ * beside it) large in the terminal's viewer; it is an image's click by default. `annotate` opens an `image`
+ * (with a `blob`) in the terminal's annotator when `hello` lists `"annotate"`; Done sends the annotated
+ * picture back as a `change` event.
  */
-export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
+export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | "annotate" | (string & {});
 
 /**
  * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
@@ -172,6 +174,8 @@ export interface TspCommonProps {
 		dblclick?: TspAction;
 		menu?: readonly TspMenuEntry[];
 		hold?: readonly TspMenuEntry[];
+		/** Runs on every press starting outside the node (and outside the dock's composer). */
+		outside?: TspAction;
 	};
 	title?: string;
 	/** Accessible name for icon-only or visual-only nodes. */
@@ -289,6 +293,10 @@ export interface TspCardProps {
 	inset?: boolean;
 	/** `bare`: no ring, fill or insets — a plain head row over the body, for grouped/compact presentations inside another frame. */
 	variant?: "bare";
+	/** An attachment chip (`omp.composer.chip`): what it attaches. */
+	kind?: "image" | "video" | "paste";
+	/** A pasted-text chip (`omp.composer.chip`): the full pasted text. */
+	expansion?: string;
 }
 export interface TspSectionProps {
 	head?: TspText;
@@ -982,8 +990,6 @@ export interface TspPrefsProps {
 	lead?: string;
 	/** The program's search text; non-empty switches the page to search results. */
 	query?: string;
-	/** Caret as a UTF-16 offset into `query` while the program's search field has it; absent: no caret. */
-	cursor?: number;
 	sections: readonly TspPrefsSection[];
 	/** Row with keyboard focus (the program's selection). */
 	focus?: string | null;
@@ -1367,6 +1373,17 @@ export type TspReply =
 	  }
 	| { r: "blobs"; have: readonly string[] };
 
+/**
+ * An encoded picture a terminal hands back (an annotated `image`): standard base64 `data` of a
+ * `mime` image, `w`×`h` pixels.
+ */
+export interface TspPicture {
+	mime: "image/png" | "image/jpeg";
+	data: string;
+	w: number;
+	h: number;
+}
+
 /** Verb `e`: terminal → program events. */
 export type TspEvent =
 	| { ev: "ack"; sf: string; s: number }
@@ -1376,6 +1393,8 @@ export type TspEvent =
 	/** The terminal's features changed (a setting: Tern's Agents tray drops `tray`); the list replaces `hello.features`. */
 	| { ev: "features"; features: readonly string[] }
 	| { ev: "visible"; sf?: string; visible: boolean }
+	/** The window reads and shows this pane's checkout (branch, changes, pull request) itself: show them from `shown` and read none of it yourself while `true`. */
+	| { ev: "checkout"; sf?: string; shown: boolean }
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
 	/** Menu opening/closing; a toggle of a named sub-item also reports its id. */
 	| { ev: "toggle"; sf: string; id: string; open: boolean; item?: string }
@@ -1399,6 +1418,12 @@ export type TspEvent =
 			item: string;
 			value: boolean | number | string | readonly string[] | null;
 	  }
+	/**
+	 * The user finished annotating `image` node `id` (one whose `actions.click` is `"annotate"`; sent only
+	 * on Done, only when `hello` lists `"annotate"`): `value` is the annotated picture, at its new size (a crop
+	 * makes it smaller).
+	 */
+	| { ev: "change"; sf: string; id: string; value: TspPicture }
 	/** The user edited a `doc` (~300 ms after typing pauses, and when editing ends): `text` is its full new source. */
 	| { ev: "change"; sf: string; id: string; text: string }
 	/**

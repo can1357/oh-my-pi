@@ -13,7 +13,7 @@
  * a run once it completes.
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
 	type Accessor,
 	batch,
@@ -36,6 +36,7 @@ import type { AgentViewSession } from "../../session/agent-session-handle";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../../session/transcript/messages";
 import { isReplyWrite, replyDisplayMessage } from "../../session/transcript/reply-write";
 import { messageBlock, readTranscriptPresentation } from "../../session/transcript/transcript-presentation";
+import { capturePage } from "../../tools/browser/page-shot";
 import { type SpotlightDetails, spotlightDetails } from "../../tools/details/spotlight";
 import { isWaitingPollDetails } from "../../tools/details/wait";
 import { presentShellInspector } from "../../ui/apps/shell-visualizer";
@@ -54,12 +55,14 @@ import type { BlockOptions, Shell, TranscriptBlock, ViewList } from "../../ui/sh
 import { mountNode } from "../../ui/shell";
 import { type ExecRun, ExecRunBlock } from "../../ui/transcript/exec-run";
 import { cardExpansion } from "../../ui/transcript/expansion";
-import { PresentedBlock } from "../../ui/transcript/figures/presented-block";
+import { PresentedBlock, presentedMode } from "../../ui/transcript/figures/presented-block";
 import { SpotlightNotice } from "../../ui/transcript/figures/spotlight";
+import type { FigureCell } from "../../ui/transcript/figures/svg";
 import {
 	AssistantMessageBlock,
 	type AssistantMessageModel,
 	thinkingTail,
+	type ToolResultMedia,
 } from "../../ui/transcript/messages/assistant-message";
 import { ThinkingRateMeter } from "../../session/transcript/thinking-speed";
 import { ReadGroup, ReadGroupBlock, type ReadResult } from "../../ui/transcript/read-group";
@@ -84,6 +87,12 @@ export interface DisplayFlags {
 	readonly expandThinkingBlocks: Signal<boolean>;
 	/** `terminal.showImages`. */
 	readonly showImages: Signal<boolean>;
+	/** `tui.renderSvg`. */
+	readonly renderSvg: Signal<boolean>;
+	/** `tui.renderEmbeds`. */
+	readonly renderEmbeds: Signal<boolean>;
+	/** Cell size when the terminal supports inline pictures. */
+	readonly figureCell: Signal<FigureCell | undefined>;
 	/** Tables get charts (the main session's do, a focused subagent's do not). */
 	readonly tableCharts: Accessor<boolean>;
 	/** Show bash commands through the shell engine's presentation (`display.shellVisualization`). */
@@ -266,7 +275,7 @@ export class TranscriptPresenter {
 			transient: signal(false),
 			finalized: signal(message !== undefined),
 			linkTargets: signal<ReadonlyMap<string, string>>(options?.linkTargets ?? this.#host.linkTargets()),
-			toolResultImages: signal<ReadonlyMap<string, readonly ImageContent[]>>(new Map()),
+			toolResultMedia: signal<ReadonlyMap<string, ToolResultMedia>>(new Map()),
 			cacheInvalidation: signal<AssistantView["cacheInvalidation"] extends Signal<infer T> ? T : never>(undefined),
 			servedModelMismatch:
 				signal<AssistantView["servedModelMismatch"] extends Signal<infer T> ? T : never>(undefined),
@@ -276,6 +285,7 @@ export class TranscriptPresenter {
 			errorExpanded: signal(false),
 		};
 		const thinkingRate = signal(0);
+		const sessionManager = this.#host.viewSession.sessionManager;
 		const model: AssistantMessageModel = {
 			message: signals.message,
 			transient: signals.transient,
@@ -284,9 +294,13 @@ export class TranscriptPresenter {
 			expandThinking: display.expandThinkingBlocks,
 			proseOnlyThinking: display.proseOnlyThinking.peek(),
 			showImages: display.showImages,
+			renderSvg: display.renderSvg,
+			renderEmbeds: display.renderEmbeds,
+			figureCell: display.figureCell,
+			embedHost: { cwd: () => sessionManager.getCwd(), capturePage },
 			showToolResultImages: () => !display.hideToolActivity(),
 			tableCharts: display.tableCharts,
-			toolResultImages: signals.toolResultImages,
+			toolResultMedia: signals.toolResultMedia,
 			linkTargets: signals.linkTargets,
 			...(options?.tone ? { tone: options.tone } : {}),
 			errorExpanded: () => signals.errorExpanded() || display.toolOutputExpanded(),
@@ -346,8 +360,14 @@ export class TranscriptPresenter {
 			});
 			return <AssistantMessageBlock model={model} />;
 		};
-		const block = this.#mount(factory, options?.before);
-		const view: AssistantView = { block, model, ...signals };
+		const block = this.#mount(factory, { before: options?.before });
+		const view: AssistantView = {
+			block,
+			model,
+			...signals,
+			setToolResultMedia: (toolCallId, media) =>
+				signals.toolResultMedia.update(current => new Map(current).set(toolCallId, media)),
+		};
 		this.register(block, { kind: "assistant", view });
 		return view;
 	}
@@ -367,6 +387,7 @@ export class TranscriptPresenter {
 		const { display } = this.#host;
 		if (face.reaction) this.#reactionTarget = face.reaction;
 		const presented = face.presented;
+		const packed = signal(false);
 		const factory = presented
 			? () => {
 					const fold = cardExpansion(display.toolOutputExpanded);
@@ -379,13 +400,16 @@ export class TranscriptPresenter {
 							expanded={fold.expanded}
 							onToggle={fold.toggle}
 							activityVisible={() => !display.hideToolActivity()}
+							packed={packed}
 						>
 							{face.face({ expanded: fold.expanded, onToggle: expanded => fold.toggle(!expanded) })}
 						</PresentedBlockNode>
 					);
 				}
 			: face.face;
-		const block = this.#mount(factory, options?.before, face.compact ? { compact: face.compact } : undefined);
+		const own = face.compact;
+		const compact = presented ? (own ? () => packed() || own() : packed) : own;
+		const block = this.#mount(factory, { before: options?.before, ...(compact ? { compact } : {}) });
 		this.register(block, { kind: "message", message });
 		if (!options?.live) this.#settle(block);
 		return block;
@@ -428,7 +452,7 @@ export class TranscriptPresenter {
 		const editMode = toolEditMode(spec.name, spec.tool);
 		if (editMode) call.setRenderContext({ editMode });
 		const presentedId = signal(spec.id);
-		const block = this.#mount(() => {
+		const factory = () => {
 			effect(() => {
 				const value = display.toolOutputExpanded();
 				untrack(() => call.setExpanded(value));
@@ -464,7 +488,8 @@ export class TranscriptPresenter {
 				return result && !call.facts.partial() ? this.#spotlightNotice(call.id, result) : undefined;
 			};
 			return [<ToolBlock call={call} />, notice];
-		}, before);
+		};
+		const block = this.#mount(factory, { before, compact: () => call.facts.presentation() !== "full" });
 		const settleIfFinal = (result: ToolCallResult, partial: boolean): void => {
 			if (partial) return;
 			if (result.isError !== true) {
@@ -558,7 +583,7 @@ export class TranscriptPresenter {
 				this.#oweReplay();
 			return toolPresentation(answer);
 		});
-		const block = this.#mount(() => {
+		const factory = () => {
 			effect(() => {
 				const value = display.toolOutputExpanded();
 				untrack(() => group.setExpanded(value));
@@ -575,7 +600,8 @@ export class TranscriptPresenter {
 			const notices = (): JSXNode[] =>
 				[...finals().entries()].map(([id, result]) => this.#spotlightNotice(id, result));
 			return [ReadGroupBlock({ group }), notices];
-		}, options?.before);
+		};
+		const block = this.#mount(factory, { before: options?.before, compact: group.compact });
 		const pending: PendingTool = {
 			block,
 			group,
@@ -642,21 +668,27 @@ export class TranscriptPresenter {
 	}
 
 	#mountRun(run: ExecRun, message: Signal<BashExecutionMessage | PythonExecutionMessage>): TranscriptBlock {
-		const block = this.#mount(() => {
+		const packed = signal(false);
+		const factory = () => {
 			effect(() => {
 				if (run.status() !== "running") this.#settleSoon(() => block);
 			});
-			return this.#runFace(run, message, () => block);
-		}, undefined);
+			return this.#runFace(run, message, () => block, packed);
+		};
+		const block = this.#mount(factory, { compact: packed });
 		this.register(block, { kind: "exec", run });
 		return block;
 	}
 
-	/** A `!`/`$` run's face; `block` is its transcript block once mounted (none while deferred). */
+	/**
+	 * A `!`/`$` run's face; `block` is its transcript block once mounted (none while deferred), and
+	 * `packed` follows whether presenters draw it compact or hidden.
+	 */
 	#runFace(
 		run: ExecRun,
 		message: Signal<BashExecutionMessage | PythonExecutionMessage>,
 		block: () => TranscriptBlock | undefined,
+		packed?: Signal<boolean>,
 	): JSXNode {
 		const { display } = this.#host;
 		effect(() => {
@@ -673,15 +705,21 @@ export class TranscriptPresenter {
 				expanded={run.expanded}
 				onToggle={collapsed => run.toggle(collapsed)}
 				activityVisible={() => !display.hideToolActivity()}
+				{...(packed ? { packed } : {})}
 			>
 				<ExecRunBlock run={run} />
 			</PresentedBlockNode>
 		);
 	}
 
-	#mount(factory: () => JSXNode, before: TranscriptBlock | undefined, options?: BlockOptions): TranscriptBlock {
+	/** Mount a transcript block, before `options.before` when given, else at the end. */
+	#mount(
+		factory: () => JSXNode,
+		options: BlockOptions & { readonly before?: TranscriptBlock | undefined },
+	): TranscriptBlock {
+		const { before, ...rest } = options;
 		const transcript = this.#host.shell.transcript;
-		return before ? transcript.insertBefore(before, factory, options) : transcript.append(factory, options);
+		return before ? transcript.insertBefore(before, factory, rest) : transcript.append(factory, rest);
 	}
 
 	#settle(block: TranscriptBlock): void {
@@ -701,8 +739,16 @@ function PresentedBlockNode(props: {
 	readonly expanded: () => boolean;
 	readonly onToggle: (collapsed: boolean) => void;
 	readonly activityVisible: () => boolean;
+	/** Set while the block draws compact or hidden: its transcript block then packs against compact neighbours. */
+	readonly packed?: Signal<boolean>;
 	readonly children: JSXNode;
 }): JSXNode {
+	const packed = props.packed;
+	if (packed)
+		effect(() => {
+			const value = presentedMode(props.block(), props.presentation(), props.expanded()) !== "full";
+			untrack(() => packed.set(value));
+		});
 	return () => (
 		<PresentedBlock
 			block={props.block()}
@@ -716,21 +762,22 @@ function PresentedBlockNode(props: {
 	);
 }
 
-/** A presenters' answer as a tool card's presentation. */
+/** A presenters' answer as a tool card's presentation (a string label or row loses its control sequences). */
 function toolPresentation(answer: TranscriptPresentation): ToolPresentation {
 	if (answer === undefined || answer === "full") return "full";
 	if (answer === "hidden" || answer === "compact") return answer;
 	const { label, rows } = answer.compact;
 	return {
 		compact: {
-			...(label !== undefined ? { label: spanText(label) } : {}),
-			...(rows ? { rows: rows.map(spanText) } : {}),
+			...(label !== undefined ? { label: plainText(label) } : {}),
+			...(rows ? { rows: rows.map(plainText) } : {}),
 		},
 	};
 }
 
-function spanText(text: TspText): string {
-	return typeof text === "string" ? stripEscapes(text) : text.map(part => part.t).join("");
+/** `text` without control sequences when a string; spans keep their theme tokens. */
+function plainText(text: TspText): TspText {
+	return typeof text === "string" ? stripEscapes(text) : text;
 }
 
 function textOf(message: AssistantMessage | undefined): string {

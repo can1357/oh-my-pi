@@ -43,6 +43,7 @@
  * that also import the module-level `settings` need the global initialized.
  */
 import { vi } from "bun:test";
+import type { FigureCell } from "../../src/ui/transcript/figures/svg";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -268,6 +269,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 			}) as unknown as StatusFacts,
 		settings: () => ({}) as StatusLineSettings,
 		refresh: vi.fn(),
+		refreshVcs: vi.fn(),
 		resetActiveTime: vi.fn(),
 		markActivityStart: vi.fn(),
 		markActivityEnd: vi.fn(),
@@ -473,6 +475,9 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 				proseOnlyThinking: display.proseOnlyThinking,
 				expandThinkingBlocks: display.expandThinkingBlocks,
 				showImages: signal(cfgTerminalShowImages.get(contextSettings)),
+				renderSvg: signal(false),
+				renderEmbeds: signal(false),
+				figureCell: signal<FigureCell | undefined>(undefined),
 				tableCharts: signal(true),
 				shellVisualization: signal(true),
 				mcpMarkdown: signal(false),

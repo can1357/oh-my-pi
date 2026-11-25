@@ -154,7 +154,7 @@ async function captureOpenAIResponseHeaders(
 		body: null as Record<string, unknown> | null,
 	};
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-		captured.sessionId = getHeader(init?.headers, "session_id");
+		captured.sessionId = getHeader(init?.headers, "session-id");
 		captured.clientRequestId = getHeader(init?.headers, "x-client-request-id");
 		captured.headers = new Headers(init?.headers);
 		captured.body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
@@ -219,7 +219,7 @@ async function captureDispatchedOpenAIResponseHeaders(
 		body: null as Record<string, unknown> | null,
 	};
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-		captured.sessionId = getHeader(init?.headers, "session_id");
+		captured.sessionId = getHeader(init?.headers, "session-id");
 		captured.clientRequestId = getHeader(init?.headers, "x-client-request-id");
 		captured.headers = new Headers(init?.headers);
 		captured.body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;

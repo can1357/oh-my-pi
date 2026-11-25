@@ -19,6 +19,13 @@ const expiredOAuth = () => ({
 	expires: Date.now() - 60_000,
 });
 
+const unexpiredOAuth = () => ({
+	type: "oauth" as const,
+	access: "live-access",
+	refresh: "refresh-1",
+	expires: Date.now() + 4 * 60_000,
+});
+
 describe("AuthStorage transient OAuth refresh failure", () => {
 	const saved: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
 	let storage: AuthStorage | undefined;
@@ -60,6 +67,32 @@ describe("AuthStorage transient OAuth refresh failure", () => {
 
 		expect((await auth.keys.getWithCredential("anthropic", "session"))?.apiKey).toBe("fresh-access");
 		expect(refresh).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps serving an unexpired token while its renewal fails transiently", async () => {
+		const auth = await open();
+		// Inside Anthropic's 5-minute renewal window, outside the 60s default.
+		await auth.credentials.set("anthropic", [unexpiredOAuth()]);
+		const refresh = vi
+			.spyOn(oauthUtils, "refreshOAuthToken")
+			.mockRejectedValue(new Error("fetch failed: ECONNRESET"));
+
+		expect((await auth.keys.getWithCredential("anthropic", "session"))?.apiKey).toBe("live-access");
+		expect((await auth.keys.getWithCredential("anthropic", "session"))?.apiKey).toBe("live-access");
+		// The failed renewal is held back instead of retried on every resolve.
+		expect(refresh).toHaveBeenCalledTimes(1);
+		expect(auth.credentials.has("anthropic")).toBe(true);
+	});
+
+	it("does not keep an unexpired token whose renewal proves the grant dead", async () => {
+		const auth = await open();
+		await auth.credentials.set("anthropic", [unexpiredOAuth()]);
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockRejectedValue(
+			new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}'),
+		);
+
+		expect(await auth.keys.getWithCredential("anthropic", "session")).toBeUndefined();
+		expect(auth.credentials.has("anthropic")).toBe(false);
 	});
 
 	it("lets availability probes treat a transient refresh failure as unavailable", async () => {

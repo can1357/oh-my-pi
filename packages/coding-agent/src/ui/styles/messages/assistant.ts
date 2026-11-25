@@ -2,7 +2,7 @@
  * `omp.assistant` / `omp.assistant.rewound` columns: the assistant's reply
  * as transcript rows.
  *
- * - Text: Markdown one cell in, code fences drawn literally at column 0;
+ * - Text: Markdown with the standard inset, code fences drawn literally at column 0;
  *   prose in the block's `tone` when set (`/live`'s spoken reply), else in
  *   `assistantMessageText` when the theme sets it.
  * - Thinking: italic Markdown in `thinkingText`, set off from what follows
@@ -13,7 +13,7 @@
  *   `[Image: mime]` in `toolOutput`; after a blank row (tool-result images
  *   share one).
  * - The turn-ending error: `Error: …` wrapped under a hanging indent, capped
- *   at 8 rows with a `… +N more lines (⌃O to expand)` hint while collapsed
+ *   at 8 rows with a `… +N more lines` expansion hint while collapsed
  *   (hidden while the same error is pinned and collapsed); the abort label;
  *   or the recovered-retry note, each after a blank row.
  * - Markers draw as dividers; the rewound tag and usage line are native-only.
@@ -24,11 +24,18 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
 import { routedLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
-import { renderMarkdownFrame, takeExtensionLinks } from "@oh-my-pi/pi-tui/text/markdown/index";
+import {
+	type MarkdownLook,
+	markdownLook,
+	renderMarkdownFrame,
+	takeExtensionLinks,
+} from "@oh-my-pi/pi-tui/text/markdown/index";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import { EXPAND_KEY, hexFg, paddedText, propsOf, termOf } from "./fill";
+import { terminalPaddingX } from "../terminal-padding";
+import { expandKeyLabel } from "../../keys/hints";
+import { hexFg, paddedText, propsOf, termOf } from "./fill";
 import { imageLink } from "../tools/file-common";
 
 /** Facets of the hidden-thinking pulse. */
@@ -45,6 +52,7 @@ interface AssistantTerm {
 interface ProseTerm {
 	source?: string;
 	links?: ReadonlyMap<string, string>;
+	deferFigures?: boolean;
 }
 
 interface SectionTerm {
@@ -64,73 +72,106 @@ export function errorRows(theme: Theme, message: string, width: number, maxRows:
 		.map(line => line.trim())
 		.filter(line => line.length > 0);
 	if (lines.length === 0) lines.push("Unknown error");
-	const wrapWidth = Math.max(1, width - 4);
+	const paddingX = terminalPaddingX();
+	const pad = " ".repeat(paddingX);
+	const wrapWidth = Math.max(1, width - 2 * paddingX - 2);
 	const rows: string[] = [];
 	lines.forEach((line, index) => {
 		wrap(theme.fg("error", index === 0 ? `Error: ${line}` : line), wrapWidth).forEach((row, part) => {
-			if (rows.length === 0) rows.push(` ${row}`);
+			if (rows.length === 0) rows.push(`${pad}${row}`);
 			// A wrapped continuation keeps the line's color through its hang; a new line's hang is plain.
-			else rows.push(part === 0 ? `   ${row}` : ` ${theme.fg("error", "  ")}${row}`);
+			else rows.push(`${pad}${part === 0 ? "  " : theme.fg("error", "  ")}${row}`);
 		});
 	});
 	if (rows.length <= maxRows) return rows;
 	const hidden = rows.length - maxRows;
 	return [
 		...rows.slice(0, maxRows),
-		` ${theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${EXPAND_KEY} to expand)`)}`,
+		`${pad}${theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${expandKeyLabel(theme)} to expand)`)}`,
 	];
 }
 
-/**
- * The reply's prose. Links of a scheme the host routes (an extension's) draw their label alone,
- * each label a mouse hit on the `md` node whose item is the href, as the stock `md` painter does.
- */
-function proseRows(
-	child: UiNode,
-	cx: PaintContext,
-): { rows: readonly string[]; stable: number; hits?: readonly Hit[] } {
-	const props = propsOf<{ text: string; stream: boolean; tone: string }>(child);
-	const term = termOf<ProseTerm>(child);
-	const links = term.links;
-	const schemes = routedLinkSchemes();
-	const frame = renderMarkdownFrame(term.source ?? props.text ?? "", cx.width, {
-		theme: cx.theme,
-		paddingX: 1,
-		codeIndent: 0,
-		textStyle: props.tone ?? (cx.theme.has("assistantMessageText") ? "assistantMessageText" : undefined),
-		stream: props.stream === true,
-		hyperlinks: cx.hyperlinks,
-		linkTarget: links && links.size > 0 ? href => links.get(href) : undefined,
-		linkSchemes: schemes.length > 0 ? schemes : undefined,
-	});
-	if (schemes.length === 0) return frame;
-	const hits: Hit[] = [];
-	const rows = frame.rows.map((line, row) => {
-		const taken = takeExtensionLinks(line);
-		for (const link of taken.links)
-			hits.push({ row, col: link.start, width: link.end - link.start, height: 1, node: child, item: link.href });
-		return taken.row;
-	});
-	return { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
+interface ReplyFrame {
+	readonly rows: readonly string[];
+	readonly stable: number;
+	readonly hits?: readonly Hit[];
 }
 
-function thinkingRows(section: UiNode, cx: PaintContext): { rows: readonly string[]; stable: number } {
-	const body = section.children().find(child => child.kind === "md");
-	if (!body) return { rows: [], stable: 0 };
-	const props = propsOf<{ text: string; stream: boolean }>(body);
-	return renderMarkdownFrame(termOf<ProseTerm>(body).source ?? props.text ?? "", cx.width, {
-		theme: cx.theme,
-		paddingX: 1,
-		textStyle: "thinkingText em",
+// The markdown renderer already reuses the settled paragraphs of the open block. Earlier message
+// blocks (often the entire thinking trace) are *not* streams: keep their final render with the node.
+const kCompleted = Symbol("omp.assistant.completed-markdown");
+
+interface MarkdownNode extends UiNode {
+	[kCompleted]?: {
+		source: string;
+		width: number;
+		theme: Theme;
+		paddingX: number;
+		hyperlinks: boolean;
+		textStyle: string | undefined;
+		schemes: readonly string[] | undefined;
+		look: MarkdownLook;
+		frame: ReplyFrame;
+	};
+}
+
+function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean): ReplyFrame {
+	const props = propsOf<{ text: string; stream: boolean; tone: string }>(child);
+	const term = termOf<ProseTerm>(child);
+	const source = term.source ?? props.text ?? "";
+	const { width, theme, hyperlinks } = cx;
+	const paddingX = terminalPaddingX();
+	const textStyle = thinking
+		? "thinkingText em"
+		: (props.tone ?? (theme.has("assistantMessageText") ? "assistantMessageText" : undefined));
+	const schemes = thinking ? undefined : routedLinkSchemes();
+	const look = markdownLook();
+	const links = thinking ? undefined : term.links;
+	// A host link resolver can change its targets in place.
+	const cacheable = !props.stream && !links?.size;
+	if (cacheable) {
+		const last = child[kCompleted];
+		if (
+			last &&
+			last.source === source &&
+			last.width === width &&
+			last.theme === theme &&
+			last.paddingX === paddingX &&
+			last.hyperlinks === hyperlinks &&
+			last.textStyle === textStyle &&
+			last.schemes === schemes &&
+			last.look === look
+		)
+			return last.frame;
+	}
+	let frame: ReplyFrame = renderMarkdownFrame(source, width, {
+		theme,
+		paddingX,
+		codeIndent: thinking ? undefined : 0,
+		textStyle,
 		stream: props.stream === true,
-		hyperlinks: cx.hyperlinks,
+		hyperlinks,
+		linkTarget: links?.size ? href => links.get(href) : undefined,
+		linkSchemes: schemes?.length ? schemes : undefined,
 	});
+	if (schemes?.length) {
+		const hits: Hit[] = [];
+		const rows = frame.rows.map((line, row) => {
+			const taken = takeExtensionLinks(line);
+			for (const link of taken.links)
+				hits.push({ row, col: link.start, width: link.end - link.start, height: 1, node: child, item: link.href });
+			return taken.row;
+		});
+		frame = { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
+	}
+	if (cacheable) child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, look, frame };
+	return frame;
 }
 
 function pulseRow(cx: PaintContext, dots: { tokens: number; rate: number }): string {
 	const theme = cx.theme;
 	const frame = cx.reduceMotion ? 0 : Math.floor(cx.now() / PULSE_FRAME_MS) % PULSE_FRAMES.length;
-	let row = ` ${theme.fg("thinkingText", PULSE_FRAMES[frame]!)}${theme.fg("muted", " Thinking")}`;
+	let row = `${" ".repeat(terminalPaddingX())}${theme.fg("thinkingText", PULSE_FRAMES[frame]!)}${theme.fg("muted", " Thinking")}`;
 	if (dots.rate >= 0.05) {
 		const rate = Math.min(SPEED_MAX, dots.rate);
 		if (dots.tokens > 0) row += theme.fg("dim", ` · ${formatNumber(dots.tokens)}`);
@@ -161,7 +202,8 @@ function imageRows(cx: PaintContext, image: UiNode): readonly string[] {
 	const mime = termOf<{ mime: string }>(image).mime ?? propsOf<{ alt: string }>(image).alt ?? "image";
 	const label = cx.theme.fg("toolOutput", `[Image: ${mime}]`);
 	// The placeholder links to the image's file (a blob copy of its bytes).
-	if (!cx.images) return [` ${imageLink(cx, label, propsOf<{ blob?: string }>(image).blob)}`];
+	if (!cx.images)
+		return [`${" ".repeat(terminalPaddingX())}${imageLink(cx, label, propsOf<{ blob?: string }>(image).blob)}`];
 	const inner = Object.create(cx, { width: { value: Math.max(1, cx.width - 1), enumerable: true } }) as PaintContext;
 	return paintImage(image, inner, label).rows.map(row => ` ${row}`);
 }
@@ -174,6 +216,8 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 	let rendered = false;
 	let toolImages = false;
 	let pulsed = false;
+	let afterFigure = false;
+	let deferredAt = Number.POSITIVE_INFINITY;
 	const dots = termOf<AssistantTerm>(node).thinkingDots;
 	const pulse = (): void => {
 		if (pulsed) return;
@@ -189,8 +233,20 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 	for (const child of node.children()) {
 		const role = propsOf<{ role: string }>(child).role ?? "";
 		const key = child.key() ?? "";
-		if (child.kind === "md") {
-			const frame = proseRows(child, cx);
+		if (role === "omp.embed" || role === "omp.figure.svg" || role === "omp.figure.code") {
+			const figure = cx.paint(child, cx.width);
+			if (figure.rows.length > 0) {
+				if (rendered) rows.push("");
+				rows.push(...figure.rows);
+				rendered = true;
+				afterFigure = true;
+			}
+		} else if (child.kind === "md") {
+			const frame = markdownRows(child, cx, false);
+			if (afterFigure && frame.rows.length) rows.push("");
+			afterFigure = false;
+			// The streaming source is replaced by its figure, so its rows cannot retire yet.
+			if (termOf<ProseTerm>(child).deferFigures) deferredAt = Math.min(deferredAt, rows.length);
 			for (const hit of frame.hits ?? []) hits.push({ ...hit, row: rows.length + hit.row });
 			streamed(frame, propsOf<{ stream: boolean }>(child).stream === true);
 			rendered ||= frame.rows.length > 0;
@@ -198,9 +254,11 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 			const term = termOf<SectionTerm>(child);
 			if (term.hidden) continue;
 			const body = child.children().find(c => c.kind === "md");
-			const frame = thinkingRows(child, cx);
-			streamed(frame, body !== undefined && propsOf<{ stream: boolean }>(body).stream === true);
-			rendered ||= frame.rows.length > 0;
+			if (body) {
+				const frame = markdownRows(body, cx, true);
+				streamed(frame, propsOf<{ stream: boolean }>(body).stream === true);
+				rendered ||= frame.rows.length > 0;
+			}
 			if (term.spaceAfter) rows.push("");
 		} else if (role === "omp.thinking.extension") {
 			// Extension thinking renderers draw under their thinking block.
@@ -239,6 +297,7 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 		}
 	}
 	pulse();
+	stable = Math.min(stable, deferredAt);
 	return { rows, ...(stable > 0 ? { stable } : {}), ...(hits.length > 0 ? { hits } : {}) };
 }
 

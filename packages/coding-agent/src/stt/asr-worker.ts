@@ -1,14 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
+import { errorMessage, getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
 import type {
 	AutomaticSpeechRecognitionOutput,
 	AutomaticSpeechRecognitionPipeline,
 	ProgressInfo,
 } from "../subprocess/transformers-types";
 import {
-	errorMessage,
 	errorText,
 	loadTransformersRuntime,
 	MemoizedRuntime,

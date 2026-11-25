@@ -1,7 +1,6 @@
 import type { AgentOptions } from "@oh-my-pi/pi-agent-core";
 import type { OAuthAccessResolution, OAuthRefreshReason } from "@oh-my-pi/pi-ai";
-import { type ApiKeyResolver, createOAuthProvenance } from "@oh-my-pi/pi-ai/auth-retry";
-import * as AIError from "@oh-my-pi/pi-ai/error";
+import { type ApiKeyResolver, createOAuthProvenance, refreshReasonFor } from "@oh-my-pi/pi-ai/auth-retry";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { AuthStorage } from "../session/auth-storage";
 import type { SecurityAccountRef, SecurityAuthRef } from "./contracts";
@@ -154,7 +153,7 @@ export function createExactSecurityOAuthResolver(
 			if (context.lastChance) return undefined;
 			const resolution = await resolveExactSecurityOAuthAccess(authStorage, account, {
 				forceRefresh: context.error !== undefined,
-				refreshReason: AIError.status(context.error) === 401 ? "auth-recovery" : undefined,
+				refreshReason: refreshReasonFor(context.error),
 				rejectedAccessToken: provenance.accessFor(context.previousKey),
 				signal: context.signal,
 			});

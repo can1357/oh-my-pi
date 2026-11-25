@@ -2,10 +2,20 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
 ### Added
 
-- Added `waiting` on agent tray cards: the agent runs, but its current call only waits on its own agents or jobs.
-- TSP `toggle` also accepts the `open` state Tern sends for menus and selectable controls, including the item id when supplied.
+- Added the TSP `annotate` image action, including its `change` event for delivering the annotated picture.
+- Added shared collab link support for generating, formatting, parsing, and normalizing relay-based collaboration links.
+
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added a TSP checkout event to indicate when a pane displays its checkout view.
+- Added a waiting state for agent tray cards when an agent is running but waiting on its own agents or jobs.
+- Extended the TSP toggle event to support the open state used by menus and selectable controls, including the selected item ID when available.
 
 ## [19.1.0] - 2026-11-21
 

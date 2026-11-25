@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Process } from "@oh-my-pi/pi-natives";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import {
 	getAdapterConfigs,
 	type LaunchAdapterSelection,
 	resolveAdapter,
+	selectAttachAdapter,
 	selectLaunchAdapter,
 } from "../../src/dap/config";
 import type { DapResolvedAdapter } from "../../src/dap/types";
@@ -240,6 +243,45 @@ describe("DAP adapter configuration", () => {
 		const config = getAdapterConfigs(cwd);
 		expect(config["missing-command"]).toBeUndefined();
 		expect(config.valid?.command).toBe("bun");
+	});
+
+	it("selects attach adapters by the OS image and falls back when the process exits", async () => {
+		const cwd = await makeTempDir("omp-dap-attach-pid-");
+		const image = process.platform === "win32" ? "node.exe" : "node";
+		const runtime = path.join(cwd, image);
+		// Use a real executable image without depending on Node being installed.
+		await fs.copyFile(process.execPath, runtime, constants.COPYFILE_FICLONE);
+		await fs.writeFile(
+			path.join(cwd, "dap.json"),
+			JSON.stringify({
+				adapters: {
+					gdb: { command: process.execPath },
+					"js-debug-adapter": { command: process.execPath },
+				},
+			}),
+		);
+
+		const target = Bun.spawn(
+			[runtime, "-e", 'process.title = "ruby"; console.log("ready"); await Bun.sleep(60_000)'],
+			{ stdout: "pipe" },
+		);
+		const reader = target.stdout.getReader();
+		try {
+			expect((await reader.read()).done).toBe(false);
+			const pinned = Process.fromPid(target.pid);
+			expect(pinned?.executableName()).toBe(image);
+			expect((await selectAttachAdapter(cwd, undefined, { pid: target.pid }))?.name).toBe("js-debug-adapter");
+			expect((await selectAttachAdapter(cwd, undefined, { pid: target.pid + 0x1_0000_0000 }))?.name).toBe("gdb");
+
+			target.kill("SIGKILL");
+			await target.exited;
+			expect(pinned?.executableName()).toBeNull();
+			expect((await selectAttachAdapter(cwd, undefined, { pid: target.pid }))?.name).toBe("gdb");
+		} finally {
+			reader.releaseLock();
+			if (target.exitCode === null && target.signalCode === null) target.kill("SIGKILL");
+			await target.exited;
+		}
 	});
 
 	it("reports missing dlv for Go source instead of falling back to a native debugger", async () => {

@@ -14,7 +14,9 @@ what CI would otherwise fetch on every job:
 - apt: clang/lld/llvm, the canvas/cairo stack, fd/ripgrep/imagemagick (+ `fd`
   and `magick` shims);
 - sccache, zig, cmake, ninja, bazelisk (also as `bazel`), all in /usr/local/bin;
-- bun, system-wide at the floor of the repo pin (package.json `packageManager`);
+- bun, system-wide, resolved like .github/actions/bun-install resolves the repo
+  pin (package.json `packageManager`): an exact pin installs that version, a
+  floor (`>=x`) the latest release;
 - rustup + the rust-toolchain.toml toolchain (components and targets) as the
   default, plus aarch64-unknown-linux-gnu and cargo-nextest/zigbuild/xwin;
   every ~/.cargo/bin entry is linked into /usr/local/bin;
@@ -27,7 +29,8 @@ what CI would otherwise fetch on every job:
 
 Toolchain pins are read from the pinned checkout, so one `--ref` decides
 what the template carries. Rebuild after bumping rust-toolchain.toml,
-.bazelversion, the bun pin, or MODULE.bazel(.lock)/Cargo.lock/bun.lock
+.bazelversion, the bun pin (or a bun release, under a floor pin), or
+MODULE.bazel(.lock)/Cargo.lock/bun.lock
 (caches only go stale: jobs fetch the difference, slower but correct):
 
     E2B_API_URL=<vmon API URL> E2B_API_KEY=<CI team API key> \\
@@ -109,32 +112,38 @@ install -d -o user -g user -m 0755 {REPO_CACHE}
 RETRY = 'retry() { for i in 1 2 3 4; do "$@" && return 0; sleep $((i * 15)); done; return 1; }'
 
 
-def xwin_download(sha: str) -> str:
+def xwin_unpack(sha: str) -> str:
     """User: fill `OMP_XWIN_CACHE_DIR` with the MSVC CRT + Windows SDK payloads
-    (~1 GiB from the Microsoft CDN) that the pinned commit's xwin sysroot
-    repositories splat, before the checkout. The script only names the xwin
-    pins, so vmon's step cache keeps this layer across template rebuilds
-    until bazel/toolchains/msvc/sysroot.bzl or MODULE.bazel change them; the
-    Bazel warm-up below then splats from the cache without the CDN."""
+    (~1 GiB from the Microsoft CDN), downloaded and unpacked, that the pinned
+    commit's xwin sysroot repositories splat, before the checkout. The script
+    only names the xwin pins, so vmon's step cache keeps this layer across
+    template rebuilds until bazel/toolchains/msvc/sysroot.bzl or MODULE.bazel
+    change them; the Bazel warm-up below then splats from the cache without
+    the CDN.
+
+    Unpacking here, one arch at a time, keeps the splats read-only: Bazel
+    fetches the x64 and arm64 sysroots in parallel, and xwin wipes and redoes
+    any unpack without a finished marker, so two splats unpacking the shared
+    SDK MSIs delete each other's files mid-copy."""
     bzl = fetch(f"{RAW_URL}/{sha}/bazel/toolchains/msvc/sysroot.bzl")
     module = fetch(f"{RAW_URL}/{sha}/MODULE.bazel")
     version = pin(r'_XWIN_VERSION = "([^"]+)"', bzl)
     manifest = pin(r'_XWIN_MANIFEST_VERSION = "([^"]+)"', bzl)
     triple = "x86_64-unknown-linux-musl"
     digest = pin(rf'"linux-x64": \("{triple}", "([0-9a-f]{{64}})"\)', bzl)
-    downloads = []
+    unpacks = []
     for call in re.findall(r"\bxwin_sysroot\((.*?)\)", module, re.S):
         arch = re.search(r'arch = "([^"]+)"', call)
         sdk = re.search(r'sdk_version = "([^"]+)"', call)
-        downloads.append(
+        unpacks.append(
             f"retry xwin --accept-license --arch {arch[1] if arch else 'x86_64'}"
             f" --variant desktop --manifest-version {manifest}"
             + (f" --sdk-version {sdk[1]}" if sdk else "")
-            + f" --cache-dir {REPO_CACHE}/xwin download"
+            + f" --cache-dir {REPO_CACHE}/xwin unpack"
         )
-    if not downloads:
+    if not unpacks:
         sys.exit("omp_ci_template.py: no xwin_sysroot repositories in MODULE.bazel")
-    lines = "\n".join(downloads)
+    lines = "\n".join(unpacks)
     return f"""set -eux
 {RETRY}
 tmp="$(mktemp -d)"
@@ -181,13 +190,18 @@ test "$(git rev-parse HEAD)" = {sha}
 """
 
 
-# Root: bun at the floor of package.json's `packageManager` pin, so
-# .github/actions/bun-install accepts it (an exact pin must equal it).
+# Root: bun as .github/actions/bun-install resolves package.json's
+# `packageManager` pin, so jobs accept it without reinstalling: an exact pin
+# installs that version, a floor (">=x") the latest release.
 INSTALL_BUN = f"""set -eux
 want="$(sed -n 's/.*"packageManager": *"bun@\\([^"]*\\)".*/\\1/p' {WORKSPACE}/package.json)"
-version="${{want#>=}}"
-[ -n "$version" ]
-curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s -- "bun-v$version"
+[ -n "$want" ]
+case "$want" in
+  '>='*) tag="" ;;
+  *)     tag="bun-v$want" ;;
+esac
+# Unquoted on purpose: an empty tag passes no argument, which the script reads as "latest".
+curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s -- $tag
 rm -rf /root/.bun
 /usr/local/bin/bun --version
 """
@@ -249,7 +263,7 @@ def make_template(sha: str):
         .apt_install(APT_PACKAGES)
         .run_cmd(INSTALL_TOOLS, user="root")
         .run_cmd(INSTALL_RUSTUP, user="user")
-        .run_cmd(xwin_download(sha), user="user")
+        .run_cmd(xwin_unpack(sha), user="user")
         .run_cmd(checkout(sha), user="user")
         .run_cmd(INSTALL_BUN, user="root")
         .run_cmd(INSTALL_RUST, user="user")

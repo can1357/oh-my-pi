@@ -35,7 +35,7 @@ import {
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
 import type { CredentialPool } from "./pool";
 import type { RankingStrategyResolver } from "../usage/registry";
-import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refresh";
+import { mergeRefreshedOrganizationScope, oauthRefreshSkewMs } from "./refresh";
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
@@ -292,7 +292,7 @@ export class UsageService implements UsageApi {
 		if (
 			request.credential.type === "oauth" &&
 			request.credential.expiresAt !== undefined &&
-			Date.now() + OAUTH_REFRESH_SKEW_MS >= request.credential.expiresAt
+			Date.now() + oauthRefreshSkewMs(request.provider) >= request.credential.expiresAt
 		) {
 			const refreshableCredential = buildRefreshableOauthCredential(request.credential);
 			if (refreshableCredential) {

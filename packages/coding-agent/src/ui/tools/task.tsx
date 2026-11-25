@@ -12,6 +12,7 @@
  * their session identity colour (`agent-identity.ts`).
  */
 import type { JSXNode } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 import { formatDuration, formatNumber, pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspAgentProps, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
@@ -27,6 +28,7 @@ import {
 } from "../../task/task-details";
 import { shortenPath } from "../../utils/render-utils";
 import { stripGeneratedOutputNotice } from "../../tools/output-meta-format";
+import { expandKeyLabel } from "../keys/hints";
 import { ErrorText, NoteText } from "./agent-common";
 import type { ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { registerToolPresenter } from "./registry";
@@ -359,7 +361,10 @@ function resultView(
 		isError: result.isError === true,
 		isPartial: state.isPartial,
 	});
-	if (!details) {
+	// An aborted or synthetic TASK result persists details without `results`
+	// (`{}`, `{"__synthetic":true,…}`): render it as the plain result, or the
+	// task card throws on the missing list and a session holding one cannot resume.
+	if (!isTaskToolDetails(details)) {
 		const fallback = text.trim();
 		if (result.isError) {
 			return {
@@ -438,6 +443,7 @@ export function NestedTaskResults(props: {
 }): JSXNode {
 	const cx: RowContext = {
 		glyph: key => UNICODE_SYMBOLS[key] ?? "",
+		expandKey: () => expandKeyLabel(currentTheme()),
 		expanded: props.expanded,
 		nowMs: Date.now(),
 		frozen: false,

@@ -29,6 +29,8 @@ import { cfgLaunchEnabled, cfgLaunchPersist } from "../tools/settings";
 
 /** Unit kind of every named service. */
 const SERVICE_KIND = "proc";
+const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
+const SERVICE_NAME_RULE = "Service name must be 1-48 letters, numbers, dots, underscores, or hyphens";
 
 export interface ServiceReady {
 	log?: string;
@@ -327,8 +329,7 @@ export async function startService(
 	notifyArmed: boolean;
 }> {
 	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
-	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(params.name))
-		throw new ToolError("Service name must be 1-48 letters, numbers, dots, underscores, or hyphens");
+	if (!SERVICE_NAME.test(params.name)) throw new ToolError(SERVICE_NAME_RULE);
 	const ready = params.ready;
 	if (ready?.port !== undefined && (!Number.isInteger(ready.port) || ready.port < 1 || ready.port > 65_535))
 		throw new ToolError("ready.port must be an integer from 1 to 65535");
@@ -425,6 +426,41 @@ export async function startService(
 	}
 }
 
+/**
+ * Adopt the running process `pid` as session service `name` (`o2ctl services add`), without
+ * restarting it: listed, supervised, and stopped like a started service, with the file its
+ * stdout (else stderr) writes to as its output. Fails when `name` is taken by a live service,
+ * `pid` is no live process of this user, or it is already a unit's process.
+ */
+export async function adoptService(
+	session: ToolSession,
+	name: string,
+	pid: number,
+	signal?: AbortSignal,
+): Promise<UnitSnapshot> {
+	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
+	if (!SERVICE_NAME.test(name)) throw new ToolError(SERVICE_NAME_RULE);
+	if (pid === process.pid) throw new ToolError(`pid ${pid} is this omp process`);
+	const persist = cfgLaunchPersist.get(session.settings);
+	const { unit } = await request(
+		session,
+		{
+			op: "open",
+			...(await serviceRef(session, name)),
+			label: name,
+			adopt: pid,
+			// Held like a started service: on this process's lease, or until stopped.
+			policy: persist ? { hold: "persist" } : { hold: "leases", idleMs: 0, onIdle: "stop" },
+			owner: serviceOwner(session) ?? undefined,
+			awaitReady: false,
+			lease: !persist,
+		},
+		signal,
+	);
+	track(session, unit);
+	return unit;
+}
+
 export async function sendService(
 	session: ToolSession,
 	name: string,
@@ -492,5 +528,5 @@ export async function modeService(
 export function serviceStatus(unit: UnitSnapshot): string {
 	const age = formatDuration(Math.max(0, (unit.exitedAt ?? Date.now()) - unit.startedAt));
 	const pid = unit.pids[0];
-	return `${unit.key} [service] — ${unit.state} — up ${age}${pid === undefined ? "" : ` — pid ${pid}`}${unit.policy.hold === "persist" ? " — persistent" : ""}${unit.policy.hold === "detached" ? " — detached" : ""}`;
+	return `${unit.key} [service] — ${unit.state} — up ${age}${pid === undefined ? "" : ` — pid ${pid}`}${unit.policy.hold === "persist" ? " — persistent" : ""}${unit.policy.hold === "detached" ? " — detached" : ""}${unit.adopted ? " — adopted" : ""}`;
 }

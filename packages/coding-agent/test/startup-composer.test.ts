@@ -21,7 +21,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
 import type { StartupPreferences } from "../src/modes/interactive/startup-cache";
@@ -41,6 +40,7 @@ import {
 	cfgStartupQuiet,
 	cfgStartupSetupWizard,
 	cfgStartupShowSplash,
+	cfgTuiImeSafeCursor,
 	cfgTuiResizeScrollback,
 	cfgTuiVimMode,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -84,7 +84,6 @@ describe("outer startup collaboration gate", () => {
 		);
 		vi.spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		vi.spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 		const enteredReplay = Promise.withResolvers<InteractiveMode>();
 		const releaseReplay = Promise.withResolvers<void>();
 		const enteredCleanup = Promise.withResolvers<void>();
@@ -255,8 +254,8 @@ describe("startup prepaint frame", () => {
 			resizeScrollback: cfgTuiResizeScrollback.get(settings),
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
 			vim: cfgTuiVimMode.get(settings),
+			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
 		};
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 	});
 
 	afterEach(async () => {
