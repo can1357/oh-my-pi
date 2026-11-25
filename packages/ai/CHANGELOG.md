@@ -29,6 +29,9 @@
 
 - Fixed Codex requests incorrectly sending a service tier to accounts whose plans do not support it.
 - Successful OAuth token refreshes now restore normal account selection after a temporary refresh outage.
+### Fixed
+
+- Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
 
 ## [19.2.0] - 2026-11-25
 
