@@ -7,7 +7,7 @@ name: Stale issues and PRs
 
 on:
    schedule:
-      - cron: "17 */6 * * *"
+      - cron: "17 * * * *"
    workflow_dispatch:
       inputs:
          dry-run:
@@ -37,9 +37,11 @@ jobs:
               stale-pr-label: stale
               exempt-issue-labels: prio:p0,prio:p1,backlog,proposal
               close-issue-reason: not_planned
-              # Each stale mark costs 4 operations, so 400 per 6-hour run marks
-              # ~90 items and spreads the initial backlog over about a week
-              # instead of one notification burst.
+              # Each stale mark or close costs 4 operations and every pass re-checks
+              # each stale item for 2, so a pass over a large stale set needs
+              # thousands of operations. Hourly runs of 400 keep closures within
+              # hours of their 14-day mark while capping each run at ~95 comments,
+              # well under GitHub's content-creation rate limits.
               operations-per-run: 400
               debug-only: ${{ inputs.dry-run == true }}
               stale-issue-message: >-
