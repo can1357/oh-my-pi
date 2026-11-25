@@ -19,7 +19,7 @@ import { type Block, defineRolePainter, EMPTY_BLOCK, type Hit, type PaintContext
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
-import type { TaskToolDetails } from "../../../task/task-details";
+import { isTaskToolDetails, type TaskToolDetails } from "../../../task/task-details";
 import { expandKeyLabel } from "../../keys/hints";
 import { agentColored } from "../../tools/agent-identity";
 import type { TaskTerm } from "../../tools/task";
@@ -89,7 +89,7 @@ function paintTask(node: UiNode, cx: PaintContext): Block {
 			const lines = callLines(rows, args);
 			if (lines.length > 0) sections.push({ separator: true, lines: inkLines(lines) });
 		}
-	} else if (!facts.details) {
+	} else if (!facts.details || !isTaskToolDetails(facts.details)) {
 		const errored = facts.isError === true;
 		outcome = errored ? "error" : "success";
 		if (errored) border = "error";
