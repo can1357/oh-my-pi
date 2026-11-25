@@ -317,8 +317,36 @@ fn envelope_words(line: &str) -> bool {
 	ENVELOPE_WORDS_RE.is_match(line)
 }
 
+/// These spellings are ambiguous with source text. Never teach them to
+/// `parse_header`, which also runs on inline prose and compiled file bodies.
+fn file_alias(line: &str) -> Option<&str> {
+	let line = line.trim();
+	if !line.starts_with("*** ") {
+		return None;
+	}
+	[
+		"*** Update File:",
+		"*** Begin Edit File:",
+		"*** Begin File:",
+		"*** Input - File:",
+		"*** Patch File:",
+	]
+	.iter()
+	.find_map(|prefix| line.strip_prefix(prefix))
+	.map(str::trim)
+}
+
+fn foreign_action(line: &str) -> bool {
+	let line = line.trim();
+	["*** Add File:", "*** Delete File:", "*** Move to:"]
+		.iter()
+		.any(|prefix| line.starts_with(prefix))
+}
+
 fn envelope_line(line: &str) -> bool {
-	ENVELOPE_LINE_RE.is_match(line)
+	// File instructions aren't noise. An unaccompanied one in a Find or
+	// replacement can itself be the line being edited.
+	ENVELOPE_LINE_RE.is_match(line) && file_alias(line).is_none() && !foreign_action(line)
 }
 
 /// Remove foreign patch envelopes and the noise following end sentinels.
@@ -330,13 +358,17 @@ fn envelope_line(line: &str) -> bool {
 /// after it still apply. Find bodies keep such lines, so a stray one can be
 /// matched and removed.
 pub fn strip_envelope_noise(lines: Vec<&str>) -> Vec<String> {
-	let mut result = Vec::new();
+	clean_envelope(lines.into_iter().map(str::to_owned).collect())
+}
+
+fn clean_envelope(mut lines: Vec<String>) -> Vec<String> {
+	let mut result = Vec::with_capacity(lines.len());
 	let mut skipping = false;
 	let mut inserting = false;
 	let mut writing = false;
 	let mut index = 0;
 	while index < lines.len() {
-		let mut line = lines[index].to_owned();
+		let mut line = std::mem::take(&mut lines[index]);
 		let header = parse_header(&line);
 		if let Some(header) = &header {
 			inserting = !skipping
@@ -363,7 +395,7 @@ pub fn strip_envelope_noise(lines: Vec<&str>) -> Vec<String> {
 			index += 1;
 			continue;
 		}
-		if line.trim() == "***" && index + 1 < lines.len() && envelope_words(lines[index + 1]) {
+		if line.trim() == "***" && index + 1 < lines.len() && envelope_words(&lines[index + 1]) {
 			line = format!("*** {}", lines[index + 1].trim());
 			index += 1;
 		}
@@ -522,7 +554,11 @@ fn flush_compiled(
 }
 
 /// Compile payload lines into per-file internal op streams.
-fn compile_sections(lines: &[String], streaming: bool) -> Result<Vec<CompiledSection>, EditError> {
+fn compile_sections(
+	lines: &[String],
+	streaming: bool,
+	recovered: bool,
+) -> Result<Vec<CompiledSection>, EditError> {
 	#[derive(Clone, Copy)]
 	enum State<'a> {
 		Idle,
@@ -551,6 +587,11 @@ fn compile_sections(lines: &[String], streaming: bool) -> Result<Vec<CompiledSec
 					.push(line.clone()),
 				State::Find | State::Legacy => find_lines.push(line.clone()),
 				State::Idle if !line.trim().is_empty() => {
+					if recovered {
+						return Err(parse_error(
+							"Expected a *** Find or block selector before edit text.",
+						));
+					}
 					state = State::Legacy;
 					find_lines.push(line.clone());
 				},
@@ -602,6 +643,11 @@ fn compile_sections(lines: &[String], streaming: bool) -> Result<Vec<CompiledSec
 		if let Some(staged) = &put_lines {
 			return Err(conflicting_operators(staged.action.header(), action.header()));
 		}
+		if recovered
+			&& (!matches!(state, State::Find) || find_lines.iter().all(|row| row.trim().is_empty()))
+		{
+			return Err(parse_error("An edit action needs its own nonempty *** Find selector."));
+		}
 		put_lines = Some(RewriteBody { lines: Vec::new(), action });
 		if matches!(action, Action::Cut | Action::Paste(_)) {
 			// Body-less: the operation is complete at its header.
@@ -623,6 +669,146 @@ fn compile_sections(lines: &[String], streaming: bool) -> Result<Vec<CompiledSec
 	Ok(sections)
 }
 
+/// Only an explicit tool payload starting in the recovered dialect opts
+/// into its aliases. A canonical file's Find/Replace/Insert bodies are
+/// source text, not places to discover new targets.
+fn tool_lines(input: &str, partial: bool) -> Result<(Vec<String>, bool), EditError> {
+	let mut lines: Vec<_> = input.lines().map(str::to_owned).collect();
+	let Some(first) = lines.iter().position(|row| !row.trim().is_empty()) else {
+		return Ok((lines, false));
+	};
+	if !lines[first].trim_start().starts_with("***") {
+		return Ok((lines, false));
+	}
+	let wrapper = matches!(lines[first].trim(), "*** Begin" | "*** Input" | "*** Start Patch");
+	let start = if wrapper || lines[first].trim() == "*** Begin Patch" {
+		(first + 1..lines.len())
+			.find(|&index| !lines[index].trim().is_empty())
+			.unwrap_or(lines.len())
+	} else {
+		first
+	};
+	let recovered = wrapper
+		|| lines
+			.get(start)
+			.is_some_and(|line| file_alias(line).is_some());
+	let invalid = || {
+		parse_error(
+			"Expected an explicit file target followed by a sloppy selector. Use *** Edit File: path \
+			 and *** Find.",
+		)
+	};
+	let mixed =
+		|| parse_error("Do not mix sloppy selectors and patch hunks or file actions in one edit.");
+	if recovered {
+		if !lines.get(start).is_some_and(|line| {
+			file_alias(line).is_some()
+				|| matches!(parse_header(line), Some(Header::Edit { path: Some(_), .. }))
+		}) {
+			return Err(invalid());
+		}
+		if start != first {
+			lines[first].clear();
+		}
+		if let Some(end) = lines.iter().rposition(|row| !row.trim().is_empty())
+			&& matches!(lines[end].trim(), "*** End" | "*** End Patch")
+		{
+			lines.truncate(end);
+		}
+	}
+
+	let mut body_closers = false;
+	let mut literal_body = false;
+	for index in start..lines.len() {
+		let line = lines[index].trim();
+		if recovered && line.starts_with("@@") {
+			return Err(mixed());
+		}
+		if !line.starts_with("***") {
+			continue;
+		}
+		if !recovered && let Some(header) = parse_header(line) {
+			literal_body = matches!(
+				header,
+				Header::Action(Action::Insert(_)) | Header::Block(BlockAction::Replace, _)
+			);
+			continue;
+		}
+		if recovered && matches!(line, "*** Begin" | "*** Input" | "*** Start Patch") {
+			return Err(invalid());
+		}
+		let next = lines[index + 1..]
+			.iter()
+			.map(|row| row.trim())
+			.find(|row| !row.is_empty());
+		let selector =
+			|| matches!(next.and_then(parse_header), Some(Header::Find { .. } | Header::Block(..)));
+		if foreign_action(line) {
+			if recovered
+				|| selector()
+				|| !literal_body && next.is_some_and(|row| row.starts_with(['+', '@']))
+			{
+				return Err(mixed());
+			}
+			continue;
+		}
+		let alias = file_alias(line);
+		if !recovered {
+			if alias.is_some()
+				&& (selector() || !literal_body && next.is_some_and(|row| row.starts_with("@@")))
+			{
+				// Could be a second target, not a literal row. Never apply
+				// its selector to the preceding canonical file instead.
+				return Err(mixed());
+			}
+			continue;
+		}
+		if let Some(path) = alias {
+			// Don't turn a trailing " all" in an Update File path into an
+			// all-matches instruction for a different file.
+			let path = if path.starts_with('"') {
+				Cow::Owned(serde_json::from_str::<String>(path).map_err(|_| invalid())?)
+			} else {
+				Cow::Borrowed(path)
+			};
+			if path.is_empty() || !partial && !selector() {
+				return Err(invalid());
+			}
+			lines[index] = format!("*** Edit File: {}", header_path(&path));
+		} else if let Some(Header::Edit { path, .. }) = parse_header(line) {
+			if path.is_none() || !partial && !selector() {
+				return Err(invalid());
+			}
+		} else if matches!(line, "*** End" | "*** End Patch")
+			&& selector()
+			&& matches!(
+				lines[..index]
+					.iter()
+					.rev()
+					.find_map(|row| parse_header(row)),
+				Some(
+					Header::Action(Action::Replace | Action::Insert(_))
+						| Header::Block(BlockAction::Replace, _)
+				)
+			) {
+			// The model closed each replacement, not the file. Let the same
+			// envelope pass as canonical input remove the intervening marker.
+			body_closers = true;
+		} else if envelope_line(line) || ENVELOPE_END_RE.is_match(line) {
+			return Err(mixed());
+		}
+	}
+
+	Ok((
+		if recovered && !body_closers {
+			lines
+		} else {
+			clean_envelope(lines)
+		},
+		recovered,
+	))
+}
+
 /// Split a sloppy payload into ordered, same-path-coalesced file sections.
 ///
 /// Fails when one `*** Find` carries more than one operator: the second
@@ -637,7 +823,15 @@ pub(super) fn split_sloppy_sections_for_preview(
 	input: &str,
 	streaming: bool,
 ) -> Result<Vec<SloppySection>, EditError> {
-	let mut lines = strip_envelope_noise(input.lines().collect());
+	let mut sections = all_sections(input, streaming)?;
+	sections.retain(|section| !section.body.is_empty());
+	Ok(sections)
+}
+
+/// Includes declared targets without operations so inspection can report a
+/// streaming file header without compiling the entire payload a second time.
+pub(super) fn all_sections(input: &str, streaming: bool) -> Result<Vec<SloppySection>, EditError> {
+	let (mut lines, recovered) = tool_lines(input, streaming)?;
 	while lines.first().is_some_and(|line| line.trim().is_empty()) {
 		lines.remove(0);
 	}
@@ -647,11 +841,11 @@ pub(super) fn split_sloppy_sections_for_preview(
 	) {
 		return Ok(Vec::new());
 	}
-	let sections = compile_sections(&lines, streaming)?;
+	let sections = compile_sections(&lines, streaming, recovered)?;
 	let mut bodies: HashMap<String, Vec<String>> = HashMap::new();
 	let mut paths = Vec::new();
 	for section in sections {
-		if section.path.is_empty() || section.ir.is_empty() {
+		if section.path.is_empty() {
 			continue;
 		}
 		if !bodies.contains_key(&section.path) {
@@ -669,7 +863,20 @@ pub(super) fn split_sloppy_sections_for_preview(
 /// selectors have actions. A path is not evidence of an executable edit.
 pub(super) fn declared_paths(input: &str) -> Vec<String> {
 	let mut paths = Vec::new();
-	for line in input.lines() {
+	let Ok((lines, _)) = tool_lines(input, true) else {
+		return paths;
+	};
+	let mut headers = lines
+		.iter()
+		.skip_while(|line| line.trim().is_empty())
+		.peekable();
+	if !matches!(
+		headers.peek().and_then(|line| parse_header(line)),
+		Some(Header::Edit { path: Some(_), .. })
+	) {
+		return paths;
+	}
+	for line in headers {
 		if let Some(Header::Edit { path: Some(path), .. }) = parse_header(line)
 			&& !paths.contains(&path)
 		{
@@ -783,7 +990,7 @@ pub fn normalize_input(input: &str) -> Result<String, EditError> {
 }
 
 fn normalize_section(input: &str, streaming: bool) -> Result<String, EditError> {
-	let mut lines = strip_envelope_noise(input.lines().collect());
+	let mut lines = clean_envelope(input.lines().map(str::to_owned).collect());
 	while lines.first().is_some_and(|line| line.trim().is_empty()) {
 		lines.remove(0);
 	}
@@ -798,7 +1005,7 @@ fn normalize_section(input: &str, streaming: bool) -> Result<String, EditError> 
 		lines.pop_if(|line| line.trim() == "```");
 	}
 	if lines.iter().any(|line| parse_header(line).is_some()) {
-		lines = compile_sections(&lines, streaming)?
+		lines = compile_sections(&lines, streaming, false)?
 			.into_iter()
 			.flat_map(|section| section.ir)
 			.collect();
