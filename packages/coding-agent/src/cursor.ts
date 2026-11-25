@@ -37,7 +37,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
-import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
+import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-replace-args";
 import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {

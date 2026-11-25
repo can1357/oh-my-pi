@@ -15,7 +15,6 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { getCurrentThemeName, initTheme, setTheme } from "../src/ui/theme/service";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { StatusHud, TodoHud } from "../src/ui/dock";
 import { createModeTerminal, type ModeTerminal, renderRows } from "./helpers/mode-terminal";
@@ -238,7 +237,6 @@ describe("InteractiveMode todo HUD persistence", () => {
 	it("keeps a matching todo open and the plan visible when its subagent completes", async () => {
 		await replaceMode();
 		setTodoClearDelay(0);
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 		const phases: TodoPhase[] = [
 			{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] },
 		];

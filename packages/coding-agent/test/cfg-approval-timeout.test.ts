@@ -25,7 +25,6 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { initTheme } from "../src/ui/theme/service";
 import { getProjectDir, setProjectDir, Snowflake } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { createModeTerminal } from "./helpers/mode-terminal";
 import { createTestSession, type TestSessionContext } from "./utilities";
 
@@ -88,7 +87,6 @@ describe("cfg:// approval prompt wiring", () => {
 			undefined,
 			createModeTerminal({ columns: 200, rows: 60 }).frame,
 		);
-		spyOn(vcs, "watch").mockImplementation(() => () => {});
 		spyOn(mode, "showHookConfirm").mockResolvedValue(true);
 		const seen: Array<number | undefined> = [];
 		spyOn(ExtensionUiController.prototype, "showCollabAwareSelector").mockImplementation(

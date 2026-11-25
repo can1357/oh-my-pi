@@ -71,7 +71,7 @@ export interface MessageFaceEnv {
 	imageLinks(message: AgentMessage, images: readonly ImageContent[]): (string | undefined)[] | undefined;
 	/** SKILL.md of a skill chip. */
 	skillPath(name: string): string | undefined;
-	/** Whether a host handles transcript actions (the prompt's copy/rewind controls). */
+	/** Whether a host handles transcript actions (the prompt's copy/edit controls). */
 	readonly actions: Accessor<boolean>;
 	/** The terminal's clock (`hour12`) prompt times follow; the locale default when undefined. */
 	readonly hour12: Accessor<boolean | undefined>;
@@ -79,7 +79,7 @@ export interface MessageFaceEnv {
 	readonly promptZones: Accessor<boolean>;
 	/** The enabled magic keywords a sent prompt glows. */
 	readonly magicKeywords: Accessor<readonly GlowingKeyword[]>;
-	/** A prompt's transcript action (`copy-message`, `rewind`, `edit-turn`, …). */
+	/** A prompt's transcript action (`copy-message`, `edit-turn`, `rewind-turn`, …). */
 	onUserAction(act: string, text: string, timestamp: number): void;
 }
 

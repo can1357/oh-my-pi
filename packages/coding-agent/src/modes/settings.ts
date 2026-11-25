@@ -712,6 +712,7 @@ export const cfgMotionResolved = combine(
 		const preset = MOTION_PRESETS[mode];
 		return {
 			spinnerInterval: spinnerInterval ?? preset.spinnerInterval,
+			titleSpinnerInterval: spinnerInterval ?? preset.titleSpinnerInterval,
 			shimmer: preset.effects ? shimmer : ("disabled" as const),
 			effects: preset.effects,
 		};
