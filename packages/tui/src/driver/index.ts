@@ -204,14 +204,14 @@ export function createTerminalDriver(
 		stallPoll = undefined;
 		watchdog.reset();
 	};
-	const sampleStall = (): void => {
-		if (!stream || dead) return;
-		if (watchdog.sample(stream.pending(), performance.now())) {
+	const sampleStall = (pending: number): void => {
+		if (dead) return;
+		if (watchdog.sample(pending, performance.now())) {
 			disconnected("output stalled");
 			return;
 		}
 		if (watchdog.armed && !stallPoll) {
-			stallPoll = setInterval(sampleStall, STALL_POLL_MS);
+			stallPoll = setInterval(() => sampleStall(stream!.pending()), STALL_POLL_MS);
 			stallPoll.unref?.();
 		} else if (!watchdog.armed && stallPoll) {
 			stopStallPoll();
@@ -221,8 +221,9 @@ export function createTerminalDriver(
 	let deferred = false;
 	const backlogged = (): boolean => {
 		if (!stream) return false;
-		sampleStall();
-		if (stream.pending() <= BACKLOG_DEFER_BYTES) return false;
+		const pending = stream.pending();
+		sampleStall(pending);
+		if (pending <= BACKLOG_DEFER_BYTES) return false;
 		if (!deferred) {
 			deferred = true;
 			stream.onDrain(() => {

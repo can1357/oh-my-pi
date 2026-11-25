@@ -1,21 +1,26 @@
 #!/usr/bin/env bun
 
 /**
- * Regenerate the per-install prompt paraphrase pool.
+ * Sync the per-install prompt paraphrase pool with the coding-agent prompts.
  *
- * Reads `packages/ai/src/prompts/perturbation-pool.json.txt`, asks a model for
- * three meaning-preserving rewrites of every non-manual `source`, validates
- * them (one line, no template syntax, close in length), and writes the pool
- * back. Manual entries (dividers) are never sent to the model.
+ * The pool holds sentences and clauses (`promptFragments` in pi-ai), not
+ * lines: the runtime splits rendered prompt text the same way and swaps every
+ * fragment it has a variant for, wherever it renders. Editing a prompt line
+ * only un-perturbs the sentences that changed until the next sync; nothing
+ * has to match a rendered line byte for byte.
  *
- * `--seed` first adds every static line of `packages/coding-agent/src/prompts`
- * (no Handlebars placeholders) as a pool entry, so each install paraphrases
- * the whole prompt rather than a hand-picked subset.
+ * A sync collects every static fragment of the model-visible prompts (`PROMPT_GLOBS`:
+ * coding-agent prompts and tool descriptions, plus every native edit-mode description),
+ * drops pooled fragments no prompt uses any more, and asks a model for
+ * meaning-preserving rewrites of fragments that are new or have invalid
+ * variants. Fragments the model cannot paraphrase are left out and retried
+ * next sync. Manual entries (the opener, dividers) are literal, hand-authored,
+ * and never sent to the model.
  *
  * Usage:
- *   bun scripts/gen-prompt-perturbation.ts                 # rewrite the pool
- *   bun scripts/gen-prompt-perturbation.ts --seed           # add every prompt line, then rewrite
- *   bun scripts/gen-prompt-perturbation.ts --check         # validate only
+ *   bun scripts/gen-prompt-perturbation.ts                 # sync: prune stale, fill new
+ *   bun scripts/gen-prompt-perturbation.ts --all           # regenerate every fragment
+ *   bun scripts/gen-prompt-perturbation.ts --check         # validate only, report coverage
  *   bun scripts/gen-prompt-perturbation.ts --model openai-codex/gpt-5.6-terra
  *
  * Auth goes through the same auth-storage key resolver as a session (broker,
@@ -26,17 +31,29 @@ import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { type Api, type ApiKey, type AuthStorage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker";
+import { promptFragments } from "@oh-my-pi/pi-ai/prompts/perturbation";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const REPO_ROOT = path.join(import.meta.dir, "..");
 const POOL_PATH = path.join(REPO_ROOT, "packages/ai/src/prompts/perturbation-pool.json.txt");
+/**
+ * Model-visible prompt sources, as repo-relative globs: every coding-agent prompt and tool
+ * description, plus the native edit tool's per-mode descriptions (hashline, sloppy, replace, …).
+ */
+const PROMPT_GLOBS = ["packages/coding-agent/src/**/*.md", "crates/edit/prompts/*.md"];
+/** Markdown that never reaches a model: UI preview samples. */
+const NON_PROMPT = /^packages\/coding-agent\/src\/ui\//;
 const DEFAULT_MODEL = "openrouter/deepseek/deepseek-v4.1-flash";
-const MAX_LENGTH_DRIFT = 0.2;
-const PROMPTS_DIR = path.join(REPO_ROOT, "packages/coding-agent/src/prompts");
-/** Lines shorter than this carry no fingerprint worth paraphrasing. */
-const MIN_SEED_LENGTH = 40;
-/** Paraphrases requested per source; any two are enough for the pool. */
+const MAX_LENGTH_DRIFT = 0.25;
+/** Fragments shorter than this carry no fingerprint worth paraphrasing. */
+const MIN_FRAGMENT_LENGTH = 24;
+/** Longer fragments are paragraphs in disguise: costly to paraphrase, and a few short unique sentences fingerprint enough. */
+const MAX_FRAGMENT_LENGTH = 100;
+const MIN_FRAGMENT_WORDS = 4;
+/** Paraphrases kept per fragment; two valid ones are enough to pool it. */
 const VARIANT_COUNT = 4;
+/** Block helpers render to nothing, so the prose on either side stands alone. */
+const BLOCK_HELPER = /\{\{~?(?:[#/^!]|else\b)[^}]*\}\}/g;
 
 interface PoolEntry {
 	source: string;
@@ -53,28 +70,36 @@ interface Pool {
 
 const SYSTEM_PROMPT = [
 	"You are an editorial paraphraser for an agent harness.",
-	"For each numbered source line, produce FOUR distinct rewrites that keep the exact same meaning, tone, and technical claims.",
+	"Each numbered item is one sentence or clause cut from a larger prompt.",
+	"For each item, produce FOUR distinct rewrites that keep the exact same meaning, tone, and technical claims.",
 	"Rules:",
 	"- one line per rewrite;",
 	"- add or remove no instruction;",
-	"- preserve every backticked code span, tool name, path, and meaning-carrying punctuation;",
-	"- keep each rewrite's length within 20% of the source;",
-	"- never use double quotes;",
+	"- keep every backticked code span verbatim, and keep tool names, paths, and RFC words (MUST, NEVER, SHOULD) as written;",
+	"- end without trailing punctuation, as the items do;",
+	"- keep each rewrite's length within 25% of the item;",
+	"- never use double quotes outside code spans;",
 	"- variants must differ in wording, not only punctuation.",
-	"Reply with ONLY a JSON array with one entry per source; each entry is an array of four strings, in input order.",
+	"Reply with ONLY a JSON array with one entry per item; each entry is an array of four strings, in input order.",
 ].join("\n");
+
+const codeSpans = (text: string): string[] => (text.match(/`[^`]*`/g) ?? []).sort();
+const trailing = (text: string): string => /[.!?;:,]?$/.exec(text)?.[0] ?? "";
+const rfcWords = (text: string): string[] => (text.match(/\b(?:MUST|NEVER|SHOULD|MAY|NOT|ALWAYS)\b/g) ?? []).sort();
 
 /** Reject variants the pool contract cannot carry. */
 function invalidVariant(source: string, variant: string): string | undefined {
 	if (variant.length === 0) return "empty";
 	if (variant === source) return "identical to source";
-	if (/^\s*/.exec(variant)?.[0] !== /^\s*/.exec(source)?.[0]) return "indentation drift";
-	const structure = /^(#{1,6} |[-*+] |> |\d+[.)] |\|)/.exec(source)?.[0];
-	if (structure !== undefined && !variant.trimStart().startsWith(structure)) return "markdown structure drift";
 	if (variant.includes("\n") || variant.includes("\r")) return "multi-line";
+	if (variant !== variant.trim()) return "surrounding whitespace";
 	if (Math.abs(variant.length - source.length) > Math.max(10, Math.round(source.length * MAX_LENGTH_DRIFT))) {
 		return "length drift";
 	}
+	if (codeSpans(variant).join("\0") !== codeSpans(source).join("\0")) return "code span drift";
+	if (rfcWords(variant).join() !== rfcWords(source).join()) return "RFC keyword drift";
+	if (trailing(variant) !== trailing(source)) return "trailing punctuation drift";
+	if ((variant.match(/\*\*/g)?.length ?? 0) !== (source.match(/\*\*/g)?.length ?? 0)) return "emphasis drift";
 	return undefined;
 }
 
@@ -95,6 +120,34 @@ export function validatePool(pool: Pool): string[] {
 		}
 	}
 	return problems;
+}
+
+/** Whether a fragment is prose worth pooling rather than a template piece or a code listing. */
+function poolable(fragment: string): boolean {
+	if (fragment.length < MIN_FRAGMENT_LENGTH || fragment.length > MAX_FRAGMENT_LENGTH) return false;
+	if (fragment.includes("{{") || fragment.includes("}}")) return false;
+	if (fragment.split(/\s+/).length < MIN_FRAGMENT_WORDS) return false;
+	const code = codeSpans(fragment).reduce((total, span) => total + span.length, 0);
+	return code * 2 < fragment.length;
+}
+
+/** Every poolable fragment of the prompt sources, mapped to the first file that uses it. */
+async function collectFragments(): Promise<Map<string, string>> {
+	const fragments = new Map<string, string>();
+	const files: string[] = [];
+	for (const pattern of PROMPT_GLOBS) {
+		for await (const relative of new Bun.Glob(pattern).scan({ cwd: REPO_ROOT })) {
+			if (!NON_PROMPT.test(relative)) files.push(relative);
+		}
+	}
+	for (const relative of files.sort()) {
+		const text = (await Bun.file(path.join(REPO_ROOT, relative)).text()).replace(BLOCK_HELPER, "\n");
+		for (const { start, end } of promptFragments(text)) {
+			const fragment = text.slice(start, end);
+			if (poolable(fragment) && !fragments.has(fragment)) fragments.set(fragment, relative);
+		}
+	}
+	return fragments;
 }
 
 interface GeneratorModel {
@@ -140,71 +193,14 @@ function parseVariants(raw: string, expected: number): string[][] | undefined {
 
 function normalize(value: string): string {
 	return value
-		.replace(/^\s*\d+[.)]\s*/, "")
+		.replace(/^\s*\d+[.)]\s+/, "")
+		.replace(/[\s.!?;:,]+$/, "")
 		.split(/\s+/)
 		.filter(Boolean)
 		.join(" ");
 }
 
-/** Ask the model for rewrites of `entries` and keep only variants that validate. */
-/** Add every static prompt line missing from the pool; returns the added entries. */
-async function seed(pool: Pool): Promise<PoolEntry[]> {
-	const known = new Set(pool.entries.map(entry => entry.source));
-	const byTrim = new Map(pool.entries.map(entry => [entry.source.trim(), entry]));
-	const added: PoolEntry[] = [];
-	// Fenced code reads worse paraphrased; prose is where fingerprints live. A line that one
-	// prompt fences and another uses as prose stays pooled, so removal waits for the full scan.
-	const fencedLines = new Set<string>();
-	const proseLines = new Set<string>();
-	const glob = new Bun.Glob("**/*.md");
-	for await (const relative of glob.scan({ cwd: PROMPTS_DIR })) {
-		const text = await Bun.file(path.join(PROMPTS_DIR, relative)).text();
-		let fenced = false;
-		for (const raw of text.split("\n")) {
-			if (raw.trimStart().startsWith("```")) {
-				fenced = !fenced;
-				continue;
-			}
-			const source = raw.trimEnd();
-			const trimmed = source.trim();
-			if (fenced) {
-				fencedLines.add(trimmed);
-				continue;
-			}
-			if (trimmed.length < MIN_SEED_LENGTH || source.includes("{{")) continue;
-			proseLines.add(trimmed);
-			const existing = byTrim.get(trimmed);
-			// Manual entries own their line, including ones that span its line break.
-			if (existing?.source === source || existing?.manual) continue;
-			// A trimmed entry cannot match an indented rendered line; replace it with the verbatim one.
-			if (existing) {
-				pool.entries = pool.entries.filter(entry => entry !== existing);
-				byTrim.delete(trimmed);
-			} else if (known.has(source)) continue;
-			known.add(source);
-			const entry: PoolEntry = { source, origin: relative, variants: [] };
-			byTrim.set(trimmed, entry);
-			added.push(entry);
-		}
-	}
-	for (const trimmed of fencedLines) {
-		const existing = byTrim.get(trimmed);
-		if (proseLines.has(trimmed) || !existing || existing.manual) continue;
-		pool.entries = pool.entries.filter(entry => entry !== existing);
-	}
-	pool.entries.push(...added);
-	return added;
-}
-
-/** Reapply a source's indentation and list numbering to a raw variant. */
-function alignVariant(entry: PoolEntry, variant: string): string {
-	const indent = /^\s*/.exec(entry.source)?.[0] ?? "";
-	const numbering = /^(\d+[.)] )/.exec(entry.source.trimStart())?.[0];
-	const body = variant.trimStart().replace(/^\d+[.)] /, "");
-	return indent + (numbering !== undefined && !body.startsWith(numbering) ? numbering : "") + body;
-}
-
-/** Ask the model for rewrites of `batch`; split the batch and retry when the reply is unusable. */
+/** Ask the model for rewrites of `batch`; split the batch and retry what comes back unusable. */
 async function regenerateBatch(batch: PoolEntry[], generator: GeneratorModel): Promise<void> {
 	if (batch.length === 0) return;
 	const listing = batch.map((entry, index) => `${index + 1}. ${entry.source}`).join("\n");
@@ -215,7 +211,7 @@ async function regenerateBatch(batch: PoolEntry[], generator: GeneratorModel): P
 			messages: [
 				{
 					role: "user",
-					content: [{ type: "text", text: `Rewrite these ${batch.length} lines:\n${listing}` }],
+					content: [{ type: "text", text: `Rewrite these ${batch.length} items:\n${listing}` }],
 					timestamp: Date.now(),
 				},
 			],
@@ -226,54 +222,25 @@ async function regenerateBatch(batch: PoolEntry[], generator: GeneratorModel): P
 		throw new Error(`model failed: ${response.errorMessage ?? response.stopReason}`);
 	}
 	const variants = parseVariants(textOf(response.content), batch.length);
-	if (!variants) {
-		if (batch.length === 1) {
-			console.warn(`  ${batch[0].origin}: unparseable reply, left unchanged`);
-			return;
-		}
-		const mid = Math.ceil(batch.length / 2);
-		await regenerateBatch(batch.slice(0, mid), generator);
-		await regenerateBatch(batch.slice(mid), generator);
-		return;
-	}
 	const failed: PoolEntry[] = [];
 	batch.forEach((entry, index) => {
-		const kept = [...new Set(variants[index].map(variant => alignVariant(entry, variant)))].filter(
+		const kept = [...new Set(variants?.[index] ?? [])].filter(
 			variant => invalidVariant(entry.source, variant) === undefined,
 		);
-		if (kept.length < 2) {
-			failed.push(entry);
-			return;
-		}
-		entry.variants = kept.slice(0, VARIANT_COUNT);
+		if (kept.length < 2) failed.push(entry);
+		else entry.variants = kept.slice(0, VARIANT_COUNT);
 	});
-	if (failed.length > 0) {
-		if (batch.length > 1) {
-			const mid = Math.ceil(failed.length / 2);
-			await regenerateBatch(failed.slice(0, mid), generator);
-			await regenerateBatch(failed.slice(mid), generator);
-			return;
-		}
-		const source = batch[0].source;
-		const kept = [...new Set(variants[0].map(variant => alignVariant(batch[0], variant)))].filter(
-			variant => invalidVariant(source, variant) === undefined,
-		);
-		// Code-shaped lines resist paraphrase; whitespace that is free in the target syntax still defeats a byte match.
-		const mechanical = [source.replaceAll(" → ", " -> "), source.replaceAll('":', '": '), `${source} `].filter(
-			variant => invalidVariant(source, variant) === undefined,
-		);
-		const merged = [...new Set([...kept, ...mechanical])];
-		if (merged.length === 0) {
-			const reasons = [...new Set(variants[0].map(variant => invalidVariant(source, variant)))]
-				.filter(Boolean)
-				.join(", ");
-			console.warn(`  ${batch[0].origin}: only 0 valid variants (${reasons}), left unchanged`);
-			return;
-		}
-		batch[0].variants = merged.slice(0, VARIANT_COUNT);
+	if (failed.length === 0) {
+		console.log(`  batch of ${batch.length}: ok`);
 		return;
 	}
-	console.log(`  batch of ${batch.length}: ok`);
+	if (batch.length === 1) {
+		console.warn(`  ${batch[0].origin}: no usable variants for ${JSON.stringify(batch[0].source.slice(0, 60))}`);
+		return;
+	}
+	const mid = Math.ceil(failed.length / 2);
+	await generateSafely(failed.slice(0, mid), generator);
+	await generateSafely(failed.slice(mid), generator);
 }
 
 async function generateSafely(batch: PoolEntry[], generator: GeneratorModel): Promise<void> {
@@ -282,7 +249,7 @@ async function generateSafely(batch: PoolEntry[], generator: GeneratorModel): Pr
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (batch.length === 1) {
-			console.warn(`  ${batch[0].origin}: ${message}, left unchanged`);
+			console.warn(`  ${batch[0].origin}: ${message}`);
 			return;
 		}
 		console.warn(`batch of ${batch.length} failed (${message}); retrying in halves`);
@@ -311,80 +278,86 @@ async function run(): Promise<void> {
 		args: Bun.argv.slice(2),
 		options: {
 			check: { type: "boolean", default: false },
-			seed: { type: "boolean", default: false },
+			all: { type: "boolean", default: false },
 			batch: { type: "string", default: "100" },
 			limit: { type: "string", default: "0" },
 			concurrency: { type: "string", default: "8" },
-			repair: { type: "boolean", default: false },
 			only: { type: "string", default: "" },
 			model: { type: "string", default: DEFAULT_MODEL },
 		},
 	});
 	const pool = (await Bun.file(POOL_PATH).json()) as Pool;
-	const seeded = values.seed ? await seed(pool) : [];
-	console.log(`Seeded ${seeded.length} prompt lines.`);
-	if (!values.seed) {
+	const fragments = await collectFragments();
+	const manual = pool.entries.filter(entry => entry.manual);
+	const pooled = new Map(pool.entries.filter(entry => !entry.manual).map(entry => [entry.source, entry]));
+	const stale = [...pooled.keys()].filter(source => !fragments.has(source));
+	const missing = [...fragments.keys()].filter(source => !pooled.has(source));
+
+	if (values.check) {
 		const problems = validatePool(pool);
-		if (problems.length > 0) {
-			console.error(`Pool has ${problems.length} problem(s):`);
-			for (const problem of problems) console.error(`  ${problem}`);
-			process.exitCode = 1;
-			return;
-		}
-	}
-	if (values.check && !values.seed) {
+		for (const problem of problems) console.error(`  ${problem}`);
 		console.log(
-			`Pool OK: ${pool.entries.length} entries, ${pool.entries.reduce((n, e) => n + e.variants.length, 0)} variants.`,
+			`Pool: ${pool.entries.length} entries, ${problems.length} problem(s); ` +
+				`${fragments.size - missing.length}/${fragments.size} prompt fragments pooled, ${stale.length} stale.`,
 		);
+		if (problems.length > 0) process.exitCode = 1;
 		return;
 	}
 
-	const storage = await discoverAuthStorage();
-	try {
-		const generator = await openModel(values.model, storage);
-		const limit = Number(values.limit) || 0;
-		const targets = new Set(values.seed ? seeded : pool.entries.filter(entry => !entry.manual));
-		if (values.repair) {
-			for (const entry of pool.entries) {
-				if (entry.manual) continue;
-				if (
-					entry.variants.length < 2 ||
-					entry.variants.some(variant => invalidVariant(entry.source, variant) !== undefined)
-				) {
-					targets.add(entry);
-				}
-			}
-		}
-		const seen = new Set<string>();
-		pool.entries = pool.entries.filter(entry => (seen.has(entry.source) ? false : (seen.add(entry.source), true)));
-		const pending = [...targets]
-			.filter(entry => values.only === "" || entry.source.includes(values.only))
-			.slice(0, limit > 0 ? limit : undefined);
-		console.log(`Regenerating ${pending.length} entries with ${values.model}...`);
-		await regenerate(
-			pending,
-			generator,
-			Math.max(1, Number(values.batch) || 100),
-			Math.max(1, Number(values.concurrency) || 8),
-		);
-		if (values.seed) {
-			const dropped = pool.entries.filter(entry => entry.variants.length === 0);
-			pool.entries = pool.entries.filter(entry => entry.variants.length > 0);
-			console.log(`Dropped ${dropped.length} lines the model could not paraphrase.`);
-		}
-		pool.generatedWith = values.model;
-		const nextProblems = validatePool(pool);
-		if (nextProblems.length > 0) {
-			console.error("Refusing to write an invalid pool:");
-			for (const problem of nextProblems) console.error(`  ${problem}`);
-			process.exitCode = 1;
-			return;
-		}
-		await Bun.write(POOL_PATH, `${JSON.stringify(pool, null, "\t")}\n`);
-		console.log(`Wrote ${POOL_PATH}`);
-	} finally {
-		storage.close();
+	// Rebuild in prompt order: manual entries, then one entry per live fragment.
+	const entries: PoolEntry[] = [...manual];
+	for (const [source, origin] of fragments) {
+		const existing = pooled.get(source);
+		entries.push(existing ? { ...existing, origin } : { source, origin, variants: [] });
 	}
+	const targets = entries.filter(
+		entry =>
+			!entry.manual &&
+			(values.all ||
+				entry.variants.length < 2 ||
+				entry.variants.some(variant => invalidVariant(entry.source, variant) !== undefined)),
+	);
+	const limit = Number(values.limit) || 0;
+	const pending = targets
+		.filter(entry => values.only === "" || entry.source.includes(values.only))
+		.slice(0, limit > 0 ? limit : undefined);
+	console.log(`Pruned ${stale.length} stale fragments; ${missing.length} new.`);
+
+	if (pending.length > 0) {
+		const storage = await discoverAuthStorage();
+		try {
+			const generator = await openModel(values.model, storage);
+			console.log(`Regenerating ${pending.length} fragments with ${values.model}...`);
+			await regenerate(
+				pending,
+				generator,
+				Math.max(1, Number(values.batch) || 100),
+				Math.max(1, Number(values.concurrency) || 8),
+			);
+			pool.generatedWith = values.model;
+		} finally {
+			storage.close();
+		}
+	}
+
+	// Whatever still lacks variants stays unperturbed and is retried next sync.
+	pool.entries = entries.filter(
+		entry =>
+			entry.manual ||
+			(entry.variants.length > 0 &&
+				entry.variants.every(variant => invalidVariant(entry.source, variant) === undefined)),
+	);
+	const skipped = entries.length - pool.entries.length;
+	if (skipped > 0) console.log(`Left ${skipped} fragments unperturbed (no valid variants).`);
+	const problems = validatePool(pool);
+	if (problems.length > 0) {
+		console.error("Refusing to write an invalid pool:");
+		for (const problem of problems) console.error(`  ${problem}`);
+		process.exitCode = 1;
+		return;
+	}
+	await Bun.write(POOL_PATH, `${JSON.stringify(pool, null, "\t")}\n`);
+	console.log(`Wrote ${POOL_PATH} (${pool.entries.length} entries).`);
 }
 
 if (import.meta.main) {

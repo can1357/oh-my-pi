@@ -38,12 +38,12 @@ export interface ViewerAgentRef {
 }
 
 /**
- * The session's handlers of transcript controls (a prompt's copy and rewind,
+ * The session's handlers of transcript controls (a prompt's copy and edit,
  * a reply's copy, a turn's hold menu). The viewer's blocks run the same ones
  * as the session's own transcript.
  */
 export interface ViewerTranscriptActions {
-	/** A prompt bubble's control or hold-menu entry (`copy-message`, `rewind`, `edit-turn`, …). */
+	/** A prompt bubble's control or hold-menu entry (`copy-message`, `edit-turn`, `rewind-turn`, …). */
 	prompt(act: string, text: string, timestamp: number): void;
 	/** A reply's control or hold-menu entry (`copy-answer`, `retry-turn`, …). */
 	reply(act: string, message: AssistantMessage, copyText?: string): void;

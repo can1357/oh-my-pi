@@ -1066,6 +1066,12 @@ pub struct TerminationTargets {
 	pgids:     Vec<i32>,
 	processes: Vec<Process>,
 	seen_pids: HashSet<i32>,
+	/// Unix: the targets and every process descended from them, in any group
+	/// or session, as of the last wave ([`crate::sys::proc::family`]). The
+	/// next wave starts from it, so a member a TERM orphaned (a debugger's
+	/// stopped inferior, a `setsid` daemon) still gets the KILL.
+	#[cfg(unix)]
+	family:    Vec<crate::sys::proc::ProcInfo>,
 }
 
 impl TerminationTargets {
@@ -1118,13 +1124,52 @@ impl TerminationTargets {
 	/// Send `signal` to every recorded target. Failures are swallowed:
 	/// targets routinely exit between collection and signalling, and
 	/// the caller's policy is "best effort".
-	pub fn signal(&self, signal: i32) {
+	///
+	/// On Unix each wave first takes the targets' whole family from one scan
+	/// of the process table (starting from the previous wave's), then signals
+	/// the groups and every member outside them, and continues the stopped
+	/// ones; elsewhere it signals each process tree.
+	pub fn signal(&mut self, signal: i32) {
+		#[cfg(unix)]
+		self.refresh_family();
 		for &pgid in &self.pgids {
 			let _ = kill_process_group(pgid, signal);
 		}
+		#[cfg(unix)]
+		crate::sys::proc::signal_each(
+			self.family.iter().filter(|p| !self.pgids.contains(&p.pgid)),
+			signal,
+		);
+		#[cfg(not(unix))]
 		for process in &self.processes {
 			let _ = process.signal_tree(signal);
 		}
+	}
+
+	/// Re-take [`TerminationTargets::family`] from the recorded processes
+	/// still running, the members of the recorded groups, and the previous
+	/// family.
+	#[cfg(unix)]
+	fn refresh_family(&mut self) {
+		use crate::sys::proc;
+		let Ok(table) = proc::list() else {
+			return;
+		};
+		let mut roots: Vec<proc::ProcInfo> = table
+			.iter()
+			.filter(|p| self.pgids.contains(&p.pgid) && !is_self_process_group(p.pgid))
+			.cloned()
+			.collect();
+		for process in &self.processes {
+			// Still running after the scan: its pid named it during the scan.
+			if process.status() == ProcessStatus::Running
+				&& let Some(p) = table.iter().find(|p| p.pid == process.pid())
+			{
+				roots.push(p.clone());
+			}
+		}
+		roots.append(&mut self.family);
+		self.family = proc::family(&table, &roots);
 	}
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	createInbandScanner,
 	type Dialect,
 	getDialectDefinition,
 	type InbandScanEvent,
@@ -650,6 +651,19 @@ describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
 				JSON.parse(RESPELLED_TEMPLATE_ARGS),
 			]);
 		}
+	});
+
+	it("retains the same text events while a long quoted token waits for its split closing run", () => {
+		const scanner = createInbandScanner("deepseek");
+		const token = "<｜tool_calls_begin｜>";
+		expect(scanner.feed(`Example: \`\`${token}`)).toEqual([{ type: "text", text: "Example: ``" }]);
+		const parts = Array.from({ length: 4096 }, (_, i) => (i % 4 === 0 ? "\n " : "word "));
+		const heldEvents = parts.flatMap(part => scanner.feed(part));
+		expect(heldEvents).toEqual([]);
+		expect(scanner.feed("`")).toEqual([]);
+		expect(scanner.feed("`")).toEqual([]);
+		expect(scanner.feed(".")).toEqual([{ type: "text", text: `${token}${parts.join("")}\`\`.` }]);
+		expect(scanner.flush()).toEqual([]);
 	});
 
 	it("heals a re-spelled call after an unmatched backtick, which Markdown renders as plain text", () => {
