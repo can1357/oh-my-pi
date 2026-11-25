@@ -12,7 +12,7 @@ import { type Block, defineRolePainter, EMPTY_BLOCK } from "@oh-my-pi/pi-tui/ter
 import { inputLine } from "@oh-my-pi/pi-tui/term/painters/prefs";
 import { visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { TspEditorProps, TspInputProps } from "@oh-my-pi/pi-wire";
-import { type ComposerChromeContext, composerShape } from "../composer/shapes";
+import { type ComposerChromeContext, composerRowLines, composerShape } from "../composer/shapes";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { keyLabel } from "../../keys/hints";
 import { bindingGlyph, boxRows, findNode, keyLabels, propsOf, termOf } from "./common";
@@ -98,7 +98,7 @@ defineRolePainter("col", "omp.overlay.hook-editor", (node, cx): Block => {
 			const text = theme.fgResolved("text", plain);
 			const width = visibleWidth(plain);
 			content.push(
-				...shape.row({
+				...composerRowLines(shape, {
 					...chrome,
 					text,
 					pad: " ".repeat(Math.max(0, contentWidth - width)),

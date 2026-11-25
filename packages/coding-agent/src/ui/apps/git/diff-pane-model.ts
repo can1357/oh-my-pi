@@ -8,7 +8,7 @@
  * width the pane was last painted at (the terminal look reports it through
  * {@link DiffPaneModel.measure}).
  */
-import { batch, signal, untrack } from "@oh-my-pi/pi-tui";
+import { batch, type ScrollRequest, signal, untrack } from "@oh-my-pi/pi-tui";
 import { Highlighter, type HighlightedLine } from "@oh-my-pi/pi-tui/text/highlight";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import type { DiffDocument, HunkBlock } from "../../../cli/git-tui/model/diff-pane";
@@ -132,6 +132,7 @@ export class DiffPaneModel {
 	readonly #focused = signal(false);
 	readonly #cursor = signal(0);
 	readonly #anchor = signal<number | null>(null);
+	readonly #nativeScroll = signal<ScrollRequest | undefined>(undefined);
 	#docVersion = 0;
 	#lastWidth = 0;
 	#lastHeight = 1;
@@ -440,6 +441,16 @@ export class DiffPaneModel {
 	}
 
 	// ── scrolling and the cursor ───────────────────────────────────────────
+
+	/** Keyboard scroll requests for the native diff, whose viewport is sized by Tern. */
+	get nativeScroll(): ScrollRequest | undefined {
+		return this.#nativeScroll();
+	}
+
+	/** Forward a line or page step without assuming the native viewport's row count. */
+	requestScroll(by: ScrollRequest["by"]): void {
+		this.#nativeScroll.update(previous => ({ by, n: (previous?.n ?? 0) + 1 }));
+	}
 
 	#total(): number {
 		if (untrack(this.#doc)) return untrack(() => this.layout(this.#width)).length;
