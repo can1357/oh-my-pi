@@ -93,7 +93,7 @@ async function createOmpInference(
 	options.signal?.throwIfAborted();
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const registry = new ModelRegistry(authStorage);
+		const registry = new ModelRegistry(authStorage, undefined, { settings });
 		await registry.refresh();
 		await loadCliExtensionProviders(registry, settings, options.cwd);
 		const primary = await resolvePrimaryModel(options.modelOverride, settings, registry);

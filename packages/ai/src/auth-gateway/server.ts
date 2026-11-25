@@ -588,7 +588,18 @@ async function handlePiNative(
 		return noStoreErrorResponse(400, "invalid_request_error", message);
 	}
 
-	const model = bootOpts.resolveModel(parsed.modelId);
+	// Resolve the same routing options we will send. A scoped client cannot select
+	// an OpenRouter variant; the gateway token can, subject to the host's model policy.
+	const streamOpts: SimpleStreamOptions = {
+		...parsed.options,
+		signal: controller.signal,
+		cursorExternalToolExecutor: true,
+	};
+	applyCallerTrust(streamOpts, req, bootOpts.client !== undefined);
+	const model = bootOpts.resolveModel(
+		parsed.modelId,
+		streamOpts.openrouterVariant ? { openrouterVariant: streamOpts.openrouterVariant } : undefined,
+	);
 	if (!model) {
 		return noStoreErrorResponse(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
@@ -604,6 +615,7 @@ async function handlePiNative(
 	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
 	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.sessionId = sessionId;
+	streamOpts.sessionId = sessionId;
 
 	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
@@ -622,15 +634,9 @@ async function handlePiNative(
 		account: resolveGatewayAccount(apiKey),
 		client: bootOpts.client?.name,
 	});
-	// Build the SimpleStreamOptions actually handed to `streamSimple`, then
-	// normalize thinking against the resolved model. The sampling strip mirrors
+	// Normalize thinking against the resolved model. The sampling strip mirrors
 	// `buildStreamOptions` — backends with `supportsSamplingParams: false` 400 on them (#3117).
-	const streamOpts: SimpleStreamOptions = {
-		...parsed.options,
-		signal: controller.signal,
-		cursorExternalToolExecutor: true,
-		providerSessionState: lease.states,
-	};
+	streamOpts.providerSessionState = lease.states;
 	normalizeGatewayThinking(model, streamOpts);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
@@ -653,8 +659,6 @@ async function handlePiNative(
 		delete streamOpts.frequencyPenalty;
 		delete streamOpts.repetitionPenalty;
 	}
-	applyCallerTrust(streamOpts, req, bootOpts.client !== undefined);
-	streamOpts.sessionId = sessionId;
 
 	logger.info("auth-gateway request", {
 		requestId,

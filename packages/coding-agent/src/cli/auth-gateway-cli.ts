@@ -45,7 +45,7 @@ import { type GeneratedProvider, getBundledModels, getEffectiveTokenCost } from 
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { disabledModelRule, withoutDisabledModels } from "../config/disabled-models";
+import { withoutDisabledModels } from "../config/disabled-models";
 import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import { ModelRegistry } from "../config/model-registry";
 import { cfgDisabledProviders, cfgModelProviderOrder } from "../config/model-settings";
@@ -58,6 +58,7 @@ import {
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
+import { gatewayModelForDispatch } from "./auth-gateway-model-policy";
 import { GATEWAY_MODEL_KINDS, runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
@@ -328,10 +329,7 @@ export function resolveServableGatewayModel(
 	settings: Settings,
 	options?: ModelResolveOptions,
 ): Model<Api> | undefined {
-	const model = resolveGatewayModel(id, index, options);
-	return model && disabledModelRule(model, settings) === undefined
-		? withDisabledModelFallbackPolicy(model, settings)
-		: undefined;
+	return gatewayModelForDispatch(resolveGatewayModel(id, index, options), settings, options);
 }
 
 /**

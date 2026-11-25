@@ -34,7 +34,10 @@ describe("--provider with a model the startup catalog lacks", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function deferredPattern(cliArgs: string[]): Promise<string | string[] | undefined> {
+	async function deferredPattern(
+		cliArgs: string[],
+		settings = Settings.isolated(),
+	): Promise<string | string[] | undefined> {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
 			throw new Error(`buildSessionOptions exited with ${code}`);
@@ -45,10 +48,18 @@ describe("--provider with a model the startup catalog lacks", () => {
 			[],
 			SessionManager.inMemory(),
 			modelRegistry,
-			Settings.isolated(),
+			settings,
 		);
 		return options.modelPattern;
 	}
+
+	test("defers a role when a denied candidate precedes a missing extension model", async () => {
+		const settings = Settings.isolated({
+			disabledModels: ["anthropic/claude-sonnet-4-5"],
+			modelRoles: { slow: "anthropic/claude-sonnet-4-5,ext-review/unregistered-model" },
+		});
+		expect(await deferredPattern(["--model", "@slow"], settings)).toBe("@slow");
+	});
 
 	test("defers the provider-qualified selector to post-extension resolution", async () => {
 		expect(await deferredPattern(["--provider", "anthropic", "--model", "claude-unreleased-9"])).toBe(

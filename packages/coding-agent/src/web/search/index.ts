@@ -12,7 +12,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../../config/auxiliary-model-policy";
-import { disabledModelRule } from "../../config/disabled-models";
+import { disabledModelRule, formatDisabledModelError } from "../../config/disabled-models";
 import { ModelRegistry } from "../../config/model-registry";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
 import { roleCandidatePool } from "../../config/model-roles";
@@ -292,14 +292,17 @@ async function executeSearch(
 	const modelRegistry =
 		options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings: activeSettings });
 	const pool = roleCandidatePool("web", activeSettings, modelRegistry);
-	const candidates = params.model
-		? (() => {
-				const resolved = resolveModelRoleValue(params.model, pool, { settings: activeSettings });
-				return resolved.model
-					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
-					: [];
-			})()
-		: resolveRoleChain("web", activeSettings, pool);
+	let explicitRefusal: string | undefined;
+	let candidates: RoleChainCandidate[];
+	if (params.model) {
+		const selected = resolveModelRoleValue(params.model, pool, { settings: activeSettings });
+		if (selected.disabledModel) explicitRefusal = selected.warning;
+		candidates = selected.model
+			? [{ model: selected.model, explicit: true, thinkingLevel: selected.thinkingLevel }]
+			: [];
+	} else {
+		candidates = resolveRoleChain("web", activeSettings, pool);
+	}
 	const parsedQuery = parseSearchQuery(params.query);
 	let expanded = rankXAIProviders(
 		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool, activeSettings)),
@@ -405,7 +408,11 @@ async function executeSearch(
 				);
 			}
 			// Availability can yield to a settings edit. Neither the extension nor the backend may receive a denied query.
-			if (disabledModelRule(model, activeSettings) !== undefined) continue;
+			const denied = disabledModelRule(model, activeSettings);
+			if (denied !== undefined) {
+				if (params.model) explicitRefusal ??= formatDisabledModelError(model, denied);
+				continue;
+			}
 			availableProviderCount++;
 			lastProvider = provider;
 
@@ -431,7 +438,9 @@ async function executeSearch(
 			};
 			// An extension may own the request for its provider's models; availability stays the backend's.
 			const extensionSearch = modelRegistry.getProviderWebSearch(model.provider);
-			const response = await (extensionSearch ? extensionSearch(searchParams) : provider.search(searchParams));
+			const response = await (extensionSearch
+				? extensionSearch(searchParams)
+				: provider.search(searchParams, activeSettings));
 			// Before any rejection below: a response a later check discards was still billed.
 			const billed = searchUsageMessage(model, response, Date.now() - sentAt);
 			if (billed) journal?.(billed);
@@ -530,13 +539,15 @@ async function executeSearch(
 	}
 
 	if (availableProviderCount === 0 && failures.length === 0) {
-		const message = cfgOffline.get(activeSettings)
-			? "No web search backend is available on the active model's provider under --offline."
-			: params.model
-				? `No web search model matches selector "${params.model}".`
-				: keylessSkipped
-					? "No configured web search service is available, and providers.webKeyless is off. Configure a search credential or turn providers.webKeyless on."
-					: "No web search model configured.";
+		const message =
+			explicitRefusal ??
+			(cfgOffline.get(activeSettings)
+				? "No web search backend is available on the active model's provider under --offline."
+				: params.model
+					? `No web search model matches selector "${params.model}".`
+					: keylessSkipped
+						? "No configured web search service is available, and providers.webKeyless is off. Configure a search credential or turn providers.webKeyless on."
+						: "No web search model configured.");
 		return {
 			content: [{ type: "text" as const, text: `Error: ${message}` }],
 			details: { response: { provider: "none", sources: [] }, error: message },

@@ -4,10 +4,18 @@ import type { Api, AssistantMessage, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createModelJobWidgetAuthor } from "@oh-my-pi/pi-coding-agent/job-widgets/author";
 import { createModelJobCaptionWriter } from "@oh-my-pi/pi-coding-agent/job-widgets/caption";
 import { CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
+import {
+	anthropicChunks,
+	type CapturedRequest,
+	captureFetch,
+	factoryModel,
+	WORKOS_TOKEN,
+} from "../../../ai/test/helpers/factory-droid";
 import { createAssistantMessage } from "../helpers/agent-session-setup";
 import { rejectionOf } from "../helpers/rejection";
 
@@ -72,6 +80,43 @@ function setup(backupReply: AssistantMessage) {
 
 describe("job widget model chain", () => {
 	afterEach(() => vi.restoreAllMocks());
+
+	it("writes the widget with the next candidate if credentials arrive after the session denies the primary", async () => {
+		const { options, sent } = setup(answered('{"rules":[]}'));
+		vi.spyOn(options.modelRegistry, "getApiKey").mockImplementationOnce(async () => {
+			cfgDisabledModels.set(options.settings, [`${primary.provider}/${primary.id}`]);
+			return "test-key";
+		});
+		const author = createModelJobWidgetAuthor(options);
+		const request = { jobId: "job-1", brief: { kind: "bash" as const, command: "make" }, sources: [] };
+		expect(await author(request, new AbortController().signal)).toEqual({ rules: [] });
+		expect(sent).toEqual([backup.id]);
+	});
+
+	it("does not send a caption prompt with a refusal fallback denied during credential lookup", async () => {
+		const model = factoryModel("claude-fable-5", ["anthropic"]);
+		const settings = Settings.isolated({ modelRoles: { widget: `${model.provider}/${model.id}` } });
+		const modelRegistry = {
+			getAvailable: () => [model],
+			getApiKey: async () => {
+				cfgDisabledModels.set(settings, ["factory-droid/claude-opus-5"]);
+				return WORKOS_TOKEN;
+			},
+			resolver: () => async () => WORKOS_TOKEN,
+		} as unknown as ModelRegistry;
+		const requests: CapturedRequest[] = [];
+		const fetch = captureFetch(requests, anthropicChunks("Build the project"));
+		vi.spyOn(ai, "completeSimple").mockImplementation((target, context, options) =>
+			ai.streamSimple(target, context, { ...options, fetch }).result(),
+		);
+		const caption = createModelJobCaptionWriter({ settings, modelRegistry, sessionId: () => "sess" });
+		expect(await caption({ kind: "bash", command: "make && make test" }, new AbortController().signal)).toBe(
+			"Build the project",
+		);
+		expect(requests).toHaveLength(1);
+		expect(requests[0]!.body.model).toBe(model.id);
+		expect(requests[0]!.body).not.toHaveProperty("fallbacks");
+	});
 
 	it("writes the spec with the role's fallback when the primary errors, charging both attempts", async () => {
 		const { options, sent, costGate } = setup(answered('{"rules":[]}'));

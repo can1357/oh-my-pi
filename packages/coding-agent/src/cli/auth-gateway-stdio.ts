@@ -12,7 +12,7 @@
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
-import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
+import { createAuthGatewayRouter, type ModelResolver, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getProjectDir, isRecord, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, normalizeModelPatternList, resolveCliModel } from "../config/model-resolver";
@@ -20,6 +20,7 @@ import { Settings } from "../config/settings";
 import { claimRpcInput } from "../modes/rpc/rpc-input";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
+import { gatewayModelForDispatch } from "./auth-gateway-model-policy";
 
 /** Names the caller in the gateway's logs. */
 const STDIO_PEER = "stdio";
@@ -86,8 +87,13 @@ export function selectorCandidates(
 export function stdioModelResolver(
 	routed: ReadonlyMap<string, Model<Api>>,
 	registry: Pick<ModelRegistry, "getAvailable">,
-): (id: string) => Model<Api> | undefined {
-	return id => routed.get(id) ?? registry.getAvailable("video").find(model => `${model.provider}/${model.id}` === id);
+	settings: Settings,
+): ModelResolver {
+	return (id, options) => {
+		const model =
+			routed.get(id) ?? registry.getAvailable("video").find(model => `${model.provider}/${model.id}` === id);
+		return gatewayModelForDispatch(model, settings, options);
+	};
 }
 
 /** Serves the gateway on stdin/stdout until stdin ends, then exits. */
@@ -106,7 +112,7 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const routed = new Map<string, Model<Api>>();
 	const router = createAuthGatewayRouter({
 		storage,
-		resolveModel: stdioModelResolver(routed, registry),
+		resolveModel: stdioModelResolver(routed, registry, settings),
 		listModels: () => GATEWAY_MODEL_KINDS.flatMap(kind => registry.getAvailable(kind)),
 	});
 	const route = async (req: Request): Promise<Response> => {

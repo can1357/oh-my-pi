@@ -72,14 +72,15 @@ function buildWireOptions(model: Model, options: SimpleStreamOptions | undefined
 		wire[k] = v;
 	}
 	if (model.api === "factory-droid-agent") {
-		// The gateway resolves its own model by ID. Carry the caller's model restrictions
-		// across that lookup; neither the caller nor the gateway can widen the other's list.
-		const targets = model.factoryDroidRefusalFallbacks;
+		// Only caller policy crosses this boundary. The gateway discovers its own account's roster.
+		const allowed = model.factoryDroidAllowedRefusalFallbacks;
 		const requested = options?.factoryDroidRefusalFallbacks;
-		if (options?.disableServerSideFallback) {
-			wire.factoryDroidRefusalFallbacks = [];
-		} else if (targets !== undefined) {
-			wire.factoryDroidRefusalFallbacks = requested ? targets.filter(id => requested.includes(id)) : targets;
+		if (allowed !== undefined || requested !== undefined) {
+			wire.factoryDroidRefusalFallbacks = options?.disableServerSideFallback
+				? []
+				: allowed && requested
+					? allowed.filter(id => requested.includes(id))
+					: (allowed ?? requested);
 		}
 	}
 	return wire;

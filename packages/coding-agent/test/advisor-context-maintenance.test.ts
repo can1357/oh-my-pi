@@ -9,6 +9,7 @@ import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-a
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { estimateToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -839,6 +840,29 @@ describe("AgentSession advisor context maintenance", () => {
 			`${sameProviderModel.provider}/${sameProviderModel.id}`,
 		]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("prior advisor output");
+	});
+
+	it("sends advisor history only to an allowed fallback when credentials resolve after a native target denial", async () => {
+		const { advisor, apiKeySpy, nativeModel, sameProviderModel, settings } = createAdvisorFallbackHarness();
+		const remoteId = "private-advisor-summarizer";
+		advisor.setModel({
+			...nativeModel,
+			remoteCompaction: { ...nativeModel.remoteCompaction, model: remoteId },
+		});
+		apiKeySpy.mockImplementation(async model => {
+			if (model.id === nativeModel.id) cfgDisabledModels.set(settings, [`${model.provider}/${remoteId}`]);
+			return "test-key";
+		});
+		const compact = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "allowed advisor summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+		}));
+
+		await session.prompt("small current update");
+
+		expect(compact.mock.calls.map(([, model]) => model.id)).toEqual([sameProviderModel.id]);
+		expect(JSON.stringify(advisor.state.messages)).toContain("allowed advisor summary");
 	});
 
 	it("applies a successful same-provider native advisor fallback", async () => {

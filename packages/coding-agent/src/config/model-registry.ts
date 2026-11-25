@@ -164,7 +164,7 @@ import {
 	NO_DISABLED_MODELS,
 	registerDisabledModelCatalog,
 } from "./disabled-models";
-import { withDisabledModelFallbackPolicy } from "./model-fallback-policy";
+import { allowedFactoryDroidFallbacks } from "./model-fallback-policy";
 import {
 	cfgCompactionModelThresholds,
 	cfgCompactionModelThresholdsEnabled,
@@ -4064,8 +4064,7 @@ export class ModelRegistry {
 		const available: Model<Api>[] = [];
 		const add = (model: Model<Api>) => {
 			if (kind !== "all" && modelKind(model) !== kind) return;
-			if (isDisabled === NO_DISABLED_MODELS) available.push(model);
-			else if (isDisabled(model) === undefined) available.push(withDisabledModelFallbackPolicy(model, isDisabled));
+			if (isDisabled === NO_DISABLED_MODELS || isDisabled(model) === undefined) available.push(model);
 		};
 		if (this.#hasFullSnapshot) {
 			// Both provider checks once per provider, not per model.
@@ -4126,12 +4125,15 @@ export class ModelRegistry {
 		try {
 			const matcher = disabledModelMatcher(this.#settings ?? settings);
 			// A bare selector checked under these rules can name any model this registry knows.
-			registerDisabledModelCatalog(matcher, this.#catalog);
+			if (matcher !== NO_DISABLED_MODELS) registerDisabledModelCatalog(matcher, this.#catalog);
 			return matcher;
 		} catch {
 			return NO_DISABLED_MODELS;
 		}
 	}
+
+	readonly #factoryDroidRefusalFallbacks = (model: Model): readonly string[] | undefined =>
+		allowedFactoryDroidFallbacks(model, this.#disabledModelMatcher());
 
 	/**
 	 * Check whether auth is configured for a model's provider.
@@ -4278,8 +4280,7 @@ export class ModelRegistry {
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const model = resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
-		if (!model || this.getDisabledModelRule(model) !== undefined) return undefined;
-		return withDisabledModelFallbackPolicy(model, this.#disabledModelMatcher());
+		return model && this.getDisabledModelRule(model) === undefined ? model : undefined;
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */
@@ -4295,13 +4296,11 @@ export class ModelRegistry {
 	 */
 	getProviderModels(provider: string): Model<Api>[] {
 		const normalizedProvider = provider.trim().toLowerCase();
-		const matcher = this.#disabledModelMatcher();
-		const models: Model<Api>[] = [];
-		for (const model of this.#modelsForProviderLookup(provider)) {
-			if (model.provider.toLowerCase() === normalizedProvider)
-				models.push(withDisabledModelFallbackPolicy(model, matcher));
-		}
-		return models;
+		// Bare selectors can refer to this provider even when all of its models are denied.
+		this.#disabledModelMatcher();
+		return this.#modelsForProviderLookup(provider).filter(
+			model => model.provider.toLowerCase() === normalizedProvider,
+		);
 	}
 
 	/**
@@ -4418,16 +4417,21 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		// A model denied by `disabledModels` gets no credential; provider-wide lookups
-		// (usage, accounts, credential health) pass no modelId and stay unaffected.
-		if (options?.modelId !== undefined && this.getDisabledModelRule({ provider, id: options.modelId })) {
+		const modelId = options?.modelId;
+		const keyless = this.#isKeylessProvider(provider);
+		const model =
+			modelId && !keyless
+				? resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider))
+				: undefined;
+		// Account routing and policy use the same catalog lookup. A selector alias
+		// must pass both its own rule and the rule for the model it resolves to.
+		if (model && this.getDisabledModelRule(model) !== undefined) return undefined;
+		if (modelId !== undefined && model?.id !== modelId && this.getDisabledModelRule({ provider, id: modelId })) {
 			return undefined;
 		}
 		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
-		if (this.#isKeylessProvider(provider)) {
-			return { apiKey: kNoAuth };
-		}
-		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
+		if (keyless) return { apiKey: kNoAuth };
+		const accountAccess = model?.accountAccess;
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
@@ -4451,7 +4455,9 @@ export class ModelRegistry {
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
 		if (typeof target === "string") {
-			return createApiKeyResolver(this, target, options);
+			const resolver = createApiKeyResolver(this, target, options);
+			resolver.factoryDroidRefusalFallbacks = this.#factoryDroidRefusalFallbacks;
+			return resolver;
 		}
 		const inner = createApiKeyResolver(this, target.provider, {
 			...options,
@@ -4460,11 +4466,13 @@ export class ModelRegistry {
 		});
 		// A denied model must be refused, not resolved without a key: providers that allow
 		// a missing key would otherwise still dispatch the request.
-		return (...args) => {
+		const guarded: ApiKeyResolver = context => {
 			const rule = this.getDisabledModelRule(target);
 			if (rule !== undefined) throw new Error(formatDisabledModelError(target, rule));
-			return inner(...args);
+			return inner(context);
 		};
+		guarded.factoryDroidRefusalFallbacks = this.#factoryDroidRefusalFallbacks;
+		return guarded;
 	}
 
 	async #peekApiKeyForProvider(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {

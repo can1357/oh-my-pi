@@ -518,6 +518,17 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("gpt-image-selected");
 	});
 
+	it("names the rule for an explicit denied image model without sending its prompt", async () => {
+		const image = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const fetch = vi.fn(async () => imageResponse());
+		const settings = Settings.isolated({ disabledModels: ["xai/grok-imagine-*"] });
+		const ctx = createContext({ models: [image], settings, fetch });
+		await expect(
+			imageGenTool.execute("denied-pick", { subject: "private", model: "xai/grok-imagine-image" }, undefined, ctx),
+		).rejects.toThrow('Model "xai/grok-imagine-image" is disabled by disabledModels rule "xai/grok-imagine-*"');
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
 	it("never sends to an image swap the session denies, even when the registry lists it", async () => {
 		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
 		const active = catalogModel("xai", "grok-4.5", "openai-responses", "chat");

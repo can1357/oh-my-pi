@@ -1248,12 +1248,9 @@ export function toSessionScopedModels(
 	});
 }
 
-/** Cycling order, routes and per-entry thinking levels all matter. */
-function sameScopedModels(a: ScopedModelSink["scopedModels"], b: ScopedModelSink["scopedModels"]): boolean {
-	return (
-		a.length === b.length &&
-		a.every((entry, i) => routedModelsAreEqual(entry.model, b[i].model) && entry.thinkingLevel === b[i].thinkingLevel)
-	);
+/** Whether two scope lists reference the same set of models (order-independent). */
+function sameScopedModels(a: ReadonlyArray<{ model: Model }>, b: ReadonlyArray<{ model: Model }>): boolean {
+	return a.length === b.length && a.every(entry => b.some(other => routedModelsAreEqual(entry.model, other.model)));
 }
 
 /** Minimal session surface the post-discovery scope rebuild mutates. */
@@ -1758,9 +1755,9 @@ export async function buildSessionOptions(
 			settings: activeSettings,
 			preferences: modelMatchPreferences,
 		});
-		if (resolved.warning) warn(resolved.warning);
-		if (resolved.disabledModel !== undefined) {
-			// Same refusal as a disabled provider: an explicit denied pin never defers.
+		if (resolved.warning && !resolved.hasUnresolvedAlternative) warn(resolved.warning);
+		if (resolved.disabledModel !== undefined && !resolved.hasUnresolvedAlternative) {
+			// Every candidate is denied; extension discovery cannot make it eligible.
 			process.stderr.write(
 				`${chalk.red(resolved.error ?? formatDisabledModelError(resolved.disabledModel.label, resolved.disabledModel.rule))}\n`,
 			);
@@ -1775,8 +1772,8 @@ export async function buildSessionOptions(
 			process.exit(1);
 		}
 		const matchedAfterMissingRolePattern = (resolved.configuredPatternIndex ?? 0) > 0;
-		if (matchedAfterMissingRolePattern) {
-			// Extensions may register an earlier configured role candidate.
+		if (matchedAfterMissingRolePattern || resolved.hasUnresolvedAlternative) {
+			// An extension can still supply a configured alternative. Resolve the role again after registration.
 			options.modelPattern = parsed.model;
 		} else if (resolved.error) {
 			if (

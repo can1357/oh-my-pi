@@ -11,9 +11,11 @@ import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import { encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -686,6 +688,41 @@ describe("createSettingsAwareStreamFn", () => {
 			const other = await createSettingsAwareStreamFn(Settings.isolated())(primary, context, options);
 			expect((await other.result()).stopReason).toBe("stop");
 			expect(requests[1]!.body.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+		});
+
+		it("applies a live session rule through a pi-native worker without changing its gateway's unconfigured behavior", async () => {
+			const settings = Settings.isolated();
+			const send = createSettingsAwareStreamFn(settings, streamSimple, { disableServerSideFallback: true });
+			const gateway = factoryModel("claude-fable-5", ["anthropic"]);
+			const client: Model = { ...gateway, transport: "pi-native", baseUrl: "http://gateway.test" };
+			const upstream: CapturedRequest[] = [];
+			const wireOptions: SimpleStreamOptions[] = [];
+			const fetch: FetchImpl = async (_url, init) => {
+				const parsed = parseRequest(JSON.parse(String(init?.body)));
+				wireOptions.push(parsed.options);
+				const events = streamSimple(gateway, parsed.context, {
+					...parsed.options,
+					apiKey: WORKOS_TOKEN,
+					fetch: captureFetch(upstream, anthropicChunks("OK")),
+				});
+				return new Response(encodeStream(events), { headers: { "Content-Type": "text/event-stream" } });
+			};
+			const options = { apiKey: "gateway-token", fetch };
+			const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+			for (const rules of [["factory-droid/claude-opus-5"], ["openai/*"], []]) {
+				cfgDisabledModels.set(settings, rules);
+				const response = await (await send(client, context, options)).result();
+				expect(response.errorMessage).toBeUndefined();
+				expect(response.stopReason).toBe("stop");
+			}
+			expect(wireOptions[0]?.factoryDroidRefusalFallbacks).toEqual([]);
+			expect(wireOptions[1]).not.toHaveProperty("factoryDroidRefusalFallbacks");
+			expect(wireOptions[2]).not.toHaveProperty("factoryDroidRefusalFallbacks");
+			expect(upstream.map(request => request.body.fallbacks)).toEqual([
+				undefined,
+				[{ model: "claude-opus-5" }],
+				[{ model: "claude-opus-5" }],
+			]);
 		});
 
 		it("drops denied server-side fallback targets with a notice and omits the key when none remain", () => {

@@ -163,6 +163,15 @@ describe("default web chain", () => {
 		expect(attempted).not.toContain("anthropic/claude-sonnet-4-5");
 	});
 
+	it("names the rule for an explicit denied web search model", async () => {
+		const result = await runSearchQuery(
+			{ query: "private", model: "web/brave" },
+			{ modelRegistry, settings: Settings.isolated({ disabledModels: ["web/bra*"] }) },
+		);
+		expect(result.content[0]?.text).toContain('Model "web/brave" is disabled by disabledModels rule "web/bra*"');
+		expect(attempted).toEqual([]);
+	});
+
 	it.each(["x.com", "news.ycombinator.com"])("does not substitute site:%s for a denied web role", async site => {
 		const session = Settings.isolated({
 			disabledModels: ["openai/gpt-4o"],
@@ -201,6 +210,7 @@ describe("default web chain", () => {
 			const denied = await runSearchQuery({ model, query: "private" }, context);
 
 			expect(denied.details.response.provider).toBe("none");
+			expect(denied.details.error).toContain(`disabled by disabledModels rule "${model}"`);
 			expect(queries).toEqual(["allowed"]);
 			expect(attempted).toEqual([]);
 		},

@@ -1,3 +1,4 @@
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type {
 	CredentialRotation,
@@ -68,7 +69,11 @@ export interface ResolvedApiKey {
 
 export type ApiKeyResolution = string | ResolvedApiKey | undefined;
 
-export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<ApiKeyResolution> | ApiKeyResolution;
+export interface ApiKeyResolver {
+	(ctx: ApiKeyResolveContext): Promise<ApiKeyResolution> | ApiKeyResolution;
+	/** The registry's current restriction for this request, independent of the account the resolver selects. */
+	factoryDroidRefusalFallbacks?: (model: Model) => readonly string[] | undefined;
+}
 
 /** Extract the bearer while preserving optional credential provenance for streaming callers. */
 export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undefined {
@@ -195,13 +200,17 @@ export async function resolveApiKeyOnce(
  */
 export function seedApiKeyResolver(seed: ApiKeyResolution, resolver: ApiKeyResolver): ApiKeyResolver {
 	let seedPending = resolvedApiKeyBearer(seed) !== undefined;
-	return ctx => {
+	const seeded: ApiKeyResolver = ctx => {
 		if (seedPending && ctx.error === undefined) {
 			seedPending = false;
 			return seed;
 		}
 		return resolver(ctx);
 	};
+	if (resolver.factoryDroidRefusalFallbacks) {
+		seeded.factoryDroidRefusalFallbacks = resolver.factoryDroidRefusalFallbacks;
+	}
+	return seeded;
 }
 
 // Re-exported from the error module (its new home); see error/auth-classify.ts.

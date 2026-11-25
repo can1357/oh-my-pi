@@ -29,6 +29,7 @@ import generationTemplate from "../prompts/bench/generation.md" with { type: "te
 import prefillInstruction from "../prompts/bench/prefill-instruction.md" with { type: "text" };
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
 import {
+	benchRequestModel,
 	type BenchRuntime,
 	type BenchTarget,
 	createDefaultBenchRuntime,
@@ -1174,7 +1175,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
 	const settings = runtime.settings ?? Settings.isolated({});
 	const streamFn: StreamSimpleFn = (model, context, options) =>
-		baseStreamFn(model, context, {
+		baseStreamFn(benchRequestModel(model, settings), context, {
 			...options,
 			preferWebsockets: resolveWebsocketPreference(settings, model, options?.preferWebsockets),
 		});

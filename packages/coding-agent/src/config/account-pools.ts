@@ -1,7 +1,7 @@
 import type { AuthApiKeyOptions, AuthStorage, SessionRestrictionLease } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
+import type { ApiKeyResolverModel, ApiKeyResolverOptions } from "./api-key-resolver";
 import type { ModelRegistry } from "./model-registry";
 
 /**
@@ -154,17 +154,10 @@ export class SessionAccountPoolScope {
 				const options =
 					typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : (optionsOrSessionId ?? {});
 				const provider = typeof resolverTarget === "string" ? resolverTarget : resolverTarget.provider;
-				return createApiKeyResolver(
-					{ getApiKeyWithCredentialForProvider, authStorage: target.authStorage },
-					provider,
-					{
-						...options,
-						...(typeof resolverTarget === "string"
-							? {}
-							: { baseUrl: resolverTarget.baseUrl, modelId: resolverTarget.id }),
-						sessionId: this.#sessionIdFor(provider, options.sessionId),
-					},
-				);
+				const sessionId = this.#sessionIdFor(provider, options.sessionId);
+				return typeof resolverTarget === "string"
+					? target.resolver(resolverTarget, { ...options, sessionId })
+					: target.resolver(resolverTarget, sessionId);
 			}) as ModelRegistry["resolver"],
 		};
 		// ModelRegistry keeps its state in #private fields, so every other member

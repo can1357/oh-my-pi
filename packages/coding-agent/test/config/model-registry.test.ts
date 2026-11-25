@@ -2,14 +2,23 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { AuthStorage, completeSimple } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
 	serializeAlibabaTokenPlanCredential,
 } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import {
+	anthropicChunks,
+	type CapturedRequest,
+	captureFetch,
+	WORKOS_TOKEN,
+} from "../../../ai/test/helpers/factory-droid";
 import { runModelsListing } from "../../src/cli/models-cli";
+import { SessionAccountPoolScope } from "../../src/config/account-pools";
 import { ModelRegistry } from "../../src/config/model-registry";
+import { cfgDisabledModels } from "../../src/config/model-settings";
+import { Settings } from "../../src/config/settings";
 
 const testModel = buildModel({
 	id: "test-model",
@@ -43,6 +52,47 @@ describe("ModelRegistry", () => {
 		vi.restoreAllMocks();
 		authStorage.close();
 		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	test("a retained Factory model and scoped resolver apply the live fallback rule on each request", async () => {
+		const rule = "factory-droid/claude-opus-5";
+		const settings = Settings.isolated();
+		cfgDisabledModels.set(settings, [rule]);
+		authStorage.keys.setRuntime("factory-droid", WORKOS_TOKEN);
+		registry = new ModelRegistry(authStorage, path.join(tmpDir, "models.yaml"), {
+			settings,
+			fetch: async input =>
+				Response.json(
+					String(input).endsWith("/api/feature-flags")
+						? { flags: {} }
+						: { settings: { modelPolicy: { allowAllFactoryModels: true } } },
+				),
+		});
+		await registry.refreshProvider("factory-droid", "online");
+		const selected = registry.find("factory-droid", "claude-fable-5")!;
+		const scope = new SessionAccountPoolScope(authStorage, {}, "test");
+		const apiKey = scope.registry(registry).resolver(selected, "test");
+		const requests: CapturedRequest[] = [];
+		const fetch = captureFetch(requests, anthropicChunks("OK"));
+		const send = () =>
+			completeSimple(selected, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { apiKey, fetch });
+		try {
+			expect((await send()).stopReason).toBe("stop");
+			cfgDisabledModels.set(settings, []);
+			expect((await send()).stopReason).toBe("stop");
+			vi.spyOn(registry, "getApiKeyWithCredentialForProvider").mockImplementationOnce(async () => {
+				cfgDisabledModels.set(settings, [rule]);
+				return { apiKey: WORKOS_TOKEN };
+			});
+			expect((await send()).stopReason).toBe("stop");
+			expect(requests.map(request => request.body.fallbacks)).toEqual([
+				undefined,
+				[{ model: "claude-opus-5" }],
+				undefined,
+			]);
+		} finally {
+			scope.release();
+		}
 	});
 
 	async function listModels(

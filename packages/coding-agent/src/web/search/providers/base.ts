@@ -1,6 +1,7 @@
 import type { Api, AuthStorage, FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import type { ModelRegistry } from "../../../config/model-registry";
+import type { Settings } from "../../../config/settings";
 import type { StructuredQuery } from "../query";
 import type { SearchProviderId, SearchResponse } from "../types";
 
@@ -126,6 +127,8 @@ export abstract class SearchProvider {
 
 	/**
 	 * Execute a search. Credentials MUST be resolved through `params.authStorage`.
+	 * Local backends can recheck the owning session's live settings after awaiting credentials.
+	 * Keep settings separate from params, which extension providers may receive over worker RPC.
 	 */
-	abstract search(params: SearchParams): Promise<SearchResponse>;
+	abstract search(params: SearchParams, settings?: Settings): Promise<SearchResponse>;
 }

@@ -67,7 +67,8 @@ export const handleTwitter: SpecialHandler = async (url, timeout, signal, _stora
 			"X blocks automated access, and Grok's X tools only read posts, profiles, post searches, and hashtags.",
 		);
 	}
-	const models = modelRegistry ? xaiModelChain(modelRegistry, handlerSettings(sessionSettings)) : [];
+	const settings = modelRegistry ? handlerSettings(sessionSettings) : undefined;
+	const models = modelRegistry && settings ? xaiModelChain(modelRegistry, settings) : [];
 	if (!modelRegistry || models.length === 0) {
 		return unavailable(
 			url,
@@ -101,6 +102,7 @@ export const handleTwitter: SpecialHandler = async (url, timeout, signal, _stora
 					max_turns: XAI_SEARCH_MAX_TURNS,
 					reasoning: { effort: XAI_SEARCH_REASONING_EFFORT },
 				},
+				settings,
 			);
 			const content = parseXAIAnswer(response);
 			if (!content) {

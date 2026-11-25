@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { handleTwitter } from "@oh-my-pi/pi-coding-agent/web/scrapers/twitter";
+import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
 import { parseXUrl, type XTarget } from "@oh-my-pi/pi-coding-agent/web/x";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { asGlobalFetch } from "../helpers/fetch-mock";
@@ -69,6 +71,26 @@ describe("handleTwitter", () => {
 		expect(result?.method).toBe("x-unavailable");
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
+
+	it.each(["read", "search"])(
+		"sends no xAI %s request after a session rule changes during header lookup",
+		async operation => {
+			const modelRegistry = await xaiRegistry();
+			const settings = Settings.isolated();
+			const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ output_text: "unexpected" }));
+			vi.spyOn(modelRegistry, "resolveModelHeaders").mockImplementation(async () => {
+				cfgDisabledModels.set(settings, ["xai/*"]);
+				return {};
+			});
+			const message =
+				operation === "read"
+					? (await handleTwitter("https://x.com/jack", 10, undefined, null, modelRegistry, settings))?.content
+					: (await runSearchQuery({ query: "private", model: "xai/grok-4.7" }, { modelRegistry, settings }))
+							.details.error;
+			expect(message).toContain('disabled by disabledModels rule "xai/*"');
+			expect(fetch).not.toHaveBeenCalled();
+		},
+	);
 
 	it("reads a profile through x_search bound to that handle and relays Grok's rendering", async () => {
 		const modelRegistry = await xaiRegistry();

@@ -50,7 +50,7 @@ async function runAgenticCommitWithAuth(
 	authStorage: AuthStorage,
 ): Promise<{ usedFallback: boolean }> {
 	process.stdout.write("● Resolving model...\n");
-	const modelRegistry = new ModelRegistry(authStorage);
+	const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 	await modelRegistry.refresh();
 	await loadCliExtensionProviders(modelRegistry, settings, cwd);
 	const stagedFilesPromise = (async () => {

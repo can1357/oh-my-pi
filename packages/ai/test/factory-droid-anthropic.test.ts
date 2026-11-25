@@ -161,11 +161,14 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		{ client: [], gateway: undefined, requested: ["claude-opus-5"], disabled: false, offered: false },
 		{ client: ["claude-opus-5"], gateway: [], requested: ["claude-opus-5"], disabled: false, offered: false },
 		{ client: ["claude-opus-5"], gateway: undefined, requested: [], disabled: false, offered: false },
-		{ client: undefined, gateway: undefined, requested: undefined, disabled: true, offered: false },
-		{ client: ["claude-opus-5"], gateway: undefined, requested: undefined, disabled: false, offered: true },
+		{ client: undefined, gateway: undefined, requested: [], disabled: false, offered: false },
+		// Without caller policy the gateway keeps its own roster and its historical fallback behavior.
+		{ client: undefined, gateway: undefined, requested: undefined, disabled: true, offered: true },
+		{ client: ["claude-opus-5"], gateway: undefined, requested: undefined, disabled: true, offered: false },
 	])("intersects the pi-native client, request and gateway refusal targets: %p", async row => {
 		const client = factoryModel("claude-fable-5", ["anthropic"]);
-		client.factoryDroidRefusalFallbacks = row.client?.slice();
+		client.factoryDroidRefusalFallbacks = [];
+		client.factoryDroidAllowedRefusalFallbacks = row.client;
 		const gateway = factoryModel("claude-fable-5", ["anthropic"]);
 		gateway.factoryDroidRefusalFallbacks = row.gateway?.slice();
 		const captured: CapturedRequest[] = [];

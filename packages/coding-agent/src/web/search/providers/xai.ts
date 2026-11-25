@@ -1,7 +1,7 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { resolveXaiBaseUrl, XAI_DEFAULT_BASE_URL } from "@oh-my-pi/pi-ai/providers/xai-base-url";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
-import { withoutDisabledModels } from "../../../config/disabled-models";
+import { disabledModelRule, formatDisabledModelError, withoutDisabledModels } from "../../../config/disabled-models";
 import type { ModelRegistry } from "../../../config/model-registry";
 import { pickDefaultAvailableModel, resolveRoleChain } from "../../../config/model-resolver";
 import { roleCandidatePool } from "../../../config/model-roles";
@@ -538,6 +538,7 @@ function parseResponse(
 export async function requestXAIResponses(
 	request: XAIRequest,
 	body: Record<string, unknown>,
+	settings?: Settings,
 ): Promise<{ response: XAIResponsesResponse; authMode: "api_key" | "oauth" }> {
 	const { model, modelRegistry } = request;
 	if (model.provider !== "xai" && model.provider !== "xai-oauth") {
@@ -567,6 +568,8 @@ export async function requestXAIResponses(
 					: (resolveXaiBaseUrl(model.provider, model.baseUrl, key) ?? model.baseUrl),
 				headers: await modelRegistry.resolveModelHeaders(model, request.signal),
 			};
+			const rule = disabledModelRule(model, settings);
+			if (rule !== undefined) throw new SearchProviderError("xai", formatDisabledModelError(model, rule));
 			return callXAIResponses(key, request, body, transport);
 		},
 		{
@@ -619,9 +622,9 @@ export function xaiModelChain(modelRegistry: ModelRegistry, settings: Settings):
 }
 
 /** Execute xAI Responses API web and X search. */
-export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
+export async function searchXAI(params: SearchParams, settings?: Settings): Promise<SearchResponse> {
 	const resultCap = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
-	const { response, authMode } = await requestXAIResponses(params, buildRequestBody(params));
+	const { response, authMode } = await requestXAIResponses(params, buildRequestBody(params), settings);
 	const parsed = parseResponse(response, resultCap, authMode);
 	if (!parsed.answer && parsed.sources.length === 0) {
 		throw new SearchProviderError("xai", "xAI web_search returned no answer or sources", 502);
@@ -638,7 +641,7 @@ export class XAIProvider extends SearchProvider {
 		return authStorage.keys.source(model?.provider ?? "xai") !== undefined;
 	}
 
-	search(params: SearchParams): Promise<SearchResponse> {
-		return searchXAI(params);
+	search(params: SearchParams, settings?: Settings): Promise<SearchResponse> {
+		return searchXAI(params, settings);
 	}
 }

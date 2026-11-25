@@ -425,7 +425,9 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 		? undefined
 		: a.route.serverSideFallbackModels?.filter(
 				model =>
-					(available?.includes(model) ?? true) && (options?.factoryDroidRefusalFallbacks?.includes(model) ?? true),
+					(available?.includes(model) ?? true) &&
+					(a.model.factoryDroidAllowedRefusalFallbacks?.includes(model) ?? true) &&
+					(options?.factoryDroidRefusalFallbacks?.includes(model) ?? true),
 			);
 	const refusalFallbacks = fallbackModels?.length ? fallbackModels.map(model => ({ model })) : undefined;
 	// Check raw frames before the shared transport can emit content events.

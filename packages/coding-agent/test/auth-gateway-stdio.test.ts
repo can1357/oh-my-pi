@@ -115,11 +115,21 @@ describe("auth-gateway stdio model resolver", () => {
 	it("resolves an unrouted id only to the available video model it names", () => {
 		const video = getBundledModel("openrouter", "alibaba/wan-2.6")!;
 		const catalog = [fast, video];
-		const resolve = stdioModelResolver(new Map(), {
-			getAvailable: (kind: ModelKind | "all" = "chat") => catalog.filter(model => modelKind(model) === kind),
-		});
+		const resolve = stdioModelResolver(
+			new Map(),
+			{ getAvailable: (kind: ModelKind | "all" = "chat") => catalog.filter(model => modelKind(model) === kind) },
+			Settings.isolated({}),
+		);
 		expect(resolve(key(video))).toBe(video);
 		expect(resolve(key(fast))).toBeUndefined();
+	});
+
+	it("refuses a denied pi-native variant even when stdio has already routed its base model", () => {
+		const base = getBundledModel("openrouter", "openai/gpt-4o")!;
+		const settings = Settings.isolated({ disabledModels: [`${key(base)}:floor`] });
+		const resolve = stdioModelResolver(new Map([[key(base), base]]), registry, settings);
+		expect(resolve(key(base), { openrouterVariant: "floor" })).toBeUndefined();
+		expect(resolve(key(base))?.id).toBe(base.id);
 	});
 });
 

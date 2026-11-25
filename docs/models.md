@@ -952,7 +952,7 @@ Rules:
 
 - A rule names a catalog model: an exact `provider/modelId` or a glob. Exact matching works even when an ID contains brackets, such as `glm-5.2-highspeed[1m]`. Globs match both `provider/id` and the bare ID. Rules do not expand role aliases or use fuzzy matching.
 - A trailing `:thinkingLevel` on a rule is ignored. A base-model rule covers `:level`, `@upstream`, and OpenRouter variants such as `:floor` and `:nitro`. This includes models.yml providers that use OpenRouter. A rule for one variant blocks only that variant, including when `providers.openrouterVariant` selects it.
-- A rule that contains `@upstream` is matched literally. Denying a single upstream is not supported.
+- If the catalog contains a literal ID such as `example@host`, that ID takes precedence over the routing suffix. A rule for `example` does not hide it. A rule that contains `@upstream` matches a literal ID; it cannot deny a single upstream route.
 - Provider-internal wire ids are not matched on their own: effort routes, `requestModelId`, and the Fireworks, firepass, and cline-pass id transforms are not catalog models. Deny the catalog model to block every route to it.
 - Precedence: `effective = (enabledModels ∩ available) − disabledModels`. A deny always wins over an allow.
 
@@ -962,10 +962,10 @@ Behavior when a model is denied:
 - A role value with several comma-separated patterns skips a denied pattern and uses the next one.
 - A configured role (for example `modelRoles.default`) that resolves only to denied models is refused: its fallback chain does not stand in for it, and the log names the rule. An unconfigured role keeps its normal defaults.
 - Automatic retry fallback skips a denied target, shows a warning notice that names the rule, and continues with the next target.
-- Anthropic and Factory requests omit denied server-side fallback targets. If no target remains, the request carries no fallback list.
-- Upgrade both ends of a pi-native connection before you rely on a local Factory fallback rule. Older gateways ignore the client's fallback restrictions.
+- Anthropic and Factory requests omit denied server-side fallback targets. If no target remains, the provider receives no fallback list. Factory checks the current rules for each request. Removing a rule restores eligible targets without selecting the model again.
+- A pi-native client sends a Factory fallback restriction only when a local rule denies a fallback target. Otherwise the gateway uses its own account and fallback settings. Upgrade both ends before relying on this restriction; older gateways ignore it.
 - A request whose model is denied is refused before it is sent; it is not retried on that model, and automatic fallback moves on to the next target.
-- The auth gateway omits denied models from `/v1/models` and answers a request for one as an unknown model (HTTP 404); it never serves another model with the same bare id. Provider usage and credential rows stay.
+- The auth gateway omits denied models from `/v1/models` and returns HTTP 404 for a denied model. This includes an OpenRouter variant that a trusted pi-native caller selects. The gateway never substitutes another model with the same bare ID. Provider usage and credential rows stay.
 - Stored roles, fallback chains, and `enabledModels` do not change. If a live edit removes the last model from an explicit `--models` scope, that scope stays empty.
 - A registry applies its own settings to its catalog. A session can narrow those results with its own `disabledModels`. This matters for an SDK session with a separately configured registry. The session checks model selection, retries, compaction, image questions and descriptions, tagged completions, subagents, and web search.
 - As with `disabledProviders`, a background feature that tries several roles or a built-in default (commit summaries, title generation, skill descriptions, speech, dictation, image generation) moves on to its next allowed model when its configured role is denied, instead of failing.

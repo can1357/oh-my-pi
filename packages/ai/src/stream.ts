@@ -857,6 +857,15 @@ function streamSimpleRequest<TApi extends Api>(
 
 			try {
 				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
+				if (model.api === "factory-droid-agent") {
+					const allowed = apiKeyResolver.factoryDroidRefusalFallbacks?.(model);
+					const requested = requestOptions.factoryDroidRefusalFallbacks;
+					if (allowed !== undefined) {
+						attemptOptions.factoryDroidRefusalFallbacks = requested
+							? allowed.filter(id => requested.includes(id))
+							: allowed;
+					}
+				}
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {

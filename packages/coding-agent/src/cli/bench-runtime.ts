@@ -20,7 +20,12 @@ import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ApiKeyResolverModel } from "../config/api-key-resolver";
-import { disabledModelRule } from "../config/disabled-models";
+import {
+	disabledModelMatcher,
+	disabledModelRule,
+	formatDisabledModelError,
+	NO_DISABLED_MODELS,
+} from "../config/disabled-models";
 import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
@@ -68,13 +73,22 @@ export interface BenchTarget {
 	thinking: ResolvedThinkingLevel | undefined;
 }
 
+/** A benchmark can reuse one target across many requests while its rules change. */
+export function benchRequestModel(model: Model<Api>, settings?: Settings): Model<Api> {
+	const matcher = disabledModelMatcher(settings);
+	if (matcher === NO_DISABLED_MODELS) return model;
+	const rule = matcher(model);
+	if (rule !== undefined) throw new Error(formatDisabledModelError(model, rule));
+	return withDisabledModelFallbackPolicy(model, matcher);
+}
+
 /** Open the auth vault, settings, and model registry for a benchmark run. */
 export async function createDefaultBenchRuntime(): Promise<BenchRuntime> {
 	const cwd = getProjectDir();
 	const settings = await Settings.init({ cwd });
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const modelRegistry = new ModelRegistry(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 		await modelRegistry.hydrateCredentialScopedModelCaches();
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {
@@ -206,7 +220,7 @@ export async function resolveBenchTargets(
 		}
 		return {
 			selector,
-			model: withDisabledModelFallbackPolicy(model, settings),
+			model,
 			thinking: resolveThinkingLevelForModel(model, concreteThinkingLevel(result.thinkingLevel)),
 		};
 	};

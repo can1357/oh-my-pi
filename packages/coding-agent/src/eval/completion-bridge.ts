@@ -381,8 +381,6 @@ function resolveTaggedAgentCandidates(agentName: string, session: ToolSession): 
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
 	const lookup = completionModelLookup(session, modelRegistry);
-	const available = lookup.getAvailable();
-	if (available.length === 0) return [];
 	const agent = session.getSessionAgents?.().find(candidate => candidate.name === agentName);
 	const selector = agent?.model?.[0];
 	if (!selector) return [];

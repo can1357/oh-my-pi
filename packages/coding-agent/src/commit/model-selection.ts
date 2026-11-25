@@ -2,7 +2,6 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { disabledModelRule, formatDisabledModelError, withoutDisabledModels } from "../config/disabled-models";
-import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ApiKeyResolverRegistry } from "../config/api-key-resolver";
 import {
 	getModelMatchPreferences,
@@ -57,7 +56,7 @@ export async function resolvePrimaryModel(
 		throw new Error(`No API key available for model ${model.provider}/${model.id}`);
 	}
 	return {
-		model: withDisabledModelFallbackPolicy(model, settings),
+		model,
 		apiKey: modelRegistry.resolver(model),
 		thinkingLevel: concreteThinkingLevel(resolved?.thinkingLevel),
 	};
@@ -75,7 +74,7 @@ export async function resolveSmolModel(
 		const apiKey = await modelRegistry.getApiKey(resolvedSmol.model);
 		if (apiKey) {
 			return {
-				model: withDisabledModelFallbackPolicy(resolvedSmol.model, settings),
+				model: resolvedSmol.model,
 				apiKey: modelRegistry.resolver(resolvedSmol.model),
 				thinkingLevel: concreteThinkingLevel(resolvedSmol.thinkingLevel),
 			};
@@ -89,7 +88,7 @@ export async function resolveSmolModel(
 		const apiKey = await modelRegistry.getApiKey(candidate);
 		if (apiKey) {
 			return {
-				model: withDisabledModelFallbackPolicy(candidate, settings),
+				model: candidate,
 				apiKey: modelRegistry.resolver(candidate),
 			};
 		}
@@ -97,5 +96,5 @@ export async function resolveSmolModel(
 
 	const denied = disabledModelRule(fallbackModel, settings);
 	if (denied) throw new Error(formatDisabledModelError(fallbackModel, denied));
-	return { model: withDisabledModelFallbackPolicy(fallbackModel, settings), apiKey: fallbackApiKey };
+	return { model: fallbackModel, apiKey: fallbackApiKey };
 }

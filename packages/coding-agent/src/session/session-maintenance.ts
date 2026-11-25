@@ -77,7 +77,13 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import * as fs from "node:fs/promises";
 import { writeArtifact } from "./artifacts";
 import { cfgOffline } from "../config/auxiliary-model-policy";
-import { disabledModelRule, withoutDisabledModels } from "../config/disabled-models";
+import {
+	disabledModelMatcher,
+	disabledModelRule,
+	formatDisabledModelError,
+	NO_DISABLED_MODELS,
+	withoutDisabledModels,
+} from "../config/disabled-models";
 import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
@@ -181,6 +187,19 @@ const FIXED_CONTEXT_DEAD_END_WARNING =
  * resets the counter, so legitimate multi-step recoveries are never cut short.
  */
 export const INCOMPLETE_RECOVERY_MAX_RETRIES = 3;
+
+/** Native compaction can send history to a model other than the candidate whose credentials it uses. */
+export function compactionModelRefusal(model: Model, remoteEnabled: boolean, settings: Settings): string | undefined {
+	const isDisabled = disabledModelMatcher(settings);
+	if (isDisabled === NO_DISABLED_MODELS) return undefined;
+	const rule = isDisabled(model);
+	if (rule !== undefined) return formatDisabledModelError(model, rule);
+	const id = remoteEnabled && model.remoteCompaction?.model;
+	if (!id) return undefined;
+	const target = { provider: model.provider, providerType: model.providerType, compat: model.compat, id };
+	const targetRule = isDisabled(target);
+	return targetRule === undefined ? undefined : formatDisabledModelError(target, targetRule);
+}
 
 /** Whether a configured preference list contains at least one automatic method. */
 function hasConfiguredCompactionMethod(settings: CompactionSettings): boolean {
@@ -1526,15 +1545,14 @@ export class SessionMaintenance {
 								: undefined,
 						);
 			if ((requireProviderRemote || remoteReader) && compactionCandidates.length === 0) {
+				const reason =
+					compactionModelRefusal(activeModel, true, this.#host.settings) ??
+					`remote compaction is unavailable for ${activeModel.id}`;
 				// Reached only after an earlier soft pass failed; its warning already named the cause.
 				if (fallbackMethodIndex === -1) {
-					throw new Error(`remote compaction is unavailable for ${activeModel.id}`);
+					throw new Error(reason);
 				}
-				this.#host.emitNotice(
-					"warning",
-					`remote compaction is unavailable for ${activeModel.id}; trying the next preferred method`,
-					"compaction",
-				);
+				this.#host.emitNotice("warning", `${reason}; trying the next preferred method`, "compaction");
 				// The nested call runs on this controller, so it never owns the resume;
 				// it reports its commit back here instead.
 				return finish(
@@ -4091,14 +4109,6 @@ export class SessionMaintenance {
 		return candidates;
 	}
 
-	/** Native compaction can send the history to an explicit target other than the candidate. */
-	#compactionDenied(model: Model, method: CompactionMethod): boolean {
-		const settings = this.#host.settings;
-		if (disabledModelRule(model, settings)) return true;
-		const id = method === "remote" && model.remoteCompaction?.model;
-		return !!id && !!disabledModelRule({ ...model, id }, settings);
-	}
-
 	#buildCompactionAuthError(): Error {
 		const currentModel = this.#model;
 		if (!currentModel) {
@@ -4164,11 +4174,22 @@ export class SessionMaintenance {
 						compactionJournal?.(message);
 						onAttempt(message);
 					};
+		let firstRefusal: string | undefined;
+		const denied = (model: Model): boolean => {
+			const refusal = compactionModelRefusal(model, method === "remote", this.#host.settings);
+			if (!refusal) return false;
+			firstRefusal ??= refusal;
+			return true;
+		};
 
 		for (const candidate of candidates) {
-			if (this.#compactionDenied(candidate, method)) continue;
+			if (denied(candidate)) continue;
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
-			if (!apiKey) continue;
+			if (!apiKey) {
+				// The registry can withhold credentials when policy changes during lookup.
+				denied(candidate);
+				continue;
+			}
 			if (
 				nativeCompactionFailure &&
 				(candidate.provider !== nativeCompactionFailure.provider ||
@@ -4179,7 +4200,7 @@ export class SessionMaintenance {
 
 			try {
 				const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, signal);
-				if (this.#compactionDenied(candidate, method)) continue;
+				if (denied(candidate)) continue;
 				return await compact(
 					this.#host.obfuscatePreparationForProvider(preparation),
 					withDisabledModelFallbackPolicy(candidate, this.#host.settings),
@@ -4244,6 +4265,11 @@ export class SessionMaintenance {
 		}
 
 		if (nativeCompactionFailure) throw nativeCompactionFailure.error;
+		// Selection can already have removed the active model before this loop.
+		if (candidates.length === 0 && this.#model) {
+			firstRefusal = compactionModelRefusal(this.#model, method === "remote", this.#host.settings);
+		}
+		if (firstRefusal) throw new Error(firstRefusal);
 		throw this.#buildCompactionAuthError();
 	}
 
@@ -6346,7 +6372,7 @@ export class SessionMaintenance {
 
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
-					if (this.#compactionDenied(candidate, method)) continue;
+					if (compactionModelRefusal(candidate, method === "remote", this.#host.settings)) continue;
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 					if (!apiKey) continue;
@@ -6362,7 +6388,7 @@ export class SessionMaintenance {
 					while (true) {
 						try {
 							const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, autoCompactionSignal);
-							if (this.#compactionDenied(candidate, method)) break;
+							if (compactionModelRefusal(candidate, method === "remote", this.#host.settings)) break;
 							compactResult = await compact(
 								this.#host.obfuscatePreparationForProvider(preparation),
 								withDisabledModelFallbackPolicy(candidate, this.#host.settings),

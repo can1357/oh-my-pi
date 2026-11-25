@@ -32,6 +32,8 @@ export interface ModelResolveOptions {
 	 * prefers a model on this api.
 	 */
 	api?: Api;
+	/** The OpenRouter routing variant the gateway will forward after applying caller trust. */
+	openrouterVariant?: string;
 	/**
 	 * Models the caller may use. A bare id resolves to its best candidate this
 	 * admits; a refused `provider/id` resolves to nothing, never to another

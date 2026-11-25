@@ -263,10 +263,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			const pool = roleCandidatePool("image", effectiveSettings, ctx.modelRegistry);
 			let candidates: Model[];
 			if (params.model) {
-				const selected = resolveModelRoleValue(params.model, pool, { settings: effectiveSettings }).model;
-				if (!selected)
+				const selected = resolveModelRoleValue(params.model, pool, { settings: effectiveSettings });
+				if (selected.disabledModel) throw new Error(selected.warning);
+				if (!selected.model)
 					throw new Error(`Image model selector did not match an available image model: ${params.model}`);
-				candidates = [selected];
+				candidates = [selected.model];
 			} else {
 				candidates = defaultImageCandidates(resolveRoleChain("image", effectiveSettings, pool), ctx.model, pool);
 			}

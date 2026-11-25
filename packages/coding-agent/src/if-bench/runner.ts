@@ -18,7 +18,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { BenchRuntime, BenchTarget, StreamSimpleFn } from "../cli/bench-runtime";
+import { benchRequestModel, type BenchRuntime, type BenchTarget, type StreamSimpleFn } from "../cli/bench-runtime";
 import { formatModelSelectorValue } from "../config/model-selector";
 import { formatModelString } from "../config/model-resolver";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
@@ -303,7 +303,7 @@ async function requestTurn(
 		return Number.isFinite(duration) && duration > 0 ? duration : 0;
 	};
 	try {
-		const stream = options.stream(model, context, {
+		const stream = options.stream(benchRequestModel(model, options.runtime.settings), context, {
 			apiKey,
 			sessionId,
 			promptCacheKey: sessionId,

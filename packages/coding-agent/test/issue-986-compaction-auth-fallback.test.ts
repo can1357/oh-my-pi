@@ -239,6 +239,27 @@ describe("issue #986 compaction auth fallback", () => {
 		expect(compact.mock.calls.map(([preparation]) => preparation.settings.remoteEnabled)).toEqual([false]);
 	});
 
+	it("reports the rule when selection has already removed every manual candidate", async () => {
+		const { currentModel } = await createSession();
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
+		const rule = `${currentModel.provider}/*`;
+		cfgDisabledModels.set(session.settings, [rule]);
+		await expect(session.compact(undefined, { mode: "soft" })).rejects.toThrow(`disabledModels rule "${rule}"`);
+	});
+
+	it("reports the rule instead of a credential error when every manual candidate becomes denied", async () => {
+		const { currentModel } = await createSession();
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([currentModel]);
+		const rule = `${currentModel.provider}/*`;
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async () => {
+			cfgDisabledModels.set(session.settings, [rule]);
+			return "test-key";
+		});
+		const compact = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("Unexpected dispatch"));
+		await expect(session.compact(undefined, { mode: "soft" })).rejects.toThrow(`disabledModels rule "${rule}"`);
+		expect(compact).not.toHaveBeenCalled();
+	});
+
 	it("continues same-provider native candidates but stops before crossing providers on non-auth failure", async () => {
 		const { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
 			await createAutoNativeFallbackSession();

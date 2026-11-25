@@ -1771,6 +1771,8 @@ export interface Model<TApi extends Api = Api> {
 	factoryDroidRoutingSource?: "configured_order";
 	/** Factory Droid: server-side refusal fallbacks the account can run; absent when none are named. */
 	factoryDroidRefusalFallbacks?: string[];
+	/** Request-only bound on Factory refusal targets. Never store it in discovery or on a selected model. */
+	factoryDroidAllowedRefusalFallbacks?: readonly string[];
 	/** Factory Droid Standard Credits base rate (relative per-token weight, not dollars). */
 	factoryDroidCredits?: number;
 	/** Factory Droid dated `credit-rates` cards, ascending; `getFactoryDroidCreditRate` picks the one due now. */
@@ -1946,6 +1948,7 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "reasoning"
 	| "identity"
 	| "compatConfig"
+	| "factoryDroidAllowedRefusalFallbacks"
 	| "requiresGlyphTokenization"
 	| "requiresCursorToolSchemaProjection"
 	| "toolSchemasInContext"

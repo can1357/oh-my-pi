@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { type Api, AuthStorage, type Model } from "@oh-my-pi/pi-ai";
+import { hashAuthGatewayToken, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
@@ -190,6 +191,65 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		const settings = Settings.isolated({ disabledModels: ["openrouter/openai/gpt-4o:floor"] });
 		expect(resolveServableGatewayModel("openrouter/openai/gpt-4o:floor", index, settings)).toBeUndefined();
 		expect(resolveServableGatewayModel("openrouter/openai/gpt-4o", index, settings)?.id).toBe("openai/gpt-4o");
+	});
+
+	test("applies the gateway denylist to the variant that survives pi-native caller trust", async () => {
+		const base = getBundledModel("openrouter", "openai/gpt-4o");
+		if (!base) throw new Error("bundled model missing");
+		const index = indexModelsByRequestId([base], new Set([base.provider]));
+		const settings = Settings.isolated({ disabledModels: ["openrouter/openai/gpt-4o:floor"] });
+		const storage = await createAuthStorage();
+		storage.keys.setRuntime(base.provider, "test-key");
+		const upstreamModels: string[] = [];
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["gateway-token"],
+			clients: [{ name: "client", tokenSha256: hashAuthGatewayToken("client-token") }],
+			storage,
+			resolveModel: (id, options) => resolveServableGatewayModel(id, index, settings, options),
+			fetch: async (input, init) => {
+				const upstream = input instanceof Request ? input : new Request(input.toString(), init);
+				const { model } = (await upstream.json()) as { model: string };
+				upstreamModels.push(model);
+				// OpenRouter uses Responses by default and Chat Completions when opted out.
+				const item = { type: "message", id: "msg_test", role: "assistant" };
+				const events = new URL(upstream.url).pathname.endsWith("/responses")
+					? [
+							{ type: "response.created", response: { id: "resp_test", status: "in_progress" } },
+							{ type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+							{ type: "response.output_text.delta", output_index: 0, item_id: item.id, delta: "ok" },
+							{
+								type: "response.output_item.done",
+								output_index: 0,
+								item: { ...item, status: "completed", content: [{ type: "output_text", text: "ok" }] },
+							},
+							{ type: "response.completed", response: { id: "resp_test", status: "completed" } },
+						]
+					: [{ choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] }];
+				return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const request = (token: string) =>
+			fetch(`${gateway.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: `openrouter/${base.id}`,
+					context: { messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+					options: { openrouterVariant: "floor" },
+					stream: false,
+				}),
+			});
+		try {
+			expect((await request("gateway-token")).status).toBe(404);
+			expect(upstreamModels).toEqual([]);
+			expect((await request("client-token")).status).toBe(200);
+			expect(upstreamModels).toEqual([base.id]);
+		} finally {
+			await gateway.close();
+		}
 	});
 
 	test("serves judge-kind models alongside chat and keeps unrouted kinds out", async () => {

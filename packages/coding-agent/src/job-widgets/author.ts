@@ -8,6 +8,8 @@ import type { AssistantMessage, Model, Tool, ToolChoice, UserMessage } from "@oh
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { formatBytes, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import { disabledModelMatcher } from "../config/disabled-models";
+import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain } from "../config/model-resolver";
 import { providerRoleCandidatePool, roleCandidatePool } from "../config/model-roles";
@@ -227,9 +229,11 @@ export async function completeWidgetRequest(
 	}
 	for (const { model } of resolveRoleChain("widget", settings, pool)) {
 		if (!(await modelRegistry.getApiKey(model, sessionId, { signal }))) continue;
+		const matcher = disabledModelMatcher(settings);
+		if (matcher(model) !== undefined) continue;
 		costGate?.admit();
 		const response = await instrumentedCompleteSimple(
-			model,
+			withDisabledModelFallbackPolicy(model, matcher),
 			context,
 			{
 				apiKey: modelRegistry.resolver(model, sessionId),

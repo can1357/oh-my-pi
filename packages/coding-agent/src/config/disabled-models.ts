@@ -238,8 +238,8 @@ export function disabledSelectorRule(
 	const routed = splitUpstreamRouting(trimmed)?.base ?? trimmed;
 	const forms = new Set([
 		trimmed,
-		routed,
 		splitThinkingSuffix(trimmed, -1, MAX_THINKING_SUFFIX_OPTIONS).base,
+		routed,
 		splitThinkingSuffix(routed, -1, MAX_THINKING_SUFFIX_OPTIONS).base,
 	]);
 	for (const form of forms) {
@@ -247,6 +247,18 @@ export function disabledSelectorRule(
 		if (slash > 0) {
 			const provider = form.slice(0, slash).toLowerCase();
 			const id = form.slice(slash + 1);
+			// A catalog ID can contain an actual `@` or `:`, even if its shorter base also exists.
+			// Prefer that row to any remaining interpretations as a route or thinking suffix.
+			if (forms.size > 1) {
+				const lowerId = id.toLowerCase();
+				const literal = catalog?.find(
+					model => model.provider.toLowerCase() === provider && model.id.toLowerCase() === lowerId,
+				);
+				if (literal) {
+					const rule = matcher(literal);
+					return rule === undefined ? undefined : { label: form, rule };
+				}
+			}
 			const row = catalog?.find(model => model.provider.toLowerCase() === provider);
 			const knownProvider = row !== undefined || providerEntry(provider) !== undefined;
 			// A raw id with an unknown prefix is not a qualified selector. An exact rule for
@@ -280,7 +292,7 @@ export function disabledSelectorRule(
 		}
 		if (!form || !allowed) continue;
 		const id = form.toLowerCase();
-		if (allowed.some(model => model.id.toLowerCase() === id)) continue;
+		if (allowed.some(model => model.id.toLowerCase() === id)) return undefined;
 		const rule =
 			matcher({ provider: "", id }) ??
 			(catalog && catalog !== allowed ? ruleDenyingId(catalog, id, matcher) : undefined) ??

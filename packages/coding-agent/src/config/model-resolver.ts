@@ -2128,8 +2128,11 @@ export async function resolveModelOverrideWithAuthFallback(
 }
 
 /**
- * Resolve a list of role patterns to the first matching model. A configured role that
- * resolves only to `disabledModels` models ends the walk: later roles never stand in for it.
+ * Resolve a list of role patterns to the first matching model. A denied role
+ * is skipped with a warning and the walk continues: background callers (commit
+ * generation, titles, repairs) try the next role instead of failing when an
+ * earlier one is denied. Explicit picks stay strict: callers that name one
+ * role use {@link resolveModelRoleValue} directly and refuse its denial.
  */
 export function resolveRoleSelection(
 	roles: readonly string[],
@@ -2149,7 +2152,6 @@ export function resolveRoleSelection(
 			logger.warn(`Model role "${role}" refused`, {
 				reason: formatDisabledModelError(resolved.disabledModel.label, resolved.disabledModel.rule),
 			});
-			return undefined;
 		}
 	}
 	return undefined;
@@ -2448,7 +2450,9 @@ export interface ResolveCliModelResult {
 	 * instead of deferring it to a later resolution pass.
 	 */
 	disabledProvider?: string;
-	/** `disabledModels` rule the selector hit. Set only alongside `error`; callers refuse outright. */
+	/** A role also names a missing candidate that extension discovery can still supply. */
+	hasUnresolvedAlternative?: boolean;
+	/** `disabledModels` rule the selector hit. Keep it if no configured alternative resolves. */
 	disabledModel?: DisabledModelSelection;
 }
 
@@ -2809,6 +2813,12 @@ function resolveCliModelInScope(
 						? formatDisabledModelError(denied.label, denied.rule)
 						: `Model "${trimmedModel}" not found. Run "omp models" to see available models.`,
 					disabledModel: denied,
+					hasUnresolvedAlternative:
+						!!denied &&
+						configuredPatterns.length > 1 &&
+						configuredPatterns.some(
+							pattern => !disabledSelectorRule(pattern, settings, availableModels, allModels),
+						),
 				};
 			}
 		}
@@ -2846,15 +2856,18 @@ function resolveCliModelInScope(
 		}
 	}
 
-	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
-	// Keep the explicit provider on the pattern: the raw-id phase provider-locks
-	// `google/gemini-x` to the bundled `google` provider unless the selector
-	// names the aggregator carrying it (`openrouter/google/gemini-x@upstream`).
+	const candidates = provider
+		? allowedModelCandidates(
+				allModels.filter(model => model.provider === provider),
+				settings,
+			)
+		: availableModels;
+	// Keep the explicit provider on the pattern so aggregator ids stay on their selected provider.
 	let parsed = parseModelPattern(provider ? `${provider}/${pattern}` : pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
 	if (!parsed.model && !provider) {
-		parsed = parseModelPattern(pattern, allModels, preferences, {
+		parsed = parseModelPattern(pattern, allowedModelCandidates(allModels, settings), preferences, {
 			allowInvalidThinkingSelectorFallback: false,
 		});
 	}

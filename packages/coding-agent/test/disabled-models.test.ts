@@ -131,29 +131,6 @@ describe("disabledModels resolution", () => {
 		expect(ids(registry.getAvailableForProviders(providers))).toEqual(lazy);
 	});
 
-	it("never hands standalone callers a Factory model that can offer a denied refusal fallback", async () => {
-		authStorage.keys.setRuntime("factory-droid", "factory-token");
-		const registry = new ModelRegistry(authStorage, tempDir.join("models.yml"), {
-			settings: Settings.isolated({ disabledModels: ["factory-droid/claude-opus-5"] }),
-			fetch: async input =>
-				Response.json(
-					String(input).endsWith("/api/feature-flags")
-						? { flags: {} }
-						: { settings: { modelPolicy: { allowAllFactoryModels: true } } },
-				),
-		});
-		await registry.refreshProvider("factory-droid", "online");
-		const providers = new Set(["factory-droid"]);
-		const fable = (models: Model<Api>[]) =>
-			models.find(m => m.provider === "factory-droid" && m.id === "claude-fable-5");
-		expect(fable(registry.getAvailableForProviders(providers))?.factoryDroidRefusalFallbacks).toEqual([]);
-		expect(registry.find("factory-droid", "claude-fable-5")?.factoryDroidRefusalFallbacks).toEqual([]);
-		expect(fable(registry.getProviderModels("factory-droid"))?.factoryDroidRefusalFallbacks).toEqual([]);
-		const raw = fable(registry.getAll("all"));
-		expect(raw?.factoryDroidRefusalFallbacks).toContain("claude-opus-5");
-		expect(fable(registry.getAvailableForProviders(providers))?.factoryDroidRefusalFallbacks).toEqual([]);
-	});
-
 	it("refuses an OpenRouter discovery variant even after its custom provider disappears from the picker", async () => {
 		const provider = "review-gateway";
 		const base = "acme/review";
@@ -334,6 +311,21 @@ describe("disabledModels resolution", () => {
 		expect(role.model?.provider).toBe("anthropic");
 	});
 
+	it("filters full-catalog fuzzy picks and provider-specific suggestions without weakening exact pins", () => {
+		const models = [gpt4o, mini];
+		const modelRegistry = { getAll: () => models, getAvailable: () => [] };
+		const selection = { modelRegistry, cliModel: "4o" };
+		const preferred = resolveCliModel(selection).model!;
+		const sibling = models.find(model => model.id !== preferred.id)!;
+		const rule = `${preferred.provider}/${preferred.id}`;
+		const settings = Settings.isolated({ disabledModels: [rule] });
+		expect(resolveCliModel({ ...selection, settings }).model?.id).toBe(sibling.id);
+		expect(resolveCliModel({ ...selection, settings, cliModel: preferred.id }).disabledModel?.rule).toBe(rule);
+		const qualified = resolveCliModel({ ...selection, cliProvider: "openai", settings });
+		expect(qualified.model).toBeUndefined();
+		expect(qualified.error).toContain(`Did you mean openai/${sibling.id}?`);
+	});
+
 	it("refuses a bare id that a provider glob denies on a bundled model, never an allowed sibling", () => {
 		// `*/gpt-4o` denies `openai/gpt-4o` but leaves `openai/gpt-4o-mini`, which fuzzy-matches `gpt-4o`.
 		const settings = Settings.isolated({ disabledModels: ["*/gpt-4o"] });
@@ -471,17 +463,63 @@ describe("disabledModels resolution", () => {
 		expect(result.error).toBe(deniedMessage("openai/gpt-4o-mini", "openai/gpt-4o-mini"));
 	});
 
-	it("stops a role walk at a configured role that names only denied models", () => {
+	it("skips a denied configured role and continues the walk with the next role", () => {
 		const settings = Settings.isolated({
 			disabledModels: ["openai/gpt-4o-mini"],
 			modelRoles: { commit: "openai/gpt-4o-mini", smol: "anthropic/claude-sonnet-4-5" },
 			"retry.fallbackChains": { commit: ["anthropic/claude-sonnet-4-5"] },
 		});
 		const available = registryFor(settings).getAvailable();
-		// Neither the role's own fallback chain nor a later role stands in for it.
+		// A denied role is not a substitute: the role's own fallback chain stays
+		// empty and the walk continues with the next role instead of stopping.
 		expect(resolveRoleChain("commit", settings, available)).toEqual([]);
-		expect(resolveRoleSelection(["commit", "smol"], settings, available)).toBeUndefined();
+		expect(resolveRoleSelection(["commit", "smol"], settings, available)).toEqual(
+			expect.objectContaining({ role: "smol", model: expect.objectContaining({ id: sonnet.id }) }),
+		);
+		// A single denied role still resolves to no model, so explicit callers refuse it.
+		expect(resolveRoleSelection(["commit"], settings, available)).toBeUndefined();
 		// An unconfigured role is not a choice the user made, so the walk continues.
 		expect(resolveRoleSelection(["slow", "smol"], settings, available)?.model.id).toBe(sonnet.id);
+	});
+
+	it("matches an exact literal id before interpreting its suffix as routing", async () => {
+		await Bun.write(
+			path.join(tempDir.path(), "models.yml"),
+			[
+				"providers:",
+				"  custom:",
+				"    baseUrl: http://127.0.0.1:9/v1",
+				"    auth: none",
+				"    api: openai-completions",
+				"    models:",
+				"      - id: model@host",
+				"        name: Literal Host Model",
+				"      - id: model",
+				"        name: Base Model",
+				"",
+			].join("\n"),
+		);
+		const settings = Settings.isolated({ disabledModels: ["custom/model"] });
+		const available = registryFor(settings).getAvailable();
+		for (const selector of ["custom/model@host", "model@host", "custom/model@host:high"]) {
+			expect(resolveModelRoleValue(selector, available, { settings }).model?.id).toBe("model@host");
+		}
+		const literal = "custom/model@host";
+		const denyLiteral = Settings.isolated({ disabledModels: [literal] });
+		const refused = resolveModelRoleValue(literal, registryFor(denyLiteral).getAvailable(), {
+			settings: denyLiteral,
+		});
+		expect(refused.disabledModel).toEqual({ label: literal, rule: literal });
+	});
+
+	it("retains the first deny rule when extension discovery supplies no role alternative", () => {
+		const rule = "anthropic/claude-sonnet-4-5";
+		const settings = Settings.isolated({
+			disabledModels: [rule],
+			modelRoles: { slow: `${rule},ext-review/unregistered-model` },
+		});
+		const refused = resolveCliModel({ cliModel: "@slow", modelRegistry: registryFor(settings), settings });
+		expect(refused.model).toBeUndefined();
+		expect(refused.error).toBe(deniedMessage(rule, rule));
 	});
 });

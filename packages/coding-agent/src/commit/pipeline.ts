@@ -71,7 +71,7 @@ async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<vo
 	const settings = await Settings.init({ cwd });
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const registry = new ModelRegistry(authStorage);
+		const registry = new ModelRegistry(authStorage, undefined, { settings });
 		await registry.refresh();
 		await loadCliExtensionProviders(registry, settings, cwd);
 		const primary = await resolvePrimaryModel(args.model, settings, registry);

@@ -250,6 +250,39 @@ describe("pi-native parseRequest", () => {
 	});
 });
 
+it("returns 400 for malformed Factory restrictions before resolving a model", async () => {
+	const storage = await AuthStorage.create(":memory:");
+	const resolveModel = vi.fn(() => undefined);
+	const handle = startAuthGateway({
+		bind: "127.0.0.1:0",
+		bearerTokens: ["test-token"],
+		storage,
+		resolveModel,
+		version: "test",
+	});
+	try {
+		for (const invalid of [null, "prefix-claude-opus-5", {}, ["claude-opus-5", 42]]) {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "x",
+					context: baseContext,
+					options: { factoryDroidRefusalFallbacks: invalid },
+				}),
+			});
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({
+				error: { type: "invalid_request_error", message: expect.stringContaining("factoryDroidRefusalFallbacks") },
+			});
+		}
+		expect(resolveModel).not.toHaveBeenCalled();
+	} finally {
+		await handle.close();
+		storage.close();
+	}
+});
+
 describe("pi-native gateway cache controls", () => {
 	it("delivers statefulResponses false to the provider stream", async () => {
 		registerMockApi();

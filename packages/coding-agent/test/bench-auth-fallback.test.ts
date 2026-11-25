@@ -18,6 +18,7 @@ import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-model
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
 import { type BenchModelRegistry, resolveBenchTargets } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getModelDbPath, TempDir } from "@oh-my-pi/pi-utils";
 import { endpoint as responsesEndpoint } from "../../ai/test/fixtures/openai-responses-server";
@@ -736,7 +737,23 @@ describe("bench service tier", () => {
 	});
 });
 
-describe("bench redirect with disabledModels", () => {
+describe("bench with disabledModels", () => {
+	it("does not send a benchmark to a model denied during credential preflight", async () => {
+		const registry = fakeRegistry({ models: [fakeModel("alpha", "runner")], authedProviders: ["alpha"] });
+		const settings = Settings.isolated();
+		registry.getApiKey = async () => {
+			cfgDisabledModels.set(settings, ["alpha/*"]);
+			return "test-key";
+		};
+		const stream = vi.fn(fakeStream);
+		const { summary } = await runBench("alpha/runner", registry, stream, settings);
+		expect(summary.models[0].results[0]).toMatchObject({
+			ok: false,
+			error: expect.stringContaining('disabled by disabledModels rule "alpha/*"'),
+		});
+		expect(stream).not.toHaveBeenCalled();
+	});
+
 	it("never redirects a bare selector to a denied model on an authenticated provider", async () => {
 		const registry = fakeRegistry({
 			models: [fakeModel("alpha", "shared-model"), fakeModel("beta", "shared-model")],

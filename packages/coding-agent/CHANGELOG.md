@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `disabledModels` setting to hide and refuse specific models (exact `provider/modelId` or globs, path-scoped) while keeping their provider enabled ([#16494](https://github.com/can1357/oh-my-pi/pull/16494) by [@enieuwy](https://github.com/enieuwy))
+- Added `disabledModels` to hide and refuse specific models without disabling their provider. Exact `provider/modelId` rules and globs support path scopes. Model selection, background requests, and gateway requests honor the active rules ([#16494](https://github.com/can1357/oh-my-pi/pull/16494) by [@enieuwy](https://github.com/enieuwy))
 
 ## [19.2.0] - 2026-11-25
 

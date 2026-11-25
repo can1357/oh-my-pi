@@ -8,25 +8,36 @@ import {
 } from "./disabled-models";
 import type { Settings } from "./settings";
 
-/** Narrow Factory's provider-generated refusal chain without changing the shared catalog model. */
+/** Restrict a request only when a rule denies a possible target. Discovery limits the account separately. */
+export function allowedFactoryDroidFallbacks(
+	model: Model,
+	isDisabled: DisabledModelMatcher,
+	onDisabledFallback?: (message: string) => void,
+): readonly string[] | undefined {
+	if (isDisabled === NO_DISABLED_MODELS) return undefined;
+	const targets = factoryDroidRefusalTargets(model);
+	let kept = 0;
+	for (const id of targets) {
+		const target = { provider: model.provider, providerType: model.providerType, id };
+		const rule = isDisabled(target);
+		if (rule === undefined) targets[kept++] = id;
+		else onDisabledFallback?.(formatDisabledModelError(target, rule));
+	}
+	if (kept === targets.length) return undefined;
+	targets.length = kept;
+	return targets;
+}
+
+/** Apply current policy to one dispatch, never to a catalog or selected model. */
 export function withDisabledModelFallbackPolicy<TApi extends Api>(
 	model: Model<TApi>,
 	policy: Settings | DisabledModelMatcher | undefined,
 	onDisabledFallback?: (message: string) => void,
 ): Model<TApi> {
 	if (model.api !== "factory-droid-agent") return model;
-	const isDisabled = typeof policy === "function" ? policy : disabledModelMatcher(policy);
-	if (isDisabled === NO_DISABLED_MODELS) return model;
-	const targets = model.factoryDroidRefusalFallbacks ?? factoryDroidRefusalTargets(model);
-	const allowed = targets.filter(id => {
-		const target = { provider: model.provider, providerType: model.providerType, id };
-		const rule = isDisabled(target);
-		if (rule === undefined) return true;
-		onDisabledFallback?.(formatDisabledModelError(target, rule));
-		return false;
-	});
-	// A provider or gateway resolves the final route later. Freeze the upper bound,
-	// including an empty one, so it cannot introduce an unchecked target.
-	if (model.factoryDroidRefusalFallbacks !== undefined && allowed.length === targets.length) return model;
-	return { ...model, factoryDroidRefusalFallbacks: allowed };
+	const matcher = typeof policy === "function" ? policy : disabledModelMatcher(policy);
+	const allowed = allowedFactoryDroidFallbacks(model, matcher, onDisabledFallback);
+	return allowed === model.factoryDroidAllowedRefusalFallbacks
+		? model
+		: { ...model, factoryDroidAllowedRefusalFallbacks: allowed };
 }

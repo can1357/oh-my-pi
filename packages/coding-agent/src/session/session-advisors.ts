@@ -76,6 +76,7 @@ import {
 } from "../advisor";
 import { evictStaleToolResults } from "../advisor/tool-result-eviction";
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
@@ -120,6 +121,7 @@ import { getOpenAiRemoteCompactionPayload } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
+import { compactionModelRefusal } from "./session-maintenance";
 import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
@@ -2654,6 +2656,18 @@ export class SessionAdvisors {
 		});
 
 		for (const candidate of candidates) {
+			// A foreign native target can summarize readable history, but its opaque
+			// output cannot replace history consumed by this advisor's active model.
+			const candidatePreparation =
+				candidate.provider === advisorModel.provider && isOpenAiRemoteCompactionApi(advisorModel.api)
+					? preparation
+					: { ...preparation, settings: { ...compactionSettings, remoteEnabled: false } };
+			const remoteEnabled = candidatePreparation.settings.remoteEnabled !== false;
+			const refusal = compactionModelRefusal(candidate, remoteEnabled, this.#host.settings);
+			if (refusal) {
+				lastError = new Error(refusal);
+				continue;
+			}
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId, { signal });
 			if (!apiKey) continue;
 			if (
@@ -2663,12 +2677,6 @@ export class SessionAdvisors {
 			) {
 				throw nativeCompactionFailure.error;
 			}
-			// A foreign native target can summarize readable history, but its opaque
-			// output cannot replace history consumed by this advisor's active model.
-			const candidatePreparation =
-				candidate.provider === advisorModel.provider && isOpenAiRemoteCompactionApi(advisorModel.api)
-					? preparation
-					: { ...preparation, settings: { ...compactionSettings, remoteEnabled: false } };
 
 			// The advisor overflow-compaction one-shot bypasses the advisor `Agent`,
 			// so its installed metadata resolver never runs. Emit the same
@@ -2680,9 +2688,14 @@ export class SessionAdvisors {
 				? buildSessionMetadata(advisorProviderSessionId, candidate.provider, this.#host.modelRegistry.authStorage)
 				: undefined;
 			try {
+				const dispatchRefusal = compactionModelRefusal(candidate, remoteEnabled, this.#host.settings);
+				if (dispatchRefusal) {
+					lastError = new Error(dispatchRefusal);
+					continue;
+				}
 				compactResult = await compact(
 					candidatePreparation,
-					candidate,
+					withDisabledModelFallbackPolicy(candidate, this.#host.settings),
 					this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId),
 					undefined,
 					signal,

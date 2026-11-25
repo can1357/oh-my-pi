@@ -44,11 +44,9 @@ export interface PiNativeParsedRequest {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse a pi-native request body. Validation is intentionally minimal — only
- * the shape the gateway itself reads is checked (`modelId`, `context.messages`
- * array, options is an object). Everything downstream is the canonical pi-ai
- * type surface; mis-shaped values surface as a `502 upstream_error` from
- * `streamSimple` rather than being re-validated here.
+ * Parse the gateway envelope and validate the Factory refusal allowlist before
+ * any provider can use it. Other provider-specific options keep their canonical
+ * pi-ai shapes and are not re-validated here.
  *
  * Accepts both `{ modelId: string }` and `{ model: { id: string } }` so the
  * existing `streamProxy` client (which sends the full Model object) can target
@@ -91,6 +89,9 @@ export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedR
 	if (typeof rawOpts === "object" && rawOpts !== null && !Array.isArray(rawOpts)) {
 		const optsBag = options as Record<string, unknown>;
 		for (const [k, v] of Object.entries(rawOpts)) {
+			if (k === "factoryDroidRefusalFallbacks" && (!Array.isArray(v) || !v.every(id => typeof id === "string"))) {
+				throw new AIError.ValidationError("`options.factoryDroidRefusalFallbacks` must be an array of strings");
+			}
 			if (v === undefined || v === null) continue;
 			// Server-owned and unknown keys are dropped rather than rejected, so
 			// clients can forward `SimpleStreamOptions` from older or newer omp builds.

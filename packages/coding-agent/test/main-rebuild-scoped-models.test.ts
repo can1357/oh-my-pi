@@ -118,7 +118,7 @@ describe("watchScopedModelSettings", () => {
 		}
 	});
 
-	it("preserves the edited cycling order even when scope membership does not change", async () => {
+	it("does not replace the scope for an order-only edit", async () => {
 		const original = ["prov/a", "prov/b"];
 		const settings = Settings.isolated();
 		cfgEnabledModels.set(settings, original);
@@ -128,7 +128,8 @@ describe("watchScopedModelSettings", () => {
 		try {
 			cfgEnabledModels.set(settings, ["prov/b", "prov/a"]);
 			await nextTurn();
-			expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["b", "a"]);
+			expect(session.setCalls).toBe(0);
+			expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a", "b"]);
 		} finally {
 			for (const dispose of session.disposers) dispose();
 		}

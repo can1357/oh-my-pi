@@ -202,9 +202,8 @@ export function createSettingsAwareStreamFn(
 			tokenizers.set(tokenizerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
-		const { fallbacks: _callerFallbacks, ...callerOptions } = streamOptions ?? {};
 		const merged: SimpleStreamOptions = {
-			...callerOptions,
+			...streamOptions,
 			maxTokens,
 			preferWebsockets: resolveWebsocketPreference(settings, model, streamOptions?.preferWebsockets),
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
@@ -233,9 +232,15 @@ export function createSettingsAwareStreamFn(
 			...(codexAccessPrograms !== undefined ? { codexAccessPrograms } : {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
-		const requestModel = merged.disableServerSideFallback
-			? model
-			: withDisabledModelFallbackPolicy(model, isDisabled, onDisabledFallback);
+		if (fallbacks === undefined && streamOptions?.fallbacks !== undefined) delete merged.fallbacks;
+		const requestModel =
+			isDisabled === NO_DISABLED_MODELS
+				? model
+				: withDisabledModelFallbackPolicy(
+						model,
+						isDisabled,
+						merged.disableServerSideFallback ? undefined : onDisabledFallback,
+					);
 		return base(requestModel, context, merged);
 	};
 }

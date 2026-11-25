@@ -289,9 +289,12 @@ describe("runEvalCompletion", () => {
 		expect(result.details).toEqual({ model: "p/tagged", structured: false });
 	});
 
-	it("refuses a tagged model before sending the prompt, even when the registry still offers it", async () => {
+	it.each<{ catalog: string; available: Model<Api>[] }>([
+		{ catalog: "still offers it", available: [SMOL, DEFAULT] },
+		{ catalog: "has no available models", available: [] },
+	])("reports the deny rule for a tagged model when the registry $catalog", async ({ available }) => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "unexpected" }));
-		const session = makeSession({ available: [SMOL, DEFAULT] });
+		const session = makeSession({ available });
 		session.getSessionAgents = () => [{ name: "m1", model: ["p/smol"] } as AgentDefinition];
 		cfgDisabledModels.set(session.settings, ["p/smol"]);
 
