@@ -15,7 +15,8 @@ import type { TerminalDriverOptions } from "../driver";
 
 type Listener = (...args: never[]) => void;
 
-class Emitter {
+/** Minimal event emitter the stream doubles share. */
+export class Emitter {
 	readonly #listeners = new Map<string, Set<Listener>>();
 	on(event: string, listener: Listener): this {
 		let set = this.#listeners.get(event);
@@ -35,7 +36,8 @@ class Emitter {
 	}
 }
 
-class MemoryStdin extends Emitter {
+/** A TTY stdin double: raw-mode flag only, never reads. */
+export class MemoryStdin extends Emitter {
 	readonly isTTY = true;
 	isRaw = false;
 	setRawMode(mode: boolean): this {
