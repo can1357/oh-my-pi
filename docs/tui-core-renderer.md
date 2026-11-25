@@ -218,7 +218,7 @@ not flush: the display is replayed when the program resumes.
 
 ## 4. ANSI and width invariants
 
-`visibleWidth`, `truncateToWidth`, and `wrapTextWithAnsi` share
+`visibleWidth`, `sliceCells`/`sliceColumns`, `truncate`, and `wrap` (`packages/tui/src/text/width.ts`) share
 one ANSI-aware UAX#11 width model. Measuring, slicing, truncation, and wrapping
 must route through these helpers so escape sequences remain zero-width and
 column boundaries agree.

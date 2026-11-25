@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed unused exports from package subpaths: `createMCPManager` (`/mcp`, `/mcp/manager`), the `/extensibility/plugins/doctor` module (`runDoctorChecks`, `formatDoctorResults`), `linkPlugin` (`/extensibility/plugins/installer`), `findConfigFileWithMeta` (`/config`), `findInitialModel` and `restoreModelFromSession` (`/config/model-resolver`), and other unreferenced LSP, MCP, SSH, worker and utility helpers ([#20527](https://github.com/can1357/oh-my-pi/pull/20527))
+
 ### Added
 
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))

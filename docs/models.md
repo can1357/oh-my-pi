@@ -836,8 +836,8 @@ When a bare id matches models from multiple providers, preference order is:
 
 At startup, the session model is chosen in this order:
 
-1. explicit CLI provider+model
-2. first scoped model (if not resuming)
+1. explicit CLI `--model`
+2. when a model scope is active (`--models` or `enabledModels`) and the session is not being resumed: the configured `default` role if it resolves within the scope, otherwise the first scoped model. Under an `enabledModels` scope, a configured `default` that does not resolve yet is re-resolved after extensions register their providers instead of falling back to the first scoped model
 3. saved default provider/model
 4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models; a provider whose discovery marks the account's default model (`isProviderDefault`, e.g. Devin) uses it in place of its bundled `default-model`
 5. first available model
