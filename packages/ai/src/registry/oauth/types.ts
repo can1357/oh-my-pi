@@ -55,6 +55,13 @@ export type OAuthCredentials = {
 	 * (see `mergeRefreshedCredential`).
 	 */
 	refreshExpires?: number;
+	/**
+	 * Space-separated scopes the token endpoint granted at login (`scope` in
+	 * the token response), when the rule maps them. Lets callers skip features
+	 * a narrower grant cannot use, such as Anthropic's 1-year login without
+	 * `user:file_upload`. Absent on rows minted before scopes were recorded.
+	 */
+	scope?: string;
 };
 
 export type OAuthProvider = OAuthProviderUnion;

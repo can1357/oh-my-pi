@@ -45,6 +45,7 @@ const CREDENTIAL_FIELDS = {
 	"project-id": "projectId",
 	"api-endpoint": "apiEndpoint",
 	"enterprise-url": "enterpriseUrl",
+	scope: "scope",
 } as const;
 const DEFAULT_SKEW_MS = 5 * 60 * 1000;
 

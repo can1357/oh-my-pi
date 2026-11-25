@@ -35,6 +35,8 @@ auth "anthropic-long-lived" {
 			email "account.email_address"
 			org-id "organization.uuid"
 			org-name "organization.name"
+			// Recorded so Files API uploads skip this grant (no `user:file_upload`).
+			scope "scope"
 		}
 		after-exchange hook="anthropic-identity"
 	}

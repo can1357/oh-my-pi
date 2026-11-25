@@ -97,6 +97,7 @@ import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import { daemonMutex } from "./daemon/modules/mutex";
 import "./discovery";
+import { resolveProviderFileCredential } from "./blob-broker/provider-files";
 import { LiveImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
@@ -4952,7 +4953,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const blobBroker = new LiveImageUrlService(
 			settings,
 			() => sessionManager.getCwd(),
-			model => modelRegistry.getApiKey(model, providerSessionId),
+			model => resolveProviderFileCredential(modelRegistry, model, providerSessionId),
 		);
 		disposeCallbacks.add(() => blobBroker.dispose());
 		// Always installed; the getter-backed options are snapshotted per request,

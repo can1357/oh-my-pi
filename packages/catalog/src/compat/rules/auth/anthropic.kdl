@@ -30,6 +30,7 @@ auth "anthropic" {
 			email "account.email_address"
 			org-id "organization.uuid"
 			org-name "organization.name"
+			scope "scope"
 		}
 		// Falls back to the claude_cli bootstrap endpoint when the token
 		// response omits account/organization identity.

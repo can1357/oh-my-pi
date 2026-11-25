@@ -11,7 +11,7 @@
 - Added ProviderSlotBroker support through configureProviderSlotBroker(broker), allowing hosts such as coding-agent to coordinate maxInFlightRequests limits across processes.
 - Added AssistantMessage.errorFromAgentLoop to distinguish errors caused by the agent loop from errors returned by the provider.
 - OpenAI- and Anthropic-compatible requests to custom hosts now include an x-session-id header when the host does not provide its own session header, preserving conversation affinity through gateways and proxies. Official OpenAI, Anthropic, and Codex APIs are unchanged.
-- Added an "Anthropic (Claude Pro/Max, 1-year token)" login that issues a token valid for a year, so the account no longer needs a re-login every 30 days; the token never refreshes and needs a new login after a year. Usage tracking keeps working. Logging in with either Anthropic login replaces the other for that account.
+- Added an "Anthropic (Claude Pro/Max, 1-year token)" login that issues a token valid for a year, so the account no longer needs a re-login every 30 days; the token never refreshes and needs a new login after a year. Usage tracking keeps working; image uploads to Anthropic's Files API stay with the regular login. Logging in with either Anthropic login replaces the other for that account.
 - Added regional and custom endpoint selection to /login otari, storing non-US endpoints with the account so EU and self-hosted deployments do not need OTARI_BASE_URL configured separately.
 
 ### Changed

@@ -391,7 +391,7 @@ auth "anthropic" {
             refresh "refresh_token"
             expires "seconds" path="expires_in" from="created_at" skew-ms=300000 fallback-ms=3600000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
             refresh-expires-in "refresh_token_expires_in"   // seconds until the refresh token ends → `refreshExpires`
-            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
+            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url, scope
         }
         userinfo url="https://…/userinfo" email="email" account-id="sub"
         after-exchange hook="anthropic-identity"

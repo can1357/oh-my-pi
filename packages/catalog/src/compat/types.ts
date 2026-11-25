@@ -454,6 +454,8 @@ export interface CompiledCredentialMap {
 	enterpriseUrl?: CompiledCredentialField;
 	/** Dot path to the refresh token's remaining lifetime in seconds (`OAuthCredentials.refreshExpires`). */
 	refreshExpiresIn?: string;
+	/** Granted scopes (`OAuthCredentials.scope`), usually the response's `scope`. */
+	scope?: CompiledCredentialField;
 }
 
 /** Bearer GET that enriches credentials with identity fields. */

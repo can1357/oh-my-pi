@@ -78,6 +78,7 @@ export const oauthCredentialSchema: FluentType<OAuthCredential> = type({
 	"activeOrganizationId?": "string",
 	"authorizedAt?": "number",
 	"refreshExpires?": "number",
+	"scope?": "string",
 	"kiroClientId?": "string",
 	"kiroClientSecret?": "string",
 	"kiroOidcRegion?": "string",
@@ -102,6 +103,7 @@ export const remoteOauthCredentialSchema: FluentType<RemoteOAuthCredential> = ty
 	"activeOrganizationId?": "string",
 	"authorizedAt?": "number",
 	"refreshExpires?": "number",
+	"scope?": "string",
 	"kiroClientId?": "string",
 	// Redacted by `redactCredentialForWire`; a snapshot carrying it is rejected.
 	"kiroClientSecret?": "undefined",

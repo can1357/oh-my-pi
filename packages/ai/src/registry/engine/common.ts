@@ -180,7 +180,16 @@ export function mapCredentials(
 		refresh: readField(map.refresh, body, claims) ?? previous?.refresh ?? "",
 		expires,
 	};
-	const optional = ["email", "accountId", "orgId", "orgName", "projectId", "apiEndpoint", "enterpriseUrl"] as const;
+	const optional = [
+		"email",
+		"accountId",
+		"orgId",
+		"orgName",
+		"projectId",
+		"apiEndpoint",
+		"enterpriseUrl",
+		"scope",
+	] as const;
 	for (const key of optional) {
 		const value = readField(map[key], body, claims);
 		if (value !== undefined) credentials[key] = value;
