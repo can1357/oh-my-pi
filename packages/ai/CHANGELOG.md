@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced CPU spent scanning streamed DeepSeek prose and long inline code spans that quote template tokens.
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes
