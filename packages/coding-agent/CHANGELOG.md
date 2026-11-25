@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor sessions triggering premature pre-prompt compaction (and falling through to handoff) after a tool-heavy turn because results Cursor already counted were counted again ([#20510](https://github.com/can1357/oh-my-pi/issues/20510)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

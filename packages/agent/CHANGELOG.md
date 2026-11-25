@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor turns that ran tools server-side counting those tool results twice in context and output-budget estimates, which collapsed the output budget on the next request ([#20510](https://github.com/can1357/oh-my-pi/issues/20510)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

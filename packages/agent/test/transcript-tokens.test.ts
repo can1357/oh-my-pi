@@ -124,4 +124,56 @@ describe("estimateTranscriptTokens", () => {
 		const hidden = estimateTranscriptTokens(messages, tokenizer, { anchorFromIndex: messages.length });
 		expect(hidden).toBe(tokenizer.countMessages(messages));
 	});
+
+	// Issue #20510: Cursor's `contextTokens` is its checkpoint total, which
+	// already holds the results of tools it ran server-side mid-turn; the host
+	// appends those results after the assistant message.
+	describe("Cursor server-resolved results after the anchor", () => {
+		const start = 1_795_543_707_339;
+		const calls = ["srv-1", "srv-2", "client-1"].map(id => ({
+			type: "toolCall" as const,
+			id,
+			name: "bash",
+			arguments: {},
+		}));
+		const result = (toolCallId: string, timestamp: number): AgentMessage => ({
+			role: "toolResult",
+			toolCallId,
+			toolName: "bash",
+			content: [{ type: "text", text: "x".repeat(13_558) }],
+			isError: false,
+			timestamp,
+		});
+		const turn = (api: AssistantMessage["api"]): AgentMessage[] => [
+			user("go"),
+			assistant("done", {
+				api,
+				provider: "cursor",
+				timestamp: start,
+				duration: 400_000,
+				content: [...calls, { type: "text", text: "done" }],
+				usage: usage({ contextTokens: 183_384 }),
+			}),
+			result("srv-1", start + 1_000),
+			result("srv-2", start + 2_000),
+			// Run by the client after the stream ended, so not in the report.
+			result("client-1", start + 400_500),
+			user("follow-up"),
+		];
+
+		test("are not re-counted on top of the provider report", () => {
+			const messages = turn("cursor-agent");
+			expect(estimateTranscriptTokens(messages, tokenizer)).toBe(
+				183_384 + tokenizer.countMessages(messages.slice(4)),
+			);
+		});
+
+		test("other providers still count every result after the anchor", () => {
+			const messages = turn("anthropic-messages");
+			const anchorTokens = findTranscriptUsageAnchor(messages)?.tokens ?? 0;
+			expect(estimateTranscriptTokens(messages, tokenizer)).toBe(
+				anchorTokens + tokenizer.countMessages(messages.slice(2)),
+			);
+		});
+	});
 });

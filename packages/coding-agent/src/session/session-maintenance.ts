@@ -33,6 +33,7 @@ import {
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
 	invalidateMessageCache,
+	isAnchorCoveredMessage,
 	isTranscriptUsageAnchor,
 	NativeCompactionError,
 	prepareCompaction,
@@ -276,18 +277,39 @@ function hasExplicitMediaRejectionEvidence(errorMessage: string | undefined): bo
 	return errorMessage !== undefined && PAYLOAD_MEDIA_LIMIT_EVIDENCE_PATTERN.test(errorMessage);
 }
 
+/** A branch's newest usage anchor and the trailing entries its usage also covers. */
+interface BranchUsageAnchor {
+	index: number;
+	/** First entry after the anchor its usage does not cover ({@link isAnchorCoveredMessage}). */
+	tailStart: number;
+}
+
 /**
- * Newest usage-anchor entry strictly after `compactionIndex`, or -1 when the
+ * Newest usage anchor strictly after `compactionIndex`, or `undefined` when the
  * branch carries none. Shared by the image, thinking and tool-result shake
- * passes so all three subtract pre-anchor savings on the same basis.
+ * passes so all three subtract anchored savings on the same basis.
  */
-function findUsageAnchorIndex(branchEntries: readonly SessionEntry[], compactionIndex: number): number {
+function findUsageAnchor(
+	branchEntries: readonly SessionEntry[],
+	compactionIndex: number,
+): BranchUsageAnchor | undefined {
 	for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
 		const entry = branchEntries[index];
 		if (entry?.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
-		return index;
+		let tailStart = index + 1;
+		while (tailStart < branchEntries.length) {
+			const next = branchEntries[tailStart];
+			if (next?.type !== "message" || !isAnchorCoveredMessage(entry.message, next.message)) break;
+			tailStart++;
+		}
+		return { index, tailStart };
 	}
-	return -1;
+	return undefined;
+}
+
+/** Whether the anchor's provider-reported prompt already carries the entry at `index` (the anchor itself excluded). */
+function isAnchoredEntry(anchor: BranchUsageAnchor | undefined, index: number): boolean {
+	return anchor !== undefined && index !== anchor.index && index < anchor.tailStart;
 }
 
 /** A terminal payload rejection may be byte-sized history or irreducible media, not necessarily token overflow. */
@@ -939,7 +961,7 @@ export class SessionMaintenance {
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
-		const anchorIndex = findUsageAnchorIndex(branchEntries, compactionIndex);
+		const anchor = findUsageAnchor(branchEntries, compactionIndex);
 		let removed = 0;
 		let tokensFreed = 0;
 		let anchoredTokensRemoved = 0;
@@ -947,7 +969,7 @@ export class SessionMaintenance {
 			// Only entries the anchor's provider-reported prompt already carried may
 			// be subtracted from it, and a remote compaction's replacement history
 			// hides everything before its cutoff from the wire.
-			const anchored = index < anchorIndex && (!hasRemoteReplacementHistory || index > compactionIndex);
+			const anchored = isAnchoredEntry(anchor, index) && (!hasRemoteReplacementHistory || index > compactionIndex);
 			if (entry.type === "message") {
 				const before = this.#tokenizer.countMessage(entry.message, countOptions);
 				const dropped = stripImagesFromMessage(entry.message);
@@ -1049,7 +1071,7 @@ export class SessionMaintenance {
 			const latestCompaction = getLatestCompactionEntry(branchEntries);
 			const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
 			const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
-			const anchorIndex = findUsageAnchorIndex(branchEntries, compactionIndex);
+			const anchor = findUsageAnchor(branchEntries, compactionIndex);
 			let removed = 0;
 			let replayedBlocks = 0;
 			let notesDropped = 0;
@@ -1104,7 +1126,7 @@ export class SessionMaintenance {
 					notesDropped++;
 				}
 				tokensFreed += saved;
-				if (index < anchorIndex && (!hasRemoteReplacementHistory || index > compactionIndex)) {
+				if (isAnchoredEntry(anchor, index) && (!hasRemoteReplacementHistory || index > compactionIndex)) {
 					anchoredTokensRemoved += saved;
 				}
 			}
@@ -1211,7 +1233,7 @@ export class SessionMaintenance {
 		assertCurrent();
 		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
-		const anchorIndex = findUsageAnchorIndex(branchEntries, compactionIndex);
+		const anchor = findUsageAnchor(branchEntries, compactionIndex);
 		const entryIndexes = new Map(branchEntries.map((entry, index) => [entry, index]));
 
 		let toolResultsDropped = 0;
@@ -1229,7 +1251,7 @@ export class SessionMaintenance {
 			const entryIndex = entryIndexes.get(region.entry) ?? -1;
 			if (
 				entryIndex >= 0 &&
-				entryIndex < anchorIndex &&
+				isAnchoredEntry(anchor, entryIndex) &&
 				(!hasRemoteReplacementHistory || entryIndex > compactionIndex)
 			) {
 				anchoredTokensRemoved += Math.max(0, region.tokens - replacementTokenCount);
@@ -1241,7 +1263,7 @@ export class SessionMaintenance {
 		for (const { region } of items) {
 			if (!entrySnapshots.has(region.entry)) entrySnapshots.set(region.entry, structuredClone(region.entry));
 		}
-		const anchorEntry = anchorIndex >= 0 ? branchEntries[anchorIndex] : undefined;
+		const anchorEntry = anchor ? branchEntries[anchor.index] : undefined;
 		if (anchorEntry && !entrySnapshots.has(anchorEntry))
 			entrySnapshots.set(anchorEntry, structuredClone(anchorEntry));
 		applyShakeRegions(items);

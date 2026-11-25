@@ -124,6 +124,38 @@ export function findRequestUsageAnchor(messages: readonly Message[]): Transcript
 	return anchor && { index: anchorIndex, message: anchor, tokens: calculateContextTokens(anchor.usage) };
 }
 
+/**
+ * Whether `anchor`'s usage already counts `message`, which follows it.
+ *
+ * Usage normally covers the prompt up to the anchor only. Cursor is the
+ * exception: it runs exec-channel tools server-side mid-turn and reports
+ * `contextTokens` from the conversation checkpoint, which already holds every
+ * result the turn consumed, while the host appends those results after the
+ * assistant message. Such a result pairs with a call in the anchor and was
+ * produced before the stream finished (`timestamp + duration`); results the
+ * client runs for the same turn are produced after it. Timing is the test
+ * because the live `kCursorExecResolved` marker does not survive a reload.
+ */
+export function isAnchorCoveredMessage(anchor: AssistantMessage, message: AgentMessage): boolean {
+	if (anchor.api !== "cursor-agent" || anchor.duration === undefined || message.role !== "toolResult") return false;
+	if (message.timestamp > anchor.timestamp + anchor.duration) return false;
+	return anchor.content.some(block => block.type === "toolCall" && block.id === message.toolCallId);
+}
+
+/**
+ * First index of `messages` the anchor's usage does not cover: the message
+ * after the anchor, skipping trailing ones {@link isAnchorCoveredMessage}
+ * accepts. Every anchored tail count starts here.
+ */
+export function transcriptTailStart(
+	messages: readonly AgentMessage[],
+	anchor: Pick<TranscriptUsageAnchor, "index" | "message">,
+): number {
+	let index = anchor.index + 1;
+	while (index < messages.length && isAnchorCoveredMessage(anchor.message, messages[index])) index++;
+	return index;
+}
+
 /** Options for {@link estimateTranscriptTokens}. */
 export interface TranscriptTokenOptions {
 	/**
@@ -165,7 +197,8 @@ export function estimateTranscriptTokens(
 		skipPrunedAnchors: options?.skipPrunedAnchors,
 	});
 	let total = anchor?.tokens ?? 0;
-	for (let index = anchor ? anchor.index + 1 : (options?.countFromIndex ?? 0); index < messages.length; index++) {
+	const start = anchor ? transcriptTailStart(messages, anchor) : (options?.countFromIndex ?? 0);
+	for (let index = start; index < messages.length; index++) {
 		total += tokenizer.countMessage(messages[index], estimateOptions);
 	}
 	return total;

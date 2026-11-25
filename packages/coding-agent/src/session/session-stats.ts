@@ -4,6 +4,7 @@ import {
 	findTranscriptUsageAnchor,
 	isTranscriptUsageAnchor,
 	type SessionMessageEntry,
+	transcriptTailStart,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
 import { type } from "@oh-my-pi/omptype";
@@ -327,7 +328,7 @@ export class SessionStatsTracker {
 				correctedPromptTokens(anchorAssistant),
 				anchorAssistant.contextSnapshot ?? current,
 				current,
-				anchorIndex + 1,
+				transcriptTailStart(activeMessages, { index: anchorIndex, message: anchorAssistant }),
 				activeMessages,
 				pendingTokens,
 				tokenizer,
@@ -352,7 +353,7 @@ export class SessionStatsTracker {
 					correctedPromptTokens(liveAnchor.message),
 					liveAnchor.message.contextSnapshot ?? current,
 					current,
-					liveAnchor.index + 1,
+					transcriptTailStart(activeMessages, liveAnchor),
 					activeMessages,
 					pendingTokens,
 					tokenizer,

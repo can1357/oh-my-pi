@@ -1,7 +1,7 @@
 import type { Context, Model, Tool } from "@oh-my-pi/pi-ai";
 import { stopsOutputAtContextWindow } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
-import { findRequestUsageAnchor } from "./compaction/transcript-tokens";
+import { findRequestUsageAnchor, transcriptTailStart } from "./compaction/transcript-tokens";
 import type { Tokenizer } from "./tokenizer";
 
 /** Smallest output cap {@link fitOutputTokensToContextWindow} will request. */
@@ -136,11 +136,12 @@ function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
 	if (!anchor) {
 		return withMargin(countContextTokens(context, tokenizer)) + messages.length * MESSAGE_FRAMING_TOKENS;
 	}
+	const tailStart = transcriptTailStart(messages, anchor);
 	let tail = 0;
-	for (let index = anchor.index + 1; index < messages.length; index++) {
+	for (let index = tailStart; index < messages.length; index++) {
 		tail += tokenizer.countMessage(messages[index]);
 	}
-	return anchor.tokens + withMargin(tail) + (messages.length - anchor.index - 1) * MESSAGE_FRAMING_TOKENS;
+	return anchor.tokens + withMargin(tail) + (messages.length - tailStart) * MESSAGE_FRAMING_TOKENS;
 }
 
 function countContextTokens(context: Context, tokenizer: Tokenizer): number {
