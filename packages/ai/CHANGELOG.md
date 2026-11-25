@@ -9,7 +9,7 @@
 - Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
 - `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`) ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
-- Added Kimi Code global-region support: `kimi-code-global` models stream with Kimi client headers and report quota from `api.kimi.ai` ([#15889](https://github.com/can1357/oh-my-pi/pull/15889) by [@z80dev](https://github.com/z80dev)).
+- Added Kimi Code global-region support: `kimi-code-global` models stream with Kimi client headers and report quota from `api.kimi.ai` ([#15889](https://github.com/can1357/oh-my-pi/pull/15889) by [@z80dev](https://github.com/z80dev), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
 
 ### Removed
 
@@ -24,7 +24,7 @@
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.
 - Added an `upstreamModel` option for mock provider responses so tests and integrations can report the model that actually served a request.
 - Added a `sign-out` provider hook and `OAuthApi.signOut`: removing a login runs the hook, which deletes the account's secrets kept outside the credential store and revokes the grant at the provider
-- Fixed Kimi Code quota probing skipping API-key credentials (`KIMI_API_KEY` without an OAuth login), so `omp usage` now reports the plan windows for key-only setups ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano)).
+- Fixed Kimi Code quota probing skipping API-key credentials (`KIMI_API_KEY` without an OAuth login), so `omp usage` now reports the plan windows for key-only setups ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
 
 ### Changed
 
