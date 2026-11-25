@@ -957,11 +957,7 @@ export class EventController {
 			}));
 		const mediaPath = readMediaPath(result.details);
 		if (images.length === 0 && !mediaPath) return false;
-		if (images.length > 0) {
-			const next = new Map(assistant.toolResultImages.peek());
-			next.set(toolCallId, images);
-			assistant.toolResultImages.set(next);
-		}
+		assistant.setToolResultMedia(toolCallId, { images, mediaPath });
 		// A media-only result (a model, a PDF) still settles through the read group.
 		return images.length > 0 && cfgTerminalShowImages.get(settings);
 	}

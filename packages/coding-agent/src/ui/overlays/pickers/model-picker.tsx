@@ -25,6 +25,8 @@ import {
 	type ModelBrowserRegistry,
 	type ModelBrowserSource,
 	providerMark,
+	type SessionModelScope,
+	sessionModelScopeWork,
 	thinkingDotToken,
 } from "../../../modes/view-model/overlays/model-browser";
 import {
@@ -38,6 +40,7 @@ import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import "../../styles/pickers/model-picker";
 import { segmentPalette } from "../../styles/pickers/model-browser";
 import type { ModelPickerLookTerm } from "../../styles/pickers/model-picker";
+import { END_SLICE, runSlicedWork, type SlicedWork } from "../../../utils/sliced-work";
 import { ModelBrowserState } from "./model-browser-state";
 import { pickerAction } from "./select-sheet";
 import { actionKbd, cancelKbd, confirmKbd } from "../../keys/hints";
@@ -96,6 +99,70 @@ function levelColor(theme: Theme, level: ConfiguredThinkingLevel): string {
 
 type Mode = "session" | "role" | "task";
 
+/** The browser state behind a picker; {@link prewarmModelPicker} builds rows through the same one. */
+function pickerBrowser(
+	source: ModelBrowserSource,
+	currentContextTokens: number | undefined,
+	emptyText?: () => string | undefined,
+): ModelBrowserState {
+	const browser = new ModelBrowserState(source, { currentContextTokens, markOverContext: true, emptyText });
+	// The rail's logos name each row's provider: picker rows show the model id alone.
+	browser.setPickerProvider(false);
+	return browser;
+}
+
+/** What {@link prewarmModelPicker} builds from: the inputs the picker will be opened with. */
+export interface ModelPickerPrewarm {
+	readonly source: ModelBrowserSource;
+	readonly registry: ModelBrowserRegistry & {
+		/** Compose the catalog ahead of its first reader, in slices (`ModelRegistry.prewarmCatalog`). */
+		prewarmCatalog(): Promise<void> | undefined;
+	};
+	/** The `--models` scope (empty: every available chat model). */
+	readonly scopedModels: ReadonlyArray<Model>;
+	readonly currentContextTokens?: number;
+	/** Stops the work between slices. */
+	readonly signal?: AbortSignal;
+}
+
+/**
+ * Builds what the first picker reads (the composed catalog, the session's
+ * model scope and its rows) in slices that yield the event loop between
+ * them, so the first open costs what a reopen does. Every result lands in
+ * the caches a picker reads; one opened meanwhile builds what is missing.
+ */
+export async function prewarmModelPicker(prewarm: ModelPickerPrewarm): Promise<void> {
+	const { source, registry, signal } = prewarm;
+	await registry.prewarmCatalog();
+	let scope: SessionModelScope | undefined;
+	await runSlicedWork(
+		untilAborted(
+			(function* () {
+				scope = yield* sessionModelScopeWork(source, registry, prewarm.scopedModels);
+			})(),
+			signal,
+		),
+	);
+	if (!scope || signal?.aborted) return;
+	const browser = pickerBrowser(source, prewarm.currentContextTokens);
+	browser.setRoles(scope.roles);
+	browser.setPerfStats(source.modelPerf);
+	await runSlicedWork(untilAborted(browser.pickerItemsWork(scope.items), signal));
+}
+
+/**
+ * `work` in a fresh turn (the phase before it may have filled the current one),
+ * stopping at its next pause once `signal` aborts.
+ */
+function* untilAborted(work: SlicedWork, signal: AbortSignal | undefined): SlicedWork {
+	yield END_SLICE;
+	while (!signal?.aborted) {
+		const step = work.next();
+		if (step.done) return;
+		yield step.value;
+	}
+}
+
 export function ModelPicker(props: ModelPickerProps): JSXNode {
 	const { source, registry, callbacks } = props;
 	const options = props.options ?? {};
@@ -133,13 +200,9 @@ export function ModelPicker(props: ModelPickerProps): JSXNode {
 		});
 	})();
 
-	const browser = new ModelBrowserState(source, {
-		currentContextTokens: options.currentContextTokens,
-		markOverContext: true,
-		emptyText: () => (roleMode() ? `  No quick roles in the ${cycleKey} cycle` : undefined),
-	});
-	// The rail's logos name each row's provider: picker rows show the model id alone.
-	browser.setPickerProvider(false);
+	const browser = pickerBrowser(source, options.currentContextTokens, () =>
+		roleMode() ? `  No quick roles in the ${cycleKey} cycle` : undefined,
+	);
 
 	const mode = (): Mode => (taskMode() ? "task" : roleMode() ? "role" : "session");
 

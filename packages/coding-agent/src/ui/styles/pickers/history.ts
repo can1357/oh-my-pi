@@ -21,6 +21,8 @@ import {
 } from "@oh-my-pi/pi-tui/term/painters/picker";
 import { padTo, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { keyLabel } from "../../keys/hints";
 import { bindingGlyph, selectNavGlyphs } from "../panels/common";
 import { caretField, highlightRanges, keyHintRows, tokenHits } from "./common";
 
@@ -38,12 +40,12 @@ export type HistoryLookTerm = PickerTerm & {
 };
 
 /** The key hints, in the user's bindings. */
-function hints(): (readonly [string, string])[] {
+function hints(theme: Theme): (readonly [string, string])[] {
 	return [
-		[selectNavGlyphs(), "navigate"],
-		[bindingGlyph("tui.select.confirm", "enter"), "select"],
-		["⌦", "delete at end"],
-		[bindingGlyph("tui.select.cancel", "escape"), "cancel"],
+		[selectNavGlyphs(theme), "navigate"],
+		[bindingGlyph("tui.select.confirm", "enter", theme), "select"],
+		[keyLabel(theme, "delete"), "delete at end"],
+		[bindingGlyph("tui.select.cancel", "escape", theme), "cancel"],
 	];
 }
 
@@ -88,7 +90,7 @@ function paintHistory(node: UiNode, cx: PaintContext): Block {
 			body.push(bar ? `${padTo(line, rowWidth)}${bar[i - start]}` : line);
 		}
 	}
-	body.push("", ...keyHintRows(theme, hints(), inner), "");
+	body.push("", ...keyHintRows(theme, hints(theme), inner), "");
 	const rows = [
 		boxTop(theme, width, term.title),
 		...body.map(row => boxRow(theme, width, row)),

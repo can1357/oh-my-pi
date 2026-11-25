@@ -13,7 +13,7 @@
  * a run once it completes.
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
 	type Accessor,
 	batch,
@@ -60,6 +60,7 @@ import {
 	AssistantMessageBlock,
 	type AssistantMessageModel,
 	thinkingTail,
+	type ToolResultMedia,
 } from "../../ui/transcript/messages/assistant-message";
 import { ThinkingRateMeter } from "../../session/transcript/thinking-speed";
 import { ReadGroup, ReadGroupBlock, type ReadResult } from "../../ui/transcript/read-group";
@@ -266,7 +267,7 @@ export class TranscriptPresenter {
 			transient: signal(false),
 			finalized: signal(message !== undefined),
 			linkTargets: signal<ReadonlyMap<string, string>>(options?.linkTargets ?? this.#host.linkTargets()),
-			toolResultImages: signal<ReadonlyMap<string, readonly ImageContent[]>>(new Map()),
+			toolResultMedia: signal<ReadonlyMap<string, ToolResultMedia>>(new Map()),
 			cacheInvalidation: signal<AssistantView["cacheInvalidation"] extends Signal<infer T> ? T : never>(undefined),
 			servedModelMismatch:
 				signal<AssistantView["servedModelMismatch"] extends Signal<infer T> ? T : never>(undefined),
@@ -286,7 +287,7 @@ export class TranscriptPresenter {
 			showImages: display.showImages,
 			showToolResultImages: () => !display.hideToolActivity(),
 			tableCharts: display.tableCharts,
-			toolResultImages: signals.toolResultImages,
+			toolResultMedia: signals.toolResultMedia,
 			linkTargets: signals.linkTargets,
 			...(options?.tone ? { tone: options.tone } : {}),
 			errorExpanded: () => signals.errorExpanded() || display.toolOutputExpanded(),
@@ -347,7 +348,13 @@ export class TranscriptPresenter {
 			return <AssistantMessageBlock model={model} />;
 		};
 		const block = this.#mount(factory, options?.before);
-		const view: AssistantView = { block, model, ...signals };
+		const view: AssistantView = {
+			block,
+			model,
+			...signals,
+			setToolResultMedia: (toolCallId, media) =>
+				signals.toolResultMedia.update(current => new Map(current).set(toolCallId, media)),
+		};
 		this.register(block, { kind: "assistant", view });
 		return view;
 	}
