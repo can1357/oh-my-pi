@@ -128,7 +128,11 @@ import { type OAuthAuthState, OAuthSelector } from "../../ui/overlays/pickers/oa
 import { ResetUsageSelector } from "../../ui/overlays/pickers/reset-usage-selector";
 import { RewindSelector, rewindTargets } from "../../ui/overlays/pickers/rewind-selector";
 import { SessionAccountSelector } from "../../ui/overlays/pickers/session-account-selector";
-import { SessionSelector, type SessionSelectorProps } from "../../ui/overlays/pickers/session-selector";
+import {
+	SessionSelector,
+	sessionSelectorFocus,
+	type SessionSelectorProps,
+} from "../../ui/overlays/pickers/session-selector";
 import { ThinkingSelector } from "../../ui/overlays/pickers/thinking-selector";
 import { TreeSelector } from "../../ui/overlays/pickers/tree-selector";
 import { PluginSelector } from "../../ui/overlays/plugins/selector";
@@ -2074,7 +2078,7 @@ export class SelectorController {
 						},
 					}),
 				),
-			{ focus: layerContent },
+			{ focus: sessionSelectorFocus },
 		);
 	}
 
