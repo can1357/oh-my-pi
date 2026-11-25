@@ -769,6 +769,7 @@ describe("Warp CLI-agent events", () => {
 			approvalMode: "always-ask",
 			prompt: { full: "Allow tool: bash", compact: "Allow tool: bash" },
 			safetyChecks: false,
+			answerable: true,
 		});
 
 		const osc = write.mock.calls[0]?.[0] as string;

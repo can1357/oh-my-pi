@@ -3,11 +3,13 @@
  * open right now. One instance per extension runner (one session). Each prompt is answered once:
  * the first of the host's dialog and `ctx.resolve*` to settle it wins, and the other is turned away.
  */
+import { acceptedApprovalAnswer } from "../../tools/approval";
 import type {
 	AskRequestedEvent,
 	AskResolvedEvent,
 	ExtensionApprovalAnswer,
 	ExtensionAskAnswer,
+	ExtensionAskData,
 	ToolApprovalRequestedEvent,
 } from "./types";
 
@@ -61,18 +63,6 @@ class PromptTable<TEvent, TAnswer> {
 	}
 }
 
-/** The answer `prompt` accepts for `answer`, or `undefined` when the prompt does not offer it. */
-export function acceptApprovalAnswer(
-	prompt: ToolApprovalRequestedEvent["prompt"],
-	answer: ExtensionApprovalAnswer,
-): ExtensionApprovalAnswer | undefined {
-	if (answer === "once" || answer === "deny") return answer;
-	if (answer === "session") return prompt.session ? answer : undefined;
-	if (typeof answer !== "object" || answer === null) return undefined;
-	if (!prompt.grants?.some(grant => grant.scope === answer.grant)) return undefined;
-	return { grant: answer.grant, always: answer.always === true };
-}
-
 /**
  * How the `ask` tool offers its form to extensions: open it as pending (after `ask_requested`
  * handlers ran, so one may already have answered), then report how it closed.
@@ -80,9 +70,7 @@ export function acceptApprovalAnswer(
 export interface ExtensionAskChannel {
 	open(
 		event: AskRequestedEvent,
-		accept: (
-			data: Record<string, string | number | string[]>,
-		) => Record<string, string | number | string[]> | undefined,
+		accept: (data: ExtensionAskData) => ExtensionAskData | undefined,
 	): Promise<PendingPrompt<ExtensionAskAnswer>>;
 	resolved(event: AskResolvedEvent): Promise<void>;
 }
@@ -92,7 +80,7 @@ export class PendingInteractions {
 	readonly #asks = new PromptTable<AskRequestedEvent, ExtensionAskAnswer>();
 
 	openApproval(event: ToolApprovalRequestedEvent): PendingPrompt<ExtensionApprovalAnswer> {
-		return this.#approvals.open(event.toolCallId, event, answer => acceptApprovalAnswer(event.prompt, answer));
+		return this.#approvals.open(event.toolCallId, event, answer => acceptedApprovalAnswer(event.prompt, answer));
 	}
 
 	resolveApproval(toolCallId: string, answer: ExtensionApprovalAnswer): boolean {
@@ -106,9 +94,7 @@ export class PendingInteractions {
 	/** `accept` turns a data answer into the form's submitted data, or rejects it; `cancel` is always accepted. */
 	openAsk(
 		event: AskRequestedEvent,
-		accept: (
-			data: Record<string, string | number | string[]>,
-		) => Record<string, string | number | string[]> | undefined,
+		accept: (data: ExtensionAskData) => ExtensionAskData | undefined,
 	): PendingPrompt<ExtensionAskAnswer> {
 		return this.#asks.open(event.askId, event, answer => {
 			if (answer === "cancel") return answer;

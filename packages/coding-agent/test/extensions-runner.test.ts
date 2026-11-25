@@ -3419,7 +3419,12 @@ describe("ExtensionRunner", () => {
 
 		describe("answered by an extension", () => {
 			type Seen = {
-				requested: Array<{ toolCallId: string; prompt: { session?: string }; safetyChecks: boolean }>;
+				requested: Array<{
+					toolCallId: string;
+					prompt: { session?: string };
+					safetyChecks: boolean;
+					answerable: boolean;
+				}>;
 				resolved: Array<{ approved: boolean; by: string; reason?: string }>;
 				ctx?: {
 					resolveToolApproval(id: string, answer: unknown): boolean;
@@ -3428,6 +3433,8 @@ describe("ExtensionRunner", () => {
 				/** Answer given inside the requested handler, if any. */
 				inHandler?: unknown;
 				inHandlerResult?: boolean;
+				/** Runs at the end of the requested handler. */
+				afterHandler?: () => void;
 			};
 			const globalState = globalThis as typeof globalThis & { __extApproval?: Seen };
 			afterEach(() => {
@@ -3445,6 +3452,7 @@ describe("ExtensionRunner", () => {
 							seen.requested.push(event);
 							seen.ctx = ctx;
 							if (seen.inHandler !== undefined) seen.inHandlerResult = ctx.resolveToolApproval(event.toolCallId, seen.inHandler);
+							seen.afterHandler?.();
 						});
 						pi.on("tool_approval_resolved", event => {
 							globalThis.__extApproval.resolved.push({ approved: event.approved, by: event.by, reason: event.reason });
@@ -3461,17 +3469,29 @@ describe("ExtensionRunner", () => {
 				);
 				if (options.ui !== false) initializeRunner(runner, options.select ?? (async () => "Approve"));
 				const executed = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }] }));
-				const wrapper = new ExtensionToolWrapper({ ...approvalTool, execute: executed }, runner);
-				const run = (id: string) =>
-					(wrapper as ExtensionToolWrapper<any>).execute(id, {}, undefined, undefined, {
+				const restricted = path.join(tempDir.path(), "restricted");
+				const wrapper = new ExtensionToolWrapper(
+					{ ...approvalTool, execute: executed, approvalRestrictionPaths: () => [path.join(restricted, "file")] },
+					runner,
+				);
+				const run = (
+					id: string,
+					extra: { signal?: AbortSignal; toolCall?: unknown; restrictedFolder?: boolean } = {},
+				) =>
+					(wrapper as ExtensionToolWrapper<any>).execute(id, {}, extra.signal, undefined, {
 						sessionManager,
 						modelRegistry,
 						model: undefined,
 						isIdle: () => true,
 						hasQueuedMessages: () => false,
 						abort: () => {},
-						settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
-					});
+						settings: Settings.isolated(
+							extra.restrictedFolder
+								? { "tools.approvalMode": "yolo", "tools.restrictedFolders": [restricted] }
+								: { "tools.approvalMode": "always-ask" },
+						),
+						...(extra.toolCall ? { toolCall: extra.toolCall } : {}),
+					} as never);
 				return { seen, runner, executed, run };
 			};
 
@@ -3537,16 +3557,81 @@ describe("ExtensionRunner", () => {
 				expect(seen.ctx!.resolveToolApproval("call-user-first", "deny")).toBe(false);
 			});
 
-			it("without a UI, only an answer given while handling the request approves", async () => {
+			it("without a UI the call fails closed even when a handler tries to answer", async () => {
 				const headless = await setup({ ui: false });
 				headless.seen.inHandler = "once";
-				await headless.run("call-headless-answered");
-				expect(headless.executed).toHaveBeenCalledTimes(1);
-				expect(headless.seen.resolved).toEqual([{ approved: true, by: "extension", reason: undefined }]);
+				await expect(headless.run("call-headless")).rejects.toThrow("no interactive UI available");
+				expect(headless.seen.requested[0]?.answerable).toBe(false);
+				expect(headless.seen.inHandlerResult).toBe(false);
+				expect(headless.executed).not.toHaveBeenCalled();
+				expect(headless.seen.resolved).toEqual([
+					{ approved: false, by: "user", reason: "no interactive UI available" },
+				]);
+			});
 
-				headless.seen.inHandler = undefined;
-				await expect(headless.run("call-headless-unanswered")).rejects.toThrow("no interactive UI available");
-				expect(headless.seen.ctx!.getPendingToolApprovals()).toEqual([]);
+			it("calls with provider safety checks are answered only at the host", async () => {
+				let pendingDuringDialog: unknown;
+				let resolvedDuringDialog: boolean | undefined;
+				const select = vi.fn(async () => {
+					pendingDuringDialog = globalState.__extApproval!.ctx!.getPendingToolApprovals();
+					resolvedDuringDialog = globalState.__extApproval!.ctx!.resolveToolApproval("call-safety", "once");
+					return "Deny";
+				});
+				const { seen, executed, run } = await setup({ select });
+				seen.inHandler = "once";
+				const toolCall = {
+					batchId: "safety-batch",
+					index: 0,
+					total: 1,
+					toolCalls: [],
+					providerMetadata: {
+						type: "computer",
+						providerItemId: "computer-call",
+						actions: [],
+						pendingSafetyChecks: [{ id: "safety-check", message: "Check the page" }],
+					},
+				};
+				await expect(run("call-safety", { toolCall })).rejects.toThrow("Tool call denied by user");
+				expect(seen.requested[0]).toMatchObject({ safetyChecks: true, answerable: false });
+				expect(seen.inHandlerResult).toBe(false);
+				expect(pendingDuringDialog).toEqual([]);
+				expect(resolvedDuringDialog).toBe(false);
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
+			it("calls a restricted folder raised are answered only at the host", async () => {
+				const select = vi.fn(async () => "Approve");
+				const { seen, executed, run } = await setup({ select });
+				seen.inHandler = "deny";
+				await run("call-restricted", { restrictedFolder: true });
+				expect(seen.requested[0]?.answerable).toBe(false);
+				expect(seen.inHandlerResult).toBe(false);
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed).toHaveBeenCalledTimes(1);
+				expect(seen.resolved).toEqual([{ approved: true, by: "user", reason: undefined }]);
+			});
+
+			it("an answer given while handling the request is shown to the user", async () => {
+				const select = vi.fn(async () => "Deny");
+				const { seen, runner, executed, run } = await setup({ select });
+				const notify = vi.spyOn(runner.getUIContext(), "notify");
+				seen.inHandler = "once";
+				await run("call-in-handler");
+				expect(select).not.toHaveBeenCalled();
+				expect(executed).toHaveBeenCalledTimes(1);
+				expect(notify).toHaveBeenCalledWith("Approval for dangerous_tool answered by extension", "info");
+			});
+
+			it("an answer given while the turn is aborted does not run the call", async () => {
+				const { seen, executed, run } = await setup();
+				const turn = new AbortController();
+				seen.inHandler = "once";
+				seen.afterHandler = () => turn.abort();
+				await expect(run("call-aborted", { signal: turn.signal })).rejects.toThrow(/Aborted/);
+				expect(seen.inHandlerResult).toBe(true);
+				expect(executed).not.toHaveBeenCalled();
+				expect(seen.resolved[0]).toMatchObject({ approved: false, by: "user" });
 			});
 		});
 	});

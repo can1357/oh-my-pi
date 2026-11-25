@@ -11,6 +11,7 @@ import type {
 	AskRequestedEvent,
 	AskResolvedEvent,
 	ExtensionAskAnswer,
+	ExtensionAskData,
 	ExtensionFormDialogResult,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -960,6 +961,83 @@ describe("AskTool answered by an extension", () => {
 		).rejects.toBeInstanceOf(ToolAbortError);
 		expect(abort).toHaveBeenCalled();
 		expect(ext.resolved[0]).toMatchObject({ answered: false, by: "extension" });
+	});
+
+	it("an answer given while the call is aborted takes the abort path", async () => {
+		const turn = new AbortController();
+		const pending = new PendingInteractions();
+		const resolved: AskResolvedEvent[] = [];
+		const extensionAsk: Channel = {
+			async open(event, accept) {
+				const prompt = pending.openAsk(event, accept);
+				pending.resolveAsk(event.askId, { data: { store: "redis" } });
+				turn.abort();
+				return prompt;
+			},
+			async resolved(event) {
+				resolved.push(event);
+			},
+		};
+		await expect(
+			new AskTool(createSession()).execute(
+				"call-ext-aborted",
+				{ html: DB_FORM },
+				turn.signal,
+				undefined,
+				withChannel(createContext({}), extensionAsk),
+			),
+		).rejects.toThrow("Ask input was cancelled");
+		expect(resolved[0]).toMatchObject({ answered: false, by: "user" });
+	});
+
+	describe("choice answers", () => {
+		const CHOICES = `<form>
+  <fieldset><legend>Tags</legend>
+    <label><input type="checkbox" name="tags" value="a" checked> A</label>
+    <label><input type="checkbox" name="tags" value="b"> B</label>
+    <label><input type="checkbox" name="tags" value="c" disabled> C</label>
+  </fieldset>
+  <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
+</form>`;
+		const answer = async (data: ExtensionAskData) => {
+			const ext = channel();
+			const opened = Promise.withResolvers<void>();
+			const select = vi.fn<Select>(async (_title, _options, dialogOptions) => {
+				opened.resolve();
+				await new Promise<void>(resolve => dialogOptions?.signal?.addEventListener("abort", () => resolve()));
+				return undefined;
+			});
+			const outcome = new AskTool(createSession()).execute(
+				"call-choices",
+				{ html: CHOICES },
+				undefined,
+				undefined,
+				withChannel(createContext({ select }), ext.extensionAsk),
+			);
+			await opened.promise;
+			const accepted = ext.pending.resolveAsk("call-choices", { data });
+			if (!accepted) ext.pending.resolveAsk("call-choices", "cancel");
+			const result = await outcome.catch(() => undefined);
+			return { accepted, result };
+		};
+
+		it("rejects a disabled option", async () => {
+			expect((await answer({ tags: ["c"] })).accepted).toBe(false);
+		});
+		it("rejects more than one Other value in a multi field", async () => {
+			expect((await answer({ tags: ["a", "x", "y"] })).accepted).toBe(false);
+		});
+		it("rejects an Other value when the field offers none", async () => {
+			expect((await answer({ region: "asia" })).accepted).toBe(false);
+		});
+		it("accepts one Other value beside options, and an empty array clears the group", async () => {
+			const other = await answer({ tags: ["b", "x"] });
+			expect(other.accepted).toBe(true);
+			expect(text(other.result!)).toContain(JSON.stringify({ tags: ["b", "x"], region: "eu" }, null, 2));
+			const cleared = await answer({ tags: [] });
+			expect(cleared.accepted).toBe(true);
+			expect(text(cleared.result!)).toContain(JSON.stringify({ region: "eu" }, null, 2));
+		});
 	});
 
 	it("once the user answers, the extension can no longer", async () => {

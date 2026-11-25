@@ -4,7 +4,7 @@
 
 ### Added
 
-- Extensions can answer pending tool approvals and `ask` questions: `ctx.resolveToolApproval` / `ctx.getPendingToolApprovals` and `ctx.resolveAsk` / `ctx.getPendingAsks`, with the rendered prompt on `tool_approval_requested`, new `ask_requested` / `ask_resolved` events, and `by: "user" | "extension"` on the resolved events; the first answer wins and closes the host's dialog ([#20502](https://github.com/can1357/oh-my-pi/pull/20502) by [@Rinai-R](https://github.com/Rinai-R))
+- Extensions can answer tool approvals and `ask` questions on the user's behalf, for example from another device; the first answer wins and the terminal dialog closes with a notice ([#20502](https://github.com/can1357/oh-my-pi/pull/20502) by [@Rinai-R](https://github.com/Rinai-R))
 ### Breaking Changes
 
 - Removed `errorMessage` from `@oh-my-pi/pi-coding-agent/disasm/protocol`, `slash-commands/helpers/parse` and `subprocess/worker-runtime`; import it from `@oh-my-pi/pi-utils/type-guards` ([#20479](https://github.com/can1357/oh-my-pi/pull/20479) by [@H4vC](https://github.com/H4vC))

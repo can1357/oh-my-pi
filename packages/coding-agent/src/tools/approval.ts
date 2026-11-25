@@ -881,15 +881,23 @@ export async function presentApproval(
 	signal?: AbortSignal,
 ): Promise<ExtensionApprovalAnswer> {
 	const dialogOptions = signal ? { signal } : undefined;
-	if (ui.approve) {
-		const answer = await ui.approve(prompt, dialogOptions);
-		if (answer === "once" || (answer === "session" && prompt.session)) return answer;
-		if (typeof answer === "object" && answer !== null && prompt.grants?.some(grant => grant.scope === answer.grant)) {
-			return { grant: answer.grant, always: answer.always === true };
-		}
-		return "deny";
-	}
+	if (ui.approve) return acceptedApprovalAnswer(prompt, await ui.approve(prompt, dialogOptions)) ?? "deny";
 	return approvalAnswerForChoice(prompt, await ui.select(prompt.full, approvalChoiceLabels(prompt), dialogOptions));
+}
+
+/**
+ * `answer` as `prompt` accepts it, or `undefined` when the prompt does not offer it: `session` needs the
+ * prompt's session label and a grant one of its grant scopes. Shared by the dialog and extension answers.
+ */
+export function acceptedApprovalAnswer(
+	prompt: Pick<ExtensionApprovalPrompt, "session" | "grants">,
+	answer: unknown,
+): ExtensionApprovalAnswer | undefined {
+	if (answer === "once" || answer === "deny") return answer;
+	if (answer === "session") return prompt.session ? answer : undefined;
+	if (typeof answer !== "object" || answer === null || !("grant" in answer)) return undefined;
+	const grant = prompt.grants?.find(candidate => candidate.scope === answer.grant);
+	return grant ? { grant: grant.scope, always: "always" in answer && answer.always === true } : undefined;
 }
 
 /** Ask the user to approve a call: {@link buildApprovalPrompt} shown by {@link presentApproval}. */

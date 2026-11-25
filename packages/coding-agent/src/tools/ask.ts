@@ -691,7 +691,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		try {
 			const early = pending?.given();
 			if (early !== undefined) {
+				// Cancelled or interrupted while a handler ran: take that path, not the late answer.
+				if (dialogSignal.aborted) throw abortError();
 				by = "extension";
+				extensionUi.notify("Question answered by extension", "info");
 				answered = early === "cancel" ? undefined : { data: early.data };
 			} else {
 				const extensionClose = new AbortController();
@@ -715,10 +718,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				const fromExtension = pending?.answer.then(value => ({ by: "extension" as const, value }));
 				const first = await (fromExtension ? Promise.race([fromUser, fromExtension]) : fromUser);
 				if (first.by === "extension") {
-					by = "extension";
 					extensionClose.abort();
 					// The closed dialog settles (cancel or abort) with nobody to read it.
 					fromUser.catch(() => {});
+					if (dialogSignal.aborted) throw abortError();
+					by = "extension";
 					extensionUi.notify("Question answered by extension", "info");
 					answered = first.value === "cancel" ? undefined : { data: first.value.data };
 				} else {

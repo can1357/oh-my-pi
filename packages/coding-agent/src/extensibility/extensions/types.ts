@@ -880,8 +880,9 @@ export interface ExtensionContext {
 	 * Answer a pending tool approval (see `tool_approval_requested`) as if the user picked `answer` in
 	 * its dialog; the host's dialog closes and the user is told an extension answered. `session` and
 	 * grant answers apply exactly as from the dialog (session approval, `always-ask-cached` grants).
-	 * First answer wins: false when the call is not pending (unknown, already answered, aborted) or the
-	 * prompt does not offer `answer` (no `session` label, or a grant scope it does not list).
+	 * First answer wins: false when the call is not pending (unknown, already answered, aborted, or not
+	 * `answerable`) or the prompt does not offer `answer` (no `session` label, or a grant scope it does not list).
+	 * An answer given while the call's turn is being aborted is discarded and the call fails closed.
 	 */
 	resolveToolApproval(toolCallId: string, answer: ExtensionApprovalAnswer): boolean;
 	/** Tool approvals still awaiting an answer, oldest first, as `tool_approval_requested` reported them. */
@@ -1489,7 +1490,7 @@ export interface InputEvent {
  * The prompt stays open until the first answer: the host's dialog or an extension, whichever comes first.
  * `tool_approval_resolved` and the host dialog wait until every handler of this event returns, so
  * handlers should hand long work (a remote round-trip) off rather than await it; a resolve made inside
- * a handler answers the call before any dialog opens.
+ * a handler answers the call before any dialog opens. Only `answerable` calls take an extension's answer.
  */
 export interface ToolApprovalRequestedEvent {
 	type: "tool_approval_requested";
@@ -1502,6 +1503,11 @@ export interface ToolApprovalRequestedEvent {
 	prompt: ExtensionApprovalPrompt;
 	/** True when the call carries provider safety checks (listed at the end of `prompt.full`). */
 	safetyChecks: boolean;
+	/**
+	 * Whether `ctx.resolveToolApproval` can answer this call. False when only the host can: a host without a
+	 * UI (the call fails closed), provider safety checks, or a prompt raised by `tools.restrictedFolders`.
+	 */
+	answerable: boolean;
 }
 
 export interface ToolApprovalResolvedEvent {
@@ -1566,7 +1572,10 @@ export interface AskResolvedEvent {
  * array for multi-choice fields; a choice value outside its options is the "Other" text), or `cancel`.
  * Unanswered fields keep their defaults.
  */
-export type ExtensionAskAnswer = { data: Record<string, string | number | string[]> } | "cancel";
+export type ExtensionAskAnswer = { data: ExtensionAskData } | "cancel";
+
+/** Values of an `ask` form by control `name`, as an extension answers them. */
+export type ExtensionAskData = Record<string, string | number | string[]>;
 
 /** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
 export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
