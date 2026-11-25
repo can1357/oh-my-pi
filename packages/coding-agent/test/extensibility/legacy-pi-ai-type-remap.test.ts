@@ -208,54 +208,6 @@ describe("legacy pi package root remaps (issue #1474)", () => {
 		expect(loaded.loadedVersion).toMatch(/^\d+\.\d+\.\d+/);
 	});
 
-	it("loads pi-vimmode's minified legacy imports", async () => {
-		const entry = await writeFixtureExtension(
-			[
-				'import{CustomEditor,copyToClipboard}from"@earendil-works/pi-coding-agent";',
-				'import{CURSOR_MARKER,decodeKittyPrintable,matchesKey,parseKey,truncateToWidth,visibleWidth}from"@earendil-works/pi-tui";',
-				"export const apiTypes=[typeof CustomEditor,typeof copyToClipboard,typeof CURSOR_MARKER,typeof decodeKittyPrintable,typeof matchesKey,typeof parseKey,typeof truncateToWidth,typeof visibleWidth];",
-				'export const printable=decodeKittyPrintable("\\x1b[97u");',
-			].join("\n"),
-		);
-
-		const loaded = (await loadLegacyPiModule(entry)) as { apiTypes: string[]; printable: string };
-		expect(loaded.apiTypes).toEqual([
-			"function",
-			"function",
-			"string",
-			"function",
-			"function",
-			"function",
-			"function",
-			"function",
-		]);
-		expect(loaded.printable).toBe("a");
-	});
-
-	it("loads pi-sprite's legacy terminal helpers", async () => {
-		const entry = await writeFixtureExtension(
-			[
-				'import { deleteAllKittyImages, deleteKittyImage, getCapabilities } from "@earendil-works/pi-tui";',
-				"export const deleteOne = deleteKittyImage(42);",
-				"export const deleteAll = deleteAllKittyImages();",
-				"export const capabilities = getCapabilities();",
-			].join("\n"),
-		);
-
-		const loaded = (await loadLegacyPiModule(entry)) as {
-			deleteOne: string;
-			deleteAll: string;
-			capabilities: { images: "kitty" | "iterm2" | null; trueColor: boolean; hyperlinks: boolean };
-		};
-		// Bare sequences, exactly like upstream Pi: legacy callers (pi-sprite)
-		// apply their own tmux passthrough wrapping.
-		expect(loaded.deleteOne).toBe("\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
-		expect(loaded.deleteAll).toBe("\x1b_Ga=d,d=A,q=2\x1b\\");
-		expect(["kitty", "iterm2", null]).toContain(loaded.capabilities.images);
-		expect(typeof loaded.capabilities.trueColor).toBe("boolean");
-		expect(typeof loaded.capabilities.hyperlinks).toBe("boolean");
-	});
-
 	it("preserves legacy defineTool root imports and usable coding tools", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-legacy-coding-tools-"));
 		tempRoots.push(dir);

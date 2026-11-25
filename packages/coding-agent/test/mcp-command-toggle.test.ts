@@ -7,7 +7,6 @@ import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { readMCPConfigFile } from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import type { MCPDroppedServer } from "@oh-my-pi/pi-coding-agent/mcp/transforms";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	getConfigRootDir,
 	getMCPConfigPath,
@@ -17,6 +16,7 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import { createInteractiveModeContext, createMcpManagerStub } from "./helpers/interactive-mode-context";
+import { initTheme } from "../src/ui/theme/service";
 
 const originalProjectDir = getProjectDir();
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;

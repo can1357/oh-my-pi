@@ -29,6 +29,7 @@ import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
+	AgentLoopError,
 	abortReasonText,
 	agentLoop,
 	agentLoopContinue,
@@ -134,7 +135,7 @@ export interface AgentOptions {
 	 * Optional transform applied after provider context assembly and before
 	 * telemetry capture/provider send.
 	 */
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 
 	/**
 	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn
@@ -432,7 +433,7 @@ export class Agent {
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	#transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
 	#standbyTools: AgentTool[] = [];
 	#steeringQueue: AgentMessage[] = [];
@@ -984,6 +985,7 @@ export class Agent {
 	async buildSideRequestContext(
 		llmMessages: Message[],
 		systemPrompt: string[] = this.#state.systemPrompt,
+		signal?: AbortSignal,
 	): Promise<Context> {
 		const model = this.#state.model;
 		if (!model) throw new Error("No active model on agent");
@@ -1000,7 +1002,7 @@ export class Agent {
 		// Side requests reuse the main loop's sent definitions without recording their own; attached before the
 		// transform too, so a request-size clamp in it measures them.
 		context = this.#sentToolDefinitions.withInactiveTools(context, standby);
-		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
+		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model, signal);
 		context = this.#sentToolDefinitions.withInactiveTools(context, context.inactiveTools);
 		return context;
 	}
@@ -2259,6 +2261,7 @@ export class Agent {
 					? AIError.create(AIError.Flag.Abort)
 					: AIError.classify(loopSignal.reason) || undefined
 				: AIError.classify(err, errorModel.api) || undefined;
+			const errorFromAgentLoop = (!stoppedForAbort && err instanceof AgentLoopError) || undefined;
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2288,6 +2291,7 @@ export class Agent {
 							errorMessage,
 							errorStatus,
 							errorId,
+							errorFromAgentLoop,
 						}
 					: {
 							role: "assistant",
@@ -2307,6 +2311,7 @@ export class Agent {
 							errorMessage,
 							errorStatus,
 							errorId,
+							errorFromAgentLoop,
 							timestamp: Date.now(),
 						};
 

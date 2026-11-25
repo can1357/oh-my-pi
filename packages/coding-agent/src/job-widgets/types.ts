@@ -4,7 +4,7 @@
  * into a `JobWidgetView` for the `wait` card, the HUD and the jobs sheet
  * ({@link JobWidgetRegistry}).
  */
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../tools/details/job-widget";
 import type { AsyncJob } from "../async/job-manager";
 
 /** Id of a task job's source carrying its subagent's finished tool calls. */

@@ -18,7 +18,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { expandModelMentionTags } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+import { expandModelMentionTags } from "@oh-my-pi/pi-coding-agent/session/model-mention-syntax";
 import {
 	MODEL_MENTION_ENTRY_TYPE,
 	ModelMentionRegistry,

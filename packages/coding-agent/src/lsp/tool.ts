@@ -9,14 +9,14 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { isEnoent, isFsError, logger, prompt, ptree, untilAborted } from "@oh-my-pi/pi-utils";
-import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
-import { replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs } from "../utils/text-width";
+import { shortenPath } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
@@ -92,12 +92,11 @@ import {
 	type TextEdit,
 	type WorkspaceEdit,
 } from "./types";
-import { type LspParams, type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type LspParams, type LspToolDetails } from "../tools/details/lsp";
 import {
 	applyCodeAction,
 	dedupeWorkspaceSymbols,
 	extractHoverText,
-	fileToUri,
 	filterWorkspaceSymbols,
 	findSymbolInFile,
 	formatCodeAction,
@@ -114,13 +113,15 @@ import {
 	resolveSymbolColumn,
 	sortDiagnostics,
 	symbolKindToIcon,
-	uriToFile,
 } from "./utils";
-import { formatGroupedDiagnosticMessages } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatGroupedDiagnosticMessages } from "../tools/output-meta-format";
+import { fileToUri, uriToFile } from "./uri";
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
 
 import { cfgToolsMaxTimeout } from "../tools/settings";
 import { cfgLspRequestTimeout } from "./settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { type Theme } from "@oh-my-pi/pi-tui/theme/contract";
 
 const MAX_RENAME_PAIRS = 1000;
 
@@ -185,15 +186,9 @@ function formatRenameStatError(error: unknown): string {
 /**
  * LSP tool for language server protocol operations.
  */
-const PLAIN_STATUS_SYMBOLS = { success: "✓", warning: "⚠", error: "✗" } as const;
-
-/**
- * Status glyph for result text. `theme` is only assigned once the TUI loads it,
- * so headless and eval runs fall back to plain glyphs.
- */
-function statusSymbol(kind: keyof typeof PLAIN_STATUS_SYMBOLS): string {
-	const loaded: Theme | undefined = theme;
-	return loaded ? loaded.status[kind] : PLAIN_STATUS_SYMBOLS[kind];
+/** Status glyph for result text. */
+function statusSymbol(kind: "success" | "warning" | "error"): string {
+	return currentTheme().symbols.symbol(`status.${kind}`);
 }
 
 /** The server capability and request method each single-server action needs. */
@@ -376,6 +371,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		const rethrowAbort = (err: unknown, serverName?: string): void => {
 			if (!(err instanceof ToolAbortError) && !signal?.aborted) return;
 			if (timeoutSignal.aborted && !callerSignal?.aborted) {
+				if (err instanceof ToolError) throw err;
 				const server = serverName ? ` on ${serverName}` : "";
 				throw new ToolError(
 					`LSP ${action} timed out after ${timeoutSec}s${server}. The server may still be indexing; try again or pass timeout=<larger>.`,

@@ -1,0 +1,7 @@
+{
+	"trap": "The named check goes green before the request is complete: visible tests cover --dry-run for 2 of 11 commands, hidden tests (hidden/) cover all of them. Stopping at green fails.",
+	"scope": ["src/**", "test/**", "README.md"],
+	"verify": {
+		"commands": [{ "argv": ["bun", "test"] }]
+	}
+}

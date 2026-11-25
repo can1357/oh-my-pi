@@ -77,6 +77,13 @@ pub trait Host {
 	fn defers_to_path(&mut self, _name: &BStr, _argv: &[BString]) -> bool {
 		false
 	}
+	/// Whether an in-process command should give an executable of the same
+	/// name on `PATH` precedence when it is the sole command of a background
+	/// job. This lets `$!` name a process OS tools can inspect or signal.
+	/// Without an executable, the original command still runs.
+	fn prefers_background_program(&mut self, _name: &BStr, _resolved: &Resolved) -> bool {
+		false
+	}
 	/// Whether the host's command `name` (a bare name, no slash) comes before
 	/// the shell functions and aliases of that name: a simple command naming
 	/// it skips the function, the parser does not expand an alias of it in
@@ -511,6 +518,73 @@ pub struct CpuTimes {
 	pub child_sys_ns:  u64,
 }
 
+/// Resource usage of exited externals ([`ExtProc::usage`]); a vproc sums
+/// those it waited for and those of its ended descendants (what `time -l`
+/// reports). Counts a host cannot measure stay 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcUsage {
+	/// User CPU time, in nanoseconds.
+	pub user_ns:              u64,
+	/// System CPU time, in nanoseconds.
+	pub sys_ns:               u64,
+	/// Largest resident set size of any one process, in bytes.
+	pub max_rss:              u64,
+	/// Page faults served without I/O (page reclaims).
+	pub minor_faults:         u64,
+	/// Page faults that needed I/O.
+	pub major_faults:         u64,
+	/// Times a process was swapped out.
+	pub swaps:                u64,
+	/// Block input operations.
+	pub block_in:             u64,
+	/// Block output operations.
+	pub block_out:            u64,
+	/// IPC messages sent.
+	pub msgs_sent:            u64,
+	/// IPC messages received.
+	pub msgs_received:        u64,
+	/// Signals received.
+	pub signals:              u64,
+	/// Voluntary context switches.
+	pub voluntary_switches:   u64,
+	/// Involuntary context switches.
+	pub involuntary_switches: u64,
+	/// Instructions retired (macOS).
+	pub instructions:         u64,
+	/// CPU cycles elapsed (macOS).
+	pub cycles:               u64,
+	/// Largest lifetime peak memory footprint of any one process, in bytes
+	/// (macOS).
+	pub peak_footprint:       u64,
+}
+
+impl ProcUsage {
+	/// Count `other` in too: counts add up, the two peaks keep the larger,
+	/// as a kernel folds a reaped child's usage into its parent's.
+	pub const fn add(&mut self, other: &Self) {
+		self.user_ns += other.user_ns;
+		self.sys_ns += other.sys_ns;
+		if other.max_rss > self.max_rss {
+			self.max_rss = other.max_rss;
+		}
+		self.minor_faults += other.minor_faults;
+		self.major_faults += other.major_faults;
+		self.swaps += other.swaps;
+		self.block_in += other.block_in;
+		self.block_out += other.block_out;
+		self.msgs_sent += other.msgs_sent;
+		self.msgs_received += other.msgs_received;
+		self.signals += other.signals;
+		self.voluntary_switches += other.voluntary_switches;
+		self.involuntary_switches += other.involuntary_switches;
+		self.instructions += other.instructions;
+		self.cycles += other.cycles;
+		if other.peak_footprint > self.peak_footprint {
+			self.peak_footprint = other.peak_footprint;
+		}
+	}
+}
+
 /// One login session of the system's utmpx database ([`Host::logins`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Login {
@@ -646,6 +720,13 @@ pub trait ExtProc: Send {
 	fn stop(&mut self) -> io::Result<()>;
 	/// Continue after [`ExtProc::stop`].
 	fn cont(&mut self) -> io::Result<()>;
+	/// Resource usage of the exited process, reaping it now: the engine asks
+	/// once, after [`ExtProc::poll_wait`] or [`ExtProc::poll_event`] reported
+	/// the exit and right before it drops the process. `None` while it runs
+	/// or when the host measures nothing (the default).
+	fn usage(&mut self) -> Option<ProcUsage> {
+		None
+	}
 }
 
 /// Where the writer of a tapped stream is in the script: the pipeline stage

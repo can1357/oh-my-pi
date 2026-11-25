@@ -1,16 +1,22 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, truncate } from "@oh-my-pi/pi-utils";
-import { collapseCommand } from "@oh-my-pi/pi-tui/apps/ps-data";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
-import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { collapseCommand } from "../cli/ps-model";
+import type { StructuredSubagentOutput } from "../task/task-details";
+import type { OutputMeta } from "../tools/output-meta-format";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { IrcBus } from "../irc/bus";
+import { yieldQueueStaleMessage } from "../session/yield-queue";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
+/**
+ * How the session's async-result sink rejects a queued push that went stale because this manager
+ * suppressed its delivery. Matched by message: the sink may sit behind the thread RPC boundary.
+ */
+const STALE_ASYNC_RESULT_ERROR = yieldQueueStaleMessage("async-result");
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 
 /** Maximum characters kept in a command-derived async job label. */
@@ -1607,15 +1613,22 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				delivery.attempt += 1;
 				delivery.lastError = error instanceof Error ? error.message : String(error);
 				delivery.nextAttemptAt = Date.now() + this.#getRetryDelay(delivery.attempt);
-				if (!this.isDeliverySuppressed(delivery.jobId) && this.#jobs.has(delivery.jobId)) {
-					this.#queueDelivery(delivery);
+				const suppressed = this.isDeliverySuppressed(delivery.jobId);
+				const retrying = !suppressed && this.#jobs.has(delivery.jobId);
+				if (retrying) this.#queueDelivery(delivery);
+				if (suppressed && delivery.lastError === STALE_ASYNC_RESULT_ERROR) {
+					logger.debug("Async job completion delivery superseded", {
+						jobId: delivery.jobId,
+						error: delivery.lastError,
+					});
+				} else {
+					logger.warn("Async job completion delivery failed", {
+						jobId: delivery.jobId,
+						attempt: delivery.attempt,
+						nextRetryAt: retrying ? delivery.nextAttemptAt : undefined,
+						error: delivery.lastError,
+					});
 				}
-				logger.warn("Async job completion delivery failed", {
-					jobId: delivery.jobId,
-					attempt: delivery.attempt,
-					nextRetryAt: delivery.nextAttemptAt,
-					error: delivery.lastError,
-				});
 			} finally {
 				const index = this.#inFlightDeliveries.indexOf(delivery);
 				if (index !== -1) this.#inFlightDeliveries.splice(index, 1);

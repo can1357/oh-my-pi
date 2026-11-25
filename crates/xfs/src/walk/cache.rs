@@ -33,7 +33,7 @@ use parking_lot::RwLock;
 use super::is_separator;
 use crate::{
 	fs::{Dir, Listing, Session, Stamp},
-	ignore::{DirIgnores, Names, Sources},
+	ignore::{DirIgnores, EXCLUDE, Names, Sources},
 };
 
 /// The ignore sources of cached listings: walks with their own ignore file
@@ -162,21 +162,27 @@ impl Cache {
 		}
 		if let Some(ignores) = ignores {
 			for (index, name) in DirIgnores::source_names(dir.names, CACHED_SOURCES) {
-				scratch.clear();
-				scratch.extend_from_slice(key);
-				if !scratch.last().is_some_and(|&b| is_separator(b)) {
-					scratch.push(super::SEP);
-				}
-				let start = scratch.len();
-				scratch.extend_from_slice(name.as_bytes());
-				for byte in &mut scratch[start..] {
-					if *byte == b'/' {
-						*byte = super::SEP;
-					}
-				}
-				// SAFETY: `scratch` joins an encoded path, an ASCII separator,
-				// and an ASCII name, which is valid encoded `OsStr` data.
-				let path = Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(scratch) });
+				let path = match &ignores.linked_exclude {
+					Some(linked) if index == EXCLUDE => linked.as_path(),
+					_ => {
+						scratch.clear();
+						scratch.extend_from_slice(key);
+						if !scratch.last().is_some_and(|&b| is_separator(b)) {
+							scratch.push(super::SEP);
+						}
+						let start = scratch.len();
+						scratch.extend_from_slice(name.as_bytes());
+						for byte in &mut scratch[start..] {
+							if *byte == b'/' {
+								*byte = super::SEP;
+							}
+						}
+						// SAFETY: `scratch` joins an encoded path, an ASCII
+						// separator, and an ASCII name, which is valid encoded
+						// `OsStr` data.
+						Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(scratch) })
+					},
+				};
 				let stamp = session
 					.stat(path, true)
 					.await

@@ -1,63 +1,64 @@
 /**
- * `magic` edit mode: edit a file from a described change.
+ * `edit.mode: magic`: the agent describes what to change in words, and a
+ * dedicated apply model carries out the change on each named file through a
+ * multi-turn `replace`/`read`/`search` tool loop over an in-memory buffer.
  *
- * The calling agent states the changes in words, one `# path` section per file:
- *
- * ```text
- * # src/jobs.ts
- * - In `drain()`, declare `limit` before `batch`.
- * # src/parse.ts
- * - Rename every `retrunValue` to `returnValue`.
- * ```
- *
- * For each file an auxiliary model (the `edit.magic.model` selector, else the
- * `smol` role) reads the numbered file and returns line operations against it. The edit tool applies them as one atomic batch,
- * preserving plan-mode policy, LSP writethrough and the result diff.
- * A rejected batch goes back to the model for a corrected reply. A file
- * whose change runs out of attempts is left as it was. The
- * files' completions run concurrently; their writes do not.
+ * The tool input is Markdown sections headed by `# path`. A section's change
+ * is applied in memory, syntax-checked against tree-sitter when the original
+ * file parsed, and committed atomically through the edit tool's `replace`
+ * engine with a snapshot guard so concurrent external writes are refused.
  */
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type Api, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	completeSimple,
+	type Message,
+	type Model,
+	retryTransientCompletion,
+	type Tool,
+	type ToolCall,
+	type ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import { parseCodeStatus } from "@oh-my-pi/pi-natives";
-import type { EditToolDetails, EditToolPerFileResult } from "@oh-my-pi/pi-tui/tools/edit";
-import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
-import { splitMagicSections } from "@oh-my-pi/pi-tui/tools/magic-sections";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
+import { concreteThinkingLevel, toReasoningEffort } from "../thinking/levels";
+import type { EditToolDetails, EditToolPerFileResult } from "../tools/details/edit";
+import { splitMagicSections } from "./magic-sections";
+import { ToolError } from "../tools/tool-errors";
+import { isEnoent, prompt, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
 import { journalCompletion } from "../session/model-usage-journal";
 import type { ToolSession } from "../tools";
 import { resolvePlanPath } from "../tools/plan-mode-guard";
+import applyFeedbackPrompt from "./magic-apply-feedback.md" with { type: "text" };
 import applyRequestPrompt from "./magic-apply.md" with { type: "text" };
 import applySystemPromptSource from "./magic-apply-system.md" with { type: "text" };
-import { blockHints, compileLineEdits, diagnoseSyntaxFailure } from "./magic-lines";
+import { normalizeApplyArguments, parseWrittenToolCalls } from "./magic-calls";
+import {
+	APPLY_TOOLS,
+	type AppliedReplace,
+	applyReplace,
+	diagnoseBufferSyntax,
+	readBufferLines,
+	searchBuffer,
+} from "./magic-tools";
 import { type FileView, fileViews } from "./magic-view";
 import { normalizeToLF, stripBom } from "./normalize";
 import type { ReplaceBatchParams } from "./schemas";
 import { cfgEditMagicModel } from "./settings";
 
-/** Completions per call: the first reply plus corrections after a rejected batch. */
-const MAX_ATTEMPTS = 3;
+/** Maximum model turns for one file's edit session. */
+const MAX_TURNS = 12;
 const COMPLETION_MAX_TOKENS = 16_384;
-/** One budget across every attempt: the calling agent's turn blocks on the edit. */
+/** One budget across every turn: the calling agent's turn blocks on the edit. */
 const APPLY_TIMEOUT_MS = 120_000;
-/** Largest share of the apply model's context window the shown part of a file may take. */
+/** Largest share of the apply model's context window the initial file view may take. */
 const MAX_CONTEXT_SHARE = 0.5;
 /** Conservative characters-per-token estimate for source text. */
 const CHARS_PER_TOKEN = 3;
 
 const REFUSAL = /^CANNOT:\s*(.*)/i;
-/**
- * Output tokens per character of the shown file and the change, plus slack: a
- * reply never needs more than retyping both, so a model that keeps talking is
- * stopped long before the general output limit. Models that can reason are
- * exempt: reasoning counts against the same limit, and some reason even when
- * told not to.
- */
-const OUTPUT_TOKENS_PER_CHAR = 0.5;
-const OUTPUT_SLACK_TOKENS = 256;
 
 const APPLY_SYSTEM_PROMPT = prompt.render(applySystemPromptSource);
 
@@ -94,12 +95,12 @@ export function magicEditPaths(input: string): string[] {
 }
 
 /**
- * Split a payload into its per-file sections. Sections naming the same path
- * merge, in order, so every file is edited once.
+ * Split a `magic` edit payload into one section per named file, in order of
+ * first appearance. Repeated headers for the same file merge into one section.
  *
  * # Errors
- * {@link ToolError} when there is no section, when text precedes the first
- * `# path` line, or when a section describes no change.
+ * {@link ToolError} when no `# path` header is given, text appears before the
+ * first header, or a header carries no change text.
  */
 export function parseMagicInput(input: string): MagicSection[] {
 	const { runs, outside } = splitMagicSections(input);
@@ -122,120 +123,210 @@ export function parseMagicInput(input: string): MagicSection[] {
 	return sections;
 }
 
-/** `content` with the edit's unique `old_string` (or the whole content) replaced. */
-function spliced(content: string, edit: ReplaceEdit): string {
-	const at = content.indexOf(edit.old_string);
-	return content.slice(0, at) + edit.new_string + content.slice(at + edit.old_string.length);
+function toolResult(call: ToolCall, text: string, isError: boolean): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: call.id,
+		toolName: call.name,
+		content: [{ type: "text", text }],
+		isError,
+		timestamp: Date.now(),
+	};
+}
+
+/** Replay written calls as native calls instead of the text or its original Responses items. */
+function withWrittenToolCalls(response: AssistantMessage, calls: ToolCall[]): AssistantMessage {
+	const { providerPayload: _native, ...rest } = response;
+	return {
+		...rest,
+		content: [...response.content.filter(block => block.type !== "text"), ...calls],
+		stopReason: "toolUse",
+	};
 }
 
 /**
- * Ask `complete` for an edit to the LF snapshot, compile it into one atomic
- * batch, and return any rejection to the model for correction.
+ * Drive the apply model across turns of `replace`, `read`, and `search` tool
+ * calls against an in-memory buffer of `content`, syntax-check the final
+ * buffer, and commit one atomic edit through `apply`.
  *
- * The model is shown `views` in order (by default {@link fileViews}): a reply
- * that fails against an excerpt is asked for again with the next, wider view.
+ * If the model declines on an initial excerpt without inspecting more of the
+ * file and a wider view is available, the loop restarts afresh with that view.
  *
  * # Errors
- * {@link ToolError} when the model declines the change with nothing wider to
- * show it, or when no reply applied within {@link MAX_ATTEMPTS}. `apply` never
- * succeeded, so the file is as it was.
+ * {@link ToolError} when the file is empty, when the model refuses, when the
+ * edits leave the file unparseable or unfinished within {@link MAX_TURNS}, or
+ * when `apply` rejects the commit.
  */
 export async function applyDescribedChange(options: {
 	path: string;
 	change: string;
 	content: string;
-	/** What the model may be shown, narrowest first; at least one view. */
+	/** Initial views of `content`, narrowest first; at least one view. */
 	views?: FileView[];
-	/** One completion of at most `maxTokens` output tokens. */
-	complete: (request: string, maxTokens: number) => Promise<Reply>;
-	apply: (edits: ReplaceEdit[], checkSnapshot?: boolean) => Promise<AgentToolResult<EditToolDetails>>;
+	/** Run one model completion turn with the current conversation and tools. */
+	complete: (messages: Message[], tools: Tool[]) => Promise<AssistantMessage>;
+	apply: (edits: ReplaceEdit[]) => Promise<AgentToolResult<EditToolDetails>>;
 }): Promise<AgentToolResult<EditToolDetails>> {
 	const { path, change, content } = options;
+	if (content === "") throw new ToolError(`${path} is empty; use write instead.`);
 	const views = options.views ?? fileViews(content, change);
 	const parses = (code: string) => parseCodeStatus({ code: code === "" ? "\n" : code, path }).parsed;
-	// A file that parses must still parse: a wrong range goes back to the model, not to syntax repair.
 	const parsed = parses(content);
-	let view = 0;
-	let previous: string | undefined;
-	let rejection = "";
-	/** A change whose ranges were doubted once; repeating it confirms it. */
-	const doubted = new Set<string>();
-	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-		const currentView = views[view];
-		const { text: file, partial } = currentView;
-		// Whatever goes wrong against an excerpt, the next attempt sees more of the file.
-		const wider = view < views.length - 1;
-		if (wider) view++;
-		const { text: reply, truncated } = await options.complete(
-			prompt.render(applyRequestPrompt, {
-				path,
-				file,
-				partial,
-				change,
-				previous,
-				rejection,
-			}),
-			Math.ceil((file.length + change.length) * OUTPUT_TOKENS_PER_CHAR) + OUTPUT_SLACK_TOKENS,
-		);
-		const refusal = reply.trim().match(REFUSAL);
-		if (refusal) {
-			// The model may have missed lines the excerpt left out: ask afresh.
-			if (wider) {
-				// Widening after an excerpt refusal must not spend a correction attempt.
-				attempt--;
-				continue;
+	const replaceAttempts = new Map<string, string | null>();
+
+	viewLoop: for (const [viewIndex, view] of views.entries()) {
+		let working = content;
+		const applied: AppliedReplace[] = [];
+		let inspected = false;
+		let failedReplacement = false;
+		let lastFeedback: string | undefined;
+		const messages: Message[] = [
+			{
+				role: "user",
+				content: prompt.render(applyRequestPrompt, {
+					path,
+					change,
+					file: view.text,
+					partial: view.partial,
+					totalLines: view.totalLines,
+				}),
+				timestamp: Date.now(),
+			},
+		];
+
+		for (let turn = 1; turn <= MAX_TURNS; turn++) {
+			const response = await options.complete(messages, APPLY_TOOLS);
+			const feedback: { truncated?: boolean; syntax?: string; failed?: boolean; callFormat?: boolean } = {};
+			if (response.stopReason === "length") {
+				// Providers may expose partly parsed tool calls on a truncated turn. Do not stage or replay them.
+				feedback.truncated = true;
+				failedReplacement = true;
+			} else {
+				let reply = response;
+				let calls = reply.content.filter(block => block.type === "toolCall");
+				let text = "";
+				if (calls.length === 0) {
+					text = response.content
+						.map(block => (block.type === "text" ? block.text : ""))
+						.join("")
+						.trim();
+					const written = parseWrittenToolCalls(text);
+					if (written.calls.length === 0) {
+						feedback.callFormat = written.attempted;
+					} else {
+						calls = written.calls.map((call, n) => ({ type: "toolCall", id: `written_${turn}_${n}`, ...call }));
+						reply = withWrittenToolCalls(response, calls);
+					}
+				}
+				if (calls.length > 0) {
+					const replyIndex = messages.length;
+					messages.push(reply);
+					let repairedCalls: Map<ToolCall, ToolCall> | undefined;
+					let replaced = false;
+					let failed = false;
+					for (const call of calls) {
+						const args = normalizeApplyArguments(call);
+						if (typeof args === "string") {
+							if (call.name !== "read" && call.name !== "search") failed = true;
+							messages.push(toolResult(call, args, true));
+							continue;
+						}
+						if (args !== call.arguments && Object.hasOwn(call.arguments, "__rawJson")) {
+							(repairedCalls ??= new Map()).set(call, { ...call, arguments: args });
+						}
+						if (call.name === "replace") {
+							const key = stableStringifyJson(args);
+							const previous = replaceAttempts.get(key);
+							if (previous !== undefined) {
+								if (previous === null) {
+									messages.push(
+										toolResult(call, "This exact replace was already applied. Do not repeat it.", true),
+									);
+								} else {
+									failed = true;
+									messages.push(toolResult(call, `This exact replace already failed: ${previous}`, true));
+								}
+								continue;
+							}
+							const attempt = applyReplace(working, args);
+							if ("error" in attempt) {
+								failed = true;
+								replaceAttempts.set(key, attempt.error);
+								messages.push(toolResult(call, attempt.error, true));
+							} else {
+								replaced = true;
+								replaceAttempts.set(key, null);
+								working = attempt.content;
+								applied.push(attempt.step);
+								messages.push(toolResult(call, attempt.message, false));
+							}
+						} else if (call.name === "read" || call.name === "search") {
+							const result = call.name === "read" ? readBufferLines(working, args) : searchBuffer(working, args);
+							if ("error" in result) messages.push(toolResult(call, result.error, true));
+							else {
+								inspected = true;
+								messages.push(toolResult(call, result.text, false));
+							}
+						} else {
+							failed = true;
+							messages.push(toolResult(call, "Available tools: replace, read, search.", true));
+						}
+					}
+					const repairs = repairedCalls;
+					if (repairs) {
+						const { providerPayload: _native, ...rest } = reply;
+						messages[replyIndex] = {
+							...rest,
+							content: reply.content.map(block =>
+								block.type === "toolCall" ? (repairs.get(block) ?? block) : block,
+							),
+						};
+					}
+					if (replaced || failed) failedReplacement = failed;
+					if (replaced) lastFeedback = undefined;
+					continue;
+				}
+
+				const refusal = text.match(REFUSAL);
+				if (refusal) {
+					if (!inspected && applied.length === 0 && viewIndex + 1 < views.length) continue viewLoop;
+					throw new ToolError(`No change was made to ${path}: ${refusal[1].trim() || "no reason given"}`);
+				}
+				if (failedReplacement) feedback.failed = true;
+				else if (/^DONE[.!]?$/i.test(text) && working !== content) {
+					if (parsed && !parses(working)) {
+						feedback.syntax = diagnoseBufferSyntax(content, working, applied, parses);
+					} else {
+						const result = await options.apply([{ old_string: content, new_string: working, replace_all: true }]);
+						if (!result.isError) return result;
+						const reason = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+						throw new ToolError(`The change to ${path} could not be applied: ${reason}`);
+					}
+				}
+				messages.push(response);
 			}
-			const reason = refusal[1].trim() || "no reason given";
-			throw new ToolError(
-				partial
-					? `No change was made to ${path}: ${reason}\nThe model saw only the lines your description names: quote the lines to change, or give their line numbers.`
-					: `No change was made to ${path}: ${reason}`,
-			);
+
+			const correction = prompt.render(applyFeedbackPrompt, feedback).trim();
+			if (turn === MAX_TURNS || correction === lastFeedback) {
+				throw new ToolError(`The change to ${path} did not finish; the file is unchanged. ${correction}`);
+			}
+			lastFeedback = correction;
+			messages.push({ role: "user", content: correction, timestamp: Date.now() });
 		}
-		const compiled = compileLineEdits(normalizeToLF(reply.trim()), content, currentView, truncated);
-		const hints = "edit" in compiled ? blockHints(content, compiled.ranges, currentView) : [];
-		if ("edit" in compiled && parsed && !parses(spliced(content, compiled.edit))) {
-			const detail = diagnoseSyntaxFailure(compiled.operations, content, currentView, parses);
-			const hintText = hints.join("; ");
-			rejection = `Nothing was applied: after these operations the file no longer parses${hintText ? ` (${hintText})` : ""}.${detail ? `\n${detail}` : ""}`;
-		} else if (hints.some(hint => !doubted.has(hint))) {
-			// A range that does not match the block it starts may be off by a line: the model confirms it by repeating it.
-			for (const hint of hints) doubted.add(hint);
-			rejection = `Nothing was applied: ${hints.join("; ")}. Correct the range, or send the same operations again if that is intended.`;
-		} else if ("edit" in compiled) {
-			const result = await options.apply([compiled.edit], true);
-			if (!result.isError) return result;
-			rejection = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
-		} else if (truncated) {
-			throw new ToolError(
-				`The model ran out of output before finishing the change to ${path}; the file is unchanged. Split the change into smaller calls.`,
-			);
-		} else {
-			rejection = compiled.problem;
-		}
-		previous = reply;
+		throw new ToolError(`The change to ${path} did not finish within ${MAX_TURNS} turns; the file is unchanged.`);
 	}
-	throw new ToolError(
-		`The change to ${path} could not be applied in ${MAX_ATTEMPTS} attempts; the file is unchanged. Last rejection:\n${rejection}\nDescribe the change more exactly: quote the lines it touches.`,
-	);
+
+	throw new ToolError(`The change to ${path} could not be applied; the file is unchanged.`);
 }
 
-/** One apply-model reply; `truncated` when it ran into the output limit. */
-interface Reply {
-	text: string;
-	truncated: boolean;
-}
-
-/** The model that writes the patch, and one completion against it. */
+/** The model that drives the apply tools, and one completion turn against it. */
 interface Applier {
-	/** `provider/id`, for error messages. */
-	name: string;
 	model: Model<Api>;
-	complete(request: string, maxTokens: number): Promise<Reply>;
+	complete(messages: Message[], tools: Tool[]): Promise<AssistantMessage>;
 }
 
 /**
- * Resolve the apply model for `session` and bind a completion to it.
+ * Resolve the apply model for `session` and bind a completion turn to it.
  *
  * # Errors
  * {@link ToolError} when `edit.magic.model` matches no available model, when
@@ -273,11 +364,13 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 	const timeout = AbortSignal.timeout(APPLY_TIMEOUT_MS);
 	const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
 	const ceiling = Math.min(model.maxTokens ?? COMPLETION_MAX_TOKENS, COMPLETION_MAX_TOKENS);
-	const complete = async (request: string, maxTokens: number): Promise<Reply> => {
+	const complete = async (messages: Message[], tools: Tool[]): Promise<AssistantMessage> => {
 		const journal = journalCompletion(session.sessionManager, {
 			purpose: "magic-edit",
 			role: selector ? undefined : "smol",
 		});
+		const last = messages.at(-1);
+		const promptText = last?.role === "user" && typeof last.content === "string" ? last.content : undefined;
 		const response = await retryTransientCompletion(
 			async () => {
 				session.costGate?.admit();
@@ -285,19 +378,20 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 					model,
 					{
 						systemPrompt: [APPLY_SYSTEM_PROMPT],
-						messages: [{ role: "user", content: request, timestamp: Date.now() }],
+						messages,
+						tools,
 					},
 					{
 						apiKey: registry.resolver(model, sessionId),
 						sessionId,
-						maxTokens: model.reasoning ? ceiling : Math.min(ceiling, maxTokens),
+						maxTokens: ceiling,
 						reasoning,
 						disableReasoning: reasoning === undefined,
 						signal: combined,
 					},
 				);
 				session.costGate?.record(attempt.usage.cost.total);
-				journal?.(attempt, request);
+				journal?.(attempt, promptText);
 				return attempt;
 			},
 			{ signal: combined, provider: model.provider },
@@ -313,22 +407,18 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 					: "The edit was aborted; the file is unchanged.",
 			);
 		}
-		return {
-			text: response.content.map(block => (block.type === "text" ? block.text : "")).join(""),
-			truncated: response.stopReason === "length",
-		};
+		return response;
 	};
-	return { name, model, complete };
+	return { model, complete };
 }
 
 /**
- * Apply one section: read its file, have `applier` write the change as line
- * operations, and pass the compiled edit to `apply` together with the raw text
- * it was written against, so `apply` can refuse a file that changed since.
+ * Apply one section: read its file, run the multi-turn apply loop against an
+ * in-memory buffer, and commit the resulting edit together with the raw text
+ * snapshot so `apply` can refuse a file that changed concurrently on disk.
  *
  * # Errors
- * {@link ToolError} when the file is missing or binary, when no view of it
- * fits the apply model, and as {@link applyDescribedChange}.
+ * {@link ToolError} when the file is missing or binary, and as {@link applyDescribedChange}.
  */
 async function applySection(options: {
 	session: ToolSession;
@@ -352,19 +442,13 @@ async function applySection(options: {
 	const content = normalizeToLF(stripBom(raw).text);
 	const window = applier.model.contextWindow ?? 0;
 	const limit = window > 0 ? window * MAX_CONTEXT_SHARE * CHARS_PER_TOKEN : undefined;
-	const views = fileViews(content, change, limit);
-	if (views.length === 0) {
-		throw new ToolError(
-			`${target} is too large for ${applier.name} to read whole, and the change names no part of it to show instead: quote the lines to change, or give their line numbers.`,
-		);
-	}
 	return applyDescribedChange({
 		path: target,
 		change,
 		content,
-		views,
+		views: fileViews(content, change, limit),
 		complete: applier.complete,
-		apply: (edits, checkSnapshot) => options.apply(edits, checkSnapshot ? raw : undefined),
+		apply: edits => options.apply(edits, raw),
 	});
 }
 

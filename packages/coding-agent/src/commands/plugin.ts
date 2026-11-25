@@ -5,7 +5,7 @@
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { pluginHelp as commandHelp } from "../cli/command-help";
 import { type PluginAction, type PluginCommandArgs, runPluginCommand } from "../cli/plugin-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 const ACTIONS: PluginAction[] = [
 	"install",
@@ -77,7 +77,7 @@ export default class Plugin extends Command {
 			},
 		};
 
-		await initTheme();
+		initTheme();
 		await runPluginCommand(cmd);
 	}
 }
