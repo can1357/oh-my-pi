@@ -38,5 +38,6 @@
 		grep: (pattern, options) => call("grep", "grep", options, { pattern }),
 		stats: options => call("stats", "stats", options),
 		messages: (id, options) => call("messages", "messages", options, { id }),
+		transcript: (id, options) => call("transcript", "transcript", options, { id }),
 	});
 }

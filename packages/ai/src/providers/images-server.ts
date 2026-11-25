@@ -50,9 +50,9 @@ function decodeInputReference(value: unknown): { data: string; mimeType: string 
 	let raw: unknown = value;
 	if (value !== null && typeof value === "object") {
 		raw = "url" in value ? value.url : undefined;
-		const imageUrl = "image_url" in value ? value.image_url : undefined;
-		if (raw === undefined && imageUrl !== null && typeof imageUrl === "object" && "url" in imageUrl) {
-			raw = imageUrl.url;
+		if (raw === undefined && "image_url" in value) {
+			const imageUrl = value.image_url;
+			raw = imageUrl !== null && typeof imageUrl === "object" && "url" in imageUrl ? imageUrl.url : imageUrl;
 		}
 	}
 	if (typeof raw !== "string" || raw.length === 0) validation("input image must be base64 or a data URL");

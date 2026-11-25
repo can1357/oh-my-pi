@@ -113,6 +113,32 @@ describe("assistant message block across streaming updates", () => {
 		}
 	});
 
+	it("matches a cold paint at recorded reveal frames with completed thinking and prose siblings", () => {
+		// Text and frame boundaries captured from an actual terminal stream.
+		const source = [
+			"The Unix shell began as a pragmatic answer to a narrow problem: how to let a user talk to a machine that ran one program at a time.",
+			'In the earliest days at Bell Labs, the "shell" was the Thompson shell, written by Ken Thompson for the PDP-7 and later distributed with Version 6 and Version 7 Unix.',
+			"It was a small program that read a line, split it into a command and arguments, and executed it.",
+			"It had redirection with `<` and `>`, pipes, and a few built-ins like `cd`.",
+		].join(" ");
+		const live = block({ transient: true });
+		try {
+			for (const end of [20, 73, 119, 169, 213, 250, 294, 332, 376, 413, 458]) {
+				const frame = msg([
+					{ type: "thinking", thinking: "A completed **thinking** block." },
+					{ type: "text", text: "An earlier `prose` block." },
+					{ type: "text", text: source.slice(0, end) },
+				]);
+				live.message.set(frame);
+				expect(live.rows()).toBe(freshRender(frame, { transient: true }));
+			}
+			live.transient.set(false);
+			expect(live.rows()).toBe(freshRender(live.message()!));
+		} finally {
+			live.term.dispose();
+		}
+	});
+
 	it("does not render dot-only reasoning placeholders", () => {
 		const rendered = Bun.stripANSI(
 			freshRender(

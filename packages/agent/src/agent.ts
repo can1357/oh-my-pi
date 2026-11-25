@@ -123,7 +123,7 @@ export interface AgentOptions {
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
 	 * Default filters to user/assistant/toolResult and converts attachments.
 	 */
-	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	convertToLlm?: AgentLoopConfig["convertToLlm"];
 
 	/**
 	 * Optional transform applied to context before convertToLlm.
@@ -314,9 +314,10 @@ export interface AgentOptions {
 	onToolChoiceUnavailable?: () => void;
 
 	/**
-	 * Cursor exec handlers for local tool execution.
+	 * Cursor exec handlers for local tool execution, or a factory resolved on the first
+	 * request dispatched to Cursor (including a mid-session model switch).
 	 */
-	cursorExecHandlers?: CursorExecHandlers;
+	cursorExecHandlers?: CursorExecHandlers | (() => Promise<CursorExecHandlers>);
 	/** Additional tools Cursor executes through its MCP request-context bridge, resolved before each provider call. */
 	getCursorTools?: () => AgentTool[];
 
@@ -431,7 +432,9 @@ export class Agent {
 	#queueListeners = new Set<() => void>();
 	#pauseListeners = new Set<(paused: boolean) => void>();
 	#abortController?: AbortController;
-	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	/** The running loop's `detachSignal` source; see {@link Agent.abort}. */
+	#detachController?: AbortController;
+	#convertToLlm: AgentLoopConfig["convertToLlm"];
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
@@ -484,6 +487,7 @@ export class Agent {
 	#maxRetryDelayMs?: number;
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	#cursorExecHandlers?: CursorExecHandlers;
+	#loadCursorExecHandlers?: () => Promise<CursorExecHandlers>;
 	#getCursorTools?: () => AgentTool[];
 	#cursorOnToolResult?: CursorToolResultHandler;
 	#cwd?: string;
@@ -608,7 +612,12 @@ export class Agent {
 		this.#onResponse = opts.onResponse;
 		this.#onSseEvent = opts.onSseEvent;
 		this.#getToolContext = opts.getToolContext;
-		this.#cursorExecHandlers = opts.cursorExecHandlers;
+		if (typeof opts.cursorExecHandlers === "function") {
+			const load = opts.cursorExecHandlers;
+			this.#loadCursorExecHandlers = async () => (this.#cursorExecHandlers ??= await load());
+		} else {
+			this.#cursorExecHandlers = opts.cursorExecHandlers;
+		}
 		this.#getCursorTools = opts.getCursorTools;
 		this.#cursorOnToolResult = opts.cursorOnToolResult;
 		this.#cwd = opts.cwd;
@@ -1697,7 +1706,14 @@ export class Agent {
 		this.#state.messages.length = 0;
 	}
 
-	abort(reason?: unknown) {
+	/**
+	 * Abort the current run. `detachTools` first raises the running tool batch's
+	 * cooperative `steeringSignal` (see {@link AgentLoopConfig.detachSignal}), so
+	 * tools that can move their work into a background job do so instead of being
+	 * killed; they observe it before the abort.
+	 */
+	abort(reason?: unknown, options?: { detachTools?: boolean }) {
+		if (options?.detachTools) this.#detachController?.abort();
 		this.#abortController?.abort(reason);
 	}
 
@@ -1793,9 +1809,6 @@ export class Agent {
 		await this.#inLogContext(() => this.#runLoop(msgs, promptOptions));
 	}
 
-	/**
-	 * Continue from current context (used for retries and resuming queued messages).
-	 */
 	#continuationDequeueSignal(signal?: AbortSignal): AbortSignal | undefined {
 		const signals: AbortSignal[] = [];
 		if (this.#abortController) signals.push(this.#abortController.signal);
@@ -1814,15 +1827,20 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	continue(signal?: AbortSignal): Promise<void> {
+	/**
+	 * Retry the current context or start a turn with queued input. Set `queuedOnly`
+	 * to drain the queue without making a model call on its own when nothing is delivered.
+	 */
+	continue(signal?: AbortSignal, options?: { queuedOnly?: boolean }): Promise<void> {
 		// Queued-message hooks run before the loop and are this agent's work too.
-		return this.#inLogContext(() => this.#continue(signal));
+		return this.#inLogContext(() => this.#continue(signal, options));
 	}
 
-	async #continue(signal?: AbortSignal) {
+	async #continue(signal?: AbortSignal, options?: { queuedOnly?: boolean }) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
+		if (options?.queuedOnly && !this.hasQueuedMessages()) return;
 
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#runningPrompt = promise;
@@ -1841,22 +1859,13 @@ export class Agent {
 			// model sees. A queued steer/follow-up is delivered as if they were absent; with nothing queued,
 			// continue from them as before and leave the tail to the caller's recovery.
 			const tail = lastContextMessage(messages);
-			if (!tail || tail.role === "assistant") {
-				// A tail with unpaired runnable tool calls resumes by re-executing
-				// them (see `unpairedToolCallTail` in agent-loop). This must win over
-				// queued-message delivery: injecting a message between the tool_use
-				// blocks and their results would break the provider's pairing
-				// invariant. Queued messages drain inside the resumed loop instead.
-				if (tail && unpairedToolCallTail([tail])) {
+			if (options?.queuedOnly || !tail || tail.role === "assistant") {
+				// Unanswered tool calls must run before queued messages to preserve tool/result pairing.
+				if (tail?.role === "assistant" && unpairedToolCallTail([tail])) {
 					await this.#runLoop(undefined, undefined, signal, true);
 					return;
 				}
-				// An empty transcript has nothing to resume, but a queued steer/follow-up
-				// must still be delivered as the opening turn. Throwing here leaves the
-				// message undeliverable, and idle-drain callers
-				// (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
-				// microtask because hasQueuedMessages() never clears, spinning an unbounded
-				// allocation loop until OOM (issue #6344).
+				// Start with queued input, not an extra model call on the existing context.
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
 				if (this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
@@ -1871,6 +1880,8 @@ export class Agent {
 					return;
 				}
 
+				// A dequeue hook may withdraw the queued input while the drain starts.
+				if (options?.queuedOnly) return;
 				if (!literalTail) throw new Error("No messages to continue from");
 				if (literalTail === tail) throw new Error("Cannot continue from message role: assistant");
 			}
@@ -1924,6 +1935,8 @@ export class Agent {
 		const loopSignal = continuationSignal
 			? AbortSignal.any([loopAbortController.signal, continuationSignal])
 			: loopAbortController.signal;
+		const detachController = new AbortController();
+		this.#detachController = detachController;
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
@@ -2043,6 +2056,7 @@ export class Agent {
 			serviceTier: this.#serviceTier,
 			hideThinkingSummary: this.#hideThinkingSummary,
 			interruptMode: this.#interruptMode,
+			detachSignal: detachController.signal,
 			sessionId: this.#sessionId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
@@ -2085,6 +2099,7 @@ export class Agent {
 						}
 					: undefined,
 			cursorExecHandlers: this.#cursorExecHandlers,
+			loadCursorExecHandlers: this.#loadCursorExecHandlers,
 			cursorOnToolResult,
 			cwd: this.#cwd,
 			getCwd: this.#cwdResolver,
@@ -2387,6 +2402,7 @@ export class Agent {
 			this.#isPaused = false;
 			this.#restoreUndeliveredQueuedMessages(loopAbortController);
 			resolveRun?.();
+			if (this.#detachController === detachController) this.#detachController = undefined;
 			if (this.#abortController === loopAbortController) {
 				this.#state.isStreaming = false;
 				this.#state.streamMessage = null;

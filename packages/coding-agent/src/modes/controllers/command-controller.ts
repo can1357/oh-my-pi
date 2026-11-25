@@ -1794,7 +1794,10 @@ export class CommandController {
 			this.ctx.showWorking("maintenance", { label: `Creating worktree on ${branchName}…`, startedAt: Date.now() });
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
+				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, {
+					...options,
+					session: this.ctx.sessionManager.getSessionId(),
+				});
 			} catch (err) {
 				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
@@ -1989,8 +1992,8 @@ export class CommandController {
 			detachInput?.();
 			if (detachInput) this.ctx.composer.setKeyPassthrough(false);
 			if (this.ctx.bashRun === run) this.ctx.bashRun = undefined;
-			// The recorded run is context now: the context meter counts it.
-			this.ctx.statusLine.refresh();
+			// The recorded run is context now (the context meter counts it), and it may have moved HEAD.
+			this.ctx.statusLine.refreshVcs();
 		}
 		return false;
 	}
@@ -2065,8 +2068,8 @@ export class CommandController {
 		}
 
 		if (this.ctx.pythonRun === run) this.ctx.pythonRun = undefined;
-		// The recorded cell is context now: the context meter counts it.
-		this.ctx.statusLine.refresh();
+		// The recorded cell is context now (the context meter counts it), and it may have moved HEAD.
+		this.ctx.statusLine.refreshVcs();
 	}
 
 	async handleCompactCommand(
@@ -2181,9 +2184,8 @@ export class CommandController {
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content,
 	 * `images` strips image blocks, and `thinking` drops the thinking blocks the
-	 * request rebuilds from them, keeping the turns it replays natively (they
-	 * are reported as kept and the transcript is left alone). Rebuilds the chat
-	 * and reports counts.
+	 * request rebuilds and clears interrupted-thinking notes, keeping the turns
+	 * it replays natively. Rebuilds the chat and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -2198,7 +2200,8 @@ export class CommandController {
 			result.toolResultsDropped +
 			result.blocksDropped +
 			(result.imagesDropped ?? 0) +
-			(result.thinkingBlocksDropped ?? 0);
+			(result.thinkingBlocksDropped ?? 0) +
+			(result.interruptedThinkingNotesDropped ?? 0);
 		if (dropped === 0) {
 			// Replayed thinking was left in place: nothing to rebuild, but say so.
 			this.ctx.showStatus((result.thinkingBlocksKept ?? 0) > 0 ? formatShakeSummary(result) : "Nothing to shake.");

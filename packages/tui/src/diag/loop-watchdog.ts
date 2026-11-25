@@ -112,7 +112,7 @@ export class LoopWatchdog {
 		if (this.#sampler) {
 			this.#sampler.start();
 			// Samples from before this run would be blamed on its first block.
-			this.#sampler.drain();
+			this.#sampler.discard();
 		}
 		this.#armTick();
 	}
@@ -169,7 +169,6 @@ export class LoopWatchdog {
 		// Consume every valid tick, even without a warning, so no phase carries
 		// forward into a later, phase-less block.
 		const phase = takeLoopPhaseAttribution(now);
-		const samples = this.#sampler?.drain();
 		if (blockedMs > this.#thresholdMs) {
 			// Only a late tick needs CPU time: to classify the gap and to log it.
 			const cpuMs = this.#cpuNow() - this.#expectedCpu;
@@ -179,6 +178,7 @@ export class LoopWatchdog {
 				this.#stallEndedAt = now;
 				if (!this.#wasBlocked) {
 					this.#wasBlocked = true;
+					const samples = this.#sampler?.drain();
 					const block = samples?.length ? summarizeBlock(samples, blockedMs) : undefined;
 					logger.warn("ui.loop-blocked", {
 						blockedMs: Math.round(blockedMs),
@@ -189,11 +189,14 @@ export class LoopWatchdog {
 							? { cause: block.cause, causeShare: Math.round(block.share * 100) / 100, top: block.top }
 							: {}),
 					});
+					this.#armTick();
+					return;
 				}
 			}
 		} else {
 			this.#wasBlocked = false;
 		}
+		this.#sampler?.discard();
 		this.#armTick();
 	}
 }
