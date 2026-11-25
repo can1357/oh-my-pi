@@ -1,6 +1,6 @@
-import { isRecord, ptree, tryParseJson } from "@oh-my-pi/pi-utils";
+import { asRecord, isRecord, ptree, tryParseJson } from "@oh-my-pi/pi-utils";
 
-export { isRecord };
+export { asRecord, isRecord };
 
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { ToolAbortError } from "../../tools/tool-errors";
