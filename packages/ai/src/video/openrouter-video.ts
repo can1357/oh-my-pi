@@ -2,6 +2,7 @@ import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { readOpenAIErrorEnvelope } from "../utils/openai-http";
 import type {
 	VideoAudioReference,
 	VideoContent,
@@ -39,22 +40,7 @@ function videoBaseUrl(model: Model<Api>): string {
 }
 
 async function responseError(response: Response, model: Model<Api>): Promise<VideoApiError> {
-	const text = await response.text();
-	let detail = text;
-	let code: string | undefined;
-	try {
-		const parsed: unknown = JSON.parse(text);
-		if (parsed && typeof parsed === "object" && "error" in parsed) {
-			const error = parsed.error;
-			if (typeof error === "string") detail = error;
-			else if (error && typeof error === "object") {
-				const envelope = error as { message?: unknown; code?: unknown; type?: unknown };
-				if (typeof envelope.message === "string") detail = envelope.message;
-				if (typeof envelope.code === "string") code = envelope.code;
-				else if (typeof envelope.type === "string") code = envelope.type;
-			}
-		}
-	} catch {}
+	const { detail, code } = await readOpenAIErrorEnvelope(response);
 	return new VideoApiError(
 		`${model.provider}/${model.id} video API error (${response.status}): ${detail || response.statusText}`,
 		response.status,

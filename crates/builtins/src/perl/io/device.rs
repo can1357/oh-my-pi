@@ -12,11 +12,37 @@ use crate::{host::{Stdin, StreamWriter}, openfile::{Fd, OpenFile}};
 
 use super::{PStr, PipeChild, Sv, Value, bad_fd};
 
+/// PerlIO, not the shell's normal pipe line writer, owns the byte buffer.
+pub(super) enum OutputSink {
+	Guarded(OpenFile),
+	Managed(StreamWriter),
+}
+
+impl Write for OutputSink {
+	fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+		match self {
+			Self::Guarded(file) => file.write(bytes),
+			Self::Managed(writer) => { let n = writer.write(bytes)?; writer.flush()?; Ok(n) },
+		}
+	}
+
+	fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+		match self {
+			Self::Guarded(file) => file.write_all(bytes),
+			Self::Managed(writer) => { writer.write_all(bytes)?; writer.flush() },
+		}
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		match self { Self::Guarded(file) => file.flush(), Self::Managed(writer) => writer.flush() }
+	}
+}
+
 /// Open resource, not including the handle's own read or write buffers.
 pub(super) enum Device {
 	File(File),
 	Stdin(Stdin),
-	Stdout { writer: StreamWriter, file: OpenFile },
+	Stdout { writer: OutputSink, file: OpenFile },
 	Descriptor { file: OpenFile, read_cancel: Option<Arc<AtomicBool>>, poll: bool, command: Option<PipeChild> },
 	Scalar(ScalarFile),
 	InPlace(Rc<RefCell<Vec<u8>>>),
@@ -180,7 +206,7 @@ impl Device {
 		match self {
 			Self::File(file) => file.native().is_some_and(IsTerminal::is_terminal),
 			Self::Stdin(stdin) => stdin.file().is_terminal(),
-			Self::Stdout { writer, .. } => writer.is_terminal(),
+			Self::Stdout { file, .. } => file.is_terminal(),
 			Self::Descriptor { file, .. } => file.is_terminal(),
 			Self::Scalar(_) | Self::InPlace(_) => false,
 		}

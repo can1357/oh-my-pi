@@ -668,7 +668,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			b"..." => {
 				self.bump();
 				terminator = true;
-				StmtKind::Expr(Expr { location: token.location, kind: ExprKind::Yada })
+				StmtKind::Expr(Expr { location: token.location, cache: NodeCache::default(), kind: ExprKind::Yada })
 			}
 			b";" => { self.bump(); StmtKind::Empty }
 			b"}" | b"" if label.is_some() => StmtKind::Empty,
@@ -888,7 +888,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 	fn loop_condition(&mut self, empty_is_true: bool) -> ResultOf<Expr> {
 		let open = self.expect(b"(")?;
 		if empty_is_true && self.eat(b")").is_some() {
-			return Ok(Expr { location: open.location, kind: ExprKind::Int(1) });
+			return Ok(Expr { location: open.location, cache: NodeCache::default(), kind: ExprKind::Int(1) });
 		}
 		let expr = self.expr(0)?;
 		self.expect(b")")?;
@@ -907,7 +907,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				return Ok(StmtKind::For(first, cond, step, body, self.continue_block()?));
 			}
 			self.expect(b")")?;
-			let items = first.unwrap_or(Expr { location: open.location, kind: ExprKind::List(Vec::new()) });
+			let items = first.unwrap_or(Expr { location: open.location, cache: NodeCache::default(), kind: ExprKind::List(Vec::new()) });
 			let body = self.block()?;
 			return Ok(StmtKind::Foreach(None, items, body, self.continue_block()?));
 		}
@@ -937,7 +937,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		};
 		if !valid { return Err(self.error()); }
 		if let Some(reference) = reference {
-			var = Expr { location: reference.location, kind: ExprKind::Unary(Unary::Reference, Box::new(var)) };
+			var = Expr { location: reference.location, cache: NodeCache::default(), kind: ExprKind::Unary(Unary::Reference, Box::new(var)) };
 		}
 		let items = self.delimited_list(b"(", b")", false)?;
 		let body = self.block()?;
@@ -1247,7 +1247,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 					if let Some(previous) = &self.previous { last = previous.start; }
 				} else if name.is_none() {
 					// `$=`: an optional placeholder whose default is never needed.
-					default = Some(Expr { location: location.clone(), kind: ExprKind::List(Vec::new()) });
+					default = Some(Expr { location: location.clone(), cache: NodeCache::default(), kind: ExprKind::List(Vec::new()) });
 				}
 			}
 			let next = self.peek();

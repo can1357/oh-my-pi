@@ -13,7 +13,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeStatusText } from "../../../modes/view-model/chrome/shared";
 import { keyGlyph } from "../../styles/panels/common";
 import type { PlanAnnotation, PlanReviewModel } from "./plan-review-model";
-import { stripInlineMarkdown } from "./plan-sections";
+import { stripInlineMarkdown } from "../../../plan-mode/plan-toc";
 import type { Keybinding } from "../../../config/keybindings/app-keybindings";
 import { actionKeyId } from "../../keys/hints";
 

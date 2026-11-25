@@ -2,27 +2,39 @@
 
 use super::{vars::forced_main, *};
 
-struct Validator<'a, 'h> {
-	interp: &'a Interp<'h>,
+struct Validator<'a, 'h, 'p> {
+	interp: &'a mut Interp<'h>,
 	package: Rc<str>,
 	bindings: Vec<(Sigil, Rc<str>)>,
 	declarations: Vec<(Sigil, Rc<str>)>,
+	operands: Vec<(Sigil, &'p Rc<str>, &'p Expr)>,
 	hints: Hints,
 	diagnostics: PStr,
 	depth: u32,
-	pending_captures: Vec<(usize, usize, FxHashSet<(u8, Rc<str>)>)>,
-	captures: FxHashMap<usize, FxHashSet<(u8, Rc<str>)>>,
+	pending_captures: Vec<(usize, usize, FxHashSet<(Sigil, Rc<str>)>)>,
+	captures: FxHashMap<usize, FxHashSet<(Sigil, Rc<str>)>>,
 }
 
 impl Interp<'_> {
 	pub(super) fn validate(&mut self, p: &Program, hints: Hints, inherits_pad: bool) -> PResult<()> {
-		let bindings = if inherits_pad { self.pad_snapshot().into_iter().map(|(sig, name, _)| (sig, name)).collect() } else { Vec::new() };
+		let bindings = if inherits_pad {
+			self.scopes.iter().flat_map(|scope| &scope.pad).map(|(id, _)| self.lexicals.spelling(*id).clone()).collect()
+		} else { Vec::new() };
 		let mut validator = Validator { interp: self, package: p.package.clone(), bindings, declarations: Vec::new(), hints, diagnostics: PStr::default(),
-			depth: 0, pending_captures: Vec::new(), captures: FxHashMap::default() };
+			depth: 0, operands: Vec::new(), pending_captures: Vec::new(), captures: FxHashMap::default() };
 		validator.statements(&p.body);
 		if validator.diagnostics.is_empty() {
-			let captures = validator.captures;
-			self.captures.extend(captures);
+			// Install operands only for live, successfully validated code. In particular,
+			// repeated failing string evals do not leave dangling operand-site metadata.
+			for (sigil, name, node) in validator.operands {
+				let id = validator.interp.lexicals.resolve(sigil, name);
+				node.cache.lexical.set(u32::try_from(id + 1).unwrap_or(0));
+			}
+			for (site, names) in validator.captures {
+				let mut ids: Vec<_> = names.into_iter().map(|(sigil, name)| validator.interp.lexicals.resolve(sigil, &name)).collect();
+				ids.sort_unstable();
+				validator.interp.captures.insert(site, ids);
+			}
 			return Ok(());
 		}
 		if !p.file.starts_with("(eval ") {
@@ -46,7 +58,7 @@ fn constant_truth(e: &Expr) -> Option<bool> {
 	}
 }
 
-impl Validator<'_, '_> {
+impl<'p> Validator<'_, '_, 'p> {
 	fn complain(&mut self, loc: &Location, message: &str) {
 		self.diagnostics.push(&PStr::from_str(&format!("{message} at {} line {}.\n", loc.file, loc.line)));
 	}
@@ -65,11 +77,11 @@ impl Validator<'_, '_> {
 
 	fn commit_declarations(&mut self) { self.bindings.append(&mut self.declarations); }
 
-	fn statements(&mut self, block: &Block) {
+	fn statements(&mut self, block: &'p Block) {
 		for stmt in &block.stmts { self.stmt(stmt); }
 	}
 
-	fn block(&mut self, block: &Block) { self.scope(|this| this.statements(block)); }
+	fn block(&mut self, block: &'p Block) { self.scope(|this| this.statements(block)); }
 
 	fn capture(&mut self, block: &Block, f: impl FnOnce(&mut Self)) {
 		self.pending_captures.push((block as *const Block as usize, self.bindings.len(), FxHashSet::default()));
@@ -82,11 +94,11 @@ impl Validator<'_, '_> {
 		let sigil = if sigil == Sigil::LastIndex { Sigil::Array } else { sigil };
 		let binding = self.bindings.iter().rposition(|(s, n)| *s == sigil && n == name);
 		for (_, start, vars) in &mut self.pending_captures {
-			if binding.is_none_or(|n| n < *start) { vars.insert((sigil as u8, name.clone())); }
+			if binding.is_none_or(|n| n < *start) { vars.insert((sigil, name.clone())); }
 		}
 	}
 
-	fn stmt(&mut self, stmt: &Stmt) {
+	fn stmt(&mut self, stmt: &'p Stmt) {
 		if self.depth >= 2048 { self.complain(&stmt.location, "Excessively nested expression"); return; }
 		self.depth += 1;
 		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.stmt_inner(stmt));
@@ -94,7 +106,7 @@ impl Validator<'_, '_> {
 		self.depth -= 1;
 	}
 
-	fn stmt_inner(&mut self, stmt: &Stmt) {
+	fn stmt_inner(&mut self, stmt: &'p Stmt) {
 		match &stmt.kind {
 			StmtKind::Expr(e) => {
 				if let ExprKind::Binary(Binary::And, first, second) = &e.kind
@@ -159,7 +171,7 @@ impl Validator<'_, '_> {
 		}
 	}
 
-	fn sub(&mut self, sub: &Subroutine) {
+	fn sub(&mut self, sub: &'p Subroutine) {
 		if let Some(name) = &sub.name && matches!(sub.scope, Some(DeclKind::My | DeclKind::State | DeclKind::Our)) {
 			self.bindings.push((Sigil::Code, name.clone()));
 		}
@@ -176,9 +188,11 @@ impl Validator<'_, '_> {
 		}));
 	}
 
-	fn bind(&mut self, e: &Expr, immediate: bool) {
-		match &ungroup(e).kind {
+	fn bind(&mut self, e: &'p Expr, immediate: bool) {
+		let e = ungroup(e);
+		match &e.kind {
 			ExprKind::Variable(sigil, name) => {
+				self.operands.push((*sigil, name, e));
 				if immediate { self.bindings.push((*sigil, name.clone())); }
 				else { self.declarations.push((*sigil, name.clone())); }
 			}
@@ -188,7 +202,8 @@ impl Validator<'_, '_> {
 		}
 	}
 
-	fn variable(&mut self, sigil: Sigil, name: &Rc<str>, loc: &Location) {
+	fn variable(&mut self, sigil: Sigil, name: &'p Rc<str>, e: &'p Expr, loc: &Location) {
+		self.operands.push((sigil, name, e));
 		self.record_capture(sigil, name);
 		let name = name.as_ref();
 		let sigil = if sigil == Sigil::LastIndex { Sigil::Array } else { sigil };
@@ -201,16 +216,16 @@ impl Validator<'_, '_> {
 		self.complain(loc, &format!("Global symbol \"{symbol}{name}\" requires explicit package name (did you forget to declare \"my {symbol}{name}\"?)"));
 	}
 
-	fn expr(&mut self, e: &Expr) {
+	fn expr(&mut self, e: &'p Expr) {
 		if self.depth >= 2048 { self.complain(&e.location, "Excessively nested expression"); return; }
 		self.depth += 1;
 		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.expr_inner(e));
 		self.depth -= 1;
 	}
 
-	fn expr_inner(&mut self, e: &Expr) {
+	fn expr_inner(&mut self, e: &'p Expr) {
 		match &e.kind {
-			ExprKind::Variable(sigil, name) => self.variable(*sigil, name, &e.location),
+			ExprKind::Variable(sigil, name) => self.variable(*sigil, name, e, &e.location),
 			ExprKind::Bareword(name) if self.hints.strict_subs && !name.ends_with("::") => {
 				self.complain(&e.location, &format!("Bareword \"{name}\" not allowed while \"strict subs\" in use"));
 			}
@@ -223,7 +238,7 @@ impl Validator<'_, '_> {
 					Select::HashElement(false) | Select::HashSlice(false) | Select::HashPairs(false) => Some(Sigil::Hash),
 					_ => None,
 				};
-				if let (Some(sigil), ExprKind::Variable(_, name)) = (sigil, &ungroup(base).kind) { self.variable(sigil, name, &base.location); }
+				if let (Some(sigil), ExprKind::Variable(_, name)) = (sigil, &ungroup(base).kind) { self.variable(sigil, name, ungroup(base), &base.location); }
 				else { self.expr(base); }
 				self.expr(key);
 			}
@@ -246,7 +261,7 @@ impl Validator<'_, '_> {
 			ExprKind::Binary(_, left, right) => { self.expr(left); self.expr(right); }
 			ExprKind::CompareChain(first, rest) => { self.expr(first); for (_, e) in rest { self.expr(e); } }
 			ExprKind::Conditional(c, y, n) => { self.expr(c); self.expr(y); self.expr(n); }
-			ExprKind::Call(call) => self.call(call),
+			ExprKind::Call(call) => self.call(e, call),
 			ExprKind::Sub(sub) => self.sub(sub),
 			ExprKind::Block(b, _) => self.block(b),
 			ExprKind::FileTest(_, Some(e)) => { if !matches!(&ungroup(e).kind, ExprKind::Bareword(_)) { self.expr(e); } }
@@ -260,13 +275,13 @@ impl Validator<'_, '_> {
 		}
 	}
 
-	fn parts(&mut self, parts: &[QuotePart]) {
+	fn parts(&mut self, parts: &'p [QuotePart]) {
 		for part in parts {
 			match part { QuotePart::Expr(e, _) => self.expr(e), QuotePart::RegexCode(b, ..) => self.capture(b, |this| this.block(b)), _ => {} }
 		}
 	}
 
-	fn call(&mut self, c: &Call) {
+	fn call(&mut self, e: &'p Expr, c: &'p Call) {
 		let builtin = match &c.target {
 			CallTarget::Code(from, _) => { self.expr(from); None }
 			CallTarget::Method(e, m) => {
@@ -278,12 +293,12 @@ impl Validator<'_, '_> {
 				if matches!(b, Builtin::Eval | Builtin::Evalbytes) {
 					// A string eval can name any lexical visible at this point.
 					for (_, start, captured) in &mut self.pending_captures {
-						captured.extend(self.bindings[..*start].iter().map(|(sigil, name)| (*sigil as u8, name.clone())));
+						captured.extend(self.bindings[..*start].iter().map(|(sigil, name)| (*sigil, name.clone())));
 					}
 				}
 				Some(*b)
 			}
-			CallTarget::Named(name, _) => { self.record_capture(Sigil::Code, name); None }
+			CallTarget::Named(name, _) => { self.operands.push((Sigil::Code, name, e)); self.record_capture(Sigil::Code, name); None }
 		};
 		if let Some(slot) = &c.slot {
 			match slot {

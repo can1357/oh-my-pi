@@ -16,7 +16,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../thinking/levels";
 import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { errorMessage, isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { cfgDefaultThinkingLevel } from "../session/settings";
 import { pickDefaultAvailableModel, resolveModelRoleValue, scopeAllowList } from "./model-resolver";
@@ -231,10 +231,6 @@ export function roleModelCandidates(
 		return scopeAllowList(session.scopedModels);
 	}
 	return session.getAvailableModels(roleLookup);
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 /** First authed model for a preset with no `default`, mirroring startup's automatic pick. */

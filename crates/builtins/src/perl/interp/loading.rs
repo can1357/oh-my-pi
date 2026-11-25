@@ -17,7 +17,7 @@ impl Interp<'_> {
 	}
 
 	fn run_file_source(&mut self, file: &str, src: &[u8], cx: Cx) -> PResult<Ret> {
-		let saved = std::mem::take(&mut self.scopes);
+		let saved = self.enter_pad(&Pad::new());
 		let persistent = std::mem::take(&mut self.persistent);
 		let location = self.location();
 		// A required or `do` file is compiled in the caller's current package.
@@ -30,7 +30,7 @@ impl Interp<'_> {
 			this.run_statements(&program.body, cx)
 		});
 		self.loc = location;
-		self.scopes = saved;
+		self.leave_pad(saved);
 		self.persistent = persistent;
 		result
 	}

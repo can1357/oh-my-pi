@@ -43,7 +43,7 @@ impl Interp<'_> {
 				// pp_tie looks the class up as a stash name, and the empty name is main.
 				let class = if matches!(&class, Value::Str(s) if s.is_empty()) { Value::str("main") } else { class };
 				let mut arguments = Vec::new();
-				for expr in args { arguments.extend(self.eval_list(expr)?); }
+				for expr in args { self.eval(expr, Cx::List)?.append_to(&mut arguments); }
 				let constructor = slot.constructor();
 				let value = self.call_method(class, constructor, arguments, Cx::Scalar)?.scalar();
 				if matches!(value, Value::Ref(_)) { slot.bind(self, Some(value.clone())); }
@@ -101,7 +101,13 @@ impl Interp<'_> {
 	}
 
 	/// Read a Perl scalar, invoking FETCH or an lvalue operation when required.
+	#[inline]
 	pub fn read_sv(&mut self, sv: &Sv) -> PResult<Value> {
+		if !sv.has_read_magic() { return Ok(sv.get()); }
+		self.read_sv_magic(sv)
+	}
+
+	fn read_sv_magic(&mut self, sv: &Sv) -> PResult<Value> {
 		if let Some(lvalue) = sv.lvalue() {
 			return match lvalue {
 				Lvalue::Substr { .. } | Lvalue::Vec { .. } => func::data::lvalue_get(self, lvalue),

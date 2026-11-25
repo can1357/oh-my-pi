@@ -268,6 +268,37 @@ describe("tray items", () => {
 		]);
 	});
 
+	it("puts settled cards after the live ones, each group in spawn order, so settling moves a card once", () => {
+		const f = fixture();
+		const memory = new TrayMemory();
+		f.sessions.push(observed("A", "active"), observed("B", "failed"), observed("C", "active"));
+		f.refs.push(ref("A", "running", 1), ref("B", "idle", 2), ref("C", "running", 3));
+		f.agentJobs.set("B", job("B", { type: "task", agentId: "B", status: "failed" }));
+		f.jobs.push(
+			job("bg_1", { startTime: 10, status: "failed", endTime: 20, errorText: "boom" }),
+			job("bg_2", { startTime: 30 }),
+		);
+		expect(cards(f, memory)).toEqual([
+			"agent:A:running",
+			"agent:C:running",
+			"job:bg_2:running",
+			"agent:B:failed",
+			"job:bg_1:failed",
+		]);
+
+		// A finishes, its result not yet delivered: it joins the settled ones in its spawn place, before B.
+		f.sessions[0] = observed("A", "completed");
+		f.refs[0] = ref("A", "idle", 1);
+		f.agentJobs.set("A", job("A", { type: "task", agentId: "A", status: "completed" }));
+		expect(cards(f, memory)).toEqual([
+			"agent:C:running",
+			"job:bg_2:running",
+			"agent:A:done",
+			"agent:B:failed",
+			"job:bg_1:failed",
+		]);
+	});
+
 	it("reads an agent being revived to be viewed as still finished, and its dot as it ended", () => {
 		const f = fixture();
 		const memory = new TrayMemory();
@@ -780,7 +811,7 @@ describe("TrayFeed", () => {
 		expect(host.cancelJob).toHaveBeenCalledTimes(1);
 
 		// Dismissing a settled agent folds it into the done card; a settled job's card goes.
-		expect(refs(tray.describe())).toEqual(["Scout", "Review", "bg_1", "bg_2", "done"]);
+		expect(refs(tray.describe())).toEqual(["Scout", "bg_1", "Review", "bg_2", "done"]);
 		tray.act("tray.dismiss", "Review");
 		tray.act("tray.dismiss", "bg_2");
 		// A live card cannot be dismissed.

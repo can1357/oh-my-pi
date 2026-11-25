@@ -62,10 +62,10 @@ impl Warnings {
 		bits != 0
 	}
 	/// Whether the category is enabled in the lexical warning bits.
-	pub fn enabled(&self, category: &str) -> bool { self.on & category_bit(category) != 0 }
+	pub fn enabled(&self, category: &str) -> bool { self.on != 0 && self.on & category_bit(category) != 0 }
 	/// Whether the category is fatal in the lexical warning bits.
-	pub fn fatal(&self, category: &str) -> bool { self.fatal & category_bit(category) != 0 }
-	pub(super) fn specified(&self, category: &str) -> bool { self.specified & category_bit(category) != 0 }
+	pub fn fatal(&self, category: &str) -> bool { self.fatal != 0 && self.fatal & category_bit(category) != 0 }
+	pub(super) fn specified(&self, category: &str) -> bool { self.specified != 0 && self.specified & category_bit(category) != 0 }
 
 	pub(super) fn packed(&self) -> Option<PStr> {
 		if self.specified == 0 { return None; }
