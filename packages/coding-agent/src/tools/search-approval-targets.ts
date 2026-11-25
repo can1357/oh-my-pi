@@ -97,7 +97,7 @@ function searchRootApprovalKey(
 	if (router.canHandle(router.normalize(root))) return approvalTargetKey(cwd, root, router);
 	let absolute: string;
 	try {
-		absolute = resolveToCwd(root, cwd);
+		absolute = resolveToCwd(root, cwd, router);
 	} catch {
 		// resolveToCwd rejects unknown URL schemes; there is no filesystem target to key.
 		return undefined;

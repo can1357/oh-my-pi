@@ -76,6 +76,7 @@ import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { WriteTool } from "../tools/write";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "../utils/png-conversion";
@@ -611,7 +612,7 @@ export function createGrepToolDefinition(cwd: string, options?: GrepToolOptions)
 			let isFile = false;
 			if (glob) {
 				try {
-					isFile = (await fs.promises.stat(resolveToCwd(searchPath, cwd))).isFile();
+					isFile = (await fs.promises.stat(resolveToCwd(searchPath, cwd, InternalUrlRouter.builtins()))).isFile();
 				} catch {
 					// Leave unresolved paths and URLs to the built-in grep resolver.
 				}

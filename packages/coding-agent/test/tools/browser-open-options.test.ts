@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
@@ -96,10 +97,13 @@ describe("browser open options CDP helpers", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-init-test-"));
 		tempDirs.push(directory);
 		await Bun.write(path.join(directory, "init.js"), "globalThis.fromFile = true;");
-		expect(await resolveInitScriptSources(["init.js", "globalThis.inline = true;"], directory)).toEqual([
-			"globalThis.fromFile = true;",
-			"globalThis.inline = true;",
-		]);
+		expect(
+			await resolveInitScriptSources(
+				["init.js", "globalThis.inline = true;"],
+				directory,
+				InternalUrlRouter.builtins(),
+			),
+		).toEqual(["globalThis.fromFile = true;", "globalThis.inline = true;"]);
 	});
 
 	async function fakeDownloads(

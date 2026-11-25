@@ -11,7 +11,7 @@ import { replaceTabs } from "../utils/text-width";
 import { shortenPath } from "../utils/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
 import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
-import type { InternalUrlRouter } from "../internal-urls/router";
+import { InternalUrlRouter } from "../internal-urls/router";
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
 import type {
@@ -530,7 +530,7 @@ function restrictionSubjects(
 	const requested = isRecord(args) ? args.cwd : undefined;
 	if (typeof requested === "string" && requested.trim().length > 0) {
 		try {
-			workingDirectory = resolveToCwd(requested, cwd);
+			workingDirectory = resolveToCwd(requested, cwd, InternalUrlRouter.builtins());
 		} catch {
 			// An internal-URL working directory is no local folder; the session's still applies.
 		}

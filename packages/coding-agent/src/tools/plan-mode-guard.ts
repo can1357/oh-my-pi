@@ -82,7 +82,7 @@ export async function resolvePlanPath(session: ToolSession, targetPath: string, 
 	if (router.canHandle(normalized)) {
 		return router.requireLocal(normalized, "write", sessionResolveContext(session, { signal }), { create: true });
 	}
-	return resolveToCwd(normalized, session.cwd);
+	return resolveToCwd(normalized, session.cwd, router);
 }
 
 /**

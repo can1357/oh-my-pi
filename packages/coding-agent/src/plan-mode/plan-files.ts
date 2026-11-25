@@ -13,7 +13,7 @@ export function resolvePlanFilePath(
 	options: { localProtocolOptions: LocalProtocolOptions; cwd: string; router: InternalUrlRouter },
 ): string {
 	const router = options.router;
-	if (!router.canHandle(planFilePath)) return resolveToCwd(planFilePath, options.cwd);
+	if (!router.canHandle(planFilePath)) return resolveToCwd(planFilePath, options.cwd, router);
 	const located = router.locateSync(planFilePath, {
 		cwd: options.cwd,
 		localProtocolOptions: options.localProtocolOptions,

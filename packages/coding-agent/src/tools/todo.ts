@@ -16,6 +16,7 @@ import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import type { SessionEntry } from "../session/session-entries";
 
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
 
 /** Whether an unknown value is a persisted todo phase. */
@@ -538,9 +539,10 @@ const STATUS_TO_MARKER: Record<TodoStatus, string> = {
 	abandoned: "-",
 };
 
-export function resolveTodoMarkdownPath(input: string, cwd: string): string {
+/** The Markdown file a `/todo export|import` argument names (default `TODO.md`); refuses a URL of a scheme `router` handles. */
+export function resolveTodoMarkdownPath(input: string, cwd: string, router: InternalUrlRouter): string {
 	const raw = normalizePathLikeInput(input) || "TODO.md";
-	return resolveToCwd(raw, cwd);
+	return resolveToCwd(raw, cwd, router);
 }
 
 /** Render todo phases as a Markdown checklist suitable for editing/copying. */

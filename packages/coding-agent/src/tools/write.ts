@@ -918,7 +918,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const { text: cleanContent, stripped } = verbatim
 				? { text: content, stripped: false }
 				: stripWriteContent(this.session, content, {
-						targetPath: target ? undefined : resolveToCwd(path, this.session.cwd),
+						targetPath: target ? undefined : resolveToCwd(path, this.session.cwd, sessionUrlRouter(this.session)),
 					});
 			// One UTF-8 scan per call, shared by the progress and result lines.
 			const cleanBytes = Buffer.byteLength(cleanContent, "utf8");

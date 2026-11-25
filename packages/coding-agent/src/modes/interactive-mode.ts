@@ -5408,7 +5408,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		let destination: string;
 		try {
-			destination = resolveToCwd(selectedPath, this.sessionManager.getCwd());
+			destination = resolveToCwd(selectedPath, this.sessionManager.getCwd(), this.session.urlRouter);
 		} catch (error) {
 			this.showError(`Invalid plan save path: ${error instanceof Error ? error.message : String(error)}`);
 			return;

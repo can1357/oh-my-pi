@@ -6,6 +6,7 @@ import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir, isEnoent, readImageMetadata } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
@@ -42,7 +43,7 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 
 	for (const fileArg of fileArgs) {
 		// Expand and resolve path (handles ~ expansion and macOS screenshot Unicode spaces)
-		const absolutePath = path.resolve(resolveReadPath(fileArg, getProjectDir()));
+		const absolutePath = path.resolve(resolveReadPath(fileArg, getProjectDir(), InternalUrlRouter.builtins()));
 
 		const stat = fs.statSync(absolutePath, { throwIfNoEntry: false });
 		if (!stat) {

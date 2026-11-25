@@ -108,7 +108,7 @@ export function approvalTargetKey(cwd: string, target: string, router: InternalU
 	if (router.canHandle(normalized)) return normalized;
 	if (isReadableUrlPath(trimmed)) return trimmed;
 	try {
-		return approvalCacheKeyForPath(resolveToCwd(target, cwd));
+		return approvalCacheKeyForPath(resolveToCwd(target, cwd, router));
 	} catch {
 		// resolveToCwd rejects registered internal URLs; those returned above.
 		return target;

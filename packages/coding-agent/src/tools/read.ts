@@ -2473,7 +2473,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				? { kind: "none" as const }
 				: parseSel(localTarget.sel);
 
-		let absolutePath = await resolveReadPathAsync(localReadPath, this.session.cwd);
+		let absolutePath = await resolveReadPathAsync(localReadPath, this.session.cwd, sessionUrlRouter(this.session));
 		let suffixResolution: { from: string; to: string } | undefined;
 
 		let isDirectory = false;

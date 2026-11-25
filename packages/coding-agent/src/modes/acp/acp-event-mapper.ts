@@ -8,7 +8,7 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
-import type { InternalUrlRouter } from "../../internal-urls/router";
+import { InternalUrlRouter } from "../../internal-urls/router";
 import { extractUriScheme } from "../../internal-urls/parse";
 import type { SchemeSpec } from "../../internal-urls/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
@@ -617,7 +617,7 @@ function buildToolTitle(toolName: string, args: unknown, intent: string | undefi
 function toAcpLocationPath(value: string, cwd?: string): string {
 	if (!cwd) return value;
 	try {
-		return resolveToCwd(value, cwd);
+		return resolveToCwd(value, cwd, InternalUrlRouter.builtins());
 	} catch {
 		return value;
 	}

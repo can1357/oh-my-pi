@@ -17,7 +17,7 @@ import { shellChangeSnapshots } from "../commit/selective/journal";
 import { executeBash, sessionShellEnv } from "../exec/bash-executor";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { cfgBashGitGuard } from "../exec/settings";
-import { sessionResolveContext } from "../internal-urls/context";
+import { sessionResolveContext, sessionUrlRouter } from "../internal-urls/context";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { ovnfsCommand } from "../task/settings";
 import type { ToolSession } from "../tools";
@@ -94,7 +94,7 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 					}),
 				};
 	const result = await executeBash(command, {
-		cwd: cwd ? resolveToCwd(cwd, session.cwd) : session.cwd,
+		cwd: cwd ? resolveToCwd(cwd, session.cwd, sessionUrlRouter(session)) : session.cwd,
 		env: sessionShellEnv({ id: owningSessionId(session), file: session.getSessionFile() }),
 		// 0 disables the executor deadline: the cell's own deadline governs.
 		timeout: timeout === undefined ? 0 : timeout * 1000,

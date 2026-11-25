@@ -16,6 +16,7 @@ import { splitPathAndSel } from "@oh-my-pi/pi-coding-agent/tools/details/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { runGrepCommand } from "../../src/cli/grep-cli";
 import { GrepTool } from "../../src/tools/grep";
 import { initTheme } from "../../src/ui/theme/service";
@@ -431,19 +432,25 @@ describe("leading-colon path recovery (issue #5508)", () => {
 	}
 
 	it("strips a leading colon before an absolute path in resolveToCwd", () => {
-		expect(resolveToCwd(":/tmp/omp-colon-test.txt", tmpDir)).toBe("/tmp/omp-colon-test.txt");
+		expect(resolveToCwd(":/tmp/omp-colon-test.txt", tmpDir, InternalUrlRouter.builtins())).toBe(
+			"/tmp/omp-colon-test.txt",
+		);
 	});
 
 	it("strips a leading colon before `./` and `../` relative paths in resolveToCwd", () => {
-		expect(resolveToCwd(":./sub/file.md", tmpDir)).toBe(path.join(tmpDir, "sub/file.md"));
-		expect(resolveToCwd(":../sibling.md", tmpDir)).toBe(path.resolve(tmpDir, "../sibling.md"));
+		expect(resolveToCwd(":./sub/file.md", tmpDir, InternalUrlRouter.builtins())).toBe(
+			path.join(tmpDir, "sub/file.md"),
+		);
+		expect(resolveToCwd(":../sibling.md", tmpDir, InternalUrlRouter.builtins())).toBe(
+			path.resolve(tmpDir, "../sibling.md"),
+		);
 	});
 
 	it("does not strip a colon that is not a mangled path prefix", () => {
 		// `:selector` shapes and bare tokens must round-trip unchanged — the
 		// lookahead only fires before `/`, `~/`, `./`, or `../`.
-		expect(resolveToCwd(":raw", tmpDir)).toBe(path.join(tmpDir, ":raw"));
-		expect(resolveToCwd(":name.txt", tmpDir)).toBe(path.join(tmpDir, ":name.txt"));
+		expect(resolveToCwd(":raw", tmpDir, InternalUrlRouter.builtins())).toBe(path.join(tmpDir, ":raw"));
+		expect(resolveToCwd(":name.txt", tmpDir, InternalUrlRouter.builtins())).toBe(path.join(tmpDir, ":name.txt"));
 	});
 
 	it("strips a leading colon before Windows path shapes in expandPath (issue #5624)", () => {

@@ -521,7 +521,7 @@ async function resolveCursorReadOffset(
 	try {
 		const cwd = options.getCwd?.() ?? options.cwd;
 		const { path: filePath } = await splitPathAndSelPreferringLiteral(readPath, cwd);
-		const absolutePath = await resolveReadPathAsync(filePath, cwd);
+		const absolutePath = await resolveReadPathAsync(filePath, cwd, options.urlRouter);
 		const handle = await fs.promises.open(absolutePath, "r");
 		try {
 			const stat = await handle.stat();

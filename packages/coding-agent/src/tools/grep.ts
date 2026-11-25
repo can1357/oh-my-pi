@@ -244,7 +244,7 @@ async function parsePathSpecs(
 			});
 			continue;
 		}
-		let clean = literalFilesystemMatch ? resolveReadPath(entry, cwd) : entry;
+		let clean = literalFilesystemMatch ? resolveReadPath(entry, cwd, router) : entry;
 		let ranges: [LineRange, ...LineRange[]] | undefined;
 		if (!literalFilesystemMatch && split.sel) {
 			const parsed = parseLineRanges(split.sel);
@@ -296,6 +296,7 @@ function mergeRangesInto(map: Map<string, LineRange[]>, absKey: string, ranges: 
 async function resolveArchiveSearchPaths(
 	pathSpecs: readonly GrepPathSpec[],
 	cwd: string,
+	router: InternalUrlRouter,
 ): Promise<{
 	resolvedPaths: string[];
 	displayMap: Map<string, string>;
@@ -318,7 +319,7 @@ async function resolveArchiveSearchPaths(
 		const member = candidates.find(c => c.subPath !== "" && c.archivePath !== entry);
 		if (!member) continue;
 
-		const archiveAbs = resolveReadPath(member.archivePath, cwd);
+		const archiveAbs = resolveReadPath(member.archivePath, cwd, router);
 		let archive = archiveCache.get(archiveAbs);
 		if (!archive) {
 			try {
@@ -492,10 +493,10 @@ function normalizeExclusion(pattern: string): string {
  * `**`, resolved against cwd like any tool path. `undefined` for a pattern that
  * matches at any depth, `null` for one that resolves to no filesystem path.
  */
-function anchoredExclusionPath(pattern: string, cwd: string): string | null | undefined {
+function anchoredExclusionPath(pattern: string, cwd: string, router: InternalUrlRouter): string | null | undefined {
 	if (!pattern.includes("/") || pattern.startsWith("**")) return undefined;
 	try {
-		return resolveToCwd(pattern, cwd);
+		return resolveToCwd(pattern, cwd, router);
 	} catch {
 		return null;
 	}
@@ -528,7 +529,7 @@ function exclusionsForRoot(
 	for (const raw of patterns) {
 		const pattern = normalizeExclusion(raw);
 		if (!pattern) continue;
-		const target = anchoredExclusionPath(pattern, cwd);
+		const target = anchoredExclusionPath(pattern, cwd, router);
 		if (target === undefined) {
 			rebased.push(pattern);
 			continue;
@@ -731,7 +732,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				displaySet: archiveDisplaySet,
 				unreadable: archiveUnreadable,
 				cleanup: cleanupArchiveScratch,
-			} = await resolveArchiveSearchPaths(pathSpecs, this.session.cwd);
+			} = await resolveArchiveSearchPaths(pathSpecs, this.session.cwd, router);
 			try {
 				const rangesByAbsPath = new Map<string, LineRange[]>();
 
@@ -782,7 +783,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						// Non-archive entry; ensure the cleaned path resolves to a regular file.
 						const absKey = router.canHandle(resolved)
 							? resolved
-							: path.resolve(resolveReadPath(resolved, this.session.cwd));
+							: path.resolve(resolveReadPath(resolved, this.session.cwd, router));
 						const stats = await urlFilesystem.stat(absKey).catch(() => null);
 						if (!stats) {
 							throw new ToolError(`Path not found for line-range selector: ${spec.original}`);

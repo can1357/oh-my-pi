@@ -72,6 +72,7 @@ import { findHintVisible } from "./jfind";
 import { formatArtifactErrorNotice } from "./output-meta-format";
 import { formatOutputNotice } from "./output-meta-format";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
 	BASH_APPROVAL_SHELL_CONTROL_CHARS,
@@ -696,9 +697,14 @@ function noticeUrlWrites(notices: string[]): (report: UrlWriteReport) => void {
 }
 
 /** Explicit tool `cwd` keeps the workspace-root alias; a hoisted shell `cd` does not. */
-function resolveCommandCwd(cwd: string | undefined, sessionCwd: string, hoistedShellCwd: boolean): string {
+function resolveCommandCwd(
+	cwd: string | undefined,
+	sessionCwd: string,
+	hoistedShellCwd: boolean,
+	router: InternalUrlRouter,
+): string {
 	if (!cwd) return sessionCwd;
-	return hoistedShellCwd ? resolveShellDirectory(cwd, sessionCwd) : resolveToCwd(cwd, sessionCwd);
+	return hoistedShellCwd ? resolveShellDirectory(cwd, sessionCwd, router) : resolveToCwd(cwd, sessionCwd, router);
 }
 
 /** Words that may precede a simple command in a command list without being its name. */
@@ -1855,7 +1861,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			const semicolonDirectory =
 				cd?.separator === ";" &&
 				!virtualTarget &&
-				(await fs.promises.stat(resolveShellDirectory(cd.path, this.session.cwd)).catch(() => null))?.isDirectory();
+				(
+					await fs.promises
+						.stat(resolveShellDirectory(cd.path, this.session.cwd, sessionUrlRouter(this.session)))
+						.catch(() => null)
+				)?.isDirectory();
 			if (cd && (cd.separator === "&&" || semicolonDirectory === true)) {
 				hoistedShellCwd = !virtualTarget;
 				cwd = cd.path;
@@ -1972,7 +1982,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 		const router = sessionUrlRouter(this.session);
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
-		const commandCwd = virtualCwd ?? resolveCommandCwd(cwd, this.session.cwd, hoistedShellCwd);
+		const commandCwd = virtualCwd ?? resolveCommandCwd(cwd, this.session.cwd, hoistedShellCwd, router);
 		if (cwd) ran.cwd = commandCwd;
 		// Where a process for this command starts: a URL directory has none of its own.
 		const hostCwd = virtualCwd === undefined ? commandCwd : this.session.cwd;

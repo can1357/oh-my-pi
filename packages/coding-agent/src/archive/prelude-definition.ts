@@ -5,6 +5,8 @@ import type { HostEvalPreludeDefinition } from "../eval/preludes";
 import archiveDocumentation from "../prompts/tools/archive.md" with { type: "text" };
 import type { TimeWindow } from "../session/time-window";
 import type { ToolSession } from "../tools";
+import { sessionUrlRouter } from "../internal-urls/context";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { resolveToCwd } from "../tools/path-utils";
 import { cfgArchiveEnabled } from "../tools/settings";
 import {
@@ -113,14 +115,20 @@ const paramsSchema = type({ action: "'projects'", "limit?": limit, ...window, "+
 
 type ArchiveParams = typeof paramsSchema.infer;
 
+/** Where relative paths resolve: the session's cwd, and its router (whose URLs are no paths). */
+interface PathBase {
+	cwd: string;
+	router: InternalUrlRouter;
+}
+
 /**
  * Absolute project directory for a `project` argument; `undefined` spans every
  * project. Omitted means the session's own working directory, `"*"` every
  * project, anything else a path (`~` expanded, relative to the session cwd).
  */
-function resolveProject(project: string | undefined, cwd: string): string | undefined {
+function resolveProject(project: string | undefined, base: PathBase): string | undefined {
 	if (project === "*") return undefined;
-	return project === undefined ? cwd : resolveToCwd(project, cwd);
+	return project === undefined ? base.cwd : resolveToCwd(project, base.cwd, base.router);
 }
 
 /**
@@ -176,18 +184,18 @@ function regexFlags(flags: string | undefined): ActivityFlags {
 
 function scopeOf(
 	params: { project?: string; since?: string; until?: string },
-	cwd: string,
+	base: PathBase,
 	count: number,
 ): ArchiveScope {
-	return { cwd: resolveProject(params.project, cwd), window: resolveWindow(params), limit: count };
+	return { cwd: resolveProject(params.project, base), window: resolveWindow(params), limit: count };
 }
 
 function activityScopeOf(
 	params: { project?: string; since?: string; until?: string; subagents?: boolean },
-	cwd: string,
+	base: PathBase,
 	count: number,
 ): ActivityScope {
-	return { ...scopeOf(params, cwd, count), subagents: params.subagents === true };
+	return { ...scopeOf(params, base, count), subagents: params.subagents === true };
 }
 
 function callFilterOf(params: {
@@ -204,14 +212,14 @@ function toolList(tool: string | string[] | undefined): string[] | undefined {
 }
 
 /** A session id prefix as given, or a `.jsonl` transcript path resolved against the cwd. */
-function transcriptRef(id: string, cwd: string): string {
-	return id.endsWith(".jsonl") ? resolveToCwd(id, cwd) : id;
+function transcriptRef(id: string, base: PathBase): string {
+	return id.endsWith(".jsonl") ? resolveToCwd(id, base.cwd, base.router) : id;
 }
 
-async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSignal): Promise<ArchiveView<unknown>> {
+async function archiveView(params: ArchiveParams, base: PathBase, signal?: AbortSignal): Promise<ArchiveView<unknown>> {
 	// A transcript is bounded by its character budget, not a record limit.
 	if (params.action === "transcript") {
-		return archiveTranscript(transcriptRef(params.id, cwd), {
+		return archiveTranscript(transcriptRef(params.id, base), {
 			budget: params.budget ?? DEFAULT_TRANSCRIPT_BUDGET,
 			detail: params.detail ?? "auto",
 			turns: params.turns,
@@ -224,20 +232,20 @@ async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSig
 		case "projects":
 			return archiveProjects(count, resolveWindow(params));
 		case "sessions":
-			return archiveSessions(scopeOf(params, cwd, count));
+			return archiveSessions(scopeOf(params, base, count));
 		case "session":
-			return archiveSession(transcriptRef(params.id, cwd), count);
+			return archiveSession(transcriptRef(params.id, base), count);
 		case "prompts":
-			return archivePrompts(params.query, scopeOf(params, cwd, count));
+			return archivePrompts(params.query, scopeOf(params, base, count));
 		case "search":
-			return archiveSearch(params.query, scopeOf(params, cwd, count));
+			return archiveSearch(params.query, scopeOf(params, base, count));
 		case "recaps":
-			return archiveRecaps(scopeOf(params, cwd, count));
+			return archiveRecaps(scopeOf(params, base, count));
 		case "calls":
 			return archiveCalls(
 				callFilterOf(params),
 				regexFlags(params.flags),
-				activityScopeOf(params, cwd, count),
+				activityScopeOf(params, base, count),
 				signal,
 			);
 		case "grep":
@@ -248,7 +256,7 @@ async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSig
 					sources: params.sources ?? ["user", "assistant", "thinking", "args", "result"],
 					tools: toolList(params.tool),
 				},
-				activityScopeOf(params, cwd, count),
+				activityScopeOf(params, base, count),
 				signal,
 			);
 		case "stats":
@@ -256,11 +264,11 @@ async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSig
 				params.by ?? "tool",
 				callFilterOf(params),
 				regexFlags(params.flags),
-				activityScopeOf(params, cwd, count),
+				activityScopeOf(params, base, count),
 				signal,
 			);
 		case "messages":
-			return archiveMessages(transcriptRef(params.id, cwd), {
+			return archiveMessages(transcriptRef(params.id, base), {
 				kinds: params.kinds,
 				window: resolveWindow(params),
 				limit: count,
@@ -313,7 +321,11 @@ export function createArchivePrelude(session: ToolSession): HostEvalPreludeDefin
 			const parsed = paramsSchema(parameters);
 			if (parsed instanceof type.errors)
 				throw new ToolError(`archive received invalid arguments: ${parsed.summary}`);
-			const view = await archiveView(parsed, session.cwd, context.signal);
+			const view = await archiveView(
+				parsed,
+				{ cwd: session.cwd, router: sessionUrlRouter(session) },
+				context.signal,
+			);
 			return { content: [{ type: "text", text: view.text }], details: view.records };
 		},
 		status: describeArchiveCall,

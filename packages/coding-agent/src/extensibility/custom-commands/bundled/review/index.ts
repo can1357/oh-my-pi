@@ -13,6 +13,7 @@ import reviewCustomRequestTemplate from "../../../../prompts/review-custom-reque
 import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-request.md" with { type: "text" };
 import * as gh from "../../../../tools/gh";
 import * as glab from "../../../../tools/glab-mr";
+import { InternalUrlRouter } from "../../../../internal-urls/router";
 import { resolveToCwd } from "../../../../tools/path-utils";
 import { listDirectChildRepos } from "../../../../utils/active-repo-context";
 import { github } from "../../../../utils/github";
@@ -177,7 +178,7 @@ export async function resolveReviewRequest(args: string[], sessionCwd: string): 
 	const rest = [...args];
 	let cwd = sessionCwd;
 	if (rest[0] !== undefined && DIR_ARG_PATTERN.test(rest[0])) {
-		const dir = resolveToCwd(rest[0], sessionCwd);
+		const dir = resolveToCwd(rest[0], sessionCwd, InternalUrlRouter.builtins());
 		const stat = await fs.promises.stat(dir).catch(() => undefined);
 		if (stat?.isDirectory()) {
 			cwd = dir;

@@ -13,6 +13,7 @@ import {
 import { acquireDatabase } from "../disasm/client";
 import { readBinaryMetadata } from "../disasm/metadata";
 import type { ToolSession } from "../sdk";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { formatPathRelativeToCwd, resolveReadPath } from "./path-utils";
 import { buildInMemorySelectorResult } from "./read-format";
 import type { ParsedSelector } from "./read-selector";
@@ -79,9 +80,9 @@ async function isFile(absolutePath: string): Promise<boolean> {
 export async function resolveBinaryViewPath(session: ToolSession, readPath: string): Promise<BinaryViewTarget | null> {
 	const backend = cfgDisasmBackend.get(session.settings);
 	if (!readPath.includes(":")) return null;
-	if (await isFile(resolveReadPath(readPath, session.cwd))) return null;
+	if (await isFile(resolveReadPath(readPath, session.cwd, sessionUrlRouter(session)))) return null;
 	for (let i = readPath.lastIndexOf(":"); i > 0; i = readPath.lastIndexOf(":", i - 1)) {
-		const absolutePath = resolveReadPath(readPath.slice(0, i), session.cwd);
+		const absolutePath = resolveReadPath(readPath.slice(0, i), session.cwd, sessionUrlRouter(session));
 		if (!(await isFile(absolutePath))) continue;
 		if (databaseOwner(absolutePath) || (await isExecutableFile(absolutePath))) {
 			return { backend, absolutePath, ...splitSliceView(readPath.slice(i + 1)) };

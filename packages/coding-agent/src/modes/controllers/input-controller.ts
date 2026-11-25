@@ -2644,7 +2644,7 @@ export class InputController {
 	 */
 	async #insertPendingVideoPreview(pastedPath: string): Promise<void> {
 		try {
-			const absolutePath = resolveReadPath(pastedPath, this.ctx.sessionManager.getCwd());
+			const absolutePath = resolveReadPath(pastedPath, this.ctx.sessionManager.getCwd(), this.ctx.session.urlRouter);
 			const meta = await probeVideo(absolutePath);
 			const sheet = await buildVideoContactSheetPng(absolutePath, meta);
 			const preview = await this.#normalizePastedImage(

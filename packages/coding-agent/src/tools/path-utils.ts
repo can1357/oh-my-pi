@@ -235,9 +235,12 @@ function needsWindowsStreamExistenceCheck(resolved: string): boolean {
  * false positive made the literal-preferring splitters drop a valid selector and
  * `read` open `file.md:1-40` verbatim. Such paths are confirmed with an `F_OK`
  * access check, which rejects missing streams and accepts real ones.
+ *
+ * The probe only stats: callers route a session's URLs before probing, so it
+ * resolves against the built-in schemes alone.
  */
 export async function probeLiteralPathExists(filePath: string, cwd: string): Promise<"exists" | "missing" | "unknown"> {
-	const resolved = resolveReadPath(filePath, cwd);
+	const resolved = resolveReadPath(filePath, cwd, InternalUrlRouter.builtins());
 	try {
 		await fs.promises.lstat(resolved);
 		if (needsWindowsStreamExistenceCheck(resolved)) await fs.promises.access(resolved, fs.constants.F_OK);
@@ -279,7 +282,7 @@ export async function splitPathAndSelPreferringLiteral(
  * error-code handling matches the async version exactly.
  */
 export function probeLiteralPathExistsSync(filePath: string, cwd: string): "exists" | "missing" | "unknown" {
-	const resolved = resolveReadPath(filePath, cwd);
+	const resolved = resolveReadPath(filePath, cwd, InternalUrlRouter.builtins());
 	try {
 		fs.lstatSync(resolved);
 		if (needsWindowsStreamExistenceCheck(resolved)) fs.accessSync(resolved, fs.constants.F_OK);
@@ -329,25 +332,23 @@ export function isInternalUrlPath(filePath: string, router: InternalUrlRouter): 
  * filesystem root is almost never what they intended. A shell `cd` target is
  * not a tool input: use {@link resolveShellDirectory}.
  *
- * Throws on a URL of a scheme `router` handles: pass the session's router when
- * the path reaches the filesystem without going through the session's URL routing.
+ * Throws on a URL of a scheme `router` handles. A caller with a session passes the
+ * session's router (its own schemes, then the built-ins); one with no session passes
+ * {@link InternalUrlRouter.builtins}. A path that only looks like a URL of a scheme
+ * `router` does not handle resolves as a local path.
  */
-export function resolveToCwd(
-	filePath: string,
-	cwd: string,
-	router: InternalUrlRouter = InternalUrlRouter.builtins(),
-): string {
+export function resolveToCwd(filePath: string, cwd: string, router: InternalUrlRouter): string {
 	return resolveDirectory(filePath, cwd, true, router);
 }
 
 /**
  * Resolve a directory a shell command named (`cd <path>`), relative to `cwd`.
  *
- * Same expansion as {@link resolveToCwd}, except a bare root (`/`, `//`, `///`)
- * is the filesystem root. Explicit tool path inputs keep the workspace alias.
+ * Same expansion and URL refusal as {@link resolveToCwd}, except a bare root
+ * (`/`, `//`, `///`) is the filesystem root. Explicit tool path inputs keep the workspace alias.
  */
-export function resolveShellDirectory(filePath: string, cwd: string): string {
-	return resolveDirectory(filePath, cwd, false, InternalUrlRouter.builtins());
+export function resolveShellDirectory(filePath: string, cwd: string, router: InternalUrlRouter): string {
+	return resolveDirectory(filePath, cwd, false, router);
 }
 
 function resolveDirectory(
@@ -382,11 +383,7 @@ function resolveDirectory(
  * The cwd itself is rejected: a download names a file, never the directory. So
  * is a URL of a scheme `router` handles: it is not a filesystem target at all.
  */
-export function confineToWorkspace(
-	filePath: string,
-	cwd: string,
-	router: InternalUrlRouter = InternalUrlRouter.builtins(),
-): string | null {
+export function confineToWorkspace(filePath: string, cwd: string, router: InternalUrlRouter): string | null {
 	if (!filePath || path.isAbsolute(filePath)) return null;
 	// `~` expands to an absolute path, and an internal URL is not a filesystem
 	// target at all; neither is a relative workspace path.
@@ -1061,7 +1058,7 @@ export async function parseSearchPathPreferringLiteral(
 ): Promise<ParsedSearchPath> {
 	if (!hasGlobPathChars(filePath) || isInternalUrlPath(filePath, router)) return parseSearchPath(filePath, router);
 	try {
-		await fs.promises.stat(resolveToCwd(filePath, cwd));
+		await fs.promises.stat(resolveToCwd(filePath, cwd, router));
 		return { basePath: normalizePathSeparators(filePath, router) };
 	} catch {
 		return parseSearchPath(filePath, router);
@@ -1375,10 +1372,10 @@ export async function partitionExistingPaths(
  * spaces) run on every platform, exactly like the sync resolver: a file
  * copied from macOS keeps its NFD/curly bytes wherever it lands, so the
  * normalization must not be darwin-gated. The wins here are non-blocking
- * probes, not fewer probes.
+ * probes, not fewer probes. Refuses a URL of a scheme `router` handles, like {@link resolveToCwd}.
  */
-export async function resolveReadPathAsync(filePath: string, cwd: string): Promise<string> {
-	const resolved = resolveToCwd(filePath, cwd);
+export async function resolveReadPathAsync(filePath: string, cwd: string, router: InternalUrlRouter): Promise<string> {
+	const resolved = resolveToCwd(filePath, cwd, router);
 	const shellEscapedVariant = tryShellEscapedPath(resolved);
 	const baseCandidates = shellEscapedVariant !== resolved ? [resolved, shellEscapedVariant] : [resolved];
 
@@ -1417,8 +1414,9 @@ export async function resolveReadPathAsync(filePath: string, cwd: string): Promi
 	return resolved;
 }
 
-export function resolveReadPath(filePath: string, cwd: string): string {
-	const resolved = resolveToCwd(filePath, cwd);
+/** {@link resolveToCwd} plus the macOS filename variants of an existing file; see {@link resolveReadPathAsync}. */
+export function resolveReadPath(filePath: string, cwd: string, router: InternalUrlRouter): string {
+	const resolved = resolveToCwd(filePath, cwd, router);
 	const shellEscapedVariant = tryShellEscapedPath(resolved);
 	const baseCandidates = shellEscapedVariant !== resolved ? [resolved, shellEscapedVariant] : [resolved];
 
@@ -1619,7 +1617,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			// (any other stat error means the path exists — let the local
 			// pipeline surface it).
 			try {
-				await fs.promises.stat(resolveToCwd(rawPath, cwd));
+				await fs.promises.stat(resolveToCwd(rawPath, cwd, internalRouter));
 			} catch (err) {
 				externalUrl = isEnoent(err) || isEnotdir(err);
 			}

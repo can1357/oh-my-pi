@@ -19,6 +19,7 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 } from "../tools/streaming-output";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, resizeImage } from "./image-resize";
 import { VideoError, buildVideoContactSheetPng, formatVideoDetails, probeVideo, videoMimeForPath } from "./video";
@@ -61,7 +62,7 @@ async function resolveMentionPath(
 	// Resolution itself can throw (an internal-scheme URL such as `@local://x` is not a
 	// filesystem path), so it stays inside the try: an unresolvable mention is prose too.
 	try {
-		const absolutePath = resolveReadPath(filePath, cwd);
+		const absolutePath = resolveReadPath(filePath, cwd, InternalUrlRouter.builtins());
 		await Bun.file(absolutePath).stat();
 		return { resolvedPath: filePath, absolutePath };
 	} catch {

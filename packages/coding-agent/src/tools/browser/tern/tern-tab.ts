@@ -22,6 +22,8 @@ import { isRecord, logger, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "../../tool-errors";
 import { JsRuntime } from "../../../eval/js/shared/runtime";
 import { resizeImage } from "../../../utils/image-resize";
+// Tab code runs on a session snapshot, not the session: its paths resolve against the built-in schemes.
+import { InternalUrlRouter } from "../../../internal-urls/router";
 import { resolveToCwd } from "../../path-utils";
 import { ToolAbortError, throwIfAborted } from "../../tool-errors";
 import { PointerSpace } from "../pointer-space";
@@ -2593,7 +2595,7 @@ export class TernTab implements InProcessRunTab {
 		const filePaths = paths.flat();
 		if (filePaths.length === 0) throw new ToolError("tab.uploadFile() requires at least one file path");
 		const cwd = this.#requireRunContext("tab.uploadFile()").session.cwd;
-		const absolute = filePaths.map(filePath => resolveToCwd(filePath, cwd));
+		const absolute = filePaths.map(filePath => resolveToCwd(filePath, cwd, InternalUrlRouter.builtins()));
 		for (const file of absolute) {
 			try {
 				await fs.promises.access(file);
@@ -3178,7 +3180,10 @@ export class TernTab implements InProcessRunTab {
 				area: screenshotArea(opts),
 				scale,
 				keepCapture: opts.format !== undefined,
-				path: opts.path === undefined ? undefined : resolveToCwd(opts.path, context.session.cwd),
+				path:
+					opts.path === undefined
+						? undefined
+						: resolveToCwd(opts.path, context.session.cwd, InternalUrlRouter.builtins()),
 				silent: opts.silent,
 				notes: opts.annotate ? [formatScreenshotLegend(legend)] : undefined,
 			},
@@ -3197,13 +3202,13 @@ export class TernTab implements InProcessRunTab {
 	async diffScreenshot(baselinePath: string, opts: DiffScreenshotOptions = {}): Promise<DiffScreenshotResult> {
 		const context = this.#requireRunContext("tab.diffScreenshot()");
 		const baseline = await untilAborted(context.signal, () =>
-			fs.promises.readFile(resolveToCwd(baselinePath, context.session.cwd)),
+			fs.promises.readFile(resolveToCwd(baselinePath, context.session.cwd, InternalUrlRouter.builtins())),
 		);
 		const current = await this.captureBytes({ format: "png" });
 		const diff = createPngDiff(baseline, current);
 		const changed = diff.pixelChangeRatio > screenshotThreshold(opts.threshold);
 		const diffPath = opts.output
-			? resolveToCwd(opts.output, context.session.cwd)
+			? resolveToCwd(opts.output, context.session.cwd, InternalUrlRouter.builtins())
 			: path.join(os.tmpdir(), `omp-screenshot-diff-${Snowflake.next()}.png`);
 		await Bun.write(diffPath, diff.png);
 		const resized = await resizeImage(
@@ -3248,7 +3253,7 @@ export class TernTab implements InProcessRunTab {
 			throw new ToolError(`${this.product} pdf answered without data`);
 		}
 		const dest = opts.path
-			? resolveToCwd(opts.path, context.session.cwd)
+			? resolveToCwd(opts.path, context.session.cwd, InternalUrlRouter.builtins())
 			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.pdf`);
 		await Bun.write(dest, Buffer.from(answer.data, "base64"));
 		return dest;
@@ -3796,7 +3801,7 @@ export class TernTab implements InProcessRunTab {
 		await this.#pull();
 		const har = await this.#network.harStop(this.loadBody);
 		const destination = options.path
-			? resolveToCwd(options.path, context.session.cwd)
+			? resolveToCwd(options.path, context.session.cwd, InternalUrlRouter.builtins())
 			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.har`);
 		await Bun.write(destination, `${JSON.stringify(har, null, 2)}\n`);
 		return destination;

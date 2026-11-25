@@ -72,7 +72,7 @@ export async function prepareEvalSource(
 		if (/^[a-z][a-z0-9+.-]*:\/\//i.test(file) && !file.startsWith("file://")) {
 			throw new ToolError("Eval scripts must be local. Download and inspect remote scripts before executing them.");
 		}
-		filename = await resolveReadPathAsync(file, session.cwd);
+		filename = await resolveReadPathAsync(file, session.cwd, sessionUrlRouter(session));
 	}
 	let code: string;
 	try {

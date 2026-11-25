@@ -22,6 +22,7 @@ import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { ToolBlock, ToolCall, type ToolCallResult } from "../../src/ui/transcript/tool-block";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { toolCall } from "../helpers/tool-text";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
@@ -74,19 +75,23 @@ describe("resolveTodoMarkdownPath", () => {
 	it("defaults to TODO.md under cwd", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
-		expect(resolveTodoMarkdownPath("", cwd)).toBe(path.join(cwd, "TODO.md"));
+		expect(resolveTodoMarkdownPath("", cwd, InternalUrlRouter.builtins())).toBe(path.join(cwd, "TODO.md"));
 	});
 
 	it("strips surrounding double quotes before resolving", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
-		expect(resolveTodoMarkdownPath('"my todos.md"', cwd)).toBe(path.join(cwd, "my todos.md"));
+		expect(resolveTodoMarkdownPath('"my todos.md"', cwd, InternalUrlRouter.builtins())).toBe(
+			path.join(cwd, "my todos.md"),
+		);
 	});
 
 	it("rejects internal URL schemes", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
-		expect(() => resolveTodoMarkdownPath("agent://todo", cwd)).toThrow("internal scheme");
+		expect(() => resolveTodoMarkdownPath("agent://todo", cwd, InternalUrlRouter.builtins())).toThrow(
+			"internal scheme",
+		);
 	});
 });
 

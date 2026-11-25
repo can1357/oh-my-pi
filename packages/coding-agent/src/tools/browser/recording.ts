@@ -9,6 +9,8 @@ import type { Protocol } from "devtools-protocol";
 import type { CDPSession, Page } from "puppeteer-core";
 import { resizeImage } from "../../utils/image-resize";
 import { buildChangedFrameContactSheetPng, requireMediaBinary, runFfmpeg } from "../../utils/video";
+// Tab code runs on a session snapshot, not the session: its paths resolve against the built-in schemes.
+import { InternalUrlRouter } from "../../internal-urls/router";
 import { resolveToCwd } from "../path-utils";
 import { readPageViewport } from "./launch";
 import type { RunOutput } from "./run-output";
@@ -477,7 +479,7 @@ export class RecordingController {
 		if (typeof rawPath !== "string" || rawPath.trim().length === 0) {
 			throw new BrowserRecordingError("tab.recordStart() requires a non-empty output path");
 		}
-		const absolutePath = resolveToCwd(rawPath, cwd);
+		const absolutePath = resolveToCwd(rawPath, cwd, InternalUrlRouter.builtins());
 		const extension = path.extname(absolutePath).toLowerCase();
 		if (extension !== ".mp4" && extension !== ".webm") {
 			throw new BrowserRecordingError("tab.recordStart() path must end in .mp4 or .webm");

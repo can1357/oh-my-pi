@@ -5,6 +5,8 @@ import { type } from "@oh-my-pi/omptype";
 import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "../tool-errors";
 import type { Cookie, CookieParam, Page } from "puppeteer-core";
+// Tab code runs on a session snapshot, not the session: its paths resolve against the built-in schemes.
+import { InternalUrlRouter } from "../../internal-urls/router";
 import { resolveToCwd } from "../path-utils";
 import { throwIfAborted } from "../tool-errors";
 
@@ -472,7 +474,7 @@ export function storageStatePath(tabName: string, requestedPath: string | undefi
 	const safeName = tabName.replace(/[^A-Za-z0-9._-]/g, "_");
 	const fileName = safeName === "." || safeName === ".." ? "_" : safeName || "main";
 	return requestedPath
-		? resolveToCwd(requestedPath, cwd)
+		? resolveToCwd(requestedPath, cwd, InternalUrlRouter.builtins())
 		: path.join(os.homedir(), ".omp", "browser-state", `${fileName}.json`);
 }
 
@@ -501,7 +503,7 @@ export async function readStorageStateFile(
 	signal?: AbortSignal,
 ): Promise<BrowserStorageState> {
 	if (typeof requestedPath !== "string" || requestedPath.length === 0) throw new ToolError(STORAGE_STATE_ERROR);
-	const source = resolveToCwd(requestedPath, cwd);
+	const source = resolveToCwd(requestedPath, cwd, InternalUrlRouter.builtins());
 	try {
 		const text = await untilAborted(signal, () => Bun.file(source).text());
 		return parseStorageState(JSON.parse(text) as unknown);
