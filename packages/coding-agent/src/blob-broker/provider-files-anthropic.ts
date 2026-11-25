@@ -32,13 +32,9 @@ function isOfficialAnthropicBaseUrl(baseUrl: string): boolean {
 	}
 }
 
-function authHeaders(credential: string): Readonly<Record<string, string>> {
-	return isAnthropicOAuthToken(credential) ? { Authorization: `Bearer ${credential}` } : { "x-api-key": credential };
-}
-
 function requestHeaders(credential: string): Readonly<Record<string, string>> {
 	return {
-		...authHeaders(credential),
+		"x-api-key": credential,
 		"anthropic-version": resolveAnthropicApiVersion(ANTHROPIC_FILES_URL),
 		"anthropic-beta": ANTHROPIC_FILES_BETA,
 	};
@@ -87,8 +83,10 @@ function uploadedFile(request: ProviderFileUploadRequest): File {
 }
 
 /**
- * Create a native Anthropic Files API client for an official Anthropic Messages model.
- * Unsupported providers, APIs, and non-Anthropic endpoints return `null` without making a request.
+ * Create a native Anthropic Files API client for an official Anthropic Messages model
+ * authenticated by an API key. Claude subscription OAuth tokens stay off the Files API;
+ * they, unsupported providers, APIs, and non-Anthropic endpoints return `null` without
+ * making a request.
  */
 export function createAnthropicFileClient(
 	model: Model,
@@ -98,7 +96,8 @@ export function createAnthropicFileClient(
 	if (
 		model.provider !== "anthropic" ||
 		model.api !== "anthropic-messages" ||
-		!isOfficialAnthropicBaseUrl(model.baseUrl)
+		!isOfficialAnthropicBaseUrl(model.baseUrl) ||
+		isAnthropicOAuthToken(credential)
 	) {
 		return null;
 	}

@@ -291,6 +291,8 @@ describe("provider-native file clients", () => {
 				forbiddenFetch,
 			),
 		).toBeNull();
+		// Claude subscription logins never upload to the Files API.
+		expect(createAnthropicFileClient(anthropicModel, "sk-ant-oat01-subscription", forbiddenFetch)).toBeNull();
 		expect(
 			createGeminiProviderFileClient(
 				{ ...geminiModel, baseUrl: "https://vertex.example.test/v1beta" },
