@@ -328,19 +328,61 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 		const art = mermaidRows(token.text, width, options.theme);
 		if (art) return art.map(row => (visibleWidth(row) > width ? truncate(row, width, "") : row));
 	}
-	const code = token.text;
-	const lines =
-		lang !== undefined && supportsLanguage(lang) ? highlightCode(code, lang, options.theme) : code.split("\n");
 	const out: Row[] = wrap(styles.codeBorder(`\`\`\`${lang ?? ""}`), width);
-	const indent = options.codeIndent ?? 2;
-	for (const raw of lines) {
-		const line = options.hyperlinks ? linkUrls(raw) : raw;
-		if (indent > 0) out.push(...wrap(spaces(indent) + line, width));
-		else if (line === "") out.push({ literal: "" });
-		else for (const literal of wrap(line, r.fullWidth)) out.push({ literal });
-	}
+	for (const line of codeLines(r, token.text, lang)) out.push(...codeLineRows(r, line, width));
 	out.push(...wrap(styles.codeBorder("```"), width));
 	return out;
+}
+
+/** Lines of a code block's text, highlighted when its language is known. */
+function codeLines(r: Renderer, code: string, lang: string | undefined): string[] {
+	return lang !== undefined && supportsLanguage(lang) ? highlightCode(code, lang, r.options.theme) : code.split("\n");
+}
+
+/** Rows of one code line: indented and wrapped at `width`, or literal rows across the full width without an indent. */
+function codeLineRows(r: Renderer, raw: string, width: number): Row[] {
+	const { options } = r;
+	const line = options.hyperlinks ? linkUrls(raw) : raw;
+	const indent = options.codeIndent ?? 2;
+	if (indent > 0) return wrap(spaces(indent) + line, width);
+	if (line === "") return [{ literal: "" }];
+	return wrap(line, r.fullWidth).map(literal => ({ literal }));
+}
+
+/**
+ * How many leading rows of `tail` (the blocks after a streaming document's
+ * settled head, drawn as `rows` rows) later text can no longer change. When
+ * the tail is one fenced code block still being written, those are its
+ * opening fence and every code line another line already follows: the
+ * highlighter reads each line in the state the lines before it leave, and
+ * each line wraps on its own. The last line can still grow (or turn out to
+ * be the closing fence). Fences whose finished form draws differently stay
+ * out: one without an info string (a finished document may drop it as an
+ * orphan closing fence, {@link repairOrphanClosingFence}), ```` ```mermaid ````
+ * drawn as a diagram, and ```` ```svg ```` (figure Markdown draws a closed one
+ * as a picture).
+ */
+function fenceHead(
+	tail: readonly Token[],
+	rows: number,
+	inner: number,
+	width: number,
+	options: MarkdownOptions,
+): number {
+	let fence: Tokens.Code | undefined;
+	for (const token of tail) {
+		if (isBlank(token)) continue;
+		if (fence || token.type !== "code") return 0;
+		fence = token as Tokens.Code;
+	}
+	if (!fence || fence.codeBlockStyle === "indented" || !fence.raw.includes("\n")) return 0;
+	const lang = fenceLanguage(fence);
+	if (lang === undefined || lang === "svg" || (lang === "mermaid" && options.mermaid !== false)) return 0;
+	const r = createRenderer(tail, width, options);
+	const lines = codeLines(r, fence.text, lang);
+	const open =
+		codeLineRows(r, lines[lines.length - 1]!, inner).length + wrap(r.styles.codeBorder("```"), inner).length;
+	return Math.max(0, rows - open);
 }
 
 const CODE_URL = /\b(?:https?|ftp):\/\/[^\s<>"'`]+/g;
@@ -826,8 +868,9 @@ function withHostLook(options: MarkdownOptions): MarkdownOptions {
 /**
  * Rows of `source` at `width` and the stable prefix among them: the rows of
  * every block before the last one being written (and the blank row after
- * them), plus the top padding. With `stream` off nothing is stable: the
- * caller owns the whole document.
+ * them), plus the top padding, plus the finished lines when that last block
+ * is a fenced code block ({@link fenceHead}). With `stream` off nothing is
+ * stable: the caller owns the whole document.
  */
 export function renderMarkdownFrame(source: string, width: number, given: MarkdownOptions): MarkdownFrame {
 	if (!source.trim()) return { rows: [], stable: 0 };
@@ -859,7 +902,11 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 		const rows = defined
 			? renderPriorDefinitions(tokens, 0, inner, width, options, true)
 			: renderPart(tokens, inner, width, options, key, true);
-		return { rows: paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows, stable: 0 };
+		const fence = fenceHead(tokens, rows.length, inner, width, options);
+		return {
+			rows: paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows,
+			stable: fence > 0 ? paddingY + fence : 0,
+		};
 	}
 	// Rows of a settled head are a function of its source alone (each block resolves reference links
 	// against the definitions before it), so they never change as the document grows: the terminal may
@@ -883,14 +930,15 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 				: renderPriorDefinitions(tokens.slice(0, settled), 0, inner, width, options, false);
 		if (settledKey !== undefined) settledHeads.set(settledKey, headRows);
 	}
+	const tail = tokens.slice(settled);
 	const tailRows = defined
 		? renderPriorDefinitions(tokens, settled, inner, width, options, true)
-		: renderPart(tokens.slice(settled), inner, width, options, key, true);
+		: renderPart(tail, inner, width, options, key, true);
 	const separator = headRows.length > 0 && tailRows.length > 0;
 	const rows: string[] = [];
 	for (let i = 0; i < paddingY; i++) rows.push(spaces(width));
 	for (const row of headRows) rows.push(row);
-	const stable = rows.length + (separator ? 1 : 0);
+	const stable = rows.length + (separator ? 1 : 0) + fenceHead(tail, tailRows.length, inner, width, options);
 	if (separator) rows.push(spaces(width));
 	for (const row of tailRows) rows.push(row);
 	for (let i = 0; i < paddingY; i++) rows.push(spaces(width));
