@@ -2267,7 +2267,6 @@ export class SelectorController {
 		const credentialProvider = getOAuthCredentialProvider(providerId);
 		const restoreEditor = () => handle.close();
 		const dialog = new LoginDialogState(
-			this.ctx.shell.theme,
 			providerId,
 			(_success, message) => {
 				// Fires on Esc: unblock the composer at once; the aborted flow's
