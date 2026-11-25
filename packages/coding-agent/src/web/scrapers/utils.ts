@@ -8,10 +8,6 @@ import { convertBufferWithMarkit } from "../../utils/markit";
 import type { LoadPageResult } from "./types";
 import { BLOCKED_STATUSES, MAX_BYTES, USER_AGENTS } from "./types";
 
-export function asRecord(value: unknown): Record<string, unknown> | null {
-	return isRecord(value) ? value : null;
-}
-
 const PLATFORM_PROBE_CACHE_LIMIT = 256;
 
 /**
