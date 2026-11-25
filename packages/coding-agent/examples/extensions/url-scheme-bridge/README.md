@@ -98,8 +98,9 @@ Terminal A prints `omp session "Main" connected`. Then:
 2. In omp: ask the model to send "hello" to leia with `write demo://leia` and then `wait`. Terminal A
    prints `[Main → leia] (expects reply) hello` and acks; the model's `wait` blocks.
 3. In terminal A: `leia: hi there` — omp receives `[@demo/leia] hi there`, which ends the `wait`.
-4. In terminal A: `leia?: what is 2+2` — sent as expecting an answer; terminal A prints omp's next
-   message to leia as `(reply to peer-2) …`.
+4. In terminal A: `leia?: what is 2+2` — sent as expecting an answer; once omp receipts it
+   (`↳ peer-2: delivered`), terminal A prints omp's next message to leia as `(reply to peer-2) …`.
+   A question omp dropped before it reached the transcript gets no receipt and is never owed.
 5. `/peers` lists the roster; `/quit` exits terminal A and removes its directory. Cleanup:
    `rm -rf /tmp/omp-peer-bridge-project`.
 

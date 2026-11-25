@@ -12,8 +12,9 @@
  *    names (`<dir>/bridge.sock`).
  * 3. Prints every message omp sends to a rostered peer, and acks it so the model's `write` succeeds.
  * 4. Reads stdin: `leia: hello` delivers "hello" into omp from `@demo/leia`; `leia?: question`
- *    additionally marks it as expecting an answer and prints omp's next message to leia as the
- *    reply. `/peers` lists the roster, `/quit` exits.
+ *    additionally marks it as expecting an answer: once omp receipts it as delivered (it reached
+ *    the transcript), omp's next message to leia is printed as the reply. `/peers` lists the
+ *    roster, `/quit` exits.
  *
  * It prints the command for the other terminal:
  *
@@ -88,8 +89,15 @@ await fs.rm(roster.socket, { force: true });
 let bridge: Bun.Socket | undefined;
 let nextId = 1;
 /**
- * Questions delivered to the connected session, per peer name, oldest first: each outbound to that
- * peer answers the oldest one. Cleared when that session goes away.
+ * Questions sent to the connected session and not yet receipted, by record id → peer name. omp
+ * receipts a message only once it reaches the transcript; one dropped before that (a session
+ * switch) gets no receipt and is never owed an answer.
+ */
+const unreceipted = new Map<string, string>();
+/**
+ * Questions the connected session received (a `delivered` receipt), per peer name, oldest first:
+ * each outbound to that peer answers the oldest one. Both maps are cleared when that session goes
+ * away.
  */
 const awaitingReply = new Map<string, string[]>();
 // Acks and inbound lines go through a drain-aware writer, like the bridge's side (see LineWriter).
@@ -133,11 +141,18 @@ const handleBridgeMessage = (message: BridgeMessage): void => {
 			send({ type: "ack", id: message.id, receipt: { outcome: "delivered" } });
 			return;
 		}
-		case "receipt":
+		case "receipt": {
 			console.log(
 				`  ↳ ${message.id}: ${message.receipt.outcome}${message.receipt.error ? ` — ${message.receipt.error}` : ""}`,
 			);
+			const peer = unreceipted.get(message.id);
+			if (peer === undefined) return;
+			unreceipted.delete(message.id);
+			if (message.receipt.outcome === "delivered") {
+				awaitingReply.set(peer, [...(awaitingReply.get(peer) ?? []), message.id]);
+			}
 			return;
+		}
 	}
 };
 
@@ -158,6 +173,7 @@ Bun.listen({
 				bridge.end();
 			}
 			// Questions asked of the previous session are not answered by this one.
+			unreceipted.clear();
 			awaitingReply.clear();
 			bridge = socket;
 			writer.attach(socket);
@@ -179,6 +195,7 @@ Bun.listen({
 			if (bridge === socket) {
 				bridge = undefined;
 				writer.detach();
+				unreceipted.clear();
 				awaitingReply.clear();
 				console.log("omp session disconnected");
 			}
@@ -220,8 +237,8 @@ for await (const rawLine of console) {
 	}
 	const id = `peer-${nextId++}`;
 	const sent = send({ type: "inbound", id, from: peer, body, expectsReply: expectsReply !== undefined });
-	// Only a question the session actually received makes its next write to this peer a reply.
-	if (sent && expectsReply) awaitingReply.set(peer, [...(awaitingReply.get(peer) ?? []), id]);
+	// A question becomes owed only once omp receipts it as delivered (see the `receipt` case).
+	if (sent && expectsReply) unreceipted.set(id, peer);
 }
 
 bridge?.end();

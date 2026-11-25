@@ -678,6 +678,39 @@ describe("examples/extensions/url-scheme-bridge", () => {
 		expect(fs.existsSync(dir)).toBe(false);
 	}, 20_000);
 
+	it("peer CLI treats a question as owed only once omp receipts it as delivered", async () => {
+		const dir = bridgeDir();
+		const cli = spawnPeerCli(["--dir", dir.path(), "--namespace", "demo", "--peers", "leia,han"]);
+		cleanups.push(() => cli.kill());
+		const [, rosterPath] = await cli.output(/roster written to (\S+)\n/);
+		await cli.output(/listening on /);
+		const harness = await rosterSession(rosterPath);
+		const { session } = harness;
+		await harness.start();
+		await cli.output(/omp session "Main" connected/);
+
+		// Dropped before admission (as during a session switch): omp never receipts it, so the next
+		// message to leia is not its answer.
+		const dropped = Promise.withResolvers<void>();
+		vi.spyOn(session, "sendCustomMessage").mockImplementation(async () => {
+			dropped.resolve();
+			return false;
+		});
+		cli.type("leia?: lost question");
+		await dropped.promise;
+		await session.urlRouter.write("demo://leia?notify", "unrelated news");
+		const [unrelated] = await cli.output(/\[Main → leia\][^\n]*unrelated news\n/);
+		expect(unrelated).not.toContain("reply to");
+
+		// Admitted: its `delivered` receipt makes it owed, and omp's next message to leia answers it.
+		harness.deliverInjected();
+		cli.type("leia?: kept question");
+		await cli.output(/peer-2: delivered/);
+		await session.urlRouter.write("demo://leia?notify", "the answer");
+		const [answer] = await cli.output(/\[Main → leia\][^\n]*the answer\n/);
+		expect(answer).toContain("(reply to peer-2)");
+	}, 20_000);
+
 	it("drops a connection that opens after the session shut down", async () => {
 		const harness = await bridgeSession();
 		// session_start starts connecting; the session goes away before that connection opens.
