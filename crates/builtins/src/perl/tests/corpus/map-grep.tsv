@@ -1,0 +1,21 @@
+# Perl corpus: map-grep. Format and regeneration: crates/builtins/src/perl/tests.rs.
+grep-alias	my @a=(1,2,3); for (grep {$_%2} @a) {$_*=10} print "@a\n";	10 2 30␊
+grep-block	print join('|',grep {$_%2} 1..5),"\n";	1|3|5␊
+grep-count	my $n=grep {$_>3} 1..6; print "$n\n";	3␊
+grep-defined	print join('|',grep {defined} 0,undef,'',2),"\n";	0||2␊
+grep-empty	my @a=grep {die 'not run'} (); print scalar(@a),"\n";	0␊
+grep-expr	print join('|',grep /at/,qw(cat dog rat)),"\n";	cat|rat␊
+grep-topic-alias	my @a=(1,2,3); my @b=grep {++$_%2} @a; print "@a|@b\n";	2 3 4|3␊
+grep-topic-restore	$_='outside'; my @b=grep {/at/} qw(cat dog rat); print "$_|@b\n";	outside|cat rat␊
+map-block	print join('|',map {$_*2} 1,2,3),"\n";	2|4|6␊
+map-context	my $n=map {($_,-$_)} 1..4; print "$n\n";	8␊
+map-empty-input	my @a=map {die 'not run'} (); print scalar(@a),"\n";	0␊
+map-empty-result	print join('|',map {$_%2?($_):()} 1..5),"\n";	1|3|5␊
+map-expr	print join('|',map uc($_),qw(ab cd)),"\n";	AB|CD␊
+map-grep	print join('|',map {$_*3} grep {$_%2} 1..5),"\n";	3|9|15␊
+map-hash	my %h=map {($_,length)} qw(a bee cc); print join('|',map {"$_=$h{$_}"} sort keys %h),"\n";	a=1|bee=3|cc=2␊
+map-inner	my @a=map {my $o=$_; map {$o+$_} (1,2)} (10,20); print "@a\n";	11 12 21 22␊
+map-multiple	print join('|',map {($_,-$_)} 1,2,3),"\n";	1|-1|2|-2|3|-3␊
+map-split	print join('|',map {split /:/} qw(1:2 3:4)),"\n";	1|2|3|4␊
+map-topic-alias	my @a=(1,2,3); my @b=map {++$_} @a; print "@a|@b\n";	2 3 4|2 3 4␊
+map-topic-restore	$_='outside'; my @a=map {uc} qw(a b); print "$_|@a\n";	outside|A B␊

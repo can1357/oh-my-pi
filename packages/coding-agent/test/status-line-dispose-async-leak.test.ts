@@ -55,7 +55,6 @@ function mockFeatureCheckout(): void {
 	} as unknown as VcsRepo;
 	vi.spyOn(vcs, "repo").mockReturnValue(repo);
 	vi.spyOn(vcs, "repoForDisplay").mockReturnValue(repo);
-	vi.spyOn(vcs, "watch").mockReturnValue(() => {});
 }
 
 describe("status line dispose guards background reads", () => {

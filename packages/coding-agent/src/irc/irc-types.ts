@@ -8,6 +8,8 @@ export interface IrcMessage {
 	id: string;
 	/** Sender agent id. */
 	from: string;
+	/** Display name of a sender in another omp instance (its session title, see `AgentMesh.label`); replies still go to `from`. */
+	fromLabel?: string;
 	/** Recipient agent id (resolved; "all" is expanded by the tool, not stored). */
 	to: string;
 	body: string;

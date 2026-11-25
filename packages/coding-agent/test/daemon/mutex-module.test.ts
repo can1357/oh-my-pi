@@ -8,108 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { daemonClient } from "../../src/daemon/client";
-import type { ModuleClient, ModuleContext, ModuleTunnel, ModuleUnit } from "../../src/daemon/module";
-import { DaemonMutex, MUTEX_KIND, MUTEX_VERSION, type MutexDaemon, mutexModule } from "../../src/daemon/modules/mutex";
-import type { DaemonTunnel, OpenRequest, OpenResult, UnitSnapshot } from "../../src/daemon/protocol";
+import { DaemonMutex, type MutexDaemon, mutexModule } from "../../src/daemon/modules/mutex";
 import { IsolatedDaemon, waitFor } from "../fixtures/daemon-harness";
-
-// The mutex module uses no core services.
-const CONTEXT = {} as ModuleContext;
-const SNAPSHOT = { id: "mutex-unit" } as UnitSnapshot;
-
-/** One macrotask: every queued tunnel delivery and its continuations have run. */
-const delivered = (): Promise<void> => Bun.sleep(0);
-
-/** An in-memory tunnel to `unit`; returns the client's end. */
-function attachTunnel(unit: ModuleUnit, client: ModuleClient): DaemonTunnel {
-	const encoder = new TextEncoder();
-	let toUnit: ((chunk: Uint8Array) => void) | undefined;
-	let toClient: ((chunk: Uint8Array) => void) | undefined;
-	let unitClosed: (() => void) | undefined;
-	let clientClosed: ((reason: string | null) => void) | undefined;
-	let open = true;
-	const close = (): void => {
-		if (!open) return;
-		open = false;
-		unitClosed?.();
-		clientClosed?.(null);
-	};
-	// Asynchronous like a socket: a reply never arrives inside the send that caused it.
-	const deliver = (sink: () => ((chunk: Uint8Array) => void) | undefined, data: string | Uint8Array): boolean => {
-		const chunk = typeof data === "string" ? encoder.encode(data) : data;
-		queueMicrotask(() => {
-			if (open) sink()?.(chunk);
-		});
-		return true;
-	};
-	const unitEnd: ModuleTunnel = {
-		client,
-		send: data => deliver(() => toClient, data),
-		drained: () => Promise.resolve(),
-		start(onData, onClose) {
-			toUnit = onData;
-			unitClosed = onClose;
-		},
-		close,
-	};
-	void unit.attach(unitEnd, undefined);
-	return {
-		unit: SNAPSHOT,
-		send: data => deliver(() => toUnit, data),
-		drained: () => Promise.resolve(),
-		start(onData, onClose) {
-			toClient = onData;
-			clientClosed = onClose;
-		},
-		close,
-		ref() {},
-		unref() {},
-	};
-}
+import { delivered, LocalModuleDaemon } from "../fixtures/local-module-daemon";
 
 /** A daemon whose mutex unit runs in this process; every attach is one process's tunnel. */
-class LocalDaemon implements MutexDaemon {
-	readonly welcome = {
-		v: 1,
-		daemon: { pid: process.pid, build: "test", startedAt: 0 },
-		caps: { [MUTEX_KIND]: MUTEX_VERSION },
-	};
-	/** Client ends, in attach order. */
-	readonly tunnels: DaemonTunnel[] = [];
-	#unit: ModuleUnit | undefined;
-
-	async open(request: OpenRequest): Promise<OpenResult> {
-		const created = this.#unit === undefined;
-		this.#unit ??= await mutexModule.open(CONTEXT, {
-			unitId: SNAPSHOT.id,
-			scope: request.scope,
-			key: request.key,
-			params: undefined,
-			client: { connectionId: "opener", pid: process.pid, build: "test" },
-		});
-		return { unit: SNAPSHOT, lease: `lease-${this.tunnels.length}`, created };
-	}
-
-	async release(): Promise<void> {}
-
-	async attach(): Promise<DaemonTunnel> {
-		if (!this.#unit) throw new Error("attach before open");
-		const tunnel = attachTunnel(this.#unit, {
-			connectionId: `tunnel-${this.tunnels.length}`,
-			pid: process.pid,
-			build: "test",
-		});
-		this.tunnels.push(tunnel);
-		return tunnel;
-	}
-
-	onReconnect(): () => void {
-		return () => {};
-	}
-
-	/** The daemon stops the unit (shutdown, upgrade): every tunnel closes. */
-	async stop(): Promise<void> {
-		await this.#unit?.stop("test");
+class LocalDaemon extends LocalModuleDaemon {
+	constructor() {
+		super(mutexModule);
 	}
 }
 
@@ -236,35 +142,44 @@ describe("hint single-flight through the daemon", () => {
 		const storePath = path.join(harness.dir, "hints.db");
 		const callsPath = path.join(harness.dir, "calls.txt");
 		const fixture = path.join(import.meta.dir, "..", "fixtures", "hint-single-flight.ts");
-		const readyPaths = [0, 1].map(index => path.join(harness.dir, `ready-${index}`));
-		const children = readyPaths.map(readyPath =>
-			Bun.spawn([process.execPath, fixture, storePath, callsPath, readyPath], {
+		const children = [0, 1].map(index => {
+			const readyPath = path.join(harness.dir, `ready-${index}`);
+			const child = Bun.spawn([process.execPath, fixture, storePath, callsPath, readyPath], {
 				stdin: "pipe",
 				stdout: "ignore",
 				stderr: "pipe",
 				env: { ...process.env },
-			}),
-		);
+			});
+			return { child, readyPath, stderr: new Response(child.stderr).text() };
+		});
 		try {
 			// Both are loaded and waiting before either starts: they really ask at once.
-			for (const readyPath of readyPaths) await waitFor(() => Bun.file(readyPath).exists(), "child ready");
-			for (const child of children) {
+			await Promise.all(
+				children.map(({ child, readyPath, stderr }) =>
+					waitFor(async () => {
+						if (child.exitCode !== null || child.signalCode !== null) {
+							throw new Error(`child exited ${await child.exited} before ready: ${await stderr}`);
+						}
+						return Bun.file(readyPath).exists();
+					}, "child ready"),
+				),
+			);
+			for (const { child } of children) {
 				child.stdin.write("go\n");
 				await child.stdin.flush();
 			}
-			const exits = await Promise.all(
-				children.map(async child => ({
-					code: await child.exited,
-					stderr: await new Response(child.stderr).text(),
-				})),
+			await Promise.all(
+				children.map(async ({ child, stderr }) => {
+					const code = await child.exited;
+					if (code !== 0) throw new Error(`child exited ${code}: ${await stderr}`);
+				}),
 			);
-			for (const exit of exits) if (exit.code !== 0) throw new Error(`child exited ${exit.code}: ${exit.stderr}`);
 
 			const calls = (await fs.readFile(callsPath, "utf8")).trim().split("\n").sort();
 			expect(calls).toEqual(["hint-0", "hint-1", "hint-2", "hint-3", "hint-4", "hint-5"]);
 		} finally {
-			for (const child of children) child.kill("SIGKILL");
-			await Promise.all(children.map(child => child.exited));
+			for (const { child } of children) child.kill("SIGKILL");
+			await Promise.all(children.map(({ child }) => child.exited));
 		}
 	}, 60_000);
 });

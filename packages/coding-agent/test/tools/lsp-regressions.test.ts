@@ -1409,6 +1409,66 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("does not count forwarded workspace file changes as activity for the idle timeout", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-watched-idle-");
+		try {
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "initialized") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: 9003,
+						method: "client/registerCapability",
+						params: {
+							registrations: [
+								{
+									id: "py-files",
+									method: "workspace/didChangeWatchedFiles",
+									registerOptions: {
+										watchers: [{ globPattern: { baseUri: fileToUri(tempDir.path()), pattern: "**/*.py" } }],
+									},
+								},
+							],
+						},
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["py"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			await server.waitFor(message => message.id === 9003 && message.method === undefined);
+
+			// Another process keeps writing in the workspace long after omp last used the server.
+			const lastUse = Date.now() - 10 * 60_000;
+			const deadline = Date.now() + 5_000;
+			for (let attempt = 0; ; attempt++) {
+				client.lastActivity = lastUse;
+				const probe = path.join(tempDir.path(), `probe-${attempt}.py`);
+				await Bun.write(probe, "x = 1\n");
+				const seen = await server
+					.waitFor(
+						message =>
+							message.method === "workspace/didChangeWatchedFiles" &&
+							JSON.stringify(message.params).includes(fileToUri(probe)),
+						300,
+					)
+					.catch(() => undefined);
+				if (seen) break;
+				if (Date.now() > deadline) throw new Error("the watch never reported a probe file");
+			}
+
+			expect(client.lastActivity).toBe(lastUse);
+			expect(lspClient.isIdleClient(client, Date.now(), 60_000)).toBe(true);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("drains every workspace/configuration pull during lazy cold start when a pull id collides with an in-flight request", async () => {
 		// #3001: basedpyright/pyright pull `workspace/configuration` repeatedly
 		// during cold start and gate document analysis on every pull being

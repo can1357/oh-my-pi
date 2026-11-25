@@ -38,6 +38,7 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	mergeLoadResults,
 	resolveUserPath,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -384,10 +385,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	}
 
 	const results = await Promise.all(promises);
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================
@@ -472,10 +470,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	}
 
 	const results = await Promise.all(promises);
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
+	return mergeLoadResults(results);
 }
 
 // =============================================================================

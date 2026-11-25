@@ -20,8 +20,18 @@ import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settin
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { createModelBrowserSource } from "../src/modes/model-browser-source";
+import {
+	buildBrowserItems,
+	buildSearchAffinity,
+	buildSessionModelScope,
+	modelSearchText,
+	rankModelItems,
+} from "../src/modes/view-model/overlays/model-browser";
+import { isSeparator } from "../src/ui/overlays/pickers/model-browser-state";
 import { ModelHub } from "../src/ui/overlays/pickers/model-hub";
-import { resetProviderAutoRefreshGuard } from "../src/ui/overlays/pickers/model-hub-state";
+import { ModelHubState, resetProviderAutoRefreshGuard } from "../src/ui/overlays/pickers/model-hub-state";
+import { prewarmModelPicker } from "../src/ui/overlays/pickers/model-picker";
+import { fuzzyRank } from "../src/utils/fuzzy";
 import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 function normalize(lines: readonly string[]): string {
@@ -56,7 +66,7 @@ function makeModel(
 }
 
 interface RegistryOverrides {
-	refresh?: (mode: string) => Promise<void>;
+	refreshIfStale?: () => Promise<boolean>;
 	refreshProvider?: ModelRegistry["refreshProvider"];
 	getAvailable?: (kind?: ModelKind | "all") => Model[];
 	getAll?: () => Model[];
@@ -68,7 +78,7 @@ interface RegistryOverrides {
 function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}): ModelRegistry {
 	const getAll = overrides.getAll ?? models;
 	return {
-		refresh: overrides.refresh ?? (async () => {}),
+		refreshIfStale: overrides.refreshIfStale ?? (async () => false),
 		refreshProvider: overrides.refreshProvider ?? (async () => {}),
 		getError: () => undefined,
 		getAvailable: overrides.getAvailable ?? models,
@@ -128,6 +138,7 @@ function createHub(options: {
 		cfgRetryFallbackChains.override(settings, chains);
 	});
 	const callbacks: ModelHubCallbacks = {
+		onCatalogRefreshed: options.callbacks?.onCatalogRefreshed,
 		onAssign: options.callbacks?.onAssign ?? onAssign,
 		onUnassign: options.callbacks?.onUnassign ?? onUnassign,
 		onLoginRequest: options.callbacks?.onLoginRequest ?? onLoginRequest,
@@ -171,6 +182,44 @@ const CTRL_RIGHT = "\x1b[1;5C";
 const ESC = "\x1b";
 
 describe("ModelHub", () => {
+	test("scoped browser ranking and catalog-wide provider counts match independent searches on every edit", () => {
+		const models = [makeModel("demo", "axxxbc"), makeModel("demo", "abc"), makeModel("other", "abc")];
+		const source = createModelBrowserSource(Settings.isolated({}));
+		const items = buildBrowserItems(models);
+		const state = new ModelHubState(
+			source,
+			makeRegistry(() => models),
+			models.map(model => ({ model })),
+			{ onAssign: vi.fn(), onUnassign: vi.fn(), onCancel: vi.fn() },
+			{ initialProviderId: "demo" },
+		);
+		try {
+			for (const query of ["ab", "abc", "ab", "de/abc", "free"]) {
+				state.browser.editQuery({ text: query, cursor: query.length });
+				const counts = new Map<string, number>();
+				for (const { item } of fuzzyRank(items, query, modelSearchText)) {
+					counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
+				}
+				expect(state.searchCounts).toEqual(counts);
+				const provider = state.activeEntry().providerId;
+				const ranked = rankModelItems(
+					query,
+					items.filter(item => !provider || item.provider === provider),
+					{
+						roles: {},
+						mruOrder: [],
+						affinity: buildSearchAffinity(source.modelProviderOrder, {}, []),
+					},
+				);
+				expect(state.browser.visible.flatMap(row => (isSeparator(row) ? [] : [row.selector]))).toEqual(
+					ranked.map(item => item.selector),
+				);
+			}
+		} finally {
+			state.dispose();
+		}
+	});
+
 	test("a native /model role action changes the quick-switch cycle in isolated settings", async () => {
 		await using ui = await nativeShell();
 		const settings = Settings.isolated();
@@ -236,6 +285,33 @@ describe("ModelHub", () => {
 	});
 
 	describe("role chips and roles view", () => {
+		test("a prewarmed chat picker opens the hub without resolving roles again or hiding kind runners", async () => {
+			const chat = makeModel("test", "chat");
+			const image = makeModel("test", "image", 128_000, undefined, "image");
+			const settings = Settings.isolated({ modelRoles: { image: "test/image" } });
+			const registry = Object.assign(
+				makeRegistry(() => [chat, image]),
+				{ prewarmCatalog: () => undefined },
+			);
+			await prewarmModelPicker({ source: createModelBrowserSource(settings), registry, scopedModels: [chat] });
+
+			const source = createModelBrowserSource(settings);
+			const resolve = vi.spyOn(source, "resolveRoleValue");
+			const hub = new ModelHubState(source, registry, [{ model: chat }], {
+				onAssign: () => {},
+				onUnassign: () => {},
+				onCancel: () => {},
+			});
+			try {
+				expect(hub.roles.image?.model).toBe(image);
+				expect(hub.availableItems.map(item => item.model)).toContain(image);
+				expect(buildSessionModelScope(source, registry, [chat]).items.map(item => item.model)).toEqual([chat]);
+				expect(resolve).not.toHaveBeenCalled();
+			} finally {
+				hub.dispose();
+			}
+		});
+
 		test("separates chat and kind roles and filters role tabs", () => {
 			const chat = makeModel("test", "chat-model");
 			const image = makeModel("test", "image-model", 128_000, undefined, "image");
@@ -1940,6 +2016,15 @@ describe("ModelHub", () => {
 	});
 
 	describe("provider refresh lifecycle", () => {
+		test("a fresh catalog opens without forcing discovery or reloading the session scope", async () => {
+			const refreshIfStale = vi.fn(async () => false);
+			const onCatalogRefreshed = vi.fn(async () => undefined);
+			createHub({ models: [], registry: { refreshIfStale }, callbacks: { onCatalogRefreshed } });
+			await Bun.sleep(0);
+			expect(refreshIfStale).toHaveBeenCalledTimes(1);
+			expect(onCatalogRefreshed).not.toHaveBeenCalled();
+		});
+
 		test("auto-refreshes a provider once per process; F5 forces a re-fetch", async () => {
 			const model = makeModel("prov-a", "model-a");
 			const refreshProvider = vi.fn<ModelRegistry["refreshProvider"]>(async () => {});

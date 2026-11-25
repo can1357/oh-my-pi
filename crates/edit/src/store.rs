@@ -3,12 +3,13 @@
 use std::{
 	collections::{BTreeSet, HashMap, VecDeque},
 	path::{Path, PathBuf},
-	sync::{Arc, LazyLock},
+	sync::Arc,
 };
 
 use parking_lot::Mutex;
-use regex::Regex;
 use xxhash_rust::{xxh32::Xxh32, xxh64::xxh64};
+
+use crate::scan;
 
 /// Retained path count before LRU eviction.
 pub const DEFAULT_MAX_PATHS: usize = 256;
@@ -107,24 +108,25 @@ pub fn payload_hash(text: &str) -> u64 {
 	xxh64(text.as_bytes(), 0)
 }
 
-static SEEN_LINE_PREFIX_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^[ *]?(\d+)(?:-(\d+))?:").expect("valid hashline prefix regex"));
-
 /// Parse displayed boundary line numbers from a hashline-formatted body.
 pub fn seen_lines_from_body(body: &str) -> Vec<u32> {
 	let mut seen = Vec::new();
 	for row in body.split('\n') {
-		let Some(captures) = SEEN_LINE_PREFIX_RE.captures(row) else {
+		let row = row.strip_prefix([' ', '*']).unwrap_or(row);
+		let Some((first, rest)) = scan::digits(row) else {
 			continue;
 		};
-		if let Ok(line) = captures[1].parse() {
-			seen.push(line);
-		}
-		if let Some(end) = captures
-			.get(2)
-			.and_then(|value| value.as_str().parse().ok())
-		{
-			seen.push(end);
+		let (last, rest) = if let Some(tail) = rest.strip_prefix('-') {
+			let Some((last, rest)) = scan::digits(tail) else {
+				continue;
+			};
+			(Some(last), rest)
+		} else {
+			(None, rest)
+		};
+		if rest.starts_with(':') {
+			seen.extend(first.parse::<u32>().ok());
+			seen.extend(last.and_then(|value| value.parse::<u32>().ok()));
 		}
 	}
 	seen
