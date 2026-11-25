@@ -25,21 +25,27 @@ fn integer_pair(a: Num, b: Num) -> Option<(i128, i128)> {
 }
 
 /// Add two numbers, promoting beyond IV/UV to NV.
+#[inline]
 pub(in crate::perl) fn add(a: Num, b: Num) -> Num {
+	if let (Num::Int(a), Num::Int(b)) = (a, b) && let Some(n) = a.checked_add(b) { return Num::Int(n); }
 	integer_pair(a, b)
 		.and_then(|(a, b)| native_integer(a + b))
 		.unwrap_or_else(|| Num::Float(a.to_f64() + b.to_f64()))
 }
 
 /// Subtract two numbers, promoting beyond IV/UV to NV.
+#[inline]
 pub(in crate::perl) fn sub(a: Num, b: Num) -> Num {
+	if let (Num::Int(a), Num::Int(b)) = (a, b) && let Some(n) = a.checked_sub(b) { return Num::Int(n); }
 	integer_pair(a, b)
 		.and_then(|(a, b)| native_integer(a - b))
 		.unwrap_or_else(|| Num::Float(a.to_f64() - b.to_f64()))
 }
 
 /// Multiply two numbers, promoting beyond IV/UV to NV.
+#[inline]
 pub(in crate::perl) fn mul(a: Num, b: Num) -> Num {
+	if let (Num::Int(a), Num::Int(b)) = (a, b) && let Some(n) = a.checked_mul(b) { return Num::Int(n); }
 	integer_pair(a, b)
 		.and_then(|(a, b)| native_integer(a.checked_mul(b)?))
 		.unwrap_or_else(|| Num::Float(a.to_f64() * b.to_f64()))
@@ -59,6 +65,7 @@ pub(in crate::perl) fn div(a: Num, b: Num) -> Result<Num, &'static str> {
 
 /// Compute a remainder with the sign of the divisor and Perl's UV-sized truncation rule.
 pub(in crate::perl) fn modulo(a: Num, b: Num) -> Result<Num, &'static str> {
+	if let (Num::Int(a), Num::Int(b)) = (a, b) && a >= 0 && b > 0 { return Ok(Num::Int(a % b)); }
 	fn trunc_mag(n: Num) -> Option<i128> {
 		match n {
 			Num::Float(f) if f.abs() < U64_LIMIT => Some(f as i128),
@@ -133,7 +140,9 @@ pub(in crate::perl) fn neg(v: &Value) -> Value {
 }
 
 /// Compare numbers in IV/UV when both are integers, otherwise in NV. NaN is unordered.
+#[inline]
 pub(in crate::perl) fn num_cmp(a: Num, b: Num) -> Option<Ordering> {
+	if let (Num::Int(a), Num::Int(b)) = (a, b) { return Some(a.cmp(&b)); }
 	if let Some((a, b)) = integer_pair(a, b) { Some(a.cmp(&b)) } else { a.to_f64().partial_cmp(&b.to_f64()) }
 }
 

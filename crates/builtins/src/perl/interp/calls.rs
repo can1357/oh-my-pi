@@ -7,6 +7,7 @@ pub(in crate::perl) struct PerlBody {
 	block: Rc<Block>,
 	package: Rc<str>,
 	lexical_name: Option<Rc<str>>,
+	anon_name: std::cell::OnceCell<Rc<str>>,
 	signature: Option<Rc<[Parameter]>>,
 	pad: Pad,
 	hints: Rc<Hints>,
@@ -29,15 +30,25 @@ impl Drop for PerlBody {
 }
 
 enum InvokeArgs {
+	Number(Num), // one fresh, non-aliasing arithmetic result
 	Explicit(Vec<Sv>),
 	Shared(Av, bool), // true when this is a tail call following an explicit argument list
 }
 impl InvokeArgs {
-	fn has_args(&self) -> bool { matches!(self, Self::Explicit(_) | Self::Shared(_, true)) }
-	fn into_array(self) -> Av {
+	fn has_args(&self) -> bool { !matches!(self, Self::Shared(_, false)) }
+	fn into_array(self, pool: &mut Vec<Av>) -> Av {
 		match self {
+			Self::Number(n) => {
+				let array = pool.pop().unwrap_or_else(|| new_av(Vec::new()));
+				{
+					let mut elems = array.elems_mut();
+					if let Some(cell) = elems.first() { cell.set(n.into_value()); cell.set_pos(None); }
+					else { elems.push(new_sv(n.into_value())); }
+				}
+				array
+			}
 			Self::Explicit(args) => {
-				let array = new_av(Vec::new());
+				let array = pool.pop().unwrap_or_else(|| new_av(Vec::new()));
 				array.replace_elems(args);
 				array
 			}
@@ -45,7 +56,7 @@ impl InvokeArgs {
 		}
 	}
 	fn into_vec(self) -> Vec<Sv> {
-		match self { Self::Explicit(args) => args, Self::Shared(array, _) => array.elems().clone() }
+		match self { Self::Number(n) => vec![new_sv(n.into_value())], Self::Explicit(args) => args, Self::Shared(array, _) => array.elems().clone() }
 	}
 }
 
@@ -95,7 +106,7 @@ impl Interp<'_> {
 		let hints = if self.compile_depth != 0 { Rc::new(self.compile_hints.clone()) } else { self.active_hints.clone() };
 		let lexical_name = if matches!(sub.scope, Some(DeclKind::My | DeclKind::State)) { sub.name.clone() } else { None };
 		CodeImpl::Perl(Rc::new(PerlBody { block: block.clone(), package, lexical_name, signature: sub.signature.clone(),
-			pad, hints, persistent, lvalue: sub.is_lvalue() }))
+			anon_name: Default::default(), pad, hints, persistent, lvalue: sub.is_lvalue() }))
 	}
 
 	pub(super) fn code_slot(&mut self, g: &Gv) -> Cv {
@@ -141,7 +152,7 @@ impl Interp<'_> {
 			if sub.scope == Some(DeclKind::State) {
 				let pad = self.persistent.borrow().vars.get(&site).cloned();
 				if let Some(pad) = pad {
-					if let Some(scope) = self.scopes.last_mut() { scope.pad.extend(pad); }
+					self.extend_pad(pad);
 					return Ok(());
 				}
 			}
@@ -194,7 +205,7 @@ impl Interp<'_> {
 	}
 
 	fn call_sub_kind(&mut self, cv: &Cv, args: InvokeArgs, cx: Cx, as_lvalue: bool) -> PResult<Ret> {
-		let result = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.depth_guard(|this| this.call_sub_loop(cv.clone(), args, cx, as_lvalue)));
+		let result = self.nested(|this| this.call_sub_loop(cv.clone(), args, cx, as_lvalue));
 		if let Ok(ret) = &result { self.track_ret(ret); }
 		result
 	}
@@ -213,7 +224,7 @@ impl Interp<'_> {
 				else if values.len() > 1 { Ret::One(Value::Int(values.len() as i64)) }
 				else { Ret::One(values.first().cloned().unwrap_or(Value::Undef)) }),
 				CodeImpl::Native(callback) => {
-					let av = args.into_array();
+					let av = args.into_array(&mut self.arg_arrays);
 					let native_args = av.elems().clone();
 					self.active_subs.push((cv.clone(), av.clone(), cx));
 					self.eval_contexts.push((cx, false));
@@ -226,9 +237,7 @@ impl Interp<'_> {
 					if as_lvalue && !self.code_is_lvalue(&cv, body.lvalue) { return Err(self.die_msg("Can't modify non-lvalue subroutine call")); }
 					let address = Rc::as_ptr(&cv) as usize;
 					let sub = cv.name.borrow().clone();
-					let depth = self.sub_depth.entry(address).or_default();
-					*depth += 1;
-					if *depth == 100 {
+					if self.enter_sub_depth(address) {
 						let msg = sub.as_deref().map_or_else(|| "Deep recursion on anonymous subroutine".to_owned(),
 							|name| format!("Deep recursion on subroutine \"{name}\""));
 						self.warn_category("recursion", msg);
@@ -237,9 +246,10 @@ impl Interp<'_> {
 							return Err(flow);
 						}
 					}
-					let av = args.into_array();
+					let av = args.into_array(&mut self.arg_arrays);
 					let outer = self.enter_pad(&body.pad);
-					let frame = self.frame(Some(sub.unwrap_or_else(|| Rc::from(format!("{}::__ANON__", body.package)))), cx, explicit, None, false, Some(av.clone()));
+					let name = sub.unwrap_or_else(|| body.anon_name.get_or_init(|| Rc::from(format!("{}::__ANON__", body.package))).clone());
+					let frame = self.frame(Some(name), cx, explicit, None, false, Some(av.clone()));
 					let saved_loc = self.loc.clone();
 					let persistent = std::mem::replace(&mut self.persistent, body.persistent.clone());
 					self.active_subs.push((cv.clone(), av.clone(), cx));
@@ -263,18 +273,58 @@ impl Interp<'_> {
 				}
 			};
 			match out.0 {
-				Ok(v) | Err(Flow::Return(v)) => return Ok(v.in_context(cx)),
+				Ok(v) | Err(Flow::Return(v)) => {
+					self.recycle_args(out.1);
+					return Ok(v.in_context(cx));
+				}
 				Err(Flow::Goto(GotoTarget::Sub(next))) => { cv = next; args = InvokeArgs::Shared(self.tail_args.take().unwrap_or(out.1), explicit); }
 				Err(flow) => return Err(flow),
 			}
 		}
 	}
 
-	fn leave_sub_depth(&mut self, address: usize) {
-		if let Some(depth) = self.sub_depth.get_mut(&address) {
-			*depth -= 1;
-			if *depth == 0 { self.sub_depth.remove(&address); }
+	/// Most calls cannot possibly be the 100th activation of their CV. Maintain the
+	/// per-CV counts only while the Perl call stack is actually that deep.
+	fn enter_sub_depth(&mut self, address: usize) -> bool {
+		self.perl_calls.push(address);
+		if self.perl_calls.len() < 100 { return false; }
+		if self.perl_calls.len() == 100 {
+			for &cv in &self.perl_calls[..99] { *self.sub_depth.entry(cv).or_default() += 1; }
 		}
+		let depth = self.sub_depth.entry(address).or_default();
+		*depth += 1;
+		*depth == 100
+	}
+
+	fn leave_sub_depth(&mut self, address: usize) {
+		self.perl_calls.pop();
+		match self.perl_calls.len() {
+			0..99 => {}
+			99 => self.sub_depth.clear(),
+			_ => if let Some(depth) = self.sub_depth.get_mut(&address) {
+				*depth -= 1;
+				if *depth == 0 { self.sub_depth.remove(&address); }
+			}
+		}
+	}
+
+	fn recycle_args(&mut self, mut av: Av) {
+		// An escaped argument array, including a weak reference, a bless, tie or
+		// address-keyed registration, must keep exactly its old identity and contents.
+		if self.arg_arrays.len() >= 64 || Rc::get_mut(&mut av).is_none()
+			|| av.blessed.borrow().is_some() || av.tie().is_some() { return; }
+		{
+			let mut elems = av.elems_mut();
+			if elems.capacity() > 32 { return; }
+			// A single anonymous number can supply both the vector and the scalar of
+			// the next arithmetic argument. Never prolong the life of a referent.
+			if !matches!(elems.as_slice(), [sv] if Rc::strong_count(sv) == 1 && Rc::weak_count(sv) == 0
+				&& !sv.registered() && !sv.is_blessed()
+				&& sv.plain_value().is_some_and(|v| matches!(*v, Value::Int(_) | Value::UInt(_) | Value::Num(_)))) {
+				elems.clear();
+			}
+		}
+		self.arg_arrays.push(av);
 	}
 
 	/// An lvalue sub's result: a reference to the returned scalar container (scalar context); in list context one
@@ -327,6 +377,16 @@ impl Interp<'_> {
 	}
 
 	fn bind_signature(&mut self, signature: &[Parameter], av: &Av, cv: &Cv) -> PResult<()> {
+		// Exact-arity scalar signatures need no argument snapshot when every FETCH is
+		// plain: binding cannot call Perl or mutate @_ before subsequent parameters.
+		if av.elems().len() == signature.len() && signature.iter().all(|p| p.sigil == Sigil::Scalar)
+			&& av.elems().iter().all(|sv| !sv.has_read_magic()) {
+			let args = av.elems();
+			for (p, arg) in signature.iter().zip(args.iter()) {
+				if let Some(name) = &p.name { self.put_pad(Sigil::Scalar, name.clone(), Slot::Scalar(new_sv(arg.get()))); }
+			}
+			return Ok(());
+		}
 		let args = av.elems().clone();
 		let required = signature.iter().filter(|p| p.sigil == Sigil::Scalar && p.default.is_none()).count();
 		let maximum = signature.len();
@@ -372,7 +432,7 @@ impl Interp<'_> {
 	fn frame(&self, sub: Option<Rc<str>>, cx: Cx, has_args: bool, eval_text: Option<PStr>, is_require: bool, args: Option<Av>) -> CallFrame {
 		let info = Frame { package: self.package(), file: self.loc.file.clone(), line: self.loc.line, sub, has_args,
 			wantarray: context_flag(cx), eval_text, is_require, args: None };
-		CallFrame { info, hints: self.active_hints.clone(), hint_bits: self.active_hints.bitmask(self.active_subs.is_empty()), args }
+		CallFrame { info, hints: self.active_hints.clone(), outer: self.active_subs.is_empty(), args }
 	}
 
 	/// Capture the requested caller frame (zero is the nearest Perl caller).
@@ -415,6 +475,14 @@ impl Interp<'_> {
 			if proto.is_some_and(|p| p.bytes.starts_with(b"_")) { out.push(self.topic()); }
 			return Ok(InvokeArgs::Explicit(out));
 		};
+		if proto.is_none() && call.slot.is_none() {
+			let mut arg = ungroup(args);
+			if let ExprKind::List(items) = &arg.kind && let [one] = items.as_slice() { arg = ungroup(one); }
+			if matches!(arg.kind, ExprKind::Binary(Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod, ..))
+				&& let Some(n) = self.plain_numeric_expr(arg) {
+				return Ok(InvokeArgs::Number(n));
+			}
+		}
 		if let Some(proto) = proto {
 			let mut specs = proto.bytes.iter().copied().filter(|b| !b.is_ascii_whitespace() && *b != b';').peekable();
 			let items: &[Expr] = match &args.kind { ExprKind::List(v) => v, _ => std::slice::from_ref(args.as_ref()) };
@@ -780,12 +848,14 @@ impl Interp<'_> {
 
 	fn caller_builtin(&mut self, explicit: bool, level: i64, cx: Cx) -> PResult<Ret> {
 		let Some(level) = usize::try_from(level).ok() else { return Ok(Ret::no_value(cx)); };
-		let Some(frame) = self.caller_frame(level) else { return Ok(Ret::no_value(cx)); };
+		let frame = if explicit && cx == Cx::List && self.package.as_ref() == "DB" { self.caller_frame(level) }
+			else { self.frames.iter().rev().nth(level).map(|f| f.info.clone()) };
+		let Some(frame) = frame else { return Ok(Ret::no_value(cx)); };
 		if cx != Cx::List { return Ok(Ret::One(Value::str(&frame.package))); }
 		let mut out = vec![Value::str(&frame.package), Value::str(&frame.file), Value::Int(i64::from(frame.line))];
 		if explicit {
 			if self.package.as_ref() == "DB" && let Some(args) = frame.args { self.av("DB::args").replace_elems(aliases(args)); }
-			let hint_bits = self.frames.iter().rev().nth(level).map_or(0, |frame| frame.hint_bits);
+			let hint_bits = self.frames.iter().rev().nth(level).map_or(0, |frame| frame.hints.bitmask(frame.outer));
 			let hints = self.caller_hints(level);
 			let warnings = hints.and_then(|h| h.warnings.packed()).map_or(Value::Undef, Value::Str);
 			let entries = hints.map_or_else(Vec::new, Hints::lexical_entries);
@@ -819,7 +889,7 @@ impl Interp<'_> {
 	pub fn run_regex_code(&mut self, cv: &Cv) -> PResult<Value> {
 		let body = cv.body.borrow().clone();
 		let CodeImpl::Perl(body) = body else { return self.call_sub(cv, Vec::new(), Cx::Scalar).map(Ret::scalar); };
-		let pad = std::mem::replace(&mut self.scopes, vec![Scope { pad: body.pad.clone(), ..Scope::default() }]);
+		let pad = self.enter_pad(&body.pad);
 		let loc = self.location();
 		let persistent = std::mem::replace(&mut self.persistent, body.persistent.clone());
 		let result = self.scoped(|i| {
@@ -827,7 +897,7 @@ impl Interp<'_> {
 			i.active_hints = body.hints.clone();
 			i.run_statements(&body.block, Cx::Scalar)
 		});
-		self.scopes = pad;
+		self.leave_pad(pad);
 		self.persistent = persistent;
 		self.loc = loc;
 		result.map(Ret::scalar)
@@ -995,7 +1065,7 @@ impl parser::ParseHooks for Interp<'_> {
 			this.package = Rc::from(pkg);
 			this.active_hints = Rc::new(this.compile_hints.clone());
 			let overlay = this.compile_overlay();
-			if let Some(scope) = this.scopes.last_mut() { scope.pad = overlay; }
+			this.extend_pad(overlay);
 			this.use_stmt(pkg, use_)
 		});
 		let result = self.begin_result(result);
@@ -1007,7 +1077,7 @@ impl parser::ParseHooks for Interp<'_> {
 		// BEGIN is a real sub (perlmod): `return`, `__SUB__` and `caller` work inside it.
 		let name: Rc<str> = Rc::from(format!("{pkg}::BEGIN"));
 		self.glob(&name);
-		let body = PerlBody { block: block.clone(), package: Rc::from(pkg), lexical_name: None, signature: None,
+		let body = PerlBody { block: block.clone(), package: Rc::from(pkg), lexical_name: None, anon_name: Default::default(), signature: None,
 			pad: self.compile_pad_snapshot(), hints: Rc::new(self.compile_hints.clone()), persistent: Rc::default(), lvalue: false };
 		let cv = Rc::new(CodeBody { name: RefCell::new(Some(name)), pkg: Rc::from(pkg), prototype: RefCell::new(None),
 			body: RefCell::new(CodeImpl::Perl(Rc::new(body))), blessed: RefCell::new(None) });
@@ -1146,7 +1216,7 @@ impl Interp<'_> {
 		let unit_hints = Hints::clone(&hints);
 		let result = self.scoped(|this| {
 			let overlay = this.compile_overlay();
-			if let Some(scope) = this.scopes.last_mut() { scope.pad.extend(overlay); }
+			this.extend_pad(overlay);
 			this.parse_unit(unit_hints, true, |this| parser::parse_eval(source, file, line, &package, parse_hints, this))
 		});
 		match result {
@@ -1159,7 +1229,7 @@ impl Interp<'_> {
 	/// Evaluates a compiled format argument line in list context: aliases of the variables it names (so `^` fields
 	/// can chop them), copies of other values.
 	pub fn eval_format_args(&mut self, args: &FormatArgs) -> PResult<Vec<Sv>> {
-		let outer = std::mem::replace(&mut self.scopes, vec![Scope { pad: args.pad.clone(), ..Scope::default() }]);
+		let outer = self.enter_pad(&args.pad);
 		let package = std::mem::replace(&mut self.package, args.package.clone());
 		let hints = std::mem::replace(&mut self.active_hints, args.hints.clone());
 		// A format is sub-like: `return` in an argument line leaves it as Err(Flow::Return).
@@ -1175,7 +1245,7 @@ impl Interp<'_> {
 		self.eval_contexts.pop();
 		self.active_hints = hints;
 		self.package = package;
-		self.scopes = outer;
+		self.leave_pad(outer);
 		result
 	}
 }

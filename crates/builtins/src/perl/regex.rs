@@ -161,11 +161,35 @@ pub(super) struct Regex {
 	actions: Vec<Action>,
 	facts: Facts,
 	capture_count: usize,
+	/// Fixed, nonempty ASCII text with no regexp syntax or case folding.
+	literal: Option<LiteralFinder>,
 	/// Compiled variants, by `Self::variant`: subject representation, exact
 	/// end (dynamic subpatterns), and cancellation checkpoints.
 	codes: [OnceCell<Result<Code, String>>; 8],
 	locale_unicode: bool,
 	properties: Vec<UserProperty>,
+}
+
+#[derive(Debug)]
+enum LiteralFinder {
+	Byte(u8),
+	String(memchr::memmem::Finder<'static>),
+}
+
+impl LiteralFinder {
+	fn compile(pattern: &[u8], flags: RxFlags) -> Option<Self> {
+		if flags.i || flags.x || pattern.is_empty() ||
+			!pattern.iter().all(|&b| b.is_ascii() && !b"\\.^$|()[]{}*+?".contains(&b)) { return None; }
+		Some(if let [b] = pattern { Self::Byte(*b) }
+			else { Self::String(memchr::memmem::Finder::new(pattern).into_owned()) })
+	}
+
+	fn find(&self, bytes: &[u8]) -> Option<usize> {
+		match self {
+			Self::Byte(b) => memchr::memchr(*b, bytes),
+			Self::String(finder) => finder.find(bytes),
+		}
+	}
 }
 
 /// One trusted Perl code block embedded in a regular expression.
@@ -231,6 +255,32 @@ pub(super) struct Captures {
 	pub last_closed: Option<usize>,
 }
 
+type Span = Option<(usize, usize)>;
+
+thread_local! {
+	static SPARE_SPANS: Cell<Vec<Span>> = const { Cell::new(Vec::new()) };
+}
+
+impl Captures {
+	fn buffer() -> Vec<Span> { SPARE_SPANS.try_with(Cell::take).unwrap_or_default() }
+
+	pub fn whole(start: usize, end: usize) -> Self {
+		let mut spans = Self::buffer();
+		spans.push(Some((start, end)));
+		Self { spans, mark: None, last_closed: None }
+	}
+}
+
+impl Drop for Captures {
+	fn drop(&mut self) {
+		// Keep common ovectors warm, but don't pin arbitrarily large user patterns.
+		if self.spans.capacity() <= 1024 {
+			self.spans.clear();
+			let _ = SPARE_SPANS.try_with(|slot| slot.set(std::mem::take(&mut self.spans)));
+		}
+	}
+}
+
 impl Regex {
 	/// Validate the interpolated pattern and compile its natural representation.
 	pub fn new(pattern: &PStr, flags: RxFlags) -> Result<Regex, String> {
@@ -245,12 +295,23 @@ impl Regex {
 		let mut facts = Scanner::analyze(pattern, flags, &actions, &properties)?;
 		facts.wide |= pattern.utf8;
 		let locale_unicode = (facts.locale || flags.charset == Charset::Locale) && codeset == Codeset::Utf8;
+		let literal = if actions.is_empty() { LiteralFinder::compile(&pattern.bytes, flags) } else { None };
 		let mut regex = Self {
 			source: pattern.clone(), flags, actions, facts, capture_count: 0,
+			literal,
 			codes: Default::default(), locale_unicode, properties,
 		};
 		regex.capture_count = regex.code(regex.facts.wide || regex.facts.bounds.need_utf(), false, false)?.captures;
 		Ok(regex)
+	}
+
+	/// Byte searching ASCII literals is exact on unflagged strings, as well
+	/// as well-formed UTF-8 (ASCII never occurs inside another character).
+	pub fn is_byte_literal(&self) -> bool { self.literal.is_some() }
+
+	pub fn literal_span(&self, bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+		let at = start + self.literal.as_ref()?.find(bytes.get(start..)?)?;
+		Some((at, at + self.source.bytes.len()))
 	}
 
 	/// Search from a byte offset, optionally disallowing an empty match there.
@@ -266,6 +327,11 @@ impl Regex {
 	fn exec_inner(&self, subject: &PStr, start: usize, opts: ExecOpts, callback: Option<&mut ActionCallback<'_>>) -> Result<Option<Captures>, String> {
 		if start > subject.bytes.len() {
 			return Ok(None);
+		}
+		if self.is_byte_literal() && (!subject.utf8 || opts.utf8_valid) && opts.required_end.is_none() {
+			return Ok(self.literal_span(&subject.bytes, start)
+				.filter(|&(at, _)| !opts.anchored || at == start)
+				.map(|(at, end)| Captures::whole(at, end)));
 		}
 		let anchor = opts.g_anchor.unwrap_or(start);
 		// A leading `\G` pins the match to the anchor: try only there instead
@@ -813,7 +879,8 @@ impl Code {
 		let pairs = count as usize;
 		// SAFETY: a successful match populated `count` pairs in `data`.
 		let raw = unsafe { std::slice::from_raw_parts(ffi::pcre2_get_ovector_pointer_8(data), pairs * 2) };
-		let mut spans = Vec::with_capacity(self.captures + 1);
+		let mut spans = Captures::buffer();
+		spans.reserve(self.captures + 1);
 		spans.extend(raw.chunks_exact(2).map(|p| {
 			(p[0] != ffi::PCRE2_UNSET && p[1] != ffi::PCRE2_UNSET).then(|| (map(p[0]), map(p[1])))
 		}));
@@ -1153,7 +1220,8 @@ unsafe extern "C" fn regex_callout(block: *mut CalloutBlock, userdata: *mut c_vo
 			let map = data.convert;
 			let caps = matches!(phase, ActionPhase::Eval | ActionPhase::Test | ActionPhase::Begin).then(|| {
 				let count = block.capture_top as usize;
-				let mut spans = Vec::with_capacity(count.max(1));
+				let mut spans = Captures::buffer();
+				spans.reserve(count.max(1));
 				spans.push(Some((map(block.start_match), map(pos))));
 				if count > 1 {
 					// SAFETY: PCRE2's internal vector has `capture_top` readable pairs.
@@ -3365,7 +3433,7 @@ mod tests {
 	}
 
 	fn match_spans(r: &Regex, s: &PStr) -> Option<Vec<Option<(usize, usize)>>> {
-		r.exec(s, 0, ExecOpts::default()).unwrap().map(|caps| caps.spans)
+		r.exec(s, 0, ExecOpts::default()).unwrap().map(|mut caps| std::mem::take(&mut caps.spans))
 	}
 
 	fn compile_error(p: &str) -> String {

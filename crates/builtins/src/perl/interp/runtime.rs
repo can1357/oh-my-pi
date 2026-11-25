@@ -49,8 +49,9 @@ impl<'h> Interp<'h> {
 			parse_scopes: Vec::new(), compile_pads: Vec::new(), compile_pad_base: 0, declared_slots: FxHashMap::default(),
 			use_hints: FxHashMap::default(), captures: FxHashMap::default(), imported_symbols: FxHashSet::default(),
 			package: Rc::from("main"), loc, scopes: vec![Scope::default()], scope_pool: Vec::new(), scope_stacks: Vec::new(),
-			topics: Vec::new(), persistent: Rc::default(),
+			lexicals: Default::default(), topics: Vec::new(), persistent: Rc::default(),
 			frames: Vec::new(), active_subs: Vec::new(), eval_contexts: Vec::new(), sub_depth: Default::default(),
+			perl_calls: Vec::new(), arg_arrays: Vec::new(),
 			tail_args: None, eval_serial: 0, in_given: 0, die_misc_warnings: false, given_value: None, given_cx: Cx::Void, in_when: 0,
 			hole: new_sv(Value::Undef), programs: Vec::new(), pending: None, depth: 0, compile_depth: 0, compile_failure: None, compile_interrupted: false, compile_status: 255,
 			in_die: false, in_warn: false, overloads: FxHashMap::default(), in_overload: 0, in_constant: false,
@@ -226,13 +227,18 @@ impl<'h> Interp<'h> {
 		self.sv("main::^CHILD_ERROR_NATIVE").replace(value);
 	}
 
+	#[inline]
 	pub(super) fn special_value(&self, qualified: &str) -> Value {
-		self.existing_glob(qualified).map_or(Value::Undef, |g| g.scalar.borrow().get())
+		self.with_special_scalar(qualified, |cell| cell.map_or(Value::Undef, |sv| sv.get()))
 	}
 
 	/// Interpret the current input record separator (`$/`).
 	pub fn input_sep(&self) -> RecordSep {
-		match self.special_value("main::/") {
+		Self::record_sep_value(self.special_value("main::/"))
+	}
+
+	fn record_sep_value(value: Value) -> RecordSep {
+		match value {
 			Value::Undef => RecordSep::Slurp,
 			Value::Ref(Ref::Scalar(s)) => RecordSep::Fixed(s.get().to_i64().max(0) as usize),
 			Value::Str(s) => if s.is_empty() { RecordSep::Paragraph } else { RecordSep::Text(s) },
@@ -240,10 +246,32 @@ impl<'h> Interp<'h> {
 		}
 	}
 
+	/// Snapshot `$/` before a potentially reentrant read, borrowing the usual newline.
+	pub(in crate::perl) fn record_sep_for_read(&self) -> std::borrow::Cow<'static, RecordSep> {
+		use std::borrow::Cow;
+		static NEWLINE: std::sync::LazyLock<RecordSep> = std::sync::LazyLock::new(RecordSep::default);
+		self.with_special_scalar("main::/", |cell| {
+			let Some(cell) = cell else { return Cow::Owned(RecordSep::Slurp); };
+			if let Ok(value) = cell.try_value()
+				&& matches!(&*value, Value::Str(s) if !s.utf8 && s.bytes == b"\n")
+			{
+				return Cow::Borrowed(&*NEWLINE);
+			}
+			Cow::Owned(Self::record_sep_value(cell.get()))
+		})
+	}
+
 	/// The separator between print arguments (`$,`).
-	pub fn output_field_sep(&self) -> Option<PStr> { let v = self.special_value("main::,"); (!v.is_undef()).then(|| v.to_pstr()) }
+	pub fn output_field_sep(&self) -> Option<PStr> { self.print_separator("main::,") }
 	/// The separator appended by print (`$\`).
-	pub fn output_record_sep(&self) -> Option<PStr> { let v = self.special_value("main::\\"); (!v.is_undef()).then(|| v.to_pstr()) }
+	pub fn output_record_sep(&self) -> Option<PStr> { self.print_separator("main::\\") }
+	fn print_separator(&self, name: &str) -> Option<PStr> {
+		match self.special_value(name) {
+			Value::Undef => None,
+			Value::Str(s) => Some(s),
+			v => Some(v.to_pstr()),
+		}
+	}
 	/// The current interpolated list separator (`$"`).
 	pub fn list_sep(&self) -> PStr { self.special_value("main::\"").to_pstr() }
 	/// The current multidimensional hash index separator (`$;`).
@@ -280,11 +308,17 @@ impl<'h> Interp<'h> {
 
 	/// Update the handle that supplies `$.`.
 	pub fn set_last_read(&mut self, io: Io) {
-		self.sync_line();
+		let cell = self.sv("main::.");
+		if let Some(previous) = &self.last_read {
+			let n = cell.get().to_i64();
+			if self.line_seen.replace(n) != n && let Ok(mut h) = previous.try_borrow_mut() {
+				h.set_line_no(n.max(0) as u64);
+			}
+		}
 		let line = io.borrow().line_no() as i64;
 		self.last_read = Some(io);
 		self.line_seen.set(line);
-		self.sv("main::.").replace(Value::Int(line));
+		cell.replace(Value::Int(line));
 	}
 
 	/// Forget the last-read handle (`readline` on an unopened handle leaves `${^LAST_FH}` undefined).
@@ -320,11 +354,12 @@ impl<'h> Interp<'h> {
 	pub(super) fn take_pending(&mut self) -> Option<Flow> { if self.pending.is_some() { self.pending.take() } else { None } }
 
 	/// Poll pending exceptions, shell cancellation and alarm delivery.
+	#[inline]
 	pub fn poll(&mut self) -> PResult<()> {
 		if let Some(flow) = self.take_pending() { return Err(flow); }
 		if self.is_cancelled() { return Err(Flow::Cancelled); }
 		if self.alarm.is_some() { self.poll_alarm()?; }
-		self.drain_destructors(false)
+		if self.objects.is_empty() && self.tied_handles.is_empty() { Ok(()) } else { self.drain_destructors(false) }
 	}
 
 	/// Deliver a due alarm; return true if an alarm handler ran or ignored it.

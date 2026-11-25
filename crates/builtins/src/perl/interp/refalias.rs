@@ -46,14 +46,18 @@ impl Interp<'_> {
 		if !matches!(sigil, Sigil::Scalar | Sigil::Array | Sigil::Hash | Sigil::Code) {
 			return Err(self.die_msg("Can't modify reference constructor in assignment"));
 		}
-		let binding = self.scopes.iter().enumerate().rev().find_map(|(scope_ix, scope)| {
+		let binding = if !pending {
+			self.pad_position(sigil, name).map(|(scope, offset)| {
+				let our = match &self.scopes[scope].pad[offset].2 { Slot::Our(name) => Some(name.clone()), _ => None };
+				(scope, offset, false, our)
+			})
+		} else { self.scopes.iter().enumerate().rev().find_map(|(scope_ix, scope)| {
 			[(true, &scope.declarations), (false, &scope.pad)].into_iter().find_map(|(is_pending, pad)| {
-				if is_pending && !pending { return None; }
 				let (index, (_, _, slot)) = pad.iter().enumerate().rfind(|(_, (s, n, _))| *s == sigil && n.as_ref() == name)?;
 				let our = if let Slot::Our(name) = slot { Some(name.clone()) } else { None };
 				Some((scope_ix, index, is_pending, our))
 			})
-		});
+		}) };
 		if let Some((scope, index, pending, our)) = binding {
 			let place = if let Some(name) = our { RefPlace::Glob(self.glob(&name), sigil) }
 			else { RefPlace::Pad { scope, index, pending } };

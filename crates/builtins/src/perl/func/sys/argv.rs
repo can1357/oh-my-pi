@@ -81,7 +81,7 @@ fn read_handle(interp: &mut Interp<'_>, io: Option<Io>, name: Option<&str>, cx: 
 	};
 	interp.set_last_read(io.clone());
 	if let Some(ret) = interp.call_tied_handle(&io, "READLINE", Vec::new(), cx) { return ret; }
-	let sep = interp.input_sep();
+	let sep = interp.record_sep_for_read();
 	if cx != Cx::List { return Ok(one(record(interp, &io, &sep, cx)?.map_or(Value::Undef, Value::Str))); }
 	let mut records = Vec::new();
 	while let Some(s) = record(interp, &io, &sep, cx)? {
@@ -92,7 +92,8 @@ fn read_handle(interp: &mut Interp<'_>, io: Option<Io>, name: Option<&str>, cx: 
 
 fn record(interp: &mut Interp<'_>, io: &Io, sep: &RecordSep, cx: Cx) -> PResult<Option<PStr>> {
 	if interp.is_cancelled() { return Err(Flow::Cancelled); }
-	let r = interruptible(interp, io, |h| h.read_record_with_context(sep, cx == Cx::List))?;
+	let mut spare = if cx == Cx::List { Vec::new() } else { std::mem::take(&mut interp.sys.record_buffer) };
+	let r = interruptible(interp, io, |h| h.read_record_reusing(sep, cx == Cx::List, &mut spare))?;
 	match r {
 		Ok(Some(s)) => {
 			// A :utf8 layer passes bytes through unchecked; Perl reports the first bad one.
@@ -138,8 +139,7 @@ fn sync_argv(interp: &mut Interp<'_>) -> PResult<()> {
 	// `<>` stream, which is exactly what must not decide this.
 	let visible = interp.find_glob("main::ARGV").and_then(|gv| gv.io.borrow().clone());
 	let is_visible = |io: &Io| visible.as_ref().is_some_and(|v| Rc::ptr_eq(v, io));
-	let current = interp.argv_state().current.clone();
-	if current.as_ref().is_some_and(&is_visible) { return Ok(()); }
+	if interp.argv_state().current.as_ref().is_some_and(&is_visible) { return Ok(()); }
 	if let Some(at) = interp.sys.argv_outer.iter().rposition(|s| is_visible(&s.argv)) {
 		// Back in the outer scope: publish whatever the inner loop left, then resume.
 		finish_current(interp)?;
@@ -152,8 +152,7 @@ fn sync_argv(interp: &mut Interp<'_>) -> PResult<()> {
 		interp.sys.argv_select_saved = resumed.select_saved;
 		return Ok(());
 	}
-	if let Some(argv) = current {
-		interp.argv_state().current = None;
+	if let Some(argv) = interp.argv_state().current.take() {
 		let inplace = interp.argv_state().inplace.take();
 		interp.sys.argv_outer.push(Suspended {
 			argv, inplace, started: std::mem::take(&mut interp.sys.argv_started), select_saved: interp.sys.argv_select_saved.take(),
@@ -163,13 +162,14 @@ fn sync_argv(interp: &mut Interp<'_>) -> PResult<()> {
 }
 
 fn read_argv(interp: &mut Interp<'_>, safe: bool, cx: Cx) -> PResult<Ret> {
-	if let Some(io) = handles::named(interp, "ARGV")
-		&& interp.tied_handle(&io).is_some()
-	{
+	// handle("main::ARGV") resolves to the active stream before consulting the glob.
+	// That stream was registered by install_argv; only a cold lookup needs named().
+	let active = interp.argv_state().current.clone().or_else(|| handles::named(interp, "ARGV"));
+	if let Some(io) = active && interp.tied_handle(&io).is_some() {
 		return read_handle(interp, Some(io), Some("ARGV"), cx);
 	}
 	sync_argv(interp)?;
-	let sep = interp.input_sep();
+	let sep = interp.record_sep_for_read();
 	let mut records = Vec::new();
 	loop {
 		let current = match interp.argv_state().current.clone() {

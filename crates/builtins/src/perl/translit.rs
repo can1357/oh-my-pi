@@ -31,6 +31,7 @@ pub(super) struct Translit {
 	search: Vec<RankedRange>,
 	replace: Vec<RankedRange>,
 	latin1: Box<[Action; 256]>,
+	byte_output: bool,
 	identity: bool,
 	count_only: bool,
 	warning: Option<&'static str>,
@@ -58,7 +59,8 @@ impl Translit {
 		let latin1 = Box::new(std::array::from_fn(|cp| {
 			action(&search, &replace, identity, flags.d, cp as u32)
 		}));
-		Ok(Self { search, replace, latin1, identity, count_only, warning, squash: flags.s, delete: flags.d })
+		let byte_output = latin1.iter().all(|a| !matches!(a, Action::Replace(256..)));
+		Ok(Self { search, replace, latin1, byte_output, identity, count_only, warning, squash: flags.s, delete: flags.d })
 	}
 
 	/// Whether the operator only counts matches, leaving the subject and its magic unchanged.
@@ -70,10 +72,37 @@ impl Translit {
 	/// Count matching input characters without producing a copy of the subject.
 	pub fn count(&self, s: &PStr) -> usize {
 		if s.utf8 {
-			s.chars().filter(|&cp| search_rank(&self.search, cp).is_some()).count()
+			s.chars().filter(|&cp| self.latin1.get(cp as usize)
+				.map_or_else(|| search_rank(&self.search, cp).is_some(), |a| !matches!(a, Action::Pass))).count()
 		} else {
 			s.bytes.iter().filter(|&&b| !matches!(self.latin1[b as usize], Action::Pass)).count()
 		}
+	}
+
+	pub fn preserves_bytes(&self) -> bool { self.byte_output }
+
+	/// Forward compaction: each input byte emits at most one output byte.
+	pub fn apply_bytes(&self, bytes: &mut Vec<u8>) -> usize {
+		let mut matched = 0;
+		let mut written = 0;
+		let mut previous = None;
+		for i in 0..bytes.len() {
+			let b = bytes[i];
+			let out = match self.latin1[usize::from(b)] {
+				Action::Pass => { previous = None; b }
+				Action::Delete => { matched += 1; continue; }
+				Action::Replace(cp) => {
+					matched += 1;
+					if self.squash && previous == Some(cp) { continue; }
+					previous = Some(cp);
+					cp as u8
+				}
+			};
+			bytes[written] = out;
+			written += 1;
+		}
+		bytes.truncate(written);
+		matched
 	}
 
 	/// Return the transformed string and the count of matched input characters.
@@ -101,7 +130,8 @@ impl Translit {
 		};
 		if s.utf8 {
 			for cp in s.chars() {
-				emit(cp, action(&self.search, &self.replace, self.identity, self.delete, cp));
+				emit(cp, self.latin1.get(cp as usize).copied()
+					.unwrap_or_else(|| action(&self.search, &self.replace, self.identity, self.delete, cp)));
 			}
 		} else {
 			for &b in &s.bytes {

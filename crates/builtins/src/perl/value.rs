@@ -2,7 +2,7 @@
 
 use std::{
 	borrow::Cow,
-	cell::{Cell, Ref as CellRef, RefCell, RefMut},
+	cell::{Cell, OnceCell, Ref as CellRef, RefCell, RefMut},
 	cmp::Ordering,
 	fmt,
 	hash::{Hash, Hasher},
@@ -237,10 +237,22 @@ impl Ord for PStr {
 }
 impl Hash for PStr {
 	fn hash<H: Hasher>(&self, state: &mut H) {
-		for cp in self.chars() { state.write_u32(cp); }
-		state.write_u32(0);
-		state.write_u8(0xff);
+		if !self.utf8 {
+			hash_latin1(&self.bytes, state);
+		} else {
+			for cp in self.chars() { state.write_u32(cp); }
+			state.write_u32(0);
+			state.write_u8(0xff);
+		}
 	}
+}
+
+// Hash::Util exposes this stream through hash_value(), including the terminator.
+#[inline]
+fn hash_latin1<H: Hasher>(bytes: &[u8], state: &mut H) {
+	for &b in bytes { state.write_u32(u32::from(b)); }
+	state.write_u32(0);
+	state.write_u8(0xff);
 }
 
 /// A number stored as a signed integer (IV), unsigned integer (UV), or floating point (NV).
@@ -322,6 +334,11 @@ impl Value {
 
 	/// Test whether the scalar is undefined.
 	pub fn is_undef(&self) -> bool { matches!(self, Self::Undef) }
+
+	/// Borrow an existing string facet without formatting or copying it.
+	pub fn as_pstr(&self) -> Option<&PStr> {
+		match self { Self::Str(s) => Some(s), Self::Dual(d) => Some(&d.str), _ => None }
+	}
 
 	/// Test Perl truth, using the string facet for dualvars.
 	pub fn truthy(&self) -> bool {
@@ -698,7 +715,7 @@ impl Ref {
 	/// Return the class of the referent, if it has been blessed.
 	pub fn blessed(&self) -> Option<Rc<str>> {
 		match self {
-			Self::Scalar(s) => s.blessed.borrow().clone(),
+			Self::Scalar(s) => s.metadata.get().and_then(|m| m.blessed.borrow().clone()),
 			Self::Array(a) => a.blessed.borrow().clone(),
 			Self::Hash(h) => h.blessed.borrow().clone(),
 			Self::Code(c) => c.blessed.borrow().clone(),
@@ -771,65 +788,107 @@ pub(in crate::perl) type Sv = Rc<ScalarBody>;
 
 /// Mutable storage and metadata shared by all aliases to a scalar variable.
 pub(in crate::perl) struct ScalarBody {
-	/// Current value of the variable.
 	value: RefCell<Value>,
+	metadata: OnceCell<Box<ScalarMetadata>>,
+	revision: Cell<u64>,
+	flags: Cell<u8>,
+}
+
+/// Rare state, allocated together the first time a scalar needs it.
+#[derive(Default)]
+pub(in crate::perl) struct ScalarMetadata {
 	weak: RefCell<Option<WeakRef>>,
-	lvalue: Option<Box<super::interp::Lvalue>>,
+	lvalue: Option<super::interp::Lvalue>,
 	tie: RefCell<Option<Value>>,
 	/// Class of a blessed scalar reference.
 	pub blessed: RefCell<Option<Rc<str>>>,
 	/// Current `m//g` position, as a byte offset.
 	pub pos: Cell<Option<usize>>,
-	revision: Cell<u64>,
-	/// Set by the interpreter on cells it tracks in side tables (special-variable magic, read-only literals), so
-	/// ordinary cells skip those lookups.
-	registered: Cell<bool>,
-	/// Listed in the thread's cycle tracker (it has held a reference; see `track_cell`).
-	tracked: Cell<bool>,
 }
 
+impl std::ops::Deref for ScalarBody {
+	type Target = ScalarMetadata;
+
+	fn deref(&self) -> &Self::Target { self.metadata.get_or_init(Default::default) }
+}
+
+const WEAK: u8 = 1;
+const LVALUE: u8 = 2;
+const TIED: u8 = 4;
+const REGISTERED: u8 = 8;
+const TRACKED: u8 = 16;
+
 impl ScalarBody {
+	fn new(value: Value, flags: u8) -> Self {
+		Self { value: RefCell::new(value), metadata: OnceCell::new(), revision: Cell::new(0), flags: Cell::new(flags) }
+	}
+
+	fn has(&self, flags: u8) -> bool { self.flags.get() & flags != 0 }
+
 	fn changed(&self) { self.revision.set(self.revision.get().wrapping_add(1)); }
 
 	/// Counter changed whenever the scalar's raw storage or magic changes.
 	pub fn revision(&self) -> u64 { self.revision.get() }
 
+	/// Borrow the value only when raw storage represents an ordinary interpreter read.
+	/// Drop the guard before calling Perl or modifying any alias to the cell.
+	#[inline]
+	pub(super) fn plain_value(&self) -> Option<CellRef<'_, Value>> {
+		if self.has(WEAK | LVALUE | TIED | REGISTERED) { None } else { self.value.try_borrow().ok() }
+	}
+
 	/// Read the stored scalar, upgrading a live weak reference or returning undef.
 	/// Use `Interp::read_sv` when the operation can invoke Perl magic.
 	#[inline]
 	pub fn get(&self) -> Value {
-		if let Some(weak) = self.weak.borrow().as_ref() { return weak.upgrade().map_or(Value::Undef, Value::Ref); }
+		if self.has(WEAK) {
+			return self.weak.borrow().as_ref().and_then(WeakRef::upgrade).map_or(Value::Undef, Value::Ref);
+		}
 		match &*self.value.borrow() {
 			Value::Int(n) => Value::Int(*n),
+			Value::UInt(n) => Value::UInt(*n),
 			Value::Num(n) => Value::Num(*n),
 			Value::Undef => Value::Undef,
 			other => other.clone(),
 		}
 	}
 
+	#[inline]
+	fn take_weak(&self) -> Option<WeakRef> {
+		if !self.has(WEAK) { return None; }
+		self.flags.set(self.flags.get() & !WEAK);
+		self.weak.take()
+	}
+
 	/// Write a raw value without invoking Perl magic.
+	#[inline]
 	pub fn set(&self, value: Value) {
 		self.changed();
-		self.weak.take();
+		self.take_weak();
 		self.value.replace(value);
 	}
 
 	/// Replace a raw value and return the previous value (with weak reference upgraded).
+	#[inline]
 	pub fn replace(&self, value: Value) -> Value {
 		self.changed();
 		let old = self.value.replace(value);
-		self.weak.take().map_or(old, |weak| weak.upgrade().map_or(Value::Undef, Value::Ref))
+		match self.take_weak() {
+			Some(weak) => weak.upgrade().map_or(Value::Undef, Value::Ref),
+			None => old,
+		}
 	}
 
 	/// Turn this reference into a weak reference; undef is unaffected.
 	pub fn weaken(&self) -> Result<(), &'static str> {
-		if self.weak.borrow().is_some() { return Ok(()); }
+		if self.has(WEAK) { return Ok(()); }
 		let mut value = self.value.borrow_mut();
 		match &*value {
 			Value::Undef => Ok(()),
 			Value::Ref(reference) => {
 				self.changed();
 				self.weak.replace(Some(WeakRef::new(reference)));
+				self.flags.set(self.flags.get() | WEAK);
 				*value = Value::Undef;
 				Ok(())
 			}
@@ -839,7 +898,7 @@ impl ScalarBody {
 
 	/// Turn a live weak reference back into a strong one.
 	pub fn unweaken(&self) -> Result<(), &'static str> {
-		if let Some(weak) = self.weak.take() {
+		if let Some(weak) = self.take_weak() {
 			self.changed();
 			self.value.replace(weak.upgrade().map_or(Value::Undef, Value::Ref));
 			return Ok(());
@@ -851,33 +910,55 @@ impl ScalarBody {
 	}
 
 	/// Whether the scalar still contains a live weak reference.
-	pub fn is_weak(&self) -> bool { self.weak.borrow().as_ref().and_then(WeakRef::upgrade).is_some() }
+	pub fn is_weak(&self) -> bool {
+		self.has(WEAK) && self.weak.borrow().as_ref().and_then(WeakRef::upgrade).is_some()
+	}
 
-	/// Borrow raw storage without copying; scalar-backed I/O uses this to stream large strings.
+	/// Borrow raw storage without copying; unlike `plain_value`, this does not check magic.
 	pub fn try_value(&self) -> Result<CellRef<'_, Value>, std::cell::BorrowError> { self.value.try_borrow() }
 
 	/// Borrow raw storage mutably, promoting any weak value to its normal scalar value.
+	#[inline]
 	pub fn try_value_mut(&self) -> Result<RefMut<'_, Value>, std::cell::BorrowMutError> {
 		let mut raw = self.value.try_borrow_mut()?;
 		self.changed();
-		if let Some(weak) = self.weak.take() { *raw = weak.upgrade().map_or(Value::Undef, Value::Ref); }
+		if let Some(weak) = self.take_weak() { *raw = weak.upgrade().map_or(Value::Undef, Value::Ref); }
 		Ok(raw)
 	}
 
-	pub(super) fn lvalue(&self) -> Option<&super::interp::Lvalue> { self.lvalue.as_deref() }
+	pub(super) fn lvalue(&self) -> Option<&super::interp::Lvalue> {
+		if self.has(LVALUE) { self.lvalue.as_ref() } else { None }
+	}
 
 	/// Whether the interpreter registered this cell in one of its side tables.
-	pub(super) fn registered(&self) -> bool { self.registered.get() }
+	pub(super) fn registered(&self) -> bool { self.has(REGISTERED) }
 	/// Mark the cell as present in an interpreter side table.
-	pub(super) fn register(&self) { self.registered.set(true); }
+	pub(super) fn register(&self) { self.flags.set(self.flags.get() | REGISTERED); }
 
-	pub(super) fn is_magical(&self) -> bool {
-		self.lvalue.is_some() || self.tie.borrow().is_some() || self.weak.borrow().is_some()
+	pub(super) fn is_magical(&self) -> bool { self.has(WEAK | LVALUE | TIED) }
+	pub(super) fn tie(&self) -> Option<Value> {
+		if self.has(TIED) { self.tie.borrow().clone() } else { None }
 	}
-	pub(super) fn tie(&self) -> Option<Value> { self.tie.borrow().clone() }
-	pub(super) fn replace_tie(&self, tie: Option<Value>) -> Option<Value> { self.changed(); self.tie.replace(tie) }
+	pub(super) fn replace_tie(&self, tie: Option<Value>) -> Option<Value> {
+		self.changed();
+		if tie.is_some() { self.flags.set(self.flags.get() | TIED); }
+		else if self.has(TIED) { self.flags.set(self.flags.get() & !TIED); }
+		else { return None; }
+		self.tie.replace(tie)
+	}
 	/// Whether reads go through the interpreter (lvalue proxy or tie); `get` handles weak references itself.
-	pub(super) fn has_read_magic(&self) -> bool { self.lvalue.is_some() || self.tie.borrow().is_some() }
+	pub(super) fn has_read_magic(&self) -> bool { self.has(LVALUE | TIED) }
+
+	pub(super) fn is_blessed(&self) -> bool {
+		self.metadata.get().is_some_and(|m| m.blessed.borrow().is_some())
+	}
+
+	pub(super) fn pos(&self) -> Option<usize> { self.metadata.get().and_then(|m| m.pos.get()) }
+
+	pub(super) fn set_pos(&self, pos: Option<usize>) {
+		if let Some(m) = self.metadata.get() { m.pos.set(pos); }
+		else if pos.is_some() { self.pos.set(pos); }
+	}
 }
 
 // Freeing a value graph recursively (Rc → RefCell<Value> → Vec<Sv> → …) uses one native frame per level, so a
@@ -903,7 +984,10 @@ fn frees_container(v: &Value) -> bool {
 
 /// Drop a value without native recursion proportional to the depth of the graph it owns (see `RELEASE_QUEUE`).
 pub(in crate::perl) fn release(v: Value) {
-	if !frees_container(&v) { return; }
+	if frees_container(&v) { release_container(v); }
+}
+
+fn release_container(v: Value) {
 	// During thread teardown the queue may already be gone: fall back to an ordinary drop.
 	let Ok(draining) = RELEASING.try_with(Cell::get) else { return };
 	if RELEASE_QUEUE.try_with(|queue| queue.borrow_mut().push(v)).is_err() || draining { return; }
@@ -964,7 +1048,10 @@ pub(in crate::perl) fn end_cycle_tracking(id: u64) {
 	}
 	for cell in tracker.cells.iter().filter_map(Weak::upgrade) {
 		let value = std::mem::replace(&mut *cell.value.borrow_mut(), Value::Undef);
-		let tie = cell.tie.borrow_mut().take();
+		let tie = if cell.has(TIED) {
+			cell.flags.set(cell.flags.get() & !TIED);
+			cell.tie.take()
+		} else { None };
 		drop(cell);
 		release(value);
 		if let Some(tie) = tie { release(tie); }
@@ -985,7 +1072,12 @@ pub(in crate::perl) fn track_code(cv: &Cv) {
 /// Cells created by `new_sv` and written by the interpreter's assignments are listed automatically.
 #[inline]
 pub(in crate::perl) fn track_cell(sv: &Sv, value: &Value) {
-	if !holds_reference(value) || sv.tracked.replace(true) { return; }
+	if !holds_reference(value) || sv.has(TRACKED) { return; }
+	sv.flags.set(sv.flags.get() | TRACKED);
+	track_reference(sv);
+}
+
+fn track_reference(sv: &Sv) {
 	let _ = CYCLE_TRACKERS.try_with(|t| {
 		if let Some(tracker) = t.borrow_mut().last_mut() {
 			if tracker.cells.len() >= tracker.limit { tracker.compact(); }
@@ -996,8 +1088,17 @@ pub(in crate::perl) fn track_cell(sv: &Sv, value: &Value) {
 
 impl Drop for ScalarBody {
 	fn drop(&mut self) {
-		release(std::mem::replace(self.value.get_mut(), Value::Undef));
-		if let Some(tie) = self.tie.get_mut().take() { release(tie); }
+		// Release in storage order: value and tie can share the same last two
+		// references to a container, so the second release must see the first.
+		if self.has(TIED) {
+			release(std::mem::replace(self.value.get_mut(), Value::Undef));
+			if let Some(tie) = self.tie.take() { release(tie); }
+		} else {
+			let value = self.value.get_mut();
+			if frees_container(value) {
+				release_container(std::mem::replace(value, Value::Undef));
+			}
+		}
 	}
 }
 
@@ -1098,34 +1199,75 @@ pub(in crate::perl) struct RegexpBody {
 pub(in crate::perl) struct HKey(PStr);
 
 impl HKey {
-	/// Construct a hash key, downgrading UTF-8 when all characters fit in Latin-1.
-	pub fn new(s: &PStr) -> Self {
-		Self(s.downgraded().map_or_else(|| s.clone(), |b| PStr::new(b, false)))
+	/// Construct an owned key from a borrowed string.
+	pub fn new(s: &PStr) -> Self { Self::from_pstr(s.clone()) }
+
+	/// Downgrade the owned key in its original buffer. A wide or malformed
+	/// string containing a wide character must retain its original bytes.
+	pub fn from_pstr(mut s: PStr) -> Self {
+		if s.utf8 {
+			if s.bytes.is_ascii() {
+				s.utf8 = false;
+			} else if s.chars().all(|cp| cp <= 0xff) {
+				let (mut src, mut dst) = (0, 0);
+				while src < s.bytes.len() {
+					let (cp, width) = decode_utf8(&s.bytes[src..]);
+					s.bytes[dst] = cp.unwrap_or(0) as u8;
+					src += width;
+					dst += 1;
+				}
+				s.bytes.truncate(dst);
+				s.utf8 = false;
+			}
+		}
+		Self(s)
 	}
 
-	/// `new` taking ownership: a byte string (or ASCII text) becomes the key without copying.
-	pub fn from_pstr(mut s: PStr) -> Self {
-		if !s.utf8 { return Self(s); }
-		if s.bytes.is_ascii() { s.utf8 = false; return Self(s); }
-		Self::new(&s)
-	}
+	/// Borrow the canonical key string without cloning its bytes.
+	pub fn as_pstr(&self) -> &PStr { &self.0 }
 
 	/// Copy the canonical representation as a string scalar.
 	pub fn to_pstr(&self) -> PStr { self.0.clone() }
 }
 
+// PStr equality and hashing use characters; the borrowed form need not
+// have been downgraded for an IndexMap lookup to find the canonical key.
+impl std::borrow::Borrow<PStr> for HKey {
+	fn borrow(&self) -> &PStr { self.as_pstr() }
+}
+
+/// A byte-slice probe for a hash lookup without allocating a PStr.
+pub(in crate::perl) struct HKeyRef<'a>(&'a [u8]);
+
+impl<'a> HKeyRef<'a> {
+	/// Return a probe if these bytes already represent the Latin-1 key.
+	pub fn new(bytes: &'a [u8], utf8: bool) -> Option<Self> {
+		(!utf8 || bytes.is_ascii()).then_some(Self(bytes))
+	}
+}
+
+impl Hash for HKeyRef<'_> {
+	fn hash<H: Hasher>(&self, state: &mut H) { hash_latin1(self.0, state); }
+}
+
+impl indexmap::Equivalent<HKey> for HKeyRef<'_> {
+	fn equivalent(&self, key: &HKey) -> bool { !key.0.utf8 && self.0 == key.0.bytes.as_slice() }
+}
+
 /// Allocate an independent scalar cell with no blessing or match position.
+#[inline]
 pub(in crate::perl) fn new_sv(v: Value) -> Sv {
 	let track = holds_reference(&v);
-	let sv = Rc::new(ScalarBody { value: RefCell::new(v), weak: RefCell::new(None), lvalue: None, tie: RefCell::new(None), blessed: RefCell::new(None), pos: Cell::new(None), revision: Cell::new(0), registered: Cell::new(false), tracked: Cell::new(false) });
-	if track { track_cell(&sv, &sv.value.borrow()); }
+	let sv = Rc::new(ScalarBody::new(v, if track { TRACKED } else { 0 }));
+	if track { track_reference(&sv); }
 	sv
 }
 
 /// Create a proxy cell whose reads and writes are defined by the interpreter.
 pub(super) fn new_lvalue(lvalue: super::interp::Lvalue) -> Sv {
-	Rc::new(ScalarBody { value: RefCell::new(Value::Undef), weak: RefCell::new(None), lvalue: Some(Box::new(lvalue)),
-		tie: RefCell::new(None), blessed: RefCell::new(None), pos: Cell::new(None), revision: Cell::new(0), registered: Cell::new(false), tracked: Cell::new(false) })
+	let mut cell = ScalarBody::new(Value::Undef, LVALUE);
+	cell.metadata = OnceCell::from(Box::new(ScalarMetadata { lvalue: Some(lvalue), ..Default::default() }));
+	Rc::new(cell)
 }
 
 /// Allocate an array, giving each element an independent scalar cell.

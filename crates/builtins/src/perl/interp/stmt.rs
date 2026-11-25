@@ -168,7 +168,7 @@ impl Interp<'_> {
 		// sets were known. Drop the unused captured cells once validation completes.
 		for (block, _, _, pad) in checks.iter_mut().chain(self.checks.iter_mut()).chain(self.inits.iter_mut()).chain(self.ends.iter_mut()) {
 			if let Some(needed) = self.captures.get(&(Rc::as_ptr(block) as usize)) {
-				pad.retain(|(sigil, name, _)| needed.contains(&(*sigil as u8, name.clone())));
+				pad.retain(|(sigil, name, _)| needed.binary_search(&self.lexicals.resolve(*sigil, name)).is_ok());
 			}
 		}
 		self.programs.push(program.clone());
@@ -229,7 +229,7 @@ impl Interp<'_> {
 
 	/// Evaluate a lexical block, restoring localized variables and match state on every exit path.
 	pub fn run_block(&mut self, b: &Block, cx: Cx) -> PResult<Ret> {
-		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.depth_guard(|this| this.scoped(|this| this.run_statements(b, cx))))
+		self.nested(|this| this.scoped(|this| this.run_statements(b, cx)))
 	}
 
 	pub(super) fn scoped<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
@@ -247,6 +247,7 @@ impl Interp<'_> {
 		self.pop_scope();
 		self.package = package;
 		self.active_hints = hints;
+		if self.pending.is_none() && self.objects.is_empty() && self.tied_handles.is_empty() { return result; }
 		let cleanup = self.drain_destructors(false);
 		match (result, self.take_pending()) {
 			(Err(flow), _) | (Ok(_), Some(flow)) => Err(flow),
@@ -265,7 +266,7 @@ impl Interp<'_> {
 			StmtKind::Empty | StmtKind::Use(_) | StmtKind::Sub(_) | StmtKind::Phase(..) | StmtKind::Format
 			| StmtKind::Package(Package { block: None, .. }))) };
 		while let Some(s) = statements.get(ix) {
-			if self.loc.line != s.location.line || !Rc::ptr_eq(&self.loc.file, &s.location.file) { self.loc = s.location.clone(); }
+			self.statement_location(&s.location);
 			self.poll()?;
 			let scx = if Some(ix) == last_executable { cx } else { Cx::Void };
 			match self.run_statement(s, scx) {
@@ -396,8 +397,21 @@ impl Interp<'_> {
 		Ok(Loop::Value(result))
 	}
 
+	#[inline]
+	pub(super) fn statement_location(&mut self, loc: &Location) {
+		if self.loc.line != loc.line || !Rc::ptr_eq(&self.loc.file, &loc.file) { self.loc = loc.clone(); }
+	}
+
+	/// In a no-callback statement with no pending Perl work, only the shell's
+	/// cancellation check remains observable. Leave room for normal nested depth guards.
+	#[inline]
+	pub(super) fn quiet_statement(&self) -> bool {
+		self.depth < 8176 && self.alarm.is_none() && self.pending.is_none() && self.objects.is_empty() && self.tied_handles.is_empty()
+	}
+
 	pub(super) fn run_statement(&mut self, stmt: &Stmt, cx: Cx) -> PResult<Ret> {
-		let result = self.nested(|this| this.run_statement_inner(stmt, cx));
+		let result = if let StmtKind::Expr(e) = &stmt.kind { self.nested(|this| this.eval(e, cx)) }
+			else { self.nested(|this| this.run_statement_inner(stmt, cx)) };
 		// New my/state bindings enter scope after the statement, not after
 		// their assignment alone: `my $x = 1 and $x++` still sees the outer $x.
 		self.commit_declarations();
@@ -433,7 +447,8 @@ impl Interp<'_> {
 					let mut exit_value = None;
 					let step = this.scope_slots(|this| {
 						this.poll()?;
-						let (succeeds, value) = this.condition_value(cond, *until, true)?;
+						let (succeeds, value) = if cx == Cx::Void { (this.condition(cond, *until, true)?, Value::Undef) }
+							else { this.condition_value(cond, *until, true)? };
 						this.commit_declarations();
 						if !succeeds { exit_value = Some(value); return Ok(Loop::Last); }
 						// The body runs in void context; the loop's own value is its final condition.
@@ -469,15 +484,27 @@ impl Interp<'_> {
 				// `for my $x (...)`: bind each element directly (the general aliasing logic, resolved once).
 				let lexical = var.as_ref().and_then(|v| match &v.kind {
 					ExprKind::Declare(DeclKind::My | DeclKind::State, _, target, _) => match &ungroup(target).kind {
-						ExprKind::Variable(Sigil::Scalar, name) => Some(name.clone()),
+						ExprKind::Variable(Sigil::Scalar, name) => Some((this.lexicals.resolve(Sigil::Scalar, name), name)),
 						_ => None,
 					},
 					_ => None,
 				});
+				let simple = match body.stmts.as_slice() {
+					[Stmt { kind: StmtKind::Expr(e), location, .. }] if continue_.is_none() && matches!(e.kind, ExprKind::Binary(..)) => Some((e, location)),
+					_ => None,
+				};
 				for alias in aliases {
-					let step = if let Some(name) = &lexical {
+					let step = if let Some((id, name)) = lexical {
+						// The ordinary polls bracket entry to the iteration and its first statement.
+						// With no Perl work pending there, a successful numeric update needs neither a
+						// fresh scope stack entry nor an interpreter frame. A retained alias still gets
+						// a fresh counter cell from the iterator.
+						if let Some((e, loc)) = simple && this.quiet_statement() {
+							if this.is_cancelled() { return Err(Flow::Cancelled); }
+							if this.try_numeric_iteration(id, name, &alias, e) { this.statement_location(loc); continue; }
+						}
 						this.scope_slots(|this| {
-							this.put_pad(Sigil::Scalar, name.clone(), Slot::Scalar(alias));
+							this.put_resolved_pad(id, Sigil::Scalar, name.clone(), Slot::Scalar(alias));
 							this.run_iteration(body, continue_.as_ref(), label, Cx::Void)
 						})?
 					} else {
@@ -566,6 +593,17 @@ impl Interp<'_> {
 	}
 
 	fn condition(&mut self, e: &Expr, negate: bool, implicit: bool) -> PResult<bool> {
+		let e = ungroup(e);
+		if implicit && assigns_topic(e) {
+			let v = self.eval_scalar(e)?;
+			let defined = !v.is_undef();
+			let topic = self.topic();
+			if matches!(v, Value::Str(_) | Value::Undef) && !topic.registered() && !topic.is_magical() && !self.is_readonly_sv(&topic) {
+				if let Value::Str(old) = topic.replace(v) { self.sys.recycle_record(old.bytes); }
+				topic.set_pos(None);
+			} else { self.write_sv(&topic, v)?; }
+			return Ok(defined != negate);
+		}
 		self.condition_value(e, negate, implicit).map(|(truth, _)| truth)
 	}
 
@@ -591,9 +629,9 @@ impl Interp<'_> {
 	fn run_iteration(&mut self, body: &Block, cont: Option<&Block>, label: Option<&str>, cx: Cx) -> PResult<Loop<Ret>> {
 		loop {
 			self.poll()?;
-			let mark = self.locals_mark();
+			let mark = cont.map(|_| self.locals_mark());
 			let result = loop_flow(self.run_statements(body, cx), label);
-			if cont.is_some() { self.unwind_locals(mark); }
+			if let Some(mark) = mark { self.unwind_locals(mark); }
 			let result = match result? {
 				Loop::Value(v) => v,
 				Loop::Last => return Ok(Loop::Last),
@@ -735,7 +773,7 @@ impl Interp<'_> {
 		self.scoped(|this| {
 			this.package = package;
 			this.active_hints = Rc::new(hints);
-			if let Some(scope) = this.scopes.last_mut() { scope.pad = pad; }
+			this.extend_pad(pad);
 			this.run_statements(&block, Cx::Void).map(|_| ())
 		})
 	}
@@ -765,7 +803,7 @@ impl Iterator for ForeachItems {
 				let i = range.next()?;
 				let sv = match last.take() {
 					Some(sv) if Rc::strong_count(&sv) == 1 && Rc::weak_count(&sv) == 0 && !sv.is_magical() && !sv.registered()
-						&& sv.blessed.borrow().is_none() => { sv.set(Value::Int(i)); sv.pos.set(None); sv }
+						&& !sv.is_blessed() => { sv.set(Value::Int(i)); sv.set_pos(None); sv }
 					_ => new_sv(Value::Int(i)),
 				};
 				*last = Some(sv.clone());

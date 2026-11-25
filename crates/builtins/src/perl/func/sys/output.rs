@@ -30,6 +30,22 @@ pub(super) fn call(interp: &mut Interp<'_>, b: Builtin, call: &Call, cx: Cx) -> 
 	};
 	let default = args(call).is_empty();
 	let tied = io.as_ref().is_some_and(|io| interp.tied_handle(io).is_some());
+	// A plain topic printed to a device outside Perl cannot alias its own destination.
+	// Release its borrow before warnings (which can run arbitrary Perl) or a second write.
+	if default && !tied && b != Builtin::Printf
+		&& let Some(io) = io.as_ref().filter(|io| io.borrow().writes_external_bytes())
+	{
+		let sv = interp.topic();
+		if let Some(value) = sv.plain_value() && let Value::Str(text) = &*value {
+			let sep = record_separator(interp, b);
+			let result = io.borrow_mut().write(text);
+			drop(value);
+			if !write_result(interp, result, b.name())? { return Ok(one(Value::Undef)); }
+			if let Some(s) = sep && !write(interp, io, &s, b.name())? { return Ok(one(Value::Undef)); }
+			return Ok(super::yes());
+		}
+	}
+	let mut single = None;
 	let mut formatted = None;
 	let vals = if b == Builtin::Printf || tied {
 		let svs = if default { vec![interp.topic()] }
@@ -49,7 +65,10 @@ pub(super) fn call(interp: &mut Interp<'_>, b: Builtin, call: &Call, cx: Cx) -> 
 		let fmt = interp.stringify(&fmt)?;
 		formatted = Some(data::format(interp, Builtin::Printf, &fmt, rest)?);
 		Vec::new()
-	} else if default { vec![topic(interp)?] } else { list(interp, call)? };
+	} else if default {
+		single = Some(topic(interp)?);
+		Vec::new()
+	} else { list(interp, call)? };
 	let Some(io) = io else {
 		warn_on(interp, "unopened", || format!("{}() on unopened filehandle {}", b.name(), name.as_deref().unwrap_or("")));
 		return Ok(fail(interp, libc::EBADF));
@@ -57,10 +76,10 @@ pub(super) fn call(interp: &mut Interp<'_>, b: Builtin, call: &Call, cx: Cx) -> 
 	if let Some(formatted) = formatted {
 		return Ok(if write(interp, &io, &formatted, "printf")? { super::yes() } else { one(Value::Undef) });
 	}
-	let field = interp.output_field_sep();
-	let record = if b == Builtin::Say { Some(PStr::from_bytes(b"\n")) } else { interp.output_record_sep() };
+	let field = if vals.len() > 1 { interp.output_field_sep() } else { None };
+	let record = record_separator(interp, b);
 	if !check_writable(interp, &io, b.name()) { return Ok(one(Value::Undef)); }
-	for (i, val) in vals.into_iter().enumerate() {
+	for (i, val) in single.into_iter().chain(vals).enumerate() {
 		if i != 0 && let Some(s) = &field && !write(interp, &io, s, b.name())? { return Ok(one(Value::Undef)); }
 		if val.is_undef() { warn_on(interp, "uninitialized", || format!("Use of uninitialized value in {}", b.name())); }
 		let s = if let Value::Str(s) = val { s } else { interp.stringify(&val)? };
@@ -68,6 +87,12 @@ pub(super) fn call(interp: &mut Interp<'_>, b: Builtin, call: &Call, cx: Cx) -> 
 	}
 	if let Some(s) = &record && !write(interp, &io, s, b.name())? { return Ok(one(Value::Undef)); }
 	Ok(super::yes())
+}
+
+fn record_separator(interp: &Interp<'_>, b: Builtin) -> Option<std::borrow::Cow<'static, PStr>> {
+	use std::borrow::Cow;
+	static NEWLINE: std::sync::LazyLock<PStr> = std::sync::LazyLock::new(|| PStr::from_bytes(b"\n"));
+	if b == Builtin::Say { Some(Cow::Borrowed(&NEWLINE)) } else { interp.output_record_sep().map(Cow::Owned) }
 }
 
 fn check_writable(interp: &mut Interp<'_>, io: &Io, operation: &str) -> bool {
@@ -86,6 +111,10 @@ fn check_writable(interp: &mut Interp<'_>, io: &Io, operation: &str) -> bool {
 pub(super) fn write(interp: &mut Interp<'_>, io: &Io, text: &PStr, operation: &str) -> PResult<bool> {
 	if !check_writable(interp, io, operation) { return Ok(false); }
 	let result = io.borrow_mut().write(text);
+	write_result(interp, result, operation)
+}
+
+fn write_result(interp: &mut Interp<'_>, result: io::Result<bool>, operation: &str) -> PResult<bool> {
 	match result {
 		Ok(wide) => {
 			if wide { interp.warn_category_default("utf8", format!("Wide character in {operation}")); }

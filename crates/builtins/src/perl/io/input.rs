@@ -199,6 +199,13 @@ impl Input {
 		Ok(())
 	}
 
+	/// Seed the next record allocation without discarding an interrupted record.
+	pub(super) fn reuse(&mut self, spare: &mut Vec<u8>) {
+		if self.partial.capacity() == 0 {
+			std::mem::swap(&mut self.partial, spare);
+		}
+	}
+
 	/// Reads through the exact delimiter, retaining it in the result.
 	pub(super) fn until(&mut self, src: &mut impl Read, sep: &[u8], crlf: bool) -> io::Result<Vec<u8>> {
 		let mut out = std::mem::take(&mut self.partial);
@@ -211,16 +218,23 @@ impl Input {
 	fn until_into(&mut self, src: &mut impl Read, sep: &[u8], crlf: bool, out: &mut Vec<u8>) -> io::Result<()> {
 		if let [byte] = *sep {
 			loop {
-				let (bytes, cooked) = self.window(src, crlf, usize::MAX)?;
-				if bytes.is_empty() {
-					return Ok(());
-				}
-				let found = memchr(byte, bytes);
-				let len = found.map_or(bytes.len(), |i| i + 1);
-				out.extend_from_slice(&bytes[..len]);
-				self.consume(len, cooked);
-				if found.is_some() {
-					return Ok(());
+				let bytes = self.peek(src)?;
+				if bytes.is_empty() { return Ok(()); }
+				let found = if crlf { memchr::memchr2(byte, b'\r', bytes) } else { memchr(byte, bytes) };
+				if let Some(at) = found && crlf && bytes[at] == b'\r' {
+					out.extend_from_slice(&bytes[..at]);
+					self.consume(at, false);
+					// Only the CR itself needs lookahead (possibly across a refill).
+					let (unit, cooked) = self.window(src, true, usize::MAX)?;
+					let logical = unit[0];
+					out.push(logical);
+					self.consume(1, cooked);
+					if logical == byte { return Ok(()); }
+				} else {
+					let len = found.map_or(bytes.len(), |at| at + 1);
+					out.extend_from_slice(&bytes[..len]);
+					self.consume(len, false);
+					if found.is_some() { return Ok(()); }
 				}
 			}
 		}

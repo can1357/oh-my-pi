@@ -5,13 +5,18 @@ use super::*;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fallback { Disabled, Generate, Builtin }
 
-struct Methods<'a> {
-	lineage: Vec<Rc<str>>,
-	table: &'a FxHashMap<Rc<str>, FxHashMap<Rc<str>, Value>>,
+type Table = FxHashMap<Rc<str>, Value>;
+
+enum Methods<'a> {
+	Direct(&'a Table),
+	Inherited { lineage: Vec<Rc<str>>, table: &'a FxHashMap<Rc<str>, Table> },
 }
 impl Methods<'_> {
 	fn get(&self, key: &str) -> Option<Value> {
-		self.lineage.iter().find_map(|pkg| self.table.get(pkg)?.get(key).cloned())
+		match self {
+			Self::Direct(table) => table.get(key).cloned(),
+			Self::Inherited { lineage, table } => lineage.iter().find_map(|pkg| table.get(pkg)?.get(key).cloned()),
+		}
 	}
 	fn fallback(&self) -> Fallback {
 		self.get("fallback").map_or(Fallback::Generate, |v| {
@@ -35,9 +40,12 @@ fn comparison_method(key: &str) -> Option<&'static str> {
 impl Interp<'_> {
 	fn methods(&self, class: &str) -> Option<Methods<'_>> {
 		if self.overloads.is_empty() { return None; }
+		if self.lookup_glob(&format!("{class}::ISA")).is_none_or(|gv| gv.array.borrow().elems().is_empty()) {
+			return self.overloads.get(class).filter(|table| !table.is_empty()).map(Methods::Direct);
+		}
 		let lineage = self.linear_isa(class, self.mro_order(class)).ok()?;
 		lineage.iter().any(|pkg| self.overloads.get(pkg).is_some_and(|table| !table.is_empty()))
-			.then_some(Methods { lineage, table: &self.overloads })
+			.then_some(Methods::Inherited { lineage, table: &self.overloads })
 	}
 
 	/// Add, replace or remove a handler registered through `use overload`.
@@ -103,8 +111,15 @@ impl Interp<'_> {
 		}))
 	}
 
+	#[inline]
 	pub(super) fn overload_binary(&mut self, op: &str, a: &Value, b: &Value, assign: bool) -> PResult<Option<Value>> {
-		if op.is_empty() || self.overloads.is_empty() { return Ok(None); }
+		if (!matches!(a, Value::Ref(_)) && !matches!(b, Value::Ref(_))) || self.overloads.is_empty() || op.is_empty() {
+			return Ok(None);
+		}
+		self.resolve_binary_overload(op, a, b, assign)
+	}
+
+	fn resolve_binary_overload(&mut self, op: &str, a: &Value, b: &Value, assign: bool) -> PResult<Option<Value>> {
 		let classes = [class(a), class(b)];
 		let left = classes[0].as_deref().and_then(|p| self.methods(p));
 		let right = classes[1].as_deref().and_then(|p| self.methods(p));

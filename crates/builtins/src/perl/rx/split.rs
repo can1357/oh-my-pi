@@ -59,6 +59,14 @@ fn separator(interp: &mut Interp<'_>, expr: Option<&Expr>) -> PResult<Separator>
 			return regex_expr(interp, re).map(Separator::regex);
 		}
 	}
+	// The -a wrapper emits split(' ', $_). A plain string literal has
+	// no evaluation effects unless a constant-overloading pragma is active.
+	if let ExprKind::String(s) = &expr.kind && interp.hints().constant_overloads.is_empty() {
+		if s.bytes == b" " { return Ok(Separator::Whitespace); }
+		if s.is_empty() { return Ok(Separator::Characters); }
+		let flags = effective_flags(interp, &[])?;
+		return compile(interp, expr as *const Expr as usize, s, flags).map(Separator::regex);
+	}
 	let value = interp.eval_scalar(expr)?;
 	if let Some(regex) = coerce_regexp(interp, &value)? { return Ok(Separator::regex(regex)); }
 	let pattern = text(interp, value, Some(expr), Operation::Compile)?;
@@ -71,8 +79,16 @@ fn separator(interp: &mut Interp<'_>, expr: Option<&Expr>) -> PResult<Separator>
 pub(super) fn split(interp: &mut Interp<'_>, args: &[Expr], cx: Cx) -> PResult<Ret> {
 	let separator = separator(interp, args.first())?;
 	let expr = args.get(1);
-	let (cell, value) = subject(interp, expr, None)?.read(interp)?;
-	let original_pos = cell.as_ref().and_then(|s| s.pos.get()).unwrap_or(0);
+	let target = subject(interp, expr, None)?;
+	// An explicit limit may run Perl and mutate the input, so preserve
+	// the normal snapshot/evaluation order in that case.
+	if args.get(2).is_none() && let super::Subject::Cell(cell) = &target
+		&& let Some(raw) = cell.plain_value() && let Value::Str(source) = &*raw
+		&& !(source.utf8 && interp.hints().bytes)
+		&& let Some(ret) = simple_fields(interp, &separator, source, cx, 0)?
+	{ return Ok(ret); }
+	let (cell, value) = target.read(interp)?;
+	let original_pos = cell.as_ref().and_then(|s| s.pos()).unwrap_or(0);
 	let mut source = text(interp, value, expr, Operation::Split)?;
 	let bytes = interp.hints().bytes;
 	source.utf8 &= !bytes;
@@ -88,21 +104,47 @@ pub(super) fn split(interp: &mut Interp<'_>, args: &[Expr], cx: Cx) -> PResult<R
 			interp.numify(&value)?.wrapping_iv()
 		}
 	} else { 0 };
+	if let Some(ret) = simple_fields(interp, &separator, &source, cx, limit)? { return Ok(ret); }
 	let source = Rc::new(source);
-	let mut output = Fields::new(&source, cx);
-	if !source.is_empty() {
-		let max_splits = if limit > 0 { (limit as usize).saturating_sub(1) } else { usize::MAX };
-		match separator {
-			Separator::Whitespace => {
-				let unicode = source.utf8 || (!bytes && interp.hints().features.enabled("unicode_strings"));
-				whitespace(interp, &source, unicode, max_splits, &mut output)?;
-			}
-			Separator::Characters => characters(interp, &source, max_splits, &mut output)?,
-			Separator::Lines => lines(interp, &source, max_splits, &mut output)?,
-			Separator::Regex(regex) => regex_fields(interp, &regex, &source, cell.as_ref(), original_pos, max_splits, &mut output)?,
-		}
+	let mut output = Fields::new(interp, &source, cx);
+	if let Separator::Regex(regex) = separator {
+		regex_fields(interp, &regex, &source, cell.as_ref(), original_pos, split_budget(limit), &mut output)?;
 	}
 	Ok(output.finish(limit == 0))
+}
+
+fn split_budget(limit: i64) -> usize {
+	if limit > 0 { (limit as usize).saturating_sub(1) } else { usize::MAX }
+}
+
+fn simple_fields(interp: &Interp<'_>, separator: &Separator, source: &PStr, cx: Cx, limit: i64) -> PResult<Option<Ret>> {
+	if !source.is_empty() && let Separator::Regex(regex) = separator
+		&& (!regex.is_byte_literal() || source.utf8 && std::str::from_utf8(&source.bytes).is_err())
+	{ return Ok(None); }
+	let mut output = Fields::new(interp, source, cx);
+	let max = split_budget(limit);
+	if !source.is_empty() {
+		match separator {
+			Separator::Whitespace => {
+				let unicode = source.utf8 || (!interp.hints().bytes && interp.hints().features.enabled("unicode_strings"));
+				if !source.utf8 { whitespace_bytes(interp, &source.bytes, unicode, max, &mut output)?; }
+				else { whitespace(interp, source, unicode, max, &mut output)?; }
+			}
+			Separator::Characters => characters(interp, source, max, &mut output)?,
+			Separator::Lines => lines(interp, source, max, &mut output)?,
+			Separator::Regex(regex) => {
+				let mut start = 0;
+				for _ in 0..max {
+					if interp.is_cancelled() { return Err(Flow::Cancelled); }
+					let Some((begin, end)) = regex.literal_span(&source.bytes, start) else { break; };
+					output.span(start, begin);
+					start = end;
+				}
+				output.span(start, source.bytes.len());
+			}
+		}
+	}
+	Ok(Some(output.finish(limit == 0)))
 }
 
 struct Fields<'a> {
@@ -113,8 +155,8 @@ struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
-	fn new(source: &'a PStr, cx: Cx) -> Self {
-		Self { source, list: (cx == Cx::List).then(Vec::new), len: 0, last_nonempty: 0 }
+	fn new(interp: &Interp<'_>, source: &'a PStr, cx: Cx) -> Self {
+		Self { source, list: (cx == Cx::List).then(|| interp.rx.split_values.take()), len: 0, last_nonempty: 0 }
 	}
 
 	fn span(&mut self, start: usize, end: usize) { self.push(Some((start, end))); }
@@ -162,6 +204,21 @@ fn lines(interp: &Interp<'_>, source: &PStr, max_splits: usize, output: &mut Fie
 		start = at + 1;
 	}
 	output.span(start, source.bytes.len());
+	Ok(())
+}
+
+fn whitespace_bytes(interp: &Interp<'_>, bytes: &[u8], unicode: bool, max: usize, output: &mut Fields<'_>) -> PResult<()> {
+	let space = |b: u8| matches!(b, 9..=13 | 32) || unicode && matches!(b, 0x85 | 0xa0);
+	let mut start = bytes.iter().position(|&b| !space(b)).unwrap_or(bytes.len());
+	if start == bytes.len() { return Ok(()); }
+	for _ in 0..max {
+		if interp.is_cancelled() { return Err(Flow::Cancelled); }
+		let Some(n) = bytes[start..].iter().position(|&b| space(b)) else { break; };
+		let end = start + n;
+		output.span(start, end);
+		start = bytes[end..].iter().position(|&b| !space(b)).map_or(bytes.len(), |n| end + n);
+	}
+	output.span(start, bytes.len());
 	Ok(())
 }
 

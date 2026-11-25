@@ -3,10 +3,11 @@
 use super::{vars::forced_main, *};
 
 struct Validator<'a, 'h> {
-	interp: &'a Interp<'h>,
+	interp: &'a mut Interp<'h>,
 	package: Rc<str>,
 	bindings: Vec<(Sigil, Rc<str>)>,
 	declarations: Vec<(Sigil, Rc<str>)>,
+	operands: Vec<(Sigil, Rc<str>)>,
 	hints: Hints,
 	diagnostics: PStr,
 	depth: u32,
@@ -18,11 +19,17 @@ impl Interp<'_> {
 	pub(super) fn validate(&mut self, p: &Program, hints: Hints, inherits_pad: bool) -> PResult<()> {
 		let bindings = if inherits_pad { self.pad_snapshot().into_iter().map(|(sig, name, _)| (sig, name)).collect() } else { Vec::new() };
 		let mut validator = Validator { interp: self, package: p.package.clone(), bindings, declarations: Vec::new(), hints, diagnostics: PStr::default(),
-			depth: 0, pending_captures: Vec::new(), captures: FxHashMap::default() };
+			depth: 0, operands: Vec::new(), pending_captures: Vec::new(), captures: FxHashMap::default() };
 		validator.statements(&p.body);
 		if validator.diagnostics.is_empty() {
-			let captures = validator.captures;
-			self.captures.extend(captures);
+			// Install operands only for live, successfully validated code. In particular,
+			// repeated failing string evals do not leave dangling operand-site metadata.
+			for (sigil, name) in validator.operands { validator.interp.lexicals.resolve(sigil, &name); }
+			for (site, names) in validator.captures {
+				let mut ids: Vec<_> = names.into_iter().map(|(sigil, name)| validator.interp.lexicals.resolve_name(sigil, &name)).collect();
+				ids.sort_unstable();
+				validator.interp.captures.insert(site, ids);
+			}
 			return Ok(());
 		}
 		if !p.file.starts_with("(eval ") {
@@ -179,6 +186,7 @@ impl Validator<'_, '_> {
 	fn bind(&mut self, e: &Expr, immediate: bool) {
 		match &ungroup(e).kind {
 			ExprKind::Variable(sigil, name) => {
+				self.operands.push((*sigil, name.clone()));
 				if immediate { self.bindings.push((*sigil, name.clone())); }
 				else { self.declarations.push((*sigil, name.clone())); }
 			}
@@ -189,6 +197,7 @@ impl Validator<'_, '_> {
 	}
 
 	fn variable(&mut self, sigil: Sigil, name: &Rc<str>, loc: &Location) {
+		self.operands.push((sigil, name.clone()));
 		self.record_capture(sigil, name);
 		let name = name.as_ref();
 		let sigil = if sigil == Sigil::LastIndex { Sigil::Array } else { sigil };
@@ -283,7 +292,7 @@ impl Validator<'_, '_> {
 				}
 				Some(*b)
 			}
-			CallTarget::Named(name, _) => { self.record_capture(Sigil::Code, name); None }
+			CallTarget::Named(name, _) => { self.operands.push((Sigil::Code, name.clone())); self.record_capture(Sigil::Code, name); None }
 		};
 		if let Some(slot) = &c.slot {
 			match slot {

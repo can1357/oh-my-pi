@@ -291,6 +291,11 @@ impl Handle {
 		self.resource.get(|device| device.with_fd(f)).ok_or_else(bad_fd)?
 	}
 
+	/// Writing to a nonscalar device cannot modify a borrowed Perl scalar.
+	pub(in crate::perl) fn writes_external_bytes(&self) -> bool {
+		self.mode.write && matches!(&self.resource, Resource::Owned(device) if !matches!(device, Device::Scalar(_)))
+	}
+
 	/// Whether the current stream is writable.
 	pub fn is_writable(&self) -> bool { self.mode.write && self.is_open() }
 
@@ -482,17 +487,24 @@ impl Handle {
 	/// Read a record for the list form of `readline`, which does not synthesize
 	/// an empty first record when slurping an empty file.
 	pub fn read_record_with_context(&mut self, sep: &RecordSep, list: bool) -> io::Result<Option<PStr>> {
+		self.read_record_reusing(sep, list, &mut Vec::new())
+	}
+
+	pub(in crate::perl) fn read_record_reusing(&mut self, sep: &RecordSep, list: bool, spare: &mut Vec<u8>) -> io::Result<Option<PStr>> {
 		let layers = self.layers;
 		let crlf = layers.crlf();
-		let bytes = self.with_input(|input, device| match sep {
-			RecordSep::Slurp | RecordSep::Fixed(0) => input.to_end(device, crlf),
-			RecordSep::Paragraph => input.paragraph(device, crlf),
-			RecordSep::Fixed(count) => input.read_count(device, *count, crlf, layers.unicode_widths()),
-			RecordSep::Text(text) if text.is_empty() => input.paragraph(device, crlf),
-			RecordSep::Text(text) => match layers.delimiter(text)? {
-				Some(sep) => input.until(device, &sep, crlf),
-				None => input.to_end(device, crlf),
-			},
+		let bytes = self.with_input(|input, device| {
+			input.reuse(spare);
+			match sep {
+				RecordSep::Slurp | RecordSep::Fixed(0) => input.to_end(device, crlf),
+				RecordSep::Paragraph => input.paragraph(device, crlf),
+				RecordSep::Fixed(count) => input.read_count(device, *count, crlf, layers.unicode_widths()),
+				RecordSep::Text(text) if text.is_empty() => input.paragraph(device, crlf),
+				RecordSep::Text(text) => match layers.delimiter(text)? {
+					Some(sep) => input.until(device, &sep, crlf),
+					None => input.to_end(device, crlf),
+				},
+			}
 		})?;
 		let allow_empty = !list && !self.read_record_once && matches!(sep, RecordSep::Slurp | RecordSep::Fixed(0));
 		if bytes.is_empty() && !allow_empty {
@@ -581,6 +593,10 @@ impl Handle {
 
 	/// Whether the stream has ended (or cannot be read). Does not consume a byte.
 	pub fn eof(&mut self) -> bool {
+		if self.mode.read && self.output.is_empty() && self.shared_input.is_none()
+			&& matches!(&self.resource, Resource::Owned(device) if !matches!(device, Device::Scalar(_)))
+			&& self.input.unread() != 0
+		{ return false; }
 		self.with_input(|input, source| match &*source.device {
 			Device::Scalar(scalar) if input.unread() == 0 => scalar.eof(),
 			_ => Ok(input.peek(source)?.is_empty()),

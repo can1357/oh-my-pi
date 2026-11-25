@@ -237,6 +237,21 @@ fn trim_slots<'a>(interp: &mut Interp<'_>, exprs: &'a [Expr]) -> PResult<Vec<(Sv
 
 pub(super) fn trim(interp: &mut Interp<'_>, call: &Call, chomp: bool) -> PResult<Value> {
 	let exprs = args(call);
+	let implicit_sep = (chomp && exprs.is_empty()).then(|| interp.record_sep_for_read());
+	if matches!(implicit_sep.as_deref(), Some(RecordSep::Text(sep)) if !sep.utf8 && sep.bytes == b"\n") {
+		let topic = interp.topic();
+		if let Some(value) = topic.plain_value() && let Value::Str(text) = &*value && !text.utf8 {
+			if !text.bytes.ends_with(b"\n") { return Ok(Value::Int(0)); }
+			drop(value);
+			if !interp.is_readonly_sv(&topic) && let Ok(mut raw) = topic.try_value_mut()
+				&& let Value::Str(text) = &mut *raw
+			{
+				text.bytes.pop();
+				topic.set_pos(None);
+				return Ok(Value::Int(1));
+			}
+		}
+	}
 	let name = if chomp { "chomp" } else { "chop" };
 	let mut pending: Vec<&Expr> = exprs.iter().collect();
 	while let Some(e) = pending.pop() {
@@ -251,8 +266,8 @@ pub(super) fn trim(interp: &mut Interp<'_>, call: &Call, chomp: bool) -> PResult
 	}
 	let slots = trim_slots(interp, exprs)?;
 	let bytes = interp.hints().bytes;
-	let sep = chomp.then(|| interp.input_sep());
-	if matches!(sep, Some(RecordSep::Slurp | RecordSep::Fixed(_))) { return Ok(Value::Int(0)); }
+	let sep = implicit_sep.or_else(|| chomp.then(|| interp.record_sep_for_read()));
+	if matches!(sep.as_deref(), Some(RecordSep::Slurp | RecordSep::Fixed(_))) { return Ok(Value::Int(0)); }
 	let is_scalar = exprs.is_empty() || (exprs.len() == 1 && aggregate_sigil(&exprs[0]).is_none()
 		&& !matches!(group_inner(&exprs[0]).kind, ExprKind::List(_) | ExprKind::Select(_, Select::ArraySlice(_) | Select::HashSlice(_) | Select::ArrayPairs(_) | Select::HashPairs(_), _)));
 	let mut removed = 0;
@@ -268,7 +283,7 @@ pub(super) fn trim(interp: &mut Interp<'_>, call: &Call, chomp: bool) -> PResult
 			continue;
 		}
 		let mut s = stringify(interp, v, expr, op, false)?;
-		let cut = if let Some(sep) = &sep {
+		let cut = if let Some(sep) = sep.as_deref() {
 			match sep {
 				RecordSep::Text(text) => {
 					let suffix;

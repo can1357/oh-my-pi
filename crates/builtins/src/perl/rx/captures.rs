@@ -13,13 +13,65 @@ pub(in crate::perl) struct MatchState {
 	subject: Rc<PStr>,
 	captures: Captures,
 	pub(super) regex: Rc<Regex>,
+	// A plain scalar snapshot can serve repeated matches until the scalar changes.
+	plain_source: Option<(Weak<super::ScalarBody>, u64)>,
 	// Most matches never access @+ or @-. Convert UTF-8 offsets only on demand.
 	offsets: OnceCell<Vec<Span>>,
 }
 
 impl MatchState {
 	pub(super) fn new(subject: Rc<PStr>, captures: Captures, regex: Rc<Regex>) -> Self {
-		Self { subject, captures, regex, offsets: OnceCell::new() }
+		Self { subject, captures, regex, plain_source: None, offsets: OnceCell::new() }
+	}
+
+	pub(super) fn install_plain(interp: &mut Interp<'_>, cell: &super::Sv, source: std::borrow::Cow<'_, PStr>, captures: Captures, regex: Rc<Regex>) {
+		// A saved dynamic scope (or an observed %+ hash) must retain the
+		// old state's identity. Recycle only after dropping the active slot.
+		interp.set_last_match(None);
+		let spare = &mut interp.rx.spare_match;
+		let stamp = cell.revision();
+		let borrowed = matches!(&source, std::borrow::Cow::Borrowed(_));
+		if let Some(state) = spare.as_mut().and_then(Rc::get_mut) {
+			let unchanged = borrowed &&
+				state.plain_source.as_ref().is_some_and(|(sv, rev)| *rev == stamp && sv.as_ptr() == Rc::as_ptr(cell));
+			if !unchanged {
+				if let Some(dst) = Rc::get_mut(&mut state.subject) {
+					match source {
+						std::borrow::Cow::Owned(s) => *dst = s,
+						std::borrow::Cow::Borrowed(s) => { dst.bytes.clone_from(&s.bytes); dst.utf8 = s.utf8; }
+					}
+				} else { state.subject = Rc::new(source.into_owned()); }
+			}
+			state.captures = captures;
+			state.regex = regex;
+			state.offsets.take();
+			if !unchanged { state.plain_source = borrowed.then(|| (Rc::downgrade(cell), stamp)); }
+		} else {
+			let mut state = Self::new(Rc::new(source.into_owned()), captures, regex);
+			state.plain_source = borrowed.then(|| (Rc::downgrade(cell), stamp));
+			*spare = Some(Rc::new(state));
+		}
+		let state = spare.clone();
+		interp.set_last_match(state);
+	}
+
+	pub(super) fn install_shared(interp: &mut Interp<'_>, source: Rc<PStr>, captures: Captures, regex: Rc<Regex>) -> Rc<Self> {
+		let next = Self::new(source, captures, regex);
+		interp.set_last_match(None);
+		// Never extend the lifetime of a regex's user code (captured lexicals).
+		let state = if next.regex.actions().is_empty() {
+			let spare = &mut interp.rx.spare_match;
+			if let Some(slot) = spare && let Some(state) = Rc::get_mut(slot) {
+				*state = next;
+				slot.clone()
+			} else {
+				let state = Rc::new(next);
+				*spare = Some(state.clone());
+				state
+			}
+		} else { Rc::new(next) };
+		interp.set_last_match(Some(state.clone()));
+		state
 	}
 
 	fn group(&self, n: usize) -> Value {
@@ -86,7 +138,7 @@ fn numbered(name: &str) -> bool {
 	matches!(name.as_bytes().first(), Some(b'1'..=b'9')) && name.as_bytes().iter().all(u8::is_ascii_digit)
 }
 
-pub(super) fn is_match_var(name: &str) -> bool {
+pub(in crate::perl) fn is_match_var(name: &str) -> bool {
 	let name = unbrace(name);
 	matches!(name, "&" | "`" | "'" | "+" | "^N" | "^MATCH" | "^PREMATCH" | "^POSTMATCH") || numbered(name)
 }

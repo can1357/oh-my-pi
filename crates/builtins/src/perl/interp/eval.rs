@@ -1,12 +1,17 @@
 //! Expression contexts, operators and interpolation (perlop, perlnumber, perlunicode).
 
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 use super::{vars::Slot, *};
 
+const DEPTH_LIMIT: u32 = 8192;
+const PURE_LEVELS: u8 = 4;
+// Allow for a compound assignment above the bounded arithmetic subtree.
+const PURE_LIMIT: u32 = DEPTH_LIMIT - PURE_LEVELS as u32 - 1;
+
 impl Interp<'_> {
 	pub(super) fn depth_guard<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-		if self.depth >= 8192 { return Err(self.die_msg("Deep recursion limit exceeded")); }
+		if self.depth >= DEPTH_LIMIT { return Err(self.die_msg("Deep recursion limit exceeded")); }
 		self.depth += 1;
 		let result = f(self);
 		self.depth -= 1;
@@ -15,17 +20,126 @@ impl Interp<'_> {
 
 	/// Evaluate an expression in the context supplied by its parent.
 	pub fn eval(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
-		if let Some(value) = self.eval_leaf(e) { return Ok(Ret::One(value)); }
-		self.at_location(&e.location, |this| this.nested(|this| {
-			if let Some(flow) = this.take_pending() { return Err(flow); }
-			let result = this.eval_inner(e, cx);
-			if let Some(flow) = this.take_pending() { return Err(flow); }
-			result.map(|r| {
-				let ret = r.in_context(cx);
-				if let Ret::One(Value::Ref(Ref::Regexp(_))) = &ret { this.track_ret(&ret); }
-				ret
-			})
-		}))
+		if let Some(value) = self.eval_immediate(e, cx) { return Ok(Ret::One(value)); }
+		self.eval_nonleaf(e, cx)
+	}
+
+	fn eval_nonleaf(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+		let saved = self.enter_location(&e.location);
+		let result = self.nested(|this| this.eval_node(e, cx));
+		self.leave_location(&e.location, saved);
+		result
+	}
+
+	fn eval_node(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+		if let Some(flow) = self.take_pending() { return Err(flow); }
+		let result = self.eval_inner(e, cx);
+		if let Some(flow) = self.take_pending() { return Err(flow); }
+		let ret = result?.in_context(cx);
+		if matches!(&ret, Ret::One(Value::Ref(Ref::Regexp(_)))) { self.track_ret(&ret); }
+		Ok(ret)
+	}
+
+	/// Execute bounded, callback-free operations without entering a recursive evaluator frame.
+	/// A miss must have no side effects: in particular, coercions that can warn or die go through eval_node.
+	#[inline]
+	fn eval_immediate(&mut self, e: &Expr, cx: Cx) -> Option<Value> {
+		if matches!(&e.kind, ExprKind::Binary(..)) { self.try_plain_binary(e, cx) } else { self.eval_leaf(e) }
+	}
+
+	/// None leaves the interpreter untouched; a successful compound assignment has updated its cell.
+	#[inline]
+	pub(super) fn try_plain_binary(&self, e: &Expr, cx: Cx) -> Option<Value> {
+		let ExprKind::Binary(op, a, b) = &e.kind else { return None; };
+		if self.pending.is_some() || self.depth >= PURE_LIMIT { return None; }
+		match *op {
+			Binary::AssignOp(c) => self.plain_compound(c, a, b, cx),
+			op => self.plain_binary_expr(op, a, b),
+		}
+	}
+
+	fn leaf_cell(&self, e: &Expr) -> Option<&Sv> {
+		let ExprKind::Variable(Sigil::Scalar, name) = &e.kind else { return None; };
+		match self.pad_slot(Sigil::Scalar, name) {
+			Some(Slot::Scalar(sv)) => Some(sv),
+			None if name.as_ref() == "_" => self.topics.last(),
+			_ => None,
+		}
+	}
+
+	fn leaf_number(&self, e: &Expr) -> Option<Num> {
+		match &e.kind {
+			ExprKind::Variable(..) => plain_num(&*self.leaf_cell(e)?.plain_value()?),
+			_ if !self.in_constant && !self.active_hints.constant_overloads.is_empty() => None,
+			ExprKind::Int(n) => Some(Num::Int(*n)),
+			ExprKind::UInt(n) => Some(Num::UInt(*n)),
+			ExprKind::Float(n) => Some(Num::Float(*n)),
+			_ => None,
+		}
+	}
+
+	/// Evaluate a pure arithmetic tree under the current pad, topic and hints. Only arithmetic roots
+	/// qualify: returning a bare scalar as a number would lose its string facet or its identity.
+	pub(super) fn plain_numeric_expr(&self, e: &Expr) -> Option<Num> {
+		if self.pending.is_some() || self.depth >= PURE_LIMIT || !matches!(&e.kind, ExprKind::Binary(..)) { return None; }
+		self.plain_number_at(e, PURE_LEVELS)
+	}
+
+	fn plain_number_at(&self, e: &Expr, remaining: u8) -> Option<Num> {
+		match &e.kind {
+			ExprKind::Binary(op @ (Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod | Binary::Pow), a, b) if remaining != 0 => {
+				arithmetic(*op, self.plain_number_at(a, remaining - 1)?, self.plain_number_at(b, remaining - 1)?, self.active_hints.integer).ok()
+			}
+			_ => self.leaf_number(e),
+		}
+	}
+
+	/// Only lends storage to a non-reentrant, interpreter-independent operation.
+	fn with_leaf_text<T>(&self, e: &Expr, f: impl FnOnce(&PStr) -> T) -> Option<T> {
+		match &e.kind {
+			ExprKind::String(s) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(f(s)),
+			ExprKind::Variable(..) => Some(f(self.leaf_cell(e)?.plain_value()?.as_pstr()?)),
+			_ => None,
+		}
+	}
+
+	fn plain_binary_expr(&self, op: Binary, a: &Expr, b: &Expr) -> Option<Value> {
+		use Binary::*;
+		match op {
+			Add | Sub | Mul | Div | Mod | Pow | Eq | Ne | Lt | Le | Gt | Ge | Cmp => {
+				numeric_binary(op, self.plain_number_at(a, PURE_LEVELS - 1)?, self.plain_number_at(b, PURE_LEVELS - 1)?, self.active_hints.integer).ok()
+			}
+			Concat | StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrCmp => self.with_leaf_text(a, |left| {
+				self.with_leaf_text(b, |right| {
+					if op == Concat {
+						let mut result = PStr::new(Vec::with_capacity(left.bytes.len().saturating_add(right.bytes.len())), false);
+						result.push(left);
+						result.push(right);
+						Value::Str(result)
+					} else {
+						comparison(op, Some(if self.active_hints.bytes { left.bytes.cmp(&right.bytes) } else { left.cmp(right) }))
+					}
+				})
+			})?,
+			_ => None,
+		}
+	}
+
+	fn plain_compound(&self, compound: Compound, left: &Expr, right: &Expr, cx: Cx) -> Option<Value> {
+		let op = match compound {
+			Compound::Add | Compound::Sub | Compound::Mul | Compound::Div | Compound::Mod | Compound::Pow => compound_op(compound),
+			_ => return None,
+		};
+		// A compound assignment's shortcut for direct lexical lvalues does not apply to the global topic.
+		let ExprKind::Variable(Sigil::Scalar, name) = &left.kind else { return None; };
+		let Slot::Scalar(cell) = self.pad_slot(Sigil::Scalar, name)? else { return None; };
+		let old = plain_num(&*cell.plain_value()?)?;
+		if self.is_readonly_sv(cell) { return None; }
+		let rhs = self.plain_number_at(right, PURE_LEVELS)?;
+		let n = arithmetic(op, old, rhs, self.active_hints.integer).ok()?;
+		cell.set(n.into_value());
+		cell.set_pos(None);
+		Some(if cx == Cx::Void { Value::Undef } else { n.into_value() })
 	}
 
 	/// `depth_guard` for the hot recursive paths, checking for stack growth only every few levels (the check reads
@@ -45,6 +159,9 @@ impl Interp<'_> {
 		if self.pending.is_some() { return None; }
 		match &e.kind {
 			ExprKind::Int(n) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(Value::Int(*n)),
+			ExprKind::UInt(n) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(Value::UInt(*n)),
+			ExprKind::Float(n) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(Value::Num(*n)),
+			ExprKind::String(s) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(Value::Str(s.clone())),
 			ExprKind::Variable(Sigil::Scalar, name) => match self.pad_slot(Sigil::Scalar, name) {
 				Some(Slot::Scalar(sv)) if !sv.has_read_magic() => Some(sv.get()),
 				// The global topic `$_` has no special-variable magic of its own.
@@ -62,21 +179,28 @@ impl Interp<'_> {
 	/// share their parent's location, which then needs no copying.
 	#[inline]
 	pub(super) fn at_location<T>(&mut self, loc: &Location, f: impl FnOnce(&mut Self) -> T) -> T {
-		let same = |current: &Location| current.line == loc.line && Rc::ptr_eq(&current.file, &loc.file);
-		if same(&self.loc) {
-			let out = f(self);
-			if !same(&self.loc) { self.loc = loc.clone(); }
-			out
-		} else {
-			let old = std::mem::replace(&mut self.loc, loc.clone());
-			let out = f(self);
-			self.loc = old;
-			out
-		}
+		let saved = self.enter_location(loc);
+		let result = f(self);
+		self.leave_location(loc, saved);
+		result
+	}
+
+	#[inline]
+	fn enter_location(&mut self, loc: &Location) -> Option<Location> {
+		(self.loc.line != loc.line || !Rc::ptr_eq(&self.loc.file, &loc.file)).then(|| std::mem::replace(&mut self.loc, loc.clone()))
+	}
+
+	#[inline]
+	fn leave_location(&mut self, loc: &Location, saved: Option<Location>) {
+		if let Some(old) = saved { self.loc = old; }
+		else if self.loc.line != loc.line || !Rc::ptr_eq(&self.loc.file, &loc.file) { self.loc = loc.clone(); }
 	}
 
 	/// Evaluate an expression, requesting a scalar result.
-	pub fn eval_scalar(&mut self, e: &Expr) -> PResult<Value> { self.eval(e, Cx::Scalar).map(Ret::scalar) }
+	pub fn eval_scalar(&mut self, e: &Expr) -> PResult<Value> {
+		if let Some(value) = self.eval_immediate(e, Cx::Scalar) { return Ok(value); }
+		self.eval_nonleaf(e, Cx::Scalar).map(Ret::scalar)
+	}
 	/// Evaluate an expression in list context and copy its values.
 	pub fn eval_list(&mut self, e: &Expr) -> PResult<Vec<Value>> { self.eval(e, Cx::List).map(Ret::list) }
 
@@ -91,7 +215,7 @@ impl Interp<'_> {
 				let s = if *kind == QuoteKind::Glob && let [QuotePart::Expr(e, false)] = parts.as_slice() {
 					let value = self.eval_scalar(e)?;
 					if let Some(ret) = self.overload_builtin("<>", &value, None, cx)? { return Ok(ret); }
-					self.interpolation_value(e, &value, "string")?
+					self.interpolation_value(e, value, "string")?
 				} else { self.interpolate(parts, InterpMode::String)? };
 				match kind {
 					QuoteKind::String => Value::Str(s),
@@ -123,7 +247,7 @@ impl Interp<'_> {
 			ExprKind::List(items) => {
 				if cx == Cx::List {
 					let mut values = Vec::new();
-					for operand in items { values.extend(self.eval_list(operand)?); }
+					for operand in items { self.eval(operand, Cx::List)?.append_to(&mut values); }
 					return Ok(Ret::Many(values));
 				}
 				let Some((last, earlier)) = items.split_last() else { return Ok(Ret::One(Value::Undef)); };
@@ -145,8 +269,7 @@ impl Interp<'_> {
 				perl_bool(true)
 			}
 			ExprKind::Conditional(cond, yes, no) => {
-				let v = self.eval_scalar(cond)?;
-				let branch = if self.truthy(&v)? { yes } else { no };
+				let branch = if self.eval_truth(cond)? { yes } else { no };
 				return self.eval(branch, cx);
 			}
 			ExprKind::Call(call) => return self.eval_call(call, cx),
@@ -169,7 +292,7 @@ impl Interp<'_> {
 	}
 
 	fn constant_value(&mut self, kind: &str, value: Value) -> PResult<Value> {
-		if self.in_constant { return Ok(value); }
+		if self.in_constant || self.active_hints.constant_overloads.is_empty() { return Ok(value); }
 		let Some(handler) = self.active_hints.constant_overloads.get(kind).cloned() else { return Ok(value); };
 		let Some(cv) = self.code_value(&handler, false)? else { return Ok(value); };
 		let source = value.to_pstr();
@@ -189,16 +312,17 @@ impl Interp<'_> {
 				_ => self.eval_lvalue(operand)?,
 			};
 			// A plain integer that stays in range: update in place (what the general path computes for an IV).
-			if !cell.has_read_magic() && !cell.is_magical() && !self.is_readonly_sv(&cell)
+			if !cell.is_magical() && !self.is_readonly_sv(&cell)
 				&& let Some(n) = cell.try_value().ok().and_then(|v| if let Value::Int(n) = *v { Some(n) } else { None })
 				&& let Some(next) = if matches!(op, PreInc | PostInc) { n.checked_add(1) } else { n.checked_sub(1) } {
 				cell.set(Value::Int(next));
-				cell.pos.set(None);
+				cell.set_pos(None);
 				return Ok(Ret::One(Value::Int(if matches!(op, PostInc | PostDec) { n } else { next })));
 			}
 			let old = self.read_sv(&cell)?;
 			let plus = matches!(op, PreInc | PostInc);
-			let next = if let Some(value) = self.overload_inc(plus, &old, cx != Cx::Void && matches!(op, PostInc | PostDec))? { value }
+			let next = if matches!(&old, Value::Ref(_))
+				&& let Some(value) = self.overload_inc(plus, &old, cx != Cx::Void && matches!(op, PostInc | PostDec))? { value }
 			else if plus { ops::incr(&old) } else { ops::decr(&old) };
 			// sv_inc/sv_dec: an NV beyond 2**53 can no longer change by 1.
 			if let Value::Num(was) = old {
@@ -290,9 +414,14 @@ impl Interp<'_> {
 			}
 			_ => {}
 		}
-		let a = self.eval_scalar(left)?;
+		let mut a = self.eval_scalar(left)?;
 		let b = self.eval_scalar(right)?;
-		self.binary_values_named(op, &a, &b, [operand_name(left), operand_name(right)]).map(Ret::One)
+		if op == Concat && let (Value::Str(x), Some(y)) = (&mut a, b.as_pstr()) {
+			x.push(y);
+			return Ok(Ret::One(a));
+		}
+		let names = [if a.is_undef() { operand_name(left) } else { None }, if b.is_undef() { operand_name(right) } else { None }];
+		self.binary_values_named(op, &a, &b, names).map(Ret::One)
 	}
 
 	fn short_circuit(&mut self, op: Binary, value: &Value) -> PResult<bool> {
@@ -307,6 +436,12 @@ impl Interp<'_> {
 			let n = self.eval_scalar(e)?.to_i64();
 			return Ok(self.magic_scalar(".").unwrap_or(Value::Undef).to_i64() == n);
 		}
+		self.eval_truth(e)
+	}
+
+	fn eval_truth(&mut self, e: &Expr) -> PResult<bool> {
+		if self.pending.is_none() && let Some(value) = self.leaf_cell(e).and_then(|sv| sv.plain_value())
+			&& !matches!(&*value, Value::Ref(_)) { return Ok(value.truthy()); }
 		let v = self.eval_scalar(e)?;
 		self.truthy(&v)
 	}
@@ -353,9 +488,19 @@ impl Interp<'_> {
 	/// `.=` on a plain string cell appends to its buffer (perl's in-place concatenation) instead of copying the
 	/// string; None when the general path must handle it (magic, overloading, undef operands, warnings).
 	fn append_in_place(&mut self, cell: &Sv, right: &Expr, cx: Cx) -> PResult<Option<Value>> {
-		let plain = |this: &Self| !cell.registered() && !cell.has_read_magic() && !cell.is_magical() && !modules::readonly_sv(this, cell)
-			&& matches!(cell.try_value().as_deref(), Ok(Value::Str(_)));
+		let plain = |this: &Self| matches!(cell.plain_value().as_deref(), Some(Value::Str(_))) && !this.is_readonly_sv(cell);
 		if !plain(self) { return Ok(None); }
+		// Literal and lexical string RHSs cannot change the target. Do not allocate a temporary RHS
+		// buffer or recheck the target. If the cells alias, the failed mutable borrow takes the copying path.
+		if self.pending.is_none() && self.depth < DEPTH_LIMIT && let Some(Some(result)) = self.with_leaf_text(right, |piece| {
+			let mut raw = cell.try_value_mut().ok()?;
+			let Value::Str(s) = &mut *raw else { return None; };
+			s.push(piece);
+			Some(if cx == Cx::Void { Value::Undef } else { Value::Str(s.clone()) })
+		}) {
+			cell.set_pos(None);
+			return Ok(Some(result));
+		}
 		let rhs = self.eval_scalar(right)?;
 		let piece = match &rhs {
 			Value::Str(_) | Value::Int(_) | Value::UInt(_) | Value::Num(_) => rhs,
@@ -368,7 +513,7 @@ impl Interp<'_> {
 		match &piece { Value::Str(p) => s.push(p), other => s.push(&other.to_pstr()) }
 		let result = if cx == Cx::Void { Value::Undef } else { Value::Str(s.clone()) };
 		drop(value);
-		cell.pos.set(None);
+		cell.set_pos(None);
 		Ok(Some(result))
 	}
 
@@ -392,7 +537,8 @@ impl Interp<'_> {
 	fn combine_compound(&mut self, op: Binary, cell: &Sv, old: Value, rhs: Value, keep: bool) -> PResult<Value> {
 		use Binary as B;
 		let value = if matches!(op, B::And | B::Or | B::DefinedOr) { rhs }
-		else if let Some(value) = self.overload_binary(op_key(op), &old, &rhs, true)? { value }
+		else if (matches!(old, Value::Ref(_)) || matches!(rhs, Value::Ref(_)))
+			&& let Some(value) = self.overload_binary(op_key(op), &old, &rhs, true)? { value }
 		else if matches!(op, B::Add | B::Sub | B::Concat) && old.is_undef() {
 			self.binary_values(op, &if op == B::Concat { Value::Str(PStr::default()) } else { Value::Int(0) }, &rhs)?
 		} else { self.binary_values(op, &old, &rhs)? };
@@ -407,50 +553,23 @@ impl Interp<'_> {
 
 	fn binary_values_named(&mut self, op: Binary, a: &Value, b: &Value, names: [Option<&str>; 2]) -> PResult<Value> {
 		use Binary::*;
-		// Two IVs: no overloading, warnings or conversions apply; results that fit stay IVs (as below).
-		if let (Value::Int(x), Value::Int(y)) = (a, b) {
-			let (x, y) = (*x, *y);
-			let fast = match op {
-				Add => x.checked_add(y).map(Value::Int),
-				Sub => x.checked_sub(y).map(Value::Int),
-				Mul => x.checked_mul(y).map(Value::Int),
-				Mod if x >= 0 && y > 0 => Some(Value::Int(x % y)),
-				Eq => Some(perl_bool(x == y)), Ne => Some(perl_bool(x != y)),
-				Lt => Some(perl_bool(x < y)), Le => Some(perl_bool(x <= y)),
-				Gt => Some(perl_bool(x > y)), Ge => Some(perl_bool(x >= y)),
-				Cmp => Some(Value::Int(match x.cmp(&y) { Ordering::Less => -1, Ordering::Equal => 0, Ordering::Greater => 1 })),
-				_ => None,
-			};
-			if let Some(v) = fast { return Ok(v); }
-		}
 		let key = op_key(op);
-		if !key.is_empty() && op != SmartMatch {
-			if let Some(v) = self.overload_binary(key, a, b, false)? { return Ok(v); }
-		}
+		if (matches!(a, Value::Ref(_)) || matches!(b, Value::Ref(_))) && op != SmartMatch
+			&& let Some(v) = self.overload_binary(key, a, b, false)? { return Ok(v); }
 		let integer = self.active_hints.integer;
 		Ok(match op {
-			Add | Sub | Mul | Div | Mod | Pow => {
-				let name = op_description(op);
-				let a = self.numify_with_named(a, name, names[0])?;
-				let b = self.numify_with_named(b, name, names[1])?;
-				if integer && op != Pow {
-					let a = a.wrapping_iv(); let b = b.wrapping_iv();
-					let n = match op {
-						Add => Ok(ops::int_add(a, b)), Sub => Ok(ops::int_sub(a, b)), Mul => Ok(ops::int_mul(a, b)),
-						Div => ops::int_div(a, b), _ => ops::int_mod(a, b),
-					};
-					Value::Int(n.map_err(|m| self.die_msg(m))?)
-				} else {
-					let n = match op {
-						Add => Ok(ops::add(a, b)), Sub => Ok(ops::sub(a, b)), Mul => Ok(ops::mul(a, b)),
-						Div => ops::div(a, b), Mod => ops::modulo(a, b), _ => Ok(ops::pow(a, b)),
-					};
-					n.map_err(|m| self.die_msg(m))?.into_value()
-				}
+			Add | Sub | Mul | Div | Mod | Pow | Eq | Ne | Lt | Le | Gt | Ge | Cmp => {
+				let (a, b) = if let (Some(a), Some(b)) = (plain_num(a), plain_num(b)) { (a, b) } else {
+					let name = op_description(op);
+					let a = self.numify_with_named(a, name, if matches!(op, Add | Sub | Mul | Div | Mod | Pow) { names[0] } else { None })?;
+					let b = self.numify_with_named(b, name, if matches!(op, Add | Sub | Mul | Div | Mod | Pow) { names[1] } else { None })?;
+					(a, b)
+				};
+				numeric_binary(op, a, b, integer).map_err(|m| self.die_msg(m))?
 			}
 			Concat => {
-				let mut a = self.stringify_with(a, "concatenation (.)")?;
-				a.push(&self.stringify_with(b, "concatenation (.)")?);
+				let mut a = self.stringify_with(a, "concatenation (.)")?.into_owned();
+				a.push(self.stringify_with(b, "concatenation (.)")?.as_ref());
 				Value::Str(a)
 			}
 			Repeat => {
@@ -492,12 +611,6 @@ impl Interp<'_> {
 					StrAnd => ops::str_bit_and(a, b), StrOr => ops::str_bit_or(a, b), _ => ops::str_bit_xor(a, b),
 				};
 				result.map_err(|m| self.die_msg(m))?
-			}
-			Eq | Ne | Lt | Le | Gt | Ge | Cmp => {
-				let a = self.numify_with(a, key)?;
-				let b = self.numify_with(b, key)?;
-				let order = if integer { Some(a.wrapping_iv().cmp(&b.wrapping_iv())) } else { ops::num_cmp(a, b) };
-				comparison(op, order)
 			}
 			StrEq | StrNe | StrLt | StrLe | StrGt | StrGe | StrCmp => {
 				let a = self.stringify_with(a, key)?;
@@ -639,6 +752,7 @@ impl Interp<'_> {
 
 	/// Stringification with Perl overload conversion.
 	pub fn stringify(&mut self, v: &Value) -> PResult<PStr> {
+		if !matches!(v, Value::Ref(_)) { return Ok(v.to_pstr()); }
 		Ok(self.convert_overload(v, &["\"\"", "0+", "bool"])?.map_or_else(|| v.to_pstr(), |v| v.to_pstr()))
 	}
 
@@ -649,19 +763,22 @@ impl Interp<'_> {
 
 	/// Numeric conversion with Perl overload conversion.
 	pub fn numify(&mut self, v: &Value) -> PResult<Num> {
+		if !matches!(v, Value::Ref(_)) { return Ok(v.to_num()); }
 		Ok(self.convert_overload(v, &["0+", "\"\"", "bool"])?.map_or_else(|| v.to_num(), |v| v.to_num()))
 	}
 
 	/// Test the value, preferring the `bool` overload when present.
 	pub fn truthy(&mut self, v: &Value) -> PResult<bool> {
+		if !matches!(v, Value::Ref(_)) { return Ok(v.truthy()); }
 		Ok(self.convert_overload(v, &["bool", "0+", "\"\""])?.map_or_else(|| v.truthy(), |v| v.truthy()))
 	}
 
-	fn stringify_with(&mut self, v: &Value, op: &str) -> PResult<PStr> {
+	fn stringify_with<'v>(&mut self, v: &'v Value, op: &str) -> PResult<Cow<'v, PStr>> {
+		if let Some(s) = v.as_pstr() { return Ok(Cow::Borrowed(s)); }
 		if v.is_undef() && self.warn_on("uninitialized") {
 			self.warn_category("uninitialized", format!("Use of uninitialized value in {op}"));
 		}
-		self.stringify(v)
+		self.stringify(v).map(Cow::Owned)
 	}
 
 	fn numify_with(&mut self, v: &Value, op: &str) -> PResult<Num> {
@@ -681,6 +798,16 @@ impl Interp<'_> {
 
 	/// Interpolate quote fragments, preserving bytes and applying case/quotemeta directives.
 	pub fn interpolate(&mut self, parts: &[QuotePart], mode: InterpMode) -> PResult<PStr> {
+		match parts {
+			[] => return Ok(PStr::default()),
+			[QuotePart::Literal(s)] => return Ok(s.clone()),
+			[QuotePart::Expr(e, false)] => {
+				let v = self.eval_scalar(e)?;
+				if mode == InterpMode::Regex && matches!(&v, Value::Ref(Ref::Regexp(_))) { return Ok(v.to_pstr()); }
+				return self.interpolation_value(e, v, interpolation_op(mode, false, None, None));
+			}
+			_ => {}
+		}
 		let joined = parts.iter().filter(|part| match part {
 			QuotePart::Literal(s) => !s.is_empty(),
 			QuotePart::Expr(..) => true,
@@ -703,9 +830,16 @@ impl Interp<'_> {
 					};
 				}
 				QuotePart::Expr(e, false) => {
+					if self.pending.is_none() && self.depth < DEPTH_LIMIT && let Some(nonempty) = self.with_leaf_text(e, |s| {
+						span.push(s);
+						!s.is_empty()
+					}) {
+						if nonempty { once = None; }
+						continue;
+					}
 					let v = self.eval_scalar(e)?;
 					let s = if mode == InterpMode::Regex && matches!(v, Value::Ref(Ref::Regexp(_))) { v.to_pstr() }
-					else { self.interpolation_value(e, &v, interpolation_op(mode, joined, changes.last().map(|(_, op)| *op), once))? };
+					else { self.interpolation_value(e, v, interpolation_op(mode, joined, changes.last().map(|(_, op)| *op), once))? };
 					if !s.is_empty() { once = None; }
 					span.push(&s);
 				}
@@ -713,7 +847,7 @@ impl Interp<'_> {
 					let sep = self.list_sep();
 					for (i, v) in self.eval_list(e)?.into_iter().enumerate() {
 						if i != 0 { span.push(&sep); }
-						let s = self.interpolation_value(e, &v, if mode == InterpMode::String { "join or string" } else {
+						let s = self.interpolation_value(e, v, if mode == InterpMode::String { "join or string" } else {
 							interpolation_op(mode, joined, changes.last().map(|(_, op)| *op), once)
 						})?;
 						if !s.is_empty() { once = None; }
@@ -760,12 +894,46 @@ impl Interp<'_> {
 		Ok(output)
 	}
 
-	fn interpolation_value(&mut self, e: &Expr, v: &Value, context: &str) -> PResult<PStr> {
+	fn interpolation_value(&mut self, e: &Expr, v: Value, context: &str) -> PResult<PStr> {
 		if v.is_undef() && self.warn_on("uninitialized") {
 			let name = match &e.kind { ExprKind::Variable(Sigil::Scalar, n) => format!(" ${n}"), _ => String::new() };
 			self.warn_category("uninitialized", format!("Use of uninitialized value{name} in {context}"));
 		}
-		self.stringify(v)
+		self.stringify_owned(v)
+	}
+}
+
+/// Only representations that can be used numerically without a conversion, warning or Perl callback.
+#[inline]
+fn plain_num(value: &Value) -> Option<Num> {
+	match value {
+		Value::Int(n) => Some(Num::Int(*n)), Value::UInt(n) => Some(Num::UInt(*n)),
+		Value::Num(n) => Some(Num::Float(*n)), Value::Dual(d) => Some(d.num), _ => None,
+	}
+}
+
+fn numeric_binary(op: Binary, a: Num, b: Num, integer: bool) -> Result<Value, &'static str> {
+	use Binary::*;
+	match op {
+		Eq | Ne | Lt | Le | Gt | Ge | Cmp => {
+			Ok(comparison(op, if integer { Some(a.wrapping_iv().cmp(&b.wrapping_iv())) } else { ops::num_cmp(a, b) }))
+		}
+		_ => arithmetic(op, a, b, integer).map(Num::into_value),
+	}
+}
+
+fn arithmetic(op: Binary, a: Num, b: Num, integer: bool) -> Result<Num, &'static str> {
+	use Binary::*;
+	if integer && op != Pow {
+		let (a, b) = (a.wrapping_iv(), b.wrapping_iv());
+		return Ok(Num::Int(match op {
+			Add => ops::int_add(a, b), Sub => ops::int_sub(a, b), Mul => ops::int_mul(a, b),
+			Div => ops::int_div(a, b)?, Mod => ops::int_mod(a, b)?, _ => return Err("Invalid binary operator"),
+		}));
+	}
+	match op {
+		Add => Ok(ops::add(a, b)), Sub => Ok(ops::sub(a, b)), Mul => Ok(ops::mul(a, b)),
+		Div => ops::div(a, b), Mod => ops::modulo(a, b), Pow => Ok(ops::pow(a, b)), _ => Err("Invalid binary operator"),
 	}
 }
 
