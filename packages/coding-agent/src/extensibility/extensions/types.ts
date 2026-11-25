@@ -1486,7 +1486,7 @@ export interface InputEvent {
 
 /**
  * A tool call is waiting for approval. `prompt` is the approval dialog's own text and choices, so an
- * extension can relay it elsewhere (another device, a chat) and answer with `ctx.resolveToolApproval`.
+ * extension can relay it elsewhere (another device, a chat) and answer with `ctx.resolveToolApproval(event.approvalId, answer)`.
  * The prompt stays open until the first answer: the host's dialog or an extension, whichever comes first.
  * `tool_approval_resolved` and the host dialog wait until every handler of this event returns, so
  * handlers should hand long work (a remote round-trip) off rather than await it; a resolve made inside
