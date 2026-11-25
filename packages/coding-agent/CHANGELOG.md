@@ -9,6 +9,8 @@
 
 - Model hub search prepares its index between input turns and shares fuzzy matches with the provider sidebar.
 - ovnfs checkout guidance now has agents commit in the checkout and `land` the commits (`--rebase` when the branch moved, `--markers` on conflicts), keeping `apply` for when you want uncommitted edits.
+- Streaming text and tool progress no longer repaint unchanged status-bar content.
+- ovnfs checkout guidance now picks `land` for work committed in a checkout (with `--rebase` when the branch moved) and `apply` for uncommitted edits.
 ### Changed
 
 - Reduced repeated model lookups during catalog discovery and model-role selection.

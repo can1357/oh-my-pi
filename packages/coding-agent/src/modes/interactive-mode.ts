@@ -888,7 +888,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		pills.jobsRunning.set(background.size);
 		pills.jobWidgets.set(this.session.getRunningJobWidgets().filter(entry => background.has(entry.id)));
-		this.statusLine.refresh();
+		this.statusLine.refreshJobs();
 	}
 	/** The job widget registry this mode follows, and how to stop listening to it. */
 	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
@@ -1700,13 +1700,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"thinking.set": value => this.#inputController.setThinkingFromComposer(value),
 				"dictation.toggle": () => void this.#toggleComposerDictation(),
 			},
-			rate: () => {
-				if (!showRate()) return undefined;
-				// Session events refresh the facts; the rate meter itself is not reactive.
-				this.statusLine.facts();
-				const rate = this.tokenRate.rate();
-				return rate === null ? undefined : Math.round(rate * 10) / 10;
-			},
+			rate: () => (showRate() ? this.statusLine.composerRate() : undefined),
 		});
 	}
 
