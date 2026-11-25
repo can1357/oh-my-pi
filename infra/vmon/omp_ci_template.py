@@ -112,32 +112,38 @@ install -d -o user -g user -m 0755 {REPO_CACHE}
 RETRY = 'retry() { for i in 1 2 3 4; do "$@" && return 0; sleep $((i * 15)); done; return 1; }'
 
 
-def xwin_download(sha: str) -> str:
+def xwin_unpack(sha: str) -> str:
     """User: fill `OMP_XWIN_CACHE_DIR` with the MSVC CRT + Windows SDK payloads
-    (~1 GiB from the Microsoft CDN) that the pinned commit's xwin sysroot
-    repositories splat, before the checkout. The script only names the xwin
-    pins, so vmon's step cache keeps this layer across template rebuilds
-    until bazel/toolchains/msvc/sysroot.bzl or MODULE.bazel change them; the
-    Bazel warm-up below then splats from the cache without the CDN."""
+    (~1 GiB from the Microsoft CDN), downloaded and unpacked, that the pinned
+    commit's xwin sysroot repositories splat, before the checkout. The script
+    only names the xwin pins, so vmon's step cache keeps this layer across
+    template rebuilds until bazel/toolchains/msvc/sysroot.bzl or MODULE.bazel
+    change them; the Bazel warm-up below then splats from the cache without
+    the CDN.
+
+    Unpacking here, one arch at a time, keeps the splats read-only: Bazel
+    fetches the x64 and arm64 sysroots in parallel, and xwin wipes and redoes
+    any unpack without a finished marker, so two splats unpacking the shared
+    SDK MSIs delete each other's files mid-copy."""
     bzl = fetch(f"{RAW_URL}/{sha}/bazel/toolchains/msvc/sysroot.bzl")
     module = fetch(f"{RAW_URL}/{sha}/MODULE.bazel")
     version = pin(r'_XWIN_VERSION = "([^"]+)"', bzl)
     manifest = pin(r'_XWIN_MANIFEST_VERSION = "([^"]+)"', bzl)
     triple = "x86_64-unknown-linux-musl"
     digest = pin(rf'"linux-x64": \("{triple}", "([0-9a-f]{{64}})"\)', bzl)
-    downloads = []
+    unpacks = []
     for call in re.findall(r"\bxwin_sysroot\((.*?)\)", module, re.S):
         arch = re.search(r'arch = "([^"]+)"', call)
         sdk = re.search(r'sdk_version = "([^"]+)"', call)
-        downloads.append(
+        unpacks.append(
             f"retry xwin --accept-license --arch {arch[1] if arch else 'x86_64'}"
             f" --variant desktop --manifest-version {manifest}"
             + (f" --sdk-version {sdk[1]}" if sdk else "")
-            + f" --cache-dir {REPO_CACHE}/xwin download"
+            + f" --cache-dir {REPO_CACHE}/xwin unpack"
         )
-    if not downloads:
+    if not unpacks:
         sys.exit("omp_ci_template.py: no xwin_sysroot repositories in MODULE.bazel")
-    lines = "\n".join(downloads)
+    lines = "\n".join(unpacks)
     return f"""set -eux
 {RETRY}
 tmp="$(mktemp -d)"
@@ -257,7 +263,7 @@ def make_template(sha: str):
         .apt_install(APT_PACKAGES)
         .run_cmd(INSTALL_TOOLS, user="root")
         .run_cmd(INSTALL_RUSTUP, user="user")
-        .run_cmd(xwin_download(sha), user="user")
+        .run_cmd(xwin_unpack(sha), user="user")
         .run_cmd(checkout(sha), user="user")
         .run_cmd(INSTALL_BUN, user="root")
         .run_cmd(INSTALL_RUST, user="user")

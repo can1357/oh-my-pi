@@ -19,7 +19,7 @@
 | Cargo registry (index + crate archives) | `~/.cargo/registry` | `cargo fetch --locked` |
 | Bazel binary | `~/.cache/bazelisk` | `.bazelversion` |
 | Bazel install base + an output base with every external repo `//:natives-all` and `//crates/...` need | `~/.cache/bazel` | `MODULE.bazel`, `MODULE.bazel.lock` |
-| Bazel repository cache (+ repo contents cache) and the xwin MSVC/SDK download cache | `/opt/bazel-repo-cache`, `/opt/bazel-repo-cache/xwin` | same |
+| Bazel repository cache (+ repo contents cache) and the xwin MSVC/SDK cache (downloaded and unpacked) | `/opt/bazel-repo-cache`, `/opt/bazel-repo-cache/xwin` | same |
 | `RUSTUP_HOME`, `CARGO_HOME` | appended to the runner `.env` | — |
 
 All warm caches come from one **pinned checkout** of `can1357/oh-my-pi` (`--ref`, default `main`, resolved to a SHA when the build starts), cloned at the exact path actions/checkout uses (`/home/user/actions-runner/_work/oh-my-pi/oh-my-pi`) so the Bazel output base — keyed by workspace path — is the one jobs reuse. The checkout is deleted afterwards; jobs check out their own commit into an empty workspace.
