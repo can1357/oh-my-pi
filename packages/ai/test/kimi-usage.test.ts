@@ -246,11 +246,8 @@ describe("kimi usage provider", () => {
 			] as const) {
 				const bearer = credential.type === "api_key" ? credential.apiKey : credential.accessToken;
 				const requests: { url: string; authorization: string | null }[] = [];
-				expect(provider.supports({ provider: id, credential })).toBe(true);
-				const report = await provider.fetchUsage!(
-					{ provider: id, credential },
-					makeRequestCtx(payload, requests),
-				);
+				expect(provider.supports?.({ provider: id, credential })).toBe(true);
+				const report = await provider.fetchUsage!({ provider: id, credential }, makeRequestCtx(payload, requests));
 
 				expect(report?.provider).toBe(id);
 				expect(requests).toEqual([{ url, authorization: `Bearer ${bearer}` }]);
@@ -274,7 +271,7 @@ describe("kimi usage provider", () => {
 
 		for (const { id, provider } of cases) {
 			for (const credential of missingCredentials) {
-				expect(provider.supports({ provider: id, credential })).toBe(false);
+				expect(provider.supports?.({ provider: id, credential })).toBe(false);
 				await expect(provider.fetchUsage!({ provider: id, credential }, ctx)).resolves.toBeNull();
 			}
 		}

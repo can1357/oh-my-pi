@@ -4,11 +4,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { kimiCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import {
-	KIMI_CODE_BASE_URLS,
-	isKimiCodeProvider,
-	type KimiCodeProvider,
-} from "@oh-my-pi/pi-catalog/wire/kimi-code";
+import { KIMI_CODE_BASE_URLS, isKimiCodeProvider, type KimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { applyGeneratedModelPolicies } from "../scripts/generated-policies";
