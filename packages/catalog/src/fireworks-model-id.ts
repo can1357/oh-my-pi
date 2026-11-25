@@ -19,11 +19,6 @@ export function toFireworksWireModelId(modelId: string): string {
  * We keep a friendly public id (e.g. `glm-5.2-fast`, `kimi-k3-fast`) in the catalog
  * and translate to the wire form (`accounts/fireworks/routers/glm-5p2-fast`) at request time.
  */
-export function toFirepassPublicModelId(modelId: string): string {
-	const stripped = modelId.startsWith(FIREPASS_WIRE_PREFIX) ? modelId.slice(FIREPASS_WIRE_PREFIX.length) : modelId;
-	return stripped.replace(VERSION_SEPARATOR_PATTERN, ".");
-}
-
 export function toFirepassWireModelId(modelId: string): string {
 	const stripped = modelId.startsWith(FIREPASS_WIRE_PREFIX) ? modelId.slice(FIREPASS_WIRE_PREFIX.length) : modelId;
 	return `${FIREPASS_WIRE_PREFIX}${stripped.replace(VERSION_DOT_PATTERN, "p")}`;
