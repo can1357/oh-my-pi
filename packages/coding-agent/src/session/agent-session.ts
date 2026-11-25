@@ -38,7 +38,6 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
-	lastContextMessage,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -903,6 +902,7 @@ type AgentContinueSkipReason =
 
 type ScheduledAgentContinueOptions = {
 	source: string;
+	queuedOnly?: boolean;
 	delayMs?: number;
 	generation?: number;
 	shouldContinue?: () => boolean;
@@ -1857,11 +1857,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
 	 *  route here. Wrapped in #beginInFlight/#endInFlight so the turn is tracked and its settle
-	 *  re-drains anything that stranded during it. A user interrupt may have intentionally left a
-	 *  follow-up queued behind an invalid tail (seam #5); the wake turn's loop would otherwise drain
-	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
-	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
-	 *  in effect, even though the wake left a provider-valid tail. */
+	 *  re-drains anything that stranded during it. Park follow-ups held by a user interrupt
+	 *  so the wake turn's loop does not consume them. Restore them afterwards; the interrupt
+	 *  still suppresses their auto-resume. */
 	#wakeForIrc(wakeRecords: AgentMessage[]): void {
 		if (this.#queueDrainPauseDepth > 0) {
 			this.#irc.queueAside(wakeRecords);
@@ -5832,7 +5830,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			for (;;) {
 				try {
 					if (!this.agent.state.isStreaming) onStart?.();
-					await this.agent.continue(signal);
+					await this.agent.continue(signal, { queuedOnly: request.options.queuedOnly });
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
@@ -5996,6 +5994,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.agent.hasQueuedMessages()) {
 			this.#scheduleAgentContinue({
 				source: "compaction-queued-message",
+				queuedOnly: true,
 				delayMs: 100,
 				generation: options.generation,
 				shouldContinue: () => this.agent.hasQueuedMessages(),
@@ -6040,6 +6039,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (this.agent.hasQueuedMessages()) {
 					this.#scheduleAgentContinue({
 						source: "auto-continue-queued-message",
+						queuedOnly: true,
 						generation,
 						shouldContinue: () => this.agent.hasQueuedMessages(),
 					});
@@ -11037,6 +11037,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#queuedMessageDrainScheduled = true;
 		this.#scheduleAgentContinue({
 			source: "queued-message-drain",
+			queuedOnly: true,
 			shouldContinue: () => {
 				this.#queuedMessageDrainScheduled = false;
 				return (
@@ -11066,33 +11067,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// and can cancel it. Autonomous brackets (IRC wakes, idle injections,
 		// scheduler continuations) do not count: a drain there would be an
 		// autonomous run the client can neither see nor cancel. Inside a client
-		// bracket the ordinary gates below still apply (not streaming,
-		// user-interrupt suppression, provider-valid tail for follow-up-only
-		// resumes).
+		// bracket the ordinary streaming and user-interrupt gates still apply.
 		if (this.#clientBridge?.deferAgentInitiatedTurns === true && this.#clientPromptInFlightCount === 0) {
 			return false;
 		}
 		if (this.isStreaming) return false;
-		// A queued steer resumes from ANY tail: Agent.continue() runs #runLoop(undefined),
-		// whose initial steering poll injects the steer before the first provider call, so the
-		// request tail becomes the steer (valid) regardless of any injected custom / bashExecution
-		// / pythonExecution record a user interrupt left as the literal transcript tail. This is
-		// why a queued user steer stranded behind a preserved advisor card (or a flushed IRC aside
-		// / eval execution record) still resumes — no tail-role enumeration needed.
-		if (this.agent.peekSteeringQueue().length > 0) return true;
-		// Follow-up-only auto-resume stays suppressed while a deliberate user interrupt is in effect
-		// (#advisorAutoResumeSuppressed, cleared on the next user prompt or manual retry): the user
-		// stopped, so their queued follow-up waits for an explicit resume — even if an interleaving
-		// IRC wake turn has since left a provider-valid tail.
-		if (this.#advisors.autoResumeSuppressed) return false;
-		// Follow-up-only resume has no steer to inject, so Agent.continue() continues from the
-		// existing context tail — which must itself be a valid provider tail. An injected
-		// non-conversational tail (advisor card → `developer`, a `!` bash/python run sent to the model)
-		// would make the first model call invalid, so leave the follow-up queued for the next explicit
-		// resume. Rows kept out of context (`!!` runs, excluded extension rows) never reach the model,
-		// so they do not count as the tail.
-		const last = lastContextMessage(this.agent.state.messages);
-		return last?.role === "assistant" || last?.role === "toolResult";
+		// A deliberate user interrupt holds follow-ups until explicit input resumes the
+		// session. A queued steer may still wake it; the drain starts with queued input
+		// regardless of the existing context tail.
+		return this.agent.peekSteeringQueue().length > 0 || !this.#advisors.autoResumeSuppressed;
 	}
 
 	queueDeferredMessage(message: CustomMessage): void {
@@ -11635,8 +11618,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Send a user message through the prompt flow.
 	 *
 	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
-	 * Explicit `deliverAs` queues without starting a turn in either state; `aside` at
-	 * an idle session instead starts a turn, since there is no live run to inject into.
+	 * Explicit `steer` or `followUp` queues the input; the queue drain can start a turn when
+	 * idle. Idle `aside` starts a turn directly, since there is no live run to inject into.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
