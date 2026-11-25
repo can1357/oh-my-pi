@@ -528,6 +528,40 @@ describe("/annotate contracts", () => {
 		expect(countOccurrences(prompt, note)).toBe(1);
 	});
 
+	it("opens the session picker on a turn that wrote a reply and read an internal URL", async () => {
+		const base = makeAssistantEntry("assistant-tools", "unused", "user-tools");
+		const assistant: SessionMessageEntry = {
+			...base,
+			message: {
+				...base.message,
+				content: [
+					{ type: "text", text: "Replying and reading." },
+					{
+						type: "toolCall",
+						id: "write-call",
+						name: "write",
+						arguments: { path: "agent://Main", content: "on it" },
+					},
+					{ type: "toolCall", id: "read-call", name: "read", arguments: { path: "skill://commit" } },
+				],
+			} as AgentMessage,
+		};
+		const { ctx, pickedSelections } = createContext({
+			branch: [makeUserEntry("user-tools", "reply and read"), assistant],
+			customKeys: [ENTER],
+		});
+		const showTextReviewOverlay = vi.fn(async (_ctx: AnnotationOverlayContext, source: TextReviewSource) => {
+			expect(source.text).toContain("Replying and reading.");
+			return { action: "paste" as const, annotations: [{ scope: "text" as const, note: "tool turn note" }] };
+		});
+
+		const result = await runAnnotateCommand(API, "session", ctx, { showTextReviewOverlay });
+
+		expect(result).toBeUndefined();
+		expect(pickedSelections[0]?.entry).toBe(assistant);
+		expect(showTextReviewOverlay).toHaveBeenCalledTimes(1);
+	});
+
 	it("summarizes an older session message while preserving its exact quote and note", async () => {
 		const sourceText = `older source ${"x".repeat(1200)}`;
 		const older = makeAssistantEntry("older", sourceText, "older-user");

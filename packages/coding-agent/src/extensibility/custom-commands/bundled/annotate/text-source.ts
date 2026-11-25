@@ -1,9 +1,10 @@
 import { transcriptEntryMessage } from "../../../../session/transcript/transcript-entry";
 import { jsx } from "@oh-my-pi/pi-tui";
-import { CopySelector } from "../../../../ui/overlays/pickers/copy-selector";
+import { CopySelector, type CopySelectorProps } from "../../../../ui/overlays/pickers/copy-selector";
 import { type CopyPickSource } from "../../../../modes/view-model/overlays/copy-selector";
 import { assistantText } from "../../../../modes/view-model/overlays/copy-targets";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
+import { InternalUrlRouter } from "../../../../internal-urls/router";
 import { isTranscriptEntry } from "../../../../session/session-context";
 import type { SessionEntry } from "../../../../session/session-entries";
 import type { TextReviewSource } from "./annotation-types";
@@ -142,12 +143,16 @@ export async function selectSessionTextReviewSource(
 		(ui, _theme, _keybindings, done) =>
 			jsx(CopySelector, {
 				entries,
+				// A command context carries no session router. The picker opens only in an interactive
+				// session, which owns no schemes of its own (RPC host URIs exist only in RPC sessions),
+				// so the built-ins classify its transcript's reply writes and URL reads.
+				router: InternalUrlRouter.builtins(),
 				terminalRows: () => ui.size().rows,
 				title: "Select message to annotate",
 				actionLabel: "select",
 				onPick: (content: string, label: string, source: CopyPickSource) => done({ content, label, ...source }),
 				onCancel: () => done(undefined),
-			}),
+			} satisfies CopySelectorProps),
 		{ overlay: true },
 	);
 	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
