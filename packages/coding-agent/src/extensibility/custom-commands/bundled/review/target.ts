@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import { parseReviewDiffSnapshot, type ReviewDiffSnapshot } from "./diff";
 
 export type LocalReviewKind = "base-branch" | "uncommitted" | "commit";
@@ -70,10 +71,6 @@ export function getReviewTargetIssue(target: ResolvedReviewTarget): string | und
 export function reviewRepository(reviewCwd: string, sessionCwd: string): string | undefined {
 	if (path.resolve(reviewCwd) === path.resolve(sessionCwd)) return undefined;
 	return vcs.repo(reviewCwd)?.root() ?? reviewCwd;
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 /** Read staged + unstaged (or jj working-copy) changes; throws when no repository is available. */

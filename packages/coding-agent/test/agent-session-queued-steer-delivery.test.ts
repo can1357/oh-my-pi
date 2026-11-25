@@ -171,6 +171,38 @@ describe("AgentSession queued steer delivery", () => {
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
 
+	it("delivers an extension follow-up as the first idle turn after a custom message", async () => {
+		const { session, mock } = await createSession([{ content: ["ready"] }, { content: ["awake"] }]);
+		await session.prompt("Warm up");
+		await session.sendCustomMessage({ customType: "digest", content: "DIGEST", display: true });
+
+		await session.sendUserMessage("WAKE", { deliverAs: "followUp" });
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(mock.calls[1].context.messages.slice(-2)).toMatchObject([
+			{ role: "developer", content: [{ type: "text", text: "DIGEST" }] },
+			{ role: "user", content: [{ type: "text", text: "WAKE" }] },
+		]);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+	});
+
+	it("delivers an idle follow-up when compaction left only its summary in context", async () => {
+		const { session, sessionManager, mock } = await createSession([{ content: ["awake"] }]);
+		sessionManager.appendCompaction("The build is ready.", undefined, "", 1_000);
+		session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+
+		await session.sendUserMessage("Run the tests.", { deliverAs: "followUp" });
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls[0].context.messages.slice(-2)).toMatchObject([
+			{ role: "user", content: [{ type: "text", text: expect.stringContaining("The build is ready.") }] },
+			{ role: "user", content: [{ type: "text", text: "Run the tests." }] },
+		]);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+	});
+
 	// `.`/`c` on a running turn interrupts it and continues. A host driving the
 	// session to a result (the subagent executor) awaits the interrupted prompt,
 	// then waitForIdle(): reporting idle between the interrupt and the

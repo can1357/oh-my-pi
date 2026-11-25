@@ -399,9 +399,11 @@ start one are retained as hidden next-turn messages.
 `pi.sendUserMessage(content, { deliverAs })` submits text/images without slash-command
 or prompt-template expansion. Omit `deliverAs` to start a prompt when idle;
 while streaming, omission queues a steer. Explicit `"steer"` or `"followUp"`
-queues the prompt even when idle instead of starting a turn directly. `"aside"`
-injects at the next step boundary while a run is live and starts a turn when
-idle. The message is recorded with `attribution: "user"` unless you pass
+queues the prompt. When idle, the queue drain can start a turn with that input,
+even after an extension message or a compaction summary. A deliberate user
+interrupt still holds already-queued follow-ups until explicit input resumes
+the session. `"aside"` injects at the next step boundary while a run is live
+and starts a turn when idle. The message is recorded with `attribution: "user"` unless you pass
 `attribution: "agent"`; use `"agent"` for text the extension generated or relayed
 from another agent.
 

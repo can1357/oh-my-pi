@@ -74,6 +74,8 @@ import {
 	type DraftImage,
 	draftImageBlob,
 	expandAtoms,
+	type PixelSize,
+	withMarkerPixelSize,
 } from "./attachments";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -1123,6 +1125,25 @@ export class Composer {
 		if (!atom.image) return undefined;
 		const at = this.pendingImages.indexOf(atom.image);
 		return at === -1 ? undefined : this.pendingImageLinks[at];
+	}
+
+	/**
+	 * Make `image`, `size` pixels, what image chip `atom` stands for (Tern's annotator handed back
+	 * the annotated picture, maybe cropped or grown): it takes the old image's place among
+	 * {@link pendingImages}, its link is resolved anew, and the chip keeps its label and number
+	 * while its marker states the new size. An atom no longer in the draft, or whose image is no
+	 * longer pending, is ignored.
+	 */
+	replaceImage(atom: Atom, image: DraftImage, size: PixelSize): void {
+		const atoms = this.#atoms.peek();
+		const index = atoms.indexOf(atom);
+		const at = atom.image ? this.pendingImages.indexOf(atom.image) : -1;
+		if (index === -1 || at === -1) return;
+		this.pendingImages[at] = image;
+		this.pendingImageLinks[at] = undefined;
+		const expansion = atom.expansion === undefined ? undefined : withMarkerPixelSize(atom.expansion, size);
+		this.#atoms.set(atoms.with(index, { ...atom, image, expansion }));
+		this.relinkImages();
 	}
 
 	/** Make `state` the draft's atoms and attachments (chip numbering continues after them). */

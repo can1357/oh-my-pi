@@ -1809,9 +1809,6 @@ export class Agent {
 		await this.#inLogContext(() => this.#runLoop(msgs, promptOptions));
 	}
 
-	/**
-	 * Continue from current context (used for retries and resuming queued messages).
-	 */
 	#continuationDequeueSignal(signal?: AbortSignal): AbortSignal | undefined {
 		const signals: AbortSignal[] = [];
 		if (this.#abortController) signals.push(this.#abortController.signal);
@@ -1830,15 +1827,20 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	continue(signal?: AbortSignal): Promise<void> {
+	/**
+	 * Retry the current context or start a turn with queued input. Set `queuedOnly`
+	 * to drain the queue without making a model call on its own when nothing is delivered.
+	 */
+	continue(signal?: AbortSignal, options?: { queuedOnly?: boolean }): Promise<void> {
 		// Queued-message hooks run before the loop and are this agent's work too.
-		return this.#inLogContext(() => this.#continue(signal));
+		return this.#inLogContext(() => this.#continue(signal, options));
 	}
 
-	async #continue(signal?: AbortSignal) {
+	async #continue(signal?: AbortSignal, options?: { queuedOnly?: boolean }) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
+		if (options?.queuedOnly && !this.hasQueuedMessages()) return;
 
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#runningPrompt = promise;
@@ -1857,22 +1859,13 @@ export class Agent {
 			// model sees. A queued steer/follow-up is delivered as if they were absent; with nothing queued,
 			// continue from them as before and leave the tail to the caller's recovery.
 			const tail = lastContextMessage(messages);
-			if (!tail || tail.role === "assistant") {
-				// A tail with unpaired runnable tool calls resumes by re-executing
-				// them (see `unpairedToolCallTail` in agent-loop). This must win over
-				// queued-message delivery: injecting a message between the tool_use
-				// blocks and their results would break the provider's pairing
-				// invariant. Queued messages drain inside the resumed loop instead.
-				if (tail && unpairedToolCallTail([tail])) {
+			if (options?.queuedOnly || !tail || tail.role === "assistant") {
+				// Unanswered tool calls must run before queued messages to preserve tool/result pairing.
+				if (tail?.role === "assistant" && unpairedToolCallTail([tail])) {
 					await this.#runLoop(undefined, undefined, signal, true);
 					return;
 				}
-				// An empty transcript has nothing to resume, but a queued steer/follow-up
-				// must still be delivered as the opening turn. Throwing here leaves the
-				// message undeliverable, and idle-drain callers
-				// (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
-				// microtask because hasQueuedMessages() never clears, spinning an unbounded
-				// allocation loop until OOM (issue #6344).
+				// Start with queued input, not an extra model call on the existing context.
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
 				if (this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
@@ -1887,6 +1880,8 @@ export class Agent {
 					return;
 				}
 
+				// A dequeue hook may withdraw the queued input while the drain starts.
+				if (options?.queuedOnly) return;
 				if (!literalTail) throw new Error("No messages to continue from");
 				if (literalTail === tail) throw new Error("Cannot continue from message role: assistant");
 			}

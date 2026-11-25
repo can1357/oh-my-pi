@@ -26,7 +26,6 @@ import {
 	buildSearchAffinity,
 	formatCostDetail,
 	formatCostPair,
-	fuzzyHits,
 	type HeldRole,
 	hasTieredPerf,
 	heldRoles,
@@ -56,7 +55,7 @@ import {
 	tieredPerf,
 	thinkingDotToken,
 } from "../../../modes/view-model/overlays/model-browser";
-import { fuzzyRank } from "../../../utils/fuzzy";
+import { fuzzyHits, fuzzyRank } from "../../../utils/fuzzy";
 import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { editLine, type LineState } from "../settings/line-edit";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";

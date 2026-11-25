@@ -3,9 +3,9 @@
  * The tray (`tray` slot, native only): on a host whose `hello` advertises
  * `tray`, a row of live cards over the composer — one per subagent and
  * background job, and a done card standing for finished agents without a
- * card of their own — in place of the HUD pills. Tern owns selection, order,
- * paging and motion; omp owns the words and which card is looked at closer
- * (the peek).
+ * card of their own — in place of the HUD pills. Tern owns selection, paging
+ * and motion; omp owns the words, the cards' order and which card is looked
+ * at closer (the peek).
  *
  * The cards are flat faces ({@link TrayItem}) the controller builds from the
  * agent registry, the observer sessions and the job manager. An agent that
