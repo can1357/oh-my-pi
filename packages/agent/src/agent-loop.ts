@@ -3984,6 +3984,12 @@ async function executeToolCalls(
 				}
 			})()
 		: undefined;
+	// The host detaching tools ahead of an abort raises the cooperative signal
+	// in either interruptMode; tools see it before the abort that follows.
+	const detachSignal = config.detachSignal;
+	const onDetach = (): void => steeringSoftController.abort("user");
+	if (detachSignal?.aborted) onDetach();
+	else detachSignal?.addEventListener("abort", onDetach, { once: true });
 	// IRC interrupt records and background completions live in session-owned
 	// queues with no wake callback. Keep the timer fallback when either peek is
 	// present; system steering uses the event-driven path above and does not poll.
@@ -4042,6 +4048,7 @@ async function executeToolCalls(
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);
+		detachSignal?.removeEventListener("abort", onDetach);
 	}
 
 	for (const record of records) {

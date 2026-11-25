@@ -431,6 +431,8 @@ export class Agent {
 	#queueListeners = new Set<() => void>();
 	#pauseListeners = new Set<(paused: boolean) => void>();
 	#abortController?: AbortController;
+	/** The running loop's `detachSignal` source; see {@link Agent.abort}. */
+	#detachController?: AbortController;
 	#convertToLlm: AgentLoopConfig["convertToLlm"];
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
@@ -1697,7 +1699,14 @@ export class Agent {
 		this.#state.messages.length = 0;
 	}
 
-	abort(reason?: unknown) {
+	/**
+	 * Abort the current run. `detachTools` first raises the running tool batch's
+	 * cooperative `steeringSignal` (see {@link AgentLoopConfig.detachSignal}), so
+	 * tools that can move their work into a background job do so instead of being
+	 * killed; they observe it before the abort.
+	 */
+	abort(reason?: unknown, options?: { detachTools?: boolean }) {
+		if (options?.detachTools) this.#detachController?.abort();
 		this.#abortController?.abort(reason);
 	}
 
@@ -1924,6 +1933,8 @@ export class Agent {
 		const loopSignal = continuationSignal
 			? AbortSignal.any([loopAbortController.signal, continuationSignal])
 			: loopAbortController.signal;
+		const detachController = new AbortController();
+		this.#detachController = detachController;
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
@@ -2043,6 +2054,7 @@ export class Agent {
 			serviceTier: this.#serviceTier,
 			hideThinkingSummary: this.#hideThinkingSummary,
 			interruptMode: this.#interruptMode,
+			detachSignal: detachController.signal,
 			sessionId: this.#sessionId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
@@ -2387,6 +2399,7 @@ export class Agent {
 			this.#isPaused = false;
 			this.#restoreUndeliveredQueuedMessages(loopAbortController);
 			resolveRun?.();
+			if (this.#detachController === detachController) this.#detachController = undefined;
 			if (this.#abortController === loopAbortController) {
 				this.#state.isStreaming = false;
 				this.#state.streamMessage = null;

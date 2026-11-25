@@ -337,6 +337,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	waitForSteeringMessages?: (signal?: AbortSignal) => Promise<void>;
 
 	/**
+	 * Aborted just before the host aborts the run when running tools should keep
+	 * their work: raises the active tool batch's cooperative
+	 * {@link ToolCallContext.steeringSignal} (source `"user"`) in either
+	 * {@link interruptMode}, so a tool that can (auto-background bash/eval)
+	 * moves its work into a background job instead of being killed.
+	 */
+	detachSignal?: AbortSignal;
+
+	/**
 	 * Called when live steering dequeues messages via {@link getSteeringMessages}
 	 * for the response being streamed. The loop records them in the transcript
 	 * after that response (or its tool batch); an abort before then leaves them

@@ -12753,7 +12753,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async abort(options?: {
 		goalReason?: "interrupted" | "internal";
 		reason?: string;
-		/** Force queued user follow-ups into the continuation after a user interrupt. */
+		/**
+		 * Interrupt-and-send (Enter on an empty composer with input queued): force queued user
+		 * follow-ups into the continuation after a user interrupt, and let running tools that can
+		 * (auto-background bash/eval) move into background jobs instead of being killed.
+		 */
 		deliverQueuedMessages?: boolean;
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
@@ -12811,7 +12815,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.abortEval();
 			const computerControlRevocation = revokeComputerControlForOwner(this.#eval.getKernelOwnerId());
 			const postPromptDrain = this.#cancelPostPromptTasks(options?.reason);
-			this.agent.abort(options?.reason);
+			this.agent.abort(options?.reason, { detachTools: forceQueuedDelivery });
 			await Promise.all([postPromptDrain, computerControlRevocation]);
 			await this.agent.waitForIdle();
 			this.#persistToolResultsEndedWhileDisconnected();
