@@ -22,7 +22,6 @@ import type { ConfigError } from "../config/config-file";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
-import { InternalUrlRouter } from "../internal-urls/router";
 import { discoverSessionAuthStorage as discoverAuthStorage } from "../session/auth-broker-config";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
@@ -348,14 +347,6 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 					cwd,
 					SessionManager.inMemory(cwd),
 					modelRegistry,
-					undefined,
-					undefined,
-					undefined,
-					undefined,
-					undefined,
-					undefined,
-					// `omp models` has no session, so only the built-in URL schemes exist.
-					InternalUrlRouter.builtins(),
 				)
 			: undefined;
 

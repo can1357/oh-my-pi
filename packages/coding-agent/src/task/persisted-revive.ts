@@ -14,6 +14,7 @@ import {
 } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
+import type { UrlSchemeSource } from "../internal-urls";
 import { MCPManager } from "../mcp/manager";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { AsyncJobManagerApi } from "../async";
@@ -215,20 +216,28 @@ export function createPersistedSubagentReviverFactory(
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 			};
+			// Host URI schemes (RPC `set_host_uri_schemes`) live on this thread, like those a
+			// fresh spawn inherits: only an on-thread revive gets the root's; a worker-placed
+			// one resolves the built-ins.
+			const reviveHere = (reviveSpec: PersistedReviveSpec, expected: AgentRef) =>
+				revivePersistedSubagent(reviveSpec, expected, ctx.session.urlSchemes.hostUriSources);
 			// Worker mode: a revival is placed like a fresh spawn (main thread or a worker).
 			const pool = subagentWorkerPool(ctx.settings);
-			return pool
-				? revivePersistedPlaced(pool, spec, expectedRef, revivePersistedSubagent)
-				: revivePersistedSubagent(spec, expectedRef);
+			return pool ? revivePersistedPlaced(pool, spec, expectedRef, reviveHere) : reviveHere(spec, expectedRef);
 		};
 	};
 }
 
 /**
  * Rebuild the persisted subagent of `spec` on the calling thread (main, or the pooled
- * worker that will home it) and claim `expectedRef` for it.
+ * worker that will home it) and claim `expectedRef` for it. `parentHostUriSources` are
+ * the root session's host URI sources, passed only by a main-thread revive.
  */
-export async function revivePersistedSubagent(spec: PersistedReviveSpec, expectedRef: AgentRef): Promise<AgentSession> {
+export async function revivePersistedSubagent(
+	spec: PersistedReviveSpec,
+	expectedRef: AgentRef,
+	parentHostUriSources?: readonly UrlSchemeSource[],
+): Promise<AgentSession> {
 	const ref = { id: spec.id, displayName: spec.displayName, parentId: spec.parentId };
 	const { sessionFile, taskDepth } = spec;
 	const registry = AgentRegistry.global();
@@ -403,6 +412,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	try {
 		({ session } = await createAgentSession({
 			cwd: spec.root.sessionManager.getCwd(),
+			parentHostUriSources,
 			costGate: spec.costGate,
 			authStorage: spec.authStorage,
 			// Revived agents join the root session tree, so their observability

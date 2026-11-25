@@ -1719,10 +1719,11 @@ a message or fall back to `content` for textual error surfacing:
   mutate virtual files expose `write` and let the model use the `write` tool
   with replacement content.
 - Schemes belong to the RPC session: its tools resolve them, and so do the
-  task subagents it runs on the main thread, including schemes registered
-  after the spawn. Other sessions in the same process, and subagents placed in
-  a worker thread (`task.workerThreads`), do not. `set_host_uri_schemes`
-  replaces the previous set, dropping anything not in the new list.
+  task subagents it runs on the main thread, fresh or revived from a parked
+  transcript, including schemes registered after the spawn. Other sessions in
+  the same process, and subagents placed in a worker thread
+  (`task.workerThreads`), do not. `set_host_uri_schemes` replaces the previous
+  set, dropping anything not in the new list.
 - Schemes are normalized to lowercase before registration.
 - Send `content` for successful reads; the current bridge treats an omitted
   value as an empty string. `contentType` defaults to `text/plain` and its

@@ -915,7 +915,7 @@ export class ExtensionRunner {
 		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 		/** Builds `ctx.annotations`; supplied by the host that wires the bundled `/annotate` command. */
 		createAnnotations?: ExtensionAnnotationsFactory,
-		/** The session's URL router; omitted only by test fixtures, which get the built-ins. */
+		/** The session's URL router; callers with no session (`omp models`, test fixtures) omit it and get the built-ins. */
 		urlRouter?: InternalUrlRouter,
 	) {
 		this.#urlRouter = urlRouter;

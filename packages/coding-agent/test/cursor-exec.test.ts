@@ -1386,6 +1386,38 @@ describe("CursorExecHandlers native StrReplace materialization", () => {
 		expect(details.diff).toBe(" 1|a\n-2|b\n+2|B\n 3|c");
 		expect(details.firstChangedLine).toBe(2);
 	});
+
+	it("writes a URL of the session's host scheme through the write tool without diffing a same-named local file", async () => {
+		const schemes = new SessionUrlSchemes();
+		new RpcHostUriBridge(() => {}, schemes.hostUris).setSchemes([{ scheme: "db" }]);
+		const lookalike = path.join(cwd, "db:", "x");
+		await Bun.write(lookalike, "local file\n");
+		const written: string[] = [];
+		const recordingWrite: AgentTool<typeof writeSchema> = {
+			...writeTool,
+			execute: async (_id, args) => {
+				written.push(args.path);
+				return { content: [{ type: "text", text: "Successfully wrote" }], details: {} };
+			},
+		};
+		const handlers = new CursorExecHandlers({
+			urlRouter: schemes.router,
+			cwd,
+			tools: new Map([["write", recordingWrite as AgentTool]]),
+			emitEvent: () => {},
+		});
+
+		const result = await handlers.write(
+			create(WriteArgsSchema, { toolCallId: "edit-url", path: "db://x", fileText: "row\n" }),
+			{ editMaterialization: true },
+		);
+
+		expect(result.isError).toBe(false);
+		expect(written).toEqual(["db://x"]);
+		// The write tool's own details, with no diff or local path from the lookalike file.
+		expect(result.details).toEqual({});
+		expect(await Bun.file(lookalike).text()).toBe("local file\n");
+	});
 });
 
 describe("CursorExecHandlers argument validation", () => {
@@ -1744,6 +1776,32 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			}
 			// Nothing was written on any of those attempts.
 			expect(await Bun.file(outside).exists()).toBe(false);
+		} finally {
+			await removeWithRetries(workspace);
+		}
+	});
+
+	it("refuses a download path of the session's host scheme", async () => {
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-session-url-"));
+		try {
+			const schemes = new SessionUrlSchemes();
+			new RpcHostUriBridge(() => {}, schemes.hostUris).setSchemes([{ scheme: "db" }]);
+			const handlers = new CursorExecHandlers({
+				urlRouter: schemes.router,
+				cwd: workspace,
+				tools: new Map(),
+				getToolContext: () => yoloToolContext(),
+				mcpResources: {
+					serverNames: () => ["files"],
+					getServerResources: async () => undefined,
+					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
+				},
+			});
+
+			await expect(
+				handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "db://x" }),
+			).rejects.toThrow(/Refusing to download/);
+			expect(await Bun.file(path.join(workspace, "db:", "x")).exists()).toBe(false);
 		} finally {
 			await removeWithRetries(workspace);
 		}
