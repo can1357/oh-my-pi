@@ -2688,6 +2688,39 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("keeps prompt image blocks on a skill command's custom message", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("expected ACP session to exist after newSession");
+		const skillDir = path.join(harness.cwdA, ".skills", "probe");
+		const skillPath = path.join(skillDir, "SKILL.md");
+		await fs.promises.mkdir(skillDir, { recursive: true });
+		await fs.promises.writeFile(skillPath, "---\ndescription: Probe skill\n---\n# Probe\nName the color.\n");
+		session.skills = [
+			{ name: "probe", description: "Probe skill", filePath: skillPath, baseDir: skillDir, source: "test" },
+		];
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000002",
+			prompt: [
+				{ type: "image", mimeType: "image/png", data: "cmVk" },
+				{ type: "text", text: "/skill:probe notes.ts. What color is the image?" },
+			],
+		} as PromptRequest);
+
+		expect(session.promptCalls).toEqual([]);
+		const content = session.customMessages[0]?.content;
+		if (!Array.isArray(content)) throw new Error("expected skill message content to carry the image block");
+		expect(content[0]).toMatchObject({ type: "text" });
+		expect(content[0]?.type === "text" && content[0].text).toContain("User: notes.ts. What color is the image?");
+		expect(content.slice(1)).toEqual([{ type: "image", mimeType: "image/png", data: "cmVk" }]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("auto-cancels an in-progress turn and queues a new prompt when called mid-flight", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
