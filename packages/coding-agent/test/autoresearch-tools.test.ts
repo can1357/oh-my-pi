@@ -20,6 +20,7 @@ import type {
 	RunDetails,
 } from "@oh-my-pi/pi-coding-agent/autoresearch/tool-details";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -48,7 +49,7 @@ function dashboardStub() {
 }
 
 function createCtx(cwd: string): ExtensionContext {
-	return { cwd, hasUI: false } as ExtensionContext;
+	return { cwd, hasUI: false, sessionManager: SessionManager.inMemory(cwd) } as ExtensionContext;
 }
 
 interface PiHarness {
@@ -378,7 +379,11 @@ describe("run_experiment", () => {
 
 	it("accepts arbitrary commands, parses METRIC/ASI, and stores a run", async () => {
 		const dir = freshRepo().dir;
-		await writeHarnessStub(dir, "echo METRIC runtime_ms=42; echo METRIC memory_mb=12; echo ASI hypothesis=baseline");
+		const ctx = createCtx(dir);
+		await writeHarnessStub(
+			dir,
+			'echo METRIC runtime_ms=42; echo METRIC memory_mb=12; echo "ASI session=$PI_SESSION_ID"',
+		);
 		const runtime = createSessionRuntime();
 		const init = createInitExperimentTool({
 			dashboard: dashboardStub(),
@@ -390,18 +395,18 @@ describe("run_experiment", () => {
 			{ name: "speed", primary_metric: "runtime_ms", metric_unit: "ms" },
 			undefined,
 			undefined,
-			createCtx(dir),
+			ctx,
 		);
 		const run = createRunExperimentTool({
 			dashboard: dashboardStub(),
 			getRuntime: () => runtime,
 			pi: createPiHarness().api,
 		});
-		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, createCtx(dir));
+		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, ctx);
 		const details = result.details as RunDetails;
 		expect(details.parsedPrimary).toBe(42);
 		expect(details.parsedMetrics).toMatchObject({ runtime_ms: 42, memory_mb: 12 });
-		expect(details.parsedAsi).toMatchObject({ hypothesis: "baseline" });
+		expect(details.parsedAsi).toMatchObject({ session: ctx.sessionManager.getSessionId() });
 		expect(details.passed).toBe(true);
 		expect(details.command).toBe("bash autoresearch.sh");
 		expect(fs.existsSync(details.benchmarkLogPath)).toBe(true);
