@@ -14,7 +14,7 @@ import {
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
 import type { TspPickerColumn, TspPickerMark } from "@oh-my-pi/pi-wire";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../../thinking/levels";
-import { FuzzyQuery, FuzzyText, fuzzyRank } from "../../../utils/fuzzy";
+import { type FuzzyFilterResult, type FuzzyMatch, FuzzyQuery, FuzzyText, fuzzyRank } from "../../../utils/fuzzy";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { drainWork } from "../../../utils/sliced-work";
 
@@ -760,6 +760,59 @@ function modelIdSearchText({ id, model }: ModelBrowserItem): string {
 	return isFreeModel(model) ? `${id} free` : id;
 }
 
+interface ModelSearchEntry {
+	text: FuzzyText;
+	/** Only time-dependent pricing needs its haystack checked again. */
+	dynamicText?: string;
+	query?: FuzzyQuery;
+	match?: FuzzyMatch;
+}
+
+/** Whole-text membership shared by the visible pane and the hub's catalog-wide counts. */
+export class ModelSearchIndex {
+	readonly #entries = new WeakMap<ModelBrowserItem, ModelSearchEntry>();
+	#raw?: string;
+	#query?: FuzzyQuery;
+
+	prepare(raw: string): FuzzyQuery {
+		if (raw !== this.#raw || !this.#query) {
+			this.#raw = raw;
+			this.#query = new FuzzyQuery(raw);
+		}
+		return this.#query;
+	}
+
+	warm(item: ModelBrowserItem): ModelSearchEntry {
+		const entry = this.#entries.get(item);
+		if (entry && entry.dynamicText === undefined) return entry;
+		const raw = modelSearchText(item);
+		if (entry?.dynamicText === raw) return entry;
+		const fresh: ModelSearchEntry = { text: new FuzzyText(raw) };
+		if (item.model.cost?.timeBased || item.model.factoryDroidCreditCards?.length) fresh.dynamicText = raw;
+		this.#entries.set(item, fresh);
+		return fresh;
+	}
+
+	match(item: ModelBrowserItem, query: FuzzyQuery): FuzzyMatch {
+		const entry = this.warm(item);
+		if (entry.query !== query || !entry.match) {
+			entry.match = query.match(entry.text);
+			entry.query = query;
+		}
+		return entry.match;
+	}
+
+	rank(items: readonly ModelBrowserItem[], raw: string): FuzzyFilterResult<ModelBrowserItem>[] {
+		const query = this.prepare(raw);
+		const results: FuzzyFilterResult<ModelBrowserItem>[] = [];
+		for (const item of items) {
+			const match = this.match(item, query);
+			if (match.matches) results.push({ item, score: match.score });
+		}
+		return results.sort((a, b) => a.score - b.score);
+	}
+}
+
 /** Inputs to {@link ModelItemRanker}. */
 export interface ModelRankOptions {
 	roles: RoleAssignments;
@@ -827,13 +880,13 @@ export class ModelItemRanker {
 	 * `provider/model` query lists the prefixed providers' models first,
 	 * matched on the model part; whole-text matches follow.
 	 */
-	rank(query: string): ModelBrowserItem[] {
+	rank(query: string, index?: ModelSearchIndex): ModelBrowserItem[] {
 		if (!query.trim()) return [...this.items];
 		const rows = new Map<ModelBrowserItem, RankRow>();
 		const scoped = parseProviderScopedQuery(query);
 		if (scoped) this.#rankScoped(scoped, rows);
 		const queryKey = compactModelSearchText(query);
-		for (const { item, score } of fuzzyRank(this.items, query, modelSearchText)) {
+		for (const { item, score } of index?.rank(this.items, query) ?? fuzzyRank(this.items, query, modelSearchText)) {
 			if (rows.has(item)) continue;
 			const keys = this.#keys.get(item)!;
 			rows.set(item, {

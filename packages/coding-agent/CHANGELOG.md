@@ -5,6 +5,9 @@
 ### Fixed
 
 - Opening `/model` reuses fresh provider catalogs instead of fetching them again. F5 still forces a provider refresh.
+### Changed
+
+- Model hub search prepares its index between input turns and shares fuzzy matches with the provider sidebar.
 
 ## [19.2.0] - 2026-11-25
 

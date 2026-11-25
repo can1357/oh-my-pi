@@ -25,6 +25,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatModelSelectorValue, parseModelString, splitUpstreamRouting } from "../../../config/model-selector";
 import {
 	buildBrowserItems,
+	ModelSearchIndex,
 	type ModelBrowserItem,
 	type ModelRoleLookup,
 	type ResolvedModelRoleValue,
@@ -42,9 +43,8 @@ import type {
 	ScopedModelItem,
 } from "../../../modes/view-model/overlays/model-hub";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata } from "../../../thinking/levels";
-import { fuzzyRank } from "../../../utils/fuzzy";
+import { END_SLICE, runSlicedWork, type SlicedWork } from "../../../utils/sliced-work";
 import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
-import { modelSearchText } from "../../../modes/view-model/overlays/model-browser";
 import { hubGeometry } from "../../styles/pickers/hub-frame";
 import { editLine, type LineState } from "../settings/line-edit";
 import { glyph, ModelBrowserState, thinkingGlyph } from "./model-browser-state";
@@ -219,6 +219,7 @@ export class ModelHubState {
 
 	#scopedModels: ReadonlyArray<ScopedModelItem>;
 	#roles: RoleAssignments = {};
+	readonly #searchIndex = new ModelSearchIndex();
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
 	#recentSelectors: ReadonlySet<string> = new Set();
@@ -274,7 +275,10 @@ export class ModelHubState {
 		this.#scopedModels = scopedModels;
 		this.#currentSelector = options.currentSelector;
 		this.#rows = options.terminalRows ?? (() => 40);
-		this.browser = new ModelBrowserState(source, { emptyText: () => this.emptyStateMessage() });
+		this.browser = new ModelBrowserState(source, {
+			emptyText: () => this.emptyStateMessage(),
+			searchIndex: this.#searchIndex,
+		});
 		this.browser.onActivate = item => this.#activateItem(item);
 		this.browser.onCancel = () => this.callbacks.onCancel();
 		this.browser.onQueryChange = query => this.#onQueryChanged(query);
@@ -673,6 +677,7 @@ export class ModelHubState {
 
 		const mruOrder = this.source.mruOrder;
 		this.#availableItems = buildBrowserItems(availableModels);
+		void runSlicedWork(this.#warmSearch(this.#availableItems));
 		sortModelItems(this.#availableItems, { roles: this.#roles, mruOrder });
 		this.browser.setRoles(this.#roles);
 		this.browser.setMruOrder(mruOrder);
@@ -905,6 +910,15 @@ export class ModelHubState {
 		this.#sync();
 	}
 
+	*#warmSearch(items: readonly ModelBrowserItem[]): SlicedWork {
+		yield END_SLICE; // Let the picker paint before indexing any rows.
+		for (const item of items) {
+			if (this.#disposed || items !== this.#availableItems) return;
+			this.#searchIndex.warm(item);
+			yield;
+		}
+	}
+
 	/** Match counts per provider for the live query; a provider scope without matches falls back to All. */
 	#onQueryChanged(query: string): void {
 		if (!query.trim()) {
@@ -913,15 +927,18 @@ export class ModelHubState {
 			this.#bump();
 			return;
 		}
-		const matches = fuzzyRank(this.#availableItems, query, modelSearchText).map(result => result.item);
+		const prepared = this.#searchIndex.prepare(query);
+		let total = 0;
 		const counts = new Map<string, number>();
 		let recent = 0;
-		for (const item of matches) {
+		for (const item of this.#availableItems) {
+			if (!this.#searchIndex.match(item, prepared).matches) continue;
+			total++;
 			counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
 			if (this.#recentSelectors.has(item.selector)) recent++;
 		}
 		this.#recentSearchCount = recent;
-		this.#searchTotal = matches.length;
+		this.#searchTotal = total;
 		this.#searchCounts = counts;
 		this.#composeEntries();
 		const entry = this.activeEntry();

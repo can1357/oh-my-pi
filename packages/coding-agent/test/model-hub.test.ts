@@ -21,7 +21,10 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { ModelHub } from "../src/ui/overlays/pickers/model-hub";
-import { resetProviderAutoRefreshGuard } from "../src/ui/overlays/pickers/model-hub-state";
+import { buildBrowserItems, buildSearchAffinity, modelSearchText, rankModelItems } from "../src/modes/view-model/overlays/model-browser";
+import { fuzzyRank } from "../src/utils/fuzzy";
+import { isSeparator } from "../src/ui/overlays/pickers/model-browser-state";
+import { ModelHubState, resetProviderAutoRefreshGuard } from "../src/ui/overlays/pickers/model-hub-state";
 import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 function normalize(lines: readonly string[]): string {
@@ -172,6 +175,40 @@ const CTRL_RIGHT = "\x1b[1;5C";
 const ESC = "\x1b";
 
 describe("ModelHub", () => {
+	test("scoped browser ranking and catalog-wide provider counts match independent searches on every edit", () => {
+		const models = [makeModel("demo", "axxxbc"), makeModel("demo", "abc"), makeModel("other", "abc")];
+		const source = createModelBrowserSource(Settings.isolated({}));
+		const items = buildBrowserItems(models);
+		const state = new ModelHubState(
+			source,
+			makeRegistry(() => models),
+			models.map(model => ({ model })),
+			{ onAssign: vi.fn(), onUnassign: vi.fn(), onCancel: vi.fn() },
+			{ initialProviderId: "demo" },
+		);
+		try {
+			for (const query of ["ab", "abc", "ab", "de/abc", "free"]) {
+				state.browser.editQuery({ text: query, cursor: query.length });
+				const counts = new Map<string, number>();
+				for (const { item } of fuzzyRank(items, query, modelSearchText)) {
+					counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
+				}
+				expect(state.searchCounts).toEqual(counts);
+				const provider = state.activeEntry().providerId;
+				const ranked = rankModelItems(query, items.filter(item => !provider || item.provider === provider), {
+					roles: {},
+					mruOrder: [],
+					affinity: buildSearchAffinity(source.modelProviderOrder, {}, []),
+				});
+				expect(state.browser.visible.flatMap(row => isSeparator(row) ? [] : [row.selector])).toEqual(
+					ranked.map(item => item.selector),
+				);
+			}
+		} finally {
+			state.dispose();
+		}
+	});
+
 	test("a native /model role action changes the quick-switch cycle in isolated settings", async () => {
 		await using ui = await nativeShell();
 		const settings = Settings.isolated();
