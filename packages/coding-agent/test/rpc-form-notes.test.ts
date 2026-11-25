@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
 import { parseRpcFormNotes } from "../src/modes/rpc/rpc-form-notes";
-import type { OptionNote } from "../src/tools/html-form/data";
-import { parseHtmlForm } from "../src/tools/html-form/parse";
+import type { HtmlFormData, HtmlFormValue, OptionNote } from "../src/tools/html-form/data";
+import { type ChoiceField, parseHtmlForm } from "../src/tools/html-form/parse";
 const form = parseHtmlForm(
 	'<form><p>Deployment</p><label><input name="env" type="radio" value="staging">Staging</label><label><input name="env" type="radio" value="prod" disabled>Production</label></form>',
 );
+function selections(data: HtmlFormData) {
+	const selected = new Map<ChoiceField, HtmlFormValue | undefined>();
+	for (const field of form.fields) if (field.kind === "choice") selected.set(field, data[field.name]);
+	return selected;
+}
 const note: OptionNote = {
 	name: "env",
 	value: "staging",
@@ -15,7 +20,7 @@ const note: OptionNote = {
 };
 
 test("remote notes use form labels and keep ordered image blocks separate from form values", () => {
-	expect(parseRpcFormNotes(form, { env: "staging" }, [note])).toEqual([
+	expect(parseRpcFormNotes(form, selections({ env: "staging" }), [note], true)).toEqual([
 		{ ...note, question: "Deployment", option: "Staging" },
 	]);
 });
@@ -35,5 +40,5 @@ test.each([
 		[{ ...note, images: [{ type: "image", mimeType: "text/html", data: "aGk=" }] }],
 	],
 ])("rejects %s notes instead of forwarding a different answer", (_label, data, notes) => {
-	expect(() => parseRpcFormNotes(form, data, notes)).toThrow();
+	expect(() => parseRpcFormNotes(form, selections(data), notes, true)).toThrow();
 });

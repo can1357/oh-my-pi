@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
@@ -731,7 +732,7 @@ describe("RPC form dialog", () => {
 	it("returns selected-option notes and image blocks with labels derived from the form", async () => {
 		const pending = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
-		const result = requestRpcFormDialog(pending, output, FRAME_LIMIT, DEPLOY_FORM);
+		const result = requestRpcFormDialog(pending, output, FRAME_LIMIT, DEPLOY_FORM, { acceptImages: true });
 		const id = requireRequest(output.mock.calls[0]?.[0]).id;
 		respond(pending, id, {
 			data: { target: "prod" },
@@ -761,6 +762,49 @@ describe("RPC form dialog", () => {
 		});
 		expect(pending.size).toBe(0);
 	});
+	it("does not let an omitted choice acquire a note from its same-name hidden default", async () => {
+		const pending = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html =
+			'<form><input type="hidden" name="tier" value="basic"><label><input type="radio" name="tier" value="basic">Basic</label><label><input type="radio" name="tier" value="pro">Pro</label></form>';
+		const note = { name: "tier", value: "basic", text: "Not actually chosen" };
+		const rejected = requestRpcFormDialog(pending, output, FRAME_LIMIT, html);
+		respond(pending, requireRequest(output.mock.calls[0]?.[0]).id, { data: {}, notes: [note] });
+		await expect(rejected).rejects.toThrow("selected options");
+		const accepted = requestRpcFormDialog(pending, output, FRAME_LIMIT, html);
+		respond(pending, requireRequest(output.mock.calls[1]?.[0]).id, { data: { tier: "basic" }, notes: [note] });
+		expect(await accepted).toEqual({
+			data: { tier: "basic" },
+			notes: [{ ...note, question: "tier", option: "Basic" }],
+		});
+	});
+
+	it.each([undefined, false, true])(
+		"keeps text notes available and gates note images on acceptImages=%s",
+		async acceptImages => {
+			const pending = new Map<string, PendingExtensionRequest>();
+			const output = vi.fn<(frame: object) => void>();
+			const options = acceptImages === undefined ? undefined : { acceptImages };
+			const text = { name: "target", value: "prod", text: "Reviewed" };
+			const textResult = requestRpcFormDialog(pending, output, FRAME_LIMIT, DEPLOY_FORM, options);
+			const request = output.mock.calls[0]?.[0];
+			expect(request).toMatchObject({ supportsNotes: true });
+			expect(request && "supportsNoteImages" in request ? request.supportsNoteImages : undefined).toBe(
+				acceptImages ? true : undefined,
+			);
+			respond(pending, requireRequest(request).id, { data: { target: "prod" }, notes: [text] });
+			expect((await textResult)?.notes?.[0]).toMatchObject(text);
+			const imageResult = requestRpcFormDialog(pending, output, FRAME_LIMIT, DEPLOY_FORM, options);
+			const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
+			respond(pending, requireRequest(output.mock.calls[1]?.[0]).id, {
+				data: { target: "prod" },
+				notes: [{ ...text, images: [image] }],
+			});
+			if (acceptImages) expect((await imageResult)?.notes?.[0]?.images).toEqual([image]);
+			else await expect(imageResult).rejects.toThrow("does not accept note images");
+		},
+	);
+
 	it.each([
 		["no data object", { data: ["prod"] }, "must carry a data object"],
 		["a field the form lacks", { data: { target: "prod", region: "eu" } }, 'unknown field "region"'],
@@ -1242,8 +1286,8 @@ describe("RPC ask dialog", () => {
 		});
 		expect(askRequests).toEqual([]);
 		expect(formRequests).toEqual([
-			expect.objectContaining({ method: "form", html, supportsNotes: true }),
-			expect.objectContaining({ method: "form", html, supportsNotes: true }),
+			expect.objectContaining({ method: "form", html, supportsNotes: true, supportsNoteImages: true }),
+			expect.objectContaining({ method: "form", html, supportsNotes: true, supportsNoteImages: true }),
 		]);
 		const answered = expect.objectContaining({
 			details: { answers: [{ name: "db", question: "Which database?", answer: "Postgres" }] },

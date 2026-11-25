@@ -16,7 +16,6 @@ import type {
 	ThinkingContent,
 	ToolExample,
 } from "@oh-my-pi/pi-ai";
-import type { OptionNote } from "../../tools/html-form/data";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
@@ -866,6 +865,7 @@ export type RpcExtensionUIRequest =
 			html: string;
 			timeout?: number;
 			supportsNotes?: boolean;
+			supportsNoteImages?: boolean;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {
@@ -1012,6 +1012,14 @@ export interface RpcHostUriResult {
 // Extension UI Commands (stdin)
 // ============================================================================
 
+/** Submitted option note; display labels are supplied by the server, not the host. */
+export interface RpcFormNote {
+	name: string;
+	value: string;
+	text: string;
+	images?: ImageContent[];
+}
+
 /** Response to an extension UI request */
 export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
@@ -1024,7 +1032,7 @@ export type RpcExtensionUIResponse =
 			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
 	  }
 	/** Submitted data of a `form` request, by control `name`; validated against the form. */
-	| { type: "extension_ui_response"; id: string; data: Record<string, unknown>; notes?: OptionNote[] };
+	| { type: "extension_ui_response"; id: string; data: Record<string, unknown>; notes?: RpcFormNote[] };
 
 // ============================================================================
 // Helper type for extracting command types

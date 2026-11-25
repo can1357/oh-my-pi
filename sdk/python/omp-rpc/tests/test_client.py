@@ -604,7 +604,7 @@ FAKE_SERVER = textwrap.dedent(
                 )
                 continue
             if message == "needs form":
-                print(json.dumps({"type": "extension_ui_request", "id": "ui-form", "method": "form", "html": "<form></form>"}), flush=True)
+                print(json.dumps({"type": "extension_ui_request", "id": "ui-form", "method": "form", "html": "<form></form>", "supportsNotes": True, "supportsNoteImages": True}), flush=True)
                 continue
             if message == "side frames":
                 print(json.dumps({"type": "available_commands_update", "commands": [{"name": "plan", "source": "builtin"}]}), flush=True)
@@ -1208,8 +1208,6 @@ class RpcClientTests(unittest.TestCase):
             {
                 "name": "target",
                 "value": "prod",
-                "question": "Target",
-                "option": "Production",
                 "text": "Reviewed [Image #1]",
                 "images": [{"type": "image", "data": "aGk=", "mimeType": "image/png"}],
             }
@@ -1217,6 +1215,8 @@ class RpcClientTests(unittest.TestCase):
         with self.make_client() as client:
             client.prompt("needs form")
             request = client.next_ui_request(timeout=2.0)
+            self.assertIs(request.supports_notes, True)
+            self.assertIs(request.supports_note_images, True)
             client.send_ui_data(request.id, {"target": "prod"}, notes=notes)
             client.wait_for_idle(timeout=2.0)
             self.assertEqual(

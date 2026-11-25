@@ -961,8 +961,9 @@ class RpcClient(WireClient):
         """Answer a `form` request with submitted values and optional selected-option notes.
 
         Send notes only when the request has `supports_notes is True`. Each note
-        carries `name`, `value`, `question`, `option`, `text`, and optional inline
-        `images`. The server validates the selection and derives its own labels.
+        carries `name`, `value`, `text`, and optional inline `images`. Images also
+        require `request.supports_note_images is True`. The server validates the
+        selection and supplies question/option labels.
 
         Raises `TypeError` for a `bool` (forms submit option values, never booleans),
         a value that is neither a string, a number nor a sequence of strings (`None`,

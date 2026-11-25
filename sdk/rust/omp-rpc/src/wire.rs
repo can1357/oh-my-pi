@@ -4689,9 +4689,12 @@ pub struct FormUiRequest {
 	pub html: String,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
-	/// True when this server accepts option notes and images in the form response.
+	/// True when this server accepts text option notes; image notes also require supportsNoteImages.
 	#[serde(rename = "supportsNotes", default, skip_serializing_if = "Option::is_none")]
 	pub supports_notes: Option<bool>,
+	/// True only when this form opts in to inline note images.
+	#[serde(rename = "supportsNoteImages", default, skip_serializing_if = "Option::is_none")]
+	pub supports_note_images: Option<bool>,
 }
 
 /// Close the dialog opened by request `targetId`; a later answer to it is ignored.
@@ -4865,12 +4868,10 @@ pub struct AnswersUiResponse {
 	pub answers: Vec<AskAnswer>,
 }
 
-/// A note on a selected enabled choice. The server derives question and option labels from the form.
+/// A submitted note on a selected enabled choice; the server supplies question and option labels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormOptionNote {
 	pub name: String,
-	pub question: String,
-	pub option: String,
 	pub value: String,
 	pub text: String,
 	#[serde(default, skip_serializing_if = "Option::is_none")]

@@ -5563,7 +5563,11 @@
 				},
 				"supportsNotes": {
 					"type": "boolean",
-					"description": "True when this server accepts option notes and images in the form response."
+					"description": "True when this server accepts text option notes; image notes also require supportsNoteImages."
+				},
+				"supportsNoteImages": {
+					"type": "boolean",
+					"description": "True only when this form opts in to inline note images."
 				}
 			},
 			"required": [
@@ -5916,12 +5920,6 @@
 				"name": {
 					"type": "string"
 				},
-				"question": {
-					"type": "string"
-				},
-				"option": {
-					"type": "string"
-				},
 				"value": {
 					"type": "string"
 				},
@@ -5937,12 +5935,10 @@
 			},
 			"required": [
 				"name",
-				"question",
-				"option",
 				"value",
 				"text"
 			],
-			"description": "A note on a selected enabled choice. The server derives question and option labels from the form."
+			"description": "A submitted note on a selected enabled choice; the server supplies question and option labels."
 		},
 		"DataUiResponse": {
 			"type": "object",

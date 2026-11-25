@@ -1630,7 +1630,9 @@ class FormUiRequest:
     html: str
     timeout: int | None = None
     supports_notes: bool | None = None
-    """True when this server accepts option notes and images in the form response."""
+    """True when this server accepts text option notes; image notes also require supportsNoteImages."""
+    supports_note_images: bool | None = None
+    """True only when this form opts in to inline note images."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1723,7 +1725,9 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
     questions: tuple[AskQuestion, ...] | None = None
     html: str | None = None
     supports_notes: bool | None = None
-    """True when this server accepts option notes and images in the form response."""
+    """True when this server accepts text option notes; image notes also require supportsNoteImages."""
+    supports_note_images: bool | None = None
+    """True only when this form opts in to inline note images."""
     target_id: str | None = None
     notify_type: NotifyType | None = None
     status_key: str | None = None
@@ -3197,6 +3201,7 @@ def parse_form_ui_request(value: object, path: str = "FormUiRequest") -> FormUiR
         html=required(payload, "html", decode_str, path),
         timeout=optional(payload, "timeout", decode_int, path),
         supports_notes=optional(payload, "supportsNotes", decode_bool, path),
+        supports_note_images=optional(payload, "supportsNoteImages", decode_bool, path),
     )
 
 
@@ -3298,6 +3303,7 @@ def parse_extension_ui_request(value: object, path: str = "ExtensionUiRequest") 
         questions=optional(payload, "questions", array(parse_ask_question), path),
         html=optional(payload, "html", decode_str, path),
         supports_notes=optional(payload, "supportsNotes", decode_bool, path),
+        supports_note_images=optional(payload, "supportsNoteImages", decode_bool, path),
         target_id=optional(payload, "targetId", decode_str, path),
         notify_type=optional(payload, "notifyType", _decode_notify_type, path),
         status_key=optional(payload, "statusKey", decode_str, path),

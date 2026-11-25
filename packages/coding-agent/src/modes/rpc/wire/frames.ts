@@ -216,8 +216,9 @@ export const frameDefs = {
 			"timeout?": "number.integer",
 			"supportsNotes?": doc(
 				"boolean",
-				"True when this server accepts option notes and images in the form response.",
+				"True when this server accepts text option notes; image notes also require supportsNoteImages.",
 			),
+			"supportsNoteImages?": doc("boolean", "True only when this form opts in to inline note images."),
 		},
 		"The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.",
 	),
@@ -284,13 +285,11 @@ export const frameDefs = {
 	FormOptionNote: doc(
 		{
 			name: "string",
-			question: "string",
-			option: "string",
 			value: "string",
 			text: "string",
 			"images?": "ImageContent[]",
 		},
-		"A note on a selected enabled choice. The server derives question and option labels from the form.",
+		"A submitted note on a selected enabled choice; the server supplies question and option labels.",
 	),
 	DataUiResponse: doc(
 		{
