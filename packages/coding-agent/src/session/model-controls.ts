@@ -17,14 +17,17 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	disabledProviderIds,
 	filterAvailableModelsByEnabledPatterns,
 	findScopedModelIndex,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveImplicitDefaultRole,
+	resolveModelOverride,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { buildServiceTierByFamily } from "../config/service-tier";
@@ -37,6 +40,7 @@ import {
 	automaticThinkingLevel,
 	clampAutoThinkingEffort,
 	clampThinkingLevelToCeiling,
+	modelSupportsEffortCeiling,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -45,6 +49,7 @@ import {
 import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { AgentKindModelChange } from "./agent-session-handle";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE, TEMPORARY_MODEL_CHANGE_ROLE } from "./session-entries";
@@ -146,6 +151,7 @@ export interface ModelControlsHost {
 	modelRegistry: ModelRegistry;
 	sessionManager: SessionManager;
 	providerSessionState: Map<string, ProviderSessionState>;
+	assertDispatchModel?: (model: Model) => void;
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
@@ -387,6 +393,44 @@ export class ModelControls {
 		return isCurrent?.() !== false && landed;
 	}
 
+	/** Select the first usable configured model for an authorized agent kind. */
+	async selectAgentModel(change: AgentKindModelChange, isCurrent: () => boolean): Promise<void> {
+		const { settings, modelRegistry, assertDispatchModel } = this.#host;
+		const offline = cfgOffline.get(settings);
+		const provider = this.#model?.provider;
+		const disabled = disabledProviderIds(settings);
+		const ceiling = this.#thinkingLevelCeiling;
+		const models = modelRegistry
+			.getAvailable()
+			.filter(
+				model =>
+					!disabled.has(model.provider) &&
+					(!offline || model.provider === provider) &&
+					(ceiling === undefined || modelSupportsEffortCeiling(model, ceiling)),
+			);
+		const lookup = { getAvailable: () => models };
+		let refused: unknown;
+		for (const pattern of change.patterns) {
+			const selection = resolveModelOverride([pattern], lookup, settings);
+			if (!selection.model) continue;
+			try {
+				assertDispatchModel?.(selection.model);
+			} catch (error) {
+				refused ??= error;
+				continue;
+			}
+			const level =
+				change.thinkingLevel ??
+				(selection.explicitThinkingLevel ? selection.thinkingLevel : change.defaultThinkingLevel);
+			if (!(await this.setModelTemporary(selection.model, level, undefined, "explicit", isCurrent))) {
+				throw new Error("Agent model change was superseded.");
+			}
+			return;
+		}
+		if (refused) throw refused;
+		throw new Error(`Agent kind "${change.kind}" has no available model for this session.`);
+	}
+
 	/**
 	 * Cycle to next/previous model.
 	 * Uses scoped models (from --models flag) if available, otherwise all available models.
@@ -589,10 +633,11 @@ export class ModelControls {
 		const wasAuto = this.#autoThinking;
 		this.#autoThinking = false;
 		this.#autoResolvedLevel = undefined;
-		const effectiveLevel = resolveThinkingLevelForModel(
-			this.#model,
-			clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
-		);
+		const model = this.#model;
+		const ceiling = this.#thinkingLevelCeiling;
+		const resolved = resolveThinkingLevelForModel(model, clampThinkingLevelToCeiling(model, level, ceiling));
+		const effectiveLevel =
+			resolved === ThinkingLevel.Off ? resolved : clampThinkingLevelToCeiling(model, resolved, ceiling);
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.

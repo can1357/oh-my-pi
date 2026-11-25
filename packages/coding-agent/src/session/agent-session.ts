@@ -322,7 +322,12 @@ import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener, WakeSources } from "./agent-session-events";
-import { type AgentViewSession, isLocalAgentSession } from "./agent-session-handle";
+import {
+	type AgentModelChange,
+	type AgentModelSelectionState,
+	type AgentViewSession,
+	isLocalAgentSession,
+} from "./agent-session-handle";
 import {
 	asyncJobSnapshot,
 	asyncJobTree,
@@ -2441,6 +2446,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelRegistry: this.#modelRegistry,
 			sessionManager: this.sessionManager,
 			providerSessionState: this.#providerSessionState,
+			assertDispatchModel: config.assertDispatchModel,
 			model: () => this.model,
 			sessionId: () => this.sessionId,
 			promptGeneration: () => this.#promptGeneration,
@@ -13243,6 +13249,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
 		await this.#models.setModelTemporary(model, thinkingLevel, options);
+	}
+
+	/** Apply an agent URL change using the same session-only controls as the model and effort pickers. */
+	async applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState> {
+		if (this.#isDisposed) throw new Error("Agent session is closed.");
+		if ("effort" in change) {
+			if (!this.model) throw new Error("Agent session has no active model.");
+			this.setThinkingLevel(change.effort);
+		} else {
+			const generation = this.#sessionGeneration;
+			await this.#models.selectAgentModel(change, () => !this.#isDisposed && generation === this.#sessionGeneration);
+		}
+		const model = this.model;
+		if (!model) throw new Error("Agent session has no active model.");
+		return { model: formatModelStringWithRouting(model), effort: this.configuredThinkingLevel() };
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
