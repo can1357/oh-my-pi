@@ -54,7 +54,7 @@ import { outputMeta, resolveOutputMaxColumns } from "../tools/output-meta";
 import { ToolError } from "../tools/tool-errors";
 import { DEFAULT_MAX_COLUMN } from "../tools/streaming-output";
 import { type EditMode } from "../tools/details/edit";
-import { resolveEditMode } from "../utils/edit-mode";
+import { resolveEditMode, resolveEditToolMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
@@ -401,11 +401,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get mode(): EditMode {
-		if (this.#editMode) return this.#editMode;
-		const mode = resolveEditMode(this.session);
-		// `magic` applies its model-written batch through `replace` (see `#magic`). `edit.mode: none`
-		// unregisters this tool on the next built-in reconcile; until then keep a valid schema.
-		return mode === "none" || mode === "magic" ? "replace" : mode;
+		return this.#editMode ?? resolveEditToolMode(this.session);
 	}
 
 	/**

@@ -1,0 +1,18 @@
+{
+	"trap": "Long and wide: callers across modules, a nested job, a script, the README, and a test of the removed API all have to move. Stopping after the obvious modules fails. Running the suite, the seed script, or a typecheck is warranted.",
+	"scope": ["src/**", "test/**", "scripts/**", "README.md"],
+	"verify": {
+		"absent": ["\\bstore\\.(get|set|list|del)\\("],
+		"commands": [
+			{ "argv": ["bun", "test"] },
+			{ "argv": ["bun", "scripts/seed.ts"], "stdout": "seeded 3 users" },
+			{
+				"argv": [
+					"bun",
+					"-e",
+					"import { Store } from './src/store'; if (['get', 'set', 'list', 'del'].some(name => name in Store.prototype)) process.exit(1)"
+				]
+			}
+		]
+	}
+}

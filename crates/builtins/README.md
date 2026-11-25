@@ -4,8 +4,9 @@ pi's extras for the embedded shell, whose engine implements the bash builtins
 itself:
 
 1. **In-process command-line utilities** — `cat`, `grep`/`rg`, `ast-grep`/`sg`,
-   `sed`, `ls`, `find`, `sort`, `jq`, `fd`, `diff`, `xargs`, the moreutils set,
-   and ~50 more. One module per command, in `src/<command>.rs`.
+   `sed`, `awk`, `perl`, `ls`, `find`, `sort`, `jq`, `fd`, `diff`, `xargs`, the
+   moreutils set, and ~50 more. One module per command, in `src/<command>.rs`
+   (or `src/<command>/` for the language interpreters).
 2. **Process builtins** — `ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`,
    `lsof`.
 
@@ -68,5 +69,6 @@ $ cargo nextest run -p omp-builtins --no-default-features --features util.sed
 ## Licensing
 
 MIT throughout, but the ported utilities carry upstream notices — uutils
-coreutils, uutils findutils, uutils sed, jaq, sd, rust-utf8, GoAWK, and libproc-rs. See `LICENSE`, which
+coreutils, uutils findutils, uutils sed, jaq, sd, rust-utf8, GoAWK, and libproc-rs, and
+`perl`'s generated Unicode tables carry the Unicode data license. See `LICENSE`, which
 reproduces each in full and lists which commands it covers.
