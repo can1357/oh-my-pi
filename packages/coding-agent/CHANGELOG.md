@@ -5,19 +5,16 @@
 ### Added
 
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- In a compiled omp with no `bun` on PATH, `bun` in an eval cell now runs bun instead of starting a headless omp, and an `omp` started from the bash tool or a JS or Python eval cell without a terminal needs `-p` ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
 
 - Removed several internal utility exports from the coding-agent package. Import `errorMessage` from `@oh-my-pi/pi-utils/type-guards`, `flattenLine` from `@oh-my-pi/pi-tui/text/sanitize`, and `fuzzyHits` from `@oh-my-pi/pi-coding-agent/utils/fuzzy`; import `stripInlineMarkdown` from `plan-mode/plan-toc`.
-- Removed `errorMessage` from `@oh-my-pi/pi-coding-agent/disasm/protocol`, `slash-commands/helpers/parse` and `subprocess/worker-runtime`; import it from `@oh-my-pi/pi-utils/type-guards` ([#20479](https://github.com/can1357/oh-my-pi/pull/20479) by [@H4vC](https://github.com/H4vC))
-- Removed `flattenLine` from `@oh-my-pi/pi-coding-agent/utils/render-utils`; import it from `@oh-my-pi/pi-tui/text/sanitize` ([#20484](https://github.com/can1357/oh-my-pi/pull/20484) by [@H4vC](https://github.com/H4vC))
-- Moved `fuzzyHits` to `@oh-my-pi/pi-coding-agent/utils/fuzzy` (was exported from `modes/view-model/overlays/model-browser` and `ui/overlays/panels/extension-list-model`), and removed `stripInlineMarkdown` from `ui/overlays/panels/plan-sections`; import it from `plan-mode/plan-toc` ([#20485](https://github.com/can1357/oh-my-pi/pull/20485) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed files and directories whose name starts with `..` being treated as outside their parent: a working directory under such a folder now counts as part of its checkout, and scoped settings, plugin roots and folder restrictions apply to it ([#20482](https://github.com/can1357/oh-my-pi/pull/20482) by [@H4vC](https://github.com/H4vC))
-- In a compiled omp with no `bun` on PATH, the command `bun` in an eval cell's `Bun.$`, `Bun.spawn` or `child_process` is now bun (the executable re-entered as bun), where Bun's shell previously resolved it to omp itself and started a headless agent with the cell's words as its prompt. An `omp` started from the bash tool or a JS or Python eval cell with a positional or piped prompt and no `-p` is now refused with an error; pass `-p` to run one on purpose ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Added
 
