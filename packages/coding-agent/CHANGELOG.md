@@ -22,6 +22,9 @@
 ### Fixed
 
 - `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` now apply to assistant replies, thinking, user prompts, extension messages, summaries and tool output, not only plain Markdown blocks ([#20468](https://github.com/can1357/oh-my-pi/issues/20468))
+### Fixed
+
+- Fixed rules from extension packages listed in a config overlay's `extensions:` (`PI_CONFIG_FILES`/`--config`) disappearing after the system prompt is rebuilt, e.g. after `setActiveTools`, `/new`, or `/clear` ([#20475](https://github.com/can1357/oh-my-pi/issues/20475))
 
 ## [19.2.0] - 2026-11-25
 
