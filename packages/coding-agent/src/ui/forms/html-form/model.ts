@@ -1,8 +1,9 @@
 /**
  * State of the HTML form dialog: which field is open (or the Submit row),
  * each field's answer, the highlighted row of a choice field, an open select
- * dropdown, the note being written, validation errors after a submit, and
- * whether the card is collapsed to one line.
+ * dropdown, the note being written, and whether the card is collapsed to one
+ * line. Answers breaking the form's rules are flagged as warnings only:
+ * Submit always sends what the user entered.
  *
  * The form is shown one field at a time inside its section ("group"): the
  * open field's group lists its legend, text and fields (the others folded
@@ -10,6 +11,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { batch, type KeyEvent, type Signal, signal, type TextEdit, untrack } from "@oh-my-pi/pi-tui";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { applyEdit, applyMaskedEdit } from "../../overlays/panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
 import { compactImageMarkers, formatVisionMarker } from "../../../modes/view-model/prompt/composer-attachments";
@@ -136,6 +138,11 @@ function lineStep(line: LineState, delta: 1 | -1): LineState {
 	return { text, cursor: Math.min(end + 1 + column, below === -1 ? text.length : below) };
 }
 
+/** Whether `value` leaves its field unanswered, as {@link fieldError} counts emptiness. */
+function isBlank(value: HtmlFormValue | undefined): boolean {
+	return value === undefined || (Array.isArray(value) ? value.length === 0 : String(value).trim() === "");
+}
+
 /** Whether `key` types a character (a dropdown's type-ahead), not a Ctrl/Alt/Super chord. */
 function isPrintable(key: KeyEvent): boolean {
 	return key.text !== undefined && key.text !== "" && !/(?:^|\+)(?:ctrl|alt|super)\+/.test(key.id);
@@ -162,8 +169,6 @@ export class HtmlFormModel {
 	/** Highlighted option of the open dropdown; undefined while it is closed. */
 	readonly dropdown = signal<number | undefined>(undefined);
 	readonly note = signal<NoteDraft | undefined>(undefined);
-	/** Errors shown since the last submit attempt. */
-	readonly errors = signal<ReadonlyMap<number, string>>(new Map());
 	readonly hidden = signal(false);
 	/**
 	 * Where the highlighted row sits when the open group is taller than the
@@ -314,6 +319,23 @@ export class HtmlFormModel {
 	}
 
 	/**
+	 * Why field `index`'s answer breaks the form's rules, shown as a warning; Submit sends it regardless.
+	 * An empty required field is flagged only once the highlight has moved past it.
+	 */
+	error(index: number): string | undefined {
+		if (!this.#reachable(index)) return undefined;
+		const value = this.value(index);
+		const active = this.active();
+		if (isBlank(value) && active !== "submit" && active <= index) return undefined;
+		return fieldError(this.field(index), value);
+	}
+
+	/** How many fields {@link error} flags, for the Submit row. */
+	errorCount(): number {
+		return this.fields.reduce((count, _, index) => (this.error(index) === undefined ? count : count + 1), 0);
+	}
+
+	/**
 	 * What choice field `index` shows folded: its options as pills (a disabled one only while it is
 	 * checked), its chosen Other answer, and the note on its answer (the first checked option's).
 	 */
@@ -321,23 +343,22 @@ export class HtmlFormModel {
 		const field = this.field(index);
 		const answer = this.answer(index);
 		if (field.kind !== "choice") return { pills: [], note: undefined };
-		const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 		const pills: AskPill[] = field.options.flatMap((option, at) =>
 			option.disabled && !answer.checked.has(at)
 				? []
 				: [
 						{
-							label: oneLine(spansText(option.label)) || option.value,
+							label: flattenLine(spansText(option.label)) || option.value,
 							chosen: answer.checked.has(at),
 							act: `pick:${index}:${at}`,
 						},
 					],
 		);
-		const typed = oneLine(answer.other.text);
+		const typed = flattenLine(answer.other.text);
 		if (field.other && answer.otherChosen && typed !== "")
 			pills.push({ label: `Other: ${typed}`, chosen: true, act: `open:${index}` });
 		const note = [...answer.checked].map(option => answer.notes.get(option)?.trim()).find(Boolean);
-		return { pills, note: note === undefined ? undefined : oneLine(note) };
+		return { pills, note: note === undefined ? undefined : flattenLine(note) };
 	}
 
 	/** `2 of 5 answered`, for forms of two or more named questions the keyboard reaches. */
@@ -348,23 +369,9 @@ export class HtmlFormModel {
 	}
 
 	#update(index: number, change: (answer: FieldAnswer) => FieldAnswer): void {
-		const before = untrack(() => this.value(index));
 		const answers = [...untrack(this.answers)];
 		answers[index] = change(answers[index]!);
 		this.answers.set(answers);
-		// Changing a field's value clears its shown error (the next submit checks it again).
-		const errors = untrack(this.errors);
-		if (
-			errors.has(index) &&
-			!Bun.deepEquals(
-				before,
-				untrack(() => this.value(index)),
-			)
-		) {
-			const next = new Map(errors);
-			next.delete(index);
-			this.errors.set(next);
-		}
 	}
 
 	/** Choose option `option` of a radio group or select; toggle it in a checkbox group. */
@@ -546,27 +553,11 @@ export class HtmlFormModel {
 		return out;
 	}
 
-	/** Validate every field; send when all pass, else show the errors and open the first invalid field. */
+	/** Send the answers as entered, rule breaks included (they were flagged, never blocking). */
 	submit(): void {
 		if (this.#done) return;
 		if (this.#pastes.length > 0) {
 			this.#submitAfterPastes = true;
-			return;
-		}
-		const errors = new Map<number, string>();
-		this.fields.forEach((field, index) => {
-			const error = fieldError(
-				field,
-				untrack(() => this.value(index)),
-			);
-			if (error) errors.set(index, error);
-		});
-		if (errors.size > 0) {
-			batch(() => {
-				this.errors.set(errors);
-				const first = [...errors.keys()].find(index => this.#reachable(index));
-				if (first !== undefined) this.#enter(first);
-			});
 			return;
 		}
 		this.#callbacks.onSubmit(this.data(), this.notes());
