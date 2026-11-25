@@ -208,6 +208,10 @@ export function normalizePathForComparison(inputPath: string): string {
  * candidate against several static roots can normalize each side once and
  * reuse the public helpers' containment semantics without repeating realpath
  * work.
+ *
+ * The comparison itself is lexical: it never resolves symlinks. Callers that
+ * want a purely lexical check may pass `path.resolve()`d paths instead, as long
+ * as both sides are prepared the same way.
  */
 export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
 	const relative = path.relative(normalizedRoot, normalizedCandidate);
