@@ -139,10 +139,14 @@ export function serializeEval(fn: string | ((...args: unknown[]) => unknown), ar
  */
 export function serializeEvalWithEnvelope(fn: string | ((...args: unknown[]) => unknown), args: unknown[]): string {
 	const inner = serializeEval(fn, args);
-	const expr = typeof fn === "string" ? `(0, eval)(${JSON.stringify(inner)})` : inner;
+	return wrapEvalEnvelope(typeof fn === "string" ? `(0, eval)(${JSON.stringify(inner)})` : inner);
+}
+
+/** Wrap an expression, evaluated as written, in the {@link serializeEvalWithEnvelope} envelope. */
+export function wrapEvalEnvelope(expression: string): string {
 	return `(() => {
 		try {
-			const __v = (${expr});
+			const __v = (${expression});
 			if (__v && typeof __v.then === "function") return { __ompPromise: true };
 			return { __ompOk: __v === undefined ? null : __v };
 		} catch (e) {

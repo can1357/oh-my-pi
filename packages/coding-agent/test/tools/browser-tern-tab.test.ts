@@ -9,6 +9,7 @@ import { TernError, TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/bro
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
+import { rejectionOf } from "../helpers/rejection";
 
 interface FakePage {
 	/** Event batches the `events` op hands out, one per poll. */
@@ -607,6 +608,28 @@ describe("TernTab", () => {
 			/page\.on\("request"\) is not supported on the Tern browser backend: .*tab\.requests\(\)/,
 		);
 		expect(() => tab.page.once("console", () => {})).toThrow(/tab\.console\(\)/);
+	});
+
+	it("polls a frame's predicate in that frame's page world and names the frame helper on timeout", async () => {
+		const fake = await startPage({ eventBatches: [], kit: { frameOf: () => "0.1" } });
+		const tab = await openTab(fake);
+		const frame = await tab.frame("#pay");
+		const before = fake.requests.length;
+		expect(String(await rejectionOf(frame.waitForFunction("window.paid", { timeout: 50, polling: 10 })))).toContain(
+			"frame.waitForFunction() timed out after 50ms",
+		);
+		const polls = fake.requests.slice(before).map(request => request.op);
+		expect(polls.length).toBeGreaterThan(0);
+		for (const op of polls) expect(op).toMatchObject({ op: "eval", world: "page", frame: "0.1" });
+		// A string holding a function is called with the extra arguments, and truthiness is decided where it runs:
+		// a value that cannot be copied out (here a cyclic object) comes back as `true`.
+		const sent = fake.requests.length;
+		const cyclic = "(n) => { const o = { n }; o.self = o; return n === 7 && o; }";
+		await rejectionOf(frame.waitForFunction(cyclic, { timeout: 50, polling: 10 }, 7));
+		const op = fake.requests[sent]?.op as { function: string; args: unknown[] };
+		expect(op.args).toEqual([7]);
+		const run = new Function(`return (${op.function}\n)`)() as (...args: unknown[]) => Promise<unknown>;
+		expect(await run(...op.args)).toEqual({ held: true, value: true });
 	});
 
 	it("names the Tern backend and the reason for helpers it cannot provide", async () => {

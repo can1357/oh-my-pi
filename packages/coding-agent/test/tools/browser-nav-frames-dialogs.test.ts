@@ -466,7 +466,36 @@ return { blocked, fast: blockedMs < 2000, answered: await tab.evaluate(() => glo
 				}),
 			),
 		).toBe("direct");
+		// The predicate runs in the frame's document: the top page has no `#out`.
+		expect(
+			valueOf(
+				await invoke({
+					action: "call",
+					name: "frames",
+					chain: [
+						{ method: "frame", args: ["#f"] },
+						{
+							method: "waitForFunction",
+							args: ["document.querySelector('#out')?.textContent", { timeout: 5_000 }],
+						},
+					],
+				}),
+			),
+		).toBe("direct");
 	}, 30_000);
+
+	test("waits a predicate out across a navigation and checks it on the page that loads", async () => {
+		const invoke = createHost();
+		await invoke({ action: "open", name: "predicate-nav", url: `${baseUrl}/one` });
+		// On the first page the predicate never settles, so the navigation always lands mid-check.
+		const result = await invoke({
+			action: "run",
+			name: "predicate-nav",
+			code: `await tab.evaluate("window.hang = true; setTimeout(() => { location.href = '/b'; }, 200); 0");
+				return await tab.waitForFunction("window.hang ? new Promise(() => {}) : document.body?.dataset.path", { timeout: 10_000 });`,
+		});
+		expect(valueOf(result)).toBe("/b");
+	});
 
 	test("observes controls inside iframes and acts on them by id", async () => {
 		const invoke = createHost();

@@ -382,6 +382,31 @@ describe("browser observe after an action", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"does not settle after a waitForFunction, which waits rather than acts",
+		async () => {
+			const pages = saveServer();
+			try {
+				const result = await runOnPage(
+					pages.url,
+					`
+						await tab.observe();
+						await tab.waitForFunction(() => true);
+						const sent = page.waitForRequest(request => request.url().endsWith("/hold"));
+						await tab.evaluate(() => startPoll());
+						await sent;
+						const names = ${NAMES};
+						return [names, await page.evaluate(() => document.body.dataset.late ?? "early")];
+					`,
+				);
+				expect(result).toEqual([["Save", "Hang"], "early"]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"excludes an earlier request in the same clock tick but waits for the action's request",
 		async () => {
 			const pages = saveServer();

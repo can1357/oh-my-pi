@@ -6,6 +6,7 @@ import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supe
 import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
+import { rejectionOf } from "../helpers/rejection";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const session: ToolSession = {
@@ -389,4 +390,47 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		expect(timeout?.name).toBe("ToolError");
 		expect(timeout?.message).toContain("tab.waitForText");
 	}, 60_000);
+
+	it("waits for a page predicate, resolves with its value, and reports a named timeout", async () => {
+		await call("evaluate", ["setTimeout(() => { window.__job = { status: 'done', result: 'EXP-1' }; }, 200), 0"]);
+		expect(
+			await call("waitForFunction", [
+				{ __omp_fn: "() => window.__job?.status === 'done' && window.__job.result" },
+				{ timeout: 10_000, polling: 20 },
+			]),
+		).toBe("EXP-1");
+		// A string holding a function (Python's only way to pass one) is called, not taken as a truthy value.
+		expect(await call("waitForFunction", ["() => window.__job?.result", { timeout: 5_000 }])).toBe("EXP-1");
+		expect(await call("waitForFunction", ["(n) => n * 2", { timeout: 5_000 }, 21])).toBe(42);
+		expect(String(await rejectionOf(call("waitForFunction", ["() => window.__never", { timeout: 150 }])))).toContain(
+			"tab.waitForFunction() timed out after 150ms",
+		);
+		// Truthiness is decided in the page: a value that cannot be copied out still ends the wait.
+		await call("evaluate", [
+			"setTimeout(() => { window.__cyclic = {}; window.__cyclic.self = window.__cyclic; }, 50), 0",
+		]);
+		expect(await call("waitForFunction", ["window.__cyclic", { timeout: 5_000 }])).toBe(true);
+		expect(await call("waitForFunction", ["Symbol('ready')", { timeout: 5_000 }])).toBe(true);
+		expect(await call("waitForFunction", ["1n", { timeout: 5_000 }])).toBe(true);
+		expect(String(await rejectionOf(call("waitForFunction", ["(() => { throw new Error('boom'); })()"])))).toContain(
+			"tab.waitForFunction() threw a JavaScript exception",
+		);
+		// Puppeteer's `polling: "raf"` is not a number of ms: it polls at the default interval, not in a tight loop.
+		await call("evaluate", ["window.__polls = 0"]);
+		await rejectionOf(
+			call("waitForFunction", ["() => { window.__polls++; return false; }", { timeout: 300, polling: "raf" }]),
+		);
+		expect(await call("evaluate", ["window.__polls"])).toBeLessThan(20);
+		// A condition or a sleep handed to `waitFor` names the call and the helper that waits for it.
+		const predicateError = String(await rejectionOf(call("waitFor", [{ __omp_fn: "() => true" }])));
+		expect(predicateError).toContain("tab.waitFor(fn) waits for a selector string");
+		expect(predicateError).toContain("tab.waitForFunction(fn");
+		const sleepError = String(await rejectionOf(call("waitFor", [1000])));
+		expect(sleepError).toContain("tab.waitFor(1000) waits for a selector string, not a number of milliseconds");
+		expect(sleepError).toContain("tab.waitForSelector(selector)");
+	});
+
+	it("calls a parenthesized function expression with its predicate arguments", async () => {
+		expect(await call("waitForFunction", ["((n) => n * 2)", { timeout: 5_000 }, 21])).toBe(42);
+	});
 });
