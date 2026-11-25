@@ -13,43 +13,7 @@
  * ```
  */
 import { createTerminalDriver, type ProcessTerminalDriver, type TerminalDriverOptions } from "../driver";
-
-type Listener = (...args: never[]) => void;
-
-class Emitter {
-	readonly #listeners = new Map<string, Set<Listener>>();
-	on(event: string, listener: Listener): this {
-		let set = this.#listeners.get(event);
-		if (!set) {
-			set = new Set();
-			this.#listeners.set(event, set);
-		}
-		set.add(listener);
-		return this;
-	}
-	off(event: string, listener: Listener): this {
-		this.#listeners.get(event)?.delete(listener);
-		return this;
-	}
-	emit(event: string, ...args: unknown[]): void {
-		for (const listener of this.#listeners.get(event) ?? []) (listener as (...values: unknown[]) => void)(...args);
-	}
-}
-
-class MemoryStdin extends Emitter {
-	readonly isTTY = true;
-	isRaw = false;
-	setRawMode(mode: boolean): this {
-		this.isRaw = mode;
-		return this;
-	}
-	resume(): this {
-		return this;
-	}
-	pause(): this {
-		return this;
-	}
-}
+import { Emitter, MemoryStdin } from "./memory-terminal";
 
 class MemoryStdout extends Emitter {
 	columns = 80;

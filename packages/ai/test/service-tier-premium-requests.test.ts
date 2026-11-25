@@ -6,6 +6,7 @@ import {
 	realizesPriorityServiceTier,
 	resolveModelServiceTier,
 	serviceTierFamily,
+	serviceTierOffersByAccount,
 	shouldSendServiceTier,
 } from "@oh-my-pi/pi-ai/types";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -62,6 +63,37 @@ describe("serviceTierFamily", () => {
 		expect(serviceTierFamily(orGoogle)).toBe("google");
 		expect(serviceTierFamily(orAnthropic)).toBe("anthropic");
 		expect(serviceTierFamily(m("openrouter", "openai-completions", "z-ai/glm-4.7"))).toBeUndefined();
+	});
+});
+
+describe("serviceTierOffersByAccount", () => {
+	it("judges each account by its own advertised tiers, not the model's union", () => {
+		const model = {
+			...codex,
+			serviceTiers: ["priority", "ultrafast"],
+			accountAccess: {
+				"acct-pro": { serviceTiers: ["priority", "ultrafast"] },
+				"acct-plus": { serviceTiers: ["priority"] },
+				// No list reported: keeps `/fast`, never Ultrafast.
+				"acct-silent": {},
+			},
+		};
+
+		expect(serviceTierOffersByAccount(model, "ultrafast")).toEqual({
+			"acct-pro": true,
+			"acct-plus": false,
+			"acct-silent": false,
+		});
+		expect(serviceTierOffersByAccount(model, "priority")).toEqual({
+			"acct-pro": true,
+			"acct-plus": true,
+			"acct-silent": true,
+		});
+	});
+
+	it("has no verdict when discovery recorded no per-account tier list", () => {
+		expect(serviceTierOffersByAccount({ ...codex, accountAccess: { a: {}, b: {} } }, "ultrafast")).toBeUndefined();
+		expect(serviceTierOffersByAccount(codex, "ultrafast")).toBeUndefined();
 	});
 });
 

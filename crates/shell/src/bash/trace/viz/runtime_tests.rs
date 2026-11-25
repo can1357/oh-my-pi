@@ -62,6 +62,21 @@ fn rows(p: &Value) -> Vec<(String, &Value)> {
 		.collect()
 }
 
+#[test]
+fn zsh_child_words_show_source_text_not_token_bytes() {
+	let (trace, stdout) = run_native_shell("zsh -c 'v=$(echo x)\nprintf %s -m1 \"a b\" \"$v\"'");
+	assert_eq!(stdout, b"-m1a bx");
+	let shown = rows(&present(&trace, &Options::default()))
+		.into_iter()
+		.map(|(text, _)| text)
+		.collect::<Vec<_>>()
+		.join("\n");
+	assert!(!shown.contains('\u{fffd}'), "{shown}");
+	for expected in ["v = $(echo x)", "printf %s -m1 \"a b\" \"$v\""] {
+		assert!(shown.contains(expected), "missing {expected}: {shown}");
+	}
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsing() {
 	// A command still streaming in: nothing has run, its last line is

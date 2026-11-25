@@ -2,8 +2,9 @@
  * The tray: on a native host whose `hello` advertises `tray`, a row of live
  * cards over the composer, one per running subagent and background job, in
  * place of the HUD pill. The status row above it is its header (its caption
- * while the main agent is idle). Tern owns selection, order, paging and motion; this module owns the
- * data, the words, and which card is looked at closer.
+ * while the main agent is idle). Tern owns selection, paging and motion; this module owns the
+ * data, the words, the cards' order (which Tern's cards, scrubber and dots all follow), and which
+ * card is looked at closer.
  *
  * {@link buildTrayItems} turns plain inputs into flat item faces; the
  * describers turn faces into nodes; {@link Tray} keeps what the faces need to
@@ -11,17 +12,20 @@
  * counter) and memoises each card's node by its face, so an unchanged card is
  * the same node reference and the reconciler skips it.
  */
+import * as path from "node:path";
 import { type TspTrayMain, type TspTrayStatus, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { hubModel } from "../ui/overlays/pickers/agent-hub-model";
-import type {
-	TrayAgentDetail,
-	TrayAgentItem,
-	TrayDoneEntry,
-	TrayDoneItem,
-	TrayEvent,
-	TrayItem,
-	TrayJobItem,
-	TrayModel,
+import {
+	type TrayAgentDetail,
+	type TrayAgentItem,
+	type TrayDoing,
+	type TrayDoneEntry,
+	type TrayDoneItem,
+	type TrayEvent,
+	type TrayItem,
+	type TrayJobItem,
+	type TrayModel,
+	trayDoingText,
 } from "../ui/dock";
 import { formatCost } from "./view-model/overlays/agent-hub-renderer";
 import { type AgentRecordLike, MAIN_AGENT_ID } from "../registry/agent-hub-types";
@@ -153,7 +157,8 @@ export class TrayMemory {
 	/**
 	 * Each agent's place, pinned the first time the tray sees it: its creation
 	 * time (spawn order; an agent restored from disk by when it was made), then
-	 * the order it was seen in. Nothing that happens to an agent later moves it.
+	 * the order it was seen in. Nothing that happens to an agent later moves it
+	 * within its group (live or settled, see {@link buildTrayItems}).
 	 */
 	readonly places = new Map<string, { at: number; seq: number }>();
 	#seq = 0;
@@ -259,40 +264,59 @@ function callDetail(intent: string | undefined, args: string | undefined, argsKe
 	return "";
 }
 
+/** A card line that names no call. */
+function plainDoing(text: string): TrayDoing {
+	return { tool: "", text, added: 0, removed: 0, callFailed: false };
+}
+
+/** A tool's name as a card's verb: `edit` → `Edit`, `ast_grep` → `Ast grep`. */
+function callVerb(tool: string): string {
+	const words = line(tool.replace(/_+/g, " "), TRUNCATE_LENGTHS.SHORT);
+	return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** What a call acts on, for a card: the file names a path argument lists, else the argument. */
+function callSubject(args: string | undefined, argsKey: string | undefined): string {
+	if (!args) return "";
+	const text = replaceTabs(args);
+	const shown =
+		argsKey === "path" || argsKey === "file_path"
+			? text
+					.split(", ")
+					.map(file => path.basename(file) || file)
+					.join(", ")
+			: shortenToolArgumentPaths(text, argsKey);
+	return previewLine(shown, TRUNCATE_LENGTHS.CONTENT);
+}
+
+/** A call as a card's line; a finished one carries the lines it changed, or its failure. */
+function callDoing(
+	tool: string,
+	args: string | undefined,
+	argsKey: string | undefined,
+	outcome?: { readonly added?: number; readonly removed?: number; readonly isError?: boolean },
+): TrayDoing {
+	return {
+		tool: callVerb(tool),
+		text: callSubject(args, argsKey),
+		added: outcome?.added ?? 0,
+		removed: outcome?.removed ?? 0,
+		callFailed: outcome?.isError === true,
+	};
+}
+
 /**
- * What a running agent is doing: the call it runs, else what its model is producing (a call it is
- * writing, the newest line of its prose, its reasoning), else its last call, else a word.
+ * What a running agent is doing: the call it runs, else the call it is writing, else its last
+ * call (reasoning and prose between calls leave it shown); before its first call, a word.
  */
-function runningDoing(
-	progress: AgentProgress | undefined,
-	activity: string | undefined,
-): { tool: string; text: string } {
+function runningDoing(progress: AgentProgress | undefined, activity: string | undefined): TrayDoing {
 	const current = progress?.currentTool;
-	if (current) {
-		return {
-			tool: line(current, TRUNCATE_LENGTHS.SHORT),
-			text: callDetail(progress.currentToolIntent, progress.currentToolArgs, progress.currentToolArgsKey),
-		};
-	}
+	if (current) return callDoing(current, progress.currentToolArgs, progress.currentToolArgsKey);
 	const streaming = progress?.streaming;
-	if (streaming?.kind === "call") {
-		return {
-			tool: line(streaming.tool, TRUNCATE_LENGTHS.SHORT),
-			text: callDetail(streaming.intent, streaming.args, streaming.argsKey),
-		};
-	}
-	if (streaming?.kind === "thinking") return { tool: "", text: "Thinking" };
-	if (streaming?.kind === "text") {
-		const said = plainLine(progress?.recentOutput ?? []);
-		if (said) return { tool: "", text: said };
-	}
+	if (streaming?.kind === "call") return callDoing(streaming.tool, streaming.args, streaming.argsKey);
 	const recent = progress?.recentTools[0];
-	if (recent)
-		return {
-			tool: line(recent.tool, TRUNCATE_LENGTHS.SHORT),
-			text: callDetail(recent.intent, recent.args, recent.argsKey),
-		};
-	return { tool: "", text: activity ? line(activity) : "Thinking" };
+	if (recent) return callDoing(recent.tool, recent.args, recent.argsKey, recent);
+	return plainDoing(activity ? line(activity) : "Thinking");
 }
 
 function agentDoing(
@@ -300,22 +324,22 @@ function agentDoing(
 	session: ObservableSession | undefined,
 	ref: AgentRecordLike | undefined,
 	job: AsyncJob | undefined,
-): { tool: string; text: string } {
+): TrayDoing {
 	const progress = session?.progress;
 	switch (status) {
 		case "queued":
-			return { tool: "", text: "Queued" };
+			return plainDoing("Queued");
 		case "running":
 			// A revived agent's observer snapshot is its previous run's; the registry's gist is current.
 			return runningDoing(session?.status === "active" ? progress : undefined, ref?.activity);
 		case "done":
-			return { tool: "", text: outcomeLine(session, ref) || "Done" };
+			return plainDoing(outcomeLine(session, ref) || "Done");
 		case "failed": {
 			const error = job?.errorText ?? progress?.retryFailure?.errorMessage ?? "Failed";
-			return { tool: "", text: line(firstLine(error)) };
+			return plainDoing(line(firstLine(error)));
 		}
 		default:
-			return { tool: "", text: "Stopped" };
+			return plainDoing("Stopped");
 	}
 }
 
@@ -471,7 +495,7 @@ function agentItem(
 		name,
 		type,
 		waiting ? "waiting" : status,
-		`${doing.tool ? `${doing.tool} · ` : ""}${doing.text}`,
+		trayDoingText(doing),
 		tools !== undefined ? formatCount("tool", tools) : "",
 	];
 	return {
@@ -484,8 +508,7 @@ function agentItem(
 		acted: remembered.acted,
 		waiting,
 		unread: input.unread(id),
-		tool: doing.tool,
-		text: doing.text,
+		...doing,
 		type,
 		model: isLive(status) ? agentModel(session, ref) : servedModel(session, ref),
 		tools,
@@ -574,8 +597,7 @@ function finishedAgentItem(
 		acted,
 		waiting: false,
 		unread: input.unread(id),
-		tool: "",
-		text,
+		...plainDoing(text),
 		type,
 		model: servedModel(session, ref),
 		tools,
@@ -737,12 +759,14 @@ export interface TrayBuild {
 }
 
 /**
- * The tray's cards in wire order: agents, then the session's background jobs
- * by start time, then the done card. Every card keeps its place for its life:
- * agents stand in their pinned places (see {@link TrayMemory.places}), never
- * by activity, so a new card only appends after the last of its kind. While
- * anything is live the done card stands for every finished agent without a
- * card. While nothing is (quiet) finished agents are not grouped: the newest
+ * The tray's cards in wire order: live cards (queued, running), then settled
+ * ones (done, failed, stopped) still waiting to be delivered or dismissed,
+ * then the done card. Within each group agents come first, in their pinned
+ * places (see {@link TrayMemory.places}), never by activity, then the
+ * session's background jobs by start time; so a new card only appends after
+ * the last of its kind, and settling moves a card once, into its place among
+ * the settled. While anything is live the done card stands for every finished
+ * agent without a card. While nothing is (quiet) finished agents are not grouped: the newest
  * {@link TRAY_QUIET_CARD_LIMIT} each get a settled card, and the done card
  * stands only for the earlier ones and dismissed ones. A card keeps its key
  * across the switch.
@@ -782,11 +806,13 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild 
 		const item = jobItem(input, memory, job);
 		if (item) jobs.push(item);
 	}
-	const quiet = ![...agents, ...jobs].some(item => isLive(item.status) || item.status === "failed");
-	if (!input.showAgents) return { items: jobs, quiet };
+	const cards: TrayItem[] = [...agents, ...jobs];
+	const quiet = !cards.some(item => isLive(item.status) || item.status === "failed");
+	const grouped = [...cards.filter(item => isLive(item.status)), ...cards.filter(item => !isLive(item.status))];
+	if (!input.showAgents) return { items: grouped, quiet };
 	if (!quiet) {
 		const done = doneItem(input, memory, finishedRefs(input, memory, carded), sessions, false);
-		return { items: [...agents, ...jobs, ...(done ? [done] : [])], quiet };
+		return { items: done ? [...grouped, done] : grouped, quiet };
 	}
 	// Quiet: every finished agent, carded or not, in its place; the newest get cards of their own,
 	// the earlier and the dismissed ones go to the done card.
@@ -796,14 +822,15 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild 
 	].sort((a, b) => byPlace(place(a.id), place(b.id)));
 	const shown = finished.filter(agent => !memory.dismissed.has(`agent:${agent.id}`));
 	const own = new Set(shown.slice(-TRAY_QUIET_CARD_LIMIT).map(agent => agent.id));
-	const cards: TrayItem[] = [];
+	const settled: TrayItem[] = [];
 	const rest: AgentRecordLike[] = [];
 	for (const agent of finished) {
-		if (own.has(agent.id)) cards.push(finishedAgentItem(input, memory, agent.id, sessions.get(agent.id), agent.ref));
+		if (own.has(agent.id))
+			settled.push(finishedAgentItem(input, memory, agent.id, sessions.get(agent.id), agent.ref));
 		else if (agent.ref) rest.push(agent.ref);
 	}
 	const done = doneItem(input, memory, rest, sessions, true);
-	return { items: [...cards, ...jobs, ...(done ? [done] : [])], quiet };
+	return { items: [...settled, ...jobs, ...(done ? [done] : [])], quiet };
 }
 
 /** Whether two builds show the same cards, in the same order, with the same faces (flat, compared field by field). */

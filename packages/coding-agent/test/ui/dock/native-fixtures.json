@@ -1097,26 +1097,57 @@
 				]
 			},
 			{
-				"k": "text",
+				"k": "row",
 				"key": "doing",
 				"p": {
-					"role": "omp.tray.doing",
-					"spans": [
-						{
-							"s": "dim",
-							"t": "grep"
-						},
-						{
-							"s": "dim",
-							"t": " · "
-						},
-						{
-							"t": "greet("
+					"align": "center",
+					"gap": "sm",
+					"role": "omp.tray.doing"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "call",
+						"p": {
+							"grow": 1,
+							"role": "omp.tray.call",
+							"shrink": 1,
+							"spans": [
+								{
+									"s": "strong",
+									"t": "Edit"
+								},
+								{
+									"t": " greet.ts"
+								}
+							],
+							"truncate": "end",
+							"wrap": "none"
 						}
-					],
-					"truncate": "end",
-					"wrap": "none"
-				}
+					},
+					{
+						"k": "text",
+						"key": "outcome",
+						"p": {
+							"role": "omp.tray.outcome",
+							"shrink": 0,
+							"spans": [
+								{
+									"s": "success mono",
+									"t": "+42"
+								},
+								{
+									"t": " "
+								},
+								{
+									"s": "error mono",
+									"t": "−12"
+								}
+							],
+							"wrap": "none"
+						}
+					}
+				]
 			},
 			{
 				"k": "row",

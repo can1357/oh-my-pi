@@ -10,7 +10,8 @@
  * Segments shown elsewhere stay out of the extras: the model chip, the
  * context meter and usage (context, cost), Tern's pane header (path), the
  * tab title (session name, PR), the HUD (subagents), the editor (vim) and
- * the brand (pi).
+ * the brand (pi). The branch and changes (git) come from Tern's own
+ * composer-bar chip while it shows the checkout, when the facts carry none.
  */
 import { type Accessor, computed, For, type JSXNode, Show } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";

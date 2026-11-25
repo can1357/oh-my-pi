@@ -1,0 +1,67 @@
+# Perl corpus: modules. Format and regeneration: crates/builtins/src/perl/tests.rs.
+ansi-color	use Term::ANSIColor qw(color colored); delete @ENV{qw(ANSI_COLORS_DISABLED NO_COLOR)}; print unpack('H*',color('bold red')),'|',unpack('H*',colored('x','green')),"\n";	1b5b313b33316d|1b5b33326d781b5b306d␊
+base	package Parent; sub value {11} package Child; use base 'Parent'; package main; print Child->value(),"\n";	11␊
+base64-decode	use MIME::Base64 qw(decode_base64); print unpack('H*',decode_base64('YQBi')),"\n";	610062␊
+base64-encode	use MIME::Base64 qw(encode_base64); print encode_base64("a\0b",'');	YQBi
+basename-fileparse	use File::Basename qw(fileparse); print join('|',fileparse('one/two.tar.gz',qr/\.tar\.gz/)),"\n";	two|one/|.tar.gz␊
+basename	use File::Basename qw(basename dirname); print basename('/a/b.txt','.txt'),'|',dirname('/a/b.txt'),"\n";	b|/a␊
+carp-confess	use Carp qw(confess); sub wrapper {confess 'trace'} eval {wrapper()}; print $@ =~ /trace/ && $@ =~ /wrapper/ ? "matches\n" : "missing\n";	matches␊
+carp-location	use Carp qw(croak);␊sub fail { croak "oops" }␊eval {fail()};␊print +(split /\n/, $@)[0],"\n";	oops at carp-location.pl line 2.␊
+carp	use Carp qw(carp); sub wrapper {carp 'careful'} wrapper();		stderr=careful at carp.pl line 1.␊␉main::wrapper() called at carp.pl line 1␊
+constant-hash	use constant {X=>3,Y=>5}; print X*Y,"\n";	15␊
+constant-list	use constant COLORS=>qw(red blue); print join('|',COLORS),"\n";	red|blue␊
+constant-scalar	use constant N=>7; print N+4,"\n";	11␊
+croak	use Carp qw(croak); sub wrapper {croak 'failed'} eval {wrapper()}; print $@;	failed at croak.pl line 1.␊␉main::wrapper() called at croak.pl line 1␊␉eval {...} called at croak.pl line 1␊
+cwd-chdir	use Cwd qw(getcwd); my $before=getcwd(); mkdir 'child' or die $!; chdir('child') or die $!; print getcwd() eq "$before/child"?1:0,"\n";	1␊
+cwd-relative	use Cwd qw(getcwd abs_path); my $cwd=getcwd(); mkdir 'child' or die $!; my $child=abs_path('child'); print $child eq "$cwd/child" ? 1:0,"\n";	1␊
+dumper-sorted	use Data::Dumper; local $Data::Dumper::Sortkeys=1; local $Data::Dumper::Indent=1; print Dumper({z=>2,a=>[1,3]});	$VAR1 = {␊  'a' => [␊    1,␊    3␊  ],␊  'z' => 2␊};␊
+dumper-terse	use Data::Dumper; my $d=Data::Dumper->new([[1,'x']]); print $d->Terse(1)->Indent(0)->Dump(),"\n";	[1,'x']␊
+exporter-tags	use lib "."; use Tagged qw(:both); print alpha(),"|",beta(),"\n";	3|7␊	file:Tagged.pm=package Tagged; use Exporter "import"; our @EXPORT_OK=qw(alpha beta); our %EXPORT_TAGS=(both=>[qw(alpha beta)]); sub alpha {3} sub beta {7} 1;␊
+file-path	use File::Path qw(make_path remove_tree); make_path('x/y/z'); print -d 'x/y/z'?1:0,'|'; remove_tree('x'); print -e 'x'?1:0,"\n";	1|0␊
+file-temp-dir	use File::Temp qw(tempdir); my $p=tempdir(DIR=>'.',CLEANUP=>1); print -d $p?1:0,"\n";	1␊
+file-temp	use File::Temp qw(tempfile); my ($f,$p)=tempfile(DIR=>'.',UNLINK=>1); print {$f} 'payload'; seek $f,0,0; print scalar <$f>,"\n";	payload␊
+filespec-canonpath	use File::Spec; print File::Spec->canonpath('a//./b///c'),"\n";	a/b/c␊
+filespec-catfile	use File::Spec; print File::Spec->catfile('a','b','c.txt'),"\n";	a/b/c.txt␊
+filespec-relative	use File::Spec; print File::Spec->abs2rel('/tmp/a/c.txt','/tmp/a/b'),"\n";	../c.txt␊
+getopt-long-repeat	use Getopt::Long; local @ARGV=('--item=a','--item=b','--no-verbose'); GetOptions('item=s@'=>\my @i,'verbose!'=>\my $v) or die; print "@i|$v\n";	a b|0␊
+getopt-long	use Getopt::Long; local @ARGV=('--count','4','--verbose','positional'); GetOptions('count=i'=>\my $n,'verbose!'=>\my $v) or die; print "$n|$v|@ARGV\n";	4|1|positional␊
+getopt-std	use Getopt::Std; local @ARGV=('-ab','-f','name','rest'); my %o; getopts('abf:',\%o); print "$o{a}|$o{b}|$o{f}|@ARGV\n";	1|1|name|rest␊
+hires-can	use Time::HiRes (); print Time::HiRes->can('gettimeofday')?1:0,"\n";	1␊
+hires-timestamp	use Time::HiRes qw(gettimeofday); my ($secs,$micros)=gettimeofday(); print $secs>0 && $micros>=0 && $micros<1000000?1:0,"\n";	1␊
+hires-use	use Time::HiRes qw(time); printf "%d\n", time()>0;	1␊
+json-booleans	use JSON::PP; print encode_json([JSON::PP::true,JSON::PP::false]),"\n";	[true,false]␊
+json-canonical	use JSON::PP; my $j=JSON::PP->new->canonical; print $j->encode({z=>1,a=>[2,3]}),"\n";	{"a":[2,3],"z":1}␊
+json-decode	use JSON::PP qw(decode_json); my $d=decode_json('{"v":[7,"hi",null]}'); print "$d->{v}[0]|$d->{v}[1]|",defined($d->{v}[2])?1:0,"\n";	7|hi|0␊
+list-any-all	use List::Util qw(any all none notall); print join('|',map {$_?1:0} scalar(any {$_>2} 1,2,3),scalar(all {$_>0} 1,2,3),scalar(none {$_<0} 1,2,3),scalar(notall {$_>2} 1,2,3)),"\n";	1|1|1|1␊
+list-first	use List::Util qw(first); print first {$_>4} 1,9,11;	9
+list-minmax	use List::Util qw(min max minstr maxstr); print join('|',min(2,10,-1),max(2,10,-1),minstr(qw(2 10)),maxstr(qw(2 10))),"\n";	-1|10|10|2␊
+list-pairmap	use List::Util qw(pairmap); print join('|',pairmap {"$a=$b"} a=>1,b=>2),"\n";	a=1|b=2␊
+list-pairs	use List::Util qw(pairkeys pairvalues); print join('|',pairkeys(a=>1,b=>2)),'|',join('|',pairvalues(a=>1,b=>2)),"\n";	a|b|1|2␊
+list-reduce	use List::Util qw(reduce); print reduce {$a*$b} 2,3,4;	24
+list-sum	use List::Util qw(sum sum0); print sum(1,4,9),'|',defined(sum())?1:0,'|',sum0(),"\n";	14|0|0␊
+list-uniq	use List::Util qw(uniq); print join('|',uniq qw(x x z x y z)),"\n";	x|z|y␊
+local-time	use Time::Local qw(timegm timelocal); $ENV{TZ}='UTC'; print timegm(0,0,0,1,0,2000),'|',timelocal(0,0,0,1,0,2000),"\n";	946684800|946684800␊
+md5-object	use Digest::MD5; my $d=Digest::MD5->new; $d->add('a','bc'); print $d->hexdigest,"\n";	900150983cd24fb0d6963f7d28e17f72␊
+md5	use Digest::MD5 qw(md5_hex); print md5_hex('abc'),"\n";	900150983cd24fb0d6963f7d28e17f72␊
+parent-file	use lib "."; package Child; use parent "Ancestor"; package main; print Child->value(),"\n";	14␊	file:Ancestor.pm=package Ancestor; sub value {14} 1;␊
+parent	package Parent; sub value {7} package Child; use parent -norequire,'Parent'; package main; print Child->value(),"\n";	7␊
+posix-fmod	use POSIX qw(fmod); print fmod(-7.5,2),"\n";	-1.5␊
+posix-round	use POSIX qw(floor ceil); print join('|',floor(2.5),ceil(2.5),floor(-2.5),ceil(-2.5)),"\n";	2|3|-3|-2␊
+posix-strftime	use POSIX qw(strftime tzset); $ENV{TZ}='UTC'; tzset(); print strftime('%Y-%m-%d %H:%M:%S',localtime(946684800)),"\n";	2000-01-01 00:00:00␊
+scalar-blessed	use Scalar::Util qw(blessed reftype); my $x=bless [],'Box'; print blessed($x),'|',reftype($x),"\n";	Box|ARRAY␊
+scalar-dualvar	use Scalar::Util qw(dualvar isdual); my $x=dualvar(7,'seven'); print $x+1,"|$x|",isdual($x)?1:0,"\n";	8|seven|1␊
+scalar-looks-number	use Scalar::Util qw(looks_like_number); print join('|',map {looks_like_number($_)?1:0} '3','2e+2','00','5abc','0x12','Inf','NaN',''),"\n";	1|1|1|0|0|1|1|0␊
+scalar-refaddr	use Scalar::Util qw(refaddr); my $a=[]; my $b=$a; my $c=[]; print refaddr($a)==refaddr($b)?1:0,'|',refaddr($a)==refaddr($c)?1:0,"\n";	1|0␊
+scalar-weaken	use Scalar::Util qw(weaken isweak); my $x=[]; my $r=$x; weaken($r); print isweak($r)?1:0,'|'; undef $x; print defined($r)?1:0,"\n";	1|0␊
+sha-object	use Digest::SHA; my $d=Digest::SHA->new(256); $d->add('a','bc'); print $d->hexdigest,"\n";	ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad␊
+sha1	use Digest::SHA qw(sha1_hex); print sha1_hex('abc'),"\n";	a9993e364706816aba3e25717850c26c9cd0d89d␊
+sha256	use Digest::SHA qw(sha256_hex); print sha256_hex('abc'),"\n";	ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad␊
+storable-alias	use Storable qw(dclone); my $x=[]; my $y=dclone([$x,$x]); push @{$y->[0]},5; print scalar(@$x),'|',scalar(@{$y->[1]}),"\n";	0|1␊
+storable-clone	use Storable qw(dclone); my $x={a=>[1,2]}; my $y=dclone($x); $y->{a}[0]=3; print "$x->{a}[0]|$y->{a}[0]\n";	1|3␊
+strict-disabled	use strict; {no strict 'vars'; $x=9} print "$main::x\n";	9␊
+strict-vars	use strict; my $x=7; print "$x\n";	7␊
+text-wrap	use Text::Wrap; local $Text::Wrap::columns=10; print Text::Wrap::wrap('> ','  ','one two three four five'),"\n";	> one two␊  three␊  four␊  five␊
+warnings-disabled	use warnings; no warnings 'uninitialized'; my $x; print "<$x>\n";	<>␊
+warnings-fatal	use warnings FATAL=>'uninitialized'; my $x; print "<$x>\n";		stderr=Use of uninitialized value $x in concatenation (.) or string at warnings-fatal.pl line 1.␊	status=255
+warnings-numeric	use warnings; my $x='go'; print $x+0,"\n";	0␊	stderr=Argument "go" isn't numeric in addition (+) at warnings-numeric.pl line 1.␊
+warnings-uninitialized	use warnings; my $x; print "<$x>\n";	<>␊	stderr=Use of uninitialized value $x in concatenation (.) or string at warnings-uninitialized.pl line 1.␊
