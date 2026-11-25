@@ -64,9 +64,11 @@ async function boot(): Promise<Harness> {
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.keys.setRuntime("openai", "openai-secret");
 	storage.keys.setRuntime("openrouter", "openrouter-secret");
+	storage.keys.setRuntime("xai", "xai-secret");
 	const direct = transcriptionModel("openai", "whisper-1");
 	const routed = transcriptionModel("openrouter", "openai/whisper-large-v3");
 	const local = transcriptionModel("local", "whisper-small", "local-inference", "local://inference");
+	const xai = transcriptionModel("xai", "grok-voice-transcribe-2.0", "xai-stt", "https://api.x.ai/v1");
 	const upstream: UpstreamRequest[] = [];
 	const fetchImpl: FetchImpl = async (input, init) => {
 		if (!(init?.body instanceof FormData)) throw new Error("Expected upstream multipart body");
@@ -93,6 +95,7 @@ async function boot(): Promise<Harness> {
 			if (id === direct.id || id === `openai/${direct.id}`) return direct;
 			if (id === routed.id || id === `openrouter/${routed.id}`) return routed;
 			if (id === local.id || id === `local/${local.id}`) return local;
+			if (id === xai.id || id === `xai/${xai.id}`) return xai;
 			return undefined;
 		},
 		version: "test",
@@ -220,6 +223,29 @@ describe("auth-gateway POST /v1/audio/transcriptions", () => {
 		});
 		expect(response.status).toBe(400);
 		expect(await response.json()).toMatchObject({ error: { code: 400, type: "invalid_request_error" } });
+		expect(harness.upstream).toHaveLength(0);
+	});
+
+	it("answers xai-stt option rejections as client errors without upstream dispatch", async () => {
+		harness = await boot();
+		const cases: Array<[field: string, value: string, message: string]> = [
+			["prompt", "Names", "xai-stt does not support prompt"],
+			["temperature", "0.2", "xai-stt does not support temperature"],
+			["timestamp_granularities[]", "segment", "xai-stt does not support segment timestamps"],
+		];
+		for (const [field, value, message] of cases) {
+			const form = new FormData();
+			form.append("model", "xai/grok-voice-transcribe-2.0");
+			form.append("file", new File([AUDIO], "speech.wav", { type: "audio/wav" }));
+			form.append(field, value);
+			const response = await fetch(`${harness.url}/v1/audio/transcriptions`, {
+				method: "POST",
+				headers: gatewayHeaders(),
+				body: form,
+			});
+			expect(response.status).toBe(400);
+			expect(await response.json()).toMatchObject({ error: { code: 400, type: "invalid_request_error", message } });
+		}
 		expect(harness.upstream).toHaveLength(0);
 	});
 

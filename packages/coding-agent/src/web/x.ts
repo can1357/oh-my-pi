@@ -1,8 +1,7 @@
 /**
- * X (formerly Twitter) URL vocabulary shared by the X reader
- * (`web/scrapers/twitter.ts`) and the xAI search provider's `x_search` mapping
- * (`web/search/providers/xai.ts`): which hosts serve X, which path segments are
- * account handles, and which page a URL shows.
+ * X (formerly Twitter) URL vocabulary shared by the URL reader and xAI search:
+ * which hosts serve X, which path segments are account handles, and which page
+ * a URL shows.
  */
 
 /** Hosts serving X pages; developer/API subdomains are ordinary web pages. */
@@ -45,7 +44,7 @@ const HANDLE_PATTERN = /^[A-Za-z0-9_]{1,15}$/;
 const POST_ID_PATTERN = /^\d{1,20}$/;
 
 /** Profile timeline tab an X profile URL shows. */
-export type XProfileTab = "posts" | "replies" | "media";
+type XProfileTab = "posts" | "replies" | "media";
 
 /** Profile tabs after the handle (`/<handle>/with_replies`); a bare handle shows posts. */
 const PROFILE_TABS: Record<string, XProfileTab> = { with_replies: "replies", media: "media" };
