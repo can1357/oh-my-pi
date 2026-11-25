@@ -1406,7 +1406,7 @@ export class AcpAgent implements Agent {
 
 	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
 		const promptTurn = record.promptTurn;
-		const skillResult = await this.#tryRunSkillCommand(record, text);
+		const skillResult = await this.#tryRunSkillCommand(record, text, images);
 		if (skillResult || promptTurn?.cancelRequested) {
 			return;
 		}
@@ -1511,7 +1511,11 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
+	async #tryRunSkillCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		images: AgentImageContent[],
+	): Promise<boolean> {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}
@@ -1527,7 +1531,7 @@ export class AcpAgent implements Agent {
 		await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
-				content: built.message,
+				content: images.length > 0 ? [{ type: "text", text: built.message }, ...images] : built.message,
 				display: true,
 				details: built.details,
 				attribution: "user",

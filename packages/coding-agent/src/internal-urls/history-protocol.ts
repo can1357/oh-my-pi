@@ -14,7 +14,8 @@
  *
  * URL forms:
  * - history:// - Index of all registry + on-disk agents (id, status, kind, last activity)
- * - history://<agentId> - Concise markdown transcript of that agent
+ * - history://<agentId> - Transcript of that agent (`session/transcript-view.ts`):
+ *   complete by default; `?detail=`, `?budget=`, `?turns=` compact or narrow it
  * - history://current/full - Full, caller-bound current branch history (experimental);
  *   bare history://current reads the same unless an agent is named `current`
  */
@@ -24,7 +25,14 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { formatSessionHistoryMarkdown } from "../session/session-history-format";
+import {
+	renderTranscriptMessages,
+	TRANSCRIPT_KINDS,
+	TRANSCRIPT_LEVELS,
+	type TranscriptDetailRequest,
+	type TranscriptDetails,
+	type TranscriptViewOptions,
+} from "../session/transcript-view";
 import {
 	bashExecutionToText,
 	pythonExecutionToText,
@@ -64,6 +72,76 @@ function diskIdsForCompletion(): Promise<string[]> {
 	completionDiskIds.set(key, ids);
 	ids.catch(() => completionDiskIds.delete(key));
 	return ids;
+}
+
+/**
+ * Detail of a bare `history://<id>`: user and assistant text whole, calls one
+ * line each, thinking and results left out.
+ */
+const COMPLETE_DETAIL: TranscriptDetails = {
+	user: "full",
+	assistant: "full",
+	thinking: "omit",
+	call: "normal",
+	result: "omit",
+};
+/** Smallest `?budget=`, as for `archive.transcript`. */
+const MIN_BUDGET = 500;
+
+/**
+ * Transcript view options of a `history://<id>` URL. Bare, the view is
+ * {@link COMPLETE_DETAIL} without a budget, so `grep` and line selectors see
+ * every turn. `?detail=` (`brief`, or `user:full,call:brief`), `?budget=`
+ * (characters; kinds left to `auto` compact until it fits), and `?turns=`
+ * (`-1`, `3,5`) work as in `archive.transcript`.
+ *
+ * @throws {Error} when a parameter is malformed.
+ */
+function historyViewOptions(url: InternalUrl, title: string): TranscriptViewOptions {
+	const detail = url.searchParams.get("detail");
+	const budget = url.searchParams.get("budget");
+	const turns = url.searchParams.get("turns");
+	return {
+		budget: budget === null ? Number.POSITIVE_INFINITY : parseBudget(budget),
+		detail: detail !== null ? parseDetail(detail) : budget !== null ? "auto" : COMPLETE_DETAIL,
+		turns: turns === null ? undefined : parseTurns(turns),
+		window: undefined,
+		title,
+	};
+}
+
+/** `brief`, or per-kind `user:full,call:brief`. */
+function parseDetail(text: string): TranscriptDetailRequest {
+	const all = TRANSCRIPT_LEVELS.find(level => level === text);
+	if (all) return all;
+	const request: Partial<TranscriptDetails> = {};
+	for (const pair of text.split(",")) {
+		const [name, value] = pair.split(":");
+		const kind = TRANSCRIPT_KINDS.find(candidate => candidate === name);
+		const level = TRANSCRIPT_LEVELS.find(candidate => candidate === value);
+		if (!kind || !level) {
+			throw new Error(
+				`history:// detail takes ${TRANSCRIPT_LEVELS.join(", ")}, or kind:level pairs like user:full,call:brief; got "${text}"`,
+			);
+		}
+		if (level !== "auto") request[kind] = level;
+	}
+	return request;
+}
+
+function parseBudget(text: string): number {
+	const budget = /^\d+$/.test(text) ? Number(text) : Number.NaN;
+	if (!(budget >= MIN_BUDGET)) {
+		throw new Error(`history:// budget must be a whole number of characters, at least ${MIN_BUDGET}; got "${text}"`);
+	}
+	return budget;
+}
+
+/** `3` (one turn), `3,5` (inclusive); negatives count back from the last turn. */
+function parseTurns(text: string): number | [number, number] {
+	const match = /^(-?\d+)(?:,(-?\d+))?$/.exec(text);
+	if (!match) throw new Error(`history:// turns takes a turn or a range like 3,5 or -3,-1; got "${text}"`);
+	return match[2] === undefined ? Number(match[1]) : [Number(match[1]), Number(match[2])];
 }
 
 /** Registry lookup for a `history://<id>` URL, bound to the caller's root. */
@@ -417,7 +495,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (!ref) {
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.
-			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir);
+			const disk = await this.#resolveFromDisk(url, agentId, preferredArtifactDir);
 			if (disk) return { ...disk, url: url.href };
 
 			const known = visible.map(candidate => candidate.id);
@@ -426,7 +504,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}
 
 		const notes: string[] = [];
-		let messages: unknown[];
+		let messages: readonly AgentMessage[];
 		if (ref.session) {
 			messages = ref.session.messages;
 			notes.push("Source: live session");
@@ -436,7 +514,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
 			// giving up, in case the transcript lingers under an artifacts dir.
-			const disk = await this.#resolveFromDisk(ref.id, preferredArtifactDir);
+			const disk = await this.#resolveFromDisk(url, ref.id, preferredArtifactDir);
 			if (disk) return { ...disk, url: url.href };
 			if (ref.status === "running") {
 				// Registered before its session or JSONL exists: the worker is alive,
@@ -459,7 +537,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			throw new Error(`Agent ${ref.id} has no transcript: session is gone and no session file was retained`);
 		}
 
-		const content = formatSessionHistoryMarkdown(messages, { title: `${ref.id} (${ref.status})` });
+		const content = renderTranscriptMessages(messages, historyViewOptions(url, `# ${ref.id} (${ref.status})`)).text;
 		return {
 			url: url.href,
 			content,
@@ -477,11 +555,15 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * known — is scanned before every registry-derived dir, so a same-id
 	 * transcript from another root cannot shadow the caller's own.
 	 */
-	async #resolveFromDisk(agentId: string, preferredArtifactDir?: string): Promise<InternalResource | undefined> {
+	async #resolveFromDisk(
+		url: InternalUrl,
+		agentId: string,
+		preferredArtifactDir?: string,
+	): Promise<InternalResource | undefined> {
 		const match = await this.#findOnDisk(agentId, preferredArtifactDir);
 		if (!match) return undefined;
 		const messages = await loadSessionMessagesReadOnly(match.file);
-		const content = formatSessionHistoryMarkdown(messages, { title: `${match.id} (on disk)` });
+		const content = renderTranscriptMessages(messages, historyViewOptions(url, `# ${match.id} (on disk)`)).text;
 		return {
 			url: "",
 			content,

@@ -22,7 +22,7 @@ import type { ConfigError } from "../config/config-file";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
-import { discoverAuthStorage } from "../sdk";
+import { discoverSessionAuthStorage as discoverAuthStorage } from "../session/auth-broker-config";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
 

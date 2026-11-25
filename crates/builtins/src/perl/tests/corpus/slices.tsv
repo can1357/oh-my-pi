@@ -1,0 +1,24 @@
+# Perl corpus: slices. Format and regeneration: crates/builtins/src/perl/tests.rs.
+array-alias	my @a=(1,2,3); for (@a[2,0]) { $_*=10 } print "@a\n";	10 2 30␊
+array-delete	my @a=qw(z o t); my @b=delete @a[0,2]; print "@b|",join(':',map {$_//'-'} @a),"\n";	z t|-:o␊
+array-empty	my @a=(5); my @b=@a[()]; print scalar(@b),"\n";	0␊
+array-missing	my @a=(5); print join('|', map {$_//'-'} @a[0,10]),"\n";	5|-␊
+array-negative	my @a=qw(z o t h); print join('|',@a[-1,-3]),"\n";	h|o␊
+array-pairs	my @a=qw(z o t); print join('|',%a[2,0]),"\n";	2|t|0|z␊
+array-range	my @a=qw(z o t h); print join('|',@a[1..3]),"\n";	o|t|h␊
+array-read	my @a=qw(z o t h); print join('|',@a[3,1,0]),"\n";	h|o|z␊
+array-repeated-lvalue	my @a=(1,2,3); @a[0,0]=(7,8); print "@a\n";	8 2 3␊
+array-scalar	my @a=(10,20,30); my $x=@a[0,2]; print "$x\n";	30␊
+array-write	my @a=(1,2,3); @a[2,0]=(7,8); print "@a\n";	8 2 7␊
+hash-alias	my %h=(a=>1,b=>2); for (@h{qw(a b)}) { $_ *= 3 } print "$h{a}|$h{b}\n";	3|6␊
+hash-delete	my %h=(a=>1,b=>2,c=>3); print join('|',delete @h{qw(b a)}),'|',join(',',sort keys %h),"\n";	2|1|c␊
+hash-missing	my %h=(a=>1); print join('|',map {$_//'-'} @h{qw(a z)}),"\n";	1|-␊
+hash-pairs	my %h=(a=>1,b=>2); print join('|',%h{qw(b a)}),"\n";	b|2|a|1␊
+hash-read	my %h=(a=>1,b=>2,c=>3); print join('|',@h{qw(c a b)}),"\n";	3|1|2␊
+hash-write	my %h; @h{qw(red blue)}=(1,2); print "$h{red}|$h{blue}\n";	1|2␊
+list-empty	print scalar(()[0,3])//'-',"\n";	-␊
+list-missing	print join('|',map {$_//'-'} (qw(z o t))[3,1]),"\n";	-|o␊
+list-negative	print join('|',(qw(z o t))[-1,-3]),"\n";	t|z␊
+list-read	print join('|',(qw(z o t))[2,0]),"\n";	t|z␊
+postfix-array	my $r=[1,2,3]; print join('|',$r->@[2,0]),"\n";	3|1␊
+postfix-hash	my $r={a=>1,b=>2}; print join('|',$r->@{qw(b a)}),"\n";	2|1␊

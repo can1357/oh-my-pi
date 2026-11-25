@@ -129,7 +129,7 @@ export const launchHelp = {
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
 		"spinner-interval": Flags.string({
 			description:
-				"Milliseconds between spinner frames (default 80; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
+				"Milliseconds between spinner frames (default 80, terminal title 250; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
 		}),
 		"max-fps": Flags.string({
 			description:
