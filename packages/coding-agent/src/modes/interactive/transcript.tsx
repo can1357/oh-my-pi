@@ -360,7 +360,7 @@ export class TranscriptPresenter {
 			});
 			return <AssistantMessageBlock model={model} />;
 		};
-		const block = this.#mount(factory, options?.before);
+		const block = this.#mount(factory, { before: options?.before });
 		const view: AssistantView = {
 			block,
 			model,
@@ -409,7 +409,7 @@ export class TranscriptPresenter {
 			: face.face;
 		const own = face.compact;
 		const compact = presented ? (own ? () => packed() || own() : packed) : own;
-		const block = this.#mount(factory, options?.before, compact ? { compact } : undefined);
+		const block = this.#mount(factory, { before: options?.before, ...(compact ? { compact } : {}) });
 		this.register(block, { kind: "message", message });
 		if (!options?.live) this.#settle(block);
 		return block;
@@ -667,16 +667,13 @@ export class TranscriptPresenter {
 
 	#mountRun(run: ExecRun, message: Signal<BashExecutionMessage | PythonExecutionMessage>): TranscriptBlock {
 		const packed = signal(false);
-		const block = this.#mount(
-			() => {
-				effect(() => {
-					if (run.status() !== "running") this.#settleSoon(() => block);
-				});
-				return this.#runFace(run, message, () => block, packed);
-			},
-			undefined,
-			{ compact: packed },
-		);
+		const factory = () => {
+			effect(() => {
+				if (run.status() !== "running") this.#settleSoon(() => block);
+			});
+			return this.#runFace(run, message, () => block, packed);
+		};
+		const block = this.#mount(factory, { compact: packed });
 		this.register(block, { kind: "exec", run });
 		return block;
 	}
@@ -713,9 +710,14 @@ export class TranscriptPresenter {
 		);
 	}
 
-	#mount(factory: () => JSXNode, before: TranscriptBlock | undefined, options?: BlockOptions): TranscriptBlock {
+	/** Mount a transcript block, before `options.before` when given, else at the end. */
+	#mount(
+		factory: () => JSXNode,
+		options: BlockOptions & { readonly before?: TranscriptBlock | undefined },
+	): TranscriptBlock {
+		const { before, ...rest } = options;
 		const transcript = this.#host.shell.transcript;
-		return before ? transcript.insertBefore(before, factory, options) : transcript.append(factory, options);
+		return before ? transcript.insertBefore(before, factory, rest) : transcript.append(factory, rest);
 	}
 
 	#settle(block: TranscriptBlock): void {
