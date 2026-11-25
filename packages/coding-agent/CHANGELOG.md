@@ -497,6 +497,7 @@
 - Live reload of config files now polls them every 500ms instead of watching their directories, so it also works on network drives and when the inotify watch limit is used up
 - The status line re-reads the git/jj branch and change counts when a run starts, after each turn, and after `!`/`$` commands, at most every 5 seconds (a skipped read runs once the run ends), instead of polling the repository; a checkout made in another terminal while the session is idle shows up at the next prompt
 - `providers.maxInFlightRequests` is shared between omp processes through the omp daemon: a queued request starts as soon as a slot frees, and a process that exits mid-request gives its slots back at once instead of after a 30-second lease timeout
+- The interactive UI now uses `@oh-my-pi/pi-tui`, which lets Tern and other terminals render the same view tree. Screens look as before.
 - A subagent spawned with a single step receives that step as written, without the `Complete assignment thoroughly:` and `# Step 1 of 1` framing
 - Shell command previews show chained commands with their real `&&`/`||` operators instead of `and`/`or`, and `cd dir` as written instead of a `cwd dir` badge
 - Asked to verify, optimize, or measure something, the agent keeps its checks to the code in question: that code's tests and its callers' instead of the whole suite, and a micro-benchmark or a scaled-down input instead of the full benchmark or the full slow case, which it runs once at the end
@@ -514,6 +515,7 @@
 
 - The interactive UI is rebuilt on `@oh-my-pi/pi-tui`: Tern draws the same view tree natively that other terminals get as rows, so both render one layout. Screens look as before.
 - Quitting writes the blocks still on screen (running tools, the last reply) into terminal history instead of clearing them.
+- The model picker spans the full terminal width.
 - Pasting text and pressing Enter in the same keystroke burst submits the pasted text.
 - The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
 
