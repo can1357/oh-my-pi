@@ -7,7 +7,7 @@ import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import { toolWireName } from "../tools/builtin-names";
 import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
-import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { type TodoItem, type TodoPhase } from "../tools/details/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
@@ -98,6 +98,8 @@ export interface TodoTrackerHost {
 	getEnabledToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
+	/** Whether the active goal's token budget is spent; the runtime has told the model to stop new work. */
+	goalBudgetLimited(): boolean;
 	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
 	prewalkWillHandoff(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
@@ -251,7 +253,7 @@ export class TodoTracker {
 	/** Checks a terminal assistant turn and schedules continuation for incomplete todos. */
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
-		if (this.#host.planModeEnabled()) return false;
+		if (this.#host.planModeEnabled() || this.#host.goalBudgetLimited()) return false;
 		if (this.#reminderAwaitingProgress) {
 			logger.debug("Todo completion: prior reminder still awaiting agent action; staying silent", {
 				attempt: this.#reminderCount,

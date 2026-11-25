@@ -27,6 +27,7 @@ pub mod fuzzy;
 pub mod modes;
 pub mod notebook;
 pub mod path_policy;
+mod scan;
 pub mod session;
 pub mod store;
 pub mod stream_json;

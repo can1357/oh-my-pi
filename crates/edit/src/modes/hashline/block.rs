@@ -15,7 +15,7 @@ use omp_ast::{
 use xxhash_rust::xxh64::xxh64;
 
 use super::{
-	apply::STRUCTURAL_CLOSER_RE,
+	apply::is_structural_closer,
 	messages::{
 		AbsoluteRangeOp, BlockCoverage, BlockDiagnosticSuggestions, BlockOp,
 		block_single_line_message, block_unresolved_message,
@@ -130,7 +130,7 @@ pub fn resolve_block_edits<'e>(
 			if matches!(mode, Some(BlockMode::InsertAfter | BlockMode::PasteAfter)) {
 				let is_closer = lines
 					.get((anchor.line.saturating_sub(1)) as usize)
-					.is_some_and(|line| STRUCTURAL_CLOSER_RE.is_match(line));
+					.is_some_and(|line| is_structural_closer(line));
 				if *mode == Some(BlockMode::PasteAfter) {
 					on_warning(if is_closer {
 						paste_after_block_closer_lowered_warning(anchor.line)

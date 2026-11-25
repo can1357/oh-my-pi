@@ -22,6 +22,7 @@ import {
 	type ToolResultProviderMetadata,
 	type TSchema,
 	toolWireSchema,
+	withRequestServiceTier,
 	type UserMessage,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -168,6 +169,18 @@ const MAX_DSML_LEAK_NUDGES = 2;
  * spin the loop. Reset whenever the requirement id changes or clears.
  */
 const MAX_SOFT_TOOL_ESCALATIONS = 3;
+
+/**
+ * The loop ended the turn itself, not a provider: the model kept missing a soft
+ * tool requirement. `Agent` marks the turn's error message `errorFromAgentLoop`
+ * so recovery does not report it as a failed request.
+ */
+export class AgentLoopError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "AgentLoopError";
+	}
+}
 
 /**
  * Whether a hard `toolChoice` for a turn conflicts with a pending soft tool
@@ -1341,6 +1354,7 @@ async function runLoopBody(
 		let hostToolChoice: ToolChoice | undefined;
 		let softRequiredTool: string | undefined;
 		let softSatisfies: SoftToolRequirement["satisfies"];
+		let softUnsatisfiedNotice: SoftToolRequirement["unsatisfiedNotice"];
 		let directiveResolvedForTurn = false;
 		let turnOpen = false;
 		// A trailing assistant message with unpaired tool calls: the harness
@@ -1442,6 +1456,7 @@ async function runLoopBody(
 						hostToolChoice = directive === undefined || isSoftToolRequirement(directive) ? undefined : directive;
 						softRequiredTool = softReq?.toolName;
 						softSatisfies = softReq?.satisfies;
+						softUnsatisfiedNotice = softReq?.unsatisfiedNotice;
 						const softRequirementId = softRequirementState.id;
 						if (softReq !== undefined) {
 							if (softReq.id !== softRequirementId) {
@@ -1726,11 +1741,6 @@ async function runLoopBody(
 				const additionalMessages: AgentMessage[] = [];
 				if (softNonCompliant && softRequiredTool !== undefined) {
 					SpeculativeOperationCoordinator.discardForMessage(message, "soft tool requirement deferred execution");
-					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
-						throw new Error(
-							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
-						);
-					}
 					// A soft-required tool is pending but the model called something else
 					// (or yielded). Do NOT execute the detour — pair each call with a
 					// skipped result and force the required tool next turn. This is the
@@ -1738,11 +1748,18 @@ async function runLoopBody(
 					// reminder pays no message-cache invalidation. Re-engage so the loop
 					// never yields while the requirement is unmet.
 					for (const toolCall of toolCalls) {
+						// A call to the required tool that fails `satisfies` already did what the
+						// generic notice asks; give it the host's notice naming the invocation needed.
+						const wrongInvocationNotice =
+							toolCall.name === softRequiredTool && softSatisfies?.(toolCall) === false
+								? softUnsatisfiedNotice?.(toolCall)
+								: undefined;
 						const result = createAbortedToolResult(
 							toolCall,
 							stream,
 							"skipped",
-							`Not executed: call the \`${softRequiredTool}\` tool to resolve the pending action before using other tools.`,
+							wrongInvocationNotice ??
+								`Not executed: call the \`${softRequiredTool}\` tool to resolve the pending action before using other tools.`,
 						);
 						currentContext.messages.push(result);
 						newMessages.push(result);
@@ -1752,6 +1769,14 @@ async function runLoopBody(
 							toolName: toolCall.name,
 							status: "skipped",
 						});
+					}
+					// Abort only after pairing the calls: a retry continues from this
+					// transcript, and `agentLoopContinue` executes an unanswered tool-call
+					// tail, which would run the calls the gate just refused.
+					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
+						throw new AgentLoopError(
+							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
+						);
 					}
 					softRequirementState.forcedToolChoice = { type: "tool", name: softRequiredTool };
 					softRequirementState.escalations++;
@@ -2015,7 +2040,10 @@ function openLiveSteering(
 			const transformed = config.transformContext
 				? await config.transformContext(messages, bound(signal))
 				: messages;
-			const converted = normalizeMessagesForProvider(await config.convertToLlm(transformed), prepared.model);
+			const converted = normalizeMessagesForProvider(
+				await config.convertToLlm(transformed, prepared.model),
+				prepared.model,
+			);
 			const userMessages: UserMessage[] = [];
 			for (const message of converted) {
 				if (message.role !== "user") return undefined;
@@ -2040,7 +2068,7 @@ async function prepareProviderCall(
 		messages = await config.transformContext(messages, signal);
 	}
 
-	const llmMessages = await config.convertToLlm(messages);
+	const llmMessages = await config.convertToLlm(messages, model);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect: Dialect | undefined =
 		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
@@ -2072,7 +2100,7 @@ async function prepareProviderCall(
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, standbyTools);
 	}
 	if (config.transformProviderContext) {
-		llmContext = await config.transformProviderContext(llmContext, model);
+		llmContext = await config.transformProviderContext(llmContext, model, signal);
 	}
 
 	let promptToolWireTools: Context["tools"];
@@ -2149,7 +2177,11 @@ async function streamAssistantResponse(
 			: providerAbortSignals.length === 1
 				? providerAbortSignals[0]!
 				: AbortSignal.any(providerAbortSignals);
-	const requestApiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
+	// The credential is chosen for the tier this request will ask for.
+	const requestApiKey = withRequestServiceTier(
+		(config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey,
+		effectiveServiceTier,
+	);
 	let resolvedCredential: ApiKeyResolution;
 	const resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal, resolved => {
 		resolvedCredential = resolved;
@@ -2257,6 +2289,9 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			if (model.api === "cursor-agent" && !config.cursorExecHandlers && config.loadCursorExecHandlers) {
+				config.cursorExecHandlers = await config.loadCursorExecHandlers();
+			}
 			onProviderStart?.();
 			let response = await streamFunction(model, llmContext, {
 				...config,
@@ -2403,16 +2438,7 @@ async function streamAssistantResponse(
 							}
 						}
 						finalMessage = snapshotAssistantMessage(finalMessage);
-						// Unhealed DSML markup must not reach history, including reasoning
-						// and turns with a valid structured call. Only a failed text-only
-						// call needs the recovery nudge.
-						if (dsmlLeakRecoveryEnabled) {
-							const hasToolCall = finalMessage.content.some(block => block.type === "toolCall");
-							const removed = removeDsmlToolMarkupLeak(finalMessage);
-							if (removed && finalMessage.stopReason === "stop" && !hasToolCall) {
-								dsmlLeakMessages.add(finalMessage);
-							}
-						}
+						if (dsmlLeakRecoveryEnabled && removeDsmlLeak(finalMessage)) dsmlLeakMessages.add(finalMessage);
 						// Expand inline macros (and any other registered rewrite) on the
 						// finalized message before it reaches the context, the UI, or tool
 						// dispatch — so a single mutation is the source of truth for all three.
@@ -2695,10 +2721,12 @@ async function streamAssistantResponse(
 						throw new HarmonyLeakInterruption(detection, removed, recovered);
 					}
 				}
+				const dsmlLeakNudge = dsmlLeakRecoveryEnabled && removeDsmlLeak(trailing);
 				if (config.transformAssistantMessage) {
 					await config.transformAssistantMessage(trailing, requestSignal);
 				}
 				trailing = snapshotAssistantMessage(trailing);
+				if (dsmlLeakNudge) dsmlLeakMessages.add(trailing);
 				const finalToolCallsCanDispatch =
 					!requestSignal?.aborted &&
 					(canDispatchFinalToolCalls?.(trailing) ??
@@ -2962,6 +2990,16 @@ interface PreparedToolCall {
 
 /** Committed assistant messages whose unhealed DSML tool-call markup was stripped; the loop answers them with a failure nudge. */
 const dsmlLeakMessages = new WeakSet<AssistantMessage>();
+
+/**
+ * Strip unhealed DSML markup from a finalized turn before anything dispatches
+ * or commits it: text, reasoning, and tool-call arguments. Returns whether the
+ * turn was a failed text-only call that needs the recovery nudge.
+ */
+function removeDsmlLeak(message: AssistantMessage): boolean {
+	const hasToolCall = message.content.some(block => block.type === "toolCall");
+	return removeDsmlToolMarkupLeak(message) && message.stopReason === "stop" && !hasToolCall;
+}
 
 /**
  * Prepare results computed in the stream-done branch (before `message_start`/
@@ -3954,6 +3992,12 @@ async function executeToolCalls(
 				}
 			})()
 		: undefined;
+	// The host detaching tools ahead of an abort raises the cooperative signal
+	// in either interruptMode; tools see it before the abort that follows.
+	const detachSignal = config.detachSignal;
+	const onDetach = (): void => steeringSoftController.abort("user");
+	if (detachSignal?.aborted) onDetach();
+	else detachSignal?.addEventListener("abort", onDetach, { once: true });
 	// IRC interrupt records and background completions live in session-owned
 	// queues with no wake callback. Keep the timer fallback when either peek is
 	// present; system steering uses the event-driven path above and does not poll.
@@ -4012,6 +4056,7 @@ async function executeToolCalls(
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);
+		detachSignal?.removeEventListener("abort", onDetach);
 	}
 
 	for (const record of records) {

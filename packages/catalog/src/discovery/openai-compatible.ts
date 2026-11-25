@@ -106,6 +106,8 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	apiKey?: string;
 	/** Retry a rejected bearer against a public catalog without credentials (only on HTTP 401). */
 	retryWithoutApiKeyOnUnauthorized?: boolean;
+	/** Throw a diagnostic instead of returning `null` on a transport or protocol failure. */
+	throwOnError?: boolean;
 	/** Additional request headers. */
 	headers?: Record<string, string>;
 	/** Query parameters appended to the `/models` probe (e.g. OpenRouter's `output_modalities` roster filter). */
@@ -139,15 +141,22 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 /**
  * Fetches and normalizes an OpenAI-compatible `/models` catalog.
  *
- * Returns `null` on transport/protocol failures.
+ * Returns `null` on transport/protocol failures unless `throwOnError` is set.
  * Returns `[]` only when the endpoint responds successfully with no usable models.
  */
 export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	options: FetchOpenAICompatibleModelsOptions<TApi>,
 ): Promise<ModelSpec<TApi>[] | null> {
 	const baseUrl = normalizeBaseUrl(options.baseUrl);
-	if (!baseUrl) {
+	const fail = (message: string, cause?: unknown): null => {
+		if (options.throwOnError) {
+			const host = URL.parse(baseUrl)?.host;
+			throw new Error(host ? `${host}: ${message}` : message, { cause });
+		}
 		return null;
+	};
+	if (!baseUrl) {
+		return fail("Missing base URL for /models");
 	}
 
 	const requestHeaders: Record<string, string> = {
@@ -160,6 +169,13 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 
 	const fetchImpl = discoveryFetch(options.fetch);
 	const query = options.query ? `?${new URLSearchParams(options.query)}` : "";
+	const failRequest = (signal: AbortSignal | undefined, message: string, cause: unknown): null => {
+		if (signal?.aborted) {
+			const timedOut = signal.reason instanceof DOMException && signal.reason.name === "TimeoutError";
+			return fail(timedOut ? "GET /models timed out" : "GET /models was aborted", cause);
+		}
+		return fail(message, cause);
+	};
 	const fetchPayload = async (signal?: AbortSignal): Promise<unknown | null> => {
 		let response: Response;
 		try {
@@ -177,19 +193,21 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 					signal,
 				});
 			}
-		} catch {
-			return null;
+		} catch (error) {
+			return failRequest(signal, "Could not reach /models", error);
 		}
 
 		if (!response.ok) {
-			return null;
+			return fail(`GET /models returned HTTP ${response.status}`);
 		}
 
 		try {
-			return await response.json();
-		} catch {
-			return null;
+			const payload: unknown = await response.json();
+			if (payload !== null) return payload;
+		} catch (error) {
+			return failRequest(signal, "GET /models returned invalid JSON", error);
 		}
+		return fail("GET /models returned no model list");
 	};
 	const payload =
 		options.signal !== undefined
@@ -204,7 +222,7 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 
 	const entries = extractModelEntries(payload);
 	if (entries === null) {
-		return null;
+		return fail("GET /models returned no model list");
 	}
 
 	const context: OpenAICompatibleModelMapperContext<TApi> = {

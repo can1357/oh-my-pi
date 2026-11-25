@@ -18,6 +18,7 @@ import {
 	isCompiledBinary,
 	isEnoent,
 	logger,
+	pathIsWithinLexical,
 	VERSION,
 	WhichCachePolicy,
 } from "@oh-my-pi/pi-utils";
@@ -25,7 +26,6 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { type FileLockHandle, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
 import { Settings, settings } from "../config/settings";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	isTimeoutError,
 	isUnsupportedProxyError,
@@ -51,6 +51,7 @@ import {
 } from "./npm-registry";
 
 import { cfgUpdateChannel } from "../modes/settings";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
@@ -368,8 +369,7 @@ function bunShimMarkerPath(launcherPath: string): string {
 function isPathInDirectoryLexical(filePath: string, directoryPath: string): boolean {
 	const normalizedPath = normalizePathForComparison(path.resolve(filePath));
 	const normalizedDirectory = normalizePathForComparison(path.resolve(directoryPath));
-	const relativePath = path.relative(normalizedDirectory, normalizedPath);
-	return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+	return pathIsWithinLexical(normalizedDirectory, normalizedPath);
 }
 
 function isPathInDirectory(filePath: string, directoryPath: string): boolean {
@@ -1093,7 +1093,7 @@ export async function verifyInstalledVersion(expectedVersion: string): Promise<I
 }
 
 function printVerifiedVersion(expectedVersion: string, binaryPath?: string): void {
-	const icon = theme?.status?.success ?? "✔";
+	const icon = currentTheme().symbols.symbol("status.success");
 	const location = binaryPath ? ` at ${binaryPath}` : "";
 	console.log(chalk.green(`\n${icon} Updated to ${expectedVersion}${location}`));
 }
@@ -2156,7 +2156,7 @@ function acquireInstallLock(): FileLockHandle {
 function announceOffer(version: string, request: UpdateRequest): boolean {
 	const comparison = compareVersions(version, VERSION);
 	if (comparison <= 0 && !request.force && !request.isChannelSwitch) {
-		const icon = theme?.status?.success ?? "✔";
+		const icon = currentTheme().symbols.symbol("status.success");
 		console.log(chalk.green(`${icon} Already up to date`));
 		return false;
 	}

@@ -14,7 +14,10 @@ import {
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime provider registration", () => {
@@ -475,6 +478,35 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		expect(runtimeFetchCalls).toBe(0);
 		expect(configuredRegistry.find(providerName, "shared-runtime-model")?.contextWindow).toBe(32_768);
+	});
+
+	test("runtime-discovered models retain their extended context window across offline policy reload", async () => {
+		const provider = "runtime-extended-context";
+		const settings = Settings.isolated();
+		cfgExtendedContext.set(settings, false);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			settings,
+			cacheDbPath: path.join(tempDir, "models.db"),
+			fetch: offlineFetch,
+		});
+		const discover = vi.fn(async () => [{ ...baseModel, contextWindow: 272_000, maxContextWindow: 872_000 }]);
+		registry.registerProvider(
+			provider,
+			{ api: "openai-responses", baseUrl: "https://example.invalid/v1", fetchDynamicModels: discover },
+			"ext://runtime",
+		);
+		await registry.refreshProvider(provider, "online");
+		const window = () => registry.find(provider, baseModel.id)?.contextWindow;
+		expect(window()).toBe(272_000);
+
+		cfgExtendedContext.set(settings, true);
+		await registry.reapplyModelPolicies();
+		expect(window()).toBe(872_000);
+
+		cfgExtendedContext.set(settings, false);
+		await registry.reapplyModelPolicies();
+		expect(window()).toBe(272_000);
+		expect(discover).toHaveBeenCalledTimes(1);
 	});
 
 	test("runtime provider manager supersedes the built-in shared catalog manager", async () => {
@@ -1318,6 +1350,40 @@ describe("ModelRegistry runtime provider registration", () => {
 		await registry.refresh("offline");
 		expect(getProviderModels(registry, "appending-first")).toHaveLength(2);
 		expect(getProviderModels(registry, "appending-second")).toHaveLength(2);
+	});
+
+	test("an authenticated projected literal @smol wins over the configured role before a full catalog read", async () => {
+		const provider = "projecting-provider";
+		await authStorage.credentials.set(provider, {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		registry.registerProvider(
+			provider,
+			{
+				api: "custom-projection-api",
+				baseUrl: "https://example.invalid/",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Projecting OAuth",
+					login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
+					refreshToken: async credentials => credentials,
+					getApiKey: credentials => credentials.access,
+					modifyModels: models =>
+						models.map(model => (model.provider === provider ? { ...model, id: "@smol" } : model)),
+				},
+			},
+			"ext://oauth",
+		);
+		const settings = Settings.isolated({ modelRoles: { smol: "openai/gpt-4o" } });
+		const all = vi.spyOn(registry, "getAll");
+		const result = resolveCliModel({ cliModel: "@smol", settings, modelRegistry: registry });
+		expect(result.selector).toBe(`${provider}/@smol`);
+		expect(result.configuredRole).toBeUndefined();
+		expect(all).not.toHaveBeenCalled();
 	});
 
 	test("provider-scoped lookups preserve whole-catalog modifyModels projections", async () => {

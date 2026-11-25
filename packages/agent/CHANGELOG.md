@@ -2,11 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.continue(signal, { queuedOnly: true })` so hosts can start an idle turn with queued input without making a separate model call on the current context.
+
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added customizable notices for unmet soft tool requirements, allowing hosts to specify the text shown when a required tool call does not satisfy its requirement.
+- Added `AgentLoopError` and turn-level error metadata so hosts can distinguish an agent loop that ended because a soft tool requirement was not met from a failed request.
+- Added abort-signal support to provider-context transformation and side-request context building.
+- Added optional tool detachment when aborting an agent run, allowing tools that support background execution to continue instead of being terminated.
+- Agents can accept an asynchronous Cursor handler factory; a session opens its execution bridge on the first Cursor request, including after a model switch.
+
 ### Fixed
 
-- Fixed handoff generation sending a prepared context that cannot fit the target model's window; it now fails before any provider call ([#20126](https://github.com/can1357/oh-my-pi/pull/20126) by [@harshaygadekar](https://github.com/harshaygadekar))
-- Fixed rejected provider streams dropping `errorStatus` and `errorId` on assistant replies so failed turns keep their HTTP status and retry classification and cancelled turns keep their cancellation marker ([#20061](https://github.com/can1357/oh-my-pi/pull/20061) by [@eggpeat](https://github.com/eggpeat))
-- Fixed claimed speculative tool candidates hanging when discarded or aborted before execution completes ([#19359](https://github.com/can1357/oh-my-pi/issues/19359), [#19361](https://github.com/can1357/oh-my-pi/pull/19361) by [@gtoxlili](https://github.com/gtoxlili))
+- Fixed DeepSeek DSML markup leaking into tool-call arguments and being executed or replayed.
+- Fixed DeepSeek DSML markup being incorrectly included in conversation history on OpenRouter Responses requests.
+- Fixed unmet soft tool requirements leaving tool calls unanswered when a run was continued or retried.
+
+## [19.1.1] - 2026-11-23
+
+### Fixed
+
+- Prevented oversized handoffs from reaching the provider by detecting when prepared context exceeds the target model’s context window.
+- Preserved provider error status, error identifiers, retry classification, and cancellation markers on failed or cancelled assistant turns.
+- Fixed speculative tool calls hanging when discarded or aborted before execution completed.
 
 ## [19.1.0] - 2026-11-21
 

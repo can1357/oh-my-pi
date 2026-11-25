@@ -1,0 +1,47 @@
+# Perl corpus: io. Format and regeneration: crates/builtins/src/perl/tests.rs.
+chdir	chdir "parts" or die $!; open my $f,"<","a" or die $!; print scalar <$f>;	hello␊	file:data=ab␊␊cd␊␊␊xy␊	file:parts/a=hello␊	file:parts/b=world␊
+custom-separator	local $/="b"; open my $f,"<","data" or die $!; print join("|",map {unpack "H*",$_} <$f>),"\n";	6162|0a0a63640a0a0a78790a␊	file:data=ab␊␊cd␊␊␊xy␊
+directory-position	opendir my $d,"parts" or die $!; my $at=telldir($d); my $first=readdir($d); seekdir($d,$at); print readdir($d) eq $first ? 1:0,"\n";	1␊	file:data=ab␊␊cd␊␊␊xy␊	file:parts/a=hello␊	file:parts/b=world␊
+directory-read	opendir my $d,"parts" or die $!; print join("|",sort readdir($d)),"\n"; closedir $d;	.|..|a|b␊	file:data=ab␊␊cd␊␊␊xy␊	file:parts/a=hello␊	file:parts/b=world␊
+directory-rewind	opendir my $d,"parts" or die $!; my @a=readdir $d; rewinddir $d; my @b=readdir $d; print join(",",sort @a) eq join(",",sort @b)?1:0,"\n";	1␊	file:data=ab␊␊cd␊␊␊xy␊	file:parts/a=hello␊	file:parts/b=world␊
+eof	open my $f,"<","data" or die $!; print eof($f)?1:0,"|"; my @all=<$f>; print eof($f)?1:0,"\n";	0|1␊	file:data=ab␊␊cd␊␊␊xy␊
+file-test-cached	my $v=-f "data"; print $v?1:0,"|",-d _?1:0,"|",-s _,"\n";	1|0|12␊	file:data=ab␊␊cd␊␊␊xy␊
+file-test-rwx	chmod 0600,"data" or die $!; print join("|",map {$_?1:0} -r "data",-w "data",-x "data"),"\n";	1|1|0␊	file:data=ab␊␊cd␊␊␊xy␊
+file-test-size	print -s "data","|",-z "empty"?1:0,"\n";	12|1␊	file:data=ab␊␊cd␊␊␊xy␊	file:empty=
+file-test-stack	print -f -s "data" ? 1:0,"\n";	1␊	file:data=ab␊␊cd␊␊␊xy␊
+file-test-text	print -T "data"?1:0,"|",-B "binary"?1:0,"\n";	1|1␊	file:binary=␀␁␂␃␄␅␆␇	file:data=ab␊␊cd␊␊␊xy␊
+file-test-type	print join("|",map {$_?1:0} -f "data",-d "parts",-e "missing",-d "data",-e "data"),"\n";	1|1|0|0|1␊	file:data=ab␊␊cd␊␊␊xy␊	file:parts/a=hello␊	file:parts/b=world␊
+fixed-record	local $/=\3; open my $f,"<","data" or die $!; print join("|",map {unpack "H*",$_} <$f>),"\n";	61620a|0a6364|0a0a0a|78790a␊	file:data=ab␊␊cd␊␊␊xy␊
+glob-handle	open DATAFILE,"<","data" or die $!; print scalar <DATAFILE>; close DATAFILE;	ab␊	file:data=ab␊␊cd␊␊␊xy␊
+memory-append	my $s="old"; open my $f,">>",\$s or die $!; print {$f} "new"; close $f; print "$s\n";	oldnew␊	file:data=ab␊␊cd␊␊␊xy␊
+memory-read	my $s="aa\nbb\n"; open my $f,"<",\$s or die $!; print scalar <$f>;	aa␊	file:data=ab␊␊cd␊␊␊xy␊
+memory-seek	my $s="abcd"; open my $f,"<",\$s or die $!; seek $f,2,0; print getc($f),"|",tell($f),"\n";	c|3␊	file:data=ab␊␊cd␊␊␊xy␊
+memory-write	my $s="old"; open my $f,">",\$s or die $!; print {$f} "new"; close $f; print "$s\n";	new␊	file:data=ab␊␊cd␊␊␊xy␊
+mkdir-rmdir	mkdir "new" or die $!; print -d "new"?1:0,"|"; rmdir "new" or die $!; print -d "new"?1:0,"\n";	1|0␊	file:data=ab␊␊cd␊␊␊xy␊
+open-append-read-write	open my $f,"+>>","data" or die $!; seek $f,0,0 or die $!; print {$f} "xyz"; close $f;		file:data=ab␊␊cd␊␊␊xy␊	after:data=ab␊␊cd␊␊␊xy␊xyz
+open-append	open my $f,">>","data" or die $!; print {$f} "xyz"; close $f or die $!;		file:data=ab␊␊cd␊␊␊xy␊	after:data=ab␊␊cd␊␊␊xy␊xyz
+open-missing	print open(my $f,"<","not-there") ? "opened\n" : "missing\n";	missing␊	file:data=ab␊␊cd␊␊␊xy␊
+open-path-spaces	open my $f,"<"," sub file " or die $!; print scalar <$f>;	spaced␊	file: sub file =spaced␊
+open-read-default	open my $f,"data" or die $!; print scalar <$f>;	ab␊	file:data=ab␊␊cd␊␊␊xy␊
+open-read-write	open my $f,"+<","data" or die $!; seek $f,1,0 or die $!; print {$f} "xy"; close $f;		file:data=ab␊␊cd␊␊␊xy␊	after:data=axy␊cd␊␊␊xy␊
+open-read	open my $f,"<","data" or die $!; print scalar <$f>;	ab␊	file:data=ab␊␊cd␊␊␊xy␊
+open-truncate-read-write	open my $f,"+>","data" or die $!; print {$f} "xyz"; seek $f,0,0 or die $!; print scalar <$f>;	xyz	file:data=ab␊␊cd␊␊␊xy␊	after:data=xyz
+open-two-arg	open my $f,"<data" or die $!; print scalar <$f>;	ab␊	file:data=ab␊␊cd␊␊␊xy␊
+open-write	open my $f,">","data" or die $!; print {$f} "xyz"; close $f or die $!;		file:data=ab␊␊cd␊␊␊xy␊	after:data=xyz
+paragraph	local $/=""; open my $f,"<","data" or die $!; print join("|",map {unpack "H*",$_} <$f>),"\n";	61620a0a|63640a0a|78790a␊	file:data=ab␊␊cd␊␊␊xy␊
+read-offset	open my $f,"<","data" or die $!; my $buf="xyz123"; my $n=read $f,$buf,2,3; print "$n|$buf\n";	2|xyzab␊	file:data=ab␊␊cd␊␊␊xy␊
+read	open my $f,"<","data" or die $!; my $n=read $f,my $buf,2; print "$n|$buf\n";	2|ab␊	file:data=ab␊␊cd␊␊␊xy␊
+readline-function	open my $f,"<","data" or die $!; print scalar readline($f);	ab␊	file:data=ab␊␊cd␊␊␊xy␊
+readline-list	open my $f,"<","data" or die $!; my @a=<$f>; print scalar(@a),"|",join(",",map {chomp;$_} @a),"\n";	6|ab,,cd,,,xy␊	file:data=ab␊␊cd␊␊␊xy␊
+rename	rename "data","moved" or die $!; print -e "data"?1:0,"|",-e "moved"?1:0,"\n";	0|1␊	file:data=ab␊␊cd␊␊␊xy␊	after:moved=ab␊␊cd␊␊␊xy␊
+seek-end	open my $f,"<","data" or die $!; seek $f,-3,2; print tell($f),"|",getc($f),"\n";	9|x␊	file:data=ab␊␊cd␊␊␊xy␊
+seek-relative	open my $f,"<","data" or die $!; seek $f,2,0; seek $f,1,1; print tell($f),"|",getc($f),"\n";	3|␊␊	file:data=ab␊␊cd␊␊␊xy␊
+select-output	open my $f,">","data" or die $!; my $old=select($f); print "selected"; select($old); close $f; print "normal\n";	normal␊	file:data=ab␊␊cd␊␊␊xy␊	after:data=selected
+slurp	local $/; open my $f,"<","data" or die $!; print unpack("H*",scalar <$f>),"\n";	61620a0a63640a0a0a78790a␊	file:data=ab␊␊cd␊␊␊xy␊
+stat-handle	open my $f,"<","data" or die $!; my @st=stat($f); print $st[7],"\n";	12␊	file:data=ab␊␊cd␊␊␊xy␊
+stat-missing	my @st=stat("missing"); print scalar(@st),"\n";	0␊	file:data=ab␊␊cd␊␊␊xy␊
+stat	my @st=stat("data"); print scalar(@st),"|",$st[7],"\n";	13|12␊	file:data=ab␊␊cd␊␊␊xy␊
+sysread	open my $f,"<","data" or die $!; my $n=sysread $f,my $buf,2; print "$n|$buf\n";	2|ab␊	file:data=ab␊␊cd␊␊␊xy␊
+tell-read	open my $f,"<","data" or die $!; my $s=<$f>; print tell($f),"\n";	3␊	file:data=ab␊␊cd␊␊␊xy␊
+truncate	truncate "data",2 or die $!;		file:data=ab␊␊cd␊␊␊xy␊	after:data=ab
+unlink	print unlink("data","missing"),"|",-e "data"?1:0,"\n";	1|0␊	file:data=ab␊␊cd␊␊␊xy␊

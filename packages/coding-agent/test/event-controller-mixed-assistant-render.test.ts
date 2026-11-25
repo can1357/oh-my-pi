@@ -3,15 +3,14 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../src/ui/theme/service";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { type Component, TERMINAL } from "@oh-my-pi/pi-tui";
+import type { AssistantView, InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { isSettled } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { blockText, transcriptText } from "./helpers/transcript-text";
 
 import { cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -58,6 +57,27 @@ function lineContaining(lines: string[], marker: string): number {
 	return index;
 }
 
+function transcriptLines(ctx: InteractiveModeContext): string[] {
+	return transcriptText(ctx.shell, 120).split("\n");
+}
+
+/** What the transcript's blocks show, in order. */
+function entries(ctx: InteractiveModeContext) {
+	return ctx.shell.transcript.blocks().map(block => ctx.transcriptEntry(block));
+}
+
+function readGroups(ctx: InteractiveModeContext): PendingTool[] {
+	return entries(ctx).flatMap(entry => (entry?.kind === "tool" && entry.tool.group ? [entry.tool] : []));
+}
+
+function toolCards(ctx: InteractiveModeContext): PendingTool[] {
+	return entries(ctx).flatMap(entry => (entry?.kind === "tool" && entry.tool.call ? [entry.tool] : []));
+}
+
+function assistantViews(ctx: InteractiveModeContext): AssistantView[] {
+	return entries(ctx).flatMap(entry => (entry?.kind === "assistant" ? [entry.view] : []));
+}
+
 function createFixture(
 	hideToolActivity = false,
 	toolByName: (name: string) => AgentTool | undefined = () => undefined,
@@ -65,7 +85,6 @@ function createFixture(
 	let hasDisplayableThinkingContent = false;
 	const ctx = createInteractiveModeContext({
 		session: { getToolByName: toolByName },
-		hideToolActivity,
 		noteDisplayableThinkingContent: vi.fn((message: AssistantMessage) => {
 			const hasThinking = message.content.some(
 				content => content.type === "thinking" && content.thinking.trim() !== "",
@@ -76,14 +95,13 @@ function createFixture(
 		}),
 		lastAssistantUsage: zeroUsage(),
 	});
-	ctx.chatContainer.setToolActivityVisible(!hideToolActivity);
-
-	return { controller: new EventController(ctx), chatContainer: ctx.chatContainer, ctx };
+	ctx.hideToolActivity = hideToolActivity;
+	return { controller: new EventController(ctx), ctx };
 }
 
 describe("EventController mixed assistant text/tool rendering", () => {
 	beforeAll(async () => {
-		await initTheme(false);
+		initTheme();
 	});
 
 	beforeEach(async () => {
@@ -102,7 +120,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		// One unfinalized block at the retirement frontier blocks history commits
 		// for everything after it, so the whole transcript tail stayed in the
 		// mutable viewport in pressure mode (no separators, compacted blocks).
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 
 		await controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
 			AgentSessionEvent,
@@ -112,10 +130,8 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			type: "message_update",
 			message: assistantMessage([{ type: "thinking", thinking: "**dead attempt**" }]),
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
-		const orphan = chatContainer.children.at(-1) as Component & {
-			isTranscriptBlockFinalized(): boolean;
-		};
-		expect(orphan.isTranscriptBlockFinalized()).toBe(false);
+		const orphan = ctx.streaming!;
+		expect(orphan.finalized.peek()).toBe(false);
 
 		// Retry attempt streams a fresh message without the dead one ever ending.
 		await controller.handleEvent({ type: "message_start", message: assistantMessage([]) } as Extract<
@@ -123,12 +139,12 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			{ type: "message_start" }
 		>);
 
-		expect(chatContainer.children).not.toContain(orphan);
-		expect(orphan.isTranscriptBlockFinalized()).toBe(true);
+		expect(ctx.shell.transcript.blocks()).not.toContain(orphan.block);
+		expect(orphan.finalized.peek()).toBe(true);
 	});
 
 	it("renders assistant text segments in order around two tool results from one mixed message", async () => {
-		const { controller, chatContainer } = createFixture();
+		const { controller, ctx } = createFixture();
 		const toolCallA: ToolCall = {
 			type: "toolCall",
 			id: TOOL_CALL_A_ID,
@@ -181,7 +197,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 				partial: withSecondToolCall,
 			},
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
-		const liveLines = chatContainer.render(120).map(line => Bun.stripANSI(line));
+		const liveLines = transcriptLines(ctx);
 		expect(lineContaining(liveLines, INTRO_MARKER)).toBeLessThan(lineContaining(liveLines, MIDDLE_MARKER));
 		await controller.handleEvent({
 			type: "tool_execution_start",
@@ -214,7 +230,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			{ type: "message_end" }
 		>);
 
-		const lines = chatContainer.render(120).map(line => Bun.stripANSI(line));
+		const lines = transcriptLines(ctx);
 		const introLine = lineContaining(lines, INTRO_MARKER);
 		const toolResultALine = lineContaining(lines, TOOL_RESULT_A_MARKER);
 		const middleLine = lineContaining(lines, MIDDLE_MARKER);
@@ -260,7 +276,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 				partial: streaming,
 			},
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
-		expect(Bun.stripANSI(live.chatContainer.render(120).join("\n"))).toContain("GitHub Repo can1357/oh-my-pi");
+		expect(transcriptText(live.ctx.shell, 120)).toContain("GitHub Repo can1357/oh-my-pi");
 
 		const executionOnly = createFixture(false, toolByName);
 		await executionOnly.controller.handleEvent({
@@ -269,9 +285,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			toolName: toolCall.name,
 			args: toolCall.arguments,
 		} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
-		expect(Bun.stripANSI(executionOnly.chatContainer.render(120).join("\n"))).toContain(
-			"GitHub Repo can1357/oh-my-pi",
-		);
+		expect(transcriptText(executionOnly.ctx.shell, 120)).toContain("GitHub Repo can1357/oh-my-pi");
 
 		const rebuilt = createFixture(false, toolByName);
 		const rebuiltHelpers = new UiHelpers(rebuilt.ctx);
@@ -282,14 +296,14 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			injectedTtsrRules: [],
 			mode: "none",
 		});
-		expect(Bun.stripANSI(rebuilt.chatContainer.render(120).join("\n"))).toContain("GitHub Repo can1357/oh-my-pi");
+		expect(transcriptText(rebuilt.ctx.shell, 120)).toContain("GitHub Repo can1357/oh-my-pi");
 
 		// Presentation resolves the renderer by name; the tool call itself is untouched.
 		expect(toolCall.name).toBe("github");
 	});
 
 	it("keeps assistant text streaming while hiding bash failures and grouped read activity", async () => {
-		const { controller, chatContainer } = createFixture(true);
+		const { controller, ctx } = createFixture(true);
 		const bashCall: ToolCall = {
 			type: "toolCall",
 			id: TOOL_CALL_A_ID,
@@ -356,7 +370,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			{ type: "message_end" }
 		>);
 
-		const rendered = Bun.stripANSI(chatContainer.render(120).join("\n"));
+		const rendered = transcriptText(ctx.shell, 120);
 		expect(rendered).toContain(INTRO_MARKER);
 		expect(rendered).toContain(MIDDLE_MARKER);
 		expect(rendered).toContain(FINAL_MARKER);
@@ -366,7 +380,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 	});
 
 	it("does not recreate a completed grouped read when later thinking arrives", async () => {
-		const { controller, chatContainer, ctx } = createFixture();
+		const { controller, ctx } = createFixture();
 		const readCall: ToolCall = {
 			type: "toolCall",
 			id: "read-completed-stable",
@@ -397,7 +411,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			isError: false,
 		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
 		expect(ctx.pendingTools.size).toBe(0);
-		expect(chatContainer.children.filter(child => child instanceof ReadToolGroupComponent)).toHaveLength(1);
+		expect(readGroups(ctx)).toHaveLength(1);
 
 		await controller.handleEvent({
 			type: "message_update",
@@ -405,14 +419,14 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			assistantMessageEvent: { type: "thinking_delta", delta: "more", contentIndex: 2, partial: withLaterThinking },
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 
-		const groups = chatContainer.children.filter(child => child instanceof ReadToolGroupComponent);
+		const groups = readGroups(ctx);
 		expect(groups).toHaveLength(1);
 		expect(ctx.pendingTools.size).toBe(0);
-		expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain("stable-completed-read.ts");
+		expect(transcriptText(ctx.shell, 120)).toContain("stable-completed-read.ts");
 	});
 
 	it("settles a grouped read whose result arrives before the streamed card", async () => {
-		const { controller, chatContainer, ctx } = createFixture();
+		const { controller, ctx } = createFixture();
 		const readCall: ToolCall = {
 			type: "toolCall",
 			id: "read-result-before-card",
@@ -432,7 +446,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			result: { content: [{ type: "text", text: "held read body" }] },
 			isError: false,
 		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
-		expect(chatContainer.children.filter(child => child instanceof ReadToolGroupComponent)).toHaveLength(0);
+		expect(readGroups(ctx)).toHaveLength(0);
 		expect(ctx.pendingTools.size).toBe(0);
 
 		await controller.handleEvent({
@@ -441,14 +455,14 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			assistantMessageEvent: { type: "toolcall_end", contentIndex: 0, toolCall: readCall, partial: streaming },
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 
-		const groups = chatContainer.children.filter(child => child instanceof ReadToolGroupComponent);
+		const groups = readGroups(ctx);
 		expect(groups).toHaveLength(1);
 		expect(ctx.pendingTools.size).toBe(0);
-		expect(Bun.stripANSI(groups[0]!.render(120).join("\n"))).toContain("result-before-card.ts");
+		expect(blockText(groups[0]!.block, 120)).toContain("result-before-card.ts");
 	});
 
 	it("finalizes closed inter-tool reasoning so multiple completed greps can retire", async () => {
-		const { controller, chatContainer, ctx } = createFixture();
+		const { controller, ctx } = createFixture();
 		const greps = [1, 2, 3].map(n => ({
 			call: {
 				type: "toolCall" as const,
@@ -501,33 +515,28 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		}
 
 		expect(ctx.pendingTools.size).toBe(0);
-		const assistants = chatContainer.children.filter(
-			(child): child is AssistantMessageComponent => child instanceof AssistantMessageComponent,
-		);
-		const tools = chatContainer.children.filter(
-			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
-		);
+		const assistants = assistantViews(ctx);
+		const tools = toolCards(ctx);
 		expect(tools).toHaveLength(3);
 		for (const tool of tools) {
-			expect(tool.isTranscriptBlockFinalized()).toBe(true);
+			expect(isSettled(tool.block.node)).toBe(true);
 		}
 		expect(assistants.length).toBeGreaterThanOrEqual(3);
 		for (const assistant of assistants.slice(0, -1)) {
-			expect(assistant.isTranscriptBlockFinalized()).toBe(true);
+			expect(assistant.finalized.peek()).toBe(true);
 		}
-		expect(assistants.at(-1)!.isTranscriptBlockFinalized()).toBe(false);
+		expect(assistants.at(-1)!.finalized.peek()).toBe(false);
 
-		const flushed = Bun.stripANSI(chatContainer.peekFlushBatch(120)?.rows.join("\n") ?? "");
-		expect(flushed).toContain("GREP_RESULT_1_UNIQUE");
-		expect(flushed).toContain("GREP_RESULT_2_UNIQUE");
+		// Everything before the live tail is final, so it can move into scrollback.
+		const settled = tools.map(tool => blockText(tool.block, 120)).join("\n");
+		expect(settled).toContain("GREP_RESULT_1_UNIQUE");
+		expect(settled).toContain("GREP_RESULT_2_UNIQUE");
 	});
 
 	for (const arrival of ["early", "buffered"] as const) {
 		it(`renders inline images from ${arrival} held read results`, async () => {
-			const protocol = Object.getOwnPropertyDescriptor(TERMINAL, "imageProtocol")!;
-			Object.defineProperty(TERMINAL, "imageProtocol", { value: null });
-			try {
-				const { controller, chatContainer, ctx } = createFixture();
+			{
+				const { controller, ctx } = createFixture();
 				cfgTerminalShowImages.set(ctx.settings, true);
 				const readCall: ToolCall = {
 					type: "toolCall",
@@ -571,11 +580,9 @@ describe("EventController mixed assistant text/tool rendering", () => {
 				};
 				await controller.handleEvent(update);
 				await controller.handleEvent(update);
-				const rendered = Bun.stripANSI(chatContainer.render(120).join("\n"));
+				const rendered = transcriptText(ctx.shell, 120);
 				expect(rendered.match(/\[Image: image\/png\]/g)).toHaveLength(1);
 				expect(ctx.pendingTools.size).toBe(0);
-			} finally {
-				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
 			}
 		});
 	}

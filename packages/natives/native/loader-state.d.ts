@@ -93,7 +93,10 @@ export interface ExtractEmbeddedAddonsInput {
 	targetDir: string;
 }
 
-/** Decompress each manifest addon to its `embedded-<hash>/<filename>` path unless that build is already there; returns the paths written. */
+/**
+ * Decompress each manifest addon to its `embedded-<hash>/<filename>` path unless that build is already there; returns the paths written.
+ * Creates and touches `targetDir` first; failing that (read-only or foreign-owned directory) throws only if an addon is missing.
+ */
 export function extractEmbeddedAddons(input: ExtractEmbeddedAddonsInput): string[];
 
 /** Where `extractEmbeddedAddons` puts `file`: `<targetDir>/embedded-<hash>/<filename>`. */
@@ -180,20 +183,6 @@ export function missingNativeClass(
 	symbolName: string,
 	addon?: NativeAddonStatus | null,
 ): (new (...args: unknown[]) => never) | undefined;
-
-/** Notice a workspace tree prints when its addon is from another release. */
-export function staleWorkspaceAddonNotice(addon: NativeAddonStatus): string;
-
-/**
- * Write {@link staleWorkspaceAddonNotice} once, from the main thread, and only
- * on a workspace load. The latch is per loaded copy of this module. Returns
- * whether this call wrote it.
- */
-export function reportStaleWorkspaceAddon(
-	ctx: { isWorkspaceLoad: boolean },
-	addon: NativeAddonStatus,
-	deps?: { write?: (text: string) => void; state?: { reported: boolean } },
-): boolean;
 
 /** Actionable text for {@link missingNativeExport}. */
 export function missingNativeExportMessage(symbolName: string, addon?: NativeAddonStatus | null): string;

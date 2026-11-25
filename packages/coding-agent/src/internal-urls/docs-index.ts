@@ -17,7 +17,7 @@
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { gunzip } from "node:zlib";
+import type * as Zlib from "node:zlib";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { Glob } from "bun";
 
@@ -26,7 +26,14 @@ const docsEmbed = process.env.PI_DOCS_EMBED ?? "";
 /** Repo `docs/` tree backing a monorepo checkout; unreachable from an installed package (see `getIndex`). */
 const DOCS_DIR = path.resolve(import.meta.dir, "../../../../docs");
 
-const gunzipAsync = promisify(gunzip);
+let gunzipFn: ((buf: Zlib.InputType) => Promise<Buffer>) | undefined;
+function gunzipAsync(buf: Zlib.InputType): Promise<Buffer> {
+	if (!gunzipFn) {
+		const zlib = require("node:zlib") as typeof Zlib;
+		gunzipFn = promisify(zlib.gunzip);
+	}
+	return gunzipFn(buf);
+}
 
 export interface DocsIndex {
 	/** Sorted documentation file names, relative to `docs/`. */

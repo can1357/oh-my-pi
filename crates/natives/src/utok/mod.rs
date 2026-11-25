@@ -29,7 +29,7 @@
 
 mod bpe;
 mod claude;
-mod jev;
+pub(crate) mod jev;
 mod pretoken;
 mod scan;
 mod tables;

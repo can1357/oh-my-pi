@@ -1,11 +1,11 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { initTheme } from "../src/ui/theme/service";
 
 beforeAll(async () => {
-	await initTheme(false);
+	initTheme();
 });
 
 function createContext() {

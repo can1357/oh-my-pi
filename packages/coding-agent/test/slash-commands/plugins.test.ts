@@ -23,7 +23,7 @@ function makeContext(cwd: string, refreshSkills: () => Promise<void>) {
 		refreshSkillState: refreshSkills,
 		refreshSlashCommandState: async () => {},
 		showStatus: () => {},
-		editor: { setText: () => {} },
+		composer: { setText: () => {} },
 	} as never as InteractiveModeContext;
 	return ctx;
 }

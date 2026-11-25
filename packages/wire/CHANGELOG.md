@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the TSP `annotate` image action and its `change` event carrying the annotated picture (`TspPicture`).
+- Added the collab link codec shared by the host and the web client: `generateRoomId`, `formatCollabLink`, `parseCollabLink`, `normalizeRelayOrigin`, `isLocalRelayHostname`, `encodeBase64Url` and `decodeBase64Url` ([#20489](https://github.com/can1357/oh-my-pi/pull/20489) by [@H4vC](https://github.com/H4vC))
+
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added a TSP checkout event to indicate when a pane displays its checkout view.
+- Added a waiting state for agent tray cards when an agent is running but waiting on its own agents or jobs.
+- Extended the TSP toggle event to support the open state used by menus and selectable controls, including the selected item ID when available.
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

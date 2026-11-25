@@ -1,0 +1,21 @@
+# Perl corpus: context. Format and regeneration: crates/builtins/src/perl/tests.rs.
+array-assignment	my @x=(9,8); my $n=(@x=(1,2,3)); print "$n|@x\n";	3|1 2 3␊
+conditional-list	my @r=1 ? (2,3) : (4,5); print "@r\n";	2 3␊
+conditional-scalar	my $r=0 ? (2,3) : (4,5); print "$r\n";	5␊
+do-context	sub f { return wantarray ? (3,4) : 5 } my @r=do {f()}; my $r=do {f()}; print "@r|$r\n";	3 4|5␊
+eval-context	sub f { return wantarray ? (3,4) : 5 } my @r=eval {f()}; my $r=eval {f()}; print "@r|$r\n";	3 4|5␊
+list-assignment-count	my ($a,$b); my $n=($a,$b)=(1,2,3); print "$n|$a|$b\n";	3|1|2␊
+list-assignment-short	my ($a,$b); my $n=($a,$b)=(1); print "$n|$a|", defined $b ? $b : 'undef',"\n";	1|1|undef␊
+list-flatten	my @a=(1,2); my @b=(3,@a,4); print "@b\n";	3 1 2 4␊
+parenthetic-sublist	print join('|',(1,(2,3),4)),"\n";	1|2|3|4␊
+return-empty-list	sub f { return } my @a=f(); print scalar(@a),"\n";	0␊
+return-empty-scalar	sub f { return } print defined(scalar f()) ? "defined\n" : "undef\n";	undef␊
+return-list	sub f { (1,2,3) } my @a=f(); print "@a\n";	1 2 3␊
+return-scalar	sub f { (1,2,3) } my $a=f(); print "$a\n";	3␊
+scalar-array	my @a=(2,3,5); my $n=@a; print "$n\n";	3␊
+scalar-hash	my %h=(z=>1,b=>2); print scalar(%h),"\n";	2␊
+scalar-parens	my $x=scalar ("a","b","c"); print "$x\n";	c␊
+scalar-range-three-dot	my @r; for (1..5) { push @r, $_ if $_>=2 ... $_>=2 } print "@r\n";	2 3 4 5␊
+scalar-range	my @r; for (1..6) { push @r, $_ if $_==2 .. $_==4 } print "@r\n";	2 3 4␊
+void	sub side { print defined(wantarray) ? 'used' : 'void',"\n"; return 3 } side();	void␊
+wantarray	sub f { return !defined(wantarray) ? 'void' : wantarray ? ('L','A') : 'scalar' } my $x=f(); my @x=f(); print "$x|@x\n";	scalar|L A␊

@@ -24,7 +24,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -580,6 +580,17 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 		expect(judged[0]?.state.request).toContain("trace the sync engine");
 		expect(judged[0]?.state.previous_request).toBeUndefined();
 		expect(session.getActiveToolNames()).toContain("todo");
+	});
+
+	it("hands a subagent off to the default target under @initial, since a subagent has no planner switch to undo", async () => {
+		stubJudge([PREWALK]);
+		const f = createFixture({ auto: { task: "on" }, autoTarget: "@initial", tools: ["read", "todo", "yield"] });
+		f.settings.setModelRole("smol", `${target.provider}/${target.id}`);
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk?.target.id).toBe(target.id);
 	});
 
 	it("fails open without a native judge credential and asks nothing", async () => {

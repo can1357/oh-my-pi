@@ -397,17 +397,15 @@ impl StateStore for MemStore {
 					{
 						items.push((i, BString::from(value)));
 					},
-					(Some(VarValue::Indexed(items)), Elem::Index(i)) => {
-						match items.binary_search_by_key(&i, |(k, _)| *k) {
-							Ok(p) => {
-								let dst = &mut items[p].1;
-								if !append {
-									dst.clear();
-								}
-								dst.extend_from_slice(value);
-							},
-							Err(p) => items.insert(p, (i, BString::from(value))),
-						}
+					(Some(VarValue::Indexed(items)), Elem::Index(i)) => match items.position(i) {
+						Ok(p) => {
+							let dst = &mut items[p].1;
+							if !append {
+								dst.clear();
+							}
+							dst.extend_from_slice(value);
+						},
+						Err(p) => items.insert(p, (i, BString::from(value))),
 					},
 					(Some(VarValue::Assoc(items)), Elem::Key(k)) => {
 						let dst = items.value_mut(bytes(k));
@@ -427,7 +425,7 @@ impl StateStore for MemStore {
 			},
 			Change::DelElem(key, elem) => match (self.var_mut(key), elem) {
 				(Some(VarValue::Indexed(items)), Elem::Index(i)) => {
-					if let Ok(p) = items.binary_search_by_key(&i, |(k, _)| *k) {
+					if let Ok(p) = items.position(i) {
 						items.remove(p);
 					}
 				},

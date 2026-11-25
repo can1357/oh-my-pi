@@ -157,6 +157,7 @@ describe("claude usage request headers", () => {
 			{ fetch: fetchMock },
 		);
 
+		expect(report?.limits[0]?.id).toBe("anthropic:5h");
 		expect(report?.limits[0]?.window?.resetsAt).toBeUndefined();
 	});
 
