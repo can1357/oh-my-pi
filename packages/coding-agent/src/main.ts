@@ -1492,7 +1492,7 @@ export async function createSessionManager(
 			}),
 			parsed.sessionDir,
 		);
-		// Nothing to resume (none left, or the newest is open in another omp
+		// Nothing to resume (none left, or every one is open in another omp
 		// process): start up as a plain launch would.
 		if (manager.getEntries().length === 0) parsed.continue = false;
 		return manager;
