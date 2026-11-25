@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added checkout event to TSP protocol to indicate when the pane shows its checkout
 - Added `waiting` on agent tray cards: the agent runs, but its current call only waits on its own agents or jobs.
 - TSP `toggle` also accepts the `open` state Tern sends for menus and selectable controls, including the item id when supplied.
 

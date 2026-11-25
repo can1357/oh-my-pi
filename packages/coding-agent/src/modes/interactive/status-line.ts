@@ -9,6 +9,8 @@
  * ({@link SessionStatusLine.refreshVcs}); nothing polls the repository. Those
  * reads start at most {@link VCS_READ_INTERVAL_MS} apart: one skipped as too
  * soon runs on a timer once the run yields, so the bar never stays stale.
+ * None of it happens while the terminal reads and shows the checkout itself
+ * ({@link SessionStatusLine.setCheckoutHomed}: Tern's `checkout` event).
  *
  * Session state is not reactive, so the session's events bump a revision the
  * snapshot reads; {@link SessionStatusLine.refresh} does the same for changes
@@ -151,6 +153,8 @@ export class SessionStatusLine implements StatusLineModel {
 	#vcsTimer: NodeJS.Timeout | undefined;
 	#vcsInFlight = false;
 	#vcsGeneration = 0;
+	/** The terminal reads and shows this session's checkout itself (Tern): no git/jj read and no `gh` here. */
+	#checkoutHomed = false;
 	readonly #defaultBranches = new Map<string, string>();
 	/** Pull request lookups by `cwd\0branch`, each kept for {@link PR_TTL_MS}. */
 	readonly #prs = new Map<string, { at: number; pr: { number: number; url: string } | null }>();
@@ -203,6 +207,22 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#markVcsStale();
 		// No run follows a user command to yield: settle now.
 		this.#settleVcs();
+		this.refresh();
+	}
+
+	/**
+	 * Follow whether the terminal reads and shows this session's checkout
+	 * itself (Tern's `checkout` event). While it does, git/jj and the branch's
+	 * pull request are read from it, so none is read here and the title's pull
+	 * request is released; turning it off reads again.
+	 */
+	setCheckoutHomed(homed: boolean): void {
+		if (homed === this.#checkoutHomed) return;
+		this.#checkoutHomed = homed;
+		this.#vcsGeneration++;
+		this.#vcs.set(undefined);
+		this.#lastPr = undefined;
+		this.#onPullRequest?.(undefined);
 		this.refresh();
 	}
 
@@ -592,6 +612,8 @@ export class SessionStatusLine implements StatusLineModel {
 
 	/** Git facts for the bar when a git segment shows; starts a refresh when the cached ones are stale. */
 	#vcsFacts(segments: readonly string[]): Pick<StatusFacts, "git" | "worktree" | "activeRepoRoot"> {
+		// Tern reads and shows the checkout itself: nothing to read here.
+		if (this.#checkoutHomed) return {};
 		const wantsGit = segments.includes("git") || segments.includes("pr");
 		const wantsPath = segments.includes("path");
 		if (!statusLineHost.gitEnabled() || (!wantsGit && !wantsPath)) return {};

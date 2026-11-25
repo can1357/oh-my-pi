@@ -436,6 +436,7 @@ export class NativeBackend {
 			case "motion":
 			case "features":
 			case "visible":
+			case "checkout":
 			case "error":
 				return;
 		}

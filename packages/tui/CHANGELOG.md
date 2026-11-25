@@ -4,10 +4,12 @@
 
 ### Added
 
+- Added checkout event support to TSP connection and host
 - Added `@oh-my-pi/pi-tui`, the terminal UI that replaces `@oh-my-pi/pi-tui`: one tree of Tern Surface Protocol nodes drawn natively by Tern and as terminal rows elsewhere, with signals and a compiler-free JSX runtime, role-based painters and widgets, a terminal driver (input, capabilities, multiplexers, images, resize policies, notifications), Markdown and text utilities, themes, and test utilities (`testing/terminal`, `testing/cells`)
 
 ### Changed
 
+- Host now reports when the terminal shows the checkout itself via checkoutShown
 - Custom theme files are polled every 500ms instead of watched, so live reload keeps working after editors save by renaming a new file over the theme.
 
 ### Fixed

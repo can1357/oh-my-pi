@@ -1811,6 +1811,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#syncTrayHost();
 			});
 		});
+		// Tern reads and shows this session's checkout itself: nothing to read here while it does.
+		this.#effect(() => {
+			const homed = this.shell.native() && this.shell.host?.checkoutShown() === true;
+			untrack(() => this.statusLine.setCheckoutHomed(homed));
+		});
 		this.#probeProgramStatus();
 	}
 

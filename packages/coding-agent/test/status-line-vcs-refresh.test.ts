@@ -103,6 +103,28 @@ describe("status line VCS refresh", () => {
 		expect(text).toContain("+2");
 	});
 
+	it("reads nothing while the terminal shows the checkout itself", async () => {
+		vi.spyOn(utils, "getProjectDir").mockReturnValue("/repo/homed");
+		const statusSummary = vi
+			.fn<() => Promise<GitStatus | null>>()
+			.mockResolvedValue({ staged: 1, unstaged: 0, untracked: 0 });
+		mockRepos({ "/repo/homed": fakeRepo("/repo/homed", "homed-branch", statusSummary) });
+		const line = statusLine(statusSession(), gitSegment);
+
+		line.setCheckoutHomed(true);
+		lineText(line);
+		await flushStatus();
+		expect(statusSummary).not.toHaveBeenCalled();
+		expect(lineText(line)).not.toContain("homed-branch");
+
+		// Turning it off reads the checkout here again.
+		line.setCheckoutHomed(false);
+		lineText(line);
+		await flushStatus();
+		expect(statusSummary).toHaveBeenCalledTimes(1);
+		expect(lineText(line)).toContain("homed-branch");
+	});
+
 	it("re-reads working-tree counts when a run starts and when a turn ends, not on repaints", async () => {
 		vi.useFakeTimers();
 		vi.spyOn(utils, "getProjectDir").mockReturnValue("/repo/turns");
