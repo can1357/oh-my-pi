@@ -1781,6 +1781,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const imageLoadOptions = {
 				path: readPath,
 				cwd: this.session.cwd,
+				router: sessionUrlRouter(this.session),
 				autoResize: cfgImagesAutoResize.get(this.session.settings),
 				maxBytes: MAX_IMAGE_SIZE,
 				resolvedPath: absolutePath,

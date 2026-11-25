@@ -12,7 +12,7 @@ import type { Context, ImageContent, Message, Model, ProviderPayload, TextConten
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { $which, isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { InternalUrlRouter } from "../internal-urls/router";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
 import { decodeStillImageJpeg, VideoError } from "./video";
@@ -145,6 +145,8 @@ async function normalizeNativeResponsesHistoryPayload(
 export interface LoadImageInputOptions {
 	path: string;
 	cwd: string;
+	/** Resolves `path` unless `resolvedPath` is given: a URL of a scheme it handles is refused. */
+	router: InternalUrlRouter;
 	autoResize: boolean;
 	maxBytes?: number;
 	resolvedPath?: string;
@@ -340,8 +342,7 @@ export async function normalizeProviderContextImagesForModel(context: Context, m
 
 export async function loadImageInput(options: LoadImageInputOptions): Promise<LoadedImageInput | null> {
 	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
-	const resolvedPath =
-		options.resolvedPath ?? resolveReadPath(options.path, options.cwd, InternalUrlRouter.builtins());
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd, options.router);
 	const metadata = options.detectedMimeType
 		? { mimeType: options.detectedMimeType }
 		: await readImageMetadata(resolvedPath);
@@ -367,8 +368,7 @@ export async function loadImageInput(options: LoadImageInputOptions): Promise<Lo
 
 /** Rasterizes an explicitly selected local SVG/SVGZ into a vision-model image input. */
 export async function loadSvgImageInput(options: LoadImageInputOptions): Promise<LoadedImageInput | null> {
-	const resolvedPath =
-		options.resolvedPath ?? resolveReadPath(options.path, options.cwd, InternalUrlRouter.builtins());
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd, options.router);
 	const extension = path.extname(resolvedPath).toLowerCase();
 	if (extension !== ".svg" && extension !== ".svgz") return null;
 
@@ -408,8 +408,7 @@ export async function loadHeifImageInput(
 	options: LoadImageInputOptions,
 	signal?: AbortSignal,
 ): Promise<LoadedImageInput> {
-	const resolvedPath =
-		options.resolvedPath ?? resolveReadPath(options.path, options.cwd, InternalUrlRouter.builtins());
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd, options.router);
 	const sourceMimeType = options.detectedMimeType ?? "image/heif";
 	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
 	const stat = await Bun.file(resolvedPath).stat();
@@ -463,8 +462,7 @@ export function parseTranscodedImageMimeType(header: Uint8Array): "image/bmp" | 
 export async function loadTranscodedImageInput(
 	options: LoadImageInputOptions & { detectedMimeType: string },
 ): Promise<LoadedImageInput> {
-	const resolvedPath =
-		options.resolvedPath ?? resolveReadPath(options.path, options.cwd, InternalUrlRouter.builtins());
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd, options.router);
 	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
 	const stat = await Bun.file(resolvedPath).stat();
 	if (stat.size > maxBytes) {

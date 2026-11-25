@@ -2790,7 +2790,12 @@ export class InputController {
 				this.ctx.showStatus("Video paste is not supported in this prompt");
 				return;
 			}
-			const image = await loadImageInput({ path, cwd: this.ctx.sessionManager.getCwd(), autoResize: false });
+			const image = await loadImageInput({
+				path,
+				cwd: this.ctx.sessionManager.getCwd(),
+				router: this.ctx.session.urlRouter,
+				autoResize: false,
+			});
 			if (!image) {
 				// Path resolved but is not a readable image (e.g. a zero-byte or
 				// locked transient screenshot file). Prefer the clipboard bytes.

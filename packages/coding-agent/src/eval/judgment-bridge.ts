@@ -25,6 +25,8 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
+import { sessionUrlRouter } from "../internal-urls/context";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import type { LoadedImageInput } from "../utils/image-loading";
 import { loadImageAttachmentInput, loadImageInput, loadSvgImageInput } from "../utils/image-loading";
 import {
@@ -54,8 +56,12 @@ function invalidImage(detail: string): ToolError {
 	return new ToolError(`invalid judgment image source: ${detail}`);
 }
 
-/** Load paths and embedded image attachments into validated inline model images. */
-export async function loadEvalJudgmentImages(value: unknown, cwd: string): Promise<ImageContent[] | undefined> {
+/** Load paths and embedded image attachments into validated inline model images; refuses URLs of schemes `router` handles. */
+export async function loadEvalJudgmentImages(
+	value: unknown,
+	cwd: string,
+	router: InternalUrlRouter,
+): Promise<ImageContent[] | undefined> {
 	if (value === undefined) return undefined;
 	if (!Array.isArray(value)) throw invalidImage("images must be an array of paths or image attachments");
 
@@ -68,8 +74,8 @@ export async function loadEvalJudgmentImages(value: unknown, cwd: string): Promi
 			if (source.length === 0) throw invalidImage(`images[${index}] path must not be empty`);
 			try {
 				loaded =
-					(await loadSvgImageInput({ path: source, cwd, autoResize: false })) ??
-					(await loadImageInput({ path: source, cwd, autoResize: false }));
+					(await loadSvgImageInput({ path: source, cwd, router, autoResize: false })) ??
+					(await loadImageInput({ path: source, cwd, router, autoResize: false }));
 			} catch (error) {
 				throw invalidImage(
 					`images[${index}] path ${JSON.stringify(source)} could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
@@ -277,7 +283,11 @@ export async function runEvalJudgment(
 		await evalRequestSlots.acquire(signal);
 		try {
 			signal?.throwIfAborted();
-			const images = await loadEvalJudgmentImages(args.images, options.session.cwd);
+			const images = await loadEvalJudgmentImages(
+				args.images,
+				options.session.cwd,
+				sessionUrlRouter(options.session),
+			);
 			signal?.throwIfAborted();
 			return toEvalJudgmentResult(
 				await judge.judge({ state, questions, ...(images === undefined ? {} : { images }) }, { signal }),
