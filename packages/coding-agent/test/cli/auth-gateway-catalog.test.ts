@@ -28,15 +28,25 @@ afterEach(() => {
 	for (const storage of authStores.splice(0)) storage.close();
 });
 
-test("a Decisions fallback with two upstream pins sends each pin to OpenRouter in order", async () => {
-	const model = getBundledModel("openrouter", "~typesafe/jev-latest");
-	if (!model) throw new Error("expected bundled OpenRouter Jev model");
+test.each([
+	["openrouter", "https://openrouter.ai/api/v1"],
+	["relay", "https://relay.example/v1"],
+	["relay", "https://ai-gateway.vercel.sh/v1"],
+])("Decisions sends each upstream pin in order through %s at %s", async (provider, baseUrl) => {
+	const bundled = getBundledModel("openrouter", "~typesafe/jev-latest");
+	const model = buildModel<Api>({
+		...bundled,
+		provider,
+		baseUrl,
+		// Decisions never sends this chat routing field, even on a Vercel host.
+		compat: { vercelGatewayRouting: { only: ["first"] } },
+	});
 	const selector = `${model.provider}/${model.id}`;
 	const settings = Settings.isolated({
 		"retry.fallbackChains": { [selector]: [`${selector}@first`, `${selector}@second`] },
 	});
 	const storage = await createAuthStorage();
-	storage.keys.setRuntime("openrouter", "test-key");
+	storage.keys.setRuntime(provider, "test-key");
 	const providers: unknown[] = [];
 	const router = createAuthGatewayRouter({
 		storage,
