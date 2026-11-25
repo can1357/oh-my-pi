@@ -10,10 +10,8 @@ import {
 	type DiagnosticSeverity,
 	type DocumentSymbol,
 	type Location,
-	SYMBOL_KIND_NAMES,
 	type SymbolInformation,
 	type SymbolKind,
-	type TextEdit,
 	type WorkspaceEdit,
 } from "./types";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -91,23 +89,6 @@ export function mergeDiagnosticLists(primary: Diagnostic[], secondary: Diagnosti
 		}
 	}
 	return merged;
-}
-
-/**
- * Get icon for diagnostic severity.
- */
-export function severityToIcon(severity?: DiagnosticSeverity): string {
-	const symbols = currentTheme().symbols;
-	switch (severity ?? 1) {
-		case 2:
-			return symbols.symbol("status.warning");
-		case 3:
-			return symbols.symbol("status.info");
-		case 4:
-			return symbols.symbol("format.bullet");
-		default:
-			return symbols.symbol("status.error");
-	}
 }
 
 /**
@@ -199,13 +180,6 @@ export function formatLocation(location: Location, cwd: string): string {
 	return `${file}:${line}:${col}`;
 }
 
-/**
- * Format a position as line:col.
- */
-export function formatPosition(line: number, col: number): string {
-	return `${line}:${col}`;
-}
-
 // =============================================================================
 // WorkspaceEdit Formatting
 // =============================================================================
@@ -249,18 +223,6 @@ export function formatWorkspaceEdit(edit: WorkspaceEdit, cwd: string): string[] 
 	}
 
 	return results;
-}
-
-/**
- * Format a text edit as a preview.
- */
-export function formatTextEdit(edit: TextEdit, maxLength = 50): string {
-	const range = `${edit.range.start.line + 1}:${edit.range.start.character + 1}`;
-	const preview =
-		edit.newText.length > maxLength
-			? `${edit.newText.slice(0, maxLength).replace(/\n/g, "\\n")}…`
-			: edit.newText.replace(/\n/g, "\\n");
-	return `line ${range} ${navArrow()} "${preview}"`;
 }
 
 // =============================================================================
@@ -311,13 +273,6 @@ function getSymbolKindIcons(): Record<SymbolKind, string> {
  */
 export function symbolKindToIcon(kind: SymbolKind): string {
 	return getSymbolKindIcons()[kind] ?? currentTheme().symbols.symbol("format.bullet");
-}
-
-/**
- * Get name for symbol kind.
- */
-export function symbolKindToName(kind: SymbolKind): string {
-	return SYMBOL_KIND_NAMES[kind] ?? "Unknown";
 }
 
 /**

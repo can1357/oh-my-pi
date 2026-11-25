@@ -141,12 +141,3 @@ const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 export function getSegmenter(): Intl.Segmenter {
 	return segmenter;
 }
-
-/**
- * Extract a range of visible columns from a line. Handles ANSI codes and wide chars.
- *
- * @param strict - If true, exclude wide chars at boundary that would extend past the range
- */
-export function sliceByColumn(line: string, startCol: number, length: number, strict = false): string {
-	return sliceWithWidth(line, startCol, length, strict).text;
-}

@@ -55,27 +55,6 @@ export async function readDir(dirPath: string): Promise<string[]> {
 	return entries.map(entry => entry.name);
 }
 
-export async function walkUp(
-	startDir: string,
-	name: string,
-	opts: { file?: boolean; dir?: boolean } = {},
-): Promise<string | null> {
-	const { file = true, dir = true } = opts;
-	let current = resolvePath(startDir);
-
-	while (true) {
-		const entries = await readDirEntries(current);
-		const entry = entries.find(e => e.name === name);
-		if (entry) {
-			if (file && entry.isFile()) return path.join(current, name);
-			if (dir && entry.isDirectory()) return path.join(current, name);
-		}
-		const parent = path.dirname(current);
-		if (parent === current) return null;
-		current = parent;
-	}
-}
-
 /**
  * Walk up from startDir looking for a `.git` entry (file or directory).
  * Returns the directory containing `.git` (the repo root), or null if not in a git repo.

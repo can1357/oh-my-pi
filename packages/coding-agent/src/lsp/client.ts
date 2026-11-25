@@ -109,8 +109,6 @@ const INIT_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
 const initFailures = new Map<string, { at: number; message: string }>();
 const READER_EXIT_GRACE_MS = 100;
 
-// Idle timeout configuration (disabled by default)
-let idleTimeoutMs: number | null = null;
 let idleCheckInterval: NodeJS.Timeout | null = null;
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 
@@ -313,16 +311,6 @@ async function connectSharedLspTransport(opts: {
 }
 
 /**
- * Configure the global fallback idle timeout for LSP clients (used in tests/overrides).
- * When unset, each client evaluates against its workspace config (`getConfig(client.cwd).idleTimeoutMs`).
- * @param ms - Timeout in milliseconds, or null/undefined to disable global override
- */
-export function setIdleTimeout(ms: number | null | undefined): void {
-	idleTimeoutMs = ms ?? null;
-	reconcileIdleChecker();
-}
-
-/**
  * Whether a client may be reaped by the idle checker.
  *
  * A client with in-flight requests is *busy*, never idle. `lastActivity` is
@@ -342,7 +330,6 @@ export function isIdleClient(client: LspClient, now: number, timeoutMs: number):
 }
 
 function hasConfiguredIdleTimeout(client?: LspClient): boolean {
-	if (idleTimeoutMs && idleTimeoutMs > 0) return true;
 	if (client) {
 		const timeoutMs = getConfig(client.cwd).idleTimeoutMs;
 		if (timeoutMs && timeoutMs > 0) return true;
@@ -358,14 +345,6 @@ function maybeStartIdleChecker(client?: LspClient): void {
 	if (hasConfiguredIdleTimeout(client)) {
 		startIdleChecker();
 	}
-}
-
-/**
- * Whether the background idle checker interval is currently active.
- * Exported for tests.
- */
-export function isIdleCheckerRunning(): boolean {
-	return idleCheckInterval !== null;
 }
 
 /**
@@ -394,7 +373,7 @@ function maybeStopIdleChecker(): void {
 export async function checkIdleClients(): Promise<void> {
 	const now = Date.now();
 	for (const [key, client] of Array.from(clients.entries())) {
-		const timeoutMs = idleTimeoutMs ?? getConfig(client.cwd).idleTimeoutMs;
+		const timeoutMs = getConfig(client.cwd).idleTimeoutMs;
 		if (timeoutMs && timeoutMs > 0 && isIdleClient(client, now, timeoutMs)) {
 			await shutdownClient(key);
 		}

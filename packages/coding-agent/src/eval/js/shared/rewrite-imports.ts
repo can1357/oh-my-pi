@@ -504,66 +504,6 @@ export async function collectModuleSourceSpecifiers(code: string): Promise<strin
 	return sources;
 }
 
-export async function rewriteModuleSourceSpecifiers(
-	code: string,
-	replacer: (source: string) => string,
-): Promise<string> {
-	const ast = await parseProgram(code);
-	if (!ast) return code;
-
-	type Edit = { start: number; end: number; text: string };
-	const edits: Edit[] = [];
-
-	for (const node of ast.program.body) {
-		if (
-			node.type !== "ImportDeclaration" &&
-			node.type !== "ExportNamedDeclaration" &&
-			node.type !== "ExportAllDeclaration"
-		) {
-			continue;
-		}
-		const source = (node as BabelModuleSourceDeclaration).source;
-		if (!source || typeof source.value !== "string") continue;
-		const next = replacer(source.value);
-		if (next === source.value) continue;
-		edits.push({ start: source.start, end: source.end, text: JSON.stringify(next) });
-	}
-
-	if (edits.length === 0) return code;
-	edits.sort((a, b) => b.start - a.start);
-	let result = code;
-	for (const edit of edits) {
-		result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
-	}
-	return result;
-}
-
-export async function rewriteDynamicImports(code: string, callee = "__omp_import__"): Promise<string> {
-	if (!code.includes("import")) return code;
-	const ast = await parseProgram(code);
-	if (!ast) return code;
-
-	type Edit = { start: number; end: number; text: string };
-	const edits: Edit[] = [];
-	walkNodes(ast, node => {
-		if (node.type !== "CallExpression") return;
-		const call = node as unknown as { callee?: { type?: string; start?: number; end?: number } };
-		const callCallee = call.callee;
-		if (callCallee?.type !== "Import" || typeof callCallee.start !== "number" || typeof callCallee.end !== "number") {
-			return;
-		}
-		edits.push({ start: callCallee.start, end: callCallee.end, text: callee });
-	});
-
-	if (edits.length === 0) return code;
-	edits.sort((a, b) => b.start - a.start);
-	let result = code;
-	for (const edit of edits) {
-		result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
-	}
-	return result;
-}
-
 function collectBindingNames(pattern: unknown, names: string[]): void {
 	if (!pattern || typeof pattern !== "object") return;
 	const node = pattern as BabelBindingPattern & { parameter?: unknown };

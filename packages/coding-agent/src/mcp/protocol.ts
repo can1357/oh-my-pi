@@ -69,16 +69,9 @@ const CACHEABLE_METHODS: Record<string, true> = {
 	"resources/read": true,
 };
 
-const MRTR_METHODS: Record<string, true> = { "tools/call": true, "prompts/get": true, "resources/read": true };
-
 /** Whether complete results of `method` carry `ttlMs` and `cacheScope`. */
 export function isCacheableMethod(method: string): boolean {
 	return Object.hasOwn(CACHEABLE_METHODS, method);
-}
-
-/** Whether a server may answer `method` with `input_required`. */
-export function isMrtrMethod(method: string): boolean {
-	return Object.hasOwn(MRTR_METHODS, method);
 }
 
 /** Fields every result carries. An absent `resultType` means `"complete"`. */

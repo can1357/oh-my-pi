@@ -612,13 +612,6 @@ export async function callTool(
 }
 
 /**
- * Check if a server supports tools.
- */
-export function serverSupportsTools(capabilities: MCPServerCapabilities): boolean {
-	return capabilities.tools !== undefined;
-}
-
-/**
  * List resources from a connected server.
  */
 export async function listResources(

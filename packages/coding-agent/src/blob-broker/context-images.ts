@@ -138,24 +138,6 @@ export async function inlineContextImages(
 	return messagesChanged ? { ...context, messages } : context;
 }
 
-/** Remove every image URL so the request carries pure inline base64. */
-export function stripContextImageUrls(context: Context): Context {
-	return mapContextImages(context, block => {
-		if (!block.url) return block;
-		const { url: _url, ...rest } = block;
-		return rest;
-	});
-}
-
-/** Remove provider-native references without disturbing independent URL mirrors. */
-export function stripContextProviderFiles(context: Context): Context {
-	return mapContextImages(context, block => {
-		if (!block.providerFile) return block;
-		const { providerFile: _providerFile, ...rest } = block;
-		return rest;
-	});
-}
-
 /** True when any outgoing image block carries a provider-native reference. */
 export function contextHasProviderFiles(context: Context): boolean {
 	return context.messages.some(

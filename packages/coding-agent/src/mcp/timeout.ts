@@ -8,8 +8,6 @@ const MCP_TIMEOUT_ENV = "OMP_MCP_TIMEOUT_MS";
 const DEFAULT_MCP_STARTUP_TIMEOUT_MS = 250;
 const MCP_STARTUP_TIMEOUT_ENV = "OMP_MCP_STARTUP_TIMEOUT_MS";
 
-let neverAbortController: AbortController | undefined;
-
 function envTimeoutMs(): number | undefined {
 	const raw = Bun.env[MCP_TIMEOUT_ENV]?.trim();
 	if (!raw) return undefined;
@@ -97,11 +95,6 @@ export function isMCPTimeoutEnabled(timeoutMs: number): boolean {
 
 export function describeMCPTimeout(timeoutMs: number): string {
 	return isMCPTimeoutEnabled(timeoutMs) ? `${timeoutMs}ms` : "disabled";
-}
-
-export function getNeverAbortSignal(): AbortSignal {
-	neverAbortController ??= new AbortController();
-	return neverAbortController.signal;
 }
 
 /** Tracks a request deadline separately from caller and transport cancellation. */

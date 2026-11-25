@@ -645,43 +645,6 @@ export async function getHostInfo(hostName: string): Promise<SSHHostInfo | undef
 	return loadHostInfoFromDiskByName(hostName);
 }
 
-export async function getHostInfoForHost(host: SSHConnectionTarget): Promise<SSHHostInfo | undefined> {
-	const cached = hostInfoCache.get(host.name);
-	if (cached) {
-		const resolved = applyCompatOverride(host, cached);
-		if (resolved !== cached) hostInfoCache.set(host.name, resolved);
-		return resolved;
-	}
-	return await loadHostInfoFromDisk(host);
-}
-
-/**
- * Synchronous, probe-free host info lookup for startup paths.
- *
- * Checks the in-memory cache, then falls back to a synchronous read of the
- * persisted host-info cache file. Never opens a connection or probes the
- * remote host — callers get `undefined` when nothing is cached yet.
- */
-export function getCachedHostInfoSync(host: SSHConnectionTarget): SSHHostInfo | undefined {
-	const cached = hostInfoCache.get(host.name);
-	if (cached) {
-		const resolved = applyCompatOverride(host, cached);
-		if (resolved !== cached) hostInfoCache.set(host.name, resolved);
-		return resolved;
-	}
-	try {
-		const parsed = parseHostInfo(JSON.parse(fs.readFileSync(getHostInfoPath(host.name), "utf-8")));
-		if (!parsed) return undefined;
-		const resolved = applyCompatOverride(host, parsed);
-		hostInfoCache.set(host.name, resolved);
-		return resolved;
-	} catch (err) {
-		if (isEnoent(err)) return undefined;
-		logger.warn("Failed to load SSH host info", { host: host.name, error: String(err) });
-		return undefined;
-	}
-}
-
 export async function ensureHostInfo(host: SSHConnectionTarget): Promise<SSHHostInfo> {
 	const cached = hostInfoCache.get(host.name);
 	if (cached) {
@@ -841,8 +804,4 @@ export async function closeAllConnections(): Promise<void> {
 
 export function getControlPathTemplate(): string {
 	return CONTROL_PATH;
-}
-
-export function getControlDir(): string {
-	return CONTROL_DIR;
 }

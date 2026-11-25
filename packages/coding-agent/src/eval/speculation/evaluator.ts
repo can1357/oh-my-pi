@@ -1,11 +1,4 @@
-import type {
-	ShadowEvaluationContext,
-	ShadowExpression,
-	ShadowOperation,
-	ShadowOrigin,
-	ShadowPlan,
-	ShadowValue,
-} from "./types";
+import type { ShadowEvaluationContext, ShadowExpression, ShadowOrigin, ShadowValue } from "./types";
 
 function originKey(origin: ShadowOrigin): string {
 	switch (origin.kind) {
@@ -105,38 +98,4 @@ export function evaluateShadowExpression(expression: ShadowExpression, context: 
 			return mergeShadowValues(input.value.join(String(argument.value)), [input, argument]);
 		}
 	}
-}
-
-export interface EvaluatedShadowOperation {
-	readonly operation: ShadowOperation;
-	readonly args: ShadowValue;
-}
-
-export function evaluateShadowOperation(
-	operation: ShadowOperation,
-	context: ShadowEvaluationContext,
-): EvaluatedShadowOperation {
-	return { operation, args: evaluateShadowExpression(operation.call.args, context) };
-}
-
-export function evaluateShadowPlan(
-	plan: ShadowPlan,
-	context: ShadowEvaluationContext,
-): { operations: readonly EvaluatedShadowOperation[]; barrier?: ShadowPlan["barrier"] } {
-	const operations: EvaluatedShadowOperation[] = [];
-	for (const operation of plan.operations) {
-		try {
-			operations.push(evaluateShadowOperation(operation, context));
-		} catch (error) {
-			return {
-				operations,
-				barrier: {
-					kind: "barrier",
-					reason: error instanceof Error ? error.message : String(error),
-					span: operation.call.span,
-				},
-			};
-		}
-	}
-	return { operations, barrier: plan.barrier };
 }

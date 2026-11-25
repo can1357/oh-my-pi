@@ -113,9 +113,9 @@ This API is used for directory-based config lookups (commands, hooks, tools, age
 
 Disabled foreign user sources (`isUserSourceEnabled`) are omitted from the user entries; project entries are not filtered by this helper. Claude user paths honor `CLAUDE_CONFIG_DIR` (trimmed and resolved relative to the process working directory).
 
-## `findConfigFile(subpath, options)` / `findConfigFileWithMeta(...)`
+## `findConfigFile(subpath, options)`
 
-Searches for the first existing file across ordered bases, returns first match (path-only or path+metadata).
+Searches for the first existing file across ordered bases and returns the first match's path.
 
 ## `findAllNearestProjectConfigDirs(subpath, cwd)`
 

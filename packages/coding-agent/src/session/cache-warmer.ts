@@ -63,7 +63,6 @@ export function capCacheWarmingMode(mode: CacheWarmingMode, cap: CacheWarmingMod
  * the prompt reaches the bridge-compaction threshold.
  */
 export type CacheWarmingStrategy = "auto" | "keepalive" | "compact";
-export const CACHE_WARMING_STRATEGIES = ["auto", "keepalive", "compact"] as const;
 
 /**
  * How a refresh reaches the provider: "prewarm" sends the request with
@@ -1223,56 +1222,4 @@ export class CacheWarmer {
 		}
 		return "stop";
 	}
-}
-
-function formatDollars(value: number): string {
-	return value < 0 ? `-$${Math.abs(value).toFixed(3)}` : `$${value.toFixed(3)}`;
-}
-
-function formatCacheWarmingEconomics(decision: CacheWarmingDecision): string {
-	if (!decision.economicsAvailable) return "cache economics unavailable";
-	const rent = decision.method ? `${decision.method} ${formatDollars(decision.warmCost)}` : "no safe refresh";
-	if (decision.phase === "idle") {
-		const probability = Math.round(decision.continuationProbability * 100);
-		const comparison = decision.expectedSavings >= CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS ? ">=" : "<";
-		return `${rent}, ${probability}% continuation probability, expected savings ${formatDollars(decision.expectedSavings)} ${comparison} $${CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS.toFixed(3)}`;
-	}
-	const buy =
-		decision.compactCost !== undefined && decision.compactCost < decision.missCost
-			? `compact ${formatDollars(decision.compactCost)}`
-			: `expire ${formatDollars(decision.missCost)}`;
-	return `${rent}, spent ${formatDollars(decision.spentCost)} of buy-out ${buy}`;
-}
-
-function formatCacheWarmingDecisionTime(nextWarmAt: number | undefined, now: number): string {
-	if (nextWarmAt === undefined || nextWarmAt <= now) return "Decision now";
-	let remainingSeconds = Math.ceil((nextWarmAt - now) / 1000);
-	const hours = Math.floor(remainingSeconds / 3600);
-	remainingSeconds %= 3600;
-	const minutes = Math.floor(remainingSeconds / 60);
-	const seconds = remainingSeconds % 60;
-	const parts: string[] = [];
-	if (hours > 0) parts.push(`${hours}h`);
-	if (minutes > 0) parts.push(`${minutes}m`);
-	if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
-	return `Decision in ${parts.join(" ")}`;
-}
-
-/** One-line human-readable warming status for hosts that surface it. */
-export function formatCacheWarmingStatus(status: CacheWarmingStatus, now = Date.now()): string {
-	const decision = status.decision;
-	// A decision is attached once the warmer (or an extension) acted on it; "inactive"
-	// without one never got that far.
-	if (!decision || (status.state === "inactive" && !decision.economicsAvailable && !status.extensionOverride)) {
-		return `Inactive (${status.reason ?? "unknown reason"})`;
-	}
-	const details = status.extensionOverride
-		? `extension override, ${formatCacheWarmingEconomics(decision)}`
-		: `${formatCacheWarmingEconomics(decision)} -> ${decision.action}`;
-	if (status.state === "inactive") {
-		const verb = status.reason === BRIDGE_IN_PROGRESS_REASON ? "Compacting" : "Stopped";
-		return status.reason ? `${verb} (${status.reason}; ${details})` : `${verb} (${details})`;
-	}
-	if (status.state === "refreshing") return `Warming cache (${details})`;
-	return `${formatCacheWarmingDecisionTime(status.nextWarmAt, now)} (${details})`;
 }

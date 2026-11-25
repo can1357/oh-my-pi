@@ -2319,19 +2319,3 @@ export class MCPManager implements MCPManagerApi {
 		return resolved;
 	}
 }
-
-/**
- * Create an MCP manager and discover servers.
- * Convenience function for quick setup.
- */
-export async function createMCPManager(
-	cwd: string,
-	options?: MCPDiscoverOptions,
-): Promise<{
-	manager: MCPManager;
-	result: MCPLoadResult;
-}> {
-	const manager = new MCPManager(cwd);
-	const result = await manager.discoverAndConnect(options);
-	return { manager, result };
-}

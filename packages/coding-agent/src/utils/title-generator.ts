@@ -344,36 +344,6 @@ export async function generateSessionTitle(
 	}
 }
 
-export async function generateTitleOnline(
-	firstMessage: string,
-	registry: ModelRegistry,
-	settings: Settings,
-	sessionId?: string,
-	currentModel?: Model<Api>,
-	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
-	signal?: AbortSignal,
-	customSystemPrompt?: string,
-	credentialSourceSessionId?: string,
-	onUsage?: TitleUsageReporter,
-): Promise<string | null> {
-	const models = getTitleModels(registry, settings, currentModel);
-	if (models.length === 0) {
-		logger.warn("title-generator: no title model found", { titleSessionId: sessionId, reason: "no-title-model" });
-		return null;
-	}
-	return generateTitleOnlineWithModels(
-		firstMessage,
-		models,
-		registry,
-		sessionId,
-		metadataResolver,
-		signal,
-		customSystemPrompt,
-		credentialSourceSessionId,
-		onUsage,
-	);
-}
-
 async function generateTitleOnlineWithModels(
 	firstMessage: string,
 	models: Model<Api>[],
@@ -666,11 +636,6 @@ function getFallbackTerminalTitle(cwd: string | undefined): string | undefined {
 	const baseName = path.basename(resolvedCwd);
 	if (!baseName || baseName === path.parse(resolvedCwd).root) return undefined;
 	return sanitizeTerminalTitlePart(baseName);
-}
-
-export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?: string): string {
-	const label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
-	return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
 }
 
 /**

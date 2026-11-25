@@ -8,7 +8,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import { type PaintContext, roleOf } from "@oh-my-pi/pi-tui/term/paint";
 import { hyperlink } from "@oh-my-pi/pi-tui/text/osc";
-import { visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { diagnosticOrder, type FileDiagnostics, type ParsedDiagnostic, parseDiagnostic } from "../../tools/file-common";
 import { fileUriForTerminal } from "../../../utils/file-links";
@@ -194,11 +194,6 @@ export function sectionDiagnostics(node: UiNode): FileDiagnostics | undefined {
 	return (node.props() as { term?: { diagnostics?: FileDiagnostics } }).term?.diagnostics;
 }
 
-/** A numbered code row: the dim gutter (`  1 `) then the code. */
-export function gutterRow(theme: Theme, number: number, gutterWidth: number, code: string): string {
-	return `${theme.fg("dim", `${String(number).padStart(gutterWidth, " ")} `)}${code}`;
-}
-
 /** A numbered row wrapped to `width`, continuation rows indented under the code. */
 export function wrapGutterRow(
 	theme: Theme,
@@ -213,14 +208,4 @@ export function wrapGutterRow(
 	return wrap(code, width - indent).map((row, index) =>
 		index === 0 ? `${gutter}${row}` : `${" ".repeat(indent)}${row}`,
 	);
-}
-
-/** Rows of `text` wrapped to `width` (blank lines kept). */
-export function wrapLines(lines: readonly string[], width: number): string[] {
-	const rows: string[] = [];
-	for (const line of lines) {
-		if (visibleWidth(line) === 0) rows.push(line);
-		else rows.push(...wrap(line, width));
-	}
-	return rows;
 }

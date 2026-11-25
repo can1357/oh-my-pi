@@ -202,23 +202,6 @@ export async function removeMCPServer(filePath: string, name: string): Promise<v
 }
 
 /**
- * Get a specific server config from a file.
- * Returns undefined if server doesn't exist.
- */
-export async function getMCPServer(filePath: string, name: string): Promise<MCPServerConfig | undefined> {
-	const config = await readMCPConfigFile(filePath);
-	return config.mcpServers?.[name];
-}
-
-/**
- * List all server names in a config file.
- */
-export async function listMCPServers(filePath: string): Promise<string[]> {
-	const config = await readMCPConfigFile(filePath);
-	return Object.keys(config.mcpServers ?? {});
-}
-
-/**
  * Read the disabled servers list from a config file.
  */
 export async function readDisabledServers(filePath: string): Promise<string[]> {

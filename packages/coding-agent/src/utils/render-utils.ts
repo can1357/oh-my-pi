@@ -121,27 +121,6 @@ export function formatMoreItems(remaining: number, itemType: string): string {
 }
 
 /**
- * Collapsed command/code previews render a tail window sized from the live
- * viewport: terminal rows minus a reserve for the rest of the block (frame,
- * Output section, stats line) and the editor/status area below the
- * transcript. This keeps a volatile streaming block from growing past the
- * viewport and stranding its top, while letting tall terminals show more.
- */
-const PREVIEW_WINDOW_RESERVED_ROWS = 20;
-
-/** Floor so tiny or unknown viewports still show a useful window. */
-const PREVIEW_WINDOW_MIN_LINES = 6;
-
-/** Assumed viewport when rows are unknown (non-TTY, tests). */
-const PREVIEW_WINDOW_FALLBACK_ROWS = 30;
-
-/** Tail-window height for collapsed command/code previews. */
-export function previewWindowRows(): number {
-	const rows = process.stdout.rows || PREVIEW_WINDOW_FALLBACK_ROWS;
-	return Math.max(PREVIEW_WINDOW_MIN_LINES, rows - PREVIEW_WINDOW_RESERVED_ROWS);
-}
-
-/**
  * Split multi-line tool text into TUI-safe display lines.
  * Splits CRLF/LF, collapses stray `\r` progress overwrites to the final
  * segment (mirroring terminal rendering), and expands tabs — so raw

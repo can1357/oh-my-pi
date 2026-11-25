@@ -42,12 +42,6 @@ export type WorkerLogMessage = {
 	meta?: Record<string, unknown>;
 };
 
-/** Minimal outbound contract shared by every worker: `pong`, `error`, `log`. */
-export type WorkerOutboundBase =
-	| { type: "pong"; id: string }
-	| { type: "error"; id: string; error: string }
-	| WorkerLogMessage;
-
 /**
  * Parent-side view of a worker subprocess: send typed inbound messages,
  * subscribe to outbound messages and worker errors, and hard-terminate.
@@ -552,100 +546,9 @@ export function createWorkerHandle<Inbound, Outbound>(
 	};
 }
 
-/**
- * A stand-in handle used when the worker subprocess cannot be spawned. It
- * ponges `ping` (so the smoke probe and readiness checks still resolve) and
- * answers every other request with the spawn error so callers fail fast
- * instead of awaiting forever.
- */
-export function createUnavailableWorker<
-	Inbound extends { type: string; id: string },
-	Outbound extends { type: string },
->(error: unknown): WorkerHandle<Inbound, Outbound> {
-	const listeners = new Set<(message: Outbound) => void>();
-	const errorMessage = error instanceof Error ? error.message : String(error);
-	const emit = (message: WorkerOutboundBase): void => {
-		// The stub only ever emits pong/error — members of every concrete worker
-		// Outbound union — but the generic cannot prove it, hence the assertion.
-		for (const listener of listeners) listener(message as unknown as Outbound);
-	};
-	return {
-		send(message) {
-			queueMicrotask(() => {
-				if (message.type === "ping") {
-					emit({ type: "pong", id: message.id });
-					return;
-				}
-				emit({ type: "error", id: message.id, error: errorMessage });
-			});
-		},
-		onMessage(handler) {
-			listeners.add(handler);
-			return () => listeners.delete(handler);
-		},
-		onError() {
-			return () => {};
-		},
-		async terminate() {
-			listeners.clear();
-		},
-	};
-}
-
-/**
- * Spawn a worker handle, falling back to {@link createUnavailableWorker} (after
- * a warning) when the subprocess cannot be created so the feature degrades
- * gracefully instead of throwing into callers.
- */
-export function spawnWorkerOrUnavailable<Handle>(
-	spawn: () => Handle,
-	unavailable: (error: unknown) => Handle,
-	warnMessage: string,
-): Handle {
-	try {
-		return spawn();
-	} catch (error) {
-		logger.warn(warnMessage, { error: error instanceof Error ? error.message : String(error) });
-		return unavailable(error);
-	}
-}
-
 /** Forward a worker's structured `log` message to the matching logger level. */
 export function logWorkerMessage(message: WorkerLogMessage): void {
 	if (message.level === "debug") logger.debug(message.msg, message.meta);
 	else if (message.level === "warn") logger.warn(message.msg, message.meta);
 	else logger.error(message.msg, message.meta);
-}
-
-/**
- * Drive the ping/pong readiness probe wired into `omp --smoke-test`: send one
- * `ping`, resolve on the first `pong` (ignoring `log` chatter), and reject on
- * any other message, a worker error, or the timeout. Always tears the handle
- * down on the way out. `label` prefixes the failure messages.
- */
-export async function smokeTestWorker<Inbound extends { type: string; id: string }, Outbound extends { type: string }>(
-	handle: WorkerHandle<Inbound, Outbound>,
-	label: string,
-	timeoutMs: number,
-): Promise<void> {
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	const timer = setTimeout(() => reject(new Error(`${label} did not pong within ${timeoutMs}ms`)), timeoutMs);
-	const unsubscribeMessage = handle.onMessage(message => {
-		if (message.type === "pong") {
-			resolve();
-			return;
-		}
-		if (message.type === "log") return;
-		reject(new Error(`${label}: expected pong, got ${JSON.stringify(message)}`));
-	});
-	const unsubscribeError = handle.onError(reject);
-	try {
-		handle.send({ type: "ping", id: "smoke" } as Inbound);
-		await promise;
-	} finally {
-		clearTimeout(timer);
-		unsubscribeMessage();
-		unsubscribeError();
-		await handle.terminate();
-	}
 }

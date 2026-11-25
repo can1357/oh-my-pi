@@ -834,7 +834,7 @@ When a bare id matches models from multiple providers, preference order is:
 
 ### Initial model selection priority
 
-`findInitialModel(...)` uses this order:
+At startup, the session model is chosen in this order:
 
 1. explicit CLI provider+model
 2. first scoped model (if not resuming)

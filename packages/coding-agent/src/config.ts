@@ -168,13 +168,6 @@ export function getConfigDirPaths(subpath: string, options: GetConfigDirsOptions
 	return getConfigDirs(subpath, options).map(e => e.path);
 }
 
-export interface ConfigFileResult<T> {
-	path: string;
-	source: string;
-	level: "user" | "project";
-	content: T;
-}
-
 /**
  * Find the first existing config file (for non-JSON files like SYSTEM.md).
  * Returns just the path, or undefined if not found.
@@ -186,25 +179,6 @@ export function findConfigFile(subpath: string, options: GetConfigDirsOptions = 
 		const filePath = path.join(base, subpath);
 		if (fs.existsSync(filePath)) {
 			return filePath;
-		}
-	}
-
-	return undefined;
-}
-
-/**
- * Find the first existing config file with metadata.
- */
-export function findConfigFileWithMeta(
-	subpath: string,
-	options: GetConfigDirsOptions = {},
-): Omit<ConfigFileResult<never>, "content"> | undefined {
-	const dirs = getConfigDirs("", { ...options, existingOnly: false });
-
-	for (const { path: base, source, level } of dirs) {
-		const filePath = path.join(base, subpath);
-		if (fs.existsSync(filePath)) {
-			return { path: filePath, source, level };
 		}
 	}
 
