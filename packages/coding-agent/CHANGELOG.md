@@ -370,6 +370,7 @@
 
 - `/session` shows the path of the session's `local://` directory, and `/copy local` copies it, creating the directory first so it can be entered before anything was written there ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
 - `snapcompactShape` on `models.yml` models, `modelOverrides` and extension `registerProvider` models sets that model's snapcompact frame shape ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
+- Added support for the `compaction.idle*` settings in RPC sessions, so idle compaction can run after a session settles. In RPC, `set_auto_compaction(false)` disables both threshold and idle automatic compaction without aborting a run already in progress ([#19820](https://github.com/can1357/oh-my-pi/pull/19820) by [@thmtz](https://github.com/thmtz))
 
 ### Fixed
 

@@ -199,6 +199,13 @@ Important edge behavior from runtime:
 arrives as `manual_compaction_start` and `manual_compaction_end` events (see
 [Progress events](#progress-events)).
 
+`set_auto_compaction` applies a session-scoped override. In RPC, `false` disables
+both threshold and idle automatic compaction. Re-enabling refreshes idle
+maintenance when the effective state changes. This does not abort a compaction
+already running, and `compact` remains available. The TUI's Auto-Compact and Idle
+Compaction settings remain independent; see
+[Idle maintenance](compaction.md#overflowincomplete-recovery-vs-thresholdidle-maintenance).
+
 ### Cache warming
 
 - `{ id?, type: "set_cache_warming", mode: "off" | "streaming" | "idle" }`

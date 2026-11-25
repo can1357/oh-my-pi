@@ -40,7 +40,12 @@ export interface PeerReport {
 export interface AgentsProbe {
 	threadId(): Promise<string>;
 	/** Build a real session (mock model) and register it as `id` in the (remote) registry. */
-	open(id: string, options: { sessionFile?: string; gated?: boolean; monitored?: boolean }): Promise<string>;
+	open(
+		id: string,
+		options: { sessionFile?: string; gated?: boolean; monitored?: boolean; idleMaintenance?: boolean },
+	): Promise<string>;
+	/** Count side-turn requests, including idle recaps, made by the worker session. */
+	recapCalls(id: string): Promise<number>;
 	/** Run a prompt on the local session to completion. */
 	prompt(id: string, text: string): Promise<void>;
 	/** Emit a tool call on a specific session, even after another session takes its id. */
@@ -80,14 +85,16 @@ const port = parentPort;
 if (!port) throw new Error("fixture must run in a worker");
 
 const sessions = new Map<string, AgentSession>();
+const recapCalls = new Map<string, number>();
 const byKey = new Map<string, AgentSession>();
 const grabbed = new Map<string, AgentRef>();
 const peerSeen: { events: string[]; runStates: string[] } = { events: [], runStates: [] };
 let threadName = "";
 let gate = Promise.withResolvers<void>();
 let gateOpen = false;
+let idleTimeoutPatched = false;
 
-async function makeSession(id: string, gated: boolean): Promise<AgentSession> {
+async function makeSession(id: string, gated: boolean, idleMaintenance = false): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("bundled model missing");
 	const mock = createMockModel({
@@ -104,13 +111,40 @@ async function makeSession(id: string, gated: boolean): Promise<AgentSession> {
 	});
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("anthropic", "test-key");
+	if (idleMaintenance && !idleTimeoutPatched) {
+		idleTimeoutPatched = true;
+		const originalSetTimeout = globalThis.setTimeout;
+		globalThis.setTimeout = ((callback: () => void, delay = 0, ...args: unknown[]) =>
+			originalSetTimeout(callback, delay === 60_000 ? 25 : delay, ...args)) as typeof setTimeout;
+	}
 	const session = new AgentSession({
 		agent,
 		sessionManager: SessionManager.inMemory(),
-		settings: Settings.isolated(),
+		settings: Settings.isolated(
+			idleMaintenance
+				? {
+						"compaction.autoContinue": false,
+						"compaction.idleEnabled": true,
+						"compaction.idleThresholdTokens": 1,
+						"compaction.idleTimeoutSeconds": 60,
+						"compaction.keepRecentTokens": 1,
+						"compaction.methodOrder": ["soft"],
+						"contextPromotion.enabled": false,
+						"recap.enabled": true,
+						"recap.idleSeconds": 60,
+					}
+				: {},
+		),
 		modelRegistry: new ModelRegistry(authStorage),
 		agentId: id,
 	});
+	if (idleMaintenance) {
+		const originalRunEphemeralTurn = session.runEphemeralTurn.bind(session);
+		session.runEphemeralTurn = async options => {
+			recapCalls.set(id, (recapCalls.get(id) ?? 0) + 1);
+			return await originalRunEphemeralTurn(options);
+		};
+	}
 	sessions.set(id, session);
 	byKey.set(session.instanceKey, session);
 	return session;
@@ -125,7 +159,7 @@ function local(id: string): AgentSession {
 const probe: AgentsProbe = {
 	threadId: async () => threadName,
 	open: async (id, options) => {
-		const session = await makeSession(id, options.gated === true);
+		const session = await makeSession(id, options.gated === true, options.idleMaintenance === true);
 		const registry = AgentRegistry.global();
 		registry.register({
 			id,
@@ -144,6 +178,7 @@ const probe: AgentsProbe = {
 		}
 		return session.instanceKey;
 	},
+	recapCalls: async id => recapCalls.get(id) ?? 0,
 	prompt: async (id, text) => {
 		await local(id).prompt(text);
 	},

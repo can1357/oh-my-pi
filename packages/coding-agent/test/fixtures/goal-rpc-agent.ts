@@ -23,7 +23,33 @@ const cwd = process.cwd();
 const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
 authStorage.keys.setRuntime("anthropic", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
-const settings = await Settings.init({ inMemory: true, cwd });
+let holdContinuation = false;
+let accelerateIdleTimers = false;
+let idleTimeoutPatched = false;
+const continuationHold = Promise.withResolvers<void>();
+const idleMaintenance = Bun.env.GOAL_RPC_IDLE_MAINTENANCE === "1";
+if (idleMaintenance && !idleTimeoutPatched) {
+	idleTimeoutPatched = true;
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((callback: () => void, delay = 0, ...args: unknown[]) =>
+		originalSetTimeout(
+			callback,
+			delay === 60_000 && accelerateIdleTimers ? 25 : delay,
+			...args,
+		)) as typeof setTimeout;
+}
+const settings = idleMaintenance
+	? Settings.isolated({
+			"compaction.autoContinue": false,
+			"compaction.idleEnabled": true,
+			"compaction.idleThresholdTokens": 1,
+			"compaction.idleTimeoutSeconds": 60,
+			"compaction.keepRecentTokens": 1,
+			"compaction.methodOrder": ["soft"],
+			"contextPromotion.enabled": false,
+			"recap.idleSeconds": 60,
+		})
+	: await Settings.init({ inMemory: true, cwd });
 cfgAsyncEnabled.set(settings, false);
 cfgGoalContinuationModes.set(settings, Bun.env.GOAL_RPC_CONTINUATION === "1" ? ["rpc"] : ["interactive"]);
 const slowTurnRelease = Promise.withResolvers<void>();
@@ -68,6 +94,13 @@ const { session } = await createAgentSession({
 					slowTurnRelease.resolve();
 				},
 			});
+			pi.registerCommand("goaltest-release-continuation", {
+				description: "release the goal-only continuation wait",
+				handler: async () => {
+					holdContinuation = false;
+					continuationHold.resolve();
+				},
+			});
 			pi.registerCommand("goaltest-navigate-here", {
 				description: "navigate to the current leaf (no session change)",
 				handler: async (_args, ctx) => {
@@ -78,6 +111,7 @@ const { session } = await createAgentSession({
 		},
 	],
 });
+const originalWaitForIdle = session.waitForIdle.bind(session);
 const turns: MockResponse[] =
 	Bun.env.GOAL_RPC_SCRIPT === "complete" || Bun.env.GOAL_RPC_SCRIPT === undefined
 		? [
@@ -88,9 +122,25 @@ const turns: MockResponse[] =
 			]
 		: [];
 let slowTurnPending = Bun.env.GOAL_RPC_SCRIPT === "slow";
+let idleModelCalls = 0;
 const mock = createMockModel({
 	handler: async (_context, options) => {
-		if (!slowTurnPending) return turns.shift() ?? { content: ["Nothing left to do."] };
+		if (!slowTurnPending) {
+			if (idleMaintenance) {
+				idleModelCalls++;
+				const usage = { input: 60_000, output: 100, totalTokens: 60_100 };
+				if (idleModelCalls === 1) return { content: ["Setup complete."], usage };
+				if (idleModelCalls > 3) return { content: ["Idle summary."] };
+				const response = turns.shift() ?? { content: ["Nothing left to do."] };
+				// The goal turn makes progress in two model calls. Hold the next continuation before admission.
+				if (idleModelCalls === 3) {
+					holdContinuation = true;
+					accelerateIdleTimers = true;
+				}
+				return { ...response, usage };
+			}
+			return turns.shift() ?? { content: ["Nothing left to do."] };
+		}
 		slowTurnPending = false;
 		const signal = options?.signal;
 		const stalled = Promise.withResolvers<void>();
@@ -109,4 +159,16 @@ session.agent.streamFn = mock.stream;
 if (Bun.env.GOAL_RPC_PLAN === "1") {
 	session.setPlanModeState({ enabled: true, planFilePath: path.join(cwd, "plan.md") });
 }
-await runRpcMode(session);
+// Hold only the goal controller's direct wait. Every other member stays bound to the real
+// session, so idle maintenance keeps its real waitForRunEnd barrier and this test can catch
+// regressions in its scheduled-turn probe and drop refresh independently.
+const rpcSession = new Proxy(session, {
+	get(target, property) {
+		if (property === "waitForIdle") {
+			return () => (holdContinuation ? continuationHold.promise : originalWaitForIdle());
+		}
+		const value: unknown = Reflect.get(target, property, target);
+		return typeof value === "function" ? value.bind(target) : value;
+	},
+});
+await runRpcMode(rpcSession);
