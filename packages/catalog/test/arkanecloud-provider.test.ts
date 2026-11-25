@@ -150,7 +150,7 @@ describe("ArkaneCloud provider discovery", () => {
 		// means "no controllable surface", not "no efforts". This asserts the
 		// discovery spec only: `buildModel` may still derive a canonical ladder
 		// from model identity, which the wire-level tests in
-		// packages/ai/test/arkanecloud-login.test.ts cover.
+		// packages/ai/test/arkanecloud-reasoning-contract.test.ts cover.
 		expect(kimi?.thinking).toBeUndefined();
 		expect(kimi?.input).toEqual(["text", "image"]);
 	});

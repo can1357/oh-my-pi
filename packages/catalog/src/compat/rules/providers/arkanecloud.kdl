@@ -5,4 +5,8 @@ provider "arkanecloud" {
 	dynamic-models-authoritative #true
 	skip-cross-provider-reference-fills #true
 	discovery label="ArkaneCloud"
+
+	// Qwen takes the same `reasoning_effort` field as every other family here,
+	// not its native `enable_thinking`.
+	thinking-format "openai"
 }

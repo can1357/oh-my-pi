@@ -243,6 +243,23 @@ describe("ArkaneCloud inference request routing", () => {
 		expect(body().enable_thinking).toBeUndefined();
 	});
 
+	test("clamps a mandatory-reasoning Qwen model instead of sending native enable_thinking", async () => {
+		// Without `thinking-format "openai"` in arkanecloud.kdl, a Qwen id falls
+		// back to Qwen's own dialect, which turns thinking off with
+		// `enable_thinking: false` instead of clamping.
+		const model = await discoverModel(
+			{ can_disable: false, enabled_by_default: true, supported_efforts: ["high"] },
+			{ id: "Qwen/Qwen3.6-35B-A3B", name: "Qwen3.6 35B A3B" },
+		);
+		const { body, fetch } = captureBody();
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
+
+		await streamOpenAICompletions(model, context, { apiKey: "ak_test", disableReasoning: true, fetch }).result();
+
+		expect(body().enable_thinking).toBeUndefined();
+		expect(body().reasoning_effort).toBe("high");
+	});
+
 	test("omits both disable and effort fields for mandatory reasoning without an effort dial", async () => {
 		const model = await discoverModel({ can_disable: false, enabled_by_default: true, supported_efforts: [] });
 		const { body, fetch } = captureBody();

@@ -8873,8 +8873,6 @@ function mapArkaneCloudModel(
 	const thinking = mapArkaneCloudThinkingConfig(entry.reasoning);
 	const compat: OpenAICompat | undefined = reasoning
 		? {
-				// Qwen uses the same reasoning fields as other families on this gateway.
-				thinkingFormat: "openai",
 				// Reasons but publishes no effort ladder: never send an
 				// identity-derived `reasoning_effort` it never advertised.
 				...(thinking === undefined && { supportsReasoningEffort: false }),
@@ -8930,6 +8928,15 @@ function mapArkaneCloudModel(
 	};
 }
 
+/**
+ * ArkaneCloud model manager: `/api/v2/models` is the whole catalog for the API
+ * key (personal and team keys see different models and prices), so nothing is
+ * bundled and the model cache is scoped to the key. Rows that are not
+ * `type: "text"`, such as image generation, are dropped. Each row's
+ * `reasoning` block (`supported_efforts`, `can_disable`, `enabled_by_default`)
+ * sets that model's reasoning compat; the host-wide dialect is the
+ * `thinking-format` in `arkanecloud.kdl`.
+ */
 export function arkaneCloudModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
 	const baseUrl = (config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("arkanecloud")!).replace(/\/$/, "");
