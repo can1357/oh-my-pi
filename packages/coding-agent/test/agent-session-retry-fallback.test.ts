@@ -5724,7 +5724,11 @@ describe("AgentSession retry fallback", () => {
 				await activeSession.prompt(`Prompt ${index}`);
 				await activeSession.waitForIdle();
 			}
-			return { requests, answer: getLastAssistantMessage(activeSession) };
+			// The pruned terminal refusal is invisible in `session.messages`; the
+			// session reader still reports it to terminal consumers.
+			const answer = activeSession.getLastAssistantMessage();
+			if (!answer) throw new Error("Expected final assistant message");
+			return { requests, answer };
 		}
 
 		it("retries once on the same model without the reasoning, before the fallback chain, and keeps it out", async () => {
@@ -5925,6 +5929,8 @@ describe("AgentSession retry fallback", () => {
 				expect(fallbackAppliedEvents).toHaveLength(1);
 				expect(fallbackAppliedEvents[0].to).toBe(`${fallbackModel.provider}/${fallbackModel.id}`);
 				expect(session.model?.id).toBe(primaryModel.id);
+				// The undo restores the pre-swap request surface together with the model.
+				expect(agent.state.systemPrompt).not.toContain("Rebuilt for the fallback model");
 				expect(fallbackTurnRedemption).toBeUndefined();
 			} else {
 				expect(requestedModels).toEqual([

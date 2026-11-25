@@ -70,6 +70,14 @@
 - Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
+- Claude usage reports now label a Team premium seat as "Team 5x" instead of "Max 5x" ([#20677](https://github.com/can1357/oh-my-pi/pull/20677) by [@ndecool](https://github.com/ndecool))
+- Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
+- The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
+- Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
+- Fixed a cancelled inference request still being sent through a custom fetch that ignores the abort signal, when the cancel came while the request body was being prepared ([#20673](https://github.com/can1357/oh-my-pi/pull/20673) by [@sjawhar](https://github.com/sjawhar))
+### Fixed
+
+- Error classification now recognizes Bedrock `content_filtered` message stops, Anthropic's "Output blocked by content filtering policy" and Gemini's "blocked by content filters" wording as non-retryable content blocks ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
 
 ## [19.2.1] - 2026-11-25
 
@@ -85,11 +93,6 @@
 
 - Fixed Codex requests incorrectly sending a service tier to accounts whose plans do not support it.
 - Successful OAuth token refreshes now restore normal account selection after a temporary refresh outage.
-- Codex requests no longer send a service tier to an account whose own plan does not offer it.
-### Fixed
-
-- Successful OAuth refreshes now clear refresh-failure backoff so healthy accounts stop triggering usage-aware fallback after an outage ([#20454](https://github.com/can1357/oh-my-pi/issues/20454)).
-- Error classification now recognizes Bedrock `content_filtered` message stops, Anthropic's "Output blocked by content filtering policy" and Gemini's "blocked by content filters" wording as non-retryable content blocks ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
 
 ## [19.2.0] - 2026-11-25
 
