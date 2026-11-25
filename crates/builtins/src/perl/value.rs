@@ -817,6 +817,9 @@ const LVALUE: u8 = 2;
 const TIED: u8 = 4;
 const REGISTERED: u8 = 8;
 const TRACKED: u8 = 16;
+const LITERAL_READONLY: u8 = 32;
+const MODULE_READONLY: u8 = 64;
+const WATCHED: u8 = 128;
 
 impl ScalarBody {
 	fn new(value: Value, flags: u8) -> Self {
@@ -825,25 +828,30 @@ impl ScalarBody {
 
 	fn has(&self, flags: u8) -> bool { self.flags.get() & flags != 0 }
 
-	fn changed(&self) { self.revision.set(self.revision.get().wrapping_add(1)); }
+	#[inline]
+	fn changed(&self) {
+		if self.has(WATCHED) { self.revision.set(self.revision.get().wrapping_add(1)); }
+	}
 
 	/// Counter changed whenever the scalar's raw storage or magic changes.
-	pub fn revision(&self) -> u64 { self.revision.get() }
+	pub fn revision(&self) -> u64 {
+		// Only cells actually used for a snapshot/offset need a change counter.
+		self.flags.set(self.flags.get() | WATCHED);
+		self.revision.get()
+	}
 
 	/// Borrow the value only when raw storage represents an ordinary interpreter read.
 	/// Drop the guard before calling Perl or modifying any alias to the cell.
 	#[inline]
 	pub(super) fn plain_value(&self) -> Option<CellRef<'_, Value>> {
-		if self.has(WEAK | LVALUE | TIED | REGISTERED) { None } else { self.value.try_borrow().ok() }
+		if self.has(WEAK | LVALUE | TIED | REGISTERED | LITERAL_READONLY) { None } else { self.value.try_borrow().ok() }
 	}
 
 	/// Read the stored scalar, upgrading a live weak reference or returning undef.
 	/// Use `Interp::read_sv` when the operation can invoke Perl magic.
 	#[inline]
 	pub fn get(&self) -> Value {
-		if self.has(WEAK) {
-			return self.weak.borrow().as_ref().and_then(WeakRef::upgrade).map_or(Value::Undef, Value::Ref);
-		}
+		if self.has(WEAK) { return self.get_weak(); }
 		match &*self.value.borrow() {
 			Value::Int(n) => Value::Int(*n),
 			Value::UInt(n) => Value::UInt(*n),
@@ -851,6 +859,11 @@ impl ScalarBody {
 			Value::Undef => Value::Undef,
 			other => other.clone(),
 		}
+	}
+
+	#[cold]
+	fn get_weak(&self) -> Value {
+		self.weak.borrow().as_ref().and_then(WeakRef::upgrade).map_or(Value::Undef, Value::Ref)
 	}
 
 	#[inline]
@@ -863,9 +876,24 @@ impl ScalarBody {
 	/// Write a raw value without invoking Perl magic.
 	#[inline]
 	pub fn set(&self, value: Value) {
-		self.changed();
-		self.take_weak();
-		self.value.replace(value);
+		if self.has(WEAK | WATCHED) {
+			self.changed();
+			self.take_weak();
+		}
+		*self.value.borrow_mut() = value;
+	}
+
+	/// An arithmetic update to an already plain scalar; no displaced Value on same-kind writes.
+	#[inline]
+	pub(super) fn set_number(&self, n: Num) {
+		if self.has(WEAK | WATCHED) { self.set(n.into_value()); return; }
+		let mut v = self.value.borrow_mut();
+		match (&mut *v, n) {
+			(Value::Int(dst), Num::Int(i)) => *dst = i,
+			(Value::UInt(dst), Num::UInt(u)) if u > i64::MAX as u64 => *dst = u,
+			(Value::Num(dst), Num::Float(f)) => *dst = f,
+			(dst, n) => *dst = n.into_value(),
+		}
 	}
 
 	/// Replace a raw value and return the previous value (with weak reference upgraded).
@@ -921,8 +949,10 @@ impl ScalarBody {
 	#[inline]
 	pub fn try_value_mut(&self) -> Result<RefMut<'_, Value>, std::cell::BorrowMutError> {
 		let mut raw = self.value.try_borrow_mut()?;
-		self.changed();
-		if let Some(weak) = self.take_weak() { *raw = weak.upgrade().map_or(Value::Undef, Value::Ref); }
+		if self.has(WEAK | WATCHED) {
+			self.changed();
+			if let Some(weak) = self.take_weak() { *raw = weak.upgrade().map_or(Value::Undef, Value::Ref); }
+		}
 		Ok(raw)
 	}
 
@@ -930,8 +960,15 @@ impl ScalarBody {
 		if self.has(LVALUE) { self.lvalue.as_ref() } else { None }
 	}
 
-	/// Whether the interpreter registered this cell in one of its side tables.
-	pub(super) fn registered(&self) -> bool { self.has(REGISTERED) }
+	/// Marked cells cannot be recycled as fresh scalar storage.
+	pub(super) fn registered(&self) -> bool { self.has(REGISTERED | LITERAL_READONLY | MODULE_READONLY) }
+	pub(super) fn literal_readonly(&self) -> bool { self.has(LITERAL_READONLY) }
+	pub(super) fn module_readonly(&self) -> bool { self.has(MODULE_READONLY) }
+	pub(super) fn readonly(&self) -> bool { self.has(MODULE_READONLY | LITERAL_READONLY) }
+	pub(super) fn set_module_readonly(&self, on: bool) {
+		self.flags.set(if on { self.flags.get() | MODULE_READONLY } else { self.flags.get() & !MODULE_READONLY });
+	}
+	pub(super) fn mark_literal(&self) { self.flags.set(self.flags.get() | LITERAL_READONLY); }
 	/// Mark the cell as present in an interpreter side table.
 	pub(super) fn register(&self) { self.flags.set(self.flags.get() | REGISTERED); }
 
@@ -1136,6 +1173,9 @@ pub(in crate::perl) type Hv = Rc<HashBody>;
 pub(in crate::perl) struct HashBody {
 	/// Mapping from canonical keys to element cells.
 	map: RefCell<HashEntries>,
+	/// A run of consecutive unsigned decimal keys stored at consecutive IndexMap indices.
+	/// Invalidated before handing arbitrary mutable access to anyone.
+	unsigned_run: Cell<(u64, u32, u32)>,
 	tie: RefCell<Option<Value>>,
 	/// Next index in the `each` iterator.
 	pub iter: Cell<usize>,
@@ -1147,9 +1187,51 @@ impl HashBody {
 	/// Borrow the underlying hash entries (no tied callbacks).
 	pub fn entries(&self) -> CellRef<'_, HashEntries> { self.map.borrow() }
 	/// Borrow the underlying hash entries mutably (no tied callbacks).
-	pub fn entries_mut(&self) -> RefMut<'_, HashEntries> { self.map.borrow_mut() }
+	pub fn entries_mut(&self) -> RefMut<'_, HashEntries> {
+		self.unsigned_run.set((0, 0, 0));
+		self.map.borrow_mut()
+	}
 	/// Replace the underlying hash entries without invoking callbacks.
-	pub fn replace_entries(&self, entries: HashEntries) -> HashEntries { self.map.replace(entries) }
+	pub fn replace_entries(&self, entries: HashEntries) -> HashEntries {
+		self.unsigned_run.set((0, 0, 0));
+		self.map.replace(entries)
+	}
+
+	/// Access an unsigned IV/UV key in a plain, unrestricted hash. Keep the real
+	/// keys/IndexMap order for keys(), delete(), each(), and string-key lookups.
+	#[inline]
+	pub(super) fn unsigned_cell(&self, n: u64, create: bool) -> Option<Sv> {
+		let (first, start, len) = self.unsigned_run.get();
+		let offset = n.wrapping_sub(first);
+		if offset < u64::from(len) {
+			return self.map.borrow().get_index(start as usize + offset as usize).map(|(_, sv)| sv.clone());
+		}
+		self.unsigned_cell_miss(n, create)
+	}
+
+	fn unsigned_cell_miss(&self, n: u64, create: bool) -> Option<Sv> {
+		let mut buf = [0; 20];
+		let bytes = decimal_key(n, false, &mut buf);
+		let mut entries = self.map.borrow_mut();
+		let (i, sv) = if let Some((i, _, sv)) = entries.get_full(&HKeyRef(bytes)) {
+			(i, sv.clone())
+		} else if create {
+			let sv = new_sv(Value::Undef);
+			let (i, _) = entries.insert_full(HKey(PStr::from_bytes(bytes)), sv.clone());
+			(i, sv)
+		} else { return None; };
+		let (first, start, len) = self.unsigned_run.get();
+		if let Ok(i) = u32::try_from(i) {
+			if len != 0 && len < u32::MAX && n.checked_sub(first) == Some(u64::from(len)) && i.checked_sub(start) == Some(len) {
+				self.unsigned_run.set((first, start, len + 1));
+			} else if len != 0 && len < u32::MAX && first.checked_sub(n) == Some(1) && start.checked_sub(i) == Some(1) {
+				self.unsigned_run.set((n, i, len + 1));
+			} else if len <= 1 {
+				self.unsigned_run.set((n, i, 1));
+			}
+		}
+		Some(sv)
+	}
 
 	pub(super) fn tie(&self) -> Option<Value> { self.tie.borrow().clone() }
 	pub(super) fn replace_tie(&self, tie: Option<Value>) -> Option<Value> { self.tie.replace(tie) }
@@ -1158,6 +1240,34 @@ impl HashBody {
 /// Shared identity of a typeglob.
 pub(in crate::perl) type Gv = Rc<GlobBody>;
 
+/// A glob is visible in its package even when none of its slots have been used.
+pub(in crate::perl) struct GlobSlot<T> {
+	cell: OnceCell<RefCell<T>>,
+	init: Cell<Option<Box<dyn FnOnce() -> T>>>,
+}
+
+impl<T> GlobSlot<T> {
+	fn new(init: impl FnOnce() -> T + 'static) -> Self {
+		Self { cell: OnceCell::new(), init: Cell::new(Some(Box::new(init))) }
+	}
+
+	pub(super) fn initialized(&self) -> bool { self.cell.get().is_some() }
+
+	/// Supply an initial value before this slot has been exposed to Perl.
+	pub(super) fn defer(&self, init: impl FnOnce() -> T + 'static) {
+		debug_assert!(!self.initialized());
+		self.init.set(Some(Box::new(init)));
+	}
+}
+
+impl<T> std::ops::Deref for GlobSlot<T> {
+	type Target = RefCell<T>;
+	#[inline]
+	fn deref(&self) -> &Self::Target {
+		self.cell.get_or_init(|| RefCell::new(self.init.take().expect("uninitialized glob slot")()))
+	}
+}
+
 /// Slots for each sigil associated with one package symbol.
 pub(in crate::perl) struct GlobBody {
 	/// Package containing the symbol.
@@ -1165,13 +1275,13 @@ pub(in crate::perl) struct GlobBody {
 	/// Unqualified symbol name.
 	pub name: Rc<str>,
 	/// Scalar slot, initially undefined.
-	pub scalar: RefCell<Sv>,
+	pub scalar: GlobSlot<Sv>,
 	/// Array slot, initially empty.
-	pub array: RefCell<Av>,
+	pub array: GlobSlot<Av>,
 	/// Hash slot, initially empty.
-	pub hash: RefCell<Hv>,
+	pub hash: GlobSlot<Hv>,
 	/// Code slot, if declared.
-	pub code: RefCell<Option<Cv>>,
+	pub code: GlobSlot<Option<Cv>>,
 	/// I/O slot, if initialized.
 	pub io: RefCell<Option<super::io::Io>>,
 	/// Class of a blessed glob reference.
@@ -1236,6 +1346,19 @@ impl std::borrow::Borrow<PStr> for HKey {
 	fn borrow(&self) -> &PStr { self.as_pstr() }
 }
 
+/// Format an IV/UV exactly as Perl's decimal scalar string, without allocating a temporary key.
+pub(super) fn decimal_key(mut n: u64, negative: bool, buf: &mut [u8; 20]) -> &[u8] {
+	let mut i = buf.len();
+	loop {
+		i -= 1;
+		buf[i] = b'0' + (n % 10) as u8;
+		n /= 10;
+		if n == 0 { break; }
+	}
+	if negative { i -= 1; buf[i] = b'-'; }
+	&buf[i..]
+}
+
 /// A byte-slice probe for a hash lookup without allocating a PStr.
 pub(in crate::perl) struct HKeyRef<'a>(&'a [u8]);
 
@@ -1277,15 +1400,15 @@ pub(in crate::perl) fn new_av(items: Vec<Value>) -> Av {
 
 /// Allocate an empty hash.
 pub(in crate::perl) fn new_hv() -> Hv {
-	Rc::new(HashBody { map: RefCell::new(IndexMap::default()), tie: RefCell::new(None), iter: Cell::new(0), blessed: RefCell::new(None) })
+	Rc::new(HashBody { map: RefCell::new(IndexMap::default()), unsigned_run: Cell::new((0, 0, 0)), tie: RefCell::new(None), iter: Cell::new(0), blessed: RefCell::new(None) })
 }
 
 /// Allocate a typeglob with fresh scalar, array and hash slots.
 pub(in crate::perl) fn new_gv(pkg: Rc<str>, name: Rc<str>) -> Gv {
 	Rc::new(GlobBody {
 		pkg, name,
-		scalar: RefCell::new(new_sv(Value::Undef)), array: RefCell::new(new_av(Vec::new())), hash: RefCell::new(new_hv()),
-		code: RefCell::new(None), io: RefCell::new(None), blessed: RefCell::new(None),
+		scalar: GlobSlot::new(|| new_sv(Value::Undef)), array: GlobSlot::new(|| new_av(Vec::new())), hash: GlobSlot::new(new_hv),
+		code: GlobSlot::new(|| None), io: RefCell::new(None), blessed: RefCell::new(None),
 	})
 }
 

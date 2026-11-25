@@ -6,10 +6,12 @@ use super::{vars::Slot, *};
 
 const DEPTH_LIMIT: u32 = 8192;
 const PURE_LEVELS: u8 = 4;
+const STACK_CHECK_EVERY: u32 = if cfg!(debug_assertions) { 1 } else { 4 };
 // Allow for a compound assignment above the bounded arithmetic subtree.
 const PURE_LIMIT: u32 = DEPTH_LIMIT - PURE_LEVELS as u32 - 1;
 
 impl Interp<'_> {
+	#[inline]
 	pub(super) fn depth_guard<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
 		if self.depth >= DEPTH_LIMIT { return Err(self.die_msg("Deep recursion limit exceeded")); }
 		self.depth += 1;
@@ -31,20 +33,49 @@ impl Interp<'_> {
 		result
 	}
 
+	/// An expression statement normally enters a statement frame immediately followed by an
+	/// expression frame. There is no Perl work between the two. In the gaps between stack
+	/// checks, reserve both levels together; at the boundary use the ordinary guarded entry.
+	pub(super) fn eval_statement_expr(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+		let phase = self.depth % STACK_CHECK_EVERY;
+		if phase == 0 || self.depth >= PURE_LIMIT - 1 { return self.nested(|this| this.eval(e, cx)); }
+		if let Some(v) = self.eval_immediate(e, cx) { return Ok(Ret::One(v)); }
+		if phase + 1 == STACK_CHECK_EVERY {
+			return self.nested(|this| this.eval_nonleaf(e, cx));
+		}
+		let saved = self.enter_location(&e.location);
+		self.depth += 2;
+		let result = self.eval_node(e, cx);
+		self.depth -= 2;
+		self.leave_location(&e.location, saved);
+		result
+	}
+
+	#[inline]
 	fn eval_node(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
 		if let Some(flow) = self.take_pending() { return Err(flow); }
-		let result = self.eval_inner(e, cx);
+		let mut result = self.eval_inner(e, cx);
 		if let Some(flow) = self.take_pending() { return Err(flow); }
-		let ret = result?.in_context(cx);
-		if matches!(&ret, Ret::One(Value::Ref(Ref::Regexp(_)))) { self.track_ret(&ret); }
-		Ok(ret)
+		if let Ok(ret) = &mut result {
+			ret.apply_context(cx);
+			if matches!(ret, Ret::One(Value::Ref(Ref::Regexp(_)))) { self.track_ret(ret); }
+		}
+		result
 	}
 
 	/// Execute bounded, callback-free operations without entering a recursive evaluator frame.
 	/// A miss must have no side effects: in particular, coercions that can warn or die go through eval_node.
 	#[inline]
 	fn eval_immediate(&mut self, e: &Expr, cx: Cx) -> Option<Value> {
-		if matches!(&e.kind, ExprKind::Binary(..)) { self.try_plain_binary(e, cx) } else { self.eval_leaf(e) }
+		match &e.kind {
+			// These operations need an lvalue, a regex, or short-circuit evaluation:
+			// no bounded arithmetic/string probe can handle them.
+			ExprKind::Binary(Binary::Assign | Binary::Bind(_) | Binary::And | Binary::Or | Binary::DefinedOr
+				| Binary::AssignOp(Compound::Concat), _, _) => None,
+			ExprKind::Binary(..) => self.try_plain_binary(e, cx),
+			ExprKind::Int(_) | ExprKind::UInt(_) | ExprKind::Float(_) | ExprKind::String(_) | ExprKind::Variable(Sigil::Scalar, _) => self.eval_leaf(e),
+			_ => None,
+		}
 	}
 
 	/// None leaves the interpreter untouched; a successful compound assignment has updated its cell.
@@ -58,24 +89,39 @@ impl Interp<'_> {
 		}
 	}
 
+	#[inline(always)]
 	fn leaf_cell(&self, e: &Expr) -> Option<&Sv> {
 		let ExprKind::Variable(Sigil::Scalar, name) = &e.kind else { return None; };
-		match self.pad_slot(Sigil::Scalar, name) {
+		self.numeric_cell(e, name)
+	}
+
+	#[inline(always)]
+	fn numeric_cell(&self, e: &Expr, name: &str) -> Option<&Sv> {
+		match self.pad_slot_at(e, Sigil::Scalar, name) {
 			Some(Slot::Scalar(sv)) => Some(sv),
-			None if name.as_ref() == "_" => self.topics.last(),
+			None if name == "_" => self.topics.last(),
 			_ => None,
 		}
 	}
 
-	fn leaf_number(&self, e: &Expr) -> Option<Num> {
-		match &e.kind {
-			ExprKind::Variable(..) => plain_num(&*self.leaf_cell(e)?.plain_value()?),
-			_ if !self.in_constant && !self.active_hints.constant_overloads.is_empty() => None,
-			ExprKind::Int(n) => Some(Num::Int(*n)),
-			ExprKind::UInt(n) => Some(Num::UInt(*n)),
-			ExprKind::Float(n) => Some(Num::Float(*n)),
+	#[inline]
+	fn with_scalar_leaf<T>(&mut self, e: &Expr, name: &str, read: impl FnOnce(&Sv) -> T) -> Option<T> {
+		match self.pad_slot_at(e, Sigil::Scalar, name) {
+			Some(Slot::Scalar(sv)) if !sv.has_read_magic() => Some(read(sv)),
+			None if name == "_" => {
+				let sv = self.topic();
+				(!sv.has_read_magic()).then(|| read(&sv))
+			}
 			_ => None,
 		}
+	}
+
+	/// An explicit, callback-free scalar operand of print/split. Do not fetch a magical
+	/// operand while another operand or the output layer still has work to do.
+	pub(in crate::perl) fn plain_scalar_cell(&mut self, e: &Expr) -> Option<Sv> {
+		if self.pending.is_some() || self.depth >= DEPTH_LIMIT { return None; }
+		let ExprKind::Variable(Sigil::Scalar, name) = &e.kind else { return None; };
+		self.with_scalar_leaf(e, name, Rc::clone)
 	}
 
 	/// Evaluate a pure arithmetic tree under the current pad, topic and hints. Only arithmetic roots
@@ -85,13 +131,23 @@ impl Interp<'_> {
 		self.plain_number_at(e, PURE_LEVELS)
 	}
 
+	#[inline(always)]
 	fn plain_number_at(&self, e: &Expr, remaining: u8) -> Option<Num> {
 		match &e.kind {
-			ExprKind::Binary(op @ (Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod | Binary::Pow), a, b) if remaining != 0 => {
-				arithmetic(*op, self.plain_number_at(a, remaining - 1)?, self.plain_number_at(b, remaining - 1)?, self.active_hints.integer).ok()
-			}
-			_ => self.leaf_number(e),
+			ExprKind::Variable(Sigil::Scalar, name) => plain_num(&*self.numeric_cell(e, name)?.plain_value()?),
+			ExprKind::Binary(op @ (Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod | Binary::Pow), a, b) if remaining != 0 =>
+				self.plain_arithmetic(*op, a, b, remaining - 1),
+			_ if !self.in_constant && !self.active_hints.constant_overloads.is_empty() => None,
+			ExprKind::Int(n) => Some(Num::Int(*n)),
+			ExprKind::UInt(n) => Some(Num::UInt(*n)),
+			ExprKind::Float(n) => Some(Num::Float(*n)),
+			_ => None,
 		}
+	}
+
+	// Recurse only for arithmetic subtrees; both leaves of `$i * 2` are inlined.
+	fn plain_arithmetic(&self, op: Binary, a: &Expr, b: &Expr, remaining: u8) -> Option<Num> {
+		arithmetic(op, self.plain_number_at(a, remaining)?, self.plain_number_at(b, remaining)?, self.active_hints.integer).ok()
 	}
 
 	/// Only lends storage to a non-reentrant, interpreter-independent operation.
@@ -132,12 +188,12 @@ impl Interp<'_> {
 		};
 		// A compound assignment's shortcut for direct lexical lvalues does not apply to the global topic.
 		let ExprKind::Variable(Sigil::Scalar, name) = &left.kind else { return None; };
-		let Slot::Scalar(cell) = self.pad_slot(Sigil::Scalar, name)? else { return None; };
+		let Slot::Scalar(cell) = self.pad_slot_at(left, Sigil::Scalar, name)? else { return None; };
 		let old = plain_num(&*cell.plain_value()?)?;
 		if self.is_readonly_sv(cell) { return None; }
 		let rhs = self.plain_number_at(right, PURE_LEVELS)?;
 		let n = arithmetic(op, old, rhs, self.active_hints.integer).ok()?;
-		cell.set(n.into_value());
+		cell.set_number(n);
 		cell.set_pos(None);
 		Some(if cx == Cx::Void { Value::Undef } else { n.into_value() })
 	}
@@ -147,8 +203,7 @@ impl Interp<'_> {
 	/// are far larger, so debug builds check at every level.
 	#[inline]
 	pub(super) fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-		const EVERY: u32 = if cfg!(debug_assertions) { 1 } else { 4 };
-		if self.depth % EVERY == 0 { stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.depth_guard(f)) } else { self.depth_guard(f) }
+		if self.depth % STACK_CHECK_EVERY == 0 { stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.depth_guard(f)) } else { self.depth_guard(f) }
 	}
 
 	/// Leaves that cannot fail, warn, recurse or run Perl code (literals without constant overloading, plain
@@ -162,15 +217,7 @@ impl Interp<'_> {
 			ExprKind::UInt(n) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(Value::UInt(*n)),
 			ExprKind::Float(n) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(Value::Num(*n)),
 			ExprKind::String(s) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(Value::Str(s.clone())),
-			ExprKind::Variable(Sigil::Scalar, name) => match self.pad_slot(Sigil::Scalar, name) {
-				Some(Slot::Scalar(sv)) if !sv.has_read_magic() => Some(sv.get()),
-				// The global topic `$_` has no special-variable magic of its own.
-				None if name.as_ref() == "_" => {
-					let sv = self.topic();
-					(!sv.has_read_magic()).then(|| sv.get())
-				}
-				_ => None,
-			},
+			ExprKind::Variable(Sigil::Scalar, name) => self.with_scalar_leaf(e, name, |sv| sv.get()),
 			_ => None,
 		}
 	}
@@ -234,7 +281,7 @@ impl Interp<'_> {
 			ExprKind::Special(Special::Line) => Value::Int(i64::from(e.location.line)),
 			ExprKind::Special(Special::Package(pkg)) => Value::str(pkg),
 			ExprKind::Special(Special::Sub) => self.active_subs.last().map_or(Value::Undef, |(cv, _, _)| Value::Ref(Ref::Code(cv.clone()))),
-			ExprKind::Variable(sigil, name) => return self.eval_var(*sigil, name, cx),
+			ExprKind::Variable(sigil, name) => return self.eval_var(e, *sigil, name, cx),
 			ExprKind::Deref(sigil, operand) => return self.eval_deref(*sigil, operand, cx),
 			ExprKind::Select(base, select, key) => return self.read_selection(base, *select, key, cx),
 			ExprKind::Array(q) => Value::Ref(Ref::Array(new_av(self.eval_list(q)?))),
@@ -257,6 +304,13 @@ impl Interp<'_> {
 			ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) => return self.eval(inner, cx),
 			ExprKind::Declare(kind, class, target, attrs) => return self.read_declaration(*kind, class.as_ref(), target, attrs, e as *const Expr as usize, cx),
 			ExprKind::Unary(op, operand) => return self.unary(*op, operand, cx),
+			ExprKind::Binary(Binary::Assign, a, b) => return self.assign(a, b, cx),
+			ExprKind::Binary(Binary::AssignOp(op), a, b) => return self.compound(*op, a, b, cx).map(Ret::One),
+			ExprKind::Binary(Binary::Bind(neg), a, b) => return rx::bind_expr(self, a, b, *neg, cx),
+			ExprKind::Binary(op @ (Binary::And | Binary::Or | Binary::DefinedOr), a, b) => {
+				let value = self.eval_scalar(a)?;
+				return if self.short_circuit(*op, &value)? { self.eval(b, cx) } else { Ok(Ret::One(value)) };
+			}
 			ExprKind::Binary(op, a, b) => return self.binary(e as *const Expr as usize, *op, a, b, cx),
 			ExprKind::CompareChain(first, rest) => {
 				let mut left = self.eval_scalar(first)?;
@@ -272,7 +326,7 @@ impl Interp<'_> {
 				let branch = if self.eval_truth(cond)? { yes } else { no };
 				return self.eval(branch, cx);
 			}
-			ExprKind::Call(call) => return self.eval_call(call, cx),
+			ExprKind::Call(call) => return self.eval_call(e, call, cx),
 			ExprKind::Sub(sub) => {
 				let cv = self.make_sub(sub, None, self.capture_pad(sub.body.as_deref()));
 				// `sub : const {...}` runs once now and becomes a constant sub of that value (perlsub).
@@ -291,6 +345,42 @@ impl Interp<'_> {
 		Ok(Ret::One(value))
 	}
 
+	/// `defined($scalar = <FH>)` needs the assignment's definedness, not another copy
+	/// of the input record. Keep every node frame and evaluate the lvalue *after* reading:
+	/// magic on the handle can change which scalar the name denotes.
+	pub(super) fn defined_read_assignment(&mut self, e: &Expr, lhs: &Expr, rhs: &Expr) -> PResult<bool> {
+		self.at_location(&e.location, |this| this.nested(|this| {
+			if let Some(flow) = this.take_pending() { return Err(flow); }
+			let result = if let ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) = &e.kind {
+				this.defined_read_assignment(inner, lhs, rhs)
+			} else {
+				(|| {
+					let value = this.eval_scalar(rhs)?;
+					let cell = match &lhs.kind {
+						ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(cell)) = this.pad_slot_at(lhs, Sigil::Scalar, name) => cell.clone(),
+						_ => this.eval_lvalue(lhs)?,
+					};
+					if matches!(value, Value::Str(_) | Value::Undef) && !cell.registered() && !cell.is_magical()
+						&& !this.is_readonly_sv(&cell) {
+						let defined = !value.is_undef();
+						if let Value::Str(old) = cell.replace(value) { this.sys.recycle_record(old.bytes); }
+						cell.set_pos(None);
+						Ok(defined)
+					} else {
+						let tied = this.scalar_tie(&cell).is_some();
+						let stored = this.store_sv(&cell, value.clone())?;
+						let assigned = if tied { this.read_sv(&cell)? } else { stored.unwrap_or(value) };
+						let defined = !assigned.is_undef();
+						if this.pending.is_none() && matches!(assigned, Value::Ref(Ref::Regexp(_))) { this.track_ret(&Ret::One(assigned)); }
+						Ok(defined)
+					}
+				})()
+			};
+			if let Some(flow) = this.take_pending() { return Err(flow); }
+			result
+		}))
+	}
+
 	fn constant_value(&mut self, kind: &str, value: Value) -> PResult<Value> {
 		if self.in_constant || self.active_hints.constant_overloads.is_empty() { return Ok(value); }
 		let Some(handler) = self.active_hints.constant_overloads.get(kind).cloned() else { return Ok(value); };
@@ -307,17 +397,23 @@ impl Interp<'_> {
 		use Unary::*;
 		if op == Reference { return self.reference(operand, cx); }
 		if matches!(op, PreInc | PreDec | PostInc | PostDec) {
-			let cell = match &ungroup(operand).kind {
-				ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot(Sigil::Scalar, name) => sv.clone(),
+			let target = ungroup(operand);
+			let cell = match &target.kind {
+				ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot_at(target, Sigil::Scalar, name) => sv.clone(),
 				_ => self.eval_lvalue(operand)?,
 			};
-			// A plain integer that stays in range: update in place (what the general path computes for an IV).
-			if !cell.is_magical() && !self.is_readonly_sv(&cell)
-				&& let Some(n) = cell.try_value().ok().and_then(|v| if let Value::Int(n) = *v { Some(n) } else { None })
+			// Repeated counters (including a newly vivified undef hash element) need neither a
+			// copied old scalar nor a magic STORE. Post-decrement preserves an undef old value.
+			let count = cell.plain_value().and_then(|v| match *v {
+				Value::Int(n) => Some((n, false)), Value::Undef => Some((0, true)), _ => None,
+			});
+			if let Some((n, undef)) = count && !self.is_readonly_sv(&cell)
 				&& let Some(next) = if matches!(op, PreInc | PostInc) { n.checked_add(1) } else { n.checked_sub(1) } {
-				cell.set(Value::Int(next));
+				cell.set_number(Num::Int(next));
 				cell.set_pos(None);
-				return Ok(Ret::One(Value::Int(if matches!(op, PostInc | PostDec) { n } else { next })));
+				return Ok(Ret::One(match op {
+					PostDec if undef => Value::Undef, PostInc | PostDec => Value::Int(n), _ => Value::Int(next),
+				}));
 			}
 			let old = self.read_sv(&cell)?;
 			let plus = matches!(op, PreInc | PostInc);
@@ -364,14 +460,6 @@ impl Interp<'_> {
 	fn binary(&mut self, site: usize, op: Binary, left: &Expr, right: &Expr, cx: Cx) -> PResult<Ret> {
 		use Binary::*;
 		match op {
-			Bind(neg) => return rx::bind_expr(self, left, right, neg, cx),
-			Assign => return self.assign(left, right, cx),
-			AssignOp(compound) => return self.compound(compound, left, right, cx).map(Ret::One),
-			And | Or | DefinedOr => {
-				let value = self.eval_scalar(left)?;
-				let pass = self.short_circuit(op, &value)?;
-				return if pass { self.eval(right, cx) } else { Ok(Ret::One(value)) };
-			}
 			SmartMatch => {
 				let a = self.smartmatch_operand(left)?;
 				let b = self.smartmatch_operand(right)?;
@@ -424,6 +512,7 @@ impl Interp<'_> {
 		self.binary_values_named(op, &a, &b, names).map(Ret::One)
 	}
 
+	#[inline]
 	fn short_circuit(&mut self, op: Binary, value: &Value) -> PResult<bool> {
 		match op {
 			Binary::And => self.truthy(value), Binary::Or => Ok(!self.truthy(value)?),
@@ -439,9 +528,37 @@ impl Interp<'_> {
 		self.eval_truth(e)
 	}
 
-	fn eval_truth(&mut self, e: &Expr) -> PResult<bool> {
-		if self.pending.is_none() && let Some(value) = self.leaf_cell(e).and_then(|sv| sv.plain_value())
-			&& !matches!(&*value, Value::Ref(_)) { return Ok(value.truthy()); }
+	pub(super) fn eval_truth(&mut self, e: &Expr) -> PResult<bool> {
+		use Binary::*;
+		if self.pending.is_none() {
+			match &e.kind {
+				// A scalar match returns only Perl's true/false value, even when matching
+				// runs callbacks. Keep its location, depth and deferred exceptions, but don't
+				// materialize an evaluator result or test it for list/regexp/overload magic.
+				ExprKind::Regex(re) if matches!(re.kind, RegexKind::Match(_)) => {
+					return self.at_location(&e.location, |this| this.nested(|this| {
+						let result = rx::eval_regex(this, re, None, false, Cx::Scalar);
+						if let Some(flow) = this.take_pending() { return Err(flow); }
+						result.map(|ret| ret.scalar().truthy())
+					}));
+				}
+				ExprKind::Variable(Sigil::Scalar, _) => {
+					if let Some(value) = self.leaf_cell(e).and_then(|sv| sv.plain_value())
+						&& !matches!(&*value, Value::Ref(_)) { return Ok(value.truthy()); }
+				}
+				ExprKind::Binary(op @ (Eq | Ne | Lt | Le | Gt | Ge), lhs, rhs) if self.depth < PURE_LIMIT => {
+					if let Some(a) = self.plain_number_at(lhs, PURE_LEVELS - 1)
+						&& let Some(b) = self.plain_number_at(rhs, PURE_LEVELS - 1) {
+						let order = if self.active_hints.integer { Some(a.wrapping_iv().cmp(&b.wrapping_iv())) } else { ops::num_cmp(a, b) };
+						return Ok(comparison_truth(*op, order));
+					}
+					// Already tried the same numeric operands that eval_immediate would inspect.
+					let v = self.eval_nonleaf(e, Cx::Scalar)?.scalar();
+					return self.truthy(&v);
+				}
+				_ => {}
+			}
+		}
 		let v = self.eval_scalar(e)?;
 		self.truthy(&v)
 	}
@@ -472,7 +589,7 @@ impl Interp<'_> {
 			return func::assign(self, *b, call, value);
 		}
 		let cell = match &target.kind {
-			ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot(Sigil::Scalar, name) => sv.clone(),
+			ExprKind::Variable(Sigil::Scalar, name) if let Some(Slot::Scalar(sv)) = self.pad_slot_at(target, Sigil::Scalar, name) => sv.clone(),
 			_ => self.eval_lvalue(left)?,
 		};
 		if op == B::Concat && let Some(value) = self.append_in_place(&cell, right, cx)? { return Ok(value); }
@@ -768,8 +885,9 @@ impl Interp<'_> {
 	}
 
 	/// Test the value, preferring the `bool` overload when present.
+	#[inline]
 	pub fn truthy(&mut self, v: &Value) -> PResult<bool> {
-		if !matches!(v, Value::Ref(_)) { return Ok(v.truthy()); }
+		if !matches!(v, Value::Ref(_)) || self.overloads.is_empty() { return Ok(v.truthy()); }
 		Ok(self.convert_overload(v, &["bool", "0+", "\"\""])?.map_or_else(|| v.truthy(), |v| v.truthy()))
 	}
 
@@ -922,7 +1040,7 @@ fn numeric_binary(op: Binary, a: Num, b: Num, integer: bool) -> Result<Value, &'
 	}
 }
 
-fn arithmetic(op: Binary, a: Num, b: Num, integer: bool) -> Result<Num, &'static str> {
+pub(super) fn arithmetic(op: Binary, a: Num, b: Num, integer: bool) -> Result<Num, &'static str> {
 	use Binary::*;
 	if integer && op != Pow {
 		let (a, b) = (a.wrapping_iv(), b.wrapping_iv());
@@ -974,13 +1092,19 @@ fn comparison(op: Binary, order: Option<Ordering>) -> Value {
 	use Ordering::*;
 	match op {
 		Cmp | StrCmp => match order { Some(Less) => Value::Int(-1), Some(Equal) => Value::Int(0), Some(Greater) => Value::Int(1), None => Value::Undef },
-		Eq | StrEq => perl_bool(order == Some(Equal)),
-		Ne | StrNe => perl_bool(order != Some(Equal)),
-		Lt | StrLt => perl_bool(order == Some(Less)),
-		Le | StrLe => perl_bool(matches!(order, Some(Less | Equal))),
-		Gt | StrGt => perl_bool(order == Some(Greater)),
-		Ge | StrGe => perl_bool(matches!(order, Some(Greater | Equal))),
-		_ => perl_bool(false),
+		_ => perl_bool(comparison_truth(op, order)),
+	}
+}
+
+#[inline]
+fn comparison_truth(op: Binary, order: Option<Ordering>) -> bool {
+	use Binary::*;
+	use Ordering::*;
+	match op {
+		Eq | StrEq => order == Some(Equal), Ne | StrNe => order != Some(Equal),
+		Lt | StrLt => order == Some(Less), Le | StrLe => matches!(order, Some(Less | Equal)),
+		Gt | StrGt => order == Some(Greater), Ge | StrGe => matches!(order, Some(Greater | Equal)),
+		_ => false,
 	}
 }
 

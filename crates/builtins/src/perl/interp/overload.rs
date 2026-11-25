@@ -229,12 +229,15 @@ impl Interp<'_> {
 		result
 	}
 
+	#[inline]
 	pub(super) fn overload_unary(&mut self, op: &str, v: &Value) -> PResult<Option<Value>> {
+		if !matches!(v, Value::Ref(_)) || self.overloads.is_empty() { return Ok(None); }
 		self.overload_builtin(op, v, None, Cx::Scalar).map(|r| r.map(Ret::scalar))
 	}
 
 	/// Apply a builtin overload to its already-evaluated arguments without repeating evaluation.
 	pub fn overload_builtin(&mut self, op: &str, left: &Value, right: Option<&Value>, cx: Cx) -> PResult<Option<Ret>> {
+		if self.overloads.is_empty() { return Ok(None); }
 		if op == "atan2" && let Some(right) = right { return self.overload_binary(op, left, right, false).map(|out| out.map(Ret::One)); }
 		let Some(pkg) = class(left) else { return Ok(None); };
 		let Some(methods) = self.methods(&pkg) else { return Ok(None); };

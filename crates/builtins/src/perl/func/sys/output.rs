@@ -30,13 +30,17 @@ pub(super) fn call(interp: &mut Interp<'_>, b: Builtin, call: &Call, cx: Cx) -> 
 	};
 	let default = args(call).is_empty();
 	let tied = io.as_ref().is_some_and(|io| interp.tied_handle(io).is_some());
-	// A plain topic printed to a device outside Perl cannot alias its own destination.
-	// Release its borrow before warnings (which can run arbitrary Perl) or a second write.
-	if default && !tied && b != Builtin::Printf
+	// `print` and `print $_` (the latter synthesized by -p) can borrow a
+	// string when neither evaluation nor the write can invoke Perl or edit it.
+	if !tied && b != Builtin::Printf
 		&& let Some(io) = io.as_ref().filter(|io| io.borrow().writes_external_bytes())
 	{
-		let sv = interp.topic();
-		if let Some(value) = sv.plain_value() && let Value::Str(text) = &*value {
+		let cell = match args(call) {
+			[] => Some(interp.topic()),
+			[expr] => interp.plain_scalar_cell(expr),
+			_ => None,
+		};
+		if let Some(sv) = cell && let Some(value) = sv.plain_value() && let Value::Str(text) = &*value {
 			let sep = record_separator(interp, b);
 			let result = io.borrow_mut().write(text);
 			drop(value);

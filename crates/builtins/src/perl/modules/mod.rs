@@ -23,7 +23,7 @@ use std::{collections::{HashMap, HashSet}, rc::{Rc, Weak}};
 use super::{
 	ast::Sigil,
 	interp::{Cx, Interp, NativeFn, PResult, Ret},
-	value::{ArrayBody, Av, HKey, PStr, Ref, ScalarBody, Sv, Value, new_av, new_sv},
+	value::{ArrayBody, Av, HKey, PStr, Ref, Sv, Value, new_av, new_sv},
 };
 
 /// Per-interpreter state for native and embedded core libraries.
@@ -31,7 +31,6 @@ use super::{
 pub(in crate::perl) struct State {
 	vars: HashMap<String, u8>,
 	english: HashMap<String, &'static str>,
-	readonly: HashMap<usize, Weak<ScalarBody>>,
 	readonly_arrays: HashMap<usize, Weak<ArrayBody>>,
 	hash_locks: extras::HashLocks,
 	errno: Option<extras::ErrnoState>,
@@ -144,9 +143,7 @@ pub(in crate::perl) fn english_alias(interp: &Interp<'_>, qualified: &str) -> Op
 }
 
 /// Whether a scalar has been marked read-only by `Internals::SvREADONLY`.
-pub(in crate::perl) fn readonly_sv(interp: &Interp<'_>, sv: &Sv) -> bool {
-	readonly(&interp.modules.readonly, sv)
-}
+pub(in crate::perl) fn readonly_sv(_: &Interp<'_>, sv: &Sv) -> bool { sv.module_readonly() }
 
 /// Whether an array's structure has been marked read-only.
 pub(in crate::perl) fn readonly_array(interp: &Interp<'_>, av: &Av) -> bool {
@@ -171,7 +168,7 @@ pub(in crate::perl) fn autodie_result(interp: &mut Interp<'_>, name: &str, resul
 }
 
 fn define(interp: &mut Interp<'_>, module: &str, defs: &[(&str, NativeFn)]) {
-	for (name, f) in defs { interp.define_native(&format!("{module}::{name}"), *f); }
+	interp.define_natives(module, defs);
 }
 
 fn version(interp: &mut Interp<'_>, module: &str, v: &str) {

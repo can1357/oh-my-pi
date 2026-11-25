@@ -23,6 +23,7 @@ use super::{ast::*, code::{CodeBody, CodeImpl, Cv}, func, io::{Handle, InPlace, 
 
 pub(in crate::perl) use self::{calls::{FormatArgs, PerlBody}, hints::{Hints, Warnings}};
 use self::vars::{Pad, Restore};
+pub(in crate::perl) use self::vars::SpecialGlob;
 
 /// Dynamic evaluation context supplied by the enclosing operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,9 +58,13 @@ impl Ret {
 	}
 	fn no_value(cx: Cx) -> Self { if cx == Cx::List { Self::empty() } else { Self::One(Value::Undef) } }
 	#[inline]
-	fn in_context(self, cx: Cx) -> Self {
-		match self { Self::Many(mut v) if cx != Cx::List => Self::One(v.pop().unwrap_or(Value::Undef)), ret => ret }
+	fn apply_context(&mut self, cx: Cx) {
+		if cx != Cx::List && let Self::Many(values) = self {
+			*self = Self::One(values.pop().unwrap_or(Value::Undef));
+		}
 	}
+	#[inline]
+	fn in_context(mut self, cx: Cx) -> Self { self.apply_context(cx); self }
 }
 
 /// Non-local control transfers. Die strings have already received their location.
@@ -215,6 +220,8 @@ pub(in crate::perl) struct Interp<'h> {
 	pub(in crate::perl) sys: func::sys::State,
 	pub(in crate::perl) data: func::data::State,
 	pub(in crate::perl) modules: modules::State,
+	/// Host-backed defaults not yet handed out through a glob or its stash.
+	startup_host: runtime::HostSpecials,
 	/// Most recent successful match in this dynamic block.
 	pub(in crate::perl) last_match: Option<Rc<rx::MatchState>>,
 	symbols: FxHashMap<Rc<str>, Gv>,
@@ -227,8 +234,7 @@ pub(in crate::perl) struct Interp<'h> {
 	/// Memoized globs of frequently used punctuation variables, valid for their `symbol_generation`.
 	special_globs: RefCell<[vars::SpecialMemo; vars::SPECIAL_GLOBS]>,
 	magic_cells: FxHashMap<usize, (&'static str, std::rc::Weak<value::ScalarBody>)>,
-	readonly_literals: FxHashMap<usize, std::rc::Weak<value::ScalarBody>>,
-	readonly_sweep: usize,
+	global_sites: Vec<vars::GlobalSite>,
 	/// Tied scalars whose FETCH/STORE is running: their magic is off meanwhile (perl's save_magic).
 	tie_suspended: FxHashSet<usize>,
 	stashes: FxHashMap<Rc<str>, Hv>,
@@ -254,7 +260,6 @@ pub(in crate::perl) struct Interp<'h> {
 	parse_scopes: Vec<Hints>,
 	compile_pads: Vec<Pad>,
 	compile_pad_base: usize,
-	declared_slots: FxHashMap<usize, (Rc<str>, vars::Slot)>,
 	use_hints: FxHashMap<usize, Rc<Hints>>,
 	captures: FxHashMap<usize, Vec<usize>>,
 	imported_symbols: FxHashSet<Rc<str>>,

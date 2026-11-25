@@ -11,6 +11,7 @@ fn matches_label(target: &Option<Rc<str>>, label: Option<&str>) -> bool {
 	target.as_deref().is_none_or(|target| Some(target) == label)
 }
 
+#[inline]
 fn loop_flow<T>(result: PResult<T>, label: Option<&str>) -> PResult<Loop<T>> {
 	match result {
 		Ok(value) => Ok(Loop::Value(value)),
@@ -168,7 +169,7 @@ impl Interp<'_> {
 		// sets were known. Drop the unused captured cells once validation completes.
 		for (block, _, _, pad) in checks.iter_mut().chain(self.checks.iter_mut()).chain(self.inits.iter_mut()).chain(self.ends.iter_mut()) {
 			if let Some(needed) = self.captures.get(&(Rc::as_ptr(block) as usize)) {
-				pad.retain(|(sigil, name, _)| needed.binary_search(&self.lexicals.resolve(*sigil, name)).is_ok());
+				pad.retain(|(id, _)| needed.binary_search(id).is_ok());
 			}
 		}
 		self.programs.push(program.clone());
@@ -410,7 +411,7 @@ impl Interp<'_> {
 	}
 
 	pub(super) fn run_statement(&mut self, stmt: &Stmt, cx: Cx) -> PResult<Ret> {
-		let result = if let StmtKind::Expr(e) = &stmt.kind { self.nested(|this| this.eval(e, cx)) }
+		let result = if let StmtKind::Expr(e) = &stmt.kind { self.eval_statement_expr(e, cx) }
 			else { self.nested(|this| this.run_statement_inner(stmt, cx)) };
 		// New my/state bindings enter scope after the statement, not after
 		// their assignment alone: `my $x = 1 and $x++` still sees the outer $x.
@@ -479,7 +480,7 @@ impl Interp<'_> {
 				if var.as_ref().is_some_and(|e| matches!(&ungroup(e).kind, ExprKind::Unary(Unary::Reference, _))) {
 					this.aliasing_enabled()?;
 				}
-				let aliases = this.foreach_items(list)?;
+				let mut aliases = this.foreach_items(list)?;
 				this.commit_declarations();
 				// `for my $x (...)`: bind each element directly (the general aliasing logic, resolved once).
 				let lexical = var.as_ref().and_then(|v| match &v.kind {
@@ -493,18 +494,21 @@ impl Interp<'_> {
 					[Stmt { kind: StmtKind::Expr(e), location, .. }] if continue_.is_none() && matches!(e.kind, ExprKind::Binary(..)) => Some((e, location)),
 					_ => None,
 				};
+				if let (Some((_, name)), Some((e, loc)), ForeachItems::Range(range, _)) = (lexical, simple, &mut aliases) {
+					this.accumulate_range(range, name, e, loc)?;
+				}
 				for alias in aliases {
-					let step = if let Some((id, name)) = lexical {
+					let step = if let Some((id, _)) = lexical {
 						// The ordinary polls bracket entry to the iteration and its first statement.
 						// With no Perl work pending there, a successful numeric update needs neither a
 						// fresh scope stack entry nor an interpreter frame. A retained alias still gets
 						// a fresh counter cell from the iterator.
 						if let Some((e, loc)) = simple && this.quiet_statement() {
 							if this.is_cancelled() { return Err(Flow::Cancelled); }
-							if this.try_numeric_iteration(id, name, &alias, e) { this.statement_location(loc); continue; }
+							if this.try_numeric_iteration(id, &alias, e) { this.statement_location(loc); continue; }
 						}
 						this.scope_slots(|this| {
-							this.put_resolved_pad(id, Sigil::Scalar, name.clone(), Slot::Scalar(alias));
+							this.put_resolved_pad(id, Slot::Scalar(alias));
 							this.run_iteration(body, continue_.as_ref(), label, Cx::Void)
 						})?
 					} else {
@@ -604,7 +608,11 @@ impl Interp<'_> {
 			} else { self.write_sv(&topic, v)?; }
 			return Ok(defined != negate);
 		}
-		self.condition_value(e, negate, implicit).map(|(truth, _)| truth)
+		if tests_definedness(e) || matches!(&e.kind,
+			ExprKind::Binary(Binary::Assign, lhs, rhs) if !Self::list_target(lhs) && tests_definedness(rhs)) {
+			return Ok(!self.eval_scalar(e)?.is_undef() != negate);
+		}
+		Ok(self.eval_truth(e)? != negate)
 	}
 
 	/// A loop/branch condition's outcome and the value it produced (a `while` statement's own value is its final,
@@ -630,13 +638,14 @@ impl Interp<'_> {
 		loop {
 			self.poll()?;
 			let mark = cont.map(|_| self.locals_mark());
-			let result = loop_flow(self.run_statements(body, cx), label);
+			let result = self.run_statements(body, cx);
 			if let Some(mark) = mark { self.unwind_locals(mark); }
-			let result = match result? {
-				Loop::Value(v) => v,
-				Loop::Last => return Ok(Loop::Last),
-				Loop::Redo => continue,
-				Loop::Next => Ret::no_value(cx),
+			let result = match result {
+				Ok(v) => v,
+				Err(Flow::Last(l)) if matches_label(&l, label) => return Ok(Loop::Last),
+				Err(Flow::Redo(l)) if matches_label(&l, label) => continue,
+				Err(Flow::Next(l)) if matches_label(&l, label) => Ret::no_value(cx),
+				Err(flow) => return Err(flow),
 			};
 			if let Some(cont) = cont {
 				match loop_flow(self.run_block(cont, Cx::Void), label)? {
@@ -669,6 +678,52 @@ impl Interp<'_> {
 		Ok(ForeachItems::Aliases(self.eval_aliases(list)?.into_iter()))
 	}
 
+	/// A lexical range counter read only as an integer by a single `+=`/`-=` need not be
+	/// materialized as a Perl cell. Hoist the proven plain operands out of the loop; if an
+	/// IV would overflow, leave that iteration and the rest to normal IV/UV/NV arithmetic.
+	fn accumulate_range(&mut self, range: &mut std::ops::RangeInclusive<i64>, iterator: &str, e: &Expr, loc: &Location) -> PResult<()> {
+		if range.is_empty() || !self.quiet_statement() { return Ok(()); }
+		let ExprKind::Binary(Binary::AssignOp(op @ (Compound::Add | Compound::Sub)), lhs, rhs) = &e.kind else { return Ok(()); };
+		let ExprKind::Variable(Sigil::Scalar, name) = &lhs.kind else { return Ok(()); };
+		if name.as_ref() == iterator { return Ok(()); }
+		let is_iterator = |v: &Expr| matches!(&v.kind, ExprKind::Variable(Sigil::Scalar, n) if n.as_ref() == iterator);
+		let scale = match &rhs.kind {
+			_ if is_iterator(rhs) => 1,
+			ExprKind::Binary(Binary::Mul, a, b) if self.in_constant || self.active_hints.constant_overloads.is_empty() => {
+				match (&a.kind, &b.kind) {
+					(_, ExprKind::Int(n)) if is_iterator(a) => *n,
+					(ExprKind::Int(n), _) if is_iterator(b) => *n,
+					_ => return Ok(()),
+				}
+			}
+			_ => return Ok(()),
+		};
+		let Some(Slot::Scalar(cell)) = self.pad_slot_at(lhs, Sigil::Scalar, name) else { return Ok(()); };
+		if self.is_readonly_sv(cell) { return Ok(()); }
+		let mut sum = match cell.plain_value().as_deref() {
+			Some(Value::Int(n)) => *n, Some(Value::Undef) => 0, _ => return Ok(()),
+		};
+		// Only the host cancellation check can interrupt this run: no alarms, destructors,
+		// tied handles, constant handlers or other Perl callbacks can become active in it.
+		let cell = cell.clone();
+		let mut changed = false;
+		let mut cancelled = false;
+		while !range.is_empty() {
+			if self.is_cancelled() { cancelled = true; break; }
+			let Some(term) = range.start().checked_mul(scale) else { break; };
+			let Some(next) = (if *op == Compound::Add { sum.checked_add(term) } else { sum.checked_sub(term) }) else { break; };
+			sum = next;
+			changed = true;
+			let _ = range.next();
+		}
+		if changed {
+			cell.set_number(Num::Int(sum));
+			cell.set_pos(None);
+			self.statement_location(loc);
+		}
+		if cancelled { Err(Flow::Cancelled) } else { Ok(()) }
+	}
+
 	fn modifier(&mut self, stmt: &Stmt, modifier: Modifier, e: &Expr, cx: Cx, label: Option<&str>) -> PResult<Ret> {
 		match modifier {
 			// `STMT if COND` is `COND && STMT`: when skipped, its value is the condition's.
@@ -685,11 +740,13 @@ impl Interp<'_> {
 				for alias in self.foreach_items(e)? {
 					let out = self.with_topic(alias, |this| loop {
 						this.poll()?;
-						match loop_flow(this.run_statement(stmt, cx), label)? {
+						// Keep the last value in its final place; normal iterations only return
+						// a tag, not another Result<Loop<Ret>> containing the same scalar.
+						match loop_flow(this.run_statement(stmt, cx).map(|v| result = v), label)? {
 							Loop::Redo => continue, step => return Ok(step),
 						}
 					})?;
-					match out { Loop::Last => break, Loop::Value(v) => result = v, _ => {} }
+					if let Loop::Last = out { break; }
 				}
 				Ok(result)
 			}
@@ -801,11 +858,13 @@ impl Iterator for ForeachItems {
 			Self::Aliases(items) => items.next(),
 			Self::Range(range, last) => {
 				let i = range.next()?;
-				let sv = match last.take() {
-					Some(sv) if Rc::strong_count(&sv) == 1 && Rc::weak_count(&sv) == 0 && !sv.is_magical() && !sv.registered()
-						&& !sv.is_blessed() => { sv.set(Value::Int(i)); sv.set_pos(None); sv }
-					_ => new_sv(Value::Int(i)),
-				};
+				if let Some(sv) = last.as_ref() && Rc::strong_count(sv) == 1 && Rc::weak_count(sv) == 0
+					&& !sv.is_magical() && !sv.registered() && !sv.is_blessed() {
+					sv.set_number(Num::Int(i));
+					sv.set_pos(None);
+					return Some(sv.clone());
+				}
+				let sv = new_sv(Value::Int(i));
 				*last = Some(sv.clone());
 				Some(sv)
 			}

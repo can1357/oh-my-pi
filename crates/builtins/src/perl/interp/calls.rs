@@ -6,20 +6,27 @@ use super::{vars::Slot, *};
 pub(in crate::perl) struct PerlBody {
 	block: Rc<Block>,
 	package: Rc<str>,
-	lexical_name: Option<Rc<str>>,
+	lexical_register: Option<usize>,
 	anon_name: std::cell::OnceCell<Rc<str>>,
-	signature: Option<Rc<[Parameter]>>,
+	signature: Option<Signature>,
 	pad: Pad,
 	hints: Rc<Hints>,
 	persistent: Rc<RefCell<Persistent>>,
 	lvalue: bool,
 }
 
+struct Signature {
+	params: Rc<[Parameter]>,
+	registers: Box<[Option<usize>]>,
+	scalars_only: bool,
+	required: usize,
+}
+
 // Lexical subs and globs captured by a closure would otherwise free each other recursively (sub capturing sub
 // capturing sub …); route them through the iterative release queue. Scalar captures do so on their own.
 impl Drop for PerlBody {
 	fn drop(&mut self) {
-		for (_, _, slot) in self.pad.drain(..) {
+		for (_, slot) in self.pad.drain(..) {
 			match slot {
 				Slot::Code(cv) => value::release(Value::Ref(Ref::Code(cv))),
 				Slot::Glob(gv) => value::release(Value::Glob(gv)),
@@ -101,11 +108,19 @@ impl Interp<'_> {
 		self.code_attr.get(&(Rc::as_ptr(cv) as usize)).map_or(default, |(_, attrs)| attrs.iter().any(|attr| attr.bytes == b"lvalue"))
 	}
 
-	fn perl_body(&self, sub: &Subroutine, pad: Pad, persistent: Rc<RefCell<Persistent>>, package: Rc<str>) -> CodeImpl {
+	fn perl_body(&mut self, sub: &Subroutine, pad: Pad, persistent: Rc<RefCell<Persistent>>, package: Rc<str>) -> CodeImpl {
 		let Some(block) = &sub.body else { return CodeImpl::Undefined; };
 		let hints = if self.compile_depth != 0 { Rc::new(self.compile_hints.clone()) } else { self.active_hints.clone() };
-		let lexical_name = if matches!(sub.scope, Some(DeclKind::My | DeclKind::State)) { sub.name.clone() } else { None };
-		CodeImpl::Perl(Rc::new(PerlBody { block: block.clone(), package, lexical_name, signature: sub.signature.clone(),
+		let lexical_register = if matches!(sub.scope, Some(DeclKind::My | DeclKind::State)) {
+			sub.name.as_ref().map(|name| self.lexicals.resolve(Sigil::Code, name))
+		} else { None };
+		let signature = sub.signature.as_ref().map(|params| Signature {
+			registers: params.iter().map(|p| p.name.as_ref().map(|name| self.lexicals.resolve(p.sigil, name))).collect(),
+			scalars_only: params.iter().all(|p| p.sigil == Sigil::Scalar),
+			required: params.iter().filter(|p| p.sigil == Sigil::Scalar && p.default.is_none()).count(),
+			params: params.clone(),
+		});
+		CodeImpl::Perl(Rc::new(PerlBody { block: block.clone(), package, lexical_register, signature,
 			anon_name: Default::default(), pad, hints, persistent, lvalue: sub.is_lvalue() }))
 	}
 
@@ -161,13 +176,14 @@ impl Interp<'_> {
 				Some(Slot::Code(cv)) if matches!(*cv.body.borrow(), CodeImpl::Undefined) => cv,
 				_ => self.make_sub(sub, Some(q), Pad::new()),
 			};
-			self.put_pad(Sigil::Code, name.clone(), Slot::Code(cv.clone()));
+			let register = self.lexicals.resolve(Sigil::Code, name);
+			self.put_resolved_pad(register, Slot::Code(cv.clone()));
 			let mut capture = self.capture_pad(sub.body.as_deref());
-			capture.retain(|(_, _, slot)| !matches!(slot, Slot::Code(c) if Rc::ptr_eq(c, &cv)));
+			capture.retain(|(_, slot)| !matches!(slot, Slot::Code(c) if Rc::ptr_eq(c, &cv)));
 			let body = self.perl_body(sub, capture, Rc::default(), self.package());
 			cv.body.replace(body);
 			if sub.scope == Some(DeclKind::State) {
-				self.persistent.borrow_mut().vars.insert(site, vec![(Sigil::Code, name.clone(), Slot::Code(cv))]);
+				self.persistent.borrow_mut().vars.insert(site, vec![(register, Slot::Code(cv))]);
 			}
 			return Ok(());
 		}
@@ -192,10 +208,8 @@ impl Interp<'_> {
 	pub fn define_constant(&mut self, qualified: &str, values: Vec<Value>) { self.define_code(qualified, CodeImpl::Constant(Rc::from(values)), Some(PStr::default())); }
 
 	fn define_code(&mut self, qualified: &str, imp: CodeImpl, proto: Option<PStr>) {
-		let g = self.glob(qualified);
-		let cv = self.code_slot(&g);
-		cv.prototype.replace(proto);
-		cv.body.replace(imp);
+		let g = self.definition_glob(qualified);
+		self.install_code_body(&g, imp, proto);
 		self.mark_package_changed(&g.pkg);
 	}
 
@@ -258,7 +272,7 @@ impl Interp<'_> {
 					let result = self.scoped(|this| {
 						this.package = body.package.clone();
 						this.active_hints = body.hints.clone();
-						if let Some(name) = &body.lexical_name { this.put_pad(Sigil::Code, name.clone(), Slot::Code(cv.clone())); }
+						if let Some(id) = body.lexical_register { this.put_resolved_pad(id, Slot::Code(cv.clone())); }
 						if let Some(signature) = &body.signature { this.bind_signature(signature, &av, &cv)?; }
 						if as_lvalue { this.run_lvalue_body(&body.block, cx) } else { this.run_statements(&body.block, cx) }
 					});
@@ -376,22 +390,22 @@ impl Interp<'_> {
 		}
 	}
 
-	fn bind_signature(&mut self, signature: &[Parameter], av: &Av, cv: &Cv) -> PResult<()> {
+	fn bind_signature(&mut self, signature: &Signature, av: &Av, cv: &Cv) -> PResult<()> {
 		// Exact-arity scalar signatures need no argument snapshot when every FETCH is
 		// plain: binding cannot call Perl or mutate @_ before subsequent parameters.
-		if av.elems().len() == signature.len() && signature.iter().all(|p| p.sigil == Sigil::Scalar)
+		if signature.scalars_only && av.elems().len() == signature.params.len()
 			&& av.elems().iter().all(|sv| !sv.has_read_magic()) {
 			let args = av.elems();
-			for (p, arg) in signature.iter().zip(args.iter()) {
-				if let Some(name) = &p.name { self.put_pad(Sigil::Scalar, name.clone(), Slot::Scalar(new_sv(arg.get()))); }
+			for (id, arg) in signature.registers.iter().zip(args.iter()) {
+				if let Some(id) = id { self.put_resolved_pad(*id, Slot::Scalar(new_sv(arg.get()))); }
 			}
 			return Ok(());
 		}
 		let args = av.elems().clone();
-		let required = signature.iter().filter(|p| p.sigil == Sigil::Scalar && p.default.is_none()).count();
-		let maximum = signature.len();
+		let required = signature.required;
+		let maximum = signature.params.len();
 		let got = args.len();
-		let slurpy = signature.last().filter(|p| matches!(p.sigil, Sigil::Array | Sigil::Hash));
+		let slurpy = signature.params.last().filter(|p| matches!(p.sigil, Sigil::Array | Sigil::Hash));
 		let sub_name = || cv.name.borrow().clone().unwrap_or_else(|| Rc::from(format!("{}::__ANON__", cv.pkg)));
 		if got < required || (slurpy.is_none() && got > maximum) {
 			let name = sub_name();
@@ -407,7 +421,7 @@ impl Interp<'_> {
 			return Err(self.die_msg(format!("Odd name/value argument for subroutine '{name}'")));
 		}
 		let mut i = 0;
-		for p in signature {
+		for (p, id) in signature.params.iter().zip(signature.registers.iter()) {
 			let slot = match p.sigil {
 				Sigil::Array => {
 					let values = args[i.min(got)..].iter().map(|a| self.read_sv(a)).collect::<PResult<Vec<_>>>()?;
@@ -424,7 +438,7 @@ impl Interp<'_> {
 					Slot::Scalar(new_sv(v))
 				}
 			};
-			if let Some(name) = &p.name { self.put_pad(p.sigil, name.clone(), slot); }
+			if let Some(id) = id { self.put_resolved_pad(*id, slot); }
 		}
 		Ok(())
 	}
@@ -559,7 +573,13 @@ impl Interp<'_> {
 		self.named_code(&format!("CORE::GLOBAL::{}", b.name()))
 	}
 
-	pub(super) fn eval_call(&mut self, call: &Call, cx: Cx) -> PResult<Ret> {
+	fn named_code_at(&mut self, e: &Expr, name: &str) -> Option<Cv> {
+		if let Some(Slot::Code(cv)) = self.pad_slot_at(e, Sigil::Code, name) { return Some(cv.clone()); }
+		if let Some(glob) = self.cached_glob_at(e, name) { return glob.code.borrow().clone(); }
+		self.lookup_code(&self.qualify(name))
+	}
+
+	pub(super) fn eval_call(&mut self, e: &Expr, call: &Call, cx: Cx) -> PResult<Ret> {
 		match &call.target {
 			CallTarget::Builtin(b, origin) => {
 				if *origin != BuiltinOrigin::Core && let Some(cv) = self.global_override(*b) {
@@ -572,7 +592,7 @@ impl Interp<'_> {
 			}
 			CallTarget::Named(name, amp) => {
 				let args = self.call_args(call, *amp, call.prototype.as_ref())?;
-				if let Some(cv) = self.named_code(name) { self.call_sub_kind(&cv, args, cx, false) } else { self.call_undefined(name, args, cx) }
+				if let Some(cv) = self.named_code_at(e, name) { self.call_sub_kind(&cv, args, cx, false) } else { self.call_undefined(name, args, cx) }
 			}
 			CallTarget::Code(code, amp) => {
 				let value = self.eval_scalar(code)?;
@@ -673,6 +693,9 @@ impl Interp<'_> {
 					Some(ExprKind::Deref(Sigil::Glob, source)) => self.defined_glob_deref(source)?,
 					Some(ExprKind::Deref(Sigil::Code, source) | ExprKind::Call(Call { target: CallTarget::Code(source, true), args: None, .. })) =>
 						self.exempt_code(source, false)?.is_some_and(|c| !matches!(*c.body.borrow(), CodeImpl::Undefined)),
+					Some(ExprKind::Binary(Binary::Assign, lhs, rhs)) if matches!(lhs.kind, ExprKind::Variable(Sigil::Scalar, _))
+						&& matches!(rhs.kind, ExprKind::Readline(_)) && let Some(assignment) = expr =>
+						self.defined_read_assignment(assignment, lhs, rhs)?,
 					_ => !self.scalar_or_topic(expr)?.is_undef(),
 				};
 				perl_bool(is_defined)
@@ -825,7 +848,7 @@ impl Interp<'_> {
 					ExprKind::Variable(Sigil::Hash, _) | ExprKind::Deref(Sigil::Hash, _) => Value::Ref(Ref::Hash(self.eval_hash(e)?)),
 					// `lock &sub` returns a reference to the sub without calling it.
 					ExprKind::Variable(Sigil::Code, name) | ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }) =>
-						match self.variable_slot(Sigil::Code, name)? { Slot::Code(cv) => Value::Ref(Ref::Code(cv)), _ => Value::Undef },
+						match self.variable_slot_at(ungroup(e), Sigil::Code, name)? { Slot::Code(cv) => Value::Ref(Ref::Code(cv)), _ => Value::Undef },
 					_ => self.eval_scalar(e)?,
 				}
 			} else { Value::Undef },
@@ -1077,7 +1100,7 @@ impl parser::ParseHooks for Interp<'_> {
 		// BEGIN is a real sub (perlmod): `return`, `__SUB__` and `caller` work inside it.
 		let name: Rc<str> = Rc::from(format!("{pkg}::BEGIN"));
 		self.glob(&name);
-		let body = PerlBody { block: block.clone(), package: Rc::from(pkg), lexical_name: None, anon_name: Default::default(), signature: None,
+		let body = PerlBody { block: block.clone(), package: Rc::from(pkg), lexical_register: None, anon_name: Default::default(), signature: None,
 			pad: self.compile_pad_snapshot(), hints: Rc::new(self.compile_hints.clone()), persistent: Rc::default(), lvalue: false };
 		let cv = Rc::new(CodeBody { name: RefCell::new(Some(name)), pkg: Rc::from(pkg), prototype: RefCell::new(None),
 			body: RefCell::new(CodeImpl::Perl(Rc::new(body))), blessed: RefCell::new(None) });

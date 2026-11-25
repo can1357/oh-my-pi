@@ -22,6 +22,7 @@ use super::{
 };
 
 pub(in crate::perl) use captures::{MatchState, is_match_var, match_array, match_hash, match_hv, match_var, named_count};
+pub(in crate::perl) use split::split_into_array;
 
 /// Regex operator state belonging to a single interpreter, not the calling thread.
 #[derive(Default)]
@@ -36,6 +37,7 @@ pub(in crate::perl) struct Runtime {
 	snapshot: Option<SubjectSnapshot>,
 	spare_match: Option<Rc<MatchState>>,
 	split_values: std::cell::Cell<Vec<Value>>,
+	spare_spans: Vec<(usize, usize)>,
 	match_cells: HashMap<String, Sv, FxBuildHasher>,
 	empty_positions: HashMap<usize, Weak<ScalarBody>, FxBuildHasher>,
 	position_sweep: usize,
@@ -107,6 +109,13 @@ impl Runtime {
 	fn remember(&mut self, site: usize, regex: &Rc<Regex>) {
 		self.patterns.insert(site, regex.clone());
 		self.hot_pattern = Some((site, regex.clone()));
+	}
+
+	fn recycle_spans(&mut self, mut spans: Vec<(usize, usize)>) {
+		if spans.capacity() <= 16 * 1024 {
+			spans.clear();
+			self.spare_spans = spans;
+		}
 	}
 
 	fn position(&self, cell: &Sv) -> Position {
@@ -292,19 +301,21 @@ fn subject(interp: &mut Interp<'_>, expr: Option<&Expr>, write: Option<Operation
 		let cell = interp.topic();
 		return subject_cell(interp, cell, write);
 	};
-	if let ExprKind::Variable(Sigil::Scalar, name) = &ungroup(expr).kind
-		&& captures::is_match_var(name)
-	{
-		let value = interp.eval_scalar(expr)?;
-		let cell = if let Some(cell) = interp.rx.match_cells.get(name.as_ref()) {
-			cell.set(value);
-			cell.clone()
-		} else {
-			let cell = new_sv(value);
-			interp.rx.match_cells.insert(name.to_string(), cell.clone());
-			cell
-		};
-		return Ok(Subject::ReadOnly(cell));
+	if let ExprKind::Variable(Sigil::Scalar, name) = &ungroup(expr).kind {
+		if captures::is_match_var(name) {
+			let value = interp.eval_scalar(expr)?;
+			let cell = if let Some(cell) = interp.rx.match_cells.get(name.as_ref()) {
+				cell.set(value);
+				cell.clone()
+			} else {
+				let cell = new_sv(value);
+				interp.rx.match_cells.insert(name.to_string(), cell.clone());
+				cell
+			};
+			return Ok(Subject::ReadOnly(cell));
+		}
+		let cell = interp.eval_lvalue(expr)?;
+		return subject_cell(interp, cell, write);
 	}
 	if scalar_place(expr) {
 		if write.is_none() && matches!(&ungroup(expr).kind, ExprKind::Select(..)) {
@@ -450,9 +461,11 @@ fn reuse_empty(interp: &Interp<'_>, regex: Rc<Regex>) -> Rc<Regex> {
 
 /// Interpret a regex quote-like operator (`m//`, `qr//`, `s///`, `tr///`, or `y///`).
 pub(in crate::perl) fn eval_regex(interp: &mut Interp<'_>, re: &RegexExpr, lhs: Option<&Expr>, negate: bool, cx: Cx) -> PResult<Ret> {
-	let copy = re.modifiers.contains(&b'r');
-	let global = re.modifiers.contains(&b'g');
-	let keep_pos = re.modifiers.contains(&b'c');
+	let (copy, global, keep_pos) = match re.modifiers.as_slice() {
+		b"" => (false, false, false),
+		b"g" => (false, true, false),
+		mods => (mods.contains(&b'r'), mods.contains(&b'g'), mods.contains(&b'c')),
+	};
 	match &re.kind {
 		RegexKind::Transliterate(spec) => {
 			if copy && negate { return Err(interp.die_msg("Using !~ with tr///r doesn't make sense")); }
@@ -479,7 +492,7 @@ pub(in crate::perl) fn eval_regex(interp: &mut Interp<'_>, re: &RegexExpr, lhs: 
 				&& let Value::Str(s) = &*raw
 			{
 				if tr.is_count_only() { return Ok(Ret::One(count_or_negate(tr.count(s), negate, true))); }
-				if !s.utf8 && tr.preserves_bytes() && !interp.is_readonly_sv(cell) {
+				if !s.utf8 && tr.preserves_bytes() {
 					drop(raw);
 					if let Ok(mut raw) = cell.try_value_mut() && let Value::Str(s) = &mut *raw {
 						let count = tr.apply_bytes(&mut s.bytes);
@@ -595,12 +608,21 @@ struct MatchMode { global: bool, keep_pos: bool, once: Option<usize>, negate: bo
 
 /// No Perl callbacks here, including error handlers: the caller releases its
 /// PV borrow before turning a PCRE error into a Perl exception.
-fn first_plain(interp: &mut Interp<'_>, regex: &Regex, source: &PStr, cell: &Sv) -> Result<Option<Captures>, String> {
+fn first_plain(interp: &mut Interp<'_>, regex: &Regex, source: &PStr, opts: ExecOpts) -> Result<Option<Captures>, String> {
+	if regex.is_byte_literal() && (!source.utf8 || opts.utf8_valid) {
+		return Ok(regex.literal_span(&source.bytes, 0).map(|(lo, hi)| Captures::whole(lo, hi)));
+	}
 	install_cancel(interp);
-	let utf8_valid = source.utf8 && std::str::from_utf8(&source.bytes).is_ok();
-	let opts = ExecOpts { utf8_valid, g_anchor: regex.uses_g().then(|| cell.pos().unwrap_or(0)), ..ExecOpts::default() };
-	let start = if source.utf8 && !utf8_valid { source.bytes.iter().take_while(|&&b| b & 0xc0 == 0x80).count() } else { 0 };
+	let start = if source.utf8 && !opts.utf8_valid { source.bytes.iter().take_while(|&&b| b & 0xc0 == 0x80).count() } else { 0 };
 	regex.exec(source, start, opts)
+}
+
+fn plain_opts(regex: &Regex, source: &PStr, cell: &Sv) -> ExecOpts {
+	ExecOpts {
+		utf8_valid: source.utf8 && std::str::from_utf8(&source.bytes).is_ok(),
+		g_anchor: regex.uses_g().then(|| cell.pos().unwrap_or(0)),
+		..ExecOpts::default()
+	}
 }
 
 fn match_subject(interp: &mut Interp<'_>, regex: Rc<Regex>, target: Subject, lhs: Option<&Expr>, mode: MatchMode) -> PResult<Ret> {
@@ -612,7 +634,7 @@ fn match_subject(interp: &mut Interp<'_>, regex: Rc<Regex>, target: Subject, lhs
 		&& let Value::Str(source) = &*raw && !(source.utf8 && interp.hints().bytes)
 	{
 		if interp.is_cancelled() { return Err(Flow::Cancelled); }
-		let caps = match first_plain(interp, &regex, source, cell) {
+		let caps = match first_plain(interp, &regex, source, plain_opts(&regex, source, cell)) {
 			Ok(Some(caps)) => caps,
 			Ok(None) => return Ok(no_match(mode.negate, mode.cx)),
 			Err(e) => { drop(raw); return Err(search_error(interp, e)); }
@@ -716,50 +738,112 @@ fn search(interp: &mut Interp<'_>, regex: &Rc<Regex>, subject: &Rc<PStr>, cell: 
 struct SubMode { global: bool, copy: bool, negate: bool }
 
 fn substitute(interp: &mut Interp<'_>, regex: Rc<Regex>, target: Subject, lhs: Option<&Expr>, kind: &RegexKind, mode: SubMode) -> PResult<Value> {
-	// A fixed, nonempty needle and a constant replacement cannot execute
-	// Perl between matches. Only the final match registers are observable.
-	if regex.is_byte_literal() && let RegexKind::Substitute(parts) = kind
+	let empty = PStr::default();
+	let literal = match kind {
+		RegexKind::Substitute(parts) => match parts.as_slice() {
+			[] => Some(&empty), [QuotePart::Literal(s)] => Some(s), _ => None,
+		},
+		_ => None,
+	};
+	// Search the cell itself. Even patterns/replacements requiring a
+	// callback on success do not need to copy a failed plain PV search.
+	let mut first_match = None;
+	if regex.actions().is_empty() && regex.deferred_properties().is_empty()
 		&& let Subject::Cell(cell) = &target && let Some(raw) = cell.plain_value()
 		&& let Value::Str(source) = &*raw && !(source.utf8 && interp.hints().bytes)
-		&& (!source.utf8 || std::str::from_utf8(&source.bytes).is_ok())
-		&& (mode.copy || !interp.is_readonly_sv(cell))
 	{
-		let empty = PStr::default();
-		if let Some(replacement) = match parts.as_slice() {
-			[] => Some(&empty), [QuotePart::Literal(s)] => Some(s), _ => None,
-		} {
-			if interp.is_cancelled() { return Err(Flow::Cancelled); }
-			let Some(mut span) = regex.literal_span(&source.bytes, 0) else {
-				return Ok(if mode.copy { Value::Str(source.clone()) } else { count_or_negate(0, mode.negate, false) });
-			};
+		if interp.is_cancelled() { return Err(Flow::Cancelled); }
+		let opts = plain_opts(&regex, source, cell);
+		let mut caps = match first_plain(interp, &regex, source, opts) {
+			Ok(Some(caps)) => caps,
+			Ok(None) => return Ok(if mode.copy { Value::Str(source.clone()) } else { count_or_negate(0, mode.negate, false) }),
+			Err(e) => { drop(raw); return Err(search_error(interp, e)); }
+		};
+		let (start, end) = whole_span(&caps);
+		if let Some(replacement) = literal && start <= end && caps.mark.is_none()
+			&& (!mode.global || regex.plain_sub_iterations() && (!source.utf8 || opts.utf8_valid))
+			&& (mode.copy || !interp.is_readonly_sv(cell))
+		{
 			let bytes = interp.hints().bytes;
-			let mut result = PStr::new(Vec::with_capacity(source.bytes.len().saturating_add(
-				replacement.bytes.len().saturating_sub(span.1 - span.0))), source.utf8);
-			let mut count = 0;
+			let raw_bytes = source.utf8 == replacement.utf8 || bytes || source.utf8 && replacement.bytes.is_ascii();
+			let literal_search = regex.is_byte_literal() && (!source.utf8 || opts.utf8_valid);
+			let mut result = PStr::new(if mode.copy { Vec::new() } else { MatchState::result_buffer(interp) }, source.utf8);
+			let growth = replacement.bytes.len().saturating_sub(end - start);
+			// When a literal can expand the line, remember the match sites
+			// and reserve its final size, rather than recopying an ever-
+			// growing PV. The equal-width/shrinking case streams directly.
+			let mut sites = (literal_search && raw_bytes && mode.global && growth != 0
+				&& source.bytes.len() / (end - start) <= 16 * 1024)
+				.then(|| std::mem::take(&mut interp.rx.spare_spans));
+			if sites.is_none() { result.bytes.reserve(source.bytes.len().saturating_add(growth)); }
 			let mut cursor = 0;
+			let mut count = 0usize;
+			let mut span = (start, end);
 			loop {
-				append_span(&mut result, source, cursor, span.0);
-				if bytes { result.push_bytes(&replacement.bytes); } else { result.push(replacement); }
+				if let Some(sites) = &mut sites { sites.push(span); }
+				else if raw_bytes {
+					result.bytes.extend_from_slice(&source.bytes[cursor..span.0]);
+					result.bytes.extend_from_slice(&replacement.bytes);
+				} else {
+					append_span(&mut result, source, cursor, span.0);
+					result.push(replacement);
+				}
 				count += 1;
 				cursor = span.1;
 				if !mode.global { break; }
 				if interp.is_cancelled() {
-					MatchState::install_plain(interp, cell, std::borrow::Cow::Borrowed(source), Captures::whole(span.0, span.1), regex);
+					MatchState::install_plain(interp, cell, std::borrow::Cow::Borrowed(source), caps, regex);
 					if !mode.copy { interp.rx.set_position(cell, Some(Position { at: span.0, empty: false })); }
 					return Err(Flow::Cancelled);
 				}
-				let Some(next) = regex.literal_span(&source.bytes, cursor) else { break; };
-				span = next;
+				if literal_search {
+					let Some(next) = regex.literal_span(&source.bytes, cursor) else { break; };
+					caps.spans[0] = Some(next);
+					span = next;
+				} else {
+					let mut start = cursor;
+					if source.utf8 {
+						while source.bytes.get(start).is_some_and(|b| b & 0xc0 == 0x80) { start += 1; }
+					}
+					let opts = ExecOpts { not_empty_at_start: span.0 == cursor && start == cursor, ..opts };
+					match regex.exec(source, start, opts) {
+						Ok(Some(next)) => {
+							let (lo, hi) = whole_span(&next);
+							if lo < cursor || hi < lo { break; }
+							caps = next;
+							span = (lo, hi);
+						}
+						Ok(None) => break,
+						Err(e) => {
+							// An exception may run Perl: publish the completed
+							// match and release the PV borrow first.
+							MatchState::install_plain(interp, cell, std::borrow::Cow::Borrowed(source), caps, regex);
+							if !mode.copy { interp.rx.set_position(cell, Some(Position { at: span.0, empty: false })); }
+							drop(raw);
+							return Err(search_error(interp, e));
+						}
+					}
+				}
 			}
-			append_span(&mut result, source, cursor, source.bytes.len());
-			let caps = Captures::whole(span.0, span.1);
+			if let Some(sites) = sites {
+				result.bytes.reserve(source.bytes.len().saturating_add(count.saturating_mul(growth)));
+				let mut prev = 0;
+				for &(lo, hi) in &sites {
+					result.bytes.extend_from_slice(&source.bytes[prev..lo]);
+					result.bytes.extend_from_slice(&replacement.bytes);
+					prev = hi;
+				}
+				interp.rx.recycle_spans(sites);
+			}
+			if raw_bytes { result.bytes.extend_from_slice(&source.bytes[cursor..]); }
+			else { append_span(&mut result, source, cursor, source.bytes.len()); }
 			if mode.copy {
 				MatchState::install_plain(interp, cell, std::borrow::Cow::Borrowed(source), caps, regex);
 				return Ok(Value::Str(result));
 			}
 			drop(raw);
-			// The unregistered plain PV has no STORE hooks. Keep its old
-			// allocation as the match snapshot rather than copying it.
+			// Move the original PV into the capture registers. Do not read
+			// the cell through get()/read_sv: that clones every subject byte.
 			let old = cell.replace(Value::Str(result));
 			interp.rx.set_position(cell, None);
 			if let Value::Str(old) = old {
@@ -767,21 +851,7 @@ fn substitute(interp: &mut Interp<'_>, regex: Rc<Regex>, target: Subject, lhs: O
 			}
 			return Ok(count_or_negate(count, mode.negate, false));
 		}
-	}
-	// Non-literal patterns still need the PCRE engine. Search the scalar's
-	// own storage first, retaining captures for the replacement loop only
-	// on success. No side effects are possible before the snapshot.
-	let mut first_match = None;
-	if regex.actions().is_empty() && regex.deferred_properties().is_empty()
-		&& let Subject::Cell(cell) = &target && let Some(raw) = cell.plain_value()
-		&& let Value::Str(source) = &*raw && !(source.utf8 && interp.hints().bytes)
-	{
-		if interp.is_cancelled() { return Err(Flow::Cancelled); }
-		match first_plain(interp, &regex, source, cell) {
-			Ok(Some(caps)) => first_match = Some(caps),
-			Ok(None) => return Ok(if mode.copy { Value::Str(source.clone()) } else { count_or_negate(0, mode.negate, false) }),
-			Err(e) => { drop(raw); return Err(search_error(interp, e)); }
-		}
+		first_match = Some(caps);
 	}
 	let readonly = matches!(&target, Subject::ReadOnly(_));
 	let (cell, value) = target.read(interp)?;
@@ -791,15 +861,6 @@ fn substitute(interp: &mut Interp<'_>, regex: Rc<Regex>, target: Subject, lhs: O
 	let original_utf8 = subject.utf8;
 	subject.utf8 &= !bytes;
 	let subject = Rc::new(subject);
-	let empty = PStr::default();
-	let literal = match kind {
-		RegexKind::Substitute(parts) => match parts.as_slice() {
-			[] => Some(&empty),
-			[QuotePart::Literal(s)] => Some(s),
-			_ => None,
-		},
-		_ => None,
-	};
 	let mut pos = Position { at: cell.as_ref().and_then(|sv| sv.pos()).unwrap_or(0), empty: false };
 	let mut result = None::<PStr>;
 	let mut cursor = 0;

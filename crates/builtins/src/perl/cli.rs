@@ -530,7 +530,7 @@ fn startup(invocation: &[OsString], args: &[&[u8]], host: &mut Host) -> Result<i
 	let usage = |msg: String| (format!("{msg}."), i32::from(Perl::USAGE_ERROR));
 	let mut options = Options::default();
 	if let Some(value) = host.var("PERL_UNICODE") { options.unicode = unicode(value.as_bytes()).map_err(usage)?; }
-	let mut deferrable = true;
+	let mut deferrable = host.var("OMP_PERL_FALLBACK") != Some("0");
 	let mut notes = Vec::new();
 	let parsed = options.parse(args, Origin::Argv, &mut notes);
 	if options.unsupported && let Some(status) = defer(host, invocation, &mut deferrable) { return Ok(status); }
@@ -540,8 +540,7 @@ fn startup(invocation: &[OsString], args: &[&[u8]], host: &mut Host) -> Result<i
 		let _ = host.stdout.write_all(display_text(kind).as_bytes());
 		return Ok(0);
 	}
-	if options.taint == 0 {
-		let env = host.var("PERL5OPT").unwrap_or_default().to_owned();
+	if options.taint == 0 && let Some(env) = host.var("PERL5OPT").filter(|s| !s.is_empty()) {
 		if env.trim_ascii_start().starts_with("-T") {
 			options.taint = 1;
 		} else {
@@ -631,20 +630,17 @@ fn startup(invocation: &[OsString], args: &[&[u8]], host: &mut Host) -> Result<i
 	}
 	// Standard stream positions before compilation, to tell whether BEGIN
 	// blocks or compile-time warnings read or wrote anything.
-	let marks: Vec<_> = if deferrable {
-		["main::STDIN", "main::STDOUT", "main::STDERR"].into_iter()
-			.filter_map(|name| interp.handle(name, false))
-			.map(|io| {
-				let at = io.try_borrow_mut().map_or(-2, |mut handle| handle.tell());
-				(Rc::downgrade(&io), at)
-			})
-			.collect()
-	} else { Vec::new() };
+	let marks = deferrable.then(|| ["main::STDIN", "main::STDOUT", "main::STDERR"].map(|name| {
+		interp.handle(name, false).map(|io| {
+			let at = io.try_borrow_mut().map_or(-2, |mut handle| handle.tell());
+			(Rc::downgrade(&io), at)
+		})
+	}));
 	let program = match interp.compile(&source, &file) {
 		Ok(program) => program,
 		Err(error) => {
 			interp.flush_outputs();
-			let untouched = marks.iter().all(|(io, at)| {
+			let untouched = marks.iter().flatten().flatten().all(|(io, at)| {
 				io.upgrade().is_some_and(|io| io.try_borrow_mut().is_ok_and(|mut handle| handle.tell() == *at))
 			});
 			if !error.is_empty() && untouched && let Some(status) = defer(interp.host(), invocation, &mut deferrable) {
@@ -674,7 +670,14 @@ fn startup(invocation: &[OsString], args: &[&[u8]], host: &mut Host) -> Result<i
 
 /// Parse the invocation and run the Perl compilation unit.
 pub(super) fn run(argv: &[OsString], host: &mut Host) -> i32 {
-	let bytes: Vec<Cow<'_, [u8]>> = argv.iter().map(|arg| os_bytes_lossy(arg)).collect();
+	#[cfg(unix)]
+	let args: Vec<&[u8]> = {
+		use std::os::unix::ffi::OsStrExt as _;
+		argv.iter().map(|arg| arg.as_os_str().as_bytes()).collect()
+	};
+	#[cfg(not(unix))]
+	let bytes: Vec<_> = argv.iter().map(|arg| os_bytes_lossy(arg)).collect();
+	#[cfg(not(unix))]
 	let args: Vec<&[u8]> = bytes.iter().map(Cow::as_ref).collect();
 	match startup(argv, &args, host) {
 		Ok(status) => status,

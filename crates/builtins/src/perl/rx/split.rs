@@ -113,38 +113,120 @@ pub(super) fn split(interp: &mut Interp<'_>, args: &[Expr], cx: Cx) -> PResult<R
 	Ok(output.finish(limit == 0))
 }
 
+/// Assign a callback-free split directly into a plain array. The caller has
+/// checked the array's assignment magic and that this call uses CORE::split.
+/// Do not touch the array until scanning succeeds (including cancellation).
+pub(in crate::perl) fn split_into_array(interp: &mut Interp<'_>, call: &super::Call, array: &crate::perl::value::Av) -> PResult<Option<usize>> {
+	let args = super::arguments(call);
+	if args.len() > 2 { return Ok(None); }
+	let separator = match args.first() {
+		None => Separator::Whitespace,
+		Some(expr) => match &expr.kind {
+			ExprKind::String(s) if interp.hints().constant_overloads.is_empty() => {
+				if s.bytes == b" " { Separator::Whitespace }
+				else if s.is_empty() { Separator::Characters }
+				else {
+					// Compilation can run Perl. Only use the already-compiled,
+					// identical literal under its original flags.
+					let Some(regex) = interp.rx.compiled(expr as *const Expr as usize).cloned() else { return Ok(None); };
+					if regex.source().bytes != s.bytes || regex.source().utf8 != s.utf8
+						|| regex.flags() != effective_flags(interp, &[])? { return Ok(None); }
+					Separator::regex(regex)
+				}
+			}
+			ExprKind::Regex(re) if matches!(re.kind, RegexKind::Match(_) | RegexKind::Compile) &&
+				re.pattern.iter().all(|p| matches!(p, super::QuotePart::Literal(_) | super::QuotePart::Case(_))) => {
+				let Some(regex) = interp.rx.compiled(re as *const _ as usize) else { return Ok(None); };
+				Separator::regex(regex.clone())
+			}
+			_ => return Ok(None),
+		},
+	};
+	let cell = if let Some(expr) = args.get(1) {
+		let Some(cell) = interp.plain_scalar_cell(ungroup(expr)) else { return Ok(None); };
+		cell
+	} else { interp.topic() };
+	let Some(raw) = cell.plain_value() else { return Ok(None); };
+	let Value::Str(source) = &*raw else { return Ok(None); };
+	if source.utf8 && interp.hints().bytes || !simple_separator(&separator, source) { return Ok(None); }
+
+	let mut spans = std::mem::take(&mut interp.rx.spare_spans);
+	let scan = simple_spans(interp, &separator, source, usize::MAX, |lo, hi| spans.push((lo, hi)));
+	let count = spans.iter().rposition(|(lo, hi)| lo != hi).map_or(0, |last| last + 1);
+	if scan.is_ok() {
+		use crate::perl::value::new_sv;
+		let mut elems = array.elems_mut();
+		elems.truncate(count);
+		for (i, &(lo, hi)) in spans[..count].iter().enumerate() {
+			let field = &source.bytes[lo..hi];
+			if let Some(slot) = elems.get_mut(i) {
+				// An escaped element (including a Weak) must keep its old
+				// contents; ordinary array assignment installs a fresh cell.
+				if let Some(sv) = Rc::get_mut(slot) && !sv.registered() && !sv.is_magical() && !sv.is_blessed() {
+					if let Ok(mut v) = sv.try_value_mut() {
+						if let Value::Str(s) = &mut *v {
+							s.bytes.clear();
+							s.bytes.extend_from_slice(field);
+							s.utf8 = source.utf8;
+						} else { *v = Value::Str(PStr::new(field.to_vec(), source.utf8)); }
+						sv.set_pos(None);
+						continue;
+					}
+				}
+				*slot = new_sv(Value::Str(PStr::new(field.to_vec(), source.utf8)));
+			} else { elems.push(new_sv(Value::Str(PStr::new(field.to_vec(), source.utf8)))); }
+		}
+	}
+	interp.rx.recycle_spans(spans);
+	scan.map(|()| Some(count))
+}
+
 fn split_budget(limit: i64) -> usize {
 	if limit > 0 { (limit as usize).saturating_sub(1) } else { usize::MAX }
 }
 
+fn simple_separator(separator: &Separator, source: &PStr) -> bool {
+	source.is_empty() || !matches!(separator, Separator::Regex(re)
+		if !re.is_byte_literal() || source.utf8 && std::str::from_utf8(&source.bytes).is_err())
+}
+
 fn simple_fields(interp: &Interp<'_>, separator: &Separator, source: &PStr, cx: Cx, limit: i64) -> PResult<Option<Ret>> {
-	if !source.is_empty() && let Separator::Regex(regex) = separator
-		&& (!regex.is_byte_literal() || source.utf8 && std::str::from_utf8(&source.bytes).is_err())
-	{ return Ok(None); }
+	if !simple_separator(separator, source) { return Ok(None); }
 	let mut output = Fields::new(interp, source, cx);
 	let max = split_budget(limit);
-	if !source.is_empty() {
-		match separator {
-			Separator::Whitespace => {
-				let unicode = source.utf8 || (!interp.hints().bytes && interp.hints().features.enabled("unicode_strings"));
-				if !source.utf8 { whitespace_bytes(interp, &source.bytes, unicode, max, &mut output)?; }
-				else { whitespace(interp, source, unicode, max, &mut output)?; }
-			}
-			Separator::Characters => characters(interp, source, max, &mut output)?,
-			Separator::Lines => lines(interp, source, max, &mut output)?,
-			Separator::Regex(regex) => {
-				let mut start = 0;
-				for _ in 0..max {
-					if interp.is_cancelled() { return Err(Flow::Cancelled); }
-					let Some((begin, end)) = regex.literal_span(&source.bytes, start) else { break; };
-					output.span(start, begin);
-					start = end;
-				}
-				output.span(start, source.bytes.len());
-			}
-		}
+	if output.list.is_none() && matches!(separator, Separator::Characters) && !source.is_empty() {
+		let length = source.char_len();
+		let count = length.min(max);
+		output.len = count + 1;
+		output.last_nonempty = if count < length { count + 1 } else { count };
+	} else {
+		simple_spans(interp, separator, source, max, |lo, hi| output.span(lo, hi))?;
 	}
 	Ok(Some(output.finish(limit == 0)))
+}
+
+fn simple_spans(interp: &Interp<'_>, separator: &Separator, source: &PStr, max: usize, mut emit: impl FnMut(usize, usize)) -> PResult<()> {
+	if source.is_empty() { return Ok(()); }
+	match separator {
+		Separator::Whitespace => {
+			let unicode = source.utf8 || (!interp.hints().bytes && interp.hints().features.enabled("unicode_strings"));
+			if !source.utf8 { whitespace_bytes(interp, &source.bytes, unicode, max, emit) }
+			else { whitespace(interp, source, unicode, max, emit) }
+		}
+		Separator::Characters => characters(interp, source, max, emit),
+		Separator::Lines => lines(interp, source, max, emit),
+		Separator::Regex(regex) => {
+			let mut start = 0;
+			for _ in 0..max {
+				if interp.is_cancelled() { return Err(Flow::Cancelled); }
+				let Some((begin, end)) = regex.literal_span(&source.bytes, start) else { break; };
+				emit(start, begin);
+				start = end;
+			}
+			emit(start, source.bytes.len());
+			Ok(())
+		}
+	}
 }
 
 struct Fields<'a> {
@@ -176,38 +258,31 @@ impl<'a> Fields<'a> {
 	}
 }
 
-fn characters(interp: &Interp<'_>, source: &PStr, max_splits: usize, output: &mut Fields<'_>) -> PResult<()> {
-	if output.list.is_none() {
-		let length = source.char_len();
-		let count = length.min(max_splits);
-		output.len = count + 1;
-		output.last_nonempty = if count < length { count + 1 } else { count };
-		return Ok(());
-	}
+fn characters(interp: &Interp<'_>, source: &PStr, max_splits: usize, mut emit: impl FnMut(usize, usize)) -> PResult<()> {
 	let mut start = 0;
 	for n in 0..max_splits {
 		if start >= source.bytes.len() { break; }
 		if n % 1024 == 0 && interp.is_cancelled() { return Err(Flow::Cancelled); }
 		let end = next_boundary(source, start);
-		output.span(start, end);
+		emit(start, end);
 		start = end;
 	}
-	output.span(start, source.bytes.len());
+	emit(start, source.bytes.len());
 	Ok(())
 }
 
-fn lines(interp: &Interp<'_>, source: &PStr, max_splits: usize, output: &mut Fields<'_>) -> PResult<()> {
+fn lines(interp: &Interp<'_>, source: &PStr, max_splits: usize, mut emit: impl FnMut(usize, usize)) -> PResult<()> {
 	let mut start = 0;
 	for (at, _) in source.bytes.iter().enumerate().filter(|(at, b)| **b == b'\n' && *at + 1 < source.bytes.len()).take(max_splits) {
 		if interp.is_cancelled() { return Err(Flow::Cancelled); }
-		output.span(start, at + 1);
+		emit(start, at + 1);
 		start = at + 1;
 	}
-	output.span(start, source.bytes.len());
+	emit(start, source.bytes.len());
 	Ok(())
 }
 
-fn whitespace_bytes(interp: &Interp<'_>, bytes: &[u8], unicode: bool, max: usize, output: &mut Fields<'_>) -> PResult<()> {
+fn whitespace_bytes(interp: &Interp<'_>, bytes: &[u8], unicode: bool, max: usize, mut emit: impl FnMut(usize, usize)) -> PResult<()> {
 	let space = |b: u8| matches!(b, 9..=13 | 32) || unicode && matches!(b, 0x85 | 0xa0);
 	let mut start = bytes.iter().position(|&b| !space(b)).unwrap_or(bytes.len());
 	if start == bytes.len() { return Ok(()); }
@@ -215,14 +290,14 @@ fn whitespace_bytes(interp: &Interp<'_>, bytes: &[u8], unicode: bool, max: usize
 		if interp.is_cancelled() { return Err(Flow::Cancelled); }
 		let Some(n) = bytes[start..].iter().position(|&b| space(b)) else { break; };
 		let end = start + n;
-		output.span(start, end);
+		emit(start, end);
 		start = bytes[end..].iter().position(|&b| !space(b)).map_or(bytes.len(), |n| end + n);
 	}
-	output.span(start, bytes.len());
+	emit(start, bytes.len());
 	Ok(())
 }
 
-fn whitespace(interp: &Interp<'_>, source: &PStr, unicode: bool, max_splits: usize, output: &mut Fields<'_>) -> PResult<()> {
+fn whitespace(interp: &Interp<'_>, source: &PStr, unicode: bool, max_splits: usize, mut emit: impl FnMut(usize, usize)) -> PResult<()> {
 	let bytes = &source.bytes;
 	let len = bytes.len();
 	// Byte-level scan: in a byte string every byte is a character, and in
@@ -255,11 +330,11 @@ fn whitespace(interp: &Interp<'_>, source: &PStr, unicode: bool, max_splits: usi
 		if interp.is_cancelled() { return Err(Flow::Cancelled); }
 		end = skip_word(end);
 		if end == len { break; }
-		output.span(start, end);
+		emit(start, end);
 		end = skip_space(end);
 		start = end;
 	}
-	output.span(start, len);
+	emit(start, len);
 	Ok(())
 }
 

@@ -12,6 +12,29 @@ const DEFAULT_INC: &[&str] = &[
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_INC: &[&str] = &["/usr/local/lib/perl5", "/usr/share/perl5", "/usr/lib/perl5"];
 
+#[derive(Default)]
+pub(super) struct HostSpecials {
+	env: Cell<Option<std::rc::Weak<value::GlobBody>>>,
+	locale: Cell<Option<std::rc::Weak<value::GlobBody>>>,
+}
+
+fn utf8_locale(host: &Host) -> bool {
+	["LC_ALL", "LC_CTYPE", "LANG"].into_iter().find_map(|n| host.var(n).filter(|v| !v.is_empty())).is_some_and(|s| {
+		let s = s.as_bytes();
+		s.windows(4).any(|w| w.eq_ignore_ascii_case(b"utf8")) || s.windows(5).any(|w| w.eq_ignore_ascii_case(b"utf-8"))
+	})
+}
+
+#[cfg(unix)]
+fn group_value(primary: u32, groups: &std::cell::OnceCell<Vec<u32>>) -> Value {
+	use std::fmt::Write as _;
+	let mut text = primary.to_string();
+	for gid in groups.get_or_init(crate::perl::io::supplementary_groups) {
+		write!(text, " {gid}").expect("writing to a String");
+	}
+	Value::Str(PStr::new(text.into_bytes(), false))
+}
+
 impl<'h> Interp<'h> {
 	/// Initialize the execution environment and standard Perl variables.
 	pub fn new(host: &'h mut Host, setup: Setup) -> Self {
@@ -21,14 +44,13 @@ impl<'h> Interp<'h> {
 		let mut stdout = Handle::stdout(host);
 		let mut stderr = Handle::stderr(host);
 		let unicode_raw = unicode;
-		let utf8_locale = ["LC_ALL", "LC_CTYPE", "LANG"].into_iter().find_map(|n| host.var(n).filter(|v| !v.is_empty())).is_some_and(|s| {
-			let s = s.to_ascii_lowercase(); s.contains("utf-8") || s.contains("utf8")
-		});
-		let unicode = if unicode & 64 != 0 && !utf8_locale { 0 } else { unicode };
+		let locale = (unicode & 64 != 0).then(|| utf8_locale(host));
+		let unicode = if locale == Some(false) { 0 } else { unicode };
 		if unicode & 1 != 0 { let _ = stdin.binmode(b":utf8"); }
 		if unicode & 2 != 0 { let _ = stdout.binmode(b":utf8"); }
 		if unicode & 4 != 0 { let _ = stderr.binmode(b":utf8"); }
 		let selected = Rc::new(RefCell::new(stdout));
+		stdin.set_prompt_output(&selected);
 		let cwd = host.cwd().to_owned();
 		let loc = Location { file: Rc::from(script.to_string_lossy().as_ref()), line: 1 };
 		let start = SystemTime::now();
@@ -39,14 +61,14 @@ impl<'h> Interp<'h> {
 		let mut this = Self {
 			cycle_tracker, host, cwd, rx: Default::default(), sys: Default::default(), data: Default::default(), modules: Default::default(), last_match: None,
 			symbols: FxHashMap::default(), symbol_generation: 0, core_global: Cell::new(None), names: RefCell::default(), special_globs: RefCell::default(), magic_cells: FxHashMap::default(), stashes: FxHashMap::default(), handles: Vec::new(), selected: selected.clone(), last_read: None,
-			readonly_literals: FxHashMap::default(), readonly_sweep: 256, tie_suspended: FxHashSet::default(),
+			startup_host: HostSpecials::default(), global_sites: Vec::new(), tie_suspended: FxHashSet::default(),
 			exposed_stashes: FxHashSet::default(), tied_handles: FxHashMap::default(),
 			package_generations: FxHashMap::default(), isa_globs: Vec::new(), code_attr: FxHashMap::default(),
 			line_seen: Cell::new(0), autoflush_seen: Cell::new(false),
 			argv: ArgvState { inplace: inplace.as_deref().map(InPlace::new), ext: inplace, ..ArgvState::default() },
-			start, alarm: None, alarm_interval: None, warn_switch: warn, phase: "START",
+			start, alarm: None, alarm_interval: None, warn_switch: warn, phase: "BOOT",
 			active_hints: Rc::new(default_hints.clone()), compile_hints: default_hints.clone(), default_hints,
-			parse_scopes: Vec::new(), compile_pads: Vec::new(), compile_pad_base: 0, declared_slots: FxHashMap::default(),
+			parse_scopes: Vec::new(), compile_pads: Vec::new(), compile_pad_base: 0,
 			use_hints: FxHashMap::default(), captures: FxHashMap::default(), imported_symbols: FxHashSet::default(),
 			package: Rc::from("main"), loc, scopes: vec![Scope::default()], scope_pool: Vec::new(), scope_stacks: Vec::new(),
 			lexicals: Default::default(), topics: Vec::new(), persistent: Rc::default(),
@@ -58,76 +80,96 @@ impl<'h> Interp<'h> {
 			objects: Default::default(), destroying: Default::default(), destroy_draining: false,
 			loading: FxHashSet::default(), unitchecks: Vec::new(), checks: Vec::new(), inits: Vec::new(), ends: Vec::new(), exit_hooks: Vec::new(),
 		};
-		for (name, io) in [("STDIN", Rc::new(RefCell::new(stdin))), ("STDOUT", selected), ("STDERR", Rc::new(RefCell::new(stderr)))] {
-			let gv = this.glob(name);
+		// The names (and their insertion order) are visible in %main:: before any user code runs.
+		// Install the globs, not three empty aggregate/scalar slots and a CV for every name.
+		this.symbols.reserve(128);
+		this.stashes.reserve(16);
+		this.stash("main").entries_mut().reserve(64);
+		for (name, io) in [("main::STDIN", Rc::new(RefCell::new(stdin))), ("main::STDOUT", selected), ("main::STDERR", Rc::new(RefCell::new(stderr)))] {
+			let gv = this.definition_glob(name);
 			this.set_handle(&gv, io);
 		}
-		let env = this.hv("main::ENV");
-		for (k, v) in this.host.env() { env.entries_mut().insert(hash_key(k), new_sv(Value::str(v))); }
-		// %SIG starts with an (undefined) entry per signal name, as perl's magic hash does.
+		let env = this.definition_glob("main::ENV");
+		this.startup_host.env.set(Some(Rc::downgrade(&env)));
 		#[cfg(unix)]
-		{
-			let sig = this.hv("main::SIG");
+		this.definition_glob("main::SIG").hash.defer(|| {
+			let sig = new_hv();
+			let mut entries = sig.entries_mut();
 			for signal in nix::sys::signal::Signal::iterator() {
 				let name = signal.as_str();
-				sig.entries_mut().insert(hash_key(name.strip_prefix("SIG").unwrap_or(name)), new_sv(Value::Undef));
+				entries.insert(HKey::from_pstr(PStr::from_str(name.strip_prefix("SIG").unwrap_or(name))), new_sv(Value::Undef));
+			}
+			drop(entries);
+			sig
+		});
+		this.definition_glob("main::ARGV").array.defer(move || {
+			let array = new_av(Vec::new());
+			array.replace_elems(argv.into_iter().map(|mut s| {
+				if unicode & 32 != 0 { s.utf8 = std::str::from_utf8(&s.bytes).is_ok(); }
+				new_sv(Value::Str(s))
+			}).collect());
+			array
+		});
+		this.definition_glob("main::INC").array.defer(move || {
+			let mut paths = Vec::with_capacity(inc.len() + DEFAULT_INC.len());
+			paths.extend(inc.into_iter().map(|dir| new_sv(Value::Str(dir))));
+			paths.extend(DEFAULT_INC.iter().map(|&dir| new_sv(Value::str(dir))));
+			let array = new_av(Vec::new());
+			array.replace_elems(paths);
+			array
+		});
+		macro_rules! scalars {
+			($($name:literal => $value:expr),+ $(,)?) => { $(
+				this.definition_glob(concat!("main::", $name)).scalar.defer(move || new_sv($value));
+			)+ };
+		}
+		scalars! {
+			"0" => Value::Str(script),
+			"/" => match input_sep.unwrap_or_default() {
+				RecordSep::Text(s) => Value::Str(s), RecordSep::Paragraph => Value::bytes(b""), RecordSep::Slurp => Value::Undef,
+				RecordSep::Fixed(n) => Value::Ref(Ref::Scalar(new_sv(Value::Int(n as i64)))),
+			},
+			"\\" => output_sep.map_or(Value::Undef, Value::Str), "\"" => Value::bytes(b" "), ";" => Value::bytes(b"\x1c"),
+			"@" => Value::bytes(b""), "?" => Value::Int(0), "^CHILD_ERROR_NATIVE" => Value::Int(0),
+			"^W" => Value::Int(i64::from(matches!(warn, WarnSwitch::W | WarnSwitch::All))),
+			"^T" => Value::Int(start.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
+			"^O" => Value::str(modules::osname()), "^X" => Value::str("/usr/bin/perl"), "]" => Value::Num(5.034001),
+			"^V" => Value::bytes(b"\x05\x22\x01"), "^C" => Value::Int(0), "^D" => Value::Int(0),
+		}
+		let inplace_sv = this.definition_glob("main::^I").scalar.borrow().clone();
+		inplace_sv.set(this.argv.ext.as_deref().map_or(Value::Undef, Value::bytes));
+		scalars! {
+			"^L" => Value::bytes(b"\x0c"), "^H" => Value::Int(0), "^A" => Value::bytes(b""), ":" => Value::bytes(b" \n-"),
+			"^TAINT" => Value::Int(0), "^UNICODE" => Value::Int(i64::from(unicode_raw)), "^UTF8CACHE" => Value::Int(1),
+		}
+		let locale_glob = this.definition_glob("main::^UTF8LOCALE");
+		if let Some(utf8) = locale {
+			locale_glob.scalar.defer(move || new_sv(Value::Int(i64::from(utf8))));
+		} else {
+			this.startup_host.locale.set(Some(Rc::downgrade(&locale_glob)));
+		}
+		scalars! {
+			"^OPEN" => Value::Undef, "^WARNING_BITS" => Value::Undef, "^LAST_FH" => Value::Undef,
+			"[" => Value::Int(0), "|" => Value::Int(0), "$" => Value::Int(i64::from(std::process::id())),
+		}
+		#[cfg(unix)]
+		{
+			use nix::unistd::{getegid, geteuid, getgid, getuid};
+			let real = Rc::new(std::cell::OnceCell::new());
+			let effective = real.clone();
+			scalars! {
+				"<" => Value::Int(i64::from(getuid().as_raw())), ">" => Value::Int(i64::from(geteuid().as_raw())),
+				"(" => group_value(getgid().as_raw(), &real), ")" => group_value(getegid().as_raw(), &effective),
 			}
 		}
-		let argv: Vec<_> = argv.into_iter().map(|mut s| {
-			if unicode & 32 != 0 { s.utf8 = std::str::from_utf8(&s.bytes).is_ok(); }
-			new_sv(Value::Str(s))
-		}).collect();
-		this.av("main::ARGV").replace_elems(argv);
-		let mut search: Vec<_> = inc.into_iter().map(|p| new_sv(Value::Str(p))).collect();
-		// Native core modules are found before @INC; these directories remain visible
-		// for a script explicitly requesting a source file there.
-		search.extend(DEFAULT_INC.iter().map(|&dir| new_sv(Value::str(dir))));
-		this.av("main::INC").replace_elems(search);
-		let sep = match input_sep.unwrap_or_default() {
-			RecordSep::Text(s) => Value::Str(s), RecordSep::Paragraph => Value::bytes(b""), RecordSep::Slurp => Value::Undef,
-			RecordSep::Fixed(n) => Value::Ref(Ref::Scalar(new_sv(Value::Int(n as i64)))),
-		};
-		let warnings = match warn { WarnSwitch::None | WarnSwitch::Off => 0, WarnSwitch::W | WarnSwitch::All => 1 };
-		let since = start.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-		let os = crate::perl::modules::osname();
-		#[cfg(unix)]
-		let (uid, euid, gid, egid) = {
-			use nix::unistd::{getegid, geteuid, getgid, getuid};
-			(getuid().as_raw(), geteuid().as_raw(), getgid().as_raw(), getegid().as_raw())
-		};
 		#[cfg(not(unix))]
-		let (uid, euid, gid, egid) = (0u32, 0u32, 0u32, 0u32);
-		let groups = |primary: u32| {
-			#[cfg(unix)]
-			{
-				let mut text = primary.to_string();
-				for group in crate::perl::io::supplementary_groups() {
-					text.push(' ');
-					text.push_str(&group.to_string());
-				}
-				Value::str(&text)
-			}
-			#[cfg(not(unix))]
-			{ Value::Int(i64::from(primary)) }
-		};
-		for (name, v) in [
-			("0", Value::Str(script)), ("/", sep), ("\\", output_sep.map_or(Value::Undef, Value::Str)),
-			("\"", Value::bytes(b" ")), (";", Value::bytes(b"\x1c")), ("@", Value::bytes(b"")),
-			("?", Value::Int(0)), ("^CHILD_ERROR_NATIVE", Value::Int(0)),
-			("^W", Value::Int(warnings)), ("^T", Value::Int(since)), ("^O", Value::str(os)),
-			("^X", Value::str("/usr/bin/perl")), ("]", Value::Num(5.034001)), ("^V", Value::bytes(b"\x05\x22\x01")),
-			("^C", Value::Int(0)), ("^D", Value::Int(0)), ("^I", this.argv.ext.as_deref().map_or(Value::Undef, Value::bytes)),
-			("^L", Value::bytes(b"\x0c")), ("^H", Value::Int(0)), ("^A", Value::bytes(b"")), (":", Value::bytes(b" \n-")),
-			("^TAINT", Value::Int(0)), ("^UNICODE", Value::Int(i64::from(unicode_raw))),
-			("^UTF8CACHE", Value::Int(1)), ("^UTF8LOCALE", Value::Int(i64::from(utf8_locale))),
-			("^OPEN", Value::Undef), ("^WARNING_BITS", Value::Undef), ("^LAST_FH", Value::Undef),
-			("[", Value::Int(0)), ("|", Value::Int(0)), ("$", Value::Int(i64::from(std::process::id()))),
-			("<", Value::Int(i64::from(uid))), (">", Value::Int(i64::from(euid))), ("(", groups(gid)), (")", groups(egid)),
-			("^F", Value::Int(2)), ("^P", Value::Int(0)), ("^M", Value::Undef), ("^R", Value::Undef), ("^SAFE_LOCALES", Value::Int(1)),
-		] { this.sv(&format!("main::{name}")).replace(v); }
+		{ scalars! { "<" => Value::Int(0), ">" => Value::Int(0), "(" => Value::Int(0), ")" => Value::Int(0) } }
+		scalars! {
+			"^F" => Value::Int(2), "^P" => Value::Int(0), "^M" => Value::Undef, "^R" => Value::Undef, "^SAFE_LOCALES" => Value::Int(1),
+		}
 		for (name, full) in [("!", "main::!"), ("^E", "main::^E"), ("|", "main::|"), (".", "main::."), ("~", "main::~"),
 			("^", "main::^"), ("=", "main::="), ("-", "main::-"), ("%", "main::%"), ("[", "main::["), ("^I", "main::^I")] {
-			let sv = this.sv(full);
+			let sv = this.definition_glob(full).scalar.borrow().clone();
 			sv.register();
 			this.magic_cells.insert(Rc::as_ptr(&sv) as usize, (name, Rc::downgrade(&sv)));
 		}
@@ -135,7 +177,87 @@ impl<'h> Interp<'h> {
 		for (name, value) in switches { this.sv(&format!("main::{}", name.to_string_lossy())).replace(Value::Str(value)); }
 		this.install_universal();
 		modules::install_core(&mut this);
+		this.phase = "START";
 		this
+	}
+
+	/// During boot all names are canonical, no stash has escaped, and every existing
+	/// symbol is in `symbols`. Dynamic/module redefinitions use ordinary gv_fetch.
+	pub(super) fn definition_glob(&mut self, qualified: &str) -> Gv {
+		if self.phase != "BOOT" || qualified.ends_with("::") { return self.glob(qualified); }
+		if let Some(g) = self.symbols.get(qualified) { return g.clone(); }
+		let (pkg, name) = qualified.rsplit_once("::").expect("qualified bootstrap symbol");
+		let stash = self.stash(pkg);
+		let package = self.stashes.get_key_value(pkg).expect("installed stash").0.clone();
+		self.insert_boot_symbol(Rc::from(qualified), package, name, &stash)
+	}
+
+	fn insert_boot_symbol(&mut self, full: Rc<str>, pkg: Rc<str>, name: &str, stash: &Hv) -> Gv {
+		let g = new_gv(pkg, Rc::from(name));
+		let key = HKey::from_pstr(PStr::from_str(name));
+		stash.entries_mut().insert(key, new_sv(Value::Glob(g.clone())));
+		self.symbols.insert(full, g.clone());
+		self.symbol_generation = self.symbol_generation.wrapping_add(1);
+		g
+	}
+
+	/// Keep builtin names discoverable (`defined &f`, `keys %Pkg::`), but do not
+	/// allocate a CodeBody or construct its name until something asks for the CODE slot.
+	pub(super) fn install_code_body(&mut self, g: &Gv, body: CodeImpl, proto: Option<PStr>) {
+		if self.phase == "BOOT" && !g.code.initialized() && let CodeImpl::Native(f) = &body {
+			let f = *f;
+			let pkg = g.pkg.clone();
+			let name = g.name.clone();
+			g.code.defer(move || Some(Rc::new(CodeBody {
+				name: RefCell::new(Some(Rc::from(format!("{pkg}::{name}")))), pkg,
+				prototype: RefCell::new(proto), body: RefCell::new(CodeImpl::Native(f)), blessed: RefCell::new(None),
+			})));
+		} else {
+			let cv = self.code_slot(g);
+			cv.prototype.replace(proto);
+			cv.body.replace(body);
+		}
+	}
+
+	pub(in crate::perl) fn define_natives(&mut self, module: &str, defs: &[(&str, NativeFn)]) {
+		if self.phase != "BOOT" {
+			for (name, f) in defs { self.define_native(&format!("{module}::{name}"), *f); }
+			return;
+		}
+		let stash = self.stash(module);
+		let pkg = self.stashes.get_key_value(module).expect("installed stash").0.clone();
+		stash.entries_mut().reserve(defs.len());
+		for &(name, f) in defs {
+			let full: Rc<str> = Rc::from(format!("{module}::{name}"));
+			let g = self.symbols.get(&full).cloned().unwrap_or_else(|| self.insert_boot_symbol(full, pkg.clone(), name, &stash));
+			self.install_code_body(&g, CodeImpl::Native(f), None);
+		}
+		let generation = self.package_generations.entry(pkg).or_insert(1);
+		*generation = generation.saturating_add(defs.len() as u64);
+	}
+
+	/// After the shell lends its environment to this invocation it does not change.
+	/// Convert it into Perl values only before exporting the owning glob (including
+	/// indirect access through the stash), never for an invocation that doesn't use it.
+	pub(super) fn materialize_host_symbol(&self, qualified: &str) {
+		match qualified {
+			"main::ENV" => if let Some(g) = self.startup_host.env.take().and_then(|w| w.upgrade()) {
+				let hash = g.hash.borrow();
+				let mut entries = hash.entries_mut();
+				entries.extend(self.host.env().map(|(k, v)| (HKey::from_pstr(PStr::from_str(k)), new_sv(Value::str(v)))));
+			},
+			"main::^UTF8LOCALE" => if let Some(g) = self.startup_host.locale.take().and_then(|w| w.upgrade()) {
+				g.scalar.borrow().set(Value::Int(i64::from(utf8_locale(self.host))));
+			},
+			_ => {}
+		}
+	}
+
+	pub(super) fn expose_boot_stash(&self, pkg: &str) {
+		if pkg == "main" {
+			self.materialize_host_symbol("main::ENV");
+			self.materialize_host_symbol("main::^UTF8LOCALE");
+		}
 	}
 
 	/// Borrow the shell host for external effects.
@@ -201,6 +323,7 @@ impl<'h> Interp<'h> {
 
 	/// Materialize `%ENV` as native byte pairs for a child process.
 	pub fn env_pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+		self.materialize_host_symbol("main::ENV");
 		let Some(glob) = self.symbols.get("main::ENV") else { return Vec::new() };
 		glob.hash.borrow().entries().iter().map(|(k, v)| (k.to_pstr().bytes, v.get().to_pstr().bytes)).collect()
 	}
@@ -250,8 +373,9 @@ impl<'h> Interp<'h> {
 	pub(in crate::perl) fn record_sep_for_read(&self) -> std::borrow::Cow<'static, RecordSep> {
 		use std::borrow::Cow;
 		static NEWLINE: std::sync::LazyLock<RecordSep> = std::sync::LazyLock::new(RecordSep::default);
-		self.with_special_scalar("main::/", |cell| {
-			let Some(cell) = cell else { return Cow::Owned(RecordSep::Slurp); };
+		self.with_special_glob(SpecialGlob::InputSeparator, |glob| {
+			let Some(glob) = glob else { return Cow::Borrowed(&RecordSep::Slurp); };
+			let cell = glob.scalar.borrow();
 			if let Ok(value) = cell.try_value()
 				&& matches!(&*value, Value::Str(s) if !s.utf8 && s.bytes == b"\n")
 			{
@@ -308,17 +432,21 @@ impl<'h> Interp<'h> {
 
 	/// Update the handle that supplies `$.`.
 	pub fn set_last_read(&mut self, io: Io) {
-		let cell = self.sv("main::.");
+		// `local` and typeglob aliases can replace the slot; cache the glob, not
+		// the SV. Updating an integer payload avoids cloning/dropping a Value.
+		let cell = self.with_special_glob(SpecialGlob::LineNumber, |gv| gv.map(|g| g.scalar.borrow().clone()))
+			.unwrap_or_else(|| self.sv("main::."));
+		let mut value = cell.try_value_mut().expect("last-read line number is not borrowed");
 		if let Some(previous) = &self.last_read {
-			let n = cell.get().to_i64();
-			if self.line_seen.replace(n) != n && let Ok(mut h) = previous.try_borrow_mut() {
+			let n = match &*value { Value::Int(n) => *n, other => other.to_i64() };
+			if self.line_seen.get() != n && let Ok(mut h) = previous.try_borrow_mut() {
 				h.set_line_no(n.max(0) as u64);
 			}
 		}
 		let line = io.borrow().line_no() as i64;
-		self.last_read = Some(io);
+		if let Value::Int(n) = &mut *value { *n = line; } else { *value = Value::Int(line); }
 		self.line_seen.set(line);
-		cell.replace(Value::Int(line));
+		self.last_read = Some(io);
 	}
 
 	/// Forget the last-read handle (`readline` on an unopened handle leaves `${^LAST_FH}` undefined).
@@ -505,6 +633,8 @@ impl<'h> Interp<'h> {
 
 	fn signal_handler(&self, signal: &str) -> Value {
 		let Some(g) = self.symbols.get("main::SIG") else { return Value::Undef };
+		// Until the hash slot is touched every handler is the default (undef).
+		if !g.hash.initialized() { return Value::Undef; }
 		g.hash.borrow().entries().get(&hash_key(signal)).map_or(Value::Undef, read_sv)
 	}
 

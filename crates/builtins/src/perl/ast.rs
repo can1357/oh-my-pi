@@ -209,8 +209,21 @@ pub struct Attribute {
 pub struct Expr {
 	/// Source location of the operation or term.
 	pub location: Location,
+	/// Interpreter-owned resolution cache for this node; the parser always leaves it empty.
+	pub cache: NodeCache,
 	/// Expression payload.
 	pub kind: ExprKind,
+}
+
+/// Per-node slots the interpreter fills on first evaluation so later evaluations skip name lookups.
+/// Each holds an index plus one into an interpreter-side table; 0 means not resolved yet. Nodes are
+/// never cloned during execution, so a slot always describes its own node.
+#[derive(Clone, Debug, Default)]
+pub struct NodeCache {
+	/// Lexical register of a variable node (see `interp::vars::Lexicals`).
+	pub lexical: std::cell::Cell<u32>,
+	/// Entry in the interpreter's package-variable cache for a variable node.
+	pub global: std::cell::Cell<u32>,
 }
 
 /// Expression forms. `List` denotes a comma expression; the interpreter supplies context.
@@ -274,7 +287,7 @@ pub enum ExprKind {
 }
 
 /// Sigil or postfix dereference slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sigil {
 	/// Scalar `$`.
 	Scalar,
