@@ -67,7 +67,8 @@ function reveal(offset: number, start: number, end: number, height: number): num
 function legendLine(theme: Theme, row: OverviewRow, selected: boolean, width: number): string {
 	const presentation = CONTEXT_PRESENTATION[row.id];
 	const glyph = theme.fg(presentation.color, theme.symbols.symbol(presentation.symbol));
-	const cursor = selected ? theme.fg("accent", "❯") : " ";
+	const cursorGlyph = theme.symbols.symbol("nav.cursor");
+	const cursor = selected ? theme.fg("accent", cursorGlyph) : " ".repeat(visibleWidth(cursorGlyph));
 	const prefix = `${cursor} ${row.child ? "  " : ""}${glyph} `;
 	const suffix = ` ${theme.fg(selected ? presentation.color : "text", row.tokenColumn)}${theme.fg(selected ? presentation.color : "dim", row.shareColumn)}`;
 	const budget = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix));

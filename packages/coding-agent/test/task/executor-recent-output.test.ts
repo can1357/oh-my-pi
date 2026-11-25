@@ -580,6 +580,24 @@ describe("recentOutput event-sequence equivalence (deferred reconstruction)", ()
 		}
 	});
 
+	it("counts the lines a finished edit changed, by its result's diff, and nothing for failures or other tools", async () => {
+		const diff = "+1|added\n+2|added too\n-3|gone\n 4|kept";
+		const call = (id: string, toolName: string, isError: boolean): AgentSessionEvent[] => [
+			{ type: "tool_execution_start", toolCallId: id, toolName, args: { path: "src/one.ts" } },
+			{ type: "tool_execution_end", toolCallId: id, toolName, result: { content: [], details: { diff } }, isError },
+		];
+		const result = await runScenario([], {
+			events: [...call("ok", "edit", false), ...call("bad", "edit", true), ...call("other", "read", false)],
+		});
+		const finished =
+			result.toolSnapshots.find(snapshot => snapshot.recentTools[0]?.tool === "read")?.recentTools ?? [];
+		expect(finished.map(({ tool, isError, added, removed }) => ({ tool, isError, added, removed }))).toEqual([
+			{ tool: "read", isError: false, added: undefined, removed: undefined },
+			{ tool: "edit", isError: true, added: undefined, removed: undefined },
+			{ tool: "edit", isError: false, added: 2, removed: 1 },
+		]);
+	});
+
 	it("matches the reference across arbitrary chunk boundaries and blank lines", async () => {
 		const corpus = "first line\n\n  \nsecond line\nthird\t line \n\n\nfourth\npartial trailing";
 		const sizes = [1, 3, 7, 2, 11, 5, 1, 13, 4];

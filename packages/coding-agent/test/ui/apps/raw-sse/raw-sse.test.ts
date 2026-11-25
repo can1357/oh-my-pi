@@ -1,13 +1,41 @@
 import * as path from "node:path";
-import { describe, expect, setSystemTime, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { ResolvedTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { CORPUS_NOW, type CorpusCase, corpusEnvironment, describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
 import { RawSseDebugBuffer } from "../../../../src/debug/raw-sse-buffer";
 import { RawSseMain, RawSseViewer, RawSseViewerModel } from "../../../../src/ui/apps/raw-sse";
-import { type AppDriver, appSuite, caseFiles, nativeDiff } from "../harness";
+import { type AppDriver, appSuite, caseFiles, nativeDiff, paintAppRows } from "../harness";
 import { click, mouse } from "./mouse";
 
 setSystemTime(new Date(CORPUS_NOW));
+
+let originalTheme: ResolvedTheme | undefined;
+afterEach(() => {
+	if (originalTheme) setCurrentTheme(originalTheme);
+	originalTheme = undefined;
+});
+
+test("the raw SSE footer paints ASCII keycaps", () => {
+	originalTheme = currentTheme();
+	const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+	setCurrentTheme(theme);
+	const model = new RawSseViewerModel({
+		buffer: new RawSseDebugBuffer(),
+		terminalRows: 12,
+		copyToClipboard: () => {},
+		onExit: () => {},
+	});
+	try {
+		const rows = paintAppRows(() => RawSseViewer({ model }), staticEnvironment(theme), 120);
+		expect(rows.find(row => row.includes("copy raw"))).toContain("Esc close · Ctrl+C copy raw · End follow tail");
+	} finally {
+		model.dispose();
+	}
+});
 
 const sseData = (i: number) =>
 	i % 3 === 0

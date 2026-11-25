@@ -13,6 +13,7 @@ import type { JSXNode } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatRawSseIsoTime } from "../../../debug/raw-sse-buffer";
+import { formatTooltipKey } from "../../keys/hints";
 import "../../styles/apps/raw-sse/look";
 import type { RawSseViewerModel } from "./model";
 import { ActionButton } from "../../overlays/panels/common";
@@ -45,7 +46,13 @@ export function RawSseViewer(props: { readonly model: RawSseViewerModel }): JSXN
 				);
 			}}
 			<row key="actions" role="omp.actions" gap="sm" align="center">
-				<ActionButton id="copy-raw" label="Copy raw" title="Copy raw  ⌃C" tone="accent" keys={["ctrl", "c"]} />
+				<ActionButton
+					id="copy-raw"
+					label="Copy raw"
+					title={`Copy raw  ${formatTooltipKey("ctrl+c")}`}
+					tone="accent"
+					keys={["ctrl", "c"]}
+				/>
 				<spacer grow={1} />
 				<ActionButton id="close" label="Close" title="Close  esc" keys={["escape"]} />
 			</row>

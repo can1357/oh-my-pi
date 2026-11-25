@@ -21,12 +21,13 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 import { splitMagicSections } from "../../edit/magic-sections";
 import { normalizeEditMode } from "../../edit/settings";
-import type {
-	EditMode,
-	EditToolDetails,
-	EditToolPerFileResult,
-	Operation,
-	PerFileDiffPreview,
+import {
+	diffStats,
+	type EditMode,
+	type EditToolDetails,
+	type EditToolPerFileResult,
+	type Operation,
+	type PerFileDiffPreview,
 } from "../../tools/details/edit";
 import {
 	HASHLINE_TAG_SUFFIX_RE,
@@ -321,17 +322,6 @@ function callFacts(args: EditArgs, state: ToolViewState, mode: EditMode | undefi
 
 function operationTitle(op: Operation | undefined): string {
 	return op === "create" ? "Create" : op === "delete" ? "Delete" : "Edit";
-}
-
-/** Added and removed lines of a diff. */
-export function diffStats(diff: string): { added: number; removed: number } {
-	let added = 0;
-	let removed = 0;
-	for (const line of diff ? diff.split("\n") : []) {
-		if (line.startsWith("+")) added++;
-		else if (line.startsWith("-")) removed++;
-	}
-	return { added, removed };
 }
 
 function statsMeta(added: number, removed: number): string | undefined {

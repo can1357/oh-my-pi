@@ -288,6 +288,36 @@ export function shouldSendServiceTier(
 }
 
 /**
+ * Whether each account that discovery listed for `model` offers `serviceTier`,
+ * keyed by the account key of {@link Model.accountAccess}. Each account is
+ * judged by {@link shouldSendServiceTier} against its own advertised tier list
+ * instead of the model's cross-account union, so a plan-gated tier (Codex
+ * Ultrafast) is sent to, and credential selection prefers, only the accounts
+ * that hold it. `undefined` when discovery recorded no per-account tier list,
+ * leaving every account on the model-level answer.
+ */
+export function serviceTierOffersByAccount(
+	model: ServiceTierModel & Pick<Model, "accountAccess">,
+	serviceTier: ServiceTier | null | undefined,
+): Record<string, boolean> | undefined {
+	const accountAccess = model.accountAccess;
+	if (!serviceTier || !accountAccess) return undefined;
+	let reported = false;
+	const offers: Record<string, boolean> = {};
+	for (const accountKey in accountAccess) {
+		const access = accountAccess[accountKey]!;
+		reported ||= access.serviceTiers !== undefined;
+		offers[accountKey] = shouldSendServiceTier(serviceTier, {
+			provider: model.provider,
+			api: model.api,
+			identity: model.identity,
+			serviceTiers: access.serviceTiers,
+		});
+	}
+	return reported ? offers : undefined;
+}
+
+/**
  * True when `priority` will actually be realized on the wire for `model`.
  * Direct Anthropic realizes fast mode; OpenAI/Google/Fireworks emit the
  * service-tier field; OpenRouter realizes it only for its OpenAI- and
