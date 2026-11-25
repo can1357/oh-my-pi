@@ -59,8 +59,8 @@
 - The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
 
 ### Fixed
-- `session.compacting` handlers merge their results instead of overwriting each other, manual handoff keeps `preserveData`, and fresh handler data overrides stale carried-over keys ([#20004](https://github.com/can1357/oh-my-pi/issues/20004), [#20398](https://github.com/can1357/oh-my-pi/pull/20398) by [@JamieJ5926](https://github.com/JamieJ5926))
 
+- `session.compacting` handlers merge their results instead of overwriting each other, manual handoff keeps `preserveData`, and fresh handler data overrides stale carried-over keys ([#20004](https://github.com/can1357/oh-my-pi/issues/20004), [#20398](https://github.com/can1357/oh-my-pi/pull/20398) by [@JamieJ5926](https://github.com/JamieJ5926))
 - `/fork pane` inside Tern now opens the fork in a new Tern pane, and `/fork window`/`/fork tab` in a new Tern tab, instead of failing with "No terminal multiplexer was detected"
 - A language server that times out during startup now reports the resolved executable and stops the launcher and its process group instead of leaving them running ([#20436](https://github.com/can1357/oh-my-pi/issues/20436)).
 - Images reach each request as the receiving model needs them: after switching to a text-only model, queued and earlier images are described by the vision model (once per image, reused across turns and resumes); after switching to a vision model, they are sent as images again with no stale description. Compaction and branch summaries and advisor reviews carry the descriptions whenever their model or the session's cannot see images, and a failed description is retried instead of sticking ([#20369](https://github.com/can1357/oh-my-pi/pull/20369) by [@taibenvenuti](https://github.com/taibenvenuti))
