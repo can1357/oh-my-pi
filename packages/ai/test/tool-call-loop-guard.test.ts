@@ -105,6 +105,30 @@ describe("ToolCallLoopGuard", () => {
 		}
 	});
 
+	test("does not flag grep pagination through skip", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		const text = "Checking the next page of matches.";
+		for (let page = 0; page < 6; page++) {
+			expect(
+				guard.recordTurn(
+					textTurn(`call-${page}`, "grep", { pattern: "todo", path: "src", skip: page * 100 }, text),
+				),
+			).toBeNull();
+		}
+	});
+
+	test("does not flag a shell sweep over distinct test files", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		const text = "Testing the next file.";
+		for (let file = 1; file <= 6; file++) {
+			expect(
+				guard.recordTurn(
+					textTurn(`call-${file}`, "bash", { command: `bun test test/case-${file}.test.ts` }, text),
+				),
+			).toBeNull();
+		}
+	});
+
 	test("does not count normalized calls when assistant text changes", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
 		for (let iteration = 1; iteration <= 152; iteration++) {
