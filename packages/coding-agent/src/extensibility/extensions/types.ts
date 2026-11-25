@@ -2211,8 +2211,9 @@ export interface ExtensionAPI {
 	 * `--trusted-extension`); the earlier extension serves it. Throws for invalid scheme syntax
 	 * (two or more characters of `[a-z0-9+.-]`, starting with a letter, after lowercasing), a
 	 * built-in or standard scheme (`local`, `http`, …), a scheme this extension already registered,
-	 * or a spec the handler contradicts. The returned function removes the registration.
-	 * Registering one keeps the extension out of startup deferral.
+	 * or a spec the handler contradicts, and when called after the extension factory returned
+	 * (register from the factory, not from `session_start` or later). The returned function
+	 * removes the registration. Registering one keeps the extension out of startup deferral.
 	 */
 	registerUrlScheme(handler: ProtocolHandler): () => void;
 

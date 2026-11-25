@@ -152,11 +152,10 @@ describe("pi.registerUrlScheme", () => {
 	});
 
 	it("stops serving while its extension is suspended, serves again on resume, and leaves on dispose", async () => {
-		let api: ExtensionAPI | undefined;
+		let dispose: (() => void) | undefined;
 		const { session } = await open(pi => {
-			api = pi;
+			dispose = pi.registerUrlScheme(readOnly("murmur", "live"));
 		});
-		const dispose = api?.registerUrlScheme(readOnly("murmur", "live"));
 		if (!dispose) throw new Error("factory did not run");
 		const runner = session.extensionRunner;
 		if (!runner) throw new Error("Expected an extension runner");
@@ -168,6 +167,20 @@ describe("pi.registerUrlScheme", () => {
 		expect(await readThrough(session, "murmur://x")).toContain("live:murmur://x");
 
 		dispose();
+		expect(session.urlRouter.getHandler("murmur")).toBeUndefined();
+	});
+
+	it("refuses a registration after the extension's factory returned, and serves nothing for it", async () => {
+		let api: ExtensionAPI | undefined;
+		const { session } = await open(pi => {
+			api = pi;
+		});
+		if (!api) throw new Error("factory did not run");
+		const late = api;
+
+		expect(() => late.registerUrlScheme(readOnly("murmur", "late"))).toThrow(
+			"registerUrlScheme: murmur:// must be registered from the extension factory, not after it returns",
+		);
 		expect(session.urlRouter.getHandler("murmur")).toBeUndefined();
 	});
 

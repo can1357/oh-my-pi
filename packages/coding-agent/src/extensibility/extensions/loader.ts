@@ -206,9 +206,16 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	/** Whether the extension's factory is still running; URL schemes register only then. */
+	#loading = true;
 
 	get pi() {
 		return getCodingAgentApi();
+	}
+
+	/** The factory returned (or threw): later `registerUrlScheme` calls are refused. */
+	static endLoading(api: ConcreteExtensionAPI): void {
+		api.#loading = false;
 	}
 
 	constructor(
@@ -343,6 +350,13 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	registerUrlScheme(handler: ProtocolHandler): () => void {
 		const scheme = handler.scheme.toLowerCase();
+		// Conflict checks, startup deferral and the first system prompt all read the schemes a load
+		// registered by the time its factory returned; a later registration would bypass them.
+		if (!this.#loading) {
+			throw new Error(
+				`registerUrlScheme: ${scheme}:// must be registered from the extension factory, not after it returns`,
+			);
+		}
 		if (!LINK_SCHEME_PATTERN.test(scheme)) {
 			throw new Error(
 				`registerUrlScheme: "${handler.scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
@@ -518,7 +532,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
-	api: ExtensionAPI,
+	api: ConcreteExtensionAPI,
 	runtime: IExtensionRuntime,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
@@ -532,6 +546,8 @@ async function runExtensionFactory(
 			...providerRegistrationCheckpoint,
 		);
 		throw error;
+	} finally {
+		ConcreteExtensionAPI.endLoading(api);
 	}
 }
 

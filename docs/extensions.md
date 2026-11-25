@@ -412,6 +412,10 @@ export default function (pi: ExtensionAPI) {
   its RPC host URI schemes and before the built-ins: a session that does not load your
   extension, or a subagent whose session does not, never sees the scheme. Subagents load
   extensions in their own sessions, so each registers its own handler.
+- **From the factory.** Call `registerUrlScheme` while your factory runs (an async factory may
+  await first). A call after the factory returns — from `session_start` or a later event —
+  throws: conflict checks, startup deferral and the first system prompt read the schemes a load
+  registered by then. The returned function may be called at any time.
 - **Refusals.** `registerUrlScheme` throws for invalid syntax (`^[a-z][a-z0-9+.-]+$` after
   lowercasing: at least two characters, so no scheme captures a Windows drive path such as
   `C:/notes.txt`), a built-in scheme, a standard one (`http`, `https`, `file`, …), a scheme your
