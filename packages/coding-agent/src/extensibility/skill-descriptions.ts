@@ -13,6 +13,7 @@ import {
 	postmortem,
 	prompt,
 	toError,
+	withFileLockSync,
 } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -334,19 +335,22 @@ export class SkillDescriptionStore {
 	 */
 	static open(dbPath: string = resolveSkillDescriptionsDbPath()): SkillDescriptionStore {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
-		const db = new Database(dbPath, { create: true });
-		try {
-			// Install before any lock-taking statement (SQLite cache contention, #2421).
-			db.run("PRAGMA busy_timeout = 100");
-			db.run("PRAGMA journal_mode=WAL");
-			db.run("PRAGMA synchronous=NORMAL");
-			db.run("CREATE TABLE IF NOT EXISTS skill_descriptions (key TEXT PRIMARY KEY, description TEXT NOT NULL)");
-			if (process.platform !== "win32") fs.chmodSync(dbPath, 0o600);
-			return new SkillDescriptionStore(dbPath, db);
-		} catch (error) {
-			db.close();
-			throw error;
-		}
+		// Two connections switching a fresh database to WAL can get SQLITE_BUSY without
+		// invoking the busy handler. Serialize initialization, not subsequent reads/writes.
+		return withFileLockSync(dbPath, () => {
+			const db = new Database(dbPath, { create: true });
+			try {
+				db.run("PRAGMA busy_timeout = 100");
+				db.run("PRAGMA journal_mode=WAL");
+				db.run("PRAGMA synchronous=NORMAL");
+				db.run("CREATE TABLE IF NOT EXISTS skill_descriptions (key TEXT PRIMARY KEY, description TEXT NOT NULL)");
+				if (process.platform !== "win32") fs.chmodSync(dbPath, 0o600);
+				return new SkillDescriptionStore(dbPath, db);
+			} catch (error) {
+				db.close();
+				throw error;
+			}
+		});
 	}
 
 	/** @throws on SQLite errors. */
