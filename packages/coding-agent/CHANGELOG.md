@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Breaking Changes
 
 - Migrated extension, hook, and custom-tool UI rendering to the host's `@oh-my-pi/pi-tui` implementation. Renderers now return pi-tui nodes or row objects, UI factories receive a lightweight UI host, and renderers receive the host theme and text-style helpers. Extensions that import bundled or alternate pi-tui packages no longer load; see [Migrating from pi-tui](../../docs/extensions.md#migrating-from-pi-tui).

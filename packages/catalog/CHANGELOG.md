@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Added
 
 - Added Otari credential helpers and endpoint-aware model discovery, supporting stored `{ token, baseUrl }` credentials and US/EU endpoints.

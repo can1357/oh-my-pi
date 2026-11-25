@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Fixed
 
 - Fixed relay sessions leaving an unwanted “omp” tab group in Chrome’s bookmarks bar after closing relay tabs.

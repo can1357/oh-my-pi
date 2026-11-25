@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Added
 
 - Added customizable notices for unmet soft tool requirements, allowing hosts to specify the text shown when a required tool call does not satisfy its requirement.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Added
 
 - Added `@oh-my-pi/pi-tui`, a terminal UI with a unified Tern Surface Protocol node tree, native and terminal rendering, reactive signals, compiler-free JSX, role-based painters and widgets, terminal input and capability support, multiplexer and image handling, resize policies, notifications, Markdown and text utilities, themes, and terminal testing utilities.

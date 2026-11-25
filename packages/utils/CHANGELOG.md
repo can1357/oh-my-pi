@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Fixed
 
 - Fatal interactive errors now display a concise cause and the path to the full log after terminal cleanup, while piped stderr continues to include the stack trace.

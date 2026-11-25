@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Added
 
 - Added a TSP checkout event to indicate when a pane displays its checkout view.

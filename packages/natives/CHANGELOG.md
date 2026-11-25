@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Breaking Changes
 
 - Removed the `watch` and `HEAD_WATCH_INTERVAL_MS` exports from `@oh-my-pi/pi-natives/vcs`; reread repository state when needed instead.

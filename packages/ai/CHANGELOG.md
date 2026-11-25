@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
 ### Breaking Changes
 
 - maxInFlightRequests limits are now scoped per process unless the host configures a ProviderSlotBroker; the previous cross-process lease-directory mechanism has been removed.
