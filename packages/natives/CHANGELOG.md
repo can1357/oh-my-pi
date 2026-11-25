@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Wayland screenshots of a still screen failing after 5 s with `PipeWire frame timed out` on Hyprland and the wlroots compositors sway, river, labwc and wayfire: on those compositors the screen share now stays open between screenshots and closes after 120 s without a screenshot or coordinate input. Other compositors, GNOME and KDE included, still open and close a share for each screenshot ([#19615](https://github.com/can1357/oh-my-pi/pull/19615) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added
