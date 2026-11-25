@@ -147,6 +147,8 @@ import {
 	createSkillDescriptionCompressor,
 	openSessionSkillDescriptionStore,
 	SkillDescriptionCatalog,
+	type SkillDescriptionStore,
+	sharedSkillDescriptionStore,
 } from "./extensibility/skill-descriptions";
 import { resolvePath } from "./extensibility/utils";
 import {
@@ -446,6 +448,7 @@ import {
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
+	cfgSkillsCompressDescriptions,
 	type SkillsSettings,
 } from "./extensibility/settings";
 import { cfgTtsr } from "./export/ttsr-settings";
@@ -4384,12 +4387,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
-		// The process agent dir uses the process-wide store; a session rooted in
-		// another agent dir keeps its own, closed when the session is disposed.
-		const ownedSkillDescriptionStore =
-			path.resolve(agentDir) === path.resolve(getAgentDir())
-				? undefined
-				: openSessionSkillDescriptionStore(agentDir);
+		// The process agent dir uses the process-wide store; a session rooted in another agent dir
+		// keeps its own, closed when the session is disposed. Both hint catalogs share it, and it opens
+		// when one of them first has a hint to look up: never while `skills.compressDescriptions` is
+		// off and no MCP namespace needs one.
+		const keepsOwnSkillDescriptionStore = path.resolve(agentDir) !== path.resolve(getAgentDir());
+		let ownedSkillDescriptionStore: SkillDescriptionStore | undefined;
+		let ownedStoreOpened = false;
+		// Set by the session's disposer: a prompt rebuild that is still running then must not open a
+		// store that nothing would close.
+		let skillDescriptionStoreReleased = false;
+		const hintStore = (): SkillDescriptionStore | undefined => {
+			if (skillDescriptionStoreReleased) return undefined;
+			if (!keepsOwnSkillDescriptionStore) return sharedSkillDescriptionStore();
+			if (!ownedStoreOpened) {
+				ownedStoreOpened = true;
+				ownedSkillDescriptionStore = openSessionSkillDescriptionStore(agentDir);
+			}
+			return ownedSkillDescriptionStore ?? sharedSkillDescriptionStore();
+		};
 		const hintCompressorOptions = {
 			getCostGate: currentCostGate,
 			getSessionProvider: () => (agent?.state.model ?? model)?.provider,
@@ -4402,7 +4418,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// One omp process asks the model for a hint; the others wait on the daemon and read its answer.
 		const hintLock = (job: string) => daemonMutex("routing-hints").lock(job);
 		const skillDescriptions = new SkillDescriptionCatalog({
-			store: ownedSkillDescriptionStore,
+			// Read on every prompt build: `cfgSystemPromptInputs` rebuilds the prompt when it changes, so
+			// a change made in a live session applies to the next prompt and to compressions still queued.
+			verbatim: () => !cfgSkillsCompressDescriptions.get(settings),
+			store: hintStore,
 			// Held until AgentSession exists: before then the root cost gate does not, so a request
 			// sent from the startup prompt render could go out ungated (see `startCompression` below).
 			deferCompression: true,
@@ -4410,7 +4429,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			lock: hintLock,
 		});
 		mcpNamespaces = new MCPEvalNamespaceCatalog({
-			store: ownedSkillDescriptionStore,
+			store: hintStore,
 			deferCompression: true,
 			resources: () => toolSession.mcpManager,
 			compress: createSkillDescriptionCompressor(modelRegistry, settings, {
@@ -5648,12 +5667,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		session.registerSessionChangeCallback(() => {
 			toolSession.state = new ToolConversationState();
 		});
-		if (ownedSkillDescriptionStore) {
-			// Let in-flight compressions land before releasing the file.
-			session.addDisposer(
-				() => void skillDescriptions.waitForPending().finally(() => ownedSkillDescriptionStore.close()),
+		// Let in-flight compressions of both hint catalogs land before releasing the session's own
+		// store, if one was opened.
+		session.addDisposer(() => {
+			skillDescriptionStoreReleased = true;
+			const owned = ownedSkillDescriptionStore;
+			if (!owned) return;
+			void Promise.all([skillDescriptions.waitForPending(), mcpNamespaces?.waitForPending()]).finally(() =>
+				owned.close(),
 			);
-		}
+		});
 		// A caller-supplied store belongs to the caller (the CLI keeps it in sync itself).
 		if (ownsAuthStorage) createAuthStorageSettingsSync(session, authStorage, modelRegistry);
 		// One coalesced prompt rebuild for every prompt input (rule bucketing, the

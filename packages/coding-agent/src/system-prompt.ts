@@ -21,7 +21,7 @@ import {
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
-import type { SkillsSettings } from "./extensibility/settings";
+import { cfgSkillsCompressDescriptions, type SkillsSettings } from "./extensibility/settings";
 import type { Personality } from "./session/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
@@ -103,6 +103,8 @@ export const cfgSystemPromptInputs = combine({
 	autoGraph: cfgTuiAutoGraph,
 	reactions: cfgTuiReactions,
 	encourageEdits: cfgEncourageEdits,
+	// Rendered into the `<skills>` catalog: previews and compressed hints, or the authored text.
+	compressSkillDescriptions: cfgSkillsCompressDescriptions,
 	// Rendered into the bash/eval/task tool descriptions (inline catalog) or read by
 	// the prompt builder (eager/batch delegation).
 	asyncEnabled: cfgAsyncEnabled,

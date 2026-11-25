@@ -1340,6 +1340,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#skillDescriptions: SkillDescriptionCatalog;
 	#mcpNamespaces: MCPEvalNamespaceCatalog | undefined;
 	#promptSkillsSource: readonly Skill[] | undefined;
+	#promptSkillsVerbatim = false;
 	#promptSkills: readonly Skill[] = [];
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
@@ -12047,8 +12048,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Descriptions frozen when this session's system prompt was built. */
 	get renderedSkills(): readonly Skill[] {
 		const skills = this.skills;
-		if (skills !== this.#promptSkillsSource) {
+		const verbatim = this.#skillDescriptions.verbatim;
+		if (skills !== this.#promptSkillsSource || verbatim !== this.#promptSkillsVerbatim) {
 			this.#promptSkillsSource = skills;
+			this.#promptSkillsVerbatim = verbatim;
 			this.#promptSkills = this.#skillDescriptions.snapshot(skills);
 		}
 		return this.#promptSkills;
