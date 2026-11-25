@@ -1,6 +1,7 @@
 /**
- * Anthropic (Claude Pro/Max) sign-in residue. The OAuth flow itself is
- * declared in `rules/auth/anthropic.kdl`; this module supplies the
+ * Anthropic (Claude Pro/Max) sign-in residue. The OAuth flows themselves are
+ * declared in `rules/auth/anthropic.kdl` and its 1-year sibling
+ * `anthropic-long-lived.kdl`; this module supplies the shared
  * `anthropic-identity` after-exchange hook that recovers account /
  * organization identity from `/api/claude_cli/bootstrap` when the token
  * response omits it.

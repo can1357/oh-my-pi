@@ -16,6 +16,7 @@ const NPM_PACKAGES: readonly (readonly [npmDir: string, name: string])[] = [
 	["pi-natives", "@oh-my-pi/pi-natives"],
 	["pi-tui", "@oh-my-pi/pi-tui"],
 	["pi-utils", "@oh-my-pi/pi-utils"],
+	["omptype", "@oh-my-pi/omptype"],
 ];
 
 /** The shims the collector points at inside the installed coding-agent package. */

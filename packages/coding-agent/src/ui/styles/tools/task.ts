@@ -20,6 +20,7 @@ import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { TaskToolDetails } from "../../../task/task-details";
+import { expandKeyLabel } from "../../keys/hints";
 import { agentColored } from "../../tools/agent-identity";
 import type { TaskTerm } from "../../tools/task";
 import { assignmentSource, contextSource, flatAgentLabel, noticeLines, runTally } from "../../tools/task/model";
@@ -43,7 +44,13 @@ function ink(theme: Theme, line: Line): string {
 }
 
 function rowContext(cx: PaintContext, expanded: boolean, facts: Pick<TaskTerm, "nowMs" | "frozen">): RowContext {
-	return { glyph: key => cx.theme.symbols.symbol(key), expanded, nowMs: facts.nowMs, frozen: facts.frozen };
+	return {
+		glyph: key => cx.theme.symbols.symbol(key),
+		expandKey: () => expandKeyLabel(cx.theme),
+		expanded,
+		nowMs: facts.nowMs,
+		frozen: facts.frozen,
+	};
 }
 
 /** A markdown section (context or brief), muted prose. */

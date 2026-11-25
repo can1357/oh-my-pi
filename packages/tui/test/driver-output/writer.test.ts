@@ -143,6 +143,10 @@ describe("images", () => {
 		vt.present({ viewport: [`${image}`, "b", "c", "status"], cursor: null });
 		expect(vt.since(mark)).not.toMatch(/\x1b\[\d*[LM]/);
 		expect(vt.screen().slice(1, 4)).toEqual(["b", "c", "status"]);
+		const removed = vt.writes.length;
+		vt.present({ viewport: ["b", "c", "d", "status"], cursor: null });
+		expect(vt.since(removed)).not.toMatch(/\x1b\[\d*[LM]/);
+		expect(vt.screen().slice(0, 4)).toEqual(["b", "c", "d", "status"]);
 	});
 });
 

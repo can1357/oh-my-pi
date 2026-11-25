@@ -38,13 +38,12 @@ mod format_modifiers {
 	//! - `%^B`: Month name in uppercase (JUNE)
 	//! - `%+4C`: Century with sign, padded to 4 characters (+019)
 
-	use std::{fmt, sync::LazyLock};
+	use std::{fmt, ops::Range};
 
 	use jiff::{
 		Zoned,
 		fmt::strtime::{BrokenDownTime, Config, PosixCustom},
 	};
-	use regex::Regex;
 
 	/// Error type for format modifier operations
 	#[derive(Debug)]
@@ -74,14 +73,37 @@ mod format_modifiers {
 		}
 	}
 
-	/// Regex to match format specifiers with optional modifiers
-	/// Pattern: % \[flags\] \[width\] specifier
-	/// Flags: -, _, 0, ^, #, +
-	/// Width: one or more digits
-	/// Specifier: any letter or special sequence like :z, ::z, :::z
-	// pi-uutils: `LazyLock` instead of upstream's function-local `OnceLock`.
-	static FORMAT_SPEC_REGEX: LazyLock<Regex> =
-		LazyLock::new(|| Regex::new(r"%([_0^#+-]*)(\d*)(:*[a-zA-Z])").unwrap());
+	struct FormatDirective<'a> {
+		span:  Range<usize>,
+		flags: &'a str,
+		width: &'a str,
+		spec:  &'a str,
+	}
+
+	/// Finds directives such as `%Y`, `%_10m` and `%::z` in their original order.
+	fn format_directives(input: &str) -> impl Iterator<Item = FormatDirective<'_>> {
+		let mut percents = memchr::memchr_iter(b'%', input.as_bytes());
+		std::iter::from_fn(move || {
+			for start in &mut percents {
+				let rest = &input[start + 1..];
+				let flags = rest
+					.bytes()
+					.take_while(|b| matches!(b, b'_' | b'0' | b'^' | b'#' | b'+' | b'-'))
+					.count();
+				let width = flags + rest.as_bytes()[flags..].iter().take_while(|b| b.is_ascii_digit()).count();
+				let spec = width + rest.as_bytes()[width..].iter().take_while(|&&b| b == b':').count();
+				if rest.as_bytes().get(spec).is_some_and(u8::is_ascii_alphabetic) {
+					return Some(FormatDirective {
+						span:  start..start + spec + 2,
+						flags: &rest[..flags],
+						width: &rest[flags..width],
+						spec:  &rest[width..=spec],
+					});
+				}
+			}
+			None
+		})
+	}
 
 	/// Check if format string contains any GNU modifiers and format if present.
 	///
@@ -94,14 +116,8 @@ mod format_modifiers {
 		format_string: &str,
 		config: &Config<PosixCustom>,
 	) -> Option<Result<String, FormatError>> {
-		let re = &*FORMAT_SPEC_REGEX;
-
-		// Quick check: does the string contain any modifiers?
-		let has_modifiers = re.captures_iter(format_string).any(|cap| {
-			let flags = cap.get(1).map_or("", |m| m.as_str());
-			let width_str = cap.get(2).map_or("", |m| m.as_str());
-			!flags.is_empty() || !width_str.is_empty()
-		});
+		let has_modifiers = format_directives(format_string)
+			.any(|directive| !directive.flags.is_empty() || !directive.width.is_empty());
 
 		if !has_modifiers {
 			return None;
@@ -132,20 +148,14 @@ mod format_modifiers {
 		let placeholder = "\x00PERCENT\x00";
 		let temp_format = format_string.replace("%%", placeholder);
 
-		let re = &*FORMAT_SPEC_REGEX;
 		let mut result = String::new();
 		let mut last_end = 0;
 
 		let broken_down = BrokenDownTime::from(date);
 
-		for cap in re.captures_iter(&temp_format) {
-			let whole_match = cap.get(0).unwrap();
-			let flags = cap.get(1).map_or("", |m| m.as_str());
-			let width_str = cap.get(2).map_or("", |m| m.as_str());
-			let spec = cap.get(3).unwrap().as_str();
-
+		for FormatDirective { span, flags, width: width_str, spec } in format_directives(&temp_format) {
 			// Add text before this match
-			result.push_str(&temp_format[last_end..whole_match.start()]);
+			result.push_str(&temp_format[last_end..span.start]);
 
 			// Format the base specifier first
 			let base_format = format!("%{spec}");
@@ -163,7 +173,7 @@ mod format_modifiers {
 				result.push_str(&formatted);
 			}
 
-			last_end = whole_match.end();
+			last_end = span.end;
 		}
 
 		// Add remaining text

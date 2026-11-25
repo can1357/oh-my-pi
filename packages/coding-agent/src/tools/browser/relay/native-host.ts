@@ -60,7 +60,7 @@ export interface NativeHostIo {
 }
 
 /** Entry for `omp browser-relay native-host`: serves Chrome on this process's stdio. */
-export async function runNativeHost(): Promise<void> {
+export async function runNativeHost(relayPort = 0): Promise<void> {
 	const command = [...resolveCliEntryCmd(), "--mode", "rpc"];
 	let flushed = Promise.resolve();
 	await serveNativeHost({
@@ -71,7 +71,7 @@ export async function runNativeHost(): Promise<void> {
 			flushed = promise;
 		},
 		spawn: (cwd, relayUrl) => spawnRpcChild(command, cwd, relayUrl),
-		relayPort: 0,
+		relayPort,
 		log: message => {
 			process.stderr.write(`omp native host: ${message}\n`);
 		},

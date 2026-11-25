@@ -258,6 +258,12 @@ export interface EditorTermRange {
 	readonly href?: string;
 	/** Draw the range only whole: on a row holding all of it, the caret not drawn inside it (a cut token shows plain). */
 	readonly whole?: boolean;
+	/**
+	 * Text drawn in the range's style in place of its characters, on a row holding all of it with
+	 * the caret and selection outside it and room for the label; elsewhere its characters show.
+	 * The row is not rewrapped, so it suits a range alone on its line (a header).
+	 */
+	readonly label?: string;
 }
 
 /** Terminal-only look facts of an `editor`/`input` node (its `term` prop). */
@@ -334,6 +340,7 @@ interface Style {
 	readonly whole: boolean;
 	readonly from: number;
 	readonly to: number;
+	readonly label?: string;
 }
 
 function rangeStyles(theme: Theme, props: EditorProps, now: () => number, links: () => boolean): Style[] {
@@ -356,7 +363,15 @@ function rangeStyles(theme: Theme, props: EditorProps, now: () => number, links:
 				open = `${open}${linkOpen}`;
 				close = `${linkClose}${close}`;
 			}
-			out.push({ open, close, hidden, whole: range.whole === true, from: range.from, to: range.to });
+			out.push({
+				open,
+				close,
+				hidden,
+				whole: range.whole === true,
+				from: range.from,
+				to: range.to,
+				...(range.label !== undefined ? { label: range.label } : {}),
+			});
 		}
 		return out;
 	}
@@ -414,6 +429,59 @@ function paintRun(
 }
 
 const PLAIN: CellLook = { style: undefined, inverse: false, underline: false };
+
+/** A labeled range drawn as its label on a row, and the cells the label adds over the range's own. */
+interface RowLabel {
+	readonly style: Style;
+	readonly label: string;
+	readonly width: number;
+	readonly grow: number;
+}
+
+/** The labeled `styles` drawn as their labels on `row` (see {@link EditorTermRange.label}); `caret` is -1 off the row. */
+function rowLabels(
+	text: string,
+	styles: readonly Style[],
+	row: EditorRow,
+	caret: number,
+	selection: { readonly from: number; readonly to: number } | null,
+): RowLabel[] {
+	const out: RowLabel[] = [];
+	let end = row.start;
+	for (const style of styles) {
+		const { label, from, to } = style;
+		if (label === undefined || from >= to || from < end || to > row.textEnd) continue;
+		if (caret >= from && caret < to) continue;
+		if (selection !== null && selection.from < to && selection.to > from) continue;
+		let own = 0;
+		for (const g of graphemes(text, from, to)) own += g.width;
+		const width = visibleWidth(label);
+		out.push({ style, label, width, grow: width - own });
+		end = to;
+	}
+	return out;
+}
+
+/** Paint `row` (see {@link paintRun}) with each of `labels` drawn in place of its range. */
+function paintRow(
+	text: string,
+	row: EditorRow,
+	labels: readonly RowLabel[],
+	look: (g: Grapheme) => CellLook | null,
+	base: readonly [string, string],
+): { out: string; width: number } {
+	let out = "";
+	let width = 0;
+	let at = row.start;
+	for (const { style, label, width: cells } of labels) {
+		const run = paintRun(text, at, style.from, look, base);
+		out += `${run.out}${style.open}${label}${style.close}${base[0]}`;
+		width += run.width + cells;
+		at = style.to;
+	}
+	const run = paintRun(text, at, row.textEnd, look, base);
+	return { out: out + run.out, width: width + run.width };
+}
 
 /**
  * Paint an editable field. With `wrap: false` (an `input`) the text stays on
@@ -497,7 +565,17 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 				underline: !sel && onCaret && caretMid === "underline",
 			};
 		};
-		let { out: body, width } = paintRun(text, row.start, row.textEnd, look, base);
+		let labels = rowLabels(text, styles, row, hasCaret ? caret : -1, selection);
+		let { out: body, width } = paintRow(text, row, labels, look, base);
+		// A label the row has no room for (the end-of-row caret included) shows the range's own characters.
+		if (
+			labels.length > 0 &&
+			options?.wrap !== false &&
+			(width > wrapWidth || (hasCaret && !caretOnText && width + 1 > room))
+		) {
+			labels = [];
+			({ out: body, width } = paintRun(text, row.start, row.textEnd, look, base));
+		}
 		let tail = "";
 		// The newline ending a selected line shows as one inverse blank.
 		if (row.last && selected(row.end) && row.end < text.length) {
@@ -515,10 +593,10 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 				// No cell left for the bar: the last grapheme carries the caret.
 				const lastAt = graphemes(text, row.start, row.textEnd).at(-1)?.at;
 				if (lastAt !== undefined) {
-					({ out: body, width } = paintRun(
+					({ out: body, width } = paintRow(
 						text,
-						row.start,
-						row.textEnd,
+						row,
+						labels,
 						g => {
 							const l = look(g);
 							return l && g.at === lastAt ? { ...l, inverse: true } : l;
@@ -548,7 +626,11 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 		}
 		const lead = promptWidth === 0 ? "" : r === 0 ? truncate(promptText, promptWidth, "") : " ".repeat(promptWidth);
 		out.push(`${lead}${base[0]}${body}${tail}${base[1]}`);
-		if (hasCaret && focused) cursor = { row: r - top, col: promptWidth + columnOf(text, row, caret) };
+		if (hasCaret && focused) {
+			let col = promptWidth + columnOf(text, row, caret);
+			for (const { style, grow } of labels) if (style.to <= caret) col += grow;
+			cursor = { row: r - top, col };
+		}
 	}
 	return { rows: out, ...(cursor ? { cursor } : {}) };
 }

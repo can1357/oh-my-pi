@@ -1,21 +1,73 @@
 //! Normalization of line prefixes copied from read/search output.
 
-use std::sync::LazyLock;
+use super::format::is_snapshot_tag;
+use crate::scan;
 
-use regex::Regex;
+struct LinePrefix<'a> {
+	number:           &'a str,
+	body:             &'a str,
+	is_diff_addition: bool,
+}
 
-static HL_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"^\s*(?:(?:>>>|>>)\s*)?(?:[+*-]\s*)?(\d+)[:|]").expect("valid regex")
-});
-static HL_PREFIX_PLUS_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\s*(?:(?:>>>|>>)\s*)?\+\s*\d+:").expect("valid regex"));
-static HL_HEADER_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\s*\[[^#\r\n]+#[0-9a-fA-F]{4}\]\s*$").expect("valid regex"));
-static READ_RANGE_ELISION_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"^\s*[1-9]\d*\s*-\s*[1-9]\d*:.*(?:…|\.\.\.).*$").expect("valid regex")
-});
-static READ_SINGLE_ELISION_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\s*(?:…|\.\.\.)\s*$").expect("valid regex"));
+/// Split a numbered row prefix like `>>> +12:` or `8|` from its body.
+fn split_line_prefix(line: &str) -> Option<LinePrefix<'_>> {
+	let line = line.trim_start();
+	let line = line
+		.strip_prefix(">>>")
+		.or_else(|| line.strip_prefix(">>"))
+		.map_or(line, str::trim_start);
+	let plus = line.starts_with('+');
+	let line = line
+		.strip_prefix(['+', '*', '-'])
+		.map_or(line, str::trim_start);
+	let (number, rest) = scan::digits(line)?;
+	let is_diff_addition = plus && rest.starts_with(':');
+	let body = rest.strip_prefix([':', '|'])?;
+	Some(LinePrefix { number, body, is_diff_addition })
+}
+
+/// Whether a row is a read/search header such as `[src/a.rs#1A2B]`.
+fn is_numbered_file_header(line: &str) -> bool {
+	let Some((path, tag)) = line
+		.trim_start()
+		.strip_prefix('[')
+		.and_then(|line| line.split_once('#'))
+	else {
+		return false;
+	};
+	!path.is_empty()
+		&& tag
+			.trim_end()
+			.strip_suffix(']')
+			.is_some_and(is_snapshot_tag)
+		&& !path.contains(['\r', '\n'])
+}
+
+/// Whether a row announces elision across a positive range, such as `4-12: …`.
+fn is_read_range_elision(line: &str) -> bool {
+	let Some((start, rest)) = scan::digits(line.trim_start()) else {
+		return false;
+	};
+	if start.starts_with('0') {
+		return false;
+	}
+	let Some((end, rest)) = rest
+		.trim_start()
+		.strip_prefix('-')
+		.and_then(|tail| scan::digits(tail.trim_start()))
+	else {
+		return false;
+	};
+	!end.starts_with('0')
+		&& rest
+			.strip_prefix(':')
+			.is_some_and(|body| (body.contains('…') || body.contains("...")) && !body.contains('\n'))
+}
+
+/// Whether a row consists only of an elision mark.
+fn is_read_single_elision(line: &str) -> bool {
+	matches!(line.trim(), "…" | "...")
+}
 
 /// Whether a row is a truncation notice emitted by `read`.
 pub fn is_read_truncation_notice(line: &str) -> bool {
@@ -43,25 +95,22 @@ pub fn is_read_truncation_notice(line: &str) -> bool {
 
 /// Whether a row is display-only metadata emitted by `read`.
 pub fn is_read_metadata_line(line: &str) -> bool {
-	is_read_truncation_notice(line)
-		|| READ_RANGE_ELISION_RE.is_match(line)
-		|| READ_SINGLE_ELISION_RE.is_match(line)
+	is_read_truncation_notice(line) || is_read_range_elision(line) || is_read_single_elision(line)
 }
 
-fn strip_leading_hashline_prefixes(line: &str) -> String {
-	let mut result = line.to_string();
-	loop {
-		let next = HL_PREFIX_RE.replace(&result, "").into_owned();
-		if next == result {
-			return result;
-		}
-		result = next;
+/// Strip repeated numbered prefixes without copying the intermediate rows.
+fn strip_leading_hashline_prefixes(mut line: &str) -> String {
+	while let Some(prefix) = split_line_prefix(line) {
+		line = prefix.body;
 	}
+	line.to_owned()
 }
 
 /// Strip at most one leading read/search line-number prefix.
 pub fn strip_one_leading_hashline_prefix(line: &str) -> String {
-	HL_PREFIX_RE.replace(line, "").into_owned()
+	split_line_prefix(line)
+		.map_or(line, |prefix| prefix.body)
+		.to_owned()
 }
 
 #[derive(Default)]
@@ -80,15 +129,13 @@ fn collect_line_prefix_stats(lines: &[String]) -> LinePrefixStats {
 			continue;
 		}
 		stats.non_empty += 1;
-		if HL_HEADER_RE.is_match(line) {
+		if is_numbered_file_header(line) {
 			stats.header_count += 1;
 			continue;
 		}
-		if HL_PREFIX_RE.is_match(line) {
+		if let Some(prefix) = split_line_prefix(line) {
 			stats.hash_prefix_count += 1;
-		}
-		if HL_PREFIX_PLUS_RE.is_match(line) {
-			stats.diff_plus_hash_prefix_count += 1;
+			stats.diff_plus_hash_prefix_count += usize::from(prefix.is_diff_addition);
 		}
 		if line.starts_with('+') && !line.starts_with("++") {
 			stats.diff_plus_count += 1;
@@ -115,7 +162,7 @@ pub fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
 	lines
 		.iter()
 		.filter_map(|line| {
-			if is_read_metadata_line(line) || (strip_hash && HL_HEADER_RE.is_match(line)) {
+			if is_read_metadata_line(line) || (strip_hash && is_numbered_file_header(line)) {
 				return None;
 			}
 			if strip_hash {
@@ -124,8 +171,11 @@ pub fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
 			if strip_plus && line.starts_with('+') && !line.starts_with("++") {
 				return Some(line[1..].to_string());
 			}
-			if stats.diff_plus_hash_prefix_count > 0 && HL_PREFIX_PLUS_RE.is_match(line) {
-				return Some(strip_one_leading_hashline_prefix(line));
+			if stats.diff_plus_hash_prefix_count > 0
+				&& let Some(prefix) = split_line_prefix(line)
+				&& prefix.is_diff_addition
+			{
+				return Some(prefix.body.to_owned());
 			}
 			Some(line.clone())
 		})
@@ -140,13 +190,12 @@ pub fn strip_new_line_prefixes(lines: &[String]) -> Vec<String> {
 fn numbers_count_up_by_one(lines: &[String]) -> bool {
 	let mut previous: Option<u64> = None;
 	for line in lines {
-		if line.is_empty() || is_read_metadata_line(line) || HL_HEADER_RE.is_match(line) {
+		if line.is_empty() || is_read_metadata_line(line) || is_numbered_file_header(line) {
 			previous = None;
 			continue;
 		}
-		let Some(number) = HL_PREFIX_RE
-			.captures(line)
-			.and_then(|captures| captures[1].parse::<u64>().ok())
+		let Some(number) =
+			split_line_prefix(line).and_then(|prefix| prefix.number.parse::<u64>().ok())
 		else {
 			return false;
 		};
@@ -174,7 +223,7 @@ pub fn strip_hashline_prefixes(lines: &[String]) -> Vec<String> {
 	}
 	lines
 		.iter()
-		.filter(|line| !is_read_metadata_line(line) && !HL_HEADER_RE.is_match(line))
+		.filter(|line| !is_read_metadata_line(line) && !is_numbered_file_header(line))
 		.map(|line| strip_leading_hashline_prefixes(line))
 		.collect()
 }
