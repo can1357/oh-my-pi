@@ -348,18 +348,26 @@ export class Reconciler {
 		this.#focusDirty = true;
 	}
 
-	/** Tern's retention budget drops settled children of `main`, including their subtrees. */
-	forget(ids: readonly string[]): void {
+	/** Forget settled `main` subtrees evicted by Tern; record lost ids and next siblings if ops are queued. */
+	forget(ids: readonly string[], gone?: Map<string, string | null>): void {
 		let lost = false;
 		for (const id of ids) {
 			const rec = this.#byId.get(id);
 			if (!rec?.node || rec.parent !== this.#main || !rec.settled) continue;
 			lost = true;
 			(this.#evicted ??= new WeakSet()).add(rec.node);
-			this.#release(rec);
+			this.#release(rec, gone);
 			this.#ids.delete(id);
 		}
 		if (!lost) return;
+		if (gone) {
+			let next: string | null = null;
+			for (let i = this.#main.kids.length - 1; i >= 0; i--) {
+				const kid = this.#main.kids[i]!;
+				if (kid.released) gone.set(kid.id, next);
+				else next = kid.id;
+			}
+		}
 		// It is already absent: do not delete it or use it as a `before` sibling.
 		this.#main.kids = this.#main.kids.filter(kid => !kid.released);
 		this.#markDirty(this.#main);
@@ -992,9 +1000,10 @@ export class Reconciler {
 	}
 
 	/** Forget a deleted record and its subtree (children moved elsewhere stay). */
-	#release(rec: Rec): void {
+	#release(rec: Rec, gone?: Map<string, string | null>): void {
 		if (rec.released) return;
 		rec.released = true;
+		gone?.set(rec.id, null);
 		this.#anchors.delete(rec);
 		rec.stop?.();
 		rec.stop = null;
@@ -1003,7 +1012,7 @@ export class Reconciler {
 		if (rec.node && this.#byNode.get(rec.node) === rec) this.#byNode.delete(rec.node);
 		for (const kid of rec.kids) {
 			if (kid.parent !== rec) continue;
-			this.#release(kid);
+			this.#release(kid, gone);
 			this.#ids.delete(kid.id);
 		}
 	}

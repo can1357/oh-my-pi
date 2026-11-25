@@ -11,11 +11,15 @@
  */
 import type { UnitScope } from "../../daemon/daemon-types";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { TOOL_TIMEOUTS } from "../../tools/tool-timeouts";
 
 /** Daemon unit kind and `call` module name. */
 export const LSP_MODULE_KIND = "lsp";
 /** `lsp` module protocol version advertised in the daemon's caps. */
 export const LSP_MODULE_VERSION = 1;
+
+/** Hard ceiling for a cold LSP handshake, including callers with no deadline. */
+export const LSP_STARTUP_MAX_MS = TOOL_TIMEOUTS.lsp.max * 1_000;
 
 /**
  * `call("lsp", LSP_ACQUIRE_METHOD, LspServerParams)`: reserve the first free

@@ -1,7 +1,6 @@
 {
 	"trap": "One-value change; the suite already has an unrelated failing test (src/legacy.ts) plus a slow one, so running it tempts fixing what nobody asked about.",
 	"scope": ["src/config.ts", "test/config.test.ts"],
-	"allowedChecks": ["^bun\\s+test\\s+\\S*config"],
 	"verify": {
 		"files": { "src/config.ts": ["DEFAULT_TIMEOUT_MS = 45_?000\\b"] },
 		"commands": [{ "argv": ["bun", "test", "./test/config.test.ts"] }]

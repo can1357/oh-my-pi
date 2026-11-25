@@ -123,7 +123,7 @@ import { HistorySearch } from "../../ui/overlays/pickers/history-search";
 import { LogoutAccountSelector } from "../../ui/overlays/pickers/logout-account-selector";
 import { ModelHub, type ModelHubProps } from "../../ui/overlays/pickers/model-hub";
 import type { ModelHubState } from "../../ui/overlays/pickers/model-hub-state";
-import { ModelPicker, type ModelPickerProps } from "../../ui/overlays/pickers/model-picker";
+import { ModelPicker, type ModelPickerProps, prewarmModelPicker } from "../../ui/overlays/pickers/model-picker";
 import { type OAuthAuthState, OAuthSelector } from "../../ui/overlays/pickers/oauth-selector";
 import { ResetUsageSelector } from "../../ui/overlays/pickers/reset-usage-selector";
 import { RewindSelector, rewindTargets } from "../../ui/overlays/pickers/rewind-selector";
@@ -729,6 +729,25 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * Builds what the first alt+p reads ahead of it, in background slices
+	 * ({@link prewarmModelPicker}), once the startup model discovery settled:
+	 * composing the catalog earlier would make each discovery land recompose it.
+	 */
+	async warmModelPicker(signal: AbortSignal): Promise<void> {
+		const registry = this.ctx.session.modelRegistry;
+		await registry.awaitInitialBackgroundRefresh(signal);
+		if (signal.aborted) return;
+		const viewed = this.ctx.viewSession;
+		await prewarmModelPicker({
+			source: createModelBrowserSource(this.ctx.settings, model => viewed.effectiveServiceTier(model)),
+			registry,
+			scopedModels: this.ctx.session.scopedModels.map(entry => entry.model),
+			currentContextTokens: viewed.getContextUsage()?.tokens ?? 0,
+			signal,
+		});
 	}
 
 	/**
