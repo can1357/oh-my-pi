@@ -174,6 +174,8 @@ export interface TspCommonProps {
 		dblclick?: TspAction;
 		menu?: readonly TspMenuEntry[];
 		hold?: readonly TspMenuEntry[];
+		/** Runs on every press starting outside the node (and outside the dock's composer). */
+		outside?: TspAction;
 	};
 	title?: string;
 	/** Accessible name for icon-only or visual-only nodes. */
