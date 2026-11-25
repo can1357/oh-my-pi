@@ -10,6 +10,8 @@
  */
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { JSXNode } from "@oh-my-pi/pi-tui";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { cleanText } from "./agent-common";
 
 export interface IrcMessage {
@@ -24,19 +26,19 @@ export interface IrcMessage {
 	readonly mode?: string;
 }
 
-/** `IRC ⟵ Anna`, `IRC ➤ Ben`, `Pool p ➤ Ben`, `IRC Anna ➤ Ben`. */
-function ircTitle(card: IrcMessage): string {
-	const from = card.from?.trim() || "?";
-	const to = card.to?.trim() || "?";
+/** An IRC heading with the given preset's directional glyph. */
+export function ircTitle(card: IrcMessage, theme: Theme): string {
+	const from = cleanText(card.from?.trim() || "?");
+	const to = cleanText(card.to?.trim() || "?");
 	switch (card.kind) {
 		case "incoming":
-			return `IRC ⟵ ${from}`;
+			return `IRC ${theme.symbols.symbol("nav.back")} ${from}`;
 		case "autoreply":
-			return `IRC ➤ ${to}`;
+			return `IRC ${theme.symbols.symbol("nav.selected")} ${to}`;
 		case "workpool":
-			return `Pool ${card.pool?.trim() || "?"} ➤ ${to}`;
+			return `Pool ${cleanText(card.pool?.trim() || "?")} ${theme.symbols.symbol("nav.selected")} ${to}`;
 		case "relay":
-			return `IRC ${from} ➤ ${to}`;
+			return `IRC ${from} ${theme.symbols.symbol("nav.selected")} ${to}`;
 	}
 }
 
@@ -44,19 +46,19 @@ function ircTitle(card: IrcMessage): string {
 export function IrcMessageCard(props: { readonly message: IrcMessage; readonly expanded?: () => boolean }): JSXNode {
 	const card = props.message;
 	const body = card.body ?? "";
-	const head: TspSpan[] = [{ s: "toolTitle strong", t: cleanText(ircTitle(card)) }];
-	if (card.kind === "autoreply") head.push({ s: "muted", t: " auto" });
-	if (card.kind === "workpool" && card.mode) head.push({ s: "muted", t: ` ${card.mode}` });
-	if (card.replyTo) head.push({ s: "muted", t: " reply" });
+	const tail: TspSpan[] = [];
+	if (card.kind === "autoreply") tail.push({ s: "muted", t: " auto" });
+	if (card.kind === "workpool" && card.mode) tail.push({ s: "muted", t: ` ${cleanText(card.mode)}` });
+	if (card.replyTo) tail.push({ s: "muted", t: " reply" });
 	const expanded = props.expanded;
 	return (
 		<card
 			role={`omp.irc.${card.kind}`}
 			tone="info"
-			head={head}
+			head={() => [{ s: "toolTitle strong", t: ircTitle(card, currentTheme()) }, ...tail]}
 			collapsible={body.trim().length > 0}
 			preview={{ lines: 3 }}
-			term={() => ({ expanded: expanded?.() === true })}
+			term={() => ({ message: card, expanded: expanded?.() === true })}
 		>
 			{card.timestamp ? (
 				<row gap="xs">

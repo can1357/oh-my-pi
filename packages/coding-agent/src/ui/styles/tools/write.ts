@@ -21,7 +21,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import { nodePlain, nodeStyle } from "./agent-common";
 import { diagnosticsRows, fileLink, sectionDiagnostics, wrapGutterRow } from "./file-common";
-import { expandHint, frameInner, frameRows, isActive, spinnerGlyph, statusIcon } from "./frame";
+import { bracketed, expandHint, frameInner, frameRows, isActive, spinnerGlyph, statusIcon } from "./frame";
 import { defineToolLook, type ToolProps, toolProps } from "./look";
 
 /** Lines a collapsed result shows. */
@@ -166,6 +166,7 @@ defineToolLook("write", { paint: paintWrite, margin: true, animated: true });
 // ─── URL write cards ────────────────────────────────────────────────────────
 
 interface CardTerm {
+	readonly message?: boolean;
 	readonly card?: {
 		readonly icon: "pending" | "error" | "success" | "warning" | "aborted" | "irc";
 		readonly title: string;
@@ -250,9 +251,9 @@ function receiptRows(theme: Theme, list: UiNode, expanded: boolean): string[] {
 		const branch = theme.symbols.symbol(
 			index === shown.length - 1 && shown.length === items.length ? "tree.last" : "tree.branch",
 		);
-		let row = `${theme.fg("dim", branch)} ${theme.fg("toolOutput", props.label?.[0]?.t ?? "")} ${theme.fg(outcome?.s ?? "success", `⟦${outcome?.t ?? ""}⟧`)}`;
+		let row = `${theme.fg("dim", branch)} ${theme.fg("toolOutput", props.label?.[0]?.t ?? "")} ${theme.fg(outcome?.s ?? "success", bracketed(theme, outcome?.t ?? ""))}`;
 		const error = props.detail?.[0]?.t;
-		if (error) row += ` ${theme.fg("error", `— ${error}`)}`;
+		if (error) row += ` ${theme.fg("error", `${theme.symbols.symbol("format.dash")} ${error}`)}`;
 		return row;
 	});
 	const hidden = items.length - shown.length;
@@ -276,7 +277,7 @@ function cancelledRows(cx: PaintContext, list: UiNode): string[] {
 		};
 		const branch = theme.fg("dim", theme.symbols.symbol(index === items.length - 1 ? "tree.last" : "tree.branch"));
 		const outcome = props.value?.[0];
-		const badge = theme.fg(outcome?.s ?? "warning", `⟦${outcome?.t ?? ""}⟧`);
+		const badge = theme.fg(outcome?.s ?? "warning", bracketed(theme, outcome?.t ?? ""));
 		const job = props.term;
 		if (!job) return `${branch} ${theme.fg("toolOutput", props.label?.[0]?.t ?? "")} ${badge}`;
 		const status = job.status;
@@ -291,7 +292,7 @@ function cancelledRows(cx: PaintContext, list: UiNode): string[] {
 						: "success",
 		);
 		const typeColor = status === "failed" ? "error" : status === "cancelled" ? "warning" : "accent";
-		const type = theme.fg(typeColor, `⟦${props.label?.[0]?.t ?? ""}⟧`);
+		const type = theme.fg(typeColor, bracketed(theme, props.label?.[0]?.t ?? ""));
 		const id = theme.fg("toolOutput", props.label?.[2]?.t ?? "");
 		const label = theme.fg("dim", props.detail?.[0]?.t ?? "");
 		return `${branch} ${icon} ${type} ${id} ${label} ${theme.fg("dim", formatDuration(job.durationMs ?? 0))} ${badge}`;
@@ -301,13 +302,16 @@ function cancelledRows(cx: PaintContext, list: UiNode): string[] {
 function paintCard(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
 	const theme = cx.theme;
-	const card = ((props.term ?? {}) as CardTerm).card;
-	if (!card) return { rows: [] };
-	let head = `${cardIcon(theme, card.icon)} ${theme.fg("accent", card.title)}`;
+	const term = (props.term ?? {}) as CardTerm;
+	const { card } = term;
+	if (!card) return EMPTY_BLOCK;
+	const message = term.message === true;
+	const title = message ? `IRC ${theme.symbols.symbol("nav.selected")} ${card.title}` : card.title;
+	let head = `${cardIcon(theme, card.icon)} ${theme.fg("accent", title)}`;
 	if (card.description) head += `: ${theme.fg("muted", card.description)}`;
 	const meta = (card.meta ?? []).map(span => theme.style(span.s, span.t));
 	if (meta.length > 0) head += ` ${theme.fg("dim", meta.join(theme.fg("dim", " · ")))}`;
-	for (const badge of card.badges ?? []) head += ` ${theme.fg(badge.color, `⟦${badge.label}⟧`)}`;
+	for (const badge of card.badges ?? []) head += ` ${theme.fg(badge.color, bracketed(theme, badge.label))}`;
 	const rows = [head];
 	// The transcript's expand state: a live call stays unfolded natively while its body streams.
 	const expanded = props.term?.expanded === true;
@@ -320,9 +324,7 @@ function paintCard(node: UiNode, cx: PaintContext): Block {
 			rows.push(...cancelledRows(cx, child));
 		else if (child.kind === "list") rows.push(...receiptRows(theme, child, expanded));
 		else if (childProps.role === "omp.tool.proc.preview")
-			rows.push(
-				...quoteRows(theme, nodePlain(child), expanded, card.title.startsWith("IRC") ? cx.width : undefined),
-			);
+			rows.push(...quoteRows(theme, nodePlain(child), expanded, message ? cx.width : undefined));
 		else if (childProps.role === "omp.tool.error") rows.push(errorDetail(theme, nodePlain(child)));
 		else if (nodeStyle(child) === "muted" && childProps.spans?.length === 1)
 			rows.push(theme.fg("muted", nodePlain(child)));

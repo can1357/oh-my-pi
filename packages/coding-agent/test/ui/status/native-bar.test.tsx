@@ -4,8 +4,10 @@
  * preview bar, and the glyphs the model chip embeds (the active preset's, so a Nerd Font run can
  * travel as an `icon` span).
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createRoot, isUiNode, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 import { StatusBarPreview } from "../../../src/ui/status/composer-facts";
 import type { StatusFacts } from "../../../src/ui/status/facts";
@@ -56,10 +58,18 @@ describe("status bar preview for Tern", () => {
 describe("model chip glyphs", () => {
 	const settings = effectiveStatusSettings({ preset: "default" });
 	const facts: StatusFacts = { ...corpusStatusFacts(), advisor: { status: "idle", yielded: true } };
-	const badge = (nerd: boolean) => segmentView("model", facts, settings, nerd)?.spans.find(span => span.s === "dim");
+	let restoreTheme: () => void;
+	beforeEach(() => {
+		const theme = currentTheme();
+		restoreTheme = () => setCurrentTheme(theme);
+	});
+	afterEach(() => restoreTheme());
 
 	test("the advisor badge is the active preset's glyph", () => {
-		expect(badge(true)?.t).toBe(` ${presetSymbols("nerd")["icon.advisorClosed"]}`);
-		expect(badge(false)?.t).toBe(` ${presetSymbols("unicode")["icon.advisorClosed"]}`);
+		for (const preset of ["nerd", "unicode"] as const) {
+			setCurrentTheme(loadThemeSync("dark", { symbolPreset: preset }));
+			const badge = segmentView("model", facts, settings)?.spans.find(span => span.s === "dim");
+			expect(badge?.t).toBe(` ${presetSymbols(preset)["icon.advisorClosed"]}`);
+		}
 	});
 });
