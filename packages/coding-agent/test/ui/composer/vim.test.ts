@@ -3,6 +3,7 @@
  * run against the composer. Expected results come from Vim 9.2 (`vim -Nu NONE`) for the same keys.
  */
 import { describe, expect, it } from "bun:test";
+import { chipLabel } from "../../../src/ui/composer";
 import { settle } from "./harness";
 import { BACKSPACE, DOWN, ESC, LEFT, UP, VimComposer, vimEditor, walk } from "./vim-harness";
 
@@ -248,14 +249,15 @@ describe("composer Vim mode", () => {
 			editor.handleInput(`\x1b[200~${older}\x1b[201~`);
 			editor.rememberDraft();
 			editor.handleInput(`\x1b[200~${live}\x1b[201~`);
-			expect(editor.getText()).toMatch(/^\[Paste #1, \+\d+ lines\]$/);
+			// Each draft numbers its own chips: the live one's paste is #1 again.
+			expect(editor.getText()).toBe(`${chipLabel("paste", 1)} `);
 			editor.setVimMode(true);
 			editor.handleInput(ESC);
 			editor.handleInput("k");
 			// The remembered draft, with its own payload.
-			expect(editor.getExpandedText()).toBe(older);
+			expect(editor.getExpandedText()).toBe(`${older} `);
 			editor.handleInput("j");
-			expect(editor.getExpandedText()).toBe(live);
+			expect(editor.getExpandedText()).toBe(`${live} `);
 		});
 
 		it("editing a prompt k recalled keeps the draft reachable with j, and keeps the edit for the next k", () => {

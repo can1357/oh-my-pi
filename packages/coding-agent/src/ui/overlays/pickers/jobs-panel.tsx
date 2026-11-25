@@ -19,6 +19,7 @@
  * (look `omp.jobs.sheet`, `src/ui/styles/pickers/jobs.ts`).
  */
 import { type Accessor, computed, type JSXNode, type KeyEvent, signal, untrack } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import { ShellVisualization } from "@oh-my-pi/pi-natives";
 import type {
@@ -34,7 +35,13 @@ import type {
 import type { JobWidgetView } from "../../../tools/details/job-widget";
 import type { ShellStream } from "../../../tools/shell-steps";
 import { defaultShellVizPreferences, readShellPresentation } from "../../../tools/shell-viz";
-import { buildJobTree, type JobTreeAgent } from "../../../modes/view-model/overlays/job-tree";
+import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
+import {
+	buildJobTree,
+	type JobTreeAgent,
+	type JobTreeRow,
+	jobTreeGuide,
+} from "../../../modes/view-model/overlays/job-tree";
 import "../../styles/pickers/jobs";
 import type { JobsSheetTerm, JobsTermDetail, JobsTermRow } from "../../styles/pickers/jobs";
 import { JobWidget } from "../../tools/jobs/widget";
@@ -215,9 +222,10 @@ function shownOutput(sources: readonly OutputSource[], pin: OutputPin | undefine
 	return { source: own, sources, pinned: false, focus: [] };
 }
 
-/** The flattened tree, with the held selection kept where it was. */
+/** The tree in display order and the jobs that can be selected. */
 interface JobsView {
-	readonly rows: readonly { job: JobsPanelJob; depth: number }[];
+	readonly rows: readonly JobTreeRow<JobsPanelJob>[];
+	readonly jobs: readonly JobsPanelJob[];
 	readonly running: number;
 	readonly recent: number;
 }
@@ -256,21 +264,21 @@ export function JobsPanel(props: JobsPanelProps): JSXNode {
 			if (held.status === "running") running = [...running, held];
 			else recent = [...recent, held];
 		}
-		const tree = buildJobTree([...running, ...recent], jobs.agents ?? [], jobs.rootId);
-		const rows: { job: JobsPanelJob; depth: number }[] = [];
-		for (const row of tree) if (row.kind === "job") rows.push({ job: row.job, depth: row.depth });
-		return { rows, running: running.length, recent: recent.length };
+		const rows = buildJobTree([...running, ...recent], jobs.agents ?? [], jobs.rootId);
+		const selectable: JobsPanelJob[] = [];
+		for (const row of rows) if (row.kind === "job") selectable.push(row.job);
+		return { rows, jobs: selectable, running: running.length, recent: recent.length };
 	});
 
 	// Open on the requested job when listed, else the first.
 	untrack(() => {
-		const rows = view().rows;
-		if (!rows.some(row => row.job.id === selectedId())) selectedId.set(rows[0]?.job.id);
+		const { jobs } = view();
+		if (!jobs.some(job => job.id === selectedId())) selectedId.set(jobs[0]?.id);
 	});
 
 	const selectedJob = computed(() => {
 		const id = selectedId();
-		return view().rows.find(row => row.job.id === id)?.job;
+		return view().jobs.find(job => job.id === id);
 	});
 
 	const detail = computed(() => {
@@ -281,17 +289,17 @@ export function JobsPanel(props: JobsPanelProps): JSXNode {
 
 	const select = (id: string | undefined): void => {
 		if (id === undefined || id === selectedId()) return;
-		if (!view().rows.some(row => row.job.id === id)) return;
+		if (!view().jobs.some(job => job.id === id)) return;
 		held = undefined;
 		pin.set(undefined);
 		selectedId.set(id);
 	};
 
 	const move = (delta: number): void => {
-		const rows = view().rows;
-		const at = rows.findIndex(row => row.job.id === selectedId());
-		const next = rows[Math.max(0, Math.min(rows.length - 1, at + delta))];
-		select(next?.job.id);
+		const { jobs } = view();
+		const at = jobs.findIndex(job => job.id === selectedId());
+		const next = jobs[Math.max(0, Math.min(jobs.length - 1, at + delta))];
+		select(next?.id);
 	};
 
 	const cancel = (): void => {
@@ -333,20 +341,26 @@ export function JobsPanel(props: JobsPanelProps): JSXNode {
 
 	const term = computed((): JobsSheetTerm => {
 		const { now: at } = snapshot();
-		const { rows, running } = view();
+		const { rows, jobs, running } = view();
 		const selected = selectedJob();
-		const termRows = rows.map(({ job, depth }): JobsTermRow => ({
-			status: job.status,
-			type: job.type,
-			age: formatDuration(jobAge(job, at)),
-			label: job.agentId !== undefined && job.intent ? `${job.agentId}: ${job.intent}` : jobTitle(job),
-			depth,
-		}));
+		const termRows = rows.map((entry): JobsTermRow => {
+			if (entry.kind === "agent")
+				return { kind: "agent", place: entry, label: sanitizeDisplaySingleLine(entry.agent.id) };
+			const { job } = entry;
+			return {
+				kind: "job",
+				place: entry,
+				status: job.status,
+				type: job.type,
+				age: formatDuration(jobAge(job, at)),
+				label: job.agentId !== undefined && job.intent ? `${job.agentId}: ${job.intent}` : jobTitle(job),
+			};
+		});
 		return {
 			role: "omp.jobs.sheet",
 			running,
 			rows: termRows,
-			selected: rows.findIndex(row => row.job === selected),
+			selected: selected ? jobs.indexOf(selected) : -1,
 			detail: selected ? termDetail(selected, detail(), shown()) : undefined,
 		};
 	});
@@ -389,9 +403,7 @@ export function JobsPanel(props: JobsPanelProps): JSXNode {
 								max={{ lines: 12 }}
 								actions={{ click: "select", dblclick: "activate" }}
 							>
-								{() =>
-									view().rows.map(({ job, depth }) => <JobItem job={job} depth={depth} now={snapshot().now} />)
-								}
+								{() => view().rows.map(entry => <JobListRow entry={entry} now={snapshot().now} />)}
 							</list>
 						</col>
 						{() => {
@@ -430,13 +442,19 @@ export function JobsPanel(props: JobsPanelProps): JSXNode {
 	);
 }
 
-function JobItem(props: { job: JobsPanelJob; depth: number; now: number }): JSXNode {
-	const { job, depth } = props;
+function JobListRow(props: { entry: JobTreeRow<JobsPanelJob>; now: number }): JSXNode {
+	const { entry } = props;
+	const guide = jobTreeGuide(entry, currentTheme().symbols);
+	const label: TspSpan[] = [];
+	if (guide) label.push({ t: guide, s: "mono dim" });
+	if (entry.kind === "agent") {
+		label.push({ t: sanitizeDisplaySingleLine(entry.agent.id) });
+		return <text key={`agent-${stableKey(entry.agent.id)}`} role="omp.jobs.group" spans={label} wrap="none" />;
+	}
+	const { job } = entry;
 	const age = formatDuration(jobAge(job, props.now));
 	const title = jobTitle(job);
 	const state = job.status === "completed" ? "done" : job.status;
-	const label: TspSpan[] = [];
-	if (depth > 0) label.push({ t: `${"   ".repeat(depth - 1)}└─ `, s: "mono dim" });
 	if (job.agentId !== undefined) label.push({ t: `${job.agentId} `, s: "strong" }, { t: title });
 	else label.push({ t: title, s: "mono" });
 	const tooltip = [

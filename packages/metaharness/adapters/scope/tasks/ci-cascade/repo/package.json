@@ -1,0 +1,9 @@
+{
+	"name": "mdlite",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"ci": "bun scripts/ci.ts",
+		"test": "bun test"
+	}
+}

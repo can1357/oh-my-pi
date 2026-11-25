@@ -1,13 +1,17 @@
 #!/usr/bin/env bun
 /**
- * Scope benchmark: how long omp takes on small, narrowly scoped requests and where the time
- * goes — model vs tools, unrequested checks (test suites, typechecks, builds, program runs
- * nobody asked for), re-reads of just-edited files, and edits outside the request.
+ * Scope benchmark: how long omp takes on narrowly scoped requests and whether it works the way
+ * we want: statically, with the change verified once before it yields. Reports model vs tool
+ * time, checks by phase (before the first edit, during the work, final), whether a check
+ * followed the last edit, check seconds, re-reads of just-edited files, and edits outside
+ * the request.
  *
  * ```sh
  * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label base
  * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label lean \
  *   --append-system-prompt adapters/scope/variants/lean-verification.md
+ * bun adapters/scope/cli.ts --model openrouter/deepseek/deepseek-v4.1-flash --label swap \
+ *   --rewrite swap.json   # [{ "find", "replace" }]: swap single prompt lines, no template fork
  * bun adapters/scope/cli.ts compare ../../runs/scope/base/result.json ../../runs/scope/lean/result.json
  * bun adapters/scope/cli.ts rescore ../../runs/scope/*\/result.json   # after editing task specs or the classifier
  * ```
@@ -22,7 +26,7 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import { discoverSharedInfra } from "@oh-my-pi/typescript-edit-benchmark/in-process-client";
 import { renderComparison, renderReport, type ScopeResult, type ScopeRun, summarize } from "./result";
 import { loadTasks, type ScopeTask } from "./tasks";
-import { rescoreRun, runTrial, type TrialConfig } from "./trial";
+import { type PromptRewrite, rescoreRun, runTrial, type TrialConfig } from "./trial";
 
 const RUNS_DIR = path.resolve(import.meta.dir, "..", "..", "..", "..", "runs", "scope");
 
@@ -38,10 +42,12 @@ function positiveInt(raw: string | undefined, flag: string, fallback: number): n
 }
 
 function progressLine(run: ScopeRun): string {
-	const unrequested = run.checks.filter(check => check.unrequested);
-	const checkSeconds = unrequested.reduce((total, check) => total + check.ms, 0) / 1000;
+	const count = (phase: ScopeRun["checks"][number]["phase"]) =>
+		run.checks.filter(check => check.phase === phase).length;
+	const checkSeconds = run.checks.reduce((total, check) => total + check.ms, 0) / 1000;
+	const verified = run.verified === null ? "no change" : run.verified ? "verified" : "UNVERIFIED";
 	const why = [run.error, ...run.failures].filter(Boolean).join("; ");
-	return `${run.pass ? "✓" : "✗"} ${run.task}#${run.attempt}  ${(run.wallMs / 1000).toFixed(1)}s  ${run.turns} turns  ${run.toolCalls} calls  ${unrequested.length} unrequested checks (${checkSeconds.toFixed(1)}s)${why ? `  ${why}` : ""}`;
+	return `${run.pass ? "✓" : "✗"} ${run.task}#${run.attempt}  ${(run.wallMs / 1000).toFixed(1)}s  ${run.turns} turns  ${run.toolCalls} calls  ${verified}  checks: ${count("before")} before, ${count("during")} during, ${count("final")} final (${checkSeconds.toFixed(1)}s)${why ? `  ${why}` : ""}`;
 }
 
 async function compare(files: string[]): Promise<void> {
@@ -72,9 +78,33 @@ async function rescore(files: string[]): Promise<void> {
 		await Bun.write(file, JSON.stringify(result, null, "\t"));
 		await Bun.write(path.join(jobDir, "report.md"), renderReport(result));
 		log(
-			`rescored ${result.config.label}: pass ${result.summary.passRate} · ${result.summary.unrequestedChecksPerRun} unrequested/run`,
+			`rescored ${result.config.label}: pass ${result.summary.passRate} · verified ${result.summary.verifiedRate} · ${result.summary.checksDuringPerRun} checks during work/run`,
 		);
 	}
+}
+
+/**
+ * Reads a `--rewrite` file: a JSON array of `{ "find": string, "replace": string }`.
+ * @throws when the file holds anything else.
+ */
+async function loadRewrites(file: string): Promise<PromptRewrite[]> {
+	const parsed: unknown = await Bun.file(file).json();
+	if (!Array.isArray(parsed)) throw new Error(`${file}: expected an array of { find, replace }`);
+	const entries: unknown[] = parsed;
+	return entries.map((entry, index): PromptRewrite => {
+		if (
+			typeof entry !== "object" ||
+			entry === null ||
+			!("find" in entry) ||
+			typeof entry.find !== "string" ||
+			entry.find === "" ||
+			!("replace" in entry) ||
+			typeof entry.replace !== "string"
+		) {
+			throw new Error(`${file}: entry ${index + 1} needs a non-empty "find" and a "replace" string`);
+		}
+		return [entry.find, entry.replace];
+	});
 }
 
 function selectTasks(all: ScopeTask[], list: string | undefined): ScopeTask[] {
@@ -101,6 +131,7 @@ async function run(argv: string[]): Promise<void> {
 			thinking: { type: "string" },
 			"append-system-prompt": { type: "string" },
 			"system-prompt-template": { type: "string" },
+			rewrite: { type: "string" },
 			timeout: { type: "string" },
 			label: { type: "string" },
 			output: { type: "string" },
@@ -134,6 +165,7 @@ async function run(argv: string[]): Promise<void> {
 		thinking,
 		appendSystemPrompt: appendFile === undefined ? undefined : await Bun.file(appendFile).text(),
 		systemPromptTemplate: templateFile === undefined ? undefined : await Bun.file(templateFile).text(),
+		rewrites: values.rewrite === undefined ? [] : await loadRewrites(values.rewrite),
 		timeoutMs: timeoutSec * 1000,
 		jobDir,
 	};
@@ -144,6 +176,7 @@ async function run(argv: string[]): Promise<void> {
 			thinking: thinking ?? null,
 			appendSystemPrompt: appendFile ?? null,
 			systemPromptTemplate: templateFile ?? null,
+			rewrite: values.rewrite ?? null,
 			tasks: tasks.map(task => task.id),
 			runs,
 			concurrency,
@@ -178,6 +211,7 @@ async function run(argv: string[]): Promise<void> {
 	);
 	if (appendFile) log(`  append ${appendFile}`);
 	if (templateFile) log(`  template ${templateFile}`);
+	if (values.rewrite) log(`  rewrite ${values.rewrite}`);
 	log(`  ${output}`);
 
 	const shared = await discoverSharedInfra();

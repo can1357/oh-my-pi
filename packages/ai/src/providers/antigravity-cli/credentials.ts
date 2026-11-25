@@ -134,12 +134,14 @@ export function agyCredentialKey(apiKey: string): string {
 	return createHash("sha256").update(account).digest("hex");
 }
 
-/** Non-secret revision for restarting a host whose cached token source is stale. */
+/** Revision of the credential source cached by agy; native grants refresh in-process. */
 export function agyCredentialVersion(apiKey: string): string {
 	const credentials = parseAgyApiKey(apiKey);
-	return createHash("sha256")
-		.update(JSON.stringify([credentials.access, credentials.refresh, credentials.expires]))
-		.digest("hex");
+	const source =
+		credentials.refresh === REMOTE_REFRESH_SENTINEL
+			? [credentials.refresh, credentials.access, credentials.expires]
+			: [credentials.refresh];
+	return createHash("sha256").update(JSON.stringify(source)).digest("hex");
 }
 
 /**
