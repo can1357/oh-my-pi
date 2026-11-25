@@ -116,11 +116,6 @@ export function retryResetTimezoneOffsetFor(provider: string, baseUrl?: string):
 	)?.offset;
 }
 
-/** Whether a provider has catalog-authored model quota scopes. */
-export function hasQuotaTierPolicy(provider: string): boolean {
-	return behavior.quotaTiers.some(rule => rule.provider === provider);
-}
-
 /** The provider-default wire model for a model-less hosted operation. */
 export function hostedDefaultModel(provider: string): string | undefined {
 	return behavior.hostedDefaults.find(entry => entry.provider === provider)?.model;
