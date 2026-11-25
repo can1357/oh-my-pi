@@ -9,7 +9,10 @@
  * did as UI events; the terminal backend's `prefs` widget turns keys into the
  * same events. Keys only the program can interpret — typing into a search or
  * a draft, Tab between section headings, the provider-limits editor — are
- * handled here first (`onKey`).
+ * handled here first (`onKey`). The search query is also an `input` child
+ * (`omp.prefs.search`): Tern draws it as the search field and edits it
+ * natively (a click places the caret; ⇧-arrows, ⌘A and drags select), its
+ * edits arriving as `edit` events (`onSearchEdit`).
  */
 import {
 	type Accessor,
@@ -24,7 +27,7 @@ import {
 	type UiNode,
 	untrack,
 } from "@oh-my-pi/pi-tui";
-import { PREFS_MENU_FOOTER_ROLE } from "@oh-my-pi/pi-tui/term/painters/prefs";
+import { PREFS_MENU_FOOTER_ROLE, PREFS_SEARCH_ROLE } from "@oh-my-pi/pi-tui/term/painters/prefs";
 import type { PrefsTerm } from "@oh-my-pi/pi-tui/term/painters/prefs-model";
 import { slugify } from "@oh-my-pi/pi-utils";
 import type { TspPrefsControl, TspPrefsProps, TspPrefsRow, TspPrefsSection, TspSpan } from "@oh-my-pi/pi-wire";
@@ -777,6 +780,15 @@ export function SettingsWindow(props: {
 		syncSearchPage();
 	};
 
+	/** A native edit of the search field (`len` guards against an edit of a query since changed). */
+	const onSearchEdit = (event: Extract<UiEvent, { type: "edit" }>): void => {
+		const line = query();
+		if (event.len !== line.text.length) return;
+		const text = line.text.slice(0, event.from) + event.text + line.text.slice(event.to);
+		if (searching()) setQuery({ text, cursor: event.cursor });
+		else if (text !== "") startSearch(text);
+	};
+
 	/** Leave search: on the selected result's page with it selected, or back where search started. */
 	const endSearch = (jump: boolean): void => {
 		const id = jump ? untrack(selectedId) : undefined;
@@ -1264,6 +1276,29 @@ export function SettingsWindow(props: {
 		return out;
 	};
 
+	/** An open editor, or the plugins page, has the keys: the search field steps aside. */
+	const searchAside = computed(() => editing() !== null || (tab() === PLUGINS_PAGE && !searching()));
+
+	/**
+	 * The search field, last among the children so an editor card's field takes the terminal's
+	 * focus first. Absent while an editor or the plugins page has the keys (Tern then shows the
+	 * query as text), so native selection never acts on it meanwhile.
+	 */
+	const searchField = (): JSXNode =>
+		searchAside() ? null : (
+			<input
+				key="search"
+				role={PREFS_SEARCH_ROLE}
+				text={() => query().text}
+				cursor={() => query().cursor}
+				placeholder="Search settings"
+				onEdit={onSearchEdit}
+				// A click into the field asks for the focus; the keys stay the window's (`onKey`), whose
+				// first field this is: a click elsewhere in the window takes them back from the composer.
+				onFocus={() => {}}
+			/>
+		);
+
 	showTab("appearance");
 
 	return (
@@ -1278,7 +1313,6 @@ export function SettingsWindow(props: {
 				return SETTINGS_PAGES[id].lead;
 			}}
 			query={() => (searching() ? query().text : undefined)}
-			cursor={() => (searching() ? query().cursor : undefined)}
 			sections={() => plugins()?.sections ?? (tab() === PLUGINS_PAGE && !searching() ? [] : sections())}
 			focus={() => {
 				const page = plugins();
@@ -1298,6 +1332,7 @@ export function SettingsWindow(props: {
 			onActivate={(_, event) => onEvent(event)}
 		>
 			{children}
+			{searchField}
 		</prefs>
 	);
 }

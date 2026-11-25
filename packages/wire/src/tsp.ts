@@ -986,8 +986,6 @@ export interface TspPrefsProps {
 	lead?: string;
 	/** The program's search text; non-empty switches the page to search results. */
 	query?: string;
-	/** Caret as a UTF-16 offset into `query` while the program's search field has it; absent: no caret. */
-	cursor?: number;
 	sections: readonly TspPrefsSection[];
 	/** Row with keyboard focus (the program's selection). */
 	focus?: string | null;
