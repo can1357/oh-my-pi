@@ -421,14 +421,37 @@ function reportRequestFailure(baseUrl: string, status: number | undefined, messa
 	}
 }
 
+/**
+ * Server answers meaning an input is over the model's per-input limit: llama.cpp (`input (N tokens)
+ * is too large to process`, `exceeds the available context size`), OpenAI (`maximum context
+ * length`), TEI (`must have less than N tokens`), Ollama (`input length exceeds the context
+ * length`). Resending the same request cannot succeed, whatever its status code.
+ */
+const OVERSIZE_INPUT_PATTERN = /too large|too long|exceeds the available context|context length|less than \d+ tokens/i;
+
+/** Shortest window a rejected input is re-clipped to before it counts as unembeddable. */
+const MIN_REFIT_CHARS = 256;
+
+/** Request deadline floor, retries included. */
+const REQUEST_TIMEOUT_BASE_MS = 30_000;
+
+/**
+ * Deadline added per input character. llama.cpp on an Apple M4 embeds ~11k chars/s, so a full
+ * 64-text batch of capped inputs takes ~47 s; 0.25 ms/char gives that batch ~160 s.
+ */
+const REQUEST_TIMEOUT_MS_PER_CHAR = 0.25;
+
+/** An `/embeddings` rejection whose body says an input is over the server's size limit. */
+interface OversizeRejection {
+	status: number;
+	detail: string;
+}
+
 async function embedApi(texts: readonly string[], role: EmbeddingRole): Promise<EmbeddingMatrix | null> {
 	const size = embeddingBatchSize();
-	if (texts.length <= size) {
-		return embedApiBatch(texts, role);
-	}
 	const matrix: EmbeddingMatrix = [];
 	for (let offset = 0; offset < texts.length; offset += size) {
-		const part = await embedApiBatch(texts.slice(offset, offset + size), role);
+		const part = await embedApiFitted(texts.slice(offset, offset + size), role);
 		if (part === null) {
 			return null;
 		}
@@ -437,7 +460,42 @@ async function embedApi(texts: readonly string[], role: EmbeddingRole): Promise<
 	return matrix;
 }
 
-async function embedApiBatch(texts: readonly string[], role: EmbeddingRole): Promise<EmbeddingMatrix | null> {
+/**
+ * Embed one request's texts, recovering from "input too large" rejections. Character caps cannot
+ * track a server's token limit (dense text runs ~2.5 chars/token), so the server's answer is the
+ * bound: a rejected batch is bisected so its other inputs still embed, and a lone rejected input
+ * is re-clipped to half its length until it fits or drops under {@link MIN_REFIT_CHARS}.
+ */
+async function embedApiFitted(texts: readonly string[], role: EmbeddingRole): Promise<EmbeddingMatrix | null> {
+	const result = await embedApiBatch(texts, role);
+	if (result === null || Array.isArray(result)) return result;
+	if (texts.length > 1) {
+		const mid = texts.length >>> 1;
+		const head = await embedApiFitted(texts.slice(0, mid), role);
+		if (head === null) return null;
+		const tail = await embedApiFitted(texts.slice(mid), role);
+		return tail === null ? null : [...head, ...tail];
+	}
+	const text = texts[0] ?? "";
+	const max = text.length >>> 1;
+	if (max < MIN_REFIT_CHARS) {
+		reportRequestFailure(embeddingBaseUrl(), result.status, result.detail);
+		return null;
+	}
+	logger[mnemopiDebugEnabled() ? "warn" : "debug"]("mnemopi: embedding input over the server limit, re-clipping", {
+		length: text.length,
+		maxInputChars: max,
+	});
+	return embedApiFitted([clipToWindow(text, max)], role);
+}
+
+/** Send one `/embeddings` request; an over-limit rejection comes back unreported for {@link embedApiFitted}. */
+async function embedApiBatch(
+	texts: readonly string[],
+	role: EmbeddingRole,
+): Promise<EmbeddingMatrix | OversizeRejection | null> {
+	let chars = 0;
+	for (const text of texts) chars += text.length;
 	const baseUrl = embeddingBaseUrl();
 	const allowRemote = activeEmbeddingOptions()?.allowRemote;
 	if (allowRemote?.(baseUrl) === false) return null;
@@ -469,9 +527,10 @@ async function embedApiBatch(texts: readonly string[], role: EmbeddingRole): Pro
 				method: "POST",
 				headers,
 				body,
-				signal: AbortSignal.timeout(30000),
+				signal: AbortSignal.timeout(REQUEST_TIMEOUT_BASE_MS + chars * REQUEST_TIMEOUT_MS_PER_CHAR),
 				maxAttempts: 3,
 				defaultDelayMs: attempt => 2 ** attempt * 1000,
+				shouldRetryResponse: (_response, detail) => !OVERSIZE_INPUT_PATTERN.test(detail),
 				fetch: (input, init) => {
 					if (allowRemote?.(baseUrl) === false) throw new Error("Remote embedding provider is not allowed");
 					return fetch(input, init);
@@ -489,6 +548,7 @@ async function embedApiBatch(texts: readonly string[], role: EmbeddingRole): Pro
 		if (!response.ok) {
 			const detail = await response.text().catch(() => "");
 			logEmbeddingRejection(response.status, detail);
+			if (OVERSIZE_INPUT_PATTERN.test(detail)) return { status: response.status, detail };
 			reportRequestFailure(baseUrl, response.status, detail);
 			return null;
 		}

@@ -1,7 +1,8 @@
 /**
  * Some hosted embedding APIs cap the inputs per request (DashScope: 10). With `batchSize` set to
  * that cap, `embed()` must split a large text list into several requests, keep the order, and
- * return null when any part fails.
+ * return null when any part fails. Servers that cap each input by tokens (llama.cpp's physical
+ * batch) reject a whole request over one long input; `embed()` must isolate and re-clip it.
  */
 
 import { Database } from "bun:sqlite";
@@ -158,5 +159,66 @@ describe("an embedding model switch against an API with a per-request input cap"
 			memory.close();
 			db.close();
 		}
+	});
+});
+
+/** Fake llama-server; `requests` holds each request's input lengths. */
+interface TokenCappedServer {
+	url: string;
+	requests: number[][];
+	stop(): void;
+}
+
+// llama-server with `-ub 2048` on dense text (2.5 chars/token): any input over 5120 chars fails the whole request.
+function startTokenCappedServer(maxChars = 5120): TokenCappedServer {
+	const requests: number[][] = [];
+	const server = Bun.serve({
+		port: 0,
+		async fetch(req) {
+			const { input } = (await req.json()) as { input: string[] };
+			requests.push(input.map(text => text.length));
+			const big = input.find(text => text.length > maxChars);
+			if (big !== undefined) {
+				const message = `input (${Math.ceil(big.length / 2.5)} tokens) is too large to process. increase the physical batch size (current batch size: 2048)`;
+				return Response.json({ error: { code: 500, message, type: "server_error" } }, { status: 500 });
+			}
+			// The first component carries the embedded text's length so the re-clip is checkable.
+			return Response.json({ data: input.map((text, index) => ({ index, embedding: [text.length, 1, 0] })) });
+		},
+	});
+	return { url: `http://127.0.0.1:${server.port}/v1`, requests, stop: () => server.stop(true) };
+}
+
+describe("embed() against a server that rejects a request over one too-large input", () => {
+	let server: TokenCappedServer;
+	beforeEach(() => {
+		resetEmbeddingProviderForTests();
+	});
+	afterEach(() => {
+		server.stop();
+	});
+
+	it("embeds the other inputs and re-clips the rejected one without resending the failed request", async () => {
+		server = startTokenCappedServer();
+		const failures: unknown[] = [];
+		const matrix = await withMnemopiRuntimeOptions(
+			{ embeddings: { model: "alias", apiUrl: server.url, apiKey: "", onRequestFailed: f => failures.push(f) } },
+			() => embed(["short memory", "x".repeat(7000)]),
+		);
+		expect(server.requests).toEqual([[12, 7000], [12], [7000], [3500]]);
+		expect(matrix?.map(v => v[0])).toEqual([12, 3500]);
+		expect(failures).toEqual([]);
+	});
+
+	it("gives up and reports once when an input stays too large at the shortest window", async () => {
+		server = startTokenCappedServer(0);
+		const failures: { status?: number }[] = [];
+		const matrix = await withMnemopiRuntimeOptions(
+			{ embeddings: { model: "alias", apiUrl: server.url, apiKey: "", onRequestFailed: f => failures.push(f) } },
+			() => embed(["y".repeat(7000)]),
+		);
+		expect(matrix).toBeNull();
+		expect(server.requests).toEqual([[7000], [3500], [1750], [875], [437]]);
+		expect(failures.map(f => f.status)).toEqual([500]);
 	});
 });
