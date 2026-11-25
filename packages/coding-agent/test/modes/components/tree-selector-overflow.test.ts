@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { treeListRows } from "../../helpers/tree-selector";
+import { mountTreeSelector, treeListRows } from "../../helpers/tree-selector";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const restoreTheme = currentTheme();
@@ -39,6 +39,42 @@ function renderSelector(tree: SessionTreeNode, leafId: string, width: number): s
 }
 
 describe("TreeSelectorComponent deep branching overflow", () => {
+	it("opens a deep linear history at its current leaf and navigates past filtered entries", () => {
+		const root = makeUserNode("first prompt");
+		let tail = root;
+		for (let i = 0; i < 50_000; i++) {
+			const node: SessionTreeNode = {
+				entry: {
+					id: `setting-${i}`,
+					parentId: tail.entry.id,
+					timestamp: root.entry.timestamp,
+					type: "thinking_level_change",
+					thinkingLevel: "off",
+				},
+				children: [],
+			};
+			tail.children.push(node);
+			tail = node;
+		}
+		const leaf = makeUserNode("latest prompt", tail.entry.id);
+		tail.children.push(leaf);
+		const selected: string[] = [];
+		const term = mountTreeSelector({
+			roots: [root],
+			currentLeafId: leaf.entry.id,
+			onSelect: id => selected.push(id),
+		});
+		try {
+			expect(term.screen().join("\n")).toContain("latest prompt");
+			term.press("enter");
+			term.press("up");
+			term.press("enter");
+			expect(selected).toEqual([leaf.entry.id, root.entry.id]);
+		} finally {
+			term.dispose();
+		}
+	});
+
 	it("keeps the selected entry text visible when branching exceeds the viewport width", () => {
 		const { root, leaf } = buildBranchyTree(80);
 		const width = 120;

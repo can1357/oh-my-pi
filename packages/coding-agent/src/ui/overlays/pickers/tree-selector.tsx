@@ -241,53 +241,72 @@ export function TreeSelector(props: TreeSelectorProps): JSXNode {
 	const toolCalls = collectToolCalls(props.roots);
 	const partsOf = (entry: SessionTreeEntry): EntryPart[] => entryParts(entry, toolCalls);
 	const parentOf = new Map<string, string | null>();
-	const containsActive = new Map<TreeSelectorNode, boolean>();
-	const visit = (node: TreeSelectorNode, parent: string | null): boolean => {
-		parentOf.set(node.entry.id, parent);
-		let has = node.entry.id === leafId;
-		for (const child of node.children) if (visit(child, node.entry.id)) has = true;
-		containsActive.set(node, has);
-		return has;
-	};
-	for (const root of props.roots) visit(root, null);
+	const nodeById = new Map<string, TreeSelectorNode>();
+	const pendingNodes = [...props.roots];
+	for (const root of pendingNodes) parentOf.set(root.entry.id, null);
+	for (let node = pendingNodes.pop(); node; node = pendingNodes.pop()) {
+		const id = node.entry.id;
+		nodeById.set(id, node);
+		for (const child of node.children) {
+			parentOf.set(child.entry.id, id);
+			pendingNodes.push(child);
+		}
+	}
 	const activePath = new Set<string>();
 	for (let id: string | null | undefined = leafId; id; id = parentOf.get(id)) activePath.add(id);
-	const activeFirst = (nodes: readonly TreeSelectorNode[]): TreeSelectorNode[] =>
-		[...nodes].sort((a, b) => Number(containsActive.get(b)) - Number(containsActive.get(a)));
-
-	// Structural rows: a fork's branches nest one level deeper; a linear chain stays at its head's depth.
-	const rows: Row[] = [];
-	const walk = (
-		nodes: readonly TreeSelectorNode[],
-		depth: number,
-		parent: string | undefined,
-		guides: readonly boolean[],
-	): void => {
-		const ordered = activeFirst(nodes);
-		ordered.forEach((node, index) => {
-			const lastSibling = index === ordered.length - 1;
-			rows.push({ node, depth, parent, siblings: ordered.length, lastSibling, guides });
-			const childDepth =
-				node.children.length > 1 || (props.roots.length > 1 && parent === undefined) ? depth + 1 : depth;
-			// A branch head keeps its fork's guide running down its own branch while siblings follow it:
-			// whatever the filter hides, the rows under it show where they hang.
-			const below = Array.from({ length: childDepth }, (_, level) => guides[level] ?? false);
-			if (ordered.length > 1 && depth > 0) below[depth - 1] = !lastSibling;
-			walk(node.children, childDepth, node.entry.id, below);
-		});
+	const activeFirst = (nodes: readonly TreeSelectorNode[]): readonly TreeSelectorNode[] => {
+		if (nodes.length < 2) return nodes;
+		const active = nodes.findIndex(node => activePath.has(node.entry.id));
+		if (active <= 0) return nodes;
+		const ordered = [...nodes];
+		ordered.copyWithin(1, 0, active);
+		ordered[0] = nodes[active]!;
+		return ordered;
 	};
-	walk(props.roots, 0, undefined, []);
-	const nodeById = new Map(rows.map(row => [row.node.entry.id, row.node]));
-	const childOrder = new Map<TreeSelectorNode, TreeSelectorNode[]>();
-	/** `node`'s children as rendered (the branch holding the current leaf first). */
-	const orderedChildren = (node: TreeSelectorNode): TreeSelectorNode[] => {
+
+	const orderedRoots = activeFirst(props.roots);
+	const childOrder = new Map<TreeSelectorNode, readonly TreeSelectorNode[]>();
+	const orderedChildren = (node: TreeSelectorNode): readonly TreeSelectorNode[] => {
+		if (node.children.length < 2) return node.children;
 		let ordered = childOrder.get(node);
 		if (!ordered) childOrder.set(node, (ordered = activeFirst(node.children)));
 		return ordered;
 	};
-	const branchPoints = new Set(
-		rows.filter(row => row.parent !== undefined && row.siblings > 1).map(row => row.parent!),
-	);
+
+	// Structural rows: a fork's branches nest one level deeper; a linear chain stays at its head's depth.
+	const rows: Row[] = [];
+	const branchPoints = new Set<string>();
+	const pendingRows: Row[] = [];
+	const pushRows = (
+		ordered: readonly TreeSelectorNode[],
+		depth: number,
+		parent: string | undefined,
+		guides: readonly boolean[],
+	): void => {
+		const siblings = ordered.length;
+		for (let at = siblings - 1; at >= 0; at--) {
+			pendingRows.push({ node: ordered[at]!, depth, parent, siblings, lastSibling: at === siblings - 1, guides });
+		}
+	};
+	pushRows(orderedRoots, 0, undefined, []);
+	for (let row = pendingRows.pop(); row; row = pendingRows.pop()) {
+		rows.push(row);
+		const children = orderedChildren(row.node);
+		if (children.length === 0) continue;
+		const id = row.node.entry.id;
+		if (children.length > 1) branchPoints.add(id);
+		const { depth, parent, guides, siblings, lastSibling } = row;
+		const childDepth = children.length > 1 || (orderedRoots.length > 1 && parent === undefined) ? depth + 1 : depth;
+		// Keep the fork's guide running down the branch while siblings follow it, even if the filter hides its head.
+		const forkGuide = siblings > 1 && depth > 0;
+		const below =
+			childDepth === depth && !forkGuide
+				? guides
+				: Array.from({ length: childDepth }, (_, level) =>
+						forkGuide && level === depth - 1 ? !lastSibling : (guides[level] ?? false),
+					);
+		pushRows(children, childDepth, id, below);
+	}
 	const maxVisible = Math.max(
 		1,
 		Math.min(Math.max(5, Math.floor(props.terminalHeight / 2)), props.terminalHeight - 8),
@@ -434,7 +453,7 @@ export function TreeSelector(props: TreeSelectorProps): JSXNode {
 				else byTarget.set(target.entry.id, { heads: [branch.entry.id], target });
 			}
 		};
-		addFork(activeFirst(props.roots));
+		addFork(orderedRoots);
 		for (const row of rows) addFork(orderedChildren(row.node));
 		const ordered = [...byTarget.values()].sort(
 			(a, b) => visibleIndex.get(a.target.entry.id)! - visibleIndex.get(b.target.entry.id)!,

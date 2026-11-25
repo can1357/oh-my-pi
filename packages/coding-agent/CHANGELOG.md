@@ -5,6 +5,11 @@
 ### Added
 
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Fixed the session tree failing to open or crashing the terminal UI on deep session histories ([#20519](https://github.com/can1357/oh-my-pi/issues/20519)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
