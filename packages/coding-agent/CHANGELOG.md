@@ -4,8 +4,9 @@
 
 ### Added
 
-- `models.yml` speech models accept `voice` (sent when the `tts` tool or the vocalizer names no voice, for gateways that reject a voiceless request) and `speechFormats` (the only containers the model returns). The `tts` tool asks a WAV-only model for WAV when the path ends in `.mp3` (and an MP3-only one for MP3 when it ends in `.wav`) and writes the sibling file with that extension; a model that returns neither is skipped ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
-- Added `speech.cloud` (default off): with it on, `speech.enabled` speaks through the `openai-speech` or `xai-tts` models you explicitly configured in the `speech` role chain, falling back to a later model (or local Phonon) when one fails and warning when every model failed. A model that fails with a missing key or a 4xx is skipped until you log in, change a key or reload `models.yml`. With it off, or with no configured cloud model, vocalization stays on local Phonon; `--offline` keeps only the session provider's models, as before ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- Added `voice` and `speechFormats` to `models.yml` speech models; the `tts` tool switches between MP3 and WAV output to match the formats a model returns ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- Added `speech.cloud` (default off) to vocalize `speech.enabled` output through the cloud speech models configured in the `speech` role ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
