@@ -49,9 +49,15 @@ describe("status line model segment", () => {
 	});
 
 	it("shows the id and the display name under display full", () => {
+		expect(text(opus, { display: "full" })).toBe("claude-opus-4-8 (Opus 4.8)");
 		expect(text(gateway, { display: "full" })).toBe("google/gemini-3.7-flash (Gemini 3.7 Flash)");
 		const unnamed: StatusFacts = { ...gateway, model: { id: "glm-5", name: "glm-5", thinking: false } };
 		expect(text(unnamed, { display: "full" })).toBe("glm-5");
+	});
+
+	it("cuts the label at maxLength with an ellipsis", () => {
+		expect(text(gateway, { display: "id", showProvider: true, maxLength: 20 })).toBe("openrouter/google/g…");
+		expect(text(opus, { maxLength: 20 })).toBe("Opus 4.8");
 	});
 
 	it("leaves the name bare when the model has no provider", () => {

@@ -14,6 +14,7 @@ import {
 	describeTree,
 	stageNative,
 } from "@oh-my-pi/pi-tui/testing/corpus";
+import type { StatusLineSegmentOptions } from "../../../src/modes/view-model/status-line/types";
 import { composerFacts } from "../../../src/ui/status/composer-facts";
 import type { StatusFacts } from "../../../src/ui/status/facts";
 import { corpusStatusFacts } from "./fixture";
@@ -114,7 +115,7 @@ test("the composer model chip keeps the user's model display options", () => {
 				...corpusStatusFacts(),
 				model: { id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "anthropic", thinking: true },
 			});
-			const label = (model: { showProvider?: boolean; display?: "name" | "id" | "full" }) =>
+			const label = (model: StatusLineSegmentOptions["model"]) =>
 				composerFacts({
 					settings: () => ({ preset: "default", segmentOptions: { model } }),
 					facts,

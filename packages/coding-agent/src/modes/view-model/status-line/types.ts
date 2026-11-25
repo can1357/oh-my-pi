@@ -39,7 +39,12 @@ export interface CollabStatus {
 
 export interface StatusLineSegmentOptions {
 	pi?: { showProfile?: boolean };
-	model?: { showThinkingLevel?: boolean; showProvider?: boolean; display?: "name" | "id" | "full" };
+	model?: {
+		showThinkingLevel?: boolean;
+		showProvider?: boolean;
+		display?: "name" | "id" | "full";
+		maxLength?: number;
+	};
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
