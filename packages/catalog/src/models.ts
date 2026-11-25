@@ -93,11 +93,14 @@ export interface FactoryDroidCreditRate {
  */
 export function getFactoryDroidCreditRate(
 	model: Pick<Model, "factoryDroidCredits" | "factoryDroidCreditCards">,
-	timestamp = Date.now(),
+	at?: number,
 ): FactoryDroidCreditRate | undefined {
 	const base = model.factoryDroidCredits;
 	if (base === undefined) return undefined;
 	const cards = model.factoryDroidCreditCards ?? [];
+	// The clock only matters with dated cards: rows without any skip reading it.
+	if (cards.length === 0) return { rate: base };
+	const timestamp = at ?? Date.now();
 	const rate = dueDatedCard(cards, timestamp)?.input ?? base;
 	let next: FactoryDroidCreditRate["next"];
 	for (const card of cards) {
@@ -116,8 +119,9 @@ export function getFactoryDroidCreditRate(
  * when the row was built while bundles, caches, and long sessions outlive it.
  * Applies no long-context tier or peak/off-peak multiplier.
  */
-export function getEffectiveTokenCost(cost: ModelCost, timestamp = Date.now()): TokenCost {
-	return resolveTokenCost(cost, 0, timestamp);
+export function getEffectiveTokenCost(cost: ModelCost, timestamp?: number): TokenCost {
+	// Only dated rate cards depend on the time: rows without any skip reading the clock.
+	return resolveTokenCost(cost, 0, cost.timeBased?.effectiveRates?.length ? (timestamp ?? Date.now()) : timestamp);
 }
 
 function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {

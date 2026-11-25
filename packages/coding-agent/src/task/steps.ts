@@ -62,8 +62,8 @@ function fillTextSlots(rendered: string, steps: readonly string[], first: number
 }
 
 /**
- * The prompts `steps` go out in, at most {@link MAX_STEPS}; `structured` selects whether a prompt
- * ends with a terminal `yield` or the final message.
+ * The prompts two or more `steps` go out in, at most {@link MAX_STEPS}; `structured` selects whether
+ * a prompt ends with a terminal `yield` or the final message. A lone step goes out verbatim instead.
  */
 export function renderStepPrompts(steps: readonly string[], structured: boolean): string[] {
 	const prompts: string[] = [];
@@ -88,8 +88,9 @@ export function renderStepPrompts(steps: readonly string[], structured: boolean)
 	return prompts;
 }
 
-/** Every step as one Markdown brief: the run's `assignment` for labels and display, never sent whole. */
+/** Every step as one Markdown brief: the run's `assignment` for labels and display. A lone step is its own brief. */
 export function renderStepsBrief(steps: readonly string[]): string {
+	if (steps.length === 1) return steps[0].trim().replace(/\r\n?/g, "\n");
 	const rendered = prompt.render(stepsBriefTemplate, { steps: steps.map((_, index) => textSlot(index)) });
 	return fillTextSlots(rendered, steps, 0);
 }

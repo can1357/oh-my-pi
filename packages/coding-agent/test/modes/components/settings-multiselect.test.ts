@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,20 +8,13 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { getProjectAgentDir, removeWithRetries } from "@oh-my-pi/pi-utils";
-import { mountSettingsWindow, settingsScreen } from "../../helpers/settings-window";
+import { settingsScreen, setupSettingsWindow } from "../../helpers/settings-window";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
 
-beforeEach(async () => {
-	resetSettingsForTest();
-	await Settings.init({ inMemory: true });
-});
-
-afterEach(() => {
-	resetSettingsForTest();
-});
+const mountSettingsWindow = setupSettingsWindow();
 
 /** Left press and release on the first cell row showing `label`. */
 function clickLabel(term: TestTerminal, label: string): void {
@@ -36,25 +29,19 @@ function clickLabel(term: TestTerminal, label: string): void {
 describe("settings section sidebar", () => {
 	it("does not toggle the selected section's first setting", () => {
 		const term = mountSettingsWindow();
-		try {
-			for (let i = 0; i < 7; i++) term.press("right");
-			expect(cfgDevAutoqa.get(settings)).toBe(true);
-			clickLabel(term, "Developer");
-			expect(cfgDevAutoqa.get(settings)).toBe(true);
-			clickLabel(term, "Developer");
-			expect(cfgDevAutoqa.get(settings)).toBe(true);
-		} finally {
-			term.dispose();
-		}
+		for (let i = 0; i < 7; i++) term.press("right");
+		expect(cfgDevAutoqa.get(settings)).toBe(true);
+		clickLabel(term, "Developer");
+		expect(cfgDevAutoqa.get(settings)).toBe(true);
+		clickLabel(term, "Developer");
+		expect(cfgDevAutoqa.get(settings)).toBe(true);
 	});
 });
 
-/** The window with the extra-context-files text editor open. */
-function openExtraContextFiles(): TestTerminal {
-	const term = mountSettingsWindow();
+/** Open the extra-context-files text editor. */
+function openExtraContextFiles(term: TestTerminal): void {
 	term.type("extra context files");
 	term.press("enter");
-	return term;
 }
 
 /** Replace the open editor's text with `value` and submit it. */
@@ -68,17 +55,14 @@ async function submitText(term: TestTerminal, value: string): Promise<void> {
 
 describe("extra context filenames editor", () => {
 	it("saves multiple filenames as an array and lets users disable extras", async () => {
-		const term = openExtraContextFiles();
-		try {
-			await submitText(term, '["AGENTS.local.md","TEAM.md"]');
-			expect(cfgContextFilesExtra.get(settings)).toEqual(["AGENTS.local.md", "TEAM.md"]);
+		const term = mountSettingsWindow();
+		openExtraContextFiles(term);
+		await submitText(term, '["AGENTS.local.md","TEAM.md"]');
+		expect(cfgContextFilesExtra.get(settings)).toEqual(["AGENTS.local.md", "TEAM.md"]);
 
-			term.press("enter");
-			await submitText(term, "[]");
-			expect(cfgContextFilesExtra.get(settings)).toEqual([]);
-		} finally {
-			term.dispose();
-		}
+		term.press("enter");
+		await submitText(term, "[]");
+		expect(cfgContextFilesExtra.get(settings)).toEqual([]);
 	});
 
 	it.each([
@@ -87,14 +71,11 @@ describe("extra context filenames editor", () => {
 		['["../TEAM.md"]', /file names, not paths/],
 	])("keeps the saved filenames when input %s is rejected", async (input, error) => {
 		cfgContextFilesExtra.set(settings, ["TEAM.md"]);
-		const term = openExtraContextFiles();
-		try {
-			await submitText(term, input);
-			expect(cfgContextFilesExtra.get(settings)).toEqual(["TEAM.md"]);
-			expect(settingsScreen(term)).toMatch(error);
-		} finally {
-			term.dispose();
-		}
+		const term = mountSettingsWindow();
+		openExtraContextFiles(term);
+		await submitText(term, input);
+		expect(cfgContextFilesExtra.get(settings)).toEqual(["TEAM.md"]);
+		expect(settingsScreen(term)).toMatch(error);
 	});
 
 	it("is not offered when the project config sets the list, so it cannot be copied to global", async () => {
@@ -107,8 +88,9 @@ describe("extra context filenames editor", () => {
 			resetSettingsForTest();
 			await Settings.init({ cwd, agentDir });
 
-			const term = openExtraContextFiles();
+			const term = mountSettingsWindow();
 			try {
+				openExtraContextFiles(term);
 				term.press("enter");
 				await settings.flush();
 				expect(settingsScreen(term)).not.toContain("Extra Context Files");
