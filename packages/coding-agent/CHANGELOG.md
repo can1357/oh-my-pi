@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Interactive resume no longer crashes with "Spread syntax requires ...iterable not be null or undefined" when a task tool result was blocked and carries empty details; the TUI now falls back to the error text when `details.results` is missing
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ## [19.2.1] - 2026-11-25

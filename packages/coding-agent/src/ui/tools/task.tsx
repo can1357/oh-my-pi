@@ -293,8 +293,8 @@ function resultAgent(result: SingleResult, state: DescribeState, depth: number):
 
 /** Agent nodes of a snapshot: settled results, then live spawns without a result. */
 function agentNodes(details: TaskToolDetails, state: DescribeState, depth: number): JSXNode[] {
-	const nodes = orderResults(details.results).map(result => resultAgent(result, state, depth));
-	const settled = new Set(details.results.map(result => result.id));
+	const nodes = orderResults(details.results ?? []).map(result => resultAgent(result, state, depth));
+	const settled = new Set((details.results ?? []).map(result => result.id));
 	for (const progress of orderProgress(details.progress ?? []))
 		if (!settled.has(progress.id)) nodes.push(progressAgent(progress, state, depth));
 	return nodes;
@@ -361,7 +361,7 @@ function resultView(
 		isError: result.isError === true,
 		isPartial: state.isPartial,
 	});
-	if (!details) {
+	if (!details || (result.isError && !details.results)) {
 		const fallback = text.trim();
 		if (result.isError) {
 			return {
@@ -384,9 +384,10 @@ function resultView(
 		seen: new Set(),
 	};
 	const agents = agentNodes(details, describe, 0);
-	const tally = runTally(details.results);
+	const results = details.results ?? [];
+	const tally = runTally(results);
 	const summary: string[] = [];
-	if (details.results.length > 0) {
+	if (results.length > 0) {
 		if (tally.succeeded) summary.push(`${tally.succeeded} succeeded`);
 		if (tally.failed) summary.push(`${tally.failed} failed`);
 		if (tally.aborted) summary.push(`${tally.aborted} aborted`);
