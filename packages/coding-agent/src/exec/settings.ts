@@ -237,7 +237,7 @@ export const cfgBashDirenv = register({
 		group: "Bash",
 		label: "direnv Auto-Load",
 		description:
-			"Auto-load a repo's direnv/devenv `.envrc` into the bash session so devenv tools and env vars are present without manual `direnv exec`. Honors direnv's allow list: an `.envrc` you haven't `direnv allow`ed is never executed",
+			"Load project environment variables with the embedded direnv builtin, honoring direnv's allow and deny rules",
 	},
 });
 
@@ -250,7 +250,7 @@ export const cfgBashDirenvLoadTimeoutMs = register({
 		group: "Bash",
 		label: "direnv Load Timeout (ms)",
 		description:
-			"Max wait for the first `direnv export` (a cold devenv shell can be slow); on timeout the session runs without the direnv env",
+			"Max wait for embedded .envrc evaluation (a cold devenv shell can be slow); on timeout the session runs without its exports",
 	},
 });
 
