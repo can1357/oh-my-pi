@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed idle follow-ups getting stuck in After yield after an extension message or a compaction summary ([#20465](https://github.com/can1357/oh-my-pi/issues/20465)).
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes
