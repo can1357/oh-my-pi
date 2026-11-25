@@ -6,7 +6,9 @@
  *
  * Git/jj facts are read again when a run starts (edits made while idle) and
  * when a turn ends (what its tools did), and after a user `!`/`$` command
- * ({@link SessionStatusLine.refreshVcs}); nothing polls the repository.
+ * ({@link SessionStatusLine.refreshVcs}); nothing polls the repository. Those
+ * reads start at most {@link VCS_READ_INTERVAL_MS} apart: one skipped as too
+ * soon runs on a timer once the run yields, so the bar never stays stale.
  *
  * Session state is not reactive, so the session's events bump a revision the
  * snapshot reads; {@link SessionStatusLine.refresh} does the same for changes
@@ -33,6 +35,8 @@ import {
 } from "../view-model/overlays/codex-reset-fireworks";
 import { codexResetSnapshot, quotaFromReports } from "./status-quota";
 
+/** Least time between the starts of two git/jj reads asked for by run starts, turn ends and user commands. */
+const VCS_READ_INTERVAL_MS = 5_000;
 /** Usage reports are fetched at most this often. */
 const USAGE_TTL_MS = 5 * 60_000;
 /** First usage fetch waits this long so startup paints first. */
@@ -139,6 +143,12 @@ export class SessionStatusLine implements StatusLineModel {
 	#brandFade: NodeJS.Timeout | undefined;
 	/** The git/jj facts are read again on the next paint; cleared when a read starts. */
 	#vcsStale = true;
+	/** When the last git/jj read started. */
+	#vcsReadAt = 0;
+	/** A read was skipped as too soon after the last one; paid by {@link #settleVcs}. */
+	#vcsOwed = false;
+	/** Pays an owed read once {@link VCS_READ_INTERVAL_MS} has passed. */
+	#vcsTimer: NodeJS.Timeout | undefined;
 	#vcsInFlight = false;
 	#vcsGeneration = 0;
 	readonly #defaultBranches = new Map<string, string>();
@@ -190,7 +200,9 @@ export class SessionStatusLine implements StatusLineModel {
 	}
 
 	refreshVcs(): void {
-		this.#vcsStale = true;
+		this.#markVcsStale();
+		// No run follows a user command to yield: settle now.
+		this.#settleVcs();
 		this.refresh();
 	}
 
@@ -344,6 +356,7 @@ export class SessionStatusLine implements StatusLineModel {
 		clearTimeout(this.#usageTimer);
 		clearTimeout(this.#pricingTimer);
 		clearTimeout(this.#brandFade);
+		clearTimeout(this.#vcsTimer);
 	}
 
 	/** Wake at the shown cost's next time-based tariff change (peak/off-peak), idle or not, to repaint it. */
@@ -373,7 +386,8 @@ export class SessionStatusLine implements StatusLineModel {
 				this.#queueStreamBump();
 				return;
 			}
-			if (event.type === "agent_start" || event.type === "turn_end") this.#vcsStale = true;
+			if (event.type === "agent_start" || event.type === "turn_end") this.#markVcsStale();
+			else if (event.type === "agent_end") this.#settleVcs();
 			this.#queueBump();
 		});
 		this.#quota.set(undefined);
@@ -594,9 +608,34 @@ export class SessionStatusLine implements StatusLineModel {
 		};
 	}
 
+	/** The repository may have changed: read again on the next paint, or owe the read when the last one started too recently. */
+	#markVcsStale(): void {
+		if (Date.now() - this.#vcsReadAt >= VCS_READ_INTERVAL_MS) this.#vcsStale = true;
+		else this.#vcsOwed = true;
+	}
+
+	/** Nothing will mark the facts stale for a while (the run yielded): pay an owed read once the interval has passed. */
+	#settleVcs(): void {
+		if (!this.#vcsOwed || this.#vcsTimer || this.#disposed) return;
+		this.#vcsTimer = setTimeout(
+			() => {
+				this.#vcsTimer = undefined;
+				if (this.#disposed) return;
+				this.#vcsStale = true;
+				this.refresh();
+			},
+			Math.max(0, this.#vcsReadAt + VCS_READ_INTERVAL_MS - Date.now()),
+		);
+		this.#vcsTimer.unref?.();
+	}
+
 	async #readVcs(cwd: string, wantsPr: boolean): Promise<void> {
 		this.#vcsInFlight = true;
 		this.#vcsStale = false;
+		this.#vcsReadAt = Date.now();
+		this.#vcsOwed = false;
+		clearTimeout(this.#vcsTimer);
+		this.#vcsTimer = undefined;
 		const generation = this.#vcsGeneration;
 		let next: VcsSnapshot | undefined;
 		try {

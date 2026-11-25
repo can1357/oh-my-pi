@@ -41,7 +41,7 @@
 
 - Tray agent cards show the agent's latest tool call as `Edit tray.tsx` with the lines an edit added and removed (`+42 −12`) or `failed`, instead of its intent; they no longer switch to `Thinking` or its prose between calls
 - Live reload of config files now polls them every 500ms instead of watching their directories, so it also works on network drives and when the inotify watch limit is used up
-- The status line re-reads the git/jj branch and change counts when a run starts, after each turn, and after `!`/`$` commands, instead of polling the repository every few seconds; a checkout made in another terminal while the session is idle shows up at the next prompt
+- The status line re-reads the git/jj branch and change counts when a run starts, after each turn, and after `!`/`$` commands, at most every 5 seconds (a skipped read runs once the run ends), instead of polling the repository; a checkout made in another terminal while the session is idle shows up at the next prompt
 - `providers.maxInFlightRequests` is shared between omp processes through the omp daemon: a queued request starts as soon as a slot frees, and a process that exits mid-request gives its slots back at once instead of after a 30-second lease timeout
 - A subagent spawned with a single step receives that step as written, without the `Complete assignment thoroughly:` and `# Step 1 of 1` framing
 - Shell command previews show chained commands with their real `&&`/`||` operators instead of `and`/`or`, and `cd dir` as written instead of a `cwd dir` badge

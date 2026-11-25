@@ -1,7 +1,8 @@
 /**
  * The status line's git facts come from background reads: a cold paint shows
  * nothing until the read lands, repaints reuse the facts until a run starts, a
- * turn ends or a user command finishes, and a cwd change drops the old
+ * turn ends or a user command finishes (reads at most one interval apart; a
+ * skipped one runs once the run yields), and a cwd change drops the old
  * repository's facts.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
@@ -13,6 +14,9 @@ import * as utils from "@oh-my-pi/pi-utils";
 import { disposeStatusLines, flushStatus, lineText, statusLine, statusSession } from "./helpers/session-status-line";
 
 type GitStatus = { staged: number; unstaged: number; untracked: number };
+
+/** The status line's least time between two git/jj reads (`VCS_READ_INTERVAL_MS`). */
+const READ_INTERVAL_MS = 5_000;
 
 const gitSegment: StatusLineSettings = {
 	preset: "custom",
@@ -35,6 +39,7 @@ afterAll(() => {
 afterEach(() => {
 	disposeStatusLines();
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
 /** A git repository on `branch` (read at every HEAD read). */
@@ -99,6 +104,7 @@ describe("status line VCS refresh", () => {
 	});
 
 	it("re-reads working-tree counts when a run starts and when a turn ends, not on repaints", async () => {
+		vi.useFakeTimers();
 		vi.spyOn(utils, "getProjectDir").mockReturnValue("/repo/turns");
 		const statusSummary = vi
 			.fn<() => Promise<GitStatus | null>>()
@@ -121,6 +127,7 @@ describe("status line VCS refresh", () => {
 		await flushStatus();
 		expect(statusSummary).toHaveBeenCalledTimes(1);
 
+		vi.advanceTimersByTime(READ_INTERVAL_MS);
 		emit("turn_end");
 		await flushStatus();
 		lineText(line);
@@ -128,6 +135,7 @@ describe("status line VCS refresh", () => {
 		expect(statusSummary).toHaveBeenCalledTimes(2);
 		expect(lineText(line)).toContain("*7");
 
+		vi.advanceTimersByTime(READ_INTERVAL_MS);
 		emit("agent_start");
 		await flushStatus();
 		lineText(line);
@@ -136,7 +144,37 @@ describe("status line VCS refresh", () => {
 		expect(lineText(line)).toContain("?3");
 	});
 
+	it("reads at most once per interval and runs a skipped read once the run yields", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(utils, "getProjectDir").mockReturnValue("/repo/busy");
+		const statusSummary = vi
+			.fn<() => Promise<GitStatus | null>>()
+			.mockResolvedValueOnce({ staged: 1, unstaged: 0, untracked: 0 })
+			.mockResolvedValueOnce({ staged: 0, unstaged: 4, untracked: 0 });
+		mockRepos({ "/repo/busy": fakeRepo("/repo/busy", "main", statusSummary) });
+		const { session, emit } = emittingSession();
+		const line = statusLine(session, gitSegment);
+		lineText(line);
+		await flushStatus();
+
+		// A turn ending right after the last read does not read again.
+		emit("turn_end");
+		await flushStatus();
+		lineText(line);
+		await flushStatus();
+		expect(statusSummary).toHaveBeenCalledTimes(1);
+
+		// The run yields: the skipped read runs once the interval is up.
+		emit("agent_end");
+		vi.advanceTimersByTime(READ_INTERVAL_MS);
+		lineText(line);
+		await flushStatus();
+		expect(statusSummary).toHaveBeenCalledTimes(2);
+		expect(lineText(line)).toContain("*4");
+	});
+
 	it("re-reads git facts after a user command", async () => {
+		vi.useFakeTimers();
 		vi.spyOn(utils, "getProjectDir").mockReturnValue("/repo/head");
 		let branch = "before";
 		const repo = fakeRepo(
@@ -152,6 +190,8 @@ describe("status line VCS refresh", () => {
 
 		branch = "after";
 		line.refreshVcs();
+		// Right after the last read: the command's read waits out the interval.
+		vi.advanceTimersByTime(READ_INTERVAL_MS);
 		lineText(line);
 		await flushStatus();
 		expect(lineText(line)).toContain("after");
