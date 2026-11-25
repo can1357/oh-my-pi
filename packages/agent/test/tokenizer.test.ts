@@ -579,6 +579,38 @@ describe("chat-completions history estimate", () => {
 		);
 	});
 
+	test("bills surviving reasoning details on a replayed opaque summary block without charging opaque state", () => {
+		const model = completionsModel("mixed-opaque-summary-test", {
+			replayReasoningContent: false,
+			reasoningOpaqueReplay: true,
+		});
+		const reasoningDetails = [{ type: "reasoning.text", text: THINKING, signature: "signed-text" }];
+		const turn = thinkingTurn(
+			model,
+			JSON.stringify({
+				field: "reasoning_text",
+				reasoningOpaque: "opaque-state".repeat(300),
+				reasoningDetails,
+			}),
+		);
+		const [assistant] = convertMessages(model, { messages: [turn] }, model.compat);
+		expect(assistant).toMatchObject({
+			reasoning_text: THINKING,
+			reasoning_opaque: "opaque-state".repeat(300),
+			reasoning_details: reasoningDetails,
+		});
+
+		const opaqueOnlyTurn = thinkingTurn(
+			model,
+			JSON.stringify({ field: "reasoning_text", reasoningOpaque: "opaque-state".repeat(300) }),
+		);
+		const tokenizer = new Tokenizer(model);
+		const expected = tokenizer.countMessage(turn, floor) + tokenizer.countTokens(JSON.stringify(reasoningDetails));
+		expect(tokenizer.countMessage(turn, floor)).toBe(tokenizer.countMessage(opaqueOnlyTurn));
+		expect(tokenizer.countMessage(turn)).toBe(expected);
+		expect(tokenizer.countMessages([turn])).toBe(expected);
+	});
+
 	test.each([
 		{ view: "base", compatConfig: { reasoningOpaqueReplay: true } },
 		{ view: "whenThinking", compatConfig: { whenThinking: { reasoningOpaqueReplay: true } } },

@@ -740,6 +740,16 @@ export class Tokenizer {
 							trustedOpaqueBlock &&
 							(block.thinkingSignature === "reasoning_text" || opaqueSignature?.field === "reasoning_text")
 						) {
+							if (
+								block.thinkingSignature &&
+								opaqueSignature?.reasoningDetails &&
+								!excludeEncryptedReasoning &&
+								signaturesPriced &&
+								typeof replayedReasoning !== "number" &&
+								this.#receivesReasoningPayload(message)
+							) {
+								fragments.push(stringifyJson(opaqueSignature.reasoningDetails) ?? block.thinkingSignature);
+							}
 							continue;
 						}
 						// Chat-completions drops it unless LiteLLM replays it in `thinking_blocks`

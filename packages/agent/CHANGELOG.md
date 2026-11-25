@@ -20,6 +20,8 @@
 ### Changed
 
 - `resolveThresholdTokens()` caps the reserve-based default trigger at `DEFAULT_THRESHOLD_CEILING_TOKENS` (690,000), so 1M-class windows compact at 690K instead of 85% of the window; a configured percentage, fixed trigger, or `baseWindowTokens` is not capped
+- Fixed OpenTelemetry chat spans reporting the requested model as `gen_ai.response.model` when the provider recorded the model that actually served the turn ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+- Context estimates now count replayed GitHub Copilot reasoning summaries without charging for the encrypted state. ([#19989](https://github.com/can1357/oh-my-pi/pull/19989) by [@ashtacore](https://github.com/ashtacore))
 
 ## [19.2.1] - 2026-11-25
 
@@ -31,10 +33,6 @@
 ### Changed
 
 - Debug logs now time the wait between dequeuing input and the model request that carries it, by phase.
-- Added `Agent.continue(signal, { queuedOnly: true })` so hosts can start an idle turn with queued input without making a separate model call on the current context.
-### Fixed
-
-- Context estimates now count replayed GitHub Copilot reasoning summaries without charging for the encrypted state. ([#19989](https://github.com/can1357/oh-my-pi/pull/19989) by [@ashtacore](https://github.com/ashtacore))
 
 ## [19.2.0] - 2026-11-25
 
