@@ -33,6 +33,7 @@ import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const AGENT_ID = "accepted-result";
 
@@ -130,11 +131,11 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		} as AgentSessionEvent);
 	};
 	const session = {
+		...createSessionDefaults(),
 		state: { messages },
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		getMountedToolCommandNames: () => [],
@@ -165,7 +166,6 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		getLastAssistantMessage: () => messages[messages.length - 1],
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
 		abort: async () => {},
-		dispose: async () => {},
 		setIrcWakeTurnObserver: (
 			observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 		) => {
@@ -173,9 +173,6 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		},
 		trackIrcReply: () => {},
 		hasIrcInterrupts: () => false,
-		holdIrcWakes: () => () => {},
-		subscribeRunState: () => () => {},
-		isParentIrcSteer: () => false,
 		asyncJobManager: options?.asyncJobManager,
 	};
 	return {
