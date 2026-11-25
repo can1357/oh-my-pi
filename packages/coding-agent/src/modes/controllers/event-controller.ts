@@ -51,6 +51,7 @@ import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import type { TranscriptBlock } from "../../ui/shell";
+import { toolEditMode } from "../../ui/tools/edit";
 import { PREVIEW_LIMITS, previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
 import {
@@ -219,13 +220,6 @@ function formatAsyncWaitLabel(sources: WakeSources | undefined): string {
 function renderArgsWithIntent(args: unknown, intent: string | undefined): unknown {
 	if (intent === undefined || !isRecord(args) || INTENT_FIELD in args) return args;
 	return { ...args, [INTENT_FIELD]: intent };
-}
-
-/** Edit-like calls whose card computes a diff preview the approval dialog waits for. */
-function hasEditPreview(toolName: string, tool: unknown): boolean {
-	if (toolName === "apply_patch") return true;
-	if (toolName !== "edit") return false;
-	return isRecord(tool) && tool.mode !== undefined;
 }
 
 /** Identity of a reply across retries: when it was sent, by which model, how it ended. */
@@ -776,7 +770,7 @@ export class EventController {
 
 	/** A new card for `toolCallId`: an edit-like call's approval waits for its diff preview. */
 	#trackPreview(toolCallId: string, toolName: string, tool: unknown): void {
-		if (hasEditPreview(toolName, tool) && !this.#previewPending.has(toolCallId)) {
+		if (toolEditMode(toolName, tool) && !this.#previewPending.has(toolCallId)) {
 			this.#previewPending.set(toolCallId, Promise.withResolvers<void>());
 		}
 	}
@@ -987,11 +981,7 @@ export class EventController {
 			}));
 		const mediaPath = readMediaPath(result.details);
 		if (images.length === 0 && !mediaPath) return false;
-		if (images.length > 0) {
-			const next = new Map(assistant.toolResultImages.peek());
-			next.set(toolCallId, images);
-			assistant.toolResultImages.set(next);
-		}
+		assistant.setToolResultMedia(toolCallId, { images, mediaPath });
 		// A media-only result (a model, a PDF) still settles through the read group.
 		return images.length > 0 && cfgTerminalShowImages.get(settings);
 	}
