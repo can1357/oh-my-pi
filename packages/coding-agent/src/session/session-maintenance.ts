@@ -129,6 +129,7 @@ import type { HandoffGenerationOptions } from "./session-handoff";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
+import type { OversizedHistoryOverflowRecovery } from "./turn-recovery";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
 import lengthStopRetryTemplate from "../prompts/system/length-stop-retry.md" with { type: "text" };
@@ -569,6 +570,7 @@ export interface SessionMaintenanceHost {
 	): Promise<string | undefined>;
 	removeAssistantMessageFromActiveContext(message: AssistantMessage): void;
 	dropPersistedAssistantTurn(message: AssistantMessage): Promise<string | undefined>;
+	routeOversizedHistoryOverflow(message: AssistantMessage): OversizedHistoryOverflowRecovery;
 	/**
 	 * Keep a terminal failure whose turn was dropped from history visible to
 	 * post-settle readers (`AgentSession.getLastAssistantMessage`) until the next run.
@@ -3535,6 +3537,23 @@ export class SessionMaintenance {
 			sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow);
 		if (overflowEvidence || reclaimablePayloadHistory || (payloadRejection && !trustedPayloadRejection)) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+			if (overflowEvidence) {
+				const recovery = this.#host.routeOversizedHistoryOverflow(assistantMessage);
+				if (recovery === "terminal") {
+					this.#host.retainTerminalFailure(assistantMessage);
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				}
+				if (recovery === "already-handled") return COMPACTION_CHECK_CONTINUATION;
+				if (recovery === "shrink-retry") {
+					await this.#host.dropPersistedAssistantTurn(assistantMessage);
+					this.#host.scheduleAgentContinue({
+						source: "oversized-history-shrink-retry",
+						delayMs: 100,
+						generation,
+					});
+					return COMPACTION_CHECK_CONTINUATION;
+				}
+			}
 
 			// A larger token window cannot raise a trusted byte-size limit.
 			const promoted = !trustedPayloadRejection && (await this.#tryContextPromotion(assistantMessage));
