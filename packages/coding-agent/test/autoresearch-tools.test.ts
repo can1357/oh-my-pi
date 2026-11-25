@@ -20,7 +20,7 @@ import type {
 	RunDetails,
 } from "@oh-my-pi/pi-coding-agent/autoresearch/tool-details";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { type ReadonlySessionManager, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -49,7 +49,8 @@ function dashboardStub() {
 }
 
 function createCtx(cwd: string): ExtensionContext {
-	return { cwd, hasUI: false, sessionManager: SessionManager.inMemory(cwd) } as ExtensionContext;
+	const sessionManager: ReadonlySessionManager = SessionManager.inMemory(cwd);
+	return { cwd, hasUI: false, sessionManager } as ExtensionContext;
 }
 
 interface PiHarness {
