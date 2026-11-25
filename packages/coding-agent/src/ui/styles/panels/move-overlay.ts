@@ -8,6 +8,7 @@ import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { inputLine } from "@oh-my-pi/pi-tui/term/painters/prefs";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { TspCardProps, TspInputProps, TspItemProps, TspListProps } from "@oh-my-pi/pi-wire";
+import { keyLabel } from "../../keys/hints";
 import { bindingGlyph, boxRows, findNode, plainText, propsOf, selectNavGlyphs } from "./common";
 
 defineRolePainter("card", "omp.dialog.move", (node, cx): Block => {
@@ -41,7 +42,7 @@ defineRolePainter("card", "omp.dialog.move", (node, cx): Block => {
 		truncate(
 			theme.fg(
 				"dim",
-				`Type to filter · ${selectNavGlyphs()} navigate · ⇥ accept · ${bindingGlyph("tui.select.confirm", "enter")} confirm · ${bindingGlyph("tui.select.cancel", "escape")} cancel`,
+				`Type to filter · ${selectNavGlyphs(theme)} navigate · ${keyLabel(theme, "tab")} accept · ${bindingGlyph("tui.select.confirm", "enter", theme)} confirm · ${bindingGlyph("tui.select.cancel", "escape", theme)} cancel`,
 			),
 			inner,
 			"…",
