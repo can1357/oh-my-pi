@@ -2,9 +2,16 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
 ### Added
 
-- Added `Agent.continue(signal, { queuedOnly: true })` so hosts can start an idle turn with queued input without making a separate model call on the current context.
+- Added `Agent.peekDeliveringMessages(queue?)` for queued input on its way into the next request that the transcript has not recorded yet; queue listeners hear when it lands.
+- Added `Agent.continue(signal, { queuedOnly: true })` to start an idle turn using queued input without making a separate model call for the current context.
+
+### Changed
+
+- Debug logs now time the wait between dequeuing input and the model request that carries it, by phase.
 
 ## [19.2.0] - 2026-11-25
 

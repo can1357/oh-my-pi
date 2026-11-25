@@ -1,16 +1,20 @@
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
-import { ptree, Snowflake } from "@oh-my-pi/pi-utils";
+import { ptree, tryParseJson } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { AgentStorageApi } from "../../session/agent-storage";
 import { cfgProvidersFetch } from "../../session/settings";
 import { throwIfAborted } from "../../tools/tool-errors";
-import { ensureTool } from "../../utils/tools-manager";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../parallel";
 import type { RenderResult, SpecialHandler } from "./types";
-import { buildResult, formatMediaDuration, formatNumber, handlerSettings } from "./types";
+import {
+	buildResult,
+	formatIsoDate,
+	formatMediaDuration,
+	formatNumber,
+	handlerSettings,
+	loadPage,
+	type LoadPageOptions,
+} from "./types";
 
 interface YouTubeUrl {
 	videoId: string;
@@ -58,43 +62,35 @@ function parseYouTubeUrl(url: string): YouTubeUrl | null {
 	return null;
 }
 
-/**
- * Clean VTT subtitle content to plain text
- */
-function cleanVttToText(vtt: string): string {
-	const lines = vtt.split("\n");
-	const textLines: string[] = [];
-	let lastLine = "";
+interface CaptionTrack {
+	baseUrl: string;
+	languageCode: string;
+	kind?: string;
+}
 
-	for (const line of lines) {
-		// Skip WEBVTT header, timestamps, and metadata
-		if (
-			line.startsWith("WEBVTT") ||
-			line.startsWith("Kind:") ||
-			line.startsWith("Language:") ||
-			line.match(/^\d{2}:\d{2}/) || // Timestamp lines
-			line.match(/^[a-f0-9-]{36}$/) || // UUID cue identifiers
-			line.match(/^\d+$/) || // Numeric cue identifiers
-			line.includes("-->") ||
-			line.trim() === ""
-		) {
-			continue;
-		}
+interface PlayerResponse {
+	videoDetails?: {
+		title?: string;
+		author?: string;
+		shortDescription?: string;
+		lengthSeconds?: string;
+		viewCount?: string;
+	};
+	microformat?: { playerMicroformatRenderer?: { uploadDate?: string } };
+	captions?: { playerCaptionsTracklistRenderer?: { captionTracks?: CaptionTrack[] } };
+}
 
-		// Remove inline timestamp tags like <00:00:01.520>
-		let cleaned = line.replace(/<\d{2}:\d{2}:\d{2}\.\d{3}>/g, "");
-		// Remove other VTT tags like <c> </c>
-		cleaned = cleaned.replace(/<\/?[^>]+>/g, "");
-		cleaned = cleaned.trim();
+interface CaptionResponse {
+	events?: { segs?: { utf8?: string }[] }[];
+}
 
-		// Skip duplicates (auto-generated captions often repeat)
-		if (cleaned && cleaned !== lastLine) {
-			textLines.push(cleaned);
-			lastLine = cleaned;
-		}
+async function loadJson<T>(url: string, options: LoadPageOptions): Promise<T | null> {
+	try {
+		const page = await loadPage(url, options);
+		return page.ok ? tryParseJson<T>(page.content) : null;
+	} catch {
+		return null;
 	}
-
-	return textLines.join(" ").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -149,158 +145,60 @@ export const handleYouTube: SpecialHandler = async (
 		}
 	}
 
-	// Ensure yt-dlp is available (auto-download if missing)
-	const ytdlp = await ensureTool("yt-dlp", { signal, silent: true });
-	if (!ytdlp) {
-		return {
-			url,
-			finalUrl: url,
-			contentType: "text/plain",
-			method: "youtube-no-ytdlp",
-			content: "YouTube video detected but yt-dlp could not be installed.",
-			fetchedAt: new Date().toISOString(),
-			truncated: false,
-			notes: ["yt-dlp installation failed"],
-		};
-	}
-
-	const execOptions = {
-		mode: "group" as const,
-		signal,
-		allowNonZero: true,
-		allowAbort: true,
-		stderr: "full" as const,
-	};
-
-	// Unique base for the metadata/subtitle output so concurrent scrapes of the
-	// same video cannot write over each other.
-	const tmpBase = path.join(os.tmpdir(), `yt-${yt.videoId}-${Snowflake.next()}`);
-
-	// Fetch video metadata and English manual subtitles in one process.
-	// --no-simulate is required: --dump-json forces simulate mode, which makes
-	// yt-dlp return before writing any subtitle files (YoutubeDL.py:3373 vs :3387).
-	const metaResult = await ptree.exec(
-		[
-			ytdlp,
-			"--dump-json",
-			"--write-sub",
-			"--sub-lang",
-			"en,en-US,en-GB",
-			"--sub-format",
-			"vtt",
-			"--skip-download",
-			"--no-simulate",
-			"--no-warnings",
-			"--no-playlist",
-			"-o",
-			tmpBase,
-			videoUrl,
-		],
-		execOptions,
+	const playerUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+	const player = (clientName: string, clientVersion: string, userAgent: string) =>
+		loadJson<PlayerResponse>(playerUrl, {
+			signal,
+			method: "POST",
+			headers: { "Content-Type": "application/json", "User-Agent": userAgent },
+			body: JSON.stringify({ context: { client: { clientName, clientVersion, hl: "en" } }, videoId: yt.videoId }),
+		});
+	// The Android player supplies usable timed-text URLs; the web player supplies the upload date.
+	const web = player("WEB", "2.20251120.01.00", "Mozilla/5.0");
+	const android = await player(
+		"ANDROID",
+		"20.10.38",
+		"com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
 	);
-
-	let title = "YouTube Video";
-	let channel = "";
-	let description = "";
-	let duration = 0;
-	let uploadDate = "";
-	let viewCount = 0;
-	let hasManualSubs = false;
-	let hasAutoSubs = false;
-
-	// The combined spawn exits nonzero when only the subtitle transfer fails
-	// (yt-dlp prints --dump-json before it writes subtitle files), so the JSON
-	// is parsed independently of the exit code. Unusable stdout keeps the
-	// defaults, which also keeps both caption-availability flags false.
-	if (metaResult.stdout.trim()) {
-		try {
-			const meta = JSON.parse(metaResult.stdout) as {
-				title?: string;
-				channel?: string;
-				uploader?: string;
-				description?: string;
-				duration?: number;
-				upload_date?: string;
-				view_count?: number;
-				subtitles?: Record<string, unknown>;
-				automatic_captions?: Record<string, unknown>;
-			};
-			title = meta.title || title;
-			channel = meta.channel || meta.uploader || "";
-			description = meta.description || "";
-			duration = meta.duration || 0;
-			uploadDate = meta.upload_date || "";
-			viewCount = meta.view_count || 0;
-			hasManualSubs = Boolean(meta.subtitles && Object.keys(meta.subtitles).length > 0);
-			hasAutoSubs = Boolean(meta.automatic_captions && Object.keys(meta.automatic_captions).length > 0);
-		} catch {}
-	}
-
-	// Format upload date
-	let formattedDate = "";
-	if (uploadDate && uploadDate.length === 8) {
-		formattedDate = `${uploadDate.slice(0, 4)}-${uploadDate.slice(4, 6)}-${uploadDate.slice(6, 8)}`;
-	}
-
-	// Try to fetch subtitles
+	const tracks = android?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
 	let transcript = "";
 	let transcriptSource = "";
-
-	try {
-		// The metadata spawn already wrote English manual subtitles next to tmpBase
-		if (hasManualSubs) {
-			// Find the downloaded subtitle file using glob
-			const subFiles = await Array.fromAsync(new Bun.Glob(`${tmpBase}*.vtt`).scan({ absolute: true }));
-			if (subFiles.length > 0) {
-				const vttContent = await Bun.file(subFiles[0]).text();
-				transcript = cleanVttToText(vttContent);
-				transcriptSource = "manual";
-				notes.push("Using manual subtitles");
+	for (const automatic of [false, true]) {
+		for (const track of tracks) {
+			if (!/^en(?:-|$)/i.test(track.languageCode) || (track.kind === "asr") !== automatic) continue;
+			if (signal?.aborted) break;
+			const captionUrl = URL.parse(track.baseUrl);
+			if (captionUrl?.origin !== "https://www.youtube.com" || captionUrl.pathname !== "/api/timedtext") continue;
+			captionUrl.searchParams.set("fmt", "json3");
+			const captions = await loadJson<CaptionResponse>(captionUrl.href, { signal });
+			const lines: string[] = [];
+			for (const event of captions?.events ?? []) {
+				const line = event.segs
+					?.map(segment => segment.utf8 ?? "")
+					.join("")
+					.replace(/\s+/g, " ")
+					.trim();
+				if (line && line !== lines.at(-1)) lines.push(line);
 			}
+			if (lines.length === 0) continue;
+			transcript = lines.join(" ");
+			transcriptSource = automatic ? "auto-generated" : "manual";
+			notes.push(automatic ? "Using auto-generated captions" : "Using manual subtitles");
+			break;
 		}
-
-		// Fall back to auto-generated captions in a second process: with both
-		// --write-sub and --write-auto-sub yt-dlp prefers manual per language, so a
-		// failed manual transfer would not fall back to auto, and the written file
-		// would no longer say which source it came from.
-		if (!transcript && hasAutoSubs) {
-			const autoResult = await ptree.exec(
-				[
-					ytdlp,
-					"--write-auto-sub",
-					"--sub-lang",
-					"en,en-US,en-GB",
-					"--sub-format",
-					"vtt",
-					"--skip-download",
-					"--no-warnings",
-					"--no-playlist",
-					"-o",
-					tmpBase,
-					videoUrl,
-				],
-				execOptions,
-			);
-
-			if (autoResult.ok) {
-				const subFiles = await Array.fromAsync(new Bun.Glob(`${tmpBase}*.vtt`).scan({ absolute: true }));
-				if (subFiles.length > 0) {
-					const vttContent = await Bun.file(subFiles[0]).text();
-					transcript = cleanVttToText(vttContent);
-					transcriptSource = "auto-generated";
-					notes.push("Using auto-generated captions");
-				}
-			}
-		}
-	} finally {
-		// Cleanup temp files (fire-and-forget with error suppression)
-		Array.fromAsync(new Bun.Glob(`${tmpBase}*`).scan({ absolute: true }))
-			.then(tmpFiles => Promise.all(tmpFiles.map(f => fs.unlink(f).catch(() => {}))))
-			.catch(() => {});
+		if (transcript) break;
 	}
+	const webPlayer = await web;
+	throwIfAborted(userSignal);
+	const details = android?.videoDetails ?? webPlayer?.videoDetails;
+	if (!details?.title) return null;
+	const { title, author: channel, shortDescription: description } = details;
+	const duration = Number(details.lengthSeconds);
+	const viewCount = Number(details.viewCount);
+	const formattedDate = formatIsoDate(webPlayer?.microformat?.playerMicroformatRenderer?.uploadDate);
+
 	// Only a user-initiated abort is fatal; the per-fetch time budget expiring
 	// just means partial metadata/transcript, which we surface as a note.
-	throwIfAborted(userSignal);
 	if (signal?.aborted) {
 		notes.push("Fetch time budget exhausted; metadata/transcript may be incomplete");
 	}
