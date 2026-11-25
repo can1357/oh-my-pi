@@ -180,11 +180,13 @@ export interface StatusLineView {
 
 /**
  * The status line's data: one {@link StatusFacts} snapshot the composer chrome and the footer
- * draw, recomputed from the viewed session, settings, git and quota watchers.
+ * draw, recomputed from the viewed session, settings, git and quota reads.
  */
 export interface StatusLineModel extends StatusLineView {
 	/** Re-read session-derived facts now (usage, model, context, modes). Replaces `statusLine.invalidate()`. */
 	refresh(): void;
+	/** Re-read the git/jj facts too: a user `!`/`$` command may have moved HEAD or edited the tree. */
+	refreshVcs(): void;
 	/** Restart the active-processing clock (new session, `/new`). */
 	resetActiveTime(): void;
 	/** A turn started (the active clock runs). */

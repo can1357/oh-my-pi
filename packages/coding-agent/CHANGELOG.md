@@ -39,6 +39,7 @@
 
 ### Changed
 
+- The status line re-reads the git/jj branch and change counts when a run starts, after each turn, and after `!`/`$` commands, instead of polling the repository every few seconds; a checkout made in another terminal while the session is idle shows up at the next prompt
 - A subagent spawned with a single step receives that step as written, without the `Complete assignment thoroughly:` and `# Step 1 of 1` framing
 - Shell command previews show chained commands with their real `&&`/`||` operators instead of `and`/`or`, and `cd dir` as written instead of a `cwd dir` badge
 - Asked to verify, optimize, or measure something, the agent keeps its checks to the code in question: that code's tests and its callers' instead of the whole suite, and a micro-benchmark or a scaled-down input instead of the full benchmark or the full slow case, which it runs once at the end

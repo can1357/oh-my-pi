@@ -4,6 +4,10 @@
  * moves a mode or a badge, when a background read (git, usage quota, pull
  * request) lands, and on the wall clock while a segment shows time.
  *
+ * Git/jj facts are read again when a run starts (edits made while idle) and
+ * when a turn ends (what its tools did), and after a user `!`/`$` command
+ * ({@link SessionStatusLine.refreshVcs}); nothing polls the repository.
+ *
  * Session state is not reactive, so the session's events bump a revision the
  * snapshot reads; {@link SessionStatusLine.refresh} does the same for changes
  * that emit no event (a model switch through the API, a settings edit).
@@ -29,8 +33,6 @@ import {
 } from "../view-model/overlays/codex-reset-fireworks";
 import { codexResetSnapshot, quotaFromReports } from "./status-quota";
 
-/** Git and jj status are refreshed at most this often (a HEAD move refreshes the branch at once). */
-const VCS_STATUS_TTL_MS = 5_000;
 /** Usage reports are fetched at most this often. */
 const USAGE_TTL_MS = 5 * 60_000;
 /** First usage fetch waits this long so startup paints first. */
@@ -135,11 +137,10 @@ export class SessionStatusLine implements StatusLineModel {
 	#brandEdgeAt: number | undefined;
 	/** Drops {@link #brandEdgeAt} once its fade is over. */
 	#brandFade: NodeJS.Timeout | undefined;
-	#vcsFetchedAt = 0;
+	/** The git/jj facts are read again on the next paint; cleared when a read starts. */
+	#vcsStale = true;
 	#vcsInFlight = false;
 	#vcsGeneration = 0;
-	#unwatchVcs: (() => void) | undefined;
-	#watchedRoot: string | undefined;
 	readonly #defaultBranches = new Map<string, string>();
 	/** Pull request lookups by `cwd\0branch`, each kept for {@link PR_TTL_MS}. */
 	readonly #prs = new Map<string, { at: number; pr: { number: number; url: string } | null }>();
@@ -186,6 +187,11 @@ export class SessionStatusLine implements StatusLineModel {
 
 	refresh(): void {
 		this.#revision.set(this.#revision.peek() + 1);
+	}
+
+	refreshVcs(): void {
+		this.#vcsStale = true;
+		this.refresh();
 	}
 
 	/** Zero the viewed session's active time; a running window is dropped too (its end then finds the meter idle). */
@@ -316,8 +322,7 @@ export class SessionStatusLine implements StatusLineModel {
 	applyCwdChange(): void {
 		this.#vcsGeneration++;
 		this.#vcs.set(undefined);
-		this.#vcsFetchedAt = 0;
-		this.#retireWatcher();
+		this.#vcsStale = true;
 		this.refresh();
 	}
 
@@ -339,7 +344,6 @@ export class SessionStatusLine implements StatusLineModel {
 		clearTimeout(this.#usageTimer);
 		clearTimeout(this.#pricingTimer);
 		clearTimeout(this.#brandFade);
-		this.#retireWatcher();
 	}
 
 	/** Wake at the shown cost's next time-based tariff change (peak/off-peak), idle or not, to repaint it. */
@@ -365,8 +369,12 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#unsubscribe?.();
 		this.#unsubscribe = session.subscribe(event => {
 			// Every delta would rebuild the facts (account, context usage, compaction) hundreds of times a second.
-			if (event.type === "message_update") this.#queueStreamBump();
-			else this.#queueBump();
+			if (event.type === "message_update") {
+				this.#queueStreamBump();
+				return;
+			}
+			if (event.type === "agent_start" || event.type === "turn_end") this.#vcsStale = true;
+			this.#queueBump();
 		});
 		this.#quota.set(undefined);
 		this.#usageKey = "";
@@ -575,8 +583,8 @@ export class SessionStatusLine implements StatusLineModel {
 		if (!statusLineHost.gitEnabled() || (!wantsGit && !wantsPath)) return {};
 		const snapshot = this.#vcs();
 		const cwd = getProjectDir();
-		if (!this.#vcsInFlight && (snapshot?.cwd !== cwd || Date.now() - this.#vcsFetchedAt >= VCS_STATUS_TTL_MS)) {
-			void this.#refreshVcs(cwd, segments.includes("pr"));
+		if (!this.#vcsInFlight && (this.#vcsStale || snapshot?.cwd !== cwd)) {
+			void this.#readVcs(cwd, segments.includes("pr"));
 		}
 		if (!snapshot || snapshot.cwd !== cwd) return {};
 		return {
@@ -586,8 +594,9 @@ export class SessionStatusLine implements StatusLineModel {
 		};
 	}
 
-	async #refreshVcs(cwd: string, wantsPr: boolean): Promise<void> {
+	async #readVcs(cwd: string, wantsPr: boolean): Promise<void> {
 		this.#vcsInFlight = true;
+		this.#vcsStale = false;
 		const generation = this.#vcsGeneration;
 		let next: VcsSnapshot | undefined;
 		try {
@@ -597,7 +606,6 @@ export class SessionStatusLine implements StatusLineModel {
 			if (!repository) {
 				next = { cwd, branch: null, status: null, pr: null };
 			} else {
-				this.#watch(repository);
 				const git = repository.asGit();
 				const headBranch = (head: ReturnType<NonNullable<typeof git>["headSync"]> | undefined) =>
 					head?.kind === "ref" ? (head.branch ?? head.refName ?? "HEAD") : head ? "detached" : null;
@@ -626,8 +634,10 @@ export class SessionStatusLine implements StatusLineModel {
 		} finally {
 			this.#vcsInFlight = false;
 		}
-		if (this.#disposed || generation !== this.#vcsGeneration) return;
-		this.#vcsFetchedAt = Date.now();
+		if (this.#disposed) return;
+		// Invalidated while this read ran (a turn ended, the cwd moved): read again.
+		if (this.#vcsStale) this.refresh();
+		if (generation !== this.#vcsGeneration) return;
 		const previous = this.#vcs.peek();
 		if (JSON.stringify(previous) !== JSON.stringify(next)) this.#vcs.set(next);
 		const pr = next.pr ?? undefined;
@@ -635,10 +645,6 @@ export class SessionStatusLine implements StatusLineModel {
 			this.#lastPr = pr;
 			this.#onPullRequest?.(pr);
 		}
-		// A watcher-less repository is polled through the TTL: wake once it expires.
-		setTimeout(() => {
-			if (!this.#disposed) this.refresh();
-		}, VCS_STATUS_TTL_MS).unref?.();
 	}
 
 	/** The repository's default branch (`main` until resolved), cached per directory. */
@@ -673,27 +679,6 @@ export class SessionStatusLine implements StatusLineModel {
 		} catch {
 			return null;
 		}
-	}
-
-	#watch(repository: NonNullable<ReturnType<typeof vcs.repo>>): void {
-		const root = repository.root();
-		if (this.#watchedRoot === root) return;
-		this.#retireWatcher();
-		this.#watchedRoot = root;
-		try {
-			this.#unwatchVcs = vcs.watch(repository, () => {
-				this.#vcsFetchedAt = 0;
-				this.refresh();
-			});
-		} catch {
-			this.#unwatchVcs = undefined;
-		}
-	}
-
-	#retireWatcher(): void {
-		this.#unwatchVcs?.();
-		this.#unwatchVcs = undefined;
-		this.#watchedRoot = undefined;
 	}
 
 	// ─── Usage quota ────────────────────────────────────────────────────────

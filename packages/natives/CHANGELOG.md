@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `watch` and `HEAD_WATCH_INTERVAL_MS` from `@oh-my-pi/pi-natives/vcs`; read the repository again when its state matters instead
+
 ### Fixed
 
 - Fixed open PTY sessions and `reapChild()` waits each holding a native blocking-pool thread, which stalled new PTY starts and other native blocking work once 8 terminals were open on Windows (512 elsewhere) ([#20283](https://github.com/can1357/oh-my-pi/pull/20283) by [@iliaal](https://github.com/iliaal))

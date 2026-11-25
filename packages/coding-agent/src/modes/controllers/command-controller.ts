@@ -1989,8 +1989,8 @@ export class CommandController {
 			detachInput?.();
 			if (detachInput) this.ctx.composer.setKeyPassthrough(false);
 			if (this.ctx.bashRun === run) this.ctx.bashRun = undefined;
-			// The recorded run is context now: the context meter counts it.
-			this.ctx.statusLine.refresh();
+			// The recorded run is context now (the context meter counts it), and it may have moved HEAD.
+			this.ctx.statusLine.refreshVcs();
 		}
 		return false;
 	}
@@ -2065,8 +2065,8 @@ export class CommandController {
 		}
 
 		if (this.ctx.pythonRun === run) this.ctx.pythonRun = undefined;
-		// The recorded cell is context now: the context meter counts it.
-		this.ctx.statusLine.refresh();
+		// The recorded cell is context now (the context meter counts it), and it may have moved HEAD.
+		this.ctx.statusLine.refreshVcs();
 	}
 
 	async handleCompactCommand(
