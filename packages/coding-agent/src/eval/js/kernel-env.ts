@@ -17,7 +17,8 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, getBunShimDir, isCompiledBinary } from "@oh-my-pi/pi-utils";
+import { $which, errorMessage, getBunShimDir, isCompiledBinary, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { resolveExecutablePath } from "../../subprocess/worker-client";
 
 /** Shell shim that makes the executable at `execPath` act as bun. */
 export function bunShimScript(execPath: string): string {
@@ -28,7 +29,7 @@ export function bunShimScript(execPath: string): string {
 export interface BunShimOptions {
 	/** Whether this process is a compiled omp (default: detected). */
 	compiled?: boolean;
-	/** Executable the shim re-enters (default: this process). */
+	/** Executable the shim re-enters (default: this omp's executable, as `resolveExecutablePath` finds it after an upgrade). */
 	execPath?: string;
 	/** Root under which each executable gets its own shim directory (default: the agent cache). */
 	shimRoot?: string;
@@ -38,8 +39,11 @@ export interface BunShimOptions {
 
 /**
  * The shim directory to append to `env.PATH`, or undefined when no shim is
- * needed: a source run (plain bun, whose fallback is bun), a PATH that already
- * resolves `bun`, or Windows (no POSIX shim).
+ * needed or none can be published: a source run (plain bun, whose fallback is
+ * bun), a PATH that already resolves `bun`, Windows (no POSIX shim), or a
+ * cache that cannot take the file (unwritable, full, blocked). Without a shim
+ * a cell's `bun` still reaches this executable, and the kernel's `OMPCODE=1`
+ * makes that launch refuse to run headless.
  *
  * Each executable path gets its own directory under the root, named by a hash
  * of that path, and its shim's content is a pure function of the path. So a
@@ -54,23 +58,40 @@ export function bunShimPathEntry(env: Record<string, string>, options: BunShimOp
 	if (!(options.compiled ?? isCompiledBinary())) return undefined;
 	const which = options.which ?? ((command, PATH) => $which(command, { PATH }));
 	if (which("bun", env.PATH) !== null) return undefined;
-	const execPath = options.execPath ?? process.execPath;
+	const execPath = options.execPath ?? resolveExecutablePath();
 	const shimDir = path.join(options.shimRoot ?? getBunShimDir(), Bun.hash(execPath).toString(16));
 	const shim = path.join(shimDir, "bun");
 	const script = bunShimScript(execPath);
-	let current: string | undefined;
 	try {
-		current = fs.readFileSync(shim, "utf8");
-	} catch {
-		current = undefined;
-	}
-	if (current !== script) {
-		fs.mkdirSync(shimDir, { recursive: true });
-		const staging = path.join(shimDir, `.bun.${process.pid}.${Date.now().toString(36)}`);
-		fs.writeFileSync(staging, script, { mode: 0o755 });
-		fs.renameSync(staging, shim);
+		if (readShim(shim) !== script) publishShim(shimDir, shim, script);
+	} catch (error) {
+		logger.warn("JS eval kernel starts without its bun shim", { shimDir, error: errorMessage(error) });
+		return undefined;
 	}
 	return shimDir;
+}
+
+/** The published shim's content, or undefined when there is none yet. */
+function readShim(shim: string): string | undefined {
+	try {
+		return fs.readFileSync(shim, "utf8");
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+}
+
+/** Write `script` beside `shim` and rename it into place; a failed attempt leaves no staging file. */
+function publishShim(shimDir: string, shim: string, script: string): void {
+	fs.mkdirSync(shimDir, { recursive: true });
+	const staging = path.join(shimDir, `.bun.${process.pid}.${Date.now().toString(36)}`);
+	try {
+		fs.writeFileSync(staging, script, { mode: 0o755 });
+		fs.renameSync(staging, shim);
+	} catch (error) {
+		fs.rmSync(staging, { force: true });
+		throw error;
+	}
 }
 
 /** Kernel env: `base` plus the tool-process mark and, when needed, the `bun` shim appended to PATH. */

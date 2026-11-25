@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { bunShimPathEntry, bunShimScript, jsKernelEnv } from "../../src/eval/js/kernel-env";
+import * as workerClient from "../../src/subprocess/worker-client";
 
 const posixOnly = process.platform === "win32" ? describe.skip : describe;
 
@@ -14,6 +15,7 @@ posixOnly("JS eval kernel env", () => {
 		return dir;
 	};
 	afterEach(() => {
+		mock.restore();
 		for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -68,5 +70,38 @@ posixOnly("JS eval kernel env", () => {
 		const before = fs.statSync(path.join(dirA ?? "", "bun")).mtimeMs;
 		expect(bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/versions/a/omp" })).toBe(dirA);
 		expect(fs.statSync(path.join(dirA ?? "", "bun")).mtimeMs).toBe(before);
+	});
+
+	it("starts the kernel without a shim when the shim root cannot be created, keeping the tool-process mark", () => {
+		const root = shimRoot();
+		const blocked = path.join(root, "not-a-dir");
+		fs.writeFileSync(blocked, "");
+		const env = jsKernelEnv(
+			{ PATH: "/usr/bin:/bin" },
+			{ compiled: true, execPath: "/opt/omp/omp", shimRoot: blocked, which: () => null },
+		);
+		expect(env.PATH).toBe("/usr/bin:/bin");
+		expect(env.OMPCODE).toBe("1");
+	});
+
+	it("leaves no staging file behind when publishing the shim fails", () => {
+		const root = shimRoot();
+		spyOn(fs, "renameSync").mockImplementation(() => {
+			throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+		});
+		const shimDir = bunShimPathEntry(
+			{ PATH: "/x" },
+			{ compiled: true, execPath: "/opt/omp/omp", shimRoot: root, which: () => null },
+		);
+		expect(shimDir).toBeUndefined();
+		const [hashDir] = fs.readdirSync(root);
+		expect(fs.readdirSync(path.join(root, hashDir ?? ""))).toEqual([]);
+	});
+
+	it("re-enters the executable an upgrade left in place, not a pruned process.execPath", () => {
+		const root = shimRoot();
+		spyOn(workerClient, "resolveExecutablePath").mockReturnValue("/usr/local/bin/omp");
+		const shimDir = bunShimPathEntry({ PATH: "/x" }, { compiled: true, shimRoot: root, which: () => null });
+		expect(fs.readFileSync(path.join(shimDir ?? "", "bun"), "utf8")).toBe(bunShimScript("/usr/local/bin/omp"));
 	});
 });
