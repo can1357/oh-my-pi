@@ -541,6 +541,35 @@ export const cfgTaskMaxRecursionDepth = register({
 	},
 });
 
+function validateTaskMaxRetries(value: unknown): void {
+	if (value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= -1)) return;
+	throw new Error(
+		`Invalid task.maxRetries: expected -1 to inherit or a non-negative integer, got ${Bun.inspect(value)}.`,
+	);
+}
+
+export const cfgTaskMaxRetries = register({
+	id: "task.maxRetries",
+	type: "number",
+	default: -1,
+	validate: validateTaskMaxRetries,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Retry Attempts",
+		description:
+			"Session retry attempts per subagent model. -1 inherits retry.maxRetries; 0 disables same-model session retries. Provider transport retries and configured credential/model recovery still apply. Use task.maxRuntimeMs for a wall-clock limit.",
+		options: [
+			{ value: "-1", label: "Inherit", description: "Default" },
+			{ value: "0", label: "No session retries" },
+			{ value: "1", label: "1 retry" },
+			{ value: "2", label: "2 retries" },
+			{ value: "5", label: "5 retries" },
+			{ value: "10", label: "10 retries" },
+		],
+	},
+});
+
 export const cfgTaskMaxRuntimeMs = register({
 	id: "task.maxRuntimeMs",
 	type: "number",
