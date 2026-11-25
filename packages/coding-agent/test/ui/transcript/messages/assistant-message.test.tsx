@@ -341,3 +341,26 @@ test("assistant embeds draw their image and page still, but do not load when ima
 		transcript.clear();
 	}
 });
+
+test("embeds at a reply's edges keep their image rows in the transcript block", async () => {
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const img = (alt: string) => `<img src="data:image/png;base64,${PNG_1X1}" alt="${alt}">`;
+	const text = [img("Lead"), "", "Between", "", img("Tail")].join("\n");
+	const block = transcript.append(() => (
+		<AssistantMessageBlock
+			model={{ message: assistant([{ type: "text", text }], 2), finalized: true, renderEmbeds: true }}
+		/>
+	));
+	const paint = () => paintNode(env, block.node, 80).rows.join("\n");
+	try {
+		paint();
+		transcript.settle(block);
+		await figureWorkSettled();
+		paint();
+		await images.whenEncoded();
+		expect(paint()).toMatch(/^\x1bP[\d;]*q[^\n]*\n\n[^\n]*Between[^\n]*\n\n\x1bP[\d;]*q[^\n]*$/);
+	} finally {
+		transcript.clear();
+	}
+});

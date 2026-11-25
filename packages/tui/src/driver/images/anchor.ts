@@ -12,6 +12,17 @@
 /** A reserved image row. */
 export const RESERVED_ROW = "\x1b[0m";
 
+/** An image sequence: SIXEL (and any tmux-wrapped sequence) as DCS, a kitty placement as APC, iTerm2 as OSC 1337. */
+const IMAGE_SEQUENCE = /\x1b(?:P|_G|\]1337;)/;
+
+/**
+ * Whether `row` is part of an image (reserved, or carrying its sequence): escape-only, yet not
+ * blank. Row trimmers keep these rows, or the image loses its place on screen.
+ */
+export function holdsImage(row: string): boolean {
+	return row === RESERVED_ROW || IMAGE_SEQUENCE.test(row);
+}
+
 /** `rows` rows drawing `sequence` from the first one. A single row is the bare sequence. */
 export function anchoredRows(sequence: string, rows: number): string[] {
 	const height = Math.max(1, rows);
