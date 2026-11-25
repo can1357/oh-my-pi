@@ -427,10 +427,12 @@ export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 
 /**
  * Detect usage/quota limit errors in error messages (persistent, requires credential switch).
- * `(daily|weekly) usage quota has been exhausted` is Devin's account allowance refusal. Its weekly
- * form names no reset time ("Your weekly usage quota has been exhausted. Visit … to purchase
- * on-demand usage"), so this phrase is all that marks it; the window word keeps a per-minute
- * throttle phrased the same way out.
+ * `(daily|weekly) usage quota has been exhausted` matches any provider, Devin's account allowance
+ * refusal included. Devin's weekly form names no reset time ("Your weekly usage quota has been
+ * exhausted. Visit … to purchase on-demand usage"), so this phrase is all that marks it; the window
+ * word keeps a per-minute throttle phrased the same way out. With no usage report, the session
+ * retry path blocks a spent weekly login only for the default `QUOTA_EXHAUSTED` backoff (30 min),
+ * so it costs one refused request per backoff window until the weekly reset.
  */
 const USAGE_LIMIT_PATTERN =
 	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|(?:daily|weekly) usage quota has been exhausted|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|out of (?:extra )?usage|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
