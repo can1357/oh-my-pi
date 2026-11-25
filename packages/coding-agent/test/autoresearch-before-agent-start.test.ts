@@ -14,8 +14,8 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // Reproduces issue #3665: when the upstream system prompt resolution leaves
-// `event.systemPrompt` unset, the autoresearch handler must still render its
-// own block instead of crashing with `event.systemPrompt.join is not a function`.
+// `event.systemPromptBlocks` unset, the autoresearch handler must still render its
+// own block instead of crashing with `event.systemPromptBlocks.join is not a function`.
 
 interface CapturedHandlers {
 	session_start?: ExtensionHandler<SessionStartEvent>;
@@ -95,7 +95,7 @@ describe("autoresearch before_agent_start handler", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("renders an autoresearch block when event.systemPrompt is undefined (issue #3665)", async () => {
+	it("renders an autoresearch block when event.systemPromptBlocks is undefined (issue #3665)", async () => {
 		const { handlers } = buildHarness();
 		if (!handlers.session_start || !handlers.before_agent_start) {
 			throw new Error("Autoresearch extension should register both session_start and before_agent_start");
@@ -104,7 +104,7 @@ describe("autoresearch before_agent_start handler", () => {
 		const ctx = makeCtx(cwdDir.path());
 		await handlers.session_start({ type: "session_start" } as SessionStartEvent, ctx);
 
-		// Crash repro: upstream leaves event.systemPrompt unset; handler must
+		// Crash repro: upstream leaves event.systemPromptBlocks unset; handler must
 		// not throw, and the rendered block must still contain the autoresearch
 		// header so the model gets its mode-specific instructions.
 		const event = {
@@ -122,7 +122,7 @@ describe("autoresearch before_agent_start handler", () => {
 		expect(blocks[0]).toContain("Autoresearch Mode");
 	});
 
-	it("joins event.systemPrompt blocks into the rendered base prompt", async () => {
+	it("joins event.systemPromptBlocks into the rendered base prompt", async () => {
 		const { handlers } = buildHarness();
 		if (!handlers.session_start || !handlers.before_agent_start) {
 			throw new Error("Autoresearch extension should register both session_start and before_agent_start");
@@ -135,7 +135,8 @@ describe("autoresearch before_agent_start handler", () => {
 			type: "before_agent_start",
 			reason: "prompt",
 			prompt: "kick off",
-			systemPrompt: ["alpha block", "beta block"],
+			systemPrompt: "alpha block\n\nbeta block",
+			systemPromptBlocks: ["alpha block", "beta block"],
 		};
 
 		const result = (await handlers.before_agent_start(event, ctx)) as BeforeAgentStartEventResult;

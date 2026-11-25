@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- `before_agent_start`: `event.systemPrompt` is now the Pi-compatible string view — the current system-prompt blocks joined with `\n\n` — instead of an array. Extensions that read it as an array must migrate to the new `event.systemPromptBlocks`. Prompt overrides still accept either a string (applied as one replacement block) or an array of blocks and remain complete replacements; without an override, the original block boundaries are preserved.
 - Removed `errorMessage` from `@oh-my-pi/pi-coding-agent/disasm/protocol`, `slash-commands/helpers/parse` and `subprocess/worker-runtime`; import it from `@oh-my-pi/pi-utils/type-guards` ([#20479](https://github.com/can1357/oh-my-pi/pull/20479) by [@H4vC](https://github.com/H4vC))
 - Removed `flattenLine` from `@oh-my-pi/pi-coding-agent/utils/render-utils`; import it from `@oh-my-pi/pi-tui/text/sanitize` ([#20484](https://github.com/can1357/oh-my-pi/pull/20484) by [@H4vC](https://github.com/H4vC))
 - Moved `fuzzyHits` to `@oh-my-pi/pi-coding-agent/utils/fuzzy` (was exported from `modes/view-model/overlays/model-browser` and `ui/overlays/panels/extension-list-model`), and removed `stripInlineMarkdown` from `ui/overlays/panels/plan-sections`; import it from `plan-mode/plan-toc` ([#20485](https://github.com/can1357/oh-my-pi/pull/20485) by [@H4vC](https://github.com/H4vC))

@@ -2829,7 +2829,8 @@ export class ExtensionRunner {
 					reason,
 					prompt,
 					images,
-					systemPrompt: currentSystemPrompt,
+					systemPrompt: currentSystemPrompt.join("\n\n"),
+					systemPromptBlocks: currentSystemPrompt,
 				};
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,

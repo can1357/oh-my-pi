@@ -317,11 +317,11 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		runtime.lastRunDuration = pendingRun?.durationSeconds ?? runtime.lastRunDuration;
 		runtime.lastRunAsi = pendingRun?.parsedAsi ?? runtime.lastRunAsi;
 		const state = runtime.state;
-		// `event.systemPrompt` is typed `string[]`, but upstream code paths can leave
-		// it unset (issue #3665). Coerce defensively so the autoresearch block still
-		// renders — the model just loses the upstream prefix for this turn, which is
-		// strictly better than crashing the handler.
-		const basePrompt = Array.isArray(event.systemPrompt) ? event.systemPrompt.join("\n\n") : "";
+		// `systemPromptBlocks` is the authoritative block view; upstream code paths
+		// can leave the views unset (issue #3665). Coerce defensively so the
+		// autoresearch block still renders — the model just loses the upstream prefix
+		// for this turn, which is strictly better than crashing the handler.
+		const basePrompt = Array.isArray(event.systemPromptBlocks) ? event.systemPromptBlocks.join("\n\n") : "";
 		const currentSegmentResults = currentResults(state.results, state.currentSegment);
 		const baselineMetric = findBaselineMetric(state.results, state.currentSegment);
 		const baselineRunNumber = findBaselineRunNumber(state.results, state.currentSegment);

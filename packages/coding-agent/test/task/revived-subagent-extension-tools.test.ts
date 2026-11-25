@@ -70,6 +70,7 @@ afterEach(async () => {
 let discoveryGate: (() => Promise<void>) | undefined;
 /** `reason` of every `before_agent_start` the extension saw, across its bindings. */
 const turnStartReasons: string[] = [];
+const turnStartPromptViews: { reason: string; text: string; blocks: string[]; matched: boolean }[] = [];
 
 /**
  * Registers the way the HexRays ida-mcp extension does: discovery starts at `session_start`, and
@@ -111,6 +112,12 @@ const registersAtFirstTurn: ExtensionFactory = pi => {
 	pi.on("input", ensure);
 	pi.on("before_agent_start", event => {
 		turnStartReasons.push(event.reason);
+		turnStartPromptViews.push({
+			reason: event.reason,
+			text: event.systemPrompt,
+			blocks: [...event.systemPromptBlocks],
+			matched: event.systemPrompt.match(/^[\s\S]*$/) !== null,
+		});
 		return ensure();
 	});
 	pi.on("session_shutdown", () => {
@@ -128,6 +135,7 @@ interface RecordedRequest {
 /** Runs `AGENT_ID` to a finished keep-alive state with `registersAtFirstTurn` loaded, then parks it. */
 async function spawnAndPark() {
 	turnStartReasons.length = 0;
+	turnStartPromptViews.length = 0;
 	const cwd = path.join(root, "home", "work");
 	const artifactsDir = path.join(root, "artifacts");
 	await fs.mkdir(cwd, { recursive: true });
@@ -248,6 +256,16 @@ it("warm-revives with the tools an extension registered at its first turn", asyn
 		expect(lateToolOutput(revived)).toBe("late_tool ok");
 		// The spawn's prompt, then the revive's replay; the wake turn fires none.
 		expect(turnStartReasons).toEqual(["prompt", "revive"]);
+		expect(
+			turnStartPromptViews.map(view => ({
+				reason: view.reason,
+				matchesBlocks: view.text === view.blocks.join("\n\n"),
+				matched: view.matched,
+			})),
+		).toEqual([
+			{ reason: "prompt", matchesBlocks: true, matched: true },
+			{ reason: "revive", matchesBlocks: true, matched: true },
+		]);
 	} finally {
 		run.close();
 	}

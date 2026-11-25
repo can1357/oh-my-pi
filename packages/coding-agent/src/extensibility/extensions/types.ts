@@ -1249,7 +1249,16 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	/** Already-normalized user images in delivery order. */
 	images?: ImageContent[];
-	systemPrompt: string[];
+	/**
+	 * Pi-compatible view of the current system prompt: the blocks joined with
+	 * `\n\n`. Reflects overrides returned by earlier handlers.
+	 */
+	systemPrompt: string;
+	/**
+	 * The current system-prompt blocks; authoritative for block boundaries.
+	 * Same content as {@link BeforeAgentStartEvent.systemPrompt}, un-joined.
+	 */
+	systemPromptBlocks: string[];
 }
 
 /** Fired in the parent session before a subagent (task tool or eval `agent()`) resolves its model. */
@@ -1821,8 +1830,12 @@ export type { ToolResultEventResult } from "../shared-events";
 
 export interface BeforeAgentStartEventResult {
 	message?: CustomMessagePayload;
-	/** Replace policy for the next request and its continuations, until the next preparation. Extensions chain in order. */
-	systemPrompt?: string[];
+	/**
+	 * Replace policy for the next request and its continuations, until the next preparation.
+	 * Complete replacement: a string becomes the single replacement block, an array replaces
+	 * the blocks. Extensions chain in order.
+	 */
+	systemPrompt?: string | string[];
 }
 
 export interface BeforeSubagentSpawnEventResult {

@@ -990,6 +990,108 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("before_agent_start", () => {
+		it("provides a Pi-compatible system prompt string", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_agent_start", event => {
+						if (event.systemPrompt.match(/^first\\n\\nsecond$/)) {
+							return { systemPrompt: "matched-string-view" };
+						}
+						throw new Error("system prompt string view did not preserve block separation");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "before-agent-start.ts"), extCode);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+
+			const override = await runner.emitBeforeAgentStart("hello", undefined, ["first", "second"]);
+
+			expect(errors).toEqual([]);
+			expect(override).toEqual({ systemPrompt: ["matched-string-view"] });
+		});
+
+		it("updates string and block views after each chained override", async () => {
+			const extCode = `
+				export default function(pi) {
+					function expectView(event, text, blocks) {
+						const actualBlocks = event.systemPromptBlocks;
+						if (event.systemPrompt !== text || actualBlocks.join("\\n\\n") !== text ||
+							actualBlocks.length !== blocks.length || actualBlocks.some((block, index) => block !== blocks[index])) {
+							throw new Error("handler received inconsistent system prompt views");
+						}
+					}
+					pi.on("before_agent_start", event => {
+						expectView(event, "base-one\\n\\nbase-two", ["base-one", "base-two"]);
+						return { systemPrompt: ["replacement-one", "replacement-two"] };
+					});
+					pi.on("before_agent_start", event => {
+						expectView(event, "replacement-one\\n\\nreplacement-two", ["replacement-one", "replacement-two"]);
+						return { systemPrompt: "final" };
+					});
+					pi.on("before_agent_start", event => {
+						expectView(event, "final", ["final"]);
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "before-agent-start-chain.ts"), extCode);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+
+			const override = await runner.emitBeforeAgentStart("hello", undefined, ["base-one", "base-two"]);
+
+			expect(errors).toEqual([]);
+			expect(override).toEqual({ systemPrompt: ["final"] });
+		});
+
+		it("preserves the original blocks when no handler overrides the prompt", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_agent_start", event => {
+						if (event.systemPrompt !== "first\\n\\nsecond" || event.systemPromptBlocks.join("|") !== "first|second") {
+							throw new Error("no-op handler received inconsistent system prompt views");
+						}
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "before-agent-start-noop.ts"), extCode);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const original = ["first", "second"];
+
+			const override = await runner.emitBeforeAgentStart("hello", undefined, original);
+
+			expect(errors).toEqual([]);
+			expect(override).toBeUndefined();
+			expect(original).toEqual(["first", "second"]);
+		});
+	});
+
 	describe("before_provider_request chaining", () => {
 		it("exposes the request model instead of the primary session model", async () => {
 			const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");

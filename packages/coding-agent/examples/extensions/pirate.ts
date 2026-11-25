@@ -28,7 +28,7 @@ export default function pirateExtension(pi: ExtensionAPI) {
 		if (pirateMode) {
 			return {
 				systemPrompt: [
-					...event.systemPrompt,
+					...event.systemPromptBlocks,
 					`
 IMPORTANT: You are now in PIRATE MODE. You must:
 - Speak like a stereotypical pirate in all responses
