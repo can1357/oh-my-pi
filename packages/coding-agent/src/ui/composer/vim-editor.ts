@@ -135,7 +135,7 @@ export interface VimEditorHost {
 	startMode?(): "insert" | "normal";
 	/** The field's wrapped rows as last laid out, for `gj`/`gk`; without it they move by lines. */
 	layout?(): readonly EditorRow[];
-	/** Ranges of `text` an edit takes whole or not at all (chips, paste markers). */
+	/** Ranges of `text` an edit takes whole or not at all (chips). */
 	atoms?(text: string): readonly { readonly from: number; readonly to: number }[];
 	/** `k`/`j` (and `-`/`+`) with no line left above or below: step `count` prompts older or newer. */
 	historyStep?(older: boolean, count: number): void;
@@ -742,7 +742,7 @@ export class VimEditor {
 		return parts.join("\n");
 	}
 
-	/** The atom (chip, paste marker) covering offset `at` of the buffer, if any. */
+	/** The atom (chip) covering offset `at` of the buffer, if any. */
 	#atomAt(at: number): { from: number; to: number } | undefined {
 		const atoms = this.#host.atoms;
 		if (!atoms) return undefined;

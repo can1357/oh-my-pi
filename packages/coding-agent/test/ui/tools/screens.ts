@@ -12,7 +12,12 @@ import * as path from "node:path";
 import { describe, setSystemTime } from "bun:test";
 import { capturing, type StageResult, stageTest } from "../deviations";
 import { createRoot, isUiNode, type JSXNode, jsx, resolveChildren, type Signal, type UiNode } from "@oh-my-pi/pi-tui";
-import { defineRolePainter, paintNode, type StaticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import {
+	defineRolePainter,
+	type PaintEnvironment,
+	paintNode,
+	type StaticEnvironment,
+} from "@oh-my-pi/pi-tui/term/paint";
 import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
 import {
@@ -28,7 +33,20 @@ import type { TspCardStatus } from "@oh-my-pi/pi-wire";
 import { paintToolLook } from "../../../src/ui/styles/tools/block";
 import "../../../src/ui/styles/tools";
 import type { ToolPresenter, ToolResult, ToolView, ToolViewState } from "../../../src/ui/tools/contract";
-import { toolNodeProps } from "../../../src/ui/transcript/tool-block";
+import { ToolBlock, type ToolCall, toolNodeProps } from "../../../src/ui/transcript/tool-block";
+
+/** The visible rows of a real transcript block, without ANSI styling or right padding. */
+export function plainToolRows(call: ToolCall, env: PaintEnvironment, width = 100): string[] {
+	return createRoot(dispose => {
+		try {
+			const node = ToolBlock({ call });
+			if (!isUiNode(node)) throw new Error("Expected a transcript tool node");
+			return paintNode(env, node, width).rows.map(row => Bun.stripANSI(row).trimEnd());
+		} finally {
+			dispose();
+		}
+	});
+}
 
 /** What a `tools/<name>` case records about the renderer call. */
 export interface ToolCaseInputs {

@@ -1,5 +1,9 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
-import { signal, type UiEvent } from "@oh-my-pi/pi-tui";
+import { expect, test } from "bun:test";
+import { createRoot, resolveChildren, signal, type UiEvent } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import {
 	HookSelector,
@@ -7,6 +11,48 @@ import {
 	type HookSelectorProps,
 } from "../../../../src/ui/overlays/pickers/hook-selector";
 import { type Driver, pickerSuite } from "./harness";
+
+test("ASCII option markers distinguish selection and checked state", () => {
+	createRoot(dispose => {
+		try {
+			const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+			const env = staticEnvironment(theme);
+			for (const selectionMarker of ["radio", "checkbox"] as const) {
+				const [node] = resolveChildren(
+					<HookSelector
+						title="Select tools"
+						options={["Read", "Search"]}
+						selectionMarker={selectionMarker}
+						checkedIndices={[0]}
+						onSelect={() => {}}
+						onCancel={() => {}}
+					/>,
+				)();
+				const rows = paintNode(env, node!, 50).rows.map(stripEscapes);
+				expect(rows.find(row => row.includes("Read"))).toContain(selectionMarker === "radio" ? "(o) Read" : "[x] Read");
+				expect(rows.find(row => row.includes("Search"))).toContain(selectionMarker === "radio" ? "( ) Search" : "[ ] Search");
+			}
+		} finally {
+			dispose();
+		}
+	});
+});
+
+test("a selected option uses the ASCII cursor", () => {
+	createRoot(dispose => {
+		try {
+			const [node] = resolveChildren(
+				<HookSelector title="Choose" options={["Read", "Search"]} onSelect={() => {}} onCancel={() => {}} />,
+			)();
+			const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+			const rows = paintNode(staticEnvironment(theme), node!, 50).rows.map(stripEscapes);
+			expect(rows.find(row => row.includes("Read"))).toContain("> Read");
+			expect(rows.find(row => row.includes("Search"))).not.toContain("> Search");
+		} finally {
+			dispose();
+		}
+	});
+});
 
 const DESCRIBED: HookSelectorOptionInput[] = [
 	{ label: "1. **Approve** the plan", description: "Run it as written, with `bash` and _edits_." },
@@ -28,6 +74,27 @@ const SLIDER = {
 	index: 1,
 	onChange: () => {},
 };
+
+test("the hook slider uses the ASCII powerline caps and separator", () => {
+	createRoot(dispose => {
+		try {
+			const [node] = resolveChildren(
+				<HookSelector
+					options={["Yes", "No"]}
+					title="Continue?"
+					slider={{ ...SLIDER, index: 0 }}
+					onSelect={() => {}}
+					onCancel={() => {}}
+				/>,
+			)();
+			const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+			const rows = paintNode(staticEnvironment(theme), node!, 70).rows.map(stripEscapes);
+			expect(rows.find(row => row.includes("fast"))).toContain("< fast >  balanced > smart");
+		} finally {
+			dispose();
+		}
+	});
+});
 
 type Variant = [title: string, options: HookSelectorOptionInput[], opts?: Partial<HookSelectorProps>];
 const VARIANTS: Record<string, Variant> = {
