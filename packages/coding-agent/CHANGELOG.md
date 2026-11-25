@@ -2,16 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- The ask dialog submits with questions left unanswered instead of reopening them; an unchecked multi-select could previously trap Enter between questions, and collab guests now get Next on a multi-select before checking anything.
-- `ask` forms no longer block Submit on `required`, `pattern`, `min`/`max` and similar rules: broken answers are flagged as you type and still sent, so you can reply to the question instead of satisfying it.
-- `--continue` (and auto-resume) now resumes the newest session that no other running omp process has open, instead of starting a new session when the most recent one is open elsewhere.
-
-### Fixed
-
-- Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
-
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes
@@ -61,6 +51,9 @@
 - `/model` opens faster after the session's model picker has warmed up.
 - Reduced CLI bootstrap work by loading session construction, the Cursor execution bridge, peer mesh, and persisted-agent support when needed.
 - Opening a full model catalog on subsequent launches reuses unchanged catalog data instead of rebuilding it.
+- The ask dialog submits with questions left unanswered instead of reopening them; an unchecked multi-select could previously trap Enter between questions, and collab guests now get Next on a multi-select before checking anything.
+- `ask` forms no longer block Submit on `required`, `pattern`, `min`/`max` and similar rules: broken answers are flagged as you type and still sent, so you can reply to the question instead of satisfying it.
+- `--continue` (and auto-resume) now resumes the newest session that no other running omp process has open, instead of starting a new session when the most recent one is open elsewhere.
 
 ### Fixed
 
@@ -84,6 +77,7 @@
 - Fixed the shared mnemopi embedding server and local tiny-model workers staying loaded for as long as any session that used them stays open; they now unload 15 minutes after their last request ([#20452](https://github.com/can1357/oh-my-pi/issues/20452))
 - LSP `idleTimeoutMs` now shuts down idle language servers even while other processes keep changing files in the workspace; forwarded watched-file changes no longer count as activity ([#20451](https://github.com/can1357/oh-my-pi/issues/20451)).
 - Opening `/model` reuses fresh provider catalogs instead of fetching them again. F5 still forces a provider refresh.
+- Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
 
 ### Removed
 
