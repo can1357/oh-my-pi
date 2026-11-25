@@ -30,6 +30,7 @@
 - In Tern, the agent tray no longer keeps showing the previous session's agents after `/resume` switches to another session.
 - In Tern, finishing an annotation of a pasted image now updates its attachment, and the prompt sends the annotated image instead of the original.
 - The Gemini planning-header loop guard interrupts at most once until the model calls a tool, so long reasoning on hard or tool-free tasks finishes instead of being interrupted and restarted repeatedly.
+- The `/agents` hub accepts keys again after opening a model pattern input, the model picker, or the New agent form; the terminal no longer stops responding ([#20552](https://github.com/can1357/oh-my-pi/issues/20552))
 
 ## [19.2.1] - 2026-11-25
 

@@ -122,7 +122,7 @@ import { LoginDialog, LoginDialogState } from "../../ui/overlays/panels/login-di
 import { UsageDashboard } from "../../ui/overlays/panels/usage-dashboard";
 import { UsageDashboardModel } from "../../ui/overlays/panels/usage-dashboard-model";
 import { AgentHub, type AgentHubHandle, type AgentHubProps } from "../../ui/overlays/pickers/agent-hub";
-import { AgentsHub } from "../../ui/overlays/pickers/agents-hub";
+import { AgentsHub, type AgentsHubHandle } from "../../ui/overlays/pickers/agents-hub";
 import { CopySelector } from "../../ui/overlays/pickers/copy-selector";
 import { HistorySearch } from "../../ui/overlays/pickers/history-search";
 import { LogoutAccountSelector } from "../../ui/overlays/pickers/logout-account-selector";
@@ -678,19 +678,24 @@ export class SelectorController {
 			model => this.ctx.session.effectiveServiceTier(model),
 		);
 		const size = this.ctx.shell.size;
-		let reload: (() => Promise<void>) | undefined;
-		const handle = this.#showFullscreenMenu("agents-dashboard", menu, () =>
-			AgentsHub({
-				deps,
-				rows: () => size().rows,
-				onCancel: () => this.#closeMenu(menu),
-				ref: hub => {
-					reload = hub.reload;
-				},
-			}),
+		let hub: AgentsHubHandle | undefined;
+		const handle = this.#showFullscreenMenu(
+			"agents-dashboard",
+			menu,
+			() =>
+				AgentsHub({
+					deps,
+					rows: () => size().rows,
+					onCancel: () => this.#closeMenu(menu),
+					ref: instance => {
+						hub = instance;
+					},
+				}),
+			// The hub swaps its root (picker ↔ card): keys go through the layer, not a node it replaces.
+			{ onKey: key => hub?.onKey(key) ?? false },
 		);
 		try {
-			await reload?.();
+			await hub?.reload();
 		} catch (error) {
 			// A dashboard that never loaded must not block the next `/agents`.
 			handle.close();
