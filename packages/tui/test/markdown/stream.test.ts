@@ -105,6 +105,8 @@ const DOCUMENTS = [
 		"Done.",
 	].join("\n"),
 	["```js", "console.log('a document that opens with a fence');", "console.log(2);", "```", "", "After."].join("\n"),
+	// A fence that interrupts the paragraph before it, with no blank line between them.
+	["Here is the code, right below this line:", "```ts", "const a = 1;", "const b = 2;", "```", "Done."].join("\n"),
 	[
 		"A reply that ends inside its code:",
 		"",
@@ -165,12 +167,17 @@ describe("stable prefix", () => {
 		expect(frame.stable).toBe(5);
 		expect(renderMarkdownFrame("```ts\nconst a = 1;\nconst b", 40, stream).stable).toBe(2);
 		expect(renderMarkdownFrame("```ts", 40, stream).stable).toBe(0);
+		// A fence that interrupts a paragraph ends it: the paragraph and the blank row after it settle too.
+		expect(renderMarkdownFrame("Intro.\n```ts\nconst a = 1;\nconst b", 40, stream).stable).toBe(4);
+		expect(renderMarkdownFrame("Intro.\n```ts", 40, stream).stable).toBe(0);
 	});
 
 	it("does not settle a fence whose finished form may draw differently", () => {
 		for (const opener of ["```", "```mermaid", "```svg"]) {
 			expect(renderMarkdownFrame(`${opener}\na\nb\nc`, 40, { ...stream, mermaid: true }).stable).toBe(0);
 		}
+		// The finished document may drop a bare fence and join the paragraph with the text after it.
+		expect(renderMarkdownFrame("Report follows.\n```\nmore of the report", 40, stream).stable).toBe(0);
 	});
 
 	it("counts the top padding as stable and nothing without streaming", () => {

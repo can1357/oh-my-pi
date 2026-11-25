@@ -392,19 +392,22 @@ describe("append-only contract of the stable head (§2.4, Lemma 4.6(i))", () => 
 	});
 
 	// #13676: a fenced code block streamed taller than the screen showed none of its early lines,
-	// on screen or in scrollback, until the block ended.
-	it("moves the finished lines of a fenced code block into history while it streams", () => {
-		const code = lines("const v", 30);
-		const text = signal("Intro.\n\n```ts\n");
-		const { driver, backend } = setup(() => <md key="answer" text={text} stream />);
-		for (const line of code) {
-			text.set(`${text()}${line}\n`);
-			backend.renderNow();
-		}
-		const reachable = driver.transcript.map(row => row.trim()).filter(row => row.startsWith("const v"));
-		expect(reachable).toEqual(code);
-		backend.stop();
-	});
+	// on screen or in scrollback, until the block ended. Models often open the fence right under
+	// their intro, with no blank line between them.
+	for (const intro of ["Intro.\n\n", "Intro.\n"]) {
+		it(`moves the finished lines of a fenced code block into history while it streams (${JSON.stringify(intro)})`, () => {
+			const code = lines("const v", 30);
+			const text = signal(`${intro}\`\`\`ts\n`);
+			const { driver, backend } = setup(() => <md key="answer" text={text} stream />);
+			for (const line of code) {
+				text.set(`${text()}${line}\n`);
+				backend.renderNow();
+			}
+			const reachable = driver.transcript.map(row => row.trim()).filter(row => row.startsWith("const v"));
+			expect(reachable).toEqual(code);
+			backend.stop();
+		});
+	}
 
 	// AppendStable is enabled only while D > h (§3.4): the separator rows written with the head's
 	// first rows relieve pressure too, and are not counted.
