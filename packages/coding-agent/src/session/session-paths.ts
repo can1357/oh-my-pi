@@ -8,7 +8,7 @@ import {
 	getTerminalSessionsDir,
 	getWorktreesDir,
 	hashPath,
-	pathIsWithin,
+	relativePathWithinRoot,
 	resolveEquivalentPath,
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
@@ -425,6 +425,17 @@ function writeIfChangedSync(file: string, content: string): void {
 }
 
 /**
+ * Whether the garbage collector's recursive `*.jsonl` scan of the sessions root reaches `file`:
+ * a JSONL transcript under that root with no dot-leading path segment, since the scan skips dot
+ * entries. Anything else needs a marker to stay visible to the collector.
+ */
+function isFoundByManagedScan(file: string): boolean {
+	if (!file.endsWith(".jsonl")) return false;
+	const relative = relativePathWithinRoot(getSessionsDir(), file);
+	return relative !== null && !relative.split(path.sep).some(segment => segment.startsWith("."));
+}
+
+/**
  * Record a session's exact file in the persistent custom-files registry when
  * the managed-root glob scan cannot fully account for it. Idempotent: the
  * marker is keyed by a hash of the resolved file, and its content is the
@@ -438,7 +449,7 @@ function recordCustomSessionFile(cwd: string, sessionFile: string, scope: Custom
 	if (scope?.remoteStorage) return;
 	try {
 		const resolvedSessionFile = path.resolve(cwd, sessionFile);
-		if (resolvedSessionFile.endsWith(".jsonl") && pathIsWithin(getSessionsDir(), resolvedSessionFile)) return;
+		if (isFoundByManagedScan(resolvedSessionFile)) return;
 		writeIfChangedSync(path.join(getCustomSessionFilesDir(), hashPath(resolvedSessionFile)), resolvedSessionFile);
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Custom session file record failed", { err });

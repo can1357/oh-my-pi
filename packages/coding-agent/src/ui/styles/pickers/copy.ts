@@ -13,6 +13,7 @@ import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { definePickerLook, type PickerTerm, sheetHit } from "@oh-my-pi/pi-tui/term/painters/picker";
 import { defineRoleWidget } from "@oh-my-pi/pi-tui/term/widgets";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { expandKeyLabel } from "../../keys/hints";
 import { termOf } from "../panels/common";
 import { type LaneItem, laneRows, transcriptScreen, wheelTranscriptView } from "./transcript-view";
 
@@ -117,7 +118,7 @@ function paintCopy(node: UiNode, cx: PaintContext): Block {
 				term.turns.some(turn => turn.outlined && turn.count > 0) ? "→ blocks" : "",
 				`⏎ ${term.action}`,
 				term.truncated ? "a earlier turns" : "",
-				"⌃O expand",
+				`${expandKeyLabel(theme)} expand`,
 				"⎋ close",
 			];
 	const head = term.heading

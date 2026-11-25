@@ -3,6 +3,7 @@ function metricNumber(value: number | undefined): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+/** `$0.0421`, `$0.389`, `$12.30`. */
 export function formatCost(cost: number): string {
 	const amount = metricNumber(cost);
 	if (amount < 0.01) return `$${amount.toFixed(4)}`;

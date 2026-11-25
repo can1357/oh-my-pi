@@ -18,9 +18,9 @@
 //! with a Rust module capable of state-machine parsing (block collapse,
 //! continuation tracking, mode toggle) that the TOML DSL cannot express.
 
-use std::{collections::HashSet, fmt::Write as _, sync::LazyLock};
+use std::{borrow::Cow, collections::HashSet, fmt::Write as _};
 
-use regex::Regex;
+use xutf::{UnitSet, Utf8, find, rfind};
 
 use crate::minimizer::{
 	MinimizerCtx, MinimizerOutput,
@@ -34,61 +34,165 @@ const fn max_mvn_failing_classes() -> usize {
 	CapClass::Warnings.lines()
 }
 
-// ── Shared line predicates ──────────────────────────────────────────────────
-//
-// Pure prefix matches are expressed as `str::starts_with` predicates rather
-// than anchored regexes (clippy::trivial_regex, and faster).
+// ── Maven line parsers ───────────────────────────────────────────────────────
 
-/// `[INFO] Running com.example.app.FooTest`
-fn is_running(line: &str) -> bool {
-	line.starts_with("[INFO] Running ")
+/// Maven messages with a recognized level prefix.
+#[derive(Clone, Copy)]
+enum MavenMessage<'a> {
+	Info(&'a str),
+	Error(&'a str),
+	Warning(&'a str),
+	Other,
 }
 
-/// Reactor summary header opening the per-module pass/fail block.
-fn is_reactor_summary(line: &str) -> bool {
-	line.starts_with("[INFO] Reactor Summary for ")
+impl<'a> MavenMessage<'a> {
+	/// Splits the displayed level from a Maven line.
+	fn parse(line: &'a str) -> Self {
+		if let Some(body) = line.strip_prefix("[INFO] ") {
+			Self::Info(body)
+		} else if let Some(body) = line.strip_prefix("[ERROR] ") {
+			Self::Error(body)
+		} else if let Some(body) = line.strip_prefix("[WARNING] ") {
+			Self::Warning(body)
+		} else {
+			Self::Other
+		}
+	}
 }
 
-// ── Shared regex patterns ────────────────────────────────────────────────────
+/// Splits a non-empty run of ASCII digits from the start of a field.
+fn take_digits(text: &str) -> Option<(&str, &str)> {
+	let len = text.bytes().take_while(u8::is_ascii_digit).count();
+	(len != 0).then(|| text.split_at(len))
+}
 
-/// Surefire/Failsafe per-class close line. Captures `Failures` and `Errors`.
-/// Tolerates the optional `<<< FAILURE!` / `<<< ERROR!` marker (3.5.5 emits
-/// `<<< FAILURE!` even for errors-only classes; `ERROR!` accepted defensively
-/// for other Surefire versions; failure detection is via the captured counts,
-/// not the marker). Separator is `-` (Surefire 2.x) or `--` (Surefire 3.x).
-/// Prefix INFO/ERROR/WARNING (3.x emits WARNING for classes with only skipped
-/// tests).
-static CLOSE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(
-		r"^\[(?:INFO|ERROR|WARNING)\] Tests run: \d+, Failures: (\d+), Errors: (\d+), Skipped: \d+, Time elapsed: [^ ]+ s(?:\s+<<<\s*(?:FAILURE|ERROR)!)?\s+--?\s+in (.+)$",
+/// Removes a non-empty run of whitespace.
+fn skip_space(text: &str) -> Option<&str> {
+	let rest = text.trim_start();
+	(rest.len() != text.len()).then_some(rest)
+}
+
+struct SurefireCounts<'a> {
+	failures: &'a str,
+	errors:   &'a str,
+}
+
+/// Parses the test, failure, error, and skip counts common to both Surefire
+/// summaries.
+fn parse_surefire_counts(body: &str) -> Option<(SurefireCounts<'_>, &str)> {
+	let (_, rest) = take_digits(body.strip_prefix("Tests run: ")?)?;
+	let (failures, rest) = take_digits(rest.strip_prefix(", Failures: ")?)?;
+	let (errors, rest) = take_digits(rest.strip_prefix(", Errors: ")?)?;
+	let (_, rest) = take_digits(rest.strip_prefix(", Skipped: ")?)?;
+	Some((SurefireCounts { failures, errors }, rest))
+}
+
+/// Parses a per-class Surefire/Failsafe close, with an optional `<<< ERROR!` or
+/// `<<< FAILURE!`.
+fn parse_surefire_close(message: MavenMessage<'_>) -> Option<SurefireCounts<'_>> {
+	let body = match message {
+		MavenMessage::Info(body) | MavenMessage::Error(body) | MavenMessage::Warning(body) => body,
+		MavenMessage::Other => return None,
+	};
+	let (counts, rest) = parse_surefire_counts(body)?;
+	let (elapsed, rest) = rest.strip_prefix(", Time elapsed: ")?.split_once(' ')?;
+	if elapsed.is_empty() {
+		return None;
+	}
+	let mut rest = skip_space(rest.strip_prefix('s')?)?;
+	if let Some(marker) = rest.strip_prefix("<<<") {
+		let marker = marker.trim_start();
+		rest = skip_space(
+			marker
+				.strip_prefix("FAILURE!")
+				.or_else(|| marker.strip_prefix("ERROR!"))?,
+		)?;
+	}
+	let after_dash = rest.strip_prefix('-')?;
+	let after_dashes = after_dash.strip_prefix('-').unwrap_or(after_dash);
+	let class = skip_space(after_dashes)?.strip_prefix("in ")?;
+	(!class.is_empty()).then_some(counts)
+}
+
+/// Recognizes Maven's `BUILD SUCCESS` and `BUILD FAILURE` footers.
+fn is_maven_build_footer(message: MavenMessage<'_>) -> bool {
+	matches!(
+		message,
+		MavenMessage::Info("BUILD SUCCESS" | "BUILD FAILURE")
+			| MavenMessage::Error("BUILD SUCCESS" | "BUILD FAILURE")
 	)
-	.unwrap()
-});
+}
 
-/// Final BUILD footer.
-static BUILD_FOOT: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\[(?:INFO|ERROR)\] BUILD (?:SUCCESS|FAILURE)$").unwrap());
+/// Recognizes the `Results:` separator in a Maven info message.
+fn is_surefire_results(body: &str) -> bool {
+	body
+		.strip_prefix("Results:")
+		.is_some_and(|rest| rest.trim().is_empty())
+}
 
-/// `[INFO] Results:` separator before the aggregate.
-static RESULTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[INFO\] Results:\s*$").unwrap());
+/// Recognizes the aggregate (no elapsed time) Surefire/Failsafe test counts.
+fn is_surefire_aggregate(message: MavenMessage<'_>) -> bool {
+	match message {
+		MavenMessage::Info(body) | MavenMessage::Error(body) => {
+			parse_surefire_counts(body).is_some_and(|(_, rest)| rest.trim().is_empty())
+		},
+		_ => false,
+	}
+}
 
-/// Aggregate counts line (no `Time elapsed`, no ` - in `).
-static AGG: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"^\[(?:INFO|ERROR)\] Tests run: \d+, Failures: \d+, Errors: \d+, Skipped: \d+\s*$")
-		.unwrap()
-});
+/// Recognizes a Maven `--- plugin:goal (id) @ module ---` info banner.
+fn is_maven_plugin_banner(body: &str) -> bool {
+	body
+		.strip_prefix("--- ")
+		.and_then(|rest| rest.strip_suffix(" ---"))
+		.is_some_and(|banner| find::<Utf8>(banner.as_bytes(), b" @ ").is_some())
+}
 
-/// Plugin banner line: `[INFO] --- plugin:goal (id) @ module ---`.
-static PLUGIN_BANNER: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\[INFO\] --- .* @ .* ---$").unwrap());
+/// Recognizes a Maven `---< project >---` info banner.
+fn is_maven_module_banner(body: &str) -> bool {
+	if !body.starts_with('-') || !body.ends_with('-') {
+		return false;
+	}
+	body
+		.trim_start_matches('-')
+		.strip_prefix("< ")
+		.and_then(|rest| rest.trim_end_matches('-').strip_suffix(" >"))
+		.is_some_and(|project| !project.is_empty())
+}
 
-/// Module banner with project name in brackets.
-static MODULE_BANNER: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\[INFO\] -+< .+ >-+$").unwrap());
-
-/// Compile-error coordinate substring to strip when deduping warnings/errors.
-static FILE_COORD: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"/[^:]+\.java:\[\d+,\d+\]").unwrap());
+/// Removes Java source coordinates such as `/src/App.java:[12,3]` from a
+/// diagnostic key.
+fn normalize_java_diagnostic(payload: &str) -> Cow<'_, str> {
+	let mut normalized = None;
+	let mut remaining = payload;
+	let mut search = payload;
+	while let Some(at) = find::<Utf8>(search.as_bytes(), b".java:[") {
+		let path = search[..at].rsplit(':').next().unwrap_or_default();
+		let coords = &search[at + ".java:[".len()..];
+		if let Some(slash) = path.find('/')
+			&& slash + 1 < path.len()
+			&& let Some((_, rest)) = take_digits(coords)
+			&& let Some((_, rest)) = rest.strip_prefix(',').and_then(take_digits)
+			&& let Some(rest) = rest.strip_prefix(']')
+		{
+			let start = remaining.len() - search.len() + at - path.len() + slash;
+			normalized
+				.get_or_insert_with(|| String::with_capacity(start + rest.len()))
+				.push_str(&remaining[..start]);
+			remaining = rest;
+			search = rest;
+		} else {
+			search = coords;
+		}
+	}
+	match normalized {
+		Some(mut normalized) => {
+			normalized.push_str(remaining);
+			Cow::Owned(normalized)
+		},
+		None => Cow::Borrowed(payload),
+	}
+}
 
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
@@ -346,25 +450,32 @@ fn is_framework_frame(trimmed: &str) -> bool {
 /// `[ERROR]   mvn <args> -rf :…` (the resume hint is actionable signal for a
 /// multi-module build) and `[ERROR] Failed to execute goal` (signal).
 const BOILER_PREFIXES: &[&str] = &[
-	"[ERROR] See ",
-	"[ERROR] -> [Help",
-	"[ERROR] To see the full stack trace",
-	"[ERROR] Re-run Maven",
-	"[ERROR] For more information",
-	"[ERROR] [Help",
+	"See ",
+	"-> [Help",
+	"To see the full stack trace",
+	"Re-run Maven",
+	"For more information",
+	"[Help",
 ];
 
 /// Post-failure help boilerplate, plus the bare `[ERROR]` divider lines Maven
 /// emits between boilerplate blocks (same drop rules as `filter_quiet`).
-fn is_boilerplate(line: &str) -> bool {
-	BOILER_PREFIXES.iter().any(|p| line.starts_with(p)) || line.trim_end() == "[ERROR]"
+fn is_boilerplate(line: &str, message: MavenMessage<'_>) -> bool {
+	match message {
+		MavenMessage::Error(body) => {
+			BOILER_PREFIXES.iter().any(|p| body.starts_with(p)) || body.trim_end().is_empty()
+		},
+		MavenMessage::Other => line.trim_end() == "[ERROR]",
+		_ => false,
+	}
 }
 
 /// `[ERROR] FQN.method -- Time elapsed: 0.030 s <<< FAILURE!` (or `<<<
-/// ERROR!`). Distinguished from CLOSE by call position: only consulted when
-/// `in_block == false` (CLOSE only occurs while a block is open).
-fn is_per_test_subline(line: &str) -> bool {
-	line.starts_with("[ERROR] ") && (line.contains("<<< FAILURE!") || line.contains("<<< ERROR!"))
+/// ERROR!`). Distinguished from the class close by call position: only
+/// consulted when `in_block == false` (the class close is read while a block is
+/// open).
+fn is_per_test_subline(message: MavenMessage<'_>) -> bool {
+	matches!(message, MavenMessage::Error(body) if body.contains("<<< FAILURE!") || body.contains("<<< ERROR!"))
 }
 
 // ── English-footer guard ────────────────────────────────────────────────────
@@ -384,40 +495,41 @@ fn has_english_footer(stripped: &str) -> bool {
 /// per-module status rows survive. Returns `false` otherwise — the caller's
 /// outside-block keep-list still applies.
 ///
-/// Designed to be called **before** `keep_outside_block` so the `BUILD_FOOT`
-/// clears-flag side effect always runs regardless of `||` short-circuit.
-fn reactor_summary_keep(line: &str, in_reactor_summary: &mut bool) -> bool {
-	if is_reactor_summary(line) {
+/// Call before `keep_outside_block` so a footer always clears the flag.
+fn reactor_summary_keep(message: MavenMessage<'_>, in_reactor_summary: &mut bool) -> bool {
+	if matches!(message, MavenMessage::Info(body) if body.starts_with("Reactor Summary for ")) {
 		*in_reactor_summary = true;
 		return true;
 	}
-	if BUILD_FOOT.is_match(line) {
+	if *in_reactor_summary && is_maven_build_footer(message) {
 		*in_reactor_summary = false;
 		return false;
 	}
 	*in_reactor_summary
 }
 
-fn keep_outside_block(line: &str) -> bool {
+fn keep_outside_block(line: &str, message: MavenMessage<'_>) -> bool {
 	// Help boilerplate must be rejected before the `[ERROR]` catch-all below.
-	if is_boilerplate(line) {
+	if is_boilerplate(line, message) {
 		return false;
 	}
-	RESULTS.is_match(line)
-		|| AGG.is_match(line)
-		|| BUILD_FOOT.is_match(line)
-		|| MODULE_BANNER.is_match(line)
-		|| line.starts_with("[INFO] Total time:")
-		|| line.starts_with("[INFO] Finished at:")
-		|| line.starts_with("[INFO] Building ")
-		|| line.starts_with("[INFO] Scanning ")
-		|| line.starts_with("[INFO] Installing ")
-		|| line.starts_with("[ERROR] Failures:")
-		|| line.starts_with("[ERROR] Errors:")
-		|| (line.starts_with("[ERROR]") && !line.starts_with("[ERROR] Tests run:"))
-		|| line.starts_with("[INFO] Building war:")
-		|| line.starts_with("[INFO] Building jar:")
-		|| line.starts_with("[INFO] Building ear:")
+	match message {
+		MavenMessage::Info(body) => {
+			is_surefire_results(body)
+				|| is_surefire_aggregate(message)
+				|| is_maven_build_footer(message)
+				|| is_maven_module_banner(body)
+				|| body.starts_with("Total time:")
+				|| body.starts_with("Finished at:")
+				|| body.starts_with("Building ")
+				|| body.starts_with("Scanning ")
+				|| body.starts_with("Installing ")
+		},
+		MavenMessage::Error(body) => {
+			!body.starts_with("Tests run:") || is_surefire_aggregate(message)
+		},
+		_ => line.starts_with("[ERROR]"),
+	}
 }
 
 // ── Surefire block filter ───────────────────────────────────────────────────
@@ -443,7 +555,7 @@ struct SurefireBlock<'a> {
 enum SurefireStep<'a> {
 	/// Inner machine consumed the line; outer loop should `continue;`.
 	Consumed,
-	/// A CLOSE line with `Failures > 0` or `Errors > 0` was reached.
+	/// A close line with a nonzero failure or error count was reached.
 	FailingClose { running: Option<&'a str>, lines: Vec<&'a str>, close: &'a str },
 	/// Inner machine did not handle the line; outer loop applies its own
 	/// outside-block keep logic.
@@ -462,12 +574,17 @@ impl<'a> SurefireBlock<'a> {
 		}
 	}
 
-	fn step(&mut self, line: &'a str, out: &mut String) -> SurefireStep<'a> {
-		if PLUGIN_BANNER.is_match(line) {
+	fn step(
+		&mut self,
+		line: &'a str,
+		message: MavenMessage<'a>,
+		out: &mut String,
+	) -> SurefireStep<'a> {
+		if matches!(message, MavenMessage::Info(body) if is_maven_plugin_banner(body)) {
 			return SurefireStep::Consumed;
 		}
 
-		if is_running(line) {
+		if matches!(message, MavenMessage::Info(body) if body.starts_with("Running ")) {
 			if self.in_block {
 				self.flush_open_block_as_keep(out);
 			}
@@ -482,10 +599,8 @@ impl<'a> SurefireBlock<'a> {
 		}
 
 		if self.in_block {
-			if let Some(caps) = CLOSE.captures(line) {
-				let fail = caps.get(1).is_some_and(|m| m.as_str() != "0");
-				let err = caps.get(2).is_some_and(|m| m.as_str() != "0");
-				if fail || err {
+			if let Some(counts) = parse_surefire_close(message) {
+				if counts.failures != "0" || counts.errors != "0" {
 					let lines = std::mem::take(&mut self.block_lines);
 					let running = self.block_running.take();
 					self.in_block = false;
@@ -531,7 +646,7 @@ impl<'a> SurefireBlock<'a> {
 				return SurefireStep::Passthrough;
 			}
 			self.trail_rearm = None; // disarm unconditionally on non-blank (load-bearing)
-			if is_per_test_subline(line) {
+			if is_per_test_subline(message) {
 				self.failure_trail = true;
 				self.drop_trail = dropped;
 				if !dropped {
@@ -623,8 +738,9 @@ impl FailuresSummaryCap {
 	/// If `line` is an `[ERROR]   ` entry inside the failures summary, write it
 	/// (or count it as dropped) and return `true` so the caller skips its own
 	/// keep-list. Returns `false` otherwise.
-	fn handle_entry(&mut self, line: &str, out: &mut String) -> bool {
-		if !self.in_summary || !line.starts_with("[ERROR]   ") {
+	fn handle_entry(&mut self, line: &str, message: MavenMessage<'_>, out: &mut String) -> bool {
+		if !self.in_summary || !matches!(message, MavenMessage::Error(body) if body.starts_with("  "))
+		{
 			return false;
 		}
 		// Per core cap policy, `0` means summary-only: no entries, tail still
@@ -641,8 +757,8 @@ impl FailuresSummaryCap {
 
 	/// Detect the `[ERROR] Failures:` header so subsequent `[ERROR]   ` lines
 	/// get capped. Caller writes the header to `out`.
-	fn handle_header(&mut self, line: &str) {
-		if line.starts_with("[ERROR] Failures:") {
+	fn handle_header(&mut self, message: MavenMessage<'_>) {
+		if matches!(message, MavenMessage::Error(body) if body.starts_with("Failures:")) {
 			self.in_summary = true;
 			self.emitted = 0;
 			self.dropped = 0;
@@ -651,8 +767,8 @@ impl FailuresSummaryCap {
 
 	/// Pre-emit the `[…N failures elided…]` tail when the aggregate
 	/// `[ERROR] Tests run:` line is about to be written, then close the summary.
-	fn handle_aggregate(&mut self, line: &str, out: &mut String) {
-		if !self.in_summary || !AGG.is_match(line) {
+	fn handle_aggregate(&mut self, message: MavenMessage<'_>, out: &mut String) {
+		if !self.in_summary || !is_surefire_aggregate(message) {
 			return;
 		}
 		if self.dropped > 0 {
@@ -663,7 +779,8 @@ impl FailuresSummaryCap {
 		self.dropped = 0;
 	}
 
-	/// End-of-stream tail emission for cases where the AGG line never arrives.
+	/// End-of-stream tail emission for cases where the aggregate line never
+	/// arrives.
 	fn finish(&self, out: &mut String) {
 		if self.in_summary && self.dropped > 0 {
 			let _ = write!(out, "\n[…{} failures elided…]\n", self.dropped);
@@ -701,13 +818,14 @@ fn filter_maven_with_cap(raw: &str, cap: usize, goal: MavenGoal) -> String {
 	let mut block = SurefireBlock::new();
 	let mut keep_continuation = false;
 	let mut in_reactor_summary = false;
-	let mut seen_warnings: HashSet<String> = HashSet::new();
+	let mut seen_warnings: HashSet<Cow<'_, str>> = HashSet::new();
 	let mut emitted_failing: usize = 0;
 	let mut dropped_failing: usize = 0;
 	let mut summary = FailuresSummaryCap::new(cap);
 
 	for line in stripped.lines() {
-		match block.step(line, &mut out) {
+		let message = MavenMessage::parse(line);
+		match block.step(line, message, &mut out) {
 			SurefireStep::Consumed => continue,
 			SurefireStep::FailingClose { running, lines, close } => {
 				if emitted_failing < cap {
@@ -731,23 +849,27 @@ fn filter_maven_with_cap(raw: &str, cap: usize, goal: MavenGoal) -> String {
 		}
 
 		// Failures-summary cap: gate `[ERROR]   ` entries, emit `+N more` tail
-		// before AGG. The helper consumes only summary entries.
-		if summary.handle_entry(line, &mut out) {
+		// before the aggregate. The helper consumes only summary entries.
+		if summary.handle_entry(line, message, &mut out) {
 			continue;
 		}
 
-		// Order matters: call reactor_summary_keep first so its BUILD_FOOT
-		// clears-flag side effect always runs regardless of `||` short-circuit.
-		let reactor_keep = reactor_summary_keep(line, &mut in_reactor_summary);
-		if reactor_keep || keep_outside_block(line) {
-			summary.handle_aggregate(line, &mut out);
-			summary.handle_header(line);
+		// Update reactor state even if the outside-block keep-list accepts the
+		// line.
+		let reactor_keep = reactor_summary_keep(message, &mut in_reactor_summary);
+		if reactor_keep || keep_outside_block(line, message) {
+			summary.handle_aggregate(message, &mut out);
+			summary.handle_header(message);
 			out.push_str(line);
 			out.push('\n');
-			keep_continuation = line.starts_with("[ERROR]")
-				&& !line.starts_with("[ERROR] Tests run:")
-				&& !line.starts_with("[ERROR] Failures:")
-				&& !line.starts_with("[ERROR] Errors:");
+			keep_continuation = match message {
+				MavenMessage::Error(body) => {
+					!body.starts_with("Tests run:")
+						&& !body.starts_with("Failures:")
+						&& !body.starts_with("Errors:")
+				},
+				_ => line.starts_with("[ERROR]"),
+			};
 			continue;
 		}
 		if goal == MavenGoal::Package {
@@ -757,8 +879,11 @@ fn filter_maven_with_cap(raw: &str, cap: usize, goal: MavenGoal) -> String {
 				continue;
 			}
 			if line.starts_with("[WARNING]") {
-				let payload = line.strip_prefix("[WARNING] ").unwrap_or(line);
-				let norm = FILE_COORD.replace_all(payload, "").into_owned();
+				let payload = match message {
+					MavenMessage::Warning(body) => body,
+					_ => line,
+				};
+				let norm = normalize_java_diagnostic(payload);
 				if seen_warnings.insert(norm) {
 					out.push_str(line);
 					out.push('\n');
@@ -794,20 +919,16 @@ pub fn filter_compile(raw: &str) -> String {
 
 	let mut out = String::new();
 	let mut keep_continuation = false;
-	let mut seen_warnings: HashSet<String> = HashSet::new();
+	let mut seen_warnings: HashSet<Cow<'_, str>> = HashSet::new();
 
 	for line in stripped.lines() {
-		if MODULE_BANNER.is_match(line) {
-			out.push_str(line);
-			out.push('\n');
-			keep_continuation = false;
-			continue;
-		}
-		if BUILD_FOOT.is_match(line)
-			|| line.starts_with("[INFO] Building ")
-			|| line.starts_with("[INFO] Total time:")
-			|| line.starts_with("[INFO] Finished at:")
-			|| line.starts_with("[INFO] Scanning ")
+		let message = MavenMessage::parse(line);
+		if is_maven_build_footer(message)
+			|| matches!(message, MavenMessage::Info(body) if is_maven_module_banner(body)
+				|| body.starts_with("Building ")
+				|| body.starts_with("Total time:")
+				|| body.starts_with("Finished at:")
+				|| body.starts_with("Scanning "))
 		{
 			out.push_str(line);
 			out.push('\n');
@@ -815,7 +936,7 @@ pub fn filter_compile(raw: &str) -> String {
 			continue;
 		}
 		// Help boilerplate: drop before the `[ERROR]` catch-all.
-		if is_boilerplate(line) {
+		if is_boilerplate(line, message) {
 			keep_continuation = false;
 			continue;
 		}
@@ -831,8 +952,11 @@ pub fn filter_compile(raw: &str) -> String {
 			continue;
 		}
 		if line.starts_with("[WARNING]") {
-			let payload = line.strip_prefix("[WARNING] ").unwrap_or(line);
-			let norm = FILE_COORD.replace_all(payload, "").to_string();
+			let payload = match message {
+				MavenMessage::Warning(body) => body,
+				_ => line,
+			};
+			let norm = normalize_java_diagnostic(payload);
 			if seen_warnings.insert(norm) {
 				out.push_str(line);
 				out.push('\n');
@@ -880,8 +1004,9 @@ pub fn filter_quiet(raw: &str) -> String {
 	let mut failure_trail = false;
 
 	for line in stripped.lines() {
+		let message = MavenMessage::parse(line);
 		// Surefire close-line for a failed class — keep + enter failure trail.
-		if CLOSE.is_match(line) {
+		if parse_surefire_close(message).is_some() {
 			out.push_str(line);
 			out.push('\n');
 			failure_trail = line.contains("<<< FAILURE!") || line.contains("<<< ERROR!");
@@ -889,7 +1014,7 @@ pub fn filter_quiet(raw: &str) -> String {
 		}
 
 		// Per-test failure subline.
-		if is_per_test_subline(line) {
+		if is_per_test_subline(message) {
 			out.push_str(line);
 			out.push('\n');
 			failure_trail = true;
@@ -914,11 +1039,11 @@ pub fn filter_quiet(raw: &str) -> String {
 		}
 
 		// Failure summary keepers.
-		if line.starts_with("[ERROR] Tests run:")
-			|| line.starts_with("[ERROR] Failures:")
-			|| line.starts_with("[ERROR] Errors:")
-			|| line.starts_with("[ERROR]   ")
-			|| line.starts_with("[ERROR] Failed to execute goal")
+		if matches!(message, MavenMessage::Error(body) if body.starts_with("Tests run:")
+			|| body.starts_with("Failures:")
+			|| body.starts_with("Errors:")
+			|| body.starts_with("  ")
+			|| body.starts_with("Failed to execute goal"))
 		{
 			out.push_str(line);
 			out.push('\n');
@@ -926,7 +1051,7 @@ pub fn filter_quiet(raw: &str) -> String {
 		}
 
 		// Drop post-failure help boilerplate and bare `[ERROR]` dividers.
-		if is_boilerplate(line) {
+		if is_boilerplate(line, message) {
 			continue;
 		}
 
@@ -992,9 +1117,7 @@ fn is_info_dash_banner(line: &str) -> bool {
 
 // ── Gradle shared patterns ───────────────────────────────────────────────────
 
-/// `^> Task :` — gradle task-progress lines. Pure literal-anchored, so a
-/// `starts_with` (not a regex) keeps `clippy::trivial_regex` happy and is
-/// faster.
+/// Recognizes Gradle task-progress lines starting with `> Task :`.
 fn is_gradle_task_line(line: &str) -> bool {
 	line.starts_with("> Task :")
 }
@@ -1012,9 +1135,10 @@ fn is_gradle_build_status(line: &str) -> bool {
 	line.starts_with("BUILD SUCCESSFUL") || line.starts_with("BUILD FAILED")
 }
 
-/// `^\d+ actionable tasks?` (rtk `ACTIONABLE`).
-static GRADLE_ACTIONABLE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\d+ actionable tasks?").unwrap());
+/// Recognizes Gradle's `12 actionable tasks` prefix.
+fn is_gradle_actionable(line: &str) -> bool {
+	take_digits(line).is_some_and(|(_, rest)| rest.starts_with(" actionable task"))
+}
 
 // ── Task detection ───────────────────────────────────────────────────────────
 
@@ -1133,30 +1257,80 @@ const GRADLE_DAEMON_PREFIXES: &[&str] = &[
 	"Configuration cache entry",
 ];
 
-/// `^\s*\d+%|^Downloading|^Configuring|^Resolving|^\[Incubating\]|^Wrote HTML
-/// report|^class \S+ could not|^\[android-` (rtk `PROGRESS`). The
-/// percentage-progress and `class … could not` shapes need a regex; kept
-/// verbatim from rtk.
-static GRADLE_PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(
-		r"^\s*\d+%|^Downloading|^Configuring|^Resolving|^\[Incubating\]|^Wrote HTML report|^class \S+ could not|^\[android-",
-	)
-	.unwrap()
-});
+/// Recognizes percentage progress and Gradle download/configuration chatter.
+fn is_gradle_progress(line: &str) -> bool {
+	match line.as_bytes().first() {
+		Some(b'0'..=b'9' | b'\t'..=b'\r' | b' ' | 0x80..=0xff) => {
+			take_digits(line.trim_start()).is_some_and(|(_, rest)| rest.starts_with('%'))
+		},
+		Some(b'D') => line.starts_with("Downloading"),
+		Some(b'C') => line.starts_with("Configuring"),
+		Some(b'R') => line.starts_with("Resolving"),
+		Some(b'[') => line.starts_with("[Incubating]") || line.starts_with("[android-"),
+		Some(b'W') => line.starts_with("Wrote HTML report"),
+		Some(b'c') => line.strip_prefix("class ").is_some_and(|rest| {
+			rest
+				.find(char::is_whitespace)
+				.is_some_and(|end| end > 0 && rest[end..].starts_with(" could not"))
+		}),
+		_ => false,
+	}
+}
 
-/// `(?i)(^FAILURE:|^\* What went wrong:|^\* Where:|> Could not|e:
-/// |error:|^Execution failed|Lint found \d+ error)` (rtk `ERROR_LINE`).
-static GRADLE_ERROR_LINE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(
-		r"(?i)(^FAILURE:|^\* What went wrong:|^\* Where:|> Could not|e: |error:|^Execution failed|Lint found \d+ error)",
-	)
-	.unwrap()
-});
+/// Strips an ASCII prefix from bytes, ignoring case.
+fn strip_ascii_case<'a>(text: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+	let (head, tail) = text.split_at_checked(prefix.len())?;
+	head.eq_ignore_ascii_case(prefix).then_some(tail)
+}
 
-/// `^(w: |warning:|Warning:|WARNING:)` (rtk `WARN_LINE`): kotlinc `w: `,
-/// javac/gradle `warning:`/`Warning:`.
-static GRADLE_WARN_LINE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^(w: |warning:|Warning:|WARNING:)").unwrap());
+/// Recognizes a Gradle failure heading or compiler/lint error diagnostic.
+fn is_gradle_error_line(line: &str) -> bool {
+	let bytes = line.as_bytes();
+	let heading = match bytes.first() {
+		Some(b'f' | b'F') => strip_ascii_case(bytes, b"FAILURE:").is_some(),
+		Some(b'*') => {
+			strip_ascii_case(bytes, b"* What went wrong:").is_some()
+				|| strip_ascii_case(bytes, b"* Where:").is_some()
+		},
+		Some(b'e' | b'E') => strip_ascii_case(bytes, b"Execution failed").is_some(),
+		_ => false,
+	};
+	if heading {
+		return true;
+	}
+
+	const MARKERS: UnitSet = UnitSet::new(b":>Ll");
+	let mut offset = 0;
+	while let Some(at) = MARKERS.find::<Utf8>(&bytes[offset..]).map(|at| at + offset) {
+		let found = match bytes[at] {
+			b':' => {
+				let before = &bytes[..at];
+				matches!(before.last(), Some(b'e' | b'E')) && bytes.get(at + 1) == Some(&b' ')
+					|| before.len() >= 5 && before[before.len() - 5..].eq_ignore_ascii_case(b"error")
+			},
+			b'>' => strip_ascii_case(&bytes[at..], b"> Could not").is_some(),
+			_ => {
+				strip_ascii_case(&bytes[at..], b"Lint found ").is_some()
+					&& take_digits(&line[at + b"Lint found ".len()..])
+						.is_some_and(|(_, rest)| strip_ascii_case(rest.as_bytes(), b" error").is_some())
+			},
+		};
+		if found {
+			return true;
+		}
+		offset = at + 1;
+	}
+	false
+}
+
+/// Recognizes Kotlin's `w: ` and javac/Gradle's `warning:` variants.
+fn is_gradle_warning_line(line: &str) -> bool {
+	match line.as_bytes().first() {
+		Some(b'w') => line.starts_with("w: ") || line.starts_with("warning:"),
+		Some(b'W') => line.starts_with("Warning:") || line.starts_with("WARNING:"),
+		_ => false,
+	}
+}
 
 /// `gradle\.com/s/|Publishing build scan` (rtk `BUILD_SCAN`).
 fn is_gradle_build_scan(line: &str) -> bool {
@@ -1174,7 +1348,7 @@ fn keep_gradle_build_line(line: &str) -> bool {
 	// Always strip these.
 	if is_gradle_task_line(line)
 		|| GRADLE_DAEMON_PREFIXES.iter().any(|p| line.starts_with(p))
-		|| GRADLE_PROGRESS.is_match(line)
+		|| is_gradle_progress(line)
 		|| is_gradle_try_section(line)
 	{
 		return false;
@@ -1191,11 +1365,11 @@ fn keep_gradle_build_line(line: &str) -> bool {
 	// them (a deliberate donor decision: the `FAILURE:` block carries the
 	// signal).
 	is_gradle_build_status(line)
-		|| GRADLE_ACTIONABLE.is_match(line)
-		|| GRADLE_ERROR_LINE.is_match(line)
-		|| GRADLE_WARN_LINE.is_match(line)
+		|| is_gradle_actionable(line)
+		|| is_gradle_error_line(line)
+		|| is_gradle_warning_line(line)
 		|| is_gradle_build_scan(line)
-		|| GRADLE_TEST_SUMMARY.is_match(line)
+		|| is_gradle_test_summary(line)
 		|| line.contains("Test result")
 		|| line.trim().is_empty()
 }
@@ -1212,21 +1386,27 @@ fn filter_gradle_build(input: &str) -> String {
 
 // ── Test filter (rtk gradlew_cmd.rs::filter_test ~230-302) ───────────────────
 
-/// `FAILED$| FAILED ` (rtk `FAILED_LINE`).
-static GRADLE_FAILED_LINE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"FAILED$| FAILED ").unwrap());
+/// Recognizes a Gradle test marked `FAILED` at the end or within the line.
+fn is_gradle_failed_line(line: &str) -> bool {
+	line.ends_with("FAILED") || find::<Utf8>(line.as_bytes(), b" FAILED ").is_some()
+}
 
-/// ` PASSED$| SKIPPED$` (rtk `PASSED_SKIPPED`).
-static GRADLE_PASSED_SKIPPED: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r" PASSED$| SKIPPED$").unwrap());
+/// Recognizes a Gradle test ending in ` PASSED` or ` SKIPPED`.
+fn is_gradle_passed_or_skipped(line: &str) -> bool {
+	line.ends_with(" PASSED") || line.ends_with(" SKIPPED")
+}
 
-/// `\d+ tests? completed|\d+ tests? failed|There were failing tests|See the
-/// report at` (rtk `SUMMARY_LINE`). The "See the report at" arm keeps the
-/// actionable HTML-report pointer.
-static GRADLE_TEST_SUMMARY: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"\d+ tests? completed|\d+ tests? failed|There were failing tests|See the report at")
-		.unwrap()
-});
+/// Recognizes Gradle's test counts and failure/report notices.
+fn is_gradle_test_summary(line: &str) -> bool {
+	line.match_indices(" test").any(|(at, field)| {
+		at > 0 && line.as_bytes()[at - 1].is_ascii_digit() && {
+			let tail = &line[at + field.len()..];
+			let tail = tail.strip_prefix('s').unwrap_or(tail);
+			tail.starts_with(" completed") || tail.starts_with(" failed")
+		}
+	}) || find::<Utf8>(line.as_bytes(), b"There were failing tests").is_some()
+		|| find::<Utf8>(line.as_bytes(), b"See the report at").is_some()
+}
 
 /// True if an `at …` stack frame belongs to a test framework (`JUnit`, Gradle
 /// runner, reflection) rather than user code. Ported from rtk
@@ -1263,22 +1443,20 @@ fn filter_gradle_test(input: &str) -> String {
 		}
 
 		// Build summary lines always kept.
-		if is_gradle_build_status(line)
-			|| GRADLE_ACTIONABLE.is_match(line)
-			|| GRADLE_TEST_SUMMARY.is_match(line)
+		if is_gradle_build_status(line) || is_gradle_actionable(line) || is_gradle_test_summary(line)
 		{
 			result_lines.push(line);
 			continue;
 		}
 
 		// PASSED/SKIPPED per-test lines — strip.
-		if GRADLE_PASSED_SKIPPED.is_match(line) {
+		if is_gradle_passed_or_skipped(line) {
 			in_failure_block = false;
 			continue;
 		}
 
 		// FAILED per-test lines — keep + enter failure block for the stack trace.
-		if GRADLE_FAILED_LINE.is_match(line) {
+		if is_gradle_failed_line(line) {
 			in_failure_block = true;
 			result_lines.push(line);
 			continue;
@@ -1318,15 +1496,26 @@ fn filter_gradle_test(input: &str) -> String {
 
 // ── Connected / instrumented test filter (rtk ~306-350) ──────────────────────
 
-/// `^INSTRUMENTATION_STATUS[_CODE]*:` (rtk `INSTRUMENTATION_STATUS` — the
-/// character-class form matches `INSTRUMENTATION_STATUS:` and
-/// `INSTRUMENTATION_STATUS_CODE:`).
-static GRADLE_INSTRUMENTATION_STATUS: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^INSTRUMENTATION_STATUS[_CODE]*:").unwrap());
+/// Recognizes Android `INSTRUMENTATION_STATUS:` and
+/// `INSTRUMENTATION_STATUS_CODE:` lines.
+fn is_gradle_instrumentation_status(line: &str) -> bool {
+	line
+		.strip_prefix("INSTRUMENTATION_STATUS")
+		.is_some_and(|rest| {
+			rest
+				.trim_start_matches(['_', 'C', 'O', 'D', 'E'])
+				.starts_with(':')
+		})
+}
 
-/// `^Starting \d+ tests? on ` (rtk `STARTING_TESTS`).
-static GRADLE_STARTING_TESTS: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^Starting \d+ tests? on ").unwrap());
+/// Recognizes `Starting 2 tests on …` device progress.
+fn is_gradle_starting_tests(line: &str) -> bool {
+	line
+		.strip_prefix("Starting ")
+		.and_then(take_digits)
+		.and_then(|(_, rest)| rest.strip_prefix(" test"))
+		.is_some_and(|rest| rest.strip_prefix('s').unwrap_or(rest).starts_with(" on "))
+}
 
 /// `ConnectedTest` filter (rtk `filter_connected`). Strips Android
 /// instrumentation noise, then delegates the surviving PASSED/FAILED-shaped
@@ -1345,10 +1534,10 @@ fn filter_gradle_connected(input: &str) -> String {
 
 	let mut result_lines: Vec<&str> = Vec::new();
 	for line in input.lines() {
-		if GRADLE_INSTRUMENTATION_STATUS.is_match(line)
+		if is_gradle_instrumentation_status(line)
 			|| line.starts_with("INSTRUMENTATION_RESULT:")
 			|| line.starts_with("INSTRUMENTATION_CODE:")
-			|| GRADLE_STARTING_TESTS.is_match(line)
+			|| is_gradle_starting_tests(line)
 			|| line.starts_with("Installing APK")
 			|| is_gradle_task_line(line)
 			|| is_gradle_try_section(line)
@@ -1371,31 +1560,135 @@ fn filter_gradle_connected(input: &str) -> String {
 
 // ── Lint filter (rtk ~354-432) ───────────────────────────────────────────────
 
-/// `[^:]+:\d+:.*[Ee]rror:.*\[` (rtk `ANDROID_LINT_ERROR`).
-static GRADLE_ANDROID_LINT_ERROR: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"[^:]+:\d+:.*[Ee]rror:.*\[").unwrap());
+/// Finds a `path:line:` or `path:line:column:` prefix anywhere before a
+/// diagnostic marker.
+fn has_lint_location(mut before: &str, with_column: bool) -> bool {
+	while let Some((path, rest)) = before.split_once(':') {
+		if !path.is_empty()
+			&& let Some(after) = take_digits(rest).and_then(|(_, rest)| rest.strip_prefix(':'))
+			&& (!with_column || take_digits(after).is_some_and(|(_, rest)| rest.starts_with(':')))
+		{
+			return true;
+		}
+		before = rest;
+	}
+	false
+}
 
-/// `[^:]+:\d+:.*[Ww]arning:.*\[` (rtk `ANDROID_LINT_WARNING`).
-static GRADLE_ANDROID_LINT_WARNING: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"[^:]+:\d+:.*[Ww]arning:.*\[").unwrap());
+/// Finds the rightmost marker whose first letter may be either case.
+fn before_lint_marker<'a>(mut text: &'a str, initial: u8, tail: &[u8]) -> Option<&'a str> {
+	while let Some(at) = rfind::<Utf8>(text.as_bytes(), tail) {
+		if at != 0 && text.as_bytes()[at - 1].eq_ignore_ascii_case(&initial) {
+			return Some(&text[..at - 1]);
+		}
+		text = &text[..at];
+	}
+	None
+}
 
-/// `[^:]+:\d+:\d+:.*[Ll]int` (rtk `KTLINT_VIOLATION`).
-static GRADLE_KTLINT_VIOLATION: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"[^:]+:\d+:\d+:.*[Ll]int").unwrap());
+/// Recognizes Android lint's `path:12: Error: … [Rule]` diagnostics.
+fn is_gradle_android_lint_error(line: &str) -> bool {
+	line
+		.rsplit_once('[')
+		.and_then(|(before, _)| before_lint_marker(before, b'e', b"rror:"))
+		.is_some_and(|before| has_lint_location(before, false))
+}
 
-/// `[^:]+:\d+:\d+:.*error` (rtk `DETEKT_VIOLATION`).
-static GRADLE_DETEKT_VIOLATION: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"[^:]+:\d+:\d+:.*error").unwrap());
+/// Recognizes Android lint's `path:12: Warning: … [Rule]` diagnostics.
+fn is_gradle_android_lint_warning(line: &str) -> bool {
+	line
+		.rsplit_once('[')
+		.and_then(|(before, _)| before_lint_marker(before, b'w', b"arning:"))
+		.is_some_and(|before| has_lint_location(before, false))
+}
 
-/// `\d+ (issues?|errors?|warnings?)` (rtk lint `SUMMARY_LINE`).
-static GRADLE_LINT_SUMMARY: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"\d+ (issues?|errors?|warnings?)").unwrap());
+/// Recognizes ktlint's `path:12:3: … Lint` diagnostics.
+fn is_gradle_ktlint_violation(line: &str) -> bool {
+	before_lint_marker(line, b'l', b"int").is_some_and(|before| has_lint_location(before, true))
+}
 
-/// `Wrote (HTML|XML|text) report|file://|/build/reports/lint` (rtk
-/// `REPORT_LINE`): long report-path lines to strip.
-static GRADLE_LINT_REPORT: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"Wrote (HTML|XML|text) report|file://|/build/reports/lint").unwrap()
-});
+/// Recognizes detekt's `path:12:3: … error` diagnostics.
+fn is_gradle_detekt_violation(line: &str) -> bool {
+	rfind::<Utf8>(line.as_bytes(), b"error").is_some_and(|at| has_lint_location(&line[..at], true))
+}
+
+/// Recognizes numerical issue, error, and warning totals.
+fn is_gradle_lint_summary(line: &str) -> bool {
+	const HIGH_BITS: u64 = u64::from_le_bytes([0x80; 8]);
+	const ASCII_ZERO: u64 = u64::from_le_bytes([b'0'; 8]);
+	const TEN: u64 = u64::from_le_bytes([10; 8]);
+	const SPACES: u64 = u64::from_le_bytes([b' '; 8]);
+	const ONES: u64 = u64::from_le_bytes([1; 8]);
+
+	let bytes = line.as_bytes();
+	let Some((&first, rest)) = bytes.split_first() else {
+		return false;
+	};
+	let mut previous = first;
+	let (blocks, tail) = rest.as_chunks::<8>();
+
+	// Pick out spaces that follow a digit, including across block boundaries.
+	for (block_index, block) in blocks.iter().enumerate() {
+		let word = u64::from_le_bytes(*block);
+		let leading = (word << 8) | u64::from(previous);
+		let digits = leading ^ ASCII_ZERO;
+		let digits = !((digits | HIGH_BITS).wrapping_sub(TEN) | digits);
+		let spaces = word ^ SPACES;
+		let spaces = spaces.wrapping_sub(ONES) & !spaces;
+		let mut candidates = digits & spaces & HIGH_BITS;
+		while candidates != 0 {
+			let at = block_index * 8 + candidates.trailing_zeros() as usize / 8 + 1;
+			// Borrowing from a zero lane can flag the next lane as well.
+			if bytes[at] == b' ' && is_lint_count_kind(&bytes[at + 1..]) {
+				return true;
+			}
+			candidates &= candidates - 1;
+		}
+		previous = block[7];
+	}
+	for (index, &byte) in tail.iter().enumerate() {
+		if byte == b' ' && previous.is_ascii_digit() && is_lint_count_kind(&tail[index + 1..]) {
+			return true;
+		}
+		previous = byte;
+	}
+	false
+}
+
+/// Recognizes the text after the number in a lint summary.
+fn is_lint_count_kind(rest: &[u8]) -> bool {
+	match rest.first() {
+		Some(b'i') => rest.starts_with(b"issue"),
+		Some(b'e') => rest.starts_with(b"error"),
+		Some(b'w') => rest.starts_with(b"warning"),
+		_ => false,
+	}
+}
+
+/// Recognizes messages pointing to a generated Gradle lint report.
+fn is_gradle_lint_report(line: &str) -> bool {
+	const MARKERS: UnitSet = UnitSet::new(b"W/");
+	let bytes = line.as_bytes();
+	let mut offset = 0;
+	while let Some(at) = MARKERS.find::<Utf8>(&bytes[offset..]).map(|at| at + offset) {
+		let rest = &bytes[at + 1..];
+		if match bytes[at] {
+			b'/' => {
+				rest.starts_with(b"build/reports/lint")
+					|| rest.starts_with(b"/") && bytes[..at].ends_with(b"file:")
+			},
+			_ => rest.strip_prefix(b"rote ").is_some_and(|rest| {
+				rest.starts_with(b"HTML report")
+					|| rest.starts_with(b"XML report")
+					|| rest.starts_with(b"text report")
+			}),
+		} {
+			return true;
+		}
+		offset = at + 1;
+	}
+	false
+}
 
 /// Lint-mode filter (rtk `filter_lint`). Keeps Android-lint / ktlint / detekt
 /// violations and summaries, strips report-path lines and `> Task :`/try
@@ -1414,23 +1707,20 @@ fn filter_gradle_lint(input: &str) -> String {
 	let mut context_remaining: usize = 0;
 
 	for line in input.lines() {
-		if is_gradle_task_line(line)
-			|| is_gradle_try_section(line)
-			|| GRADLE_LINT_REPORT.is_match(line)
-		{
+		if is_gradle_task_line(line) || is_gradle_try_section(line) || is_gradle_lint_report(line) {
 			context_remaining = 0;
 			continue;
 		}
 
 		let is_android_lint =
-			GRADLE_ANDROID_LINT_ERROR.is_match(line) || GRADLE_ANDROID_LINT_WARNING.is_match(line);
+			is_gradle_android_lint_error(line) || is_gradle_android_lint_warning(line);
 
 		if is_gradle_build_status(line)
-			|| GRADLE_ACTIONABLE.is_match(line)
-			|| GRADLE_LINT_SUMMARY.is_match(line)
+			|| is_gradle_actionable(line)
+			|| is_gradle_lint_summary(line)
 			|| is_android_lint
-			|| GRADLE_KTLINT_VIOLATION.is_match(line)
-			|| GRADLE_DETEKT_VIOLATION.is_match(line)
+			|| is_gradle_ktlint_violation(line)
+			|| is_gradle_detekt_violation(line)
 		{
 			result_lines.push(line);
 			// Only Android-lint violations carry multi-line context; ktlint/detekt
@@ -1503,7 +1793,7 @@ fn filter_gradle_dependencies(input: &str) -> String {
 			|| is_gradle_task_line(trimmed)
 			|| is_gradle_try_section(trimmed)
 			|| is_gradle_build_status(trimmed)
-			|| GRADLE_ACTIONABLE.is_match(trimmed)
+			|| is_gradle_actionable(trimmed)
 			|| trimmed.starts_with("Downloading")
 			|| trimmed.starts_with("Download ")
 			|| trimmed.starts_with("Starting a Gradle")
@@ -1585,7 +1875,7 @@ fn filter_gradle_other(input: &str) -> String {
 	for line in input.lines() {
 		if is_gradle_task_line(line)
 			|| GRADLE_DAEMON_PREFIXES.iter().any(|p| line.starts_with(p))
-			|| GRADLE_PROGRESS.is_match(line)
+			|| is_gradle_progress(line)
 		{
 			continue;
 		}
@@ -1633,7 +1923,7 @@ fn filter_spring_boot(input: &str) -> String {
 /// it carries a startup-success or failure signal; everything else (banner,
 /// INFO/DEBUG/TRACE bean chatter) is dropped.
 fn spring_boot_keep(line: &str) -> bool {
-	SPRING_STARTED.is_match(line)
+	is_spring_started(line)
 		|| line.contains("Tomcat started on port")
 		|| line.contains("listening on port")
 		|| line.contains("ERROR")
@@ -1643,16 +1933,49 @@ fn spring_boot_keep(line: &str) -> bool {
 		|| line.contains("Application run failed")
 		|| line.contains("Tests run:")
 		|| line.contains("FAILURE")
-		|| SPRING_BUILD.is_match(line)
+		|| is_spring_build(line)
 }
 
-/// `Started\s.*\sin\s` (rtk keep-list) — the `Started <App> in <n>s` line.
-static SPRING_STARTED: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"Started\s.*\sin\s").unwrap());
+/// Recognizes the Spring Boot startup-completion message `Started App in 3.2
+/// seconds`.
+fn is_spring_started(mut line: &str) -> bool {
+	while let Some((_, after)) = line.split_once('S') {
+		if let Some(rest) = after.strip_prefix("tarted") {
+			let mut rest = rest.chars();
+			// Only one separator is consumed: a second one could just precede
+			// `in`.
+			if rest.next().is_some_and(char::is_whitespace) {
+				let rest = rest.as_str();
+				return rest.match_indices("in").any(|(at, word)| {
+					rest[..at]
+						.chars()
+						.next_back()
+						.is_some_and(char::is_whitespace)
+						&& rest[at + word.len()..]
+							.chars()
+							.next()
+							.is_some_and(char::is_whitespace)
+				});
+			}
+		}
+		line = after;
+	}
+	false
+}
 
-/// `BUILD\s` (rtk keep-list) — `BUILD SUCCESS`/`BUILD FAILURE`/`BUILD FAILED`
-/// across both mvn and gradle footer shapes.
-static SPRING_BUILD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"BUILD\s").unwrap());
+/// Recognizes a Maven or Gradle build status marker in Spring Boot output.
+fn is_spring_build(mut line: &str) -> bool {
+	while let Some((_, after)) = line.split_once('B') {
+		if after
+			.strip_prefix("UILD")
+			.is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+		{
+			return true;
+		}
+		line = after;
+	}
+	false
+}
 
 #[cfg(test)]
 mod tests {
@@ -2042,11 +2365,10 @@ mod tests {
 	fn close_line_matches_error_marker() {
 		let line = "[ERROR] Tests run: 1, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 0.006 s \
 		            <<< ERROR! -- in com.example.rtk.BoomTest";
-		let caps = CLOSE
-			.captures(line)
-			.expect("CLOSE must match an ERROR!-marked close line");
-		assert_eq!(caps.get(1).expect("failures group").as_str(), "0");
-		assert_eq!(caps.get(2).expect("errors group").as_str(), "1");
+		let counts = parse_surefire_close(MavenMessage::parse(line))
+			.expect("must parse an ERROR!-marked close line");
+		assert_eq!(counts.failures, "0");
+		assert_eq!(counts.errors, "1");
 	}
 
 	#[test]
@@ -2686,7 +3008,7 @@ mod tests {
 		             1 executed, 2 up-to-date";
 		let o = filter_gradle_test(input);
 		assert!(!o.is_empty(), "must output something on success; got:\n{o}");
-		// The summary regex does not match this output, so the testLogging hint
+		// No test summary appears in this output, so the testLogging hint
 		// fires (richer than the generic OK an empty buffer would produce).
 		assert!(
 			o.contains("add testLogging to build.gradle") || o.contains("BUILD SUCCESSFUL"),

@@ -10,6 +10,7 @@
  * the run ended. {@link CleanseRun} is the board the cleanse command drives.
  */
 import { type JSXNode, signal } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { sanitizeDisplayText } from "../../../extensibility/inventory/display-text";
@@ -78,11 +79,11 @@ interface RepairState {
 export type CleanseEnding = "clean" | "unresolved" | "unsupported" | "cancelled";
 
 const ENDINGS: Readonly<Record<CleanseEnding | "error", { readonly tone: TspTone; readonly label: string }>> = {
-	clean: { tone: "success", label: "✔ Clean" },
-	unresolved: { tone: "warning", label: "⚠ Diagnostics remain" },
-	unsupported: { tone: "warning", label: "⚠ No runnable checker" },
-	cancelled: { tone: "warning", label: "⚠ Cancelled" },
-	error: { tone: "error", label: "✘ Error" },
+	clean: { tone: "success", label: "Clean" },
+	unresolved: { tone: "warning", label: "Diagnostics remain" },
+	unsupported: { tone: "warning", label: "No runnable checker" },
+	cancelled: { tone: "warning", label: "Cancelled" },
+	error: { tone: "error", label: "Error" },
 };
 
 /** The files of an assignment as a lane names them: the first, `+N` more. */
@@ -342,7 +343,9 @@ export function CleansePanel(props: CleansePanelProps): JSXNode {
 				if (!end) return <Hints nodeKey="footer" hints={[{ keys: interruptKbd(), label: "cancel /cleanse" }]} />;
 				return (
 					<row key="footer" align="center" gap="md" wrap>
-						<text spans={[{ s: end.tone, t: end.label }]} />
+						<text
+							spans={[{ s: end.tone, t: `${currentTheme().symbols.symbol(`status.${end.tone}`)} ${end.label}` }]}
+						/>
 						<Hints hints={[{ keys: interruptKbd(), label: "dismiss" }]} />
 					</row>
 				);

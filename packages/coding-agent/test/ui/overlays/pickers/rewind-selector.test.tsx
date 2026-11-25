@@ -1,4 +1,9 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
+import { expect, test } from "bun:test";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import type { TranscriptEntryLike } from "../../../../src/session/transcript/transcript-entry";
 import { RewindSelector } from "../../../../src/ui/overlays/pickers/rewind-selector";
 import { pickerSuite } from "./harness";
@@ -40,6 +45,21 @@ const ENTRIES = [
 ];
 const LONG = Array.from({ length: 120 }, (_, i) => e(`u${i}`, i ? `u${i - 1}` : null, user(`prompt ${i}`)));
 const noop = (): void => {};
+
+test("the rewind screen's title uses the ASCII rewind icon", () => {
+	createRoot(dispose => {
+		try {
+			const [node] = resolveChildren(
+				<RewindSelector entries={ENTRIES} terminalRows={() => 30} onSelect={noop} onCancel={noop} />,
+			)();
+			const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+			const rows = paintNode(staticEnvironment(theme), node!, 100).rows.map(stripEscapes);
+			expect(rows.find(row => row.includes("pick the point"))).toContain("<- Rewind");
+		} finally {
+			dispose();
+		}
+	});
+});
 pickerSuite({
 	dir: "overlays/rewind-selector",
 	mount(caseName) {

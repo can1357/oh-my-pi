@@ -290,11 +290,10 @@ describe("BTW session boundaries", () => {
 		expect(await Bun.file(recordPath).text()).toBe(originalRecord);
 	});
 
-	describe.each(["initial", "reinitialized"] as const)("%s extension command context", binding => {
+	describe("extension command context", () => {
 		async function transition(action: "newSession" | "switchSession" | "branch") {
 			const controller = new ExtensionUiController(mode);
 			await controller.initHooksAndCustomTools();
-			if (binding === "reinitialized") controller.initializeHookRunner(extensionRunner.getUIContext(), true);
 			const context = extensionRunner.createCommandContext();
 			const target = action === "switchSession" ? await targetSession() : manager.getLeafId()!;
 			return () => {

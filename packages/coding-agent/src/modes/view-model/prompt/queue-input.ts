@@ -1,12 +1,14 @@
 const QUEUE_PREFIXES: readonly string[] = ["->", "=>"];
 
-/** Prefix matcher shared by queue-list parsing and editor highlighting. */
-export const QUEUE_LIST_MARKER_RE = /^([\t ]*)(\d+|[A-Za-z]+)([.)])(?=[\t ]|$)/;
+/** A list item's indent, marker and punctuation (`  2.`, `b)`). */
+const QUEUE_LIST_MARKER_RE = /^([\t ]*)(\d+|[A-Za-z]+)([.)])(?=[\t ]|$)/;
 
 const CANONICAL_ROMAN_RE = /^(?=[MDCLXVI])M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})$/i;
 
 interface EnumeratedItem {
 	line: number;
+	/** UTF-16 offset of the item's line in the list source. */
+	offset: number;
 	indent: string;
 	marker: string;
 	punctuation: string;
@@ -19,10 +21,46 @@ interface EnumeratedList {
 	items: EnumeratedItem[];
 }
 
+/** A `[from, to)` UTF-16 range of a draft. */
+export interface QueueRange {
+	readonly from: number;
+	readonly to: number;
+}
+
+/** Where a draft's yield-queue shorthand stands (see {@link queueShorthandMarks}). */
+export interface QueueShorthandMarks {
+	/** The `->` / `=>` prefix. */
+	readonly prefix: QueueRange;
+	/** Each item's marker (`1.`, `b)`) when the body is a sequential list; empty otherwise. */
+	readonly markers: readonly QueueRange[];
+}
+
 /** Extract the message body from the `->` / `=>` yield-queue shorthand. */
 export function parseQueueShorthand(text: string): string | undefined {
 	const prefix = QUEUE_PREFIXES.find(candidate => text.startsWith(candidate));
 	return prefix ? text.slice(prefix.length).trim() : undefined;
+}
+
+/** Whether `text` is a bare `->` / `=>` prefix, its body not begun. */
+export function isBareQueuePrefix(text: string): boolean {
+	return QUEUE_PREFIXES.includes(text);
+}
+
+/**
+ * The prefix and list-item markers of `text`'s queue shorthand, the items {@link splitQueuedMessages}
+ * would split it into; undefined when `text` is no queue shorthand. The composer highlights them.
+ */
+export function queueShorthandMarks(text: string): QueueShorthandMarks | undefined {
+	const prefix = QUEUE_PREFIXES.find(candidate => text.startsWith(candidate));
+	if (!prefix) return undefined;
+	const body = text.slice(prefix.length);
+	// The list source is the trimmed body.
+	const start = prefix.length + body.length - body.trimStart().length;
+	const markers = (parseEnumeratedList(body)?.items ?? []).map(item => {
+		const from = start + item.offset + item.indent.length;
+		return { from, to: from + item.marker.length + item.punctuation.length };
+	});
+	return { prefix: { from: 0, to: prefix.length }, markers };
 }
 
 /** Render messages as `->` / `=>` shorthand that {@link parseQueueShorthand} and {@link splitQueuedMessages} read back as the same messages. */
@@ -31,12 +69,12 @@ export function formatQueueShorthand(messages: readonly string[]): string {
 	return `=>\n${messages.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`).join("\n")}`;
 }
 
-function parseEnumeratedItem(line: string, lineIndex: number): EnumeratedItem | undefined {
+function parseEnumeratedItem(line: string, lineIndex: number, offset: number): EnumeratedItem | undefined {
 	const match = QUEUE_LIST_MARKER_RE.exec(line);
 	if (!match) return undefined;
 	const [matched, indent, marker, punctuation] = match;
 	if (indent === undefined || marker === undefined || punctuation === undefined) return undefined;
-	return { line: lineIndex, indent, marker, punctuation, content: line.slice(matched.length).trimStart() };
+	return { line: lineIndex, offset, indent, marker, punctuation, content: line.slice(matched.length).trimStart() };
 }
 
 function decodeDecimal(marker: string): number | undefined {
@@ -104,12 +142,16 @@ function parseEnumeratedList(text: string): EnumeratedList | undefined {
 	const source = text.trim();
 	if (!source) return undefined;
 	const lines = source.split(/\r?\n/);
-	const first = parseEnumeratedItem(lines[0] ?? "", 0);
+	const first = parseEnumeratedItem(lines[0] ?? "", 0, 0);
 	if (!first) return undefined;
 
 	const items = [first];
+	let offset = 0;
 	for (let lineIndex = 1; lineIndex < lines.length; lineIndex++) {
-		const item = parseEnumeratedItem(lines[lineIndex] ?? "", lineIndex);
+		// Past the previous line and its `\n` or `\r\n` break.
+		offset += (lines[lineIndex - 1] ?? "").length;
+		offset += source[offset] === "\r" ? 2 : 1;
+		const item = parseEnumeratedItem(lines[lineIndex] ?? "", lineIndex, offset);
 		if (item?.indent === first.indent) items.push(item);
 	}
 	if (items.length < 2 || items.some(item => item.punctuation !== first.punctuation) || !isEnumeratedSequence(items)) {

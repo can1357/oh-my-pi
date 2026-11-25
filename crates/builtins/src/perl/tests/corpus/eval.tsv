@@ -1,0 +1,18 @@
+# Perl corpus: eval. Format and regeneration: crates/builtins/src/perl/tests.rs.
+string-context	sub f {wantarray ? (1,2):3} my $a=eval 'f()'; my @a=eval 'f()'; print "$a|@a\n";	3|1 2␊
+string-defines-sub	eval 'sub created {12}'; print created(),"\n";	12␊
+string-die	my $x=eval 'die "inside\\n"'; print defined($x)?1:0,"|$@";	0|inside␊
+string-do	my $v=eval 'do { my $x=7; $x+1 }'; print "$v\n";	8␊
+string-empty	my $x=eval ''; print defined($x)?1:0,'|',length($@),"\n";	0|0␊
+string-file	print eval('__FILE__'),"\n";	(eval 1)␊
+string-line	print eval('__LINE__'),"\n";	1␊
+string-list	my @x=eval '(2,3,4)'; print "@x|$@\n";	2 3 4|␊
+string-mutate-lexical	my $x=4; eval '$x+=5'; print "$x\n";	9␊
+string-package	package X; print eval('__PACKAGE__'),"\n";	X␊
+string-return	my $v=eval 'return 13; 9'; print "$v\n";	13␊
+string-scalar	my $x=eval '(2,3,4)'; print "$x|$@\n";	4|␊
+string-sees-lexical	my $x=4; print eval('$x*3'),"\n";	12␊
+string-success-clears	eval 'die "old"'; eval '1'; print length($@),"\n";	0␊
+string-syntax	my $x=eval 'my $x = ;'; print defined($x)?1:0,"|$@";	0|syntax error at (eval 1) line 1, at EOF␊
+string-value	my $x=eval '2+3'; print "$x|$@\n";	5|␊
+string-variable	my $src='3*4'; print eval($src),"\n";	12␊
