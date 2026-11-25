@@ -17,6 +17,8 @@
 
 - Bash loads approved `.envrc` and opt-in `.env` files without a `direnv` executable on `PATH`, using the exact file contents checked for approval.
 
+- Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
