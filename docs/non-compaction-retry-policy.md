@@ -201,6 +201,7 @@ Defined in `packages/coding-agent/src/session/settings.ts`:
 - `retry.rateLimitWalksChain` (default `false`; `true` walks the chain as soon as a rate limit fails the turn, including after signed thinking, instead of keeping the failing model for its whole retry budget)
 - `retry.fallbackChains`
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
+- `retry.fallbackNotice` (default `false`; `true` gives the session one hidden notice naming the model now serving it each time a retry fallback moves it to another model or back to its primary, once a turn on that model has been served)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
 - `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
 - `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)

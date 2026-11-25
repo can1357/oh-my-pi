@@ -512,6 +512,8 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 		noJudge?: boolean;
 		/** Start the subagent on OpenRouter and use OpenRouter's native judge instead of TypeSafe. */
 		openRouter?: boolean;
+		/** `task.namedModelFallback`; `false` holds the agent's named model to its own list. */
+		namedModelFallback?: boolean;
 	}
 
 	function createFixture(options: FixtureOptions = {}) {
@@ -533,6 +535,7 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 			...(options.auto ? { "task.agentPrewalkAuto": options.auto } : {}),
 			...(options.unconditional ? { "task.agentPrewalk": options.unconditional } : {}),
 			...(options.noJudge ? { "models.noJudge": true } : {}),
+			...(options.namedModelFallback === false ? { "task.namedModelFallback": false } : {}),
 		});
 		const session = yieldEmittingSession(options.tools ?? ["read", "yield"]);
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
@@ -660,6 +663,21 @@ describe("runSubprocess task.agentPrewalkAuto", () => {
 			auto: { task: "on" },
 			autoTarget: `${target.provider}/${target.id}`,
 			restrictToolNames: true,
+		});
+
+		const { result, forwarded } = await f.spawn();
+
+		expect(result.exitCode).toBe(0);
+		expect(forwarded?.prewalk).toBeUndefined();
+		expect(routeCalls(calls)).toHaveLength(0);
+	});
+
+	it("never judges or prewalks a named model held to its own list", async () => {
+		const calls = stubJudge([PREWALK]);
+		const f = createFixture({
+			auto: { task: "on" },
+			autoTarget: `${target.provider}/${target.id}`,
+			namedModelFallback: false,
 		});
 
 		const { result, forwarded } = await f.spawn();

@@ -239,6 +239,11 @@ export interface AgentSessionConfig {
 	 * startup fallback, are not affected.
 	 */
 	disableModelFallback?: boolean;
+	/**
+	 * The one `retry.fallbackChains` key the session's own model walks; no other chain applies to it,
+	 * and context promotion is off. A hinted role (the advisor's) keeps its own chain.
+	 */
+	exclusiveRetryFallbackRole?: string;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */

@@ -714,6 +714,13 @@ export interface CreateAgentSessionOptions {
 	disableModelFallback?: boolean;
 	/** Never opt requests into a provider's optional server-side model fallback. Per-call `model` subagents set it. */
 	disableServerSideFallback?: boolean;
+	/**
+	 * The one `retry.fallbackChains` key this session's own model walks: no model-selector, wildcard,
+	 * other role or `default` chain applies to it, and context promotion is off. A hinted role (the
+	 * advisor's) keeps its own chain. A subagent whose model a selector named sets its `subagent:<id>`
+	 * role while `task.namedModelFallback` is off.
+	 */
+	exclusiveRetryFallbackRole?: string;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -5532,6 +5539,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			assertDispatchModel: options.assertDispatchModel,
 			disableModelFallback: options.disableModelFallback,
+			exclusiveRetryFallbackRole: options.exclusiveRetryFallbackRole,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,

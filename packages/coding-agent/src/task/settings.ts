@@ -439,6 +439,19 @@ export const cfgTaskPerCallModelAllow = register({
 	},
 });
 
+export const cfgTaskNamedModelFallback = register({
+	id: "task.namedModelFallback",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Fallback for Named Subagent Models",
+		description:
+			"On: a subagent whose model a selector names (agent definition `model`, task.agentModelOverrides, an SDK modelOverride) walks retry.fallbackChains like any session, model-keyed and wildcard chains included, and falls back to the parent's model if credentials are missing at spawn. Off: it runs only on the models that selector lists, in order, never moves to a context promotion or prewalk target, and fails when none has working credentials or all of them fail. A role alias (@task, @smol) keeps its role's chain either way, and a subagent that inherits the parent's model is not affected.",
+	},
+});
+
 export const cfgTaskMaxConcurrency = register({
 	id: "task.maxConcurrency",
 	protocolDefault: ["rpc", "acp"],

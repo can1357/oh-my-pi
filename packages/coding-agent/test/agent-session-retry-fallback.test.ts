@@ -671,6 +671,232 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(primaryModel.provider);
 	});
 
+	/** Contexts sent to the model, one per request, plus the `Fallback:` notices each one carries. */
+	function recordRequests(
+		requestContexts: string[],
+		answer: (model: Model) => MockResponse,
+		primaryModel: Model,
+		settings: Settings,
+		tools: AgentTool<any, any>[] = [],
+	): void {
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			// The default conversion drops hidden custom messages, so a notice would never reach the request.
+			convertToLlm,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools, messages: [] },
+			streamFn: (model, context, options) => {
+				requestContexts.push(JSON.stringify(context.messages));
+				mock.push(answer(model));
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+	}
+
+	const fallbackNotices = (context: string): string[] => context.match(/Fallback: [^"\\]*/g) ?? [];
+
+	it("tells the session which model serves it once a fallback turn is served (retry.fallbackNotice)", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestContexts: string[] = [];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackNotice": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		recordRequests(
+			requestContexts,
+			model =>
+				model.provider === primaryModel.provider
+					? { throw: "overloaded_error: provider returned error 503" }
+					: { content: [`ok:${model.provider}/${model.id}`] },
+			primaryModel,
+			settings,
+		);
+
+		await session?.prompt("First turn: the primary refuses");
+		await session?.waitForIdle();
+		// The refused attempt and the retry on the fallback ran before any turn was served on it.
+		expect(requestContexts.map(context => fallbackNotices(context).length)).toEqual([0, 0]);
+
+		await session?.prompt("Second turn: which model are you?");
+		await session?.waitForIdle();
+		expect(requestContexts).toHaveLength(3);
+		expect(fallbackNotices(requestContexts[2])).toEqual([`Fallback: ${primarySelector} → ${fallbackSelector}`]);
+		expect(requestContexts[2]).toContain("overloaded_error: provider returned error 503");
+	});
+
+	it("adds no notice for a refused attempt that moves on before a turn is served on it", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const refusingModel = getBundledModel("openai", "gpt-4o-mini");
+		const servingModel = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !refusingModel || !servingModel) throw new Error("Expected bundled test models to exist");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const refusingSelector = `${refusingModel.provider}/${refusingModel.id}`;
+		const servingSelector = `${servingModel.provider}/${servingModel.id}`;
+		const requestContexts: string[] = [];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackNotice": true,
+			"retry.fallbackChains": { default: [refusingSelector, servingSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		recordRequests(
+			requestContexts,
+			model => {
+				if (model.provider === primaryModel.provider)
+					return { throw: "overloaded_error: provider returned error 503" };
+				if (model.id === refusingModel.id) return { throw: "service unavailable: 503 overloaded" };
+				return { content: [`ok:${model.provider}/${model.id}`] };
+			},
+			primaryModel,
+			settings,
+		);
+
+		await session?.prompt("First turn: two models refuse");
+		await session?.waitForIdle();
+		await session?.prompt("Second turn: which model are you?");
+		await session?.waitForIdle();
+
+		// Primary, refusing model and serving model each took one request, then the second turn.
+		expect(requestContexts).toHaveLength(4);
+		expect(requestContexts.slice(0, 3).map(context => fallbackNotices(context).length)).toEqual([0, 0, 0]);
+		expect(fallbackNotices(requestContexts[3])).toEqual([`Fallback: ${primarySelector} → ${servingSelector}`]);
+		expect(requestContexts[3]).not.toContain(refusingSelector);
+	});
+
+	it("sends one notice on the return to the primary (retry.fallbackNotice)", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		let primaryCredential = false;
+		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation((model, ...rest) =>
+			model.provider === primaryModel.provider && !primaryCredential
+				? Promise.resolve(undefined)
+				: getApiKey(model, ...rest),
+		);
+		const requestContexts: string[] = [];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackNotice": true,
+			"retry.fallbackChains": { "anthropic/*": [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		recordRequests(
+			requestContexts,
+			model => ({ content: [`ok:${model.provider}/${model.id}`] }),
+			primaryModel,
+			settings,
+		);
+
+		await session?.prompt("Work while the primary is logged out");
+		await session?.waitForIdle();
+		primaryCredential = true;
+		await session?.prompt("Work after the primary logs back in");
+		await session?.waitForIdle();
+		await session?.prompt("Third turn: which model are you?");
+		await session?.waitForIdle();
+
+		expect(requestContexts).toHaveLength(3);
+		expect(fallbackNotices(requestContexts[1])).toEqual([`Fallback: ${primarySelector} → ${fallbackSelector}`]);
+		expect(fallbackNotices(requestContexts[2])).toEqual([
+			`Fallback: ${primarySelector} → ${fallbackSelector}`,
+			`Fallback: ${fallbackSelector} → ${primarySelector}`,
+		]);
+		expect(requestContexts[2]).toContain("The primary model is available again.");
+	});
+
+	it("names no serving model in the context by default", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestContexts: string[] = [];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		recordRequests(
+			requestContexts,
+			model =>
+				model.provider === primaryModel.provider
+					? { throw: "overloaded_error: provider returned error 503" }
+					: { content: [`ok:${model.provider}/${model.id}`] },
+			primaryModel,
+			settings,
+		);
+
+		await session?.prompt("First turn: the primary refuses");
+		await session?.waitForIdle();
+		await session?.prompt("Second turn: which model are you?");
+		await session?.waitForIdle();
+
+		expect(requestContexts).toHaveLength(3);
+		expect(requestContexts.map(context => fallbackNotices(context).length)).toEqual([0, 0, 0]);
+	});
+
+	it("reaches the next model request of the same run, without waking an idle session (retry.fallbackNotice)", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestContexts: string[] = [];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackNotice": true,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		const toolSchema = type({ value: type("string") });
+		// The tool call keeps the run going: the turn after its result is the next model request of the same run.
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "probe",
+			label: "Probe",
+			description: "Return its argument",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: params.value }], details: params };
+			},
+		};
+		let toolCalled = false;
+		recordRequests(
+			requestContexts,
+			model => {
+				if (model.provider === primaryModel.provider)
+					return { throw: "overloaded_error: provider returned error 503" };
+				if (toolCalled) return { content: ["done"] };
+				toolCalled = true;
+				return { content: [{ type: "toolCall", id: "tool-1", name: "probe", arguments: { value: "x" } }] };
+			},
+			primaryModel,
+			settings,
+			[tool],
+		);
+
+		await session?.prompt("One run: the primary refuses, then work continues");
+		await session?.waitForIdle();
+
+		// Primary refusal, the fallback's tool-call turn, then the turn after the tool result, all in this run.
+		expect(requestContexts).toHaveLength(3);
+		expect(fallbackNotices(requestContexts[1])).toEqual([]);
+		expect(fallbackNotices(requestContexts[2])).toEqual([`Fallback: ${primarySelector} → ${fallbackSelector}`]);
+		expect(requestContexts[2]).toContain("overloaded_error: provider returned error 503");
+	});
 	it("re-syncs the edit-mode system prompt after a retry-fallback model swap", async () => {
 		// A session that starts on a default-hashline model and auto-falls-back to a
 		// variant-pinned model must rebuild its base prompt so the edit-mode policy

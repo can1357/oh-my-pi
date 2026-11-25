@@ -481,7 +481,7 @@ export interface SessionMaintenanceHost {
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
-	/** Model fallback is disabled (a per-call `model` subagent): no context promotion. */
+	/** Model fallback is disabled (a per-call `model` subagent) or held to one chain: no context promotion. */
 	modelFallbackDisabled?(): boolean;
 	isStreaming(): boolean;
 	isSessionTransitioning(): boolean;

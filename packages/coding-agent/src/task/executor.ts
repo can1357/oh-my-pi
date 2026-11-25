@@ -30,7 +30,7 @@ import {
 } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { ModelRegistry } from "../config/model-registry";
+import { isAuthenticated, kNoAuth, ModelRegistry } from "../config/model-registry";
 import { formatModelSelectorValue } from "../config/model-selector";
 import { previewLine, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { replaceTabs } from "../utils/text-width";
@@ -169,6 +169,7 @@ import {
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentAccountPools,
 	cfgTaskEnableLsp,
+	cfgTaskNamedModelFallback,
 } from "./settings";
 import {
 	cfgTierSubagent,
@@ -303,6 +304,10 @@ export function subagentRetryFallbackRole(id: string): string {
 	return `subagent:${id}`;
 }
 
+function formatUnauthenticatedNamedModelsError(models: readonly string[]): string {
+	return `No working credentials for named subagent model${models.length === 1 ? "" : "s"}: ${models.join(", ")}.`;
+}
+
 interface SubagentRetryFallbackCandidate {
 	model: Model<Api>;
 	selector: string;
@@ -339,7 +344,8 @@ function resolveSubagentRetryFallbackCandidates(
  * otherwise the pin silently re-routes the child onto the `default` role's
  * chain. Explicit model selectors keep inheriting `default`: they carry no role
  * identity, and a role that happens to be assigned the same model must not
- * capture the child's fallback routing.
+ * capture the child's fallback routing. With `task.namedModelFallback` off they
+ * inherit nothing instead (see `namedModelsOnly` in the spawn).
  *
  * Spawn paths preserve the pre-expansion alias as `modelRole` because their
  * model patterns are already expanded. Direct callers may still supply an
@@ -492,6 +498,8 @@ export interface ExecutorOptions {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	/** {@link modelOverride} is the parent session's model: no request, override or agent definition named one. */
+	modelInherited?: true;
 	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
 	modelRoute?: string;
 	/**
@@ -4847,6 +4855,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		(toolNames === undefined || toolNames.includes("write"));
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
+	// `task.namedModelFallback` off: a model a selector named walks only the later entries of its own
+	// list. A role alias keeps its role's chain, an inherited parent model keeps the parent's routing,
+	// and a per-call `model` never falls back at all.
+	const namedModelsOnly =
+		!cfgTaskNamedModelFallback.get(settings) &&
+		modelPatterns.length > 0 &&
+		!options.perCallModelGrants &&
+		!options.modelInherited &&
+		(modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings)) === undefined;
 	const sessionFile = subtaskSessionFile ?? null;
 	const spawnsEnv = atMaxDepth
 		? ""
@@ -4992,8 +5009,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					null)
 				: undefined;
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
-			const inheritedRetryFallbackChain =
-				configuredModelPatterns.length === 1
+			const inheritedRetryFallbackChain = namedModelsOnly
+				? []
+				: configuredModelPatterns.length === 1
 					? resolveSubagentInheritedRetryFallbackChain(
 							subagentSettings,
 							modelRegistry,
@@ -5005,6 +5023,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
+				unauthenticatedModels,
 				warning: modelResolutionWarning,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
@@ -5013,9 +5032,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					modelRegistry,
 					settings,
 					id,
-					{ exactOnly: !!options.perCallModelGrants, allowedProvider },
+					{ exactOnly: !!options.perCallModelGrants, allowedProvider, allowParentFallback: !namedModelsOnly },
 				),
 			);
+			if (unauthenticatedModels && unauthenticatedModels.length > 0) {
+				throw new Error(formatUnauthenticatedNamedModelsError(unauthenticatedModels));
+			}
 			if (cfgOffline.get(settings) && !model) {
 				throw new Error("Offline mode: no subagent model is available on the active parent provider.");
 			}
@@ -5159,22 +5181,24 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// session-level --prewalk. The bundled generic `task` agent has no
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn. A per-call
-			// worker never switches models, so it never prewalks.
+			// worker never switches models, so it never prewalks; nor does a named model
+			// held to its own list (`namedModelsOnly`).
 			// `task.agentPrewalkAuto` (same "on"/"off"/pattern grammar; "on" targets
 			// `prewalk.autoTarget`) asks the judge per assignment when nothing arms
 			// unconditionally. The judgment runs only after the target is known to be
 			// usable; a non-arming or failed judgment leaves the spawn without prewalk.
 			const perCallModelGrants = options.perCallModelGrants;
+			const prewalkBarred = perCallModelGrants !== undefined || namedModelsOnly;
 			let prewalk: Prewalk | undefined;
 			const judgmentUsage: JudgmentUsage[] = [];
-			const unconditionalPattern = perCallModelGrants
+			const unconditionalPattern = prewalkBarred
 				? undefined
 				: resolveAgentPrewalkPattern({
 						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
 						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
 					});
 			const autoEntry =
-				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
+				unconditionalPattern === undefined && !prewalkBarred && !restrictToolNames
 					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
 					: undefined;
 			const autoTarget = cfgPrewalkAutoTarget.get(settings);
@@ -5237,6 +5261,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			}
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			const deferModelPatterns = !model && (modelOverride !== undefined || namedModelsOnly);
 			// Rebuilding an equivalent session from the same JSONL file re-invokes
 			// createAgentSession with this spec (same agent id, tools, model, system
 			// prompt, artifacts dir) — only the SessionManager and settings differ.
@@ -5252,13 +5277,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
-					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+					modelPattern: deferModelPatterns ? modelPatterns : undefined,
 					modelPatternParentFallback:
-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
-					modelPatternFallbackRole:
-						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
-					modelPatternDefaultFallbackChain:
-						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+						deferModelPatterns && !namedModelsOnly ? options.parentActiveModelPattern : undefined,
+					modelPatternFallbackRole: deferModelPatterns ? subagentRetryFallbackRole(id) : undefined,
+					modelPatternDefaultFallbackChain: deferModelPatterns ? inheritedRetryFallbackChain : undefined,
 					thinkingLevel: effectiveThinkingLevel,
 					...(perCallModelGrants || allowedProvider !== undefined
 						? {
@@ -5275,6 +5298,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 								...(perCallModelGrants ? { disableModelFallback: true } : {}),
 								disableServerSideFallback: true,
 							}
+						: {}),
+					// Held to its own list: no configured chain, promotion target or server-side chain.
+					...(namedModelsOnly
+						? { exclusiveRetryFallbackRole: subagentRetryFallbackRole(id), disableServerSideFallback: true }
 						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Bridge long tool waits (a third of them happen in subagents), but never
@@ -5376,6 +5403,25 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					}),
 				);
 				({ session, modelFallbackMessage } = await awaitAbortable(sessionPromise));
+				if (namedModelsOnly && !model && session.model) {
+					const deferredKey = await awaitAbortable(modelRegistry.getApiKey(session.model, id));
+					if (deferredKey !== kNoAuth && !isAuthenticated(deferredKey)) {
+						const catalog =
+							typeof modelRegistry.getAll === "function"
+								? { getAvailable: () => modelRegistry.getAll() }
+								: undefined;
+						const missing: string[] = [];
+						for (const pattern of configuredModelPatterns) {
+							const candidate = catalog ? resolveModelOverride([pattern], catalog, settings).model : undefined;
+							const label = candidate ? formatModelStringWithRouting(candidate) : pattern;
+							if (!missing.includes(label)) missing.push(label);
+						}
+						const names = missing.length > 0 ? missing : [formatModelStringWithRouting(session.model)];
+						await session.dispose();
+						sessionPromise = undefined;
+						throw new Error(formatUnauthenticatedNamedModelsError(names));
+					}
+				}
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
 				// fallback, model switch) still finds it. Consumption is gated per
@@ -5506,6 +5552,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					? enabledSubagentTools.filter(name => name !== "write")
 					: enabledSubagentTools;
 
+			// Deferred model resolution installs this role inside createAgentSession,
+			// so read it back from the settings both install paths write.
+			const retryFallback = getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id));
+
 			session.sessionManager.appendSessionInit({
 				// Blocks as sent; the session appends a newer session_init whenever a model call's base changes.
 				systemPrompt: session.agent.state.systemPrompt,
@@ -5523,9 +5573,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							perCallThinkingLevel: session.configuredThinkingLevel() ?? null,
 						}
 					: {}),
-				// Deferred model resolution installs this role inside createAgentSession,
-				// so read it back from the settings both install paths write.
-				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
+				retryFallback: retryFallback && namedModelsOnly ? { ...retryFallback, exclusive: true } : retryFallback,
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,

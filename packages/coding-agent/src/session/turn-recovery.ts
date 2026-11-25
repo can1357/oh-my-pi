@@ -41,13 +41,15 @@ import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-func
 import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
+import modelFallbackNoticeTemplate from "../prompts/system/model-fallback-notice.md" with { type: "text" };
+import { escapeHarnessTags } from "./harness-tags";
 import {
 	AUTO_THINKING,
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
 	resolveThinkingLevelForModel,
 } from "../thinking/levels";
-import { type ConfiguredThinkingLevel } from "../utils/render-utils";
+import { type ConfiguredThinkingLevel, previewLine } from "../utils/render-utils";
 import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
@@ -100,11 +102,16 @@ import {
 	cfgModelLoopGuardEnabled,
 	cfgRetry,
 	cfgRetryEnabled,
+	cfgRetryFallbackNotice,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgRetryUsageReservePct,
 	cfgRetryUsageReservePolicy,
 } from "./settings";
+
+/** Custom message type of the hidden notice naming the model that now serves the session. */
+export const MODEL_FALLBACK_NOTICE_TYPE = "model-fallback-notice";
+const MODEL_FALLBACK_REASON_MAX_CHARS = 400;
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
@@ -319,6 +326,12 @@ export interface TurnRecoveryHost {
 	unexpectedStopAbortSignal?(): AbortSignal;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
+	/** Queues a hidden, agent-attributed context message for the session's next prompt (`retry.fallbackNotice`). */
+	queueHiddenNextTurnMessage?(message: {
+		customType: string;
+		content: string;
+		details?: Record<string, unknown>;
+	}): Promise<void>;
 	scheduleAgentContinue(options: {
 		source: string;
 		delayMs?: number;
@@ -370,6 +383,11 @@ export interface TurnRecoveryOptions {
 	/** Skip construction-time fallback-chain validation; the owner runs {@link TurnRecovery.validateRetryFallbackChains}. */
 	deferFallbackChainValidation?: boolean;
 	/**
+	 * The one chain key the session's own model walks: no model-selector, wildcard, other role or
+	 * `default` chain applies to it. A hinted role (the advisor's) still resolves its own chain.
+	 */
+	exclusiveRetryFallbackRole?: string;
+	/**
 	 * Override for the unexpected-stop judge verdict budget (default 15s).
 	 * Test seam so the slow-verdict boundary runs in milliseconds instead of
 	 * seconds; production never sets it.
@@ -417,6 +435,7 @@ type IssuedProviderAssistantMessage = AssistantMessage & { [kUsageLimitRequestPr
 export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	readonly #unexpectedStopJudgeTimeoutMs: number;
+	readonly #exclusiveRetryFallbackRole: string | undefined;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
 	#genericAbortStreak = 0;
@@ -459,6 +478,14 @@ export class TurnRecovery {
 	 */
 	#lastServed: { attribution: ServingModel; sessionId: string } | undefined;
 	/**
+	 * Why the session moved off the model its context names, kept until a turn is served on another
+	 * model (`retry.fallbackNotice`). A refused attempt that moves on keeps the first cause and `from`,
+	 * so the one notice names the model that finally serves and the move that left the last served one.
+	 */
+	#servingChange: { fromSelector: string; fromIdentity: string; reason: string | undefined } | undefined;
+	/** Identity of the model the session's context last named as serving it; set by the first served turn. */
+	#contextServing: string | undefined;
+	/**
 	 * Session whose current model was reached by fallback routing rather than by
 	 * the configured primary, or `undefined` when it was not. Tracked separately
 	 * from {@link #activeRetryFallback} because the Fireworks Fast degrade swaps
@@ -496,6 +523,7 @@ export class TurnRecovery {
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
 		this.#unexpectedStopJudgeTimeoutMs = options.unexpectedStopJudgeTimeoutMs ?? UNEXPECTED_STOP_TIMEOUT_MS;
+		this.#exclusiveRetryFallbackRole = options.exclusiveRetryFallbackRole;
 		if (options.initialRetryFallback) {
 			this.#activeRetryFallback = {
 				...options.initialRetryFallback,
@@ -658,6 +686,7 @@ export class TurnRecovery {
 				},
 				sessionId: this.#host.sessionManager.getSessionId(),
 			};
+			await this.#announceServingChange(this.#lastServed.attribution);
 		}
 		// Independent of the retry saga below: a usage-aware fallback is applied
 		// before a request without ever incrementing `#retryAttempt`, and it still
@@ -2020,13 +2049,17 @@ export class TurnRecovery {
 	 * specificity: an exact model-selector key, then a `provider/*` wildcard,
 	 * then a model role whose current assignment matches, then `default`.
 	 * Model-oriented keys win over roles so a chain follows the model across
-	 * role reassignments.
+	 * role reassignments. A session given an exclusive role resolves its own
+	 * model to that role alone.
 	 */
 	resolveRetryFallbackRole(
 		currentSelector: string,
 		currentModel: Model | null | undefined = this.#host.model(),
 		roleHint?: string,
 	): string | undefined {
+		if (roleHint === undefined && this.#exclusiveRetryFallbackRole !== undefined) {
+			return this.#exclusiveRetryFallbackRole;
+		}
 		return resolveRetryFallbackChainKey(
 			this.#getRetryFallbackResolutionContext(),
 			currentSelector,
@@ -2399,13 +2432,15 @@ export class TurnRecovery {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options.pinFallback === true;
 		}
+		const reason = describeFallbackCause(options.cause);
+		this.#noteServingChange(currentSelector, previousModel, reason);
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
 			to: selector.raw,
 			role,
-			reason: describeFallbackCause(options.cause),
+			reason,
 		});
 		return true;
 	}
@@ -2704,16 +2739,18 @@ export class TurnRecovery {
 		});
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
+		// The loop, not the Fast tier, ended the turn: say why, and that the tier still changes.
+		const reason =
+			cause.trigger === "agent-loop"
+				? `${describeFallbackCause(cause)?.replace(/\.?$/, ".")} Retrying on the Standard tier.`
+				: "Request rejected by the Fast tier. Retrying on the Standard tier.";
+		this.#noteServingChange(currentSelector, model, reason);
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
 			to: baseSelector,
 			role: "fireworks-fast",
-			// The loop, not the Fast tier, ended the turn: say why, and that the tier still changes.
-			reason:
-				cause.trigger === "agent-loop"
-					? `${describeFallbackCause(cause)?.replace(/\.?$/, ".")} Retrying on the Standard tier.`
-					: "Request rejected by the Fast tier. Retrying on the Standard tier.",
+			reason,
 		});
 		return true;
 	}
@@ -2779,7 +2816,46 @@ export class TurnRecovery {
 		// The plain comparison: a hop kept the primary's prompt, so this is a no-op, unless a rebuild
 		// while on the fallback rendered the fallback's policy, which the primary must not keep.
 		await this.#host.syncAfterModelChange(previousEditMode);
+		this.#noteServingChange(currentSelector, currentModel, "The primary model is available again.");
 		return true;
+	}
+
+	/** Records that a runtime move left `fromSelector`; ignored unless `retry.fallbackNotice` is on. */
+	#noteServingChange(fromSelector: string, fromModel: Model | undefined, reason: string | undefined): void {
+		if (!cfgRetryFallbackNotice.get(this.#host.settings)) return;
+		const pending = this.#servingChange;
+		this.#servingChange = {
+			fromSelector: pending?.fromSelector ?? fromSelector,
+			fromIdentity: pending?.fromIdentity ?? (fromModel ? formatModelStringWithRouting(fromModel) : fromSelector),
+			reason: pending?.reason ?? reason,
+		};
+	}
+
+	/**
+	 * Gives the session's context one notice for a change of serving model, once a turn has been served on
+	 * the new one. The notice is queued for the next prompt; the aside provider moves it into the run still
+	 * going at its next step boundary, so it never lands between a tool call and its result and never starts
+	 * a turn by itself. A move that ended on the model the context already names, and a switch no fallback
+	 * caused (`/model`), add nothing.
+	 */
+	async #announceServingChange(served: ServingModel): Promise<void> {
+		if (!cfgRetryFallbackNotice.get(this.#host.settings)) return;
+		const identity = served.modelIdentity ?? served.selector;
+		const change = this.#servingChange;
+		this.#servingChange = undefined;
+		const named = this.#contextServing ?? change?.fromIdentity;
+		this.#contextServing = identity;
+		if (!change || named === identity || !this.#host.queueHiddenNextTurnMessage) return;
+		const reason = change.reason?.trim();
+		await this.#host.queueHiddenNextTurnMessage({
+			customType: MODEL_FALLBACK_NOTICE_TYPE,
+			content: prompt.render(modelFallbackNoticeTemplate, {
+				from: change.fromSelector,
+				to: served.selector,
+				reason: reason ? escapeHarnessTags(previewLine(reason, MODEL_FALLBACK_REASON_MAX_CHARS)) : undefined,
+			}),
+			details: { from: change.fromSelector, to: served.selector },
+		});
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {

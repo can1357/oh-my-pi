@@ -198,6 +198,11 @@ export interface RetryFallbackRole {
 	primary: string;
 	/** Fallback selectors walked after the primary; empty explicitly disables fallbacks. */
 	chain: string[];
+	/**
+	 * The session's own model walks this chain and no other (`exclusiveRetryFallbackRole`). Settings
+	 * cannot hold it, so installing the role ignores it; `session_init` stores it for cold revival.
+	 */
+	exclusive?: true;
 }
 
 /** Reads the primary and chain installed for `role`, including an explicitly empty chain. */

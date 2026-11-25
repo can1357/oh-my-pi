@@ -548,7 +548,7 @@ import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
-import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { MODEL_FALLBACK_NOTICE_TYPE, TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { extensionTheme } from "../ui/extensions/render-output";
@@ -2528,6 +2528,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			unexpectedStopAbortSignal: () => this.#postPromptTasksAbortController.signal,
 			sessionId: () => this.sessionId,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
+			queueHiddenNextTurnMessage: async message => {
+				await this.sendCustomMessage(
+					{
+						customType: message.customType,
+						content: message.content,
+						display: false,
+						details: message.details,
+						attribution: "agent",
+					},
+					{ deliverAs: "nextTurn" },
+				);
+			},
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
 			appendSessionMessage: message => this.#appendSessionMessage(message),
@@ -2548,6 +2560,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#recovery = new TurnRecovery(recoveryHost, {
 			initialRetryFallback: config.initialRetryFallback,
 			deferFallbackChainValidation: this.#fallbackChainValidationDeferred,
+			exclusiveRetryFallbackRole: config.exclusiveRetryFallbackRole,
 			unexpectedStopJudgeTimeoutMs: config.unexpectedStopJudgeTimeoutMs,
 		});
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
@@ -2808,6 +2821,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						display: false,
 						timestamp: Date.now(),
 					}));
+				}
+			}
+			if (boundary === "work") {
+				// A fallback notice joins the next step of the same run. At a stop boundary it stays queued for the
+				// next prompt: an aside there would start one more model turn.
+				const notices = this.#pendingNextTurnMessages.filter(
+					message => message.customType === MODEL_FALLBACK_NOTICE_TYPE,
+				);
+				if (notices.length > 0) {
+					this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(
+						message => message.customType !== MODEL_FALLBACK_NOTICE_TYPE,
+					);
+					thunks.push(...notices.map(notice => () => notice));
 				}
 			}
 			return thunks;
@@ -3116,7 +3142,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
-			modelFallbackDisabled: () => this.#disableModelFallback,
+			// A session held to its own chain never promotes to a model outside it.
+			modelFallbackDisabled: () => this.#disableModelFallback || config.exclusiveRetryFallbackRole !== undefined,
 			isStreaming: () => this.isStreaming,
 			isSessionTransitioning: () => this.isSessionTransitioning,
 			waitForIdle: () => this.waitForIdle(),
