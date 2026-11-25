@@ -49,7 +49,8 @@ function stepParts(model: MCPAddWizardModel, theme: Theme, width: number): strin
 			const intro = view.intro ? lines(theme, view.intro, width, "") : wrap(view.lead, width);
 			const list = view.choices.flatMap((choice, index) => {
 				const label = choice.tag ? `${choice.label} (${choice.tag})` : choice.label;
-				if (index === model.selected) return wrap(`${theme.fg("accent", "❯ ")}${theme.fg("accent", label)}`, width);
+				if (index === model.selected)
+					return wrap(theme.fg("accent", `${theme.symbols.symbol("nav.cursor")} ${label}`), width);
 				const rows = wrap(`  ${label}`, width);
 				if (choice.description) rows.push(...wrap(`    ${theme.fg("dim", choice.description)}`, width));
 				return rows;

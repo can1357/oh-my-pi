@@ -71,6 +71,7 @@ pub use crate::bash::syntax::{
 };
 pub(crate) use crate::bash::syntax::{
 	parser::{MAX_NESTING, RESERVED_WORDS},
+	print::zsh_text,
 	util::ansi_decode_all,
 };
 

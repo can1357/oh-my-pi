@@ -57,6 +57,9 @@ const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 	// in root-level and nested modules; extension nodes must share the host's.
 	{ dir: "ui", npmDir: "pi-tui", identifier: "PiUi", rootShim: null, rootWildcard: "nested" },
 	{ dir: "utils", npmDir: "pi-utils", identifier: "PiUtils", rootShim: null, rootWildcard: "flat" },
+	// Extensions import omptype for schema builders; they must share the host's lazy JIT
+	// runtime, and resolving it from the host keeps them off the install cache.
+	{ dir: "omptype", npmDir: "omptype", identifier: "OmpType", rootShim: null, rootWildcard: "flat" },
 ];
 
 const TYPEBOX_MODULE_KEY = "typebox";

@@ -21,8 +21,6 @@ export type TranscriptAction =
 	| { readonly act: "retry" }
 	/** Open the temporary model picker (`app.model.selectTemporary`). */
 	| { readonly act: "switch-model" }
-	/** Open the transcript rewind selector. */
-	| { readonly act: "rewind" }
 	/** Run a turn's hold-menu action on `message`. */
 	| { readonly act: "turn"; readonly turn: TurnAct; readonly message: TurnMessage }
 	/** Resume the session stored at `path` (a welcome card's recent session). */

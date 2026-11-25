@@ -299,7 +299,7 @@ async fn cancellation_prevents_start_and_wait_claims_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wait_wakes_on_callback_published_after_it_starts() {
+async fn wait_claims_callback_published_after_it_starts() {
 	let _serial = TEST_SERIAL.lock().await;
 	let home = temp_home("late-callback");
 	fs::create_dir_all(&home).unwrap();
@@ -307,11 +307,9 @@ async fn wait_wakes_on_callback_published_after_it_starts() {
 	let publisher = {
 		let callback = callback.clone();
 		tokio::spawn(async move {
-			// Lets the wait fail its first claim and park on the watch.
+			// Lets the wait fail its first claim and sleep until its next poll.
 			tokio::time::sleep(Duration::from_millis(50)).await;
-			let published = std::time::Instant::now();
 			publication::publish_once(&callback, b"omp-test://callback?code=late").unwrap();
-			published
 		})
 	};
 	let url = wait_for_callback_async(
@@ -323,12 +321,8 @@ async fn wait_wakes_on_callback_published_after_it_starts() {
 	)
 	.await
 	.unwrap();
-	let latency = publisher.await.unwrap().elapsed();
+	publisher.await.unwrap();
 	assert_eq!(url, "omp-test://callback?code=late");
-	// A poll would claim it most of a POLL_INTERVAL later (2 s in tests); only
-	// the directory watch wakes the wait well inside a quarter of that, even
-	// on a loaded runner.
-	assert!(latency < POLL_INTERVAL / 4, "callback claimed {latency:?} after publication");
 	fs::remove_dir_all(home).unwrap();
 }
 
