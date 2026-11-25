@@ -958,6 +958,7 @@ export async function requestOpenAiRemoteCompaction(
 			providerType: model.providerType,
 			protocol: "openai",
 			sessionId: opts?.sessionId,
+			compat: model.compat,
 			cacheAffinity: resolveOpenCodeGoCacheAffinity(
 				remoteCompactionPolicyModel(model),
 				opts?.promptCacheKey ? promptCacheSessionId : undefined,

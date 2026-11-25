@@ -132,7 +132,7 @@ describe("ThemeController", () => {
 		expect(published[0]!.name).toBe("dark");
 	});
 
-	// Real file-system events: the watcher reacts to the OS, which fake timers cannot drive.
+	// Real stat polls: they run on real timers, which fake timers cannot drive.
 	it("reloads a watched custom theme file", async () => {
 		const file = path.join(getCustomThemesDir(), "live.json");
 		await fs.mkdir(getCustomThemesDir(), { recursive: true });
@@ -147,8 +147,8 @@ describe("ThemeController", () => {
 			const reloaded = Promise.withResolvers<ResolvedTheme>();
 			onPublish = reloaded.resolve;
 			json.colors.accent = "#010203";
-			// File-system notifications can be dropped or coalesced under load (and on network mounts):
-			// rewrite until the watcher reports the change, as an editor saving again would.
+			// A write that lands before the poll's first stat becomes its baseline:
+			// rewrite until the poll reports the change, as an editor saving again would.
 			let published: ResolvedTheme | undefined;
 			void reloaded.promise.then(theme => {
 				published = theme;

@@ -26,7 +26,6 @@ import {
 	buildSearchAffinity,
 	formatCostDetail,
 	formatCostPair,
-	fuzzyHits,
 	type HeldRole,
 	hasTieredPerf,
 	heldRoles,
@@ -38,6 +37,7 @@ import {
 	type ModelBrowserPerf,
 	type ModelBrowserSource,
 	ModelItemRanker,
+	type ModelSearchIndex,
 	measuredPerf,
 	modelIdentityKey,
 	modelSearchText,
@@ -55,7 +55,7 @@ import {
 	tieredPerf,
 	thinkingDotToken,
 } from "../../../modes/view-model/overlays/model-browser";
-import { fuzzyRank } from "../../../utils/fuzzy";
+import { fuzzyHits, fuzzyRank } from "../../../utils/fuzzy";
 import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { editLine, type LineState } from "../settings/line-edit";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
@@ -251,6 +251,7 @@ export interface PickerCatalogue {
 
 /** Options of a {@link ModelBrowserState}. */
 export interface ModelBrowserOptions {
+	readonly searchIndex?: ModelSearchIndex;
 	/** Rows lead with a dim `provider/` (default true). */
 	readonly showProvider?: boolean;
 	/** Session tokens: rows whose window is smaller are flagged (when {@link markOverContext}). */
@@ -285,6 +286,7 @@ export class ModelBrowserState {
 	readonly #contextTokens: number;
 	readonly #emptyText: (() => string | undefined) | undefined;
 	#affinity: SearchAffinity = { models: new Map(), providers: new Map() };
+	readonly #searchIndex?: ModelSearchIndex;
 	#ranker: { source: readonly BrowserRow[]; affinity: SearchAffinity; ranker: ModelItemRanker } | undefined;
 	/** When the earliest dated credit card of a listed model takes effect (the `free` search word follows it). */
 	#nextCreditChange = Number.POSITIVE_INFINITY;
@@ -305,6 +307,7 @@ export class ModelBrowserState {
 
 	constructor(source: ModelBrowserSource, options: ModelBrowserOptions = {}) {
 		this.source = source;
+		this.#searchIndex = options.searchIndex;
 		this.#showProvider = signal(options.showProvider ?? true);
 		this.#markOverContext = signal(options.markOverContext ?? false);
 		const tokens = options.currentContextTokens ?? 0;
@@ -1034,8 +1037,10 @@ export class ModelBrowserState {
 	#rank(query: string): BrowserRow[] {
 		const items = this.#items.peek();
 		const models = items.filter((row): row is ModelBrowserItem => !isSeparator(row));
-		if (this.#preserveOrder.peek())
-			return this.#withSeparator(fuzzyRank(models, query, modelSearchText).map(r => r.item));
+		if (this.#preserveOrder.peek()) {
+			const matches = this.#searchIndex?.rank(models, query) ?? fuzzyRank(models, query, modelSearchText);
+			return this.#withSeparator(matches.map(r => r.item));
+		}
 		let cached = this.#ranker;
 		if (cached?.source !== items || cached.affinity !== this.#affinity) {
 			cached = {
@@ -1049,7 +1054,7 @@ export class ModelBrowserState {
 			};
 			this.#ranker = cached;
 		}
-		return this.#withSeparator(cached.ranker.rank(query));
+		return this.#withSeparator(cached.ranker.rank(query, this.#searchIndex));
 	}
 
 	/** Recompute the visible rows; the selection lands on `preferred` when listed, else the first model. */

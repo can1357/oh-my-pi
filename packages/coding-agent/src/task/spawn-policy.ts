@@ -1,3 +1,8 @@
+import { $env } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../tools";
+import { cfgTaskMaxRecursionDepth } from "./settings";
+import { canSpawnAtDepth } from "./types";
+
 /** Default agent used when a session has unrestricted spawning. */
 export const DEFAULT_SPAWN_AGENT = "task";
 
@@ -55,6 +60,26 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 		allowedErrorText: allowedAgents.join(","),
 		allowedPromptText: allowedAgents.map(agent => `\`${agent}\``).join(", "),
 	};
+}
+
+/** Why a session cannot use an agent kind under its depth, recursion, and spawn policy. */
+export function spawnDenial(
+	session: Pick<ToolSession, "settings" | "taskDepth" | "getSessionSpawns">,
+	agent: string,
+	blockedAgent = $env.PI_BLOCKED_AGENT,
+): string | undefined {
+	const depth = session.taskDepth ?? 0;
+	const maxDepth = cfgTaskMaxRecursionDepth.get(session.settings);
+	if (!canSpawnAtDepth(maxDepth, depth)) {
+		return `Cannot spawn another agent at task depth ${depth}; maximum depth is ${maxDepth}.`;
+	}
+	if (blockedAgent && blockedAgent === agent) {
+		return `Cannot spawn ${blockedAgent} agent from within itself (recursion prevention). Use a different agent type.`;
+	}
+	const policy = resolveSpawnPolicy(session.getSessionSpawns());
+	if (!policy.enabled || (policy.allowedAgents !== null && !policy.allowedAgents.includes(agent))) {
+		return `Cannot spawn '${agent}'. Allowed: ${policy.allowedErrorText}`;
+	}
 }
 
 /**

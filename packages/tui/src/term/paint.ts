@@ -59,6 +59,41 @@ export interface Block {
 	readonly covering?: number;
 }
 
+/** Every observable part of the block counts, including pointer routing when no cell changed. */
+function sameBlock(a: Block, b: Block): boolean {
+	if (a === b) return true;
+	if (
+		a.rows.length !== b.rows.length ||
+		a.stable !== b.stable ||
+		a.covering !== b.covering ||
+		a.cursor?.row !== b.cursor?.row ||
+		a.cursor?.col !== b.cursor?.col
+	)
+		return false;
+	if (a.rows !== b.rows) {
+		for (let i = 0; i < a.rows.length; i++) if (a.rows[i] !== b.rows[i]) return false;
+	}
+	if (a.hits !== b.hits) {
+		if (!a.hits || !b.hits || a.hits.length !== b.hits.length) return false;
+		for (let i = 0; i < a.hits.length; i++) {
+			const x = a.hits[i]!;
+			const y = b.hits[i]!;
+			if (
+				x !== y &&
+				(x.node !== y.node ||
+					x.item !== y.item ||
+					x.act !== y.act ||
+					x.row !== y.row ||
+					x.col !== y.col ||
+					x.width !== y.width ||
+					x.height !== y.height)
+			)
+				return false;
+		}
+	}
+	return true;
+}
+
 /** What a painter may consult. */
 export interface PaintContext {
 	/** Cells available per row. */
@@ -71,7 +106,7 @@ export interface PaintContext {
 	paint(node: UiNode, width: number, height?: number): Block;
 	/**
 	 * Terminal clock in ms; reading it repaints this block on every animation tick. `smooth` asks for
-	 * 30 Hz ticks while the block is drawn (a sweep that reads as motion), else the spinner cadence.
+	 * 20 Hz ticks while the block is drawn (a sweep that reads as motion), else the spinner cadence.
 	 */
 	now(smooth?: boolean): number;
 	/** Whether `node` holds keyboard focus. */
@@ -236,12 +271,15 @@ export function paintNode(env: PaintEnvironment, node: UiNode, width: number, he
 		const cx = createContext(env, width, height);
 		// Detached from whatever paint is running: the entry lives until the node retires or is evicted.
 		entry = createRoot(dispose => ({
-			block: computed(() => {
-				if ((node.props() as { hidden?: boolean }).hidden === true) return EMPTY_BLOCK;
-				const painter = painterFor(node);
-				if (!painter) throw new Error(`pi-tui: no terminal painter for <${node.kind}>`);
-				return painter(node, cx);
-			}),
+			block: computed(
+				() => {
+					if (node.props().hidden === true) return EMPTY_BLOCK;
+					const painter = painterFor(node);
+					if (!painter) throw new Error(`pi-tui: no terminal painter for <${node.kind}>`);
+					return painter(node, cx);
+				},
+				{ equals: sameBlock },
+			),
 			dispose,
 		}));
 		cache.entries.set(size, entry);
