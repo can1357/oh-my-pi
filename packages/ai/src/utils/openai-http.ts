@@ -14,7 +14,7 @@
  *   captured response body for the strict-tools fallback and the responses
  *   chain-state detectors, which regex over `error.message`.
  */
-import { fetchWithRetry, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, isRecord, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
 
@@ -175,6 +175,26 @@ async function* decodeStream<TEvent>(
 		}
 		yield frame;
 	}
+}
+
+/**
+ * Message and machine code of a failed OpenAI-compatible response. `detail` is
+ * the raw body when no envelope parses and empty when the envelope's message is.
+ */
+export async function readOpenAIErrorEnvelope(
+	response: Response,
+): Promise<{ detail: string | undefined; code: string | undefined }> {
+	const bodyText = await response.text();
+	let bodyJson: unknown;
+	try {
+		bodyJson = JSON.parse(bodyText);
+	} catch {}
+	const { detail, code } = OpenAIHttpError.parseEnvelope(bodyJson, bodyText);
+	// An envelope that is present but empty says nothing: report no detail, so
+	// callers fall back to the status text rather than echoing the JSON body.
+	const error = isRecord(bodyJson) ? bodyJson.error : undefined;
+	const emptyEnvelope = error === "" || (isRecord(error) && error.message === "");
+	return { detail: emptyEnvelope ? "" : detail, code };
 }
 
 /** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */
