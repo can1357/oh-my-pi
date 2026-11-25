@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
@@ -41,6 +44,7 @@
 - Fixed rules supplied by extensions in configuration overlays from disappearing when the system prompt is rebuilt.
 - Fixed idle follow-ups becoming stuck after extension messages or compaction summaries.
 - Fixed resuming goals whose token budget is exhausted so they remain budget-limited, and prevented incomplete-goal reminders from asking the agent to continue while budget-limited.
+- Assistant replies show SVG fences and HTML image and page embeds inline again on terminals that support graphics ([#20508](https://github.com/can1357/oh-my-pi/issues/20508)).
 
 ## [19.2.0] - 2026-11-25
 
