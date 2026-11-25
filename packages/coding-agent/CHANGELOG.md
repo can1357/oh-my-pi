@@ -4,14 +4,6 @@
 
 ### Breaking Changes
 
-- Removed `errorMessage` from `@oh-my-pi/pi-coding-agent/disasm/protocol`, `slash-commands/helpers/parse` and `subprocess/worker-runtime`; import it from `@oh-my-pi/pi-utils/type-guards` ([#20479](https://github.com/can1357/oh-my-pi/pull/20479) by [@H4vC](https://github.com/H4vC))
-- Removed `flattenLine` from `@oh-my-pi/pi-coding-agent/utils/render-utils`; import it from `@oh-my-pi/pi-tui/text/sanitize` ([#20484](https://github.com/can1357/oh-my-pi/pull/20484) by [@H4vC](https://github.com/H4vC))
-- Moved `fuzzyHits` to `@oh-my-pi/pi-coding-agent/utils/fuzzy` (was exported from `modes/view-model/overlays/model-browser` and `ui/overlays/panels/extension-list-model`), and removed `stripInlineMarkdown` from `ui/overlays/panels/plan-sections`; import it from `plan-mode/plan-toc` ([#20485](https://github.com/can1357/oh-my-pi/pull/20485) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed the first request after resume missing the prompt cache when a context notebook was written mid-session: the notebook is now injected where it was written, not at the head of the context ([#18836](https://github.com/can1357/oh-my-pi/issues/18836), [#20391](https://github.com/can1357/oh-my-pi/pull/20391) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed files and directories whose name starts with `..` being treated as outside their parent: a working directory under such a folder now counts as part of its checkout, and scoped settings, plugin roots and folder restrictions apply to it ([#20482](https://github.com/can1357/oh-my-pi/pull/20482) by [@H4vC](https://github.com/H4vC))
 - `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
 
 ### Added
@@ -27,6 +19,7 @@
 
 ### Fixed
 
+- Fixed the first request after resume missing the prompt cache when a context notebook was written mid-session: the notebook is now injected where it was written, not at the head of the context ([#18836](https://github.com/can1357/oh-my-pi/issues/18836), [#20391](https://github.com/can1357/oh-my-pi/pull/20391) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Resuming or rewinding a session with an aborted task result no longer throws while the transcript renders; the card shows the cancellation text ([#20533](https://github.com/can1357/oh-my-pi/pull/20533) by [@g0spel](https://github.com/g0spel))
 - Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).
 - The focused diff in Tern's native `/git` preview now scrolls with the arrow keys, Page Up/Page Down, and Home/End ([#20537](https://github.com/can1357/oh-my-pi/issues/20537)).
