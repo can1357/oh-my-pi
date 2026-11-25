@@ -205,6 +205,14 @@ interface ToolSchemaTokenCache {
  */
 const TOOL_SCHEMA_TOKEN_CACHE = new WeakMap<ToolSchemaSource, ToolSchemaTokenCache>();
 
+// A metadata revision requires re-reading live getters, not re-tokenizing identical wire bytes.
+// Keep only the last wire snapshot per tokenizer; a replacement roster can reuse it too.
+const LAST_TOOL_SCHEMA_ESTIMATE = Symbol("last-tool-schema-estimate");
+
+interface SchemaTokenizer extends Tokenizer {
+	[LAST_TOOL_SCHEMA_ESTIMATE]?: { fragments: string[]; tokens: number };
+}
+
 function toolSchemaTokenCache(tools: ToolSchemaSource): ToolSchemaTokenCache {
 	let cache = TOOL_SCHEMA_TOKEN_CACHE.get(tools);
 	if (!cache) {
@@ -332,7 +340,19 @@ export function estimateToolSchemaTokens(
 		return cached.tokens;
 
 	const fragments = tools.flatMap(tool => toolSchemaFragments(tool, { pruneDescriptions }).fragments);
-	const tokens = tokenizer.countTokens(fragments);
+	const counter: SchemaTokenizer = tokenizer;
+	const previous = counter[LAST_TOOL_SCHEMA_ESTIMATE];
+	let tokens: number;
+	if (
+		previous &&
+		fragments.length === previous.fragments.length &&
+		fragments.every((text, index) => text === previous.fragments[index])
+	) {
+		tokens = previous.tokens;
+	} else {
+		tokens = tokenizer.countTokens(fragments);
+		if (Object.isExtensible(counter)) counter[LAST_TOOL_SCHEMA_ESTIMATE] = { fragments, tokens };
+	}
 	cache.byTokenizer.set(tokenizer, { revision: cache.revision, sourceRevision, pruneDescriptions, tokens });
 	return tokens;
 }

@@ -5,6 +5,7 @@ import { type BtwInjectState } from "./btw-inject";
 /** What a press on a note asks of its controller; also the ids of its menu entries. */
 export type BtwNoteAction =
 	| "btw-focus"
+	| "btw-blur"
 	| "btw-expand"
 	| "btw-fold"
 	| "btw-copy"

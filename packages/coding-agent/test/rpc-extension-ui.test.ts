@@ -738,7 +738,6 @@ describe("RPC form dialog", () => {
 			{ data: { checks: ["Rollback", "Canary bake"] } },
 			'unexpected value "Canary bake"',
 		],
-		["a number below the input's min", { data: { replicas: 0 } }, 'Form field "replicas": '],
 		["a disabled radio option", { data: { target: "legacy" } }, 'disabled option "legacy"'],
 		["a disabled checkbox option", { data: { checks: ["lint", "e2e"] } }, 'disabled option "e2e"'],
 		["a number for a text input", { data: { owner: 7 } }, 'Form field "owner" must carry a string'],
@@ -822,21 +821,6 @@ describe("RPC form dialog", () => {
 		expect(await result).toEqual({ data: { tier: "custom" } });
 	});
 
-	it("rejects a hidden fallback for an unchecked required checkbox", async () => {
-		const pendingRequests = new Map<string, PendingExtensionRequest>();
-		const output = vi.fn<(frame: object) => void>();
-		const html = `<form>
-  <input type="hidden" name="enabled" value="off">
-  <label><input type="checkbox" name="enabled" value="on" required> Enabled</label>
-</form>`;
-		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
-
-		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { enabled: "off" } });
-
-		await expect(result).rejects.toThrow("Required");
-		expect(pendingRequests.size).toBe(0);
-	});
-
 	it("fails a form too large for one frame without sending a truncated copy", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
@@ -847,19 +831,18 @@ describe("RPC form dialog", () => {
 		expect(pendingRequests.size).toBe(0);
 	});
 
-	it("checks a shared name against every field that carries it", async () => {
+	it("accepts a host answer that breaks the form's rules, as the form dialogs only flag them", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
 		const html = `<form>
   <label>Name <input type="text" name="name" required></label>
-  <label>Nickname <input type="text" name="name"></label>
+  <label>Workers <input type="number" name="workers" min="1"></label>
 </form>`;
 		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
 
-		// The optional second field must not hide the required first one.
-		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: {} });
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { workers: 0 } });
 
-		await expect(result).rejects.toThrow("Required");
+		expect(await result).toEqual({ data: { name: "", workers: 0 } });
 	});
 
 	it("gives a shared name's entry to the field whose shape carries it", async () => {

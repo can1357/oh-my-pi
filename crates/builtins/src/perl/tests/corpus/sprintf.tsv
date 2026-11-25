@@ -1,0 +1,54 @@
+# Perl corpus: sprintf. Format and regeneration: crates/builtins/src/perl/tests.rs.
+alt-float	print "<", sprintf('%#.0f',3), ">\n";	<3.>␊
+binary-alt	print "<", sprintf('%#b',19), ">\n";	<0b10011>␊
+binary-upper	print "<", sprintf('%#B',19), ">\n";	<0B10011>␊
+binary	print "<", sprintf('%b',19), ">\n";	<10011>␊
+character	print "<", sprintf('%c',65), ">\n";	<A>␊
+decimal	print "<", sprintf('%d',-37), ">\n";	<-37>␊
+fixed	print "<", sprintf('%.3f',0.125), ">\n";	<0.125>␊
+general-upper	print "<", sprintf('%.2G',0.00000125), ">\n";	<1.3E-06>␊
+general	print "<", sprintf('%.4g',12345.67), ">\n";	<1.235e+04>␊
+hex-alt	print "<", sprintf('%#x',255), ">\n";	<0xff>␊
+hex-float-upper	print "<", sprintf('%.2A',1.5), ">\n";	<0X1.80P+0>␊
+hex-float	print "<", sprintf('%.2a',1.5), ">\n";	<0x1.80p+0>␊
+hex-upper	print "<", sprintf('%X',255), ">\n";	<FF>␊
+hex	print "<", sprintf('%x',255), ">\n";	<ff>␊
+index	print "<", sprintf('%2$s|%1$s',"one","two"), ">\n";	<two|one>␊
+infinity	print "<", sprintf('%f|%g',"Inf","-Inf"), ">\n";	<Inf|-Inf>␊
+invalid	use warnings; print sprintf('x%Zy',3),"\n";	x%Zy␊	stderr=Invalid conversion in sprintf: "%Z" at invalid.pl line 1.␊
+leading-plus-float	print "<", sprintf('%+08.2f',1.25), ">\n";	<+0001.25>␊
+left-pad	print "<", sprintf('%5d',3), ">\n";	<    3>␊
+legacy-integers	print "<", sprintf('%D|%U|%O',7,7,7), ">\n";	<7|7|7>␊
+length-j	print "<", sprintf('%jd',17), ">\n";	<17>␊
+length-z	print "<", sprintf('%zu',17), ">\n";	<17>␊
+long-long	print "<", sprintf('%lld',9223372036854775807), ">\n";	<9223372036854775807>␊
+missing	use warnings; print sprintf('%s:%s','one'),"\n";	one:␊	stderr=Missing argument in sprintf at missing.pl line 1.␊
+nan	print "<", sprintf('%E',"NaN"), ">\n";	<NaN>␊
+negative-zero	print "<", sprintf('%+.2f',-0.0), ">\n";	<-0.00>␊
+octal-alt	print "<", sprintf('%#o',19), ">\n";	<023>␊
+octal	print "<", sprintf('%o',19), ">\n";	<23>␊
+percent	print "<", sprintf('%%'), ">\n";	<%>␊
+plus	print "<", sprintf('%+d',8), ">\n";	<+8>␊
+precision-index	print "<", sprintf('%1$.*2$f',1.25,3), ">\n";	<1.250>␊
+precision-int	print "<", sprintf('%.5d',23), ">\n";	<00023>␊
+precision-star	print "<", sprintf('%.*f',3,1.25), ">\n";	<1.250>␊
+precision-string	print "<", sprintf('%.3s',"hello"), ">\n";	<hel>␊
+precision-zero	print "<", sprintf('%.0d',0), ">\n";	<>␊
+printf-default	local $_='a%%b'; printf;	a%b
+redundant	use warnings; print sprintf('%s','one','two'),"\n";	one␊	stderr=Redundant argument in sprintf at redundant.pl line 1.␊
+right-pad	print "<", sprintf('%-5s',"ab"), ">\n";	<ab   >␊
+scientific-upper	print "<", sprintf('%.2E',126), ">\n";	<1.26E+02>␊
+scientific	print "<", sprintf('%.2e',126), ">\n";	<1.26e+02>␊
+short	print "<", sprintf('%hd',65535), ">\n";	<-1>␊
+space	print "<", sprintf('% d',8), ">\n";	< 8>␊
+store-count	my $n; my $s=sprintf('abc%n!',$n); print "$s|$n\n";	abc!|3␊
+string	print "<", sprintf('%s',"hello"), ">\n";	<hello>␊
+unsigned	print "<", sprintf('%u',-1), ">\n";	<18446744073709551615>␊
+vector-hex	print "<", sprintf('%vX',"ABC"), ">\n";	<41.42.43>␊
+vector-separator	print "<", sprintf('%*vX',":","ABC"), ">\n";	<41:42:43>␊
+vector	print "<", sprintf('%vd',"ABC"), ">\n";	<65.66.67>␊
+width-index	print "<", sprintf('%1$*2$d',7,5), ">\n";	<    7>␊
+width-negative	print "<", sprintf('%*s',-5,"x"), ">\n";	<x    >␊
+width-star	print "<", sprintf('%*d',5,6), ">\n";	<    6>␊
+zero-pad	print "<", sprintf('%05d',-12), ">\n";	<-0012>␊
+zero-with-precision	print "<", sprintf('%06.3d',42), ">\n";	<   042>␊
