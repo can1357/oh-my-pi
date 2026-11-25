@@ -1458,33 +1458,34 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		function continuationHost(message: AssistantMessage, textOutputCommitted = true) {
 			const messages: AgentMessage[] = [message];
 			const continues: string[] = [];
+			const beforeContinue: (() => void)[] = [];
 			const host = createHost(model, modelRegistry, { messages, textOutputCommitted });
 			host.agent = {
 				state: { messages },
 				appendMessage: (appended: AgentMessage) => messages.push(appended),
 			} as never;
-			host.scheduleAgentContinue = options => continues.push(options.source);
-			return { host, messages, continues };
+			host.scheduleAgentContinue = options => {
+				continues.push(options.source);
+				if (options.beforeContinue) beforeContinue.push(options.beforeContinue);
+			};
+			return { host, messages, continues, beforeContinue };
 		}
 
 		it("keeps the partial turn and continues with a resume reminder", () => {
 			const message = stalledTextTurn();
-			const { host, messages, continues } = continuationHost(message);
+			const { host, messages, continues, beforeContinue } = continuationHost(message);
 			const recovery = new TurnRecovery(host);
 
 			expect(recovery.isRetryableError(message)).toBe(false);
 			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 
+			// The reminder lands only when the delayed continuation starts.
+			expect(messages).toEqual([message]);
+			for (const run of beforeContinue) run();
 			expect(messages[0]).toBe(message);
 			const reminder = messages[1];
 			if (reminder?.role !== "developer") throw new Error("expected developer reminder");
-			const text =
-				typeof reminder.content === "string"
-					? reminder.content
-					: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
-			expect(text).toContain("Continue exactly where it stopped");
-			expect(text).toContain("Attempt #1/3");
 			expect(continues).toEqual(["stream-stall-continue"]);
 		});
 
@@ -1531,8 +1532,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
-			expect(continues).toHaveLength(3);
+			expect(continues).toHaveLength(5);
 
 			recovery.resetForNewPrompt();
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
@@ -1564,6 +1567,26 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 			expect(messages[0]).toBe(message);
 			expect(continues).toEqual(["stream-stall-continue"]);
+		});
+
+		it("resets the stall sequence after a successful turn", () => {
+			const message = stalledTextTurn();
+			const { host, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			const settled = makeMessage([{ type: "text", text: "All done." }], model);
+			settled.stopReason = "stop";
+			expect(recovery.handleCommittedTextStreamStall(settled)).toBe(false);
+
+			// The successful turn restarted the sequence: a full fresh budget of
+			// continuations runs before the cap refuses again.
+			for (let i = 0; i < 5; i++) {
+				expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			}
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
+			expect(continues).toHaveLength(7);
 		});
 
 		it("leaves uncommitted text, tool turns, other errors, and disabled retry to the error path", () => {

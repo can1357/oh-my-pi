@@ -115,7 +115,8 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
-const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+const STREAM_STALL_CONTINUE_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
+const STREAM_STALL_CONTINUE_MAX_RETRIES = STREAM_STALL_CONTINUE_DELAYS_MS.length;
 const GENERIC_ABORT_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 /** Bounds best-effort usage-limit bookkeeping so a stalled report or sibling probe cannot hold the terminal agent_end event. */
@@ -133,6 +134,12 @@ const HTTP2_STREAM_RESET_ERROR_RE =
 // eligible for preserved-turn continuation on resolved tool turns.
 const PREMATURE_STREAM_CLOSE_ERROR_RE =
 	/(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion event|Cursor stream ended before turnEnded)/i;
+
+// Responses transport drops reported in the gateway's or provider's own words
+// (`stream_incomplete`, a websocket closed before `response.completed`). Narrower
+// than `AIError.isTransientStreamDropError`, which also covers Anthropic envelope
+// errors whose committed text keeps the main-session replay veto.
+const RESPONSES_STREAM_DROP_ERROR_RE = /stream_incomplete|(?:stream|websocket) closed before response\.completed/i;
 
 /**
  * Bare abort sentinels with no provider reason: our own `"Request was aborted"`
@@ -324,6 +331,8 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		/** Runs once, immediately before `agent.continue()`; never runs for a skipped request. */
+		beforeContinue?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -819,23 +828,29 @@ export class TurnRecovery {
 			provider: message.provider,
 			errorMessage: message.errorMessage,
 		});
-		this.#host.agent.appendMessage({
-			role: "developer",
-			content: [
-				{
-					type: "text",
-					text: prompt.render(streamStallContinueTemplate, {
-						retryCount: this.#streamStallContinueCount,
-						maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
-					}),
-				},
-			],
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		const retryCount = this.#streamStallContinueCount;
 		this.#host.scheduleAgentContinue({
 			source: "stream-stall-continue",
+			delayMs: STREAM_STALL_CONTINUE_DELAYS_MS[retryCount - 1],
 			generation: this.#host.promptGeneration(),
+			// Append the reminder only when the delayed continuation really starts:
+			// an Esc during the wait must not leave a "resume the answer" instruction
+			// behind for the user's next, unrelated prompt.
+			beforeContinue: () =>
+				this.#host.agent.appendMessage({
+					role: "developer",
+					content: [
+						{
+							type: "text",
+							text: prompt.render(streamStallContinueTemplate, {
+								retryCount,
+								maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
+							}),
+						},
+					],
+					attribution: "agent",
+					timestamp: Date.now(),
+				}),
 		});
 		return true;
 	}
@@ -1824,9 +1839,11 @@ export class TurnRecovery {
 	 * truncated stream envelope. A premature close (no finish_reason/terminal
 	 * event) and an envelope that never reached its terminal frame — including a
 	 * gateway's in-band `error` frame, which the provider reports as the same
-	 * envelope truncation — are the same failure class as a stall or reset.
-	 * Resets and closes are ignored while a deliberate abort, disposal, or
-	 * streaming-edit abort owns the stream.
+	 * envelope truncation — are the same failure class as a stall or reset, and
+	 * so is a Responses transport drop the provider or a proxy reports in its own
+	 * words (a `stream_incomplete` error event for an upstream websocket that
+	 * closed before `response.completed`). Resets and closes are ignored while a
+	 * deliberate abort, disposal, or streaming-edit abort owns the stream.
 	 */
 	#isMidStreamTransportFailure(message: AssistantMessage, id: number): boolean {
 		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
@@ -1840,7 +1857,11 @@ export class TurnRecovery {
 			HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
 			AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(errorMessage) ||
 			AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage) ||
-			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage)
+			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage) ||
+			// Providers such as Cursor keep the raw diagnostic in errorClassificationMessage and
+			// display-only text in errorMessage; retry classification reads both, so must this.
+			RESPONSES_STREAM_DROP_ERROR_RE.test(errorMessage) ||
+			RESPONSES_STREAM_DROP_ERROR_RE.test(message.errorClassificationMessage ?? "")
 		);
 	}
 	/**

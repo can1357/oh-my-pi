@@ -43,6 +43,35 @@ describe("error-id classification", () => {
 		expect(AIError.retriable(id)).toBe(true);
 	});
 
+	it("classifies OpenAI Responses stream_incomplete websocket drops as transient", () => {
+		const assistant = message({
+			api: "openai-responses",
+			provider: "codex-lb",
+			model: "gpt-6-sol",
+			errorId: 0,
+			errorStatus: null as unknown as undefined,
+			errorMessage:
+				"stream_incomplete: Upstream websocket closed before response.completed: Upstream websocket receive failed",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(assistant.errorId).toBe(id);
+	});
+
+	it("keeps OpenAI Responses invalid_request errors terminal", () => {
+		const assistant = message({
+			api: "openai-responses",
+			provider: "codex-lb",
+			model: "gpt-6-sol",
+			errorStatus: 400,
+			errorMessage: "invalid_request_error: malformed request body",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
 	it("classifies provider connection failures as transient", () => {
 		for (const errorMessage of ["Unable to connect. Is the computer able to access the url?", "Socket is closed"]) {
 			const id = AIError.classifyMessage(message({ errorMessage }));
