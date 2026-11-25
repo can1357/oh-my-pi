@@ -59,13 +59,13 @@ export type StatusHookLook = {
 };
 
 /** The bar's segments, in order, for `settings` over `facts`. */
-export function statusSegs(settings: StatusLineSettings, facts: StatusFacts, nerd = false): StatusSeg[] {
+export function statusSegs(settings: StatusLineSettings, facts: StatusFacts): StatusSeg[] {
 	const effective = effectiveStatusSettings(settings);
 	const badge = facts.subagents > 0;
 	const collect = (ids: readonly StatusLineSegmentId[]) =>
 		ids.flatMap(id => {
 			if (badge && id === "subagents") return [];
-			const segView = segmentView(id, facts, effective, nerd);
+			const segView = segmentView(id, facts, effective);
 			return segView ? [{ id, view: segView }] : [];
 		});
 	const left = collect(effective.leftSegments);
@@ -143,8 +143,6 @@ export interface StatusLineProps {
 	readonly settings: Accessor<StatusLineSettings>;
 	readonly facts: Accessor<StatusFacts>;
 	readonly placement: Accessor<StatusPlacement>;
-	/** The symbol preset is the Nerd Font one (billing units). */
-	readonly nerd?: Accessor<boolean>;
 }
 
 /** The status line's terminal chrome around a composer, drawn on demand. */
@@ -212,7 +210,7 @@ export function createStatusLine(props: StatusLineProps): {
 	/** The bar as a shape shows it: in its top `attachment`, or the full standalone bar without one. */
 	preview(attachment: StatusAttachment | undefined): UiNode;
 } {
-	const segs = computed(() => statusSegs(props.settings(), props.facts(), props.nerd?.() ?? false));
+	const segs = computed(() => statusSegs(props.settings(), props.facts()));
 	const byKey = computed(() => new Map(segs().map(seg => [seg.key, seg])));
 	const keys = computed(() => segs().map(seg => seg.key), {
 		equals: (a, b) => a.length === b.length && a.every((key, i) => key === b[i]),

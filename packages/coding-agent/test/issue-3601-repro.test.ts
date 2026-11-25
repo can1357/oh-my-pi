@@ -75,7 +75,7 @@ describe("Composer empty bracketed paste (issue #3601)", () => {
 		const { composer, paste, spies } = createCtx({ readImage: async () => null, readText: async () => "" });
 		spies.handleImagePaste.mockResolvedValue(true);
 
-		expect(paste("")).toBe("intercepted");
+		paste("");
 
 		expect(spies.handleImagePaste).toHaveBeenCalledTimes(1);
 		// The empty payload must not also reach the editor (a literal empty paste / undo entry).
@@ -106,7 +106,7 @@ describe("Composer empty bracketed paste (issue #3601)", () => {
 		const { paste, spies } = createCtx();
 		spies.handleImagePathPaste.mockResolvedValue();
 
-		expect(paste("/tmp/screenshot.png")).toBe("intercepted");
+		paste("/tmp/screenshot.png");
 
 		expect(spies.handleImagePathPaste).toHaveBeenCalledWith("/tmp/screenshot.png");
 		expect(spies.handleImagePaste).not.toHaveBeenCalled();

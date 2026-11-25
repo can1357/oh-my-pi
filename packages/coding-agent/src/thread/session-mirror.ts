@@ -33,6 +33,8 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import type {
+	AgentModelChange,
+	AgentModelSelectionState,
 	AgentSessionAdvisorOverview,
 	AgentSessionHandle,
 	AgentViewToolSchema,
@@ -217,6 +219,7 @@ export interface SessionAbortOptions {
 	reason?: string;
 	preserveCompaction?: boolean;
 	deliverQueuedMessages?: boolean;
+	detachTools?: boolean;
 }
 
 /**
@@ -231,6 +234,7 @@ export type SessionHostProtocol = {
 	dispose: RpcMethod<[options?: AgentSessionDisposeOptions], void>;
 	deliverIrcMessage: RpcMethod<[msg: IrcMessage], "injected" | "woken">;
 	waitForIrcReplies: RpcMethod<[], void>;
+	applyAgentModelChange: RpcMethod<[change: AgentModelChange], AgentModelSelectionState>;
 	setWorkPoolYieldItems: RpcMethod<[items: readonly WorkPoolYieldItem[]], void>;
 	emitIrcRelayObservation: RpcMethod<[record: CustomMessage], void>;
 	/** Start (true) or stop (false) forwarding the full event stream and the view state. */
@@ -306,6 +310,7 @@ export type SessionBridgeProtocol = {
 	dispose: RpcMethod<[session: AgentSessionHandle, options?: AgentSessionDisposeOptions], void>;
 	deliverIrcMessage: RpcMethod<[session: AgentSessionHandle, msg: IrcMessage], "injected" | "woken">;
 	waitForIrcReplies: RpcMethod<[session: AgentSessionHandle], void>;
+	applyAgentModelChange: RpcMethod<[session: AgentSessionHandle, change: AgentModelChange], AgentModelSelectionState>;
 	setWorkPoolYieldItems: RpcMethod<[session: AgentSessionHandle, items: readonly WorkPoolYieldItem[]], void>;
 	emitIrcRelayObservation: RpcMethod<[session: AgentSessionHandle, record: CustomMessage], void>;
 };

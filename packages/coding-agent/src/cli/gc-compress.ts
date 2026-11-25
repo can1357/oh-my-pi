@@ -16,9 +16,8 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { COMPRESS_SCRATCH_PREFIX } from "@oh-my-pi/omp-stats/parser";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { errorMessage, isEnoent } from "@oh-my-pi/pi-utils";
 import { FileSessionStorage } from "../session/session-storage";
-import { errorMessage } from "../slash-commands/helpers/parse";
 import { sha256File } from "../utils/file-hash";
 
 const SCRATCH_GLOB = new Bun.Glob(`**/${COMPRESS_SCRATCH_PREFIX}*`);

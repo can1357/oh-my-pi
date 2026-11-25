@@ -1,23 +1,16 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { afterAll, describe, expect, it } from "bun:test";
+import { settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { cfgHindsightApiToken } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
-import { mountSettingsWindow, settingsScreen } from "../../helpers/settings-window";
+import { settingsScreen, setupSettingsWindow } from "../../helpers/settings-window";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
 
-beforeEach(async () => {
-	resetSettingsForTest();
-	await Settings.init({ inMemory: true });
-});
-
-afterEach(() => {
-	resetSettingsForTest();
-});
+const mountSettingsWindow = setupSettingsWindow();
 
 function createSelector(onCancel: () => void = () => {}, columns = 120): TestTerminal {
 	return mountSettingsWindow({ callbacks: { onCancel } }, { columns });
@@ -88,7 +81,6 @@ describe("settings memory page and search", () => {
 		expect(cfgHindsightApiToken.get(settings)).toBe("test-token-123");
 		expect(loadHindsightConfig(settings).hindsightApiToken).toBe("test-token-123");
 		expect(settingsScreen(comp)).not.toContain("test-token-123");
-		comp.dispose();
 	});
 
 	it("hides Hindsight rows again when the backend is switched back to off without leaving the tab", () => {
@@ -127,7 +119,6 @@ describe("settings memory page and search", () => {
 
 		comp.press("escape");
 		expect(cancelCount).toBe(1);
-		comp.dispose();
 	});
 
 	it("puts the exact global settings search hit before incidental matches", () => {
@@ -135,7 +126,6 @@ describe("settings memory page and search", () => {
 		comp.type("fetch provider");
 
 		const rendered = settingsScreen(comp);
-		comp.dispose();
 		const providersIndex = rendered.indexOf("Providers");
 		const appearanceIndex = rendered.indexOf("Appearance");
 
@@ -163,7 +153,6 @@ describe("settings memory page and search", () => {
 		for (let i = 0; i < 5; i++) comp.press("left");
 		comp.type("x");
 		expect(banner(comp)).toContain("xmodel");
-		comp.dispose();
 	});
 
 	it("delegates Escape to an open settings submenu before closing the selector", () => {
@@ -181,6 +170,5 @@ describe("settings memory page and search", () => {
 
 		comp.press("escape");
 		expect(cancelCount).toBe(1);
-		comp.dispose();
 	});
 });

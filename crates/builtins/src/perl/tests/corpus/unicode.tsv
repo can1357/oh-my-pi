@@ -1,0 +1,24 @@
+# Perl corpus: unicode. Format and regeneration: crates/builtins/src/perl/tests.rs.
+bytes-length	use utf8; use bytes; print length("éß☺"),"\n";	7␊
+chr	binmode STDOUT, ':utf8'; print chr(0x263A),"\n";	☺␊
+first-case	use utf8; binmode STDOUT, ':utf8'; print ucfirst("éclair"),'|',lcfirst("ÉCOLE"),"\n";	Éclair|éCOLE␊
+fold	use feature 'fc'; use utf8; binmode STDOUT, ':utf8'; print fc("ßK"),"\n";	ssk␊
+hash-key	use utf8; my %h=("é"=>1); print $h{chr(233)},"\n";	1␊
+hex-codepoint	binmode STDOUT, ':utf8'; print "\x{263A}\n";	☺␊
+index	use utf8; print index("πé☺",'☺'),"\n";	2␊
+length	use utf8; print length("éß☺"),"\n";	3␊
+lower	use utf8; binmode STDOUT, ':utf8'; print lc("ÉΣ"),"\n";	éσ␊
+normalize-string-with-latin1	use utf8; binmode STDOUT, ':utf8'; print "☺".chr(233),"\n";	☺é␊
+ord	use utf8; print ord('☺'),"\n";	9786␊
+pack-unicode	print join('|',unpack('U*',pack('U*',233,0x263a))),"\n";	233|9786␊
+regex-ascii	use utf8; print 'π' =~ /^\w+$/a ? 1:0,"\n";	0␊
+regex-offset	use utf8; 'é☺x' =~ /x/; print "$-[0]|$+[0]\n";	2|3␊
+regex-property	use utf8; print 'π' =~ /\p{Greek}/ ? 1:0,"\n";	1␊
+regex-utf8-pos	use utf8; my $s='é☺'; $s =~ /./g; print pos($s),"\n";	1␊
+regex-word	use utf8; print 'π' =~ /^\w+$/u ? 1:0,"\n";	1␊
+source-utf8	use utf8; binmode STDOUT, ':utf8'; print "éß☺\n";	éß☺␊
+split-characters	use utf8; binmode STDOUT, ':utf8'; print join('|',split //,'é☺π'),"\n";	é|☺|π␊
+substr	use utf8; binmode STDOUT, ':utf8'; print substr("a☺éz",1,2),"\n";	☺é␊
+translit	use utf8; binmode STDOUT, ':utf8'; my $s='éπé'; $s =~ tr/éπ/☺Ω/; print "$s\n";	☺Ω☺␊
+upper	use utf8; binmode STDOUT, ':utf8'; print uc("éß"),"\n";	ÉSS␊
+wide-warning	print "\x{263A}\n";	☺␊	stderr=Wide character in print at wide-warning.pl line 1.␊
