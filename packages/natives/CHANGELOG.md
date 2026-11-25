@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows `computer` takeovers starting while you type, so your keys went into the target: a takeover now waits until the session has had no input for 5 s (pointer moves included) and you hold no mouse button or modifier, and returns `UserIntervened` with nothing sent if that does not come before the call's deadline; once started, a takeover still runs to the end if you type ([#20019](https://github.com/can1357/oh-my-pi/pull/20019) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

@@ -95,9 +95,12 @@ fn keyboard_layout(target: Option<HWND>) -> HKL {
 
 fn global_button(input: &mut Enigo, button: MouseButton, direction: Direction) -> CoreResult<()> {
 	control::check()?;
-	input
+	let sending = super::activity::sending();
+	let result = input
 		.button(button_to_enigo(button), direction)
-		.map_err(enigo_error)
+		.map_err(enigo_error);
+	sending.sent(result.is_ok());
+	result
 }
 
 fn with_global_keys(
@@ -187,15 +190,19 @@ fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 			let vertical = scroll_steps(dy);
 			if horizontal != 0 {
 				control::check()?;
-				input
+				let sending = super::activity::sending();
+				let result = input
 					.scroll(horizontal, Axis::Horizontal)
-					.map_err(enigo_error)?;
+					.map_err(enigo_error);
+				sending.sent(result.is_ok());
+				result?;
 			}
 			if vertical != 0 {
 				control::check()?;
-				input
-					.scroll(vertical, Axis::Vertical)
-					.map_err(enigo_error)?;
+				let sending = super::activity::sending();
+				let result = input.scroll(vertical, Axis::Vertical).map_err(enigo_error);
+				sending.sent(result.is_ok());
+				result?;
 			}
 			Ok(())
 		},
@@ -997,6 +1004,7 @@ mod foreground {
 	use crate::desktop::{
 		types::DesktopFocusReturn,
 		win32::{
+			activity,
 			delivery::{TextUnit, text_units},
 			window,
 		},
@@ -1035,6 +1043,10 @@ mod foreground {
 			control::check()?;
 			let target = background::hwnd(id)?;
 			background::ensure_integrity(id, target)?;
+			// Finding an element's window can take a while after the lease's
+			// admission check: the session must still be quiet as it comes
+			// forward.
+			activity::activating()?;
 			// SAFETY: GetForegroundWindow has no preconditions.
 			let previous = unsafe { GetForegroundWindow() };
 			if previous.is_null() {
@@ -1199,10 +1211,12 @@ mod foreground {
 		if events.is_empty() {
 			return Ok(());
 		}
+		let sending = activity::sending();
 		// SAFETY: `events` is an initialized INPUT slice copied synchronously by
 		// Win32.
 		let sent =
 			unsafe { SendInput(events.len() as u32, events.as_ptr(), size_of::<INPUT>() as i32) };
+		sending.sent(sent != 0);
 		if sent as usize == events.len() {
 			Ok(())
 		} else {
@@ -1213,8 +1227,11 @@ mod foreground {
 			let cleanup = control::cleanup(|| {
 				let mut cleanup = Ok(());
 				for release in releases.iter().rev() {
+					let sending = activity::sending();
 					// SAFETY: release is one initialized INPUT copied synchronously.
-					if unsafe { SendInput(1, release, size_of::<INPUT>() as i32) } != 1 {
+					let released = unsafe { SendInput(1, release, size_of::<INPUT>() as i32) } == 1;
+					sending.sent(released);
+					if !released {
 						cleanup =
 							Err(DesktopError::input_failed("SendInput could not release inserted input"));
 					}
@@ -1714,9 +1731,11 @@ mod foreground {
 		let marker = [key_event(DRAIN_KEY, false, layout), key_event(DRAIN_KEY, true, layout)];
 		// The text is out, so the marker goes even after a cancel that came
 		// since; the wait below ends on it.
+		let sending = activity::sending();
 		// SAFETY: `marker` is an initialized INPUT slice copied synchronously.
 		let sent =
 			unsafe { SendInput(marker.len() as u32, marker.as_ptr(), size_of::<INPUT>() as i32) };
+		sending.sent(sent != 0);
 		let deadline = Instant::now() + DRAIN_TIMEOUT;
 		let unread = if sent as usize == marker.len() {
 			loop {
