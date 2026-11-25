@@ -74,6 +74,8 @@ export interface ComposerRowContext extends ComposerChromeContext {
 	readonly last: boolean;
 	/** Cells an end-of-row caret took from the right chrome's padding. */
 	readonly overflow: number;
+	/** The last row of a side-bordered shape when the IME-safe layout is on: the bottom border moves to its own row. */
+	readonly imeSafeCursorTail?: boolean;
 }
 
 /** A composer shape (see the module docs). */
@@ -206,6 +208,11 @@ const box: ComposerShape = {
 	row(cx) {
 		const { box: g, paddingX } = cx;
 		const cells = rightCells(cx);
+		if (cx.last && cx.imeSafeCursorTail) {
+			const left = cx.border(`${g.vertical}${" ".repeat(paddingX)}`);
+			const bottom = cx.border(`${g.bottomLeft}${g.horizontal.repeat(Math.max(0, cx.width - 2))}${g.bottomRight}`);
+			return [`${left}${cx.text}`, bottom];
+		}
 		if (cx.last) {
 			const left = cx.border(`${g.bottomLeft}${g.horizontal}${" ".repeat(Math.max(0, paddingX - 1))}`);
 			const right = cx.border(

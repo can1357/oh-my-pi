@@ -527,3 +527,29 @@ describe("a `?` draft", () => {
 		expect(field?.props()).not.toHaveProperty("lang", expect.anything());
 	});
 });
+
+describe("IME-safe cursor layout", () => {
+	test("moves the box bottom border to its own row when the hardware cursor is active", () => {
+		const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true });
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.slice(-2)).toEqual(["│  hi", `╰${"─".repeat(18)}╯`]);
+	});
+
+	test("keeps the separate bottom border when the caret is not at the end", () => {
+		const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true });
+		composer.setCursor(1);
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.slice(-2)).toEqual(["│  hi", `╰${"─".repeat(18)}╯`]);
+	});
+
+	test("keeps the merged bottom border when the caret is drawn", () => {
+		const { composer } = make({ text: "hi", caret: "drawn", imeSafeCursor: true });
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.at(-1)?.startsWith("╰─")).toBe(true);
+		expect(rows.at(-1)).toContain("hi");
+		expect(rows.at(-1)).not.toBe(`╰${"─".repeat(18)}╯`);
+	});
+});

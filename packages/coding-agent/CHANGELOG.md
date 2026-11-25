@@ -37,6 +37,9 @@
 ### Fixed
 
 - Extension transcript presenters' compact tool-call and read rows draw their `TspSpan` theme styles again, and consecutive compact tool, read, `!`/`$` run and message blocks pack without blank rows between them ([#20512](https://github.com/can1357/oh-my-pi/issues/20512)).
+### Fixed
+
+- Restored `tui.imeSafeCursor`, which moves the prompt's bottom border to its own row so macOS IME preedit cannot displace it ([#20503](https://github.com/can1357/oh-my-pi/pull/20503) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [19.2.1] - 2026-11-25
 
