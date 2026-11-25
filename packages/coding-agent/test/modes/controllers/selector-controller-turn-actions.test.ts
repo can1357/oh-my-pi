@@ -17,7 +17,9 @@ const prompt = (text: string, timestamp: number) => ({ role: "user", content: te
 const answer = (timestamp: number) =>
 	({ role: "assistant", content: [{ type: "text", text: "ok" }], timestamp }) as unknown as AgentMessage;
 
-/** u1 (t=10) → a1 (t=11) → u2 (t=20) → a2 (t=21), the leaf at a2; each rewind lands where omp's navigateTree would. */
+const SOURCE_FILE = "/sessions/source.jsonl";
+
+/** u1 (t=10) → a1 (t=11) → u2 (t=20) → a2 (t=21), the leaf at a2 of a session persisted at {@link SOURCE_FILE}. */
 function harness(draft = "") {
 	const branch = [
 		entry("u1", null, prompt("first prompt", 10)),
@@ -29,14 +31,27 @@ function harness(draft = "") {
 	const editor = { text: draft, submitted: [] as string[] };
 	const statuses: [string, ShowStatusOptions | undefined][] = [];
 	const undone = Promise.withResolvers<void>();
-	const navigateTree = vi.fn(async (id: string) => ({ cancelled: false, editorText: prompts[id] }));
+	const branchSession = vi.fn(async (id: string, _options?: { requireIdle?: boolean }) => ({
+		cancelled: false,
+		selectedText: prompts[id] ?? "",
+		selectedImages: [],
+	}));
 	const ctx = {
 		sessionManager: {
 			getBranch: () => branch,
 			getEntry: (id: string) => branch.find(e => e.id === id),
 			getLeafId: () => "a2",
+			isSessionOnDisk: () => true,
+			getSessionFile: () => SOURCE_FILE,
 		},
-		session: { navigateTree },
+		session: { branch: branchSession, isBusyForSnapshot: false, abortForRewind: async () => {} },
+		eventController: { resetTranscriptAnchors: () => {} },
+		statusLine: { refresh: () => {} },
+		prepareSessionSwitch: async () => {},
+		cancelGoalContinuation: () => {},
+		cancelPendingSubmission: () => false,
+		updatePendingMessagesDisplay: () => {},
+		clearTransientSessionUi: () => {},
 		composer: {
 			text: () => editor.text,
 			pendingImages: [],
@@ -57,16 +72,18 @@ function harness(draft = "") {
 		},
 		showError: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	return { controller: new SelectorController(ctx), navigateTree, editor, statuses, undone: undone.promise };
+	const controller = new SelectorController(ctx);
+	const resume = vi.spyOn(controller, "handleResumeSession").mockResolvedValue(true);
+	return { controller, branchSession, resume, editor, statuses, undone: undone.promise };
 }
 
 describe("SelectorController turn actions", () => {
-	it("retries an answer's turn: rewinds past its prompt and sends that prompt again", async () => {
+	it("retries an answer's turn: branches before its prompt and sends that prompt again", async () => {
 		const h = harness();
 
 		await h.controller.runTurnAction("retry", { role: "assistant", at: 21 });
 
-		expect(h.navigateTree).toHaveBeenCalledWith("u2", { summarize: false });
+		expect(h.branchSession).toHaveBeenCalledWith("u2", { requireIdle: true });
 		expect(h.editor.submitted).toEqual(["second prompt"]);
 		expect(h.statuses.map(([message]) => message)).toEqual(["Retrying the turn"]);
 	});
@@ -76,24 +93,24 @@ describe("SelectorController turn actions", () => {
 
 		await h.controller.runTurnAction("retry", { role: "user", at: 10 });
 
-		expect(h.navigateTree).not.toHaveBeenCalled();
+		expect(h.branchSession).not.toHaveBeenCalled();
 		expect(h.editor).toMatchObject({ text: "half-typed", submitted: [] });
 	});
 
-	it("edits a prompt into the editor, and the toast's Undo restores the turns and the draft", async () => {
+	it("edits a prompt into the editor in a new session, and the toast's Undo resumes the old one with the draft", async () => {
 		const h = harness("half-typed");
 
 		await h.controller.runTurnAction("edit", { role: "user", at: 10 });
 
-		expect(h.navigateTree).toHaveBeenCalledWith("u1", { summarize: false });
+		expect(h.branchSession).toHaveBeenCalledWith("u1", { requireIdle: true });
 		expect(h.editor).toMatchObject({ text: "first prompt", submitted: [] });
 		const [message, options] = h.statuses.at(-1)!;
-		expect(message).toBe("Rewound 2 turns");
+		expect(message).toBe("Rewound 2 turns in a new session");
 		expect(options?.action).toMatchObject({ act: "undo", label: "Undo" });
 
 		options!.action!.run();
 		await h.undone;
-		expect(h.navigateTree).toHaveBeenLastCalledWith("a2", { summarize: false });
+		expect(h.resume).toHaveBeenCalledWith(SOURCE_FILE);
 		expect(h.editor.text).toBe("half-typed");
 	});
 });

@@ -25,9 +25,9 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { padTo, spaces, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
 import type { AggregateMetrics, AgentMetrics } from "../../../modes/view-model/overlays/agent-hub-projection";
+import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import type { AgentStatus } from "../../../registry/agent-hub-types";
 import {
-	formatCost,
 	formatMetricDuration,
 	type HubModel,
 	metricsText,

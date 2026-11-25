@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, pathIsWithinLexical } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
@@ -17,7 +17,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
-import { isContained, realpathIfExists } from "./contained-path";
+import { realpathIfExists } from "./contained-path";
 import {
 	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
@@ -141,7 +141,7 @@ async function readMarketplaceRootManifest(root: ClaudePluginRoot): Promise<Clau
  * to resolve the target means it cannot be checked, so it is refused.
  */
 async function isWithinPluginRoot(rootPath: string, targetPath: string): Promise<boolean> {
-	if (!isContained(rootPath, targetPath)) return false;
+	if (!pathIsWithinLexical(rootPath, targetPath)) return false;
 	let realTarget: string;
 	try {
 		realTarget = await fs.realpath(targetPath);
@@ -149,7 +149,7 @@ async function isWithinPluginRoot(rootPath: string, targetPath: string): Promise
 		return isEnoent(error);
 	}
 	const realRoot = (await realpathIfExists(rootPath)) ?? rootPath;
-	return isContained(realRoot, realTarget);
+	return pathIsWithinLexical(realRoot, realTarget);
 }
 
 /**
