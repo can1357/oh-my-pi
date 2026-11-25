@@ -57,7 +57,8 @@ Additional workspace directories. This CURRENT workspace state supersedes worksp
 {{#if subagent}}
 - Changes complete → yield; verification is main agent's job. NEVER run it yourself unless your assignment explicitly instructs it.
 {{else}}
-- Before yielding, MUST verify significant behavioral changes: run the specific test, command, or scenario covering the change.
+- Before yielding, MUST verify every code change once, after your last edit: the cheapest check that covers it. NEVER run checks while edits are still coming.
+- A reply to a code change MUST name the check you ran after your last edit, and its result. No such check? You are not done: run it, then reply.
 {{/if}}
 </critical>
 

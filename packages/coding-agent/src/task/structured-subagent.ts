@@ -271,10 +271,25 @@ const ASSIGNMENT_SLOT = "\u0000assignment\u0000";
  * padding), so inline and file-backed instructions reach the subagent identically.
  */
 export function renderSubagentUserPrompt(assignment: string): string {
-	const text = assignment.trim().replace(/\r\n?/g, "\n");
 	return prompt
 		.render(subagentUserPromptTemplate, { assignment: ASSIGNMENT_SLOT })
-		.replace(ASSIGNMENT_SLOT, () => text);
+		.replace(ASSIGNMENT_SLOT, () => assignment.trim().replace(/\r\n?/g, "\n"));
+}
+
+/**
+ * The prompts a spawn goes out in: `task` first, then the executor sends each later `steps` prompt
+ * once the previous one was delivered. A lone step is the whole assignment: it goes out verbatim,
+ * without step framing or the assignment wrapper.
+ */
+function spawnPrompts(
+	request: StructuredSubagentRequest,
+	structured: boolean,
+): Pick<ExecutorOptions, "task" | "steps"> {
+	const steps = request.steps ?? [];
+	if (steps.length === 1) return { task: steps[0].trim().replace(/\r\n?/g, "\n") };
+	if (steps.length === 0) return { task: renderSubagentUserPrompt(request.assignment) };
+	const prompts = renderStepPrompts(steps, structured);
+	return { task: renderSubagentUserPrompt(prompts[0]), steps: prompts };
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {
@@ -749,7 +764,6 @@ function buildExecutorOptions(
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
-	const steps = request.steps?.length ? renderStepPrompts(request.steps, policy.structured) : undefined;
 	return {
 		cwd: session.cwd,
 		costGate: session.costGate,
@@ -757,9 +771,7 @@ function buildExecutorOptions(
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
-		// A stepped spawn starts on its first step prompt; the executor sends the rest.
-		task: renderSubagentUserPrompt(steps ? steps[0] : request.assignment),
-		steps,
+		...spawnPrompts(request, policy.structured),
 		assignment: request.assignment.trim(),
 		context: request.context?.trim() || undefined,
 		planReference: undefined,

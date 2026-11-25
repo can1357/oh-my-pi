@@ -830,6 +830,7 @@ const PI_PACKAGE_NAMES = [
 	"pi-natives",
 	"pi-tui",
 	"pi-utils",
+	"omptype",
 ] as const;
 
 /**

@@ -2096,7 +2096,7 @@ async function prepareProviderCall(
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, standbyTools);
 	}
 	if (config.transformProviderContext) {
-		llmContext = await config.transformProviderContext(llmContext, model);
+		llmContext = await config.transformProviderContext(llmContext, model, signal);
 	}
 
 	let promptToolWireTools: Context["tools"];

@@ -16,11 +16,8 @@ import type { JSXNode, Reactive } from "@oh-my-pi/pi-tui";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { SkillPromptDetails } from "../../../session/transcript/messages";
 import { cardExpansion } from "../expansion";
-import { chipText, termChips } from "./chips";
+import { chipText, skillChipLabel, termChips } from "./chips";
 import { openableImage } from "./image";
-
-/** The skill chip glyph (the unicode symbol preset's `icon.extensionSkill`). */
-const SKILL_GLYPH = "✦";
 
 /** What a skill row shows. */
 export interface SkillMessageProps {
@@ -43,7 +40,7 @@ export function SkillMessage(props: SkillMessageProps): JSXNode {
 	const name = details?.name?.trim() || "unknown";
 	const token = `/skill:${name}`;
 	const prompt = details?.prompt ?? (details?.args ? `${token} ${details.args}` : token);
-	const label = `${SKILL_GLYPH} ${name}`;
+	const label = skillChipLabel(name);
 	// Only the invoked skill becomes a chip: another `/skill:` token the dispatcher ignored stays literal.
 	const display = prompt.replace(new RegExp(`${RegExp.escape(token)}(?![\\w./-])`, "g"), label);
 	const leading = display.startsWith(label) && /^\s*$/.test(display.charAt(label.length));
