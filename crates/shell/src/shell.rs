@@ -443,6 +443,20 @@ impl Shell {
 			.map_or_else(Vec::new, |active| active.children.pids())
 	}
 
+	/// Every live external the session holds, in or between runs, with
+	/// whether it runs in a detached (`nohup`) tree
+	/// ([`crate::session::Children::held`]): the background jobs earlier runs
+	/// left running included. Empty once the session is gone. Never blocks on
+	/// the session lock held by a running command.
+	#[must_use]
+	pub fn held_processes(&self) -> Vec<(i32, bool)> {
+		self
+			.active
+			.lock()
+			.as_ref()
+			.map_or_else(Vec::new, |active| active.children.held())
+	}
+
 	/// Number of live external background jobs tracked by the persistent
 	/// session. The host retains a per-call shell while this is nonzero, since
 	/// dropping it would kill its children. Exited children are reaped

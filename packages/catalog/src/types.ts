@@ -1583,6 +1583,14 @@ export interface ModelAccountAccess {
 	 * account's values when multi-account rosters are unioned.
 	 */
 	antigravityWireProfiles?: Readonly<Record<string, AntigravityModelWireProfile>>;
+	/**
+	 * Service-tier ids this account's own catalog advertised for the model
+	 * (Codex `service_tiers[].id`). Tier entitlements differ per account
+	 * (Ultrafast is plan-gated), while {@link Model.serviceTiers} is the union
+	 * across accounts, so requests and credential selection read this list for
+	 * the account in hand. Absent when the account's catalog listed no tiers.
+	 */
+	serviceTiers?: readonly string[];
 }
 
 /** One Cursor `RequestedModel.parameters` entry recovered from rich discovery. */

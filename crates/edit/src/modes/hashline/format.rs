@@ -36,20 +36,15 @@ pub const HL_FILE_HASH_SEP: &str = "#";
 pub const HL_RANGE_SEP: &str = ".=";
 /// Numbered-line body separator.
 pub const HL_LINE_BODY_SEP: &str = ":";
-/// Regex source for a positive line number.
-pub const HL_LINE_RE_RAW: &str = r"[1-9]\d*";
-/// Capturing regex source for a positive line number.
-pub const HL_LINE_CAPTURE_RE_RAW: &str = r"([1-9]\d*)";
 /// Number of hexadecimal characters in a snapshot tag.
 pub const HL_FILE_HASH_LENGTH: usize = 4;
-/// Regex source for a snapshot tag.
-pub const HL_FILE_HASH_RE_RAW: &str = r"[0-9A-F]{4}";
-/// Capturing regex source for a snapshot tag.
-pub const HL_FILE_HASH_CAPTURE_RE_RAW: &str = r"([0-9A-F]{4})";
-/// Regex-escaped numbered-line separator.
-pub const HL_LINE_BODY_SEP_RE_RAW: &str = ":";
 /// Representative snapshot tags used in diagnostics.
 pub const HL_FILE_HASH_EXAMPLES: [&str; 3] = ["1A2B", "3C4D", "9F3E"];
+
+/// Whether a snapshot tag has the required four hexadecimal digits.
+pub(super) fn is_snapshot_tag(tag: &str) -> bool {
+	tag.len() == HL_FILE_HASH_LENGTH && tag.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 
 /// Format a concrete replacement hunk header.
 pub fn format_replace_header(start: u32, end: u32) -> String {

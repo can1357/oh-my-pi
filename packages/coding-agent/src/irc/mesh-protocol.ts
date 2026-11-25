@@ -32,6 +32,8 @@ export interface MeshState {
 	sessionFile: string | null;
 	status: AgentStatus | "unknown";
 	agents: MeshSubagent[];
+	/** Title of the root session; peers show it in place of the pid. */
+	title?: string;
 }
 
 /** One instance in the room, as the roster shows it. */

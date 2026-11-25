@@ -92,6 +92,23 @@ export interface AgentSessionAdvisorOverview {
 	advisors: AdvisorStatusOverviewEntry[];
 }
 
+/** Model patterns selected from an authorized task agent kind. */
+export interface AgentKindModelChange {
+	kind: string;
+	patterns: string[];
+	thinkingLevel?: ConfiguredThinkingLevel;
+	defaultThinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/** A session-only change authorized by the calling agent's URL write. */
+export type AgentModelChange = AgentKindModelChange | { effort: ConfiguredThinkingLevel };
+
+/** Model and configured effort after the home session applies a control write. */
+export interface AgentModelSelectionState {
+	model: string;
+	effort: ConfiguredThinkingLevel | undefined;
+}
+
 /** The surface other agents' code uses on a session obtained from the registry, lifecycle, or IRC delivery. */
 export interface AgentSessionHandle {
 	/** Cross-thread identity token: `${homeThreadId}:${snowflake}`, unique per session object. */
@@ -156,7 +173,10 @@ export interface AgentSessionHandle {
 		reason?: string;
 		preserveCompaction?: boolean;
 		deliverQueuedMessages?: boolean;
+		detachTools?: boolean;
 	}): Promise<void>;
+	/** Apply a validated agent URL change on the session's home thread. */
+	applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState>;
 	/** Replace the pooled-turn yield contract. */
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void>;
 	/** Dispose the session and release its resources. */

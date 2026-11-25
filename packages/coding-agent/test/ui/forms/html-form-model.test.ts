@@ -45,6 +45,19 @@ function clipboardRead() {
 }
 
 describe("html form model", () => {
+	it("flags rule breaks without blocking Submit, an empty required field once passed over", () => {
+		const { model, press, onSubmit } = dialog(`<form>
+<label>Name <input name="name" required></label>
+<label>Code <input name="code" pattern="[A-Z]{3}"></label>
+</form>`);
+		expect(model.error(0)).toBeUndefined();
+		press("enter", '"abc"');
+		expect(model.error(0)).toBe("Required");
+		expect(model.error(1)).toBe("Must match [A-Z]{3}");
+		press("enter", "enter");
+		expect(onSubmit).toHaveBeenCalledWith({ name: "", code: "abc" }, []);
+	});
+
 	describe("text paste", () => {
 		it("asks the host for clipboard text on the paste key and pastes it into a one-line answer without submitting", async () => {
 			const { onPasteClipboard, reads } = clipboardRead();

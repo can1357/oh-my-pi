@@ -126,6 +126,13 @@ export interface Host {
 	/** Whether the terminal advertises TSP feature `name` (reactive; always false in the terminal renderer). */
 	feature(name: string): boolean;
 	/**
+	 * Whether the terminal reads and shows this session's checkout itself
+	 * (Tern's `checkout` event, reactive; always false in the terminal
+	 * renderer): the app shows the branch, its changes and its pull request
+	 * from it and runs no `git status` or `gh` itself.
+	 */
+	checkoutShown(): boolean;
+	/**
 	 * Hand the terminal to `run` (an external editor, a job-control stop): rendering and input pause
 	 * and the terminal is restored; once `run` settles the driver starts again and the display is
 	 * redrawn whole.
@@ -206,7 +213,16 @@ const HELLO_CONFIRM_GRACE_MS = 100;
 /** The renderer a host runs: the {@link Host} members that differ between native and terminal rendering. */
 type Renderer = Pick<
 	Host,
-	"native" | "hour12" | "retired" | "replayHistory" | "redescribe" | "dispatch" | "feature" | "setMouse" | "suspend"
+	| "native"
+	| "hour12"
+	| "retired"
+	| "replayHistory"
+	| "redescribe"
+	| "dispatch"
+	| "feature"
+	| "checkoutShown"
+	| "setMouse"
+	| "suspend"
 > & {
 	/** Stop rendering and release the renderer (not the driver). */
 	stop(): void;
@@ -336,6 +352,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			redescribe: node => backend.redescribe(node),
 			dispatch: event => backend.dispatch(event),
 			feature: name => connection.hasFeature(name),
+			checkoutShown: () => connection.checkout(),
 			setMouse: tracking => driver.setMouse(tracking),
 			async suspend(run) {
 				backend.stop(false);
@@ -392,6 +409,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			redescribe: () => {},
 			dispatch: event => backend.dispatch(event),
 			feature: () => false,
+			checkoutShown: () => false,
 			setMouse(tracking) {
 				driver.setMouse(tracking);
 				if (tracking === "off") backend.clearHover();
@@ -435,6 +453,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		redescribe: node => renderer.redescribe(node),
 		dispatch: event => renderer.dispatch(event),
 		feature: name => renderer.feature(name),
+		checkoutShown: () => renderer.checkoutShown(),
 		suspend: run => renderer.suspend(run),
 		onFrame(listener) {
 			frameListeners.add(listener);
