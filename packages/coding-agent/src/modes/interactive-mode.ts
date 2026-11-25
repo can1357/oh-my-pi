@@ -7202,10 +7202,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#toolUiContextSetter(uiContext, hasUI);
 	}
 
-	initializeHookRunner(uiContext: ExtensionUIContext, hasUI: boolean): void {
-		this.#extensionUiController.initializeHookRunner(uiContext, hasUI);
-	}
-
 	// UI helpers
 	present(factory: () => JSXNode, options?: PresentOptions): TranscriptBlock {
 		const transcript = this.shell.transcript;
