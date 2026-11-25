@@ -235,7 +235,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Availability: always available; uses keyless mode when no credential or self-hosted endpoint is configured. A configured credential that fails to resolve against the hosted API errors instead of downgrading to keyless mode.
       - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. The endpoint is built by the shared resolver in `packages/coding-agent/src/web/firecrawl.ts`, which applies the `FIRECRAWL_BASE_URL` (alias `FIRECRAWL_API_URL`) self-hosting override. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
       - `limit` / `num_search_results`: collapsed and clamped to `1..100`, default `10`; output `sources`, `requestId`, and `authMode: "api_key" | "keyless"`.
-      - The shared client also exposes `/scrape` as a `providers.fetch` reader backend, requiring a Firecrawl credential. API reference: [docs.firecrawl.dev](https://docs.firecrawl.dev).
+      - The shared client also exposes `/scrape` as a `providers.fetch` reader backend, requiring a Firecrawl credential; the in-process `local` engine (`renderHtml`/`Reader`) is the default backend. API reference: [docs.firecrawl.dev](https://docs.firecrawl.dev).
    - **Brave** — `packages/coding-agent/src/web/search/providers/brave.ts`
       - Availability: `BRAVE_API_KEY` or a configured/stored `brave` credential.
       - Querying: GET `https://api.search.brave.com/res/v1/web/search` with `count`, `extra_snippets=true`, and recency `freshness=pd|pw|pm|py`. Absolute date bounds override recency; safe search defaults to `moderate`. The public tool path does not map `lang:` to Brave's optional language/country fields.
