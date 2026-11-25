@@ -7979,8 +7979,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleToolsCommand();
 	}
 
-	handleContextCommand(): void {
-		this.#commandController.handleContextCommand();
+	handleContextCommand(showAll = false): void {
+		this.#commandController.handleContextCommand(showAll);
 	}
 
 	#vibeSessionTransitionBlocked(): boolean {

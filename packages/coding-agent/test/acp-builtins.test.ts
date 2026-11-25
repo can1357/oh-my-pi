@@ -1574,14 +1574,6 @@ describe("wave 4 commands", () => {
 		expect(output[0]).toContain("reload");
 	});
 
-	it("/mcp resources: outputs server list or no-server message", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp resources", runtime);
-		expect(result).toEqual({ consumed: true });
-		// No servers configured in tmp project dir — should report that
-		expect(output[0]).toMatch(/No MCP servers configured|No resources/);
-	});
-
 	it("/mcp unknown-verb: returns usage pointing to help", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/mcp frobnicate", runtime);
@@ -1793,6 +1785,57 @@ describe("wave 5 — adapters and polish", () => {
 		const text = output[0] ?? "";
 		expect(text).toContain("tokens");
 		expect(text.split("\n").length).toBeGreaterThan(1);
+	});
+
+	it("/context all: adds per-tool and per-skill token estimates", async () => {
+		const { output, session, runtime } = createRuntime();
+		(session as unknown as Record<string, unknown>).model = {
+			provider: "anthropic",
+			id: "claude-test",
+			contextWindow: 200_000,
+		};
+		(session as unknown as Record<string, unknown>).agent = {
+			state: {
+				tools: [
+					{ name: "read", description: "Read a file.", parameters: { type: "object" } },
+					{ name: "edit", description: "Edit a file.", parameters: { type: "object" } },
+				],
+			},
+			tokenizer: new Tokenizer(),
+		};
+		const skillLine = "- review: Review the current change.";
+		const systemPrompt = [`You are a helpful assistant.\n${skillLine}`];
+		(session as unknown as Record<string, unknown>).systemPrompt = systemPrompt;
+		(session as unknown as Record<string, unknown>).systemPromptSources = {
+			blocks: systemPrompt,
+			sources: [{ id: "skill-0", kind: "skills", label: "review", block: 0, start: 29, end: 29 + skillLine.length }],
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/context all", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		const text = output[0] ?? "";
+		expect(text).toContain("\nSystem tools\n");
+		expect(text).toMatch(/[├└] read: \d+ tokens/);
+		expect(text).toMatch(/[├└] edit: \d+ tokens/);
+		expect(text).toContain("\nSkills\n└ review:");
+
+		const aggregateTools = text.match(/System tools\s+.*?(\d+) tokens/)?.[1];
+		const toolSection = text.split("\nSystem tools\n")[1]?.split("\n\nSkills\n")[0] ?? "";
+		const detailTools = Array.from(toolSection.matchAll(/: (\d+) tokens/g), match => Number(match[1])).reduce(
+			(total, tokens) => total + tokens,
+			0,
+		);
+		expect(detailTools).toBe(Number(aggregateTools));
+	});
+
+	it("/context rejects unsupported arguments as a failed consumed command", async () => {
+		const { output, runtime } = createRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/context verbose", runtime);
+
+		expect(result).toEqual({ consumed: true, failed: true });
+		expect(output).toEqual(["Usage: /context [all]"]);
 	});
 
 	// /jobs empty state

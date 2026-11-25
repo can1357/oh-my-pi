@@ -132,6 +132,14 @@ describe("context command viewer", () => {
 			mode.handleToolsCommand();
 			expect(mode.shell.overlays.open()).toBe(false);
 			expect(mode.shell.dock.slot("report").occupied()).toBe(true);
+			mode.handleContextCommand(true);
+			expect(mode.shell.overlays.open()).toBe(false);
+			expect(mode.shell.dock.slot("report").occupied()).toBe(true);
+			await screen.waitFor(rows => rows.some(row => row.includes("System tools")));
+			const detailReport = screen.screen().join("\n");
+			expect(detailReport).toContain("System tools");
+			expect(detailReport).toContain("Skills");
+			expect(detailReport).toContain("None");
 		} finally {
 			release.resolve();
 			await pending;
