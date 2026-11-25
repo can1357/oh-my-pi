@@ -46,6 +46,7 @@ import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { ImageDescriptions } from "../utils/image-vision-fallback";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { ShellStream } from "../tools/shell-steps";
 import type { JobWidgetView } from "../tools/details/job-widget";
@@ -343,13 +344,23 @@ export interface AgentSessionConfig {
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 	/**
 	 * Builds one advisor's provider request transform. Each advisor is its own
 	 * conversation, so it gets its own transform state (the date/cwd reminder).
 	 * Without it, advisors share {@link transformProviderContext}.
 	 */
-	createAdvisorTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
+	createAdvisorTransformProviderContext?: () => (
+		context: Context,
+		model: Model,
+		signal?: AbortSignal,
+	) => Context | Promise<Context>;
+	/**
+	 * Descriptions of input images for text-only models, shared with {@link transformProviderContext}. Summaries
+	 * and advisor transcripts, which carry history as text, use them for a summary or advisor model that cannot
+	 * see images.
+	 */
+	imageDescriptions?: ImageDescriptions;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */

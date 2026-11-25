@@ -25,7 +25,7 @@ import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { TspElapsedProps, TspSpan } from "@oh-my-pi/pi-wire";
 import { oneLine } from "../../tools/agent-common";
 import { nodePlain, nodeStyle, plainText, spansOf } from "./agent-common";
-import { isActive, spinnerGlyph } from "./frame";
+import { bracketed, isActive, spinnerGlyph } from "./frame";
 import { defineToolLook, isExpanded, type ToolProps, toolProps } from "./look";
 
 /** Longest composer line. */
@@ -114,7 +114,9 @@ function paintComposer(node: UiNode, props: ToolProps, term: VibeTerm, cx: Paint
 		for (const span of spans.slice(3)) {
 			if (span.t === " ") continue;
 			parts.push(
-				span.s === "accent strong" ? theme.fg("accent", `⟦${span.t}⟧`) : theme.style(span.s, oneLine(span.t, 40)),
+				span.s === "accent strong"
+					? theme.fg("accent", bracketed(theme, span.t))
+					: theme.style(span.s, oneLine(span.t, 40)),
 			);
 		}
 		head = parts.join(" ");
@@ -176,7 +178,7 @@ function paintCard(card: UiNode, cx: PaintContext, expanded: boolean): string[] 
 			text?: string;
 			term?: { color?: string };
 		};
-		parts.push(theme.fg(badgeProps.term?.color ?? "muted", `⟦${badgeProps.text ?? ""}⟧`));
+		parts.push(theme.fg(badgeProps.term?.color ?? "muted", bracketed(theme, badgeProps.text ?? "")));
 	}
 	const id = idSpan?.t ?? "";
 	parts.push(
