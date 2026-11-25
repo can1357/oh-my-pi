@@ -1079,7 +1079,9 @@ export class SessionMaintenance {
 						message.stopReason === "aborted"
 							? this.#tokenizer.countMessages(convertToLlm([message], model), countOptions)
 							: this.#tokenizer.countMessage(message, countOptions);
-					message.content = message.content.filter(block => block.type !== "thinking" && block.type !== "redactedThinking");
+					message.content = message.content.filter(
+						block => block.type !== "thinking" && block.type !== "redactedThinking",
+					);
 					invalidateMessageCache(message);
 					saved = Math.max(0, before - this.#tokenizer.countMessage(message, countOptions));
 					removed += dropped;
@@ -4124,7 +4126,8 @@ export class SessionMaintenance {
 				signal,
 			);
 		}
-		return messages => this.#host.convertToLlmForSideRequest(messages, candidate, { withImageDescriptions: !!describeFor });
+		return messages =>
+			this.#host.convertToLlmForSideRequest(messages, candidate, { withImageDescriptions: !!describeFor });
 	}
 
 	async #compactWithFallbackModel(
