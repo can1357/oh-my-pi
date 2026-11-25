@@ -123,7 +123,7 @@ import type { AdvisorConfig } from "../advisor/advisor-config-types";
 import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
 import { ASYNC_NOTIFY_MESSAGE_TYPE } from "./transcript/messages";
 import { formatUsageResetWindow } from "./usage-display";
-import { loadAdvisorTranscriptCosts } from "../advisor";
+import { loadAdvisorTranscriptCosts } from "../advisor/transcript-costs";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	type AsyncJob,

@@ -2284,6 +2284,9 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			if (model.api === "cursor-agent" && !config.cursorExecHandlers && config.loadCursorExecHandlers) {
+				config.cursorExecHandlers = await config.loadCursorExecHandlers();
+			}
 			onProviderStart?.();
 			let response = await streamFunction(model, llmContext, {
 				...config,

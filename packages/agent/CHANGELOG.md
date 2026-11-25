@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Agents can accept an asynchronous Cursor handler factory; a session opens its execution bridge on the first Cursor request, including after a model switch.
+
 ## [19.2.0] - 2026-11-25
 
 ### Added

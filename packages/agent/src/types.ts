@@ -4,6 +4,7 @@ import type {
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
+	CursorExecHandlers,
 	Effort,
 	ImageContent,
 	Message,
@@ -198,6 +199,8 @@ export interface SteeringQueueState {
  * Configuration for the agent loop.
  */
 export interface AgentLoopConfig extends SimpleStreamOptions {
+	/** Resolve the host bridge only when dispatching to the Cursor transport. */
+	loadCursorExecHandlers?: () => Promise<CursorExecHandlers>;
 	model: Model;
 
 	/** Reports whether this loop has reached a safe process-pause boundary. */

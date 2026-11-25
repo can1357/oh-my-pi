@@ -8,13 +8,13 @@ import { type JSXNode, type KeyEvent, signal, type UiNode, untrack } from "@oh-m
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { actionKey, formatKeyHint } from "../../ui/keys/hints";
 import { getAgentDir, getProjectDir, logger, normalizePathForComparison, sanitizeText } from "@oh-my-pi/pi-utils";
+import { ADVISOR_DEFAULT_TOOL_NAMES } from "../../advisor/advise-tool";
 import {
-	ADVISOR_DEFAULT_TOOL_NAMES,
 	discoverAdvisorConfigs,
 	loadWatchdogConfigFile,
 	resolveAdvisorConfigEditPath,
 	saveWatchdogConfigFile,
-} from "../../advisor";
+} from "../../advisor/config";
 import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "../../advisor/advisor-config-types";
 import { showGitOverlay } from "../../cli/git-tui";

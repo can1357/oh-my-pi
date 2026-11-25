@@ -314,9 +314,10 @@ export interface AgentOptions {
 	onToolChoiceUnavailable?: () => void;
 
 	/**
-	 * Cursor exec handlers for local tool execution.
+	 * Cursor exec handlers for local tool execution, or a factory resolved on the first
+	 * request dispatched to Cursor (including a mid-session model switch).
 	 */
-	cursorExecHandlers?: CursorExecHandlers;
+	cursorExecHandlers?: CursorExecHandlers | (() => Promise<CursorExecHandlers>);
 	/** Additional tools Cursor executes through its MCP request-context bridge, resolved before each provider call. */
 	getCursorTools?: () => AgentTool[];
 
@@ -486,6 +487,7 @@ export class Agent {
 	#maxRetryDelayMs?: number;
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	#cursorExecHandlers?: CursorExecHandlers;
+	#loadCursorExecHandlers?: () => Promise<CursorExecHandlers>;
 	#getCursorTools?: () => AgentTool[];
 	#cursorOnToolResult?: CursorToolResultHandler;
 	#cwd?: string;
@@ -610,7 +612,12 @@ export class Agent {
 		this.#onResponse = opts.onResponse;
 		this.#onSseEvent = opts.onSseEvent;
 		this.#getToolContext = opts.getToolContext;
-		this.#cursorExecHandlers = opts.cursorExecHandlers;
+		if (typeof opts.cursorExecHandlers === "function") {
+			const load = opts.cursorExecHandlers;
+			this.#loadCursorExecHandlers = async () => (this.#cursorExecHandlers ??= await load());
+		} else {
+			this.#cursorExecHandlers = opts.cursorExecHandlers;
+		}
 		this.#getCursorTools = opts.getCursorTools;
 		this.#cursorOnToolResult = opts.cursorOnToolResult;
 		this.#cwd = opts.cwd;
@@ -2097,6 +2104,7 @@ export class Agent {
 						}
 					: undefined,
 			cursorExecHandlers: this.#cursorExecHandlers,
+			loadCursorExecHandlers: this.#loadCursorExecHandlers,
 			cursorOnToolResult,
 			cwd: this.#cwd,
 			getCwd: this.#cwdResolver,
