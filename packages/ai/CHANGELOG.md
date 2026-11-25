@@ -13,21 +13,6 @@
 ### Fixed
 
 - Fixed Codex WebSocket turns staying on SSE for the rest of the session after one WebSocket failure; the WebSocket is retried after `PI_CODEX_WEBSOCKET_FALLBACK_COOLDOWN_MS` (default five minutes) ([#13102](https://github.com/can1357/oh-my-pi/issues/13102), [#20416](https://github.com/can1357/oh-my-pi/pull/20416) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed `generate_image` edits failing on OpenAI-compatible gateways with `400 Missing required parameter: 'images'`; OMP’s auth gateway now accepts the documented JSON edit format ([#20442](https://github.com/can1357/oh-my-pi/issues/20442)).
-- Anthropic OAuth logins explicitly rejected by their organization stay out of account rotation for seven days, across sessions and restarts ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
-- DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
-- Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
-- GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
-- An openai-completions stream that gets HTTP 500 back sends six requests, not twelve: the provider-error replay no longer re-runs a status the transport already retried ([#19729](https://github.com/can1357/oh-my-pi/issues/19729), [#20215](https://github.com/can1357/oh-my-pi/pull/20215) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed `omp usage` showing no data for Synthetic’s weekly-only plans; it now shows weekly credit usage and the next regeneration tick ([#20251](https://github.com/can1357/oh-my-pi/pull/20251) by [@dagurval](https://github.com/dagurval))
-- Fixed `antigravity-cli` quota exhaustion on agy 1.5.14+ being recorded as a normal reply instead of a rate limit, so exhausted accounts now rotate to healthy ones and honor the reported reset time ([#20247](https://github.com/can1357/oh-my-pi/issues/20247))
-- Gemini models on OpenRouter keep thinking throughout long tool loops instead of going silent after the first few steps; replayed reasoning now keeps the `id` and `format` OpenRouter needs to return Gemini's thought signatures
-- Fixed `/btw` and other side turns on OpenCode Go/Zen missing the prompt cache because `x-opencode-session` carried the side request's id instead of the parent conversation's ([#20261](https://github.com/can1357/oh-my-pi/issues/20261))
-- Fixed `antigravity-cli` requests failing with `Unknown model ID` when the signed-in account’s agy roster lacks the model: the rejection now blocks only that model on the account and rotates to a sibling login that offers it ([#20315](https://github.com/can1357/oh-my-pi/pull/20315) by [@qSHEMq](https://github.com/qSHEMq))
-- Fixed `antigravity-cli` losing conversation context when OAuth refreshes during a tool call or when restoring a saved turn after agy compacts generation metadata ([#20437](https://github.com/can1357/oh-my-pi/issues/20437)).
-- OpenAI API requests now send the `session-id` and `thread-id` headers codex-rs sends instead of `session_id`, which proxies that reject underscored header names dropped or refused
-- `omp auth-gateway` now reads the `session-id` and `thread-id` headers current Codex CLI versions send for prompt-cache affinity and forwards them upstream, instead of dropping them
-- `omp auth-gateway` keys prompt caching on Claude Code's session id (`x-claude-code-session-id` or the session in `metadata.user_id`) and OpenCode's `x-session-affinity`, instead of a key derived from the request body
 - Codex requests no longer send a service tier to an account whose own plan does not offer it.
 ### Fixed
 
