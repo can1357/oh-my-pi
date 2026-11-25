@@ -1,0 +1,8 @@
+{
+	"name": "@platform/sync",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"test": "bun test"
+	}
+}

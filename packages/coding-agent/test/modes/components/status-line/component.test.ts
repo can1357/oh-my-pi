@@ -5,10 +5,6 @@ import type { AgentViewSession } from "../../../../src/session/agent-session-han
 import { SessionManager } from "../../../../src/session/session-manager";
 import { statusSegs } from "../../../../src/ui/status/status-line";
 import { StatusLineTestComponents } from "../../../helpers/status-line";
-import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-
-const restoreTheme = currentTheme();
-afterAll(() => setCurrentTheme(restoreTheme));
 
 const statusLines = new StatusLineTestComponents();
 
@@ -72,10 +68,10 @@ function makeSession(
 	} as unknown as AgentViewSession;
 }
 
-/** The status line's segments as plain text (`nerd`: Nerd Font glyphs). */
-function statusText(session: AgentViewSession, nerd = false): string {
+/** The status line's segments as plain text. */
+function statusText(session: AgentViewSession): string {
 	const line = statusLines.track(new SessionStatusLine(session));
-	return statusSegs(line.settings(), line.facts(), nerd)
+	return statusSegs(line.settings(), line.facts())
 		.map(seg => `${seg.icon ?? ""}${seg.spans.map(span => span.t).join("")}`)
 		.join(" | ");
 }

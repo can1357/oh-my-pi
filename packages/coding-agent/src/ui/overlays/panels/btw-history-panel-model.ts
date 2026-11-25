@@ -32,6 +32,7 @@ import { editLine } from "../settings/line-edit";
 import type { LineValue } from "./common";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
+import { actionKey } from "../../keys/hints";
 
 /** `btw.inject` hooks, given while injecting is on for this view. */
 export interface BtwHistoryInject {
@@ -472,11 +473,11 @@ export class BtwHistoryModel implements DictationTarget {
 				this.focus = "answer";
 				this.#jumpToEnd();
 			} else {
-				composer.notice = "Follow-up was not started. Your draft is kept; ⏎ to retry.";
+				composer.notice = `Follow-up was not started. Your draft is kept; ${actionKey("tui.input.submit")} to retry.`;
 			}
 		} catch {
 			if (this.composer === composer)
-				composer.notice = "Could not start the follow-up. Your draft is kept; ⏎ to retry.";
+				composer.notice = `Could not start the follow-up. Your draft is kept; ${actionKey("tui.input.submit")} to retry.`;
 		} finally {
 			this.followUpPending = false;
 			this.touch();

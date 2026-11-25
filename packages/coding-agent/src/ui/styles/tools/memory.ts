@@ -7,9 +7,9 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { MemoryTerm } from "../../tools/memory";
-import { expandHint } from "./frame";
+import { expandHint, standaloneErrorRows } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Retained memories listed while collapsed. */
@@ -22,13 +22,7 @@ function paintMemory(node: UiNode, cx: PaintContext): Block {
 	const term = props.term as MemoryTerm | undefined;
 	if (!term) return { rows: [] };
 	const theme = cx.theme;
-	if (term.error !== undefined)
-		return {
-			rows: wrap(
-				`${theme.fg("error", theme.symbols.symbol("status.error"))} ${theme.fg("error", `Error: ${term.error}`)}`,
-				cx.width,
-			),
-		};
+	if (term.error !== undefined) return { rows: standaloneErrorRows(cx, term.error) };
 	const expanded = props.collapsed === false;
 	const glyph = !term.result
 		? theme.fg("muted", theme.symbols.symbol("status.pending"))
@@ -45,8 +39,9 @@ function paintMemory(node: UiNode, cx: PaintContext): Block {
 	if (term.items && term.items.length > 0) {
 		const items = term.items;
 		const shown = expanded ? items : items.slice(0, COLLAPSED_ITEMS);
-		for (const item of shown)
-			rows.push(`  ${theme.fg("muted", "•")} ${theme.fg("muted", truncate(item, Math.max(1, cx.width - 4)))}`);
+		const prefix = `  ${theme.fg("muted", theme.symbols.symbol("format.bullet"))} `;
+		const contentWidth = Math.max(1, cx.width - visibleWidth(prefix));
+		for (const item of shown) rows.push(`${prefix}${theme.fg("muted", truncate(item, contentWidth))}`);
 		if (shown.length < items.length) more(`${theme.symbols.ellipsis} ${items.length - shown.length} more`);
 	}
 	if (term.lines && term.lines.length > 0) {
