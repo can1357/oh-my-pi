@@ -11,13 +11,14 @@ import { editorKey } from "../chrome/keybinding-hints";
 import { col, keyed, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
+import { uiText } from "@oh-my-pi/pi-utils";
 import { plainText } from "../native/spans";
 
 /** `Enter code: ABCD-1234` style device-flow instructions: the lead-in and the code. */
 const DEVICE_CODE_INSTRUCTIONS = /^(.*\bcode:?\s+)([A-Za-z0-9][A-Za-z0-9-]{3,})\s*$/s;
 
 /** A prompt's trailing `, then press Enter:` — the sheet's Continue button says it. */
-const PRESS_KEY_SUFFIX = /,?\s*then press\s+\S+\s*:?\s*$/i;
+const PRESS_KEY_SUFFIX = /,?\s*(?:then press|затем нажмите)\s+\S+\s*:?\s*$/i;
 
 /** Progress that reports a problem rather than a finished stage. */
 const PROGRESS_PROBLEM = /\b(?:fail(?:ed|ure)?|error|unavailable|in use|could ?n[o']t|unable)\b/i;
@@ -87,7 +88,7 @@ export class LoginDialogComponent extends OverlayPanel {
 	) {
 		const providerInfo = getOAuthProviders().find(p => p.id === providerId);
 		const providerName = providerInfo?.name || providerId;
-		super(`Login to ${providerName}`, "omp.overlay.login");
+		super(uiText(`Login to {{provider}}`, { provider: providerName }), "omp.overlay.login");
 		this.#providerName = providerName;
 		this.#tui = tui;
 		this.#onComplete = onComplete;
@@ -181,13 +182,15 @@ export class LoginDialogComponent extends OverlayPanel {
 			),
 		);
 
-		const clickHint = `${formatKeyHint(keyHintPlatform() === "darwin" ? "super" : "ctrl")}+click to open`;
+		const clickHint = uiText(`{{key}}+click to open`, {
+			key: formatKeyHint(keyHintPlatform() === "darwin" ? "super" : "ctrl"),
+		});
 		const hyperlink = `\x1b]8;;${url}\x07${clickHint}\x1b]8;;\x07`;
 		this.#contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 0, 0));
 
 		if (launchUrl && launchUrl !== url) {
 			this.#contentContainer.addChild(
-				new Text(theme.fg("dim", `Local shortcut (this machine only): ${launchUrl}`), 0, 0),
+				new Text(theme.fg("dim", uiText(`Local shortcut (this machine only): {{url}}`, { url: launchUrl })), 0, 0),
 			);
 		}
 
@@ -224,7 +227,7 @@ export class LoginDialogComponent extends OverlayPanel {
 		const nativeMounted = this.#nativeSteps.find(step => step.kind === "input" && step.field === previousInput);
 		if (mounted !== -1) {
 			// The flow asks again only when the last paste carried no usable code.
-			this.#input.setError(RETRY_MESSAGE);
+			this.#input.setError(uiText(RETRY_MESSAGE));
 			this.#contentContainer.children.splice(mounted, 1, this.#input);
 			if (nativeMounted?.kind === "input") nativeMounted.field = this.#input;
 		} else {
@@ -233,7 +236,7 @@ export class LoginDialogComponent extends OverlayPanel {
 			this.#contentContainer.addChild(new Text(theme.fg("dim", prompt), 0, 0));
 			this.#contentContainer.addChild(this.#input);
 			this.#contentContainer.addChild(
-				new Text(theme.fg("dim", `(${editorKey("tui.select.cancel")} to cancel)`), 0, 0),
+				new Text(theme.fg("dim", uiText(`({{key}} to cancel)`, { key: editorKey("tui.select.cancel") })), 0, 0),
 			);
 		}
 		this.#nativeRoot = undefined;
@@ -278,14 +281,19 @@ export class LoginDialogComponent extends OverlayPanel {
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("text", prompt.message), 0, 0));
 		if (prompt.placeholder) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${prompt.placeholder}`), 0, 0));
+			this.#contentContainer.addChild(
+				new Text(theme.fg("dim", uiText(`e.g., {{example}}`, { example: prompt.placeholder })), 0, 0),
+			);
 		}
 		this.#contentContainer.addChild(this.#input);
 		this.#contentContainer.addChild(
 			new Text(
 				theme.fg(
 					"dim",
-					`(${editorKey("tui.select.cancel")} to cancel, ${editorKey("tui.input.submit")} to submit)`,
+					uiText(`({{cancel}} to cancel, {{submit}} to submit)`, {
+						cancel: editorKey("tui.select.cancel"),
+						submit: editorKey("tui.input.submit"),
+					}),
 				),
 				0,
 				0,
@@ -317,7 +325,9 @@ export class LoginDialogComponent extends OverlayPanel {
 	showWaiting(message: string): void {
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("dim", message), 0, 0));
-		this.#contentContainer.addChild(new Text(theme.fg("dim", `(${editorKey("tui.select.cancel")} to cancel)`), 0, 0));
+		this.#contentContainer.addChild(
+			new Text(theme.fg("dim", uiText(`({{key}} to cancel)`, { key: editorKey("tui.select.cancel") })), 0, 0),
+		);
 		this.#nativeSteps.push({ kind: "progress", message: plainText(message) });
 		this.#nativeRoot = undefined;
 		this.#tui.requestRender();
@@ -356,7 +366,7 @@ export class LoginDialogComponent extends OverlayPanel {
 			if (auth.launchUrl) {
 				body.push(
 					keyed(
-						text([span("On this machine  ", "dim"), span(auth.launchUrl, "mono", { href: auth.launchUrl })], {
+						text([span(uiText("On this machine  "), "dim"), span(auth.launchUrl, "mono", { href: auth.launchUrl })], {
 							role: "omp.login.shortcut",
 							truncate: "middle",
 							lines: 1,
@@ -404,16 +414,16 @@ export class LoginDialogComponent extends OverlayPanel {
 			}
 		}
 		// The provider reports nothing while the browser half runs (GitHub's device poll): say so.
-		if (auth && live === -1 && !field) status.push(this.#describeLive(BROWSER_WAIT, "browser"));
+		if (auth && live === -1 && !field) status.push(this.#describeLive(uiText(BROWSER_WAIT), "browser"));
 		if (status.length > 0) body.push(node("col", { role: "omp.login.status", gap: "xs" }, status, "status"));
 
 		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
-		const cancel = actionButton("Cancel", "cancel", cancelKey ? { keys: cancelKey } : {});
+		const cancel = actionButton(uiText("Cancel"), "cancel", cancelKey ? { keys: cancelKey } : {});
 		const open = auth ? this.#describeOpen(auth.url, !field) : null;
 		let buttons: (NativeNode | null)[];
 		if (field) {
 			const submitKey = getKeybindings().getKeys("tui.input.submit")[0];
-			const submit = actionButton("Continue", "submit", {
+			const submit = actionButton(uiText("Continue"), "submit", {
 				tone: "accent",
 				...(submitKey ? { keys: submitKey } : {}),
 			});
@@ -425,7 +435,7 @@ export class LoginDialogComponent extends OverlayPanel {
 			"overlay",
 			{
 				role: this.nativeRole,
-				head: `Sign in to ${this.#providerName}`,
+				head: uiText(`Sign in to {{provider}}`, { provider: this.#providerName }),
 				anchor: "center",
 				size: "md",
 				modal: true,
@@ -439,16 +449,16 @@ export class LoginDialogComponent extends OverlayPanel {
 
 	/** What to do, in one sentence: enter the code, follow the provider's instructions, or finish in the browser. */
 	#lead(auth: LoginAuth): string {
-		if (auth.device) return "Enter this code on the sign-in page to connect your account.";
+		if (auth.device) return uiText("Enter this code on the sign-in page to connect your account.");
 		if (auth.instructions) return sheetText(auth.instructions);
-		return "Continue in your browser. If it didn't open, open or copy the link below.";
+		return uiText("Continue in your browser. If it didn't open, open or copy the link below.");
 	}
 
 	/** The device code, large in a well; a click copies it. */
 	#describeCode(code: string): NativeNode {
 		return node(
 			"row",
-			{ role: "omp.login.code", align: "center", actions: { click: "copy" }, href: code, title: "Copy code" },
+			{ role: "omp.login.code", align: "center", actions: { click: "copy" }, href: code, title: uiText("Copy code") },
 			[keyed(text([span(code, "mono")]), "value"), node("icon", { name: "copy" }, undefined, "icon")],
 			"code",
 		);
@@ -468,7 +478,7 @@ export class LoginDialogComponent extends OverlayPanel {
 			[
 				node("icon", { name: "link" }, undefined, "icon"),
 				keyed(shown, "url"),
-				actionButton("Copy", "copy", { key: "copyLink", href: url, title: "Copy the sign-in link" }),
+				actionButton(uiText("Copy"), "copy", { key: "copyLink", href: url, title: uiText("Copy the sign-in link") }),
 			],
 			"link",
 		);
@@ -476,10 +486,10 @@ export class LoginDialogComponent extends OverlayPanel {
 
 	/** Open sign-in page (Tern opens the link itself): the primary action while nothing waits for an answer. */
 	#describeOpen(url: string, primary: boolean): NativeNode {
-		return actionButton("Open sign-in page", "open", {
+		return actionButton(uiText("Open sign-in page"), "open", {
 			key: "openLink",
 			href: url,
-			title: `Open ${urlPlace(url)} in your browser`,
+			title: uiText(`Open {{place}} in your browser`, { place: urlPlace(url) }),
 			icon: "open",
 			tone: primary ? "accent" : undefined,
 		});

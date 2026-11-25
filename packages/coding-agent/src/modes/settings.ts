@@ -23,6 +23,7 @@ import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-
 import { DEFAULT_MAX_FPS, parseMaxFps, setMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
 import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
 import { parseSpinnerInterval, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
+import { IS_RUSSIAN_BUILD } from "@oh-my-pi/pi-utils/ui-language";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -59,6 +60,24 @@ export const cfgGitEnabled = register({
 // ────────────────────────────────────────────────────────────────────────
 // Appearance
 // ────────────────────────────────────────────────────────────────────────
+
+export const cfgUiLanguage = IS_RUSSIAN_BUILD
+	? register({
+		id: "ui.language",
+		type: "enum",
+		values: ["ru", "en"] as const,
+		default: "ru",
+		ui: {
+			tab: "appearance",
+			label: "Interface Language",
+			description: "Language used for the OMP interface",
+			options: [
+				{ value: "ru", label: "Русский" },
+				{ value: "en", label: "English" },
+			],
+		},
+	})
+	: undefined;
 
 // Theme
 export const cfgThemeDark = register({

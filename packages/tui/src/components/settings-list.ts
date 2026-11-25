@@ -1,10 +1,11 @@
+import { slugify } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
 import type { MouseRoutable, SgrMouseEvent } from "../mouse";
-import { slugify } from "@oh-my-pi/pi-utils";
+import { uiText } from "@oh-my-pi/pi-utils/ui-language";
 import type { TspPrefsControl, TspPrefsRow, TspPrefsSection, TspProps, TspSpan } from "@oh-my-pi/pi-wire";
 import { col, node, span } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
@@ -583,7 +584,7 @@ export class SettingsList implements Component {
 
 	#renderSearchStatus(width: number): string {
 		const query = sanitizeSingleLine(this.#filterQuery);
-		const statusText = query ? `  Search: ${query}` : "  Type to search";
+		const statusText = query ? `  ${uiText("Search: {{query}}", { query })}` : `  ${uiText("Type to search")}`;
 		return this.#theme.hint(truncateToWidth(statusText, width, Ellipsis.Omit));
 	}
 
@@ -695,7 +696,9 @@ export class SettingsList implements Component {
 			selected: this.getSelectedItem()?.id ?? null,
 			filter: this.#filterQuery.trim() || undefined,
 			empty:
-				this.#items.length === 0 ? (this.#options.emptyText ?? "No settings available") : "No matching settings",
+				this.#items.length === 0
+					? (this.#options.emptyText ?? uiText("No settings available"))
+					: uiText("No matching settings"),
 			max:
 				typeof cachedMax === "object" && cachedMax.lines === this.#maxVisible
 					? cachedMax
@@ -813,7 +816,7 @@ export class SettingsList implements Component {
 		const lines: string[] = [];
 
 		if (this.#items.length === 0) {
-			lines.push(this.#theme.hint(`  ${this.#options.emptyText ?? "No settings available"}`));
+			lines.push(this.#theme.hint(`  ${this.#options.emptyText ?? uiText("No settings available")}`));
 			return lines;
 		}
 
@@ -821,11 +824,11 @@ export class SettingsList implements Component {
 			if (this.#shouldRenderSearchStatus()) {
 				lines.push(this.#renderSearchStatus(width));
 			}
-			lines.push(this.#theme.hint("  No matching settings"));
+			lines.push(this.#theme.hint(`  ${uiText("No matching settings")}`));
 			lines.push("");
 			const editKey = editorKey("tui.editor.deleteCharBackward");
 			const cancelKey = editorKey("tui.select.cancel");
-			lines.push(truncateToWidth(this.#theme.hint(`  ${editKey} to edit search · ${cancelKey} to cancel`), width));
+			lines.push(truncateToWidth(this.#theme.hint(`  ${editKey} ${uiText("to edit search")} · ${cancelKey} ${uiText("to cancel")}`), width));
 			return lines;
 		}
 
@@ -930,7 +933,7 @@ export class SettingsList implements Component {
 	 * both panes, falling back to the flat single-column layout.
 	 */
 	#renderSplitList(width: number, sections: SettingSection[]): string[] | null {
-		const sectionNames = sections.map(section => section.name || "Other");
+		const sectionNames = sections.map(section => section.name || uiText("Other"));
 		let nameWidth = 0;
 		for (const name of sectionNames) nameWidth = Math.max(nameWidth, visibleWidth(name));
 		const sidebarWidth = this.#options.sidebarWidth ?? Math.min(22, nameWidth) + 4; // 2-space indent + 2-space gap

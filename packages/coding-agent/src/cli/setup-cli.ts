@@ -4,7 +4,7 @@
  * Handles `omp setup` for onboarding and `omp setup <component>` for optional dependencies.
  */
 import * as path from "node:path";
-import { APP_NAME, getProjectDir, getPythonEnvDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getProjectDir, getPythonEnvDir, uiText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
 import { Settings } from "../config/settings";
@@ -45,15 +45,15 @@ export function parseSetupArgs(args: string[]): SetupCommandArgs | undefined {
 	}
 
 	if (args.length < 2) {
-		console.error(chalk.red(`Usage: ${APP_NAME} setup <component>`));
-		console.error(`Valid components: ${VALID_COMPONENTS.join(", ")}`);
+		console.error(chalk.red(uiText(`Usage: ${APP_NAME} setup <component>`)));
+		console.error(uiText(`Valid components: ${VALID_COMPONENTS.join(", ")}`));
 		process.exit(1);
 	}
 
 	const component = args[1];
 	if (!VALID_COMPONENTS.includes(component as SetupComponent)) {
-		console.error(chalk.red(`Unknown component: ${component}`));
-		console.error(`Valid components: ${VALID_COMPONENTS.join(", ")}`);
+		console.error(chalk.red(uiText(`Unknown component: {{component}}`, { component })));
+		console.error(uiText(`Valid components: ${VALID_COMPONENTS.join(", ")}`));
 		process.exit(1);
 	}
 
@@ -134,22 +134,22 @@ async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Pr
 	}
 
 	if (!check.pythonPath) {
-		console.error(chalk.red(`${theme.status.error} Python not found`));
-		console.error(chalk.dim("Install Python 3.8+ or set python.interpreter to its executable path"));
+		console.error(chalk.red(`${theme.status.error} ${uiText("Python not found")}`));
+		console.error(chalk.dim(uiText("Install Python 3.8+ or set python.interpreter to its executable path")));
 		process.exit(1);
 	}
 
-	console.log(chalk.dim(`Python: ${check.pythonPath}`));
+	console.log(chalk.dim(uiText(`Python: {{path}}`, { path: check.pythonPath })));
 	if (check.usingManagedEnv) {
-		console.log(chalk.dim(`Using managed environment: ${check.managedEnvPath}`));
+		console.log(chalk.dim(uiText(`Using managed environment: {{path}}`, { path: check.managedEnvPath ?? "" })));
 	}
 
 	if (check.available) {
-		console.log(chalk.green(`\n${theme.status.success} Python execution is ready`));
+	console.log(chalk.green(`\n${theme.status.success} ${uiText("Python execution is ready")}`));
 		return;
 	}
 
-	console.error(chalk.red(`\n${theme.status.error} Python interpreter reported failure`));
+	console.error(chalk.red(`\n${theme.status.error} ${uiText("Python interpreter reported failure")}`));
 	process.exit(1);
 }
 
@@ -262,7 +262,7 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 	}
 
 	if (flags.check) {
-		console.log(chalk.bold("Speech dependencies:"));
+		console.log(chalk.bold(uiText("Speech dependencies:")));
 		let allReady = true;
 		for (const component of components) {
 			const ready = await component.isReady();
@@ -280,10 +280,10 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 			await component.pick();
 		}
 		if (await component.isReady()) {
-			console.log(chalk.green(`${theme.status.success} ${component.name} ready`));
+			console.log(chalk.green(`${theme.status.success} ${uiText(component.name)} ${uiText("ready")}`));
 			continue;
 		}
-		console.log(chalk.dim(`Preparing ${component.name}...`));
+		console.log(chalk.dim(uiText(`Preparing {{name}}...`, { name: component.name })));
 		try {
 			await component.ensure(progress => {
 				const percent = typeof progress.percent === "number" ? ` (${progress.percent}%)` : "";
@@ -292,16 +292,19 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 			process.stdout.write("\n");
 		} catch (err) {
 			process.stdout.write("\n");
-			const msg = err instanceof Error ? err.message : `Failed to set up ${component.name}`;
+			const msg = err instanceof Error ? err.message : uiText(`Failed to set up {{name}}`, { name: component.name });
 			console.error(chalk.red(`${theme.status.error} ${msg}`));
 			process.exit(1);
 		}
 	}
 
-	console.log(chalk.green(`\n${theme.status.success} Speech is ready`));
+	console.log(chalk.green(`\n${theme.status.success} ${uiText("Speech is ready")}`));
 	console.log(
 		chalk.dim(
-			`Enable speech-to-text via stt.enabled, then hold ${formatKeyHint("space")} by default to talk (remap or disable it with app.stt.pushToTalk, or bind app.stt.toggle separately); enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.`,
+			uiText(
+				`Enable speech-to-text via stt.enabled, then hold {{key}} by default to talk (remap or disable it with app.stt.pushToTalk, or bind app.stt.toggle separately); enable the speech-generation tool via speechgen.enabled; speak replies aloud via speech.enabled.`,
+				{ key: formatKeyHint("space") },
+			),
 		),
 	);
 }

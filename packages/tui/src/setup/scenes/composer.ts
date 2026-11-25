@@ -1,3 +1,4 @@
+import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 import { type SgrMouseEvent } from "../../mouse";
 import { type SelectItem, SelectList } from "../../components/select-list";
 import { Container } from "../../tui";
@@ -11,11 +12,13 @@ import { getSelectListTheme, theme } from "../../theme/theme";
 import { ansi, col, span, text } from "../../native/describe";
 import type { DescribeContext, NativeNode } from "../../native/node";
 import { Memo } from "../../native/memo";
-import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
+import { uiText } from "@oh-my-pi/pi-utils";
 
 class ComposerSceneController implements SetupSceneController {
-	title = "Choose composer shape";
-	subtitle = "Pick the prompt and status line layout for your workflow.";
+	get title(): string {
+		return uiText("Choose composer shape");
+	}
+	subtitle = uiText("Pick the prompt and status line layout for your workflow.");
 	#selectList: SelectList;
 	#shapes: readonly ComposerShape[];
 	#items: readonly SelectItem[];
@@ -32,8 +35,8 @@ class ComposerSceneController implements SetupSceneController {
 		this.#shapes = choices.map(choice => choice.value);
 		this.#items = choices.map((choice, index) => ({
 			value: choice.value,
-			label: `${index + 1}  ${choice.label}`,
-			description: choice.description,
+			label: `${index + 1}  ${uiText(choice.label)}`,
+		description: choice.description ? uiText(choice.description) : undefined,
 		}));
 		const configuredShape = host.ctx.composerShape ?? "band";
 		const initialShape = this.#shapes.includes(configuredShape) ? configuredShape : "band";
@@ -81,13 +84,15 @@ class ComposerSceneController implements SetupSceneController {
 		const intro = new Text(
 			theme.fg(
 				"muted",
-				`Select a layout; live preview updates below. Press ${editorKey("tui.select.confirm")} to confirm.`,
+				uiText(`Select a layout; live preview updates below. Press {{key}} to confirm.`, {
+					key: editorKey("tui.select.confirm"),
+				}),
 			),
 			0,
 			0,
 		);
 		const preview = new Container();
-		preview.addChild(new Text(theme.fg("muted", "Preview:"), 0, 0));
+		preview.addChild(new Text(theme.fg("muted", uiText("Preview:")), 0, 0));
 		for (const line of renderComposerShapePreview(this.#currentShape, width, this.#host.ctx.statusLine)) {
 			preview.addChild(new Text(line, 0, 0));
 		}
@@ -121,10 +126,17 @@ class ComposerSceneController implements SetupSceneController {
 		return this.#native.get([this.#currentShape, cx.cols, confirm], () =>
 			col(
 				[
-					text([span(`Select a layout; live preview updates below. Press ${confirm} to confirm.`, "muted")]),
+					text([
+						span(
+							uiText(`Select a layout; live preview updates below. Press {{key}} to confirm.`, {
+								key: confirm,
+							}),
+							"muted",
+						),
+					]),
 					this.#selectList,
 					col([
-						text([span("Preview:", "muted")]),
+						text([span(uiText("Preview:"), "muted")]),
 						ansi(renderComposerShapePreview(this.#currentShape, cx.cols, this.#host.ctx.statusLine).join("\n"), {
 							cols: cx.cols,
 						}),

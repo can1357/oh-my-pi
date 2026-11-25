@@ -1,5 +1,6 @@
 import { centerLine } from "../../utils";
 import { padToWidth } from "../../render/utils";
+import { uiText } from "@oh-my-pi/pi-utils/ui-language";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { gradientLogo, PI_LOGO } from "../../prompt/welcome";
 import { theme } from "../../theme/theme";
@@ -24,10 +25,10 @@ export function describeSetupOutro(model: string | undefined): NativeNode {
 			compact([
 				node("spacer", { grow: 1 }, undefined, "top"),
 				node("image", { builtin: "omp", alt: APP_NAME, w: 72, role: "omp.setup.outro.mark" }, undefined, "logo"),
-				keyed(text([span("You're all set", "strong")], { wrap: "none", role: "omp.setup.outro.title" }), "title"),
+				keyed(text([span(uiText("You're all set"), "strong")], { wrap: "none", role: "omp.setup.outro.title" }), "title"),
 				model !== undefined &&
 					keyed(
-						text([span("Default model", "muted"), span(" · ", "dim"), span(model, "muted")], {
+						text([span(uiText("Default model"), "muted"), span(" · ", "dim"), span(model, "muted")], {
 							wrap: "none",
 							truncate: "end",
 							role: "omp.setup.outro.model",
@@ -35,7 +36,7 @@ export function describeSetupOutro(model: string | undefined): NativeNode {
 						"model",
 					),
 				keyed(
-					text([span(`Starting ${APP_NAME}…`, "muted")], { wrap: "none", role: "omp.setup.outro.status" }),
+					text([span(uiText(`Starting ${APP_NAME}…`), "muted")], { wrap: "none", role: "omp.setup.outro.status" }),
 					"status",
 				),
 				node("progress", { value: null, role: "omp.setup.outro.progress" }, undefined, "progress"),
@@ -51,8 +52,8 @@ export function renderSetupOutro(width: number, height: number, elapsedMs: numbe
 	const lines = renderStarfield(width, height, frame + 1000);
 	const progress = Math.max(0, Math.min(1, elapsedMs / SETUP_OUTRO_MS));
 	const logo = gradientLogo(PI_LOGO, progress * 1.2, { pos: (progress * 2) % 1, strength: 1 - progress });
-	const title = theme.bold(theme.fg("success", `${theme.status.success} Setup saved`));
-	const subtitle = theme.fg("muted", "Handing off to the normal CLI…");
+	const title = theme.bold(theme.fg("success", `${theme.status.success} ${uiText("Setup saved")}`));
+	const subtitle = theme.fg("muted", uiText("Handing off to the normal CLI…"));
 	const sweepWidth = Math.max(1, Math.min(width - 8, Math.floor((width - 8) * progress)));
 	const sweep = `${theme.fg("accent", "━".repeat(sweepWidth))}${theme.fg("dim", "─".repeat(Math.max(0, width - 8 - sweepWidth)))}`;
 	const content = [...logo, "", title, subtitle, "", sweep];

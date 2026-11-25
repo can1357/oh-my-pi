@@ -24,6 +24,7 @@ import {
 import { $env, isBunTestRuntime, isCompiledBinary, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { IS_RUSSIAN_BUILD, setUiLanguage } from "@oh-my-pi/pi-utils/ui-language";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
@@ -188,6 +189,7 @@ import {
 	cfgTuiSpinnerInterval,
 	cfgTuiMaxFps,
 	cfgTuiMotion,
+	cfgUiLanguage,
 	cfgUpdateAuto,
 	cfgUpdateChannel,
 } from "./modes/settings";
@@ -278,9 +280,8 @@ function writeStartupWarning(warning: string): void {
 }
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
-	if (!cfgStartupCheckUpdate.get(settings) && !cfgUpdateAuto.get(settings)) {
-		return;
-	}
+	if (IS_RUSSIAN_BUILD) return undefined;
+	if (!cfgStartupCheckUpdate.get(settings) && !cfgUpdateAuto.get(settings)) return undefined;
 	try {
 		// Checkouts update through git and a manager (Tern) updates its omp itself:
 		// "run omp update" would be wrong advice for both.
@@ -778,7 +779,7 @@ async function runInteractiveMode(
 		const notifyNewVersion = (newVersion: string): void => {
 			if (cfgStartupCheckUpdate.get(settings)) mode.showNewVersionNotification(newVersion);
 		};
-		if (cfgUpdateAuto.get(settings)) {
+		if (!IS_RUSSIAN_BUILD && cfgUpdateAuto.get(settings)) {
 			void runAutoUpdate(checkedVersionPromise, {
 				show: update => mode.showVersionUpdate(update),
 				notify: notifyNewVersion,
@@ -2032,6 +2033,7 @@ export async function runRootCommand(
 		}
 
 		const settingsInstance = await settingsPromise;
+		if (isInteractive && cfgUiLanguage) setUiLanguage(cfgUiLanguage.get(settingsInstance));
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.

@@ -1,3 +1,4 @@
+import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 import { type SgrMouseEvent } from "../../mouse";
 import { TERMINAL } from "../../terminal-capabilities";
 import { type SelectItem, SelectList } from "../../components/select-list";
@@ -7,7 +8,7 @@ import { getSelectListTheme, type SymbolPreset, setSymbolPreset, theme } from ".
 import { col, span, text } from "../../native/describe";
 import type { NativeNode } from "../../native/node";
 import { Memo } from "../../native/memo";
-import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
+import { uiText } from "@oh-my-pi/pi-utils";
 
 const GLYPH_PRESETS = ["nerd", "unicode", "ascii"] as const satisfies readonly SymbolPreset[];
 
@@ -29,10 +30,17 @@ const GLYPH_ITEMS: readonly SelectItem[] = GLYPH_PRESETS.map((preset, index) => 
 	label: `${index + 1}  ${GLYPH_LABELS[preset]}`,
 	description: preset === "nerd" ? `${GLYPH_SAMPLES.nerd}  ╭─╮  ├─  ◆  ✔  ✖` : GLYPH_SAMPLES[preset],
 }));
+const GLYPH_ITEM_VIEWS: readonly SelectItem[] = GLYPH_ITEMS.map(item => ({
+	value: item.value,
+	label: uiText(item.label),
+	description: item.description,
+}));
 
 class GlyphSceneController implements SetupSceneController {
-	title = "Choose glyph mode";
-	subtitle = "Pick the row that renders cleanly in your terminal.";
+	get title(): string {
+		return uiText("Choose glyph mode");
+	}
+	subtitle = uiText("Pick the row that renders cleanly in your terminal.");
 	#selectList: SelectList;
 	#previewRequest = 0;
 	#committing = false;
@@ -43,7 +51,7 @@ class GlyphSceneController implements SetupSceneController {
 
 	constructor(host: SetupSceneHost) {
 		this.#host = host;
-		this.#selectList = new SelectList(GLYPH_ITEMS, GLYPH_ITEMS.length, getSelectListTheme());
+		this.#selectList = new SelectList(GLYPH_ITEM_VIEWS, GLYPH_ITEM_VIEWS.length, getSelectListTheme());
 		const current = theme.getSymbolPreset();
 		const currentIndex = GLYPH_PRESETS.indexOf(current);
 		this.#selectList.setSelectedIndex(currentIndex >= 0 ? currentIndex : 0);
@@ -85,11 +93,11 @@ class GlyphSceneController implements SetupSceneController {
 		if (!this.#step) {
 			this.#step = new WizardStep({
 				kind: "choice",
-				intro: new Text(theme.fg("muted", "If a row shows boxes, tofu, or misaligned icons, pick another."), 0, 0),
+				intro: new Text(theme.fg("muted", uiText("If a row shows boxes, tofu, or misaligned icons, pick another.")), 0, 0),
 				content: this.#selectList,
-				minContentLines: GLYPH_ITEMS.length,
+				minContentLines: GLYPH_ITEM_VIEWS.length,
 				fitContent: () => {
-					this.#selectList.setMaxVisible(GLYPH_ITEMS.length);
+					this.#selectList.setMaxVisible(GLYPH_ITEM_VIEWS.length);
 				},
 			});
 		}
@@ -101,7 +109,7 @@ class GlyphSceneController implements SetupSceneController {
 	describe(): NativeNode {
 		return this.#native.get([this.#selectList], () =>
 			col(
-				[text([span("If a row shows boxes, tofu, or misaligned icons, pick another.", "muted")]), this.#selectList],
+				[text([span(uiText("If a row shows boxes, tofu, or misaligned icons, pick another."), "muted")]), this.#selectList],
 				{ gap: "sm", role: "omp.setup.glyph" },
 			),
 		);

@@ -3,7 +3,7 @@ import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { TspText } from "@oh-my-pi/pi-wire";
-import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, uiText } from "@oh-my-pi/pi-utils";
 import { Container } from "../../tui";
 import { Spacer } from "../../components/spacer";
 import { Text } from "../../components/text";
@@ -48,9 +48,13 @@ type SignInOutcome =
  * in the cell grid drawn in the wizard body in place of the selector.
  */
 export class SignInScene implements SetupSceneController {
-	readonly title = SCENE_TITLE;
+	get title(): string {
+		return uiText(SCENE_TITLE);
+	}
 	get subtitle(): string {
-		return `Sign in to one or more providers. Press ${editorKey("tui.select.cancel")} when you're done.`;
+		return uiText(`Sign in to one or more providers. Press {{key}} when you're done.`, {
+			key: editorKey("tui.select.cancel"),
+		});
 	}
 
 	#authStorage: AuthStorage;
@@ -128,7 +132,7 @@ export class SignInScene implements SetupSceneController {
 		let intro: Container | undefined;
 		if (maxLines === undefined || maxLines >= 17 + 2) {
 			intro = new Container();
-			intro.addChild(new Text(theme.fg("muted", LIST_LEAD), 0, 0));
+			intro.addChild(new Text(theme.fg("muted", uiText(LIST_LEAD)), 0, 0));
 			intro.addChild(new Spacer(1));
 		}
 		const status = new Container();
@@ -164,7 +168,7 @@ export class SignInScene implements SetupSceneController {
 			if (dialog) return col([dialog]);
 			if (sheet) return col([this.#selector]);
 			const children: NativeChild[] = [
-				node("text", { spans: [span(LIST_LEAD, "muted")] }, undefined, "intro"),
+				node("text", { spans: [span(uiText(LIST_LEAD), "muted")] }, undefined, "intro"),
 				this.#selector,
 			];
 			this.#statusLines().forEach((line, index) => {
@@ -180,19 +184,27 @@ export class SignInScene implements SetupSceneController {
 		let status: TspText | undefined;
 		if (outcome?.kind === "success") {
 			status = [
-				span(`Signed in to ${outcome.provider}.`, "success"),
-				span(" Add another provider or continue.", "muted"),
+				span(uiText(`Signed in to {{provider}}.`, { provider: outcome.provider }), "success"),
+				span(uiText(" Add another provider or continue."), "muted"),
 			];
 		} else if (outcome?.kind === "error") {
-			status = [span(`Couldn't sign in to ${outcome.provider}: ${outcome.message}`, "error")];
+			status = [
+				span(
+					uiText(`Couldn't sign in to {{provider}}: {{message}}`, {
+						provider: outcome.provider,
+						message: outcome.message,
+					}),
+					"error",
+				),
+			];
 		}
 		return {
-			title: SCENE_TITLE,
-			subtitle: SHEET_LEAD,
+			title: uiText(SCENE_TITLE),
+			subtitle: uiText(SHEET_LEAD),
 			role: SETUP_SHEET_ROLE,
 			size: "lg",
 			...(status ? { status } : {}),
-			leave: { id: "skip", label: this.#signedIn ? "Continue" : "Skip" },
+			leave: { id: "skip", label: uiText(this.#signedIn ? "Continue" : "Skip") },
 		};
 	}
 
@@ -202,14 +214,22 @@ export class SignInScene implements SetupSceneController {
 		if (!outcome) return [];
 		if (outcome.kind === "success") {
 			return [
-				{ text: `${theme.status.success} Signed in to ${outcome.provider}`, color: "success" },
-				{ text: `Credentials saved to ${getAgentDbPath()}`, color: "dim" },
+				{
+					text: uiText(`{{mark}} Signed in to {{provider}}`, {
+						mark: theme.status.success,
+						provider: outcome.provider,
+					}),
+					color: "success",
+				},
+				{ text: uiText(`Credentials saved to {{path}}`, { path: getAgentDbPath() }), color: "dim" },
 			];
 		}
 		return [
-			{ text: `Login failed: ${outcome.message}`, color: "error" },
+			{ text: uiText(`Login failed: {{message}}`, { message: outcome.message }), color: "error" },
 			{
-				text: `Choose another provider or press ${editorKey("tui.select.cancel")} to continue.`,
+				text: uiText(`Choose another provider or press {{key}} to continue.`, {
+					key: editorKey("tui.select.cancel"),
+				}),
 				color: "dim",
 			},
 		];
@@ -256,7 +276,9 @@ export class SignInScene implements SetupSceneController {
 				onManualCodeInput: useManualInput
 					? signal =>
 							dialog.showManualInput(
-								`Paste the authorization code (or full redirect URL), then press ${editorKey("tui.input.submit")}:`,
+								uiText(`Paste the authorization code (or full redirect URL), then press {{key}}:`, {
+									key: editorKey("tui.input.submit"),
+								}),
 								signal,
 							)
 					: undefined,

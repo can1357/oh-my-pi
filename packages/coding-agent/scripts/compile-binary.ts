@@ -58,6 +58,9 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
+				// omp-ru: frozen at compile time so runtime env or the executable's name can neither
+				// enable nor disable the Russian UI of a build that was not built for it.
+				__OMP_RU_BUILD__: JSON.stringify(Bun.env.OMP_BUILD_FLAVOR === "ru"),
 			},
 			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
 			// `omp --version` 256 ms -> 30 ms on M4 Max (+52 MB binary).

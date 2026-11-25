@@ -41,7 +41,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText, uiText } from "@oh-my-pi/pi-utils";
 import { sanitizeStatusText } from "../chrome/shared";
 import { getEditorTheme, getMarkdownTheme, getThemeEpoch, theme } from "../theme/theme";
 import {
@@ -74,10 +74,8 @@ import { isNativeRendering } from "../native/state";
 import type { TspDocComment, TspMenuItem } from "@oh-my-pi/pi-wire";
 import { getKeybindings } from "../keybindings";
 
-/** Title shown in the overlay's top border. */
-const OVERLAY_TITLE = "Plan Review";
-/** Native sheet title when the plan has no title heading of its own. */
-const NATIVE_TITLE = "Plan review";
+const OVERLAY_TITLE = uiText("Plan Review");
+const NATIVE_TITLE = uiText("Plan review");
 /** Minimum plan-body rows kept visible even on short terminals. */
 const MIN_BODY_ROWS = 3;
 /** Visible rows for the in-overlay annotation editor before it scrolls. */
@@ -318,8 +316,8 @@ function quoteLine(quote: string): string {
 
 /** What an annotation is on, as the annotation chooser lists it. */
 function annotationWhere(target: AnnotationTarget): string {
-	if (target.kind === "line") return `line ${target.context}`;
-	return target.kind === "quote" ? `“${quoteLine(target.quote)}”` : "section";
+	if (target.kind === "line") return uiText(`line {{context}}`, { context: target.context });
+	return target.kind === "quote" ? `“${quoteLine(target.quote)}”` : uiText("section");
 }
 
 /**
@@ -1640,8 +1638,9 @@ export class PlanReviewOverlay implements Component {
 
 	/** An option's label and, for an approval choice with one, its dim `meta`. */
 	#entryLabel(entry: OptionEntry): { label: string; meta?: string } {
-		if (entry.kind === "approve") return { label: entry.choice.label, meta: entry.choice.meta };
-		return { label: entry.kind === "refine" ? entry.label : SAVE_LABEL };
+		if (entry.kind === "approve")
+			return { label: uiText(entry.choice.label), meta: entry.choice.meta ? uiText(entry.choice.meta) : undefined };
+		return { label: entry.kind === "refine" ? uiText(entry.label) : uiText(SAVE_LABEL) };
 	}
 
 	#renderOptionLines(): string[] {
@@ -1675,35 +1674,36 @@ export class PlanReviewOverlay implements Component {
 		const enter = formatKeyHint("enter");
 		switch (this.#focus) {
 			case "actions":
-				parts.push(`${upDown} select`, `${enter} confirm`);
-				if (this.#slider) parts.push(`${formatKeyHints(["left", "right"])} model`);
+			parts.push(uiText(`{{keys}} select`, { keys: upDown }), uiText(`{{key}} confirm`, { key: enter }));
+			if (this.#slider) parts.push(uiText(`{{keys}} model`, { keys: formatKeyHints(["left", "right"]) }));
 				break;
 			case "toc":
-				parts.push(
-					`${upDown} section`,
-					`${enter} open`,
-					`${formatKeyHint("a")} annotate`,
-					`${formatKeyHint("e")} edit`,
-					`${formatKeyHint("d")} delete`,
-					`${formatKeyHint("u")} undo`,
-				);
+			parts.push(
+				uiText(`{{keys}} section`, { keys: upDown }),
+				uiText(`{{key}} open`, { key: enter }),
+				uiText(`{{key}} annotate`, { key: formatKeyHint("a") }),
+				uiText(`{{key}} edit`, { key: formatKeyHint("e") }),
+				uiText(`{{key}} delete`, { key: formatKeyHint("d") }),
+				uiText(`{{key}} undo`, { key: formatKeyHint("u") }),
+			);
 				break;
 			case "body":
-				parts.push(
-					`${upDown} scroll`,
-					`${formatKeyHint("shift")} faster`,
-					formatKeyHints(["pageUp", "pageDown"]),
-					`${formatKeyHints(["g", "shift+g"])} ends`,
-					`${formatKeyHint("a")} annotate`,
-					`${formatKeyHint("e")} edit`,
-					`${formatKeyHint("u")} undo`,
-				);
+			parts.push(
+				uiText(`{{keys}} scroll`, { keys: upDown }),
+				uiText(`{{key}} faster`, { key: formatKeyHint("shift") }),
+				formatKeyHints(["pageUp", "pageDown"]),
+				uiText(`{{keys}} ends`, { keys: formatKeyHints(["g", "shift+g"]) }),
+				uiText(`{{key}} annotate`, { key: formatKeyHint("a") }),
+				uiText(`{{key}} edit`, { key: formatKeyHint("e") }),
+				uiText(`{{key}} undo`, { key: formatKeyHint("u") }),
+			);
 				break;
 		}
-		if (this.callbacks.onCopyPlan) parts.push(`${formatKeyHint("c")} copy`);
-		parts.push(`${formatKeyHint("tab")} regions`);
-		if (this.#externalEditorLabel && this.#focus !== "toc") parts.push(`${this.#externalEditorLabel} editor`);
-		parts.push(this.#helpSuffix ?? `${editorKey("tui.select.cancel")} cancel`);
+		if (this.callbacks.onCopyPlan) parts.push(uiText(`{{key}} copy`, { key: formatKeyHint("c") }));
+		parts.push(uiText(`{{key}} regions`, { key: formatKeyHint("tab") }));
+		if (this.#externalEditorLabel && this.#focus !== "toc")
+			parts.push(uiText(`{{label}} editor`, { label: this.#externalEditorLabel }));
+		parts.push(this.#helpSuffix ?? uiText(`{{key}} cancel`, { key: editorKey("tui.select.cancel") }));
 		return parts.join(sep);
 	}
 
@@ -1830,7 +1830,7 @@ export class PlanReviewOverlay implements Component {
 		for (let i = 0; i < noteLines.length; i++) {
 			const prefix =
 				i === 0
-					? `${theme.fg("warning", "▎ ")}${theme.fg("dim", "note: ")}`
+					? `${theme.fg("warning", "▎ ")}${theme.fg("dim", uiText("note: "))}`
 					: `${theme.fg("warning", "▎ ")}${theme.fg("dim", "      ")}`;
 			const available = Math.max(0, bodyContentWidth - visibleWidth(prefix));
 			const displayLine = truncateToWidth(
@@ -1887,7 +1887,7 @@ export class PlanReviewOverlay implements Component {
 		const indent = " ".repeat(Math.max(0, section.level - this.#tocBaseLevel));
 		const ann = section.annotations.length > 0 ? " ✎" : "";
 		const avail = Math.max(0, width - 1 - indent.length - visibleWidth(ann));
-		const title = truncateToWidth(section.title || "(untitled)", avail, Ellipsis.Unicode);
+		const title = truncateToWidth(section.title || uiText("(untitled)"), avail, Ellipsis.Unicode);
 		const body = indent + title + ann;
 		// Single-column gutter glyph: a cursor `›` on the focused selection, an
 		// accent bar `▎` on the current scrolled section, otherwise blank. The
@@ -1910,7 +1910,7 @@ export class PlanReviewOverlay implements Component {
 						0,
 						Math.min(chooser.selected - Math.floor(optionLimit / 2), chooser.entries.length - optionLimit),
 					);
-		const lines = [theme.bold(theme.fg("accent", "Edit annotation"))];
+		const lines = [theme.bold(theme.fg("accent", uiText("Edit annotation")))];
 		for (let windowIndex = 0; windowIndex < optionLimit; windowIndex++) {
 			const optionIndex = start + windowIndex;
 			const selection = chooser.entries[optionIndex];
@@ -1929,7 +1929,11 @@ export class PlanReviewOverlay implements Component {
 			lines.push(
 				theme.fg(
 					"dim",
-					`${upDown} choose · ${formatKeyHint("enter")} edit · ${editorKey("tui.select.cancel")} cancel`,
+					uiText(`{{upDown}} choose · {{enter}} edit · {{cancel}} cancel`, {
+						upDown,
+						enter: formatKeyHint("enter"),
+						cancel: editorKey("tui.select.cancel"),
+					}),
 				),
 			);
 		}
@@ -1947,17 +1951,17 @@ export class PlanReviewOverlay implements Component {
 					? `‹${title}›`
 					: `‹${title}› · ${truncateToWidth(target?.context ?? "", Math.max(1, innerWidth - 16), Ellipsis.Unicode)}`;
 			const caption = truncateToWidth(
-				`${theme.fg("dim", "Annotate")} ${theme.fg("accent", location)}`,
+				`${theme.fg("dim", uiText("Annotate"))} ${theme.fg("accent", location)}`,
 				innerWidth,
 				Ellipsis.Unicode,
 			);
 			const hintParts = [
-				`${editorKey("tui.input.submit")} save`,
-				`${editorKey("tui.input.newLine")} newline`,
-				`${editorKey("tui.select.cancel")} cancel`,
+				uiText(`{{key}} save`, { key: editorKey("tui.input.submit") }),
+				uiText(`{{key}} newline`, { key: editorKey("tui.input.newLine") }),
+				uiText(`{{key}} cancel`, { key: editorKey("tui.select.cancel") }),
 			];
-			if (this.#editingAnnotation) hintParts.push("empty deletes");
-			if (this.#externalEditorLabel) hintParts.push(`${this.#externalEditorLabel} editor`);
+			if (this.#editingAnnotation) hintParts.push(uiText("empty deletes"));
+			if (this.#externalEditorLabel) hintParts.push(uiText(`{{label}} editor`, { label: this.#externalEditorLabel }));
 			this.#editor.setMaxHeight(Math.max(1, Math.min(MAX_ANNOTATION_EDITOR_ROWS, (process.stdout.rows || 40) - 12)));
 			this.#editor.focused = true;
 			return [caption, ...this.#editor.render(innerWidth), theme.fg("dim", hintParts.join(" · "))];
@@ -2028,14 +2032,16 @@ export class PlanReviewOverlay implements Component {
 			children.push(bodyCol);
 		}
 		if (!dock && this.#promptTitle) {
-			children.push(keyed(text([span(this.#promptTitle, "muted")], { role: "omp.plan.prompt" }), "prompt"));
+			children.push(keyed(text([span(uiText(this.#promptTitle), "muted")], { role: "omp.plan.prompt" }), "prompt"));
 		}
 		if (this.#committed) {
-			const label = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
+			const label = this.#committedLabel
+				? uiText(`{{label}} — submitting…`, { label: this.#committedLabel })
+				: uiText("Submitting…");
 			children.push(node("spinner", { label: [span(label, "accent strong")] }, undefined, "options"));
 			children.push(
 				keyed(
-					text([span("Applying your selection — this can take a moment while context is prepared.", "dim")], {
+					text([span(uiText("Applying your selection — this can take a moment while context is prepared."), "dim")], {
 						wrap: "word",
 					}),
 					"footer",
@@ -2123,7 +2129,7 @@ export class PlanReviewOverlay implements Component {
 		const main = node(
 			"button",
 			{
-				text: refine ? "Refine" : "Approve",
+				text: refine ? uiText("Refine") : uiText("Approve"),
 				variant: "primary",
 				keys: ["enter"],
 				actions: { click: refine ? "refine" : "approve" },
@@ -2142,7 +2148,7 @@ export class PlanReviewOverlay implements Component {
 		});
 		const more = node(
 			"menu",
-			{ trigger: "primary", icon: "chev", title: "Approve options", align: "start", items: menuItems },
+			{ trigger: "primary", icon: "chev", title: uiText("Approve options"), align: "start", items: menuItems },
 			undefined,
 			"more",
 		);
@@ -2158,8 +2164,7 @@ export class PlanReviewOverlay implements Component {
 					{
 						role: "omp.plan.model",
 						text: active.detail ?? active.label,
-						caret: true,
-						title: "Model that executes the plan",
+						title: uiText("Model that executes the plan"),
 						items: slider.segments.map((segment, i) => ({
 							id: `tier:${i}`,
 							label: segment.label,
@@ -2176,7 +2181,7 @@ export class PlanReviewOverlay implements Component {
 		children.push(node("spacer", { grow: 1 }));
 		if (this.callbacks.onSave) {
 			children.push(
-				node("button", { role: "omp.btn", text: SAVE_LABEL, actions: { click: "save" } }, undefined, "save"),
+				node("button", { role: "omp.btn", text: uiText(SAVE_LABEL), actions: { click: "save" } }, undefined, "save"),
 			);
 		}
 		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
@@ -2185,7 +2190,7 @@ export class PlanReviewOverlay implements Component {
 				"button",
 				{
 					role: "omp.btn",
-					text: "Cancel",
+					text: uiText("Cancel"),
 					...(cancelKey ? { keys: keyNames(cancelKey) } : {}),
 					actions: { click: "cancel" },
 				},
@@ -2202,7 +2207,7 @@ export class PlanReviewOverlay implements Component {
 		return node(
 			"row",
 			{ role: "omp.plan.tools", gap: "sm", align: "center", justify: "end" },
-			[actionButton("Cancel", "cancel", cancelKey ? { keys: cancelKey } : {})],
+			[actionButton(uiText("Cancel"), "cancel", cancelKey ? { keys: cancelKey } : {})],
 			"tools",
 		);
 	}
@@ -2367,7 +2372,7 @@ export class PlanReviewOverlay implements Component {
 			const section = this.#sections[sectionIndex]!;
 			const count = section.annotations.length;
 			return item(`h${sectionIndex}`, {
-				label: section.title || "(untitled)",
+				label: section.title || uiText("(untitled)"),
 				value: count > 0 ? [span(`✎${count}`, "warning")] : undefined,
 				role: `omp.plan.toc.depth${section.level - this.#tocBaseLevel}`,
 			});
@@ -2424,20 +2429,20 @@ export class PlanReviewOverlay implements Component {
 			const entries = chooser.entries.map((selection, i) => {
 				const section = this.#sections[selection.sectionIndex];
 				const annotation = section?.annotations[selection.annotationIndex];
-				const where = annotation ? annotationWhere(annotation.target) : "section";
+				const where = annotation ? annotationWhere(annotation.target) : uiText("section");
 				return item(`c${i}`, {
 					label: sanitizeStatusText(annotation?.note ?? ""),
 					detail: `${sanitizeStatusText(section?.title || "Plan preamble")} · ${where}`,
 				});
 			});
 			return [
-				keyed(text([span("Edit annotation", "accent strong")]), "chooserHead"),
+				keyed(text([span(uiText("Edit annotation"), "accent strong")]), "chooserHead"),
 				selectList("chooser", entries, { selected: `c${chooser.selected}` }),
 				hintsRow(
 					[
-						actionHint(["tui.select.up", "tui.select.down"], "choose"),
-						{ keys: ["enter"], label: "edit" },
-						actionHint("tui.select.cancel", "cancel"),
+						actionHint(["tui.select.up", "tui.select.down"], uiText("choose")),
+						{ keys: ["enter"], label: uiText("edit") },
+						actionHint("tui.select.cancel", uiText("cancel")),
 					],
 					"chooserHints",
 				),
@@ -2448,12 +2453,13 @@ export class PlanReviewOverlay implements Component {
 			const title = sanitizeStatusText(this.#sections[target?.sectionIndex ?? -1]?.title || "Plan preamble");
 			const location = target?.row === null ? `‹${title}›` : `‹${title}› · ${target?.context ?? ""}`;
 			const hints: (NativeHint | undefined)[] = [
-				actionHint("tui.input.submit", "save"),
-				actionHint("tui.input.newLine", "newline"),
-				actionHint("tui.select.cancel", "cancel"),
+				actionHint("tui.input.submit", uiText("save")),
+				actionHint("tui.input.newLine", uiText("newline")),
+				actionHint("tui.select.cancel", uiText("cancel")),
 			];
-			if (this.#editingAnnotation) hints.push({ keys: [], label: "empty deletes" });
-			if (this.#externalEditorLabel) hints.push({ keys: [], label: `${this.#externalEditorLabel} editor` });
+			if (this.#editingAnnotation) hints.push({ keys: [], label: uiText("empty deletes") });
+			if (this.#externalEditorLabel)
+				hints.push({ keys: [], label: uiText(`{{label}} editor`, { label: this.#externalEditorLabel }) });
 			// The feedback field, inline under the plan: its caption names the anchor, omp's editor holds the text.
 			return [
 				node(
@@ -2461,7 +2467,7 @@ export class PlanReviewOverlay implements Component {
 					{ role: "omp.plan.feedback", gap: "xs" },
 					[
 						keyed(
-							text([span("Note on ", "muted"), span(location, "accent")], { truncate: "end" }),
+							text([span(uiText("Note on "), "muted"), span(location, "accent")], { truncate: "end" }),
 							"annotateHead",
 						),
 						this.#editor,
@@ -2484,46 +2490,51 @@ export class PlanReviewOverlay implements Component {
 		const hints: (NativeHint | undefined)[] = [];
 		if (this.#nativeDock) {
 			// The dock's buttons carry their own keycaps (Enter, Esc); the hints name the rest.
-			if (this.#slider) hints.push(key(["left", "right"], "model"));
+			if (this.#slider) hints.push(key(["left", "right"], uiText("model")));
 			if (this.#sidebarShown) {
-				hints.push(upDown("section"), key("d", "delete section"));
-				if (!this.#nativeDoc) hints.push(key("a", "annotate"), key("e", "edit"));
+				hints.push(upDown(uiText("section")), key("d", uiText("delete section")));
+				if (!this.#nativeDoc) hints.push(key("a", uiText("annotate")), key("e", uiText("edit")));
 			}
-			hints.push(key("u", "undo"));
+			hints.push(key("u", uiText("undo")));
 			if (this.#nativeDoc) {
-				hints.push({ keys: [], label: "double-click to edit" }, { keys: [], label: "select text to comment" });
+				hints.push(
+					{ keys: [], label: uiText("double-click to edit") },
+					{ keys: [], label: uiText("select text to comment") },
+				);
 			}
 			return hints;
 		}
 		switch (this.#focus) {
 			case "actions":
-				hints.push(key(["left", "right"], "select"), key("enter", "confirm"));
-				if (this.#slider) hints.push(key(["shift+left", "shift+right"], "model"));
+				hints.push(key(["left", "right"], uiText("select")), key("enter", uiText("confirm")));
+				if (this.#slider) hints.push(key(["shift+left", "shift+right"], uiText("model")));
 				break;
 			case "toc":
 				hints.push(
-					upDown("section"),
-					key("enter", "open"),
-					key("a", "annotate"),
-					key("e", "edit"),
-					key("d", "delete"),
-					key("u", "undo"),
+					upDown(uiText("section")),
+					key("enter", uiText("open")),
+					key("a", uiText("annotate")),
+					key("e", uiText("edit")),
+					key("d", uiText("delete")),
+					key("u", uiText("undo")),
 				);
 				break;
 			case "body":
 				hints.push(
-					upDown("scroll"),
-					key("shift", "faster"),
-					key(["pageUp", "pageDown"], "page"),
-					key(["g", "shift+g"], "ends"),
-					key("a", "annotate"),
-					key("e", "edit"),
-					key("u", "undo"),
+					upDown(uiText("scroll")),
+					key("shift", uiText("faster")),
+					key(["pageUp", "pageDown"], uiText("page")),
+					key(["g", "shift+g"], uiText("ends")),
+					key("a", uiText("annotate")),
+					key("e", uiText("edit")),
+					key("u", uiText("undo")),
 				);
 				break;
 		}
-		hints.push(key("tab", "regions"));
-		hints.push(this.#helpSuffix ? { keys: [], label: this.#helpSuffix } : actionHint("tui.select.cancel", "cancel"));
+		hints.push(key("tab", uiText("regions")));
+		hints.push(
+			this.#helpSuffix ? { keys: [], label: this.#helpSuffix } : actionHint("tui.select.cancel", uiText("cancel")),
+		);
 		return hints;
 	}
 
@@ -2537,15 +2548,17 @@ export class PlanReviewOverlay implements Component {
 
 		const committed = this.#committed;
 		const sliderLines = committed ? [] : this.#renderSliderLines();
-		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
+		const submittingLabel = this.#committedLabel
+			? uiText(`{{label}} — submitting…`, { label: this.#committedLabel })
+			: uiText("Submitting…");
 		const optionLines = committed ? [theme.bold(theme.fg("accent", submittingLabel))] : this.#renderOptionLines();
-		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];
+		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", uiText(this.#promptTitle)))] : [];
 		const baseChrome = 4 + promptLines.length + sliderLines.length + optionLines.length;
 		const chooserFooterRows = this.#annotationChooser
 			? Math.max(0, termHeight - baseChrome - MIN_BODY_ROWS)
 			: Number.POSITIVE_INFINITY;
 		const footerLines = committed
-			? [theme.fg("dim", "Applying your selection — this can take a moment while context is prepared.")]
+			? [theme.fg("dim", uiText("Applying your selection — this can take a moment while context is prepared."))]
 			: this.#renderFooterLines(innerWidth, chooserFooterRows);
 
 		// Chrome rows: top border, two dividers, bottom border, plus the

@@ -1,4 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { uiText } from "@oh-my-pi/pi-utils/ui-language";
 import {
 	type Component,
 	Ellipsis,
@@ -105,6 +106,10 @@ import { isNativeRendering } from "../native/state";
 
 const OTHER_OPTION = "Other (type your own)";
 const RECOMMENDED_SUFFIX = " (Recommended)";
+
+/** Display forms of the dialog's fixed rows and the recommendation badge. */
+const otherOptionLabel = (): string => uiText(OTHER_OPTION);
+const recommendedSuffix = (): string => uiText(RECOMMENDED_SUFFIX);
 /** Native label of the free-text row. */
 const OTHER_LABEL = "Other…";
 /** Widest a folded question's text grows natively, in cells, before it is cut. */
@@ -341,13 +346,16 @@ function normalizedInlineInput(input: string): string {
  * participant answers. State and results keep originals.
  */
 function displayOptionLabels(question: ExtensionAskDialogQuestion): string[] {
+	const suffix = recommendedSuffix();
 	const badged = question.options.map((option, index) => {
 		const base = sanitizeCarriageReturns(option.label);
-		return question.recommended === index && !base.endsWith(RECOMMENDED_SUFFIX)
-			? `${base}${RECOMMENDED_SUFFIX}`
+		return question.recommended === index && !base.endsWith(RECOMMENDED_SUFFIX) && !base.endsWith(suffix)
+			? `${base}${suffix}`
 			: base;
 	});
-	return disambiguateDisplayLabels(badged, [OTHER_OPTION, ...GUEST_ACTION_LABELS]);
+	// Sentinels match what the rows display, so a caller option colliding with
+	// the Other row (or a guest action label) still disambiguates.
+	return disambiguateDisplayLabels(badged, [otherOptionLabel(), ...GUEST_ACTION_LABELS]);
 }
 
 /** Inline markdown code (`` `x` ``) as mono `code` spans, the rest plain, as the ANSI rows render it. */
@@ -365,8 +373,9 @@ function inlineCodeSpans(value: string): TspSpan[] {
 
 /** An option's native label: the `(Recommended)` suffix goes (the row's badge says it), inline code runs mono. */
 function optionLabelSpans(question: ExtensionAskDialogQuestion, optionIndex: number, label: string): TspSpan[] {
-	const recommended = question.recommended === optionIndex && label.endsWith(RECOMMENDED_SUFFIX);
-	return inlineCodeSpans(recommended ? label.slice(0, -RECOMMENDED_SUFFIX.length) : label);
+	const suffix = recommendedSuffix();
+	const recommended = question.recommended === optionIndex && label.endsWith(suffix);
+	return inlineCodeSpans(recommended ? label.slice(0, -suffix.length) : label);
 }
 
 function isAnswered(state: QuestionState): boolean {
@@ -382,7 +391,8 @@ function foldSummary(question: ExtensionAskDialogQuestion, state: QuestionState,
 	const labels = displayOptionLabels(question);
 	const note = noteForSubmittedAnswer(question, state)?.text.trim();
 	const noteText = note ? normalizedInlineInput(note) : undefined;
-	const custom = state.customInput === undefined ? undefined : `Other: “${normalizedInlineInput(state.customInput)}”`;
+	const custom =
+		state.customInput === undefined ? undefined : `${uiText("Other: ")}“${normalizedInlineInput(state.customInput)}”`;
 	if (custom !== undefined && !question.multi) {
 		return { kind: "answer", text: custom, note: noteText };
 	}
@@ -501,7 +511,7 @@ function renderRowLabel(
 	const marker = `${theme.fg(checked ? "success" : "dim", optionMarker(theme, question.multi, checked))} `;
 	const cursor = selected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 	const label = renderInlineMarkdown(rowItem.label, mdTheme, t => theme.fg(color, t));
-	const noteMarker = state.note && state.noteRowKey === rowItem.key ? theme.fg("success", "  ✎ note") : "";
+	const noteMarker = state.note && state.noteRowKey === rowItem.key ? theme.fg("success", `  ✎ ${uiText("note")}`) : "";
 	// `width` is already the inner content width supplied by OverlayPanel; when
 	// a scrollbar is needed, renderRows() calls this again with one less column.
 	// Keep the cursor, option marker, first wrapped label line, and optional
@@ -655,7 +665,7 @@ export class AskDialogComponent implements Component {
 				() => this.#handleTimeout(),
 			);
 		}
-		this.#panel = new OverlayPanel("Ask");
+		this.#panel = new OverlayPanel(uiText("Ask"));
 		this.#bodyRegion = new PanelRows();
 		this.#skipRegion = new PanelRows();
 		this.#panel.addChild(this.#bodyRegion);
@@ -757,27 +767,27 @@ export class AskDialogComponent implements Component {
 
 	/** The keys for the open question, themed on one line: the rows panel has no footer, so the host shows them in the folded composer. */
 	keyHints(): string {
-		const composer = `${editorKey("tui.select.cancel")} composer`;
+		const composer = `${editorKey("tui.select.cancel")} ${uiText("composer")}`;
 		const hideKey = editorKey("app.ask.hide");
 		const enter = formatKeyHint("enter");
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
 		const index = this.#currentQuestionIndex();
 		const question = this.#questions[index];
 		// Enter moves on to the next question; on the last it submits (or opens the first unanswered one).
-		const enterAction = index + 1 < this.#questions.length ? "next" : "submit";
+		const enterAction = index + 1 < this.#questions.length ? uiText("next") : uiText("submit");
 		const hints = [
 			question?.multi
-				? `${formatKeyHint("space")} toggle · ${enter} ${enterAction}`
-				: `${enter} select · ${formatKeyHint("n")} note`,
-			`${upDown} move`,
+				? `${formatKeyHint("space")} ${uiText("toggle")} · ${enter} ${enterAction}`
+				: `${enter} ${uiText("select")} · ${formatKeyHint("n")} ${uiText("note")}`,
+			`${upDown} ${uiText("move")}`,
 		];
-		if (this.#questions.length > 1) hints.push(`${formatKeyHints(["tab", "left", "right"])} question`);
-		if (this.#questionCanPage) hints.push(`${editorKeys("tui.select.pageUp", "tui.select.pageDown")} page`);
+		if (this.#questions.length > 1) hints.push(`${formatKeyHints(["tab", "left", "right"])} ${uiText("question")}`);
+		if (this.#questionCanPage) hints.push(`${editorKeys("tui.select.pageUp", "tui.select.pageDown")} ${uiText("page")}`);
 		if (this.#headerExpandable || this.#descExpandable) {
-			hints.push(`${expandKeyHint()} ${this.#expanded ? "collapse" : "expand"}`);
+			hints.push(`${expandKeyHint()} ${this.#expanded ? uiText("collapse") : uiText("expand")}`);
 		}
 		hints.push(composer);
-		if (hideKey) hints.push(`${hideKey} hide`);
+		if (hideKey) hints.push(`${hideKey} ${uiText("hide")}`);
 		return theme.fg("dim", hints.join(" · "));
 	}
 
@@ -814,7 +824,7 @@ export class AskDialogComponent implements Component {
 		}
 		const total = this.#questions.length;
 		this.#native = askCard({
-			...(total > 1 ? { progress: `${answered} of ${total} answered` } : {}),
+			...(total > 1 ? { progress: uiText("{{answered}} of {{total}} answered", { answered, total }) } : {}),
 			body,
 			...(skip ? { skip } : {}),
 			actions: this.#describeActions(ring),
@@ -835,7 +845,7 @@ export class AskDialogComponent implements Component {
 				style: "ring",
 				size: "sm",
 				label: `${Math.ceil(left / 1000)}s`,
-				title: "Answers the recommended option when the time runs out",
+				title: uiText("Answers the recommended option when the time runs out"),
 			},
 			undefined,
 			"timer",
@@ -868,7 +878,7 @@ export class AskDialogComponent implements Component {
 			const recommended = rowItem.kind === "option" && question.recommended === rowItem.optionIndex;
 			const detail =
 				describeRowDetail(rowItem, question, state) ??
-				(rowItem.kind === "other" ? [span("Type your own answer")] : undefined);
+				(rowItem.kind === "other" ? [span(uiText("Type your own answer"))] : undefined);
 			const role =
 				rowItem.kind === "other"
 					? question.multi
@@ -883,11 +893,11 @@ export class AskDialogComponent implements Component {
 					// The badge replaces the ANSI `(Recommended)` suffix.
 					label:
 						rowItem.kind === "other"
-							? [span(OTHER_LABEL)]
+							? [span(uiText(OTHER_LABEL))]
 							: optionLabelSpans(question, rowItem.optionIndex ?? -1, rowItem.label),
 					role,
 					...(detail ? { detail } : {}),
-					...(recommended ? { value: [span("Recommended")] } : {}),
+					...(recommended ? { value: [span(uiText("Recommended"))] } : {}),
 					...(checked ? { tone: "accent" as const, ...(question.multi ? { icon: "check" } : {}) } : {}),
 					// Notes this row without picking it, wherever the cursor is.
 					actions: { menu: ["note"] },
@@ -916,13 +926,13 @@ export class AskDialogComponent implements Component {
 	 * their keys live in their tooltips.
 	 */
 	#describeActions(ring: boolean): NativeNode {
-		const cancel = actionButton("Cancel", "cancel", { title: "Cancel without answering" });
+		const cancel = actionButton(uiText("Cancel"), "cancel", { title: uiText("Cancel without answering") });
 		const lead: NativeNode[] = this.#countdown ? [this.#describeTimer(this.#countdown, ring)] : [];
-		const note = actionButton("Note", "note", {
+		const note = actionButton(uiText("Note"), "note", {
 			keys: "n",
-			title: "Add a note to the highlighted answer  n",
+			title: uiText("Add a note to the highlighted answer  n"),
 		});
-		const submit = actionButton("Submit", "submit", { tone: "accent", title: "Submit the answers" });
+		const submit = actionButton(uiText("Submit"), "submit", { tone: "accent", title: uiText("Submit the answers") });
 		return actionBar([...lead, null, note, cancel, submit]);
 	}
 
@@ -1156,7 +1166,9 @@ export class AskDialogComponent implements Component {
 	}
 
 	#titleText(): string {
-		return this.#remainingSeconds === undefined ? "Ask" : `Ask (${this.#remainingSeconds}s)`;
+		return this.#remainingSeconds === undefined
+			? uiText("Ask")
+			: uiText("Ask ({{seconds}}s)", { seconds: this.#remainingSeconds });
 	}
 
 	/** The panel's title: {@link #titleText}, and with several questions how many have an answer (the native card's progress). */
@@ -1164,7 +1176,7 @@ export class AskDialogComponent implements Component {
 		const total = this.#questions.length;
 		if (total < 2) return this.#titleText();
 		const answered = this.#states.filter(isAnswered).length;
-		return `${this.#titleText()} · ${answered} of ${total} answered`;
+		return `${this.#titleText()} · ${uiText("{{answered}} of {{total}} answered", { answered, total })}`;
 	}
 
 	#setHidden(hidden: boolean): void {
@@ -1179,11 +1191,14 @@ export class AskDialogComponent implements Component {
 		const hideKey = editorKey("app.ask.hide");
 		const enter = formatKeyHint("enter");
 		const show = hideKey ? `${hideKey}/${enter}` : enter;
-		const hints = [`${show} show`, `${editorKey("tui.select.cancel")} composer`];
+		const hints = [`${show} ${uiText("show")}`, `${editorKey("tui.select.cancel")} ${uiText("composer")}`];
 		const hint = theme.fg("dim", ` · ${hints.join(" · ")}`);
-		const label = theme.fg("accent", `${this.#titleText()} hidden:`);
+		const label = theme.fg("accent", uiText("{{title}} hidden:", { title: this.#titleText() }));
 		const question = this.#questions[this.#currentQuestionIndex()];
-		const more = this.#questions.length > 1 ? theme.fg("dim", ` (+${this.#questions.length - 1} more)`) : "";
+		const more =
+			this.#questions.length > 1
+				? theme.fg("dim", ` ${uiText("(+{{count}} more)", { count: this.#questions.length - 1 })}`)
+				: "";
 		const summary = normalizedInlineInput(sanitizeCarriageReturns(question?.question ?? ""));
 		const summaryWidth = Math.max(1, width - visibleWidth(label) - visibleWidth(more) - visibleWidth(hint) - 1);
 		const clipped = truncateToWidth(summary, summaryWidth, Ellipsis.Unicode);
@@ -1207,7 +1222,7 @@ export class AskDialogComponent implements Component {
 			label: display[index] ?? sanitizeCarriageReturns(option.label),
 			optionIndex: index,
 		}));
-		rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
+		rows.push({ kind: "other", key: "other", label: otherOptionLabel(), optionIndex: undefined });
 		return rows;
 	}
 
@@ -1280,7 +1295,10 @@ export class AskDialogComponent implements Component {
 				(state.customInput === undefined
 					? undefined
 					: { text: state.customInput, images: state.customInputImages });
-			const result = await this.#openPrompt({ title: "Custom answer", question: question.question }, prefill);
+			const result = await this.#openPrompt(
+			{ title: uiText("Custom answer"), question: question.question },
+			prefill,
+		);
 			if (this.#closed) return;
 			const input = promptOutcome(result);
 			if (!input.submitted) {
@@ -1322,7 +1340,7 @@ export class AskDialogComponent implements Component {
 			const prefill =
 				isReedit && state.note !== undefined ? { text: state.note, images: state.noteImages } : undefined;
 			const result = await this.#openPrompt(
-				{ title: `Note for ${rowItem.label}`, question: question.question },
+				{ title: uiText("Note for {{label}}", { label: rowItem.label }), question: question.question },
 				prefill,
 			);
 			if (this.#closed) return;

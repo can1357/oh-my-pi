@@ -2,6 +2,7 @@ import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
 import { CLI_THINKING_LEVELS } from "@oh-my-pi/pi-tui/thinking";
+import { uiText } from "@oh-my-pi/pi-utils/ui-language";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 
 export const launchHelp = {
@@ -72,7 +73,11 @@ export const launchHelp = {
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
-		models: Flags.string({ description: `Comma-separated model patterns for ${formatKeyHint("ctrl+p")} cycling` }),
+		models: Flags.string({
+			description: uiText("Comma-separated model patterns for {{keys}} cycling", {
+				keys: formatKeyHint("ctrl+p"),
+			}),
+		}),
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
 		"no-judge": Flags.boolean({ description: "Restrict judge calls to the active model's provider" }),
 		"no-spotlight": Flags.boolean({ description: "Restrict Spotlight calls to the active model's provider" }),
@@ -86,7 +91,7 @@ export const launchHelp = {
 				"Comma-separated built-in or extension tool names to enable (default: tools enabled in settings; see Built-in Tools)",
 		}),
 		thinking: Flags.string({
-			description: `Set thinking level: ${CLI_THINKING_LEVELS.join(", ")}`,
+			description: uiText("Set thinking level: {{levels}}", { levels: CLI_THINKING_LEVELS.join(", ") }),
 			options: [...CLI_THINKING_LEVELS],
 		}),
 		"service-tier": Flags.string({

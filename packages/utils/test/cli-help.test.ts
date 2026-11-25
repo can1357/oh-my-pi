@@ -1,5 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { Args, Command, type CommandEntry, Flags, run } from "../src/cli";
+import { setUiLanguage } from "../src/ui-language";
 
 class GoodCommand extends Command {
 	static description = "prints good things";
@@ -95,6 +96,33 @@ describe("run() root help", () => {
 		expect(loads).toBe(0);
 		expect(output).toContain("--model=<value>");
 		expect(output).toContain("good  prints good things");
+	});
+	it("localizes visible help labels while preserving command identifiers and flags", async () => {
+		setUiLanguage("ru");
+		const writes: string[] = [];
+		const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(String(chunk));
+			return true;
+		});
+		try {
+			await run({
+				bin: "omp",
+				version: "0.0.0",
+				argv: ["--help"],
+				commands: [
+					{ name: "launch", load: async () => GoodCommand, help: { hidden: true, flags: GoodCommand.flags } },
+					{ name: "good", load: async () => GoodCommand, help: { description: "prints good things" } },
+				],
+			});
+		} finally {
+			stdoutSpy.mockRestore();
+			setUiLanguage("en");
+		}
+		const output = writes.join("");
+		expect(output).toContain("ИСПОЛЬЗОВАНИЕ");
+		expect(output).toContain("КОМАНДЫ");
+		expect(output).toContain("good  prints good things");
+		expect(output).toContain("--verbose");
 	});
 
 	it("preserves constructable commands for existing custom help callbacks", async () => {

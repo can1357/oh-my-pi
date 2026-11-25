@@ -1,3 +1,4 @@
+import { uiText } from "@oh-my-pi/pi-utils/ui-language";
 import { centerLine, visibleWidth } from "../../utils";
 import { padToWidth } from "../../render/utils";
 import { APP_NAME, VERSION } from "@oh-my-pi/pi-utils";
@@ -28,7 +29,7 @@ const MIN_SCENE_HEIGHT = 22;
 
 /** Skip affordance; built at render time so it follows the live symbol preset. */
 function skipHint(): string {
-	return `press ${formatKeyHint("enter")} to skip`;
+	return uiText(`press {{key}} to skip`, { key: formatKeyHint("enter") });
 }
 
 function starAt(x: number, y: number, frame: number): string {
@@ -263,7 +264,7 @@ export function describeSetupSplash(): NativeNode {
 			lockupNode(VERSION),
 			node("spacer", { grow: 1 }, undefined, "bottom"),
 			keyed(
-				row([text([span("Press", "muted")]), kbd("enter"), text([span("to begin", "muted")])], {
+				row([text([span(uiText("Press"), "muted")]), kbd("enter"), text([span(uiText("to begin"), "muted")])], {
 					align: "center",
 					gap: "xs",
 					role: "omp.setup.hint",

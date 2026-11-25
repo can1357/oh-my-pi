@@ -11,6 +11,7 @@
  */
 import * as fs from "node:fs";
 import { parseArgs as nodeParseArgs } from "node:util";
+import { uiText } from "./ui-language";
 
 /**
  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of
@@ -216,7 +217,7 @@ export abstract class Command {
 					strict,
 				});
 			} catch (error) {
-				throw new CliUsageError(error instanceof Error ? error.message : String(error));
+				throw new CliUsageError(translateParseArgsError(error instanceof Error ? error.message : String(error)));
 			}
 		})();
 
@@ -230,7 +231,12 @@ export abstract class Command {
 				} else {
 					const n = Number.parseInt(raw as string, 10);
 					if (Number.isNaN(n)) {
-						throw new CliUsageError(`Expected integer for --${name}, got "${raw}"`);
+						throw new CliUsageError(
+							uiText('Expected integer for --{{flag}}, got "{{value}}"', {
+								flag: name,
+								value: SECRET_VALUE_FLAG.test(name) ? uiText("[redacted]") : String(raw),
+							}),
+						);
 					}
 					flags[name] = n;
 				}
@@ -244,7 +250,11 @@ export abstract class Command {
 				if (val !== undefined && desc.options && !Array.isArray(val)) {
 					if (!desc.options.includes(val as string)) {
 						throw new CliUsageError(
-							`Expected --${name} to be one of: ${[...desc.options].join(", ")}; got "${val}"`,
+							uiText('Expected --{{flag}} to be one of: {{options}}; got "{{value}}"', {
+								flag: name,
+								options: [...desc.options].join(", "),
+								value: SECRET_VALUE_FLAG.test(name) ? uiText("[redacted]") : (val as string),
+							}),
 						);
 					}
 				}
@@ -252,7 +262,7 @@ export abstract class Command {
 			}
 			// Validate required
 			if (desc.required && flags[name] === undefined) {
-				throw new CliUsageError(`Missing required flag: --${name}`);
+				throw new CliUsageError(uiText("Missing required flag: --{{flag}}", { flag: name }));
 			}
 		}
 
@@ -271,14 +281,18 @@ export abstract class Command {
 			}
 			// Validate required
 			if (desc.required && args[argName] === undefined) {
-				throw new CliUsageError(`Missing required argument: ${argName}`);
+				throw new CliUsageError(uiText("Missing required argument: {{argument}}", { argument: argName }));
 			}
 			// Validate options constraint
 			const argVal = args[argName];
 			if (argVal !== undefined && desc.options && typeof argVal === "string") {
 				if (!desc.options.includes(argVal)) {
 					throw new CliUsageError(
-						`Expected ${argName} to be one of: ${[...desc.options].join(", ")}; got "${argVal}"`,
+						uiText('Expected {{argument}} to be one of: {{options}}; got "{{value}}"', {
+							argument: argName,
+							options: [...desc.options].join(", "),
+							value: argVal,
+						}),
 					);
 				}
 			}
@@ -286,6 +300,41 @@ export abstract class Command {
 
 		return { flags, args, argv: positionals } as never;
 	}
+}
+
+/** Flag names whose values must never be echoed in a usage diagnostic. */
+const SECRET_VALUE_FLAG = /(?:api[-_]?key|token|password|passwd|secret|cookie|credential|authorization)/i;
+
+/**
+ * Localize the fixed `node:util.parseArgs` diagnostic templates before their
+ * runtime tokens are interpolated. Unrecognized shapes keep the original
+ * external message verbatim.
+ */
+function translateParseArgsError(message: string): string {
+	const unknown = /^Unknown option '(.+)'\. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "(.+)"'$/s.exec(
+		message,
+	);
+	if (unknown) {
+		return uiText(
+			'Unknown option \'{{option}}\'. To specify a positional argument starting with a \'-\', place it at the end of the command after \'--\', as in \'-- "{{option}}"\'',
+			{ option: unknown[1]! },
+		);
+	}
+	const missing = /^Option '(.+)' argument missing$/.exec(message);
+	if (missing) return uiText("Option '{{option}}' argument missing", { option: missing[1]! });
+	const noValue = /^Option '(.+)' does not take an argument$/.exec(message);
+	if (noValue) return uiText("Option '{{option}}' does not take an argument", { option: noValue[1]! });
+	const ambiguous =
+		/^Option '(.+)' argument is ambiguous\.\nDid you forget to specify the option argument for '(.+)'\?\nTo specify an option argument starting with a dash use '(.+)'\.$/.exec(
+			message,
+		);
+	if (ambiguous) {
+		return uiText(
+			"Option '{{option}}' argument is ambiguous.\nDid you forget to specify the option argument for '{{option}}'?\nTo specify an option argument starting with a dash use '{{example}}'.",
+			{ option: ambiguous[1]!, example: ambiguous[3]! },
+		);
+	}
+	return message;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,8 +346,8 @@ export function renderRootHelp(config: CliConfig<CommandMetadata>): void {
 	const { bin, version, commands } = config;
 	const lines: string[] = [];
 	lines.push(`${bin} v${version}\n`);
-	lines.push("USAGE");
-	lines.push(`  $ ${bin} [COMMAND]\n`);
+	lines.push(uiText("USAGE"));
+	lines.push(`  $ ${bin} [${uiText("COMMAND")}]\n`);
 
 	// Show the default command's flags/args/examples inline.
 	// The default command is the one marked hidden (it's the implicit entry point).
@@ -310,10 +359,10 @@ export function renderRootHelp(config: CliConfig<CommandMetadata>): void {
 	// List visible subcommands
 	const visible = [...commands.entries()].filter(([, C]) => !C.hidden);
 	if (visible.length > 0) {
-		lines.push("COMMANDS");
+		lines.push(uiText("COMMANDS"));
 		const maxLen = Math.max(...visible.map(([n]) => n.length));
 		for (const [name, command] of visible.sort((a, b) => a[0].localeCompare(b[0]))) {
-			lines.push(`  ${name.padEnd(maxLen + 2)}${command.description ?? ""}`);
+			lines.push(`  ${name.padEnd(maxLen + 2)}${uiText(command.description ?? "")}`);
 		}
 		lines.push("");
 	}
@@ -340,14 +389,14 @@ function formatUsageArgs(Cmd: CommandCtor): string {
 /** Build the single USAGE line for a command (without the leading label). */
 export function commandUsageLine(bin: string, id: string, Cmd: CommandCtor): string {
 	const hasFlags = Object.keys(Cmd.flags ?? {}).length > 0;
-	return `$ ${bin} ${id}${formatUsageArgs(Cmd)}${hasFlags ? " [FLAGS]" : ""}`;
+	return `$ ${bin} ${id}${formatUsageArgs(Cmd)}${hasFlags ? ` [${uiText("FLAGS")}]` : ""}`;
 }
 
 /** Render help for a single command. */
 export function renderCommandHelp(bin: string, id: string, Cmd: CommandCtor): void {
 	const lines: string[] = [];
-	if (Cmd.description) lines.push(`${Cmd.description}\n`);
-	lines.push("USAGE");
+	if (Cmd.description) lines.push(`${uiText(Cmd.description)}\n`);
+	lines.push(uiText("USAGE"));
 	lines.push(`  ${commandUsageLine(bin, id, Cmd)}\n`);
 	renderCommandBody(lines, Cmd);
 	process.stdout.write(lines.join("\n"));
@@ -360,11 +409,11 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 	// Arguments
 	const argEntries = Object.entries(argDefs);
 	if (argEntries.length > 0) {
-		lines.push("ARGUMENTS");
+		lines.push(uiText("ARGUMENTS"));
 		const maxLen = Math.max(...argEntries.map(([n]) => n.length));
 		for (const [name, desc] of argEntries) {
 			const parts = [name.toUpperCase().padEnd(maxLen + 2)];
-			if (desc.description) parts.push(desc.description);
+			if (desc.description) parts.push(uiText(desc.description));
 			if (desc.options) parts.push(`(${[...desc.options].join("|")})`);
 			lines.push(`  ${parts.join(" ")}`);
 		}
@@ -374,13 +423,13 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 	// Flags
 	const flagEntries = Object.entries(flagDefs);
 	if (flagEntries.length > 0) {
-		lines.push("FLAGS");
+		lines.push(uiText("FLAGS"));
 		const formatted: [string, string][] = [];
 		for (const [name, desc] of flagEntries) {
 			const charPart = desc.char ? `-${desc.char}, ` : "    ";
 			const namePart = `--${name}`;
 			const typePart = desc.kind === "boolean" ? "" : desc.kind === "integer" ? "=<int>" : "=<value>";
-			formatted.push([`  ${charPart}${namePart}${typePart}`, desc.description ?? ""]);
+			formatted.push([`  ${charPart}${namePart}${typePart}`, uiText(desc.description ?? "")]);
 		}
 		const maxLeft = Math.max(...formatted.map(([l]) => l.length));
 		for (const [left, right] of formatted) {
@@ -391,7 +440,7 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 
 	// Examples
 	if (command.examples && command.examples.length > 0) {
-		lines.push("EXAMPLES");
+		lines.push(uiText("EXAMPLES"));
 		for (const ex of command.examples) {
 			for (const line of ex.split("\n")) {
 				lines.push(`  ${line}`);
@@ -471,7 +520,7 @@ export async function run(opts: RunOptions): Promise<void> {
 			const Cmd = await loadEntry(entry);
 			renderCommandHelp(bin, entry.name, Cmd);
 		} else {
-			process.stderr.write(`Unknown command: ${commandId}\n`);
+			process.stderr.write(`${uiText("Unknown command: {{command}}", { command: commandId })}\n`);
 		}
 		return;
 	}
@@ -480,7 +529,7 @@ export async function run(opts: RunOptions): Promise<void> {
 	const entry = findEntry(opts.commands, commandId);
 
 	if (!entry) {
-		process.stderr.write(`Error: command ${commandId} not found\n`);
+		process.stderr.write(`${uiText("Error: command {{command}} not found", { command: commandId })}\n`);
 		process.exitCode = 1;
 		return;
 	}
@@ -496,9 +545,9 @@ export async function run(opts: RunOptions): Promise<void> {
 		// process-level catch would dump a minified `dist/cli.js` code frame over a
 		// plain argument error (issue #5369).
 		if (error instanceof CliUsageError) {
-			process.stderr.write(`error: ${error.message}\n\n`);
-			process.stderr.write(`USAGE\n  ${commandUsageLine(bin, entry.name, Cmd)}\n`);
-			process.stderr.write(`\nRun \`${bin} ${entry.name} --help\` for details.\n`);
+			process.stderr.write(`${uiText("error: {{message}}", { message: error.message })}\n\n`);
+			process.stderr.write(`${uiText("USAGE")}\n  ${commandUsageLine(bin, entry.name, Cmd)}\n`);
+			process.stderr.write(`\n${uiText("Run `{{command}}` for details.", { command: `${bin} ${entry.name} --help` })}\n`);
 			process.exitCode = 1;
 			return;
 		}

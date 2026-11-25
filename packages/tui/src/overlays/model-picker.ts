@@ -7,6 +7,7 @@
  * with `@` exposes the configured ctrl+p quick roles.
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { uiText } from "@oh-my-pi/pi-utils/ui-language";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { addKeyAliases, canonicalKeyId } from "../keybindings";
@@ -135,6 +136,9 @@ const THINKING_STEP_LABELS: Readonly<Record<string, string>> = {
 	[ThinkingLevel.XHigh]: "XHigh",
 	[ThinkingLevel.Max]: "Max",
 };
+/** Display label of one slider step (`Auto`, `Off`, …) or frozen-slider reason. */
+const thinkingStepLabel = (label: string): string => uiText(label, undefined, "thinking");
+
 /** The frozen slider's steps for a model without an effort to pick. */
 const FROZEN_THINKING_STEPS: readonly ConfiguredThinkingLevel[] = [
 	ThinkingLevel.Off,
@@ -159,7 +163,9 @@ function thinkingSteps(model: Model): { steps: readonly ConfiguredThinkingLevel[
 	if (efforts.length > 0) return { steps: [AUTO_THINKING, ThinkingLevel.Off, ...efforts] };
 	return {
 		steps: FROZEN_THINKING_STEPS,
-		disabled: model.reasoning ? `${model.name} picks its own effort` : `${model.name} does not reason`,
+		disabled: model.reasoning
+			? uiText("{{name}} picks its own effort", { name: model.name }, "thinking")
+			: uiText("{{name}} does not reason", { name: model.name }, "thinking"),
 	};
 }
 
@@ -192,16 +198,16 @@ export function thinkingSlider(model: Model, level: ConfiguredThinkingLevel | un
 function footerHint(mode: PickerMode, thinking: boolean): string {
 	const upDown = editorKeys("tui.select.up", "tui.select.down");
 	const enter = formatKeyHint("enter");
-	const provider = `${formatKeyHint("tab")} provider`;
-	const close = `${editorKey("tui.select.cancel")} close`;
+	const provider = `${formatKeyHint("tab")} ${uiText("provider")}`;
+	const close = `${editorKey("tui.select.cancel")} ${uiText("close")}`;
 	switch (mode) {
 		case "role":
-			return `${upDown} roles · ${enter} apply role model · type to search · ${close}`;
+			return `${upDown} ${uiText("roles")} · ${enter} ${uiText("apply role model")} · ${uiText("type to search")} · ${close}`;
 		case "task":
-			return `${upDown} models · ${enter} use for Task subagents · ${provider} · type to search · ${close}`;
+			return `${upDown} ${uiText("models")} · ${enter} ${uiText("use for Task subagents")} · ${provider} · ${uiText("type to search")} · ${close}`;
 		default: {
-			const level = thinking ? ` · ${formatKeyHint("left")}/${formatKeyHint("right")} thinking` : "";
-			return `${upDown} models · ${enter} use for this session · ${provider}${level} · type to search · @ quick roles · ${close}`;
+			const level = thinking ? ` · ${formatKeyHint("left")}/${formatKeyHint("right")} ${uiText("thinking")}` : "";
+			return `${upDown} ${uiText("models")} · ${enter} ${uiText("use for this session")} · ${provider}${level} · ${uiText("type to search")} · @ ${uiText("quick roles")} · ${close}`;
 		}
 	}
 }
@@ -278,7 +284,9 @@ export class ModelPickerComponent implements Component {
 			markOverContext: true,
 			emptyText: () =>
 				this.#roleMode
-					? `  No quick roles in the ${editorKey("app.model.cycleForward") || formatKeyHint("ctrl+p")} cycle`
+					? `  ${uiText("No quick roles in the {{key}} cycle", {
+							key: editorKey("app.model.cycleForward") || formatKeyHint("ctrl+p"),
+						})}`
 					: undefined,
 		});
 		// The rail's logos name each row's provider: the rows show the model id alone.
@@ -550,23 +558,23 @@ export class ModelPickerComponent implements Component {
 		let status = this.#configError
 			? theme.fg("error", ` ${this.#configError}`)
 			: this.#taskMode
-				? theme.fg("error", ` ${TASK_STATUS_HINT}`)
+				? theme.fg("error", ` ${uiText(TASK_STATUS_HINT)}`)
 				: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
 		const slider = this.#slider();
 		if (slider) {
 			status += slider.disabled
-				? theme.fg("dim", " · no thinking")
-				: `${theme.fg("muted", " · thinking ")}${theme.getThinkingBorderColor(slider.value)(THINKING_STEP_LABELS[slider.value] ?? slider.value)}`;
+				? theme.fg("dim", ` · ${uiText("no thinking")}`)
+				: `${theme.fg("muted", ` · ${uiText("thinking")} `)}${theme.getThinkingBorderColor(slider.value)(thinkingStepLabel(THINKING_STEP_LABELS[slider.value] ?? slider.value))}`;
 		}
 
 		const borderColor: ThemeColor | undefined = this.#taskMode ? "error" : undefined;
 		let footer = footerHint(this.#mode(), this.#thinkingLevelFor !== undefined);
 		if (this.#taskModeKey !== undefined && !this.#roleMode) {
-			footer += ` · ${formatKeyHint(this.#taskModeKey)} ${this.#taskMode ? "session model" : "task model"}`;
+			footer += ` · ${formatKeyHint(this.#taskModeKey)} ${uiText(this.#taskMode ? "session model" : "task model")}`;
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, this.#taskMode ? "Switch Task Model" : "Switch Model", borderColor));
+		out.push(topBorder(width, uiText(this.#taskMode ? "Switch Task Model" : "Switch Model"), borderColor));
 		out.push(row(status, width, borderColor));
 		for (const line of this.#browser.render(inner)) {
 			out.push(row(line, width, borderColor));
@@ -618,7 +626,7 @@ export class ModelPickerComponent implements Component {
 		const query = this.#browser.query;
 		const view = this.#browser.pickerOrder({
 			providers: false,
-			rest: mode === "role" ? null : query.trim() ? "Matches" : "All",
+			rest: mode === "role" ? null : query.trim() ? uiText("Matches") : uiText("All"),
 		});
 		const catalogue = this.#browser.pickerItems(this.#roleMode ? this.#quickRoleItems : this.#modelItems);
 		const current =
@@ -646,26 +654,29 @@ export class ModelPickerComponent implements Component {
 		const cycleKey = editorKey("app.model.cycleForward") || formatKeyHint("ctrl+p");
 		const node = picker({
 			icon: "cpu",
-			noun: mode === "role" ? "roles" : "models",
+			noun: uiText(mode === "role" ? "roles" : "models"),
 			size: "md",
 			anchor: "composer",
 			search: "list",
 			density: "snug",
 			layout: "rows",
 			preview: "none",
-			placeholder: mode === "task" ? "Search Task models…" : "Search, @ for roles…",
+			placeholder: uiText(mode === "task" ? "Search Task models…" : "Search, @ for roles…"),
 			...(scopes ? { scopes, scope: this.#scope, scopeStyle: "rail" as const } : {}),
 			...this.#browser.pickerRows(catalogue, view, current),
 			level,
 			// The head is the search alone; a config error titles it instead (`message` shows only in the error state).
-			...(this.#configError ? { title: "Switch model", subtitle: [span(this.#configError, "error")] } : {}),
-			empty: mode === "role" ? `No quick roles in the ${cycleKey} cycle` : "No models available",
+			...(this.#configError ? { title: uiText("Switch model"), subtitle: [span(this.#configError, "error")] } : {}),
+			empty:
+				mode === "role"
+					? uiText("No quick roles in the {{key}} cycle", { key: cycleKey })
+					: uiText("No models available"),
 			// No action bar: click/Enter pick, Esc and the head's esc keycap close; the
 			// Task-subagent toggle sits in the head.
 			actions:
 				this.#taskModeKey !== undefined && mode !== "role"
 					? [
-							pickerAction("task", "Task / Main", this.#taskModeKey, {
+								pickerAction("task", uiText("Task / Main"), this.#taskModeKey, {
 								on: mode === "task",
 								head: true,
 								icon: "users",
@@ -686,8 +697,8 @@ export class ModelPickerComponent implements Component {
 		const key = `${slider.steps.join(",")}\0${slider.value}\0${slider.disabled ?? ""}\0${provider}`;
 		if (this.#level?.key === key) return this.#level.value;
 		const value: TspPickerLevel = {
-			label: "Thinking",
-			steps: slider.steps.map(id => ({ id, label: THINKING_STEP_LABELS[id] ?? id })),
+			label: uiText("Thinking"),
+			steps: slider.steps.map(id => ({ id, label: thinkingStepLabel(THINKING_STEP_LABELS[id] ?? id) })),
 			value: slider.value,
 			...(provider ? { detail: provider } : {}),
 			icon: "brain",
@@ -707,31 +718,32 @@ export class ModelPickerComponent implements Component {
 		const status = this.#configError
 			? span(this.#configError, "error")
 			: this.#taskMode
-				? span(TASK_STATUS_HINT, "error")
-				: span(this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT, "muted");
+				? span(uiText(TASK_STATUS_HINT), "error")
+				: span(uiText(this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT), "muted");
 		const hints: (NativeHint | undefined)[] = [
-			actionHint(["tui.select.up", "tui.select.down"], mode === "role" ? "roles" : "models"),
+			actionHint(["tui.select.up", "tui.select.down"], uiText(mode === "role" ? "roles" : "models")),
 			{
 				keys: ["enter"],
-				label:
+				label: uiText(
 					mode === "role"
 						? "apply role model"
 						: mode === "task"
 							? "use for Task subagents"
 							: "use for this session",
+					),
 			},
-			{ keys: [], label: "type to search" },
+			{ keys: [], label: uiText("type to search") },
 		];
-		if (mode === "session") hints.push({ keys: ["@"], label: "quick roles" });
-		hints.push(actionHint("tui.select.cancel", "close"));
+		if (mode === "session") hints.push({ keys: ["@"], label: uiText("quick roles") });
+		hints.push(actionHint("tui.select.cancel", uiText("close")));
 		if (this.#taskModeKey !== undefined && !this.#roleMode) {
-			hints.push({ keys: [this.#taskModeKey], label: this.#taskMode ? "session model" : "task model" });
+			hints.push({ keys: [this.#taskModeKey], label: uiText(this.#taskMode ? "session model" : "task model") });
 		}
 		// `card` directly: the task-mode tone is a common prop `overlayCard` doesn't take.
 		const node = card(
 			{
 				role: "omp.overlay.model-picker",
-				head: this.#taskMode ? "Switch Task Model" : "Switch Model",
+				head: uiText(this.#taskMode ? "Switch Task Model" : "Switch Model"),
 				tone: this.#taskMode ? "error" : undefined,
 			},
 			[text([status], { wrap: "word" }), this.#browser, hintsRow(hints)],

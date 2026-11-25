@@ -10,8 +10,9 @@
  * Add a hint by appending to {@link COMPOSER_HINTS}, extending
  * {@link ComposerHintId}, and recording the gesture where it is handled.
  */
-import { formatDoubleTap, formatKeyHint, type KeybindingsManager } from "../app-keybindings";
+import { uiText } from "@oh-my-pi/pi-utils/ui-language";
 import { theme } from "../theme/theme";
+import { formatDoubleTap, formatKeyHint, type KeybindingsManager } from "../app-keybindings";
 
 /** Stable hint ids; persisted as usage-counter keys, so never rename one. */
 export type ComposerHintId = "agents" | "effort";
@@ -49,7 +50,11 @@ export const COMPOSER_HINTS: readonly ComposerHint[] = [
 			if (ctx.runningAgents === 0 || ctx.focusedOnAgent) return undefined;
 			return {
 				key: formatDoubleTap("left"),
-				label: `to see ${ctx.runningAgents} running ${ctx.runningAgents === 1 ? "agent" : "agents"}`,
+				label: uiText(
+					ctx.runningAgents === 1 ? "to see {{count}} running agent" : "to see {{count}} running agents",
+					{ count: ctx.runningAgents },
+					`agents-${ruPluralCategory(ctx.runningAgents)}`,
+				),
 			};
 		},
 	},
@@ -59,10 +64,26 @@ export const COMPOSER_HINTS: readonly ComposerHint[] = [
 		resolve: ctx => {
 			if (ctx.conversationStarted) return undefined;
 			const key = ctx.keybindings.getKeys("app.thinking.cycle")[0];
-			return key ? { key: formatKeyHint(key), label: "to change thinking effort" } : undefined;
+			return key ? { key: formatKeyHint(key), label: uiText("to change thinking effort") } : undefined;
 		},
 	},
 ];
+
+/** Russian plural category for a count, driving the `agents-…` catalog contexts. */
+function ruPluralCategory(count: number): "one" | "few" | "many" {
+	const mod100 = count % 100;
+	if (mod100 >= 11 && mod100 <= 14) return "many";
+	switch (count % 10) {
+		case 1:
+			return "one";
+		case 2:
+		case 3:
+		case 4:
+			return "few";
+		default:
+			return "many";
+	}
+}
 
 /** Render the highest-priority applicable, not-yet-learned hint, if any. */
 export function resolveComposerHint(ctx: ComposerHintContext): string | undefined {

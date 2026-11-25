@@ -7,6 +7,7 @@ import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { setUiLanguage } from "@oh-my-pi/pi-utils/ui-language";
 import { getAgentDir, getProjectDir, logger, normalizePathForComparison, sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
@@ -141,6 +142,7 @@ import {
 	cfgTreeFilterMode,
 } from "../settings";
 import { cfgTaskAgentModelOverrides } from "../../task/settings";
+import { cfgUiLanguage } from "../settings";
 
 /** First-use boundary for provider auth catalog and dialog components. */
 async function loadProviderAuthUi() {
@@ -340,6 +342,10 @@ export class SelectorController {
 					},
 					{
 						onChange: (id, value) => {
+							if (id === cfgUiLanguage?.id && (value === "ru" || value === "en")) {
+								setUiLanguage(value);
+								void this.ctx.refreshSlashCommandState().then(() => this.ctx.ui.requestRender());
+							}
 							this.handleSettingChange(id, value);
 							// A backend offered here is registered, so it gets the current list at once. An approved
 							// `cfg://` write can name one whose extension is still loading, like a config reload:

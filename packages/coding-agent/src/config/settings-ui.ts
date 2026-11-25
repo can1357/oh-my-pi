@@ -21,6 +21,8 @@ import { cfgTaskPerCallModelAllow } from "../task/settings";
 import { cfgToolsRestrictedFolders } from "../tools/settings";
 import { cfgAuthUnpausedProviders } from "./model-settings";
 
+import { IS_RUSSIAN_BUILD, uiText } from "@oh-my-pi/pi-utils/ui-language";
+
 /** Condition over the global settings; hidden (false) until they are initialized. */
 function whenSettings(test: (settings: Settings) => boolean): () => boolean {
 	return () => isSettingsInitialized() && test(Settings.instance);
@@ -51,8 +53,8 @@ const CONDITIONS: Record<string, () => boolean> = {
 function envNote(setting: AnySetting): string {
 	if (!setting.envName || setting.envValue() === undefined) return "";
 	return setting.envFallback
-		? ` Unset, it falls back to $${setting.envName}.`
-		: ` $${setting.envName} overrides this setting while it is set.`;
+		? uiText(" Unset, it falls back to ${{name}}.", { name: setting.envName })
+		: uiText(" ${{name}} overrides this setting while it is set.", { name: setting.envName });
 }
 
 /**
@@ -67,11 +69,28 @@ export function createSettingsHost(): SettingsHost {
 			const ui = setting.ui;
 			if (ui?.tab !== tab) continue;
 			const note = envNote(setting);
+			const displayUi = IS_RUSSIAN_BUILD
+				? {
+						...ui,
+						label: uiText(ui.label),
+						description: `${uiText(ui.description)}${note}`,
+						warning: ui.warning ? uiText(ui.warning) : undefined,
+						options: Array.isArray(ui.options)
+							? ui.options.map(option => ({
+									...option,
+									label: uiText(option.label, undefined, "settings"),
+									description: option.description ? uiText(option.description, undefined, "settings") : undefined,
+								}))
+							: ui.options,
+					}
+				: note
+					? { ...ui, description: `${ui.description}${note}` }
+					: ui;
 			entries.push({
 				path: setting.id,
 				type: setting.type,
 				defaultValue: setting.default,
-				ui: note ? { ...ui, description: `${ui.description}${note}` } : ui,
+				ui: displayUi,
 				enumValues: setting.enumValues,
 				credential: setting.isCredential,
 				condition: ui.condition ? CONDITIONS[ui.condition] : undefined,

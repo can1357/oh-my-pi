@@ -1,6 +1,8 @@
 import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
+import { getUiLanguage, setUiLanguage, uiText } from "@oh-my-pi/pi-utils/ui-language";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import { cfgUiLanguage } from "../modes/settings";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import { BUILTIN_COMMIT_SLASH_COMMANDS } from "./builtin-commit";
 import {
@@ -41,8 +43,42 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getAutocompleteDescription?: () => string | undefined;
 }
 
+const languageCommand: SlashCommandSpec = {
+	name: "language",
+	description: "Switch interface language",
+	allowArgs: true,
+	subcommandOptional: true,
+	subcommands: [
+		{ name: "ru", description: "Use the Russian interface" },
+		{ name: "en", description: "Use the English interface" },
+	],
+	handleTui: async (command, runtime) => {
+		if (!cfgUiLanguage) return;
+		clearSubmittedText(runtime);
+		const { ctx } = runtime;
+		const requested = command.args.trim().toLowerCase();
+		if (!requested) {
+			ctx.showStatus(uiText("Interface language: {{language}}", { language: getUiLanguage() }));
+			return;
+		}
+		if (requested !== "en" && requested !== "ru") {
+			ctx.showWarning(uiText("Use /language ru or /language en."));
+			return;
+		}
+		cfgUiLanguage.set(ctx.settings, requested);
+		await ctx.settings.flush();
+		const language = cfgUiLanguage.get(ctx.settings);
+		setUiLanguage(language);
+		await ctx.refreshSlashCommandState();
+		ctx.ui.invalidate();
+		ctx.ui.requestRender();
+		ctx.showStatus(uiText("Interface language: {{language}}", { language }));
+	},
+};
+
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_MODE_SLASH_COMMANDS,
+	...(cfgUiLanguage ? [languageCommand] : []),
 	...BUILTIN_COLLABORATION_SLASH_COMMANDS,
 	...BUILTIN_SESSION_SLASH_COMMANDS,
 	...BUILTIN_COMMIT_SLASH_COMMANDS,
@@ -84,9 +120,16 @@ function materializeTuiBuiltinSlashCommand(
 	cmd: BuiltinSlashCommand,
 	runtime?: TuiSlashCommandRuntime,
 ): TuiBuiltinSlashCommand {
-	const materialized: TuiBuiltinSlashCommand = { ...cmd };
-	if (cmd.subcommands) {
-		const subcommands = cmd.subcommands;
+	const subcommands = cmd.subcommands?.map(subcommand => ({
+		...subcommand,
+		description: uiText(subcommand.description),
+	}));
+	const materialized: TuiBuiltinSlashCommand = {
+		...cmd,
+		description: uiText(cmd.description),
+		subcommands,
+	};
+	if (subcommands) {
 		// `/mcp` and `/effort` narrow their declarative lists to live session
 		// state so the dropdown never offers a value the handler would reject.
 		if (runtime && cmd.name === "mcp") {
@@ -113,7 +156,10 @@ function materializeTuiBuiltinSlashCommand(
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
-		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);
+		materialized.getAutocompleteDescription = () => {
+			const description = cmd.getTuiAutocompleteDescription?.(runtime);
+			return description === undefined ? undefined : uiText(description);
+		};
 	}
 	return materialized;
 }
@@ -159,7 +205,7 @@ export async function executeBuiltinSlashCommand(
 	// Collab guests run a read-mostly replica: session-mutating builtins are
 	// host-only; the allowlist covers purely local/read-only commands.
 	if (runtime.ctx.collabGuest && !COLLAB_GUEST_ALLOWED_COMMANDS[command.name]) {
-		runtime.ctx.showStatus(`/${command.name} is host-only during a collab session`);
+		runtime.ctx.showStatus(uiText("/{{command}} is host-only during a collab session", { command: command.name }));
 		// A detached draft already left the editor: give it back, images included.
 		if (runtime.draftDetached) {
 			restoreDetachedDraft(runtime.ctx.editor, parsed.text, runtime.input?.images, runtime.input?.imageLinks);

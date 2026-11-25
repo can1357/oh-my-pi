@@ -1,3 +1,4 @@
+import { uiText } from "@oh-my-pi/pi-utils/ui-language";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatDoubleTap, formatKeyHint, formatKeyHints, type KeyName } from "../app-keybindings";
@@ -71,7 +72,7 @@ function renderNewTag(phase: number, encoding: ColorEncoding): string {
 	const bold = "\x1b[1m";
 	const reset = "\x1b[0m";
 	const wrapped = ((phase % 1) + 1) % 1;
-	const chars = [...NEW_TAG_TEXT];
+	const chars = [...uiText(NEW_TAG_TEXT)];
 	let out = bold;
 	let prev = "";
 	for (let i = 0; i < chars.length; i++) {
@@ -150,11 +151,14 @@ function tipSpans(tip: string): TspSpan[] {
  * `[]` when `width` leaves no room for a useful line.
  */
 export function renderWelcomeTip(tip: string, width: number, phase = 0): string[] {
-	const label = "Tip: ";
+	const label = uiText("Tip: ");
 	if (width - visibleWidth(label) < 8) return [];
 
 	const isNew = NEW_TIP_MARKER.test(tip);
-	const body = linkTipText(expandTipKeys(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip));
+	// Exact-key lookup on the marker-stripped English template, before key
+	// placeholders expand and links format; the catalog translation keeps
+	// markers, URLs and slash tokens verbatim.
+	const body = linkTipText(expandTipKeys(uiText(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip)));
 
 	// Trailing spaces left by the wrap would count toward the width the banner centers.
 	const wrapped = wrapTextWithAnsi(replaceTabs(`${label}${body}`), width).map(line => line.trimEnd());
@@ -177,7 +181,7 @@ export function renderWelcomeTip(tip: string, width: number, phase = 0): string[
 		// a line of its own so the styled glyphs never overflow the width.
 		const encoding: ColorEncoding = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
 		const tag = renderNewTag(phase, encoding);
-		const tagWidth = 1 + visibleWidth(NEW_TAG_TEXT); // 1 = space separator
+		const tagWidth = 1 + visibleWidth(uiText(NEW_TAG_TEXT)); // 1 = space separator
 		const lastLine = lines[lines.length - 1];
 		if (lastLine !== undefined && visibleWidth(lastLine) + tagWidth <= width) {
 			lines[lines.length - 1] = `${lastLine} ${tag}`;
@@ -231,7 +235,7 @@ export class WelcomeComponent implements Component {
 		this.#nagRoll ??= Math.random();
 		this.#tipRoll ??= Math.random();
 		if (theme.getSymbolPreset() === "unicode" && this.#nagRoll < 0.1) {
-			return "Please use nerdfont 😭.";
+			return uiText("Please use nerdfont 😭.");
 		}
 		return pickWeightedTip(isNativeRendering() ? TSP_TIPS : TIPS, this.#tipRoll) || undefined;
 	}
@@ -255,12 +259,12 @@ export class WelcomeComponent implements Component {
 		const body: NativeChild[] = [lockupNode(this.version, this.#versionUpdate)];
 		if (tip) {
 			const isNew = NEW_TIP_MARKER.test(tip);
-			const tipText = compactText(tipSpans(expandTipKeys(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip)));
+			const tipText = compactText(tipSpans(expandTipKeys(uiText(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip))));
 			const tipRow: NativeChild[] = [
 				node("icon", { name: "lightbulb", role: "omp.welcome.tip-icon" }),
 				text(tipText, { wrap: "word", role: "omp.welcome.tip-text" }),
 			];
-			if (isNew) tipRow.push(node("shimmer", { text: "New", role: "omp.welcome.new" }));
+			if (isNew) tipRow.push(node("shimmer", { text: uiText("New"), role: "omp.welcome.new" }));
 			body.push(node("row", { gap: "sm", align: "start", role: "omp.welcome.tip" }, tipRow, "tip"));
 		}
 		// No head row or chevron: the card is the hero; the version sits under the wordmark.
@@ -484,7 +488,7 @@ function versionUpdateLabels(update: VersionUpdate): string[] {
 	let compact = head;
 	if (update.phase === "updating") {
 		if (update.fraction === undefined) {
-			detail = theme.fg("muted", "updating…");
+			detail = theme.fg("muted", uiText("updating…"));
 		} else {
 			const percent = theme.fg("accent", updatePercent(update.fraction));
 			const bar = renderProgressBar(update.fraction, UPDATE_BAR_WIDTH, {
@@ -499,9 +503,9 @@ function versionUpdateLabels(update: VersionUpdate): string[] {
 			compact = `${head} ${percent}`;
 		}
 	} else if (update.phase === "ready") {
-		detail = theme.fg("success", `${theme.status.success} next launch`);
+		detail = theme.fg("success", `${theme.status.success} ${uiText("next launch")}`);
 	} else {
-		detail = theme.fg("warning", `${theme.status.warning} update failed`);
+		detail = theme.fg("warning", `${theme.status.warning} ${uiText("update failed")}`);
 	}
 	return [`${head} ${detail}`, compact];
 }
@@ -523,9 +527,9 @@ function appendVersionUpdate(lines: string[], update: VersionUpdate, termWidth: 
 function versionUpdateSpans(update: VersionUpdate): TspSpan[] {
 	const tone = updateTone(update);
 	const head = span(` → v${update.version}`, `${tone} mono`);
-	if (update.phase === "ready") return [head, span(" next launch", tone)];
-	if (update.phase === "failed") return [head, span(" update failed", tone)];
-	if (update.fraction === undefined) return [head, span(" updating…", "muted")];
+	if (update.phase === "ready") return [head, span(` ${uiText("next launch")}`, tone)];
+	if (update.phase === "failed") return [head, span(` ${uiText("update failed")}`, tone)];
+	if (update.fraction === undefined) return [head, span(` ${uiText("updating…")}`, "muted")];
 	return [head, span(` ${updatePercent(update.fraction)}`, `${tone} mono`)];
 }
 

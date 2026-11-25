@@ -6,10 +6,12 @@ import { getSelectListTheme, theme } from "../../theme/theme";
 import { col, span, text } from "../../native/describe";
 import type { NativeNode } from "../../native/node";
 import { Memo } from "../../native/memo";
+import { uiText } from "@oh-my-pi/pi-utils";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
-const INTRO =
+const INTRO_EN =
 	"Updates install through whatever installed omp: the standalone binary, Homebrew, mise, bun, or npm. Change this later in /settings.";
+const INTRO = uiText(INTRO_EN);
 
 const UPDATE_ITEMS: readonly SelectItem[] = [
 	{
@@ -23,10 +25,17 @@ const UPDATE_ITEMS: readonly SelectItem[] = [
 		description: "Show a notice on startup; run omp update yourself",
 	},
 ];
+const UPDATE_ITEM_VIEWS: readonly SelectItem[] = UPDATE_ITEMS.map(item => ({
+	value: item.value,
+	label: uiText(item.label),
+	description: item.description ? uiText(item.description) : undefined,
+}));
 
 class UpdatesSceneController implements SetupSceneController {
-	title = "Keep omp up to date";
-	subtitle = "Choose how new releases reach you.";
+	get title(): string {
+		return uiText("Keep omp up to date");
+	}
+	subtitle = uiText("Choose how new releases reach you.");
 	#selectList: SelectList;
 	#committing = false;
 	#step: WizardStep | undefined;
@@ -36,7 +45,7 @@ class UpdatesSceneController implements SetupSceneController {
 
 	constructor(host: SetupSceneHost) {
 		this.#host = host;
-		this.#selectList = new SelectList(UPDATE_ITEMS, UPDATE_ITEMS.length, getSelectListTheme());
+		this.#selectList = new SelectList(UPDATE_ITEM_VIEWS, UPDATE_ITEM_VIEWS.length, getSelectListTheme());
 		this.#selectList.setSelectedIndex(host.ctx.autoUpdate ? 0 : 1);
 		this.#selectList.onSelect = item => {
 			void this.#commit(item.value === "auto");
@@ -73,9 +82,9 @@ class UpdatesSceneController implements SetupSceneController {
 			kind: "choice",
 			intro: new Text(theme.fg("muted", INTRO), 0, 0),
 			content: this.#selectList,
-			minContentLines: UPDATE_ITEMS.length,
+			minContentLines: UPDATE_ITEM_VIEWS.length,
 			fitContent: () => {
-				this.#selectList.setMaxVisible(UPDATE_ITEMS.length);
+				this.#selectList.setMaxVisible(UPDATE_ITEM_VIEWS.length);
 			},
 		});
 		this.#step.setMaxHeight(maxLines);
@@ -114,3 +123,4 @@ export const updatesSetupScene: SetupScene = {
 	shouldRun: ctx => ctx.canAutoUpdate(),
 	mount: host => new UpdatesSceneController(host),
 };
+

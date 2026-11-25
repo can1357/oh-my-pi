@@ -1,6 +1,7 @@
 import type { CredentialsApi, KeysApi } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
+import { uiText } from "@oh-my-pi/pi-utils";
 import {
 	Container,
 	extractPrintableText,
@@ -60,7 +61,12 @@ const ORIGIN_LABELS = {
 	oauth: "login",
 	api_key: "api key",
 	env: "env",
-};
+} as const;
+
+/** Display label of a credential origin: its tag, or `env: VAR` for env sources. */
+function originLabel(origin: { kind: keyof typeof ORIGIN_LABELS; envVar?: string | undefined }): string {
+	return origin.kind === "env" && origin.envVar ? `env: ${origin.envVar}` : ORIGIN_LABELS[origin.kind];
+}
 /**
  * Component that renders an OAuth provider selector.
  */
@@ -108,7 +114,10 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			sheet?: OAuthSelectorSheet;
 		},
 	) {
-		super(mode === "login" ? "Select provider to login" : "Select provider to logout", "omp.overlay.oauth");
+		super(
+			mode === "login" ? uiText("Select provider to login") : uiText("Select provider to logout"),
+			"omp.overlay.oauth",
+		);
 		this.#mode = mode;
 		this.#authStorage = authStorage;
 		this.#onSelectCallback = onSelect;
@@ -272,7 +281,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	#getSourceLabel(providerId: string): string {
 		const origin = this.#authStorage.keys.source(providerId);
 		if (!origin) return "";
-		const detail = origin.kind === "env" && origin.envVar ? `env: ${origin.envVar}` : ORIGIN_LABELS[origin.kind];
+		const detail = originLabel(origin);
 		return theme.fg("muted", ` (${detail})`);
 	}
 
@@ -282,16 +291,16 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		if (state === "checking") {
 			const frameCount = theme.spinnerFrames.length;
 			const spinner = frameCount > 0 ? theme.spinnerFrames[this.#spinnerFrame % frameCount] : theme.status.pending;
-			return theme.fg("warning", ` ${spinner} checking`) + source;
+			return theme.fg("warning", ` ${spinner} ${uiText("checking")}`) + source;
 		}
 		if (state === "invalid") {
-			return theme.fg("error", ` ${theme.status.error} invalid`) + source;
+			return theme.fg("error", ` ${theme.status.error} ${uiText("invalid")}`) + source;
 		}
 		if (state === "valid") {
-			return theme.fg("success", ` ${theme.status.enabled} logged in`) + source;
+			return theme.fg("success", ` ${theme.status.enabled} ${uiText("logged in")}`) + source;
 		}
 		return this.#hasSelectableAuth(providerId)
-			? theme.fg("success", ` ${theme.status.enabled} logged in`) + source
+			? theme.fg("success", ` ${theme.status.enabled} ${uiText("logged in")}`) + source
 			: "";
 	}
 
@@ -305,9 +314,9 @@ export class OAuthSelectorComponent extends OverlayPanel {
 
 	#renderStatusLine(_total: number): string {
 		const query = this.#menu.query.trim();
-		if (!query) return theme.fg("muted", "Type to search");
+		if (!query) return theme.fg("muted", uiText("Type to search"));
 		const width = visibleWidth(this.#search.getValue()) + 1;
-		return theme.fg("muted", "Search: ") + (this.#search.render(width)[0] ?? "");
+		return theme.fg("muted", uiText("Search: ")) + (this.#search.render(width)[0] ?? "");
 	}
 
 	#getProviderSearchText(provider: OAuthProviderInfo): string {
@@ -380,9 +389,9 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			const message =
 				this.#menu.items.length === 0
 					? this.#mode === "login"
-						? "No OAuth providers available"
-						: "No stored provider credentials to log out"
-					: "No matching providers";
+						? uiText("No OAuth providers available")
+						: uiText("No stored provider credentials to log out")
+					: uiText("No matching providers");
 			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
 		}
 		if (this.#statusMessage) {
@@ -466,7 +475,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			this.stopValidation();
 			this.#onSelectCallback(selectedProvider.id);
 		} else if (selectedProvider) {
-			this.#statusMessage = "Provider unavailable in this environment.";
+			this.#statusMessage = uiText("Provider unavailable in this environment.");
 			this.#updateList();
 		}
 	}
@@ -476,17 +485,14 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		const origin = this.#authStorage.keys.source(providerId);
 		const detail = origin
 			? [
-					span(
-						origin.kind === "env" && origin.envVar ? `env: ${origin.envVar}` : ORIGIN_LABELS[origin.kind],
-						"muted",
-					),
+					span(originLabel(origin), "muted"),
 				]
 			: undefined;
 		const state = this.#authState.get(providerId);
-		if (state === "checking") return { value: [span("checking", "warning", { fx: "pulse" })], detail };
-		if (state === "invalid") return { value: [span("invalid", "error")], detail };
+		if (state === "checking") return { value: [span(uiText("checking"), "warning", { fx: "pulse" })], detail };
+		if (state === "invalid") return { value: [span(uiText("invalid"), "error")], detail };
 		if (state === "valid" || this.#hasSelectableAuth(providerId)) {
-			return { value: [span("logged in", "success")], detail };
+			return { value: [span(uiText("logged in"), "success")], detail };
 		}
 		return { detail };
 	}
@@ -503,16 +509,12 @@ export class OAuthSelectorComponent extends OverlayPanel {
 					: state === "valid" || this.#hasSelectableAuth(provider.id)
 						? "success"
 						: "muted";
-		const source = origin
-			? origin.kind === "env" && origin.envVar
-				? `env: ${origin.envVar}`
-				: ORIGIN_LABELS[origin.kind]
-			: undefined;
+		const source = origin ? originLabel(origin) : undefined;
 		const detail = !source
-			? "Not configured"
+			? uiText("Not configured")
 			: origin?.kind === "oauth"
-				? `Signed in · ${source}`
-				: `API key · ${source}`;
+				? uiText(`Signed in · {{source}}`, { source })
+				: uiText(`API key · {{source}}`, { source });
 		const initials = provider.name
 			.split(/[^\p{L}\p{N}]+/u)
 			.filter(word => word.length > 0)
@@ -525,7 +527,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			detail,
 			mark: { text: initials, seed: provider.id },
 			dot,
-			...(provider.available ? {} : { disabled: "Provider unavailable in this environment" }),
+			...(provider.available ? {} : { disabled: uiText("Provider unavailable in this environment") }),
 		};
 	}
 
@@ -542,26 +544,26 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			: CLOSE_ACTION;
 		this.#pickerRoot = dockedPicker({
 			...(sheet ? { role: sheet.role } : {}),
-			title: sheet?.title ?? (login ? "Sign in" : "Sign out"),
-			subtitle: sheet?.subtitle ?? (login ? "Pick a provider" : "Remove stored credentials"),
+			title: sheet?.title ?? (login ? uiText("Sign in") : uiText("Sign out")),
+			subtitle: sheet?.subtitle ?? (login ? uiText("Pick a provider") : uiText("Remove stored credentials")),
 			icon: "key-round",
 			noun: "providers",
 			size: sheet?.size ?? "md",
 			layout: "cards",
 			preview: "none",
 			...search,
-			placeholder: "Search providers…",
+			placeholder: uiText("Search providers…"),
 			items: this.#pickerItems,
 			...(query.length > 0 ? { order: this.#menu.visibleItems.map(provider => provider.id) } : {}),
 			selected: this.#menu.selectedKey ?? null,
 			total: all.length,
-			empty: login ? "No OAuth providers available" : "No stored provider credentials to log out",
+			empty: login ? uiText("No OAuth providers available") : uiText("No stored provider credentials to log out"),
 			...(this.#statusMessage ? { message: this.#statusMessage } : {}),
 			...(sheet?.status ? { strip: { label: sheet.status, items: [] } } : {}),
 			actions: [
 				pickerAction(
 					"confirm",
-					login ? "Sign in" : "Sign out",
+					login ? uiText("Sign in") : uiText("Sign out"),
 					"enter",
 					login ? { primary: true } : { primary: true, danger: true },
 				),
@@ -596,7 +598,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			children.push(
 				node(
 					"input",
-					{ text: this.#search.getValue(), cursor: this.#search.getCursor(), placeholder: "Type to search" },
+					{ text: this.#search.getValue(), cursor: this.#search.getCursor(), placeholder: uiText("Type to search") },
 					undefined,
 					"search",
 				),
@@ -605,9 +607,9 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		const empty =
 			this.#menu.items.length === 0
 				? this.#mode === "login"
-					? "No OAuth providers available"
-					: "No stored provider credentials to log out"
-				: "No matching providers";
+					? uiText("No OAuth providers available")
+					: uiText("No stored provider credentials to log out")
+				: uiText("No matching providers");
 		children.push(
 			node(
 				"list",
