@@ -192,7 +192,8 @@ describe("manage_skill execute", () => {
 		// An authored skill can also shadow a managed copy that already existed.
 		const hidden = path.join(getManagedSkillsDir(), "demo", "SKILL.md");
 		await Bun.write(hidden, "---\ndescription: Hidden copy.\n---\nManaged content.");
-		await expect(tool().execute("d", { action: "delete", name: "demo" })).rejects.toThrow(/visible skill/i);
+		const fixed = new ManageSkillTool(makeSession({}, { skills: [authored] }));
+		await expect(fixed.execute("d", { action: "delete", name: "demo" })).rejects.toThrow(/visible skill/i);
 		expect(await Bun.file(hidden).text()).toContain("Managed content.");
 	});
 
@@ -234,6 +235,29 @@ describe("manage_skill execute", () => {
 		// With no project copy left, an unscoped update reaches the global skill.
 		await t.execute("u2", { action: "update", name: "dup", description: "Global v2.", body: "# global2" });
 		expect(await Bun.file(globalFile).text()).toContain("# global2");
+	});
+
+	it("refuses unscoped edits to an ignored skill but lets a manual skill remain addressable", async () => {
+		const session = makeSession(
+			{ "skills.ignoredSkills": ["private-*"], "skills.manualSkills": ["manual-*"] },
+			{ cwd: tempHome, skillRediscoveryHost: () => ({ skills: [], refreshSkills: async () => [] }) },
+		);
+		const t = new ManageSkillTool(session);
+		for (const name of ["private-recipe", "manual-recipe"]) {
+			await t.execute("c", { action: "create", scope: "global", name, description: "Recipe.", body: "original" });
+		}
+		await expect(t.execute("d", { action: "delete", name: "private-recipe" })).rejects.toThrow(
+			/visible managed skill/i,
+		);
+		const ignoredFile = Bun.file(path.join(getManagedSkillsDir(), "private-recipe", "SKILL.md"));
+		expect(await ignoredFile.text()).toContain("original");
+		await t.execute("u", { action: "update", name: "manual-recipe", description: "Manual.", body: "updated" });
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "manual-recipe", "SKILL.md")).text()).toContain("updated");
+		// An embedder's fixed list is authoritative even when the on-disk skill matches default settings.
+		const fixed = new ManageSkillTool(makeSession({}, { cwd: tempHome, skills: [] }));
+		await expect(fixed.execute("d", { action: "delete", name: "manual-recipe" })).rejects.toThrow(
+			/visible managed skill/i,
+		);
 	});
 
 	it("does not let a later explicit global delete overtake an unscoped update", async () => {

@@ -54,7 +54,7 @@
 ## Side Effects
 
 - Filesystem: writes or deletes `<agent-dir>/managed-skills/<name>/SKILL.md` (global) or `<agent-dir>/project-managed-skills/<project-key>/<name>/SKILL.md` (project); the default agent directory is `~/.omp/agent`. `<project-key>` is a readable path tail plus a SHA-256 prefix of the canonical project root. Neither store is inside the repository.
-- Linked worktrees of a standard Git checkout share the primary checkout's store. Submodules and separate Git directories do not guarantee this. Outside a repository, the working directory identifies the project.
+- Registered linked worktrees of a standard Git checkout share the primary checkout's store. An unregistered checkout uses its own store. Submodules and separate Git directories do not guarantee sharing. Outside a repository, the working directory identifies the project.
 - Network: none.
 - Session state: reads `autolearn.enabled` during tool creation and refreshes the active skill list after a successful mutation when `refreshSkills` is available.
 - Background work: none.
@@ -84,3 +84,4 @@
 - A project-scoped managed skill wins over a same-named global one in its project; an authored skill wins over both.
 - Do not include YAML frontmatter in `body`; `writeManagedSkill(...)` generates normalized `name` and sanitized `description` frontmatter.
 - If an authored skill or a skill with a different directory name owns the visible name, unscoped edits fail. An explicit scope selects the managed copy directly.
+- Unscoped edits use the calling session's discovery rules. `ignoredSkills` excludes a skill from those edits; `manualSkills` only hides it from the prompt.

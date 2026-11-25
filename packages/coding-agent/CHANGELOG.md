@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added project-scoped managed skills to `manage_skill` and `learn` (partially addresses [#4067](https://github.com/can1357/oh-my-pi/issues/4067)). Standard Git worktrees share the primary checkout's store. Existing global skills keep their scope ([#16772](https://github.com/can1357/oh-my-pi/pull/16772) by [@enieuwy](https://github.com/enieuwy)).
+- Added project-scoped managed skills to `manage_skill` and `learn` (partially addresses [#4067](https://github.com/can1357/oh-my-pi/issues/4067)). Registered worktrees of a standard Git checkout share its store. Existing global skills keep their scope ([#16772](https://github.com/can1357/oh-my-pi/pull/16772) by [@enieuwy](https://github.com/enieuwy)).
 
 ## [19.2.0] - 2026-11-25
 

@@ -12,10 +12,9 @@
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getAgentDir, isEnoent, parseFrontmatter, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { encodeManagedSkillsProjectKey } from "./project-key";
+import { encodeManagedSkillsProjectKey, resolveManagedSkillsProjectRoot } from "./project-key";
 
 /** Provider id stamped on discovered managed skills (distinguishes them from authored). */
 export const MANAGED_SKILLS_PROVIDER_ID = "omp-managed";
@@ -31,7 +30,8 @@ export type ManagedSkillScope = "global" | "project";
 /** Omit scope to select the visible managed copy in cwd. Primitive calls without a location use global. */
 export type ManagedSkillLocation =
 	| { readonly scope: "global" }
-	| { readonly scope?: ManagedSkillScope; readonly cwd: string };
+	| { readonly scope: "project"; readonly cwd: string }
+	| { readonly scope?: undefined; readonly cwd: string; getVisibleFile(name: string): Promise<string> };
 
 const GLOBAL_MANAGED_SKILLS = { scope: "global" } as const;
 
@@ -57,19 +57,26 @@ async function resolveMutationStore(
 	name: string,
 	location: ManagedSkillLocation,
 ) {
-	if (location.scope !== "global" && (location.scope === "project" || action !== "create")) {
-		const root = getProjectManagedSkillsDir(location.cwd);
-		await assertProjectManagedRootSafe(root);
-		if (location.scope === "project" || (await readAddressableManagedSkill(root, name))) {
-			return { scope: "project", root } as const;
+	let scope: ManagedSkillScope = location.scope ?? "global";
+	let root = getManagedSkillsDir();
+	if (location.scope === "project" || (!location.scope && action !== "create")) {
+		const projectRoot = getProjectManagedSkillsDir(location.cwd);
+		await assertProjectManagedRootSafe(projectRoot);
+		if (location.scope === "project") return { scope: location.scope, root: projectRoot };
+		// Windows directories can be case-sensitive even though path.relative folds case.
+		const visible = path.resolve(await location.getVisibleFile(name));
+		if (visible === path.resolve(projectRoot, name, "SKILL.md")) {
+			scope = "project";
+			root = projectRoot;
+		} else if (visible !== path.resolve(root, name, "SKILL.md")) {
+			throw new Error(`The visible skill "${name}" is not in this session's managed store under that name.`);
+		}
+		if (!(await readAddressableManagedSkill(root, name))) {
+			throw new Error(`The visible managed skill "${name}" is no longer addressable in the ${scope} scope.`);
 		}
 	}
-	const root = getManagedSkillsDir();
-	await assertGlobalManagedRootSafe(root);
-	if (!location.scope && action !== "create" && !(await readAddressableManagedSkill(root, name))) {
-		throw new Error(`A visible managed skill "${name}" does not exist. Specify a scope to manage a hidden copy.`);
-	}
-	return { scope: "global", root } as const;
+	if (scope === "global") await assertGlobalManagedRootSafe(root);
+	return { scope, root };
 }
 
 /** Resolve the isolated global managed-skills directory (`~/.omp/agent/managed-skills`). */
@@ -80,15 +87,6 @@ export function getManagedSkillsDir(agentDir: string = getAgentDir()): string {
 /** Parent of every project store (`~/.omp/agent/project-managed-skills`). */
 export function getProjectManagedSkillsBaseDir(agentDir: string = getAgentDir()): string {
 	return path.join(agentDir, "project-managed-skills");
-}
-
-/**
- * Ordinary linked worktrees share the primary checkout. Submodules and separate
- * Git directories may have a different primary root. Outside VCS, use cwd.
- */
-export function resolveManagedSkillsProjectRoot(cwd: string): string {
-	const resolved = path.resolve(cwd);
-	return resolveEquivalentPath(vcs.repo(resolved)?.primaryRoot() ?? resolved);
 }
 
 /** Project store for `cwd` (`~/.omp/agent/project-managed-skills/<project-key>`). */
@@ -236,33 +234,47 @@ async function openManagedSkillFileForUpdate(name: string, file: string) {
 	}
 }
 
+interface ManagedSkillWriteResult {
+	path: string;
+	scope: ManagedSkillScope;
+}
+
 /** Create or update a managed skill and report the store that changed. */
+export function writeManagedSkill(
+	input: WriteManagedSkillInput,
+	location?: ManagedSkillLocation,
+): Promise<ManagedSkillWriteResult>;
+/** Reserve the name now. A queued predicate can wait for lesson storage or decline the write. */
+export function writeManagedSkill(
+	input: WriteManagedSkillInput,
+	location: ManagedSkillLocation,
+	shouldWrite: (name: string) => Promise<boolean>,
+): Promise<ManagedSkillWriteResult | null>;
 export async function writeManagedSkill(
 	input: WriteManagedSkillInput,
 	location: ManagedSkillLocation = GLOBAL_MANAGED_SKILLS,
-): Promise<{ path: string; scope: ManagedSkillScope }> {
+	shouldWrite?: (name: string) => Promise<boolean>,
+): Promise<ManagedSkillWriteResult | null> {
 	const name = sanitizeSkillName(input.name);
-	const description = sanitizeManagedDescription(input.description);
-	const body = input.body.trim();
-	// Reject empty content: an all-whitespace/control description sanitizes to ""
-	// and the `requireDescription` discovery scan then silently drops the skill,
-	// so the tool would report success for a skill that never appears.
-	if (!description) {
-		throw new Error(`Managed skill "${name}" needs a non-empty description.`);
-	}
-	if (!body) {
-		throw new Error(`Managed skill "${name}" needs a non-empty body.`);
-	}
-	const content = `${toSkillFrontmatter(name, description)}\n${body}\n`;
-	// Cap the UTF-8 byte size of the FINAL file (body + description + frontmatter),
-	// not the UTF-16 code-unit length of the body alone.
-	const bytes = Buffer.byteLength(content, "utf8");
-	if (bytes > MAX_MANAGED_SKILL_BYTES) {
-		throw new Error(
-			`Managed skill is ${bytes} bytes; the limit is ${MAX_MANAGED_SKILL_BYTES}. Trim the body or description.`,
-		);
-	}
 	return serializeSkillMutation(name, async () => {
+		if (shouldWrite && !(await shouldWrite(name))) return null;
+		const description = sanitizeManagedDescription(input.description);
+		const body = input.body.trim();
+		// Discovery drops skills without a description. Do not report a successful write.
+		if (!description) {
+			throw new Error(`Managed skill "${name}" needs a non-empty description.`);
+		}
+		if (!body) {
+			throw new Error(`Managed skill "${name}" needs a non-empty body.`);
+		}
+		const content = `${toSkillFrontmatter(name, description)}\n${body}\n`;
+		// Cap the UTF-8 byte size of the final file, not the UTF-16 length of the body.
+		const bytes = Buffer.byteLength(content, "utf8");
+		if (bytes > MAX_MANAGED_SKILL_BYTES) {
+			throw new Error(
+				`Managed skill is ${bytes} bytes; the limit is ${MAX_MANAGED_SKILL_BYTES}. Trim the body or description.`,
+			);
+		}
 		const { scope, root } = await resolveMutationStore(input.action, name, location);
 		const dir = path.join(root, name);
 		const file = path.join(dir, "SKILL.md");

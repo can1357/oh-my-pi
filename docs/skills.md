@@ -100,10 +100,10 @@ Current registered skill providers:
 7. `opencode` (priority 55)
 8. `github` (priority 30) — `.github/skills/<name>/SKILL.md` (GitHub Agent Skills layout, project-only)
 9. `omp-managed` (priority 5) — auto-learn skills, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill. Two stores:
-   - project (`omp-managed:project`): `~/.omp/agent/project-managed-skills/<project-key>/<name>/SKILL.md`. Linked worktrees of a standard Git checkout share the primary checkout's store. Sharing is not guaranteed for submodules or separate Git directories. Outside a repository, the working directory identifies the project. The key combines a readable path tail with a SHA-256 prefix of the canonical root.
+   - project (`omp-managed:project`): `~/.omp/agent/project-managed-skills/<project-key>/<name>/SKILL.md`. Registered linked worktrees of a standard Git checkout share the primary checkout's store. Unregistered directories use their own stores. Sharing is not guaranteed for submodules or separate Git directories. Outside a repository, the working directory identifies the project. The key combines a readable path tail with a SHA-256 prefix of the canonical root.
    - global (`omp-managed:user`): `~/.omp/agent/managed-skills/<name>/SKILL.md`, loaded in every session.
 
-Choose the store per call with `manage_skill.scope` or `learn`'s `skill.scope`. Without a scope, create uses global; update and delete target the visible managed copy, project before global. A linked skill cannot be changed. Only the global store root may link to an existing directory.
+Choose the store per call with `manage_skill.scope` or `learn`'s `skill.scope`. Without a scope, create uses global; update and delete target the managed copy visible to that session, project before global. A skill excluded by discovery requires an explicit scope. Manual skills remain addressable. A linked skill cannot be changed. Only the global store root may link to an existing directory.
 
 Capability dedup key is skill name; the first item with a given name wins in the deduped `items` view. `loadSkills()` resolves same-name collisions itself (see "Collision and duplicate handling").
 

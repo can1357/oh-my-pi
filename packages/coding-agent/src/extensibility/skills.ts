@@ -1,6 +1,5 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
-import * as path from "node:path";
 import {
 	getProjectDir,
 	isEnoent,
@@ -254,19 +253,6 @@ export function isNameClaimedByAuthoredSkill(name: string): boolean {
 	return getActiveSkills().some(
 		skill => skill.name === name && skill._source?.provider !== MANAGED_SKILLS_PROVIDER_ID,
 	);
-}
-
-/** Never let an unscoped edit reach behind an authored skill or an on-disk alias. */
-export function assertVisibleSkillIsAddressable(name: string): void {
-	const visible = getActiveSkills().find(skill => skill.name === name);
-	if (
-		visible &&
-		(visible._source?.provider !== MANAGED_SKILLS_PROVIDER_ID || path.basename(visible.baseDir) !== name)
-	) {
-		throw new Error(
-			`The visible skill "${name}" is not an addressable managed copy. Specify a managed scope to edit a hidden copy.`,
-		);
-	}
 }
 
 export interface LoadSkillsFromDirOptions {

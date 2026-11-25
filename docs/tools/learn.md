@@ -40,14 +40,14 @@
 ## Flow
 
 1. `LearnTool.createIf(...)` checks `autolearn.enabled`, the supported backend, and Hindsight configuration when that backend is selected.
-2. `execute(...)` stores the lesson before attempting any skill mutation:
+2. With a `skill` payload, `execute(...)` reserves the name before it waits for lesson storage. No skill write occurs until the lesson succeeds:
    - Mnemopi: for `scope: "global"`, first resolves `state.getGlobalRetainTarget()`, which throws under `per-project` scoping before anything is stored or any skill is written; then calls `rememberScoped(...)` (with that target for a global lesson) with `source: "coding-agent-learn"`, `importance: 0.8`, `scope: "bank"`, fact and entity extraction enabled, `veracity: "tool"`, `memoryType: "fact"`, and session/cwd/context metadata. A thrown storage error is reported as `Mnemopi did not store the lesson: <reason>`; the return value is not checked.
    - Local backend: calls `localBackend.save(...)`, which normalizes and writes a project-scoped `learned.md`; `stored === 0` is treated as failure.
    - Local backend: rejects `scope: "global"` with `Global memory scope is not available with the local memory backend.` before storing or writing a skill.
    - Hindsight: awaits `state.enqueueRetain(toolCallId, [{ content: memory, context, scope }])`, which writes the lesson to the same [durable outbox as retain](./retain.md) before the lesson is reported as queued. A global lesson is retained untagged; `enqueueRetain` throws before queueing or writing a skill while `hindsight.globalScope` is off (`Hindsight global scope is off; set hindsight.globalScope to true to enable it.`), under `per-project` scoping (`Hindsight global scope requires global or per-project-tagged scoping.`), or when the outbox is full or unwritable.
 3. If `skill` is absent, the tool returns after the memory write/queue.
 4. If `skill.action == "create"`, the tool checks the lowercased/validated name against active authored skills. A conflict returns an error result after the lesson has already been stored or queued.
-5. Otherwise, it calls `writeManagedSkill(...)`. Skill-write failure is rethrown as a partial outcome because lesson persistence already happened.
+5. It writes the skill in the reserved turn. A skill-write failure reports a partial outcome because the lesson already succeeded.
 6. After a skill write, `learn` calls the session's `refreshSkills` callback when available. A refresh error reports that both writes succeeded; it does not undo them.
 
 ## Modes / Variants

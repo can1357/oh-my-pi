@@ -3,9 +3,10 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { deleteManagedSkill, sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
-import { assertVisibleSkillIsAddressable, isNameClaimedByAuthoredSkill } from "../extensibility/skills";
+import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import manageSkillDescription from "../prompts/tools/manage-skill.md" with { type: "text" };
 import type { ToolSession } from ".";
+import { managedSkillToolLocation } from "./managed-skill-location";
 
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 
@@ -54,8 +55,7 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 	}
 
 	async execute(_id: string, params: ManageSkillParams): Promise<AgentToolResult> {
-		const location = { scope: params.scope, cwd: this.session.cwd };
-		if (!params.scope && params.action !== "create") assertVisibleSkillIsAddressable(sanitizeSkillName(params.name));
+		const location = managedSkillToolLocation(this.session, params.scope);
 		if (params.action === "delete") {
 			const scope = await deleteManagedSkill(params.name, location);
 			await this.session.refreshSkills?.();

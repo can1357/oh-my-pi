@@ -9,8 +9,10 @@ import {
 	writeManagedSkill,
 } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import "@oh-my-pi/pi-coding-agent/discovery";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { managedSkillToolLocation } from "@oh-my-pi/pi-coding-agent/tools/managed-skill-location";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { $ } from "bun";
@@ -30,6 +32,7 @@ async function writeSkill(dir: string, name: string, description: string): Promi
 describe("managed-skills discovery", () => {
 	let tempHome: string;
 	let tempCwd: string;
+	const sessionLocation = () => managedSkillToolLocation({ cwd: tempCwd, settings: Settings.isolated() });
 	let managedDir: string;
 	let authoredDir: string;
 	let originalClaudeConfigDir: string | undefined;
@@ -244,9 +247,24 @@ describe("managed-skills discovery", () => {
 		await fs.symlink(path.join(external, "shared"), path.join(project, "shared"), "dir");
 		const { skills } = await loadSkills({ cwd: tempCwd });
 		expect(skills.find(s => s.name === "shared")?.description).toBe("Linked project skill.");
-		await expect(deleteManagedSkill("shared", { cwd: tempCwd })).rejects.toThrow(/symlink/);
+		await expect(deleteManagedSkill("shared", sessionLocation())).rejects.toThrow(/symlink/);
 		expect(await Bun.file(path.join(managedDir, "shared", "SKILL.md")).text()).toContain("Global twin.");
 		expect(await Bun.file(path.join(external, "shared", "SKILL.md")).text()).toContain("Linked project skill.");
+	});
+
+	it("refuses to delete a visible skill with a differently cased directory name", async () => {
+		const visible = Bun.file(path.join(managedDir, "Demo", "SKILL.md"));
+		const canonical = Bun.file(path.join(managedDir, "demo", "SKILL.md"));
+		const alias = "---\nname: demo\ndescription: Visible alias.\n---\nKeep the alias.";
+		await Bun.write(visible, alias);
+		// On a case-sensitive volume, the lowercase directory holds a separate, hidden skill.
+		if (!(await canonical.exists())) await writeSkill(managedDir, "demo", "Hidden twin.");
+		const before = await canonical.text();
+		const { skills } = await loadSkills({ cwd: tempCwd });
+		expect(skills.find(s => s.name === "demo")?.description).toBe("Visible alias.");
+		await expect(deleteManagedSkill("demo", sessionLocation())).rejects.toThrow(/under that name/);
+		expect(await visible.text()).toBe(alias);
+		expect(await canonical.text()).toBe(before);
 	});
 
 	it("skips a linked project store and refuses to mutate either copy through it", async () => {
@@ -259,7 +277,7 @@ describe("managed-skills discovery", () => {
 		expect((await loadSkills({ cwd: tempCwd })).skills.find(s => s.name === "guard")?.description).toBe(
 			"Visible global.",
 		);
-		await expect(deleteManagedSkill("guard", { cwd: tempCwd })).rejects.toThrow(/root is a symlink/);
+		await expect(deleteManagedSkill("guard", sessionLocation())).rejects.toThrow(/root is a symlink/);
 		expect(await Bun.file(path.join(managedDir, "guard", "SKILL.md")).exists()).toBe(true);
 		expect(await Bun.file(path.join(external, "guard", "SKILL.md")).exists()).toBe(true);
 	});
@@ -274,7 +292,7 @@ describe("managed-skills discovery", () => {
 		);
 		const updated = await writeManagedSkill(
 			{ action: "update", name: "demo", description: "New.", body: "Updated global content." },
-			{ cwd: tempCwd },
+			sessionLocation(),
 		);
 		expect(await Bun.file(updated.path).text()).toContain("Updated global content.");
 		expect(await Bun.file(projectFile).text()).toBe(disabled);
