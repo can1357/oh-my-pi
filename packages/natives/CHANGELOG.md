@@ -21,6 +21,8 @@
 
 ### Changed
 
+- The OAuth callback wait polls for the callback every 200ms instead of watching the transaction directory
+- `tail -f` checks every followed file once per `--sleep-interval`, and at once when the file-system watcher reports a change, so a file moved to another directory, a symlink target or a file on a network drive no longer stalls; if the watcher fails, `tail` falls back to polling instead of exiting
 - A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
 - `ShellRunResult` now reports `movedCwd` (the command ended in another directory than it started in) and `errexit` (it ended with `set -e` on)
 

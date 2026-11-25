@@ -175,7 +175,6 @@ dns-lookup = "3.0.1"
 
 [target."cfg(unix)".dependencies]
 nix = { version = "0.31.3", features = ["fs", "poll", "process", "resource", "signal", "term", "user"] }
-notify = { version = "=8.2.0", features = ["macos_kqueue"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "system", "time"] }
 uucore = { version = "0.8.0", features = ["fsxattr", "safe-traversal"] }
 
@@ -191,7 +190,6 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 zbus = { version = "5.19", default-features = false, features = ["tokio"], optional = true }
 
 [target."cfg(windows)".dependencies]
-notify = "=8.2.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
 windows-sys = { version = "0.61", features = [
   "Wdk_System_SystemServices",
