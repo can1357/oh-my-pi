@@ -1,8 +1,9 @@
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { decodeBase64ImageData, isRecord, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
 import { fieldQuestions, type HtmlFormValue, type OptionNote } from "../../tools/html-form/data";
 import { type ChoiceField, type HtmlForm, spansText } from "../../tools/html-form/parse";
-import { MAX_IMAGE_INPUT_BYTES } from "../../utils/image-input";
+import { MAX_IMAGE_INPUT_BYTES, webpExclusionForModel } from "../../utils/image-input";
+import { loadImageAttachmentInput } from "../../utils/image-loading";
 
 /** Validate remote notes against the answered form and derive their labels as the local form does. */
 export function parseRpcFormNotes(
@@ -70,4 +71,29 @@ export function parseRpcFormNotes(
 			...(images.length ? { images } : {}),
 		};
 	});
+}
+
+/** Apply the same decode, minimum-size and encoder policy as other inbound image attachments. */
+export async function normalizeRpcFormNoteImages(notes: OptionNote[], model?: Model): Promise<OptionNote[]> {
+	const normalized: OptionNote[] = [];
+	for (const note of notes) {
+		if (!note.images?.length) {
+			normalized.push(note);
+			continue;
+		}
+		const images: ImageContent[] = [];
+		for (const image of note.images) {
+			const loaded = await loadImageAttachmentInput({
+				image,
+				label: "RPC form note",
+				uri: "rpc://form-note",
+				autoResize: true,
+				excludeWebP: webpExclusionForModel(model),
+			});
+			if (!loaded) throw new Error("Unsupported form note image");
+			images.push({ type: "image", data: loaded.data, mimeType: loaded.mimeType });
+		}
+		normalized.push({ ...note, images });
+	}
+	return normalized;
 }

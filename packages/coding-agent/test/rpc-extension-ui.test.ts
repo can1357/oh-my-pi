@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
+import { DEFAULT_MIN_DIMENSION } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
@@ -13,6 +15,8 @@ import {
 	requestRpcInput,
 	requestRpcSelect,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+
+const NOTE_IMAGE_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
 function requireRequest(frame: object | undefined): { id: string } {
 	if (!frame || !("id" in frame)) {
@@ -743,11 +747,12 @@ describe("RPC form dialog", () => {
 					question: "forged",
 					option: "forged",
 					text: "Reviewed [Image #1]",
-					images: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
+					images: [{ type: "image", data: NOTE_IMAGE_PNG, mimeType: "image/png" }],
 				},
 			],
 		});
-		expect(await result).toEqual({
+		const answer = await result;
+		expect(answer).toEqual({
 			data: { release: "r7", target: "prod", checks: [], replicas: "", owner: "" },
 			notes: [
 				{
@@ -756,12 +761,79 @@ describe("RPC form dialog", () => {
 					question: "Which target?",
 					option: "Production",
 					text: "Reviewed [Image #1]",
-					images: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
+					images: [
+						expect.objectContaining({
+							type: "image",
+							data: expect.any(String),
+							mimeType: expect.stringMatching(/^image\//),
+						}),
+					],
 				},
 			],
 		});
+		const dimensions = await new Bun.Image(Buffer.from(answer!.notes![0]!.images![0]!.data, "base64")).metadata();
+		expect(dimensions.width).toBeGreaterThanOrEqual(DEFAULT_MIN_DIMENSION);
+		expect(dimensions.height).toBeGreaterThanOrEqual(DEFAULT_MIN_DIMENSION);
 		expect(pending.size).toBe(0);
 	});
+	it.each([
+		["undecodable", "aGk=", "image/png"],
+		["mislabeled", NOTE_IMAGE_PNG, "image/jpeg"],
+	])("rejects %s note images before returning a tool result", async (_label, data, mimeType) => {
+		const pending = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const result = requestRpcFormDialog(pending, output, FRAME_LIMIT, DEPLOY_FORM, { acceptImages: true });
+		respond(pending, requireRequest(output.mock.calls[0]?.[0]).id, {
+			data: { target: "prod" },
+			notes: [{ name: "target", value: "prod", text: "Inspect", images: [{ type: "image", data, mimeType }] }],
+		});
+		await expect(result).rejects.toThrow("not a decodable");
+		expect(pending.size).toBe(0);
+	});
+
+	it("claims the host response before image work, so abort and old timeout cannot cancel it again", async () => {
+		const image: ImageContent = { type: "image", data: NOTE_IMAGE_PNG, mimeType: "image/png" };
+		const loaded = await imageLoading.loadImageAttachmentInput({
+			image,
+			label: "fixture",
+			uri: "rpc://fixture",
+			autoResize: true,
+		});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<imageLoading.LoadedImageInput | null>();
+		const normalize = vi.spyOn(imageLoading, "loadImageAttachmentInput").mockImplementation(() => {
+			entered.resolve();
+			return release.promise;
+		});
+		const pending = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const controller = new AbortController();
+		const onTimeout = vi.fn();
+		try {
+			const result = requestRpcFormDialog(pending, output, FRAME_LIMIT, DEPLOY_FORM, {
+				acceptImages: true,
+				signal: controller.signal,
+				timeout: 20,
+				onTimeout,
+			});
+			respond(pending, requireRequest(output.mock.calls[0]?.[0]).id, {
+				data: { target: "prod" },
+				notes: [{ name: "target", value: "prod", text: "Inspect", images: [image] }],
+			});
+			await entered.promise;
+			expect(pending.size).toBe(0);
+			controller.abort();
+			await Bun.sleep(35);
+			expect(onTimeout).not.toHaveBeenCalled();
+			expect(output).toHaveBeenCalledTimes(1);
+			release.resolve(loaded);
+			expect((await result)?.notes?.[0]?.text).toBe("Inspect");
+		} finally {
+			release.resolve(loaded);
+			normalize.mockRestore();
+		}
+	});
+
 	it("does not let an omitted choice acquire a note from its same-name hidden default", async () => {
 		const pending = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
@@ -795,13 +867,16 @@ describe("RPC form dialog", () => {
 			respond(pending, requireRequest(request).id, { data: { target: "prod" }, notes: [text] });
 			expect((await textResult)?.notes?.[0]).toMatchObject(text);
 			const imageResult = requestRpcFormDialog(pending, output, FRAME_LIMIT, DEPLOY_FORM, options);
-			const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
+			const image: ImageContent = { type: "image", data: NOTE_IMAGE_PNG, mimeType: "image/png" };
 			respond(pending, requireRequest(output.mock.calls[1]?.[0]).id, {
 				data: { target: "prod" },
 				notes: [{ ...text, images: [image] }],
 			});
-			if (acceptImages) expect((await imageResult)?.notes?.[0]?.images).toEqual([image]);
-			else await expect(imageResult).rejects.toThrow("does not accept note images");
+			if (acceptImages) {
+				const acceptedImage = (await imageResult)?.notes?.[0]?.images?.[0];
+				const metadata = await new Bun.Image(Buffer.from(acceptedImage!.data, "base64")).metadata();
+				expect(metadata.width).toBeGreaterThanOrEqual(DEFAULT_MIN_DIMENSION);
+			} else await expect(imageResult).rejects.toThrow("does not accept note images");
 		},
 	);
 
@@ -1302,11 +1377,17 @@ describe("RPC ask dialog", () => {
 			}),
 		);
 		expect(providerResults).toHaveLength(2);
-		expect(providerResults[1]).toEqual(
-			expect.arrayContaining([
-				image,
-				expect.objectContaining({ type: "text", text: expect.stringContaining(note.text) }),
-			]),
+		const providerContent = providerResults[1];
+		if (!Array.isArray(providerContent)) throw new Error("Provider must receive tool content blocks");
+		const providerImage: unknown = providerContent.find((part: unknown) => isRecord(part) && part.type === "image");
+		if (!isRecord(providerImage) || typeof providerImage.data !== "string")
+			throw new Error("Provider did not receive note image");
+		const imageMetadata = await new Bun.Image(Buffer.from(providerImage.data, "base64")).metadata();
+		expect(imageMetadata.width).toBeGreaterThanOrEqual(DEFAULT_MIN_DIMENSION);
+		expect(imageMetadata.height).toBeGreaterThanOrEqual(DEFAULT_MIN_DIMENSION);
+		expect(providerImage.data).not.toBe(image.data);
+		expect(providerContent).toContainEqual(
+			expect.objectContaining({ type: "text", text: expect.stringContaining(note.text) }),
 		);
 	}, 60_000);
 });
