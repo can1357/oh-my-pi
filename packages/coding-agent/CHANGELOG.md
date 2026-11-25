@@ -439,7 +439,6 @@
 ### Fixed
 
 - Resuming a goal whose token budget is already spent now keeps it budget-limited instead of reporting it active with 0 tokens remaining, and incomplete-todo reminders no longer ask the agent to keep working while the goal is budget-limited ([#20455](https://github.com/can1357/oh-my-pi/issues/20455))
-- Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
 - A classifier refusal now ends the turn and is handed back to the agent instead of re-sending the refused content to every fallback chain entry at full price; only the zero-cost retry Anthropic's fallback credit grants still switches, and `retry.fallbackRevertPolicy: cooldown-expiry` restores the primary after it ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
 - Provider content-filter stops (Bedrock `content_filtered`, Anthropic's content filtering policy, Gemini's blocked-by-content-filters wording) no longer retry or walk the fallback chain ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
 
