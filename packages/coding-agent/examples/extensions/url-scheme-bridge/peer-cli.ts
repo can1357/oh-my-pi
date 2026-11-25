@@ -4,24 +4,30 @@
  *
  *   bun examples/extensions/url-scheme-bridge/peer-cli.ts --namespace demo --peers leia,han
  *
- * 1. Writes the roster file the bridge reads (`--roster`, default /tmp/omp-peer-bridge/roster.json).
- * 2. Listens on the Unix socket named in that roster (`--socket`).
+ * 1. Makes a directory only this user can reach: a fresh 0700 one under the OS temp dir (removed on
+ *    `/quit`), or `--dir <path>`, which is created 0700 when missing and refused when it already
+ *    exists and is not a 0700 directory owned by this user. The bridge refuses any other location
+ *    for the roster or the socket: whoever can place either one steers the model.
+ * 2. Writes the roster file the bridge reads (`<dir>/roster.json`) and listens on the Unix socket it
+ *    names (`<dir>/bridge.sock`).
  * 3. Prints every message omp sends to a rostered peer, and acks it so the model's `write` succeeds.
  * 4. Reads stdin: `leia: hello` delivers "hello" into omp from `@demo/leia`; `leia?: question`
  *    additionally marks it as expecting an answer and prints omp's next message to leia as the
  *    reply. `/peers` lists the roster, `/quit` exits.
  *
- * Then, in another terminal:
+ * It prints the command for the other terminal:
  *
- *   OMP_PEER_BRIDGE_ROSTER=/tmp/omp-peer-bridge/roster.json omp -e "$PWD/examples/extensions/url-scheme-bridge/extension.ts"
+ *   OMP_PEER_BRIDGE_ROSTER=<dir>/roster.json omp -e "$PWD/examples/extensions/url-scheme-bridge/extension.ts"
  *
  * and inside omp: `read demo://` lists the peers; `write demo://leia` arrives here. A standalone CLI
  * (not a TUI), so console output is the intended interface.
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import {
+	assertPrivateDir,
 	type BridgeMessage,
 	LineDecoder,
 	LineWriter,
@@ -35,32 +41,48 @@ const { values } = parseArgs({
 	options: {
 		namespace: { type: "string", default: "demo" },
 		peers: { type: "string", default: "leia,han" },
-		socket: { type: "string", default: "/tmp/omp-peer-bridge/bridge.sock" },
-		roster: { type: "string", default: "/tmp/omp-peer-bridge/roster.json" },
+		dir: { type: "string" },
 	},
 });
-/** The roster from the command line; exits with a usage error when it is invalid. */
-function rosterFromArgs(): Roster {
+
+/** Print a usage error and exit 2. */
+function usageError(error: unknown): never {
+	console.error(`peer-cli: ${error instanceof Error ? error.message : String(error)}`);
+	process.exit(2);
+}
+
+/** The namespace and peers from the command line; exits with a usage error when they are invalid. */
+function rosterFromArgs(): Omit<Roster, "socket"> {
 	try {
-		const parsed = parseRoster({
+		// The socket path is only known once the directory exists; validate the rest first.
+		const { namespace, peers } = parseRoster({
 			namespace: values.namespace,
-			socket: values.socket,
+			socket: "-",
 			peers: values.peers
 				.split(",")
 				.map(peer => peer.trim())
 				.filter(peer => peer.length > 0),
 		});
-		if (parsed.peers.length === 0) throw new Error("--peers must name at least one peer");
-		return parsed;
+		if (peers.length === 0) throw new Error("--peers must name at least one peer");
+		return { namespace, peers };
 	} catch (error) {
-		console.error(`peer-cli: ${error instanceof Error ? error.message : String(error)}`);
-		process.exit(2);
+		usageError(error);
 	}
 }
-const roster = rosterFromArgs();
+const { namespace, peers } = rosterFromArgs();
 
-await fs.mkdir(path.dirname(roster.socket), { recursive: true });
-await Bun.write(values.roster, `${JSON.stringify(roster, null, 2)}\n`);
+const freshDir = values.dir === undefined;
+// Absolute, so the socket path in the roster means the same from omp's working directory.
+const dir = path.resolve(values.dir ?? (await fs.mkdtemp(path.join(os.tmpdir(), "omp-peer-bridge-"))));
+try {
+	if (!freshDir) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+	await assertPrivateDir(dir, "bridge");
+} catch (error) {
+	usageError(error);
+}
+const rosterPath = path.join(dir, "roster.json");
+const roster: Roster = { namespace, socket: path.join(dir, "bridge.sock"), peers };
+await Bun.write(rosterPath, `${JSON.stringify(roster, null, 2)}\n`);
 await fs.rm(roster.socket, { force: true });
 
 let bridge: Bun.Socket | undefined;
@@ -167,10 +189,10 @@ Bun.listen({
 	},
 });
 
-console.log(`roster written to ${values.roster}`);
+console.log(`roster written to ${rosterPath}`);
 console.log(`listening on ${roster.socket} as ${roster.namespace}://{${roster.peers.join(",")}}`);
 console.log("start omp with:");
-console.log(`  OMP_PEER_BRIDGE_ROSTER=${values.roster} omp -e ${path.join(import.meta.dir, "extension.ts")}`);
+console.log(`  OMP_PEER_BRIDGE_ROSTER=${rosterPath} omp -e ${path.join(import.meta.dir, "extension.ts")}`);
 console.log("type `<peer>: message` to send, `<peer>?: message` to send and await a reply, /peers, /quit");
 
 const INPUT_RE = /^([A-Za-z0-9._-]+)(\?)?:\s*(.*)$/;
@@ -203,5 +225,7 @@ for await (const rawLine of console) {
 }
 
 bridge?.end();
-await fs.rm(roster.socket, { force: true });
+// A fresh directory is ours to remove; a `--dir` keeps everything but the socket.
+if (freshDir) await fs.rm(dir, { recursive: true, force: true });
+else await fs.rm(roster.socket, { force: true });
 process.exit(0);

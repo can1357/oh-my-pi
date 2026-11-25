@@ -3,8 +3,12 @@
  * of remote agents): newline-delimited JSON over a Unix domain socket. The peer side listens; the
  * bridge connects. One connection per omp session.
  */
+import * as fs from "node:fs/promises";
 
-/** Written by the peer CLI before it listens; read by the bridge at `session_start`. */
+/**
+ * Written by the peer CLI before it listens; read by the bridge when it loads. The roster and the
+ * socket live in a directory only this user can reach (see {@link assertPrivateDir}).
+ */
 export interface Roster {
 	/**
 	 * Namespace of the mesh. It is also the URL scheme the bridge registers (`<namespace>://`), and
@@ -211,4 +215,23 @@ export function parseRoster(value: unknown): Roster {
 		throw new Error("roster.peers must be an array of names (letters, digits, '.', '_', '-')");
 	}
 	return { namespace, socket, peers };
+}
+
+/**
+ * Throws unless `dir` is a real directory (not a symlink) owned by this user that no other user can
+ * read, write or enter. The roster names the socket whose lines steer the model, and the bridge
+ * does not authenticate the peer, so only this user may place either file. `what` names the
+ * directory in the error.
+ */
+export async function assertPrivateDir(dir: string, what: string): Promise<void> {
+	const stat = await fs.lstat(dir);
+	if (stat.isSymbolicLink() || !stat.isDirectory()) {
+		throw new Error(`the ${what} directory ${dir} must be a directory, not a symlink or a file`);
+	}
+	if (stat.uid !== process.getuid?.()) throw new Error(`the ${what} directory ${dir} is not owned by this user`);
+	if ((stat.mode & 0o077) !== 0) {
+		throw new Error(
+			`the ${what} directory ${dir} is open to other users (mode ${(stat.mode & 0o777).toString(8)}); it must be 0700`,
+		);
+	}
 }

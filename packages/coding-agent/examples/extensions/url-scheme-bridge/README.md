@@ -60,32 +60,32 @@ lines.
 ## Demo: two terminals
 
 Everything below runs from `packages/coding-agent` in a checkout of this repo and stays isolated from
-other omp sessions: unique socket/roster paths, `--no-extensions` (the explicit `-e` still loads),
-`--no-session`, and a scratch `--cwd`. Your normal model auth is used as is.
-
-Setup, once:
-
-```bash
-cd packages/coding-agent
-mkdir -p /tmp/omp-peer-bridge/project
-```
+other omp sessions: a private socket/roster directory, `--no-extensions` (the explicit `-e` still
+loads), `--no-session`, and a scratch `--cwd`. Your normal model auth is used as is.
 
 Terminal A — the mesh (plays `leia` and `han`):
 
 ```bash
 cd packages/coding-agent
-bun examples/extensions/url-scheme-bridge/peer-cli.ts \
-  --namespace demo --peers leia,han \
-  --socket /tmp/omp-peer-bridge/bridge.sock --roster /tmp/omp-peer-bridge/roster.json
+bun examples/extensions/url-scheme-bridge/peer-cli.ts --namespace demo --peers leia,han
+# roster written to /tmp/omp-peer-bridge-XXXXXX/roster.json
 # prints the exact terminal-B command with an absolute -e path
 ```
 
-Terminal B — omp, from source or an installed binary (swap `bun src/cli.ts` for `omp`):
+The peer CLI makes a fresh 0700 directory under the OS temp dir for the roster and the socket, and
+removes it on `/quit`. `--dir <path>` uses a fixed directory instead: created 0700 when missing,
+refused when it exists and is not a 0700 directory owned by you. The bridge refuses a roster or
+socket anywhere else: the peer is not authenticated, so whoever can place either file steers the
+model.
+
+Terminal B — omp, from source or an installed binary (swap `bun src/cli.ts` for `omp`), with the
+roster path terminal A printed:
 
 ```bash
 cd packages/coding-agent
-OMP_PEER_BRIDGE_ROSTER=/tmp/omp-peer-bridge/roster.json \
-  bun src/cli.ts --no-extensions --no-session --cwd /tmp/omp-peer-bridge/project \
+mkdir -p /tmp/omp-peer-bridge-project
+OMP_PEER_BRIDGE_ROSTER=/tmp/omp-peer-bridge-XXXXXX/roster.json \
+  bun src/cli.ts --no-extensions --no-session --cwd /tmp/omp-peer-bridge-project \
   -e "$PWD/examples/extensions/url-scheme-bridge/extension.ts"
 ```
 
@@ -100,7 +100,8 @@ Terminal A prints `omp session "Main" connected`. Then:
 3. In terminal A: `leia: hi there` — omp receives `[@demo/leia] hi there`, which ends the `wait`.
 4. In terminal A: `leia?: what is 2+2` — sent as expecting an answer; terminal A prints omp's next
    message to leia as `(reply to peer-2) …`.
-5. `/peers` lists the roster; `/quit` exits terminal A. Cleanup: `rm -rf /tmp/omp-peer-bridge`.
+5. `/peers` lists the roster; `/quit` exits terminal A and removes its directory. Cleanup:
+   `rm -rf /tmp/omp-peer-bridge-project`.
 
 Headless works too (`-p`): the bridge connects on `session_start`, and a peer message steers the turn.
 
@@ -116,7 +117,9 @@ Newline-delimited JSON; the peer listens, the bridge connects (one connection pe
 | peer → bridge | `{type:"inbound", id, from, body, expectsReply}`       | `from` is a bare rostered name; injected as `[@<namespace>/<from>] …`.    |
 | bridge → peer | `{type:"receipt", id, receipt}`                        | Sent once that inbound message reaches omp's transcript (`delivered`), or `failed` for an unrostered sender; a message dropped before admission gets none. |
 
-Trust model: the socket is a user-owned local path and both ends are the same user's processes. Each
+Trust model: both ends are the same user's processes, and the roster and the socket sit in 0700
+directories owned by that user. The bridge checks both directories when it loads (not a symlink,
+owned by you, no group or other permissions) and fails the load otherwise. Each
 side still checks every line against the record shapes above (`parsePeerMessage`,
 `parseBridgeMessage`) and skips one that is not JSON or not a valid record, as it skips a malformed
 line. A bridge that crosses a trust boundary must also authenticate the peer.

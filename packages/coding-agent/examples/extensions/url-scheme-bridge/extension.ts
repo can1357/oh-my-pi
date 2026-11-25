@@ -24,12 +24,16 @@
  * to the mesh: every load registers the scheme (in the factory, so startup sees it), but only the
  * top-level session's load connects, and a subagent's writes, routed to its own load, are refused.
  *
- * Configuration: `OMP_PEER_BRIDGE_ROSTER=<path>` names the roster JSON written by the peer CLI.
+ * Configuration: `OMP_PEER_BRIDGE_ROSTER=<path>` names the roster JSON written by the peer CLI. The
+ * roster and the socket it names must each sit in a 0700 directory owned by this user (the peer CLI
+ * creates one): lines on the socket steer the model unauthenticated, so the load fails otherwise.
  *
- *   OMP_PEER_BRIDGE_ROSTER=/tmp/omp-peer-bridge/roster.json omp -e "$PWD/examples/extensions/url-scheme-bridge/extension.ts"
+ *   OMP_PEER_BRIDGE_ROSTER=<dir>/roster.json omp -e "$PWD/examples/extensions/url-scheme-bridge/extension.ts"
  */
+import * as path from "node:path";
 import type { ExtensionAPI, InternalUrl, ProtocolHandler, WriteContext } from "@oh-my-pi/pi-coding-agent";
 import {
+	assertPrivateDir,
 	type BridgeMessage,
 	LineDecoder,
 	LineWriter,
@@ -64,7 +68,11 @@ export default async function urlSchemeBridge(pi: ExtensionAPI): Promise<void> {
 	if (!rosterPath)
 		throw new Error("url-scheme-bridge: set OMP_PEER_BRIDGE_ROSTER to the roster file peer-cli.ts wrote");
 
+	// Only this user may have placed the roster or the socket: a peer is not authenticated, and its
+	// lines steer the model.
+	await assertPrivateDir(path.dirname(path.resolve(rosterPath)), "roster");
 	const roster: Roster = parseRoster(await Bun.file(rosterPath).json());
+	await assertPrivateDir(path.dirname(path.resolve(roster.socket)), "socket");
 	let agentId = "";
 	let socket: Bun.Socket | undefined;
 	/** Set by `session_start` in the top-level session: only that load connects. */

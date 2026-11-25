@@ -35,6 +35,7 @@ import {
 	type PeerMessage,
 	parseBridgeMessage,
 	parsePeerMessage,
+	parseRoster,
 	type Roster,
 } from "../../examples/extensions/url-scheme-bridge/protocol";
 
@@ -137,17 +138,74 @@ function startPeer(socketPath: string): TestPeer {
 	};
 }
 
-interface BridgeHarness {
+/** A session loading the bridge, which reads its roster from `OMP_PEER_BRIDGE_ROSTER`. */
+interface SessionHarness {
 	session: AgentSession;
 	runner: ExtensionRunner;
-	peer: TestPeer;
-	socketPath: string;
 	/** Start the extensions (`session_start` registers the scheme and connects). */
 	start: () => Promise<void>;
 	/** Whether a `wait` call blocks (for the peer's answer) rather than returning at once. */
 	waitBlocks: () => Promise<boolean>;
 	/** Deliver injected peer messages the way the session does: each reaches the transcript (`message_start`). Returns the spy. */
 	deliverInjected: () => Mock<AgentSession["sendCustomMessage"]>;
+}
+
+/** A bridge session talking to the in-process peer. */
+interface BridgeHarness extends SessionHarness {
+	peer: TestPeer;
+	socketPath: string;
+}
+
+const EXTENSION_PATH = path.join(import.meta.dir, "../../examples/extensions/url-scheme-bridge/extension.ts");
+const PEER_CLI = path.join(import.meta.dir, "../../examples/extensions/url-scheme-bridge/peer-cli.ts");
+
+/** The real `peer-cli.ts`, run as a child process: its stdin is the terminal, its stdout what a human sees. */
+interface PeerCli {
+	/** Resolves with the first match of `pattern` in the CLI's stdout (so far or still to come). */
+	output: (pattern: RegExp) => Promise<RegExpExecArray>;
+	/** Type one line into the CLI. */
+	type: (line: string) => void;
+	exited: Promise<number>;
+	stderr: () => Promise<string>;
+	kill: () => void;
+}
+
+function spawnPeerCli(args: string[]): PeerCli {
+	const child = Bun.spawn([process.execPath, PEER_CLI, ...args], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+	let text = "";
+	const waiters: Array<{ pattern: RegExp; resolve: (match: RegExpExecArray) => void }> = [];
+	const settle = (): void => {
+		// Backwards, so removing a settled waiter does not skip the next one.
+		for (let index = waiters.length - 1; index >= 0; index--) {
+			const waiter = waiters[index];
+			const match = waiter.pattern.exec(text);
+			if (!match) continue;
+			waiters.splice(index, 1);
+			waiter.resolve(match);
+		}
+	};
+	void (async () => {
+		const utf8 = new TextDecoder();
+		for await (const chunk of child.stdout as ReadableStream<Uint8Array>) {
+			text += utf8.decode(chunk, { stream: true });
+			settle();
+		}
+	})();
+	return {
+		output: pattern => {
+			const { promise, resolve } = Promise.withResolvers<RegExpExecArray>();
+			waiters.push({ pattern, resolve });
+			settle();
+			return promise;
+		},
+		type: line => {
+			child.stdin.write(`${line}\n`);
+			child.stdin.flush();
+		},
+		exited: child.exited,
+		stderr: () => new Response(child.stderr as ReadableStream<Uint8Array>).text(),
+		kill: () => child.kill(),
+	};
 }
 
 describe("examples/extensions/url-scheme-bridge", () => {
@@ -164,25 +222,17 @@ describe("examples/extensions/url-scheme-bridge", () => {
 	});
 
 	/** `subagent`: the session is a task's subagent (depth 1), whose load of the bridge stays inactive. */
-	async function bridgeSession({ subagent = false }: { subagent?: boolean } = {}): Promise<BridgeHarness> {
+	async function rosterSession(
+		rosterPath: string,
+		{ subagent = false }: { subagent?: boolean } = {},
+	): Promise<SessionHarness> {
 		const tempDir = TempDir.createSync(`@pi-url-scheme-bridge-${Snowflake.next()}-`);
 		tempDirs.push(tempDir);
 		const cwd = tempDir.join("project");
 		fs.mkdirSync(cwd, { recursive: true });
 		const agentDir = tempDir.join("agent");
 		fs.mkdirSync(agentDir, { recursive: true });
-		// Unix socket paths are length-capped (104 bytes on macOS); keep it in /tmp.
-		const socketPath = `/tmp/omp-usb-${Snowflake.next()}.sock`;
-		const roster: Roster = { namespace: "demo", socket: socketPath, peers: ["leia", "han"] };
-		const rosterPath = tempDir.join("roster.json");
-		fs.writeFileSync(rosterPath, JSON.stringify(roster));
 		Bun.env.OMP_PEER_BRIDGE_ROSTER = rosterPath;
-
-		const peer = startPeer(socketPath);
-		cleanups.push(() => {
-			peer.stop();
-			fs.rmSync(socketPath, { force: true });
-		});
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");
 		const { session } = await createAgentSession({
@@ -214,8 +264,6 @@ describe("examples/extensions/url-scheme-bridge", () => {
 		return {
 			session,
 			runner,
-			peer,
-			socketPath,
 			start: async () => {
 				await initializeExtensions(session, {
 					mode: "print",
@@ -251,6 +299,28 @@ describe("examples/extensions/url-scheme-bridge", () => {
 					return true;
 				}),
 		};
+	}
+
+	/**
+	 * A private directory for a roster and a socket, as the bridge requires. Under /tmp with a short
+	 * name: Unix socket paths are length-capped (104 bytes on macOS).
+	 */
+	function bridgeDir(): TempDir {
+		const dir = TempDir.createSync("/tmp/omp-usb-");
+		tempDirs.push(dir);
+		return dir;
+	}
+
+	/** A bridge session talking to the in-process peer, the roster and socket in a private directory. */
+	async function bridgeSession({ subagent = false }: { subagent?: boolean } = {}): Promise<BridgeHarness> {
+		const dir = bridgeDir();
+		const socketPath = dir.join("bridge.sock");
+		const roster: Roster = { namespace: "demo", socket: socketPath, peers: ["leia", "han"] };
+		const rosterPath = dir.join("roster.json");
+		fs.writeFileSync(rosterPath, JSON.stringify(roster));
+		const peer = startPeer(socketPath);
+		cleanups.push(() => peer.stop());
+		return { ...(await rosterSession(rosterPath, { subagent })), peer, socketPath };
 	}
 
 	/** Write to `url` and ack it with `outcome` from the peer; resolves with the write's outcome. */
@@ -483,7 +553,7 @@ describe("examples/extensions/url-scheme-bridge", () => {
 	it("registers its scheme in the factory, so startup never defers it past the first prompt", async () => {
 		const tempDir = TempDir.createSync(`@pi-url-scheme-bridge-${Snowflake.next()}-`);
 		tempDirs.push(tempDir);
-		const roster: Roster = { namespace: "demo", socket: `/tmp/omp-usb-${Snowflake.next()}.sock`, peers: ["leia"] };
+		const roster: Roster = { namespace: "demo", socket: tempDir.join("bridge.sock"), peers: ["leia"] };
 		const rosterPath = tempDir.join("roster.json");
 		fs.writeFileSync(rosterPath, JSON.stringify(roster));
 		Bun.env.OMP_PEER_BRIDGE_ROSTER = rosterPath;
@@ -511,6 +581,65 @@ describe("examples/extensions/url-scheme-bridge", () => {
 		expect(loaded.extensions).toEqual([]);
 		expect(loaded.errors[0]?.error).toContain("OMP_PEER_BRIDGE_ROSTER");
 	});
+
+	/** Load the bridge from its path with the roster at `rosterPath`; resolves with the load errors. */
+	async function loadErrors(rosterPath: string): Promise<string[]> {
+		Bun.env.OMP_PEER_BRIDGE_ROSTER = rosterPath;
+		const loaded = await loadExtensions([EXTENSION_PATH], path.dirname(rosterPath));
+		for (const extension of loaded.extensions) extension.registrations?.release();
+		return loaded.errors.map(error => error.error);
+	}
+
+	/** Write a roster into `dir` naming a socket in `socketDir`; returns the roster path. */
+	function writeRoster(dir: string, socketDir: string): string {
+		const rosterPath = path.join(dir, "roster.json");
+		const roster: Roster = { namespace: "demo", socket: path.join(socketDir, "bridge.sock"), peers: ["leia"] };
+		fs.writeFileSync(rosterPath, JSON.stringify(roster));
+		return rosterPath;
+	}
+
+	it("fails its load when the roster or socket directory is open to other users, or a symlink", async () => {
+		const open = bridgeDir();
+		fs.chmodSync(open.path(), 0o755);
+		expect(await loadErrors(writeRoster(open.path(), bridgeDir().path()))).toEqual([
+			expect.stringContaining(`roster directory ${open.path()} is open to other users`),
+		]);
+		// The roster's directory is private, but the socket it names sits in the shared /tmp.
+		expect(await loadErrors(writeRoster(bridgeDir().path(), "/tmp"))).toEqual([
+			expect.stringContaining("socket directory /tmp "),
+		]);
+		// A link to a private directory: whoever controls the link chooses what it points at.
+		const target = bridgeDir();
+		const link = `${target.path()}-link`;
+		fs.symlinkSync(target.path(), link);
+		cleanups.push(() => fs.rmSync(link, { force: true }));
+		expect(await loadErrors(writeRoster(link, target.path()))).toEqual([
+			expect.stringContaining(`roster directory ${link} must be a directory, not a symlink`),
+		]);
+	});
+
+	it("peer CLI refuses an existing --dir that other users can reach", async () => {
+		const open = bridgeDir();
+		fs.chmodSync(open.path(), 0o755);
+		const cli = spawnPeerCli(["--dir", open.path()]);
+		cleanups.push(() => cli.kill());
+		expect(await cli.exited).toBe(2);
+		expect(await cli.stderr()).toContain(`${open.path()} is open to other users`);
+		expect(fs.readdirSync(open.path())).toEqual([]);
+	}, 20_000);
+
+	it("peer CLI keeps its roster and socket in a fresh 0700 directory and removes it on /quit", async () => {
+		const cli = spawnPeerCli([]);
+		cleanups.push(() => cli.kill());
+		const [, rosterPath] = await cli.output(/roster written to (\S+)\n/);
+		const dir = path.dirname(rosterPath);
+		expect(fs.lstatSync(dir).mode & 0o777).toBe(0o700);
+		expect(parseRoster(JSON.parse(fs.readFileSync(rosterPath, "utf8"))).socket).toBe(path.join(dir, "bridge.sock"));
+		await cli.output(/listening on /);
+		cli.type("/quit");
+		expect(await cli.exited).toBe(0);
+		expect(fs.existsSync(dir)).toBe(false);
+	}, 20_000);
 
 	it("drops a connection that opens after the session shut down", async () => {
 		const harness = await bridgeSession();
