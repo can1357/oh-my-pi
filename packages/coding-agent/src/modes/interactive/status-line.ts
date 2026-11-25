@@ -21,12 +21,14 @@
  */
 import * as os from "node:os";
 import * as path from "node:path";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
 import { getNextTimeBasedPricingTransition, getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
+import { formatModelStringWithRouting } from "../../config/model-resolver";
+import { MAX_THINKING_SUFFIX_OPTIONS, parseThinkingSuffix } from "../../config/model-selector";
 import type { AgentViewSession } from "../../session/agent-session-handle";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
@@ -76,6 +78,23 @@ interface StatusSessionExtras {
 }
 
 type StatusSession = AgentViewSession & StatusSessionExtras;
+
+/**
+ * Whether a retry fallback serves as the displayed model. Attribution moves only
+ * once a model settles a turn, so after `/model` or a primary restore it still
+ * names the fallback while `model` is already the newly selected one. The
+ * selector is the routed id plus an optional thinking suffix; the suffix is
+ * stripped only after the id matches, since ids can end in a level word
+ * (`ollama/phi3:medium`).
+ */
+function displaysServingFallback(session: AgentViewSession, model: Model | undefined): boolean {
+	const serving = session.servingModel;
+	if (!serving?.isFallback || !model) return false;
+	const identity = formatModelStringWithRouting(model);
+	if (serving.selector === identity) return true;
+	if (!serving.selector.startsWith(`${identity}:`)) return false;
+	return parseThinkingSuffix(serving.selector.slice(identity.length + 1), MAX_THINKING_SUFFIX_OPTIONS) !== undefined;
+}
 
 type SessionFacts = Omit<
 	StatusFacts,
@@ -616,6 +635,7 @@ export class SessionStatusLine implements StatusLineModel {
 				? { autoResolvedLevel: session.autoResolvedThinkingLevel() }
 				: {}),
 			...(session.isFastModeActive() ? { fastMode: true } : {}),
+			...(displaysServingFallback(session, model) ? { servingFallback: true } : {}),
 			...(advisorStatuses.length > 0
 				? {
 						advisor: {

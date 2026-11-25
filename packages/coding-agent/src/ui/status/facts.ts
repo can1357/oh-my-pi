@@ -85,6 +85,8 @@ export interface StatusFacts {
 	/** The level auto thinking resolved for the turn, once classified. */
 	readonly autoResolvedLevel?: string;
 	readonly fastMode?: boolean;
+	/** A retry fallback, not the configured model, serves the session as the displayed model. */
+	readonly servingFallback?: boolean;
 	/** Anthropic usage-limit stage label (wrap-up allowance, low priority). */
 	readonly slowModeLabel?: string;
 	readonly advisor?: StatusAdvisor;

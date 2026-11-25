@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a warning-colored `fallback` marker to the status line `model` segment while a retry fallback serves the session ([#20260](https://github.com/can1357/oh-my-pi/pull/20260) by [@Xytronix](https://github.com/Xytronix))
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
