@@ -3531,6 +3531,8 @@ describe("ExtensionRunner", () => {
 				afterHandler?: () => void;
 				/** The requested handler awaits this before returning, like a remote round-trip. */
 				hold?: Promise<void>;
+				/** Runs first in the requested handler, with the event it received. */
+				mutate?: (event: { prompt: { full: string; session?: string; grants?: unknown[] } }) => void;
 				/** When set, the handler answers the moment the call's signal aborts, and stores the result. */
 				answerOnAbort?: boolean;
 				abortResult?: boolean;
@@ -3548,6 +3550,7 @@ describe("ExtensionRunner", () => {
 					`export default function(pi) {
 						pi.on("tool_approval_requested", async (event, ctx) => {
 							const seen = globalThis.__extApproval;
+							seen.mutate?.(event);
 							seen.requested.push(event);
 							seen.ctx = ctx;
 							if (seen.inHandler !== undefined) seen.inHandlerResult = ctx.resolveToolApproval(event.toolCallId, seen.inHandler);
@@ -3724,6 +3727,32 @@ describe("ExtensionRunner", () => {
 				expect(select).not.toHaveBeenCalled();
 				expect(executed).toHaveBeenCalledTimes(1);
 				expect(notify).toHaveBeenCalledWith("Approval for dangerous_tool answered by extension", "info");
+			});
+
+			it("a handler changing the event's prompt changes neither the dialog nor the answers it accepts", async () => {
+				const select = vi.fn(async (_title: string, options: string[]) => options[1]);
+				const { seen, executed, run } = await setup({ select });
+				seen.mutate = event => {
+					event.prompt.full = "redacted";
+					delete event.prompt.session;
+				};
+				await run("call-mutated-dialog");
+				expect(select).toHaveBeenCalledWith(
+					expect.stringContaining("Allow tool: dangerous_tool"),
+					["Approve", "Approve dangerous_tool for this session", "Deny"],
+					expect.anything(),
+				);
+				expect(executed).toHaveBeenCalledTimes(1);
+
+				// The session answer is still the host's to accept, however the event was edited.
+				const second = await setup({ select: async () => "Deny" });
+				second.seen.mutate = event => {
+					delete event.prompt.session;
+				};
+				second.seen.inHandler = "session";
+				await second.run("call-mutated-answer");
+				expect(second.seen.inHandlerResult).toBe(true);
+				expect(second.executed).toHaveBeenCalledTimes(1);
 			});
 
 			it("a call aborted while its prompt is built requests nothing", async () => {

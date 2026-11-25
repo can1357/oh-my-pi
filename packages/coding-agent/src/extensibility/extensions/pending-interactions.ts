@@ -89,11 +89,13 @@ export class PendingInteractions {
 	readonly #asks = new PromptTable<AskRequestedEvent, ExtensionAskAnswer>();
 
 	openApproval(event: ToolApprovalRequestedEvent, signal?: AbortSignal): PendingPrompt<ExtensionApprovalAnswer> {
-		const { signal: _signal, ...listed } = event;
+		// A private copy: the emitted event may be edited by handlers, and answers are checked against this one.
+		const { signal: _signal, ...rest } = event;
+		const listed = structuredClone(rest);
 		return this.#approvals.open(
 			event.toolCallId,
 			listed,
-			answer => acceptedApprovalAnswer(event.prompt, answer),
+			answer => acceptedApprovalAnswer(listed.prompt, answer),
 			signal,
 		);
 	}
@@ -112,10 +114,10 @@ export class PendingInteractions {
 		accept: (data: ExtensionAskData) => ExtensionAskData | undefined,
 		signal?: AbortSignal,
 	): PendingPrompt<ExtensionAskAnswer> {
-		const { signal: _signal, ...listed } = event;
+		const { signal: _signal, ...rest } = event;
 		return this.#asks.open(
 			event.askId,
-			listed,
+			structuredClone(rest),
 			answer => {
 				if (answer === "cancel") return answer;
 				if (

@@ -496,7 +496,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				toolCallId,
 				...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
 				approvalMode,
-				prompt: approvalPrompt,
+				// Handlers get their own copy: editing it (to redact, say) must not change what the host shows or accepts.
+				prompt: structuredClone(approvalPrompt),
 				safetyChecks: pendingSafetyChecks.length > 0,
 				answerable,
 				...(signal ? { signal } : {}),
