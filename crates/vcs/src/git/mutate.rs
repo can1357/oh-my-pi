@@ -289,7 +289,7 @@ impl GitRepo {
 			.then(|| write_index_tree(&repo, &index))
 			.transpose()?;
 		if !options.no_verify {
-			run_commit_hook(self, "pre-commit", &[], index_path)?;
+			run_commit_hook(self, "pre-commit", &[], options)?;
 			// The hook may have edited the index.
 			index = load_index()?;
 			reject_unmerged_index(&index, "git commit")?;
@@ -382,7 +382,7 @@ impl GitRepo {
 		// message, as under `git commit`; only the private copy is read back.
 		let _ = fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message);
 		if !options.no_verify {
-			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
+			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], options)?;
 		}
 		let message = fs::read_to_string(&message_file.path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
@@ -452,7 +452,7 @@ impl GitRepo {
 		} else {
 			Vec::new()
 		};
-		let _ = run_commit_hook(self, "post-commit", &[], index_path);
+		let _ = run_commit_hook(self, "post-commit", &[], options);
 		Ok((id.to_hex().to_string(), notes))
 	}
 
@@ -1256,7 +1256,7 @@ fn run_commit_hook(
 	repository: &GitRepo,
 	name: &str,
 	args: &[&OsStr],
-	index_path: Option<&Path>,
+	options: &CommitOptions,
 ) -> Result<()> {
 	let configured = hook_configured(repository, name)?;
 	let mut command = match repository.hook_path(name)? {
@@ -1280,8 +1280,14 @@ fn run_commit_hook(
 		stderr:    err.to_string(),
 	};
 	super::cli::detach_from_terminal(&mut command);
-	if let Some(index_path) = index_path {
+	if let Some(index_path) = &options.index_path {
 		command.env("GIT_INDEX_FILE", index_path);
+	}
+	if let Some(session) = &options.hook_session {
+		command
+			.env("PI_SESSION_ID", &session.session_id)
+			.env("PI_SESSION_FILE", &session.session_file)
+			.env("PI_TOOL_CALL_ID", &session.tool_call_id);
 	}
 	let (mut reader, writer) = io::pipe().map_err(io_failed)?;
 	let stderr = writer.try_clone().map_err(io_failed)?;

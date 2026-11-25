@@ -667,6 +667,10 @@ Values are read when each tool call starts, so the next call follows `/fork`, `/
 echo "$PI_SESSION_ID"
 ```
 
+### Selective commit hooks
+
+Git hooks run by the `eval` `commit` helper receive the same three variables. `PI_TOOL_CALL_ID` is the tool bridge's generated ID for the `commit` call, not the ID of the enclosing `eval` call.
+
 ---
 
 ## 8) UI/theme/session detection (auto-detected env)

@@ -269,6 +269,16 @@ pub struct CommitOptions {
 	pub expected_head: Option<String>,
 	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
 	pub no_verify:     bool,
+	/// Session identity exported only to the commit hooks.
+	pub hook_session:  Option<CommitHookSession>,
+}
+
+/// OMP metadata passed to commit hooks without changing the host environment.
+#[derive(Debug, Clone)]
+pub struct CommitHookSession {
+	pub session_id:   String,
+	pub session_file: String,
+	pub tool_call_id: String,
 }
 
 /// Which hunks of a file a selection covers.

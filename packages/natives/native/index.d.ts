@@ -5063,6 +5063,13 @@ export interface VcsCommitDetails {
   message: string
 }
 
+/** The session environment shared with shell tool calls. */
+export interface VcsCommitHookSession {
+  PI_SESSION_ID: string
+  PI_SESSION_FILE: string
+  PI_TOOL_CALL_ID: string
+}
+
 /** Commit creation options. */
 export interface VcsCommitOptions {
   author?: VcsCommitAuthor
@@ -5075,6 +5082,8 @@ export interface VcsCommitOptions {
   expectedHead?: string
   /** Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`). */
   noVerify?: boolean
+  /** Session identity exported only to the commit hooks. */
+  hookSession?: VcsCommitHookSession
 }
 
 /** Detach copied Git metadata. */

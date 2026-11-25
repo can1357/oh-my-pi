@@ -10,6 +10,7 @@
 - Fixed standalone binaries failing to start when the natives directory is read-only (or owned by another user) even though it already holds this build's extracted addon ([#20266](https://github.com/can1357/oh-my-pi/issues/20266))
 ### Added
 
+- Commit creation accepts `hookSession` to set the three OMP session variables for Git hooks without allowing arbitrary environment overrides ([#20364](https://github.com/can1357/oh-my-pi/issues/20364), [#20367](https://github.com/can1357/oh-my-pi/pull/20367) by [@Eridanus117](https://github.com/Eridanus117)).
 - Added `truncateToTokens(input, maxTokens)`: the UTF-16 length of the longest prefix of `input` within `maxTokens` `Jev` tokens, never ending on half a surrogate pair; pieces after the one that crosses the budget are not merged ([#20384](https://github.com/can1357/oh-my-pi/pull/20384) by [@iliaal](https://github.com/iliaal))
 - Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
 - Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
