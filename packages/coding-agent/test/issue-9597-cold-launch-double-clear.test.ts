@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import {
@@ -6,7 +6,6 @@ import {
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { StartupPreferences } from "../src/modes/interactive/startup-cache";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal } from "./helpers/mode-terminal";
@@ -91,7 +90,6 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 			lease!.frame,
 		);
 		lease!.adopt();
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 		try {
 			await mode.init({ suppressWelcomeIntro: resuming, clearInitialTerminalHistory: true });
 			await mode.renderInitialMessages({ preserveExistingChat: true });

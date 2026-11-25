@@ -268,6 +268,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 			}) as unknown as StatusFacts,
 		settings: () => ({}) as StatusLineSettings,
 		refresh: vi.fn(),
+		refreshVcs: vi.fn(),
 		resetActiveTime: vi.fn(),
 		markActivityStart: vi.fn(),
 		markActivityEnd: vi.fn(),

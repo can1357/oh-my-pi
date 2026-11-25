@@ -1,0 +1,43 @@
+# Perl corpus: operators. Format and regeneration: crates/builtins/src/perl/tests.rs.
+assign-chain	my ($a,$b); $a=$b=9; print "$a|$b\n";	9|9␊
+bit-numeric	print join("|", 13 & 7, 13 | 7, 13 ^ 7), "\n";	5|15|10␊
+bit-string	print join("|", map { unpack('H*',$_) } ('abc' & 'xyz', 'abc' | 'x', 'abc' ^ 'xy')), "\n";	606062|796263|191b63␊
+comma-scalar	my $x=(10,20,30); print "$x\n";	30␊
+concat-assign	my $x='a'; $x.='b'; print "$x\n";	ab␊
+defined-value	print join("|", undef // 8, 0 // 8, "" // 8), "\n";	8|0|␊
+division-float	print join("|", 9/4), "\n";	2.25␊
+fat-comma	print join('|', red=>dog=>3),"\n";	red|dog|3␊
+list-repetition	print join("|", ('a','b') x 3), "\n";	a|b|a|b|a|b␊
+logic-assign	my $x=0; $x//=10; print "$x|"; $x||=20; $x&&=30; print "$x\n";	0|30␊
+logical-value	print join("|", 0 || 7, 4 && 7, 0 && 7, 4 || 7), "\n";	7|7|0|4␊
+math-assign	my $x=7; $x+=4; $x*=2; $x-=3; print "$x\n";	19␊
+mod-both-negative	print join("|", -17%-5), "\n";	-2␊
+mod-fraction	print join("|", 17.5%5.2), "\n";	2␊
+mod-negative-dividend	print join("|", -17%5), "\n";	3␊
+mod-negative-divisor	print join("|", 17%-5), "\n";	-3␊
+mod-positive	print join("|", 17%5), "\n";	2␊
+mult-before-add	print join("|", 2 + 3 * 4), "\n";	14␊
+negative-power	print join("|", (-2) ** 4), "\n";	16␊
+num-eq	print join("|", 10 == "10.0" ? 'equal' : 'unequal'), "\n";	equal␊
+numeric-comparison	print join("|", 10 <=> 2, 2 <=> 10, 10 <=> 10), "\n";	1|-1|0␊
+paren-before-mult	print join("|", (2 + 3) * 4), "\n";	20␊
+postincrement	my $x=8; my $y=$x++; print "$x|$y\n";	9|8␊
+power-before-neg	print join("|", -2 ** 4), "\n";	-16␊
+preincrement	my $x=8; my $y=++$x; print "$x|$y\n";	9|9␊
+range-alpha	print join("|", 'ax'..'bb'), "\n";	ax|ay|az|ba|bb␊
+range-empty	print join("|", 4..2), "\n";	␊
+range-numeric	print join("|", 2..5), "\n";	2|3|4|5␊
+range-pad	print join("|", '08'..'12'), "\n";	08|09|10|11|12␊
+right-assoc-power	print join("|", 2 ** 3 ** 2), "\n";	512␊
+shift-left	print join("|", 3 << 4), "\n";	48␊
+shift-negative	print join("|", 16 << -2), "\n";	4␊
+shift-right	print join("|", 48 >> 4), "\n";	3␊
+short-circuit	my $x=0; 0 && ++$x; 1 || ++$x; 1 && ++$x; print "$x\n";	1␊
+string-compare	print join("|", "10" cmp "2", "z" cmp "a", "x" cmp "x"), "\n";	-1|1|0␊
+string-eq	print join("|", 10 eq "10.0" ? 'equal' : 'unequal'), "\n";	unequal␊
+string-increment	my $x='Az'; print ++$x,'|'; $x='zz'; print ++$x,'|'; $x='a9'; print ++$x,"\n";	Ba|aaa|b0␊
+string-neg	print join("|", -"abc", -"-abc"), "\n";	-abc|+abc␊
+ternary-nesting	print join("|", (0 ? 'a' : 1 ? 'b' : 'c')), "\n";	b␊
+word-and	my $x=4 and $x+=2; print "$x\n";	4␊
+word-or	my $x=0 or $x=7; print "$x\n";	0␊
+xor	print ((1 xor 0) ? 1 : 0),"\n";	1

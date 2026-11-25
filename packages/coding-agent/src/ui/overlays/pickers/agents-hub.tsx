@@ -227,7 +227,6 @@ const isCancel = (key: KeyEvent): boolean => matchesSelectCancel(key);
 export function AgentsHub(props: AgentsHubProps): JSXNode {
 	const { deps } = props;
 	const revision = signal(0);
-	const touch = (): void => revision.set(revision() + 1);
 
 	let allAgents: HubAgent[] = [];
 	let activeEntryId = "all";
@@ -311,6 +310,34 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 		return row?.kind === "agent" ? row.agent : undefined;
 	};
 
+	// Keep one preview for this selection, not a catalog cache shared between agents or hub opens.
+	let modelPreview:
+		| { agent: HubAgent; revision: number; override?: string; patterns: string; resolved?: string }
+		| undefined;
+	const modelFor = (agent: HubAgent) => {
+		const settingsRevision = deps.browserSource.revision;
+		if (
+			modelPreview?.agent === agent &&
+			modelPreview.revision === settingsRevision &&
+			modelPreview.override === agent.overrideModel
+		)
+			return modelPreview;
+		const patterns = deps.effectiveModelPatterns(agent);
+		modelPreview = {
+			agent,
+			revision: settingsRevision,
+			override: agent.overrideModel,
+			patterns: patterns.join(","),
+			resolved: deps.resolvePatterns(patterns),
+		};
+		return modelPreview;
+	};
+	const touch = (): void => {
+		if (modelPreview && (modelPreview.agent !== selectedAgent() || assigning || createActive()))
+			modelPreview = undefined;
+		revision.set(revision() + 1);
+	};
+
 	const reload = async (): Promise<void> => {
 		loadError = null;
 		try {
@@ -331,6 +358,7 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 			buildRows();
 			loadError = error instanceof Error ? error.message : String(error);
 		}
+		modelPreview = undefined;
 		touch();
 	};
 	props.ref?.({ reload });
@@ -347,9 +375,8 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 	/** One line on what `property` resolves to now (notices). */
 	const describeProperty = (agent: HubAgent, property: PropertyKind): string => {
 		if (property === "model") {
-			const patterns = deps.effectiveModelPatterns(agent);
-			const resolved = deps.resolvePatterns(patterns);
-			const base = agent.overrideModel ?? (patterns.length > 0 ? patterns.join(",") : "session model");
+			const { patterns, resolved } = modelFor(agent);
+			const base = agent.overrideModel ?? (patterns || "session model");
 			return `${agent.name} model: ${base}${resolved ? ` → ${resolved}` : ""}`;
 		}
 		const pattern =
@@ -938,9 +965,8 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 				<md text="Describe what the agent should do; the architect drafts its name, when to use it and its system prompt." />,
 			];
 		const agent = row.agent;
-		const patterns = deps.effectiveModelPatterns(agent);
-		const resolved = deps.resolvePatterns(patterns);
-		const model = [patterns.length > 0 ? span(patterns.join(","), "mono") : span("session model", "dim")];
+		const { patterns, resolved } = modelFor(agent);
+		const model = [patterns ? span(patterns, "mono") : span("session model", "dim")];
 		if (resolved) model.push(span(" → ", "dim"), span(resolved, "mono success"));
 		const prewalk = deps.effectivePrewalkPattern(agent);
 		const advisor = deps.effectiveAdvisorPattern(agent);
@@ -1017,9 +1043,8 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 					<text spans={[span("Select an agent to inspect", "dim")]} />
 				</section>
 			);
-		const patterns = deps.effectiveModelPatterns(agent);
-		const resolved = deps.resolvePatterns(patterns);
-		const model = [patterns.length > 0 ? span(patterns.join(",")) : span("(session model)", "dim")];
+		const { patterns, resolved } = modelFor(agent);
+		const model = [patterns ? span(patterns) : span("(session model)", "dim")];
 		if (resolved) model.push(span(" → ", "dim"), span(resolved, "success"));
 		const prewalk = deps.effectivePrewalkPattern(agent);
 		const advisor = deps.effectiveAdvisorPattern(agent);
@@ -1325,11 +1350,11 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 		const agent = selectedAgent();
 		let detail: Extract<AgentsHubBody, { kind: "list" }>["detail"];
 		if (agent) {
-			const patterns = deps.effectiveModelPatterns(agent);
+			const { patterns, resolved } = modelFor(agent);
 			detail = {
 				description: agent.description,
-				patterns: patterns.join(","),
-				resolved: deps.resolvePatterns(patterns),
+				patterns,
+				resolved,
 				prewalk: deps.effectivePrewalkPattern(agent),
 				advisor: deps.effectiveAdvisorPattern(agent),
 				path: agent.filePath ? shortenPath(agent.filePath) : undefined,

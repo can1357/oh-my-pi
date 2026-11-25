@@ -152,6 +152,19 @@ export const cfgBashAutoBackgroundEnabled = register({
 	},
 });
 
+export const cfgBashReapBackground = register({
+	id: "bash.reapBackground",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Reap Background Processes",
+		description:
+			"Remind the agent about processes its bash calls left running (`cmd &`, `nohup`) when it stops, and kill the `&` ones at session end unless registered as services; off in RPC mode",
+	},
+});
+
 export const cfgBashGitGuard = register({
 	id: "bash.gitGuard",
 	type: "boolean",

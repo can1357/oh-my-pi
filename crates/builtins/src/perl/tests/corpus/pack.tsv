@@ -1,0 +1,56 @@
+# Perl corpus: pack. Format and regeneration: crates/builtins/src/perl/tests.rs.
+ascii-null	print unpack("H*",pack(q{a5},"abc")),"\n";	6162630000␊
+ascii-space	print unpack("H*",pack(q{A5},"abc")),"\n";	6162632020␊
+ascii-z-star	print unpack("H*",pack(q{Z*},"abc")),"\n";	61626300␊
+ascii-z	print unpack("H*",pack(q{Z5},"abcde")),"\n";	6162636400␊
+ber	print unpack("H*",pack(q{w*},0,127,128,16384)),"\n";	007f8100818000␊
+bracket-count	print unpack("H*",pack(q{C[3]},1,2,3)),"\n";	010203␊
+byte-mode	print unpack("H*",pack(q{C0U*},65,233,0x263a)),"\n";	41c3a9e298ba␊
+comment	print unpack("H*",pack(q{C2 # ignore extra letters},1,2)),"\n";	0102␊
+double-float-le	print unpack("H*",pack(q{d<},1.5)),"\n";	000000000000f83f␊
+extra-args	print unpack("H*",pack(q{C},1,2,3)),"\n";	01␊
+high-bits	print unpack("H*",pack(q{B8},"10010011")),"\n";	93␊
+high-nibbles	print unpack("H*",pack(q{H4},"1af0")),"\n";	1af0␊
+invalid-template	pack('y',3);		stderr=Invalid type 'y' in pack at invalid-template.pl line 1.␊	status=255
+little-long	print unpack("H*",pack(q{V},0x12345678)),"\n";	78563412␊
+little-short	print unpack("H*",pack(q{v},0x1234)),"\n";	3412␊
+low-bits	print unpack("H*",pack(q{b8},"10010011")),"\n";	c9␊
+low-nibbles	print unpack("H*",pack(q{h4},"1af0")),"\n";	a10f␊
+missing-args	print unpack("H*",pack(q{C3},7)),"\n";	070000␊
+network-long	print unpack("H*",pack(q{N},0x12345678)),"\n";	12345678␊
+network-short	print unpack("H*",pack(q{n*},0x1234,0x5678)),"\n";	12345678␊
+odd-nibbles	print unpack("H*",pack(q{H3},"abc")),"\n";	abc0␊
+padding	print unpack("H*",pack(q{Cx2C},1,2)),"\n";	01000002␊
+parenthesized-endian	print unpack("H*",pack(q{(SS)>},0x1234,0x5678)),"\n";	12345678␊
+parenthesized	print unpack("H*",pack(q{(CC)2},1,2,3,4)),"\n";	01020304␊
+position	print unpack("H*",pack(q{C@4C},1,2)),"\n";	0100000002␊
+quad-be	print unpack("H*",pack(q{Q>},0x1122334455667788)),"\n";	1122334455667788␊
+quad-le	print unpack("H*",pack(q{Q<},0x1122334455667788)),"\n";	8877665544332211␊
+repeat-all	print unpack("H*",pack(q{(CC)*},1,2,3,4)),"\n";	01020304␊
+rewind	print unpack("H*",pack(q{C2XC},1,2,3)),"\n";	0103␊
+signed-byte	print unpack("H*",pack(q{c3},-1,-128,127)),"\n";	ff807f␊
+signed-long-be	print unpack("H*",pack(q{l>},-2)),"\n";	fffffffe␊
+signed-quad	print unpack("H*",pack(q{q>},-2)),"\n";	fffffffffffffffe␊
+signed-short-be	print unpack("H*",pack(q{s>},-2)),"\n";	fffe␊
+single-float-be	print unpack("H*",pack(q{f>},1.5)),"\n";	3fc00000␊
+slash-count	print unpack("H*",pack(q{n/a*},"test")),"\n";	000474657374␊
+unpack-ber	print join("|", unpack('w*',pack('w*',0,127,128,16384))), "\n";	0|127|128|16384␊
+unpack-bits	print join("|", unpack('B*',pack('H*','a5'))), "\n";	10100101␊
+unpack-checksum	print join("|", unpack('%32C*',pack('C*',1,2,3,255))), "\n";	261␊
+unpack-float	print join("|", unpack('d>',pack('d>',1.5))), "\n";	1.5␊
+unpack-group	print join("|", unpack('(nC)2',pack('(nC)2',256,2,512,4))), "\n";	256|2|512|4␊
+unpack-invalid	unpack('y','x');		stderr=Invalid type 'y' in unpack at unpack-invalid.pl line 1.␊	status=255
+unpack-keep-nul	print join("|", unpack('H*',unpack('a*',"abc\0 "))), "\n";	6162630020␊
+unpack-position	print join("|", unpack('C@2C.',"\x01\x02\x03")), "\n";	1|3|3␊
+unpack-scalar	print join("|", scalar unpack('C*','ABC')), "\n";	65␊
+unpack-short-input	print join("|", unpack('n2',pack('C*',1,2,3))), "\n";	258␊
+unpack-signed	print join("|", unpack('c*',pack('C*',255,128,127))), "\n";	-1|-128|127␊
+unpack-slash	print join("|", unpack('n/a*',pack('n/a*','world'))), "\n";	world␊
+unpack-trim-space	print join("|", unpack('A*',"abc \0 ")), "\n";	abc␊
+unpack-unsigned	print join("|", unpack('C*',pack('c*',-1,-128,127))), "\n";	255|128|127␊
+unpack-uu	print join("|", unpack('u',pack('u','abcxyz'))), "\n";	abcxyz␊
+unpack-z-stop	print join("|", unpack('Z*',"abc\0def")), "\n";	abc␊
+unsigned-byte	print unpack("H*",pack(q{C*},0,1,255)),"\n";	0001ff␊
+unsigned-long-le	print unpack("H*",pack(q{L<},0x12345678)),"\n";	78563412␊
+unsigned-short-le	print unpack("H*",pack(q{S<},0x1234)),"\n";	3412␊
+utf8-mode	print unpack("H*",pack(q{U0U*},65,233,0x263a)),"\n";	41e93a␊
