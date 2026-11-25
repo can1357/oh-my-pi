@@ -660,6 +660,20 @@ impl Shell {
 		self.inner.live_background_job_count().await
 	}
 
+	/// Every live external this shell session holds, whether a run is in
+	/// flight or not: background jobs (`cmd &`, `nohup cmd &`) earlier runs
+	/// left running included. Each is unreaped while held, so its pid names
+	/// it. Empty once the session is gone.
+	#[napi]
+	pub fn held_processes(&self) -> Vec<HeldProcess> {
+		self
+			.inner
+			.held_processes()
+			.into_iter()
+			.map(|(pid, detached)| HeldProcess { pid, detached })
+			.collect()
+	}
+
 	/// Pids of the still-alive processes spawned by this session's in-flight
 	/// `run`, in spawn order: foreground commands, pipeline stages, and `&`
 	/// jobs started by that run. Builtins run in-process and never appear.
@@ -670,6 +684,16 @@ impl Shell {
 	pub fn pids(&self) -> Vec<i32> {
 		self.inner.pids()
 	}
+}
+
+/// A live external a shell session holds ([`Shell::held_processes`]).
+#[napi(object)]
+pub struct HeldProcess {
+	/// OS process id.
+	pub pid:      i32,
+	/// It runs in a detached tree: started under the shell's `nohup`, which
+	/// does not mask `SIGHUP`, so this is how such a process is told apart.
+	pub detached: bool,
 }
 
 /// Run the shell engine as a process shell in this process (`omp zsh`,

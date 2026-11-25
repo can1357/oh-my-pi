@@ -14,7 +14,7 @@
  *   captured response body for the strict-tools fallback and the responses
  *   chain-state detectors, which regex over `error.message`.
  */
-import { fetchWithRetry, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, isRecord, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
 
@@ -175,6 +175,42 @@ async function* decodeStream<TEvent>(
 		}
 		yield frame;
 	}
+}
+
+/**
+ * Message and machine code of a failed OpenAI-compatible response, for the
+ * nested `{ error: { message, code | type } }` envelope and the flat
+ * `{ error: "text", code }` / `{ message, code }` shapes. `detail` is the raw
+ * body when none of them parses, and empty when the envelope is present but
+ * carries no text anywhere.
+ */
+export async function readOpenAIErrorEnvelope(
+	response: Response,
+): Promise<{ detail: string | undefined; code: string | undefined }> {
+	const bodyText = await response.text();
+	let bodyJson: unknown;
+	try {
+		bodyJson = JSON.parse(bodyText);
+	} catch {}
+	const parsed = OpenAIHttpError.parseEnvelope(bodyJson, bodyText);
+	if (!isRecord(bodyJson)) return parsed;
+
+	const { error, message } = bodyJson;
+	const topMessage = typeof message === "string" && message.length > 0 ? message : undefined;
+	if (isRecord(error)) {
+		// A nested envelope without usable text: a top-level message is the next
+		// best thing. Failing that, an empty message reports no detail and a
+		// missing one keeps the raw body.
+		if (typeof error.message === "string" && error.message.length > 0) return parsed;
+		if (topMessage !== undefined) return { detail: topMessage, code: parsed.code };
+		return error.message === "" ? { detail: "", code: parsed.code } : parsed;
+	}
+	// Flat shapes. `parseEnvelope` drops their machine code, which credential
+	// rotation reads (`insufficient_quota`), so carry it through.
+	const code = typeof bodyJson.code === "string" ? bodyJson.code : undefined;
+	const text = typeof error === "string" && error.length > 0 ? error : topMessage;
+	if (text !== undefined) return { detail: text, code };
+	return { detail: error === "" ? "" : parsed.detail, code };
 }
 
 /** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */

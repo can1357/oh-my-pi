@@ -7,6 +7,7 @@
 import { type Block, defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { keyLabel } from "../../keys/hints";
 import { termOf } from "./common";
 
 interface FireworksTerm {
@@ -99,7 +100,7 @@ defineRolePainter("col", "omp.fireworks", (node, cx): Block => {
 	rows.push(
 		`${lead}${edge(`${box.topLeft}${box.horizontal.repeat(Math.floor(fill / 2))}`)}${theme.fg("warning", shownTitle)}${edge(`${box.horizontal.repeat(Math.ceil(fill / 2))}${box.topRight}`)}`,
 	);
-	const line = truncate(`${term.line ?? ""} · ⎋ to return`, inner, "");
+	const line = truncate(`${term.line ?? ""} · ${keyLabel(theme, "escape")} to return`, inner, "");
 	const pad = inner - visibleWidth(line);
 	rows.push(
 		`${lead}${edge(`${box.vertical}${" ".repeat(Math.floor(pad / 2))}`)}${theme.fg("mdLink", line)}${edge(`${" ".repeat(Math.ceil(pad / 2))}${box.vertical}`)}`,

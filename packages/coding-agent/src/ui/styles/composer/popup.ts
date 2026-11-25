@@ -45,6 +45,12 @@ interface Entry {
 	readonly detail: string;
 }
 
+interface CursorColumn {
+	readonly marker: string;
+	readonly blank: string;
+	readonly width: number;
+}
+
 /** The rows of one item at `width`. */
 function itemRows(
 	cx: PaintContext,
@@ -53,11 +59,12 @@ function itemRows(
 	width: number,
 	column: number,
 	iconColumn: number,
+	cursor: CursorColumn,
 	term: PopupTerm,
 ): string[] {
 	const theme = cx.theme;
-	let prefix = selected ? "❯ " : "  ";
-	let prefixWidth = 2;
+	let prefix = selected ? cursor.marker : cursor.blank;
+	let prefixWidth = cursor.width;
 	if (iconColumn > 0) {
 		const cell =
 			entry.glyphWidth <= iconColumn
@@ -134,15 +141,18 @@ function paintPopup(node: UiNode, cx: PaintContext): Block {
 		widest = Math.max(widest, visibleWidth(entry.label) + PRIMARY_GAP);
 		widestGlyph = Math.max(widestGlyph, entry.glyphWidth);
 	}
+	const marker = `${cx.theme.symbols.symbol("nav.cursor")} `;
+	const cursorWidth = visibleWidth(marker);
+	const cursor: CursorColumn = { marker, blank: " ".repeat(cursorWidth), width: cursorWidth };
 	// Even on a narrow screen leave space for the cursor, gap, a label cell and the end margin.
-	const iconColumn = Math.min(widestGlyph, Math.max(0, rowWidth - 6));
+	const iconColumn = Math.min(widestGlyph, Math.max(0, rowWidth - cursorWidth - 4));
 	const column = Math.max(min, Math.min(max, widest));
 
 	const start = overflow ? Math.max(0, Math.min(selected - Math.floor(visible / 2), entries.length - visible)) : 0;
 	const end = Math.min(entries.length, start + visible);
 	const rows: string[] = [];
 	for (let i = start; i < end && rows.length < visible; i++) {
-		for (const row of itemRows(cx, entries[i]!, i === selected, rowWidth, column, iconColumn, term)) {
+		for (const row of itemRows(cx, entries[i]!, i === selected, rowWidth, column, iconColumn, cursor, term)) {
 			if (rows.length >= visible) break;
 			rows.push(row);
 		}

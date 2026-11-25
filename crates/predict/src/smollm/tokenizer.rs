@@ -14,13 +14,123 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::{Context, bail, ensure};
-use regex::Regex;
 use serde::Deserialize;
+use xutf::{GeneralCategoryGroup, Ucd};
 
-/// GPT-2 pre-tokenization pattern minus its `\s+(?!\S)` lookahead, which
-/// [`Tokenizer::pre_tokenize`] applies by hand (the `regex` crate has no
-/// lookaround).
-const SPLIT: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+";
+/// How a char takes part in pre-tokenization.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+	/// Punctuation and symbols: neither whitespace, letter nor number.
+	Other,
+	Letter,
+	/// Always a pre-token of its own.
+	Number,
+	/// U+0020, which joins the word or symbol run after it.
+	Blank,
+	Space,
+}
+
+/// [`Class`] of every ASCII byte; `None` for the bytes of a multi-byte char,
+/// which is classified from its scalar.
+static CLASSES: [Option<Class>; 256] = {
+	let mut table = [None; 256];
+	let mut byte = 0;
+	while byte < 0x80 {
+		table[byte] = Some(match byte as u8 {
+			b' ' => Class::Blank,
+			b'\t'..=b'\r' => Class::Space,
+			b'0'..=b'9' => Class::Number,
+			b'A'..=b'Z' | b'a'..=b'z' => Class::Letter,
+			_ => Class::Other,
+		});
+		byte += 1;
+	}
+	table
+};
+
+/// Suffixes split off the word before them.
+const CONTRACTIONS: [&[u8]; 7] = [b"'s", b"'t", b"'re", b"'ve", b"'m", b"'ll", b"'d"];
+
+#[cold]
+fn classify_wide(text: &str, at: usize) -> (Class, usize) {
+	let c = text[at..].chars().next().expect("cursor inside the text");
+	let class = if c.is_numeric() {
+		Class::Number
+	} else if c.is_whitespace() {
+		Class::Space
+	} else if c.general_category_group() == GeneralCategoryGroup::Letter {
+		Class::Letter
+	} else {
+		Class::Other
+	};
+	(class, c.len_utf8())
+}
+
+/// Class and byte length of the char at `at`; `None` at the end.
+#[inline]
+fn classify(text: &str, at: usize) -> Option<(Class, usize)> {
+	Some(match CLASSES[usize::from(*text.as_bytes().get(at)?)] {
+		Some(class) => (class, 1),
+		None => classify_wide(text, at),
+	})
+}
+
+/// End of the run of `class` chars starting at `at`.
+#[inline]
+fn run_end(text: &str, mut at: usize, class: Class) -> usize {
+	while let Some((found, len)) = classify(text, at)
+		&& found == class
+	{
+		at += len;
+	}
+	at
+}
+
+/// Byte ranges of the pre-tokens, as `Digits(individual_digits)` followed by
+/// `ByteLevel` produce them: every numeric char alone; contractions (`'s`,
+/// `'ll`, …); words and symbol runs, each with the blank before it;
+/// whitespace runs, which leave their last char to the word that follows
+/// (`"a  b"` → `"a"`, `" "`, `" b"`).
+fn pre_tokenize(text: &str) -> Vec<(usize, usize)> {
+	let mut spans = Vec::new();
+	let mut at = 0;
+	while let Some((class, len)) = classify(text, at) {
+		let start = at;
+		at += len;
+		match class {
+			Class::Number => {},
+			Class::Letter => at = run_end(text, at, Class::Letter),
+			Class::Other => {
+				let rest = &text.as_bytes()[start..];
+				at = match CONTRACTIONS.iter().find(|suffix| rest.starts_with(suffix)) {
+					Some(suffix) => start + suffix.len(),
+					None => run_end(text, at, Class::Other),
+				};
+			},
+			Class::Blank | Class::Space => {
+				let next = classify(text, at).map(|(next, _)| next);
+				if class == Class::Blank
+					&& let Some(word @ (Class::Letter | Class::Other)) = next
+				{
+					at = run_end(text, at, word);
+				} else {
+					let mut last = start;
+					while let Some((Class::Blank | Class::Space, len)) = classify(text, at) {
+						last = at;
+						at += len;
+					}
+					let word_follows =
+						matches!(classify(text, at), Some((Class::Letter | Class::Other, _)));
+					if word_follows && last > start {
+						at = last;
+					}
+				}
+			},
+		}
+		spans.push((start, at));
+	}
+	spans
+}
 
 #[derive(Deserialize)]
 struct TokenizerJson {
@@ -167,7 +277,6 @@ pub struct Tokenizer {
 	token_bytes: Arc<TokenBytes>,
 	/// Special added tokens (never produced by `encode`).
 	special:     Vec<bool>,
-	split:       Regex,
 }
 
 impl Tokenizer {
@@ -292,7 +401,7 @@ impl Tokenizer {
 			merges.entry((l, r)).or_insert((rank as u32, merged));
 		}
 
-		Ok(Self { byte_ids, merges, token_bytes, special, split: Regex::new(SPLIT)? })
+		Ok(Self { byte_ids, merges, token_bytes, special })
 	}
 
 	/// Text of token `id` for prefix matching: `None` for special tokens and
@@ -314,49 +423,10 @@ impl Tokenizer {
 	/// Tokenize `text` (no special tokens are added or matched).
 	pub fn encode(&self, text: &str) -> Encoding {
 		let mut out = Encoding::default();
-		for (start, end) in self.pre_tokenize(text) {
+		for (start, end) in pre_tokenize(text) {
 			self.bpe(text.as_bytes(), start, end, &mut out);
 		}
 		out
-	}
-
-	/// Byte ranges of the pre-tokens: `Digits(individual)` isolates every
-	/// numeric char, then the GPT-2 pattern splits each piece on its own.
-	fn pre_tokenize(&self, text: &str) -> Vec<(usize, usize)> {
-		let mut spans = Vec::new();
-		let mut piece_start = 0;
-		for (at, c) in text.char_indices() {
-			if c.is_numeric() {
-				self.split_piece(text, piece_start, at, &mut spans);
-				spans.push((at, at + c.len_utf8()));
-				piece_start = at + c.len_utf8();
-			}
-		}
-		self.split_piece(text, piece_start, text.len(), &mut spans);
-		spans
-	}
-
-	fn split_piece(&self, text: &str, start: usize, end: usize, spans: &mut Vec<(usize, usize)>) {
-		let piece = &text[start..end];
-		let mut at = 0;
-		while at < piece.len() {
-			let Some(found) = self.split.find_at(piece, at) else {
-				break;
-			};
-			let mut stop = found.end();
-			// `\s+(?!\S)`: a whitespace run followed by a non-space leaves its
-			// last char to prefix the next pre-token (`"a  b"` → `"a"`, `" "`, `"
-			// b"`).
-			let matched = found.as_str();
-			if stop < piece.len() && matched.chars().all(char::is_whitespace) {
-				let last = matched.chars().next_back().map_or(0, char::len_utf8);
-				if matched.len() > last {
-					stop -= last;
-				}
-			}
-			spans.push((start + found.start(), start + stop));
-			at = stop;
-		}
 	}
 
 	/// Merge the bytes of one pre-token by merge rank (lowest first, leftmost
@@ -437,9 +507,8 @@ pub(super) mod tests {
 
 	#[test]
 	fn whitespace_lookahead_and_digits() {
-		let tok = tiny();
 		let pre = |text: &str| -> Vec<String> {
-			tok.pre_tokenize(text)
+			pre_tokenize(text)
 				.into_iter()
 				.map(|(s, e)| text[s..e].to_owned())
 				.collect()
