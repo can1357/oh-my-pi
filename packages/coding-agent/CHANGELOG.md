@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- macOS background drags no longer report success when their slider or scroll bar did not move. A Chrome or Electron slider the drag did not leave at the release is pressed once at the path's end and the result names the value read back; such a slider is never stepped, and one the drag did not move to a value the release can mean throws `InputFailed` naming the value read. A slider that exposes its thumb is stepped toward the release, and a slider the pointer moved is left there with its value in the result ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes
