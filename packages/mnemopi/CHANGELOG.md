@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed embedding rebuilds against local OpenAI-compatible servers (llama.cpp) never finishing: an input over the server's token limit no longer fails its whole batch or gets resent three times, but is re-clipped until it fits, and the request timeout now grows with the batch size instead of aborting large batches at 30 s ([#20450](https://github.com/can1357/oh-my-pi/issues/20450))
+
 ## [19.1.0] - 2026-11-21
 
 ### Fixed
