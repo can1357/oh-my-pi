@@ -12,6 +12,7 @@ import {
 	AUTH_BLOCK_SCOPE,
 	credentialBlockScopesForRequest,
 	DEFAULT_BLOCK_MS,
+	OAUTH_ORG_POLICY_BLOCK_SCOPE,
 	providerTypeKey,
 	type CredentialBlocks,
 } from "./blocks";
@@ -827,6 +828,15 @@ export class CredentialSelector {
 					(rejectedAccess === undefined || candidate.selection.credential.access !== rejectedAccess);
 				const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
 				if ((!force || syncedPeerCredential) && hasFreshAccess) return;
+				if (
+					this.#deps.blocks.isScopeBlocked(
+						provider,
+						providerKey,
+						candidate.selection.index,
+						OAUTH_ORG_POLICY_BLOCK_SCOPE,
+					)
+				)
+					return;
 				const latestCredential = this.#deps.pool.credentials(provider)[candidate.selection.index];
 				if (
 					!force &&
@@ -985,7 +995,18 @@ export class CredentialSelector {
 			? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
 			: candidates;
 
+		let checkPoolExhaustion = this.#deps.affinity.isRestricted(provider, sessionId);
 		for (const pass of passes) {
+			if (pass.allowBlocked && checkPoolExhaustion) {
+				checkPoolExhaustion = false;
+				const reason = this.#deps.blocks.describeOrgPolicyPoolExhaustion(
+					provider,
+					sessionId,
+					this.#deps.affinity,
+					blockScopes,
+				);
+				if (reason) throw new AIError.MissingApiKeyError(provider, reason);
+			}
 			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
 				if (preflightFailures.has(candidate)) continue;
 				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
@@ -1093,6 +1114,12 @@ export class CredentialSelector {
 		}
 
 		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
+			return undefined;
+		}
+		if (
+			allowBlocked &&
+			this.#deps.blocks.isScopeBlocked(provider, providerKey, selection.index, OAUTH_ORG_POLICY_BLOCK_SCOPE)
+		) {
 			return undefined;
 		}
 		// Capture the row id once, immediately after #prepareOAuthCredentialForRequest

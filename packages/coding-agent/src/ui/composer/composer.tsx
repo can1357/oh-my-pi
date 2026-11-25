@@ -3,7 +3,8 @@
  * The composer: the prompt field and its state.
  *
  * One `col` node (role `omp.editor`, `omp.editor.bash|python|btw-ask` in
- * a draft mode, tone `pending` while a turn runs) holding the `line` row (mode
+ * a draft mode, tone `pending` while a turn runs) holding the `focus` row
+ * (the viewing header, while a subagent is viewed), the `line` row (mode
  * chip and the `editor` field), the `bar` row (status facts the app slots
  * in, then Send or Stop) and, while completing, the `complete` popup. A Tern
  * terminal draws it natively; the terminal backend paints it with the
@@ -11,16 +12,17 @@
  * popup under it.
  *
  * The composer owns the draft: text and caret (edits from the field apply
- * here; deleting into a paste marker or chip deletes all of it), undo,
- * prompt history (Up on an empty draft or the first row of a recalled one,
- * Down on its last row), collapsed pastes and attachment chips, completion
+ * here; deleting into a chip deletes all of it), undo, prompt history (Up on
+ * an empty draft or the first row of a recalled one, Down on its last row),
+ * attachment chips (a large paste collapses into one), completion
  * (`/command`, `@path`), Vim modes and submission.
  *
  * Extension hooks: {@link Composer.addKeyHandler} (consulted before the
- * composer's own bindings), {@link Composer.addDecorator} (styled ranges over
- * the draft), {@link Composer.setSubmitTransform} (rewrite or cancel what is
- * sent) and the shape ({@link Composer.setShape}; shapes are registered with
- * `registerComposerShape`).
+ * composer's own bindings), {@link Composer.addPasteHandler} (consulted
+ * before a paste is typed or collapsed), {@link Composer.addDecorator}
+ * (styled ranges over the draft), {@link Composer.setSubmitTransform}
+ * (rewrite or cancel what is sent) and the shape ({@link Composer.setShape};
+ * shapes are registered with `registerComposerShape`).
  */
 import {
 	type Accessor,
@@ -70,8 +72,8 @@ import {
 	chipLabel,
 	collapsesPaste,
 	type DraftImage,
+	draftImageBlob,
 	expandAtoms,
-	pasteMarker,
 } from "./attachments";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -85,7 +87,15 @@ import {
 import type { VimMode } from "./vim";
 import { UndoHistory, type UndoStacks, VimEditor } from "./vim-editor";
 import { holdText, SpaceHoldGesture, type SpaceHoldHandler } from "../../config/keybindings/space-hold";
-import { actionKey, formatTooltipKey } from "../keys/hints";
+import { MAIN_AGENT_ID } from "../../registry/agent-hub-types";
+import { actionKbd, actionKey, formatTooltipKey } from "../keys/hints";
+
+/**
+ * Action prefix of the viewing header's links: `focus:<agent id>` views that agent, the main
+ * agent's id ({@link MAIN_AGENT_ID}) goes back to the main session. The app handles them
+ * ({@link Composer.addActionHandler}).
+ */
+export const FOCUS_ACTION = "focus:";
 
 /** Live state the composer shows (set by the app). */
 export interface ComposerState {
@@ -99,11 +109,22 @@ export interface ComposerState {
 	readonly shell?: { readonly kind: "bash" | "python" | "btw"; readonly excluded?: boolean };
 	/** Drafts go to the `/btw` note the user clicked, as its follow-ups: role `omp.editor.btw`, a `btw` chip that leads back to the chat. */
 	readonly btw?: boolean;
+	/**
+	 * The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main
+	 * session. Natively the viewing header (`omp.composer.focus`) names it over the draft.
+	 */
+	readonly viewing?: readonly string[];
+	/**
+	 * Sending the draft skips the ask waiting above the composer: natively a `skips ask` chip leads
+	 * the input and Send reads Skip & send (`omp.composer.skip`).
+	 */
+	readonly skipsAsk?: boolean;
 }
 
 /** Whether two composer states draw the same composer (see {@link ComposerState}). */
 function sameComposerState(a: ComposerState, b: ComposerState): boolean {
-	if (a.running !== b.running || a.btw !== b.btw) return false;
+	if (a.running !== b.running || a.btw !== b.btw || a.skipsAsk !== b.skipsAsk) return false;
+	if (a.viewing?.length !== b.viewing?.length || a.viewing?.some((id, i) => id !== b.viewing?.[i])) return false;
 	if (a.shell === b.shell) return true;
 	return (
 		a.shell !== undefined &&
@@ -150,6 +171,9 @@ export type ComposerDecorator = (text: string) => readonly ComposerDecoration[];
 
 /** A key handler consulted before the composer's bindings; true takes the key. */
 export type ComposerKeyHandler = (key: KeyEvent, composer: Composer) => boolean;
+
+/** A paste handler consulted before the composer types or collapses the paste; true takes it. */
+export type ComposerPasteHandler = (paste: PasteEvent, composer: Composer) => boolean;
 
 /** An edit typed or pasted into the field: `[from, to)` of the old draft became `insert`. */
 export interface ComposerEdit {
@@ -346,7 +370,7 @@ export class Composer {
 	readonly #nativePlaceholder = signal<TspText | undefined>(undefined);
 
 	readonly #atoms: Signal<readonly Atom[]> = signal<readonly Atom[]>([]);
-	readonly #counts: Record<ChipKind | "marker", number> = { paste: 0, image: 0, video: 0, marker: 0 };
+	readonly #counts: Record<ChipKind, number> = { paste: 0, image: 0, video: 0 };
 	/** Images the draft's chips stand for. */
 	readonly pendingImages: DraftImage[] = [];
 	/** Each pending image's source link (a file path or URL), parallel to {@link pendingImages}. */
@@ -401,6 +425,7 @@ export class Composer {
 	readonly #slots = signal<ComposerSlots>({});
 
 	readonly #keyHandlers: ComposerKeyHandler[] = [];
+	readonly #pasteHandlers: ComposerPasteHandler[] = [];
 	readonly #editListeners: ComposerEditListener[] = [];
 	/** The open popup lists replacements for a range of the draft. */
 	#replacing: ReplacementPicker | undefined;
@@ -550,10 +575,18 @@ export class Composer {
 
 	// ─── Attachments ────────────────────────────────────────────────────────
 
+	/**
+	 * The token of chip `n` of `kind` in this composer's glyphs (the symbol preset's `chip.*`, see
+	 * {@link ComposerOptions.symbol}): what an attachment the app inserts ({@link insertAtom}) is labelled.
+	 */
+	chipLabel(kind: ChipKind, n: number): string {
+		return chipLabel(kind, n, this.#options.symbol);
+	}
+
 	/** Attach `content` as a text chip at the caret; the submission carries `expansion` (default: the content). */
 	insertTextAttachment(content: string, expansion: string = content): void {
 		const n = ++this.#counts.paste;
-		const label = chipLabel("paste", n, this.#options.symbol);
+		const label = this.chipLabel("paste", n);
 		this.#atoms.set([
 			...this.#atoms(),
 			{ label, kind: "paste", n, expansion, ...(expansion !== content ? { content } : {}) },
@@ -562,8 +595,8 @@ export class Composer {
 	}
 
 	/**
-	 * Insert an atom labelled `label` (a chip of `kind`, or a marker) expanding to `expansion` on
-	 * submit. An image joins {@link pendingImages} with its source `link`.
+	 * Insert an atom labelled `label` (a chip of `kind`, a text chip by default) expanding to
+	 * `expansion` on submit. An image joins {@link pendingImages} with its source `link`.
 	 */
 	insertAtom(
 		label: string,
@@ -587,7 +620,7 @@ export class Composer {
 		]);
 	}
 
-	/** The draft with every atom (paste marker, chip) replaced by what it stands for. */
+	/** The draft with every atom (chip, token) replaced by what it stands for. */
 	expandedText(): string {
 		return expandAtoms(this.#text(), this.#atoms());
 	}
@@ -623,7 +656,7 @@ export class Composer {
 						const n = Number(idx);
 						if (n > count) return match;
 						const chipKind: ChipKind = kind === "Video" ? "video" : "image";
-						const label = chipLabel(chipKind, n, this.#options.symbol);
+						const label = this.chipLabel(chipKind, n);
 						this.#counts[chipKind] = Math.max(this.#counts[chipKind], n);
 						// The chip stands for the marker alone: a legacy `attachment://N` after it goes.
 						const marker = match.replace(/ attachment:\/\/\d+$/, "");
@@ -976,21 +1009,23 @@ export class Composer {
 		this.#atomizer = atomizer;
 	}
 
-	/** The attachments the draft's chips stand for, in insertion order (collapsed pastes are not chips). */
+	/** The attachments the draft's chips stand for, in insertion order (token chips are not attachments). */
 	chips(): readonly Atom[] {
 		const text = this.#text();
-		return this.#atoms().filter(atom => atom.kind !== "marker" && atom.kind !== "token" && text.includes(atom.label));
+		return this.#atoms().filter(atom => atom.kind !== "token" && text.includes(atom.label));
 	}
 
+	/**
+	 * A paste into the field: the app's handlers first ({@link addPasteHandler}), then a large
+	 * one collapses into a text chip; anything else is left for the field to type.
+	 */
 	#onPaste(paste: PasteEvent): boolean {
 		this.#jump = undefined;
+		for (const handler of this.#pasteHandlers) if (handler(paste, this)) return true;
 		const text = paste.text.replace(/\r\n?/g, "\n");
 		if (!collapsesPaste(text)) return false;
-		const n = ++this.#counts.marker;
-		const label = pasteMarker(n, text);
-		this.#atoms.set([...this.#atoms(), { label, kind: "marker", n, expansion: text }]);
 		this.#closeCompletion();
-		this.#insert(label);
+		this.insertTextAttachment(text);
 		return true;
 	}
 
@@ -1092,7 +1127,7 @@ export class Composer {
 	#restoreState(state: DraftState | undefined): void {
 		const atoms = state?.atoms ?? [];
 		this.#atoms.set(atoms);
-		for (const kind of ["paste", "image", "video", "marker"] as const)
+		for (const kind of ["paste", "image", "video"] as const)
 			this.#counts[kind] = Math.max(0, ...atoms.filter(atom => atom.kind === kind).map(atom => atom.n));
 		this.pendingImages.splice(0, this.pendingImages.length, ...(state?.images ?? []));
 		this.pendingImageLinks.splice(0, this.pendingImageLinks.length, ...(state?.links ?? []));
@@ -1111,7 +1146,7 @@ export class Composer {
 		this.#revision++;
 		this.#atoms.set([]);
 		this.#recalledState = false;
-		for (const kind of ["paste", "image", "video", "marker"] as const) this.#counts[kind] = 0;
+		for (const kind of ["paste", "image", "video"] as const) this.#counts[kind] = 0;
 		this.pendingImages.length = 0;
 		this.pendingImageLinks.length = 0;
 		this.#linksRevision.set(this.#linksRevision.peek() + 1);
@@ -1682,6 +1717,15 @@ export class Composer {
 		};
 	}
 
+	/** Consult `handler` for every paste into the field before the composer types or collapses it; returns its removal. */
+	addPasteHandler(handler: ComposerPasteHandler): () => void {
+		this.#pasteHandlers.push(handler);
+		return () => {
+			const at = this.#pasteHandlers.indexOf(handler);
+			if (at !== -1) this.#pasteHandlers.splice(at, 1);
+		};
+	}
+
 	/** Hear every edit made in the field (typing, pastes, deletions); returns its removal. */
 	addEditListener(listener: ComposerEditListener): () => void {
 		this.#editListeners.push(listener);
@@ -1749,7 +1793,7 @@ export class Composer {
 			const { ranges, extra } = decorations();
 			const out: TspEditorDecoration[] = ranges.map(({ from, to, atom }) =>
 				atom.kind === "image" && atom.image
-					? { from, to, s: "accent strong", blob: imageBlob(atom.image) }
+					? { from, to, s: "accent strong", blob: draftImageBlob(atom.image) }
 					: { from, to, s: (atom.kind === "token" && atom.s) || "accent strong" },
 			);
 			for (const d of extra)
@@ -1763,7 +1807,6 @@ export class Composer {
 			const text = this.#text();
 			const { ranges, extra } = decorations();
 			const out: EditorTermRange[] = ranges.map(({ from, to, atom }) => {
-				if (atom.kind === "marker") return { from, to, s: "accent strong", whole: true };
 				if (atom.kind === "token") {
 					const href = atom.link && chipHref(atom.link.path, atom.link.line);
 					return { from, to, s: atom.s ?? "accent strong", whole: true, ...(href ? { href } : {}) };
@@ -1824,6 +1867,20 @@ export class Composer {
 					</row>
 				);
 			}
+			if (!s && this.#state().skipsAsk) {
+				return (
+					<row
+						key="mode"
+						role="omp.composer.mode"
+						tone="warning"
+						align="center"
+						gap="xs"
+						title="Sending this message skips the questions above"
+					>
+						<text key="label" spans={[{ s: "warning", t: "skips ask" }]} wrap="none" />
+					</row>
+				);
+			}
 			if (!s) return null;
 			const title = s.excluded ? `${SHELL_TITLES[s.kind]} · not sent to the model` : SHELL_TITLES[s.kind];
 			return (
@@ -1833,8 +1890,61 @@ export class Composer {
 				</row>
 			);
 		};
+		// The viewing header while a subagent is focused: an eye, the agent's ancestors as links
+		// (`omp.composer.crumb`), the agent itself (`omp.composer.agent`), then the way back to the
+		// main session (`omp.composer.exit`, the interrupt key's keycap: Esc on an empty draft). Tern's
+		// tray reads it: the named agent's card is marked as viewed, and its MAIN bar runs the exit's click.
+		const viewingHeader = (): JSXNode => {
+			const viewing = this.#state().viewing;
+			const agent = viewing?.at(-1);
+			if (viewing === undefined || agent === undefined) return null;
+			const back = formatTooltipKey(getKeybindings().keysFor("app.interrupt")[0] ?? "escape");
+			return (
+				<row
+					key="focus"
+					role="omp.composer.focus"
+					align="center"
+					gap="xs"
+					title={`Viewing subagent ${agent}: what you send goes to it`}
+				>
+					<icon key="icon" name="eye" />
+					<text key="label" text="Viewing" wrap="none" />
+					{viewing.slice(0, -1).map(id => (
+						<text
+							key={`crumb:${id}`}
+							role="omp.composer.crumb"
+							text={id}
+							wrap="none"
+							title={`View ${id}`}
+							actions={{ click: `${FOCUS_ACTION}${id}` }}
+						/>
+					))}
+					<text key="agent" role="omp.composer.agent" text={agent} wrap="none" />
+					<row
+						key="exit"
+						role="omp.composer.exit"
+						align="center"
+						gap="xs"
+						title={`Back to the main session  ${back}`}
+						actions={{ click: `${FOCUS_ACTION}${MAIN_AGENT_ID}` }}
+					>
+						<kbd key="key" keys={actionKbd("app.interrupt", "escape")} />
+						<text key="label" text="main" wrap="none" />
+					</row>
+				</row>
+			);
+		};
 		const submitControl = (): JSXNode =>
-			this.#state().running ? (
+			this.#state().skipsAsk ? (
+				<text
+					key="skip"
+					actions={{ click: "submit" }}
+					role="omp.composer.skip"
+					text="Skip & send"
+					title="Send this message instead of answering the questions  ⏎"
+					tone="warning"
+				/>
+			) : this.#state().running ? (
 				<text
 					key="stop"
 					actions={{ click: "interrupt" }}
@@ -1973,6 +2083,7 @@ export class Composer {
 				}}
 			>
 				{() => this.#slots().context}
+				{viewingHeader}
 				{() => this.#slots().chips}
 				<row key="line" role="omp.composer.line" align="start" gap="sm">
 					{modeChip}
@@ -1998,19 +2109,6 @@ export class Composer {
 /** The terminal link target of a chip's file `link` (a path, opened at `line`), if any. */
 export function chipHref(link: string | undefined, line?: number): string | undefined {
 	return link ? fileUriForTerminal(link, line === undefined ? undefined : { line }, terminalIdentity().id) : undefined;
-}
-
-const kBlob = Symbol("composer.image-blob");
-
-interface BlobHolder {
-	[kBlob]?: string;
-}
-
-/** The blob id of an image's bytes (sha-256, hex), cached on the image. */
-function imageBlob(image: DraftImage): string {
-	const holder = image as DraftImage & BlobHolder;
-	holder[kBlob] ??= new Bun.CryptoHasher("sha256").update(Buffer.from(image.data, "base64")).digest("hex");
-	return holder[kBlob];
 }
 
 /**
