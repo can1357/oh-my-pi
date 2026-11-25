@@ -102,7 +102,7 @@ describe("component escape bindings", () => {
 			getError: () => undefined,
 			getDiscoverableProviders: () => [],
 			getProviderDiscoveryState: () => undefined,
-			refresh: async () => {},
+			refreshIfStale: async () => false,
 			refreshProvider: async () => {},
 			authStorage: { keys: { source: () => undefined } },
 		} as unknown as ModelRegistry;

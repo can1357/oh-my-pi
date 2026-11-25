@@ -9,7 +9,7 @@ import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controlle
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
-async function createHost(initializeUi: boolean) {
+async function createHost() {
 	let actions: ExtensionContextActions | undefined;
 	const state = {
 		streaming: false,
@@ -81,8 +81,7 @@ async function createHost(initializeUi: boolean) {
 		}),
 	) as InteractiveModeContext;
 	const controller = new ExtensionUiController(host);
-	if (initializeUi) await controller.initHooksAndCustomTools();
-	else controller.initializeHookRunner({} as ExtensionUIContext, false);
+	await controller.initHooksAndCustomTools();
 	if (!actions) throw new Error("Extension runtime was not initialized");
 	return { host, actions, state, errors };
 }
@@ -95,15 +94,7 @@ async function flushShutdown() {
 
 describe("interactive extension shutdown", () => {
 	test("an idle background request closes the initialized host without terminal input", async () => {
-		const { actions, state, errors } = await createHost(true);
-		actions.shutdown();
-		await flushShutdown();
-		expect(state.closed).toBe(true);
-		expect(errors).toEqual([]);
-	});
-
-	test("a rebound hook runtime also closes an idle host without another submit", async () => {
-		const { actions, state, errors } = await createHost(false);
+		const { actions, state, errors } = await createHost();
 		actions.shutdown();
 		await flushShutdown();
 		expect(state.closed).toBe(true);
@@ -111,7 +102,7 @@ describe("interactive extension shutdown", () => {
 	});
 
 	test("keeps the request pending until streaming, queued input and the open run settle", async () => {
-		const { host, actions, state, errors } = await createHost(true);
+		const { host, actions, state, errors } = await createHost();
 		state.streaming = true;
 		actions.shutdown();
 		await flushShutdown();
@@ -135,7 +126,7 @@ describe("interactive extension shutdown", () => {
 	});
 
 	test("waits for an admitted extension submission and re-evaluates the turn it started", async () => {
-		const { host, actions, state, errors } = await createHost(true);
+		const { host, actions, state, errors } = await createHost();
 		state.admitted = 1;
 		actions.shutdown();
 		await flushShutdown();
@@ -156,7 +147,7 @@ describe("interactive extension shutdown", () => {
 	});
 
 	test("keeps the request pending while a foreground submission is still being prepared", async () => {
-		const { host, actions, state, errors } = await createHost(true);
+		const { host, actions, state, errors } = await createHost();
 		state.pendingSubmission = true;
 		actions.shutdown();
 		await flushShutdown();
