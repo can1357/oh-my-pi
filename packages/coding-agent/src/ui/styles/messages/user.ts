@@ -24,7 +24,8 @@ import type { TspCardProps } from "@oh-my-pi/pi-wire";
 import { type GlowingKeyword, MAGIC_KEYWORD_PERIOD_MS, magicKeywordLetters } from "../../composer/magic-keywords";
 import type { TermChip } from "../../transcript/messages/chips";
 import { fileLink } from "../tools/file-common";
-import { EXPAND_KEY, fillRow, hexFg, propsOf, termOf, withResolvedColor } from "./fill";
+import { expandKeyLabel } from "../../keys/hints";
+import { fillRow, hexFg, propsOf, termOf, withResolvedColor } from "./fill";
 
 const ZONE_START = "\x1b]133;A\x07";
 const ZONE_CLOSE = "\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07";
@@ -150,7 +151,7 @@ function paintSynthetic(node: UiNode, cx: PaintContext): Block {
 	const props = propsOf<TspCardProps>(node);
 	if (!props.collapsible) return paintUser(node, cx);
 	const theme = cx.theme;
-	const summary = `${styledText(theme, props.head)} · ${EXPAND_KEY}`;
+	const summary = `${styledText(theme, props.head)}${theme.symbols.symbol("sep.dot")}${expandKeyLabel(theme)}`;
 	const rows = [` ${theme.fg("dim", truncate(stripEscapes(summary), Math.max(10, cx.width - 1)))}`];
 	const prompt = node.children().find(child => child.kind === "md");
 	if (prompt && !props.collapsed) rows.push(...bubbleRows(cx, prompt, cx.width));

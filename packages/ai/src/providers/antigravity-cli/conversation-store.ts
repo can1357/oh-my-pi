@@ -9,6 +9,7 @@ import type { AntigravityCliCheckpoint } from "../../types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^[0-9a-f]{64}$/;
+const FINGERPRINT_PREFIX = "v2:";
 
 /** Store path of a validated ACP conversation UUID; never accepts path components. */
 export function conversationStorePath(geminiDir: string, id: string): string {
@@ -136,7 +137,8 @@ function recordedFingerprint(store: string, checkpoint: AntigravityCliCheckpoint
 				!isRecord(record) ||
 				record.digest !== digest ||
 				!isRecord(record.checkpoint) ||
-				typeof record.fingerprint !== "string"
+				typeof record.fingerprint !== "string" ||
+				!record.fingerprint.startsWith(FINGERPRINT_PREFIX)
 			)
 				continue;
 			if (
@@ -162,8 +164,10 @@ function prefixFingerprint(db: Database, checkpoint: AntigravityCliCheckpoint): 
 	] as const;
 	for (const [table, end] of tables) {
 		hash.update(table);
+		// agy compacts generation blobs in place after recording later generations.
+		const columns = table === "gen_metadata" ? "idx" : "*";
 		for (const row of db
-			.query<Record<string, unknown>, [number]>(`SELECT * FROM ${table} WHERE idx < ? ORDER BY idx`)
+			.query<Record<string, unknown>, [number]>(`SELECT ${columns} FROM ${table} WHERE idx < ? ORDER BY idx`)
 			.iterate(end)) {
 			for (const key of Object.keys(row).sort()) {
 				hash.update(JSON.stringify(key));
@@ -180,7 +184,7 @@ function prefixFingerprint(db: Database, checkpoint: AntigravityCliCheckpoint): 
 			hash.update("\n");
 		}
 	}
-	return hash.digest("hex");
+	return FINGERPRINT_PREFIX + hash.digest("hex");
 }
 
 function highWaterMarks(db: Database): AntigravityCliCheckpoint {

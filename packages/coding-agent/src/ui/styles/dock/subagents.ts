@@ -1,6 +1,6 @@
 /**
- * Terminal look of the subagents HUD (`col` `omp.hud.subagents`), one cell
- * in: a blank row; `Subagents` (bold accent) ` · 2 running` (dim) with the
+ * Terminal look of the subagents HUD (`col` `omp.hud.subagents`): a blank
+ * row; inset `Subagents` (bold accent) ` · 2 running` (dim) with the
  * hub key dim at the right edge; then the agents as a dim tree, one cell
  * further in: `⟳ Id: description` in accent (the `⟳` muted while the agent
  * only waits on its own agents or jobs; the id bold, a dim `⟦type⟧`
@@ -15,6 +15,7 @@ import { type Block, defineRolePainter, EMPTY_BLOCK, type Hit, type PaintContext
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatDuration } from "@oh-my-pi/pi-utils";
+import { terminalPaddingX } from "../terminal-padding";
 import { FEED_MODEL_BADGE_WIDTH, previewLine } from "../../../utils/render-utils";
 import { keyLabel } from "../../keys/hints";
 import { type SubagentCall, type SubagentEntry, type SubagentHudModel, subagentLayout } from "../../dock/subagents";
@@ -81,7 +82,9 @@ function paintSubagents(node: UiNode, cx: PaintContext): Block {
 	const theme = cx.theme;
 	const dim = (text: string): string => theme.fg("dim", text);
 	const symbols = theme.symbols;
-	const content = Math.max(0, cx.width - 2);
+	const paddingX = terminalPaddingX();
+	const pad = " ".repeat(paddingX);
+	const content = Math.max(0, cx.width - 2 * paddingX);
 	const layout = subagentLayout(entries.length, model.expanded());
 	const preview = model.livePreview();
 	// Rows are the tree's content width: the outer indent and the branch take four cells.
@@ -93,7 +96,7 @@ function paintSubagents(node: UiNode, cx: PaintContext): Block {
 	const hubKey = model.hubKey();
 	const hint = hubKey ? dim(keyLabel(theme, hubKey)) : "";
 	const gap = content - visibleWidth(title) - visibleWidth(hint);
-	const rows = ["", ` ${hint && gap >= 2 ? `${title}${" ".repeat(gap)}${hint}` : title}`];
+	const rows = ["", `${pad}${hint && gap >= 2 ? `${title}${" ".repeat(gap)}${hint}` : title}`];
 	const hits: Hit[] = [];
 	const shown = entries.slice(0, layout.items);
 	const live = preview && shown.some(entry => entry.call?.live && entry.call.startedAt !== undefined);
@@ -102,10 +105,10 @@ function paintSubagents(node: UiNode, cx: PaintContext): Block {
 		const last = index === shown.length - 1;
 		const top = rows.length;
 		const branch = `${dim(symbols.symbol(last ? "tree.last" : "tree.branch"))} `;
-		rows.push(` ${truncate(` ${branch}${headLine(theme, entry, rowWidth)}`, content, "")}`);
+		rows.push(`${pad}${truncate(` ${branch}${headLine(theme, entry, rowWidth)}`, content, "")}`);
 		if (preview && entry.call) {
 			const hang = last ? "   " : `${dim(symbols.symbol("tree.vertical"))}  `;
-			rows.push(` ${truncate(` ${hang}${callLine(theme, entry.call, rowWidth, now)}`, content, "")}`);
+			rows.push(`${pad}${truncate(` ${hang}${callLine(theme, entry.call, rowWidth, now)}`, content, "")}`);
 		}
 		hits.push({
 			row: top,
@@ -126,7 +129,7 @@ function paintSubagents(node: UiNode, cx: PaintContext): Block {
 			node,
 			act: "subagents.toggle",
 		});
-		rows.push(` ${truncate(` ${dim(label)}`, content, "")}`);
+		rows.push(`${pad}${truncate(` ${dim(label)}`, content, "")}`);
 	}
 	return { rows, hits };
 }

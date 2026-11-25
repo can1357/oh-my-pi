@@ -19,6 +19,7 @@ import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type EvalStatusEvent, splitEvalOutput } from "../../../tools/details/eval";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice } from "../../../tools/output-meta-format";
 import { FEED_MODEL_BADGE_WIDTH, isFeedModelBadgeEnabled, shortenPath } from "../../../utils/render-utils";
+import { expandKeyLabel } from "../../keys/hints";
 import { feedModel } from "../../tools/agent-common";
 import { type EvalTerm, type EvalTermCell, formatMcpProgress, highlightLanguage, mcpProgress } from "../../tools/eval";
 import { styledModelBadge } from "./agent-common";
@@ -461,7 +462,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 			const output = cellOutputRows(theme, cell, expanded, previewLines, width);
 			const lines = [...output.rows];
 			if (!expanded && output.hidden > 0)
-				lines.push(theme.fg("dim", `… ${output.hidden} more lines (⌃O to expand)`));
+				lines.push(theme.fg("dim", `… ${output.hidden} more lines (${expandKeyLabel(theme)} to expand)`));
 			if (status.length > 0) {
 				if (lines.length > 0) lines.push(theme.fg("dim", "Status"));
 				lines.push(...status);
@@ -514,7 +515,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 			truncate(
 				theme.fg(
 					"dim",
-					`… (${tail.skipped} earlier lines, showing ${tail.rows.length} of ${tail.skipped + tail.rows.length}) (⌃O to expand)`,
+					`… (${tail.skipped} earlier lines, showing ${tail.rows.length} of ${tail.skipped + tail.rows.length}) (${expandKeyLabel(theme)} to expand)`,
 				),
 				width,
 			),

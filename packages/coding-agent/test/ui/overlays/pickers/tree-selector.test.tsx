@@ -1,4 +1,9 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
+import { expect, test } from "bun:test";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { TreeSelector, type TreeSelectorNode } from "../../../../src/ui/overlays/pickers/tree-selector";
 import { pickerSuite } from "./harness";
 
@@ -37,6 +42,23 @@ function build(): { roots: TreeSelectorNode[]; leaf: string } {
 }
 
 const noop = (): void => {};
+
+test("the ASCII tree paints fork guides and active-path bullets", () => {
+	createRoot(dispose => {
+		const { roots, leaf } = build();
+		try {
+			const [node] = resolveChildren(
+				<TreeSelector roots={roots} currentLeafId={leaf} terminalHeight={30} onSelect={noop} onCancel={noop} />,
+			)();
+			const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+			const rows = paintNode(staticEnvironment(theme), node!, 120).rows.map(stripEscapes);
+			expect(rows.find(row => row.includes("branch one"))).toContain("'- [mark] user: branch one");
+			expect(rows.find(row => row.includes("branch two"))).toContain("|- * user: branch two");
+		} finally {
+			dispose();
+		}
+	});
+});
 pickerSuite({
 	dir: "overlays/tree-selector",
 	mount(caseName) {
