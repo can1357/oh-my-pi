@@ -4,6 +4,18 @@ import { refuseToolShellAutoPrint } from "../../src/cli/tool-shell-launch";
 describe("refuseToolShellAutoPrint", () => {
 	const inToolShell = { OMPCODE: "1" };
 
+	it("reports a pending invalid flag value before the refusal, so `--mode bogus` names the bad value", () => {
+		const refusal = refuseToolShellAutoPrint({
+			env: inToolShell,
+			print: undefined,
+			mode: undefined,
+			stdinIsTerminal: false,
+			invalidFlagValues: ['Invalid --mode value: "bogus". Expected one of: text, json, rpc, rpc-ui, acp.'],
+		});
+		expect(refusal?.startsWith('Error: Invalid --mode value: "bogus"')).toBe(true);
+		expect(refusal).toContain("without a terminal");
+	});
+
 	it("refuses a headless launch from a tool shell that did not ask for -p, and says how to", () => {
 		const refusal = refuseToolShellAutoPrint({
 			env: inToolShell,

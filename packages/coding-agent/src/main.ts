@@ -2085,9 +2085,10 @@ export async function runRootCommand(
 			print: parsedArgs.print,
 			mode: parsedArgs.mode,
 			stdinIsTerminal: process.stdin.isTTY === true,
+			invalidFlagValues: parsedArgs.invalidFlagValues,
 		});
 		if (toolShellRefusal !== undefined) {
-			process.stderr.write(toolShellRefusal);
+			process.stderr.write(chalk.red(toolShellRefusal));
 			process.exit(2);
 		}
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.

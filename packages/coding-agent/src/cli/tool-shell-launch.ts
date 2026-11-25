@@ -1,7 +1,7 @@
 /**
  * Whether a launch from inside an omp tool process may run headless by accident.
  *
- * `OMPCODE=1` marks the bash tool's shell and the eval kernels. Without a terminal
+ * `OMPCODE=1` marks the bash tool's shell and the JS and Python eval kernels. Without a terminal
  * on stdin, `omp <words>` there runs like `-p` with the words as the prompt: an
  * unattended agent with the session's cwd, environment and credentials, which a
  * command meant for another program (observed in the field with Bun's shell
@@ -19,13 +19,20 @@ export interface ToolShellLaunch {
 	/** `--mode` given (rpc, acp, json, …); these own stdin. */
 	mode: string | undefined;
 	stdinIsTerminal: boolean;
+	/**
+	 * Values the startup parse rejected (`--mode bogus`). An extension may still claim one, so they are
+	 * only pending here; the refusal lists them first so a typo is not reported as a missing `-p`.
+	 */
+	invalidFlagValues?: readonly string[];
 }
 
 /** The refusal to print and exit with, or undefined when the launch may proceed. */
 export function refuseToolShellAutoPrint(launch: ToolShellLaunch): string | undefined {
 	if (launch.env.OMPCODE !== "1") return undefined;
 	if (launch.print || launch.mode !== undefined || launch.stdinIsTerminal) return undefined;
+	const pending = (launch.invalidFlagValues ?? []).map(message => `Error: ${message}\n`).join("");
 	return (
+		pending +
 		`Error: ${APP_NAME} was started from an ${APP_NAME} tool shell without a terminal, so a positional or piped prompt would start a headless agent.\n` +
 		`To do that on purpose, pass the prompt with \`${APP_NAME} -p "…"\`.\n`
 	);
