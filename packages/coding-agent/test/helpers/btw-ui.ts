@@ -104,6 +104,8 @@ export interface NoteView {
 	readonly folded: boolean;
 	/** The ids of its right-click entries. */
 	readonly menu: string[];
+	/** Its `outside` action: what Tern sends on a press outside it. */
+	readonly outside: string | undefined;
 	press(act: BtwNoteAction): void;
 	text(width?: number): string;
 }
@@ -137,6 +139,9 @@ function noteView(block: TranscriptBlock): NoteView {
 		get menu() {
 			const menu = propsOf<{ actions?: { menu?: readonly TspMenuEntry[] } }>(current()).actions?.menu ?? [];
 			return menu.flatMap(entry => (typeof entry === "object" && "id" in entry ? [entry.id] : []));
+		},
+		get outside() {
+			return propsOf<{ actions?: { outside?: string } }>(current()).actions?.outside;
 		},
 		press(act) {
 			current().handlers.onAction?.(act, { type: "action", key: "", act, mods: [] } as never);

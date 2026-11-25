@@ -18,11 +18,8 @@ pub mod syntax;
 pub mod tokenizer;
 pub mod types;
 
-use std::sync::LazyLock;
-
-use regex::Regex;
-
 use self::{
+	format::is_snapshot_tag,
 	input::{Patch, SplitOptions},
 	types::FileOp,
 };
@@ -30,6 +27,7 @@ use crate::{
 	engine::{EditMode, FileOpIntent, Inspection, ModeEngine, PreviewFile, StagedFile},
 	error::EditError,
 	files::FileSource,
+	scan,
 	store::EditStore,
 	stream_json::ArgSnapshot,
 };
@@ -94,36 +92,68 @@ impl ModeEngine for HashlineEngine {
 	}
 }
 
-static PATH_NOISE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)^\s*\*{3}\s*(?:(?:Add|Update|Delete)\s+File|Move\s+to)\s*:\s*")
-		.expect("valid hashline path-noise regex")
-});
-static HEADER: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?m)^\s*\[([^\]\r\n]+)\]\s*$").expect("valid hashline header regex")
-});
-
+/// Strip an `apply_patch` label such as `*** Update File:` from a path.
 fn strip_path_noise(value: &str) -> String {
-	PATH_NOISE.replace(value, "").trim().to_owned()
+	let value = value.trim_start();
+	let path = value.strip_prefix("***").and_then(|rest| {
+		let rest = rest.trim_start();
+		let (action, target) = match rest.as_bytes().first()?.to_ascii_lowercase() {
+			b'a' => ("add", "file"),
+			b'u' => ("update", "file"),
+			b'd' => ("delete", "file"),
+			b'm' => ("move", "to"),
+			_ => return None,
+		};
+		let rest = scan::keyword(rest, action)?;
+		let rest = scan::keyword(scan::space(rest)?, target)?;
+		rest.trim_start().strip_prefix(':')
+	});
+	path.unwrap_or(value).trim().to_owned()
 }
 
+/// Find bracketed path rows and their full spans in a patch preview.
 fn header_parts(input: &str) -> Vec<(String, usize, usize)> {
-	HEADER
-		.captures_iter(input)
-		.filter_map(|captures| {
-			let whole = captures.get(0)?;
-			let mut inner = captures.get(1)?.as_str();
-			if inner.len() >= 5
-				&& inner.as_bytes()[inner.len() - 5] == b'#'
-				&& inner[inner.len() - 4..]
-					.bytes()
-					.all(|byte| byte.is_ascii_hexdigit())
-			{
-				inner = &inner[..inner.len() - 5];
-			}
-			let path = strip_path_noise(inner);
-			(!path.is_empty()).then_some((path, whole.start(), whole.end()))
-		})
-		.collect()
+	let mut headers = Vec::new();
+	let mut search = input;
+	while !search.is_empty() {
+		let row = search.trim_start();
+		let (line, next) = row.split_once('\n').unwrap_or((row, ""));
+		let Some((inner, _)) = line
+			.strip_prefix('[')
+			.and_then(|line| line.split_once(']'))
+			.filter(|(inner, after)| {
+				!inner.is_empty() && !inner.contains('\r') && after.trim_start().is_empty()
+			})
+		else {
+			search = next;
+			continue;
+		};
+		let start = input.len() - search.len();
+		let tail = &row[line.len()..];
+		let nonblank = tail.trim_start();
+		let end = if nonblank.is_empty() {
+			input.len()
+		} else {
+			// Trailing blank rows belong to the header only up to a row ending.
+			let whitespace = &tail[..tail.len() - nonblank.len()];
+			input.len() - tail.len() + whitespace.rfind('\n').expect("row break")
+		};
+		let inner = inner
+			.rsplit_once('#')
+			.filter(|(_, tag)| is_snapshot_tag(tag))
+			.map_or(inner, |(path, _)| path);
+		let path = strip_path_noise(inner);
+		if !path.is_empty() {
+			headers.push((path, start, end));
+		}
+		// After a blank row, the closing boundary can also start the next row.
+		search = if end == input.len() || input.as_bytes()[end - 1] == b'\n' {
+			&input[end..]
+		} else {
+			&input[end + 1..]
+		};
+	}
+	headers
 }
 
 fn inspect_input(input: &str) -> Inspection {

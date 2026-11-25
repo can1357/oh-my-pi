@@ -17,11 +17,6 @@ export function disasmUnitKey(backend: DisasmBackendId, id: string): string {
 	return `${backend}:${id}`;
 }
 
-/** Message text of any thrown value, for logs and wire errors. */
-export function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 /** Split a byte stream into LF-delimited UTF-8 lines; empty lines are skipped. */
 export function lineReader(onLine: (line: string) => void): (chunk: Uint8Array) => void {
 	const decoder = new TextDecoder();
