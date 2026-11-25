@@ -5498,6 +5498,78 @@ export function abliterationModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 16.75 Refuseless (refuseless.com)
+// ---------------------------------------------------------------------------
+
+const REFUSELESS_SEED_BY_ID = new Map(
+	seedModels<"openai-completions">("refuseless").map(model => [model.id, model] as const),
+);
+
+/** Effort ladder from a `reasoning_efforts` list (`off`, `low`, `high`, `max`); without `off`, thinking stays on. */
+function mapRefuselessThinking(levels: unknown[]): ThinkingConfig | undefined {
+	const efforts = parseWireEfforts(levels);
+	if (efforts.length === 0) return undefined;
+	return { mode: "effort", efforts, requiresEffort: !levels.includes("off") };
+}
+
+/**
+ * Refuseless `/v1/models` rows carry `reasoning_efforts`, `vision`,
+ * `context_length`, and the key's billed USD rates as `pricing.*_per_m`. A
+ * field the row omits falls back to the seed row.
+ */
+function mapRefuselessModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference ?? REFUSELESS_SEED_BY_ID.get(defaults.id));
+	const levels = Array.isArray(entry.reasoning_efforts) ? entry.reasoning_efforts : undefined;
+	const thinking = levels ? mapRefuselessThinking(levels) : model.thinking;
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	return {
+		...model,
+		reasoning: levels ? thinking !== undefined : model.reasoning,
+		thinking,
+		input: typeof entry.vision === "boolean" ? (entry.vision ? ["text", "image"] : ["text"]) : model.input,
+		cost: {
+			input: toPositiveNumber(pricing.input_per_m, model.cost.input),
+			output: toPositiveNumber(pricing.output_per_m, model.cost.output),
+			cacheRead: toPositiveNumber(pricing.cached_input_per_m, model.cost.cacheRead),
+			cacheWrite: 0,
+		},
+	};
+}
+
+/**
+ * Refuseless model manager. Keyed `/v1/models` is the account's whole lineup
+ * (public models plus any granted to the account) at its billed rates, so
+ * discovery is authoritative and cached per key; without a key the seed rows
+ * from `rules/providers/refuseless.kdl` are served.
+ */
+export function refuselessModelManagerOptions(
+	config?: SimpleProviderConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return {
+		...createOpenAICompatibleModelManagerOptions({
+			api: "openai-completions",
+			providerId: "refuseless",
+			defaultBaseUrl: getDefaultModelDiscoveryBaseUrl("refuseless")!,
+			config,
+			requireApiKey: true,
+			dynamicModelsAuthoritative: true,
+			dynamicReasoningAuthoritative: true,
+			dynamicInputAuthoritative: true,
+			cacheProviderId: resolveModelCacheProviderId("refuseless", {
+				apiKey: config?.apiKey,
+				baseUrl: config?.baseUrl,
+			}),
+			mapModel: mapRefuselessModel,
+		}),
+		staticModels: seedModels<"openai-completions">("refuseless"),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 16.8 Yolo-Auto (yolo-auto.com)
 // ---------------------------------------------------------------------------
 
