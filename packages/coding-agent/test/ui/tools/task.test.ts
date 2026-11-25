@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { homedir } from "node:os";
+import * as os from "node:os";
 import { createRoot, isUiNode, type UiNode } from "@oh-my-pi/pi-tui";
 import { paintNode } from "@oh-my-pi/pi-tui/term/paint";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
@@ -100,7 +100,7 @@ describe.skipIf(flowFiles.length === 0)("transcript/tool/task corpus", () => {
  * The card shows the cancellation text cleaned, with the home path shortened.
  */
 test("a saved task result without results paints the cancellation text", () => {
-	const home = homedir();
+	const home = os.homedir();
 	const call = new ToolCall({ id: "call_task_saved", name: "task", args: { i: "saved task" } });
 	call.setExecutionStarted();
 	call.updateResult(
