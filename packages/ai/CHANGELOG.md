@@ -4,19 +4,35 @@
 
 ### Added
 
-- Requests that ask for a fast service tier now prefer a credential that offers it: Codex accounts whose plan advertises the tier (Ultrafast), Claude accounts with fast mode available, or a stored or environment API key. Such an account keeps serving on paid overage and inside its reserve, and ordinary balancing across the rest takes over once it is blocked or refused the tier.
+- Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 
 ### Changed
 
-- Embeddings, transcription and video errors now show the upstream message for flat `{ "message": "..." }` responses, and embeddings and transcription errors for flat `{ "error": "..." }` responses, instead of the raw JSON body ([#20490](https://github.com/can1357/oh-my-pi/pull/20490) by [@H4vC](https://github.com/H4vC))
+- `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
 - Cursor tool-call markup (`<|open|>toolscall`) that cursor-agent returns as text now ends the turn with an error saying the call did not run, instead of being stored as assistant text ([#8495](https://github.com/can1357/oh-my-pi/issues/8495), [#20421](https://github.com/can1357/oh-my-pi/pull/20421) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Codex requests no longer send a service tier to an account whose own plan does not offer it.
+- Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
+- The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
+- Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Fast-tier requests now prefer eligible credentials, including Codex plans with Ultrafast, Claude accounts with fast mode, and stored or environment API keys. Eligible accounts continue serving on paid overage and within their reserve, while normal load balancing resumes when the requested tier is unavailable or refused.
+
+### Changed
+
+- Embeddings, transcription, and video errors now present upstream error messages clearly when available instead of exposing raw JSON response bodies.
+
 ### Fixed
 
-- Successful OAuth refreshes now clear refresh-failure backoff so healthy accounts stop triggering usage-aware fallback after an outage ([#20454](https://github.com/can1357/oh-my-pi/issues/20454)).
+- Fixed Codex requests incorrectly sending a service tier to accounts whose plans do not support it.
+- Successful OAuth token refreshes now restore normal account selection after a temporary refresh outage.
 
 ## [19.2.0] - 2026-11-25
 

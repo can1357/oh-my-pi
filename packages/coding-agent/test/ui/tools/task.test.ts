@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import * as os from "node:os";
 import { createRoot, isUiNode, type UiNode } from "@oh-my-pi/pi-tui";
 import { paintNode } from "@oh-my-pi/pi-tui/term/paint";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
@@ -10,7 +11,8 @@ import { noteAgentArrival, resetAgentIdentities } from "../../../src/ui/tools/ag
 import { NestedTaskResults, taskPresenter } from "../../../src/ui/tools/task";
 import { registerSubprocessToolView } from "../../../src/ui/tools/task/subprocess-views";
 import { checkFlowCase, flowCaseFiles, loadFlowCase } from "../transcript/tool-flows";
-import { loadScreenCase, screenCaseFiles, type ToolScreen, toolScreenSuite } from "./screens";
+import { loadScreenCase, plainToolRows, screenCaseFiles, type ToolScreen, toolScreenSuite } from "./screens";
+import { ToolCall } from "../../../src/ui/transcript/tool-block";
 
 /**
  * The fixtures register every agent id they draw, sorted, before any case
@@ -90,4 +92,33 @@ describe.skipIf(flowFiles.length === 0)("transcript/tool/task corpus", () => {
 		const results = checkFlowCase(loadFlowCase("task", file));
 		for (const result of results) stageTest("transcript/tool/task", file, result);
 	}
+});
+
+/**
+ * A TASK result saved by the abort and synthetic paths carries details without
+ * a `results` array; resuming a session holding one crashed the transcript.
+ * The card shows the cancellation text cleaned, with the home path shortened.
+ */
+test("a saved task result without results paints the cancellation text", () => {
+	const home = os.homedir();
+	const call = new ToolCall({ id: "call_task_saved", name: "task", args: { i: "saved task" } });
+	call.setExecutionStarted();
+	call.updateResult(
+		{
+			content: [
+				{
+					type: "text",
+					text: `Tool was not executed: ${home}/.omp/settings.json is unreadable\t(raw)`,
+				},
+			],
+			details: {},
+			isError: true,
+		},
+		false,
+	);
+	const rendered = plainToolRows(call, corpusEnvironment("dark")).join("\n");
+	expect(rendered).toContain("Tool was not executed");
+	expect(rendered).toContain("~/.omp/settings.json");
+	expect(rendered).not.toContain(home);
+	expect(rendered).not.toContain("\t");
 });

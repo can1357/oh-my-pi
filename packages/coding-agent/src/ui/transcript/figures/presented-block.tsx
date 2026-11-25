@@ -140,6 +140,27 @@ function flatRow(text: TspText): TspSpan[] {
 	return spansOf(text).map(span => ({ ...span, t: span.t.replaceAll("\t", "   ").replace(/\r?\n/g, " ") }));
 }
 
+/**
+ * A presenter's compact rows as the spans of one text node: each row on one line, a `\n` span
+ * between rows, theme tokens kept. Terminal rows: `paintPresenterRows` (`ui/styles/figures/presented.ts`).
+ */
+export function presenterRows(rows: readonly TspText[]): TspSpan[] {
+	return rows.flatMap((row, i) => (i === 0 ? flatRow(row) : [{ t: "\n" }, ...flatRow(row)]));
+}
+
+/**
+ * How a presented block draws: in full while expanded, when no presenter answered or one said
+ * `"full"`, and for a block omp has no compact facts of; else as the presenters answered.
+ */
+export function presentedMode(
+	block: TranscriptBlock,
+	answer: TranscriptPresentation,
+	expanded: boolean,
+): "full" | "hidden" | "compact" {
+	if (expanded || answer === undefined || answer === "full" || !presentedFacts(block)) return "full";
+	return answer === "hidden" ? "hidden" : "compact";
+}
+
 /** See the module docs. */
 export function PresentedBlock(props: {
 	readonly block: TranscriptBlock;
@@ -155,11 +176,7 @@ export function PresentedBlock(props: {
 }): JSXNode {
 	const faces = resolveChildren(props.children);
 	const facts = presentedFacts(props.block);
-	const mode = computed((): "full" | "hidden" | "compact" => {
-		const answer = read(props.presentation);
-		if (!facts || read(props.expanded) || answer === undefined || answer === "full") return "full";
-		return answer === "hidden" ? "hidden" : "compact";
-	});
+	const mode = computed(() => presentedMode(props.block, read(props.presentation), read(props.expanded)));
 	const custom = computed(() => {
 		const answer = read(props.presentation);
 		return typeof answer === "object" ? answer.compact : undefined;
@@ -208,12 +225,7 @@ function compactNode(
 	};
 	const rows = spec?.rows ?? [];
 	const body: JSXNode = spec
-		? rows.length > 0 && (
-				<text
-					spans={rows.flatMap((row, i) => (i === 0 ? flatRow(row) : [{ t: "\n" }, ...flatRow(row)]))}
-					wrap="none"
-				/>
-			)
+		? rows.length > 0 && <text spans={presenterRows(rows)} wrap="none" />
 		: isTool
 			? () => face.children()
 			: face;
