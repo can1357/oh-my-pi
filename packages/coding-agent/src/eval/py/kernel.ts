@@ -361,9 +361,6 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		// UTF-8 mode: text-mode subprocess pipes otherwise decode with the ANSI code page on
 		// Windows, and a decode error in CPython's pipe reader thread yields `stdout=None`.
 		spawnEnv.PYTHONUTF8 = "1";
-		// The tool-process mark the bash tool and the JS kernel carry: an `omp <words>`
-		// a cell starts without a terminal is refused unless it says `-p` on purpose.
-		spawnEnv.OMPCODE = "1";
 
 		const scriptPath = await stageRunnerScript("omp-python-runner", "py", RUNNER_SCRIPT);
 		const kernel = new PythonKernel(Snowflake.next(), runtime.pythonPath);

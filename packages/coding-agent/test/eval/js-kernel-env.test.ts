@@ -1,107 +1,55 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { bunShimPathEntry, bunShimScript, jsKernelEnv } from "../../src/eval/js/kernel-env";
-import * as workerClient from "../../src/subprocess/worker-client";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
+import { BUN_STUB_MESSAGE, bunStubPathEntry, jsKernelEnv } from "../../src/eval/js/kernel-env";
 
-const posixOnly = process.platform === "win32" ? describe.skip : describe;
+const isWindows = process.platform === "win32";
+// Windows runs a `.cmd` stub through cmd.exe, which lives in System32.
+const systemPath = isWindows ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32") : undefined;
 
-posixOnly("JS eval kernel env", () => {
-	const roots: string[] = [];
-	const shimRoot = (): string => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-bun-shim-"));
-		roots.push(dir);
-		return dir;
-	};
+describe("JS eval kernel env", () => {
 	afterEach(() => {
 		mock.restore();
-		for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("marks the kernel as a tool process", () => {
-		expect(jsKernelEnv({ PATH: "/usr/bin" }, { compiled: false }).OMPCODE).toBe("1");
-	});
-
-	it("puts a bun shim at the END of a compiled kernel's PATH when none resolves, so the fallback never fires", () => {
-		const root = shimRoot();
+	it("makes Bun.$`bun` reach the stub instead of the running executable when no bun is on PATH", async () => {
+		using dir = TempDir.createSync("@omp-bun-stub-");
 		const env = jsKernelEnv(
-			{ PATH: "/usr/bin:/bin" },
-			{ compiled: true, execPath: "/opt/omp/omp", shimRoot: root, which: () => null },
+			{ PATH: systemPath ?? dir.path() },
+			{ compiled: true, stubDir: dir.join("stub"), which: () => null },
 		);
-		const shimDir = env.PATH.slice("/usr/bin:/bin:".length);
-		expect(env.PATH).toBe(`/usr/bin:/bin:${shimDir}`);
-		expect(path.dirname(shimDir)).toBe(root);
-		const shim = path.join(shimDir, "bun");
-		expect(fs.readFileSync(shim, "utf8")).toBe(bunShimScript("/opt/omp/omp"));
-		expect(fs.statSync(shim).mode & 0o111).toBe(0o111);
-		expect(fs.readdirSync(shimDir)).toEqual(["bun"]);
+		expect(env.PATH).toBe(`${systemPath ?? dir.path()}${path.delimiter}${dir.join("stub")}`);
+		// In a source run Bun's shell falls back to this bun; the stub must win over that fallback.
+		const result = await $`bun --version`.env(env).nothrow().quiet();
+		expect(result.exitCode).toBe(127);
+		expect(result.stderr.toString()).toContain(BUN_STUB_MESSAGE);
 	});
 
-	it("re-enters the executable as bun: the shim runs the exec path with BUN_BE_BUN=1 and the caller's arguments", () => {
-		const root = shimRoot();
-		const fakeExec = path.join(root, "fake omp's exe");
-		fs.writeFileSync(fakeExec, '#!/bin/sh\nprintf \'%s|%s\\n\' "$BUN_BE_BUN" "$*"\n', { mode: 0o755 });
-		const shimDir = bunShimPathEntry(
-			{ PATH: "/usr/bin:/bin" },
-			{ compiled: true, execPath: fakeExec, shimRoot: root, which: () => null },
-		);
-		const out = Bun.spawnSync([path.join(shimDir ?? "", "bun"), "--version"], { env: { PATH: "/usr/bin:/bin" } });
-		expect(out.stdout.toString()).toBe("1|--version\n");
+	it("leaves the env alone when bun already resolves or in a source run", () => {
+		using dir = TempDir.createSync("@omp-bun-stub-");
+		const base = { PATH: "/x" };
+		const stubDir = dir.join("stub");
+		expect(jsKernelEnv(base, { compiled: true, stubDir, which: () => "/x/bun" })).toEqual(base);
+		expect(jsKernelEnv(base, { compiled: false, stubDir, which: () => null })).toEqual(base);
+		expect(fs.existsSync(stubDir)).toBe(false);
 	});
 
-	it("installs no shim when bun already resolves or in a source run", () => {
-		const root = shimRoot();
-		expect(
-			bunShimPathEntry({ PATH: "/x" }, { compiled: true, shimRoot: root, which: () => "/x/bun" }),
-		).toBeUndefined();
-		expect(bunShimPathEntry({ PATH: "/x" }, { compiled: false, shimRoot: root, which: () => null })).toBeUndefined();
-		expect(fs.readdirSync(root)).toEqual([]);
+	it.skipIf(!isWindows)("extends the PATH key the env already uses on Windows instead of adding a second one", () => {
+		using dir = TempDir.createSync("@omp-bun-stub-");
+		const env = jsKernelEnv({ Path: "C:\\x" }, { compiled: true, stubDir: dir.join("stub"), which: () => null });
+		expect(Object.keys(env)).toEqual(["Path"]);
+		expect(env.Path).toBe(`C:\\x;${dir.join("stub")}`);
 	});
 
-	it("gives each executable its own shim that never changes, so another version's live kernel keeps its target", () => {
-		const root = shimRoot();
-		const opts = { compiled: true, shimRoot: root, which: () => null };
-		const dirA = bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/versions/a/omp" });
-		const dirB = bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/versions/b/omp" });
-		expect(dirA).not.toBe(dirB);
-		expect(fs.readFileSync(path.join(dirA ?? "", "bun"), "utf8")).toBe(bunShimScript("/versions/a/omp"));
-		expect(fs.readFileSync(path.join(dirB ?? "", "bun"), "utf8")).toBe(bunShimScript("/versions/b/omp"));
-		const before = fs.statSync(path.join(dirA ?? "", "bun")).mtimeMs;
-		expect(bunShimPathEntry({ PATH: "/x" }, { ...opts, execPath: "/versions/a/omp" })).toBe(dirA);
-		expect(fs.statSync(path.join(dirA ?? "", "bun")).mtimeMs).toBe(before);
-	});
-
-	it("starts the kernel without a shim when the shim root cannot be created, keeping the tool-process mark", () => {
-		const root = shimRoot();
-		const blocked = path.join(root, "not-a-dir");
-		fs.writeFileSync(blocked, "");
-		const env = jsKernelEnv(
-			{ PATH: "/usr/bin:/bin" },
-			{ compiled: true, execPath: "/opt/omp/omp", shimRoot: blocked, which: () => null },
-		);
-		expect(env.PATH).toBe("/usr/bin:/bin");
-		expect(env.OMPCODE).toBe("1");
-	});
-
-	it("leaves no staging file behind when publishing the shim fails", () => {
-		const root = shimRoot();
+	it("starts the kernel without a stub, leaving no staging file, when publishing fails", () => {
+		using dir = TempDir.createSync("@omp-bun-stub-");
 		spyOn(fs, "renameSync").mockImplementation(() => {
 			throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
 		});
-		const shimDir = bunShimPathEntry(
-			{ PATH: "/x" },
-			{ compiled: true, execPath: "/opt/omp/omp", shimRoot: root, which: () => null },
-		);
-		expect(shimDir).toBeUndefined();
-		const [hashDir] = fs.readdirSync(root);
-		expect(fs.readdirSync(path.join(root, hashDir ?? ""))).toEqual([]);
-	});
-
-	it("re-enters the executable an upgrade left in place, not a pruned process.execPath", () => {
-		const root = shimRoot();
-		spyOn(workerClient, "resolveExecutablePath").mockReturnValue("/usr/local/bin/omp");
-		const shimDir = bunShimPathEntry({ PATH: "/x" }, { compiled: true, shimRoot: root, which: () => null });
-		expect(fs.readFileSync(path.join(shimDir ?? "", "bun"), "utf8")).toBe(bunShimScript("/usr/local/bin/omp"));
+		const stubDir = dir.join("stub");
+		expect(bunStubPathEntry("/x", { compiled: true, stubDir, which: () => null })).toBeUndefined();
+		expect(fs.readdirSync(stubDir)).toEqual([]);
 	});
 });

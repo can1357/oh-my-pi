@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- In a compiled omp with no `bun` on PATH, `bun` in an eval cell now runs bun instead of starting a headless omp, and an `omp` started from the bash tool or a JS or Python eval cell without a terminal needs `-p` ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ## [19.2.1] - 2026-11-25
 

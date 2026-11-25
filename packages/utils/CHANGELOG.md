@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `getBunShimDir()`, the cache root under which a compiled omp publishes the `bun` shim its eval kernel puts on PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ## [19.2.1] - 2026-11-25
 
