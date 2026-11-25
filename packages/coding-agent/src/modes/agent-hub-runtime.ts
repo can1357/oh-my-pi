@@ -10,7 +10,7 @@ import type { Settings } from "../config/settings";
 import { IrcBus, type IrcBusApi } from "../irc/bus";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
+import { isSessionTreeRef, registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 import type { AgentHubProps } from "../ui/overlays/pickers/agent-hub";
 
@@ -52,7 +52,7 @@ export function createAgentHubRuntime(
 		// transcript paths never sit under the guest's replica session.
 		inSession:
 			rootSessionFile && !options.remote
-				? ref => !ref.sessionFile || sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile) || copied.has(ref)
+				? ref => isSessionTreeRef(ref, rootSessionFile) || copied.has(ref)
 				: undefined,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
 		irc: options.irc ?? IrcBus.global(),

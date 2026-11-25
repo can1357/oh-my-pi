@@ -27,7 +27,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { logger } from "@oh-my-pi/pi-utils";
+import { Laps, logger } from "@oh-my-pi/pi-utils";
 import {
 	AgentLoopError,
 	abortReasonText,
@@ -1063,16 +1063,22 @@ export class Agent {
 		for (const hook of this.#beforeQueuedMessageDequeueHooks) await hook(signal);
 	}
 
-	async #dequeueSteeringMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
-		if (signal.aborted || this.#steeringQueue.length === 0) return [];
+	/**
+	 * Run the before-dequeue hooks, then take and prepare `queue`'s next batch. Logs at debug how
+	 * long each took: queued input shows nowhere new until its turn's request opens.
+	 */
+	async #dequeueAfterHooks(queue: QueuedMessageQueue, signal: AbortSignal): Promise<AgentMessage[]> {
+		const pending = queue === "steering" ? this.#steeringQueue : this.#followUpQueue;
+		if (signal.aborted || pending.length === 0) return [];
+		const laps = new Laps();
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("steering", signal);
-	}
-
-	async #dequeueFollowUpMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
-		if (signal.aborted || this.#followUpQueue.length === 0) return [];
-		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("followUp", signal);
+		laps.lap("hooksMs");
+		if (signal.aborted) return [];
+		const messages = await this.#prepareQueuedMessageBatch(queue, signal);
+		laps.lap("prepareMs");
+		if (messages.length > 0)
+			logger.debug("Queued messages dequeued", { queue, count: messages.length, ...laps.record() });
+		return messages;
 	}
 
 	async #prepareQueuedMessageBatch(queue: QueuedMessageQueue, signal: AbortSignal): Promise<AgentMessage[]> {
@@ -1215,9 +1221,9 @@ export class Agent {
 			suppress(message, controller);
 			for (const context of additional ?? []) suppress(context, controller);
 		}
-		// Every snapshot counts live-steered messages as pending, so clearing
+		// Every snapshot counts live-steered and delivering messages as pending, so clearing
 		// them is a queue change even when the caller re-queues them right after.
-		const hadLiveSteered = this.#liveSteered.length > 0;
+		const hadUndelivered = this.#liveSteered.length > 0 || this.#queuedMessageDeliveries.size > 0;
 		this.#liveSteered = [];
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
@@ -1228,7 +1234,7 @@ export class Agent {
 		if (withdrawn.steering.length > 0 || withdrawn.followUp.length > 0) {
 			this.queuedMessageGate?.release([...withdrawn.steering, ...withdrawn.followUp]);
 		}
-		if (hadLiveSteered) this.#emitQueueChanged();
+		if (hadUndelivered) this.#emitQueueChanged();
 		return withdrawn;
 	}
 
@@ -1477,6 +1483,8 @@ export class Agent {
 		for (const delivery of this.#queuedMessageDeliveries) {
 			if (delivery.messages[delivery.next] !== m) continue;
 			if (++delivery.next === delivery.messages.length) this.#queuedMessageDeliveries.delete(delivery);
+			// It stops showing as on its way ({@link peekDeliveringMessages}) now that it is recorded.
+			this.#emitQueueChanged();
 			break;
 		}
 	}
@@ -1592,8 +1600,16 @@ export class Agent {
 	 *  requeues them, so the session's empty-submit interrupt counts them as
 	 *  pending input even though {@link peekSteeringQueue} no longer does. */
 	peekUndeliveredQueuedMessages(): AgentMessage[] {
-		const messages = this.peekLiveSteeredMessages();
+		return [...this.peekLiveSteeredMessages(), ...this.peekDeliveringMessages()];
+	}
+
+	/** Messages dequeued from `queue` (both queues when omitted) for the next model request that the
+	 *  transcript has not recorded yet, oldest first. Their events only emit once the request opens,
+	 *  so queue displays keep listing them until then. */
+	peekDeliveringMessages(queue?: QueuedMessageQueue): AgentMessage[] {
+		const messages: AgentMessage[] = [];
 		for (const delivery of this.#queuedMessageDeliveries) {
+			if (queue !== undefined && delivery.queue !== queue) continue;
 			for (let i = delivery.next; i < delivery.messages.length; i++) messages.push(delivery.messages[i]);
 		}
 		return messages;
@@ -1866,14 +1882,14 @@ export class Agent {
 					return;
 				}
 				// Start with queued input, not an extra model call on the existing context.
-				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
+				const queuedSteering = await this.#dequeueAfterHooks("steering", dequeueSignal);
 				if (this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
 					return;
 				}
 
-				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+				const queuedFollowUp = await this.#dequeueAfterHooks("followUp", dequeueSignal);
 				if (this.#abortController !== continuationAbortController) return;
 				if (queuedFollowUp.length > 0) {
 					await this.#runLoop(queuedFollowUp, undefined, signal, true);
@@ -2148,7 +2164,7 @@ export class Agent {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
-				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
+				return this.#dequeueAfterHooks("steering", signal ?? loopSignal);
 			},
 			isUndeliveredQueuedMessage: message => this.#isUndeliveredQueuedMessage(message),
 			hasSteeringMessages: () =>
@@ -2163,7 +2179,7 @@ export class Agent {
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			hasQueuedAsides: this.hasQueuedAsides,
-			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
+			getFollowUpMessages: signal => this.#dequeueAfterHooks("followUp", signal ?? loopSignal),
 			getAsideMessages: async boundary => (await this.#asideMessageProvider?.(boundary)) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			onDetachedToolUpdate: event => this.emitExternalEvent(event),
