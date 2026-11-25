@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
 ### Added
 
 - Added path utilities for checking whether a path exists and whether it is lexically contained within another path without resolving symlinks.

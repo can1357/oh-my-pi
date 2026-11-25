@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
 ### Breaking Changes
 
 - Removed several internal utility exports from the coding-agent package. Import `errorMessage` from `@oh-my-pi/pi-utils/type-guards`, `flattenLine` from `@oh-my-pi/pi-tui/text/sanitize`, and `fuzzyHits` from `@oh-my-pi/pi-coding-agent/utils/fuzzy`; import `stripInlineMarkdown` from `plan-mode/plan-toc`.

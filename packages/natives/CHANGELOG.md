@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
 ### Added
 
 - Added `Shell.heldProcesses()` to inspect all live external processes held by a shell session, including background and `nohup` jobs, with their `nohup` status.

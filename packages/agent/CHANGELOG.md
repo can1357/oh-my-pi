@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
 ### Added
 
 - Added `Agent.peekDeliveringMessages(queue?)` for queued input on its way into the next request that the transcript has not recorded yet; queue listeners hear when it lands.

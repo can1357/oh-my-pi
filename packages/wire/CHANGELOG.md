@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
 ### Added
 
 - Added the TSP `annotate` image action, including its `change` event for delivering the annotated picture.
