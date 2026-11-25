@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { type Api, AuthStorage, type Model } from "@oh-my-pi/pi-ai";
+import { createAuthGatewayRouter } from "@oh-my-pi/pi-ai/auth-gateway";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
@@ -13,6 +14,7 @@ import {
 } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import { expandOnlineTinyModelFallbacks } from "../../src/tiny/online-candidates";
 
 const authStores: AuthStorage[] = [];
 
@@ -24,6 +26,52 @@ async function createAuthStorage(): Promise<AuthStorage> {
 
 afterEach(() => {
 	for (const storage of authStores.splice(0)) storage.close();
+});
+
+test("a Decisions fallback with two upstream pins sends each pin to OpenRouter in order", async () => {
+	const model = getBundledModel("openrouter", "~typesafe/jev-latest");
+	if (!model) throw new Error("expected bundled OpenRouter Jev model");
+	const selector = `${model.provider}/${model.id}`;
+	const settings = Settings.isolated({
+		"retry.fallbackChains": { [selector]: [`${selector}@first`, `${selector}@second`] },
+	});
+	const storage = await createAuthStorage();
+	storage.keys.setRuntime("openrouter", "test-key");
+	const providers: unknown[] = [];
+	const router = createAuthGatewayRouter({
+		storage,
+		resolveModel: id => (id === selector ? model : undefined),
+		fallbackModels: requested => expandOnlineTinyModelFallbacks(requested, settings, [model]).slice(1),
+		fetch: async (_url, init) => {
+			const body = JSON.parse(String(init?.body)) as { provider?: { only: string[] } };
+			providers.push(body.provider);
+			return Response.json({
+				model: model.id,
+				// A missing answer gives the gateway a 502 until the second pin responds.
+				answers: body.provider?.only[0] === "second" ? { ok: { type: "noul", noul: 1 } } : {},
+				usage: { input_tokens: 1, output_tokens: 1 },
+			});
+		},
+	});
+	try {
+		const body = JSON.stringify({
+			model: selector,
+			state: "hello",
+			questions: { ok: { type: "noul", instructions: "Is this a greeting?" } },
+		});
+		const response = await router.route(
+			new Request("http://gateway.test/alpha/decisions", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "Content-Length": String(body.length) },
+				body,
+			}),
+			"test",
+		);
+		expect(providers).toEqual([undefined, { only: ["first"] }, { only: ["second"] }]);
+		expect(response.status).toBe(200);
+	} finally {
+		router.close();
+	}
 });
 
 describe("indexModelsByRequestId (auth-gateway catalog)", () => {

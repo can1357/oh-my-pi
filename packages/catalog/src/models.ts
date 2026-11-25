@@ -278,7 +278,8 @@ function singleRoutingOnly(routing: unknown): string | undefined {
  * Undefined when the model is unpinned or routed across several upstreams.
  */
 export function getUpstreamPin(model: Model<Api>): string | undefined {
-	const compat = model.compat;
+	// The Decisions wire reads routing directly from the configured compat.
+	const compat = model.api === "openrouter-decisions" ? model.compatConfig : model.compat;
 	if (!compat || typeof compat !== "object") return undefined;
 	if (modelMatchesHost(model, "vercelAIGateway") && "vercelGatewayRouting" in compat) {
 		return singleRoutingOnly(compat.vercelGatewayRouting);

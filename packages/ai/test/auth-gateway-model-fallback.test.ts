@@ -106,24 +106,33 @@ describe("auth-gateway model fallback", () => {
 
 	const toBackup = (model: Model<Api>): Model<Api>[] => (model.id === "primary" ? [backup] : []);
 
-	it("resends a failed request to the model's fallback, but not after the requested model's own 400", async () => {
+	it("resends a transient failure but keeps authentication, billing, and validation failures on the requested model", async () => {
 		boot(toBackup);
 		expect(await chat()).toEqual({ status: 200, content: "from-backup" });
-
-		failures["mock/primary"] = 400;
 		backup.reset();
-		expect((await chat()).status).toBe(400);
+		for (const status of [400, 401, 402, 403, 422]) {
+			failures["mock/primary"] = status;
+			expect((await chat()).status).toBe(status);
+		}
 		expect(backup.calls).toHaveLength(0);
 	});
 
-	it("moves past a fallback that rejects the request, and answers with the requested model's failure when none succeeds", async () => {
+	it("advances past a rate-limited fallback but stops at a terminal error and keeps the primary failure", async () => {
 		const refuser = mockModel("alpha", "refuser");
-		failures["alpha/refuser"] = 400;
+		failures["alpha/refuser"] = 429;
 		boot(model => (model.id === "primary" ? [refuser, backup] : []));
 		expect(await chat()).toEqual({ status: 200, content: "from-backup" });
 
 		failures["alpha/backup"] = 502;
 		expect((await chat()).status).toBe(503);
+		delete failures["alpha/backup"];
+
+		backup.reset();
+		for (const status of [400, 413, 499]) {
+			failures["alpha/refuser"] = status;
+			expect((await chat()).status).toBe(503);
+		}
+		expect(backup.calls).toHaveLength(0);
 	});
 
 	it("dispatches the chain's own model, which the catalog lookup may not return", async () => {
@@ -151,6 +160,19 @@ describe("auth-gateway model fallback", () => {
 			throw new Error("chain lookup failed");
 		});
 		expect((await chat()).status).toBe(503);
+	});
+
+	it("returns the primary error when valid JSON is too deeply nested to serialize for a fallback", async () => {
+		const { url } = boot(toBackup);
+		const nested = `${"[".repeat(100_000)}0${"]".repeat(100_000)}`;
+		const response = await fetch(`${url}/v1/chat/completions`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: `Bearer ${GATEWAY_TOKEN}` },
+			body: `{"model":"mock/primary","messages":[{"role":"user","content":"hi"}],"extra":${nested}}`,
+		});
+		expect(response.status).toBe(503);
+		expect(primary.calls).toHaveLength(1);
+		expect(backup.calls).toHaveLength(0);
 	});
 
 	it("answers a request whose body the host already read, instead of rejecting", async () => {

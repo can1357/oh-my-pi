@@ -942,7 +942,6 @@ const FALLBACK_ROUTES: Record<string, true> = {
 	"/v1/audio/transcriptions": true,
 	"/v1/embeddings": true,
 	"/v1/rerank": true,
-	"/v1/videos": true,
 };
 
 /** The declared length selects candidates. The actual byte count limits replay. */
@@ -951,6 +950,11 @@ function mayFallBack(req: Request, pathname: string, opts: AuthGatewayRouteOptio
 	if (req.headers.get("content-type")?.toLowerCase().startsWith("multipart/")) return false;
 	const declared = Number(req.headers.get("content-length"));
 	return Number.isSafeInteger(declared) && declared > 0 && declared <= MAX_FALLBACK_BODY_BYTES;
+}
+
+/** Each attempt may advance only on rate limits or server failures (including network errors mapped to 502). */
+function canRetryModel(status: number): boolean {
+	return status === 429 || (status >= 500 && status < 600);
 }
 
 /** A failed request that can move on: its JSON body and the models to resend it to. */
@@ -1134,7 +1138,7 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 			return formatError(413, "invalid_request_error", FALLBACK_BODY_TOO_LARGE);
 		}
 		const model = first.model;
-		if (!model || failure.status <= 400 || failure.status === 413 || failure.status === 499 || req.signal.aborted) {
+		if (!model || !canRetryModel(failure.status) || req.signal.aborted) {
 			return failure;
 		}
 		let plan: FallbackPlan | undefined;
@@ -1163,12 +1167,18 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 		for (const fallback of fallbacks) {
 			if (req.signal.aborted) break;
 			const id = `${fallback.provider}/${fallback.id}`;
-			const attempt = new Request(req.url, {
-				method: req.method,
-				headers,
-				body: JSON.stringify({ ...body, model: id }),
-				signal: req.signal,
-			});
+			let attempt: Request;
+			try {
+				attempt = new Request(req.url, {
+					method: req.method,
+					headers,
+					body: JSON.stringify({ ...body, model: id }),
+					signal: req.signal,
+				});
+			} catch {
+				// Valid JSON can be too deeply nested to serialize for a retry.
+				return failure;
+			}
 			// Use the chain's model so its upstream pin reaches the provider.
 			const response = await dispatch(attempt, peer, {
 				...opts,
@@ -1184,6 +1194,7 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 				status: response.status,
 			});
 			await response.body?.cancel().catch(() => {});
+			if (!canRetryModel(response.status)) break;
 		}
 		return failure;
 	};
