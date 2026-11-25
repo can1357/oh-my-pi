@@ -509,10 +509,6 @@
 			"types": "./src/web/*.ts",
 			"import": "./src/web/*.ts"
 		},
-		"./web/scrapers": {
-			"types": "./src/web/scrapers/index.ts",
-			"import": "./src/web/scrapers/index.ts"
-		},
 		"./web/scrapers/*": {
 			"types": "./src/web/scrapers/*.ts",
 			"import": "./src/web/scrapers/*.ts"
