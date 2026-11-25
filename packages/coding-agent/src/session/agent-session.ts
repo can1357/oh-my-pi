@@ -3044,8 +3044,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 			preserveAdvisorCard: card => this.#preserveAdvisorCard(card),
 			hasPendingNextTurnMessages: () => this.#pendingNextTurnMessages.length > 0,
-			convertToLlmForSideRequest: (messages, reader) =>
-				this.#providerBoundary.convertToLlmForSideRequest(messages, reader),
+			convertToLlmForSideRequest: (messages, reader) => this.#providerBoundary.convertToLlmForSideRequest(messages, reader),
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
 			resolveContextPromotionTarget: (model, contextWindow, signal) =>
 				this.#maintenance.resolveContextPromotionTarget(model, contextWindow, signal),
@@ -15526,9 +15525,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				reserveTokens: cfgBranchSummaryReserveTokens.get(this.settings),
 				metadata: this.agent.metadataForProvider(model.provider),
 				convertToLlm: messages =>
-					this.#providerBoundary.convertToLlmForSideRequest(messages, model, {
-						withImageDescriptions: !!describeFor,
-					}),
+					this.#providerBoundary.convertToLlmForSideRequest(messages, model, { withImageDescriptions: !!describeFor }),
 				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
 				// Same per-provider concurrency cap rationale as the compaction
 				// path above (chatgpt-codex review on #3751).
