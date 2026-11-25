@@ -10,6 +10,7 @@ import { ExtensionUiController } from "../../../src/modes/controllers/extension-
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "../../../src/modes/types";
 import { initTheme } from "../../../src/ui/theme/service";
+import * as externalEditor from "../../../src/utils/external-editor";
 import {
 	disposeProgramStatus,
 	initProgramStatus,
@@ -17,7 +18,6 @@ import {
 	setRunStatus,
 } from "../../../src/utils/run-status";
 import * as titleGenerator from "../../../src/utils/title-generator";
-import * as externalEditor from "../../../src/utils/external-editor";
 import { attachTerminal, createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(() => {
