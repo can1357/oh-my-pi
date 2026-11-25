@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `commandcode:monthly` usage limit for Command Code subscriptions: the monthly credit grant, graded against what remains and reset at the subscription's billing period end, so a monthly cap that binds before the weekly window is visible ([#16492](https://github.com/can1357/oh-my-pi/pull/16492) by [@enieuwy](https://github.com/enieuwy))
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

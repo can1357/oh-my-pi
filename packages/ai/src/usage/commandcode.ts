@@ -8,7 +8,7 @@ import type {
 	UsageReport,
 } from "../usage";
 import { isRecord } from "../utils";
-import { HOUR_MS, parsePositiveTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { HOUR_MS, parseIsoTimestamp, parsePositiveTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const PROVIDER = "commandcode";
 const DEFAULT_ORIGIN = "https://api.commandcode.ai";
@@ -16,6 +16,24 @@ const DEFAULT_ORIGIN = "https://api.commandcode.ai";
 // field from that, so the plain identity route is enough.
 const WHOAMI_PATH = "/alpha/whoami";
 const CREDITS_PATH = "/alpha/billing/credits";
+const SUBSCRIPTIONS_PATH = "/alpha/billing/subscriptions";
+
+/**
+ * Monthly credit grant per plan, in credits (USD). The credits route reports
+ * only what REMAINS of the grant (`monthlyCredits`), so the total comes from
+ * `monthlyCreditsGranted` when the route sends it and from the plan otherwise.
+ * Values follow https://commandcode.ai/pricing, keyed by the subscription's
+ * `planId`.
+ */
+const MONTHLY_GRANT_BY_PLAN: Readonly<Record<string, number>> = {
+	"individual-go": 10,
+	"individual-go-v1": 10,
+	"individual-goat": 70,
+	"individual-pro": 30,
+	"individual-pro-v1": 80,
+	"individual-max": 150,
+	"individual-ultra": 300,
+};
 
 /**
  * Command Code's inference base carries `/provider` or `/provider/v1`, while the
@@ -42,14 +60,17 @@ function finiteNumber(value: unknown): number | undefined {
 
 /**
  * Returns the unwrapped JSON body, or `null` for any failure that should read
- * as "no data", 403 included. Only a 401 throws, so a revoked key purges the
- * cached report instead of re-serving it.
+ * as "no data", 403 included. Only a 401 on a required route throws, so a
+ * revoked key purges the cached report instead of re-serving it; an optional
+ * route reads its 401 as "no data", so a route-specific denial cannot
+ * invalidate a key the required routes accepted.
  */
 async function getJson(
 	url: string,
 	apiKey: string,
 	signal: AbortSignal | undefined,
 	ctx: UsageFetchContext,
+	optional = false,
 ): Promise<Record<string, unknown> | null> {
 	try {
 		const response = await ctx.fetch(url, {
@@ -60,7 +81,7 @@ async function getJson(
 			signal,
 		});
 		if (!response.ok) {
-			if (response.status === 401) {
+			if (response.status === 401 && !optional) {
 				throw new ProviderHttpError(
 					`Command Code usage endpoint returned ${response.status} ${response.statusText}`.trim(),
 					response.status,
@@ -131,6 +152,40 @@ function buildWindowLimit(
 }
 
 /**
+ * Builds the monthly grant limit from the remaining `monthlyCredits`, the
+ * grant size, and the subscription's billing period. Without a known grant
+ * the remaining amount alone cannot be graded, and without the billing period
+ * the limit has no reset, so in either case no limit is emitted and the
+ * balance limit stays the only record of it.
+ */
+function buildMonthlyLimit(
+	remaining: number | undefined,
+	credits: Record<string, unknown>,
+	subscription: Record<string, unknown> | undefined,
+	accountId: string,
+	orgId: string | undefined,
+): UsageLimit | undefined {
+	if (remaining === undefined) return undefined;
+	const periodStart = parseIsoTimestamp(subscription?.currentPeriodStart);
+	const resetsAt = parseIsoTimestamp(subscription?.currentPeriodEnd);
+	if (periodStart === undefined || resetsAt === undefined || resetsAt <= periodStart) return undefined;
+	const durationMs = resetsAt - periodStart;
+	const planId = nonEmptyString(subscription?.planId);
+	const grant = finiteNumber(credits.monthlyCreditsGranted) ?? (planId ? MONTHLY_GRANT_BY_PLAN[planId] : undefined);
+	if (grant === undefined || grant <= 0) return undefined;
+	const used = Math.max(0, grant - remaining);
+	const usedFraction = used / grant;
+	return {
+		id: `${PROVIDER}:monthly`,
+		label: "Monthly credits",
+		scope: { provider: PROVIDER, accountId, ...(orgId ? { orgId } : {}), windowId: "monthly", shared: true },
+		window: { id: "monthly", label: "Monthly", durationMs, resetsAt },
+		amount: { used, limit: grant, remaining, usedFraction, unit: "credits" },
+		status: usageStatus(usedFraction),
+	};
+}
+
+/**
  * Reads the account routes that the Command Code CLI calls with the same API
  * key; the Provider API documents no usage endpoint. Pay-as-you-go accounts
  * carry no `windowLimits`, so they report only the credit balance. Credits
@@ -151,8 +206,13 @@ async function fetchCommandCodeUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	const orgId = nonEmptyString(org?.id);
 	const orgLogin = nonEmptyString(org?.login);
 
-	const creditsUrl = `${origin}${CREDITS_PATH}${orgId ? `?orgId=${encodeURIComponent(orgId)}` : ""}`;
-	const creditsBody = await getJson(creditsUrl, params.credential.apiKey, params.signal, ctx);
+	const orgQuery = orgId ? `?orgId=${encodeURIComponent(orgId)}` : "";
+	const creditsBody = await getJson(
+		`${origin}${CREDITS_PATH}${orgQuery}`,
+		params.credential.apiKey,
+		params.signal,
+		ctx,
+	);
 	if (!creditsBody) return null;
 	const credits = isRecord(creditsBody.credits) ? creditsBody.credits : undefined;
 	if (!credits) return null;
@@ -161,12 +221,28 @@ async function fetchCommandCodeUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	const free = finiteNumber(credits.freeCredits);
 	if (monthly === undefined && purchased === undefined && free === undefined) return null;
 
+	// Only a subscription carries a monthly grant, so pay-as-you-go accounts
+	// skip the lookup. A failed lookup drops the monthly limit and nothing else.
+	const subscriptionBody =
+		monthly !== undefined
+			? await getJson(
+					`${origin}${SUBSCRIPTIONS_PATH}${orgQuery}`,
+					params.credential.apiKey,
+					params.signal,
+					ctx,
+					true,
+				)
+			: null;
+	const subscription = subscriptionBody ?? undefined;
+
 	const limits: UsageLimit[] = [];
 	const windowLimits = isRecord(creditsBody.windowLimits) ? creditsBody.windowLimits : undefined;
 	for (const spec of WINDOWS) {
 		const limit = buildWindowLimit(spec, windowLimits?.[spec.key], userId, orgId);
 		if (limit) limits.push(limit);
 	}
+	const monthlyLimit = buildMonthlyLimit(monthly, credits, subscription, userId, orgId);
+	if (monthlyLimit) limits.push(monthlyLimit);
 	limits.push({
 		id: `${PROVIDER}:balance`,
 		label: "Credit balance",
@@ -183,9 +259,9 @@ async function fetchCommandCodeUsage(params: UsageFetchParams, ctx: UsageFetchCo
 			email: nonEmptyString(user?.email),
 			orgId,
 			orgName: orgLogin,
-			planType: nonEmptyString(credits.planId),
+			planType: nonEmptyString(subscription?.planId) ?? nonEmptyString(credits.planId),
 		},
-		raw: { whoami, credits: creditsBody },
+		raw: { whoami, credits: creditsBody, ...(subscriptionBody ? { subscription: subscriptionBody } : {}) },
 	};
 }
 
@@ -196,12 +272,17 @@ export const commandCodeUsageProvider: UsageProvider = {
 	validatesCredentials: true,
 };
 
-/** Ranks Command Code accounts by the 5-hour and weekly credit windows. */
+/**
+ * Ranks Command Code accounts by the 5-hour and weekly credit windows. The
+ * monthly grant row is display-only: purchased and free credits keep serving
+ * once the grant is spent, so it must never hard-block the credential.
+ */
 export const commandCodeRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits: report => ({
 		primary: report.limits.find(limit => limit.window?.id === "5h"),
 		secondary: report.limits.find(limit => limit.window?.id === "7d"),
 	}),
+	scopeLimits: report => report.limits.filter(limit => limit.window?.id !== "monthly"),
 	windowDefaults: {
 		primaryMs: 5 * HOUR_MS,
 		secondaryMs: WEEK_MS,
