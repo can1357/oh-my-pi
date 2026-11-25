@@ -71,6 +71,35 @@ describe("endpoint client errors", () => {
 		await expect(poll).rejects.toThrow("video API error (400): Bad Request");
 	});
 
+	it("a usable top-level message wins over an empty error", async () => {
+		await expect(embedWith('{"error":"","message":"The input file is unsupported"}')).rejects.toThrow(
+			"embeddings API error (400): The input file is unsupported",
+		);
+	});
+
+	it("a flat quota rejection keeps its code, so the request moves to a sibling credential", async () => {
+		const keys: string[] = [];
+		const upstream: FetchImpl = async (_input, init) => {
+			const key = new Headers(init?.headers).get("authorization");
+			keys.push(String(key));
+			if (key === "Bearer exhausted") {
+				return new Response('{"message":"Request rejected","code":"insufficient_quota"}', { status: 429 });
+			}
+			return Response.json({
+				object: "list",
+				data: [{ object: "embedding", index: 0, embedding: [0.5] }],
+				model: "text-embedding-3-small",
+				usage: { prompt_tokens: 1, total_tokens: 1 },
+			});
+		};
+		const result = await embed(
+			model("openai-embeddings", "text-embedding-3-small", "embedding"),
+			{ input: "hi", encodingFormat: "float" },
+			{ apiKey: ctx => (ctx.error === undefined ? "exhausted" : "sibling"), fetch: upstream },
+		);
+		expect(result.embeddings).toEqual([{ index: 0, embedding: [0.5] }]);
+		expect(keys).toEqual(["Bearer exhausted", "Bearer sibling"]);
+	});
 	it("a body that is not an envelope is reported as-is", async () => {
 		await expect(embedWith("upstream timed out")).rejects.toThrow("embeddings API error (400): upstream timed out");
 	});

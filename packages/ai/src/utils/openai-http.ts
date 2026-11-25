@@ -178,8 +178,11 @@ async function* decodeStream<TEvent>(
 }
 
 /**
- * Message and machine code of a failed OpenAI-compatible response. `detail` is
- * the raw body when no envelope parses and empty when the envelope's message is.
+ * Message and machine code of a failed OpenAI-compatible response, for the
+ * nested `{ error: { message, code | type } }` envelope and the flat
+ * `{ error: "text", code }` / `{ message, code }` shapes. `detail` is the raw
+ * body when none of them parses, and empty when the envelope is present but
+ * carries no text anywhere.
  */
 export async function readOpenAIErrorEnvelope(
 	response: Response,
@@ -189,12 +192,22 @@ export async function readOpenAIErrorEnvelope(
 	try {
 		bodyJson = JSON.parse(bodyText);
 	} catch {}
-	const { detail, code } = OpenAIHttpError.parseEnvelope(bodyJson, bodyText);
-	// An envelope that is present but empty says nothing: report no detail, so
-	// callers fall back to the status text rather than echoing the JSON body.
-	const error = isRecord(bodyJson) ? bodyJson.error : undefined;
-	const emptyEnvelope = error === "" || (isRecord(error) && error.message === "");
-	return { detail: emptyEnvelope ? "" : detail, code };
+	const parsed = OpenAIHttpError.parseEnvelope(bodyJson, bodyText);
+	if (!isRecord(bodyJson)) return parsed;
+
+	const { error, message } = bodyJson;
+	const topMessage = typeof message === "string" && message.length > 0 ? message : undefined;
+	if (isRecord(error)) {
+		// A nested envelope with an empty message says nothing; a top-level
+		// message, when there is one, is the next best text.
+		return error.message === "" ? { detail: topMessage ?? "", code: parsed.code } : parsed;
+	}
+	// Flat shapes. `parseEnvelope` drops their machine code, which credential
+	// rotation reads (`insufficient_quota`), so carry it through.
+	const code = typeof bodyJson.code === "string" ? bodyJson.code : undefined;
+	const text = typeof error === "string" && error.length > 0 ? error : topMessage;
+	if (text !== undefined) return { detail: text, code };
+	return { detail: error === "" ? "" : parsed.detail, code };
 }
 
 /** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */
