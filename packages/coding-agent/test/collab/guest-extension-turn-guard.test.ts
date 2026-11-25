@@ -15,7 +15,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionAPI, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { GuestLifecycleEmitter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/lifecycle-mirror";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -100,8 +100,9 @@ describe("collab guest extension turn guard", () => {
 			showError: (message: string) => errors.push(message),
 			syncComposerShape: () => {},
 			syncExtensionLinks: () => {},
+			setToolUIContext: () => {},
 		} as unknown as InteractiveModeContext;
-		new ExtensionUiController(ctx).initializeHookRunner({} as ExtensionUIContext, false);
+		await new ExtensionUiController(ctx).initHooksAndCustomTools();
 
 		const mirror = new GuestLifecycleEmitter();
 		const mirrorHostRun = async (): Promise<void> => {

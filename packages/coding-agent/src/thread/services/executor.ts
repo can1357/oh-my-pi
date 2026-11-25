@@ -6,7 +6,6 @@
  * worker forwards for sessions homed elsewhere, routing them on.
  */
 import { runFollowUpTurnOnThisThread, runSubagentFollowUpTurn, runSubagentRunRequest } from "../../task/executor";
-import { revivePersistedSubagent } from "../../task/persisted-revive";
 import { invalidateRemoteAuthAvailability } from "./auth-remote";
 import { setWorkerMainLink } from "../executor-routing";
 import type { ThreadService } from "../services";
@@ -30,6 +29,9 @@ export const executorThreadService: ThreadService = {
 		});
 		// Main resolved the home already; running here never bounces the turn back.
 		link.handle("runFollowUpTurn", options => runFollowUpTurnOnThisThread(options));
-		link.handle("revivePersisted", (spec, expected) => revivePersistedSubagent(spec, expected));
+		link.handle("revivePersisted", async (spec, expected) => {
+			const { revivePersistedSubagent } = await import("../../task/persisted-revive");
+			return revivePersistedSubagent(spec, expected);
+		});
 	},
 };

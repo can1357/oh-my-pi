@@ -10,6 +10,7 @@ import * as path from "node:path";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
 import { PtySession } from "@oh-my-pi/pi-natives";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import xterm from "@oh-my-pi/pi-utils/vterm";
 
 const DEFAULT_PROXY_HOST = "127.0.0.1";
@@ -691,9 +692,6 @@ export class ClaudeMessagesProxy {
 		clientTls.on("error", () => upstreamTls.destroy());
 		upstreamTls.on("error", () => clientTls.destroy());
 	}
-}
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 async function shutdownPty(session: PtySession, runPromise: Promise<unknown>): Promise<void> {
