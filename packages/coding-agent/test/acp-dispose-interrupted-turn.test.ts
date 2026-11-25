@@ -11,7 +11,7 @@ import { INTERRUPTED_TURN_ERROR } from "@oh-my-pi/pi-coding-agent/session/exit-d
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
-import type { AgentSideConnection } from "@oh-my-pi/pi-utils/acp";
+import { AgentSideConnection, type AnyMessage, type Stream } from "@oh-my-pi/pi-utils/acp";
 
 describe("AcpAgent.dispose under a running turn", () => {
 	let tempDir: TempDir;
@@ -67,13 +67,13 @@ describe("AcpAgent.dispose under a running turn", () => {
 					return { delayMs: 60_000, content: ["never streamed"] };
 				},
 			]);
-			const connection = {
-				sessionUpdate: async () => {},
-				extNotification: async () => {},
-				signal: new AbortController().signal,
-				closed: Promise.withResolvers<void>().promise,
-			} as unknown as AgentSideConnection;
-			const acp = new AcpAgent(connection, async () => session);
+			let acp: AcpAgent;
+			const sink: Stream = {
+				writable: new WritableStream<AnyMessage>(),
+				readable: new ReadableStream<AnyMessage>(),
+			};
+			const connection = new AgentSideConnection(() => acp, sink);
+			acp = new AcpAgent(connection, async () => session);
 			try {
 				await acp.initialize({ protocolVersion: 1, clientCapabilities: {} });
 				const { sessionId } = await acp.newSession({ cwd: tempDir.path(), mcpServers: [] });
