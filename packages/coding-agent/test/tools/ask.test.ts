@@ -1040,6 +1040,19 @@ describe("AskTool answered by an extension", () => {
 		});
 	});
 
+	it("a timeout is reported as unanswered even when the form's values are valid", async () => {
+		const ext = channel();
+		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 30 }, timedOut: true }));
+		await new AskTool(createSession()).execute(
+			"call-timeout",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			withChannel(createContext({ formDialog }), ext.extensionAsk),
+		);
+		expect(ext.resolved[0]).toMatchObject({ answered: false, by: "user" });
+	});
+
 	it("once the user answers, the extension can no longer", async () => {
 		const ext = channel();
 		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 1 } }));

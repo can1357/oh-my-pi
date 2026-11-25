@@ -455,18 +455,21 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				await untilAborted(signal, () => this.runner.waitForToolApprovalPreview(toolCallId));
 			}
 
-			// The prompt is built first: a tool's `formatApprovalDetails` may throw, and then no approval was
-			// requested, so nothing is recorded or reported and the preflight is cancelled.
+			// The prompt is built first: a tool's `formatApprovalDetails` may throw, or the call may abort while a
+			// directory grant's folder is listed; then no approval was requested, so nothing is recorded or
+			// reported and the preflight is cancelled.
 			const safetyAppendix =
 				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
 			let approvalPrompt: ExtensionApprovalPrompt;
 			try {
-				approvalPrompt = await buildApprovalPrompt(this.tool, resolvedArgs, {
-					reason: approvalCheck.reason,
-					appendix: safetyAppendix,
-					sessionSubject: sessionScope?.subject,
-					grants: cacheTargets,
-				});
+				approvalPrompt = await untilAborted(signal, () =>
+					buildApprovalPrompt(this.tool, resolvedArgs, {
+						reason: approvalCheck.reason,
+						appendix: safetyAppendix,
+						sessionSubject: sessionScope?.subject,
+						grants: cacheTargets,
+					}),
+				);
 			} catch (err) {
 				cancelPreflight();
 				throw err;

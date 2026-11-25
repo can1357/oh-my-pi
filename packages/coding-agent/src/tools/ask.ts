@@ -745,9 +745,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				sessionId,
 				askId: toolCallId,
 				toolCallId,
-				answered:
-					settled !== undefined &&
-					!(settled.timedOut && named.some(field => fieldError(field, settled.data[field.name!]) !== undefined)),
+				// A timeout is never an answer, even when it submits valid values the form already held.
+				answered: settled !== undefined && !settled.timedOut,
 				by,
 			});
 		}

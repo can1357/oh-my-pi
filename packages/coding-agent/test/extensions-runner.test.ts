@@ -3726,6 +3726,21 @@ describe("ExtensionRunner", () => {
 				expect(notify).toHaveBeenCalledWith("Approval for dangerous_tool answered by extension", "info");
 			});
 
+			it("a call aborted while its prompt is built requests nothing", async () => {
+				const { seen, executed, run } = await setup();
+				const turn = new AbortController();
+				turn.abort();
+				await expect(run("call-aborted-early", { signal: turn.signal })).rejects.toThrow(/Aborted/);
+				expect(seen.requested).toEqual([]);
+				expect(seen.resolved).toEqual([]);
+				expect(
+					sessionManager
+						.getEntries()
+						.filter(entry => entry.type === "custom" && entry.customType === "tool_approval_requested"),
+				).toEqual([]);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
 			it("aborting the call stops waiting on a handler and closes the approval", async () => {
 				const { seen, executed, run } = await setup();
 				const release = Promise.withResolvers<void>();
