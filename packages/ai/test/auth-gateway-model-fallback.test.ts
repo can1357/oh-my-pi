@@ -106,22 +106,25 @@ describe("auth-gateway model fallback", () => {
 
 	const toBackup = (model: Model<Api>): Model<Api>[] => (model.id === "primary" ? [backup] : []);
 
-	it("resends a transient failure but keeps authentication, billing, and validation failures on the requested model", async () => {
+	it("returns a backup's answer when the primary runs out of credits, but does not retry authentication or validation failures", async () => {
 		boot(toBackup);
+		failures["mock/primary"] = 402;
 		expect(await chat()).toEqual({ status: 200, content: "from-backup" });
 		backup.reset();
-		for (const status of [400, 401, 402, 403, 422]) {
+		for (const status of [400, 401, 403, 413, 422, 499]) {
 			failures["mock/primary"] = status;
 			expect((await chat()).status).toBe(status);
 		}
 		expect(backup.calls).toHaveLength(0);
 	});
 
-	it("advances past a rate-limited fallback but stops at a terminal error and keeps the primary failure", async () => {
+	it("advances past exhausted or rate-limited backups but stops at a terminal error and keeps the primary failure", async () => {
 		const refuser = mockModel("alpha", "refuser");
-		failures["alpha/refuser"] = 429;
 		boot(model => (model.id === "primary" ? [refuser, backup] : []));
-		expect(await chat()).toEqual({ status: 200, content: "from-backup" });
+		for (const status of [402, 429]) {
+			failures["alpha/refuser"] = status;
+			expect(await chat()).toEqual({ status: 200, content: "from-backup" });
+		}
 
 		failures["alpha/backup"] = 502;
 		expect((await chat()).status).toBe(503);

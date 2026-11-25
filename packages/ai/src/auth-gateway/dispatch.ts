@@ -58,7 +58,7 @@ export interface AuthGatewayRouteOptions {
 	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
 	excludeProviders?: ReadonlySet<string>;
 	/**
-	 * Models to try, in order, after an HTTP 429 or 5xx. Omit to disable
+	 * Models to try, in order, after HTTP 402, 429, or 5xx. Omit to disable
 	 * fallback. The router replaces only `model` in the JSON body. It skips
 	 * other model kinds and models outside the caller's grants. Video jobs,
 	 * `/v1/pi/stream`, multipart bodies, and bodies without a declared length

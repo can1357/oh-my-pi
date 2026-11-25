@@ -952,9 +952,9 @@ function mayFallBack(req: Request, pathname: string, opts: AuthGatewayRouteOptio
 	return Number.isSafeInteger(declared) && declared > 0 && declared <= MAX_FALLBACK_BODY_BYTES;
 }
 
-/** Each attempt may advance only on rate limits or server failures (including network errors mapped to 502). */
+/** Each attempt may advance on exhausted credits, rate limits, or server failures (including network errors). */
 function canRetryModel(status: number): boolean {
-	return status === 429 || (status >= 500 && status < 600);
+	return status === 402 || status === 429 || (status >= 500 && status < 600);
 }
 
 /** A failed request that can move on: its JSON body and the models to resend it to. */
