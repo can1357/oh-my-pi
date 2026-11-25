@@ -37,6 +37,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		session: { isStreaming: false, moveSession },
 		sessionManager: {
 			getCwd: () => state.cwd,
+			getSessionId: () => "session-1",
 			captureState,
 			restoreState,
 			rollbackMove,

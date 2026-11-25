@@ -4307,46 +4307,54 @@ pub mod matchers {
 		}
 	}
 
+	/// Parses a decimal count, using the first sign for comparison and allowing a second sign.
+	fn parse_comparable_prefix(value: &str) -> Option<(ComparableValue, &str)> {
+		let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
+		let digits = unsigned.strip_prefix(['+', '-']).unwrap_or(unsigned);
+		let end = digits.as_bytes().iter().take_while(|b| b.is_ascii_digit()).count();
+		let (number, suffix) = digits.split_at(end);
+		let val = number.parse().ok()?;
+		let comparison = match value.as_bytes()[0] {
+			b'+' => ComparableValue::MoreThan(val),
+			b'-' => ComparableValue::LessThan(val),
+			_ => ComparableValue::EqualTo(val),
+		};
+		Some((comparison, suffix))
+	}
+
+	/// Parses an entire optionally signed count such as `+10`.
 	fn convert_arg_to_comparable_value(
 		option_name: &str,
 		value_as_string: &str,
 	) -> Result<ComparableValue, Box<dyn Error>> {
-		let re = Regex::new(r"^([-+]?)[-+]?(\d+)$")?;
-		if let Some(groups) = re.captures(value_as_string)
-			&& let Ok(val) = groups[2].parse::<u64>()
-		{
-			return Ok(match &groups[1] {
-				"+" => ComparableValue::MoreThan(val),
-				"-" => ComparableValue::LessThan(val),
-				_ => ComparableValue::EqualTo(val),
-			});
+		if let Some((comparison, "")) = parse_comparable_prefix(value_as_string) {
+			return Ok(comparison);
 		}
 		Err(From::from(format!(
 			"Expected a decimal integer (with optional + or - prefix) argument to {option_name}, but \
-			 got `{value_as_string}'"
+				 got `{value_as_string}'"
 		)))
 	}
 
-	fn convert_arg_to_comparable_value_and_suffix(
+	/// Parses the first optionally signed count and its suffix on the final line.
+	fn convert_arg_to_comparable_value_and_suffix<'a>(
 		option_name: &str,
-		value_as_string: &str,
-	) -> Result<(ComparableValue, String), Box<dyn Error>> {
-		let re = Regex::new(r"([-+]?)[-+]?(\d+)(.*)$")?;
-		if let Some(groups) = re.captures(value_as_string)
-			&& let Ok(val) = groups[2].parse::<u64>()
-		{
-			return Ok((
-				match &groups[1] {
-					"+" => ComparableValue::MoreThan(val),
-					"-" => ComparableValue::LessThan(val),
-					_ => ComparableValue::EqualTo(val),
-				},
-				groups[3].to_string(),
-			));
+		value_as_string: &'a str,
+	) -> Result<(ComparableValue, &'a str), Box<dyn Error>> {
+		let line = value_as_string.rsplit_once('\n').map_or(value_as_string, |(_, line)| line);
+		let bytes = line.as_bytes();
+		if let Some(digit) = bytes.iter().position(u8::is_ascii_digit) {
+			let mut start = digit;
+			while start > digit.saturating_sub(2) && matches!(bytes[start - 1], b'+' | b'-') {
+				start -= 1;
+			}
+			if let Some(value) = parse_comparable_prefix(&line[start..]) {
+				return Ok(value);
+			}
 		}
 		Err(From::from(format!(
 			"Expected a decimal integer (with optional + or - prefix) and (optional suffix) argument to \
-			 {option_name}, but got `{value_as_string}'"
+				 {option_name}, but got `{value_as_string}'"
 		)))
 	}
 
@@ -4414,42 +4422,23 @@ pub mod matchers {
 		}
 	}
 
-	/// This function implements the function of matching substrings of
-	/// X and Y from the -newerXY string.
-	/// X and Y are constrained to a/B/c/m and t.
-	/// such as: "-neweraB" -> Some(a, B) "-neweraD" -> None
-	///
-	/// Additionally, there is support for the -anewer and -cnewer short arguments.
-	/// as follows:
-	/// 1. -anewer is equivalent to -neweram
-	/// 2. -cnewer is equivalent to - newercm
-	///
-	/// If -newer is used it will be resolved to -newermm.
-	fn parse_str_to_newer_args(input: &str) -> Option<(String, String)> {
-		if input.is_empty() {
-			return None;
+	/// Parses `-newerXY` time selectors or the `-anewer`, `-cnewer` and `-newer` aliases.
+	fn parse_str_to_newer_args(input: &str) -> Option<(&str, &str)> {
+		match input {
+			"-newer" => return Some(("m", "m")),
+			"-anewer" => return Some(("a", "m")),
+			"-cnewer" => return Some(("c", "m")),
+			_ => {},
 		}
-
-		if input == "-newer" {
-			return Some(("m".to_string(), "m".to_string()));
+		for at in memchr::memmem::find_iter(input.as_bytes(), b"-newer") {
+			let start = at + b"-newer".len();
+			if let Some([b'a' | b'B' | b'c' | b'm', b'a' | b'B' | b'c' | b'm' | b't']) =
+				input.as_bytes().get(start..start + 2)
+			{
+				return Some((&input[start..start + 1], &input[start + 1..start + 2]));
+			}
 		}
-
-		if input == "-anewer" {
-			return Some(("a".to_string(), "m".to_string()));
-		}
-
-		if input == "-cnewer" {
-			return Some(("c".to_string(), "m".to_string()));
-		}
-
-		let re = Regex::new(r"-newer([aBcm])([aBcmt])").unwrap();
-		if let Some(captures) = re.captures(input) {
-			let x = captures.get(1)?.as_str().to_string();
-			let y = captures.get(2)?.as_str().to_string();
-			Some((x, y))
-		} else {
-			None
-		}
+		None
 	}
 
 	/// Creates a file if it doesn't exist.
@@ -4656,7 +4645,7 @@ pub mod matchers {
 					}
 					let (size, unit) = convert_arg_to_comparable_value_and_suffix(args[i], args[i + 1])?;
 					i += 1;
-					Some(SizeMatcher::new(size, &unit)?.into_box())
+					Some(SizeMatcher::new(size, unit)?.into_box())
 				},
 				"-empty" => Some(EmptyMatcher::new().into_box()),
 				"-exec" | "-execdir" => {
@@ -4942,7 +4931,7 @@ pub mod matchers {
 							}
 							if y_option == "t" {
 								let time = args[i + 1];
-								let newer_time_type = NewerOptionType::from_str(x_option.as_str());
+								let newer_time_type = NewerOptionType::from_str(x_option);
 								// Convert args to unix timestamps. (expressed in numeric types)
 								let comparable_time = jiff::Timestamp::try_from(now).ok().and_then(|now| {
 									parse_date_str_to_timestamps(time, &now.to_zoned(shell_time_zone(host)))
@@ -4959,7 +4948,7 @@ pub mod matchers {
 								let file_path = args[i + 1];
 								i += 1;
 								Some(
-									NewerOptionMatcher::new(&x_option, &y_option, file_path, host)
+									NewerOptionMatcher::new(x_option, y_option, file_path, host)
 										.await?
 										.into_box(),
 								)

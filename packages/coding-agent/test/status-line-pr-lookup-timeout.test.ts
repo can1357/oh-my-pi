@@ -41,9 +41,6 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
-/** Fires the HEAD watcher the status line installs (a checkout, a commit). */
-let headMoved = (): void => {};
-
 beforeEach(() => {
 	const gitRepository = {
 		headSync: () => fakeRefHead,
@@ -60,10 +57,6 @@ beforeEach(() => {
 	vi.spyOn(vcs, "repoForDisplay").mockReturnValue(repository);
 	// No repository to read a default branch from: it stays `main`.
 	vi.spyOn(vcs, "git").mockReturnValue(null);
-	vi.spyOn(vcs, "watch").mockImplementation((_repo, onChange) => {
-		headMoved = onChange as () => void;
-		return () => {};
-	});
 });
 
 afterEach(() => {
@@ -127,7 +120,7 @@ describe("status line PR lookup timeout guard", () => {
 			stderr: "",
 		});
 		setSystemTime(start + 61_000);
-		headMoved();
+		line.refreshVcs();
 		lineText(line);
 		await flushStatus();
 

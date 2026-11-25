@@ -350,6 +350,10 @@ pub struct Invocation<'a> {
 	pub vpid:      Vpid,
 	/// File-creation mask: the shell's `umask`.
 	pub umask:     u32,
+	/// Arguments that are job specs (`%1`, `%%`, `%name`) naming a job of the
+	/// invoking shell that runs a program, each with that program's OS pid:
+	/// what `jobs -x` would put in their place. Empty when none is.
+	pub jobs:      &'a [(BString, u32)],
 }
 
 /// A native command running on host threads or inline.
