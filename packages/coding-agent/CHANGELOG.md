@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- A stale usage-limit error from the previous provider no longer blocks the fallback provider's healthy account ([#17098](https://github.com/can1357/oh-my-pi/issues/17098), [#20389](https://github.com/can1357/oh-my-pi/pull/20389) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed files and directories whose name starts with `..` being treated as outside their parent: a working directory under such a folder now counts as part of its checkout, and scoped settings, plugin roots and folder restrictions apply to it ([#20482](https://github.com/can1357/oh-my-pi/pull/20482) by [@H4vC](https://github.com/H4vC))
 
 ### Added
@@ -28,36 +29,6 @@
 
 ### Fixed
 
-- A stale usage-limit error from the previous provider no longer blocks the fallback provider's healthy account ([#17098](https://github.com/can1357/oh-my-pi/issues/17098), [#20389](https://github.com/can1357/oh-my-pi/pull/20389) by [@JamieJ5926](https://github.com/JamieJ5926))
-- `/fork pane` inside Tern now opens the fork in a new Tern pane, and `/fork window`/`/fork tab` in a new Tern tab, instead of failing with "No terminal multiplexer was detected"
-- A language server that times out during startup now reports the resolved executable and stops the launcher and its process group instead of leaving them running ([#20436](https://github.com/can1357/oh-my-pi/issues/20436)).
-- Images reach each request as the receiving model needs them: after switching to a text-only model, queued and earlier images are described by the vision model (once per image, reused across turns and resumes); after switching to a vision model, they are sent as images again with no stale description. Compaction and branch summaries and advisor reviews carry the descriptions whenever their model or the session's cannot see images, and a failed description is retried instead of sticking ([#20369](https://github.com/can1357/oh-my-pi/pull/20369) by [@taibenvenuti](https://github.com/taibenvenuti))
-- A large paste always collapses to the same text chip (`📄 #1`, with its card): one pasted with Tern's or kitty's paste key no longer lands as a `[Paste #1, +90 lines]` marker, and it opens the large-paste menu and attaches pasted image paths like any other paste
-- Edit cards in hashline, sloppy and magic modes name their target file again instead of `…`: while a call streams, and in the Agent Hub transcript of a subagent
-- In Tern, viewing a subagent shows the composer's `Viewing` header again, so the tray marks that agent's card (amber, with an eye) and its MAIN bar leads back to the main session
-- Attachment chips show the symbol preset's icon again instead of an emoji (a Nerd Font glyph in Tern): in the draft, on the chip's card and in sent prompts; skill and model chips of sent prompts follow the preset too
-- Image and video attachment cards show the picture and its pixel size again: in Tern, and as a thumbnail in terminals that draw Kitty Unicode placeholders
-- In Tern, a draft that would skip a pending question shows the composer's `skips ask` chip and its `Skip & send` button again
-- In Tern, hovering the prompt-cache indicator shows its card again: whether the next message reads the cache and until when, or why not and what it re-sends
-- Web search results without a synthesized answer show each source's excerpt again (one line collapsed, up to three expanded; under the source in Tern) instead of a warning with the raw source listing
-- The background jobs panel shows a subagent's name as a heading above its jobs again
-- Expand hints on tool cards, notices, summaries, error banners, approvals and the rewind and copy pickers name the key bound to `app.tools.expand` in the active symbol preset (`Ctrl+O` off macOS) instead of a fixed `⌃O`
-- Key hints in terminal dialogs, pickers and full-screen views (model and agent hubs, session tree, history search, plan save, pause, plugin settings, log viewer, raw SSE, git help, autoresearch, live, ps) follow the symbol preset and your key bindings again instead of fixed Unicode keycaps
-- Glyphs follow the symbol preset again where they had become fixed Unicode ones: bullets and tree guides in argument trees, memory lists and the session tree, IRC arrows, accept and reject marks, badge brackets, the service PID icon, selection cursors, radio and checkbox marks, and the status marks of `/btw`, `/cleanse`, `/omfg`, the agent hubs and plugin settings (in Tern too)
-- The status line's cost segment follows the ASCII preset and the classic footer follows every preset; the session-tree segment shows its icon again, `pi.showProfile: false` hides the profile tag again, and the autocomplete popup marks its selection with the preset's cursor
-- Failed `find`, `glob` and memory calls no longer read `Error: Error: …`
-- `tui.maxInlineImageColumns` and `tui.maxInlineImageRows` limit transcript pictures again, and a change applies to the pictures already on screen
-- Terminals that draw images show the picture of an image `read` and of a user-run command's output again instead of only its placeholder
-- In Tern, reading a media file (image, PDF, video, audio, 3D model) opens it in the media viewer again, capped at the inline image height, for single and grouped reads
-- Tight Layout (`tui.tight`) works again and applies at once: assistant prose, notices, command output, Read and search rows and the dock's rows give up their one-cell side padding, so they share one left edge; user bubbles and framed tool cards keep theirs
-- `omp gallery` draws aliased tool samples with their real tool's look, and its path and status segment samples match the status line
-- Extensions importing `@oh-my-pi/omptype` resolve to the host's copy, so they load offline and after Bun prunes the package's cached registry manifest; the bare import used to fall back to the install cache and fail the extension load
-- After plan mode is paused or disabled without approving a plan, the agent no longer refuses edits by citing plan mode's read-only rules; those rules leave the model context when plan mode ends and are not restored on resume ([#20375](https://github.com/can1357/oh-my-pi/issues/20375))
-- Fixed judged TTSR rules seeing less of a long assistant output than fits their 32,000-token Jev budget: the text sent is now the longest prefix that fits, found natively instead of by a bisection that could stop short of a fitting word ([#20384](https://github.com/can1357/oh-my-pi/pull/20384) by [@iliaal](https://github.com/iliaal))
-- `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
-- Restricted subagents report which OAuth accounts are usage-limited or rejected by org policy instead of showing only the provider’s 403; `omp usage` also lists rejected logins and when they can be tried again ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
-- Fixed the `/usage` and Tern Activity heatmap failing to sync session history in npm installs ([#20377](https://github.com/can1357/oh-my-pi/issues/20377)).
-- Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 - A broadcast from the main agent that arrives while a subagent is finishing no longer replaces that subagent's report; the subagent answers it in a separate turn, and the broadcast still interrupts a waiting subagent.
 - On Linux, `time -l` and `time -v` in the bash tool report the program's own maximum resident set size instead of at least omp's.
 - In the Pseudo shell visualization, words of a zsh script (`zsh -c '…'`, sourced zsh files) show their source text instead of `�` where `$`, `(`, `-`, quotes and other shell syntax stood.
