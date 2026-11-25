@@ -481,6 +481,11 @@ export function catalogAxisProviders(axis: string): ReadonlySet<string> | null {
 	return providers;
 }
 
+/** Runtime rules are process-local and must never be baked into a cross-launch catalog. */
+export function hasRuntimeProviderRules(): boolean {
+	return runtimeRules.size !== 0;
+}
+
 /**
  * Adds, replaces, or (with `undefined`) removes the runtime rule assigning
  * `directives` to every model of `provider`: what a KDL `provider "<id>" { … }`

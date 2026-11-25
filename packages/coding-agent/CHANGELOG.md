@@ -26,6 +26,9 @@
 ### Changed
 
 - Reduced CLI bootstrap work by loading session construction, the Cursor execution bridge, peer mesh, and persisted-agent support when needed.
+### Changed
+
+- Opening a full model catalog on subsequent launches reuses unchanged catalog data instead of rebuilding it.
 
 ## [19.2.0] - 2026-11-25
 

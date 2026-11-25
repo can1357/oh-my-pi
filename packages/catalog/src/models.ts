@@ -24,6 +24,12 @@ import type {
  * For runtime-aware resolution, use `createModelManager()` / `resolveProviderModels()`.
  */
 const catalog = openModelCatalog(modelsData);
+let bundledCatalogHash: string | undefined;
+
+/** Content identity of the generated catalog, independent of which providers have been decoded. */
+export function getBundledCatalogHash(): string {
+	return (bundledCatalogHash ??= Bun.hash(JSON.stringify(modelsData)).toString(36));
+}
 const bundledProviders: readonly KnownProvider[] = Object.freeze(getCatalogProviders(catalog) as KnownProvider[]);
 const bundledProviderSet = new Set<string>(bundledProviders);
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
