@@ -24,6 +24,7 @@ import {
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { type FileLockHandle, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
+import { IS_RUSSIAN_BUILD } from "@oh-my-pi/pi-utils/ui-language";
 import { Settings, settings } from "../config/settings";
 import {
 	isTimeoutError,
@@ -337,6 +338,7 @@ export function isSourceCheckout(): boolean {
  * package-manager probes `omp update` runs.
  */
 export async function canSelfUpdate(): Promise<boolean> {
+	if (IS_RUSSIAN_BUILD) return false;
 	if (isSourceCheckout()) return false;
 	if (isPathInDirectory(isCompiledBinary() ? process.execPath : import.meta.dir, NIX_STORE_DIR)) return false;
 	return (await managedInstallName(process.execPath)) === undefined;
@@ -2330,6 +2332,11 @@ async function runManagedUpdate(
  * fails, or when another update holds the install lock.
  */
 export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
+	if (IS_RUSSIAN_BUILD) {
+		const reason = "Эта сборка OMP обновляется только установкой нового выпуска omp-ru.";
+		console.log(chalk.yellow(reason));
+		return { kind: "unsupported", reason };
+	}
 	const ompPath = resolveOmpPath();
 	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
 	if (manager) {

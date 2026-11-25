@@ -1,4 +1,5 @@
 import { combine, effect, register, type Setting } from "../config/registry";
+import { IS_RUSSIAN_BUILD } from "@oh-my-pi/pi-utils/ui-language";
 import type { Settings } from "../config/settings";
 import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
 import { cfgReadToolResultPreview } from "../tools/settings";
@@ -58,6 +59,24 @@ export const cfgGitEnabled = register({
 // ────────────────────────────────────────────────────────────────────────
 // Appearance
 // ────────────────────────────────────────────────────────────────────────
+
+export const cfgUiLanguage = IS_RUSSIAN_BUILD
+	? register({
+			id: "ui.language",
+			type: "enum",
+			values: ["ru", "en"] as const,
+			default: "ru",
+			ui: {
+				tab: "appearance",
+				label: "Interface Language",
+				description: "Language used for the OMP interface",
+				options: [
+					{ value: "ru", label: "Русский" },
+					{ value: "en", label: "English" },
+				],
+			},
+		})
+	: undefined;
 
 // Theme
 export const cfgThemeDark = register({

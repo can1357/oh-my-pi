@@ -11,6 +11,7 @@ import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { IS_RUSSIAN_BUILD, setUiLanguage } from "@oh-my-pi/pi-utils/ui-language";
 import { bindAgentMesh } from "./irc/mesh";
 import {
 	APP_NAME,
@@ -176,6 +177,7 @@ import {
 	cfgStartupSetupWizard,
 	cfgStartupShowSplash,
 	cfgSymbolPreset,
+	cfgUiLanguage,
 	cfgThemeDark,
 	cfgThemeLight,
 	cfgTuiResizeScrollback,
@@ -274,6 +276,7 @@ function writeStartupWarning(warning: string): void {
 }
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
+	if (IS_RUSSIAN_BUILD) return undefined;
 	if (!cfgStartupCheckUpdate.get(settings) && !cfgUpdateAuto.get(settings)) {
 		return;
 	}
@@ -860,7 +863,7 @@ async function runInteractiveMode(
 		const notifyNewVersion = (newVersion: string): void => {
 			if (cfgStartupCheckUpdate.get(settings)) mode.showNewVersionNotification(newVersion);
 		};
-		if (cfgUpdateAuto.get(settings)) {
+		if (!IS_RUSSIAN_BUILD && cfgUpdateAuto.get(settings)) {
 			void runAutoUpdate(checkedVersionPromise, {
 				show: update => mode.showVersionUpdate(update),
 				notify: notifyNewVersion,
@@ -2139,6 +2142,7 @@ export async function runRootCommand(
 		}
 
 		const settingsInstance = await settingsPromise;
+		if (isInteractive && cfgUiLanguage) setUiLanguage(cfgUiLanguage.get(settingsInstance));
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
