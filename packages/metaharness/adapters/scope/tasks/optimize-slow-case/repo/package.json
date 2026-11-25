@@ -1,0 +1,10 @@
+{
+	"name": "salesreport",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"report": "bun src/cli.ts",
+		"test": "bun test",
+		"check": "bun build src/*.ts test/*.ts --target=bun --outdir=node_modules/.check"
+	}
+}

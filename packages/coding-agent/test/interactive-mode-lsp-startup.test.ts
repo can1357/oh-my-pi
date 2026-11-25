@@ -1,5 +1,4 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -82,11 +81,6 @@ describe("InteractiveMode LSP startup events", () => {
 			eventBus,
 			createModeTerminal().frame,
 		);
-		// This test exercises the LSP startup banner, not git branch watching.
-		// Starting a real fs.watch on the repo HEAD in a parallel Bun worker is
-		// enough to trigger a Bun SIGTRAP in unrelated workers during the
-		// 4-worker suite reproducer, so keep the watcher out of this contract.
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 	});
 
 	afterEach(async () => {

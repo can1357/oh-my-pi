@@ -9,6 +9,7 @@ import { elapsedAt } from "@oh-my-pi/pi-tui/term/painters/elapsed";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { formatAge } from "@oh-my-pi/pi-utils";
 import type { TspElapsedProps, TspSpan } from "@oh-my-pi/pi-wire";
+import { type IrcMessage, ircTitle } from "../../tools/irc";
 import { expandHint } from "./frame";
 
 /** Body lines a collapsed card shows. */
@@ -47,7 +48,7 @@ function paintIrcCard(node: UiNode, cx: PaintContext): Block {
 	const theme = cx.theme;
 	const props = node.props() as {
 		head?: readonly TspSpan[];
-		term?: { expanded?: boolean };
+		term?: { message?: IrcMessage; expanded?: boolean };
 	};
 	const head = props.head ?? [];
 	const meta = head.slice(1).map(span => span.t.trim());
@@ -60,7 +61,8 @@ function paintIrcCard(node: UiNode, cx: PaintContext): Block {
 		const ms = elapsedAt(elapsed, elapsed.props() as TspElapsedProps, cx.now());
 		meta.push(formatAge(Math.max(1, Math.round(ms / 1000))));
 	}
-	let line = `${theme.fg("accent", theme.symbols.symbol("tool.irc"))} ${theme.fg("accent", head[0]?.t ?? "")}`;
+	const title = props.term?.message ? ircTitle(props.term.message, theme) : (head[0]?.t ?? "");
+	let line = `${theme.fg("accent", theme.symbols.symbol("tool.irc"))} ${theme.fg("accent", title)}`;
 	if (meta.length > 0) line += ` ${theme.fg("dim", meta.join(" · "))}`;
 	const rows = [line];
 	const md = children.find(child => child.kind === "md");

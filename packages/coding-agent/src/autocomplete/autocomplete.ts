@@ -306,97 +306,93 @@ function buildSlashCommandCompletions(
 	commands: CommandEntry[],
 	lowerPrefix: string,
 	commandUsage?: (name: string) => number,
+	// For submitted commands, collect the *possible* matches for a longer
+	// prefix, in registry order (not the current ranked/display order).
+	nextCandidates?: CommandEntry[],
 ): AutocompleteItem[] {
-	return (
-		commands
-			.flatMap(cmd => {
-				const name = getCommandName(cmd);
-				if (!name) return [];
-				const usage = commandUsage?.(name) ?? 0;
-				const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
-				const staticDesc = getStaticCommandDescription(cmd);
-				let fullDescMemo: string | undefined;
-				let nativeTextMemo: Pick<AutocompleteItem, "nativeDetail" | "state"> = {};
-				let fullDescComputed = false;
-				// Resolve the (possibly live) display description lazily, only once a
-				// candidate actually matches — getAutocompleteDescription reads live
-				// session state and must not run for every command on each keystroke.
-				const resolveFullDesc = (): string | undefined => {
-					if (!fullDescComputed) {
-						const displayDesc = getAutocompleteCommandDescription(cmd);
-						fullDescMemo = hint ? (displayDesc ? `${hint} - ${displayDesc}` : hint) : displayDesc;
-						nativeTextMemo = nativeCommandText(displayDesc, staticDesc, hint);
-						fullDescComputed = true;
-					}
-					return fullDescMemo;
-				};
-				let best: (AutocompleteItem & { score: number; usage: number }) | undefined;
+	const ranked: { item: AutocompleteItem; score: number; usage: number }[] = [];
+	const collapseSkills = nextCandidates !== undefined && !lowerPrefix.startsWith(SKILL_NAMESPACE);
+	const approachesNamespace = SKILL_NAMESPACE.startsWith(lowerPrefix);
+	const commandTier = collapseSkills && !approachesNamespace ? strongestCommandTier(commands, lowerPrefix) : 0;
+	let skillCount = 0;
+	let skillIcon: string | undefined;
+	let skillIconName: string | undefined;
 
-				const isSkillCommand = name.startsWith(SKILL_NAMESPACE);
-				// Skills are matched by their bare name as well as the full
-				// `skill:` name so a broken-out or mid-prompt skill ranks at
-				// prefix strength (`/batch` → `skill:batch`) instead of a weak
-				// full-name fuzzy hit.
-				const nameScore =
-					lowerPrefix.length === 0 && isSkillCommand
-						? 950
-						: isSkillCommand
-							? Math.max(
-									scoreCommandTextMatch(lowerPrefix, name.toLowerCase()),
-									skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
-								)
-							: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
-				const lowerDesc = staticDesc.toLowerCase();
-				const descScore =
-					lowerDesc && subsequenceMatch(lowerPrefix, lowerDesc)
-						? subsequenceScore(lowerPrefix, lowerDesc) * 0.5
-						: 0;
-				const primaryScore = Math.max(nameScore, descScore);
-				if (primaryScore > 0) {
-					const fullDesc = resolveFullDesc();
-					best = {
-						value: name,
-						label: "name" in cmd ? cmd.name : cmd.label,
-						score: primaryScore,
-						usage,
-						...(cmd.icon && { icon: cmd.icon }),
-						...(cmd.iconName && { iconName: cmd.iconName }),
-						...(fullDesc && { description: fullDesc }),
-						...nativeTextMemo,
-						...(nameScore === 0 && { descriptionMatch: true }),
-					};
-				}
+	const rank = (cmd: CommandEntry, name: string, nameScore: number): boolean => {
+		const staticDesc = getStaticCommandDescription(cmd);
+		const descScore = staticDesc ? subsequenceScore(lowerPrefix, staticDesc.toLowerCase()) * 0.5 : 0;
+		let score = Math.max(nameScore, descScore);
+		let value = name;
+		let label = "name" in cmd ? name : cmd.label;
+		let descriptionMatch = nameScore === 0;
+		if (lowerPrefix) {
+			for (const alias of getCommandAliases(cmd)) {
+				if (alias === name) continue;
+				const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
+				if (aliasScore === 0) continue;
+				// A weaker alias hit still allows Enter to accept a description hit.
+				descriptionMatch = false;
+				if (aliasScore <= score) continue;
+				score = aliasScore;
+				value = alias;
+				label = alias;
+			}
+		}
+		if (!score) return false;
+		const hint = "argumentHint" in cmd ? cmd.argumentHint : undefined;
+		const liveDesc = getAutocompleteCommandDescription(cmd);
+		const description = hint ? (liveDesc ? `${hint} - ${liveDesc}` : hint) : liveDesc;
+		ranked.push({
+			score,
+			usage: commandUsage?.(name) ?? 0,
+			item: {
+				value,
+				label,
+				...(cmd.icon && { icon: cmd.icon }),
+				...(cmd.iconName && { iconName: cmd.iconName }),
+				...(description && { description }),
+				...nativeCommandText(liveDesc, staticDesc, hint),
+				...(descriptionMatch && { descriptionMatch: true }),
+			},
+		});
+		return true;
+	};
 
-				if (lowerPrefix.length > 0) {
-					for (const alias of getCommandAliases(cmd)) {
-						if (alias === name) continue;
-						const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
-						if (aliasScore === 0) continue;
-						// An alias can match even when the description outranks it; Enter
-						// must still accept the command rather than submit the raw query.
-						if (best?.descriptionMatch) delete best.descriptionMatch;
-						if (best && aliasScore <= best.score) continue;
-						const fullDesc = resolveFullDesc();
-						best = {
-							value: alias,
-							label: alias,
-							score: aliasScore,
-							usage,
-							...(cmd.icon && { icon: cmd.icon }),
-							...(cmd.iconName && { iconName: cmd.iconName }),
-							...(fullDesc && { description: fullDesc }),
-							...nativeTextMemo,
-						};
-					}
-				}
-
-				return best ? [best] : [];
-			})
-			// Equal text-match scores fall back to usage frequency, then to the
-			// stable registry order.
-			.sort((a, b) => b.score - a.score || b.usage - a.usage)
-			.map(({ score: _score, usage: _usage, ...rest }) => rest)
-	);
+	for (const cmd of commands) {
+		const name = getCommandName(cmd);
+		if (!name) continue;
+		let skillTier = 0;
+		if (name.startsWith(SKILL_NAMESPACE)) {
+			if (collapseSkills && approachesNamespace) {
+				// Any skill may appear when the user completes or leaves `skill:`.
+				skillCount++;
+				skillIcon ??= cmd.icon;
+				skillIconName ??= cmd.iconName;
+				nextCandidates.push(cmd);
+				continue;
+			}
+			skillTier = lowerPrefix
+				? skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase())
+				: 950;
+			if (collapseSkills && skillTier <= commandTier) {
+				// A competing name or alias can stop matching on the next key.
+				if (skillTier) nextCandidates.push(cmd);
+				continue;
+			}
+		}
+		const nameScore = Math.max(skillTier, scoreCommandTextMatch(lowerPrefix, name.toLowerCase()));
+		if (rank(cmd, name, nameScore)) nextCandidates?.push(cmd);
+	}
+	if (skillCount) {
+		const group = {
+			name: SKILL_NAMESPACE,
+			description: `${skillCount} skill${skillCount === 1 ? "" : "s"}`,
+			...(skillIcon && { icon: skillIcon }),
+			...(skillIconName && { iconName: skillIconName }),
+		};
+		rank(group, group.name, lowerPrefix ? scoreCommandTextMatch(lowerPrefix, group.name) : 950);
+	}
+	return ranked.sort((a, b) => b.score - a.score || b.usage - a.usage).map(match => match.item);
 }
 
 /** Exact/leading-prefix tier for ordinary command names and aliases. */
@@ -416,7 +412,7 @@ function commandBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
  * only contains the query mid-name (`/job` → `jobs` before
  * `skill:…-job-…`; #18891). Only a bare-name-exact hit keeps the 1000 tier.
  * Ties fall back to registry order in the stable sort, so builtins win, and
- * {@link collapseSkillNamespace} keeps the popup command-only on a tie.
+ * the submitted popup stays command-only on a tie.
  */
 function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): number {
 	if (lowerPrefix.length === 0) return 0;
@@ -437,56 +433,19 @@ function skillBareNameBreakoutTier(lowerPrefix: string, lowerBareName: string): 
 	return 0;
 }
 
-/**
- * Collapse `skill:*` commands into a single `/skill:` namespace row while the
- * typed prefix has not committed to the namespace. A lone group entry (shown
- * only while the prefix is still a prefix of `skill:`) keeps the `/` popup
- * readable. A skill breaks out of the group only when its bare name matches
- * the prefix at the beginning of the name or a hyphen-delimited segment, at a
- * strictly stronger tier than every non-skill command name and alias. Ordinary
- * commands keep exact/leading-prefix tiers only; a tie keeps the popup
- * command-only, and fuzzy-only skill hits never surface. Accepting the group
- * inserts `/skill:` without a trailing space so the reopened popup expands to
- * the individual skills.
- */
-function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
-	if (lowerPrefix.startsWith(SKILL_NAMESPACE)) return commands;
-	const approachesNamespace = SKILL_NAMESPACE.startsWith(lowerPrefix);
-	let commandTier = 0;
-	if (!approachesNamespace) {
-		for (const cmd of commands) {
-			const name = getCommandName(cmd);
-			if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
-			commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, name.toLowerCase()));
-			for (const alias of getCommandAliases(cmd)) {
-				commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, alias.toLowerCase()));
-			}
-			if (commandTier === 1000) break;
-		}
-	}
-	let skillCount = 0;
-	let skillIcon: string | undefined;
-	let skillIconName: string | undefined;
-	const rest = commands.filter(cmd => {
+/** A bare skill breaks out only when it beats every ordinary name and alias. */
+function strongestCommandTier(commands: CommandEntry[], lowerPrefix: string): number {
+	let tier = 0;
+	for (const cmd of commands) {
 		const name = getCommandName(cmd);
-		if (!name?.startsWith(SKILL_NAMESPACE)) return true;
-		skillCount += 1;
-		skillIcon ??= cmd.icon;
-		skillIconName ??= cmd.iconName;
-		return (
-			!approachesNamespace &&
-			skillBareNameBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
-		);
-	});
-	if (skillCount === 0) return commands;
-	if (!SKILL_NAMESPACE.startsWith(lowerPrefix)) return rest;
-	rest.push({
-		name: SKILL_NAMESPACE,
-		description: `${skillCount} skill${skillCount === 1 ? "" : "s"}`,
-		...(skillIcon && { icon: skillIcon }),
-		...(skillIconName && { iconName: skillIconName }),
-	});
-	return rest;
+		if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
+		tier = Math.max(tier, commandBreakoutTier(lowerPrefix, name.toLowerCase()));
+		for (const alias of getCommandAliases(cmd)) {
+			tier = Math.max(tier, commandBreakoutTier(lowerPrefix, alias.toLowerCase()));
+		}
+		if (tier === 1000) break;
+	}
+	return tier;
 }
 
 /**
@@ -550,6 +509,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	#commands: CommandEntry[];
 	#basePath: string;
 	#commandUsage?: (name: string) => number;
+	#previousSlash?: { prefix: string; candidates: CommandEntry[] };
 	// Intentionally separate from omp-natives cache: this cache is a local,
 	// per-directory readdir fast-path for prefix completions. Global fuzzy
 	// discovery continues to use native fuzzyFind + shared scan cache.
@@ -567,6 +527,15 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		this.#commands = commands;
 		this.#basePath = basePath;
 		this.#commandUsage = options?.commandUsage;
+	}
+
+	#submittedSlashCompletions(lowerPrefix: string): AutocompleteItem[] {
+		const previous = this.#previousSlash;
+		const commands = previous && lowerPrefix.startsWith(previous.prefix) ? previous.candidates : this.#commands;
+		const candidates: CommandEntry[] = [];
+		const items = buildSlashCommandCompletions(commands, lowerPrefix, this.#commandUsage, candidates);
+		this.#previousSlash = { prefix: lowerPrefix, candidates };
+		return items;
 	}
 
 	async getSuggestions(
@@ -604,11 +573,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 				const matches = isMidPromptSkillLookup
 					? buildMidPromptSkillCompletions(this.#commands, lowerPrefix)
-					: buildSlashCommandCompletions(
-							collapseSkillNamespace(this.#commands, lowerPrefix),
-							lowerPrefix,
-							this.#commandUsage,
-						);
+					: this.#submittedSlashCompletions(lowerPrefix);
 
 				if (matches.length > 0) {
 					return {
@@ -1221,11 +1186,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		if (commandText.includes(" ")) return null; // Only complete command name, not args
 
 		const lowerPrefix = commandText.slice(1).toLowerCase();
-		const matches = buildSlashCommandCompletions(
-			collapseSkillNamespace(this.#commands, lowerPrefix),
-			lowerPrefix,
-			this.#commandUsage,
-		);
+		const matches = this.#submittedSlashCompletions(lowerPrefix);
 
 		if (matches.length === 0) return null;
 		// Mirror `getSuggestions`: preserve leading whitespace so the editor's
