@@ -1,5 +1,6 @@
 # Topic branches carried in every build, merged in this order onto the quarantined upstream base.
 # Original topics remain available; safe topics retain their fork-only changes without importing young upstream.
+fix/catalog-generated-merge
 feat/goal-park-guard-2cdc756
 feat/extension-ctx-restart-source-88c8dc4
 fix/skip-underscore-extension-files
