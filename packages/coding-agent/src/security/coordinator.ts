@@ -12,7 +12,6 @@ import securityReviewerPrompt from "../prompts/agents/security-reviewer.md" with
 import securityCoordinatorPrompt from "../prompts/security/scan-coordinator.md" with { type: "text" };
 import securityRequestPrompt from "../prompts/security/scan-request.md" with { type: "text" };
 import securityPublishDescription from "../prompts/tools/security-publish.md" with { type: "text" };
-import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
@@ -248,6 +247,7 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		"security-reviewer": "off",
 	});
 	const providerSessionId = `security:${input.scanId}`;
+	const { createAgentSession } = await import("../sdk");
 	const { session } = await createAgentSession({
 		cwd: input.executionRoot,
 		authStorage: input.host.authStorage,

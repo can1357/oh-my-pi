@@ -125,6 +125,41 @@ async function fetchRelease(
 	return buildResult(md, { url, method: "metacpan", fetchedAt, notes: ["Fetched via MetaCPAN API"] });
 }
 
+/** Repository, homepage and issue-tracker lines of a release. */
+function resourceLines(release: ReleaseResponse): string {
+	let md = "";
+	const resources = release.metadata?.resources;
+	if (resources?.repository?.web || resources?.repository?.url) {
+		const repoUrl = resources.repository.web || resources.repository.url;
+		md += `**Repository:** ${repoUrl}\n`;
+	}
+	if (resources?.homepage) {
+		md += `**Homepage:** ${resources.homepage}\n`;
+	}
+	if (resources?.bugtracker?.web) {
+		md += `**Issues:** ${resources.bugtracker.web}\n`;
+	}
+	return md;
+}
+
+/** `## Dependencies` section: up to 20 runtime requirements, perl itself excluded. */
+function dependencySection(release: ReleaseResponse): string {
+	const runtimeDeps = release.dependency?.filter(
+		d => d.phase === "runtime" && d.relationship === "requires" && d.module !== "perl",
+	);
+	if (!runtimeDeps?.length) return "";
+	let md = `\n## Dependencies\n\n`;
+	for (const dep of runtimeDeps.slice(0, 20)) {
+		md += `- **${dep.module}**`;
+		if (dep.version && dep.version !== "0") md += ` >= ${dep.version}`;
+		md += "\n";
+	}
+	if (runtimeDeps.length > 20) {
+		md += `\n[…${runtimeDeps.length - 20} dependencies elided…]\n`;
+	}
+	return md;
+}
+
 function formatModuleMarkdown(module: ModuleResponse, release: ReleaseResponse | null): string {
 	let md = `# ${module.name}\n\n`;
 	if (module.abstract) md += `${module.abstract}\n\n`;
@@ -137,34 +172,8 @@ function formatModuleMarkdown(module: ModuleResponse, release: ReleaseResponse |
 		if (release.license?.length) {
 			md += `**License:** ${release.license.join(", ")}\n`;
 		}
-
-		const resources = release.metadata?.resources;
-		if (resources?.repository?.web || resources?.repository?.url) {
-			const repoUrl = resources.repository.web || resources.repository.url;
-			md += `**Repository:** ${repoUrl}\n`;
-		}
-		if (resources?.homepage) {
-			md += `**Homepage:** ${resources.homepage}\n`;
-		}
-		if (resources?.bugtracker?.web) {
-			md += `**Issues:** ${resources.bugtracker.web}\n`;
-		}
-
-		// Show runtime dependencies
-		const runtimeDeps = release.dependency?.filter(
-			d => d.phase === "runtime" && d.relationship === "requires" && d.module !== "perl",
-		);
-		if (runtimeDeps?.length) {
-			md += `\n## Dependencies\n\n`;
-			for (const dep of runtimeDeps.slice(0, 20)) {
-				md += `- **${dep.module}**`;
-				if (dep.version && dep.version !== "0") md += ` >= ${dep.version}`;
-				md += "\n";
-			}
-			if (runtimeDeps.length > 20) {
-				md += `\n[…${runtimeDeps.length - 20} dependencies elided…]\n`;
-			}
-		}
+		md += resourceLines(release);
+		md += dependencySection(release);
 	}
 
 	md += `\n## Installation\n\n\`\`\`bash\ncpanm ${module.name}\n\`\`\`\n`;
@@ -188,33 +197,8 @@ function formatReleaseMarkdown(release: ReleaseResponse): string {
 		md += `**Released:** ${date}\n`;
 	}
 
-	const resources = release.metadata?.resources;
-	if (resources?.repository?.web || resources?.repository?.url) {
-		const repoUrl = resources.repository.web || resources.repository.url;
-		md += `**Repository:** ${repoUrl}\n`;
-	}
-	if (resources?.homepage) {
-		md += `**Homepage:** ${resources.homepage}\n`;
-	}
-	if (resources?.bugtracker?.web) {
-		md += `**Issues:** ${resources.bugtracker.web}\n`;
-	}
-
-	// Show runtime dependencies
-	const runtimeDeps = release.dependency?.filter(
-		d => d.phase === "runtime" && d.relationship === "requires" && d.module !== "perl",
-	);
-	if (runtimeDeps?.length) {
-		md += `\n## Dependencies\n\n`;
-		for (const dep of runtimeDeps.slice(0, 20)) {
-			md += `- **${dep.module}**`;
-			if (dep.version && dep.version !== "0") md += ` >= ${dep.version}`;
-			md += "\n";
-		}
-		if (runtimeDeps.length > 20) {
-			md += `\n[…${runtimeDeps.length - 20} dependencies elided…]\n`;
-		}
-	}
+	md += resourceLines(release);
+	md += dependencySection(release);
 
 	md += `\n## Installation\n\n\`\`\`bash\ncpanm ${release.distribution}\n\`\`\`\n`;
 

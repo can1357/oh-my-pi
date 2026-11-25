@@ -1,24 +1,24 @@
 /**
  * The jobs sheet in the terminal (`term.role = "omp.jobs.sheet"`): a heading
- * with the running count, one plain row per job (`>` marks the selected one,
- * `└─` its nesting), then the selected job's caption or command, its facts on
- * one line, its widget and the tail of the output it shows.
+ * with the running count, the job tree (`>` marks the selected job), then
+ * the selected job's caption or command, its facts on one line, its widget
+ * and the tail of the output it shows.
  */
 import { type Block, defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { replaceTabs, truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { jobTreeGuide, type JobTreePlace } from "../../../modes/view-model/overlays/job-tree";
 import type { JobWidgetView } from "../../../tools/details/job-widget";
 import { jobWidgetRows } from "../tools/jobs/widget";
 import { termOf } from "../panels/common";
 
-/** One job row. */
-export interface JobsTermRow {
-	readonly status: string;
-	readonly type: string;
-	/** Formatted run time. */
-	readonly age: string;
+/** A job or subagent heading in the job tree. */
+export type JobsTermRow = {
+	readonly place: JobTreePlace;
 	readonly label: string;
-	readonly depth: number;
-}
+} & (
+	| { readonly kind: "agent" }
+	| { readonly kind: "job"; readonly status: string; readonly type: string; readonly age: string }
+);
 
 /** The selected job's facts. */
 export interface JobsTermDetail {
@@ -37,7 +37,7 @@ export type JobsSheetTerm = {
 	readonly role: "omp.jobs.sheet";
 	readonly running: number;
 	readonly rows: readonly JobsTermRow[];
-	/** Index of the selected row (-1: none). */
+	/** Index of the selected job, not counting headings (-1: none). */
 	readonly selected: number;
 	readonly detail?: JobsTermDetail;
 };
@@ -56,16 +56,21 @@ defineRolePainter("col", "omp.jobs.sheet", (node, cx): Block => {
 	const width = cx.width;
 	const theme = cx.theme;
 	const rows = [truncate(` Background jobs · ${term.running ?? 0} running`, width)];
-	const jobs = term.rows ?? [];
-	if (jobs.length === 0) {
+	const entries = term.rows ?? [];
+	if (entries.length === 0) {
 		rows.push(truncate(" No background jobs", width));
 		return { rows };
 	}
-	jobs.forEach((job, index) => {
-		const marker = index === term.selected ? "> " : "  ";
-		const nest = job.depth > 0 ? `${"   ".repeat(job.depth - 1)}└─ ` : "";
-		rows.push(truncate(`${marker}${nest}${job.status}  ${job.type} ${job.age}  ${job.label}`, width));
-	});
+	let jobIndex = 0;
+	for (const entry of entries) {
+		const guide = jobTreeGuide(entry.place, theme.symbols);
+		if (entry.kind === "agent") {
+			rows.push(truncate(`  ${guide}${entry.label}`, width));
+			continue;
+		}
+		const marker = jobIndex++ === term.selected ? "> " : "  ";
+		rows.push(truncate(`${marker}${guide}${entry.status}  ${entry.type} ${entry.age}  ${entry.label}`, width));
+	}
 	const detail = term.detail;
 	if (!detail) return { rows };
 	const inner = Math.max(1, width - DETAIL_INDENT.length);
