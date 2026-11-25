@@ -9,6 +9,7 @@
  * sends them as spans (identity colours are terminal-only). Widths are
  * cells; `Infinity` leaves rows whole.
  */
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { formatDuration, formatNumber, pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { toolIntentLabel, type TspSpan, type TspText } from "@oh-my-pi/pi-wire";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
@@ -145,13 +146,9 @@ function textLines(text: TspText): Line[] {
 	return lines;
 }
 
-function flatten(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
-
 /** `text` on one line, cut to `width` cells. */
 function previewLine(text: string, width: number): string {
-	return truncate(flatten(text), width);
+	return truncate(flattenLine(text), width);
 }
 
 /** Cut to `width` only while collapsed (expanded rows wrap whole). */
@@ -677,7 +674,7 @@ export function resultRows(
 			...cp,
 			icon(cx, "aborted"),
 			seg(" "),
-			seg(clip(flatten(sanitizeText(result.abortReason)), 80, cx.expanded), "dim"),
+			seg(clip(flattenLine(sanitizeText(result.abortReason)), 80, cx.expanded), "dim"),
 		]);
 	}
 	const review = reviewVerdict(yieldRecords(result.extractedToolData?.yield));
@@ -744,7 +741,7 @@ export function resultRows(
 	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
 		lines.push([
 			...cp,
-			seg(clip(flatten(sanitizeText(result.error)), 70, cx.expanded), mergeFailed ? "warning" : "error"),
+			seg(clip(flattenLine(sanitizeText(result.error)), 70, cx.expanded), mergeFailed ? "warning" : "error"),
 		]);
 	}
 	return lines;

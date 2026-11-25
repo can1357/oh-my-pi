@@ -14,7 +14,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost, Usage } from "@oh-my-pi/pi-catalog/types";
-import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, pathExists } from "@oh-my-pi/pi-utils";
 
 export const RATCHET_ROOT = path.join(".omp", "ratchet");
 export const RATCHET_STAGES = ["inputs", "grader", "plan"] as const;
@@ -160,16 +160,6 @@ function normalizeRepoPath(cwd: string, value: string): string {
 		throw new RatchetError(`Path must be inside the workspace: ${value}`);
 	}
 	return toPosix(relative);
-}
-
-async function pathExists(absolute: string): Promise<boolean> {
-	try {
-		await fs.stat(absolute);
-		return true;
-	} catch (err) {
-		if (isEnoent(err)) return false;
-		throw err;
-	}
 }
 
 export async function loadState(cwd: string, flow: string): Promise<RatchetState | undefined> {

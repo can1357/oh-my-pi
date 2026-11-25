@@ -251,6 +251,41 @@ describe("goal runtime", () => {
 		expect(harness.hiddenMessages).toHaveLength(2);
 	});
 
+	it("resuming a paused goal whose budget is spent stays budget-limited instead of reporting active", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: true,
+				mode: "active",
+				goal: createGoal({ status: "budget-limited", tokenBudget: 100_000, tokensUsed: 156_977 }),
+			},
+		});
+
+		await harness.runtime.pauseGoal();
+		const resumed = await harness.runtime.resumeGoal();
+
+		expect(resumed.enabled).toBe(true);
+		expect(resumed.goal.status).toBe("budget-limited");
+		expect(harness.runtime.buildContinuationPrompt()).toBeUndefined();
+
+		await harness.runtime.onBudgetMutated(200_000);
+		expect(harness.getState()?.goal.status).toBe("active");
+	});
+
+	it("resuming a paused goal with budget left reactivates it", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: false,
+				mode: "active",
+				goal: createGoal({ status: "paused", tokenBudget: 100_000, tokensUsed: 99_999 }),
+			},
+		});
+
+		const resumed = await harness.runtime.resumeGoal();
+
+		expect(resumed.goal.status).toBe("active");
+		expect(harness.runtime.buildContinuationPrompt()).toBeDefined();
+	});
+
 	it("pauses an active goal when an interruption aborts the task", async () => {
 		const harness = createHarness({
 			state: { enabled: true, mode: "active", goal: createGoal() },

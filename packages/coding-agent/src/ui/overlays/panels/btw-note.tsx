@@ -71,6 +71,7 @@ export function BtwTurnBody(props: {
 
 const NOTE_ACTIONS: ReadonlySet<string> = new Set<BtwNoteAction>([
 	"btw-focus",
+	"btw-blur",
 	"btw-expand",
 	"btw-fold",
 	"btw-copy",
@@ -119,7 +120,11 @@ export function BtwNote(props: BtwNoteProps): JSXNode {
 				<col
 					role={active ? "omp.btw.note.active" : "omp.btw.note"}
 					gap="sm"
-					actions={{ click: "btw-focus", menu, hold: menu }}
+					actions={
+						active
+							? { click: "btw-focus", menu, hold: menu, outside: "btw-blur" }
+							: { click: "btw-focus", menu, hold: menu }
+					}
 					onAction={run}
 				>
 					<row key="head" role="omp.btw.note.head" align="start" gap="sm">

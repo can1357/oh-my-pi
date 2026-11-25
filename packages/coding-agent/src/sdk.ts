@@ -29,8 +29,7 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 } from "@oh-my-pi/pi-ai";
-import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
-import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import { resolveApiKeyOnce, withRequestServiceTier } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { anthropicHostRunsTool } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
@@ -47,13 +46,13 @@ import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { DEFAULT_FRAME_DATA_BYTES_BUDGET, frameDataBytesBudget } from "@oh-my-pi/snapcompact";
+import { discoverAdvisorConfigs } from "./advisor/config";
 import {
-	discoverAdvisorConfigs,
 	discoverWatchdogFiles,
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
 	formatAdvisorMemoryPrompt,
-} from "./advisor";
+} from "./advisor/watchdog";
 import { AsyncJobManager, type AsyncJobManagerApi } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
@@ -93,10 +92,11 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
-import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
-import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
+import type { CursorMcpResourceAdapter } from "./cursor";
+import type * as CursorBridgeTools from "./cursor-bridge-tools";
 import { daemonMutex } from "./daemon/modules/mutex";
 import "./discovery";
+import { resolveProviderFileCredential } from "./blob-broker/provider-files";
 import { LiveImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
@@ -214,12 +214,8 @@ import type { AgentSessionDisposeOptions } from "./session/agent-session-types";
 import { isLegacyImageDescription } from "./session/queued-messages";
 import type { AdvisorToolFactory } from "./session/session-advisors";
 import {
-	applyUnpausedProviders,
 	createAuthStorageSettingsSync,
-	discoverAuthStorage as discoverAuthStorageFromConfig,
-	type EffectiveSettingsScope,
-	loadEffectiveAuthAccountPolicyConfig,
-	resolveEffectiveSettings,
+	discoverSessionAuthStorage as discoverAuthStorage,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { CostCapError, type CostGateApi, guardStreamFn } from "./session/cost-gate";
@@ -1011,6 +1007,8 @@ export interface CreateAgentSessionOptions {
 	 * top-level "Main" session, which has no parent.
 	 */
 	parentAgentId?: string;
+	/** Identity of the live spawning session, recorded alongside its registry id. */
+	parentSessionKey?: string;
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
@@ -1188,42 +1186,7 @@ export {
 
 // Discovery Functions
 
-/**
- * Create an AuthStorage instance.
- *
- * Default: local SQLite store at `<agentDir>/agent.db`.
- *
- * Broker mode: when `OMP_AUTH_BROKER_URL` is set, credentials are pulled from
- * a remote auth-broker over the wire. Refresh tokens never leave the broker;
- * the client receives access tokens with `refresh = "__remote__"` and calls
- * back into the broker through the {@link AuthStorageOptions.refreshOAuthCredential}
- * override to re-mint access tokens when needed.
- *
- * Account routing (`auth.accountPolicies`, `retry.usageReservePct`) comes from
- * effective settings: `options.settings` when given, else the matching global
- * instance, else a read-only load for `options.cwd`; explicit option values win.
- *
- * Delegates to {@link ./session/auth-broker-config} so the TUI and the catalog
- * generator share the same credential-discovery logic.
- */
-export async function discoverAuthStorage(
-	agentDir: string = getAgentDir(),
-	options: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver"> &
-		Omit<EffectiveSettingsScope, "agentDir"> = {},
-): Promise<AuthStorage> {
-	const { settings, cwd, ...discoveryOptions } = options;
-	const effective = await resolveEffectiveSettings({ settings, cwd, agentDir });
-	applyUnpausedProviders(effective);
-	const policy = await loadEffectiveAuthAccountPolicyConfig({ settings: effective });
-	return discoverAuthStorageFromConfig(agentDir, {
-		...discoveryOptions,
-		accountPolicies: discoveryOptions.accountPolicies ?? policy.accountPolicies,
-		authStorageOptions: {
-			...discoveryOptions.authStorageOptions,
-			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
-		},
-	});
-}
+export { discoverAuthStorage };
 
 /**
  * Discover extensions from cwd.
@@ -2247,7 +2210,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					items: options.rules,
 					warnings: undefined,
 				})
-			: logger.time("discoverTtsrRules", () => loadCapability<Rule>(ruleCapability.id, { cwd, agentDir }));
+			: logger.time("discoverTtsrRules", () =>
+					loadCapability<Rule>(ruleCapability.id, {
+						cwd,
+						agentDir,
+						disabledExtensions: [...disabledExtensionIds],
+					}),
+				);
 	rawRulesPromise.catch(() => {});
 	const customToolPathsPromise =
 		options.restrictToolNames === true
@@ -2806,6 +2775,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			getAgentSession: () => session,
 			getPromptCacheKey: () => {
 				if (!session) return undefined;
 				const model = session.agent.state.model;
@@ -2883,7 +2853,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const messages = session?.messages ?? [];
 				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
 			},
-			getContextMessages: () => convertToLlm(session?.messages ?? []),
+			getContextMessages: () => convertToLlm(session?.messages ?? [], session?.model),
 			noteEvalPreludeCall: name => session?.noteEvalPreludeCall(name),
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
@@ -4208,19 +4178,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// a session that starts on another provider can switch to Cursor later,
 		// and the roster is built once, at session creation.
 		const editWasGranted = toolRegistry.has("edit");
-		// Built on first use rather than eagerly: a session that never reaches
-		// Cursor never constructs it.
-		let cursorBridgeEditTool: AgentTool | undefined;
-		const getCursorBridgeEditTool = (): AgentTool | undefined => {
-			// Only when the session actually granted `edit`. `createTools` omits
-			// it entirely for a restricted tool set, and the bridge answers native
-			// frames that arrive regardless of the advertised catalog — so
-			// building one unconditionally would hand a read-only agent a
-			// mutating tool it was denied (the issue #5680 escalation).
-			if (!editWasGranted) return undefined;
-			cursorBridgeEditTool ??= createBridgeEditTool(toolSession, extensionRunner);
-			return cursorBridgeEditTool;
-		};
+		const grepWasGranted = toolRegistry.has("grep");
 
 		// Goal mode can be enabled after the session was created (settings UI,
 		// `/set goal.enabled true`). The eager registration above only runs at
@@ -4370,41 +4328,60 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			readServerResource: (name, uri) => mcpManager.readServerResource(name, uri),
 		};
-		const cursorExecHandlers = new CursorExecHandlers({
-			cwd,
-			// The session's cwd moves (`/cd`, resume, branch restore) while this
-			// bridge is built once at startup. Path-confining frames — the native
-			// `delete` and a `download_path` resource read — resolve against
-			// whichever of the two they are given, so without the live resolver the
-			// primary would write into the workspace the session has left while
-			// reporting success for the path the server asked about. The advisor
-			// bridge already passes one.
-			getCwd: () => sessionManager.getCwd(),
-			tools: toolRegistry,
-			getExecutableTool: resolveToolCommandTool,
-			// `pi_edit` needs the `replace`-mode instance specifically, and the
-			// registry may still hold the session's own `edit` (any mode) when
-			// this session did not start on Cursor.
-			getEditReplaceTool: getCursorBridgeEditTool,
-			getToolContext: () => toolContextStore.getContext(),
-			mcpResources: cursorMcpResources,
-			emitEvent: event => cursorEventEmitter?.(event),
-			getTodoPhases: () => session.getTodoPhases(),
-			commitTodoPhases: phases => session.commitTodoPhases(phases),
-			// `pi_grep` carries its own context width and match cap, which the
-			// shared grep instance fixed at construction cannot express. Gated on
-			// the grant: the factory builds a fresh tool and `executeTool` prefers
-			// it over the registry, so installing it unconditionally would let a
-			// session without `grep` search anyway.
-			createGrepTool: toolRegistry.has("grep") ? createBridgeGrepFactory(toolSession, extensionRunner) : undefined,
-			// Native delete and resource-download frames mutate files without a
-			// registry tool. Resolve both the transactional active predicate and
-			// live access mode: Agent.state.tools commits only after prompt rebuilding,
-			// while this predicate revokes before the await and rolls back on failure.
-			allowDirectFileMutation: () =>
-				(editWasGranted && toolSession.isToolActive?.("edit") === true) ||
-				(toolSession.isToolActive?.("write") === true && toolRegistry.has("write")),
-		});
+		const cursorExecHandlers = async () => {
+			const [{ CursorExecHandlers }, { createBridgeEditTool, createBridgeGrepFactory }] = await Promise.all([
+				import("./cursor"),
+				import("./cursor-bridge-tools"),
+			]);
+			// Built on first use rather than eagerly: a session that never reaches
+			// Cursor never constructs it.
+			let cursorBridgeEditTool: AgentTool | undefined;
+			const getCursorBridgeEditTool = (): AgentTool | undefined => {
+				// Only when the session actually granted `edit`. `createTools` omits
+				// it entirely for a restricted tool set, and the bridge answers native
+				// frames that arrive regardless of the advertised catalog — so
+				// building one unconditionally would hand a read-only agent a
+				// mutating tool it was denied (the issue #5680 escalation).
+				if (!editWasGranted) return undefined;
+				cursorBridgeEditTool ??= createBridgeEditTool(toolSession, extensionRunner);
+				return cursorBridgeEditTool;
+			};
+			return new CursorExecHandlers({
+				cwd,
+				// The session's cwd moves (`/cd`, resume, branch restore) while this
+				// bridge is built once at startup. Path-confining frames — the native
+				// `delete` and a `download_path` resource read — resolve against
+				// whichever of the two they are given, so without the live resolver the
+				// primary would write into the workspace the session has left while
+				// reporting success for the path the server asked about. The advisor
+				// bridge already passes one.
+				getCwd: () => sessionManager.getCwd(),
+				tools: toolRegistry,
+				getExecutableTool: resolveToolCommandTool,
+				// `pi_edit` needs the `replace`-mode instance specifically, and the
+				// registry may still hold the session's own `edit` (any mode) when
+				// this session did not start on Cursor.
+				getEditReplaceTool: getCursorBridgeEditTool,
+				getToolContext: () => toolContextStore.getContext(),
+				mcpResources: cursorMcpResources,
+				emitEvent: event => cursorEventEmitter?.(event),
+				getTodoPhases: () => session.getTodoPhases(),
+				commitTodoPhases: phases => session.commitTodoPhases(phases),
+				// `pi_grep` carries its own context width and match cap, which the
+				// shared grep instance fixed at construction cannot express. Gated on
+				// the grant: the factory builds a fresh tool and `executeTool` prefers
+				// it over the registry, so installing it unconditionally would let a
+				// session without `grep` search anyway.
+				createGrepTool: grepWasGranted ? createBridgeGrepFactory(toolSession, extensionRunner) : undefined,
+				// Native delete and resource-download frames mutate files without a
+				// registry tool. Resolve both the transactional active predicate and
+				// live access mode: Agent.state.tools commits only after prompt rebuilding,
+				// while this predicate revokes before the await and rolls back on failure.
+				allowDirectFileMutation: () =>
+					(editWasGranted && toolSession.isToolActive?.("edit") === true) ||
+					(toolSession.isToolActive?.("write") === true && toolRegistry.has("write")),
+			});
+		};
 
 		// Resolve the live inline-descriptors setting against the active model.
 		// `auto` enforces the per-model policy (inline for Gemini, off otherwise), so
@@ -4482,20 +4459,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Sessions handed an explicit rule set (subagents inherit the parent's) keep it
 			// but still re-bucket, so live `ttsr.*` filter changes apply to them too.
 			if (hasSession) {
+				const disabledExtensions = [...cfgDisabledExtensions.get(settings)];
 				// These reads share only the cwd and discovery scope. Start them together:
 				// a slow repository lookup must not delay context files or rules, including
 				// the first refresh after session_start hooks have edited those files.
 				const [repoContext, refreshedContextFiles, ruleItems] = await Promise.all([
 					logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd),
 					pinnedContextFiles === undefined
-						? logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-								...cfgDisabledExtensions.get(settings),
-							])
+						? logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, disabledExtensions)
 						: undefined,
 					options.rules ??
 						logger
 							.time("rediscoverRules", () =>
-								loadCapability<Rule>(ruleCapability.id, { cwd: promptCwd, agentDir }),
+								// Rebuilds run outside the creation-time invocation scope; pass the
+								// session's effective roots so overlay/runtime `extensions:` survive.
+								loadCapability<Rule>(ruleCapability.id, {
+									cwd: promptCwd,
+									agentDir,
+									disabledExtensions,
+									extensionRoots: buildSessionExtensionRoots(),
+								}),
 							)
 							.then(result => result.items),
 				]);
@@ -4818,6 +4801,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			displayName: resolvedAgentDisplayName,
 			kind: agentKind,
 			parentId: options.parentAgentId,
+			parentSessionKey: options.parentSessionKey,
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
@@ -4910,8 +4894,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// whose blocks would otherwise be normalized and published for nothing.
 		// Read both dynamically so a `/model` switch or setting change takes
 		// effect on the next turn.
-		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-			const converted = convertToLlm(messages);
+		const convertToLlmWithBlockImages = (messages: AgentMessage[], reader: Model | undefined): Message[] => {
+			const converted = convertToLlm(messages, reader);
 			if (cfgImagesBlockImages.get(settings)) {
 				return replaceLlmImagesWithText(converted, "Image reading is disabled.");
 			}
@@ -4927,8 +4911,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Final convertToLlm: live provider replay drops API-level refusal errors,
 		// then applies secret obfuscation to the remaining outbound context.
-		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
-			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
+		const convertToLlmFinal = (messages: AgentMessage[], reader: Model | undefined): Message[] => {
+			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages, reader));
 			if (!obfuscator?.hasSecrets()) return converted;
 			return obfuscateMessages(obfuscator, converted);
 		};
@@ -4953,7 +4937,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const blobBroker = new LiveImageUrlService(
 			settings,
 			() => sessionManager.getCwd(),
-			model => modelRegistry.getApiKey(model, providerSessionId),
+			model => resolveProviderFileCredential(modelRegistry, model, providerSessionId),
 		);
 		disposeCallbacks.add(() => blobBroker.dispose());
 		// Always installed; the getter-backed options are snapshotted per request,
@@ -5441,6 +5425,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return advisorAvailableToolNames;
 			},
 			create: granted => {
+				const {
+					createBridgeEditTool,
+					createBridgeGrepFactory,
+				}: typeof CursorBridgeTools = require("./cursor-bridge-tools");
 				const advisorSession = createAdvisorToolSession();
 				// Descriptions, schemas, and execute-time gates read this live. A name
 				// is active only once its factory returns a tool, so a grant for an
@@ -5544,6 +5532,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agent,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
+			assertDispatchModel: options.assertDispatchModel,
 			disableModelFallback: options.disableModelFallback,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
@@ -6202,11 +6191,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (isOpenAICodexWebSocketPreferred(codexModel, { preferWebsockets: session.preferWebsockets })) {
 				void (async () => {
 					try {
-						const codexPrewarmApiKey = options.getApiKey
-							? // `getApiKey` returns a value-or-promise union; unwrap the promise,
-								// then resolve the result if it is itself an ApiKeyResolver.
-								await resolveApiKeyOnce(await options.getApiKey(codexModel))
-							: await modelRegistry.getApiKey(codexModel, providerSessionId);
+						// Resolve as the first request will, tier included, so the
+						// prewarmed socket belongs to the account that request lands on.
+						const serviceTier = session.effectiveServiceTier(codexModel);
+						const codexPrewarmApiKey = await resolveApiKeyOnce(
+							withRequestServiceTier(
+								// `getApiKey` returns a value-or-promise union; unwrap it first.
+								options.getApiKey
+									? await options.getApiKey(codexModel)
+									: modelRegistry.resolver(codexModel, providerSessionId),
+								serviceTier,
+							),
+						);
 						if (!codexPrewarmApiKey) return;
 						// Load the transport only for an actual Codex prewarm, not unrelated session setup.
 						const { prewarmOpenAICodexResponses } =
@@ -6216,7 +6212,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							sessionId: providerSessionId,
 							preferWebsockets: session.preferWebsockets,
 							providerSessionState: session.providerSessionState,
-							serviceTier: session.effectiveServiceTier(codexModel),
+							serviceTier,
 						});
 					} catch (error) {
 						const errorMessage = error instanceof Error ? error.message : String(error);

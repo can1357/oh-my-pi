@@ -74,6 +74,8 @@ import {
 	type DraftImage,
 	draftImageBlob,
 	expandAtoms,
+	type PixelSize,
+	withMarkerPixelSize,
 } from "./attachments";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -164,6 +166,8 @@ export interface ComposerDecoration {
 	 */
 	readonly gradient?: { readonly stops: readonly string[]; readonly periodMs?: number };
 	readonly fx?: TspEffect;
+	/** Terminal-only text drawn in place of the range (see {@link EditorTermRange.label}); Tern draws the range. */
+	readonly label?: string;
 }
 
 /** Decorations for the draft `text`. */
@@ -1123,6 +1127,25 @@ export class Composer {
 		return at === -1 ? undefined : this.pendingImageLinks[at];
 	}
 
+	/**
+	 * Make `image`, `size` pixels, what image chip `atom` stands for (Tern's annotator handed back
+	 * the annotated picture, maybe cropped or grown): it takes the old image's place among
+	 * {@link pendingImages}, its link is resolved anew, and the chip keeps its label and number
+	 * while its marker states the new size. An atom no longer in the draft, or whose image is no
+	 * longer pending, is ignored.
+	 */
+	replaceImage(atom: Atom, image: DraftImage, size: PixelSize): void {
+		const atoms = this.#atoms.peek();
+		const index = atoms.indexOf(atom);
+		const at = atom.image ? this.pendingImages.indexOf(atom.image) : -1;
+		if (index === -1 || at === -1) return;
+		this.pendingImages[at] = image;
+		this.pendingImageLinks[at] = undefined;
+		const expansion = atom.expansion === undefined ? undefined : withMarkerPixelSize(atom.expansion, size);
+		this.#atoms.set(atoms.with(index, { ...atom, image, expansion }));
+		this.relinkImages();
+	}
+
 	/** Make `state` the draft's atoms and attachments (chip numbering continues after them). */
 	#restoreState(state: DraftState | undefined): void {
 		const atoms = state?.atoms ?? [];
@@ -1817,7 +1840,14 @@ export class Composer {
 			});
 			for (const d of extra) {
 				if (d.gradient && d.gradient.stops.length > 0) out.push(...gradientRanges(text, d, d.gradient));
-				else out.push({ from: d.from, to: d.to, s: d.s, ...(d.fg ? { fg: d.fg } : {}) });
+				else
+					out.push({
+						from: d.from,
+						to: d.to,
+						s: d.s,
+						...(d.fg ? { fg: d.fg } : {}),
+						...(d.label ? { label: d.label } : {}),
+					});
 			}
 			return out.sort((a, b) => a.from - b.from);
 		});

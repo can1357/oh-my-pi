@@ -142,6 +142,51 @@ test("native /agents selection targets the clicked agent in its fullscreen menu"
 	expect(props().strip?.label).toBe("scout");
 });
 
+test("model preview reuses only the current selection and settings revision, including unresolved models", async () => {
+	await using ui = await nativeShell();
+	const host = deps("normal");
+	let revision = 0;
+	host.browserSource = {
+		...host.browserSource,
+		get revision() {
+			return revision;
+		},
+	};
+	const resolved: string[] = [];
+	host.effectiveModelPatterns = agent => [agent.name];
+	host.resolvePatterns = patterns => {
+		resolved.push(...patterns);
+		return undefined;
+	};
+	let reload!: () => Promise<void>;
+	ui.shell.overlays.show(() =>
+		fullscreenMenuView(
+			"agents-dashboard",
+			<AgentsHub
+				deps={host}
+				rows={() => 30}
+				onCancel={() => {}}
+				ref={hub => {
+					reload = hub.reload;
+				}}
+			/>,
+		),
+	);
+	await reload();
+	const { id } = ui.node("picker");
+	const select = (item: string) => ui.send({ ev: "select", sf: ui.sf, id, item });
+	select("agent:bundled:scout");
+	select("agent:bundled:scout");
+	expect(resolved).toEqual(["dev", "scout"]);
+	revision++;
+	select("agent:bundled:scout");
+	select("agent:project:dev");
+	select("agent:bundled:scout");
+	await reload();
+	ui.node("picker");
+	expect(resolved).toEqual(["dev", "scout", "scout", "dev", "scout", "scout"]);
+});
+
 pickerSuite({
 	dir: "overlays/agents-hub",
 	mount(caseName) {

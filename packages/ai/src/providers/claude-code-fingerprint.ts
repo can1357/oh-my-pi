@@ -15,6 +15,8 @@
 export const DEFAULT_CLAUDE_CODE_VERSION = "2.1.326";
 /** `@anthropic-ai/sdk` version bundled by the current Claude Code release. */
 export const claudeCodeSdkVersion = "0.128.0";
+/** `axios` version bundled by Claude Code 2.1.332; its default User-Agent signs the OAuth token refresh. */
+export const claudeCodeAxiosVersion = "1.15.2";
 
 const SEMVER_PATTERN = /^(\d+)\.(\d+)\.(\d+)$/;
 const VERSION_TOO_OLD_CODE = "claude_code_version_too_old";
