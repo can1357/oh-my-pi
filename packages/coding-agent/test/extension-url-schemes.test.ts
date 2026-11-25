@@ -6,7 +6,8 @@
  * malformed, repeated and RPC host schemes are refused.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-// Type-only from the package root: the handler types an extension implements are importable there.
+// The handler types an extension implements are importable from the package root.
+import * as codingAgentRoot from "@oh-my-pi/pi-coding-agent";
 import type { ExtensionAPI, ExtensionFactory, ProtocolHandler, ResolveContext } from "@oh-my-pi/pi-coding-agent";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -219,5 +220,16 @@ describe("pi.registerUrlScheme", () => {
 			"Host URI scheme is already registered in this session: murmur://",
 		);
 		expect(await readThrough(session, "murmur://x")).toContain("extension:murmur://x");
+	});
+});
+
+describe("package root URL exports", () => {
+	it("exports the handler contract and its spec check, not the routers or built-in handlers", () => {
+		expect(() =>
+			codingAgentRoot.assertProtocolHandlerSpec({ ...readOnly("contra", "x"), write: async () => {} }),
+		).toThrow("handler has write()");
+		for (const internal of ["InternalUrlRouter", "SessionUrlSchemes", "UrlSchemeTable", "AgentProtocolHandler"]) {
+			expect(internal in codingAgentRoot, internal).toBe(false);
+		}
 	});
 });

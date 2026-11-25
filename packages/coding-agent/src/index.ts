@@ -37,8 +37,9 @@ export * from "./extensibility/extensions";
 // Hook system types (legacy re-export)
 // Skills
 export * from "./extensibility/skills";
-// Internal URL handler types and routers, for `registerUrlScheme`
-export * from "./internal-urls";
+// Internal URL handler contract for `registerUrlScheme`: the types, and the spec check the loader applies
+export { assertProtocolHandlerSpec } from "./internal-urls/router";
+export type * from "./internal-urls/types";
 // Slash commands
 export { type FileSlashCommand, loadSlashCommands as discoverSlashCommands } from "./extensibility/slash-commands";
 export type * from "./lsp";
