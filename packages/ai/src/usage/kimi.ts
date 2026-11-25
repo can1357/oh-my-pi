@@ -269,8 +269,9 @@ function createKimiUsageProvider(id: KimiCodeProvider): UsageProvider {
 		id,
 		supports(params: UsageFetchParams): boolean {
 			if (params.provider !== id) return false;
-			// `/coding/v1/usages` also accepts a subscription API key (KIMI_API_KEY)
-			// as the bearer, so key-only setups (no /login OAuth) can report quota.
+			// `/coding/v1/usages` also accepts a subscription API key
+			// (KIMI_API_KEY / KIMI_CODE_GLOBAL_API_KEY) as the bearer, so key-only
+			// setups (no /login OAuth) can report quota.
 			return params.credential.type === "oauth"
 				? Boolean(params.credential.accessToken)
 				: Boolean(params.credential.apiKey);

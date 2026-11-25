@@ -51,12 +51,27 @@ describe("Kimi Code regional OAuth registry", () => {
 		);
 	});
 
-	it("lets the global provider honor shared and global-specific OAuth host aliases in order", async () => {
+	it("prefers global-specific OAuth hosts over shared aliases", async () => {
 		clearOAuthHostEnv();
 		Bun.env.KIMI_CODE_OAUTH_HOST = "https://shared-code-override.example";
 		Bun.env.KIMI_OAUTH_HOST = "https://shared-legacy-override.example";
 		Bun.env.KIMI_GLOBAL_OAUTH_HOST = "https://global-override.example";
 		Bun.env.KIMI_GLOBAL_AUTH_HOST = "https://global-auth-override.example";
+		expect(await firstDeviceAuthorizationUrl("kimi-code-global")).toBe(
+			"https://global-override.example/api/oauth/device_authorization",
+		);
+
+		clearOAuthHostEnv();
+		Bun.env.KIMI_CODE_OAUTH_HOST = "https://shared-code-override.example";
+		Bun.env.KIMI_OAUTH_HOST = "https://shared-legacy-override.example";
+		Bun.env.KIMI_GLOBAL_AUTH_HOST = "https://global-auth-override.example";
+		expect(await firstDeviceAuthorizationUrl("kimi-code-global")).toBe(
+			"https://global-auth-override.example/api/oauth/device_authorization",
+		);
+
+		clearOAuthHostEnv();
+		Bun.env.KIMI_CODE_OAUTH_HOST = "https://shared-code-override.example";
+		Bun.env.KIMI_OAUTH_HOST = "https://shared-legacy-override.example";
 		expect(await firstDeviceAuthorizationUrl("kimi-code-global")).toBe(
 			"https://shared-code-override.example/api/oauth/device_authorization",
 		);
@@ -65,19 +80,6 @@ describe("Kimi Code regional OAuth registry", () => {
 		Bun.env.KIMI_OAUTH_HOST = "https://shared-legacy-override.example";
 		expect(await firstDeviceAuthorizationUrl("kimi-code-global")).toBe(
 			"https://shared-legacy-override.example/api/oauth/device_authorization",
-		);
-
-		clearOAuthHostEnv();
-		Bun.env.KIMI_GLOBAL_OAUTH_HOST = "https://global-override.example";
-		Bun.env.KIMI_GLOBAL_AUTH_HOST = "https://global-auth-override.example";
-		expect(await firstDeviceAuthorizationUrl("kimi-code-global")).toBe(
-			"https://global-override.example/api/oauth/device_authorization",
-		);
-
-		clearOAuthHostEnv();
-		Bun.env.KIMI_GLOBAL_AUTH_HOST = "https://global-auth-override.example";
-		expect(await firstDeviceAuthorizationUrl("kimi-code-global")).toBe(
-			"https://global-auth-override.example/api/oauth/device_authorization",
 		);
 	});
 

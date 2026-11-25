@@ -73,7 +73,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `XIAOMI_TOKEN_PLAN_CN_API_KEY`        | Xiaomi MiMo Token Plan auth (CN)                   | Using `xiaomi-token-plan-cn` provider                          |                                                                                                                                              |
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`       | Xiaomi MiMo Token Plan auth (SGP)                  | Using `xiaomi-token-plan-sgp` provider                         |                                                                                                                                              |
 | `KIRO_API_KEY`                        | Kiro API-key auth                                  | Using `kiro` without `/login kiro`                             | Must be a `ksk_…` key; a stored `/login kiro` credential wins                                                                                |
-| `MOONSHOT_API_KEY`                    | Moonshot auth                                      | Using `moonshot` provider                                      | `KIMI_API_KEY` is NOT accepted; it authenticates the Kimi Code providers instead                                                            |
+| `MOONSHOT_API_KEY`                    | Moonshot auth                                      | Using `moonshot` provider                                      | `KIMI_API_KEY` is NOT accepted; it authenticates the mainland `kimi-code` provider instead                                                            |
 | `STEPFUN_API_KEY`                     | StepFun auth                                       | Using `stepfun` provider                                       | Keys are region-scoped: the `.ai` key works against `api.stepfun.ai`, the `.com` key against `api.stepfun.com`                               |
 | `HELMCODE_API_KEY`                    | Helmcode auth                                      | Using `helmcode` provider                                      |                                                                                                                                              |
 | `XAI_API_KEY`                         | xAI auth                                           | Using xAI models or as fallback for `xai-oauth`                |                                                                                                                                              |
@@ -315,14 +315,15 @@ Base URL resolution: option `azureBaseUrl` → env `AZURE_OPENAI_BASE_URL` → o
 
 | Variable               | Default / behavior                                                                                            |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `KIMI_API_KEY`           | API-key auth for the `kimi-code` (kimi.com) and `kimi-code-global` (kimi.ai) providers; never used by Moonshot |
-| `KIMI_CODE_OAUTH_HOST`   | OAuth host override for both Kimi Code providers                                                              |
-| `KIMI_OAUTH_HOST`        | Fallback OAuth host override for both providers                                                               |
-| `KIMI_GLOBAL_OAUTH_HOST` | Global OAuth host override (`kimi-code-global` only)                                                          |
-| `KIMI_GLOBAL_AUTH_HOST`  | Fallback global OAuth host override (`kimi-code-global` only)                                                 |
+| `KIMI_API_KEY`           | API-key auth for the mainland `kimi-code` (kimi.com) provider; never used by Moonshot                          |
+| `KIMI_CODE_GLOBAL_API_KEY` | API-key auth for the `kimi-code-global` (kimi.ai) provider                                                    |
+| `KIMI_CODE_OAUTH_HOST`   | Shared OAuth host override for both Kimi Code providers                                                       |
+| `KIMI_OAUTH_HOST`        | Shared fallback OAuth host override for both providers                                                        |
+| `KIMI_GLOBAL_OAUTH_HOST` | Global OAuth host override (`kimi-code-global` only; takes precedence over the shared overrides)              |
+| `KIMI_GLOBAL_AUTH_HOST`  | Fallback global OAuth host override (`kimi-code-global` only; applies before the shared overrides)            |
 | `KIMI_CODE_BASE_URL`     | Overrides Kimi usage endpoint base URL (`usage/kimi.ts`) for the mainland `kimi-code` deployment only         |
 
-OAuth host chain: mainland `kimi-code` resolves `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.com`; global `kimi-code-global` resolves `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `KIMI_GLOBAL_OAUTH_HOST` → `KIMI_GLOBAL_AUTH_HOST` → `https://auth.kimi.ai`, with its API base at `https://api.kimi.ai/coding/v1`.
+OAuth host chain: mainland `kimi-code` resolves `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.com`; global `kimi-code-global` resolves `KIMI_GLOBAL_OAUTH_HOST` → `KIMI_GLOBAL_AUTH_HOST` → `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.ai`, with its API base at `https://api.kimi.ai/coding/v1`.
 
 ### Kiro
 

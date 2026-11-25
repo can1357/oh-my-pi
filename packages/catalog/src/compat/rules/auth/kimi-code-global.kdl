@@ -5,7 +5,8 @@ auth "kimi-code-global" {
     login "device-code" {
         client-id "17e5f671-d194-4dfb-9706-5516cb48c098"
         base-url "https://auth.kimi.ai" {
-            env "KIMI_CODE_OAUTH_HOST" "KIMI_OAUTH_HOST" "KIMI_GLOBAL_OAUTH_HOST" "KIMI_GLOBAL_AUTH_HOST"
+            // Global-specific overrides win over the shared mainland/global aliases.
+            env "KIMI_GLOBAL_OAUTH_HOST" "KIMI_GLOBAL_AUTH_HOST" "KIMI_CODE_OAUTH_HOST" "KIMI_OAUTH_HOST"
         }
         headers-hook "kimi-fingerprint"
         device url="{base}/api/oauth/device_authorization"

@@ -5,6 +5,7 @@ import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 import { decodeKiroCredential, kiroCredentialCacheScope } from "../wire/kiro";
+import { KIMI_CODE_BASE_URLS } from "../wire/kimi-code";
 import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
@@ -85,9 +86,9 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "charm-hyper":
 			return CHARM_HYPER_API_BASE_URL;
 		case "kimi-code":
-			return "https://api.kimi.com/coding/v1";
+			return KIMI_CODE_BASE_URLS["kimi-code"];
 		case "kimi-code-global":
-			return "https://api.kimi.ai/coding/v1";
+			return KIMI_CODE_BASE_URLS["kimi-code-global"];
 		case "meta":
 		case "muse-code":
 			return "https://api.meta.ai/v1";

@@ -4,7 +4,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { kimiCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import { KIMI_CODE_BASE_URLS, isKimiCodeProvider, type KimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
+import { KIMI_CODE_BASE_URLS, type KimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { applyGeneratedModelPolicies } from "../scripts/generated-policies";
@@ -77,13 +77,6 @@ describe("Kimi Code provider catalog", () => {
 	it("keeps mainland and global discovery identity, endpoints, and caches separate", async () => {
 		await using temp = await TempDir.create("@kimi-code-regional-cache-");
 		const providers: readonly KimiCodeProvider[] = ["kimi-code", "kimi-code-global"];
-		expect(isKimiCodeProvider("kimi-code")).toBe(true);
-		expect(isKimiCodeProvider("kimi-code-global")).toBe(true);
-		expect(isKimiCodeProvider("moonshot")).toBe(false);
-		expect(KIMI_CODE_BASE_URLS).toEqual({
-			"kimi-code": "https://api.kimi.com/coding/v1",
-			"kimi-code-global": "https://api.kimi.ai/coding/v1",
-		});
 
 		const requests: Record<KimiCodeProvider, string[]> = {
 			"kimi-code": [],

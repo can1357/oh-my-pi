@@ -4,9 +4,10 @@
 provider "kimi-code-global" {
 	default-model "kimi-for-coding"
 	dynamic-models-authoritative #true
-	// Same provider-level KIMI_API_KEY wiring as "kimi-code"; runtime resolution
-	// and discovery select this provider's regional base URL.
-	env "KIMI_API_KEY"
+	// Global Kimi Code keys are not interchangeable with mainland `KIMI_API_KEY`
+	// keys, so this provider owns a dedicated env var; runtime resolution and
+	// discovery select this provider's regional base URL.
+	env "KIMI_CODE_GLOBAL_API_KEY"
 	discovery label="Kimi Code (Global)"
 
 	class "kimi" {

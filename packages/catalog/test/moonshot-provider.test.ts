@@ -366,6 +366,7 @@ describe("Moonshot China platform", () => {
 		MOONSHOT_BASE_URL: Bun.env.MOONSHOT_BASE_URL,
 		MOONSHOT_API_KEY: Bun.env.MOONSHOT_API_KEY,
 		KIMI_API_KEY: Bun.env.KIMI_API_KEY,
+		KIMI_CODE_GLOBAL_API_KEY: Bun.env.KIMI_CODE_GLOBAL_API_KEY,
 	};
 
 	function inputUrl(input: string | URL | Request): string {
@@ -400,24 +401,31 @@ describe("Moonshot China platform", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("Kimi Code resolves KIMI_API_KEY for both regions and never consumes the Moonshot key", () => {
-		expect(providerEntry("kimi-code")?.envVars).toEqual(["KIMI_API_KEY"]);
-		expect(providerEntry("kimi-code-global")?.envVars).toEqual(["KIMI_API_KEY"]);
-
+	it("Kimi Code resolves region-scoped API keys without crossing regions", () => {
 		delete Bun.env.KIMI_API_KEY;
+		delete Bun.env.KIMI_CODE_GLOBAL_API_KEY;
 		Bun.env.MOONSHOT_API_KEY = "moonshot-only-key";
 		expect(getEnvApiKey("kimi-code")).toBeUndefined();
 		expect(getEnvApiKey("kimi-code-global")).toBeUndefined();
 
-		Bun.env.KIMI_API_KEY = "kimi-code-key";
-		expect(getEnvApiKey("kimi-code")).toBe("kimi-code-key");
-		expect(getEnvApiKey("kimi-code-global")).toBe("kimi-code-key");
+		Bun.env.KIMI_API_KEY = "kimi-mainland-key";
+		expect(getEnvApiKey("kimi-code")).toBe("kimi-mainland-key");
+		expect(getEnvApiKey("kimi-code-global")).toBeUndefined();
+
+		Bun.env.KIMI_CODE_GLOBAL_API_KEY = "kimi-global-key";
+		expect(getEnvApiKey("kimi-code")).toBe("kimi-mainland-key");
+		expect(getEnvApiKey("kimi-code-global")).toBe("kimi-global-key");
+
+		delete Bun.env.KIMI_API_KEY;
+		expect(getEnvApiKey("kimi-code")).toBeUndefined();
+		expect(getEnvApiKey("kimi-code-global")).toBe("kimi-global-key");
 	});
 
-	it("Moonshot resolves only MOONSHOT_API_KEY and does not consume KIMI_API_KEY", () => {
+	it("Moonshot resolves only MOONSHOT_API_KEY and does not consume Kimi Code keys", () => {
 		expect(providerEntry("moonshot")?.envVars).toEqual(["MOONSHOT_API_KEY"]);
 		delete Bun.env.MOONSHOT_API_KEY;
-		Bun.env.KIMI_API_KEY = "kimi-code-key";
+		delete Bun.env.KIMI_CODE_GLOBAL_API_KEY;
+		Bun.env.KIMI_API_KEY = "kimi-mainland-key";
 		expect(getEnvApiKey("moonshot")).toBeUndefined();
 
 		Bun.env.MOONSHOT_API_KEY = "moonshot-key";
