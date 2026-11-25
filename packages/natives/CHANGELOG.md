@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `DesktopCapabilities.displayCount` is now `displayCount?: number`, absent while the backend cannot tell how many displays it can use; it was always a number ([#19618](https://github.com/can1357/oh-my-pi/pull/19618) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed Wayland `capabilities()` reporting zero displays before the first capture; the count is now absent until known ([#19618](https://github.com/can1357/oh-my-pi/pull/19618) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

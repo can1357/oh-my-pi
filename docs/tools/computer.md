@@ -88,7 +88,7 @@ The same surface is reachable as `computer.*` directly and as `desktop.*` inside
 - `desktop.window(id | { id?, app?, title?, wait? })` returns one persistent window facade. An id may be a string or a number (`74` is the id `"74"`, never matched against app or title). A filter's optional `wait` polls every 100 ms for a window to appear; it accepts finite milliseconds from 0 to 10000 and is cancellable, including in read-only runs. Without `wait`, lookup lists windows once. Python keyword filters support the same option: `await computer.window(app="Preview", title="report.pdf", wait=3000)`. Zero matches throw with the open windows grouped by app as `id "title"`: apps matching the filter's `app` first (up to 10 windows each, titled before untitled), then the focused window's app, then the rest (up to 3 each), at most 12 apps, with overflow and unlisted windows counted, plus a line when no app matches. Multiple matches throw with the candidates.
 - `desktop.focusedWindow()` returns a window facade or `null`.
 - `desktop.displays()` returns `DesktopDisplay[]`.
-- `desktop.capabilities()` returns capture/input/AX availability, `backgroundWindowInput` and `takeover` support, permission states, display server, backend, display count, `screenLocked` on macOS and Windows, and `displayAsleep` on macOS.
+- `desktop.capabilities()` returns capture/input/AX availability, `backgroundWindowInput` and `takeover` support, permission states, display server, backend, display count (absent on Wayland until the first capture names the shared monitor), `screenLocked` on macOS and Windows, and `displayAsleep` on macOS.
 
 A window facade exposes immutable `id`, `app`, `title`, optional `pid`, `bounds`, and `focused` fields.
 

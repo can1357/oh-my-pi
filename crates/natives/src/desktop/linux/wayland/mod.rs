@@ -303,7 +303,9 @@ impl Backend for WaylandBackend {
 			} else {
 				"unavailable".to_string()
 			},
-			display_count: self.displays.len() as u32,
+			// The portal names the shared monitor only when a capture opens a
+			// stream, so before the first one the count is unknown, not zero.
+			display_count: (!self.displays.is_empty()).then_some(self.displays.len() as u32),
 			screen_locked: false,
 			display_asleep: false,
 		}
@@ -784,6 +786,16 @@ mod tests {
 		let displays = backend.displays().unwrap();
 		assert_eq!(displays.len(), 1);
 		assert_eq!((displays[0].width, displays[0].height), (1920, 1080));
+	}
+
+	#[test]
+	fn display_count_is_unknown_until_the_first_capture() {
+		let mut backend = backend_without_services();
+		assert_eq!(backend.capabilities().display_count, None);
+		backend
+			.displays
+			.push(PortalGeometry::new(None, None, 1920, 1080).display());
+		assert_eq!(backend.capabilities().display_count, Some(1));
 	}
 
 	#[test]
