@@ -30,11 +30,16 @@ function launcherPath(dir: string, platform: NodeJS.Platform): string {
 function manifestPaths(platform: NodeJS.Platform, options: RelayNativeHostOptions, dir: string): string[] {
 	const file = `${NATIVE_HOST}.json`;
 	if (platform === "win32") return [path.join(dir, file)];
-	return chromiumUserDataDirs({
-		platform,
-		home: options.home,
-		configHome: options.configHome,
-	}).map(browser => path.join(browser.dir, "NativeMessagingHosts", file));
+	return (
+		chromiumUserDataDirs({
+			platform,
+			home: options.home,
+			configHome: options.configHome,
+		})
+			// Brave on macOS overrides DIR_USER_NATIVE_MESSAGING to Google/Chrome/NativeMessagingHosts.
+			.filter(browser => !(platform === "darwin" && browser.browser === "Brave Origin"))
+			.map(browser => path.join(browser.dir, "NativeMessagingHosts", file))
+	);
 }
 
 function launcherText(platform: NodeJS.Platform, command: readonly string[]): string {

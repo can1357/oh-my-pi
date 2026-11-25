@@ -89,4 +89,35 @@ describe("findUnpackedInstalls", () => {
 			},
 		]);
 	});
+
+	it("detects an unpacked extension in Windows Brave Origin profiles", async () => {
+		const root = home.join("AppData/Local/BraveSoftware/Brave-Origin/User Data");
+		await Bun.write(
+			`${root}/Local State`,
+			JSON.stringify({ profile: { info_cache: { Default: { name: "Default" } } } }),
+		);
+		await Bun.write(
+			`${root}/Default/Preferences`,
+			JSON.stringify({
+				extensions: {
+					ui: { developer_mode: true },
+					settings: { [ID]: { location: 4, disable_reasons: [] } },
+				},
+			}),
+		);
+
+		const found = await findUnpackedInstalls(ID, {
+			platform: "win32",
+			home: home.path(),
+		});
+		expect(found).toEqual([
+			{
+				browser: "Brave Origin",
+				profile: "Default",
+				loaded: true,
+				enabled: true,
+				developerMode: true,
+			},
+		]);
+	});
 });
