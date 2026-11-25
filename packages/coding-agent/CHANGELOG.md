@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A broadcast from the main agent now interrupts its waiting subagents: it reaches them as a parent steer (or interrupt) instead of sitting queued until their current `wait` window elapses. Broadcasts between peers still queue without interrupting.
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

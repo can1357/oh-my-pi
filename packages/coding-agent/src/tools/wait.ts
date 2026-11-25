@@ -89,7 +89,7 @@ interface WaitMessaging {
  * message that ended the wait, plus mailbox mail (a failed live hand-off,
  * which reaches the caller only through here). Returns the hand-off when a
  * message that ends a wait now waits for the caller: mail handed over here,
- * or a direct message already queued in its session. Broadcast legs and
+ * or a direct message already queued in its session. Peer broadcast legs and
  * progress notes queued there alone end nothing; they inject once the wait
  * returns. With no mail the check stays synchronous, so a wait registers its
  * bus waiter before a message sent right after the call can slip past it.
@@ -299,9 +299,10 @@ export function hasWaitTool(session: ToolSession): boolean {
  * waits), the top for each back-to-back one. A
  * direct message arriving mid-wait ends any wait. Messages never ride in the wait's result: each one
  * reaches the caller as a user turn right after it (see `handOffMail`).
- * Broadcast legs and progress notes ask the caller nothing, so they never end
- * a wait and inject as asides once it returns; the exception is a broadcast
- * from an agent a reply wait asked, which interrupts it without settling the
+ * A progress note, or a broadcast leg from a peer, asks the caller nothing, so
+ * it never ends a wait and injects as an aside once it returns. A broadcast
+ * from an agent a reply wait asked, or from the waiter's own ancestor (the only
+ * broadcaster, the main agent), interrupts the wait without settling the
  * question (see `IrcBus.unansweredSends`). A progress note leaves its sender's
  * reply owed, so the reply wait goes on.
  */

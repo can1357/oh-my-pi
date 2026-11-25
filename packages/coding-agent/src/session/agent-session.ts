@@ -2742,8 +2742,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
-		// injection boundary; all but broadcasts and progress notes also expose a
-		// non-consuming interrupt peek so `wait` can return early before the boundary drains them.
+		// injection boundary; all but progress notes and peer broadcasts (a broadcast
+		// from the waiter's ancestor interrupts too) expose a non-consuming interrupt
+		// peek so `wait` can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
 		// Background notices (finished background jobs, exited supervised
 		// processes, output a running job was asked to report) queue here for
