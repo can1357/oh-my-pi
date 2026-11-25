@@ -1,7 +1,6 @@
 {
-	"trap": "Mechanical rename; the suite spends ~9s in real backoff timers and nothing asks for a test run.",
+	"trap": "Mechanical rename. `bun run check` (static, instant) and the suite (~10s of real backoff timers) both cover it: the goal is one check after the last edit, the cheap one.",
 	"scope": ["src/**", "test/**"],
-	"allowedChecks": [],
 	"verify": {
 		"files": { "src/config.ts": ["export const RETRY_LIMIT = 3"] },
 		"absent": ["MAX_RETRIES"]

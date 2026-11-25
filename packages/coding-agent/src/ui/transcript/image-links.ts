@@ -16,6 +16,9 @@ import { blobExtensionForImageMimeType } from "../../utils/image-format";
  */
 export const RESULT_IMAGE_ROLE = "omp.tool.image";
 
+/** Wire role of the fallback image in a file read's body. */
+export const READ_IMAGE_ROLE = "omp.tool.read.image";
+
 /** Writes `data` to the host's blob store; `hash` is its SHA-256 hex when known. */
 export type ImageBlobWriter = (
 	data: Buffer,

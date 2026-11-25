@@ -59,7 +59,7 @@ use super::{Dir, Leftover, Sessions, Shared, child_end};
 use crate::{
 	bash::{
 		ChildRedir, ChildRedirs, EnvView, ExitStatus, ExtProc, OpenFlags, OsHandle, PgroupSpec,
-		Platform, ProcEvent, Rlimit, SigSet, Signal, SpawnSpec, StdioSpec,
+		Platform, ProcEvent, ProcUsage, Rlimit, SigSet, Signal, SpawnSpec, StdioSpec,
 	},
 	sys::{
 		lifecycle::{Abandon, Tracker},
@@ -312,12 +312,13 @@ impl State {
 		self.umask == Some(umask) && ign.iter().all(host_ignores)
 	}
 
-	/// Retire a process-only scope before its pid can be reused. Readers
-	/// hold this lock while collecting the process table too.
-	fn reap(&self, pid: i32) {
+	/// Retire a process-only scope before its pid can be reused, reaping the
+	/// process; its resource usage. Readers hold this lock while collecting
+	/// the process table too.
+	fn reap(&self, pid: i32) -> libc::rusage {
 		let mut gs = self.groups.lock();
 		gs.list.retain(|s| *s != Scope::Process { pid });
-		reap(pid);
+		reap(pid)
 	}
 }
 
@@ -701,6 +702,7 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		tracker,
 		shared: Arc::clone(shared),
 		detached: lineage.detached,
+		reaped: false,
 		pumps,
 		#[cfg(target_os = "linux")]
 		pidfd,
@@ -1543,17 +1545,64 @@ fn signaled(n: i32) -> ExitStatus {
 		.map_or(ExitStatus::SignaledRaw(n), ExitStatus::Signaled)
 }
 
-/// Reap `pid`, which has exited (or is about to: SIGKILL was sent).
-fn reap(pid: i32) {
+/// Reap `pid`, which has exited (or is about to: SIGKILL was sent); its
+/// resource usage (zeroed when the reap failed).
+fn reap(pid: i32) -> libc::rusage {
 	let mut st = 0;
-	// SAFETY: `st` is writable; `pid` is our unreaped child.
-	while unsafe { libc::waitpid(pid, &raw mut st, 0) } < 0
+	// SAFETY: rusage is plain data, valid zeroed.
+	let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+	// SAFETY: `st` and `ru` are writable; `pid` is our unreaped child.
+	while unsafe { libc::wait4(pid, &raw mut st, 0, &raw mut ru) } < 0
 		&& io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
 	{}
+	ru
 }
 
-/// A spawned external. Its process is never reaped while this exists, so
-/// signals to its scope cannot reach a recycled pid or group.
+/// The usage `wait4` reported for a reaped child, plus on macOS what its
+/// zombie still told [`proc_pid_rusage`](libc::proc_pid_rusage) (`apple`):
+/// instructions, cycles and the peak memory footprint.
+fn proc_usage(ru: &libc::rusage, apple: Option<&libc::rusage_info_v4>) -> ProcUsage {
+	let ns = |tv: libc::timeval| {
+		(tv.tv_sec.max(0) as u64) * 1_000_000_000 + (tv.tv_usec.max(0) as u64) * 1_000
+	};
+	let count = |n: libc::c_long| n.max(0) as u64;
+	// Linux and the BSDs count kilobytes; macOS bytes.
+	let rss_unit = if cfg!(target_os = "macos") { 1 } else { 1024 };
+	ProcUsage {
+		user_ns: ns(ru.ru_utime),
+		sys_ns: ns(ru.ru_stime),
+		max_rss: count(ru.ru_maxrss) * rss_unit,
+		minor_faults: count(ru.ru_minflt),
+		major_faults: count(ru.ru_majflt),
+		swaps: count(ru.ru_nswap),
+		block_in: count(ru.ru_inblock),
+		block_out: count(ru.ru_oublock),
+		msgs_sent: count(ru.ru_msgsnd),
+		msgs_received: count(ru.ru_msgrcv),
+		signals: count(ru.ru_nsignals),
+		voluntary_switches: count(ru.ru_nvcsw),
+		involuntary_switches: count(ru.ru_nivcsw),
+		instructions: apple.map_or(0, |ri| ri.ri_instructions),
+		cycles: apple.map_or(0, |ri| ri.ri_cycles),
+		peak_footprint: apple.map_or(0, |ri| ri.ri_lifetime_max_phys_footprint),
+	}
+}
+
+/// What macOS keeps of the unreaped child `pid`'s usage beyond `rusage`
+/// (`wait4` reports no instructions, cycles or footprint).
+#[cfg(target_os = "macos")]
+fn apple_usage(pid: i32) -> Option<libc::rusage_info_v4> {
+	// SAFETY: rusage_info_v4 is plain data, valid zeroed.
+	let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+	// SAFETY: `info` is a writable rusage_info_v4, the struct the V4 flavor
+	// fills; the zombie stays queryable until it is reaped.
+	let rc = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, (&raw mut info).cast()) };
+	(rc == 0).then_some(info)
+}
+
+/// A spawned external. Its process is reaped only once the engine is done
+/// with it (the drop, or [`ExtProc::usage`] after the exit was collected),
+/// so signals to its scope cannot reach a recycled pid or group.
 struct UnixProc {
 	pid:      i32,
 	scope:    Scope,
@@ -1562,6 +1611,9 @@ struct UnixProc {
 	/// [`crate::bash::Lineage::detached`]: dropping it while it runs releases
 	/// the process instead of escalating TERM → KILL.
 	detached: bool,
+	/// [`ExtProc::usage`] reaped it already: dropping it must not reap again
+	/// (the pid may name another child by then).
+	reaped:   bool,
 	/// The child's pumps and the shared input feeds it holds (kept open
 	/// while this lives), driven by `poll_wait`.
 	pumps:    Pumps,
@@ -1661,6 +1713,22 @@ impl ExtProc for UnixProc {
 	fn cont(&mut self) -> io::Result<()> {
 		self.scope.signal(Signal::Cont)
 	}
+
+	/// Reaps the collected exit with `wait4`; nothing signals the scope
+	/// after an exit was collected, so reaping before the drop frees nothing
+	/// still in use.
+	fn usage(&mut self) -> Option<ProcUsage> {
+		if self.reaped || !self.tracker.lock().collected() {
+			return None;
+		}
+		#[cfg(target_os = "macos")]
+		let apple = apple_usage(self.pid);
+		#[cfg(not(target_os = "macos"))]
+		let apple = None;
+		let ru = self.shared.state.reap(self.pid);
+		self.reaped = true;
+		Some(proc_usage(&ru, apple.as_ref()))
+	}
 }
 
 impl Drop for UnixProc {
@@ -1679,7 +1747,9 @@ impl Drop for UnixProc {
 			let exited = life.release();
 			drop(life);
 			if exited {
-				self.shared.state.reap(self.pid);
+				if !self.reaped {
+					self.shared.state.reap(self.pid);
+				}
 				return;
 			}
 			// Running on; parked: a waiter observes the exit and reaps.
@@ -1690,7 +1760,9 @@ impl Drop for UnixProc {
 		match life.abandon(Instant::now(), grace) {
 			Abandon::Exited => {
 				drop(life);
-				self.shared.state.reap(self.pid);
+				if !self.reaped {
+					self.shared.state.reap(self.pid);
+				}
 			},
 			Abandon::Orphaned { term, sweep_at } => {
 				// Unreaped (a zombie), so the scope is still ours.
