@@ -301,6 +301,20 @@ export class InputController {
 	#submissionHookOrder: Promise<void> = Promise.resolve();
 	/** Submissions (Enter or the follow-up key) the session has not admitted yet and that still dispatch locally. */
 	readonly #submissionDispatches = new Set<Promise<void>>();
+	/**
+	 * Messages a queue restore rendered into the draft, keyed by the `=>` shorthand body it produced.
+	 * The shorthand carries the delivery mode but not the exact text (the enumerated form indents
+	 * continuation lines), so an unedited restored draft re-queues these messages verbatim. Consumed
+	 * by the next submit: once the user edits the draft, its body no longer matches and it is parsed
+	 * as typed.
+	 */
+	#restoredQueueDraft: { body: string; messages: readonly string[] } | undefined;
+
+	/** Remember the messages `draft` was rendered from, for the next submit of that exact draft. */
+	#noteRestoredQueueDraft(draft: string, messages: readonly string[]): void {
+		const body = parseQueueShorthand(draft);
+		this.#restoredQueueDraft = body === undefined ? undefined : { body, messages };
+	}
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -1235,12 +1249,16 @@ export class InputController {
 
 			if (!text && !hasInputImages) return;
 
+			// A restored queue draft carries its messages out of band; any other submit retires them.
+			const restoredQueue = this.#restoredQueueDraft;
+			this.#restoredQueueDraft = undefined;
 			const queueBody = parseQueueShorthand(text);
 			if (queueBody !== undefined) {
 				await this.#queueForYield(queueBody, {
 					historyText: text,
 					images: inputImages,
 					imageLinks: inputImageLinks,
+					messages: restoredQueue?.body === queueBody ? restoredQueue.messages : undefined,
 				});
 				return;
 			}
@@ -2037,6 +2055,8 @@ export class InputController {
 			imageLinks?: (string | undefined)[];
 			/** The submitted draft already left the editor; anything there now is newer. Restored on failure. */
 			detachedText?: string;
+			/** Messages the draft was rendered from, when a queue restore wrote it (see {@link #restoredQueueDraft}). */
+			messages?: readonly string[];
 		},
 	): Promise<void> {
 		// Queue shorthand reaches this helper before the normal guest input gate.
@@ -2047,14 +2067,14 @@ export class InputController {
 			return;
 		}
 
-		const splitMessages = splitQueuedMessages(text);
+		const splitMessages = options.messages ?? splitQueuedMessages(text);
 		if (splitMessages.length === 0 && !options.images?.length) {
 			if (options.detachedText === undefined) this.#clearDraft();
 			this.ctx.showWarning("Usage: /queue <message> (or start a prompt with -> / =>)");
 			return;
 		}
 
-		const messages = splitMessages.length > 0 ? splitMessages : [""];
+		const messages: readonly string[] = splitMessages.length > 0 ? splitMessages : [""];
 		const originalDraft = this.ctx.composer.text();
 		const images = options.images?.length ? [...options.images] : undefined;
 		const imageLinks = options.imageLinks
@@ -2137,7 +2157,9 @@ export class InputController {
 					}
 				}
 			} else {
-				const restored = formatQueueShorthand(messages.slice(queuedCount));
+				const remaining = messages.slice(queuedCount);
+				const restored = formatQueueShorthand(remaining);
+				this.#noteRestoredQueueDraft(restored, remaining);
 				if (options.detachedText !== undefined) restoreDetachedDraft(this.ctx.composer, restored);
 				else this.ctx.composer.setText(restored);
 			}
@@ -2458,10 +2480,17 @@ export class InputController {
 		}
 		const current = options?.currentText ?? this.ctx.composer.text();
 		const queuedDraft = options?.queued ? (current.trim() ? parseQueueShorthand(current) : "") : undefined;
-		const combinedText =
-			queuedDraft === undefined
-				? [queuedText, current].filter(t => t.trim()).join("\n\n")
-				: formatQueueShorthand([queuedText, ...splitQueuedMessages(queuedDraft)]);
+		let combinedText: string;
+		if (queuedDraft === undefined) {
+			combinedText = [queuedText, current].filter(t => t.trim()).join("\n\n");
+			this.#restoredQueueDraft = undefined;
+		} else {
+			// The shorthand cannot spell every message back (a message that is itself a list, or a
+			// multi-line one), so keep the messages next to the draft: Enter re-queues exactly these.
+			const messages = [queuedText, ...splitQueuedMessages(queuedDraft)];
+			combinedText = formatQueueShorthand(messages);
+			this.#noteRestoredQueueDraft(combinedText, messages);
+		}
 		// Hand queued images back to the pending-image buffer first (links are
 		// re-materialized lazily), then set the text: setCollapsedText folds the
 		// renumbered `[Image #N, WxH]` references back into chip tokens, and the
