@@ -109,14 +109,25 @@ function rowLines(theme: Theme, model: AskDialogModel, row: AskRow, selected: bo
 	const checked =
 		option !== undefined ? state.selected.has(option.label) : row.kind === "other" && state.customInput !== undefined;
 	const color = selected ? "accent" : checked ? "toolOutput" : "text";
-	const glyph = question.multi ? (checked ? "☑" : "☐") : checked ? "◉" : "○";
+	const symbol = question.multi
+		? checked
+			? "checkbox.checked"
+			: "checkbox.unchecked"
+		: checked
+			? "radio.selected"
+			: "radio.unselected";
+	const glyph = theme.symbols.symbol(symbol);
 	const marker = `${theme.fg(checked ? "success" : "dim", glyph)} `;
-	const cursor = selected ? theme.fg("accent", "❯ ") : "  ";
+	const cursor = selected ? theme.fg("accent", `${theme.symbols.symbol("nav.cursor")} `) : "  ";
 	const noteMarker = state.note && state.noteRowKey === row.key ? theme.fg("success", "  ✎ note") : "";
-	const labelWidth = Math.max(1, width - 4 - visibleWidth(noteMarker));
+	const prefixWidth = visibleWidth(cursor) + visibleWidth(marker);
+	const labelWidth = Math.max(1, width - prefixWidth - visibleWidth(noteMarker));
 	const label = markdownRows(theme, row.label, labelWidth, color);
 	const lines = [`${cursor}${marker}${label[0] ?? ""}${noteMarker}`];
-	for (const line of label.slice(1)) lines.push(`    ${line}`);
+	if (label.length > 1) {
+		const indent = " ".repeat(prefixWidth);
+		for (const line of label.slice(1)) lines.push(indent + line);
+	}
 	if (option?.description?.trim()) {
 		const described = descriptionRows(theme, option.description.trim(), width);
 		for (const line of model.expanded ? described : described.slice(0, MAX_DESC_ROWS)) {

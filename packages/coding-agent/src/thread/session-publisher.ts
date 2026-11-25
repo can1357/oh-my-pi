@@ -557,6 +557,7 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	dispose: async (publisher, options) => settle(publisher, publisher.session.dispose(options)),
 	deliverIrcMessage: async (publisher, msg) => settle(publisher, publisher.session.deliverIrcMessage(msg)),
 	waitForIrcReplies: async publisher => settle(publisher, publisher.session.waitForIrcReplies()),
+	applyAgentModelChange: (publisher, change) => settle(publisher, publisher.session.applyAgentModelChange(change)),
 	setWorkPoolYieldItems: async (publisher, items) => settle(publisher, publisher.session.setWorkPoolYieldItems(items)),
 	emitIrcRelayObservation: (publisher, record) => publisher.session.emitIrcRelayObservation(record),
 	watch: (publisher, on) => publisher.watch(on),

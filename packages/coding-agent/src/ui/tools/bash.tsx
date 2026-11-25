@@ -99,6 +99,8 @@ function isSoleInvocation(command: string | undefined, tool: string): boolean {
 /** A footer fact of the terminal look: an icon (symbol key) and text, dim unless `color`. */
 export interface BashStat {
 	readonly icon?: string;
+	/** Separator between the icon and text; defaults to a space. */
+	readonly iconSeparator?: string;
 	readonly text: string;
 	readonly color?: string;
 }
@@ -313,7 +315,7 @@ function footerStats(
 					? { icon: "status.warning", text: "ready timed out" }
 					: { icon: "status.error", text: "not ready" },
 		);
-		if (service.pid !== undefined) stats.push({ text: `#${service.pid}` });
+		if (service.pid !== undefined) stats.push({ icon: "icon.pid", iconSeparator: "", text: String(service.pid) });
 	}
 	const timeoutDisabled = details?.timeoutDisabled === true || contextTimeout === 0;
 	const timeoutSeconds = timeoutDisabled ? undefined : (details?.timeoutSeconds ?? contextTimeout);

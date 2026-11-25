@@ -8,12 +8,12 @@
  *   the fence's code as the reply's Markdown draws it.
  * - `image` `omp.figure.chart`: a table's chart under a blank row (inside a
  *   reply: no blank row, and nothing where images cannot be drawn).
- * - `md` `omp.figure.code`: a fence's Markdown one cell in from both sides.
+ * - `md` `omp.figure.code`: a fence's Markdown with the standard inset.
  * - `text` `omp.figure.pending`: `Drawing SVG…`, one cell in.
  * - `image`/`web` `omp.embed`: the picture (a frame's captured still), else
  *   ` ▣ <name>` dim, with why it is not shown where images can be drawn.
  * - `col` `omp.figures` (a reply with figures): its runs set off by blank
- *   rows, prose Markdown one cell in from both sides.
+ *   rows, prose Markdown with the standard inset.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
@@ -22,6 +22,7 @@ import { stack, styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { terminalPaddingX } from "../terminal-padding";
 import type { EmbedTerm } from "../../transcript/figures/embed";
 import type { FigureTerm } from "../../transcript/figures/svg-figure";
 import type { ChartTerm } from "../../transcript/figures/table-chart";
@@ -38,9 +39,13 @@ function figureRoom(cx: PaintContext): PaintContext {
 	return narrowed(cx, cx.width - 2);
 }
 
-/** Markdown one cell in from both sides. */
+/** Markdown with the standard horizontal padding. */
 function paddedMarkdown(cx: PaintContext, text: string): readonly string[] {
-	return renderMarkdownFrame(text, cx.width, { theme: cx.theme, paddingX: 1, hyperlinks: cx.hyperlinks }).rows;
+	return renderMarkdownFrame(text, cx.width, {
+		theme: cx.theme,
+		paddingX: terminalPaddingX(),
+		hyperlinks: cx.hyperlinks,
+	}).rows;
 }
 
 function drawable(node: UiNode, cx: PaintContext): boolean {
@@ -116,9 +121,12 @@ defineRolePainter("image", "omp.embed", paintEmbed);
 defineRolePainter("web", "omp.embed", paintEmbed);
 
 defineRolePainter("col", "omp.figures", (node, cx) => {
+	const paddingX = terminalPaddingX();
+	const pad = " ".repeat(paddingX);
 	const blocks = node.children().map((child): Block => {
-		if (child.kind !== "md" || propsOf<{ role: string }>(child).role !== undefined) return cx.paint(child, cx.width);
-		return { rows: cx.paint(child, Math.max(1, cx.width - 2)).rows.map(row => ` ${row}`) };
+		if (paddingX === 0 || child.kind !== "md" || propsOf<{ role: string }>(child).role !== undefined)
+			return cx.paint(child, cx.width);
+		return { rows: cx.paint(child, Math.max(1, cx.width - 2 * paddingX)).rows.map(row => pad + row) };
 	});
 	return stack(blocks, 1);
 });

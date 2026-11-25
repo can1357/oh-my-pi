@@ -29,6 +29,7 @@ pathIgnorePatterns = [
   "sdk/**",
   "docs/**",
   "runs/**",
+  "packages/metaharness/adapters/scope/tasks/**",
   "python/robomp/data/**",
   ".wt/**",
   ".worktrees/**",

@@ -23,6 +23,8 @@
 //! reference regex; differential-tested against the fancy-regex chain in
 //! `tests` below.
 
+use std::ops::{ControlFlow, Range};
+
 use xutf::GeneralCategoryGroup as GCG;
 
 use super::{cls, decode_at, digits_end, ws_end};
@@ -30,22 +32,36 @@ use crate::utok::utf::Unit;
 
 /// Split `units` into pieces of the full three-stage chain, in order,
 /// covering the input exactly.
+#[cfg(test)]
 pub fn for_each_piece<U: Unit>(units: &[U], f: &mut impl FnMut(&[U])) {
-	isolated(units, digits_end, &mut |p1: &[U]| {
-		isolated(p1, cjk_end, &mut |p2: &[U]| {
-			isolated(p2, main_end, f);
-		});
+	let _ = try_for_each_piece_range(units, &mut |range| {
+		f(&units[range]);
+		ControlFlow::Continue(())
 	});
+}
+
+/// Split `units` into piece index ranges of the full three-stage chain,
+/// stopping early when `f` returns [`ControlFlow::Break`].
+pub fn try_for_each_piece_range<U: Unit>(
+	units: &[U],
+	f: &mut impl FnMut(Range<usize>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+	isolated_until(units, 0, digits_end, &mut |r1| {
+		isolated_until(&units[r1.clone()], r1.start, cjk_end, &mut |r2| {
+			isolated_until(&units[r2.clone()], r2.start, main_end, f)
+		})
+	})
 }
 
 /// One `Split(Isolated)` stage: `matcher` returns the end of a match
 /// starting exactly at the given offset (or `None`); matches become
 /// pieces, unmatched gaps between them survive as pieces too.
-fn isolated<U: Unit>(
+fn isolated_until<U: Unit>(
 	piece: &[U],
+	base: usize,
 	matcher: impl Fn(&[U], usize) -> Option<usize>,
-	f: &mut impl FnMut(&[U]),
-) {
+	f: &mut impl FnMut(Range<usize>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
 	let mut gap = 0;
 	let mut pos = 0;
 	while pos < piece.len() {
@@ -56,9 +72,9 @@ fn isolated<U: Unit>(
 					"utoken: stage matcher must advance within bounds"
 				);
 				if pos > gap {
-					f(&piece[gap..pos]);
+					f((base + gap)..(base + pos))?;
 				}
-				f(&piece[pos..end]);
+				f((base + pos)..(base + end))?;
 				pos = end;
 				gap = end;
 			},
@@ -66,8 +82,9 @@ fn isolated<U: Unit>(
 		}
 	}
 	if gap < piece.len() {
-		f(&piece[gap..]);
+		f((base + gap)..(base + piece.len()))?;
 	}
+	ControlFlow::Continue(())
 }
 
 /// `[一-龥぀-ゟ゠-ヿ]`.

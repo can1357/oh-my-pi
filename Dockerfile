@@ -22,7 +22,7 @@
 #     FROM ${PI_BASE} AS pi-base
 ###############################################################################
 
-ARG BUN_VERSION=1.4.4
+ARG BUN_VERSION=1.4.5
 
 ############################
 # 1) natives-builder — Rust + Bun → pi_natives.linux-<arch>.node (local cargo)
