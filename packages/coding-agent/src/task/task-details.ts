@@ -216,6 +216,9 @@ export interface AgentProgress {
 		argsKey?: string;
 		intent?: string;
 		isError?: boolean;
+		/** Lines an edit call added and removed, by its diff; absent for other calls and failed ones. */
+		added?: number;
+		removed?: number;
 		endMs: number;
 	}>;
 	recentOutput: string[];

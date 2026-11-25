@@ -26,6 +26,7 @@ import type {
 	TspSpan,
 	TspText,
 } from "@oh-my-pi/pi-wire";
+import { flattenLine } from "../../text/sanitize";
 import type { UiNode } from "../../node";
 import { type Signal, signal } from "../../reactive";
 import type { Theme } from "../../theme/contract";
@@ -248,11 +249,6 @@ export function boxBottom(theme: Theme, width: number): string {
 
 // ─── Rows ───────────────────────────────────────────────────────────────────
 
-/** Single-line plain text: tabs and line breaks to spaces, runs of whitespace collapsed. */
-export function oneLine(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
-
 /** Plain text of a TSP text value. */
 export function plainText(content: TspText | undefined): string {
 	if (content === undefined) return "";
@@ -291,8 +287,8 @@ export function selectRow(
 	const { width, selected } = options;
 	const lead = pointer(theme, selected);
 	const leadWidth = visibleWidth(lead);
-	const detail = options.detail ? oneLine(options.detail) : "";
-	const label = oneLine(options.label);
+	const detail = options.detail ? flattenLine(options.detail) : "";
+	const label = flattenLine(options.label);
 	if (detail && width > 40) {
 		const column = Math.max(1, Math.min(options.labelWidth ?? 32, width - leadWidth - 4));
 		const shown = truncate(label, Math.max(1, column - 2), "");
@@ -400,9 +396,9 @@ export function paintPickerList(node: UiNode, theme: Theme, width: number): { ro
 			if (text !== undefined) row = inlineRow(theme, { text, selected, width: rowWidth });
 			else if (term.layout === "inline") {
 				const label = plainText(item.label);
-				const parts: TspSpan[] = [{ t: oneLine(label), ...(item.disabled ? { s: "dim" } : {}) }];
+				const parts: TspSpan[] = [{ t: flattenLine(label), ...(item.disabled ? { s: "dim" } : {}) }];
 				if (current.has(item.id)) parts.push({ t: " (current)", s: "muted" });
-				if (item.detail) parts.push({ t: `  ${oneLine(plainText(item.detail))}`, s: "dim" });
+				if (item.detail) parts.push({ t: `  ${flattenLine(plainText(item.detail))}`, s: "dim" });
 				row = inlineRow(theme, { text: parts, selected, width: rowWidth });
 			} else {
 				const own = term.labels?.[item.id];

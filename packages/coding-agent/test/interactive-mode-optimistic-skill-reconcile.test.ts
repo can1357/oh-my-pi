@@ -17,7 +17,6 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isSettled } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { TranscriptBlock } from "../src/ui/shell";
@@ -76,9 +75,6 @@ describe("InteractiveMode optimistic skill reconcile (#11217)", () => {
 			undefined,
 			createModeTerminal().frame,
 		);
-		// The test drives reconcile directly and never starts the mode; keep the
-		// git branch watcher off so it does not leak an fs.watch into sibling files.
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 	});
 
 	beforeEach(() => {

@@ -6467,7 +6467,7 @@ pub mod fast_regex {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::{borrow::Cow, cell::OnceCell, error::Error, ops::ControlFlow, sync::LazyLock};
+use std::{borrow::Cow, cell::OnceCell, error::Error, ops::ControlFlow};
 
 use fancy_regex::{Captures as FancyCaptures, Regex as FancyRegex};
 use memchr::memmem;
@@ -6477,43 +6477,35 @@ use crate::sed::error_handling::{SedError, SedResult};
 
 use crate::sed::fast_io::IOChunk;
 
-/// REs requiring backreferences rather than the faster Unicode regex engine.
-// False positives only result in a small performance pessimization,
-// so this is just a maximally sensitive, good-enough approximation.
-// For example, r"\\1" and r"[\1]" will match, whereas only a number
-// after an odd number of backslashes and outside a character class
-// should match.
-static NEEDS_FANCY_RE: LazyLock<RustRegex> =
-	LazyLock::new(|| regex::Regex::new(r"\\[1-9]").unwrap());
+/// Detects `\1` through `\9`, conservatively including escaped backslashes.
+fn needs_backreferences(pattern: &str) -> bool {
+	let bytes = pattern.as_bytes();
+	memchr::memchr_iter(b'\\', bytes).any(|at| matches!(bytes.get(at + 1), Some(b'1'..=b'9')))
+}
 
-/// All characters signifying that the match must be handled by an RE
-/// rather than by plain string pattern matching.
-// These do not include the ^$ metacharacters, which we can easily handle.
-// Plain string fixed-string matching is currently faster than Regex
-// matching, because Regex always constructs an automaton and needs
-// to handle state transitions, whereas plain string matching can
-// use tailored CPU string or vectored instructions.
-static NEEDS_RE: LazyLock<RustRegex> = LazyLock::new(|| {
-	regex::Regex::new(
-		r"(?x) # Turn on verbose mode
-          ( ^                   # Non-escaped: i.e. at BOL
-             | ^[^\\]            # or after a BOL non \
-             | [^\\] {2}         # or after two non \ characters
-             | \\.               # or after a consumed or escaped \
-           )
-           (                     # A potentially incompatible match
-              [.?|+(\[{*]        # Any magic RE character
-                                 # Some are operators so illegal at
-                                 # BOL but they should error there,
-                                 # not use them as literals.
-             | \\[WwDdSsPp]      # Unicode classes
-             | \\[AzBb]          # Empty matches
-             | \\[0-9]           # Back-references
-           )
-        ",
-	)
-	.unwrap()
-});
+/// Detects metacharacters and escapes that require more than literal matching.
+fn needs_regex(pattern: &str) -> bool {
+	let bytes = pattern.as_bytes();
+	bytes.iter().enumerate().any(|(at, &b)| {
+		let special = match b {
+			b'.' | b'?' | b'|' | b'+' | b'(' | b'[' | b'{' | b'*' => true,
+			b'\\' => matches!(
+				bytes.get(at + 1),
+				Some(b'W' | b'w' | b'D' | b'd' | b'S' | b's' | b'P' | b'p' | b'A' | b'z' | b'B' | b'b' | b'0'..=b'9')
+			),
+			_ => false,
+		};
+		if !special || at == 0 {
+			return special;
+		}
+		// The preceding escape may consume a backslash, but not a newline.
+		match bytes[at - 1] {
+			b'\\' => at >= 2 && bytes[at - 2] == b'\\',
+			b'\n' => at < 2 || bytes[at - 2] != b'\\',
+			_ => true,
+		}
+	})
+}
 
 #[derive(Clone, Debug)]
 /// Types of literal string anchored matches
@@ -6708,10 +6700,10 @@ pub fn ensure_dotall(pattern: &str) -> String {
 impl Regex {
 	/// Construct the most efficient RE-like matching engine possible.
 	pub fn new(pattern: &str) -> Result<Self, Box<dyn Error>> {
-		if NEEDS_FANCY_RE.is_match(pattern) {
+		if needs_backreferences(pattern) {
 			let pattern = ensure_dotall(pattern);
 			Ok(Self::Fancy(FancyRegex::new(&pattern)?, RawRegex::new(pattern)))
-		} else if NEEDS_RE.is_match(pattern) {
+		} else if needs_regex(pattern) {
 			let pattern = ensure_dotall(pattern);
 			Ok(Self::Unicode(RustRegex::new(&pattern)?, RawRegex::new(pattern)))
 		} else {
@@ -6903,7 +6895,6 @@ impl<'t> Captures<'t> {
 mod tests {
 	use super::*;
 
-	// FANCY_RE
 	#[test]
 	fn test_needs_fancy_re_matches() {
 		let should_match = [
@@ -6911,7 +6902,7 @@ mod tests {
 		];
 
 		for pat in &should_match {
-			assert!(NEEDS_FANCY_RE.is_match(pat), "Expected NEEDS_FANCY_RE to match: {pat:?}");
+			assert!(needs_backreferences(pat), "Expected needs_backreferences to match: {pat:?}");
 		}
 	}
 
@@ -6927,11 +6918,10 @@ mod tests {
 		];
 
 		for pat in &should_not_match {
-			assert!(!NEEDS_FANCY_RE.is_match(pat), "Expected NEEDS_FANCY_RE to NOT match: {pat:?}");
+			assert!(!needs_backreferences(pat), "Expected needs_backreferences to NOT match: {pat:?}");
 		}
 	}
 
-	// NEEDS_RE
 	#[test]
 	fn test_needs_re_matches() {
 		let should_match = [
@@ -6950,7 +6940,7 @@ mod tests {
 		];
 
 		for pat in &should_match {
-			assert!(NEEDS_RE.is_match(pat), "Expected NEEDS_RE to match: {pat:?}");
+			assert!(needs_regex(pat), "Expected needs_regex to match: {pat:?}");
 		}
 	}
 
@@ -6967,7 +6957,7 @@ mod tests {
 		];
 
 		for pat in &should_not_match {
-			assert!(!NEEDS_RE.is_match(pat), "Expected NEEDS_RE to NOT match: {pat:?}");
+			assert!(!needs_regex(pat), "Expected needs_regex to NOT match: {pat:?}");
 		}
 	}
 
