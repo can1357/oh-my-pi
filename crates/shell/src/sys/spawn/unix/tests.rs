@@ -299,6 +299,43 @@ fn parked_waiters_report_each_external_its_own_exit() {
 	assert!(s.leftovers().unwrap().is_empty());
 }
 
+/// A measured spawn (`time`; on Linux the program runs under a helper)
+/// ends as the program did, takes group signals as it would, reports a
+/// usage, and fails like a plain spawn when the program is missing.
+#[test]
+fn measured_spawns_end_as_their_program() {
+	let env = EnvView::default();
+	for sessions in [Sessions::Detach, Sessions::Share] {
+		let s = spawner(sessions, Duration::from_secs(2));
+		for (script, status) in
+			[("exit 3", ExitStatus::Exited(3)), ("kill -USR1 $$", ExitStatus::Signaled(Signal::Usr1))]
+		{
+			let a = sh(script);
+			let mut p = s.spawn_measured(spec(&a, &env, NEW)).unwrap();
+			assert_eq!(wait(&mut p), status, "{sessions:?}: {script}");
+			assert!(p.usage().is_some_and(|u| u.max_rss > 0), "{sessions:?}: {script}");
+		}
+		let a = argv(&["/bin/sleep", "30"]);
+		let mut p = s.spawn_measured(spec(&a, &env, NEW)).unwrap();
+		#[cfg(target_os = "linux")]
+		{
+			let program = child_of(p.pid() as i32);
+			assert_eq!(program.name, "sleep", "the helper's child is the program");
+			assert_eq!(program.pgid, pgid(p.pid()), "in the helper's group");
+		}
+		p.signal(Signal::Term).unwrap();
+		assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Term), "{sessions:?}");
+		drop(p);
+		assert!(s.leftovers().unwrap().is_empty(), "{sessions:?}");
+	}
+	let a = argv(&["/nonexistent/prog"]);
+	let err = NativeSpawner::default()
+		.spawn_measured(spec(&a, &env, NEW))
+		.err()
+		.unwrap();
+	assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
 #[test]
 fn missing_program_fails_with_not_found_on_both_paths() {
 	let env = EnvView::default();

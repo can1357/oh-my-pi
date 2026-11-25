@@ -297,25 +297,11 @@ async fn dd_rss(s: &mut Session, command: &str) -> u64 {
 		.unwrap_or_else(|_| panic!("{command}: {:?}", r.stdout))
 }
 
-/// The most `time` may report as the peak of a program this process
-/// spawned: 1 GiB, or on Linux this process's own peak when larger, since
-/// exec keeps the spawner's high-water mark in the child's `ru_maxrss`.
-fn rss_ceiling() -> u64 {
-	let gib = 1 << 30;
-	if !cfg!(target_os = "linux") {
-		return gib;
-	}
-	// SAFETY: rusage is plain data, valid zeroed; `ru` is writable.
-	let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-	// SAFETY: RUSAGE_SELF is always valid and `ru` is writable.
-	unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut ru) };
-	// Linux counts kilobytes.
-	gib.max(ru.ru_maxrss.max(0) as u64 * 1024 + 1)
-}
-
 /// `time -l` is the utility, not the keyword timing a command named `-l`:
 /// it reports the program's own peak memory, on its stderr, so a pipe
 /// reads it; a program run inside a nested shell's pipeline counts too.
+/// The peak is the program's, not this process's (Linux exec keeps the
+/// spawner's high-water mark).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn time_reports_a_programs_peak_memory() {
 	let mut s = session();
@@ -323,7 +309,7 @@ async fn time_reports_a_programs_peak_memory() {
 	for command in [format!("time -l {dd}"), format!("time -l sh -c '{dd} 2>/dev/null | cat; true'")]
 	{
 		let rss = dd_rss(&mut s, &command).await;
-		assert!((64 << 20..rss_ceiling()).contains(&rss), "{command}: {rss}");
+		assert!((64 << 20..1 << 30).contains(&rss), "{command}: {rss}");
 	}
 }
 

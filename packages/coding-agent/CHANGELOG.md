@@ -11,6 +11,7 @@
 ### Fixed
 
 - A broadcast from the main agent that arrives while a subagent is finishing no longer replaces that subagent's report; the subagent answers it in a separate turn, and the broadcast still interrupts a waiting subagent.
+- On Linux, `time -l` and `time -v` in the bash tool report the program's own maximum resident set size instead of at least omp's.
 
 ### Added
 

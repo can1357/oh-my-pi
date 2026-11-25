@@ -30,6 +30,10 @@
 //!
 //! **Waiting** reports stops and continues besides the exit
 //! ([`ExtProc::poll_event`]).
+//!
+//! **Measured spawns** (`time`) run the program under a helper process on
+//! Linux, so its peak resident set is its own rather than the host's
+//! (`measure`).
 
 use std::{
 	cell::RefCell,
@@ -588,7 +592,13 @@ fn may_need_script_fallback(path: &[u8], cwd: &[u8]) -> bool {
 			.contains(&0)
 }
 
-pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
+/// Spawn `spec`; `measured`: for `time`, whose report reads its usage
+/// (`measure`).
+pub(super) fn spawn(
+	shared: &Arc<Shared>,
+	spec: SpawnSpec<'_>,
+	measured: bool,
+) -> io::Result<Box<dyn ExtProc>> {
 	let SpawnSpec {
 		path,
 		argv,
@@ -641,6 +651,15 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		}
 		fds.push((fd, child_fd(shared, s, Dir::Probe, &mut pumps, &mut feeds)?));
 	}
+	#[cfg(target_os = "linux")]
+	let report = (measured
+		&& redirs.is_none()
+		&& place != Place::Inherit
+		&& !sigmask_ign.contains(Signal::Chld))
+	.then(|| measure::Report::attach(&mut fds))
+	.flatten();
+	#[cfg(not(target_os = "linux"))]
+	let _ = measured;
 	lift(&mut fds)?;
 	let tracker = Tracker::new(pumps.iter().map(Pump::outputs).sum());
 	// Polled by the `ExtProc`; dropped (stopping every pump) on any failure
@@ -648,10 +667,17 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let pumps = Pumps::new(pumps, feeds, &tracker);
 	let program =
 		Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits, tty, closed: &closed };
-	let launched = match &redirs {
-		Some(redirs) => fork_redirs(&program, &fds, place, redirs),
-		None => launch(&shared.state, &program, &fds, place),
+	let direct = |fds: &[(i32, Source)]| match &redirs {
+		Some(redirs) => fork_redirs(&program, fds, place, redirs),
+		None => launch(&shared.state, &program, fds, place),
 	};
+	#[cfg(target_os = "linux")]
+	let (launched, report) = match report {
+		Some(report) => report.launch(&shared.state, &program, &mut fds, place, direct),
+		None => (direct(&fds), None),
+	};
+	#[cfg(not(target_os = "linux"))]
+	let launched = direct(&fds);
 	// Our copies of the child's ends: pumps see end of file when the child
 	// (and what it forks) closes its own.
 	drop(fds);
@@ -708,6 +734,8 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		pidfd,
 		#[cfg(target_os = "linux")]
 		awaited: false,
+		#[cfg(target_os = "linux")]
+		report,
 	}))
 }
 
@@ -1625,6 +1653,10 @@ struct UnixProc {
 	/// been woken by its readiness and check the exit status.
 	#[cfg(target_os = "linux")]
 	awaited:  bool,
+	/// A measured spawn's pipe from its helper, which reports the
+	/// program's usage there ([`measure`]).
+	#[cfg(target_os = "linux")]
+	report:   Option<fs::File>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1726,6 +1758,8 @@ impl ExtProc for UnixProc {
 		let apple = apple_usage(self.pid);
 		let ru = self.shared.state.reap(self.pid);
 		self.reaped = true;
+		#[cfg(target_os = "linux")]
+		let ru = self.report.take().and_then(measure::usage).unwrap_or(ru);
 		let usage = proc_usage(&ru);
 		#[cfg(target_os = "macos")]
 		let usage = match apple {
@@ -1869,5 +1903,7 @@ pub(super) fn kill_leftovers(shared: &Shared) -> io::Result<Vec<Leftover>> {
 	Ok(killed)
 }
 
+#[cfg(target_os = "linux")]
+mod measure;
 #[cfg(test)]
 mod tests;
