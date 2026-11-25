@@ -15,9 +15,12 @@ import {
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import { isEnoent, logger, TempDir } from "@oh-my-pi/pi-utils";
 import type { SharedInfra } from "@oh-my-pi/typescript-edit-benchmark/in-process-client";
-import { analyzeCalls, type ToolCallRecord } from "./checks";
+import { analyzeCalls, type ToolCallRecord, verifies } from "./checks";
 import type { ScopeRun } from "./result";
 import type { ScopeTask, VerifySpec } from "./tasks";
+
+/** A literal `find` → `replace` substitution on the rendered system prompt. */
+export type PromptRewrite = readonly [find: string, replace: string];
 
 /** Session settings shared by every run of an arm. */
 export interface TrialConfig {
@@ -27,6 +30,8 @@ export interface TrialConfig {
 	appendSystemPrompt: string | undefined;
 	/** Handlebars text replacing the system prompt template. */
 	systemPromptTemplate: string | undefined;
+	/** Substitutions applied, in order, to every rendered prompt block (template, project block, appended text). */
+	rewrites: readonly PromptRewrite[];
 	timeoutMs: number;
 	/** Job directory; the run's trace lands in `traces/`. */
 	jobDir: string;
@@ -34,6 +39,7 @@ export interface TrialConfig {
 
 /** Prefix of the failure line {@link score} adds; {@link rescoreRun} replaces it. */
 const SCOPE_FAILURE = "changed outside scope: ";
+const NO_CHECK_FAILURE = "ran no check";
 const VERIFY_TIMEOUT_MS = 120_000;
 /** Tool installs and harness state, not the agent's edits. */
 const IGNORED_DIRS = ["node_modules/", ".git/", ".omp/"];
@@ -46,6 +52,21 @@ async function snapshot(root: string): Promise<Map<string, number | bigint>> {
 		files.set(file, Bun.hash(await fs.readFile(path.join(root, file))));
 	}
 	return files;
+}
+
+/**
+ * Applies `rewrites` to every block of the rendered system prompt.
+ * @throws when a `find` occurs in no block: the prompt moved on and the arm would silently equal its baseline.
+ */
+function rewritePrompt(blocks: string[], rewrites: readonly PromptRewrite[]): string[] {
+	let rewritten = blocks;
+	for (const [find, replace] of rewrites) {
+		if (!rewritten.some(block => block.includes(find))) {
+			throw new Error(`rewrite target is not in the system prompt: ${find.trim().slice(0, 80)}`);
+		}
+		rewritten = rewritten.map(block => block.replaceAll(find, replace));
+	}
+	return rewritten;
 }
 
 /** Pairs tool start/end events into timed {@link ToolCallRecord}s, live or replayed from a trace. */
@@ -94,7 +115,7 @@ function isTraceToolEvent(value: unknown): value is TraceToolEvent {
 }
 
 /** Run fields derived from tool calls, file changes, and verifier results under a task's spec. */
-type Score = Pick<ScopeRun, "pass" | "failures" | "checks" | "postEditReads" | "outOfScope">;
+type Score = Pick<ScopeRun, "pass" | "failures" | "checks" | "verified" | "postEditReads" | "outOfScope">;
 
 function score(
 	task: ScopeTask,
@@ -108,28 +129,28 @@ function score(
 	},
 ): Score {
 	const outOfScope = run.changed.filter(file => !task.scope.some(glob => new Bun.Glob(glob).match(file)));
-	const analysis = analyzeCalls(run.calls, {
-		allowedChecks: task.allowedChecks.map(source => new RegExp(source)),
-		// The agent names files relative to its cwd (`src/x.ts`, `../lib/x.ts`) or absolutely; both contain this form.
-		paths: run.files.map(file => path.relative(task.cwd, file).replace(/^(?:\.\.\/)+/, "")),
-	});
-	const failures =
-		outOfScope.length > 0
-			? [...run.verifyFailures, `${SCOPE_FAILURE}${outOfScope.join(", ")}`]
-			: [...run.verifyFailures];
+	// The agent names files relative to its cwd (`src/x.ts`, `../lib/x.ts`) or absolutely; both contain this form.
+	const asNamed = (file: string): string => path.relative(task.cwd, file).replace(/^(?:\.\.\/)+/, "");
+	const analysis = analyzeCalls(run.calls, { changed: run.changed.map(asNamed), paths: run.files.map(asNamed) });
+	const failures = [...run.verifyFailures];
+	if (outOfScope.length > 0) failures.push(`${SCOPE_FAILURE}${outOfScope.join(", ")}`);
+	if (task.verify.ranCheck === true && !analysis.checks.some(check => verifies(check.kinds))) {
+		failures.push(NO_CHECK_FAILURE);
+	}
 	return {
 		pass: run.error === null && failures.length === 0,
 		failures,
 		checks: analysis.checks,
+		verified: analysis.verified,
 		postEditReads: analysis.postEditReads,
 		outOfScope,
 	};
 }
 
 /**
- * Re-derives a recorded run's checks, post-edit reads, scope, and pass under `task`'s current
- * spec and classifier by replaying the tool calls in its trace. Verifier results are kept as
- * recorded: the workspace is gone.
+ * Re-derives a recorded run's checks, verified flag, post-edit reads, scope, and pass under
+ * `task`'s current spec and classifier by replaying the tool calls in its trace. Verifier
+ * results are kept as recorded: the workspace is gone.
  */
 export async function rescoreRun(run: ScopeRun, task: ScopeTask, jobDir: string): Promise<ScopeRun> {
 	const timeline = new CallTimeline();
@@ -146,7 +167,9 @@ export async function rescoreRun(run: ScopeRun, task: ScopeTask, jobDir: string)
 			files: [...new Set([...fixture, ...run.changed])],
 			changed: run.changed,
 			error: run.error,
-			verifyFailures: run.failures.filter(failure => !failure.startsWith(SCOPE_FAILURE)),
+			verifyFailures: run.failures.filter(
+				failure => !failure.startsWith(SCOPE_FAILURE) && failure !== NO_CHECK_FAILURE,
+			),
 		}),
 	};
 }
@@ -252,6 +275,7 @@ export async function runTrial(
 			thinkingLevel: config.thinking,
 			appendSystemPrompt: config.appendSystemPrompt,
 			systemPromptTemplate: config.systemPromptTemplate,
+			systemPrompt: config.rewrites.length > 0 ? blocks => rewritePrompt(blocks, config.rewrites) : undefined,
 			authStorage: shared.authStorage,
 			modelRegistry: shared.modelRegistry,
 			sessionManager: SessionManager.inMemory(cwd),
@@ -312,6 +336,8 @@ export async function runTrial(
 	const after = await snapshot(root);
 	const files = [...new Set([...before.keys(), ...after.keys()])].sort();
 	const changed = files.filter(file => before.get(file) !== after.get(file));
+	// Hidden checks land only now: the agent never saw them, and they never count as its changes.
+	if (task.hiddenDir) await fs.cp(task.hiddenDir, root, { recursive: true });
 	const verifyFailures = error === null ? await verify(task.verify, root, [...after.keys()], answer) : [];
 	return {
 		task: task.id,
