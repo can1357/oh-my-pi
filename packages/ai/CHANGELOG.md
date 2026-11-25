@@ -9,6 +9,9 @@
 ### Fixed
 
 - Codex requests no longer send a service tier to an account whose own plan does not offer it.
+### Fixed
+
+- Successful OAuth refreshes now clear refresh-failure backoff so healthy accounts stop triggering usage-aware fallback after an outage ([#20454](https://github.com/can1357/oh-my-pi/issues/20454)).
 
 ## [19.2.0] - 2026-11-25
 
