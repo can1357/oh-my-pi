@@ -8,6 +8,7 @@ import type {
 	ArchiveMessage,
 	ArchiveStat,
 } from "@oh-my-pi/pi-coding-agent/archive/activity";
+import type { ArchiveTranscript } from "@oh-my-pi/pi-coding-agent/archive/transcript";
 import type {
 	ArchiveProject,
 	ArchivePrompt,
@@ -444,5 +445,129 @@ describe("archive activity", () => {
 		]);
 		const scout = await call<ArchiveMessage[]>({ action: "messages", id: subagentFile(mainFile, "Scout") });
 		expect(scout.map(message => `${message.kind}`)).toEqual(["user", "call", "result"]);
+	});
+
+	it("renders a transcript whole when it fits, and terser as the budget shrinks", async () => {
+		const whole = await call<ArchiveTranscript>({ action: "transcript", id: sessionId, budget: 100_000 });
+		expect(whole.detail).toEqual({ user: "full", assistant: "full", thinking: "full", call: "full", result: "full" });
+		expect(whole.text).toContain(`${"x".repeat(3000)}TAIL`);
+		expect(whole.text).toContain('"command":"/usr/bin/sed -z s/a/b/ build.log"');
+
+		const tight = await call<ArchiveTranscript>({ action: "transcript", id: sessionId, budget: 500 });
+		expect(tight.text.length).toBeLessThanOrEqual(500);
+		expect(tight.omitted).toBe(0);
+		expect(tight.detail.result).toBe("omit");
+		expect(tight.text).not.toContain("xxxxxxxxxx");
+		expect(tight.text).toContain("clean the build");
+		expect(tight.text).toContain("now the tests");
+		// The failed sed call keeps its outcome even with results omitted.
+		expect(tight.text).toMatch(/bash[^\n]*✗24/);
+	});
+
+	it("groups back-to-back lookups per tool, merging their paths by shared prefix", async () => {
+		const id = `look-${crypto.randomUUID()}`;
+		writeTranscript(sessionFile(app, id), id, app, [
+			user(at(40), "explore"),
+			assistant(at(41), [
+				toolCall("r1", "read", { path: "src/a/x.ts:1-20" }),
+				toolCall("r2", "read", { path: "src/a/y.ts" }),
+				toolCall("g1", "grep", { pattern: "foo", path: "src" }),
+				toolCall("r3", "read", { path: "src/b/z.ts" }),
+				toolCall("r4", "read", { path: "src/a/x.ts:40-60" }),
+				toolCall("b1", "bash", { command: "bun test" }),
+				toolCall("r5", "read", { path: "src/c.ts" }),
+				toolCall("b2", "bash", { command: "bun lint" }),
+			]),
+			toolResult(at(42), "r1", "read", "x".repeat(20)),
+			toolResult(at(42), "r2", "read", "missing", true),
+			toolResult(at(42), "g1", "grep", "hit"),
+			toolResult(at(42), "r3", "read", "z"),
+			toolResult(at(42), "r4", "read", "x"),
+			toolResult(at(42), "b1", "bash", "ok"),
+			toolResult(at(42), "r5", "read", "c"),
+			toolResult(at(42), "b2", "bash", "fail", true),
+		]);
+		const normal = await call<ArchiveTranscript>({
+			action: "transcript",
+			id,
+			detail: { call: "normal", result: "omit" },
+		});
+		// Lookups group only back to back; other calls keep their own lines.
+		expect(normal.text).toContain(
+			"call read ×4: src/{a/{x.ts, y.ts}, b/z.ts} · ✓29 (1 failed)\ncall grep: `foo` · ✓3\ncall bash: bun test · ✓2\ncall read: src/c.ts · ✓1\ncall bash: bun lint · ✗4",
+		);
+		// A brief run counts every call per tool.
+		const brief = await call<ArchiveTranscript>({
+			action: "transcript",
+			id,
+			detail: { call: "brief", result: "omit" },
+		});
+		expect(brief.text).toContain("calls: read ×5 ✓30 (1 failed), grep ✓3, bash ×2 ✓6 (1 failed)");
+	});
+
+	describe("on a long session", () => {
+		let id: string;
+
+		beforeEach(() => {
+			id = `long-${crypto.randomUUID()}`;
+			const entries: { timestamp: string }[] = [];
+			for (let turn = 1; turn <= 12; turn++) {
+				entries.push(
+					user(at(turn * 3), `task ${turn}: ${"please ".repeat(30)}`),
+					assistant(at(turn * 3 + 1), [
+						{ type: "thinking", thinking: `ponder ${turn} `.repeat(40) },
+						{
+							type: "text",
+							text: `Done ${turn}.\n\`\`\`ts\nconst secret${turn} = 1;\n\`\`\`\n<note>hidden${turn}</note> wrap-up`,
+						},
+						toolCall(`t${turn}`, "bash", { command: `run ${turn}` }),
+					]),
+					toolResult(at(turn * 3 + 2), `t${turn}`, "bash", "y".repeat(500)),
+				);
+			}
+			writeTranscript(sessionFile(app, id), id, app, entries);
+		});
+
+		it("compacts every kind, then drops from the middle, keeping both ends", async () => {
+			const view = await call<ArchiveTranscript>({ action: "transcript", id, budget: 1200 });
+			expect(view.text.length).toBeLessThanOrEqual(1200);
+			expect(view.detail).toEqual({
+				user: "brief",
+				assistant: "brief",
+				thinking: "omit",
+				call: "brief",
+				result: "omit",
+			});
+			expect(view.omitted).toBeGreaterThan(0);
+			expect(view.text).toMatch(/^#1 · .*task 1:/m);
+			expect(view.text).toMatch(/^#12 · .*task 12:/m);
+			expect(view.text).toMatch(/\[… \d+ records dropped, turns \d+–\d+\]/);
+		});
+
+		it("zooms into selected turns at pinned detail", async () => {
+			const last = await call<ArchiveTranscript>({
+				action: "transcript",
+				id,
+				turns: -1,
+				detail: { result: "full" },
+			});
+			expect([last.turns, last.records, last.omitted]).toEqual([12, 5, 0]);
+			expect(last.text).toStartWith("Transcript · turn 12 of 12");
+			expect(last.text).not.toContain("#11");
+			expect(last.text).toContain("y".repeat(500));
+			expect(last.text).toContain("const secret12 = 1;");
+
+			const brief = await call<ArchiveTranscript>({ action: "transcript", id, turns: [1, 2], detail: "brief" });
+			expect(brief.text).toStartWith("Transcript · turns 1–2 of 12");
+			expect(brief.text).toContain("call bash ✓500\nresult: yyy");
+			expect(brief.text).toMatch(/^thinking: ponder 1 .*chars omitted/m);
+			// Code and paired tags give way to placeholders.
+			expect(brief.text).toContain("assistant: Done 1. [code, 1 line] <note/> wrap-up");
+			expect(brief.text).not.toContain("secret1");
+			expect(brief.text).not.toContain("hidden1");
+
+			const recent = await call<ArchiveTranscript>({ action: "transcript", id, since: at(36) });
+			expect(recent.text).toStartWith("Transcript · turn 12 of 12");
+		});
 	});
 });
