@@ -14,7 +14,9 @@ what CI would otherwise fetch on every job:
 - apt: clang/lld/llvm, the canvas/cairo stack, fd/ripgrep/imagemagick (+ `fd`
   and `magick` shims);
 - sccache, zig, cmake, ninja, bazelisk (also as `bazel`), all in /usr/local/bin;
-- bun, system-wide at the floor of the repo pin (package.json `packageManager`);
+- bun, system-wide, resolved like .github/actions/bun-install resolves the repo
+  pin (package.json `packageManager`): an exact pin installs that version, a
+  floor (`>=x`) the latest release;
 - rustup + the rust-toolchain.toml toolchain (components and targets) as the
   default, plus aarch64-unknown-linux-gnu and cargo-nextest/zigbuild/xwin;
   every ~/.cargo/bin entry is linked into /usr/local/bin;
@@ -27,7 +29,8 @@ what CI would otherwise fetch on every job:
 
 Toolchain pins are read from the pinned checkout, so one `--ref` decides
 what the template carries. Rebuild after bumping rust-toolchain.toml,
-.bazelversion, the bun pin, or MODULE.bazel(.lock)/Cargo.lock/bun.lock
+.bazelversion, the bun pin (or a bun release, under a floor pin), or
+MODULE.bazel(.lock)/Cargo.lock/bun.lock
 (caches only go stale: jobs fetch the difference, slower but correct):
 
     E2B_API_URL=<vmon API URL> E2B_API_KEY=<CI team API key> \\
@@ -181,13 +184,18 @@ test "$(git rev-parse HEAD)" = {sha}
 """
 
 
-# Root: bun at the floor of package.json's `packageManager` pin, so
-# .github/actions/bun-install accepts it (an exact pin must equal it).
+# Root: bun as .github/actions/bun-install resolves package.json's
+# `packageManager` pin, so jobs accept it without reinstalling: an exact pin
+# installs that version, a floor (">=x") the latest release.
 INSTALL_BUN = f"""set -eux
 want="$(sed -n 's/.*"packageManager": *"bun@\\([^"]*\\)".*/\\1/p' {WORKSPACE}/package.json)"
-version="${{want#>=}}"
-[ -n "$version" ]
-curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s -- "bun-v$version"
+[ -n "$want" ]
+case "$want" in
+  '>='*) tag="" ;;
+  *)     tag="bun-v$want" ;;
+esac
+# Unquoted on purpose: an empty tag passes no argument, which the script reads as "latest".
+curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s -- $tag
 rm -rf /root/.bun
 /usr/local/bin/bun --version
 """
