@@ -106,6 +106,7 @@ import {
 	isBunTestRuntime,
 	isInteractiveHost,
 	isRecord,
+	Laps,
 	logger,
 	postmortem,
 	prompt,
@@ -9836,7 +9837,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		signal: AbortSignal,
 	): Promise<QueuedMessagePreparation> {
 		const generation = this.#promptGeneration;
+		const laps = new Laps();
 		await this.#prewalk.beginAutoTask(message);
+		laps.lap("beginTaskMs");
 		// Past the cap, the before-model-call gate refuses this task's first request and reports it; judging it, or
 		// moving it to an `escalate` planner, would only spend and switch for a request that is never sent.
 		const capped = this.#costGate.check() !== undefined;
@@ -9849,9 +9852,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					message,
 					() => !signal.aborted && this.#promptGeneration === generation,
 				);
+		laps.lap("prewalkRouteMs");
 		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
+		laps.lap("agentStartMs");
 		const decision = await autoPrewalk?.decision;
+		laps.lap("prewalkJudgeMs");
 		const plan = await autoParallel;
+		laps.lap("autoParallelMs");
+		logger.debug("Queued task prepared", laps.record());
 		return {
 			commit: () => {
 				const additional = preparation.commit();
@@ -9894,7 +9902,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			(!this.#isDisposed || alreadyDisposing) &&
 			!signal?.aborted;
 		const cancelled = { baseToolCommandCatalogDelivered: false, commit: () => undefined };
+		const laps = new Laps();
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+		laps.lap("extensionsMs");
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
 		if (pendingMCPDiscovery) {
 			const timedOut = new Error("MCP discovery still pending");
@@ -9907,13 +9917,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				logger.debug("Turn started before MCP discovery finished", { error: String(error) });
 			});
 		}
+		laps.lap("mcpMs");
 		for (let attempt = 0; attempt < AGENT_START_POLICY_MAX_ATTEMPTS; attempt++) {
 			await this.#memory.transition;
+			laps.lap("memoryMs");
 			if (!isCurrent()) return cancelled;
 			const sourceBase = this.#tools.baseSystemPrompt;
 			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal);
+			laps.lap("systemPromptMs");
 			if (!isCurrent()) return cancelled;
 			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
+			laps.lap("hooksMs");
 			if (!isCurrent()) return cancelled;
 			// Overrides are opaque replacements, not string patches. Re-run only policy preparation
 			// against the winning base; discard this attempt's returned context and staged memory.
@@ -9963,7 +9977,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 				if (!isCurrent()) return cancelled;
 			}
+			laps.lap("messagesMs");
 			if (!overrideIsCurrent()) continue;
+			logger.debug("Agent start prepared", { origin, attempts: attempt + 1, ...laps.record() });
 			return {
 				baseToolCommandCatalogDelivered: result?.systemPrompt === undefined,
 				commit: () => {
@@ -11790,16 +11806,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.queuedMessageCount > 0 || this.agent.peekUndeliveredQueuedMessages().some(isDisplayableQueuedMessage);
 	}
 
-	/** Chip texts for the queue display. Steering live steering took for the streaming response
-	 *  stays listed until the transcript records it, when the model actually switches to it. */
+	/** Chip texts for the queue display. Input the agent already took stays listed, first in its
+	 *  queue, until the transcript records it: steering live steering took for the streaming
+	 *  response (the model switches to it then), and messages on their way into the next request
+	 *  (recorded once it opens). `liveSteered` counts the steering among them. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
-		const liveSteered = this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage).length;
+		const sent = [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekDeliveringMessages("steering")].filter(
+			isUserAuthoredQueuedMessage,
+		);
 		return {
-			steering: [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
+			steering: [...sent, ...this.agent.peekSteeringQueue().filter(isUserAuthoredQueuedMessage)].map(queueChipText),
+			followUp: [...this.agent.peekDeliveringMessages("followUp"), ...this.agent.peekFollowUpQueue()]
 				.filter(isUserAuthoredQueuedMessage)
 				.map(queueChipText),
-			followUp: this.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage).map(queueChipText),
-			liveSteered,
+			liveSteered: sent.length,
 		};
 	}
 
