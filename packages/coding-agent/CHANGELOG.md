@@ -4,7 +4,7 @@
 
 ### Added
 
-- Extensions can answer pending tool approvals and `ask` questions: `ctx.resolveToolApproval` / `ctx.getPendingToolApprovals` and `ctx.resolveAsk` / `ctx.getPendingAsks`, with the rendered prompt on `tool_approval_requested`, new `ask_requested` / `ask_resolved` events, and `by: "user" | "extension"` on the resolved events; the first answer wins and closes the host's dialog.
+- Extensions can answer pending tool approvals and `ask` questions: `ctx.resolveToolApproval` / `ctx.getPendingToolApprovals` and `ctx.resolveAsk` / `ctx.getPendingAsks`, with the rendered prompt on `tool_approval_requested`, new `ask_requested` / `ask_resolved` events, and `by: "user" | "extension"` on the resolved events; the first answer wins and closes the host's dialog ([#20502](https://github.com/can1357/oh-my-pi/pull/20502) by [@Rinai-R](https://github.com/Rinai-R))
 
 ### Changed
 
