@@ -139,6 +139,7 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
 		name: displayName,
 		description: "",
 		systemPrompt: init.systemPrompt.join("\n\n"),
+		systemPreset: init.systemPreset,
 		source: "user",
 	};
 }
@@ -346,24 +347,29 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// them); expanding again is a no-op for those and only resolves aliases
 	// in files written before that. Absent = unadvised (the
 	// createSubagentSettings default).
-	const subagentSettings = createSubagentSettings(spec.settings, {
-		...subagentLspWritethroughSettings(spec.settings),
-		...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-		...(init.advisor
-			? {
-					"advisor.enabled": true,
-					...(init.advisor !== "on"
-						? {
-								modelRoles: {
-									...spec.settings.getModelRoles(),
-									advisor: resolveAgentAdvisorRolePattern(init.advisor, spec.settings),
-								},
-							}
-						: undefined),
-				}
-			: undefined),
-		...compactionThresholdSettings(init.compactionThreshold),
-	});
+	const subagentSettings = createSubagentSettings(
+		spec.settings,
+		{
+			...subagentLspWritethroughSettings(spec.settings),
+			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			...(init.advisor
+				? {
+						"advisor.enabled": true,
+						...(init.advisor !== "on"
+							? {
+									modelRoles: {
+										...spec.settings.getModelRoles(),
+										advisor: resolveAgentAdvisorRolePattern(init.advisor, spec.settings),
+									},
+								}
+							: undefined),
+					}
+				: undefined),
+			...compactionThresholdSettings(init.compactionThreshold),
+		},
+		undefined,
+		init.systemPreset,
+	);
 	// Restore the `subagent:<id>` fallback chain the spawn installed; the
 	// transcript alone cannot rebuild it (multi-model agent patterns and
 	// inherited role chains are resolved only at spawn).
@@ -438,6 +444,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			expectedAgentRef: expectedRef,
 			taskDepth,
 			toolNames: init.tools,
+			...(init.systemPreset === "minimal-task" ? { contextFiles: [], skills: [], rules: [] } : undefined),
 			// The persisted enabled set includes tool commands: keep them as commands,
 			// or they come back as top-level tools and change the replayed tool list.
 			mountedToolNames: init.mountedTools,

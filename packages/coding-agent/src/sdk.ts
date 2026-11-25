@@ -186,6 +186,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionStateApi } from "./mnemopi/state";
 import autolearnCaptureRefused from "./prompts/system/autolearn-capture-refused.md" with { type: "text" };
 import mcpToolCommandGuidanceTemplate from "./prompts/system/mcp-tool-command-guidance.md" with { type: "text" };
+import secretTokenContractTemplate from "./prompts/system/secret-token-contract.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
@@ -759,7 +760,10 @@ export interface CreateAgentSessionOptions {
 	planYolo?: PlanYolo;
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
-	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
+	systemPrompt?:
+		| string
+		| string[]
+		| ((defaultPrompt: string[], runtimeInstructions?: readonly string[]) => string | string[]);
 	/** Raw Handlebars template replacing the bundled default system prompt rendering. */
 	systemPromptTemplate?: string;
 	/** Already-loaded custom prompt text rendered through the bundled custom system prompt template. */
@@ -4584,8 +4588,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.trim(),
 				);
 			}
+			const serverInstructionParts: string[] = [];
 			if (serverInstructions && serverInstructions.size > 0) {
-				appendParts.push(
+				serverInstructionParts.push(
 					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
 				);
 				for (const [srvName, srvInstructions] of serverInstructions) {
@@ -4593,9 +4598,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
 							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
 							: srvInstructions;
-					appendParts.push(`### ${srvName}\n${truncated}`);
+					serverInstructionParts.push(`### ${srvName}\n${truncated}`);
 				}
 			}
+			appendParts.push(...serverInstructionParts);
 			const appendPrompt = composeAppendPrompt(appendParts, options.appendSystemPrompt);
 			// Owned/in-band tool dialects (non-native) require the full functions-
 			// namespace catalog; native tool calling lets the compact name list suffice.
@@ -4704,7 +4710,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (typeof options.systemPrompt !== "function") {
 				return defaultPrompt;
 			}
-			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
+			// Prompt filters can retain live tool protocols without inheriting project context.
+			const runtimeInstructions = [...serverInstructionParts];
+			if (obfuscator?.obfuscates() === true) {
+				runtimeInstructions.push(secretTokenContractTemplate.trim());
+			}
+			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt, runtimeInstructions);
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
 				// The viewer attributes only default blocks the callback left unchanged.

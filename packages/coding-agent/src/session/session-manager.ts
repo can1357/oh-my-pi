@@ -52,6 +52,7 @@ import {
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { createInterruptedToolResults, sessionExitFollowsLastMessage } from "./exit-diagnostics";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
+import type { SystemPromptPreset } from "../task/types";
 import {
 	type BuildSessionContextOptions,
 	buildSessionContext,
@@ -3793,6 +3794,7 @@ export class SessionManager {
 		systemPrompt: string[];
 		task: string;
 		tools: string[];
+		systemPreset?: SystemPromptPreset;
 		mountedTools?: string[];
 		agent?: string;
 		modelRole?: string;
@@ -4888,6 +4890,7 @@ export interface PersistedSessionInit {
 	systemPrompt: string[];
 	task: string;
 	tools: string[];
+	systemPreset?: SystemPromptPreset;
 	mountedTools?: string[];
 	agent?: string;
 	modelRole?: string;
@@ -4920,6 +4923,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			systemPrompt: typeof entry.systemPrompt === "string" ? [entry.systemPrompt] : entry.systemPrompt,
 			task: entry.task,
 			tools: entry.tools,
+			systemPreset: entry.systemPreset,
 			mountedTools: entry.mountedTools,
 			agent: entry.agent,
 			modelRole: entry.modelRole,
