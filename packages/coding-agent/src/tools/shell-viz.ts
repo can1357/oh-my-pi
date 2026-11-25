@@ -1,5 +1,5 @@
 import { RunTrace, ShellVisualization, type ShellVizOptions } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type {
 	ShellTrace,
 	ShellVizPreferences,
@@ -79,10 +79,6 @@ export function readShellPresentation(
 	return presentation;
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function finite(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
@@ -113,7 +109,7 @@ function state(value: unknown): boolean {
 }
 
 function preferences(value: unknown): value is ShellVizPreferences {
-	if (!record(value) || !record(value.layers)) return false;
+	if (!isRecord(value) || !isRecord(value.layers)) return false;
 	const layers = value.layers;
 	return (
 		(value.view === "raw" || value.view === "pseudo") &&
@@ -130,7 +126,7 @@ function preferences(value: unknown): value is ShellVizPreferences {
 
 function watch(value: unknown): value is ShellVizWatch {
 	return (
-		record(value) &&
+		isRecord(value) &&
 		string(value.name) &&
 		string(value.value) &&
 		optional(value, "fullLength", finite) &&
@@ -144,7 +140,7 @@ function watch(value: unknown): value is ShellVizWatch {
 
 function segment(value: unknown): value is ShellVizSegment {
 	return (
-		record(value) &&
+		isRecord(value) &&
 		string(value.text) &&
 		optional(value, "active", boolean) &&
 		optional(value, "state", state) &&
@@ -162,7 +158,7 @@ function segment(value: unknown): value is ShellVizSegment {
 
 function row(value: unknown): value is ShellVizRow {
 	return (
-		record(value) &&
+		isRecord(value) &&
 		string(value.id) &&
 		finite(value.depth) &&
 		optional(value, "node", isShellVizNode) &&
@@ -175,7 +171,7 @@ function row(value: unknown): value is ShellVizRow {
 		Array.isArray(value.effects) &&
 		value.effects.every(
 			effect =>
-				record(effect) &&
+				isRecord(effect) &&
 				["network", "write", "destructive", "secret", "privilege", "background"].includes(String(effect.kind)) &&
 				string(effect.glyph) &&
 				string(effect.label) &&
@@ -190,7 +186,7 @@ function row(value: unknown): value is ShellVizRow {
 }
 
 function presentation(value: unknown): value is ShellVizPresentation {
-	if (!record(value) || !record(value.timeline)) return false;
+	if (!isRecord(value) || !isRecord(value.timeline)) return false;
 	const timeline = value.timeline;
 	return (
 		preferences(value.preferences) &&

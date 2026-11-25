@@ -1,0 +1,1 @@
+Move everything off the deprecated callback methods on `Store` (`get`, `set`, `list`, `del`) to the promise ones (`read`, `write`, `scan`, `remove`), then delete the callback methods. Every usage moves, scripts and docs included, and `bun test` must pass.

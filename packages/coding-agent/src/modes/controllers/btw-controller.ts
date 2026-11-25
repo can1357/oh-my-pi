@@ -1081,6 +1081,10 @@ export class BtwController {
 			case "btw-focus":
 				this.#setFocus(this.#focus.peek() === record.id ? undefined : record.id);
 				return;
+			case "btw-blur":
+				// A press outside the note; Tern sends one per press, so only the note still focused lets go.
+				if (this.#focus.peek() === record.id) this.#setFocus(undefined);
+				return;
 			case "btw-expand":
 				note?.folded.set(false);
 				this.#setFocus(record.id);

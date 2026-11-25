@@ -215,21 +215,3 @@ export function joinPatches(parts) {
 export function validateHunkSelections(rawDiff, selections) {
 	return api().vcsValidateHunkSelections(rawDiff, selections);
 }
-
-/** Stat-poll interval for {@link watch}. */
-export const HEAD_WATCH_INTERVAL_MS = 1000;
-
-/**
- * Watch a repository for head changes; returns a disposer.
- *
- * Stat-polls via `fs.watchFile` instead of `fs.watch`: backends may atomically
- * replace the watched entry, permanently silencing inotify-backed watchers.
- */
-export function watch(repo, onChange, intervalMs = HEAD_WATCH_INTERVAL_MS) {
-	const target = repo.watchTarget();
-	const listener = (curr, prev) => {
-		if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino || curr.size !== prev.size) onChange();
-	};
-	fs.watchFile(target, { interval: intervalMs }, listener).unref();
-	return () => fs.unwatchFile(target, listener);
-}

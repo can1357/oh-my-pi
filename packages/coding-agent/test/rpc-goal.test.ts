@@ -49,6 +49,7 @@ describe("RPC goal command", () => {
 		script?: "complete" | "idle" | "slow";
 		plan?: boolean;
 		persist?: boolean;
+		restrict?: boolean;
 	}): Promise<RpcClient> {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-goal-"));
 		client = new RpcClient({
@@ -61,6 +62,7 @@ describe("RPC goal command", () => {
 				GOAL_RPC_SCRIPT: options.script ?? "complete",
 				GOAL_RPC_PLAN: options.plan ? "1" : "0",
 				GOAL_RPC_PERSIST: options.persist ? "1" : "0",
+				GOAL_RPC_RESTRICT: options.restrict ? "1" : "0",
 			},
 		});
 		await client.start();
@@ -91,6 +93,18 @@ describe("RPC goal command", () => {
 		const state = await rpc.getState();
 		expect(state.goal).toBeNull();
 		expect(state.messageCount).toBe(0);
+	}, 30_000);
+
+	test("a --no-tools session refuses create and keeps its exact tool list", async () => {
+		const rpc = await start({ continuation: true, restrict: true });
+		const refused = await rejectionOf(rpc.goal("create", { objective: "no goal tool here" }));
+		expect(refused).toMatchObject({
+			command: "goal",
+			message: "Goal mode is unavailable in a --no-tools session.",
+		});
+		const state = await rpc.getState();
+		expect(state.goal).toBeNull();
+		expect(state.dumpTools?.map(tool => tool.name)).toEqual(["read"]);
 	}, 30_000);
 
 	test("continuation stops after a turn with no progress and the goal stays active", async () => {

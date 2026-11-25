@@ -10,7 +10,7 @@ import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { bannerRow, nodePlain, spansOf, stillMark } from "./agent-common";
-import { isActive } from "./frame";
+import { bracketed, isActive } from "./frame";
 import { defineToolLook, type ToolProps, toolProps } from "./look";
 
 /** Characters of the reason the call line shows. */
@@ -19,7 +19,7 @@ const REASON_CHARS = 72;
 /** `proposed → resolved` as the terminal draws it: `⟦proposed -> resolved⟧`. */
 function transition(theme: Theme, span: TspSpan | undefined): string {
 	if (!span) return "";
-	return theme.style(span.s, `⟦${span.t.replace("→", "->")}⟧`);
+	return theme.style(span.s, bracketed(theme, span.t.replace("→", "->")));
 }
 
 function paintCall(node: UiNode, props: ToolProps, cx: PaintContext): string[] {
@@ -36,10 +36,10 @@ function paintResult(node: UiNode, props: ToolProps, cx: PaintContext): string[]
 	const theme = cx.theme;
 	const color = props.tone === "error" ? "error" : props.tone === "warning" ? "warning" : "success";
 	const spans = spansOf(props.title);
-	const glyph = color === "success" ? "✓" : "✘";
+	const glyph = theme.symbols.symbol(color === "success" ? "tool.resolve" : "status.error");
 	let head = ` ${glyph} ${theme.style("strong", spans[0]?.t ?? "")} ${replaceTabs(spans[2]?.t ?? "")}`;
 	const tool = spans[4];
-	if (tool) head += ` ${theme.style("strong", `⟦${tool.t.slice(1, -1)}⟧`)}`;
+	if (tool) head += ` ${theme.style("strong", bracketed(theme, tool.t.slice(1, -1)))}`;
 	const reason = node.children()[0];
 	const reasonRow = reason ? ` ${theme.style("em", nodePlain(reason))}` : "";
 	const width = cx.width;

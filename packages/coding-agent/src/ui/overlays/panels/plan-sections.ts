@@ -4,6 +4,8 @@
  * Each section keeps its exact source, so joining them gives the plan back.
  */
 
+import { stripInlineMarkdown } from "../../../plan-mode/plan-toc";
+
 /** One section of a plan. */
 export interface PlanSection {
 	/** 0 for the preamble, else the heading depth (1–6). */
@@ -16,33 +18,6 @@ export interface PlanSection {
 
 const HEADING = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
-/**
- * `text` with inline Markdown (links, images, autolinks, code, emphasis,
- * strikethrough) reduced to its words, runs of blanks collapsed. With
- * `keepIntrawordUnderscores`, `_` marks emphasis only at word edges.
- */
-export function stripInlineMarkdown(text: string, options: { keepIntrawordUnderscores?: boolean } = {}): string {
-	let out = text
-		.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-		.replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1")
-		.replace(/<([^>\s]+)>/g, "$1")
-		.replace(/`([^`]+)`/g, "$1");
-	if (options.keepIntrawordUnderscores) {
-		out = out
-			.replace(/\*\*(.+?)\*\*/g, "$1")
-			.replace(/(?<![\p{L}\p{N}_])__(.+?)__(?![\p{L}\p{N}_])/gu, "$1")
-			.replace(/\*(.+?)\*/g, "$1")
-			.replace(/(?<![\p{L}\p{N}_])_(.+?)_(?![\p{L}\p{N}_])/gu, "$1");
-	} else {
-		out = out.replace(/(\*\*|__)(.+?)\1/g, "$2").replace(/(\*|_)(.+?)\1/g, "$2");
-	}
-	return out
-		.replace(/~~(.+?)~~/g, "$1")
-		.replace(/\s+/g, " ")
-		.trim();
-}
 
 /** The sections of `text`; their sources joined give `text` back. */
 export function parsePlanSections(text: string): PlanSection[] {

@@ -48,13 +48,17 @@ describe("OpenAI-compatible image response_format", () => {
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
 
-	test("ChatGPT Image JSON edits omit the unsupported parameter", async () => {
+	test("ChatGPT Image JSON edits satisfy a strict OpenAI-compatible gateway", async () => {
 		const model = imageModel("gateway", "chatgpt-image-latest");
-		let body: Record<string, unknown> | undefined;
-		const fetch: FetchImpl = async (_input, init) => {
-			const requestBody: Record<string, unknown> = JSON.parse(String(init?.body));
-			body = requestBody;
-			return imageResponse("response_format" in requestBody ? 400 : 200);
+		const fetch: FetchImpl = async (input, init) => {
+			expect(String(input)).toBe("https://gateway.example/v1/images/edits");
+			const body: Record<string, unknown> = JSON.parse(String(init?.body));
+			if (!Array.isArray(body.images)) {
+				return Response.json({ error: { message: "Missing required parameter: 'images'" } }, { status: 400 });
+			}
+			expect(body.images).toEqual([{ image_url: `data:image/png;base64,${IMAGE_DATA}` }]);
+			expect(body).not.toHaveProperty("input_references");
+			return imageResponse("response_format" in body ? 400 : 200);
 		};
 
 		const result = await generateOpenAIImage(
@@ -63,8 +67,6 @@ describe("OpenAI-compatible image response_format", () => {
 			{ apiKey: "test", fetch },
 		);
 
-		expect(body?.input_references).toEqual([{ type: "image_url", url: `data:image/png;base64,${IMAGE_DATA}` }]);
-		expect(body).not.toHaveProperty("response_format");
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
 
