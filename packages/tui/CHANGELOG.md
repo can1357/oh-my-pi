@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- In Tern, a block that keeps redrawing after the blocks above it changed (a streaming `/btw` note) no longer flashes in as new on every update.
 - In Tern, a key that opens a page no longer reaches that page too: Esc Esc opens the rewind view again instead of flashing it shut.
 - Corrected math environment detection to properly handle blocks starting with `\begin`
 - Cmd+A highlights the full text of editors and inputs when the terminal forwards the shortcut. Typing, deleting or pasting replaces the selected range.
