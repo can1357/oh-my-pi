@@ -329,6 +329,32 @@ describe("native reconciler", () => {
 		expect(h.ops()).toEqual([["set", "main/0/0", { title: "two" }]]);
 	});
 
+	it("morphs a re-created node that moved up since it was first described", async () => {
+		const before = signal(["x", "y", "z"]);
+		const text = signal("a");
+		const h = await mount(() => ({
+			main: (
+				<>
+					<For each={before}>{t => <text text={t} />}</For>
+					{() => (
+						<col>
+							<text text={text()} />
+						</col>
+					)}
+				</>
+			),
+		}));
+		// The col leaves index 3 for index 2, whose id `main/2` the block after `x` still holds.
+		before.set(["y", "z"]);
+		h.settle();
+		expect(h.ops()).toEqual([["del", "main/0"]]);
+		for (const next of ["ab", "abc"]) {
+			text.set(next);
+			h.settle();
+			expect(h.ops()).toEqual([["text", "main/3/0", "append", next.slice(-1)]]);
+		}
+	});
+
 	it("re-adds a node whose kind changed under a fresh id, deleting the old one last", async () => {
 		const code = signal(false);
 		const h = await mount(() => ({

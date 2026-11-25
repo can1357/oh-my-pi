@@ -43,12 +43,16 @@ import { createAgentSession, type ExtensionContext, type ExtensionFactory } from
 import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	wrapSteeringForModel,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { createTestImageDescriptions } from "./helpers/image-description";
 
 function createAgent(): Agent {
@@ -683,43 +687,37 @@ describe("AgentSession message pipeline", () => {
 		expect(hookErrors).toHaveLength(3);
 	});
 
-	it("applies transformContext before convertToLlm", async () => {
-		const inputMessages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: Date.now() }];
-		const transformedMessages: AgentMessage[] = [
-			...inputMessages,
-			{ role: "user", content: "injected context", timestamp: Date.now() },
-		];
-		const convertedMessages: Message[] = [
-			{
-				role: "user",
-				content: [{ type: "text", text: "converted" }],
-				attribution: "user",
-				timestamp: Date.now(),
-			},
-		];
-		const transformContext = vi.fn(async (messages: AgentMessage[], signal?: AbortSignal) => {
-			expect(signal).toBe(abortController.signal);
-			return [...messages, ...transformedMessages.slice(messages.length)];
-		});
-		const convertToLlm = vi.fn(async (_messages: AgentMessage[]) => {
-			return convertedMessages;
-		});
-		const abortController = new AbortController();
+	it("applies the destination's reasoning policy to notes added by a context transform", async () => {
+		using tempDir = TempDir.createSync("@pi-context-reader-");
+		const authStorage = createInMemoryAuthStorage();
+		const note: AgentMessage = {
+			role: "custom",
+			customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
+			content: "interrupted reasoning",
+			display: false,
+			attribution: "agent",
+			timestamp: 1,
+		};
 		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
+			agent: new Agent({ initialState: { model: getBundledModel("openai", "gpt-4o-mini") } }),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-			transformContext,
+			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
+			transformContext: messages => [...messages, note],
 			convertToLlm,
 		});
-		sessions.push(session);
-
-		const result = await session.convertMessagesToLlm(inputMessages, abortController.signal);
-
-		expect(transformContext).toHaveBeenCalledWith(inputMessages, abortController.signal);
-		expect(convertToLlm).toHaveBeenCalledWith(transformedMessages);
-		expect(result).toEqual(convertedMessages);
+		try {
+			const history: AgentMessage[] = [{ role: "user", content: "continue", timestamp: 0 }];
+			const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const restricted = await session.convertMessagesToLlm(history, undefined, claude);
+			expect(restricted.map(getConvertedUserText)).toEqual(["continue"]);
+			expect(await session.convertMessagesToLlm(history)).toContainEqual(
+				expect.objectContaining({ role: "developer", content: [{ type: "text", text: note.content }] }),
+			);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
 	});
 
 	it("marks queued user steers without changing the public queue text", async () => {

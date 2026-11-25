@@ -11,6 +11,7 @@ import {
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
 } from "../config/service-tier";
+import { DaemonProviderSlots } from "../daemon/modules/provider-slots";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
@@ -26,7 +27,7 @@ import { compileModelPatterns } from "../utils/model-patterns";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
-import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
+import { configureProviderMaxInFlightRequests, configureProviderSlotBroker } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "../ui/keys/hints";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking/levels";
@@ -231,6 +232,8 @@ export const cfgProvidersMaxInFlightRequests = register({
 effect(cfgProvidersMaxInFlightRequests, limits =>
 	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
 );
+// The limits bind every omp process of this config root, through the daemon.
+configureProviderSlotBroker(new DaemonProviderSlots());
 
 export const cfgImagesDescribeForTextModels = register({
 	id: "images.describeForTextModels",

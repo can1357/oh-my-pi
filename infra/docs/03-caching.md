@@ -5,7 +5,7 @@ vmon sandboxes share no filesystem: every job forks the same `omp-ci` snapshot a
 | Cache | Where | Written by | Read by |
 | --- | --- | --- | --- |
 | Bazel action cache + CAS (Rust compiles, clippy, rustfmt, tests, `.node` addons) | vmon node Bazel cache, `$VMON_CACHE_URL/bazel` | branch and tag jobs on vmon | all vmon jobs (pull requests read-only) |
-| Bazel repository cache, repo contents cache, xwin download cache | `/opt/bazel-repo-cache` in the `omp-ci` template | template build | vmon jobs (`.github/actions/bazel-cache`) |
+| Bazel repository cache, repo contents cache, xwin download + unpack cache | `/opt/bazel-repo-cache` in the `omp-ci` template | template build | vmon jobs (`.github/actions/bazel-cache`) |
 | Bazel install base + fetched output base, bazelisk's Bazel | `~/.cache/bazel`, `~/.cache/bazelisk` in the template | template build | vmon jobs |
 | bun package store | `~/.bun/install/cache` in the template; `bun-<os>-<lockhash>` Actions cache entry | template build; main's GitHub-hosted jobs (`bun-cache-warm.yml`, release jobs) | vmon jobs (template); GitHub-hosted jobs (Actions cache) |
 | Cargo registry | `~/.cargo/registry` in the template | template build | `check` (`cargo fetch --locked`, then offline `cargo deny`) |

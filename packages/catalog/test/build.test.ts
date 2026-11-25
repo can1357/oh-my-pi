@@ -10,7 +10,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { defaultSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getBundledModels, getBundledModelSlice } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import {
 	deepinfraModelManagerOptions,
@@ -1502,7 +1502,19 @@ describe("model cache materialized round trip", () => {
 		expect(fingerprintStaticModels(staticModels)).not.toBe(initial);
 
 		const frozen = Object.freeze([completionsSpec({ id: "frozen-fingerprint-model" })]);
-		expect(() => fingerprintStaticModels(frozen)).not.toThrow();
+		const initialFrozen = fingerprintStaticModels(frozen);
+		frozen[0]!.name = "Changed inside frozen array";
+		expect(fingerprintStaticModels(frozen)).not.toBe(initialFrozen);
+	});
+
+	it("preserves bundled content and policy identities across shared slice lookups", () => {
+		const shared = getBundledModelSlice("anthropic");
+		const copy = getBundledModels("anthropic");
+		expect(getBundledModelSlice("anthropic")).toBe(shared);
+		expect(Object.isFrozen(shared)).toBe(true);
+		for (const policy of [{}, { additive: true }, { authoritative: true }, { authoritative: true, additive: true }]) {
+			expect(fingerprintStaticModels(shared, policy)).toBe(fingerprintStaticModels(copy, policy));
+		}
 	});
 
 	it("uses generator-materialized bundled rows without rebuilding them", async () => {

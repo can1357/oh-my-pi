@@ -164,7 +164,6 @@ export default function (api) {
 			"--extension",
 			extensionPath,
 			"--no-session",
-			"--no-tools",
 			"--no-lsp",
 			"--no-skills",
 			"--no-rules",
