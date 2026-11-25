@@ -215,6 +215,14 @@ export function relativePathWithinNormalizedRoot(normalizedRoot: string, normali
 	return relative;
 }
 
+/**
+ * Lexical containment: `candidate` is `root` itself or below it. No realpath and no case folding;
+ * callers resolve or normalize both sides first. Use {@link pathIsWithin} to compare through symlinks.
+ */
+export function pathIsWithinLexical(root: string, candidate: string): boolean {
+	return relativePathWithinNormalizedRoot(root, candidate) !== null;
+}
+
 /** `options` apply to `candidate` only. */
 export function pathIsWithin(root: string, candidate: string, options?: EquivalentPathOptions): boolean {
 	const normalizedRoot = normalizePathForComparison(root);
