@@ -10,6 +10,10 @@
 
 - Added the `change` UI event for annotated images, delivered to the node’s `onChange` handler without an associated item.
 
+### Fixed
+
+- Panes in a background Tern tab no longer log frame-acknowledgment stall warnings.
+
 ## [19.2.0] - 2026-11-25
 
 ### Added
