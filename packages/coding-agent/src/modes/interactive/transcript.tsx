@@ -452,7 +452,7 @@ export class TranscriptPresenter {
 		const editMode = toolEditMode(spec.name, spec.tool);
 		if (editMode) call.setRenderContext({ editMode });
 		const presentedId = signal(spec.id);
-		const block = this.#mount(() => {
+		const factory = () => {
 			effect(() => {
 				const value = display.toolOutputExpanded();
 				untrack(() => call.setExpanded(value));
@@ -488,7 +488,8 @@ export class TranscriptPresenter {
 				return result && !call.facts.partial() ? this.#spotlightNotice(call.id, result) : undefined;
 			};
 			return [<ToolBlock call={call} />, notice];
-		}, before, { compact: () => call.facts.presentation() !== "full" });
+		};
+		const block = this.#mount(factory, { before, compact: () => call.facts.presentation() !== "full" });
 		const settleIfFinal = (result: ToolCallResult, partial: boolean): void => {
 			if (partial) return;
 			if (result.isError !== true) {
@@ -582,7 +583,7 @@ export class TranscriptPresenter {
 				this.#oweReplay();
 			return toolPresentation(answer);
 		});
-		const block = this.#mount(() => {
+		const factory = () => {
 			effect(() => {
 				const value = display.toolOutputExpanded();
 				untrack(() => group.setExpanded(value));
@@ -599,7 +600,8 @@ export class TranscriptPresenter {
 			const notices = (): JSXNode[] =>
 				[...finals().entries()].map(([id, result]) => this.#spotlightNotice(id, result));
 			return [ReadGroupBlock({ group }), notices];
-		}, options?.before, { compact: group.compact });
+		};
+		const block = this.#mount(factory, { before: options?.before, compact: group.compact });
 		const pending: PendingTool = {
 			block,
 			group,

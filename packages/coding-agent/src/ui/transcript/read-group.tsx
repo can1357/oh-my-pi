@@ -966,11 +966,7 @@ function GroupNode(props: GroupNodeProps): JSXNode {
 				term={term}
 				onToggle={props.onToggle}
 			>
-				{compactRows.length > 0 ? (
-					<text spans={presenterRows(compactRows)} wrap="none" />
-				) : (
-					body
-				)}
+				{compactRows.length > 0 ? <text spans={presenterRows(compactRows)} wrap="none" /> : body}
 			</tool>
 		);
 	}
@@ -1001,11 +997,7 @@ function GroupNode(props: GroupNodeProps): JSXNode {
 }
 
 /** The terminal facts of `entries` drawn as one group (or one compact read). */
-function groupTerm(
-	group: ReadGroup,
-	entries: readonly ReadEntry[],
-	compact: CompactRow | undefined,
-): ReadGroupTerm {
+function groupTerm(group: ReadGroup, entries: readonly ReadEntry[], compact: CompactRow | undefined): ReadGroupTerm {
 	if (compact) {
 		const entry = entries[0]!;
 		return {
