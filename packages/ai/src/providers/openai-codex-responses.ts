@@ -724,6 +724,7 @@ interface CodexRequestContext {
 	providerSessionState?: CodexProviderSessionState;
 	isolatedTransportState?: CodexProviderSessionState;
 	websocketState?: CodexWebSocketSessionState;
+	beforeWebSocketSend?: () => void;
 	turnState: CodexTurnStateCell;
 	responsesLite: boolean;
 	requestMetadata?: CodexRequestMetadata;
@@ -1569,6 +1570,7 @@ export async function openCodexCompactionEventStream(
 		requestContext = createCodexRequestContext(model, toCodexRequestBody(body), options, {
 			isolateCompactionTransport: false,
 		});
+		requestContext.beforeWebSocketSend = options.beforeDispatch;
 		initial = await openInitialCodexEventStream(model, options, requestSetup, requestContext);
 	} catch (error) {
 		requestSetup.requestAbortController.abort();
@@ -1853,7 +1855,7 @@ async function openCodexWebSocketTransport(
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 			});
 		const eventStream = websocketConnection.streamRequest(
-			{ send: withCodexRoutingFieldsFirst(websocketRequest) },
+			{ send: withCodexRoutingFieldsFirst(websocketRequest), beforeSend: requestContext.beforeWebSocketSend },
 			timeouts,
 			requestSetup.requestSignal,
 			onSseEvent,
@@ -3752,7 +3754,7 @@ interface CodexWebSocketRequestTimeouts {
 
 /** What {@link CodexWebSocketConnection.streamRequest} puts on the wire before reading a response. */
 type CodexWebSocketExchange =
-	| { send: Record<string, unknown> }
+	| { send: Record<string, unknown>; beforeSend?: () => void }
 	/** Read the successor the server creates from accepted steering; nothing is sent. */
 	| { attachSteerIds: readonly string[] };
 

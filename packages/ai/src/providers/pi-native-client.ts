@@ -47,6 +47,7 @@ import { notifyProviderResponse } from "../utils/provider-response";
 const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"signal",
 	"apiKey",
+	"factoryDroidRequestPolicy",
 	"fetch",
 	"onPayload",
 	"onResponse",

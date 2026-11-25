@@ -596,7 +596,7 @@ export class ModelRegistry {
 			const model = models[index];
 			let projected = model.thinking?.unverified ? withThinkingCapability(model, this.#cacheDbPath) : model;
 			if (model.api === "factory-droid-agent") {
-				projected = bindFactoryDroidRequestPolicy(projected, this.#factoryDroidRefusalFallbacks);
+				projected = bindFactoryDroidRequestPolicy(projected, this.factoryDroidRequestPolicy);
 			}
 			if (projected === model) continue;
 			if (finalized === models) finalized = models.slice();
@@ -4135,7 +4135,8 @@ export class ModelRegistry {
 		}
 	}
 
-	readonly #factoryDroidRefusalFallbacks = (model: Model): readonly string[] | undefined => {
+	/** Live Factory policy for requests this registry dispatches, including requests with a caller's own bearer. */
+	readonly factoryDroidRequestPolicy = (model: Model): readonly string[] | undefined => {
 		const matcher = this.#disabledModelMatcher();
 		if (matcher === NO_DISABLED_MODELS) return undefined;
 		const rule = matcher(model);
@@ -4464,7 +4465,7 @@ export class ModelRegistry {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
 		if (typeof target === "string") {
 			const resolver = createApiKeyResolver(this, target, options);
-			resolver.factoryDroidRefusalFallbacks = this.#factoryDroidRefusalFallbacks;
+			resolver.factoryDroidRefusalFallbacks = this.factoryDroidRequestPolicy;
 			return resolver;
 		}
 		const inner = createApiKeyResolver(this, target.provider, {
@@ -4479,7 +4480,7 @@ export class ModelRegistry {
 			if (rule !== undefined) throw new Error(formatDisabledModelError(target, rule));
 			return inner(context);
 		};
-		guarded.factoryDroidRefusalFallbacks = this.#factoryDroidRefusalFallbacks;
+		guarded.factoryDroidRefusalFallbacks = this.factoryDroidRequestPolicy;
 		return guarded;
 	}
 

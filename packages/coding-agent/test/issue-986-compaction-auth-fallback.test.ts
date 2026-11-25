@@ -8,8 +8,10 @@ import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settin
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { cfgCompactionRemoteStreamingV2Enabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { getTestModel } from "./helpers/model-fixtures";
 import { assistantMsg, userMsg } from "./utilities";
@@ -224,6 +226,36 @@ describe("issue #986 compaction auth fallback", () => {
 			expect(apiKeySpy.mock.calls.map(([model]) => model.id)).not.toContain(currentModel.id);
 		},
 	);
+
+	it.each(["manual", "automatic"])("redirects %s compaction after a late denial", async mode => {
+		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
+		const remoteId = "private-native-summarizer";
+		const resolveHeaders = vi.fn(async () => {
+			cfgDisabledModels.set(session.settings, [`${currentModel.provider}/${remoteId}`]);
+			return {};
+		});
+		const candidate = {
+			...currentModel,
+			remoteCompaction: { ...currentModel.remoteCompaction, model: remoteId, enabled: true },
+			resolveHeaders,
+		};
+		session.agent.setModel(candidate);
+		cfgCompactionRemoteStreamingV2Enabled.set(session.settings, false);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([candidate, sameProviderModel]);
+		const sent: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				sent.push(JSON.parse(String(init?.body)).model);
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "allowed-summary" }] });
+			}),
+		);
+		if (mode === "manual") await session.compact();
+		else await triggerAutoCompaction();
+		expect(resolveHeaders).toHaveBeenCalled();
+		expect(sent).toEqual([
+			sameProviderModel.remoteCompaction?.model ?? sameProviderModel.requestModelId ?? sameProviderModel.id,
+		]);
+	});
 
 	it("falls back to soft compaction without contacting a denied native override", async () => {
 		const { currentModel } = await createSession({ remoteModel: "private-summarizer" });

@@ -129,6 +129,7 @@ interface CodexCompactionTestSocket {
 }
 
 function installCodexCompactionWebSocket(options?: {
+	onOpen?: () => void;
 	respond?: (socket: CodexCompactionTestSocket, request: Record<string, unknown>) => void;
 }): {
 	sockets: CodexCompactionTestSocket[];
@@ -159,6 +160,7 @@ function installCodexCompactionWebSocket(options?: {
 			sockets.push(this);
 			queueMicrotask(() => {
 				this.readyState = CodexCompactionWebSocket.OPEN;
+				options?.onOpen?.();
 				this.onopen?.(new Event("open"));
 			});
 		}
@@ -2040,6 +2042,60 @@ describe("Responses Lite remote compaction", () => {
 		}
 	});
 
+	test.each(["WebSocket handshake", "WebSocket to SSE replay", "SSE retry"] as const)(
+		"does not send Codex compaction history after the guard closes during %s",
+		async phase => {
+			let denied = false;
+			const controller = new AbortController();
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const webSocket = installCodexCompactionWebSocket({
+				onOpen: () => {
+					denied = phase === "WebSocket handshake";
+				},
+				respond: socket => {
+					denied = true;
+					queueMicrotask(() => socket.fail());
+				},
+			});
+			try {
+				const preferWebsockets = phase !== "SSE retry";
+				const model = makeCodexLiteModel({ preferWebsockets });
+				const request = buildCompactionV2Request(
+					model,
+					[{ type: "message", role: "user", content: [{ type: "input_text", text: "private history" }] }],
+					"instructions",
+					{ sessionId: "guarded-compaction" },
+				);
+				const fetch = vi.fn(async () => {
+					denied = true;
+					return new Response("try again", { status: 503, headers: { "retry-after": "0" } });
+				});
+				await expect(
+					requestCompactionV2Streaming(model, "test-key", request, controller.signal, {
+						beforeDispatch: () => {
+							if (!denied) return;
+							const refusal = new Error("compaction target denied");
+							controller.abort(refusal);
+							throw refusal;
+						},
+						fetch,
+						preferWebsockets,
+						providerSessionState,
+						codexCompaction: TEST_CODEX_COMPACTION,
+					}),
+				).rejects.toThrow();
+				expect(controller.signal.aborted).toBe(true);
+				expect(webSocket.sockets.flatMap(socket => socket.sent)).toHaveLength(
+					phase === "WebSocket to SSE replay" ? 1 : 0,
+				);
+				expect(fetch).toHaveBeenCalledTimes(phase === "SSE retry" ? 1 : 0);
+			} finally {
+				for (const state of providerSessionState.values()) state.close();
+				webSocket.restore();
+			}
+		},
+	);
+
 	test("V2 compaction over WebSocket keeps the first mid-turn x-codex-turn-state", async () => {
 		const midTurnCompaction = { ...TEST_CODEX_COMPACTION, phase: "mid_turn" as const };
 		const providerSessionState = new Map<string, ProviderSessionState>();
@@ -3756,6 +3812,10 @@ describe("Amazon Bedrock OpenAI routes", () => {
 		"AWS_CONFIG_FILE",
 		"AWS_SHARED_CREDENTIALS_FILE",
 		"AWS_EC2_METADATA_DISABLED",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+		"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+		"AWS_WEB_IDENTITY_TOKEN_FILE",
 	] as const;
 
 	async function withAwsEnv<T>(env: Partial<Record<(typeof AWS_ENV_KEYS)[number], string>>, run: () => Promise<T>) {
@@ -3882,6 +3942,48 @@ describe("Amazon Bedrock OpenAI routes", () => {
 
 		expect(url).toBe("https://bedrock-mantle.eu-west-2.api.aws/openai/v1/responses/compact");
 		expect(authorization).toBe("Bearer mantle-token");
+	});
+
+	test("does not send native history if the target becomes denied while Bedrock obtains signing credentials", async () => {
+		const credentialsUrl = "http://127.0.0.1/credentials";
+		const urls: string[] = [];
+		let denied = false;
+		await withAwsEnv(
+			{
+				AWS_REGION: "us-west-2",
+				AWS_CONFIG_FILE: "/nonexistent/aws-config",
+				AWS_SHARED_CREDENTIALS_FILE: "/nonexistent/aws-credentials",
+				AWS_CONTAINER_CREDENTIALS_FULL_URI: credentialsUrl,
+				AWS_EC2_METADATA_DISABLED: "true",
+			},
+			async () => {
+				await expect(
+					requestOpenAiRemoteCompaction(
+						makeMantleModel(),
+						NO_AUTH_SENTINEL,
+						[{ role: "user", content: "private history" }],
+						"instructions",
+						undefined,
+						{
+							beforeDispatch: () => {
+								if (denied) throw new Error("denied during signing");
+							},
+							fetch: async url => {
+								urls.push(String(url));
+								denied = true;
+								return Response.json({
+									AccessKeyId: "test",
+									SecretAccessKey: "secret",
+									Token: "token",
+									Expiration: new Date(Date.now() + 3_600_000).toISOString(),
+								});
+							},
+						},
+					),
+				).rejects.toThrow("denied during signing");
+			},
+		);
+		expect(urls).toEqual([credentialsUrl]);
 	});
 
 	test("signs V2 compaction for a templated Mantle model with SigV4 when no bearer token exists", async () => {

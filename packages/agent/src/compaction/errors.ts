@@ -18,6 +18,11 @@ export class CompactionCancelledError extends Error {
 	}
 }
 
+/** The host refused a compaction send. No provider failure occurred on that attempt. */
+export class CompactionModelRefusalError extends Error {
+	override readonly name = "CompactionModelRefusalError";
+}
+
 /**
  * A provider-native compaction request failed after every native protocol
  * available for the selected model was exhausted.

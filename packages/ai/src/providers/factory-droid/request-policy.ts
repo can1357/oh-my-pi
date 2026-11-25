@@ -7,10 +7,10 @@ type RequestPolicy = (model: Model) => readonly string[] | undefined;
 type ScopedModel<TApi extends Api> = Model<TApi> & { [kRequestPolicy]?: RequestPolicy };
 
 export function bindFactoryDroidRequestPolicy<TApi extends Api>(
-	model: Model<TApi>,
+	model: ScopedModel<TApi>,
 	policy: RequestPolicy,
 ): ScopedModel<TApi> {
-	return { ...model, [kRequestPolicy]: policy };
+	return model[kRequestPolicy] === policy ? model : { ...model, [kRequestPolicy]: policy };
 }
 
 /** Materialize the registry's current bound without changing discovery data or widening a caller's bound. */

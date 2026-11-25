@@ -74,6 +74,7 @@ const OPTION_TIERS = {
 
 	signal: "server",
 	apiKey: "server",
+	factoryDroidRequestPolicy: "server",
 	credentialId: "server",
 	oauthIdentity: "server",
 	fetch: "server",

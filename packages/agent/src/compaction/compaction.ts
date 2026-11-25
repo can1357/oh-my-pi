@@ -67,7 +67,7 @@ import {
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
-import { NativeCompactionError } from "./errors";
+import { CompactionModelRefusalError, NativeCompactionError } from "./errors";
 import {
 	type ConvertToLlm,
 	createCompactionSummaryMessage,
@@ -771,6 +771,8 @@ export interface SummaryOptions {
 	tools?: Tool[];
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
+	/** Synchronous host policy check for each dispatch, including native transport retries. */
+	beforeDispatch?: () => void;
 	/** Inspect or replace a generic remote-compaction payload before it is sent. */
 	onPayload?: SimpleStreamOptions["onPayload"];
 	/**
@@ -1099,7 +1101,13 @@ async function summarizeConversationWindow(
 					endpoint,
 					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
 					signal,
-					{ fetch: options.fetch, model, apiKey: key, onPayload: options.onPayload },
+					{
+						fetch: options.fetch,
+						model,
+						apiKey: key,
+						onPayload: options.onPayload,
+						beforeDispatch: options.beforeDispatch,
+					},
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
@@ -1117,6 +1125,7 @@ async function summarizeConversationWindow(
 			initiatorOverride: options?.initiatorOverride,
 			metadata: options?.metadata,
 			fetch: options?.fetch,
+			beforeDispatch: options?.beforeDispatch,
 			sessionId: options?.sessionId,
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,
@@ -1337,7 +1346,13 @@ async function generateShortSummary(
 						endpoint,
 						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
 						signal,
-						{ fetch: options?.fetch, model, apiKey: key, onPayload: options?.onPayload },
+						{
+							fetch: options.fetch,
+							model,
+							apiKey: key,
+							onPayload: options.onPayload,
+							beforeDispatch: options.beforeDispatch,
+						},
 					),
 				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 			);
@@ -1359,6 +1374,7 @@ async function generateShortSummary(
 					initiatorOverride: options?.initiatorOverride,
 					metadata: options?.metadata,
 					fetch: options?.fetch,
+					beforeDispatch: options?.beforeDispatch,
 					sessionId: options?.sessionId,
 					promptCacheKey: options?.promptCacheKey,
 					providerSessionState: options?.providerSessionState,
@@ -1877,6 +1893,7 @@ export async function compact(
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
 		fetch: options?.fetch,
+		beforeDispatch: options?.beforeDispatch,
 		onPayload: options?.onPayload,
 		completeImpl: options?.completeImpl,
 		onRemoteUsage: options?.onRemoteUsage,
@@ -1943,6 +1960,22 @@ export async function compact(
 	let usedRemoteCompaction = false;
 	let remoteReplayThroughEntryId: string | undefined;
 	let nativeCompactionError: unknown;
+	const recordNativeFailure = (err: unknown): void => {
+		if (signal?.aborted) {
+			if (signal.reason instanceof CompactionModelRefusalError) {
+				// Refusing a replay does not erase an earlier native protocol failure.
+				if (
+					nativeCompactionError !== undefined &&
+					!AIError.is(AIError.classify(nativeCompactionError), AIError.Flag.AuthFailed)
+				) {
+					throw new NativeCompactionError(nativeCompactionError);
+				}
+				throw signal.reason;
+			}
+			throw err;
+		}
+		nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+	};
 	/**
 	 * Remote compaction replaces the whole history, so its request carries the
 	 * kept tail too. A turn can leave that history over the window (a large
@@ -2123,6 +2156,7 @@ export async function compact(
 				key =>
 					requestCompactionV2Streaming(model, key, request, signal, {
 						fetch: summaryOptions.fetch,
+						beforeDispatch: summaryOptions.beforeDispatch,
 						providerSessionState: summaryOptions.providerSessionState,
 						preferWebsockets: summaryOptions.preferWebsockets,
 						codexAccessPrograms: summaryOptions.codexAccessPrograms,
@@ -2147,11 +2181,7 @@ export async function compact(
 				);
 				usedRemoteCompaction = true;
 			} catch (err) {
-				// A user/session abort is a cancellation, not a remote failure —
-				// swallowing it here would downgrade Esc into "fall back to local
-				// summarization" and keep compaction running on an aborted signal.
-				if (signal?.aborted) throw err;
-				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+				recordNativeFailure(err);
 				// Claim the V1 fallback only when the V1 block below will run.
 				logger.warn(
 					shouldUseOpenAiRemoteCompaction(model)
@@ -2191,6 +2221,7 @@ export async function compact(
 						signal,
 						{
 							fetch: summaryOptions.fetch,
+							beforeDispatch: summaryOptions.beforeDispatch,
 							sessionId: summaryOptions.sessionId,
 							promptCacheKey: summaryOptions.remotePromptCacheKey,
 							providerSessionState: summaryOptions.providerSessionState,
@@ -2227,11 +2258,7 @@ export async function compact(
 				);
 				usedRemoteCompaction = true;
 			} catch (err) {
-				// A user/session abort is a cancellation, not a remote failure —
-				// swallowing it here would downgrade Esc into "fall back to local
-				// summarization" and keep compaction running on an aborted signal.
-				if (signal?.aborted) throw err;
-				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+				recordNativeFailure(err);
 				logger.warn("OpenAI remote compaction failed", {
 					error: err instanceof Error ? err.message : String(err),
 					model: model.id,
@@ -2365,6 +2392,7 @@ export async function compact(
 					initiatorOverride: summaryOptions.initiatorOverride,
 					metadata: summaryOptions.metadata,
 					fetch: summaryOptions.fetch,
+					beforeDispatch: summaryOptions.beforeDispatch,
 					sessionId: summaryOptions.sessionId,
 					promptCacheKey: summaryOptions.promptCacheKey,
 					providerSessionState: summaryOptions.providerSessionState,
@@ -2379,11 +2407,7 @@ export async function compact(
 			nativeUsedTokens = calculatePromptTokens(remote.usage);
 			usedRemoteCompaction = true;
 		} catch (err) {
-			// A user/session abort is a cancellation, not a remote failure —
-			// swallowing it here would downgrade Esc into "fall back to local
-			// summarization" and keep compaction running on an aborted signal.
-			if (signal?.aborted) throw err;
-			nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
+			recordNativeFailure(err);
 			logger.warn("Anthropic server-side compaction failed", {
 				error: err instanceof Error ? err.message : String(err),
 				model: model.id,
@@ -2542,6 +2566,7 @@ async function generateTurnPrefixSummary(
 			initiatorOverride: options?.initiatorOverride,
 			metadata: options?.metadata,
 			fetch: options?.fetch,
+			beforeDispatch: options?.beforeDispatch,
 			sessionId: options?.sessionId,
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,

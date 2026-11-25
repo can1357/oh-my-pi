@@ -24,6 +24,7 @@ import {
 	supportsAnthropicCompaction,
 	supportsBedrockConverseCompaction,
 } from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type InstrumentedChatSpanOptions, instrumentedCompleteSimple } from "../telemetry";
 import type { AgentMessage } from "../types";
@@ -243,6 +244,7 @@ export interface AnthropicNativeCompactionOptions
 			| "initiatorOverride"
 			| "metadata"
 			| "fetch"
+			| "beforeDispatch"
 			| "sessionId"
 			| "promptCacheKey"
 			| "providerSessionState"
@@ -284,7 +286,8 @@ export async function requestAnthropicNativeCompaction(
 			reasoning,
 			initiatorOverride: options.initiatorOverride,
 			metadata: options.metadata,
-			fetch: options.fetch,
+			fetch: options.beforeDispatch ? transportFetch(model, options.fetch, options.beforeDispatch) : options.fetch,
+			beforeDispatch: options.beforeDispatch,
 			sessionId: options.sessionId,
 			promptCacheKey: options.promptCacheKey,
 			providerSessionState: options.providerSessionState,

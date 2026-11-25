@@ -18,6 +18,7 @@ import {
 	applyShakeRegions,
 	CompactionCancelledError,
 	type CompactionDetails,
+	CompactionModelRefusalError,
 	type CompactionPreparation,
 	type CompactionResult,
 	type CompactionSummaryMessage,
@@ -59,6 +60,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type {
+	ApiKeyResolver,
 	AssistantMessage,
 	CodexCompactionContext,
 	Context,
@@ -209,6 +211,57 @@ export function compactionModelRefusal(
 	const target = { provider: model.provider, providerType: model.providerType, compat: model.compat, id };
 	const targetRule = isDisabled(target);
 	return targetRule === undefined ? undefined : formatDisabledModelError(target, targetRule);
+}
+
+/** A refusal aborts only this candidate, including provider-owned retry loops. */
+export async function compactWithSessionPolicy(
+	settings: Settings,
+	preparation: CompactionPreparation,
+	candidate: Model,
+	resolveApiKey: ApiKeyResolver,
+	customInstructions: string | undefined,
+	signal: AbortSignal,
+	options: SummaryOptions,
+): Promise<CompactionResult> {
+	const refused = new AbortController();
+	const checkModel = (): void => {
+		const reason = compactionModelRefusal(candidate, preparation.settings, settings);
+		if (!reason) return;
+		const error = new CompactionModelRefusalError(reason);
+		refused.abort(error);
+		throw error;
+	};
+	const guardedResolver: ApiKeyResolver = async context => {
+		checkModel();
+		const key = await resolveApiKey(context);
+		checkModel();
+		return key;
+	};
+	guardedResolver.factoryDroidRefusalFallbacks = resolveApiKey.factoryDroidRefusalFallbacks;
+	try {
+		const result = await compact(
+			preparation,
+			withDisabledModelFallbackPolicy(candidate, settings),
+			guardedResolver,
+			customInstructions,
+			AbortSignal.any([signal, refused.signal]),
+			{
+				...options,
+				beforeDispatch: () => {
+					options.beforeDispatch?.();
+					checkModel();
+				},
+			},
+		);
+		refused.signal.throwIfAborted();
+		return result;
+	} catch (error) {
+		// Stream clients can turn an aborted request into an ordinary error message.
+		if (!signal.aborted && refused.signal.aborted && !(error instanceof NativeCompactionError)) {
+			throw refused.signal.reason;
+		}
+		throw error;
+	}
 }
 
 /** Whether a configured preference list contains at least one automatic method. */
@@ -4211,9 +4264,10 @@ export class SessionMaintenance {
 			try {
 				const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, signal);
 				if (denied(candidate)) continue;
-				return await compact(
+				return await compactWithSessionPolicy(
+					this.#host.settings,
 					this.#host.obfuscatePreparationForProvider(preparation),
-					withDisabledModelFallbackPolicy(candidate, this.#host.settings),
+					candidate,
 					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 					this.#host.obfuscateTextForProvider(customInstructions),
 					signal,
@@ -4264,6 +4318,10 @@ export class SessionMaintenance {
 					},
 				);
 			} catch (error) {
+				if (error instanceof CompactionModelRefusalError) {
+					firstRefusal ??= error.message;
+					continue;
+				}
 				const id = AIError.classify(error instanceof NativeCompactionError ? error.cause : error, candidate.api);
 				if (AIError.is(id, AIError.Flag.AuthFailed)) continue;
 				if (error instanceof NativeCompactionError) {
@@ -6399,9 +6457,10 @@ export class SessionMaintenance {
 						try {
 							const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, autoCompactionSignal);
 							if (compactionModelRefusal(candidate, preparation.settings, this.#host.settings)) break;
-							compactResult = await compact(
+							compactResult = await compactWithSessionPolicy(
+								this.#host.settings,
 								this.#host.obfuscatePreparationForProvider(preparation),
-								withDisabledModelFallbackPolicy(candidate, this.#host.settings),
+								candidate,
 								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 								undefined,
 								autoCompactionSignal,
@@ -6452,6 +6511,10 @@ export class SessionMaintenance {
 						} catch (error) {
 							if (autoCompactionSignal.aborted) {
 								throw error;
+							}
+							if (error instanceof CompactionModelRefusalError) {
+								lastError = nativeCompactionFailure?.error ?? error;
+								break;
 							}
 
 							const message = error instanceof Error ? error.message : String(error);

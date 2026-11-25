@@ -940,6 +940,82 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(JSON.stringify(advisor.state.messages)).toContain("allowed-advisor-state");
 	});
 
+	it.each(["V1 headers", "V2 headers", "V2 retry"] as const)(
+		"does not send advisor history after a native override becomes disabled during %s",
+		async phase => {
+			const { advisor, nativeModel, sameProviderModel, settings } = createAdvisorFallbackHarness();
+			const remoteId = "private-advisor-summarizer";
+			const deny = () => cfgDisabledModels.set(settings, [`${nativeModel.provider}/${remoteId}`]);
+			advisor.setModel({
+				...nativeModel,
+				remoteCompaction: {
+					...nativeModel.remoteCompaction,
+					model: remoteId,
+					v2StreamingEnabled: phase !== "V1 headers",
+				},
+				resolveHeaders: async () => {
+					if (phase !== "V2 retry") deny();
+					return {};
+				},
+			});
+			const fallback = {
+				...sameProviderModel,
+				remoteCompaction: { ...sameProviderModel.remoteCompaction, v2StreamingEnabled: false },
+			};
+			vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([advisor.state.model, fallback]);
+			cfgCompactionRemoteStreamingV2Enabled.set(settings, true);
+			const requestedModels: string[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch(async (_url, init) => {
+					const { model } = JSON.parse(String(init?.body)) as { model: string };
+					requestedModels.push(model);
+					if (model === remoteId) {
+						deny();
+						return new Response("try again", { status: 500 });
+					}
+					return Response.json({ output: [{ type: "compaction", encrypted_content: "allowed-advisor-state" }] });
+				}),
+			);
+
+			await session.prompt("review after native compaction");
+
+			const allowed = fallback.remoteCompaction.model ?? fallback.requestModelId ?? fallback.id;
+			expect(requestedModels).toEqual(phase === "V2 retry" ? [remoteId, allowed] : [allowed]);
+			expect(JSON.stringify(advisor.state.messages)).toContain("allowed-advisor-state");
+		},
+	);
+
+	it("keeps a provider failure distinct from a refusal when rules change after the native send", async () => {
+		registerMockApi();
+		const { advisor, nativeModel, sameProviderModel, settings } = createAdvisorFallbackHarness();
+		const foreign = createMockModel({
+			provider: "other-provider",
+			id: "foreign-summarizer",
+			handler: () => ({ content: ["foreign summary"] }),
+		});
+		settings.setModelRole("slow", `${foreign.provider}/${foreign.id}`);
+		vi.spyOn(session.modelRegistry, "getAvailable").mockReturnValue([nativeModel, sameProviderModel, foreign]);
+		vi.spyOn(session.modelRegistry, "getApiKeyWithCredentialForProvider").mockResolvedValue({ apiKey: "test-key" });
+		cfgCompactionRemoteStreamingV2Enabled.set(settings, false);
+		const requests: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				requests.push(JSON.parse(String(init?.body)).model);
+				cfgDisabledModels.set(settings, [
+					`${nativeModel.provider}/${nativeModel.id}`,
+					`${sameProviderModel.provider}/${sameProviderModel.id}`,
+				]);
+				return Response.json({ error: { message: "invalid native history" } }, { status: 400 });
+			}),
+		);
+
+		await session.prompt("review after native failure");
+
+		expect(requests).toEqual([nativeModel.remoteCompaction?.model ?? nativeModel.requestModelId ?? nativeModel.id]);
+		expect(foreign.calls).toHaveLength(0);
+		expect(JSON.stringify(advisor.state.messages)).toContain("prior advisor output");
+	});
+
 	it("applies a successful same-provider native advisor fallback", async () => {
 		const { advisor, crossProviderModel, nativeModel, sameProviderModel } = createAdvisorFallbackHarness();
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {

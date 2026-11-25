@@ -26,7 +26,6 @@ import {
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
-import { withResolvedHeaders } from "@oh-my-pi/pi-ai/utils/model-headers";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -39,7 +38,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson, toError } from "@oh-my-pi/pi-utils";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
-import { prepareBedrockCompactionRequest } from "./bedrock";
+import { prepareResponsesCompactionTransport } from "./responses-transport";
 
 // ============================================================================
 // Types & Configuration
@@ -278,6 +277,7 @@ export async function requestCompactionV2Streaming(
 	signal?: AbortSignal,
 	options?: {
 		fetch?: FetchImpl;
+		beforeDispatch?: () => void;
 		timeoutMs?: number;
 		retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 		providerSessionState?: Map<string, ProviderSessionState>;
@@ -286,15 +286,14 @@ export async function requestCompactionV2Streaming(
 		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
-	model = await withResolvedHeaders(model, signal);
-	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
-	if (isBedrockOpenAIUrl(model.baseUrl)) {
-		({
-			model,
-			apiKey,
-			fetch: fetchImpl,
-		} = await prepareBedrockCompactionRequest(model, apiKey, options?.fetch, signal));
-	}
+	const transport = await prepareResponsesCompactionTransport(
+		model,
+		apiKey,
+		options?.fetch,
+		signal,
+		options?.beforeDispatch,
+	);
+	({ model, apiKey } = transport);
 	const endpoint = getCompactionV2Endpoint(model);
 	if (!endpoint) {
 		throw new Error(`Model ${model.id} does not support V2 streaming compaction`);
@@ -322,7 +321,8 @@ export async function requestCompactionV2Streaming(
 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
 		const timeoutSignal = ptree.combineSignals(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS);
 		try {
-			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, timeoutSignal, {
+			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, transport.fetch, timeoutSignal, {
+				beforeDispatch: options?.beforeDispatch,
 				codexMetadata,
 				providerSessionState: options?.providerSessionState,
 				codexCompaction: options?.codexCompaction,
@@ -360,6 +360,7 @@ async function attemptCompactionV2Streaming(
 	fetchImpl: FetchImpl,
 	signal: AbortSignal | undefined,
 	options: {
+		beforeDispatch?: () => void;
 		codexMetadata?: OpenAICodexCompatibilityMetadata;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
@@ -387,6 +388,7 @@ async function attemptCompactionV2Streaming(
 			apiKey,
 			signal,
 			fetch: fetchImpl,
+			beforeDispatch: options.beforeDispatch,
 			sessionId: request.sessionId,
 			providerSessionState: options.providerSessionState,
 			preferWebsockets: options.preferWebsockets,

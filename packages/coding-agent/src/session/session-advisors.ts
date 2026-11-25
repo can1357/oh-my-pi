@@ -15,7 +15,6 @@ import {
 import {
 	canReplayRemoteCompaction,
 	type CompactionResult,
-	compact,
 	compactionContextTokens,
 	createCompactionSummaryMessage,
 	estimateTranscriptTokens,
@@ -38,7 +37,6 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { completeSimple, isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
-import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -77,7 +75,6 @@ import {
 } from "../advisor";
 import { evictStaleToolResults } from "../advisor/tool-result-eviction";
 import { cfgOffline } from "../config/auxiliary-model-policy";
-import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
@@ -122,7 +119,7 @@ import { getOpenAiRemoteCompactionPayload } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
-import { compactionModelRefusal } from "./session-maintenance";
+import { compactionModelRefusal, compactWithSessionPolicy } from "./session-maintenance";
 import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
@@ -2694,20 +2691,11 @@ export class SessionAdvisors {
 					lastError = new Error(dispatchRefusal);
 					continue;
 				}
-				// Native requests resolve (and may rotate) credentials inside compact().
-				// Check the owning session again before each lookup releases the credential.
-				const resolver = this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId);
-				const guardedResolver: ApiKeyResolver = async context => {
-					const credential = await resolver(context);
-					const reason = getRefusal();
-					if (reason) throw new Error(reason);
-					return credential;
-				};
-				guardedResolver.factoryDroidRefusalFallbacks = resolver.factoryDroidRefusalFallbacks;
-				compactResult = await compact(
+				compactResult = await compactWithSessionPolicy(
+					this.#host.settings,
 					candidatePreparation,
-					withDisabledModelFallbackPolicy(candidate, this.#host.settings),
-					guardedResolver,
+					candidate,
+					this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId),
 					undefined,
 					signal,
 					{
@@ -2738,8 +2726,8 @@ export class SessionAdvisors {
 				break;
 			} catch (error) {
 				if (signal.aborted) throw error;
-				const id = AIError.classify(error, candidate.api);
-				if (error instanceof NativeCompactionError && !getRefusal() && !AIError.is(id, AIError.Flag.AuthFailed)) {
+				const id = AIError.classify(error instanceof NativeCompactionError ? error.cause : error, candidate.api);
+				if (error instanceof NativeCompactionError && !AIError.is(id, AIError.Flag.AuthFailed)) {
 					nativeCompactionFailure ??= { error, provider: candidate.provider };
 					lastError = nativeCompactionFailure.error;
 					continue;

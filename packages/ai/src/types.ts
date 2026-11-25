@@ -36,7 +36,7 @@ import type {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
-import type { ApiKey } from "./auth-retry";
+import type { ApiKey, ApiKeyResolver } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -915,6 +915,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	disableServerSideFallback?: boolean;
 	/** Factory Droid only: narrow the route's refusal targets. An empty list permits none. */
 	factoryDroidRefusalFallbacks?: readonly string[];
+	/** Local dispatch registry. Its live Factory policy takes precedence over the resolver and the model's origin. */
+	factoryDroidRequestPolicy?: ApiKeyResolver["factoryDroidRefusalFallbacks"];
 }
 
 // Generic StreamFunction with typed options

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage, complete, completeSimple } from "@oh-my-pi/pi-ai";
+import { type ApiKey, AuthStorage, complete, completeSimple } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
@@ -19,6 +19,8 @@ import { SessionAccountPoolScope } from "../../src/config/account-pools";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { cfgDisabledModels } from "../../src/config/model-settings";
 import { Settings } from "../../src/config/settings";
+import { createAgentSession } from "../../src/sdk";
+import { SessionManager } from "../../src/session/session-manager";
 
 const testModel = buildModel({
 	id: "test-model",
@@ -107,12 +109,15 @@ describe("ModelRegistry", () => {
 		]);
 	});
 
-	test("a retained Factory model and scoped resolver apply the live fallback rule on each request", async () => {
+	test("a scoped resolver applies its registry's live policy to a model from another registry", async () => {
+		const sourceSettings = Settings.isolated();
+		const source = await factoryRegistry(sourceSettings);
+		const selected = source.find("factory-droid", "claude-fable-5")!;
+		cfgDisabledModels.set(sourceSettings, ["factory-droid/*"]);
 		const rule = "factory-droid/claude-opus-5";
 		const settings = Settings.isolated();
 		cfgDisabledModels.set(settings, [rule]);
 		registry = await factoryRegistry(settings);
-		const selected = registry.find("factory-droid", "claude-fable-5")!;
 		const scope = new SessionAccountPoolScope(authStorage, {}, "test");
 		const apiKey = scope.registry(registry).resolver(selected, "test");
 		const requests: CapturedRequest[] = [];
@@ -135,6 +140,70 @@ describe("ModelRegistry", () => {
 			]);
 		} finally {
 			scope.release();
+		}
+	});
+
+	test("a session dispatches a borrowed Factory model under its own registry and settings", async () => {
+		const primary = "factory-droid/claude-fable-5";
+		const fallback = "factory-droid/claude-opus-5";
+		const sourceSettings = Settings.isolated();
+		const source = await factoryRegistry(sourceSettings);
+		const model = source.find("factory-droid", "claude-fable-5")!;
+		const registrySettings = Settings.isolated();
+		const modelRegistry = await factoryRegistry(registrySettings);
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const { session } = await createAgentSession({
+			cwd: tmpDir,
+			agentDir: tmpDir,
+			sessionManager: SessionManager.inMemory(tmpDir),
+			modelRegistry,
+			settings,
+			model,
+			cacheWarming: "off",
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		try {
+			const requests: CapturedRequest[] = [];
+			const fetch = captureFetch(requests, anthropicChunks("OK"));
+			const send = async (requestModel = model, apiKey: ApiKey = WORKOS_TOKEN) => {
+				const events = await session.agent.streamFn(
+					requestModel,
+					{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+					{ apiKey, fetch },
+				);
+				return events.result();
+			};
+
+			cfgDisabledModels.set(sourceSettings, [primary, fallback]);
+			expect((await send()).stopReason).toBe("stop");
+			expect(requests[0]?.body.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+			// Changing registries does not replace the borrowed model's account entitlement.
+			expect((await send({ ...model, factoryDroidRefusalFallbacks: [] })).stopReason).toBe("stop");
+			expect(requests[1]!.body).not.toHaveProperty("fallbacks");
+
+			cfgDisabledModels.set(registrySettings, [fallback]);
+			expect((await send()).stopReason).toBe("stop");
+			expect(requests[2]!.body).not.toHaveProperty("fallbacks");
+			cfgDisabledModels.set(registrySettings, []);
+			cfgDisabledModels.set(settings, [fallback]);
+			expect((await send()).stopReason).toBe("stop");
+			expect(requests[3]!.body).not.toHaveProperty("fallbacks");
+
+			cfgDisabledModels.set(sourceSettings, []);
+			cfgDisabledModels.set(registrySettings, [primary]);
+			await expect(send()).rejects.toThrow(primary);
+			// A credential resolver from a more permissive registry cannot lift the session registry's denial.
+			await expect(send(model, source.resolver("factory-droid"))).rejects.toThrow(primary);
+			expect(requests).toHaveLength(4);
+		} finally {
+			await session.dispose();
 		}
 	});
 

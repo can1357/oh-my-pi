@@ -5218,6 +5218,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			return withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
 				settingsBoundStreamFn(streamModel, context, {
 					...streamOptions,
+					factoryDroidRequestPolicy:
+						streamModel.api === "factory-droid-agent" ? modelRegistry.factoryDroidRequestPolicy : undefined,
 					thinkingCapabilityDbPath: modelRegistry.modelsDbPath,
 				}),
 			);

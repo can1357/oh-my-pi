@@ -40,7 +40,7 @@ import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
 import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factory-droid";
-import { factoryDroidRequestModel } from "./providers/factory-droid/request-policy";
+import { bindFactoryDroidRequestPolicy, factoryDroidRequestModel } from "./providers/factory-droid/request-policy";
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -787,6 +787,13 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
+	if (model.api === "factory-droid-agent") {
+		// Bind once, but evaluate at dispatch after credential selection and queue waits.
+		const policy =
+			sessionOptions.factoryDroidRequestPolicy ??
+			(isApiKeyResolver(sessionOptions.apiKey) ? sessionOptions.apiKey.factoryDroidRefusalFallbacks : undefined);
+		if (policy) model = bindFactoryDroidRequestPolicy(model, policy);
+	}
 	// Requests without an effort keep unknown thinking controls off the wire.
 	const effortRequested =
 		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
@@ -858,17 +865,12 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
-				if (model.api === "factory-droid-agent") {
-					const allowed = apiKeyResolver.factoryDroidRefusalFallbacks?.(model);
-					const requested = requestOptions.factoryDroidRefusalFallbacks;
-					if (allowed !== undefined) {
-						attemptOptions.factoryDroidRefusalFallbacks = requested
-							? allowed.filter(id => requested.includes(id))
-							: allowed;
-					}
-				}
-				const inner = streamSimpleRequest(model, context, attemptOptions);
+				const inner = streamSimpleRequest(model, context, {
+					...requestOptions,
+					apiKey,
+					credentialId,
+					oauthIdentity,
+				});
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
 						if ("partial" in event) event.partial.credentialId = credentialId;
@@ -1054,9 +1056,10 @@ function streamSimpleDispatch<TApi extends Api>(
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, limited =>
-				customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited }),
-			),
+			withProviderInFlightLimit(model, opts, limited => {
+				const requestModel = model.api === "factory-droid-agent" ? factoryDroidRequestModel(model) : model;
+				return customApiProvider.streamSimple(requestModel, context, { ...opts, waitForTerminalDrain: limited });
+			}),
 		);
 	}
 

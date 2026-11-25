@@ -69,7 +69,7 @@ import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJS
 import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
-import { prepareBedrockCompactionRequest } from "./bedrock";
+import { prepareResponsesCompactionTransport } from "./responses-transport";
 import {
 	isOpenAiRemoteCompactionApi,
 	parseResponsesCompactionUsage,
@@ -878,6 +878,7 @@ export async function requestOpenAiRemoteCompaction(
 	signal?: AbortSignal,
 	opts?: {
 		fetch?: FetchImpl;
+		beforeDispatch?: () => void;
 		timeoutMs?: number;
 		sessionId?: string;
 		/**
@@ -893,11 +894,14 @@ export async function requestOpenAiRemoteCompaction(
 		rewriteOutputs?: boolean;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
-	model = await withResolvedHeaders(model, signal);
-	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
-	if (isBedrockOpenAIUrl(model.baseUrl)) {
-		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal));
-	}
+	const transport = await prepareResponsesCompactionTransport(
+		model,
+		apiKey,
+		opts?.fetch,
+		signal,
+		opts?.beforeDispatch,
+	);
+	({ model, apiKey } = transport);
 	const endpoint = resolveOpenAiCompactEndpoint(model);
 	const requestModel = resolveOpenAiCompactModel(model);
 	const trimmed = trimRemoteCompactionInputToContextWindow(
@@ -1012,7 +1016,7 @@ export async function requestOpenAiRemoteCompaction(
 		}
 	}
 
-	const response = await fetchImpl(endpoint, {
+	const response = await transport.fetch(endpoint, {
 		method: "POST",
 		headers,
 		body: stringifyJson(isCodexResponses ? withCodexRoutingFieldsFirst(request) : request),
@@ -1093,6 +1097,7 @@ export async function requestRemoteCompaction(
 		model?: Model;
 		apiKey?: string;
 		onPayload?: SimpleStreamOptions["onPayload"];
+		beforeDispatch?: () => void;
 	},
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
@@ -1127,6 +1132,7 @@ export async function requestRemoteCompaction(
 	const replacement = await opts?.onPayload?.(body, opts.model, signal);
 	if (replacement !== undefined) body = replacement;
 
+	opts?.beforeDispatch?.();
 	const response = await (opts?.fetch ?? fetch)(endpoint, {
 		method: "POST",
 		headers,
