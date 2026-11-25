@@ -1243,6 +1243,27 @@ interface SubagentChainSettings extends Settings {
 	[kMinimalTaskParentSettings]?: Settings;
 }
 
+/** Restore prompt preferences below a minimal parent without pinning the child's own writes. */
+function restorePromptPreferences(parent: Settings, source: Settings): Settings {
+	const restored = parent.overlay(
+		{
+			inlineToolDescriptors: cfgInlineToolDescriptors.get(source),
+			"tools.commands": cfgToolsCommands.get(source),
+		},
+		{ derived: true },
+	);
+	const ref = new WeakRef(restored);
+	const stop = source.onEffectiveChange([cfgInlineToolDescriptors, cfgToolsCommands], () => {
+		const target = ref.deref();
+		if (!target) {
+			stop();
+			return;
+		}
+		cfgInlineToolDescriptors.override(target, cfgInlineToolDescriptors.get(source));
+		cfgToolsCommands.override(target, cfgToolsCommands.get(source));
+	});
+	return restored;
+}
 
 /**
  * Settings overrides applying an exact-name compaction threshold entry to one
@@ -1295,8 +1316,12 @@ export function createSubagentSettings(
 	// Minimal-task prompt workarounds belong to this session, not ordinary descendants.
 	const promptParentSettings = baseSettings[kMinimalTaskParentSettings] ?? baseSettings;
 	const inheritedPromptSettings = baseSettings[kMinimalTaskParentSettings];
+	const parentSettings =
+		inheritedPromptSettings && systemPreset !== "minimal-task"
+			? restorePromptPreferences(baseSettings, inheritedPromptSettings)
+			: baseSettings;
 	// Every other setting reads through to the parent live; writes on the overlay stay local.
-	const subagentSettings: SubagentChainSettings = baseSettings.overlay(
+	const subagentSettings: SubagentChainSettings = parentSettings.overlay(
 		{
 			...(inheritedRootThresholds && {
 				"compaction.thresholdPercent": inheritedRootThresholds.thresholdPercent,
@@ -1331,7 +1356,6 @@ export function createSubagentSettings(
 			// worker runs sailing past the configured threshold until the provider
 			// rejected the context (#13211). A per-spawn override still wins.
 			"compaction.midTurnEnabled": true,
-			...(inheritedPromptSettings ? { inlineToolDescriptors: cfgInlineToolDescriptors.get(inheritedPromptSettings), "tools.commands": cfgToolsCommands.get(inheritedPromptSettings) } : undefined),
 			...overrides,
 			...(systemPreset === "minimal-task" ? { inlineToolDescriptors: "off", "tools.commands": false } : undefined),
 		},
@@ -4518,15 +4542,22 @@ interface SubagentSettingsRecipe {
 	parent: Settings;
 	layers: OverlayLayers;
 	rootThresholds: RootCompactionThresholds | undefined;
+	minimalTaskParentSettings: Settings | undefined;
 }
 
 function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
-	return { parent, layers: settings.overlayLayers(), rootThresholds: settings[kRootCompactionThresholds] };
+	return {
+		parent: settings.overlayParent() ?? parent,
+		layers: settings.overlayLayers(),
+		rootThresholds: settings[kRootCompactionThresholds],
+		minimalTaskParentSettings: settings[kMinimalTaskParentSettings],
+	};
 }
 
 function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 	const settings: SubagentChainSettings = recipe.parent.restoreOverlay(recipe.layers);
 	settings[kRootCompactionThresholds] = recipe.rootThresholds;
+	settings[kMinimalTaskParentSettings] = recipe.minimalTaskParentSettings;
 	return settings;
 }
 
@@ -4711,18 +4742,24 @@ export interface SubagentRunRequest {
 	readonly options: ExecutorOptions;
 	/** Root compaction thresholds tagged on `options.settings` (a symbol property, which never crosses). */
 	readonly rootThresholds: RootCompactionThresholds | undefined;
+	readonly minimalTaskParentSettings: Settings | undefined;
 }
 
 /** Package `options` for a worker, carrying what the settings' symbol tag holds explicitly. */
 export function subagentRunRequest(options: ExecutorOptions): SubagentRunRequest {
 	const settings: SubagentChainSettings | undefined = options.settings;
-	return { options, rootThresholds: settings?.[kRootCompactionThresholds] };
+	return {
+		options,
+		rootThresholds: settings?.[kRootCompactionThresholds],
+		minimalTaskParentSettings: settings?.[kMinimalTaskParentSettings],
+	};
 }
 
 /** Worker entry of a routed run: re-tag the settings mirror, then run here. */
 export function runSubagentRunRequest(request: SubagentRunRequest): Promise<SingleResult> {
 	const settings: SubagentChainSettings | undefined = request.options.settings;
 	if (settings && request.rootThresholds) settings[kRootCompactionThresholds] = request.rootThresholds;
+	if (settings) settings[kMinimalTaskParentSettings] = request.minimalTaskParentSettings;
 	return runSubprocessOnThisThread(request.options);
 }
 
