@@ -1,0 +1,28 @@
+# Perl corpus: split. Format and regeneration: crates/builtins/src/perl/tests.rs.
+all-separators	print join("|", split(/:/,':::',-1)), "\n";	|||␊
+assign-two	my ($a,$b)=split /:/,'a:b:c:d'; print "$a|$b\n";	a|b␊
+capturing	print join("|", split(/(:)/,'a:b:c')), "\n";	a|:|b|:|c␊
+empty-pattern	print join("|", split(//,'abc')), "\n";	a|b|c␊
+empty-string-pattern	print join("|", split('','abc')), "\n";	a|b|c␊
+empty-string	print join("|", split(/:/,'',-1)), "\n";	␊
+escaped-dot	print join("|", split(/\./,'a.b.c')), "\n";	a|b|c␊
+implicit-pattern	$_="  a b\tc "; print join('|',split),"\n";	a|b|c␊
+implicit-topic	$_='a:b:c'; print join('|',split(/:/)),"\n";	a|b|c␊
+keep-trailing	print join("|", split(/:/,'a:b::',-1)), "\n";	a|b||␊
+leading-empty	print join("|", split(/:/,':a:b')), "\n";	|a|b␊
+limit-one	print join("|", split(/:/,'a:b:c',1)), "\n";	a:b:c␊
+limit-positive	print join("|", split(/:/,'a:b:c:d',3)), "\n";	a|b|c:d␊
+limit-zero	print join("|", split(/:/,'a:b::',0)), "\n";	a|b␊
+newline-anchors	print join("|", split(/^/m,"ab\ncd\nef\n")), "\n";	ab␊|cd␊|ef␊␊
+no-match	print join("|", split(/:/,'abc')), "\n";	abc␊
+optional-capture	print join("|", map {$_//'-'} split(/(:)|(,)/,'a:b,c')), "\n";	a|:|-|b|-|,|c␊
+positive-lookbehind	print join("|", split(/(?<=b)/,'abbc')), "\n";	ab|b|c␊
+regex-dot	print join("|", split(/./,'abc')), "\n";	␊
+remove-trailing	print join("|", split(/:/,'a:b::')), "\n";	a|b␊
+scalar-count	my $n=split /:/,'a:b:c'; print "$n\n";	3␊
+separator	print join("|", split(/:/,'ab:cd:ef')), "\n";	ab|cd|ef␊
+space-regex	print join("|", split(/ /,"  a b  c ")), "\n";	||a|b||c␊
+space-special	print join("|", split(' ',"  a\tb  c ")), "\n";	a|b|c␊
+string-pattern	print join("|", split(':','a:b:c')), "\n";	a|b|c␊
+whitespace-regex	print join("|", split(/\s+/,"  a\tb  c ")), "\n";	|a|b|c␊
+zero-width	print join("|", split(/(?=b)/,'abbc')), "\n";	a|b|bc␊

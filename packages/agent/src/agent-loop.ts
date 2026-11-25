@@ -22,6 +22,7 @@ import {
 	type ToolResultProviderMetadata,
 	type TSchema,
 	toolWireSchema,
+	withRequestServiceTier,
 	type UserMessage,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -53,7 +54,7 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
-import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON, toError } from "@oh-my-pi/pi-utils";
+import { cloneJsonTree, Laps, logger, sanitizeText, structuredCloneJSON, toError } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { LiveSteeringChannel } from "./live-steering";
 import { agentPauseGate } from "./pause";
@@ -1299,6 +1300,9 @@ async function runLoopBody(
 	let preserveSoftRequirementState = false;
 
 	let pendingMessages: AgentMessage[] = [];
+	// From the run's start or a dequeue of input to the request carrying it: that input shows in
+	// the transcript only once the request opens, so the wait is logged (debug) with its phases.
+	let deliveryLaps: Laps | undefined = new Laps();
 	// Steering the provider took from the queue during the last response:
 	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
 	let liveAccepted: AgentMessage[] = [];
@@ -1334,6 +1338,7 @@ async function runLoopBody(
 		// the messages in a run that is about to die.
 		try {
 			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
+			deliveryLaps.lap("steeringMs");
 		} catch (error) {
 			if (signal?.aborted && (await endAbortedBeforeModel(messagesToEmit, false))) return;
 			stream.push({ type: "turn_start" });
@@ -1394,6 +1399,7 @@ async function runLoopBody(
 				...(resumeContextMessage ? { additionalMessages: [resumeContextMessage] } : {}),
 			});
 			turnOpen = false;
+			deliveryLaps.lap("resumedToolsMs");
 			// A tool hook may mark its completed result as terminal (e.g. subagent
 			// yield) — same stop-before-next-model-call rule as the main loop.
 			if (signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON) {
@@ -1416,7 +1422,12 @@ async function runLoopBody(
 				// Park at the turn boundary while the process-wide pause gate is
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
+				if (agentPauseGate.paused) {
+					await waitForProcessPause(config, signal);
+					deliveryLaps?.lap("pausedMs");
+				}
+				let laps = deliveryLaps;
+				deliveryLaps = undefined;
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1436,6 +1447,11 @@ async function runLoopBody(
 				let preparedProviderCall: PreparedProviderCall;
 				let gateResult: AgentPreModelCallResult;
 				const emitTurnInputs = () => {
+					if (laps) {
+						laps.lap("requestSetupMs");
+						logger.debug("Input reached its model request", { count: turnMessages.length, ...laps.record() });
+						laps = undefined;
+					}
 					emitInputMessages(
 						stream,
 						signal?.aborted
@@ -1447,6 +1463,7 @@ async function runLoopBody(
 					if (config.syncContextBeforeModelCall) {
 						await config.syncContextBeforeModelCall(currentContext, signal);
 					}
+					laps?.lap("syncContextMs");
 					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 
 					if (!directiveResolvedForTurn) {
@@ -1477,9 +1494,11 @@ async function runLoopBody(
 					}
 
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+					laps?.lap("prepareProviderMs");
 					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
+					laps?.lap("beforeModelCallMs");
 				} catch (error) {
 					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 					if (!turnOpen) {
@@ -1906,12 +1925,16 @@ async function runLoopBody(
 					// for the next boundary (or is steered into that response).
 					pendingMessages = live;
 				} else {
+					const steeringLaps = new Laps();
 					const steering = signal?.aborted
 						? []
 						: [...live, ...((await config.getSteeringMessages?.(signal)) || [])];
+					steeringLaps.lap("steeringMs");
+					if (steering.length > 0) deliveryLaps = steeringLaps;
 					if (hasMoreToolCalls) {
 						// Mid-work: fold any non-interrupting asides into the next turn alongside steering.
 						const asides = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.("work"));
+						steeringLaps.lap("asidesMs");
 						pendingMessages = asides.length > 0 ? [...steering, ...asides] : steering;
 					} else {
 						// Stop boundary: only steering (live user input) forces another turn here. Leave
@@ -1928,7 +1951,9 @@ async function runLoopBody(
 			}
 
 			// Agent would stop here. Drain non-interrupting asides + follow-up messages.
+			const yieldLaps = new Laps();
 			await config.onBeforeYield?.();
+			yieldLaps.lap("beforeYieldMs");
 
 			if (isDeadlineExceeded(config.deadline)) {
 				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
@@ -1939,11 +1964,15 @@ async function runLoopBody(
 			// above and this yield point (e.g. queued while onBeforeYield ran). Without
 			// this poll it would strand in the queue until the next manual prompt.
 			const lateSteering = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
+			yieldLaps.lap("steeringMs");
 			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.("stop"));
+			yieldLaps.lap("asidesMs");
 			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
+			yieldLaps.lap("followUpMs");
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
+				if (lateSteering.length > 0 || followUpMessages.length > 0) deliveryLaps = yieldLaps;
 				continue;
 			}
 
@@ -2176,7 +2205,11 @@ async function streamAssistantResponse(
 			: providerAbortSignals.length === 1
 				? providerAbortSignals[0]!
 				: AbortSignal.any(providerAbortSignals);
-	const requestApiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
+	// The credential is chosen for the tier this request will ask for.
+	const requestApiKey = withRequestServiceTier(
+		(config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey,
+		effectiveServiceTier,
+	);
 	let resolvedCredential: ApiKeyResolution;
 	const resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal, resolved => {
 		resolvedCredential = resolved;

@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
+### Breaking Changes
+
+- Removed several internal utility exports from the coding-agent package. Import `errorMessage` from `@oh-my-pi/pi-utils/type-guards`, `flattenLine` from `@oh-my-pi/pi-tui/text/sanitize`, and `fuzzyHits` from `@oh-my-pi/pi-coding-agent/utils/fuzzy`; import `stripInlineMarkdown` from `plan-mode/plan-toc`.
+
+### Added
+
+- Background processes started by the bash tool are now detected when the agent stops, allowing them to be registered as services or terminated; background jobs using `&` are cleaned up when the session ends. Configure this behavior with `bash.reapBackground` (RPC mode does not reap processes).
+- Added the `o2ctl services` shell commands for adopting an existing process as a named service, listing services, and stopping services.
+- Agents can change their own model or a live child agent's model through the `agent://<id>/model` interface, including permitted user-tagged models, and adjust reasoning effort through `agent://<id>/effort` or a model suffix.
+- In Tern, pasted-image attachments can be opened in the image annotator; completing annotation replaces the attachment with the edited image.
+- Added `archive.transcript(id, { detail, budget, turns })` for rendering compacted, budget-limited views of previous evaluation sessions, with controls for transcript detail and turn ranges.
+
+### Changed
+
+- Session identifiers and session-file paths are now available to all commands run within a session, including evaluation shell commands, `!` commands, `/loop` conditions, and autoresearch runs.
+- Isolated subagent and `/wt` ovnfs checkouts now record the session that created or moved into them, and `ovnfs ls` displays that session after the supporting daemon is restarted.
+- `/fast` and `/fast ultra` automatically select an eligible account or stored API key, fall back to other accounts at standard speed when limits are reached, and resume using the fast account when it recovers. Refused fast-mode requests no longer disable `/fast` when another eligible credential remains available.
+- `history://<id>` now uses the enhanced transcript view with numbered turns, grouped consecutive reads and searches, and `budget`, `detail`, and `turns` query parameters.
+- Tern's agent tray now shows running and queued agents before completed agents, with each group ordered by spawn time.
+
+### Fixed
+
+- A queued or steered message keeps its queue pill until it appears in the transcript, instead of vanishing while its request is still being prepared.
+- Fixed LSP diagnostics failing to load when imported before the LSP tool.
+- Model lookups now reflect catalog changes from an extension provider’s OAuth login, including in mirrored registries.
+- Tern browser actions now report the last observed reason a target was not actionable and discard target coordinates received after the deadline.
+- Fixed checkout and workspace detection for paths inside directories whose names begin with `..`, so scoped settings, plugin roots, and folder restrictions apply correctly.
+- Fixed broadcasts arriving while a subagent is finishing so they no longer replace the subagent's final report.
+- On Linux, bash `time -l` and `time -v` now report the measured program's peak memory usage rather than the agent process's usage.
+- Fixed zsh scripts rendered in the pseudo shell so shell syntax is displayed correctly instead of replacement characters.
+- Fixed ACP session loading and resuming for saved Copilot 1M models during background model-catalog refreshes.
+- Fixed Tern browser actions that ran out of time mid-wait reporting a transport timeout instead of why the element was not actionable (disabled, covered, moving).
+- Fixed extension OAuth catalog modifiers (`oauth.modifyModels`) not rerunning on a model-catalog refresh when `models.yml` is unchanged or missing, so a login no longer leaves other providers' models unmodified until restart.
+- Fixed `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` so they apply consistently to assistant replies, thinking, user prompts, extension messages, summaries, and tool output.
+- Fixed rules supplied by extensions in configuration overlays from disappearing when the system prompt is rebuilt.
+- Fixed idle follow-ups becoming stuck after extension messages or compaction summaries.
+- Fixed resuming goals whose token budget is exhausted so they remain budget-limited, and prevented incomplete-goal reminders from asking the agent to continue while budget-limited.
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

@@ -24,7 +24,12 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
 import { routedLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
-import { renderMarkdownFrame, takeExtensionLinks } from "@oh-my-pi/pi-tui/text/markdown/index";
+import {
+	type MarkdownLook,
+	markdownLook,
+	renderMarkdownFrame,
+	takeExtensionLinks,
+} from "@oh-my-pi/pi-tui/text/markdown/index";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatNumber } from "@oh-my-pi/pi-utils";
@@ -104,6 +109,7 @@ interface MarkdownNode extends UiNode {
 		hyperlinks: boolean;
 		textStyle: string | undefined;
 		schemes: readonly string[] | undefined;
+		look: MarkdownLook;
 		frame: ReplyFrame;
 	};
 }
@@ -118,6 +124,7 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 		? "thinkingText em"
 		: (props.tone ?? (theme.has("assistantMessageText") ? "assistantMessageText" : undefined));
 	const schemes = thinking ? undefined : routedLinkSchemes();
+	const look = markdownLook();
 	const links = thinking ? undefined : term.links;
 	// A host link resolver can change its targets in place.
 	const cacheable = !props.stream && !links?.size;
@@ -131,7 +138,8 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 			last.paddingX === paddingX &&
 			last.hyperlinks === hyperlinks &&
 			last.textStyle === textStyle &&
-			last.schemes === schemes
+			last.schemes === schemes &&
+			last.look === look
 		)
 			return last.frame;
 	}
@@ -155,7 +163,7 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 		});
 		frame = { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
 	}
-	if (cacheable) child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, frame };
+	if (cacheable) child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, look, frame };
 	return frame;
 }
 

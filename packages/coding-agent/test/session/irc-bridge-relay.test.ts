@@ -93,13 +93,18 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		return { bridge: new IrcBridge(host), steered, observed };
 	}
 
-	it("steers a parent's broadcast leg to its child like a direct parent message", async () => {
+	it("interrupts the child with a parent's broadcast leg but never steers it into the run", async () => {
 		const { bridge, steered } = makeStreamingChild();
 		await bridge.deliver({ id: "b1", from: "Main", to: "Child", body: "everyone: status", ts: 1, broadcast: true });
 		await bridge.deliver({ id: "d1", from: "Main", to: "Child", body: "you: status", ts: 2 });
 
-		expect(steered.map(message => bridge.isParentSteer(message))).toEqual([true, true]);
-		expect(bridge.drainPending()).toHaveLength(0);
+		// Only the direct message is a parent request; the broadcast still ends a wait.
+		expect(steered.map(message => bridge.isParentSteer(message))).toEqual([true]);
+		expect(bridge.hasInterrupts()).toBe(true);
+		expect(bridge.drainPending({ keepPeerMessages: true })).toHaveLength(0);
+		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
+			{ id: "b1", broadcast: true },
+		]);
 	});
 
 	it("keeps a peer's broadcast leg queued without interrupting the recipient", async () => {
@@ -160,14 +165,14 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		expect(card).not.toContain("[Wait interrupted by message]");
 	});
 
-	it("leaves peer messages queued at a stop boundary and drains them after work", async () => {
+	it("leaves peer messages and broadcasts queued at a stop boundary and drains them after work", async () => {
 		const { bridge } = makeStreamingChild();
 		await bridge.deliver({ id: "p1", from: "Peer", to: "Child", body: "question?", ts: 3 });
 		await bridge.deliver({ id: "b3", from: "Main", to: "Child", body: "everyone: status", ts: 4, broadcast: true });
 		bridge.queueAside([{ role: "custom", customType: "note", content: "aside", display: false, timestamp: 5 }]);
 
 		expect(bridge.drainPending({ keepPeerMessages: true }).map(record => record.timestamp)).toEqual([5]);
-		expect(bridge.drainPending().map(record => record.timestamp)).toEqual([3]);
+		expect(bridge.drainPending().map(record => record.timestamp)).toEqual([3, 4]);
 	});
 
 	it("drains a message from the recipient's own descendant at a stop boundary, since its run may wait on it", async () => {

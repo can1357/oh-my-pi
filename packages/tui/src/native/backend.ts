@@ -12,6 +12,8 @@
  * Each batch spends a credit and gets its own sequence number. Changes made
  * while blocked coalesce behind the unsent ops. If the oldest frame stays
  * unanswered for {@link STALLED_ACK_MS}, the credits reset (one warning per stall).
+ * Tern acknowledges a frame once it draws it and draws no hidden pane (a
+ * background tab), so silence while the pane is hidden resets them without one.
  *
  * Events: the terminal's UI events become {@link UiEvent}s delivered to the
  * node they name and bubbled to the nearest handler; keys and pastes the
@@ -109,9 +111,10 @@ function toUiEvent(
 				...(event.checked === undefined ? {} : { checked: event.checked }),
 			};
 		case "change":
-			return "text" in event
-				? { type: "docChange", key, text: event.text }
-				: { type: "change", key, item: event.item, value: event.value };
+			if ("text" in event) return { type: "docChange", key, text: event.text };
+			return "item" in event
+				? { type: "change", key, item: event.item, value: event.value }
+				: { type: "change", key, value: event.value };
 		case "comment":
 			return "comment" in event
 				? { type: "commentNote", key, comment: event.comment, note: event.note }
@@ -379,14 +382,14 @@ export class NativeBackend {
 		const now = this.#clock!.now();
 		const waited = now - oldest.sentAt;
 		if (waited >= STALLED_ACK_MS) {
-			if (this.#stalledSince === undefined) {
+			if (this.#stalledSince === undefined && this.#connection!.visible.peek()) {
 				this.#stalledSince = oldest.sentAt;
 				logger.warn("TSP: terminal stopped acknowledging frames; resetting credits", {
 					sf: this.id,
 					unacked: this.#unacked.length,
 				});
 			}
-			this.#stallResets++;
+			if (this.#stalledSince !== undefined) this.#stallResets++;
 			this.#unacked = [];
 			return true;
 		}

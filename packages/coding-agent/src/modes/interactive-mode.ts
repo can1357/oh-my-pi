@@ -394,7 +394,8 @@ import {
 } from "@oh-my-pi/pi-tui";
 
 import { insideMultiplexer } from "@oh-my-pi/pi-tui/driver/mux/detect";
-import { setLinkSchemes, setMarkdownLook } from "@oh-my-pi/pi-tui/term/painters/md";
+import { setLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
+import { setMarkdownLook } from "@oh-my-pi/pi-tui/text/markdown/look";
 import { KeybindingsManager } from "../config/keybindings/keybindings";
 import { appInterruptKeys } from "../config/keybindings/matchers";
 import { setExtensionLinkClicksProvider } from "../extensibility/extensions/link-clicks";
@@ -2852,6 +2853,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				timeoutMs: cfgLoopConditionTimeoutMs.get(settings),
 				signal: controller.signal,
 				sessionId,
+				sessionFile: this.sessionManager.getSessionFile(),
 				isSessionCurrent: () => this.sessionManager.getSessionId() === sessionId,
 			});
 		} finally {
@@ -7199,10 +7201,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	// Extension UI integration
 	setToolUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
 		this.#toolUiContextSetter(uiContext, hasUI);
-	}
-
-	initializeHookRunner(uiContext: ExtensionUIContext, hasUI: boolean): void {
-		this.#extensionUiController.initializeHookRunner(uiContext, hasUI);
 	}
 
 	// UI helpers

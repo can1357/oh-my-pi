@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Fast-tier requests now prefer eligible credentials, including Codex plans with Ultrafast, Claude accounts with fast mode, and stored or environment API keys. Eligible accounts continue serving on paid overage and within their reserve, while normal load balancing resumes when the requested tier is unavailable or refused.
+
+### Changed
+
+- Embeddings, transcription, and video errors now present upstream error messages clearly when available instead of exposing raw JSON response bodies.
+
+### Fixed
+
+- Fixed Codex requests incorrectly sending a service tier to accounts whose plans do not support it.
+- Successful OAuth token refreshes now restore normal account selection after a temporary refresh outage.
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

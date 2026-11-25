@@ -19,13 +19,15 @@ import {
 import { $env, logger } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
+	type ApiKeyResolution,
 	createAuthRetryKeyState,
 	isApiKeyResolver,
 	preferAuthRetryError,
 	resolvedApiKeyBearer,
 	resolveNextAuthRetryKey,
+	SERVICE_TIER_UNAVAILABLE_FEATURE,
+	withRequestServiceTier,
 } from "./auth-retry";
-import type { OAuthRequestIdentity } from "./auth/types";
 import { withProbedThinking } from "./thinking-probe";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -836,27 +838,41 @@ function streamSimpleRequest<TApi extends Api>(
 		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
 	);
 
-	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
+	// Every resolve carries the tier the request will ask for, so the credential is chosen for it.
+	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey)
+		? withRequestServiceTier(requestOptions.apiKey, requestOptions.serviceTier)
+		: undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
-		const runAttempt = async (
-			apiKey?: string,
-			credentialId?: number,
-			oauthIdentity?: OAuthRequestIdentity,
-		): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (resolved?: ApiKeyResolution): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
 				emitBufferedEvents(outer, bufferedEvents);
 				bufferedEvents.length = 0;
 			};
+			const credential = typeof resolved === "object" ? resolved : undefined;
+			const credentialId = credential?.credentialId;
+			// A credential known not to offer the requested tier serves at standard
+			// speed; sending the tier anyway would only buy a rejected round trip.
+			const withheldTier = credential?.serviceTierUnavailable === true && requestOptions.serviceTier !== undefined;
+			const tagWithheldTier = (message: AssistantMessage): void => {
+				if (!withheldTier || message.disabledFeatures?.includes(SERVICE_TIER_UNAVAILABLE_FEATURE)) return;
+				message.disabledFeatures = [...(message.disabledFeatures ?? []), SERVICE_TIER_UNAVAILABLE_FEATURE];
+			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
+				const attemptOptions = {
+					...requestOptions,
+					apiKey: resolvedApiKeyBearer(resolved),
+					credentialId,
+					oauthIdentity: credential?.oauthIdentity,
+					...(withheldTier ? { serviceTier: undefined } : {}),
+				};
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
@@ -864,6 +880,7 @@ function streamSimpleRequest<TApi extends Api>(
 						else if (event.type === "done") event.message.credentialId = credentialId;
 						else event.error.credentialId = credentialId;
 					}
+					if (event.type === "done") tagWithheldTier(event.message);
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
 						continue;
@@ -893,6 +910,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (!outer.done) {
 					const result = await inner.result();
 					if (credentialId !== undefined) result.credentialId = credentialId;
+					tagWithheldTier(result);
 					outer.end(result);
 				}
 			} catch (error) {
@@ -923,13 +941,10 @@ function streamSimpleRequest<TApi extends Api>(
 
 		void (async () => {
 			let lastKey: string | undefined;
-			let credentialId: number | undefined;
-			let oauthIdentity: OAuthRequestIdentity | undefined;
+			let initial: ApiKeyResolution;
 			try {
-				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
-				lastKey = resolvedApiKeyBearer(resolved);
-				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+				initial = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				lastKey = resolvedApiKeyBearer(initial);
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -951,27 +966,25 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			let failure = await runAttempt(initial);
 			if (!failure) return;
 			let reportedFailure = failure;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				let nextCredentialId: number | undefined;
-				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				let nextResolved: ApiKeyResolution;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
 					failure.error,
 					signal,
 					resolved => {
-						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
-						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+						nextResolved = resolved;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(nextResolved);
 				if (!next) return;
 				reportedFailure =
 					preferAuthRetryError(reportedFailure.error, next.error) === reportedFailure.error

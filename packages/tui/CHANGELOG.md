@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [19.2.1] - 2026-11-25
+
+### Breaking Changes
+
+- Removed the public `oneLine` export from `@oh-my-pi/pi-tui/term/painters/picker`; use `flattenLine` from `@oh-my-pi/pi-tui/text/sanitize` instead.
+
+### Added
+
+- Added the `change` UI event for annotated images, delivered to the node’s `onChange` handler without an associated item.
+
+### Fixed
+
+- Panes in a background Tern tab no longer log frame-acknowledgment stall warnings.
+
 ## [19.2.0] - 2026-11-25
 
 ### Added

@@ -338,12 +338,12 @@ describe("InteractiveMode tray", () => {
 		const cards = children(described[trayAt]);
 		expect(cards.map(card => [card.p?.item, card.p?.ref])).toEqual([
 			["agent", "TrayScan"],
-			["agent", "TrayReview"],
 			["job", "bg_1"],
 			["job", "bg_2"],
+			["agent", "TrayReview"],
 			["done", "done"],
 		]);
-		const [scan, review, widgetJob, bareJob, done] = cards;
+		const [scan, widgetJob, bareJob, review, done] = cards;
 
 		expect(scan!.p).toMatchObject({
 			role: "omp.tray.card",

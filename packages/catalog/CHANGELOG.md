@@ -6,6 +6,12 @@
 
 - Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#10058](https://github.com/can1357/oh-my-pi/pull/10058) by [@Randyopo](https://github.com/Randyopo))
 
+## [19.2.1] - 2026-11-25
+
+### Fixed
+
+- Fixed Codex service tiers, such as Ultrafast, being hidden for accounts that support them when the first logged-in account has a plan that does not.
+
 ## [19.2.0] - 2026-11-25
 
 ### Added
