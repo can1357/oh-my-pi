@@ -373,6 +373,7 @@ export function resolveOpenAIRequestSetup(
 		sessionId,
 		cacheAffinity: resolveOpenCodeGoCacheAffinity(model, options.promptCacheAffinityKey),
 		parentSessionId: options.parentSessionId,
+		compat: model.compat,
 	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
