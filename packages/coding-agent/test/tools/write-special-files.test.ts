@@ -145,7 +145,15 @@ describe("write with empty content", () => {
 		expect(outcome).toBeInstanceOf(ToolError);
 		expect(outcome).toHaveProperty("message", expect.stringContaining("Refusing to overwrite"));
 		expect(outcome).toHaveProperty("message", expect.stringContaining(target));
-		expect(outcome).toHaveProperty("message", expect.stringContaining(`truncate -s 0 '${target}'`));
+		// The erase command follows the configured shell. `truncate` covers POSIX shells and
+		// Git Bash, and `type nul >` covers the cmd.exe fallback.
+		const eraseCommands = [`truncate -s 0 '${target}'`, `type nul > "${target}"`].map(command =>
+			command.replace(/[.*+?^${}()|[\]\\`]/g, "\\$&"),
+		);
+		expect(outcome).toHaveProperty(
+			"message",
+			expect.stringMatching(new RegExp("`(?:" + eraseCommands.join("|") + ")`")),
+		);
 		expect(fs.readFileSync(target, "utf8")).toBe(original);
 	});
 
