@@ -164,6 +164,8 @@ export interface ComposerDecoration {
 	 */
 	readonly gradient?: { readonly stops: readonly string[]; readonly periodMs?: number };
 	readonly fx?: TspEffect;
+	/** Terminal-only text drawn in place of the range (see {@link EditorTermRange.label}); Tern draws the range. */
+	readonly label?: string;
 }
 
 /** Decorations for the draft `text`. */
@@ -1817,7 +1819,14 @@ export class Composer {
 			});
 			for (const d of extra) {
 				if (d.gradient && d.gradient.stops.length > 0) out.push(...gradientRanges(text, d, d.gradient));
-				else out.push({ from: d.from, to: d.to, s: d.s, ...(d.fg ? { fg: d.fg } : {}) });
+				else
+					out.push({
+						from: d.from,
+						to: d.to,
+						s: d.s,
+						...(d.fg ? { fg: d.fg } : {}),
+						...(d.label ? { label: d.label } : {}),
+					});
 			}
 			return out.sort((a, b) => a.from - b.from);
 		});

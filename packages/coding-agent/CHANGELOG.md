@@ -33,6 +33,7 @@
 ### Changed
 
 - Opening a full model catalog on subsequent launches reuses unchanged catalog data instead of rebuilding it.
+- Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
 
 ## [19.2.0] - 2026-11-25
 

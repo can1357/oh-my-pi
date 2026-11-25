@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `label` to editor terminal decoration ranges: replacement text drawn in place of a range on rows where it fits and the caret is outside it.
+
 ### Changed
 
 - Terminal animations now skip unchanged frames and share redraws with streaming content; shimmer motion runs at 20 fps.

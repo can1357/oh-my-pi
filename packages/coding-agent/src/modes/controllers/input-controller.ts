@@ -33,6 +33,7 @@ import { resolveReadPath } from "../../tools/path-utils";
 import { vocalizer } from "../../tts/vocalizer";
 import { collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
+import { attachQueueShorthand } from "../../ui/composer/queue-shorthand";
 import { combineAtomizers, FOCUS_ACTION } from "../../ui/composer/composer";
 import { modelMentionAtomizer } from "../../ui/composer/model-mention-chips";
 import { skillAtomizer } from "../../ui/composer/skill-chips";
@@ -422,6 +423,7 @@ export class InputController {
 				}),
 				isSuggestionsKey: key => this.ctx.keybindings.matches(key, "tui.editor.spellingSuggestions"),
 			}),
+			attachQueueShorthand(composer, () => currentTheme().symbols.symbol("nav.selected")),
 		);
 		// A `/skill:<name>` of a known skill shows as a chip linking to its SKILL.md; a `^provider/id`
 		// mention of a taggable model as a model chip.
