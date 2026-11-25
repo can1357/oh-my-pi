@@ -7,7 +7,6 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as startupCache from "../src/modes/interactive/startup-cache";
 import {
@@ -96,7 +95,6 @@ describe("interactive mode status prediction", () => {
 		dir = TempDir.createSync("@pi-status-prediction-");
 		cache = StartupCache.open(path.join(dir.path(), "composer.db"));
 		vi.spyOn(startupCache, "sharedStartupCache").mockReturnValue(cache);
-		vi.spyOn(vcs, "watch").mockImplementation(() => () => {});
 		await Settings.init({ inMemory: true, cwd: dir.path() });
 		authStorage = await AuthStorage.create(path.join(dir.path(), "auth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);

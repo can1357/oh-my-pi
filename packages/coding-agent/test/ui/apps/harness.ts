@@ -24,6 +24,7 @@ import {
 import { bubbleEvent, bubbleKey, keypathOf, pathTo } from "@oh-my-pi/pi-tui/dispatch";
 import { decodeKey } from "@oh-my-pi/pi-tui/driver/input/keys";
 import { paintNode, releasePaintCache, type StaticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { type WidgetContext, widgetFor, widgetState } from "@oh-my-pi/pi-tui/term/widgets";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
 import {
@@ -76,6 +77,17 @@ export interface AppScreen {
 	/** `apps/<screen>`. */
 	readonly dir: string;
 	mount(caseName: string, corpusCase: CorpusCase): AppMount;
+}
+
+/** Paint an app once and return only the visible row text. */
+export function paintAppRows(view: () => JSXNode, env: StaticEnvironment, width: number): string[] {
+	return createRoot(dispose => {
+		try {
+			return resolveChildren(view)().flatMap(node => paintNode(env, node, width).rows.map(stripEscapes));
+		} finally {
+			dispose();
+		}
+	});
 }
 
 const KEY_CONTEXT = { kitty: false, backspaceIsCtrl: false };

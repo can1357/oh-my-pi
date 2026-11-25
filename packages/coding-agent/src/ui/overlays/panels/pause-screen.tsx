@@ -118,7 +118,7 @@ export function PauseScreen(props: PauseScreenProps): JSXNode {
 				<ActionButton
 					id="resume"
 					label="Resume"
-					title={`Resume  ${keyTitle(interruptKey)} ·   ⏎ ·   ␣`}
+					title={`Resume  ${keyTitle(interruptKey)} ·   ${keyTitle("enter")} ·   ${keyTitle("space")}`}
 					tone="accent"
 					keys={kbdOf(interruptKey)}
 				/>

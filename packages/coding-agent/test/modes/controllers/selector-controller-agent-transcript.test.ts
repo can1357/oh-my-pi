@@ -152,7 +152,7 @@ describe("the Agent Hub's transcript viewer in Tern", () => {
 		await using _ui = ui;
 		await openViewer();
 
-		// The prompt: a hold menu, and Copy, Rewind and the time sent under it.
+		// The prompt: a hold menu, and Copy, Edit & resend and the time sent under it.
 		const tools = ui.node("row", "tools");
 		const prompt = ui.get(tools.parent!);
 		expect(prompt.p.role).toBe("omp.user");
@@ -166,10 +166,10 @@ describe("the Agent Hub's transcript viewer in Tern", () => {
 			"fork-turn",
 		]);
 		ui.click("icon", "copy");
-		ui.click("icon", "rewind");
+		ui.click("icon", "edit");
 		expect(acted.prompts).toEqual([
 			["copy-message", "Reply with a greeting.", PROMPT_AT],
-			["rewind", "Reply with a greeting.", PROMPT_AT],
+			["edit-turn", "Reply with a greeting.", PROMPT_AT],
 		]);
 
 		// The reply: an agent-attributed assignment starts no turn clock, so the usage line has no duration.

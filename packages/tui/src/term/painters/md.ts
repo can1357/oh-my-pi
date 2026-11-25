@@ -31,14 +31,6 @@ export function setLinkSchemes(schemes: Iterable<string>): void {
 	if (next.length !== current.length || next.some((scheme, i) => scheme !== current[i])) linkSchemes.set(next);
 }
 
-const look = signal<{ readonly colorful: boolean; readonly mermaid: boolean }>({ colorful: true, mermaid: true });
-
-/** The host's Markdown look settings (palette hues, mermaid diagrams); `md` blocks repaint on a change. */
-export function setMarkdownLook(next: { readonly colorful: boolean; readonly mermaid: boolean }): void {
-	const current = look();
-	if (current.colorful !== next.colorful || current.mermaid !== next.mermaid) look.set(next);
-}
-
 definePainter("md", (node, cx) => {
 	const props = node.props() as TspMarkdownProps;
 	const text = props.text ?? "";
@@ -51,8 +43,6 @@ definePainter("md", (node, cx) => {
 		marks: props.marks,
 		hyperlinks: cx.hyperlinks,
 		textSizing: cx.textSizing,
-		colorful: look().colorful,
-		mermaid: look().mermaid,
 		linkSchemes: schemes.length > 0 ? schemes : undefined,
 	});
 	if (frame.rows.length === 0) return EMPTY_BLOCK;

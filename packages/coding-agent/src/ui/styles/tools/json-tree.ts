@@ -142,13 +142,18 @@ export function jsonTreeRows(
 			container: false,
 		};
 	};
+	const lastBranch = theme.fg("dim", theme.symbols.symbol("tree.last"));
+	const branch = theme.fg("dim", theme.symbols.symbol("tree.branch"));
+	const hook = theme.symbols.symbol("tree.hook");
+	const vertical = theme.symbols.symbol("tree.vertical");
+
 	/** A container's children under `gutter`; past the depth limit a lone `…` stands for them. */
 	const walk = (container: object, depth: number, gutter: string): void => {
 		const entries = entriesOf(container, false);
 		if (entries.length === 0) return;
 		if (depth > limits.maxDepth) {
 			if (rows.length >= limits.maxLines) truncated = true;
-			else rows.push(`${gutter}${theme.fg("dim", "└─")} ${theme.fg("dim", "…")}`);
+			else rows.push(`${gutter}${lastBranch} ${theme.fg("dim", "…")}`);
 			return;
 		}
 		entries.forEach(([key, entry, keyColor], i) => {
@@ -157,28 +162,30 @@ export function jsonTreeRows(
 				return;
 			}
 			const last = i === entries.length - 1;
-			const branch = theme.fg("dim", last ? "└─" : "├─");
 			// The rails of open ancestors stay unstyled.
-			const below = `${gutter}${last ? "   " : "│  "}`;
-			const row = entryRows(key, keyColor, entry, `${gutter}${branch} `, below);
+			const below = `${gutter}${last ? "   " : `${vertical}  `}`;
+			const row = entryRows(key, keyColor, entry, `${gutter}${last ? lastBranch : branch} `, below);
 			rows.push(...row.rows);
 			if (row.container) walk(entry as object, depth + 1, below);
 		});
 	};
 	if (value === null || typeof value !== "object") {
-		rows.push(`${theme.fg("dim", "└")} ${theme.fg(scalarColor(value), scalarText(value))}`);
+		rows.push(`${theme.fg("dim", hook)} ${theme.fg(scalarColor(value), scalarText(value))}`);
 		return { rows, truncated };
 	}
 	const entries = entriesOf(value, true);
+	const bullet = theme.symbols.symbol("format.bullet");
+	const hookPad = " ".repeat(1 + visibleWidth(hook));
+	const gutter = `${hookPad}${" ".repeat(1 + visibleWidth(bullet))}`;
 	entries.forEach(([key, entry, keyColor], i) => {
 		if (rows.length >= limits.maxLines) {
 			truncated = true;
 			return;
 		}
-		const lead = i === 0 ? `${theme.fg("dim", "└")} ` : "  ";
-		const row = entryRows(key, keyColor, entry, `${lead}${theme.fg("dim", "•")} `, "    ");
+		const lead = i === 0 ? `${theme.fg("dim", hook)} ` : hookPad;
+		const row = entryRows(key, keyColor, entry, `${lead}${theme.fg("dim", bullet)} `, gutter);
 		rows.push(...row.rows);
-		if (row.container) walk(entry as object, 2, "    ");
+		if (row.container) walk(entry as object, 2, gutter);
 	});
 	return { rows, truncated };
 }

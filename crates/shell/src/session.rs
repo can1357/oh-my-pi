@@ -271,8 +271,9 @@ pub struct Children(Arc<ChildrenState>);
 struct ChildrenState {
 	/// A run is in flight.
 	active: AtomicBool,
-	/// Live pids in spawn order.
-	pids:   Mutex<Vec<u32>>,
+	/// Live pids in spawn order, each with whether it runs in a detached
+	/// (`nohup`) tree.
+	pids:   Mutex<Vec<(u32, bool)>>,
 }
 
 impl Children {
@@ -287,7 +288,21 @@ impl Children {
 			.pids
 			.lock()
 			.iter()
-			.filter_map(|&pid| i32::try_from(pid).ok())
+			.filter_map(|&(pid, _)| i32::try_from(pid).ok())
+			.collect()
+	}
+
+	/// Every live external the session holds, whether a run is in flight or
+	/// not, background jobs (`cmd &`, `nohup cmd &`) that outlived their run
+	/// included: its pid, and whether it runs in a detached (`nohup`) tree.
+	/// A held external is unreaped, so its pid cannot name another process.
+	pub fn held(&self) -> Vec<(i32, bool)> {
+		self
+			.0
+			.pids
+			.lock()
+			.iter()
+			.filter_map(|&(pid, detached)| Some((i32::try_from(pid).ok()?, detached)))
 			.collect()
 	}
 
@@ -297,13 +312,13 @@ impl Children {
 }
 
 impl SpawnObserver for Children {
-	fn spawned(&self, pid: u32) {
-		self.0.pids.lock().push(pid);
+	fn spawned(&self, pid: u32, detached: bool) {
+		self.0.pids.lock().push((pid, detached));
 	}
 
 	fn released(&self, pid: u32) {
 		let mut pids = self.0.pids.lock();
-		if let Some(i) = pids.iter().position(|&p| p == pid) {
+		if let Some(i) = pids.iter().position(|&(p, _)| p == pid) {
 			pids.remove(i);
 		}
 	}
@@ -1022,7 +1037,8 @@ impl Driver {
 	/// host callout ([`ToolCalls::on_done`]); nothing else submits scripts.
 	fn on_done(&mut self, run: RunId, status: i32) {
 		let signal = self.shell.exec_signal(run);
-		self.tools.on_done(run, status, signal);
+		let usage = self.shell.run_usage(run);
+		self.tools.on_done(run, status, signal, usage);
 	}
 
 	/// Start a host callout ([`crate::bash::Resolved::Tool`]).

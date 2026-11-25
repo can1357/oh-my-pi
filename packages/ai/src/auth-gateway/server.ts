@@ -400,7 +400,14 @@ async function handleFormatEndpoint(
 	// expected to resolve the credential and pass it as `options.apiKey`.
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
-	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
+		parsed.options.serviceTier,
+	);
 	if (controller.signal.aborted) return clientClosedResponse(route);
 	if ("status" in apiKey) return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
 
@@ -605,7 +612,14 @@ async function handlePiNative(
 	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.sessionId = sessionId;
 
-	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
+		parsed.options.serviceTier,
+	);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return noStoreErrorResponse(apiKey.status, apiKey.type, apiKey.message);
 
