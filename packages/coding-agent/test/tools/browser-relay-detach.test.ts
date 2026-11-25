@@ -793,7 +793,8 @@ describe("relay tabs Chrome detaches omp from", () => {
 			const ext = await openRelayTab();
 			ext.refuseAttach = "Another debugger is already attached to the tab with id: 1.";
 			const evaluating = ext.hanging();
-			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+			// The refused re-adoption waits out the new worker's setup budget, a third of this call's budget.
+			const stalled = invoke({ action: "run", ...HANG, timeout: 6 }).catch((error: unknown) => error);
 			await evaluating;
 			await ext.chromeDetach("target_closed");
 			const failure = String(await stalled);
