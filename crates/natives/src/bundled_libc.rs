@@ -28,7 +28,9 @@ macro_rules! c_math {
 c_math! {
 	acos(x: f64) -> f64;
 	acosf(x: f32) -> f32;
+	acosh(x: f64) -> f64;
 	asin(x: f64) -> f64;
+	asinh(x: f64) -> f64;
 	atan(x: f64) -> f64;
 	atan2(y: f64, x: f64) -> f64;
 	atan2f(y: f32, x: f32) -> f32;

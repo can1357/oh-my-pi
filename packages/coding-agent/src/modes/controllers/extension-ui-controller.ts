@@ -118,11 +118,6 @@ function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): Ex
 	return Object.create(Object.getPrototypeOf(uiContext), descriptors) as ExtensionUIContext;
 }
 
-async function editDialogExternally(text: string): Promise<string | null> {
-	const command = getEditorCommand();
-	return command ? openInEditor(command, text) : null;
-}
-
 interface CollabWinner<T> {
 	source: "local" | "remote";
 	value: T | undefined;
@@ -206,6 +201,12 @@ export class ExtensionUiController {
 	 */
 	#toolUIContext: ExtensionUIContext | undefined;
 	constructor(private ctx: InteractiveModeContext) {}
+
+	/** Ctrl+G in a dialog editor: the editor gets the terminal, the TUI stops rendering and reading keys until it exits. */
+	#editDialogExternally = async (text: string): Promise<string | null> => {
+		const command = getEditorCommand();
+		return command ? this.ctx.suspend(() => openInEditor(command, text)) : null;
+	};
 
 	#syncExtensionComposerShapes(): void {
 		this.disposeComposerShapes();
@@ -1166,7 +1167,7 @@ export class ExtensionUiController {
 							prefill,
 							options: {
 								promptStyle: true,
-								externalEditor: editDialogExternally,
+								externalEditor: this.#editDialogExternally,
 								question: prompt.question,
 								maxHeight: this.#dialogEditorRows(),
 								...options,
@@ -1564,7 +1565,7 @@ export class ExtensionUiController {
 						prefill,
 						options: {
 							...editorOptions,
-							externalEditor: editDialogExternally,
+							externalEditor: this.#editDialogExternally,
 							maxHeight: this.#dialogEditorRows(),
 						},
 						vim: this.ctx.dialogVim(),
