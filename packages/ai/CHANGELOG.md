@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed a 402 whose body says `A positive credit balance is required` being treated as a rejection: it now rotates to a sibling account or fallback model ([#20403](https://github.com/can1357/oh-my-pi/pull/20403) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Anthropic OAuth logins explicitly rejected by their organization stay out of account rotation for seven days, across sessions and restarts ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
 - Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
@@ -19,7 +20,6 @@
 - Gemini models on OpenRouter keep thinking throughout long tool loops instead of going silent after the first few steps; replayed reasoning now keeps the `id` and `format` OpenRouter needs to return Gemini's thought signatures
 - Fixed `/btw` and other side turns on OpenCode Go/Zen missing the prompt cache because `x-opencode-session` carried the side request's id instead of the parent conversation's ([#20261](https://github.com/can1357/oh-my-pi/issues/20261))
 - Fixed `antigravity-cli` requests failing with `Unknown model ID` when the signed-in account’s agy roster lacks the model: the rejection now blocks only that model on the account and rotates to a sibling login that offers it ([#20315](https://github.com/can1357/oh-my-pi/pull/20315) by [@qSHEMq](https://github.com/qSHEMq))
-- Fixed a 402 whose body says `A positive credit balance is required` being treated as a rejection: it now rotates to a sibling account or fallback model ([#20403](https://github.com/can1357/oh-my-pi/pull/20403) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed `antigravity-cli` losing conversation context when OAuth refreshes during a tool call or when restoring a saved turn after agy compacts generation metadata ([#20437](https://github.com/can1357/oh-my-pi/issues/20437)).
 
 ## [19.1.1] - 2026-11-23
