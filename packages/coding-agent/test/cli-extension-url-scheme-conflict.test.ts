@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { shortenPath } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import { setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
 
 class ProcessExitSignal extends Error {
@@ -82,19 +83,30 @@ afterEach(() => {
 
 describe("CLI extension URL scheme conflicts", () => {
 	it("warns at print-mode startup that the later extension's scheme is not used", async () => {
-		using dir = TempDir.createSync("@omp-cli-url-scheme-warn-");
-		const first = dir.join("first.ts");
-		const second = dir.join("second.ts");
+		// The notification truncates long paths for the TUI (macOS temp dirs lose the basename), so the two
+		// extensions live in temp dirs whose names differ at their first character, right after the shared
+		// temp root; a truncated path still tells them apart.
+		using firstDir = TempDir.createSync("@first-omp-scheme-");
+		using secondDir = TempDir.createSync("@second-omp-scheme-");
+		const first = firstDir.join("ext.ts");
+		const second = secondDir.join("ext.ts");
 		await Bun.write(first, schemeExtension("first"));
 		await Bun.write(second, schemeExtension("second"));
 
-		const { stderr } = await launchPrint(dir.path(), ["--no-extensions", "-e", first, "-e", second]);
+		const { stderr } = await launchPrint(firstDir.path(), ["--no-extensions", "-e", first, "-e", second]);
 
 		const warnings = stderr.split("\n").filter(line => line.includes("demo:// is already registered"));
 		expect(warnings).toHaveLength(1);
-		expect(warnings[0]).toContain("Failed to load extension");
-		expect(warnings[0]).toContain("second.ts");
-		expect(warnings[0]).toContain("first.ts");
+		const match = /Failed to load extension (.+?): URL scheme demo:\/\/ is already registered by (.+?)(?:;|…|$)/.exec(
+			warnings[0],
+		);
+		expect(match).not.toBeNull();
+		const [, reported, owner] = match!;
+		// The later extension is the one reported; the earlier one is named as the scheme's owner.
+		const reportedShown = reported.replace(/…$/, "");
+		expect(shortenPath(second).startsWith(reportedShown)).toBe(true);
+		expect(shortenPath(first).startsWith(reportedShown)).toBe(false);
+		expect(first.startsWith(owner)).toBe(true);
 	}, 30_000);
 
 	it("fails a --trusted-extension launch before building a session", async () => {
