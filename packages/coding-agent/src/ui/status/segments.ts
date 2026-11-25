@@ -140,7 +140,8 @@ function modelLabel(facts: StatusFacts, options: StatusLineSegmentOptions["model
 	} else {
 		name = modelName(facts);
 	}
-	return options.showProvider && model?.provider ? `${model.provider}/${name}` : name;
+	// Ids and providers can come from custom configs; keep the bar on one row.
+	return sanitizeStatusText(options.showProvider && model?.provider ? `${model.provider}/${name}` : name);
 }
 
 const ADVISOR_COLORS = { error: "error", quota_exhausted: "warning", running: "success", idle: "dim" } as const;
