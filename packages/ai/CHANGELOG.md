@@ -2,11 +2,20 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `maxInFlightRequests` limits now apply per process unless the host installs a `ProviderSlotBroker`; the lease directory under `run/provider-inflight` that shared them between processes is gone
+
 ### Added
 
+- Added `configureProviderSlotBroker(broker)`: a `ProviderSlotBroker` admits requests against other processes sharing their `maxInFlightRequests` limit (coding-agent installs one backed by its daemon)
 - Added `AssistantMessage.errorFromAgentLoop`, set when the agent loop rather than the provider ended the turn with the error ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
 - OpenAI- and Anthropic-protocol requests to hosts without their own session header now carry `x-session-id`, so gateways and proxies that route on it (bifrost, llmgateway, agentgateway, …) keep a conversation on one upstream; the official OpenAI, Anthropic, and Codex APIs are unchanged
 - `/login otari` asks for the region (US, EU, or a custom self-hosted API root) and stores a non-US endpoint with the key, so EU workspaces no longer need `OTARI_BASE_URL` exported for login, discovery, and requests ([#20300](https://github.com/can1357/oh-my-pi/pull/20300) by [@tbille](https://github.com/tbille))
+
+### Changed
+
+- A request queued behind `maxInFlightRequests` starts as soon as a request of its process finishes, instead of polling the lease directory
 
 ### Fixed
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed `getProviderInFlightRoot()`: provider in-flight limits no longer use a lease directory
+
 ### Fixed
 
 - Fatal interactive errors now print a concise cause and the path to the full log after terminal cleanup. Piped stderr still includes the stack trace.

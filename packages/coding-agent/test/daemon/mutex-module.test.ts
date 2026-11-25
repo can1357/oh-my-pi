@@ -8,108 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { daemonClient } from "../../src/daemon/client";
-import type { ModuleClient, ModuleContext, ModuleTunnel, ModuleUnit } from "../../src/daemon/module";
-import { DaemonMutex, MUTEX_KIND, MUTEX_VERSION, type MutexDaemon, mutexModule } from "../../src/daemon/modules/mutex";
-import type { DaemonTunnel, OpenRequest, OpenResult, UnitSnapshot } from "../../src/daemon/protocol";
+import { DaemonMutex, type MutexDaemon, mutexModule } from "../../src/daemon/modules/mutex";
 import { IsolatedDaemon, waitFor } from "../fixtures/daemon-harness";
-
-// The mutex module uses no core services.
-const CONTEXT = {} as ModuleContext;
-const SNAPSHOT = { id: "mutex-unit" } as UnitSnapshot;
-
-/** One macrotask: every queued tunnel delivery and its continuations have run. */
-const delivered = (): Promise<void> => Bun.sleep(0);
-
-/** An in-memory tunnel to `unit`; returns the client's end. */
-function attachTunnel(unit: ModuleUnit, client: ModuleClient): DaemonTunnel {
-	const encoder = new TextEncoder();
-	let toUnit: ((chunk: Uint8Array) => void) | undefined;
-	let toClient: ((chunk: Uint8Array) => void) | undefined;
-	let unitClosed: (() => void) | undefined;
-	let clientClosed: ((reason: string | null) => void) | undefined;
-	let open = true;
-	const close = (): void => {
-		if (!open) return;
-		open = false;
-		unitClosed?.();
-		clientClosed?.(null);
-	};
-	// Asynchronous like a socket: a reply never arrives inside the send that caused it.
-	const deliver = (sink: () => ((chunk: Uint8Array) => void) | undefined, data: string | Uint8Array): boolean => {
-		const chunk = typeof data === "string" ? encoder.encode(data) : data;
-		queueMicrotask(() => {
-			if (open) sink()?.(chunk);
-		});
-		return true;
-	};
-	const unitEnd: ModuleTunnel = {
-		client,
-		send: data => deliver(() => toClient, data),
-		drained: () => Promise.resolve(),
-		start(onData, onClose) {
-			toUnit = onData;
-			unitClosed = onClose;
-		},
-		close,
-	};
-	void unit.attach(unitEnd, undefined);
-	return {
-		unit: SNAPSHOT,
-		send: data => deliver(() => toUnit, data),
-		drained: () => Promise.resolve(),
-		start(onData, onClose) {
-			toClient = onData;
-			clientClosed = onClose;
-		},
-		close,
-		ref() {},
-		unref() {},
-	};
-}
+import { delivered, LocalModuleDaemon } from "../fixtures/local-module-daemon";
 
 /** A daemon whose mutex unit runs in this process; every attach is one process's tunnel. */
-class LocalDaemon implements MutexDaemon {
-	readonly welcome = {
-		v: 1,
-		daemon: { pid: process.pid, build: "test", startedAt: 0 },
-		caps: { [MUTEX_KIND]: MUTEX_VERSION },
-	};
-	/** Client ends, in attach order. */
-	readonly tunnels: DaemonTunnel[] = [];
-	#unit: ModuleUnit | undefined;
-
-	async open(request: OpenRequest): Promise<OpenResult> {
-		const created = this.#unit === undefined;
-		this.#unit ??= await mutexModule.open(CONTEXT, {
-			unitId: SNAPSHOT.id,
-			scope: request.scope,
-			key: request.key,
-			params: undefined,
-			client: { connectionId: "opener", pid: process.pid, build: "test" },
-		});
-		return { unit: SNAPSHOT, lease: `lease-${this.tunnels.length}`, created };
-	}
-
-	async release(): Promise<void> {}
-
-	async attach(): Promise<DaemonTunnel> {
-		if (!this.#unit) throw new Error("attach before open");
-		const tunnel = attachTunnel(this.#unit, {
-			connectionId: `tunnel-${this.tunnels.length}`,
-			pid: process.pid,
-			build: "test",
-		});
-		this.tunnels.push(tunnel);
-		return tunnel;
-	}
-
-	onReconnect(): () => void {
-		return () => {};
-	}
-
-	/** The daemon stops the unit (shutdown, upgrade): every tunnel closes. */
-	async stop(): Promise<void> {
-		await this.#unit?.stop("test");
+class LocalDaemon extends LocalModuleDaemon {
+	constructor() {
+		super(mutexModule);
 	}
 }
 
