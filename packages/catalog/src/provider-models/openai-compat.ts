@@ -60,6 +60,7 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
+import { KIMI_CODE_BASE_URLS, type KimiCodeProvider } from "../wire/kimi-code";
 import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
@@ -4332,29 +4333,31 @@ export const KIMI_CODE_DEFAULT_MAX_TOKENS = 32_000;
  * rule-owned (`runtime/behavior.kdl` model-limits), everything else ->
  * `fallback`.
  */
-export function kimiCodeMaxTokens(modelId: string, fallback?: number): number;
-export function kimiCodeMaxTokens(modelId: string, fallback: number | null): number | null;
+export function kimiCodeMaxTokens(provider: KimiCodeProvider, modelId: string, fallback?: number): number;
+export function kimiCodeMaxTokens(provider: KimiCodeProvider, modelId: string, fallback: number | null): number | null;
 export function kimiCodeMaxTokens(
+	provider: KimiCodeProvider,
 	modelId: string,
 	fallback: number | null = KIMI_CODE_DEFAULT_MAX_TOKENS,
 ): number | null {
-	return modelLimitsFor("kimi-code", modelId.trim().toLowerCase())?.maxTokens ?? fallback;
+	return modelLimitsFor(provider, modelId.trim().toLowerCase())?.maxTokens ?? fallback;
 }
 
 export function kimiCodeModelManagerOptions(
 	config?: KimiCodeModelManagerConfig,
+	provider: KimiCodeProvider = "kimi-code",
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("kimi-code")!;
+	const baseUrl = config?.baseUrl ?? KIMI_CODE_BASE_URLS[provider];
 	return {
-		providerId: "kimi-code",
-		cacheProviderId: resolveModelCacheProviderId("kimi-code", { apiKey, baseUrl }),
+		providerId: provider,
+		cacheProviderId: resolveModelCacheProviderId(provider, { apiKey, baseUrl }),
 		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
 					api: "openai-completions",
-					provider: "kimi-code",
+					provider,
 					baseUrl,
 					apiKey,
 					headers: {
@@ -4374,10 +4377,10 @@ export function kimiCodeModelManagerOptions(
 							name: typeof entry.display_name === "string" ? entry.display_name : defaults.name,
 							reasoning,
 							// K2.5's misreported vision support is rule-owned
-							// (`providers/kimi-code.kdl` input-modalities).
+							// (`providers/kimi-code*.kdl` input-modalities).
 							input: entry.supports_image_in === true ? ["text", "image"] : ["text"],
 							contextWindow: typeof entry.context_length === "number" ? entry.context_length : 262144,
-							maxTokens: kimiCodeMaxTokens(id),
+							maxTokens: kimiCodeMaxTokens(provider, id, KIMI_CODE_DEFAULT_MAX_TOKENS),
 							thinking,
 							compat: {
 								thinkingFormat: thinking ? "kimi" : "zai",

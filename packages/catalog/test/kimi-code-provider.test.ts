@@ -4,6 +4,11 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { kimiCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import {
+	KIMI_CODE_BASE_URLS,
+	isKimiCodeProvider,
+	type KimiCodeProvider,
+} from "@oh-my-pi/pi-catalog/wire/kimi-code";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { applyGeneratedModelPolicies } from "../scripts/generated-policies";
@@ -72,6 +77,63 @@ describe("Kimi Code provider catalog", () => {
 		expect(offlineA.models.map(model => model.id)).toEqual(["k3.1-pro"]);
 		const offlineB = await resolveProviderModels(planB, "offline");
 		expect(offlineB.models.map(model => model.id)).toEqual(["kimi-for-coding"]);
+	});
+	it("keeps mainland and global discovery identity, endpoints, and caches separate", async () => {
+		await using temp = await TempDir.create("@kimi-code-regional-cache-");
+		const providers: readonly KimiCodeProvider[] = ["kimi-code", "kimi-code-global"];
+		expect(isKimiCodeProvider("kimi-code")).toBe(true);
+		expect(isKimiCodeProvider("kimi-code-global")).toBe(true);
+		expect(isKimiCodeProvider("moonshot")).toBe(false);
+		expect(KIMI_CODE_BASE_URLS).toEqual({
+			"kimi-code": "https://api.kimi.com/coding/v1",
+			"kimi-code-global": "https://api.kimi.ai/coding/v1",
+		});
+
+		const requests: Record<KimiCodeProvider, string[]> = {
+			"kimi-code": [],
+			"kimi-code-global": [],
+		};
+		const optionsFor = (provider: KimiCodeProvider, id: string) => ({
+			...kimiCodeModelManagerOptions(
+				{
+					apiKey: "shared-kimi-code-key",
+					fetch: async (input: string | URL | Request) => {
+						requests[provider].push(
+							typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
+						);
+						return Response.json({ data: [{ ...LIVE_K3, id }] });
+					},
+				},
+				provider,
+			),
+			cacheDbPath: temp.join("models.db"),
+		});
+		const regionalOptions = {
+			"kimi-code": optionsFor(providers[0]!, "mainland-probe"),
+			"kimi-code-global": optionsFor(providers[1]!, "global-probe"),
+		};
+
+		const mainland = await resolveProviderModels(regionalOptions["kimi-code"], "online-if-uncached");
+		const global = await resolveProviderModels(regionalOptions["kimi-code-global"], "online-if-uncached");
+		expect(mainland.models[0]).toMatchObject({
+			id: "mainland-probe",
+			provider: "kimi-code",
+			baseUrl: KIMI_CODE_BASE_URLS["kimi-code"],
+		});
+		expect(global.models[0]).toMatchObject({
+			id: "global-probe",
+			provider: "kimi-code-global",
+			baseUrl: KIMI_CODE_BASE_URLS["kimi-code-global"],
+		});
+		expect(requests).toEqual({
+			"kimi-code": ["https://api.kimi.com/coding/v1/models"],
+			"kimi-code-global": ["https://api.kimi.ai/coding/v1/models"],
+		});
+
+		const offlineMainland = await resolveProviderModels(regionalOptions["kimi-code"], "offline");
+		const offlineGlobal = await resolveProviderModels(regionalOptions["kimi-code-global"], "offline");
+		expect(offlineMainland.models.map(model => model.id)).toEqual(["mainland-probe"]);
+		expect(offlineGlobal.models.map(model => model.id)).toEqual(["global-probe"]);
 	});
 
 	it("preserves live Kimi thinking ladders during catalog regeneration", async () => {

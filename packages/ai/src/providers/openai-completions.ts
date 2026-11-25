@@ -4,6 +4,7 @@ import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
+import { isKimiCodeProvider } from "@oh-my-pi/pi-catalog/wire/kimi-code";
 import {
 	$env,
 	isRecord,
@@ -2118,12 +2119,11 @@ function createRequestSetup(
 		// attribution headers prepended before caller headers. Kept here (not in
 		// the shared helper) because it is provider-specific request setup.
 		// ClinePass sends the mirrored Cline CLI identity; documented in wire/cline-pass.ts.
-		prependHeaders:
-			model.provider === "kimi-code"
-				? getKimiCommonHeaders
-				: model.provider === "cline-pass"
-					? () => clinePassClientHeaders(promptCacheSessionId)
-					: undefined,
+		prependHeaders: isKimiCodeProvider(model.provider)
+			? getKimiCommonHeaders
+			: model.provider === "cline-pass"
+				? () => clinePassClientHeaders(promptCacheSessionId)
+				: undefined,
 		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});
