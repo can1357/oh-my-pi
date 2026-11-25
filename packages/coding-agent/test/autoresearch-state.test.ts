@@ -388,13 +388,17 @@ describe("autoresearch control state", () => {
 	});
 });
 
+interface ShortcutRegistration {
+	handler: (ctx: ExtensionCommandContext) => Promise<void> | void;
+}
+
 interface AutoresearchCommandHarness {
 	command: RegisteredCommand;
 	ctx: ExtensionCommandContext;
 	readonly branch: string;
 	sentMessages: string[];
 	notifications: Array<{ message: string; type: "info" | "warning" | "error" | undefined }>;
-	shortcuts: Map<string, { handler: (ctx: ExtensionCommandContext) => Promise<void> | void }>;
+	shortcuts: Map<string, ShortcutRegistration>;
 	/** Key of every `setWidget` call, in order. */
 	widgetUpdates: string[];
 }
@@ -443,7 +447,7 @@ function createCommandHarness(
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name">): void {
 			command = { name, ...options };
 		},
-		registerShortcut(shortcut: string, options: AutoresearchCommandHarness["shortcuts"][string]): void {
+		registerShortcut(shortcut: string, options: ShortcutRegistration): void {
 			shortcuts.set(shortcut, options);
 		},
 		registerTool(): void {},
