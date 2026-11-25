@@ -89,7 +89,6 @@ const OPTION_TIERS = {
 	onPayload: "server",
 	onResponse: "server",
 	onSseEvent: "server",
-	onProviderNotice: "server",
 	execHandlers: "server",
 	cursorExecHandlers: "server",
 	cursorOnToolResult: "server",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Antigravity CLI sessions now warn when a conversation replay omits older history or images to fit prompt limits. Text print mode sends the warning to stderr ([#20431](https://github.com/can1357/oh-my-pi/issues/20431), [#20461](https://github.com/can1357/oh-my-pi/pull/20461) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

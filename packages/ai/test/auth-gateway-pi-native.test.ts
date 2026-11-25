@@ -124,7 +124,7 @@ describe("pi-native parseRequest", () => {
 				onPayload: () => {},
 				onResponse: () => {},
 				onSseEvent: () => {},
-				onProviderNotice: "should-be-stripped",
+				providerOptions: { onReplayNotice: "should-be-stripped" },
 				execHandlers: {},
 				providerSessionState: new Map(),
 				notARealField: "ignored",
@@ -137,6 +137,7 @@ describe("pi-native parseRequest", () => {
 		expect("onPayload" in parsed.options).toBe(false);
 		expect("onResponse" in parsed.options).toBe(false);
 		expect("onSseEvent" in parsed.options).toBe(false);
+		expect("providerOptions" in parsed.options).toBe(false);
 		expect("notARealField" in parsed.options).toBe(false);
 	});
 

@@ -11,13 +11,17 @@ import type { Context, Model, StreamFunction, StreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { agyGeminiDir } from "./antigravity-cli/binary";
 import { agyCredentialKey, agyCredentialVersion, stageAgyCredentials } from "./antigravity-cli/credentials";
-import { AgyHost } from "./antigravity-cli/host";
+import { AgyHost, type AgyStepOptions } from "./antigravity-cli/host";
 import { StepWriter } from "./antigravity-cli/step-writer";
 
 /** Per-request settings supported by the ACP transport. */
 export interface AntigravityCliOptions extends StreamOptions {
 	/** Selected model's native `thought_level`. */
 	reasoning?: Effort;
+	providerOptions?: StreamOptions["providerOptions"] & {
+		/** A display-only warning when a replay omits history or images. */
+		onReplayNotice?: AgyStepOptions["onReplayNotice"];
+	};
 }
 
 interface RetainedHost {
@@ -61,11 +65,12 @@ async function runStep(
 	const account = agyCredentialKey(options.apiKey);
 	const directory = path.join(agyGeminiDir(), account);
 	await stageAgyCredentials(options.apiKey, directory);
+	const onReplayNotice = options.providerOptions?.onReplayNotice;
 	const stepOptions = {
 		cwd: options.cwd,
 		reasoning: options.reasoning,
 		signal: options.signal,
-		onProviderNotice: options.onProviderNotice,
+		onReplayNotice: typeof onReplayNotice === "function" ? onReplayNotice : undefined,
 		credentialVersion: agyCredentialVersion(options.apiKey),
 	};
 	const sessions = options.providerSessionState;

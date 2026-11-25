@@ -506,6 +506,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * counts them. Unassigned: unknown host, held to a conservative floor.
 	 */
 	"image-count-budget": { key: "imageCountBudget", set: "catalog", shape: "scalar" },
+	/** The transport enforces the image count on the outgoing prompt; leave its reconciliation transcript intact. */
+	"prompt-scoped-image-budget": {
+		key: "promptScopedImageBudget",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	/**
 	 * Replaces `image-count-budget` while the request reaches the official
 	 * endpoint (pi-ai `reachesBudgetedHost`): a limit measured or documented

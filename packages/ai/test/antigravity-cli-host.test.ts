@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { streamAntigravityCli } from "@oh-my-pi/pi-ai/providers/antigravity-cli";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import { agyCredentialKey } from "@oh-my-pi/pi-ai/providers/antigravity-cli/credentials";
 import {
 	AgyHost,
 	describeToolArguments,
@@ -18,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, Context, ImageContent, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -29,6 +32,8 @@ import type {
 	PromptResponse,
 	SessionConfigOption,
 } from "@oh-my-pi/pi-utils/acp";
+import { refreshDirsFromEnv } from "@oh-my-pi/pi-utils/dirs";
+import { withEnv } from "./helpers";
 
 const model = buildModel({
 	api: "antigravity-acp",
@@ -522,7 +527,9 @@ describe("AgyHost stateful steps", () => {
 			message.role === "toolResult" && message.content.includes(images[0]!)
 				? {
 						...message,
-						content: message.content.map(part => (part.type === "image" ? { ...part, data: btoa("edited") } : part)),
+						content: message.content.map(part =>
+							part.type === "image" ? { ...part, data: btoa("edited") } : part,
+						),
 					}
 				: message,
 		);
@@ -636,6 +643,57 @@ describe("AgyHost stateful steps", () => {
 		await next.done;
 	});
 
+	it.each([
+		["direct ACP", streamAntigravityCli],
+		["streamSimple", streamSimple],
+	] as const)("%s reports replay omissions out of band", async (_name, start) => {
+		const state = await fixture();
+		const apiKey = JSON.stringify({
+			token: "fixture-access",
+			refreshToken: "fixture-refresh",
+			expiresAt: Date.now() + 3_600_000,
+			email: "account@example.test",
+		});
+		const notices: string[] = [];
+		const env = {
+			HOME: state.dir,
+			USERPROFILE: state.dir,
+			XDG_DATA_HOME: undefined,
+			PI_AGY_PATH: path.join(state.dir, "unused-agy-binary"),
+		};
+		try {
+			await withEnv(env, async () => {
+				refreshDirsFromEnv();
+				const sessionId = "replay-notice";
+				const key = `antigravity-acp:${agyCredentialKey(apiKey)}:${sessionId}`;
+				const stream = start(
+					model,
+					{ messages: [user("old history ".repeat(20_000)), user("continue")] },
+					{
+						apiKey,
+						sessionId,
+						providerSessionState: new Map([[key, state.host]]),
+						providerOptions: { onReplayNotice: (message: string) => notices.push(message) },
+					},
+				);
+				const completion = stream.result();
+				const fake = await Promise.race([
+					state.started.next(),
+					completion.then(message => {
+						throw new Error(message.errorMessage ?? "ACP stream completed before starting the host");
+					}),
+				]);
+				const { response } = await fake.prompts.next();
+				expect(notices).toEqual([expect.stringContaining("omitted older history")]);
+				fake.text("Continued.");
+				response.resolve({ stopReason: "end_turn" });
+				expect((await completion).content).toEqual([{ type: "text", text: "Continued." }]);
+			});
+		} finally {
+			refreshDirsFromEnv();
+		}
+	});
+
 	it("keeps the UTF-8 replay tail within agy's text cap including system append, and warns out of band", async () => {
 		const state = await parked();
 		const system = ["system".repeat(9_000), "系统".repeat(3_000)].join("\n\n");
@@ -651,7 +709,7 @@ describe("AgyHost stateful steps", () => {
 			],
 			{ systemPrompt: [system] },
 			undefined,
-			{ onProviderNotice: message => notices.push(message) },
+			{ onReplayNotice: message => notices.push(message) },
 		);
 		await state.fake.cancellations.next();
 		const { request, response } = await state.fake.prompts.next();

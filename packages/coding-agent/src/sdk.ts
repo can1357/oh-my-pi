@@ -5087,7 +5087,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			),
 			() => blobBroker.current,
 		);
-		const onProviderNotice: NonNullable<SimpleStreamOptions["onProviderNotice"]> = message => {
+		const onReplayNotice = (message: string) => {
 			session?.emitNotice("warning", message, PROVIDER_NOTICE_SOURCE);
 		};
 		// Outbound credential-pattern redaction follows THIS session's `secrets.enabled` per
@@ -5097,11 +5097,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (cfgOffline.get(settings) && streamModel.provider !== session?.model?.provider) {
 				return Promise.reject(new Error("Offline mode restricts model calls to the active session provider."));
 			}
+			const providerOptions = streamOptions?.providerOptions;
 			return withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
 				settingsBoundStreamFn(streamModel, context, {
 					...streamOptions,
 					thinkingCapabilityDbPath: modelRegistry.modelsDbPath,
-					onProviderNotice: streamOptions?.onProviderNotice ?? onProviderNotice,
+					providerOptions:
+						streamModel.api === "antigravity-acp" && typeof providerOptions?.onReplayNotice !== "function"
+							? { ...providerOptions, onReplayNotice }
+							: providerOptions,
 				}),
 			);
 		};

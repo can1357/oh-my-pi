@@ -693,8 +693,6 @@ export interface StreamOptions {
 	 * generation. Its headers are not per-generation cache/request metadata.
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
-	/** A non-fatal provider warning for display, not part of the assistant's reply or conversation history. */
-	onProviderNotice?: (message: string) => void;
 	/**
 	 * Optional callback for raw Server-Sent Events as they arrive from HTTP streaming providers,
 	 * plus synthesized SSE-shaped frames for the Codex WebSocket transport (one synthetic frame

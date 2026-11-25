@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Antigravity CLI losing its live conversation after several image tool results; when a replay is needed, it keeps the newest history and warns if anything was omitted ([#20431](https://github.com/can1357/oh-my-pi/issues/20431)) ([#20461](https://github.com/can1357/oh-my-pi/pull/20461) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
+- Fixed Antigravity CLI losing its live conversation after several image tool results; when a replay is needed, it keeps the newest history and warns if anything was omitted ([#20431](https://github.com/can1357/oh-my-pi/issues/20431), [#20461](https://github.com/can1357/oh-my-pi/pull/20461) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
 
 ## [19.2.0] - 2026-11-25
 

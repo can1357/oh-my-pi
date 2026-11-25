@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	resolveImageCountBudget,
 	resolveInlineImageByteBudget,
@@ -103,6 +104,15 @@ describe("image-count-budget", () => {
 		["cursor", "cursor-agent", CURSOR_URL, "gpt-5.5", 60],
 	] as const)("%s carries its budget", (provider, api, baseUrl, id, budget) => {
 		expect(imageCountBudget(imageModel(provider, api, baseUrl, id))).toBe(budget);
+	});
+
+	test("only the Antigravity ACP transport opts into prompt-scoped image counts", () => {
+		const acp = imageModel("antigravity-cli", "antigravity-acp", "https://antigravity.google", "gemini-4-neon");
+		const oauth = imageModel("google-antigravity", "google-gemini-cli", ANTIGRAVITY_URL, "gemini-3.7-flash");
+		const cursor = imageModel("cursor", "cursor-agent", CURSOR_URL, "gpt-5.5");
+		expect(resolveCatalogPolicy(acp).promptScopedImageBudget).toBe(true);
+		expect(resolveCatalogPolicy(oauth).promptScopedImageBudget).toBeUndefined();
+		expect(resolveCatalogPolicy(cursor).promptScopedImageBudget).toBeUndefined();
 	});
 
 	test("Claude on Antigravity and Cursor, and Cursor's default route, carry Claude's 20-image many-image limit", () => {

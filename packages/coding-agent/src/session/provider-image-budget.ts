@@ -13,6 +13,7 @@ import type {
 import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
 import { adoptFactoryReplay, toGeminiTools } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
@@ -243,9 +244,9 @@ function clampImages(context: Context, state: ImageBudgetState): Context {
  * on behalf of a model output.
  */
 export function clampProviderContextImages(context: Context, model: Model): Context {
-	// ACP reconciles the full transcript first and budgets only the blocks the next prompt sends.
-	if (model.api === "antigravity-acp") return context;
 	if (!model.input.includes("image")) return context;
+	// Preserve the transcript for reconciliation when the transport budgets its outgoing prompt.
+	if (resolveCatalogPolicy(model).promptScopedImageBudget === true) return context;
 	const metadataWire = sendsComputerScreenshotMetadata(model);
 	const totalImages = countImages(context, metadataWire);
 	const remainingDrops = totalImages - providerImageBudget(model);

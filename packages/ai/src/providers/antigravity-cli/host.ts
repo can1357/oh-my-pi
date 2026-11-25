@@ -23,7 +23,6 @@ import type {
 	Message,
 	Model,
 	ProviderSessionState,
-	StreamOptions,
 	Tool,
 	ToolResultMessage,
 } from "../../types";
@@ -77,7 +76,7 @@ export interface AgyStepOptions {
 	cwd?: string;
 	reasoning?: string;
 	signal?: AbortSignal;
-	onProviderNotice?: StreamOptions["onProviderNotice"];
+	onReplayNotice?: (message: string) => void;
 	/** Non-secret credential revision; a changed revision restarts agy's native token cache. */
 	credentialVersion?: string;
 }
@@ -376,10 +375,14 @@ export class AgyHost implements ProviderSessionState {
 				);
 				if (blocks.length === 0) throw new Error("Antigravity CLI has nothing new to send for this request");
 				this.#prompt(blocks);
-				if (options.onProviderNotice && (omittedHistory || omittedImages)) {
-					const omitted = omittedHistory ? (omittedImages ? "older history and images" : "older history") : "images";
+				if (options.onReplayNotice && (omittedHistory || omittedImages)) {
+					const omitted = omittedHistory
+						? omittedImages
+							? "older history and images"
+							: "older history"
+						: "images";
 					try {
-						options.onProviderNotice(
+						options.onReplayNotice(
 							`Antigravity CLI omitted ${omitted} from the conversation replay to fit its prompt limits.`,
 						);
 					} catch (error) {

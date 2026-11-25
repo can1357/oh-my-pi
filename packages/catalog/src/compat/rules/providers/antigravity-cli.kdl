@@ -4,6 +4,7 @@
 // Keep the conservative default until agy's per-prompt image cap is known.
 on-api "antigravity-acp" {
 	image-count-budget 5
+	prompt-scoped-image-budget #true
 }
 
 provider "antigravity-cli" {
