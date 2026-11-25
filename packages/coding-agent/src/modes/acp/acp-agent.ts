@@ -1595,7 +1595,11 @@ export class AcpAgent implements Agent {
 	 * Mark the turn canceled, stop event delivery and begin bounded abort cleanup.
 	 * The reason labels the aborted turn. Client cancels keep the user-interrupt label.
 	 */
-	#beginCancelCleanup(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
+	#beginCancelCleanup(
+		record: ManagedSessionRecord,
+		promptTurn: PromptTurnState,
+		reason: string = USER_INTERRUPT_LABEL,
+	): Promise<void> {
 		if (promptTurn.cleanup) {
 			return promptTurn.cleanup;
 		}
