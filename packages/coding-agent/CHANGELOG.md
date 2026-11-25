@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `browser.open` honors `headed: false` when spawning Chrome from an explicit executable path and refuses to reuse a running profile in the opposite mode ([#18129](https://github.com/can1357/oh-my-pi/issues/18129), reported by [@GauravAlbal](https://github.com/GauravAlbal)).
+- `browser.open` honors `headed: false` when spawning Chrome from an explicit executable path and refuses to reuse a running profile in the opposite mode ([#18129](https://github.com/can1357/oh-my-pi/issues/18129), reported by [@GauravAlbal](https://github.com/GauravAlbal)) ([#20458](https://github.com/can1357/oh-my-pi/pull/20458) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
 
 ## [19.2.0] - 2026-11-25
 
