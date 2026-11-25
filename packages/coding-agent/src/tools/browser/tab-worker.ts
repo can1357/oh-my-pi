@@ -26,7 +26,8 @@ import type {
 import { stringifyFunction } from "puppeteer-core/internal/util/Function.js";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { resizeImage } from "../../utils/image-resize";
-// Tab code runs on a session snapshot, not the session: its paths resolve against the built-in schemes.
+// The tab worker gets a session snapshot over its message transport (a worker thread, or inline when
+// a worker cannot spawn), not the session's router: its paths resolve against the built-in schemes.
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { resolveToCwd } from "../path-utils";
 import {
@@ -3451,10 +3452,12 @@ export class WorkerCore {
 				op("tab.setStorage()", actionOpMs, sig => setPageStorage(page, kind, keyOrEntries, value, sig)),
 			clearStorage: kind => op("tab.clearStorage()", actionOpMs, sig => clearPageStorage(page, kind, sig)),
 			saveState: filePath =>
-				op("tab.saveState()", actionOpMs, sig => saveStorageState(page, name, filePath, session.cwd, sig)),
+				op("tab.saveState()", actionOpMs, sig =>
+					saveStorageState(page, name, filePath, session.cwd, InternalUrlRouter.builtins(), sig),
+				),
 			loadState: filePath =>
 				op("tab.loadState()", actionOpMs, sig =>
-					loadStorageState(page, filePath, session.cwd, {
+					loadStorageState(page, filePath, session.cwd, InternalUrlRouter.builtins(), {
 						allowOtherOrigins: this.#mode === "headless",
 						navigationTimeoutMs: actionOpMs,
 						signal: sig,
@@ -3462,7 +3465,14 @@ export class WorkerCore {
 				),
 			recordStart: (destination, opts) =>
 				op(`tab.recordStart(${JSON.stringify(destination)})`, quickOpMs, sig =>
-					this.#recording.start(createCdpRecordingSource(page), destination, session.cwd, opts, sig),
+					this.#recording.start(
+						createCdpRecordingSource(page),
+						destination,
+						session.cwd,
+						InternalUrlRouter.builtins(),
+						opts,
+						sig,
+					),
 				),
 			recordStop: () =>
 				op("tab.recordStop()", budgetBound, sig =>
@@ -3470,11 +3480,18 @@ export class WorkerCore {
 				),
 			recordRestart: (destination, opts) =>
 				op(`tab.recordRestart(${JSON.stringify(destination)})`, budgetBound, sig =>
-					this.#recording.restart(createCdpRecordingSource(page), destination, session.cwd, opts, {
-						signal: sig,
-						output,
-						excludeWebP: session.excludeWebP,
-					}),
+					this.#recording.restart(
+						createCdpRecordingSource(page),
+						destination,
+						session.cwd,
+						InternalUrlRouter.builtins(),
+						opts,
+						{
+							signal: sig,
+							output,
+							excludeWebP: session.excludeWebP,
+						},
+					),
 				),
 			recording: () => op("tab.recording()", quickOpMs, () => Promise.resolve(this.#recording.status())),
 			webmcpList: opts => op("tab.webmcpList()", quickOpMs, sig => untilAborted(sig, () => webmcp.list(opts, sig))),

@@ -4,8 +4,6 @@ import * as path from "node:path";
 import { Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { JsRuntime } from "../../../eval/js/shared/runtime";
 import { readImageHeaderDimensions, resizeImage } from "../../../utils/image-resize";
-// Tab code runs on a session snapshot, not the session: its paths resolve against the built-in schemes.
-import { InternalUrlRouter } from "../../../internal-urls/router";
 import { resolveToCwd } from "../../path-utils";
 import { throwIfAborted } from "../../tool-errors";
 import { ToolError } from "../../tool-errors";
@@ -1142,10 +1140,7 @@ export class CmuxTab implements InProcessRunTab {
 				mimeType: "image/png",
 				area: "viewport",
 				scale: cssWidth && pixelWidth ? pixelWidth / cssWidth : undefined,
-				path:
-					opts.path === undefined
-						? undefined
-						: resolveToCwd(opts.path, context.session.cwd, InternalUrlRouter.builtins()),
+				path: opts.path === undefined ? undefined : resolveToCwd(opts.path, context.session.cwd, context.router),
 				silent: opts.silent,
 				notes: captureNotes.length > 0 ? [`[cmux surface: ${captureNotes.join("; ")}]`] : undefined,
 			},
@@ -1161,14 +1156,14 @@ export class CmuxTab implements InProcessRunTab {
 
 	async diffScreenshot(baselinePath: string, opts: DiffScreenshotOptions = {}): Promise<DiffScreenshotResult> {
 		const context = this.#requireRunContext("tab.diffScreenshot()");
-		const absoluteBaseline = resolveToCwd(baselinePath, context.session.cwd, InternalUrlRouter.builtins());
+		const absoluteBaseline = resolveToCwd(baselinePath, context.session.cwd, context.router);
 		const baseline = await untilAborted(context.signal, () => fs.promises.readFile(absoluteBaseline));
 		const capture = await this.#captureScreenshotPng(context.timeoutMs);
 		const diff = createPngDiff(baseline, Buffer.from(capture.png_base64, "base64"));
 		const threshold = screenshotThreshold(opts.threshold);
 		const changed = diff.pixelChangeRatio > threshold;
 		const diffPath = opts.output
-			? resolveToCwd(opts.output, context.session.cwd, InternalUrlRouter.builtins())
+			? resolveToCwd(opts.output, context.session.cwd, context.router)
 			: path.join(os.tmpdir(), `omp-screenshot-diff-${Snowflake.next()}.png`);
 		await fs.promises.mkdir(path.dirname(diffPath), { recursive: true });
 		await Bun.write(diffPath, diff.png);
@@ -1625,9 +1620,9 @@ export class CmuxTab implements InProcessRunTab {
 	async uploadFile(selector: string, ...paths: Array<string | string[]>): Promise<void> {
 		const filePaths = paths.flat();
 		if (!filePaths.length) throw new ToolError("tab.uploadFile() requires at least one file path");
-		const cwd = this.#requireRunContext("tab.uploadFile()").session.cwd;
+		const context = this.#requireRunContext("tab.uploadFile()");
 		const files = await readFilePayloads(
-			filePaths.map(filePath => resolveToCwd(filePath, cwd, InternalUrlRouter.builtins())),
+			filePaths.map(filePath => resolveToCwd(filePath, context.session.cwd, context.router)),
 		);
 		await this.#selectorAction(selector, "uploadFile", { files });
 	}

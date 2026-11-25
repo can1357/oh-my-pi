@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { ToolError } from "../tool-errors";
 import type { CDPSession, Page } from "puppeteer-core";
-// Tab code runs on a session snapshot, not the session: its paths resolve against the built-in schemes.
+// Only the tab worker traces; it gets a session snapshot, not the session's router: its paths resolve against the built-in schemes.
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { resolveToCwd } from "../path-utils";
 
