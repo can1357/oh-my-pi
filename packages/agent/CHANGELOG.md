@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote compaction through Amazon Bedrock still retries when its connection drops before any response, now that the error says how far the compaction request had uploaded ([#19513](https://github.com/can1357/oh-my-pi/pull/19513) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

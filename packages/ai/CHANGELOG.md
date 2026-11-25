@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Requests to OpenAI, Codex, xAI, Gemini, Antigravity, Factory Droid, Anthropic-compatible endpoints, Anthropic through a proxy and other providers on Bun's `fetch` whose connection drops before any response now say when, and whether a request body of 1 MB or more was still uploading or all written, with its size, instead of a bare `ECONNRESET` socket error or `Connection error.` ([#19513](https://github.com/can1357/oh-my-pi/pull/19513) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

@@ -1,0 +1,258 @@
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import * as net from "node:net";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { logger } from "@oh-my-pi/pi-utils";
+
+// Larger than loopback socket buffers on both ends, so a server that stops
+// reading early leaves part of the body queued in the client.
+const BODY = "x".repeat(32 * 1024 * 1024);
+const HEADER_END = Buffer.from("\r\n\r\n");
+
+let servers: Array<{ close(): void }> = [];
+
+afterEach(() => {
+	for (const server of servers) server.close();
+	servers = [];
+});
+
+function testModel(provider: string, api: Api): Model<Api> {
+	return buildModel({
+		id: "upload-test",
+		name: "upload-test",
+		api,
+		provider,
+		baseUrl: "http://127.0.0.1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1,
+		maxTokens: 1,
+	});
+}
+
+/** Server that never responds: it drops the connection once it has read `cutoff(contentLength)` body bytes. */
+async function droppingServer(cutoff: (contentLength: number) => number): Promise<string> {
+	const server = net.createServer(socket => {
+		let head = Buffer.alloc(0);
+		let bodyStart = -1;
+		let limit = 0;
+		let received = 0;
+		socket.on("error", () => {});
+		socket.on("data", (chunk: Buffer) => {
+			if (bodyStart === -1) {
+				head = Buffer.concat([head, chunk]);
+				bodyStart = head.indexOf(HEADER_END);
+				if (bodyStart === -1) return;
+				const contentLength = Number(/content-length:\s*(\d+)/i.exec(head.subarray(0, bodyStart).toString())?.[1]);
+				limit = cutoff(contentLength);
+				received = head.length - bodyStart - HEADER_END.length;
+			} else {
+				received += chunk.length;
+			}
+			if (received >= limit) socket.destroy();
+		});
+	});
+	servers.push(server);
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	return `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
+}
+
+async function postThroughTransport(origin: string, body: string): Promise<unknown> {
+	const fetch = transportFetch(testModel("openai", "openai-responses"), undefined);
+	return fetch(`${origin}/v1/responses`, { method: "POST", body }).catch((error: unknown) => error);
+}
+
+async function expectRetryable(error: unknown, api: Api, provider: string): Promise<void> {
+	const finalized = await AIError.finalize(error, { api, provider });
+	expect(AIError.retriable(finalized.id)).toBe(true);
+	expect(AIError.isProviderRetryableError(error)).toBe(true);
+}
+
+describe("transportFetch connection lost before a response", () => {
+	it("says the body was still uploading when the connection drops mid-body", async () => {
+		const origin = await droppingServer(() => 256 * 1024);
+		const error = await postThroughTransport(origin, BODY);
+
+		expect(error).toBeInstanceOf(AIError.ConnectionLostBeforeResponseError);
+		await expectRetryable(error, "openai-responses", "openai");
+		const { message } = error as Error;
+		expect(message).toStartWith("Connection error: connection lost after ");
+		expect(message).toEndWith(" while uploading the 32.0MB request body; no response received (ECONNRESET).");
+	});
+
+	it("says the body was written when the connection drops after the whole body", async () => {
+		const origin = await droppingServer(contentLength => contentLength);
+		const error = await postThroughTransport(origin, BODY);
+
+		expect(error).toBeInstanceOf(AIError.ConnectionLostBeforeResponseError);
+		await expectRetryable(error, "openai-responses", "openai");
+		const { message } = error as Error;
+		expect(message).toStartWith("Connection error: connection lost after ");
+		expect(message).toEndWith(
+			", after the 32.0MB request body was written to the socket, before any response (ECONNRESET).",
+		);
+	});
+
+	it("leaves a body below the streaming threshold to Bun's own error, measuring a string in UTF-8 bytes", async () => {
+		const origin = await droppingServer(() => 0);
+		const error = await postThroughTransport(origin, "x".repeat(64 * 1024));
+
+		expect(error).not.toBeInstanceOf(AIError.ConnectionLostBeforeResponseError);
+		expect((error as Error).message).toContain("The socket connection was closed unexpectedly");
+
+		// Half a million two-byte characters: 1 MB exactly, so it streams.
+		const atThreshold = await postThroughTransport(origin, "é".repeat(512 * 1024));
+		expect(atThreshold).toBeInstanceOf(AIError.ConnectionLostBeforeResponseError);
+		expect((atThreshold as Error).message).toContain(" the 1.0MB request body");
+	});
+
+	it("names the upload in the Anthropic client's error when the cowork transport falls back to fetch", async () => {
+		const origin = await droppingServer(() => 256 * 1024);
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			baseURL: origin,
+			maxRetries: 0,
+			// First-party Anthropic resolves to the cowork transport, which hands a plain-http URL to Bun's fetch.
+			fetch: transportFetch(testModel("anthropic", "anthropic-messages"), undefined),
+		});
+		const error = await client.messages
+			.create({
+				model: "claude-haiku-4-5",
+				messages: [{ role: "user", content: BODY }],
+				max_tokens: 64,
+				stream: true,
+			})
+			.asResponse()
+			.catch((error: unknown) => error);
+
+		expect(error).toBeInstanceOf(AIError.AnthropicConnectionError);
+		await expectRetryable(error, "anthropic-messages", "anthropic");
+		expect((error as Error).message).toMatch(
+			/^Connection error: connection lost after .+ while uploading the 32\.\dMB request body; no response received \(ECONNRESET\)\.$/,
+		);
+	});
+
+	it("hands first-party Anthropic's large body to the cowork transport whole", async () => {
+		const debug = spyOn(logger, "debug");
+		try {
+			const fetch = transportFetch(testModel("anthropic", "anthropic-messages"), undefined);
+			// Nothing listens on port 1: the request fails at connect, after the transport is chosen.
+			await fetch("https://127.0.0.1:1/v1/messages", { method: "POST", headers: {}, body: BODY }).catch(() => {});
+			expect(debug.mock.calls.filter(([message]) => message === "cowork transport bypassed")).toEqual([]);
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it("follows a 307 by uploading the body to the new location, still naming how far it got", async () => {
+		const dropping = await droppingServer(() => 256 * 1024);
+		const requests: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push(`${request.method} ${(await request.arrayBuffer()).byteLength}`);
+				return new Response(null, { status: 307, headers: { location: `${dropping}/v1/responses` } });
+			},
+		});
+		servers.push({ close: () => server.stop(true) });
+
+		const error = await postThroughTransport(`http://127.0.0.1:${server.port}`, BODY);
+
+		expect(requests).toEqual([`POST ${BODY.length}`]);
+		expect(error).toBeInstanceOf(AIError.ConnectionLostBeforeResponseError);
+		expect((error as Error).message).toEndWith(
+			" while uploading the 32.0MB request body; no response received (ECONNRESET).",
+		);
+	});
+
+	it("says a response reached through a 307 was redirected, after sending the body again", async () => {
+		const requests: string[] = [];
+		const target = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push(`${request.method} ${(await request.arrayBuffer()).byteLength}`);
+				return new Response("done");
+			},
+		});
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push(`${request.method} ${(await request.arrayBuffer()).byteLength}`);
+				return new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${target.port}/done` } });
+			},
+		});
+		servers.push({ close: () => server.stop(true) }, { close: () => target.stop(true) });
+		const fetch = transportFetch(testModel("openai", "openai-responses"), undefined);
+
+		const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, { method: "POST", body: BODY });
+
+		const copy = response.clone();
+		expect(await response.text()).toBe("done");
+		expect(response.redirected).toBe(true);
+		expect([copy.redirected, copy.clone().redirected]).toEqual([true, true]);
+		expect(requests).toEqual([`POST ${BODY.length}`, `POST ${BODY.length}`]);
+	});
+
+	it("follows a cross-origin 303 as a GET without the body or credentials", async () => {
+		const requests: string[] = [];
+		const target = Bun.serve({
+			hostname: "localhost",
+			port: 0,
+			async fetch(request) {
+				const received = (await request.arrayBuffer()).byteLength;
+				requests.push(`${request.method} ${received} ${request.headers.get("authorization")}`);
+				return new Response("done");
+			},
+		});
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				const received = (await request.arrayBuffer()).byteLength;
+				requests.push(`${request.method} ${received} ${request.headers.get("authorization")}`);
+				return new Response(null, { status: 303, headers: { location: `http://localhost:${target.port}/done` } });
+			},
+		});
+		servers.push({ close: () => server.stop(true) }, { close: () => target.stop(true) });
+		const fetch = transportFetch(testModel("openai", "openai-responses"), undefined);
+
+		const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, {
+			method: "POST",
+			body: BODY,
+			headers: { authorization: "Bearer sk-test" },
+		});
+
+		expect(await response.text()).toBe("done");
+		expect(response.redirected).toBe(true);
+		expect(requests).toEqual([`POST ${BODY.length} Bearer sk-test`, "GET 0 null"]);
+	});
+
+	it("returns a 300 with a location to the caller instead of resending the body", async () => {
+		const requests: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push(`${request.method} ${(await request.arrayBuffer()).byteLength}`);
+				return new Response(null, { status: 300, headers: { location: "/elsewhere" } });
+			},
+		});
+		servers.push({ close: () => server.stop(true) });
+		const fetch = transportFetch(testModel("openai", "openai-responses"), undefined);
+
+		const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, { method: "POST", body: BODY });
+
+		expect(response.status).toBe(300);
+		expect(requests).toEqual([`POST ${BODY.length}`]);
+	});
+});
