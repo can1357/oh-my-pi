@@ -3,11 +3,12 @@
 //! to rows.
 use super::{analysis::Analysis, model::Layers};
 use crate::bash::syntax::{
-	AndOrOp, CaseMode, ComsubKind, PrintStyle, ReplaceMode, Sep, Special, print, zsh_text,
+	AndOrOp, CaseMode, ComsubKind, PrintStyle, ReplaceMode, Sep, Special, print,
 	tree::{
 		ArrayElem, Assign, AssignValue, CommandKind, Cond, CondExpr, List, Param, ParamName, ParamOp,
 		Part, Pipeline, Seq, Subscript, Word, WordPart,
 	},
+	zsh_text,
 };
 
 pub struct WordPrinter<'a> {
@@ -90,7 +91,8 @@ impl WordPrinter<'_> {
 			),
 			Part::Compound(e) => self.elements(e),
 			Part::BadSubst(v) => text(v),
-			// Token bytes (0x83..) are not UTF-8; show the source text they stand for.
+			// Token bytes (0x83..) are not UTF-8; show the source text they stand
+			// for.
 			Part::Zsh(v) => {
 				let mut out = Vec::new();
 				zsh_text(v, &mut out);

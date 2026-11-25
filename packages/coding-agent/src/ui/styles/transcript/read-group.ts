@@ -14,6 +14,7 @@ import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { terminalPaddingX } from "../terminal-padding";
 import {
 	READ_PREVIEW_LINES,
@@ -22,6 +23,7 @@ import {
 	type ReadTermPreview,
 	type ReadTermRow,
 } from "../../transcript/read-group";
+import { paintPresenterRows } from "../figures/presented";
 import { codeCellRows, markdownCellRows } from "../tools/code-cell";
 import { fileLink, webLink } from "../tools/file-common";
 import { frameInner, hangingWrap, statusIcon } from "../tools/frame";
@@ -118,10 +120,11 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 	if (term.presented) {
 		const compact = term.presented;
 		const mark = compact.status === "success" ? theme.fg("dim", "•") : glyph(cx, compact.status);
-		const label = compact.label ?? `${title(cx)}${compact.path ? theme.fg("muted", ` ${compact.path}`) : ""}`;
-		return {
-			rows: [truncate(`${mark} ${label}`, width), ...compact.rows.map(row => truncate(`  ${row}`, width))],
-		};
+		const label =
+			compact.label !== undefined
+				? styledText(theme, compact.label)
+				: `${title(cx)}${compact.path ? theme.fg("muted", ` ${compact.path}`) : ""}`;
+		return { rows: [truncate(`${mark} ${label}`, width), ...paintPresenterRows(compact.rows, cx)] };
 	}
 	const bullet = theme.symbols.symbol("format.bullet");
 	const pad = " ".repeat(terminalPaddingX());
