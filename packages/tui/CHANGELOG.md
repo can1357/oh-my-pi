@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Terminal animations now skip unchanged frames and share redraws with streaming content; shimmer motion runs at 20 fps.
+
 ## [19.2.0] - 2026-11-25
 
 ### Added

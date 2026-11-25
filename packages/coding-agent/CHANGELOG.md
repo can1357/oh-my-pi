@@ -14,6 +14,9 @@
 ### Changed
 
 - Startup can resolve `--model @role` and `--model pi/role` without composing the full catalog when the role names an available provider/model.
+### Changed
+
+- The terminal welcome animation now waits until the composer is ready for input.
 
 ## [19.2.0] - 2026-11-25
 

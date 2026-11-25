@@ -2131,7 +2131,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#inputController.enableEnhancedPaste();
 		}
 		this.#bindShellHost();
-		if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
 		pushTerminalTitle();
 		// Claim the terminal title before any session update: this is the one path
 		// that releases the teardown latch, so a late async `setSessionTerminalTitle`
@@ -2390,6 +2389,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// other's turn instead of dying.
 		this.composer.setDisableSubmit(false);
 		this.#idleMaintenanceActivity.ready = true;
+		if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
 		this.syncIdleMaintenanceView();
 		// The first alt+p then opens as fast as a reopen.
 		this.#selectorController
