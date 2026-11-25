@@ -2405,6 +2405,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			toolRegistry: () => this.#tools.registry,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
+			goalBudgetLimited: () =>
+				this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "budget-limited",
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 			phasesChanged: () => this.#mirrorTodoPhases(),
