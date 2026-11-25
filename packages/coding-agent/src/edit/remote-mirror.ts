@@ -15,22 +15,25 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { extractUriScheme } from "../internal-urls/parse";
 import { type InternalUrlRouter, registrationId } from "../internal-urls/router";
-import type { ProtocolHandler, SchemeSpec } from "../internal-urls/types";
+import type { SchemeSpec } from "../internal-urls/types";
 
-/** Mirror path → the remote URL it stands for and the handler registration that served it. */
-const mirrors = new Map<string, { url: string; owner: ProtocolHandler }>();
+/**
+ * Mirror path → the remote URL it stands for and the {@link registrationId} of the handler that
+ * served it. The id, not the handler, so a closed session's handlers are not kept reachable.
+ */
+const mirrors = new Map<string, { url: string; registration: string }>();
 
 /** Whether `spec` names remote text written whole through its handler, so `edit` may patch it via a mirror. */
 export function isRemoteTextWritable(spec: SchemeSpec | undefined): boolean {
 	return spec?.backing === "remote" && spec.write?.via === "handler" && spec.write.payload === "text";
 }
 
-/** The handler `router` resolves `url`'s scheme to; throws for a URL of a scheme it does not handle. */
-function ownerOf(url: string, router: InternalUrlRouter): ProtocolHandler {
+/** {@link registrationId} of the handler `router` resolves `url`'s scheme to; throws for a URL of a scheme it does not handle. */
+function registrationOf(url: string, router: InternalUrlRouter): string {
 	const scheme = extractUriScheme(url);
 	const owner = scheme === undefined ? undefined : router.getHandler(scheme);
 	if (!owner) throw new Error(`No handler serves ${url}`);
-	return owner;
+	return registrationId(owner);
 }
 
 /**
@@ -39,13 +42,13 @@ function ownerOf(url: string, router: InternalUrlRouter): ProtocolHandler {
  * name, so language detection matches the remote file.
  */
 export async function writeRemoteMirror(url: string, content: string, router: InternalUrlRouter): Promise<string> {
-	const owner = ownerOf(url, router);
+	const registration = registrationOf(url, router);
 	const root = await fs.realpath(os.tmpdir());
 	const name = path.posix.basename(new URL(url).pathname) || "file";
-	const key = Bun.hash(`${registrationId(owner)}\0${url}`).toString(16);
+	const key = Bun.hash(`${registration}\0${url}`).toString(16);
 	const mirror = path.join(root, "omp-remote-edit", key, name);
 	await Bun.write(mirror, content);
-	mirrors.set(mirror, { url, owner });
+	mirrors.set(mirror, { url, registration });
 	return mirror;
 }
 
@@ -57,7 +60,7 @@ export async function writeRemoteMirror(url: string, content: string, router: In
 export function remoteMirrorUrl(mirror: string, router: InternalUrlRouter): string | undefined {
 	const entry = mirrors.get(mirror);
 	if (!entry) return undefined;
-	if (ownerOf(entry.url, router) !== entry.owner) {
+	if (registrationOf(entry.url, router) !== entry.registration) {
 		throw new Error(`${mirror} mirrors ${entry.url} as another session resolves it`);
 	}
 	return entry.url;
