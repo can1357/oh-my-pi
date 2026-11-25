@@ -7,6 +7,7 @@ import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 import type { BunPlugin } from "bun";
 import { getTemplate } from "../src/export/html/index";
 import viewerAsset from "../src/export/html/viewer.generated.json" with { type: "json" };
+import { ensureDevelopmentViewer } from "./fixtures/development-export-viewer";
 
 const bundleDistUrl = new URL("../scripts/bundle-dist.ts", import.meta.url).href;
 const probePath = path.resolve(import.meta.dir, "fixtures", "html-export-template-probe.ts");
@@ -51,6 +52,7 @@ async function runProbe(command: string[]): Promise<string> {
 }
 
 beforeAll(async () => {
+	await ensureDevelopmentViewer();
 	await fs.mkdir(unrelatedCwd);
 	const bundle = await Bun.build({
 		entrypoints: [probePath],

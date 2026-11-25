@@ -5,7 +5,12 @@
 ### Fixed
 
 - Fixed Codex models such as GPT-6.2 Sol disappearing for up to two hours, failing with `Unknown model`, after a slow or failed model-list request on the official ChatGPT backend ([#20269](https://github.com/can1357/oh-my-pi/pull/20269) by [@lij113](https://github.com/lij113))
-- A Codex service tier offered by only some logged-in accounts (such as Ultrafast) is no longer hidden when the first account's plan lacks it.
+
+## [19.2.1] - 2026-11-25
+
+### Fixed
+
+- Fixed Codex service tiers, such as Ultrafast, being hidden for accounts that support them when the first logged-in account has a plan that does not.
 
 ## [19.2.0] - 2026-11-25
 
