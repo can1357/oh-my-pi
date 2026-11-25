@@ -10,6 +10,7 @@
 ### Fixed
 
 - Fixed files and directories whose name starts with `..` being treated as outside their parent: a working directory under such a folder now counts as part of its checkout, and scoped settings, plugin roots and folder restrictions apply to it ([#20482](https://github.com/can1357/oh-my-pi/pull/20482) by [@H4vC](https://github.com/H4vC))
+- Restored `tui.imeSafeCursor`, which moves the prompt's bottom border to its own row so macOS IME preedit cannot displace it.
 
 ### Added
 

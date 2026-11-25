@@ -208,6 +208,11 @@ const box: ComposerShape = {
 	row(cx) {
 		const { box: g, paddingX } = cx;
 		const cells = rightCells(cx);
+		if (cx.last && cx.imeSafeCursorTail) {
+			const left = cx.border(`${g.vertical}${" ".repeat(paddingX)}`);
+			const bottom = cx.border(`${g.bottomLeft}${g.horizontal.repeat(Math.max(0, cx.width - 2))}${g.bottomRight}`);
+			return [`${left}${cx.text}`, bottom];
+		}
 		if (cx.last) {
 			const left = cx.border(`${g.bottomLeft}${g.horizontal}${" ".repeat(Math.max(0, paddingX - 1))}`);
 			const right = cx.border(
