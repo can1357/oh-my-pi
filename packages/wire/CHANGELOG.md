@@ -4,8 +4,8 @@
 
 ### Added
 
-- Added the TSP `annotate` image action and its `change` event carrying the annotated picture (`TspPicture`).
-- Added the collab link codec shared by the host and the web client: `generateRoomId`, `formatCollabLink`, `parseCollabLink`, `normalizeRelayOrigin`, `isLocalRelayHostname`, `encodeBase64Url` and `decodeBase64Url` ([#20489](https://github.com/can1357/oh-my-pi/pull/20489) by [@H4vC](https://github.com/H4vC))
+- Added the TSP `annotate` image action, including its `change` event for delivering the annotated picture.
+- Added shared collab link support for generating, formatting, parsing, and normalizing relay-based collaboration links.
 
 ## [19.2.0] - 2026-11-25
 

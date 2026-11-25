@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `Agent.continue(signal, { queuedOnly: true })` so hosts can start an idle turn with queued input without making a separate model call on the current context.
+- Added `Agent.continue(signal, { queuedOnly: true })` to start an idle turn using queued input without making a separate model call for the current context.
 
 ## [19.2.0] - 2026-11-25
 

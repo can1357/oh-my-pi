@@ -4,54 +4,35 @@
 
 ### Breaking Changes
 
-- Removed `errorMessage` from `@oh-my-pi/pi-coding-agent/disasm/protocol`, `slash-commands/helpers/parse` and `subprocess/worker-runtime`; import it from `@oh-my-pi/pi-utils/type-guards` ([#20479](https://github.com/can1357/oh-my-pi/pull/20479) by [@H4vC](https://github.com/H4vC))
-- Removed `flattenLine` from `@oh-my-pi/pi-coding-agent/utils/render-utils`; import it from `@oh-my-pi/pi-tui/text/sanitize` ([#20484](https://github.com/can1357/oh-my-pi/pull/20484) by [@H4vC](https://github.com/H4vC))
-- Moved `fuzzyHits` to `@oh-my-pi/pi-coding-agent/utils/fuzzy` (was exported from `modes/view-model/overlays/model-browser` and `ui/overlays/panels/extension-list-model`), and removed `stripInlineMarkdown` from `ui/overlays/panels/plan-sections`; import it from `plan-mode/plan-toc` ([#20485](https://github.com/can1357/oh-my-pi/pull/20485) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed files and directories whose name starts with `..` being treated as outside their parent: a working directory under such a folder now counts as part of its checkout, and scoped settings, plugin roots and folder restrictions apply to it ([#20482](https://github.com/can1357/oh-my-pi/pull/20482) by [@H4vC](https://github.com/H4vC))
+- Removed several internal utility exports from the coding-agent package. Import `errorMessage` from `@oh-my-pi/pi-utils/type-guards`, `flattenLine` from `@oh-my-pi/pi-tui/text/sanitize`, and `fuzzyHits` from `@oh-my-pi/pi-coding-agent/utils/fuzzy`; import `stripInlineMarkdown` from `plan-mode/plan-toc`.
 
 ### Added
 
-- Processes a bash call leaves running (`cmd &`, `(cmd &)`, `nohup cmd &`) no longer leak: the agent is reminded of them when it stops so it can register them as services or kill them, and the `&` ones are killed when the session ends (`nohup` ones never are). Turn off with `bash.reapBackground`; RPC mode never reaps.
-- New `o2ctl services` command in the bash tool's shell: `o2ctl services add <name> <pid|%job>` keeps an already-running process as a named service without restarting it (listed, supervised and stopped like any other; when its stdout or stderr goes to a file such as `nohup.out`, that file is the service's output), `o2ctl services ls` lists services and `o2ctl services stop <name>` stops one.
+- Background processes started by the bash tool are now detected when the agent stops, allowing them to be registered as services or terminated; background jobs using `&` are cleaned up when the session ends. Configure this behavior with `bash.reapBackground` (RPC mode does not reap processes).
+- Added the `o2ctl services` shell commands for adopting an existing process as a named service, listing services, and stopping services.
+- Agents can change their own model or a live child agent's model through the `agent://<id>/model` interface, including permitted user-tagged models, and adjust reasoning effort through `agent://<id>/effort` or a model suffix.
+- In Tern, pasted-image attachments can be opened in the image annotator; completing annotation replaces the attachment with the edited image.
+- Added `archive.transcript(id, { detail, budget, turns })` for rendering compacted, budget-limited views of previous evaluation sessions, with controls for transcript detail and turn ranges.
 
 ### Changed
 
-- `PI_SESSION_ID` and `PI_SESSION_FILE` now reach every command omp runs for a session (eval `sh()`, `!` commands, `/loop` conditions, autoresearch runs), not only `bash` tool calls, so `ovnfs ls` can show the session that opened each checkout.
-- The ovnfs checkouts of isolated subagents record the session that spawned them, and `/wt` checkouts the session moving into them; `ovnfs ls` shows it as SESSION once its daemon is restarted onto a build that supports it.
-- `/fast` and `/fast ultra` now route to an account or stored API key that offers the tier, without pinning one by hand; once it hits its limits the other accounts serve as usual at standard speed, and the fast one takes over again when it recovers.
-- A refused Claude fast-mode request no longer turns `/fast` off when another credential can still be tried; run `/fast` again to re-check an account after enabling usage credits.
-- `history://<id>` renders through the same transcript view as `archive.transcript`: turns are numbered, back-to-back reads and searches group, and `?budget=`, `?detail=`, and `?turns=` compact or narrow the transcript.
-- Tern's agent tray lists running and queued cards first and finished ones (done, failed, stopped) after them, each group in spawn order.
+- Session identifiers and session-file paths are now available to all commands run within a session, including evaluation shell commands, `!` commands, `/loop` conditions, and autoresearch runs.
+- Isolated subagent and `/wt` ovnfs checkouts now record the session that created or moved into them, and `ovnfs ls` displays that session after the supporting daemon is restarted.
+- `/fast` and `/fast ultra` automatically select an eligible account or stored API key, fall back to other accounts at standard speed when limits are reached, and resume using the fast account when it recovers. Refused fast-mode requests no longer disable `/fast` when another eligible credential remains available.
+- `history://<id>` now uses the enhanced transcript view with numbered turns, grouped consecutive reads and searches, and `budget`, `detail`, and `turns` query parameters.
+- Tern's agent tray now shows running and queued agents before completed agents, with each group ordered by spawn time.
 
 ### Fixed
 
-- A broadcast from the main agent that arrives while a subagent is finishing no longer replaces that subagent's report; the subagent answers it in a separate turn, and the broadcast still interrupts a waiting subagent.
-- On Linux, `time -l` and `time -v` in the bash tool report the program's own maximum resident set size instead of at least omp's.
-- In the Pseudo shell visualization, words of a zsh script (`zsh -c '…'`, sourced zsh files) show their source text instead of `�` where `$`, `(`, `-`, quotes and other shell syntax stood.
-
-### Added
-
-- Agents can switch their own or a live child's model via `agent://<id>/model` using permitted agent kinds, including user-tagged models, and adjust thinking via `agent://<id>/effort` or a model suffix.
-- In Tern, clicking a pasted image's chip opens it in Tern's image annotator; Done replaces the attachment with the annotated (possibly cropped) picture and its new size.
-- Added `archive.transcript(id, {detail, budget, turns})` in eval: renders a past session within a character budget, compacting prompts, replies, thinking, and tool calls by kind until it fits, and dropping from the middle of the conversation as a last resort; calls are counted per tool, and back-to-back `read`/`glob`/`grep`/`find` calls list their paths merged by shared prefix; `detail` and `turns` zoom in.
-### Fixed
-
-- Fixed ACP `session/load` and `session/resume` rejecting saved Copilot 1M models during a background catalog refresh ([#20467](https://github.com/can1357/oh-my-pi/issues/20467)).
-### Fixed
-
-- `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` now apply to assistant replies, thinking, user prompts, extension messages, summaries and tool output, not only plain Markdown blocks ([#20468](https://github.com/can1357/oh-my-pi/issues/20468))
-### Fixed
-
-- Fixed rules from extension packages listed in a config overlay's `extensions:` (`PI_CONFIG_FILES`/`--config`) disappearing after the system prompt is rebuilt, e.g. after `setActiveTools`, `/new`, or `/clear` ([#20475](https://github.com/can1357/oh-my-pi/issues/20475))
-### Fixed
-
-- Fixed idle follow-ups getting stuck in After yield after an extension message or a compaction summary ([#20465](https://github.com/can1357/oh-my-pi/issues/20465)).
-### Fixed
-
-- Resuming a goal whose token budget is already spent now keeps it budget-limited instead of reporting it active with 0 tokens remaining, and incomplete-todo reminders no longer ask the agent to keep working while the goal is budget-limited ([#20455](https://github.com/can1357/oh-my-pi/issues/20455))
+- Fixed checkout and workspace detection for paths inside directories whose names begin with `..`, so scoped settings, plugin roots, and folder restrictions apply correctly.
+- Fixed broadcasts arriving while a subagent is finishing so they no longer replace the subagent's final report.
+- On Linux, bash `time -l` and `time -v` now report the measured program's peak memory usage rather than the agent process's usage.
+- Fixed zsh scripts rendered in the pseudo shell so shell syntax is displayed correctly instead of replacement characters.
+- Fixed ACP session loading and resuming for saved Copilot 1M models during background model-catalog refreshes.
+- Fixed `tui.colorfulMarkdown: false` and `tui.renderMermaid: false` so they apply consistently to assistant replies, thinking, user prompts, extension messages, summaries, and tool output.
+- Fixed rules supplied by extensions in configuration overlays from disappearing when the system prompt is rebuilt.
+- Fixed idle follow-ups becoming stuck after extension messages or compaction summaries.
+- Fixed resuming goals whose token budget is exhausted so they remain budget-limited, and prevented incomplete-goal reminders from asking the agent to continue while budget-limited.
 
 ## [19.2.0] - 2026-11-25
 

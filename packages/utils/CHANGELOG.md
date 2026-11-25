@@ -4,13 +4,12 @@
 
 ### Added
 
-- Added `pathExists()`, which reports a missing path as `false` and rethrows any other filesystem error ([#20483](https://github.com/can1357/oh-my-pi/pull/20483) by [@H4vC](https://github.com/H4vC))
-- Added `pathIsWithinLexical()` for containment checks that use the platform's path comparison without resolving symlinks ([#20481](https://github.com/can1357/oh-my-pi/pull/20481) by [@H4vC](https://github.com/H4vC))
-- Added `errorMessage()` to `@oh-my-pi/pi-utils/type-guards` for the message text of a thrown value ([#20479](https://github.com/can1357/oh-my-pi/pull/20479) by [@H4vC](https://github.com/H4vC))
+- Added path utilities for checking whether a path exists and whether it is lexically contained within another path without resolving symlinks.
+- Added `errorMessage()` to `@oh-my-pi/pi-utils/type-guards` for retrieving message text from thrown values.
 
 ### Fixed
 
-- Fixed path containment checks treating a file or directory whose name starts with `..` as outside its parent ([#20482](https://github.com/can1357/oh-my-pi/pull/20482) by [@H4vC](https://github.com/H4vC))
+- Fixed path containment checks for files and directories whose names begin with `..`.
 
 ## [19.2.0] - 2026-11-25
 
