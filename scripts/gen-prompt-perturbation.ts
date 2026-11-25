@@ -152,6 +152,10 @@ async function seed(pool: Pool): Promise<PoolEntry[]> {
 	const known = new Set(pool.entries.map(entry => entry.source));
 	const byTrim = new Map(pool.entries.map(entry => [entry.source.trim(), entry]));
 	const added: PoolEntry[] = [];
+	// Fenced code reads worse paraphrased; prose is where fingerprints live. A line that one
+	// prompt fences and another uses as prose stays pooled, so removal waits for the full scan.
+	const fencedLines = new Set<string>();
+	const proseLines = new Set<string>();
 	const glob = new Bun.Glob("**/*.md");
 	for await (const relative of glob.scan({ cwd: PROMPTS_DIR })) {
 		const text = await Bun.file(path.join(PROMPTS_DIR, relative)).text();
@@ -163,16 +167,12 @@ async function seed(pool: Pool): Promise<PoolEntry[]> {
 			}
 			const source = raw.trimEnd();
 			const trimmed = source.trim();
-			// Fenced code reads worse paraphrased; prose is where fingerprints live.
 			if (fenced) {
-				const existing = byTrim.get(trimmed);
-				if (existing && !existing.manual) {
-					pool.entries = pool.entries.filter(entry => entry !== existing);
-					byTrim.delete(trimmed);
-				}
+				fencedLines.add(trimmed);
 				continue;
 			}
 			if (trimmed.length < MIN_SEED_LENGTH || source.includes("{{")) continue;
+			proseLines.add(trimmed);
 			const existing = byTrim.get(trimmed);
 			// Manual entries own their line, including ones that span its line break.
 			if (existing?.source === source || existing?.manual) continue;
@@ -186,6 +186,11 @@ async function seed(pool: Pool): Promise<PoolEntry[]> {
 			byTrim.set(trimmed, entry);
 			added.push(entry);
 		}
+	}
+	for (const trimmed of fencedLines) {
+		const existing = byTrim.get(trimmed);
+		if (proseLines.has(trimmed) || !existing || existing.manual) continue;
+		pool.entries = pool.entries.filter(entry => entry !== existing);
 	}
 	pool.entries.push(...added);
 	return added;
@@ -375,7 +380,7 @@ async function run(): Promise<void> {
 			process.exitCode = 1;
 			return;
 		}
-		await Bun.write(POOL_PATH, `${JSON.stringify(pool)}\n`);
+		await Bun.write(POOL_PATH, `${JSON.stringify(pool, null, "\t")}\n`);
 		console.log(`Wrote ${POOL_PATH}`);
 	} finally {
 		storage.close();

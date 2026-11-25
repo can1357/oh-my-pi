@@ -20,6 +20,7 @@ import {
 	LSP_ACQUIRE_METHOD,
 	LSP_MODULE_KIND,
 	LSP_MODULE_VERSION,
+	LSP_STARTUP_MAX_MS,
 	LSP_UNRESERVE_METHOD,
 	type LspAcquireResult,
 	lspInstanceKey,
@@ -43,7 +44,7 @@ import type {
 } from "../module";
 import { projectScope, scopeKey, type UnitPolicy, type UnitScope } from "../protocol";
 
-/** Grace after the last lease before an unused server is stopped. */
+/** Grace after the last lease before an unused, initialized server is stopped. */
 const SERVER_LINGER_MS = 5 * 60 * 1_000;
 const SHUTDOWN_BUDGET_MS = 2_000;
 const KILL_GRACE_MS = 2_000;
@@ -141,6 +142,9 @@ interface Reservation {
 /** Instance keys handed out by `acquire` and not yet attached, by {@link slotKey}. */
 const reservations = new Map<string, Reservation>();
 
+/** Acquires still resolving their cwd, by connection id; `disconnected` marks them gone so they reserve nothing. */
+const pendingAcquires = new Map<string, Set<{ gone: boolean }>>();
+
 function slotKey(scope: UnitScope, key: string): string {
 	return `${scopeKey(scope)}\0${key}`;
 }
@@ -234,6 +238,7 @@ class LspServerUnit implements ModuleUnit {
 	#initializeCached = false;
 	#initializeInFlight = false;
 	#initializedSent = false;
+	#startupTimer?: NodeJS.Timeout;
 	#nextId = 1;
 	#nextClientId = 1;
 	#stopping = false;
@@ -276,6 +281,20 @@ class LspServerUnit implements ModuleUnit {
 				return { reason: String(error) };
 			},
 		);
+		if (!this.#initializedSent) this.#armStartupDeadline(this.#child.state().startedAt);
+	}
+
+	#armStartupDeadline(startedAt: number): void {
+		this.#startupTimer = setTimeout(
+			() => {
+				const reason = `initialize timed out after ${LSP_STARTUP_MAX_MS}ms`;
+				for (const [session, id] of this.#initializeWaiters) session.send(rpcError(id, -32000, reason));
+				this.#initializeWaiters.clear();
+				this.#stopReason ??= reason;
+				this.#killServer();
+			},
+			Math.max(0, LSP_STARTUP_MAX_MS - (Date.now() - startedAt)),
+		).unref();
 	}
 
 	/** Free for a new client: nothing attached and the process is not going away. */
@@ -312,12 +331,11 @@ class LspServerUnit implements ModuleUnit {
 
 	async stop(reason: string): Promise<void> {
 		this.#stopReason ??= reason;
-		if (!this.#gone && !this.#stopping) {
+		if (!this.#gone && !this.#stopping && this.#initializedSent) {
 			this.#stopping = true;
 			await this.#shutdownGracefully();
 		}
-		this.#stopping = true;
-		if (!this.#gone) this.#child.kill();
+		this.#killServer();
 		const timer = setTimeout(() => {
 			if (!this.#gone) this.#child.kill("SIGKILL");
 		}, KILL_GRACE_MS);
@@ -445,6 +463,7 @@ class LspServerUnit implements ModuleUnit {
 				if (!request) {
 					if (!this.#initializedSent) {
 						this.#initializedSent = true;
+						clearTimeout(this.#startupTimer);
 						this.#writeServer(message);
 					} else {
 						this.#replayState(session);
@@ -755,6 +774,11 @@ class LspServerUnit implements ModuleUnit {
 		session.closed = true;
 		this.#initializeWaiters.delete(session);
 		if (!this.#sessions.delete(session)) return;
+		if (this.#sessions.size === 0 && !this.#initializedSent) {
+			this.#stopReason ??= "client disconnected before initialization completed";
+			this.#killServer();
+			return;
+		}
 		for (const uri of session.openUris) {
 			this.#documents.delete(uri);
 			this.#writeServer({ jsonrpc: "2.0", method: "textDocument/didClose", params: { textDocument: { uri } } });
@@ -776,6 +800,7 @@ class LspServerUnit implements ModuleUnit {
 
 	#serverExited(code: number): void {
 		if (this.#gone) return;
+		clearTimeout(this.#startupTimer);
 		this.#gone = true;
 		this.#stopping = true;
 		this.#watchedFiles?.close();
@@ -809,10 +834,13 @@ class LspServerUnit implements ModuleUnit {
 	}
 
 	#killServer(): void {
+		clearTimeout(this.#startupTimer);
 		this.#stopping = true;
 		if (this.#gone) return;
 		try {
-			this.#child.kill();
+			// Startup has no protocol-level shutdown, and killing only the launcher
+			// politely can leave its descendants running after it exits.
+			this.#child.kill(this.#initializedSent ? "SIGTERM" : "SIGKILL");
 		} catch {
 			this.#serverExited(-1);
 		}
@@ -823,7 +851,25 @@ class LspServerUnit implements ModuleUnit {
 async function acquire(context: ModuleContext, params: unknown, client: ModuleClient): Promise<LspAcquireResult> {
 	const server = ServerParams(params);
 	if (server instanceof type.errors) throw new Error(`invalid lsp acquire params: ${server.summary}`);
-	const scope = projectScope(await canonicalDir(server.cwd));
+	const pending = { gone: false };
+	let connectionAcquires = pendingAcquires.get(client.connectionId);
+	if (!connectionAcquires) {
+		connectionAcquires = new Set();
+		pendingAcquires.set(client.connectionId, connectionAcquires);
+	}
+	connectionAcquires.add(pending);
+	let dir: string;
+	try {
+		dir = await canonicalDir(server.cwd);
+	} finally {
+		connectionAcquires.delete(pending);
+		if (connectionAcquires.size === 0 && pendingAcquires.get(client.connectionId) === connectionAcquires) {
+			pendingAcquires.delete(client.connectionId);
+		}
+	}
+	// `disconnected` already ran for this client: a reservation now would hold the key until it expires.
+	if (pending.gone) throw new Error("lsp acquire: client disconnected");
+	const scope = projectScope(dir);
 	const identity = muxServerKey(server);
 	// Synchronous from here: concurrent acquires each see the previous one's reservation.
 	for (let index = 0; ; index++) {
@@ -889,6 +935,8 @@ export const lspModule: DaemonModule = {
 		return new LspServerUnit({ child, slot: restored.slot, cwd: restored.cwd, label: restored.label, restored });
 	},
 	disconnected(client) {
+		for (const pending of pendingAcquires.get(client.connectionId) ?? []) pending.gone = true;
+		pendingAcquires.delete(client.connectionId);
 		for (const [slot, reservation] of reservations) {
 			if (reservation.connectionId === client.connectionId) releaseReservation(slot);
 		}

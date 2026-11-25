@@ -498,7 +498,7 @@ export interface ExtensionUIContext {
 	/**
 	 * Paste text into the core input editor.
 	 *
-	 * Interactive mode should route through the editor's paste handling (e.g. large paste markers).
+	 * Interactive mode should route through the editor's paste handling (e.g. large pastes collapse into a chip).
 	 * Non-interactive modes may fall back to replacing the editor text.
 	 */
 	pasteToEditor(text: string): void;

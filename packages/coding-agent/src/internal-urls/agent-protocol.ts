@@ -304,10 +304,13 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				details: { message: { op: "send", from: senderId, to } },
 			};
 		}
+		const remote = pid !== undefined && !pid.local;
 		const result = await executeSend(
 			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content, progress, remote: pid !== undefined && !pid.local },
+			{ to, message: content, progress, remote },
 		);
+		const toLabel = remote ? agentMesh()?.label(pid.address) : undefined;
+		const message = result.details;
 		return {
 			content: [
 				{
@@ -315,7 +318,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 					text: result.content.find(item => item.type === "text")?.text ?? "Message delivery failed.",
 				},
 			],
-			details: { message: result.details },
+			details: { message: message && toLabel ? { ...message, toLabel } : message },
 			isError: result.isError,
 		};
 	}
@@ -345,7 +348,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		const content =
 			peers.length === 0
 				? "No other omp instances in this project.\n"
-				: `${peers.map(peer => `- agent://${peer.pid} (${peer.status})`).join("\n")}\n\nRead agent://<pid>/<id> for a subagent's output; write agent://<pid> to message its main agent.\n`;
+				: `${peers.map(peer => `- agent://${peer.pid} (${peer.status})${peer.title ? `: ${peer.title}` : ""}`).join("\n")}\n\nRead agent://<pid>/<id> for a subagent's output; write agent://<pid> to message its main agent.\n`;
 		return {
 			url: url.href,
 			content,

@@ -25,6 +25,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { benchSettingsYaml } from "../bench-settings";
 import type { Subprocess } from "bun";
 import { type FreshStart, HISTORY_DIR } from "./fresh";
 import continuePrompt from "./prompts/continue.md" with { type: "text" };
@@ -57,7 +58,8 @@ const KILL_GRACE_MS = 60_000;
 const IDLE_SEGMENT_LIMIT = 3;
 
 /**
- * omp settings for a trial: the shared harness config plus a `compaction:` block.
+ * omp settings for a trial: the shared harness config ({@link benchSettingsYaml}
+ * included) plus a `compaction:` block.
  * Baseline and the control/fresh arms pass `{ enabled: false }`.
  */
 export function agentConfigYaml(compaction: { enabled: false } | { method: string; thresholdTokens: number }): string {
@@ -72,7 +74,7 @@ edit:
   mode: replace
 web_search:
   enabled: false
-`;
+${benchSettingsYaml()}`;
 }
 
 /** Inputs for {@link runTrial}. */

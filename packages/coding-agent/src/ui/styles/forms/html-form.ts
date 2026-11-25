@@ -240,7 +240,7 @@ function blockLines(cx: PaintContext, block: FormBlock, width: number, media: Me
 
 function foldLines(theme: Theme, model: HtmlFormModel, index: number, width: number): string[] {
 	const field = model.field(index);
-	const error = model.errors().get(index);
+	const error = model.error(index);
 	const mark = error
 		? theme.fg("error", "!")
 		: model.answered(index)
@@ -416,7 +416,7 @@ function openFieldLines(
 ): void {
 	const field = model.field(index);
 	const lines = column.lines;
-	const error = model.errors().get(index);
+	const error = model.error(index);
 	column.focusStart = lines.length;
 	if (field.kind === "choice" && !isDropdown(field)) {
 		if (field.label.length > 0) lines.push(labelLine(theme, model, field, view, width));
@@ -550,10 +550,10 @@ function buildColumn(cx: PaintContext, look: HtmlFormLook, view: View, width: nu
 		column.groupStart = group.index === 0 || before === 0 ? 0 : before + 1;
 	}
 	lines.push("");
-	const errors = model.errors().size;
+	const errors = model.errorCount();
 	const submitFocused = view.active === "submit" && view.focused;
 	if (view.active === "submit") column.groupStart = column.focusStart = lines.length;
-	const fix = errors > 0 ? theme.fg("error", `  ${errors} to fix`) : "";
+	const fix = errors > 0 ? theme.fg("error", `  ${errors} flagged`) : "";
 	// Submit and the form's actions side by side; the one Enter presses is highlighted while the row is focused.
 	const button = model.button();
 	const buttons = ["Submit", ...model.actions.map(action => action.label)]

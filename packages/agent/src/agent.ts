@@ -123,7 +123,7 @@ export interface AgentOptions {
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
 	 * Default filters to user/assistant/toolResult and converts attachments.
 	 */
-	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	convertToLlm?: AgentLoopConfig["convertToLlm"];
 
 	/**
 	 * Optional transform applied to context before convertToLlm.
@@ -135,7 +135,7 @@ export interface AgentOptions {
 	 * Optional transform applied after provider context assembly and before
 	 * telemetry capture/provider send.
 	 */
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 
 	/**
 	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn
@@ -314,9 +314,10 @@ export interface AgentOptions {
 	onToolChoiceUnavailable?: () => void;
 
 	/**
-	 * Cursor exec handlers for local tool execution.
+	 * Cursor exec handlers for local tool execution, or a factory resolved on the first
+	 * request dispatched to Cursor (including a mid-session model switch).
 	 */
-	cursorExecHandlers?: CursorExecHandlers;
+	cursorExecHandlers?: CursorExecHandlers | (() => Promise<CursorExecHandlers>);
 	/** Additional tools Cursor executes through its MCP request-context bridge, resolved before each provider call. */
 	getCursorTools?: () => AgentTool[];
 
@@ -431,9 +432,11 @@ export class Agent {
 	#queueListeners = new Set<() => void>();
 	#pauseListeners = new Set<(paused: boolean) => void>();
 	#abortController?: AbortController;
-	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	/** The running loop's `detachSignal` source; see {@link Agent.abort}. */
+	#detachController?: AbortController;
+	#convertToLlm: AgentLoopConfig["convertToLlm"];
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	#transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
 	#standbyTools: AgentTool[] = [];
 	#steeringQueue: AgentMessage[] = [];
@@ -484,6 +487,7 @@ export class Agent {
 	#maxRetryDelayMs?: number;
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	#cursorExecHandlers?: CursorExecHandlers;
+	#loadCursorExecHandlers?: () => Promise<CursorExecHandlers>;
 	#getCursorTools?: () => AgentTool[];
 	#cursorOnToolResult?: CursorToolResultHandler;
 	#cwd?: string;
@@ -608,7 +612,12 @@ export class Agent {
 		this.#onResponse = opts.onResponse;
 		this.#onSseEvent = opts.onSseEvent;
 		this.#getToolContext = opts.getToolContext;
-		this.#cursorExecHandlers = opts.cursorExecHandlers;
+		if (typeof opts.cursorExecHandlers === "function") {
+			const load = opts.cursorExecHandlers;
+			this.#loadCursorExecHandlers = async () => (this.#cursorExecHandlers ??= await load());
+		} else {
+			this.#cursorExecHandlers = opts.cursorExecHandlers;
+		}
 		this.#getCursorTools = opts.getCursorTools;
 		this.#cursorOnToolResult = opts.cursorOnToolResult;
 		this.#cwd = opts.cwd;
@@ -985,6 +994,7 @@ export class Agent {
 	async buildSideRequestContext(
 		llmMessages: Message[],
 		systemPrompt: string[] = this.#state.systemPrompt,
+		signal?: AbortSignal,
 	): Promise<Context> {
 		const model = this.#state.model;
 		if (!model) throw new Error("No active model on agent");
@@ -1001,7 +1011,7 @@ export class Agent {
 		// Side requests reuse the main loop's sent definitions without recording their own; attached before the
 		// transform too, so a request-size clamp in it measures them.
 		context = this.#sentToolDefinitions.withInactiveTools(context, standby);
-		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
+		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model, signal);
 		context = this.#sentToolDefinitions.withInactiveTools(context, context.inactiveTools);
 		return context;
 	}
@@ -1696,7 +1706,14 @@ export class Agent {
 		this.#state.messages.length = 0;
 	}
 
-	abort(reason?: unknown) {
+	/**
+	 * Abort the current run. `detachTools` first raises the running tool batch's
+	 * cooperative `steeringSignal` (see {@link AgentLoopConfig.detachSignal}), so
+	 * tools that can move their work into a background job do so instead of being
+	 * killed; they observe it before the abort.
+	 */
+	abort(reason?: unknown, options?: { detachTools?: boolean }) {
+		if (options?.detachTools) this.#detachController?.abort();
 		this.#abortController?.abort(reason);
 	}
 
@@ -1923,6 +1940,8 @@ export class Agent {
 		const loopSignal = continuationSignal
 			? AbortSignal.any([loopAbortController.signal, continuationSignal])
 			: loopAbortController.signal;
+		const detachController = new AbortController();
+		this.#detachController = detachController;
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
@@ -2042,6 +2061,7 @@ export class Agent {
 			serviceTier: this.#serviceTier,
 			hideThinkingSummary: this.#hideThinkingSummary,
 			interruptMode: this.#interruptMode,
+			detachSignal: detachController.signal,
 			sessionId: this.#sessionId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
@@ -2084,6 +2104,7 @@ export class Agent {
 						}
 					: undefined,
 			cursorExecHandlers: this.#cursorExecHandlers,
+			loadCursorExecHandlers: this.#loadCursorExecHandlers,
 			cursorOnToolResult,
 			cwd: this.#cwd,
 			getCwd: this.#cwdResolver,
@@ -2386,6 +2407,7 @@ export class Agent {
 			this.#isPaused = false;
 			this.#restoreUndeliveredQueuedMessages(loopAbortController);
 			resolveRun?.();
+			if (this.#detachController === detachController) this.#detachController = undefined;
 			if (this.#abortController === loopAbortController) {
 				this.#state.isStreaming = false;
 				this.#state.streamMessage = null;

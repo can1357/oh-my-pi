@@ -28,6 +28,7 @@ import * as settingsWindowModule from "../src/ui/overlays/settings/settings";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 /** The settings window `/settings` opens for `session`: what it was given and how it reports changes. */
 async function openSettings(session: AgentSession, settings: Settings) {
@@ -43,6 +44,7 @@ async function openSettings(session: AgentSession, settings: Settings) {
 	const ctx = {
 		session,
 		settings,
+		statusLine: createInteractiveModeContext().statusLine,
 		shell: {
 			focus: () => {},
 			overlays: {

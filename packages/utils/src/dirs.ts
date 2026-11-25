@@ -1180,11 +1180,6 @@ export function getSessionOwnersDir(): string {
 	return dirs.baseRootSubdir(path.join("run", "session-owners"), "state");
 }
 
-/** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */
-export function getProviderInFlightRoot(): string {
-	return dirs.rootSubdir(path.join("run", "provider-inflight"), "state");
-}
-
 /** Get the marketplaces registry path (~/.omp/marketplaces.json; XDG default: $XDG_DATA_HOME/omp/marketplaces.json). Adopts a legacy registry on first XDG resolution. */
 export function getMarketplacesRegistryPath(): string {
 	const registryPath = dirs.rootSubdir("marketplaces.json", "data");

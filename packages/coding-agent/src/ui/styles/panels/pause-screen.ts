@@ -11,9 +11,9 @@ import { type Block, defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { formatDuration } from "@oh-my-pi/pi-tui/term/painters/elapsed";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
-import { keyGlyph, termOf } from "./common";
+import { keyLabel } from "../../keys/hints";
+import { termOf } from "./common";
 import { appInterruptKeys } from "../../../config/keybindings/matchers";
-import { canonicalKeyId } from "../../../config/keybindings/key-id";
 
 interface PauseTerm {
 	readonly since: number;
@@ -57,7 +57,7 @@ defineRolePainter("col", "omp.pause", (node, cx): Block => {
 	const clock = theme.fg("dim", `paused for ${formatDuration(cx.now() - (term.since ?? cx.now()), "clock")}`);
 	const settlement = settlementLines(theme, term);
 	const sessionLine = session ? theme.style("strong", session) : undefined;
-	const interrupt = keyGlyph(canonicalKeyId(appInterruptKeys()[0] ?? "escape"));
+	const interrupt = keyLabel(theme, appInterruptKeys()[0] ?? "escape");
 	const lines: string[] = [];
 	const full: string[] = [];
 	if (sessionLine) full.push(center(sessionLine, width), "");
@@ -67,7 +67,8 @@ defineRolePainter("col", "omp.pause", (node, cx): Block => {
 	const factLead = " ".repeat(Math.max(0, Math.floor((width - factWidth) / 2)));
 	for (const fact of FACT_LINES) full.push(`${factLead}${theme.fg("muted", fact)}`);
 	for (const line of settlement) full.push(center(line, width));
-	full.push(center(clock, width), "", center(theme.fg("dim", `${interrupt} · ⏎ · ␣ — resume`), width));
+	const resumeHint = `${interrupt} · ${keyLabel(theme, "enter")} · ${keyLabel(theme, "space")} — resume`;
+	full.push(center(clock, width), "", center(theme.fg("dim", resumeHint), width));
 
 	const title = center(theme.style("strong", theme.fg("accent", "▌▌ P A U S E D")), width);
 	const resume = center(theme.fg("dim", `${interrupt} to resume`), width);

@@ -28,6 +28,14 @@ export const PREWALK_PLAN_MESSAGE_TYPE = "prewalk-plan";
 /** Custom message type for the transient Vibe mode directive. */
 export const VIBE_MODE_CONTEXT_MESSAGE_TYPE = "vibe-mode-context";
 
+/**
+ * Custom message type for the transient plan mode rules (read-only working
+ * tree). Injected per turn only while plan mode is on; never persisted, and
+ * dropped from live history when plan mode ends so later turns do not obey a
+ * lifted restriction (#20375).
+ */
+export const PLAN_MODE_CONTEXT_MESSAGE_TYPE = "plan-mode-context";
+
 /** Fallback type for extension-injected messages that omit a custom type. */
 export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
 

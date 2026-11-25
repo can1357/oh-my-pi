@@ -152,7 +152,7 @@ function OpenField(props: {
 	const { model, index } = props;
 	const field = model.field(index);
 	const answer = model.answer(index);
-	const error = model.errors().get(index);
+	const error = model.error(index);
 	const children: JSXNode[] = [];
 	if (field.label.length > 0) {
 		const spans = tspSpans(field.label);
@@ -291,7 +291,7 @@ function choiceControls(model: HtmlFormModel, index: number, field: ChoiceField)
 function Fold(props: { readonly model: HtmlFormModel; readonly index: number; readonly nodeKey: string }): JSXNode {
 	const { model, index, nodeKey } = props;
 	const field = model.field(index);
-	const error = model.errors().get(index);
+	const error = model.error(index);
 	const mark: TspSpan = error
 		? { s: "error", t: "!" }
 		: model.answered(index)

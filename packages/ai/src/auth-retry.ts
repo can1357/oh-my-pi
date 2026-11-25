@@ -1,7 +1,14 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import type { CredentialRotation, LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
+import type {
+	CredentialRotation,
+	LimitsApi,
+	OAuthAccess,
+	OAuthApi,
+	OAuthRefreshReason,
+	OAuthRequestIdentity,
+} from "./auth/types";
 import * as AIError from "./error";
-import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
+import { isAuthRetryableError, isInvalidatedOAuthTokenError, isRevokedOAuthBearerError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 
@@ -140,6 +147,15 @@ export function createOAuthProvenance(): {
 	};
 }
 
+/**
+ * Refresh reason for the same-login retry after `error`: `"auth-recovery"` when
+ * the provider refused the bearer itself (a 401, or a revoked-token 403), so the
+ * refresher adopts a newer stored token before exchanging the grant again.
+ */
+export function refreshReasonFor(error: unknown): OAuthRefreshReason | undefined {
+	return AIError.status(error) === 401 || isRevokedOAuthBearerError(error) ? "auth-recovery" : undefined;
+}
+
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
 
@@ -201,6 +217,8 @@ export const AUTH_RETRY_STEPS: readonly boolean[] = [false, true];
 export const AUTH_RETRY_MAX_ATTEMPTS = 64;
 
 function isDirectCredentialRotationError(error: unknown): boolean {
+	// A revoked bearer gets the same-login refresh a 401 gets, whatever else its body says.
+	if (isRevokedOAuthBearerError(error)) return false;
 	if (isAccountPolicyError(error)) return true;
 	if (isUsageLimit(error) || isInvalidatedOAuthTokenError(error)) return true;
 	const status = AIError.status(error);
@@ -526,7 +544,7 @@ export async function withOAuthAccess<T>(
 				try {
 					next = await storage.oauth.access(provider, sessionId, {
 						forceRefresh: true,
-						refreshReason: AIError.status(lastError) === 401 ? "auth-recovery" : undefined,
+						refreshReason: refreshReasonFor(lastError),
 						rejectedAccessToken: lastAccess.accessToken,
 						signal,
 					});
