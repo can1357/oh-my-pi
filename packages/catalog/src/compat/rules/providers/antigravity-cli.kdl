@@ -1,6 +1,11 @@
 // Catalog entry for "antigravity-cli": Google's Antigravity CLI (`agy acp`)
 // driven as a local subprocess over the Agent Client Protocol.
 
+// Keep the conservative default until agy's per-prompt image cap is known.
+on-api "antigravity-acp" {
+	image-count-budget 5
+}
+
 provider "antigravity-cli" {
 	// `gemini-4-carbon` is the bundled default. Rosters vary by account: `agy acp`
 	// 1.5.12 advertises `gemini-4-carbon-disabled` on accounts that no longer

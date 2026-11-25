@@ -1446,6 +1446,7 @@ function mapOptionsForApi<TApi extends Api>(
 		beforeDispatch: options?.beforeDispatch,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
+		onProviderNotice: options?.onProviderNotice,
 		onSseEvent: options?.onSseEvent,
 		execHandlers: options?.execHandlers,
 		fetch: options?.fetch,

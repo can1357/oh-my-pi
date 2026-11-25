@@ -15,6 +15,11 @@ import lateToolResultTemplate from "./late-tool-result.md" with { type: "text" }
 import toolResultImagesTemplate from "./tool-result-images.md" with { type: "text" };
 import transcriptTemplate from "./transcript.md" with { type: "text" };
 
+const CHECKPOINT_START = prompt.render(transcriptTemplate, { checkpoint: true });
+const CHECKPOINT_END = "</conversation-checkpoint>";
+const HISTORY_OMISSION = prompt.render(transcriptTemplate, { omittedHistory: true });
+const IMAGE_OMISSION = prompt.render(transcriptTemplate, { omittedImages: true });
+
 /** The exact leading transcript represented by the live conversation. */
 export interface Ledger {
 	count: number;
@@ -83,49 +88,147 @@ export function transcriptDigest(messages: readonly Message[]): string {
 	return hash.digest("hex");
 }
 
-/** Replay earlier turns as labelled text and image blocks, then send trailing input directly. */
-export function replayPrompt(replay: readonly Message[]): ContentBlock[] {
+/** Budget only the image blocks in the outgoing steer or delayed result, newest first. */
+export function projectPromptImages(blocks: ContentBlock[], imageBudget: number): ContentBlock[] {
+	let images = 0;
+	for (const block of blocks) if (block.type === "image") images++;
+	const omitted = images - imageBudget;
+	let drops = omitted;
+	if (drops <= 0) return blocks;
+	let write = 0;
+	for (const block of blocks) {
+		if (block.type === "image" && drops > 0) {
+			if (drops === omitted) blocks[write++] = { type: "text", text: IMAGE_OMISSION };
+			drops--;
+		} else {
+			blocks[write++] = block;
+		}
+	}
+	blocks.length = write;
+	return blocks;
+}
+
+/** Keep the newest replay content that fits, then emit it in chronological order. */
+export function replayPrompt(
+	replay: readonly Message[],
+	textBudget: number,
+	imageBudget: number,
+): { blocks: ContentBlock[]; omittedHistory: boolean; omittedImages: boolean } {
 	let split = replay.length;
 	while (split > 0 && isInputMessage(replay[split - 1]!)) split--;
 	const blocks: ContentBlock[] = [];
-	if (split > 0) {
-		blocks.push({ type: "text", text: prompt.render(transcriptTemplate, {}) });
-		for (const message of replay.slice(0, split)) {
-			const tag = message.role === "toolResult" ? "tool_result" : message.role;
-			const attrs =
-				message.role === "toolResult"
-					? ` id=${JSON.stringify(message.toolCallId)} name=${JSON.stringify(message.toolName)} error=${message.isError}`
-					: "";
-			blocks.push({ type: "text", text: `<${tag}${attrs}>` });
-			if (typeof message.content === "string") blocks.push({ type: "text", text: message.content });
-			else
-				for (const part of message.content) {
-					switch (part.type) {
-						case "text":
-							blocks.push({ type: "text", text: part.text });
-							break;
-						case "image":
-							blocks.push({ type: "image", data: part.data, mimeType: part.mimeType });
-							break;
-						case "thinking":
-							blocks.push({ type: "text", text: `<thinking>${part.thinking}</thinking>` });
-							break;
-						case "toolCall":
-							blocks.push({
-								type: "text",
-								text: `<tool_call id=${JSON.stringify(part.id)} name=${JSON.stringify(part.name)}>${stableStringifyJson(part.arguments)}</tool_call>`,
-							});
-							break;
-					}
-				}
-			blocks.push({ type: "text", text: `</${tag}>` });
+	let hasCheckpoint = false;
+	let omittedHistory = false;
+	let omittedImages = false;
+	const checkpointBytes = textBytes(CHECKPOINT_START) + textBytes(CHECKPOINT_END);
+	let remaining = textBudget - textBytes(HISTORY_OMISSION) - textBytes(IMAGE_OMISSION);
+	if (replay.length > 0 && remaining < 0)
+		throw new Error("Antigravity CLI system prompt leaves no room for conversation replay");
+	const appendText = (text: string, allowClip: boolean): boolean => {
+		const bytes = textBytes(text);
+		if (bytes <= remaining) {
+			blocks.push({ type: "text", text });
+			remaining -= bytes;
+			return true;
 		}
-		blocks.push({ type: "text", text: "</conversation-checkpoint>" });
+		if (allowClip) {
+			const tail = utf8Tail(text, remaining - 2);
+			if (tail) blocks.push({ type: "text", text: tail });
+		}
+		return false;
+	};
+	for (let index = replay.length - 1; index >= 0; index--) {
+		const message = replay[index]!;
+		const wrapped = index < split;
+		const tag = message.role === "toolResult" ? "tool_result" : message.role;
+		const attrs =
+			wrapped && message.role === "toolResult"
+				? ` id=${JSON.stringify(message.toolCallId)} name=${JSON.stringify(message.toolName)} error=${message.isError}`
+				: "";
+		const start = wrapped ? `<${tag}${attrs}>` : "";
+		const end = wrapped ? `</${tag}>` : "";
+		const wrapperBytes = wrapped ? textBytes(start) + textBytes(end) + (hasCheckpoint ? 0 : checkpointBytes) : 0;
+		if (wrapperBytes > remaining) {
+			omittedHistory = true;
+			break;
+		}
+		remaining -= wrapperBytes;
+		if (wrapped) {
+			if (!hasCheckpoint) {
+				hasCheckpoint = true;
+				blocks.push({ type: "text", text: CHECKPOINT_END });
+			}
+			blocks.push({ type: "text", text: end });
+		}
+		const content = message.content;
+		if (typeof content === "string") {
+			omittedHistory = !appendText(content, true);
+		} else {
+			for (let partIndex = content.length - 1; partIndex >= 0; partIndex--) {
+				const part = content[partIndex]!;
+				if (part.type === "image") {
+					if (imageBudget <= 0) {
+						omittedImages = true;
+						continue;
+					}
+					// Leave space for agy's text-side image reference, not its base64 media.
+					if (remaining < 64) {
+						omittedHistory = true;
+						break;
+					}
+					remaining -= 64;
+					imageBudget--;
+					blocks.push({ type: "image", data: part.data, mimeType: part.mimeType });
+					continue;
+				}
+				let text: string;
+				switch (part.type) {
+					case "text":
+						text = part.text;
+						break;
+					case "thinking":
+						text = `<thinking>${part.thinking}</thinking>`;
+						break;
+					case "toolCall":
+						text = `<tool_call id=${JSON.stringify(part.id)} name=${JSON.stringify(part.name)}>${stableStringifyJson(part.arguments)}</tool_call>`;
+						break;
+					default:
+						continue;
+				}
+				// Keep plain-text suffixes without emitting half a tool_call or thinking tag.
+				if (!appendText(text, part.type === "text")) {
+					omittedHistory = true;
+					break;
+				}
+			}
+		}
+		if (wrapped) blocks.push({ type: "text", text: start });
+		if (omittedHistory) break;
 	}
-	for (const message of replay.slice(split)) {
-		if (isInputMessage(message)) blocks.push(...inputBlocks(message));
+	if (omittedImages) blocks.push({ type: "text", text: IMAGE_OMISSION });
+	if (omittedHistory) blocks.push({ type: "text", text: HISTORY_OMISSION });
+	if (hasCheckpoint) blocks.push({ type: "text", text: CHECKPOINT_START });
+	return { blocks: blocks.reverse(), omittedHistory, omittedImages };
+}
+
+/** Charge room for the separator agy adds between text blocks. */
+function textBytes(text: string): number {
+	return Buffer.byteLength(text) + 2;
+}
+
+/** Newest UTF-8 text within budget, without encoding discarded text or splitting a surrogate pair. */
+function utf8Tail(text: string, bytes: number): string {
+	let index = text.length;
+	while (bytes > 0 && index > 0) {
+		const unit = text.charCodeAt(index - 1);
+		const previous = text.charCodeAt(index - 2);
+		const pair = unit >= 0xdc00 && unit <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff;
+		const width = pair ? 4 : unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
+		if (width > bytes) break;
+		bytes -= width;
+		index -= pair ? 2 : 1;
 	}
-	return blocks;
+	return text.slice(index);
 }
 
 /** Supply the actual delayed result only after agy's old prompt has confirmed cancellation. */

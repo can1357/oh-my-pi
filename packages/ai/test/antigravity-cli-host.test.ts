@@ -18,11 +18,17 @@ import {
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
-import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, ImageContent, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
+import type {
+	ContentBlock,
+	NewSessionRequest,
+	PromptRequest,
+	PromptResponse,
+	SessionConfigOption,
+} from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
 	api: "antigravity-acp",
@@ -88,6 +94,7 @@ class FakeAgy implements AgyTransport {
 	readonly promptHistory: FakePrompt[] = [];
 	readonly loads: string[] = [];
 	readonly created: string[] = [];
+	readonly sessionRequests: NewSessionRequest[] = [];
 	readonly configurations: string[] = [];
 	readonly abort = new AbortController();
 	readonly exit = Promise.withResolvers<number>();
@@ -128,7 +135,8 @@ class FakeAgy implements AgyTransport {
 		this.connection = {
 			signal: this.abort.signal,
 			initialize: async () => ({ protocolVersion: 1 }),
-			newSession: async () => {
+			newSession: async request => {
+				this.sessionRequests.push(request);
 				this.currentId = crypto.randomUUID();
 				this.created.push(this.currentId);
 				return { sessionId: this.currentId, configOptions };
@@ -479,6 +487,85 @@ describe("AgyHost stateful steps", () => {
 		expect(third.writer.output.content).toEqual([{ type: "text", text: "Both show benches." }]);
 	});
 
+	it("keeps one conversation through seven image results, but reseeds if old image bytes change", async () => {
+		const state = await parked();
+		const messages = [...state.messages];
+		const images: ImageContent[] = [];
+		let output = state.output;
+		let assistant = state.first.writer.output;
+		for (let index = 0; index < 7; index++) {
+			const image: ImageContent = { type: "image", data: btoa(`image ${index}`), mimeType: "image/png" };
+			images.push(image);
+			const toolResult = result(assistant, `result-${index}`);
+			toolResult.content.push(image);
+			messages.push(toolResult);
+			if (index === 4 || index === 5) messages.push(user(`late-steer-${index}`));
+			const run = step(state.host, messages);
+			const { request } = await state.fake.prompts.next();
+			expect(request.sessionId).toBe(state.prompt.request.sessionId);
+			expect(request.prompt.filter(block => block.type === "image")).toEqual([image]);
+			expect(textOf(request.prompt)).not.toContain("<conversation-checkpoint>");
+			if (index === 4 || index === 5) expect(textOf(request.prompt)).toContain(`late-steer-${index}`);
+			expect(await output).toMatchObject({
+				isError: false,
+				content: [{ type: "text", text: `result-${index}` }, expect.anything()],
+			});
+			state.fake.text(`Read ${index}.`);
+			output = state.fake.call("read", { path: `${index + 1}.png` });
+			await run.done;
+			assistant = run.writer.output;
+			messages.push(assistant);
+		}
+		expect(state.fake.created).toHaveLength(1);
+
+		const branch = messages.map((message): Message =>
+			message.role === "toolResult" && message.content.includes(images[0]!)
+				? {
+						...message,
+						content: message.content.map(part => (part.type === "image" ? { ...part, data: btoa("edited") } : part)),
+					}
+				: message,
+		);
+		const updated = step(state.host, [...branch, result(assistant, "newest result after the edit")]);
+		await state.fake.cancellations.next();
+		const reseed = await state.fake.prompts.next();
+		expect((await output).isError).toBe(true);
+		expect(state.fake.created).toHaveLength(2);
+		expect(reseed.request.sessionId).not.toBe(state.prompt.request.sessionId);
+		expect(reseed.request.prompt.filter(block => block.type === "image")).toEqual(images.slice(-5));
+		expect(textOf(reseed.request.prompt)).toContain("newest result after the edit");
+		expect(textOf(reseed.request.prompt)).toContain("images omitted");
+		state.fake.text("Replayed the edited conversation.");
+		reseed.response.resolve({ stopReason: "end_turn" });
+		await updated.done;
+	});
+
+	it("budgets all images in one live prompt while preserving text and the newest media", async () => {
+		const state = await parked();
+		const images: ImageContent[] = Array.from({ length: 8 }, (_, index) => ({
+			type: "image",
+			data: btoa(`image ${index}`),
+			mimeType: "image/png",
+		}));
+		const toolResult = result(state.first.writer.output, "tool text");
+		toolResult.content.push(...images.slice(0, 6));
+		const input: Message = {
+			role: "user",
+			content: [{ type: "text", text: "new input" }, ...images.slice(6)],
+			timestamp: 0,
+		};
+		const next = step(state.host, [...state.messages, toolResult, input]);
+		const steer = await state.fake.prompts.next();
+		expect(steer.request.sessionId).toBe(state.prompt.request.sessionId);
+		expect(steer.request.prompt.filter(block => block.type === "image")).toEqual(images.slice(-5));
+		expect(textOf(steer.request.prompt)).toContain("images omitted");
+		expect(textOf(steer.request.prompt)).toContain("new input");
+		expect((await state.output).content[0]).toEqual({ type: "text", text: "tool text" });
+		state.fake.text("Received the images.");
+		steer.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+	});
+
 	it("waits for confirmed cancellation before releasing a deadline-held MCP call or sending its late result", async () => {
 		const state = await parked({ holdLimitMs: 20, cancelTimeoutMs: 300 });
 		state.fake.cancelMode = "hold";
@@ -547,6 +634,46 @@ describe("AgyHost stateful steps", () => {
 		state.fake.text("Edited history received.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await next.done;
+	});
+
+	it("keeps the UTF-8 replay tail within agy's text cap including system append, and warns out of band", async () => {
+		const state = await parked();
+		const system = ["system".repeat(9_000), "系统".repeat(3_000)].join("\n\n");
+		const notices: string[] = [];
+		const latest = "LATEST-TOOL-RESULT";
+		const next = step(
+			state.host,
+			[
+				user(`EARLIEST-HISTORY-HEAD\n${"🔖".repeat(45_000)}\nSURVIVING-HISTORY-TAIL`),
+				state.first.writer.output,
+				result(state.first.writer.output, latest),
+				user("LATEST-USER-INSTRUCTION"),
+			],
+			{ systemPrompt: [system] },
+			undefined,
+			{ onProviderNotice: message => notices.push(message) },
+		);
+		await state.fake.cancellations.next();
+		const { request, response } = await state.fake.prompts.next();
+		expect((await state.output).isError).toBe(true);
+		expect(state.fake.created).toHaveLength(2);
+		expect(state.fake.sessionRequests.at(-1)?._meta).toEqual({ antigravity: { systemPrompt: { append: system } } });
+		const text = textOf(request.prompt);
+		const bytes = Buffer.from(text);
+		expect(bytes.length + Buffer.byteLength(system)).toBeLessThan(192_000);
+		expect(bytes.toString("utf8")).toBe(text);
+		expect(text).not.toContain("EARLIEST-HISTORY-HEAD");
+		expect(text).toContain("Older conversation history omitted");
+		expect(text).toContain("SURVIVING-HISTORY-TAIL");
+		expect(text).toContain("<tool_call");
+		expect(text).toContain(latest);
+		expect(text).toContain("</conversation-checkpoint>");
+		expect(request.prompt.at(-1)).toEqual({ type: "text", text: "LATEST-USER-INSTRUCTION" });
+		expect(notices).toEqual([expect.stringContaining("omitted older history")]);
+		state.fake.text("Continued with the recent results.");
+		response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Continued with the recent results." }]);
 	});
 
 	it("restarts on tool-set changes and carries the actual result and historical images into the reseed", async () => {

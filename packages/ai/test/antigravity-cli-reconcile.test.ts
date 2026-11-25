@@ -189,7 +189,7 @@ describe("replayPrompt", () => {
 		reply.content.push(secondImage);
 		const body = toolResult("a", "before");
 		body.content.push(thirdImage, { type: "text", text: "after" });
-		const blocks = replayPrompt([{ ...user(""), content: [firstImage] }, reply, body, user("continue")]);
+		const { blocks } = replayPrompt([{ ...user(""), content: [firstImage] }, reply, body, user("continue")], 10_000, 5);
 		expect(blocks.filter(block => block.type === "image")).toEqual([firstImage, secondImage, thirdImage]);
 		const imageIndex = blocks.findIndex(block => block.type === "image" && block.data === thirdImage.data);
 		expect(blocks[imageIndex - 1]).toEqual({ type: "text", text: "before" });
@@ -234,17 +234,35 @@ describe("replayPrompt", () => {
 		});
 	});
 	it("sends trailing user input as-is and labels earlier transcript messages", () => {
-		const blocks = replayPrompt([
-			user("read a.txt"),
-			assistant("reading", ["call-1"]),
-			toolResult("call-1", "FILE-BODY-42"),
-			user("what did it say?"),
-		]);
+		const { blocks } = replayPrompt(
+			[user("read a.txt"), assistant("reading", ["call-1"]), toolResult("call-1", "FILE-BODY-42"), user("what did it say?")],
+			10_000,
+			5,
+		);
 
 		const text = blocks.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 		expect(text).toContain("FILE-BODY-42");
 		expect(text).toContain("read a.txt");
 		expect(text).toContain('id="call-1"');
 		expect(blocks.at(-1)).toEqual({ type: "text", text: "what did it say?" });
+	});
+
+	it("keeps the end of an oversized tool result without losing the latest user input or checkpoint framing", () => {
+		const { blocks, omittedHistory } = replayPrompt(
+			[
+				user("read the big file"),
+				assistant("reading", ["call-1"]),
+				toolResult("call-1", `EARLIEST-RESULT\n${"🔖".repeat(300)}\nLATEST-RESULT`),
+				user("check that result"),
+			],
+			800,
+			5,
+		);
+		const text = blocks.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(omittedHistory).toBe(true);
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(800);
+		expect(text).not.toContain("EARLIEST-RESULT");
+		expect(text).toContain('id="call-1"');
+		expect(text).toContain("LATEST-RESULT\n</tool_result>\n</conversation-checkpoint>\ncheck that result");
 	});
 });

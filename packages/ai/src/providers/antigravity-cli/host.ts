@@ -5,6 +5,7 @@
  * only in a subsequent prompt. Failed drains kill the process and reseed.
  */
 import * as path from "node:path";
+import { resolveImageCountBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { $which, isRecord, logger, prompt, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	type ContentBlock,
@@ -22,6 +23,7 @@ import type {
 	Message,
 	Model,
 	ProviderSessionState,
+	StreamOptions,
 	Tool,
 	ToolResultMessage,
 } from "../../types";
@@ -42,6 +44,7 @@ import {
 	type Ledger,
 	lateToolResultPrompt,
 	planTurn,
+	projectPromptImages,
 	replayPrompt,
 	toolResultImagesPrompt,
 	transcriptDigest,
@@ -55,6 +58,8 @@ const ANNOUNCEMENT_TIMEOUT_MS = 2_000;
 // Leave enough time to force-stop a process that never acknowledges cancellation.
 const HOLD_LIMIT_MS = 165_000;
 const CANCEL_TIMEOUT_MS = 5_000;
+// agy 1.5.15 clips the combined prompt text at 192,000 bytes. Leave room for its own framing.
+const REPLAY_TEXT_BUDGET = 190_000;
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
 // agy <1.5.14 streams its own retry attempts as a line of agent text; anchored so prose mentioning an API error stays text.
 const RETRY_NOTICE = /(?:^|\n)[^\S\n]*(?:⚠\uFE0F?[^\S\n]*)?API error \(attempt \d+\):[^\S\n]*([^\n]+)/;
@@ -72,6 +77,7 @@ export interface AgyStepOptions {
 	cwd?: string;
 	reasoning?: string;
 	signal?: AbortSignal;
+	onProviderNotice?: StreamOptions["onProviderNotice"];
 	/** Non-secret credential revision; a changed revision restarts agy's native token cache. */
 	credentialVersion?: string;
 }
@@ -323,12 +329,18 @@ export class AgyHost implements ProviderSessionState {
 			}
 			await this.#setup(this.#configure(model, options.reasoning));
 			step.controller.signal.throwIfAborted();
+			const imageBudget = resolveImageCountBudget(model, true) ?? Number.POSITIVE_INFINITY;
 			if (plan.kind === "resume") {
 				const pending = this.#pending;
 				if (pending?.drain) await this.#setup(pending.drain);
 				if (plan.toolResult && pending?.state === "detached") {
 					this.#releasePending();
-					this.#prompt([...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
+					this.#prompt(
+						projectPromptImages(
+							[...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)],
+							imageBudget,
+						),
+					);
 				} else {
 					pending?.expiry.cancel();
 					const steer = [
@@ -337,7 +349,7 @@ export class AgyHost implements ProviderSessionState {
 					];
 					if (steer.length > 0) {
 						const previous = this.#turn;
-						this.#prompt(steer);
+						this.#prompt(projectPromptImages(steer, imageBudget));
 						// The old prompt settling proves agy accepted the steer before the held tool resumes.
 						if (previous)
 							await this.#setup(
@@ -357,9 +369,23 @@ export class AgyHost implements ProviderSessionState {
 					}
 				}
 			} else {
-				const blocks = replayPrompt(plan.replay);
+				const { blocks, omittedHistory, omittedImages } = replayPrompt(
+					plan.replay,
+					REPLAY_TEXT_BUDGET - Buffer.byteLength(system),
+					imageBudget,
+				);
 				if (blocks.length === 0) throw new Error("Antigravity CLI has nothing new to send for this request");
 				this.#prompt(blocks);
+				if (options.onProviderNotice && (omittedHistory || omittedImages)) {
+					const omitted = omittedHistory ? (omittedImages ? "older history and images" : "older history") : "images";
+					try {
+						options.onProviderNotice(
+							`Antigravity CLI omitted ${omitted} from the conversation replay to fit its prompt limits.`,
+						);
+					} catch (error) {
+						logger.debug("Antigravity CLI replay notice observer failed", { error });
+					}
+				}
 			}
 			await step.done.promise;
 		} catch (error) {

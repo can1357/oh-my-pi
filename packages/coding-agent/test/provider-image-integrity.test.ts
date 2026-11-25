@@ -18,7 +18,14 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { dropUnreadableContextImages } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
  * 1x1 PNG whose chunk framing does not land exactly on `IEND`, yet every
@@ -122,6 +129,42 @@ function textOf(part: TextContent | ImageContent | undefined): string {
 	if (part?.type !== "text") throw new Error(`expected a text block, got ${part?.type}`);
 	return part.text;
 }
+
+test("the SDK keeps prior ACP image bytes after crossing the per-prompt image count", async () => {
+	using dir = TempDir.createSync("@pi-acp-image-history-");
+	const model = getBundledModel("antigravity-cli", "gemini-4-neon");
+	const authStorage = await AuthStorage.create(dir.join("auth.db"));
+	authStorage.keys.setRuntime(model.provider, "test-key");
+	const { session } = await createAgentSession({
+		cwd: dir.path(),
+		agentDir: dir.path(),
+		sessionManager: SessionManager.inMemory(dir.path()),
+		modelRegistry: new ModelRegistry(authStorage, dir.join("models.yml")),
+		authStorage,
+		settings: Settings.isolated(),
+		model,
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		skipPythonPreflight: true,
+	});
+	try {
+		const history = Array.from({ length: 7 }, (_, index) =>
+			userMessage([{ type: "text", text: `Image ${index}` }, INTACT_IMAGE]),
+		);
+		const context = await session.agent.buildSideRequestContext(history, []);
+		const images = context.messages.flatMap(message =>
+			typeof message.content === "string" ? [] : message.content.filter(part => part.type === "image"),
+		);
+		expect(images.map(image => image.data)).toEqual(history.map(() => INTACT_IMAGE.data));
+	} finally {
+		await session.dispose();
+	}
+});
 
 describe("dropUnreadableContextImages", () => {
 	test("degrades an undecodable image to text and keeps decodable siblings byte-identical", async () => {

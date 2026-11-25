@@ -65,6 +65,7 @@ async function runStep(
 		cwd: options.cwd,
 		reasoning: options.reasoning,
 		signal: options.signal,
+		onProviderNotice: options.onProviderNotice,
 		credentialVersion: agyCredentialVersion(options.apiKey),
 	};
 	const sessions = options.providerSessionState;

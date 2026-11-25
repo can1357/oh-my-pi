@@ -97,6 +97,7 @@ describe("image-count-budget", () => {
 		],
 		["openrouter", "openrouter", "https://openrouter.ai/api/v1", "anthropic/claude-opus-5.5", 90],
 		["google-antigravity", "google-gemini-cli", ANTIGRAVITY_URL, "gemini-3.7-flash", 60],
+		["antigravity-cli", "antigravity-acp", "https://antigravity.google", "gemini-4-neon", 5],
 		["xai-oauth", "openai-responses", XAI_URL, "grok-4.7", 60],
 		["xai", "openai-responses", XAI_URL, "grok-4.6", 60],
 		["cursor", "cursor-agent", CURSOR_URL, "gpt-5.5", 60],

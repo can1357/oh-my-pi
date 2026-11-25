@@ -10,6 +10,8 @@ import type { TodoItem } from "../tools/details/todo";
 import type { CustomMessage } from "./messages";
 import type { CacheWarmingRefreshEnd, CacheWarmingRefreshStart } from "./cache-warmer";
 
+export const PROVIDER_NOTICE_SOURCE = "provider";
+
 /**
  * Session-specific events that extend the core AgentEvent.
  *

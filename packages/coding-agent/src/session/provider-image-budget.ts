@@ -243,6 +243,8 @@ function clampImages(context: Context, state: ImageBudgetState): Context {
  * on behalf of a model output.
  */
 export function clampProviderContextImages(context: Context, model: Model): Context {
+	// ACP reconciles the full transcript first and budgets only the blocks the next prompt sends.
+	if (model.api === "antigravity-acp") return context;
 	if (!model.input.includes("image")) return context;
 	const metadataWire = sendsComputerScreenshotMetadata(model);
 	const totalImages = countImages(context, metadataWire);
