@@ -39,6 +39,7 @@ import { editDiffString } from "@oh-my-pi/pi-natives";
 import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-replace-args";
 import { normalizeToLF, stripBom } from "./edit/normalize";
+import type { InternalUrlRouter } from "./internal-urls/router";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
 	approvalRestrictions,
@@ -100,6 +101,8 @@ interface CursorExecBridgeOptions {
 	 */
 	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
+	/** The session's URL router: its own schemes, then the built-ins. Keys the write-policy restriction check. */
+	urlRouter: InternalUrlRouter;
 	emitEvent?: (event: AgentEvent) => void;
 	/**
 	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
@@ -439,7 +442,7 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 	if (approval.policy === "allow") {
 		// The frame names its file only in `pathArg`, so the restriction check keys it here.
 		const cwd = options.getCwd?.() ?? options.cwd;
-		const target = approvalTargetKey(cwd, pathArg);
+		const target = approvalTargetKey(cwd, pathArg, options.urlRouter);
 		const restriction = restrictedFolderReason(
 			{ name: toolName, approvalCacheTargets: () => (target === undefined ? undefined : [target]) },
 			undefined,

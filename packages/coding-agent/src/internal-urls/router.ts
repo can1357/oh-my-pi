@@ -1,13 +1,18 @@
 /**
- * Internal URL router: one process-global registry of scheme handlers.
+ * Internal URL router: built-in scheme handlers plus a session's own schemes.
  *
- * Access via `InternalUrlRouter.instance()`. Handlers are stateless: per-session
- * state arrives through the caller's {@link ResolveContext}/{@link WriteContext}.
- * Tools consult the router's {@link SchemeSpec}-driven API (`target`, `locate`,
- * `writeTier`, `readTier`, ...) instead of branching on scheme names, and the
- * system prompt lists schemes via {@link InternalUrlRouter.describe}. Every
- * method accepts a scheme's single-slash alias (`local:/x`) and normalizes it
- * through {@link InternalUrlRouter.normalize}.
+ * Two layers. {@link InternalUrlRouter.builtins} is the process-wide router: it
+ * holds only OMP's built-in schemes and never changes at runtime. A session's
+ * router (`new InternalUrlRouter(sources)`, reached through `session.urlRouter`
+ * or `ResolveContext.router`) checks the session's own {@link UrlSchemeSource}s
+ * first, in order, and then the built-ins. Code with no session gets the
+ * built-ins only. Handlers are stateless: per-session state arrives through the
+ * caller's {@link ResolveContext}/{@link WriteContext}. Tools consult the
+ * router's {@link SchemeSpec}-driven API (`target`, `locate`, `writeTier`,
+ * `readTier`, ...) instead of branching on scheme names, and the system prompt
+ * lists schemes via {@link InternalUrlRouter.describe}. Every method accepts a
+ * scheme's single-slash alias (`local:/x`) and normalizes it through
+ * {@link InternalUrlRouter.normalize}.
  */
 import * as path from "node:path";
 import type { ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
@@ -82,109 +87,138 @@ const QUERY_START_RE = /\?[\w.-]*=/;
 // Selectors a mutating tool accepts: whole-file display modes that do not change which bytes are addressed.
 const WHOLE_FILE_SELECTOR_RE = /^(?:raw|conflicts)$/i;
 
-/** Process-global scheme registry; tools route internal URLs through its spec-driven API. */
-export class InternalUrlRouter {
-	static #instance: InternalUrlRouter | undefined;
+/**
+ * Schemes a session owns, checked before the built-ins: RPC host URIs, then
+ * extension schemes. Keys are lowercase; a source never holds a built-in scheme.
+ */
+export interface UrlSchemeSource {
+	/** Handler for a lowercase `scheme`, if this source owns it. */
+	get(scheme: string): ProtocolHandler | undefined;
+	/** Every handler this source owns, in registration order. */
+	handlers(): Iterable<ProtocolHandler>;
+}
 
-	#handlers = new Map<string, ProtocolHandler>();
-	/** Scheme whose handler resolves resources of unregistered custom schemes (MCP resource URIs). */
-	readonly #resourceFallbackScheme: string;
-	/** Schemes the constructor registers: OMP-owned, never replaced by hosts. */
-	readonly #builtinSchemes: ReadonlySet<string>;
+/**
+ * Throw when `handler`'s spec write policy disagrees with the handler: `write()` exists exactly for
+ * `write.via: "handler"`; `write.via: "file"` needs a mutable file-backed spec with `locate()`; a
+ * `sandbox` scope needs a linkable `locateSync()` so {@link InternalUrlRouter.sandboxRoots} can locate its root.
+ */
+export function assertProtocolHandlerSpec(handler: ProtocolHandler): void {
+	const { scheme, spec } = handler;
+	const via = spec.write?.via;
+	if (via === "handler" && !handler.write) {
+		throw new Error(`${scheme}:// spec.write.via is "handler" but the handler lacks write()`);
+	}
+	if (via !== "handler" && handler.write) {
+		throw new Error(
+			`${scheme}:// handler has write() but spec.write.via is ${via === undefined ? "absent" : `"${via}"`}`,
+		);
+	}
+	if (via === "file") {
+		if (spec.backing !== "file") {
+			throw new Error(`${scheme}:// spec.write.via "file" requires backing "file", not "${spec.backing}"`);
+		}
+		if (!handler.locate) throw new Error(`${scheme}:// spec.write.via "file" requires a locate() hook`);
+		if (spec.immutable) throw new Error(`${scheme}:// spec.write.via "file" contradicts spec.immutable`);
+	}
+	if (spec.write?.scope === "sandbox" && (!spec.linkable || !handler.locateSync)) {
+		throw new Error(`${scheme}:// spec.write.scope "sandbox" requires spec.linkable and a locateSync() hook`);
+	}
+}
 
-	constructor() {
-		const resourceFallback = new McpProtocolHandler();
-		this.#resourceFallbackScheme = resourceFallback.scheme.toLowerCase();
-		// Registration order is system-prompt order (see describe()).
-		this.register(new SkillProtocolHandler());
-		this.register(new RuleProtocolHandler());
-		this.register(new MemoryProtocolHandler());
-		this.register(new OutProtocolHandler());
-		this.register(new AgentProtocolHandler());
-		this.register(new HistoryProtocolHandler());
-		this.register(new LocalProtocolHandler());
-		this.register(new ProcProtocolHandler());
-		this.register(new CfgProtocolHandler());
-		this.register(new SshProtocolHandler());
+/** OMP's built-in handlers, keyed by lowercase scheme; registration order is system-prompt order (see describe()). */
+function createBuiltinHandlers(resourceFallback: McpProtocolHandler): Map<string, ProtocolHandler> {
+	const handlers = new Map<string, ProtocolHandler>();
+	for (const handler of [
+		new SkillProtocolHandler(),
+		new RuleProtocolHandler(),
+		new MemoryProtocolHandler(),
+		new OutProtocolHandler(),
+		new AgentProtocolHandler(),
+		new HistoryProtocolHandler(),
+		new LocalProtocolHandler(),
+		new ProcProtocolHandler(),
+		new CfgProtocolHandler(),
+		new SshProtocolHandler(),
 		// Reserved OMP-owned security-analysis namespace; vendor adapters normalize into its store.
-		this.register(new SecurityProtocolHandler());
-		this.register(new VaultProtocolHandler());
-		this.register(new IssueProtocolHandler());
-		this.register(new PrProtocolHandler());
-		this.register(new MrProtocolHandler());
-		this.register(resourceFallback);
-		this.register(new OmpProtocolHandler());
-		this.register(new HelpProtocolHandler());
-		this.register(new AttachmentProtocolHandler());
-		this.register(new ConflictProtocolHandler());
-		this.#builtinSchemes = new Set(this.#handlers.keys());
+		new SecurityProtocolHandler(),
+		new VaultProtocolHandler(),
+		new IssueProtocolHandler(),
+		new PrProtocolHandler(),
+		new MrProtocolHandler(),
+		resourceFallback,
+		new OmpProtocolHandler(),
+		new HelpProtocolHandler(),
+		new AttachmentProtocolHandler(),
+		new ConflictProtocolHandler(),
+	] satisfies ProtocolHandler[]) {
+		assertProtocolHandlerSpec(handler);
+		handlers.set(handler.scheme.toLowerCase(), handler);
+	}
+	return handlers;
+}
+
+/** Built-in handlers shared by every router in the process; created on first use, never changed after. */
+interface BuiltinTable {
+	handlers: ReadonlyMap<string, ProtocolHandler>;
+	/** Scheme whose handler resolves resources of unregistered custom schemes (MCP resource URIs). */
+	resourceFallbackScheme: string;
+}
+
+/** Scheme registry for one caller: a session's own schemes, then the built-ins; tools route internal URLs through its spec-driven API. */
+export class InternalUrlRouter {
+	static #builtinTable: BuiltinTable | undefined;
+	static #builtins: InternalUrlRouter | undefined;
+
+	readonly #builtinHandlers: ReadonlyMap<string, ProtocolHandler>;
+	readonly #resourceFallbackScheme: string;
+	readonly #sources: readonly UrlSchemeSource[];
+
+	/** A router over `sources` (checked in order), then the built-ins. No sources: the built-ins alone. */
+	constructor(sources: readonly UrlSchemeSource[] = []) {
+		InternalUrlRouter.#builtinTable ??= (() => {
+			const resourceFallback = new McpProtocolHandler();
+			return {
+				handlers: createBuiltinHandlers(resourceFallback),
+				resourceFallbackScheme: resourceFallback.scheme.toLowerCase(),
+			};
+		})();
+		this.#builtinHandlers = InternalUrlRouter.#builtinTable.handlers;
+		this.#resourceFallbackScheme = InternalUrlRouter.#builtinTable.resourceFallbackScheme;
+		this.#sources = sources;
 	}
 
-	/** Process-global router instance. */
-	static instance(): InternalUrlRouter {
-		InternalUrlRouter.#instance ??= new InternalUrlRouter();
-		return InternalUrlRouter.#instance;
+	/** The process-wide router: OMP's built-in schemes only. For code with no session. */
+	static builtins(): InternalUrlRouter {
+		InternalUrlRouter.#builtins ??= new InternalUrlRouter();
+		return InternalUrlRouter.#builtins;
 	}
 
-	/** Reset the global instance in tests. */
+	/** Whether `scheme` (case-insensitive) is one of OMP's built-in schemes, which no session source may own. */
+	static isBuiltin(scheme: string): boolean {
+		return InternalUrlRouter.builtins().#builtinHandlers.has(scheme.toLowerCase());
+	}
+
+	/** Drop the built-in handlers (and their cached state) in tests; the next router recreates them. */
 	static resetForTests(): void {
-		InternalUrlRouter.#instance = undefined;
+		InternalUrlRouter.#builtinTable = undefined;
+		InternalUrlRouter.#builtins = undefined;
 	}
 
-	/**
-	 * Install (or replace) the handler for `handler.scheme`. Throws when the spec's write
-	 * policy disagrees with the handler: `write()` exists exactly for `write.via: "handler"`;
-	 * `write.via: "file"` needs a mutable file-backed spec with `locate()`; a `sandbox` scope
-	 * needs a linkable `locateSync()` so {@link sandboxRoots} can locate its root.
-	 */
-	register(handler: ProtocolHandler): void {
-		const { scheme, spec } = handler;
-		const via = spec.write?.via;
-		if (via === "handler" && !handler.write) {
-			throw new Error(`${scheme}:// spec.write.via is "handler" but the handler lacks write()`);
-		}
-		if (via !== "handler" && handler.write) {
-			throw new Error(
-				`${scheme}:// handler has write() but spec.write.via is ${via === undefined ? "absent" : `"${via}"`}`,
-			);
-		}
-		if (via === "file") {
-			if (spec.backing !== "file") {
-				throw new Error(`${scheme}:// spec.write.via "file" requires backing "file", not "${spec.backing}"`);
-			}
-			if (!handler.locate) throw new Error(`${scheme}:// spec.write.via "file" requires a locate() hook`);
-			if (spec.immutable) throw new Error(`${scheme}:// spec.write.via "file" contradicts spec.immutable`);
-		}
-		if (spec.write?.scope === "sandbox" && (!spec.linkable || !handler.locateSync)) {
-			throw new Error(`${scheme}:// spec.write.scope "sandbox" requires spec.linkable and a locateSync() hook`);
-		}
-		this.#handlers.set(scheme.toLowerCase(), handler);
-	}
-
-	/** Whether the router constructor registered `scheme` (case-insensitive): an OMP-owned scheme hosts may not replace. */
-	isBuiltin(scheme: string): boolean {
-		return this.#builtinSchemes.has(scheme.toLowerCase());
-	}
-
-	/** Remove a scheme's handler; true when one was registered. */
-	unregister(scheme: string): boolean {
-		return this.#handlers.delete(scheme.toLowerCase());
-	}
-
-	/** Registered handler for `scheme` (case-insensitive). */
+	/** Registered handler for `scheme` (case-insensitive): the session's sources first, then the built-ins. */
 	getHandler(scheme: string): ProtocolHandler | undefined {
-		return this.#handlers.get(scheme.toLowerCase());
+		return this.#handler(scheme.toLowerCase());
 	}
 
 	/** Declared spec of a registered scheme (case-insensitive). */
 	spec(scheme: string): SchemeSpec | undefined {
-		return this.#handlers.get(scheme.toLowerCase())?.spec;
+		return this.#handler(scheme.toLowerCase())?.spec;
 	}
 
-	/** Specs of every registered scheme, in registration order. */
+	/** Specs of every registered scheme: built-ins in registration order, then the session's own. */
 	specs(): ReadonlyMap<string, SchemeSpec> {
 		const specs = new Map<string, SchemeSpec>();
-		for (const [scheme, handler] of this.#handlers) specs.set(scheme, handler.spec);
+		for (const [scheme, handler] of this.#entries()) specs.set(scheme, handler.spec);
 		return specs;
 	}
 
@@ -198,13 +232,13 @@ export class InternalUrlRouter {
 		if (!URL_PREFIX_RE.test(input)) {
 			// The first eligible scheme wins: later `local://` text belongs to the URL's own path.
 			for (const segment of input.matchAll(PREFIXED_URL_SEGMENT_RE)) {
-				if (this.#handlers.get(segment[1].toLowerCase())?.spec.singleSlashAlias) {
+				if (this.#handler(segment[1].toLowerCase())?.spec.singleSlashAlias) {
 					return input.slice(segment.index + 1);
 				}
 			}
 		}
 		const match = SINGLE_SLASH_ALIAS_RE.exec(input);
-		if (!match || !this.#handlers.get(match[1].toLowerCase())?.spec.singleSlashAlias) return input;
+		if (!match || !this.#handler(match[1].toLowerCase())?.spec.singleSlashAlias) return input;
 		return `${match[1]}://${input.slice(match[0].length)}`;
 	}
 
@@ -224,14 +258,14 @@ export class InternalUrlRouter {
 		if (!scheme) return false;
 		// Registered handlers only accept the hierarchical `scheme://` form;
 		// opaque inputs reach the MCP resource fallback alone.
-		if (this.#handlers.has(scheme)) return this.canHandle(normalized);
+		if (this.#handler(scheme)) return this.canHandle(normalized);
 		return this.#isResourceFallbackScheme(scheme);
 	}
 
 	/** Schemes whose handler supports host/path autocomplete. */
 	completionSchemes(): string[] {
 		const schemes: string[] = [];
-		for (const [scheme, handler] of this.#handlers) {
+		for (const [scheme, handler] of this.#entries()) {
 			if (handler.complete) schemes.push(scheme);
 		}
 		return schemes;
@@ -242,7 +276,7 @@ export class InternalUrlRouter {
 	 * Returns `null` when the scheme is unknown or does not support completion.
 	 */
 	async complete(scheme: string, query: string, context?: ResolveContext): Promise<UrlCompletion[] | null> {
-		const handler = this.#handlers.get(scheme.toLowerCase());
+		const handler = this.#handler(scheme.toLowerCase());
 		if (!handler?.complete) return null;
 		return handler.complete(query, context);
 	}
@@ -282,7 +316,7 @@ export class InternalUrlRouter {
 		const scheme = extractUriScheme(bare);
 		if (!scheme) return null;
 		// Registered handlers only accept the hierarchical `scheme://` form.
-		const registered = this.#handlers.get(scheme);
+		const registered = this.#handler(scheme);
 		const handler = registered
 			? this.canHandle(bare)
 				? registered
@@ -366,7 +400,7 @@ export class InternalUrlRouter {
 	 */
 	sandboxRoots(context?: ResolveContext): string[] {
 		const roots: string[] = [];
-		for (const [scheme, handler] of this.#handlers) {
+		for (const [scheme, handler] of this.#entries()) {
 			if (handler.spec.write?.scope !== "sandbox") continue;
 			const root = this.locateSync(`${scheme}://`, context);
 			if (root !== undefined) roots.push(path.resolve(root));
@@ -412,7 +446,7 @@ export class InternalUrlRouter {
 	readTier(text: string): ToolTier {
 		const lower = text.toLowerCase();
 		let tier: ToolTier = "read";
-		for (const [scheme, handler] of this.#handlers) {
+		for (const [scheme, handler] of this.#entries()) {
 			const schemeTier = handler.spec.readTier ?? "read";
 			if (TIER_RANK[schemeTier] <= TIER_RANK[tier]) continue;
 			if (lower.includes(`${scheme}://`)) tier = schemeTier;
@@ -423,7 +457,7 @@ export class InternalUrlRouter {
 	/** Rendered promptDoc lines, registration order, for schemes available under `host`. */
 	describe(host: SchemeHost): string[] {
 		const lines: string[] = [];
-		for (const handler of this.#handlers.values()) {
+		for (const [, handler] of this.#entries()) {
 			const line = handler.promptDoc?.(host);
 			if (line !== undefined) lines.push(line);
 		}
@@ -433,26 +467,45 @@ export class InternalUrlRouter {
 	/** Rendered promptReference entries, registration order: the body of `help://read/urls`. */
 	reference(): string[] {
 		const lines: string[] = [];
-		for (const handler of this.#handlers.values()) {
+		for (const [, handler] of this.#entries()) {
 			const line = handler.promptReference?.();
 			if (line !== undefined) lines.push(line);
 		}
 		return lines;
 	}
 
+	/** Handler for a lowercase `scheme`: the first source that owns it, else the built-in. */
+	#handler(scheme: string): ProtocolHandler | undefined {
+		for (const source of this.#sources) {
+			const handler = source.get(scheme);
+			if (handler) return handler;
+		}
+		return this.#builtinHandlers.get(scheme);
+	}
+
+	/** Every registered `[scheme, handler]`: built-ins in registration order, then each source's own. */
+	*#entries(): Generator<[string, ProtocolHandler]> {
+		yield* this.#builtinHandlers;
+		for (const source of this.#sources) {
+			for (const handler of source.handlers()) yield [handler.scheme.toLowerCase(), handler];
+		}
+	}
+
 	#isResourceFallbackScheme(scheme: string): boolean {
-		return !["file", "http", "https"].includes(scheme) && this.#handlers.has(this.#resourceFallbackScheme);
+		return !["file", "http", "https"].includes(scheme) && this.#builtinHandlers.has(this.#resourceFallbackScheme);
 	}
 
 	#resourceFallbackHandler(scheme: string): ProtocolHandler | undefined {
-		return this.#isResourceFallbackScheme(scheme) ? this.#handlers.get(this.#resourceFallbackScheme) : undefined;
+		return this.#isResourceFallbackScheme(scheme)
+			? this.#builtinHandlers.get(this.#resourceFallbackScheme)
+			: undefined;
 	}
 
 	/** Normalized hierarchical URL of a registered scheme, with its handler; undefined otherwise. */
 	#registered(input: string): RegisteredUrl | undefined {
 		const url = this.normalize(input);
 		const split = splitUrlScheme(url);
-		const handler = split && this.#handlers.get(split.scheme);
+		const handler = split && this.#handler(split.scheme);
 		return handler && split ? { url, scheme: split.scheme, handler } : undefined;
 	}
 
@@ -478,11 +531,9 @@ export class InternalUrlRouter {
 		const parsed = parseInternalUrl(this.normalize(input));
 		const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
 		const handler =
-			this.#handlers.get(scheme) ?? (allowResourceFallback ? this.#resourceFallbackHandler(scheme) : undefined);
+			this.#handler(scheme) ?? (allowResourceFallback ? this.#resourceFallbackHandler(scheme) : undefined);
 		if (!handler) {
-			const available = Array.from(this.#handlers.keys())
-				.map(candidate => `${candidate}://`)
-				.join(", ");
+			const available = Array.from(this.#entries(), ([candidate]) => `${candidate}://`).join(", ");
 			throw new Error(`Unknown protocol: ${scheme}://\nSupported: ${available || "none"}`);
 		}
 		return { parsed, handler };

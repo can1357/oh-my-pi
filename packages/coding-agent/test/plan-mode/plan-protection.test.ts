@@ -6,6 +6,7 @@ import { AGGRESSIVE_SHAKE_CONFIG, collectShakeRegions } from "@oh-my-pi/pi-agent
 import type { ProtectedToolContext } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, TextContent, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { createPlanReadMatcher } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-protection";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const tokenizer = new Tokenizer();
 
@@ -33,19 +34,19 @@ function context(opts: { toolName?: string; callName?: string | undefined; path?
 
 describe("createPlanReadMatcher", () => {
 	it("protects reads of the canonical local://PLAN.md alias", () => {
-		const matcher = createPlanReadMatcher(() => "local://PLAN.md");
+		const matcher = createPlanReadMatcher(() => "local://PLAN.md", InternalUrlRouter.builtins());
 		expect(matcher(context({ path: "local://PLAN.md" }))).toBe(true);
 	});
 
 	it("protects reads of a titled plan path from the reference getter", () => {
-		const matcher = createPlanReadMatcher(() => "local://wp-migration.md");
+		const matcher = createPlanReadMatcher(() => "local://wp-migration.md", InternalUrlRouter.builtins());
 		expect(matcher(context({ path: "local://wp-migration.md" }))).toBe(true);
 		// The canonical alias stays protected even when the reference is titled.
 		expect(matcher(context({ path: "local://PLAN.md" }))).toBe(true);
 	});
 
 	it("tolerates read selectors and single-slash scheme spelling", () => {
-		const matcher = createPlanReadMatcher(() => "local://wp-migration.md");
+		const matcher = createPlanReadMatcher(() => "local://wp-migration.md", InternalUrlRouter.builtins());
 		expect(matcher(context({ path: "local://PLAN.md:1-50" }))).toBe(true);
 		expect(matcher(context({ path: "local://PLAN.md:raw" }))).toBe(true);
 		expect(matcher(context({ path: "local:/PLAN.md" }))).toBe(true);
@@ -54,14 +55,14 @@ describe("createPlanReadMatcher", () => {
 
 	it("reflects a mid-session retitle at match time", () => {
 		let planPath = "local://PLAN.md";
-		const matcher = createPlanReadMatcher(() => planPath);
+		const matcher = createPlanReadMatcher(() => planPath, InternalUrlRouter.builtins());
 		expect(matcher(context({ path: "local://renamed.md" }))).toBe(false);
 		planPath = "local://renamed.md";
 		expect(matcher(context({ path: "local://renamed.md" }))).toBe(true);
 	});
 
 	it("does not protect non-plan reads or non-read tools", () => {
-		const matcher = createPlanReadMatcher(() => "local://wp-migration.md");
+		const matcher = createPlanReadMatcher(() => "local://wp-migration.md", InternalUrlRouter.builtins());
 		// A different local artifact (shared subagent content) is not the plan.
 		expect(matcher(context({ path: "local://scratch.md" }))).toBe(false);
 		// Prefix collisions must not match (PLAN.md vs PLAN.md.bak / PLANNER.md).
@@ -121,7 +122,7 @@ function readResult(toolCallId: string, text: string): SessionMessageEntry {
 }
 
 describe("plan-read protection in compaction", () => {
-	const matcher = createPlanReadMatcher(() => "local://wp-migration.md");
+	const matcher = createPlanReadMatcher(() => "local://wp-migration.md", InternalUrlRouter.builtins());
 
 	it("prunes regular reads but keeps the plan read intact", () => {
 		const planResult = readResult("plan-read", "plan body that must remain intact");

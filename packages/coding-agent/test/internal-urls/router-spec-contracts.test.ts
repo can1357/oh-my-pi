@@ -8,6 +8,7 @@ import {
 	InternalUrlRouter,
 	type ProtocolHandler,
 	type SchemeSpec,
+	UrlSchemeTable,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -33,14 +34,13 @@ afterEach(() => {
 	InternalUrlRouter.resetForTests();
 });
 
-describe("InternalUrlRouter.register invariants", () => {
+describe("session scheme registration invariants", () => {
 	const locate = async (): Promise<string | null> => "/tmp/fixture";
+	const register = (handler: ProtocolHandler): void => new UrlSchemeTable("Test scheme").replace([handler]);
 
 	it("refuses a write() hook without spec.write", () => {
 		const handler = fixture({ backing: "virtual", selectors: "lines", immutable: false }, { write: async () => {} });
-		expect(() => InternalUrlRouter.instance().register(handler)).toThrow(
-			"fixture:// handler has write() but spec.write.via is absent",
-		);
+		expect(() => register(handler)).toThrow("fixture:// handler has write() but spec.write.via is absent");
 	});
 
 	it("refuses a write() hook when tools own the writes", () => {
@@ -48,9 +48,7 @@ describe("InternalUrlRouter.register invariants", () => {
 			{ backing: "file", selectors: "lines", immutable: false, write: fileWrite },
 			{ locate, write: async () => {} },
 		);
-		expect(() => InternalUrlRouter.instance().register(handler)).toThrow(
-			'fixture:// handler has write() but spec.write.via is "file"',
-		);
+		expect(() => register(handler)).toThrow('fixture:// handler has write() but spec.write.via is "file"');
 	});
 
 	it("refuses spec.write.via handler without a write() hook", () => {
@@ -60,22 +58,21 @@ describe("InternalUrlRouter.register invariants", () => {
 			immutable: false,
 			write: { ...fileWrite, via: "handler" },
 		});
-		expect(() => InternalUrlRouter.instance().register(handler)).toThrow(
-			'fixture:// spec.write.via is "handler" but the handler lacks write()',
-		);
+		expect(() => register(handler)).toThrow('fixture:// spec.write.via is "handler" but the handler lacks write()');
 	});
 
 	it("refuses file writes without a file backing, a locate() hook, or with an immutable spec", () => {
-		const router = InternalUrlRouter.instance();
+		const table = new UrlSchemeTable("Test scheme");
+		const router = new InternalUrlRouter([table]);
 		const virtualBacked = fixture(
 			{ backing: "virtual", selectors: "lines", immutable: false, write: fileWrite },
 			{ locate },
 		);
 		const unlocatable = fixture({ backing: "file", selectors: "lines", immutable: false, write: fileWrite });
 		const immutable = fixture({ backing: "file", selectors: "lines", immutable: true, write: fileWrite }, { locate });
-		expect(() => router.register(virtualBacked)).toThrow('requires backing "file", not "virtual"');
-		expect(() => router.register(unlocatable)).toThrow("requires a locate() hook");
-		expect(() => router.register(immutable)).toThrow("contradicts spec.immutable");
+		expect(() => table.replace([virtualBacked])).toThrow('requires backing "file", not "virtual"');
+		expect(() => table.replace([unlocatable])).toThrow("requires a locate() hook");
+		expect(() => table.replace([immutable])).toThrow("contradicts spec.immutable");
 		expect(router.canHandle("fixture://x")).toBe(false);
 	});
 
@@ -84,28 +81,31 @@ describe("InternalUrlRouter.register invariants", () => {
 			{ backing: "file", selectors: "lines", immutable: false, write: { ...fileWrite, scope: "sandbox" } },
 			{ locate },
 		);
-		expect(() => InternalUrlRouter.instance().register(handler)).toThrow("requires spec.linkable and a locateSync()");
+		expect(() => register(handler)).toThrow("requires spec.linkable and a locateSync()");
 	});
 
-	it("registers a mutable file-backed scheme whose tools own the writes", () => {
-		const router = InternalUrlRouter.instance();
-		router.register(fixture({ backing: "file", selectors: "lines", immutable: false, write: fileWrite }, { locate }));
+	it("serves a mutable file-backed session scheme whose tools own the writes, in that session only", () => {
+		const table = new UrlSchemeTable("Test scheme");
+		const router = new InternalUrlRouter([table]);
+		table.replace([fixture({ backing: "file", selectors: "lines", immutable: false, write: fileWrite }, { locate })]);
 		expect(router.canHandle("fixture://x")).toBe(true);
 		expect(router.fileWritable("fixture://x")).toBe(true);
-		expect(router.isBuiltin("fixture")).toBe(false);
-		expect(router.isBuiltin("LOCAL")).toBe(true);
+		expect(InternalUrlRouter.builtins().canHandle("fixture://x")).toBe(false);
+		expect(new InternalUrlRouter().canHandle("fixture://x")).toBe(false);
+		expect(InternalUrlRouter.isBuiltin("fixture")).toBe(false);
+		expect(InternalUrlRouter.isBuiltin("LOCAL")).toBe(true);
 	});
 });
 
 describe("InternalUrlRouter URL shape", () => {
 	it("rewrites only single-slash aliases of schemes that declare one", () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		expect(router.normalize("local:/notes.md")).toBe("local://notes.md");
 		expect(router.normalize("vault:/Work/a.md")).toBe("vault:/Work/a.md");
 	});
 
 	it("strips a filesystem path prefixed onto an aliasing scheme's URL", () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		expect(router.normalize("/home/me/repo/local://notes.md")).toBe("local://notes.md");
 		expect(router.normalize("notes/local://a/b.md:10-20")).toBe("local://a/b.md:10-20");
 		// The first prefixed scheme wins; a later `local://` is part of the URL's path.
@@ -123,7 +123,7 @@ describe("InternalUrlRouter URL shape", () => {
 	});
 
 	it("never treats a URL query as a glob, but keeps path globs", () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		for (const url of [
 			"vault://W?op=search&q=[x]",
 			"vault://W?op=search&q=a/*.md",
@@ -145,7 +145,7 @@ describe("InternalUrlRouter.requireLocal diagnostics", () => {
 		const unregister = registerArtifactsDir(artifactsDir);
 		try {
 			await Bun.write(path.join(artifactsDir, "reviewer_0.md"), "report\n");
-			await expect(InternalUrlRouter.instance().requireLocal("agent://reviewer_9", "find", {})).rejects.toThrow(
+			await expect(InternalUrlRouter.builtins().requireLocal("agent://reviewer_9", "find", {})).rejects.toThrow(
 				"Cannot find agent://reviewer_9: Not found: reviewer_9",
 			);
 		} finally {

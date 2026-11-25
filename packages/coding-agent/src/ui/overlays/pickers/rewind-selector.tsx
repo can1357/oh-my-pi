@@ -41,6 +41,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspMark, TspSpan } from "@oh-my-pi/pi-wire";
+import type { InternalUrlRouter } from "../../../internal-urls/router";
 import type { TranscriptReplica } from "../../../modes/interactive/transcript-replica";
 import type { BranchVariantPath } from "../../../modes/view-model/overlays/rewind-selector";
 import {
@@ -71,6 +72,8 @@ import { ActionButton } from "../panels/common";
 
 export interface RewindSelectorProps {
 	readonly entries: readonly TranscriptEntryLike[];
+	/** The session's URL router: turn search text and drawn turns classify URLs through it. */
+	readonly router: InternalUrlRouter;
 	/** Alternate branches diverging at a turn (by the id of the entry that opened it). */
 	siblingPaths?(turnId: string): readonly BranchVariantPath[];
 	/** Entry the outline starts on (a turn's "Rewind to here…"); default: the latest turn. */
@@ -183,7 +186,7 @@ function termLane(targets: readonly RewindTarget[]): TurnLane {
 	};
 }
 
-function pageLane(replica: TranscriptReplica): TurnLane {
+function pageLane(replica: TranscriptReplica, router: InternalUrlRouter): TurnLane {
 	const turns = replica.turns;
 	const texts: (string | undefined)[] = [];
 	return {
@@ -195,7 +198,7 @@ function pageLane(replica: TranscriptReplica): TurnLane {
 		},
 		text: index => {
 			const turn = turns[index];
-			return turn ? (texts[index] ??= turnSearchText(turn.entries)) : "";
+			return turn ? (texts[index] ??= turnSearchText(turn.entries, router)) : "";
 		},
 		holds: (index, entryId) => turns[index]?.entries.some(entry => entry.id === entryId) === true,
 	};
@@ -281,7 +284,7 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 		const replica = keep(() => replay(entries));
 		replica.expanded.set(expanded);
 		replicas.add(replica);
-		return pageLane(replica);
+		return pageLane(replica, props.router);
 	};
 
 	// A page replays the branch's tail; the terminal look draws rows on demand and takes it whole.
@@ -296,7 +299,7 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 	const filter = signal<LineState | undefined>(undefined);
 	/** The filter field is up: one field for the whole query, whatever is typed into it. */
 	const filtering = computed(() => filter() !== undefined);
-	const views = new TurnViews();
+	const views = new TurnViews(props.router);
 
 	/** Replay the whole branch, keeping the outline on the same turn. */
 	const loadFull = (): void => {

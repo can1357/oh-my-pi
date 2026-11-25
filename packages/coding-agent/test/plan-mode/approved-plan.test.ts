@@ -25,6 +25,7 @@ describe("resolveApprovedPlan", () => {
 			suppliedTitle: "auth-refactor",
 			statePlanFilePath: "local://PLAN.md",
 			readPlan: reader({ "local://auth-refactor-plan.md": "# Auth refactor\n\nbody" }),
+			router: InternalUrlRouter.builtins(),
 		});
 		expect(result.planFilePath).toBe("local://auth-refactor-plan.md");
 		expect(result.planContent).toContain("body");
@@ -36,6 +37,7 @@ describe("resolveApprovedPlan", () => {
 			suppliedTitle: "auth-plan",
 			statePlanFilePath: "local://PLAN.md",
 			readPlan: reader({ "local://auth-plan.md": "# Auth\n\nbody" }),
+			router: InternalUrlRouter.builtins(),
 		});
 		expect(result.planFilePath).toBe("local://auth-plan.md");
 	});
@@ -45,6 +47,7 @@ describe("resolveApprovedPlan", () => {
 			suppliedTitle: "mismatch",
 			statePlanFilePath: "local://existing-plan.md",
 			readPlan: reader({ "local://existing-plan.md": "# Existing\n\nbody" }),
+			router: InternalUrlRouter.builtins(),
 		});
 		expect(result.planFilePath).toBe("local://existing-plan.md");
 	});
@@ -58,6 +61,7 @@ describe("resolveApprovedPlan", () => {
 				"local://new-draft-plan.md": "# New\n\nNew plan",
 			}),
 			listPlanFiles: async () => ["local://new-draft-plan.md", "local://completed-plan.md"],
+			router: InternalUrlRouter.builtins(),
 		});
 		expect(result.planFilePath).toBe("local://new-draft-plan.md");
 		expect(result.planContent).toContain("New plan");
@@ -67,7 +71,7 @@ describe("resolveApprovedPlan", () => {
 		// Mirror the real reader: canonicalize the local scheme before lookup, so a
 		// `local:/…` state path resolves the same file as the scanner's `local://…`.
 		const canonical = (files: Record<string, string>) => {
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const map: Record<string, string> = {};
 			for (const url in files) map[router.normalize(url)] = files[url];
 			return async (url: string) => map[router.normalize(url)] ?? null;
@@ -81,6 +85,7 @@ describe("resolveApprovedPlan", () => {
 				"local://new-draft-plan.md": "# New\n\nNew plan",
 			}),
 			listPlanFiles: async () => ["local://new-draft-plan.md", "local://completed-plan.md"],
+			router: InternalUrlRouter.builtins(),
 		});
 		expect(result.planFilePath).toBe("local://new-draft-plan.md");
 		expect(result.planContent).toContain("New plan");
@@ -96,6 +101,7 @@ describe("resolveApprovedPlan", () => {
 				"local://old-artifact-plan.md": "# Old\n\nOld plan",
 			}),
 			listPlanFiles: async () => ["local://old-artifact-plan.md"],
+			router: InternalUrlRouter.builtins(),
 		});
 		expect(result.planFilePath).toBe("docs/CURRENT.md");
 		expect(result.planContent).toContain("Current plan");
@@ -107,6 +113,7 @@ describe("resolveApprovedPlan", () => {
 			statePlanFilePath: "local://PLAN.md",
 			readPlan: reader({ "local://discovered-plan.md": "# Discovered\n\nbody" }),
 			listPlanFiles: async () => ["local://discovered-plan.md"],
+			router: InternalUrlRouter.builtins(),
 		});
 		expect(result.planFilePath).toBe("local://discovered-plan.md");
 	});
@@ -117,6 +124,7 @@ describe("resolveApprovedPlan", () => {
 				suppliedTitle: "ghost",
 				statePlanFilePath: "local://PLAN.md",
 				readPlan: reader({}),
+				router: InternalUrlRouter.builtins(),
 			}),
 		).rejects.toThrow("Plan file not found at local://ghost-plan.md");
 	});

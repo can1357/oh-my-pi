@@ -1658,7 +1658,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
 	const hostToolBridge = new RpcHostToolBridge(output);
-	const hostUriBridge = new RpcHostUriBridge(output);
+	const hostUriBridge = new RpcHostUriBridge(output, session.urlSchemes.hostUris);
 	// Live frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
 	const liveBridge = new RpcLiveBridge(session, output, createLiveSession);
 	let lastDictationError: { message: string } | undefined;

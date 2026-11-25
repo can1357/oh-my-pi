@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls/scheme-table";
 import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -21,9 +22,13 @@ function getTextOutput(result: { content: Array<{ type: string; text?: string }>
 		.join("\n");
 }
 
+/** Test-only session schemes every {@link makeSession} session resolves through. */
+const testSchemes = new UrlSchemeTable("Test scheme");
+
 function makeSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	return {
 		cwd,
+		urlRouter: new InternalUrlRouter([testSchemes]),
 		hasUI: false,
 		getSessionFile: () => path.join(cwd, "session.jsonl"),
 		getSessionSpawns: () => "*",
@@ -76,8 +81,7 @@ describe("read tool raw range exactness", () => {
 				spec: { backing: "virtual", selectors: "lines", immutable: true },
 				resolve: async url => ({ url: url.href, content: body, contentType: "text/plain" }),
 			};
-			InternalUrlRouter.resetForTests();
-			InternalUrlRouter.instance().register(handler);
+			testSchemes.replace([handler]);
 			const wrapped = wrapToolWithMetaNotice(new ReadTool(makeSession(testDir)));
 
 			const target = source === "disk" ? filePath : source === "located" ? "local://0.log" : "verbatim://fixture";
@@ -97,8 +101,7 @@ describe("read tool raw range exactness", () => {
 			spec: { backing: "virtual", selectors: "lines", immutable: true },
 			resolve: async url => ({ url: url.href, content: "A\nB\n", contentType: "text/plain" }),
 		};
-		InternalUrlRouter.resetForTests();
-		InternalUrlRouter.instance().register(handler);
+		testSchemes.replace([handler]);
 
 		const target = source === "disk" ? filePath : "verbatim://fixture";
 		const result = await tool.execute("normal-bounds", { path: `${target}:1-1,99-99` });

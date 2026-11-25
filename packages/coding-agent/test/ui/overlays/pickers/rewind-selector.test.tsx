@@ -7,6 +7,7 @@ import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import type { TranscriptEntryLike } from "../../../../src/session/transcript/transcript-entry";
 import { RewindSelector } from "../../../../src/ui/overlays/pickers/rewind-selector";
 import { pickerSuite } from "./harness";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const e = (id: string, parentId: string | null, message: unknown): TranscriptEntryLike =>
 	({ type: "message", id, parentId, timestamp: "2024-01-01T00:00:00Z", message }) as unknown as TranscriptEntryLike;
@@ -50,7 +51,13 @@ test("the rewind screen's title uses the ASCII rewind icon", () => {
 	createRoot(dispose => {
 		try {
 			const [node] = resolveChildren(
-				<RewindSelector entries={ENTRIES} terminalRows={() => 30} onSelect={noop} onCancel={noop} />,
+				<RewindSelector
+					router={InternalUrlRouter.builtins()}
+					entries={ENTRIES}
+					terminalRows={() => 30}
+					onSelect={noop}
+					onCancel={noop}
+				/>,
 			)();
 			const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
 			const rows = paintNode(staticEnvironment(theme), node!, 100).rows.map(stripEscapes);
@@ -79,6 +86,7 @@ pickerSuite({
 		return {
 			view: () => (
 				<RewindSelector
+					router={InternalUrlRouter.builtins()}
 					entries={entries}
 					siblingPaths={siblingPaths as never}
 					terminalRows={() => 30}

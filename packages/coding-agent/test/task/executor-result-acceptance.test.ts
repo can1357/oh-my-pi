@@ -437,7 +437,7 @@ describe("runSubprocess result acceptance", () => {
 			await finish?.(undefined);
 			AgentRegistry.global().setStatus(AGENT_ID, "idle");
 
-			const resolved = await InternalUrlRouter.instance().resolve(`agent://${AGENT_ID}`);
+			const resolved = await InternalUrlRouter.builtins().resolve(`agent://${AGENT_ID}`);
 			expect(resolved.content).toBe('{"reports":[{"verdict":"round-2"}]}');
 			const read = await reader.execute("latest-result", { path: `agent://${AGENT_ID}` });
 			expect(read.content).toEqual(
@@ -445,7 +445,7 @@ describe("runSubprocess result acceptance", () => {
 			);
 			expect(JSON.stringify(read.content)).not.toContain("round-1");
 			// The previous structured sidecar must not shadow the new message result.
-			const extracted = await InternalUrlRouter.instance().resolve(`agent://${AGENT_ID}/reports/0/verdict`);
+			const extracted = await InternalUrlRouter.builtins().resolve(`agent://${AGENT_ID}/reports/0/verdict`);
 			expect(extracted.content).toBe("round-2");
 		} finally {
 			InternalUrlRouter.resetForTests();
@@ -537,7 +537,7 @@ describe("runSubprocess result acceptance", () => {
 			await manager.drainDeliveries({ timeoutMs: 1000 });
 			AgentRegistry.global().setStatus(AGENT_ID, "idle");
 
-			const resolved = await InternalUrlRouter.instance().resolve(`agent://${AGENT_ID}`);
+			const resolved = await InternalUrlRouter.builtins().resolve(`agent://${AGENT_ID}`);
 			expect(resolved.content).toBe("## Report\nroot cause found");
 			expect(delivered).toHaveLength(1);
 			expect(delivered[0]).toContain("root cause found");

@@ -13,6 +13,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -99,6 +100,7 @@ describe("system prompt model identifier", () => {
 			toolNames: [],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			model: "anthropic/claude-opus-4",
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		expect(systemPrompt.join("\n\n")).toContain("Model: anthropic/claude-opus-4");
@@ -123,6 +125,7 @@ describe("system prompt model identifier", () => {
 			rules: [],
 			toolNames: [],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		expect(systemPrompt.join("\n\n")).not.toContain("Model:");

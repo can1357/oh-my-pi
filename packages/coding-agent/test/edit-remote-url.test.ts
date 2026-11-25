@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
-import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { InternalResource, InternalUrl, ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -13,7 +13,7 @@ const text = (result: AgentToolResult<unknown>): string =>
 	result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
 
 /** A remote, handler-written text scheme like `ssh://`, backed by a map. */
-function registerRemote(files: Map<string, string>): void {
+function remoteRouter(files: Map<string, string>): InternalUrlRouter {
 	const handler: ProtocolHandler = {
 		scheme: "remotetest",
 		spec: {
@@ -31,19 +31,18 @@ function registerRemote(files: Map<string, string>): void {
 			files.set(url.pathname, content);
 		},
 	};
-	InternalUrlRouter.instance().register(handler);
+	const schemes = new UrlSchemeTable("Test scheme");
+	schemes.replace([handler]);
+	return new InternalUrlRouter([schemes]);
 }
 
 describe("hashline edit on a remote handler-written URL", () => {
-	afterEach(() => {
-		InternalUrlRouter.instance().unregister("remotetest");
-	});
-
 	it("tags the read and writes the patched text back through the handler", async () => {
 		using dir = TempDir.createSync("@omp-edit-remote-");
 		const files = new Map([["/tmp/x.py", "def f():\n    return 1\n"]]);
-		registerRemote(files);
+		const urlRouter = remoteRouter(files);
 		const session = {
+			urlRouter,
 			cwd: dir.path(),
 			hasUI: false,
 			getSessionFile: () => path.join(dir.path(), "session.jsonl"),

@@ -12,6 +12,7 @@ const FIXTURE_ROOT = path.join(import.meta.dir, "..", "fixtures", "security");
 let temporaryRoot = "";
 let repositoryRoot = "";
 let store: SecurityStore;
+let router: InternalUrlRouter;
 
 beforeEach(async () => {
 	temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-security-protocol-"));
@@ -31,12 +32,14 @@ beforeEach(async () => {
 		}),
 	);
 	InternalUrlRouter.resetForTests();
-	InternalUrlRouter.instance().register(
-		new SecurityProtocolHandler(
-			async () => store,
-			() => true,
-		),
+	// A session source ahead of the built-in security:// handler, bound to this test's store.
+	const handler = new SecurityProtocolHandler(
+		async () => store,
+		() => true,
 	);
+	router = new InternalUrlRouter([
+		{ get: scheme => (scheme === handler.scheme ? handler : undefined), handlers: () => [handler] },
+	]);
 });
 
 afterEach(async () => {
@@ -46,7 +49,6 @@ afterEach(async () => {
 
 describe("security://", () => {
 	test("both producers render through every stable URI level", async () => {
-		const router = InternalUrlRouter.instance();
 		const expectations: Record<string, { contentType: "application/json" | "text/markdown"; marker: string }> = {
 			"": { contentType: "text/markdown", marker: "# Security" },
 			"/manifest": { contentType: "application/json", marker: `"id"` },
@@ -79,10 +81,9 @@ describe("security://", () => {
 		if (!finding) return;
 		finding.title = "unsafe\u001b[31m title";
 		await store.putBundle(bundle);
-		const resource = await InternalUrlRouter.instance().resolve(
-			`security://scans/secscan_sariffixture/findings/${finding.id}`,
-			{ cwd: repositoryRoot },
-		);
+		const resource = await router.resolve(`security://scans/secscan_sariffixture/findings/${finding.id}`, {
+			cwd: repositoryRoot,
+		});
 		expect(resource.content).not.toContain("\u001b");
 	});
 
@@ -91,7 +92,6 @@ describe("security://", () => {
 		const bundle = await store.getBundle(scanId);
 		const finding = bundle?.findings[0];
 		if (!finding) throw new Error("expected a SARIF finding");
-		const router = InternalUrlRouter.instance();
 		const listUrl = `security://scans/${scanId}/findings`;
 		const detailUrl = `${listUrl}/${finding.id}`;
 		const initial = await router.resolve(detailUrl, { cwd: repositoryRoot });
@@ -119,12 +119,12 @@ describe("security://", () => {
 
 	test("write is rejected as read-only", async () => {
 		await expect(
-			InternalUrlRouter.instance().write("security://scans/secscan_codexfixture", "mutate", { cwd: repositoryRoot }),
+			router.write("security://scans/secscan_codexfixture", "mutate", { cwd: repositoryRoot }),
 		).rejects.toThrow("read-only");
 	});
 
 	test("completion includes scan resources", async () => {
-		const completions = await InternalUrlRouter.instance().complete("security", "", { cwd: repositoryRoot });
+		const completions = await router.complete("security", "", { cwd: repositoryRoot });
 		expect(completions?.some(item => item.value === "scans/secscan_codexfixture/findings")).toBeTrue();
 		expect(completions?.some(item => item.value === "scans/secscan_sariffixture/findings")).toBeTrue();
 	});
@@ -170,7 +170,7 @@ describe("security://", () => {
 			},
 		};
 		await store.putBundle(bundle);
-		const resource = await InternalUrlRouter.instance().resolve("security://scans/secscan_codexfixture/provenance", {
+		const resource = await router.resolve("security://scans/secscan_codexfixture/provenance", {
 			cwd: repositoryRoot,
 		});
 		expect(resource.content).toContain("secop_public");
@@ -182,7 +182,7 @@ describe("security://", () => {
 
 	test("rejects surplus path segments instead of aliasing a canonical resource", async () => {
 		await expect(
-			InternalUrlRouter.instance().resolve("security://scans/secscan_codexfixture/manifest/extra", {
+			router.resolve("security://scans/secscan_codexfixture/manifest/extra", {
 				cwd: repositoryRoot,
 			}),
 		).rejects.toThrow("Unknown security resource");
@@ -191,14 +191,14 @@ describe("security://", () => {
 		expect(findingId).toBeDefined();
 		if (!findingId) return;
 		await expect(
-			InternalUrlRouter.instance().resolve(`security://scans/secscan_sariffixture/findings/${findingId}/extra`, {
+			router.resolve(`security://scans/secscan_sariffixture/findings/${findingId}/extra`, {
 				cwd: repositoryRoot,
 			}),
 		).rejects.toThrow("Unknown security resource");
 	});
 
 	test("completion filters candidates by the requested path fragment", async () => {
-		const completions = await InternalUrlRouter.instance().complete("security", "sariffixture/coverage", {
+		const completions = await router.complete("security", "sariffixture/coverage", {
 			cwd: repositoryRoot,
 		});
 		expect(completions?.map(item => item.value)).toEqual(["scans/secscan_sariffixture/coverage"]);
@@ -210,7 +210,7 @@ describe("security://", () => {
 		if (!bundle) return;
 		bundle.report = `${"line\n".repeat(10_000)}\u001b[31mTAIL`;
 		await store.putBundle(bundle);
-		const resource = await InternalUrlRouter.instance().resolve("security://scans/secscan_codexfixture/report", {
+		const resource = await router.resolve("security://scans/secscan_codexfixture/report", {
 			cwd: repositoryRoot,
 		});
 		expect(Buffer.byteLength(resource.content)).toBeLessThanOrEqual(50 * 1024);

@@ -1296,6 +1296,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			skills: session.skills,
 			rules: session.ttsrManager?.getRules(),
+			router: session.urlRouter,
 		};
 	}
 	approvalOwnsComposer = false;
@@ -1525,7 +1526,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			renderer: customType => this.viewSession.extensionRunner?.getMessageRenderer(customType),
 			onRenderError: (customType, error) =>
 				logger.warn("Extension message renderer failed", { customType, error: String(error) }),
-			imageLinks: (_message, images) => imageLinksForMessage(images, this.viewSession.sessionManager),
+			imageLinks: (_message, images) =>
+				imageLinksForMessage(images, this.viewSession.sessionManager, this.viewSession.urlRouter),
 			skillPath: name => this.skillCommands.get(`skill:${name}`)?.filePath,
 			actions: () => true,
 			hour12: this.shell.hour12,
@@ -4212,6 +4214,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				getSessionId: () => this.sessionManager.getSessionId(),
 			},
 			cwd: this.sessionManager.getCwd(),
+			router: this.session.urlRouter,
 		});
 	}
 

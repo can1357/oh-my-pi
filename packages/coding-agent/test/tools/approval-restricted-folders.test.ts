@@ -9,6 +9,7 @@ import * as path from "node:path";
 import type { AgentTool, AgentToolContext, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -28,6 +29,9 @@ import {
 import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-agent/tools/approval-targets";
 import { getAgentDir, isRecord, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
+// Approval targets here are host paths only.
+const router = InternalUrlRouter.builtins();
+
 /** Tool whose targets come from `args.path`, like read/write/edit. */
 function pathTool(name: string, tier: ToolTier, cwd: string): AgentTool {
 	return {
@@ -37,7 +41,7 @@ function pathTool(name: string, tier: ToolTier, cwd: string): AgentTool {
 		parameters: {} as never,
 		approval: tier,
 		approvalCacheTargets: (args: unknown) =>
-			isRecord(args) && typeof args.path === "string" ? [approvalTargetKey(cwd, args.path)!] : undefined,
+			isRecord(args) && typeof args.path === "string" ? [approvalTargetKey(cwd, args.path, router)!] : undefined,
 		execute: async () => ({ content: [{ type: "text" as const, text: "executed" }] }),
 	};
 }
@@ -86,7 +90,7 @@ describe("restricted folder resolution", () => {
 		const read = pathTool("read", "read", cwd);
 		const args = { path: "restricted/secret.txt" };
 		const grants = getApprovalGrants(path.join(cwd, "agent"), "s1");
-		grants.record(approvalGrantKey("read", approvalTargetKey(cwd, args.path)!), "read", "session");
+		grants.record(approvalGrantKey("read", approvalTargetKey(cwd, args.path, router)!), "read", "session");
 		grants.record(approvalGrantKey("exec", approvalDirectoryKey(restricted)), "read", "session");
 		// Without the restriction the grants allow the call; with it they do not.
 		expect(resolveApproval(read, args, "always-ask-cached", {}, grants).policy).toBe("allow");
@@ -148,7 +152,7 @@ describe("restricted folder resolution", () => {
 	it("names a folder through ~, a symlink, or (on Windows) different case", () => {
 		const read = pathTool("read", "read", cwd);
 		const home = path.join(os.homedir(), ".omp-restricted-probe", "file.txt");
-		const probe: AgentTool = { ...read, approvalCacheTargets: () => [approvalTargetKey(cwd, home)!] };
+		const probe: AgentTool = { ...read, approvalCacheTargets: () => [approvalTargetKey(cwd, home, router)!] };
 		expect(
 			resolveApproval(probe, {}, "yolo", {}, undefined, { restrictedFolders: ["~/.omp-restricted-probe"], cwd })
 				.policy,

@@ -6,6 +6,7 @@ import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { Settings } from "../../../src/config/settings";
 import { buildSystemPrompt } from "../../../src/system-prompt";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
@@ -28,6 +29,7 @@ describe("Mermaid rendering setting", () => {
 			skills: [],
 			toolNames: [],
 			workspaceTree,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		expect(systemPrompt.join("\n")).not.toContain("```mermaid");

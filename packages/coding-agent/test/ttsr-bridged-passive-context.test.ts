@@ -254,6 +254,7 @@ describe("TTSR reminders on bridged tool calls", () => {
 		using dir = TempDir.createSync("@pi-ttsr-bridged-cursor-");
 		const { session, settings, wrappedWrite, injectedRules } = await createBridgedHarness(dir.path());
 		const handlers = new CursorExecHandlers({
+			urlRouter: session.urlRouter,
 			cwd: dir.path(),
 			tools: new Map<string, Tool>([["write", wrappedWrite as unknown as Tool]]),
 			getToolContext: () => ({ settings, autoApprove: true }) as unknown as AgentToolContext,

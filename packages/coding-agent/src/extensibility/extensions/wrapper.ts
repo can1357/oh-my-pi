@@ -502,7 +502,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						reason: approvalCheck.reason,
 						appendix: safetyAppendix,
 						sessionSubject: sessionScope?.subject,
-						grants: cacheTargets,
+						grants: cacheTargets ? { router: this.runner.urlRouter } : undefined,
 						signal,
 					}),
 				);

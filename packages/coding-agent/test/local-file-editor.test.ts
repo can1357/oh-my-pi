@@ -31,7 +31,7 @@ describe("resolveLocalEditorTarget", () => {
 		const expected = await fs.realpath(planPath);
 
 		for (const target of ["plan.md", "local://plan.md", "  local:/plan.md  "]) {
-			expect((await resolveLocalEditorTarget(target, options)).path).toBe(expected);
+			expect((await resolveLocalEditorTarget(target, options, InternalUrlRouter.builtins())).path).toBe(expected);
 		}
 	});
 
@@ -41,13 +41,13 @@ describe("resolveLocalEditorTarget", () => {
 		await Bun.write(path.join(tmp.path(), "local", "sub", "inner.md"), "x");
 		await Bun.write(path.join(tmp.path(), "escape.md"), "outside");
 
-		await expect(resolveLocalEditorTarget("nope.md", options)).rejects.toThrow(
+		await expect(resolveLocalEditorTarget("nope.md", options, InternalUrlRouter.builtins())).rejects.toThrow(
 			"Local file not found: local://nope.md",
 		);
-		await expect(resolveLocalEditorTarget("sub", options)).rejects.toThrow(
+		await expect(resolveLocalEditorTarget("sub", options, InternalUrlRouter.builtins())).rejects.toThrow(
 			"local://sub is a directory; name a file inside it.",
 		);
-		await expect(resolveLocalEditorTarget("../escape.md", options)).rejects.toThrow();
+		await expect(resolveLocalEditorTarget("../escape.md", options, InternalUrlRouter.builtins())).rejects.toThrow();
 	});
 
 	it("opens bare names containing %, #, and ? without double-decoding an encoded local:// URL", async () => {
@@ -60,11 +60,11 @@ describe("resolveLocalEditorTarget", () => {
 		}
 
 		for (const name of names) {
-			const resolved = await resolveLocalEditorTarget(name, options);
+			const resolved = await resolveLocalEditorTarget(name, options, InternalUrlRouter.builtins());
 			expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", name)));
 			expect(resolved.url).toBe(`local://${name}`);
 		}
-		expect((await resolveLocalEditorTarget("local://100%25.md", options)).path).toBe(
+		expect((await resolveLocalEditorTarget("local://100%25.md", options, InternalUrlRouter.builtins())).path).toBe(
 			await fs.realpath(path.join(tmp.path(), "local", "100%.md")),
 		);
 	});
@@ -77,7 +77,7 @@ describe("resolveLocalEditorTarget", () => {
 			const options = { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" };
 			await Bun.write(path.join(tmp.path(), "local", "local:notes.md"), "colon");
 
-			const resolved = await resolveLocalEditorTarget("local:notes.md", options);
+			const resolved = await resolveLocalEditorTarget("local:notes.md", options, InternalUrlRouter.builtins());
 			expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", "local:notes.md")));
 		},
 	);
@@ -89,6 +89,7 @@ describe("resolveLocalEditorTarget", () => {
 		const showError = vi.fn();
 		const ctx = {
 			sessionManager: { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" },
+			session: { urlRouter: InternalUrlRouter.builtins() },
 			showError,
 		} as unknown as InteractiveModeContext;
 		try {
@@ -112,7 +113,9 @@ describe("resolveLocalEditorTarget", () => {
 		await fs.mkdir(path.join(tmp.path(), "local"));
 		await fs.symlink(outside, path.join(tmp.path(), "local", "normal.md"));
 
-		await expect(resolveLocalEditorTarget("normal.md", options)).rejects.toThrow(/escapes/);
+		await expect(resolveLocalEditorTarget("normal.md", options, InternalUrlRouter.builtins())).rejects.toThrow(
+			/escapes/,
+		);
 	});
 
 	it("revalidates an already-picked entry without trimming filenames that start or end with spaces", async () => {
@@ -130,7 +133,7 @@ describe("resolveLocalEditorTarget", () => {
 			size: 6,
 			mtimeMs: Date.now(),
 		};
-		const revalidated = await revalidateLocalEditorEntry(spaceEntry, options);
+		const revalidated = await revalidateLocalEditorEntry(spaceEntry, options, InternalUrlRouter.builtins());
 		expect(revalidated.path).toBe(await fs.realpath(path.join(tmp.path(), "local", spaceName)));
 		expect(revalidated.url).toBe(`local://${spaceName}`);
 	});
@@ -154,7 +157,7 @@ describe("resolveLocalEditorTarget", () => {
 		await fs.unlink(path.join(tmp.path(), "local", "normal.md"));
 		await fs.symlink(outside, path.join(tmp.path(), "local", "normal.md"));
 
-		await expect(revalidateLocalEditorEntry(entry, options)).rejects.toThrow(/escapes/);
+		await expect(revalidateLocalEditorEntry(entry, options, InternalUrlRouter.builtins())).rejects.toThrow(/escapes/);
 	});
 
 	it("rejects openLocalFileInEditor when collabGuest is active", async () => {
@@ -182,7 +185,7 @@ describe("buildLocalFileArgumentCompletions", () => {
 
 	const completerFor = (options: { getArtifactsDir: () => string; getSessionId: () => string }) =>
 		buildLocalFileArgumentCompletions({
-			ctx: { sessionManager: options },
+			ctx: { sessionManager: options, session: { urlRouter: InternalUrlRouter.builtins() } },
 		} as never);
 
 	it("inserts an encoded local:// URL so whitespace and metachar names survive trimming", async () => {
@@ -198,7 +201,7 @@ describe("buildLocalFileArgumentCompletions", () => {
 
 		// The inserted value resolves back to the exact file — a leading-space
 		// name does not collapse onto the "plan.md" sibling.
-		const resolved = await resolveLocalEditorTarget("local://%20plan.md", options);
+		const resolved = await resolveLocalEditorTarget("local://%20plan.md", options, InternalUrlRouter.builtins());
 		expect(resolved.path).toBe(await fs.realpath(path.join(tmp.path(), "local", " plan.md")));
 	});
 

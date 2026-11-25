@@ -1830,7 +1830,7 @@ export class EventController {
 						// Creating either component now would lock the read into the wrong shape.
 						continue;
 					}
-					if (readArgsCollapseIntoGroup(content.arguments)) {
+					if (readArgsCollapseIntoGroup(content.arguments, this.ctx.viewSession.urlRouter)) {
 						const existing = this.ctx.pendingTools.get(content.id);
 						if (existing) {
 							this.#trackReadToolCall(content.id, content.arguments);
@@ -1882,7 +1882,10 @@ export class EventController {
 					// draws as prose rather than a card; the block waits until the path tells. Empty partial
 					// JSON (`toolcall_start`) is still streaming, not final empty args. An unbound reveal
 					// never advances, so drop it: the next update's fresh entry shows all received.
-					if (partialJson !== undefined && isReplyWrite(renderToolName, renderArgs) === undefined) {
+					if (
+						partialJson !== undefined &&
+						isReplyWrite(renderToolName, renderArgs, this.ctx.viewSession.urlRouter) === undefined
+					) {
 						this.#toolArgsReveal.finish(content.id);
 						continue;
 					}
@@ -2096,7 +2099,7 @@ export class EventController {
 			const turnUsage = this.#turnUsage.add(event.message, this.#turnStartedAt);
 			if (turnUsage) lastAssistant.turnUsage.set(turnUsage);
 			if (cfgDisplayShowTokenUsage.get(settings) && assistantUsageIsBilled(event.message.usage)) {
-				const readCallIds = groupedReadUsageCallIds(event.message);
+				const readCallIds = groupedReadUsageCallIds(event.message, this.ctx.viewSession.urlRouter);
 				const turnElapsed = cfgDisplayShowTurnTime.get(settings)
 					? turnElapsedMs(this.#turnStartedAt, event.message)
 					: undefined;
@@ -2167,7 +2170,7 @@ export class EventController {
 					this.ctx.shell.transcript.remove(stale.block);
 				}
 			}
-			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
+			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args, this.ctx.viewSession.urlRouter)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
 				const group = this.#getReadGroup();
 				group.updateArgs(event.args, event.toolCallId);
@@ -2207,7 +2210,7 @@ export class EventController {
 			// timeline-only hit cannot be a fresh execution — its queued
 			// update/end duplicate the settled result and are dropped as such.
 			this.#toolArgsReveal.finish(event.toolCallId);
-			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
+			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args, this.ctx.viewSession.urlRouter)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
 			}
 			const component =

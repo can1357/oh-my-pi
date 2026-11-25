@@ -7,7 +7,8 @@ import { type AstFindMatch, astGrep, type ShellFilesystem } from "@oh-my-pi/pi-n
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 
-import { sessionResolveContext } from "../internal-urls/context";
+import { sessionResolveContext, sessionUrlRouter } from "../internal-urls/context";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text" };
 import { sessionDelegationBias } from "../task/prompt-policy";
@@ -85,6 +86,8 @@ async function runMultiTargetAstGrep(
 		limit: number;
 		signal?: AbortSignal;
 		filesystem: ShellFilesystem;
+		/** Router of the session the targets were resolved for. */
+		router: InternalUrlRouter;
 	},
 ): Promise<{
 	matches: AstFindMatch[];
@@ -122,8 +125,8 @@ async function runMultiTargetAstGrep(
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
 		for (const match of targetResult.matches) {
-			const absolute = resolveTargetResultPath(target, match.path);
-			const rebased = relativeSearchResultPath(options.commonBasePath, absolute);
+			const absolute = resolveTargetResultPath(target, match.path, options.router);
+			const rebased = relativeSearchResultPath(options.commonBasePath, absolute, options.router);
 			retainAstFindMatch(retainedMatches, retainedCapacity, { ...match, path: rebased });
 		}
 	}
@@ -143,14 +146,17 @@ async function runMultiTargetAstGrep(
 
 export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolDetails> {
 	readonly name = "ast_grep";
-	readonly approval = searchPathTier;
+	readonly approval = (args: unknown) => searchPathTier(args, sessionUrlRouter(this.session));
 	/** `always-ask-cached` keys: the tree (or file) of every root it searches, as `grep` reports them. */
-	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined =>
-		searchApprovalCacheTargets(
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const router = sessionUrlRouter(this.session);
+		return searchApprovalCacheTargets(
 			toPathList((args as { path?: string } | null | undefined)?.path),
 			this.session.cwd,
-			entry => parseSearchPath(entry).basePath,
+			router,
+			entry => parseSearchPath(entry, router).basePath,
 		);
+	};
 	readonly label = "AST Grep";
 	readonly summary = "Search code with AST patterns (SHOULD be preferred for structural search)";
 	get description(): string {
@@ -254,6 +260,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 							limit: DEFAULT_AST_LIMIT,
 							signal,
 							filesystem,
+							router: urlFilesystem.router,
 						})
 					: astGrep({
 							patterns,
@@ -274,7 +281,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			});
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(normalizedParseErrors);
 			const formatPath = (filePath: string): string =>
-				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
+				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd, urlFilesystem.router);
 
 			const { record: recordFile, list: fileList } = createFileRecorder();
 			const fileMatchCounts = new Map<string, number>();

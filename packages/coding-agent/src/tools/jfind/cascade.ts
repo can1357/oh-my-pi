@@ -299,7 +299,7 @@ class Cascade {
 		onProgress?.("lexical scan");
 		const native = filesystem.shellFilesystem();
 		const [entries, index] = await Promise.all([
-			listFiles(root, { includeHidden, filesystem: native, signal }),
+			listFiles(root, { includeHidden, filesystem: native, router: filesystem.router, signal }),
 			grepIndex(root.path, keywords, { includeHidden, filesystem: native, signal, timeoutMs: SCAN_TIMEOUT_MS }),
 		]);
 		this.stats.listed = entries.length;

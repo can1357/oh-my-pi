@@ -3,6 +3,7 @@ import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { buildSessionContext } from "../src/session/session-context";
@@ -26,6 +27,7 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 	const events: AgentEvent[] = [];
 	let phases = initial;
 	const handlers = new CursorExecHandlers({
+		urlRouter: InternalUrlRouter.builtins(),
 		cwd: "/tmp",
 		tools: new Map(),
 		getTodoPhases: () => phases,
@@ -279,6 +281,7 @@ describe("cursor todo persistence", () => {
 		// animating. There is just nothing to mirror into `details.phases`.
 		const events: AgentEvent[] = [];
 		const handlers = new CursorExecHandlers({
+			urlRouter: InternalUrlRouter.builtins(),
 			cwd: "/tmp",
 			tools: new Map(),
 			emitEvent: event => {

@@ -11,6 +11,7 @@ import { buildSystemPrompt } from "../../src/system-prompt";
 import { computeNonMessageBreakdown, type SystemPromptSources } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import type { Skill } from "../../src/extensibility/skills";
 import type { ContextViewData } from "@oh-my-pi/pi-coding-agent/session/context-view-model";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 const sessions: AgentSession[] = [];
@@ -157,6 +158,7 @@ describe("context snapshot prompt sources", () => {
 			customPrompt,
 			contextFiles,
 			skills,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 	const entryTexts = (data: ContextViewData, id: string) => category(data, id).entries.map(entry => entry.text);
 	const changedNotice = (left: string) =>
@@ -274,6 +276,7 @@ describe("context snapshot prompt sources", () => {
 			contextFiles: [{ path: instructionPath, content: "Unique instruction body" }],
 			skills,
 			systemPromptTemplate: `Custom policy\n${listing}`,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const data = buildSessionContextView(sessionWith({ prompt: built.systemPrompt, sources: built.sources, skills }));
 		expect(data.notices).toEqual([]);

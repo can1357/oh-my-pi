@@ -201,9 +201,10 @@ import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import {
-	InternalUrlRouter,
+	type InternalUrlRouter,
 	type LocalProtocolOptions,
 	resolveLocalRoot,
+	SessionUrlSchemes,
 	sessionLocalProtocolOptions,
 } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
@@ -1292,6 +1293,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	readonly #eval: EvalRunner;
 	readonly #evalToolSession: ToolSession | undefined;
+	/** This session's own URL schemes (RPC host URIs) and the router callers resolve through. */
+	readonly urlSchemes: SessionUrlSchemes;
+	/** The router this session's callers resolve URLs through: its own schemes, then the built-ins. */
+	get urlRouter(): InternalUrlRouter {
+		return this.urlSchemes.router;
+	}
 	/** Manager owned by this top-level session; subagents borrow but never dispose it. */
 	readonly #ownedAsyncJobManager: AsyncJobManager | undefined;
 	/** Manager of this session's root, used for its own job queries and deliveries. */
@@ -2223,6 +2230,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			statePlanFilePath: state.planFilePath,
 			readPlan: url => this.#readPlanFile(url),
 			listPlanFiles: () => this.#listPlanFiles(),
+			router: this.urlRouter,
 		});
 		return {
 			content: [{ type: "text", text: "Plan ready for review." }],
@@ -2234,6 +2242,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return readPlanFile(planFilePath, {
 			localProtocolOptions: this.#localProtocolOptions(),
 			cwd: this.sessionManager.getCwd(),
+			router: this.urlRouter,
 		});
 	}
 
@@ -2313,6 +2322,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			kernelOwnerId: config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`,
 		});
 		this.#evalToolSession = config.evalToolSession;
+		this.urlSchemes = config.urlSchemes ?? new SessionUrlSchemes();
 		const initialEvalStateContext = this.#buildEvalStateContextMessage(this.agent.state.messages);
 		if (initialEvalStateContext) {
 			// Persist the startup snapshot at the slot this process sends it from, so
@@ -2392,6 +2402,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setPlanProposalHandler: handler => this.setPlanProposalHandler(handler),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			urlRouter: this.urlRouter,
 		};
 		this.#prewalk = new PrewalkCoordinator(prewalkHost, {
 			prewalk: config.prewalk,
@@ -2898,6 +2909,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: this.settings,
 			model: () => this.model,
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			urlRouter: this.urlRouter,
 			imageDescriptions: config.imageDescriptions,
 			transformContext: (messages, signal) => this.#transformContext(messages, signal),
 			convertToLlm: config.convertToLlm ?? convertToLlm,
@@ -3041,6 +3053,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
+			urlRouter: this.urlRouter,
 			modelRegistry: this.#modelRegistry,
 			yieldQueue: this.yieldQueue,
 			obfuscator: () => this.#obfuscator,
@@ -3126,6 +3139,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
 			goalModeState: () => this.#goalModeState,
 			planReferencePath: () => this.#planReferencePath,
+			urlRouter: this.urlRouter,
 			nonMessageTokenSource: () => this,
 			hasExperimentalContextRolloverTools: () => {
 				const enabled = this.#tools.getEnabledToolNames();
@@ -8953,7 +8967,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A draft exists before approval; its file path alone is not execution consent.
 		if (!this.#planReferenceApproved) return null;
 
-		const plan = await loadOverallPlanReference(this.#planReferencePath, this.#localProtocolOptions());
+		const plan = await loadOverallPlanReference(
+			this.#planReferencePath,
+			this.#localProtocolOptions(),
+			this.urlRouter,
+		);
 		if (!plan) return null;
 
 		const content = prompt.render(planModeReferencePrompt, {
@@ -8979,11 +8997,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const state = this.#planModeState;
 		if (!state?.enabled) return null;
 		const sessionPlanUrl = "local://PLAN.md";
-		const planPathOptions = { localProtocolOptions: this.#localProtocolOptions(), cwd: this.sessionManager.getCwd() };
+		const planPathOptions = {
+			localProtocolOptions: this.#localProtocolOptions(),
+			cwd: this.sessionManager.getCwd(),
+			router: this.urlRouter,
+		};
 		const resolvedPlanPath = resolvePlanFilePath(state.planFilePath, planPathOptions);
 		const resolvedSessionPlan = resolvePlanFilePath(sessionPlanUrl, planPathOptions);
 		const displayPlanPath =
-			InternalUrlRouter.instance().canHandle(state.planFilePath) || resolvedPlanPath !== resolvedSessionPlan
+			this.urlRouter.canHandle(state.planFilePath) || resolvedPlanPath !== resolvedSessionPlan
 				? state.planFilePath
 				: sessionPlanUrl;
 

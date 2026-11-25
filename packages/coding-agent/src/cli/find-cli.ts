@@ -6,6 +6,7 @@ import { ToolError } from "../tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "../config/auxiliary-model-policy";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesystem";
 import { openStandaloneJudge } from "../judgment/standalone";
 import { standaloneFindSpotlight } from "../spotlight/session";
@@ -97,7 +98,9 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	const log = cmd.quiet ? () => {} : (message: string) => console.error(chalk.dim(message));
 	const cwd = process.cwd();
 	// Internal URLs (`omp://`, `local://`, …) are searched in place; `find` only reads.
-	const filesystem = new InternalUrlFilesystem({ context: { cwd }, tier: "read" });
+	// A CLI run has no session, so only the built-in schemes resolve.
+	const router = InternalUrlRouter.builtins();
+	const filesystem = new InternalUrlFilesystem({ context: { cwd, router }, tier: "read" });
 	let root: SearchRoot;
 	try {
 		root = await resolveSearchRoot(filesystem, cmd.path, cwd);
@@ -137,11 +140,11 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 			...raw,
 			hits: raw.hits.map(hit => ({
 				...hit,
-				rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel), cwd),
+				rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel, router), cwd),
 			})),
 			lexicalFallback: raw.lexicalFallback.map(match => ({
 				...match,
-				rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, match.rel), cwd),
+				rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, match.rel, router), cwd),
 			})),
 		};
 		const elapsedMs = performance.now() - started;

@@ -268,7 +268,7 @@ describe("internal URL tools resolve against the caller root (A/B same ids)", ()
 		await fsp.writeFile(path.join(dir, "b", "main", "Worker.md"), JSON.stringify({ count: 2 }));
 		await fsp.writeFile(path.join(dir, "b", "main", "Worker.json"), JSON.stringify({ count: 2 }));
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("agent://Worker/count", { sessionFile: rootA });
 		expect(JSON.parse(resourceText(resource))).toBe(1);
 		expect(resource.sourcePath?.endsWith(path.join("a", "main", "Worker.md"))).toBe(true);

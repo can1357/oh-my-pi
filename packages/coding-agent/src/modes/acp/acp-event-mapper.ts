@@ -8,7 +8,7 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
-import { InternalUrlRouter } from "../../internal-urls/router";
+import type { InternalUrlRouter } from "../../internal-urls/router";
 import { extractUriScheme } from "../../internal-urls/parse";
 import type { SchemeSpec } from "../../internal-urls/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
@@ -33,6 +33,8 @@ interface AcpEventMapperOptions {
 	 * before emitting `ToolCallLocation` entries.
 	 */
 	cwd?: string;
+	/** The session's URL router: classifies `write` targets by their scheme spec. */
+	router: InternalUrlRouter;
 }
 
 interface ContentArrayContainer {
@@ -138,26 +140,25 @@ interface TextMessageLike {
 const ACP_TEXT_LIMIT = 4_000;
 
 /** Declared spec of the registered scheme a `write` call targets; undefined for file paths and other tools. */
-function writeTargetSpec(toolName: string, args: unknown): SchemeSpec | undefined {
+function writeTargetSpec(toolName: string, args: unknown, router: InternalUrlRouter): SchemeSpec | undefined {
 	if (toolName !== "write") return undefined;
 	const path = extractStringProperty<PathContainer>(args, "path");
 	if (!path) return undefined;
-	const router = InternalUrlRouter.instance();
 	const scheme = extractUriScheme(path);
 	return scheme && router.canHandle(path) ? router.spec(scheme) : undefined;
 }
 
 /** Peer-to-peer messages (coordination-scoped writes) stay off the external ACP session stream. */
-function isInternalAgentMessageTool(toolName: string, args: unknown): boolean {
-	return writeTargetSpec(toolName, args)?.write?.scope === "coordination";
+function isInternalAgentMessageTool(toolName: string, args: unknown, router: InternalUrlRouter): boolean {
+	return writeTargetSpec(toolName, args, router)?.write?.scope === "coordination";
 }
 
-export function mapToolKind(toolName: string, args?: unknown): ToolKind {
+export function mapToolKind(toolName: string, args: unknown, router: InternalUrlRouter): ToolKind {
 	// A write to a device-backed URL (proc:// control, out:// replies) is an
 	// action, not a file change — "edit" would make ACP clients render it as a
 	// file modification to a nonexistent path (and auto-approve it under edit-tier policies). Reads
 	// stay "read": fetching a URL's content is discovery.
-	if (writeTargetSpec(toolName, args)?.backing === "device") return "execute";
+	if (writeTargetSpec(toolName, args, router)?.backing === "device") return "execute";
 	switch (toolName) {
 		case "read":
 			return "read";
@@ -189,7 +190,7 @@ export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 export function mapAgentSessionEventToAcpSessionUpdates(
 	event: AgentSessionEvent,
 	sessionId: string,
-	options: AcpEventMapperOptions = {},
+	options: AcpEventMapperOptions,
 ): SessionNotification[] {
 	switch (event.type) {
 		case "message_update":
@@ -197,18 +198,19 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		case "message_end":
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
-			if (isInternalAgentMessageTool(event.toolName, event.args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, event.args, options.router)) return [];
 			const update = buildToolCallStartUpdate({
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
 				intent: event.intent,
 				cwd: options.cwd,
+				router: options.router,
 			});
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
-			if (isInternalAgentMessageTool(event.toolName, event.args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, event.args, options.router)) return [];
 			const content = mergeToolUpdateContent(
 				buildToolStartContent(event.toolName, event.args),
 				extractToolCallContent(event.partialResult, options),
@@ -230,7 +232,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		}
 		case "tool_execution_end": {
 			const args = getToolExecutionEndArgs(event, options);
-			if (isInternalAgentMessageTool(event.toolName, args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, args, options.router)) return [];
 			const resultContent = [
 				...extractDiffToolCallContent(event.result),
 				...extractToolCallContent(event.result, options),
@@ -464,6 +466,7 @@ export function buildToolCallStartUpdate(input: {
 	args: unknown;
 	intent?: string;
 	cwd?: string;
+	router: InternalUrlRouter;
 	status?: "pending" | "completed";
 }): SessionUpdate {
 	const update: ToolCall & { sessionUpdate: "tool_call" } = {
@@ -471,7 +474,7 @@ export function buildToolCallStartUpdate(input: {
 		toolCallId: input.toolCallId,
 		name: input.toolName,
 		title: buildToolTitle(input.toolName, input.args, input.intent),
-		kind: mapToolKind(input.toolName, input.args),
+		kind: mapToolKind(input.toolName, input.args, input.router),
 		status: input.status ?? "pending",
 		rawInput: input.args,
 	};

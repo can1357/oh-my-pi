@@ -12,10 +12,13 @@ import { extensionTheme } from "../ui/extensions/render-output";
  * - Absolute paths used as-is
  * - Paths starting with ~ expanded to home directory
  * - Relative paths resolved from cwd
+ *
+ * Resolves extension/hook/custom-tool config paths during loading, before any session
+ * router exists, so internal URLs are recognized against the built-in schemes only.
  */
 export function resolvePath(filePath: string, cwd: string): string {
 	const expanded = expandPath(filePath);
-	if (InternalUrlRouter.instance().canHandle(expanded)) {
+	if (InternalUrlRouter.builtins().canHandle(expanded)) {
 		throw new Error(
 			`Path "${filePath}" uses internal scheme "${extractUriScheme(expanded)}://" and must be resolved through the proper protocol handler, not as a filesystem path.`,
 		);

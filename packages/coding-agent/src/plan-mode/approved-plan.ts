@@ -1,4 +1,4 @@
-import { InternalUrlRouter } from "../internal-urls/router";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { ToolError } from "../tools/tool-errors";
 
 /** Shape forwarded from the plan-proposal handler to InteractiveMode's
@@ -140,6 +140,8 @@ export interface ResolveApprovedPlanInput {
 	 *  plan whose name can't be reconstructed (e.g. a dropped `extra.title`) is
 	 *  still found. */
 	listPlanFiles?: () => Promise<string[]>;
+	/** The session's URL router: canonicalizes plan URL spellings. */
+	router: InternalUrlRouter;
 }
 
 export interface ResolvedApprovedPlan {
@@ -170,7 +172,7 @@ export async function resolveApprovedPlan(input: ResolveApprovedPlanInput): Prom
 	// the scan competes purely on the newest-first ordering below (issue #6569).
 	// Compare canonical `local://` spellings so a resumed `local:/…` state path
 	// still matches the scanner's `local://…` entry (InternalUrlRouter.normalize).
-	const router = InternalUrlRouter.instance();
+	const router = input.router;
 	const canonicalListed = new Set(listed.map(url => router.normalize(url)));
 	if (input.statePlanFilePath && !canonicalListed.has(router.normalize(input.statePlanFilePath))) {
 		consider(input.statePlanFilePath);

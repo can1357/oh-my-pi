@@ -21,6 +21,7 @@ import type { ToolSession } from "../tools";
 import { parseReadUrlTarget } from "../tools/fetch";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { ReadTool, splitImageQuestionTarget } from "../tools/read";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { renderError } from "../tools/tool-errors";
 import { parseXUrl } from "../web/x";
 
@@ -100,7 +101,10 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 		// resolving anything (issue #11338), and X reads report missing xAI
 		// credentials.
 		const urlTarget = parseReadUrlTarget(cmd.path);
-		if (splitImageQuestionTarget(cmd.path).question || (urlTarget && parseXUrl(urlTarget.path))) {
+		if (
+			splitImageQuestionTarget(cmd.path, InternalUrlRouter.builtins()).question ||
+			(urlTarget && parseXUrl(urlTarget.path))
+		) {
 			authStorage ??= await discoverAuthStorage(undefined, { settings });
 			const modelRegistry = new ModelRegistry(authStorage);
 			await modelRegistry.hydrateCredentialScopedModelCaches();

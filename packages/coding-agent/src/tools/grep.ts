@@ -22,8 +22,8 @@ import {
 } from "@oh-my-pi/pi-utils/ar";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, NO_FULL_LINE, recordFullySeenRows } from "../edit/store";
-import { sessionResolveContext } from "../internal-urls/context";
-import { InternalUrlRouter } from "../internal-urls/router";
+import { sessionResolveContext, sessionUrlRouter } from "../internal-urls/context";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead } from "./streaming-output";
@@ -195,9 +195,12 @@ function parseExternalUrlSpec(entry: string): { clean: string; ranges?: [LineRan
 	return null;
 }
 
-async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promise<GrepPathSpec[]> {
+async function parsePathSpecs(
+	rawEntries: readonly string[],
+	cwd: string,
+	router: InternalUrlRouter,
+): Promise<GrepPathSpec[]> {
 	const specs: GrepPathSpec[] = [];
-	const router = InternalUrlRouter.instance();
 	for (const entry of rawEntries) {
 		// Internal URLs (single-slash aliases included) use the router's splitter,
 		// which peels selector-shaped tails only for schemes declaring line
@@ -514,9 +517,14 @@ function relativeInside(root: string, target: string): string | undefined {
  * other is anchored to the root with a leading `/` (`!./gen` must not drop
  * `sub/gen`); one naming a place outside this root has nothing to exclude there.
  */
-function exclusionsForRoot(patterns: readonly string[], cwd: string, root: string): string[] | undefined {
+function exclusionsForRoot(
+	patterns: readonly string[],
+	cwd: string,
+	root: string,
+	router: InternalUrlRouter,
+): string[] | undefined {
 	const rebased: string[] = [];
-	const internalRoot = InternalUrlRouter.instance().canHandle(root);
+	const internalRoot = router.canHandle(root);
 	for (const raw of patterns) {
 		const pattern = normalizeExclusion(raw);
 		if (!pattern) continue;
@@ -555,7 +563,7 @@ export interface GrepToolOptions {
 
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
 	readonly name = "grep";
-	readonly approval = searchPathTier;
+	readonly approval = (args: unknown) => searchPathTier(args, sessionUrlRouter(this.session));
 	/**
 	 * `always-ask-cached` keys: every file and folder this grep searches, so a
 	 * folder grant recorded by a `read` covers a search of it and a search of one
@@ -567,7 +575,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
 		const cwd = this.session.cwd;
-		const splitBase = (entry: string) => parseSearchPath(splitPathAndSel(entry).path).basePath;
+		const router = sessionUrlRouter(this.session);
+		const splitBase = (entry: string) => parseSearchPath(splitPathAndSel(entry).path, router).basePath;
 		const roots = toPathList(a?.path ?? a?.paths);
 		const exclusionParts = (list: string) =>
 			approvalRootCandidates(list)
@@ -594,6 +603,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		return searchApprovalCacheTargets(
 			hasExclusion ? [...roots, "."] : roots,
 			cwd,
+			router,
 			splitBase,
 			undefined,
 			skipCandidate,
@@ -682,7 +692,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				context: resolveContext,
 				tier: resolveToolTier(this, params),
 			});
-			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+			const router = urlFilesystem.router;
+			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, router, {
 				exclusionParts: true,
 				mixedLocalPaths: urlFilesystem,
 			});
@@ -695,7 +706,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				else searchEntries.push(entry);
 			}
 			const rawEntries = searchEntries.length > 0 ? searchEntries : ["."];
-			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
+			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd, router);
 			const filesystem = urlFilesystem.shellFilesystem();
 			const materializedExternalPaths = new Map<string, string>();
 			const materializeExternalUrlForSearch = async (rawPath: string) => {
@@ -757,7 +768,6 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				// Build the per-file line-range filter after URL materialization has run:
 				// archive entries are keyed by scratch path, external URL entries by read-cache
 				// content path, internal URLs by their URL, and ordinary files by their resolved path.
-				const router = InternalUrlRouter.instance();
 				for (let idx = 0; idx < pathSpecs.length; idx++) {
 					const spec = pathSpecs[idx];
 					if (!spec.ranges) continue;
@@ -866,7 +876,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									maxColumns: DEFAULT_MAX_COLUMN,
 									mode: effectiveOutputMode,
 									maxCountPerFile: nativeMaxCountPerFile,
-									exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath),
+									exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath, router),
 									signal,
 									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 									filesystem,
@@ -875,15 +885,15 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
 							for (const binaryPath of targetResult.binaryMatches ?? []) {
-								const absolute = resolveSearchResultPath(target.basePath, binaryPath);
-								binaryMatches.push(relativeSearchResultPath(searchPath, absolute));
+								const absolute = resolveSearchResultPath(target.basePath, binaryPath, router);
+								binaryMatches.push(relativeSearchResultPath(searchPath, absolute, router));
 							}
 							limitReached = limitReached || Boolean(targetResult.limitReached);
 							totalCapReached ||= targetResult.matches.length >= nativeMaxCount;
 							totalMatches += targetResult.totalMatches;
 							filesSearched += targetResult.filesSearched;
 							for (const match of targetResult.matches) {
-								const absolute = resolveSearchResultPath(target.basePath, match.path);
+								const absolute = resolveSearchResultPath(target.basePath, match.path, router);
 								// Overlapping targets (a directory plus a file nested
 								// inside it) surface the same physical line twice;
 								// keep the first occurrence.
@@ -893,7 +903,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									continue;
 								}
 								seenMatchKeys.add(matchKey);
-								matches.push({ ...match, path: relativeSearchResultPath(searchPath, absolute) });
+								matches.push({ ...match, path: relativeSearchResultPath(searchPath, absolute, router) });
 							}
 						}
 						result = {
@@ -921,7 +931,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								maxColumns: DEFAULT_MAX_COLUMN,
 								mode: effectiveOutputMode,
 								maxCountPerFile: nativeMaxCountPerFile,
-								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
+								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath, router),
 								signal,
 								timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 								filesystem,
@@ -955,7 +965,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					try {
 						const projectedMatches = new Map<string, GrepMatch[]>();
 						for (const notebookPath of notebookPaths) {
-							const absolute = resolveSearchResultPath(searchPath, notebookPath);
+							const absolute = resolveSearchResultPath(searchPath, notebookPath, router);
 							if (!path.isAbsolute(absolute)) continue;
 							let text: string;
 							try {
@@ -1020,7 +1030,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				if (rangesByAbsPath.size > 0) {
 					const filteredMatches: GrepMatch[] = [];
 					for (const match of result.matches) {
-						const abs = resolveSearchResultPath(searchPath, match.path);
+						const abs = resolveSearchResultPath(searchPath, match.path, router);
 						// Native absolute matches can retain forward slashes on Windows; range keys use path.resolve.
 						const ranges = rangesByAbsPath.get(path.isAbsolute(match.path) ? path.resolve(abs) : abs);
 						if (!ranges) {
@@ -1051,7 +1061,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				}
 				if (archiveDisplayMap.size > 0) {
 					for (const match of result.matches) {
-						const display = archiveDisplayMap.get(resolveSearchResultPath(searchPath, match.path));
+						const display = archiveDisplayMap.get(resolveSearchResultPath(searchPath, match.path, router));
 						if (display) match.path = display;
 					}
 				}
@@ -1059,7 +1069,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const formatPath = (filePath: string): string =>
 					archiveDisplaySet.has(filePath)
 						? filePath
-						: formatResultPath(filePath, isDirectory, searchPath, this.session.cwd);
+						: formatResultPath(filePath, isDirectory, searchPath, this.session.cwd, router);
 
 				// Single-file scopes can't paginate — there is one file by definition.
 				const canPaginate = isMultiScope;
@@ -1158,7 +1168,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							try {
 								const st = await urlFilesystem.stat(target);
 								if (st.type === "file" && st.size > NATIVE_GREP_MAX_FILE_BYTES) {
-									oversized.push(formatPathRelativeToCwd(target, this.session.cwd));
+									oversized.push(formatPathRelativeToCwd(target, this.session.cwd, { router }));
 								}
 							} catch {
 								// Stat failures here are surfaced by other code paths.
@@ -1176,7 +1186,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						: undefined;
 				// Binary files are skipped unless named; native lists only those whose content matches.
 				const binaryMatchPaths = binaryMatches.map(filePath =>
-					formatResultPath(filePath, true, searchPath, this.session.cwd),
+					formatResultPath(filePath, true, searchPath, this.session.cwd, router),
 				);
 				const binaryMatchNote =
 					binaryMatchPaths.length > 0
@@ -1234,7 +1244,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								followLinks: searchPath.startsWith("skill://"),
 								maxCount: 1,
 								mode: GrepOutputMode.FilesWithMatches,
-								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
+								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath, router),
 								signal,
 								timeoutMs: GITIGNORE_PROBE_TIMEOUT_MS,
 								filesystem,

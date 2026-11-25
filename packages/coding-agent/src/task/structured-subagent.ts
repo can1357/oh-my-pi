@@ -27,7 +27,7 @@ import type { Settings } from "../config/settings";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import { sessionLocalProtocolOptions } from "../internal-urls/context";
+import { sessionLocalProtocolOptions, sessionUrlRouter } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -842,6 +842,7 @@ async function loadPlanReference(
 	return loadOverallPlanReference(
 		request.session.getPlanReferencePath?.() ?? "local://PLAN.md",
 		sessionLocalProtocolOptions(request.session),
+		sessionUrlRouter(request.session),
 	);
 }
 

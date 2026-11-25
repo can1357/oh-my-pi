@@ -19,3 +19,25 @@ export function splitUrlScheme(input: string): { scheme: string; rest: string } 
 	const match = URL_SCHEME_RE.exec(input);
 	return match ? { scheme: match[1].toLowerCase(), rest: input.slice(match[0].length) } : undefined;
 }
+
+/** Standard schemes no session may claim: web, file and mail links. */
+const STANDARD_SCHEMES: Readonly<Record<string, true>> = {
+	about: true,
+	blob: true,
+	data: true,
+	file: true,
+	ftp: true,
+	http: true,
+	https: true,
+	javascript: true,
+	mailto: true,
+	ssh: true,
+	ws: true,
+	wss: true,
+};
+
+/** Whether lowercase `scheme` is a standard web, file or mail scheme. */
+export function isStandardScheme(scheme: string): boolean {
+	// `=== true`: inherited keys such as `constructor` are not reserved.
+	return STANDARD_SCHEMES[scheme] === true;
+}

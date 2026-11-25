@@ -23,6 +23,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { $which } from "@oh-my-pi/pi-utils";
 import { chipLabel } from "../src/ui/composer/attachments";
 import { Composer } from "../src/ui/composer/composer";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 // A clipboard with no image on it — the deterministic default for the
 // not-found assertions so a real screenshot on the dev's clipboard cannot
@@ -52,6 +53,7 @@ function createContext() {
 			putBlob: async () => ({ hash: "h", path: "/tmp/h.png", displayPath: "/tmp/h.png" }),
 		} as unknown as InteractiveModeContext["sessionManager"],
 		showStatus,
+		session: { urlRouter: InternalUrlRouter.builtins() },
 	} as unknown as InteractiveModeContext;
 	return { ctx, spies: { pasteText, insertAtom, showStatus } };
 }

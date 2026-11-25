@@ -85,8 +85,8 @@ function normalizeAtPrefix(filePath: string): string {
 		withoutAt.startsWith("~/") ||
 		// Windows absolute paths (drive letters / UNC / root-relative)
 		path.win32.isAbsolute(withoutAt) ||
-		// Internal URL shorthands
-		InternalUrlRouter.instance().canHandle(withoutAt)
+		// Internal URL shorthands (built-in schemes: this is filesystem path normalization)
+		InternalUrlRouter.builtins().canHandle(withoutAt)
 	) {
 		return withoutAt;
 	}
@@ -299,16 +299,20 @@ export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: strin
 	return strict;
 }
 
+/**
+ * Filesystem-path guard: refuses a built-in internal URL. Reached only after a tool's own URL
+ * routing, so it checks the process-wide built-in schemes, not a session's.
+ */
 function assertNotInternalUrl(expanded: string, original: string): void {
-	if (!InternalUrlRouter.instance().canHandle(expanded)) return;
+	if (!InternalUrlRouter.builtins().canHandle(expanded)) return;
 	throw new Error(
 		`Path "${original}" uses internal scheme "${extractUriScheme(expanded)}://" and must be resolved through the proper protocol handler, not as a filesystem path.`,
 	);
 }
 
-/** Whether `filePath` (after `@`/single-slash alias normalization) is a URL of a registered internal scheme. */
-function isInternalUrlPath(filePath: string): boolean {
-	return InternalUrlRouter.instance().canHandle(expandPath(filePath));
+/** Whether `filePath` (after `@`/single-slash alias normalization) is a URL of a scheme `router` handles. */
+function isInternalUrlPath(filePath: string, router: InternalUrlRouter): boolean {
+	return router.canHandle(expandPath(filePath));
 }
 
 /**
@@ -363,8 +367,10 @@ function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boo
 export function confineToWorkspace(filePath: string, cwd: string): string | null {
 	if (!filePath || path.isAbsolute(filePath)) return null;
 	// `~` expands to an absolute path, and an internal URL is not a filesystem
-	// target at all; neither is a relative workspace path.
-	if (filePath.startsWith("~") || isInternalUrlPath(filePath)) return null;
+	// target at all; neither is a relative workspace path. The path is a
+	// server-supplied download target, not a tool URL, so only the built-in
+	// schemes are checked, like {@link resolveToCwd}'s guard.
+	if (filePath.startsWith("~") || isInternalUrlPath(filePath, InternalUrlRouter.builtins())) return null;
 	const root = path.resolve(cwd);
 	const resolved = path.resolve(root, filePath);
 	if (!isUnderRootLexical(resolved, root)) return null;
@@ -512,11 +518,16 @@ async function isProvenNotSymlink(target: string): Promise<boolean> {
 export function formatPathRelativeToCwd(
 	filePath: string,
 	cwd: string,
-	options: { trailingSlash?: boolean } = {},
+	options: {
+		trailingSlash?: boolean;
+		/** Router whose schemes display as URLs; defaults to the built-ins (renderers with no session). */
+		router?: InternalUrlRouter;
+	} = {},
 ): string {
 	const resolvedCwd = path.resolve(cwd);
-	const normalized = InternalUrlRouter.instance().normalize(filePath);
-	if (isInternalUrlPath(normalized)) {
+	const router = options.router ?? InternalUrlRouter.builtins();
+	const normalized = router.normalize(filePath);
+	if (isInternalUrlPath(normalized, router)) {
 		return options.trailingSlash && !normalized.endsWith("/") ? `${normalized}/` : normalized;
 	}
 	const expanded = expandPath(normalized);
@@ -541,9 +552,8 @@ export function stripOuterDoubleQuotes(input: string): string {
 	return input.startsWith('"') && input.endsWith('"') && input.length > 1 ? input.slice(1, -1) : input;
 }
 
-/** Search root for a parsed base path: a registered internal URL as spelled (single-slash alias normalized), else {@link resolveToCwd}. */
-export function resolveSearchBase(basePath: string, cwd: string): string {
-	const router = InternalUrlRouter.instance();
+/** Search root for a parsed base path: a URL `router` handles as spelled (single-slash alias normalized), else {@link resolveToCwd}. */
+export function resolveSearchBase(basePath: string, cwd: string, router: InternalUrlRouter): string {
 	const url = router.normalize(basePath);
 	return router.canHandle(url) ? url : resolveToCwd(basePath, cwd);
 }
@@ -554,9 +564,8 @@ export function resolveSearchBase(basePath: string, cwd: string): string {
  * Absolute paths and URLs pass through; below a URL root each name joins as a
  * percent-encoded segment.
  */
-export function resolveSearchResultPath(base: string, rel: string): string {
+export function resolveSearchResultPath(base: string, rel: string, router: InternalUrlRouter): string {
 	if (rel === "") return base;
-	const router = InternalUrlRouter.instance();
 	if (router.canHandle(rel) || path.isAbsolute(rel)) return rel;
 	return router.canHandle(base) ? joinUrlPath(base, rel) : path.resolve(base, rel);
 }
@@ -569,18 +578,18 @@ export function resolveSearchResultPath(base: string, rel: string): string {
 export function resolveTargetResultPath(
 	target: { basePath: string; isDirectory: boolean },
 	displayPath: string,
+	router: InternalUrlRouter,
 ): string {
-	return target.isDirectory ? resolveSearchResultPath(target.basePath, displayPath) : target.basePath;
+	return target.isDirectory ? resolveSearchResultPath(target.basePath, displayPath, router) : target.basePath;
 }
 
 /** `target` relative to the host directory `base` with `/` separators; `target` itself when either is an internal URL. */
-export function relativeSearchResultPath(base: string, target: string): string {
-	const router = InternalUrlRouter.instance();
+export function relativeSearchResultPath(base: string, target: string, router: InternalUrlRouter): string {
 	if (router.canHandle(base) || router.canHandle(target)) return target;
 	return path.relative(base, target).replace(/\\/g, "/");
 }
-function normalizePathSeparators(input: string): string {
-	if (isInternalUrlPath(input)) return input;
+function normalizePathSeparators(input: string, router: InternalUrlRouter): string {
+	if (isInternalUrlPath(input, router)) return input;
 	if (!input.includes("\\")) return input;
 	return input.replace(/\\/g, "/");
 }
@@ -657,8 +666,13 @@ function splitTopLevelDelimitedPath(entry: string, mode: DelimitedPathSplitMode)
 	return parts;
 }
 
-async function delimitedPathPartResolves(entry: string, cwd: string, splitter: PathEntrySplitter): Promise<boolean> {
-	if (isInternalUrlPath(entry)) return true;
+async function delimitedPathPartResolves(
+	entry: string,
+	cwd: string,
+	splitter: PathEntrySplitter,
+	router: InternalUrlRouter,
+): Promise<boolean> {
+	if (isInternalUrlPath(entry, router)) return true;
 	const peeled = splitPathAndSel(entry).path;
 	const { basePath } = splitter(peeled);
 	const absoluteBasePath = resolveToCwd(basePath, cwd);
@@ -689,6 +703,7 @@ async function tryDelimitedPathSplit(
 	splitter: PathEntrySplitter,
 	mode: DelimitedPathSplitMode,
 	requirement: DelimitedResolveRequirement,
+	router: InternalUrlRouter,
 ): Promise<string[] | null> {
 	const rawParts = splitTopLevelDelimitedPath(entry, mode);
 	if (rawParts.length < 2) return null;
@@ -698,7 +713,7 @@ async function tryDelimitedPathSplit(
 	if (parts.length < 2 && rawParts.length === parts.length) return null;
 
 	if (requirement !== "none") {
-		const resolved = await Promise.all(parts.map(part => delimitedPathPartResolves(part, cwd, splitter)));
+		const resolved = await Promise.all(parts.map(part => delimitedPathPartResolves(part, cwd, splitter, router)));
 		const valid = requirement === "all" ? resolved.every(Boolean) : resolved.some(Boolean);
 		if (!valid) return null;
 	}
@@ -734,12 +749,12 @@ async function probeInternalUrlTarget(
 }
 
 async function internalUrlEntryResolves(entry: string, filesystem: InternalUrlFilesystem): Promise<boolean> {
-	const router = InternalUrlRouter.instance();
+	const router = filesystem.router;
 	const peeledUrl = router.split(expandPath(entry)).path;
 	if (router.isGlob(peeledUrl)) {
 		let parsedUrl: ParsedSearchPath | undefined;
 		try {
-			parsedUrl = parseUrlSearchPath(peeledUrl);
+			parsedUrl = parseUrlSearchPath(peeledUrl, router);
 		} catch {
 			return false;
 		}
@@ -756,6 +771,7 @@ async function internalUrlEntryResolves(entry: string, filesystem: InternalUrlFi
 export async function splitDelimitedPathEntry(
 	entry: string,
 	cwd: string,
+	router: InternalUrlRouter,
 	options: {
 		splitter?: PathEntrySplitter;
 		routedUrlPredicate?: (entry: string) => boolean;
@@ -772,40 +788,42 @@ export async function splitDelimitedPathEntry(
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!hasTopLevelPathDelimiter(normalizedEntry)) return null;
-	const splitter = options.splitter ?? parseSearchPath;
+	const splitter = options.splitter ?? ((item: string) => parseSearchPath(item, router));
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
-		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
+		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none", router);
 		const routed = options.routedUrlPredicate;
 		return parts?.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
 			? parts
 			: null;
 	}
-	if (options.mixedLocalPaths !== undefined && isInternalUrlPath(normalizedEntry)) {
+	if (options.mixedLocalPaths !== undefined && isInternalUrlPath(normalizedEntry, router)) {
 		// Before the all-internal branch, which keeps the whole string when any
 		// part is not itself an internal URL. All-URL lists always split. For a
 		// mixed list, probe the range-free URL (or its non-glob base directory)
 		// and split only on confirmed missing or invalid targets so semicolons
 		// inside real URLs and read/permission/size errors stay intact.
 		const isUrlPart = (part: string): boolean =>
-			isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part));
-		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
+			isInternalUrlPath(part, router) || (options.exclusionParts === true && isExclusionPart(part));
+		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none", router);
 		if (!parts || parts.length <= 1) return null;
 		if (parts.every(isUrlPart)) return parts;
 		// No resolve cache: a URL that does resolve is read again during the search.
 		// Only mixed `;` lists pay that second read, including ssh:// and mcp://.
 		return (await internalUrlEntryResolves(normalizedEntry, options.mixedLocalPaths)) ? null : parts;
 	}
-	if (isInternalUrlPath(normalizedEntry)) {
+	if (isInternalUrlPath(normalizedEntry, router)) {
 		// A `;` list of internal URLs (`local://44.log;local://43.log`) names
 		// several resources: the router resolves one URI per entry, so the list
 		// must split before dispatch (issue #14091). Split only when every part
 		// is itself an internal URL or a `!glob` exclusion (`local://notes;!*.test.ts`)
 		// — a URL whose own path contains `;` stays whole, and a single URL ending
 		// in `;` (`local://report;`) names one resource.
-		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
+		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none", router);
 		return parts &&
 			parts.length > 1 &&
-			parts.every(part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)))
+			parts.every(
+				part => isInternalUrlPath(part, router) || (options.exclusionParts === true && isExclusionPart(part)),
+			)
 			? parts
 			: null;
 	}
@@ -823,15 +841,15 @@ export async function splitDelimitedPathEntry(
 	// `a:1-30,:-30` may name a literal `a:1-30,` with a tail selector instead of `a` with a list.
 	const unfoldedPath = splitPathAndSel(normalizedEntry, { foldListColons: false }).path;
 	if (unfoldedPath !== peeledEntry && (await probeLiteralPathExists(unfoldedPath, cwd)) !== "missing") return null;
-	if (!hasGlobPathChars(peeledEntry) && (await delimitedPathPartResolves(normalizedEntry, cwd, splitter))) {
+	if (!hasGlobPathChars(peeledEntry) && (await delimitedPathPartResolves(normalizedEntry, cwd, splitter, router))) {
 		return null;
 	}
 
 	return (
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none")) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "comma", "some")) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "whitespace", "all")) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "mixed", "all"))
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none", router)) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "comma", "some", router)) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "whitespace", "all", router)) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "mixed", "all", router))
 	);
 }
 
@@ -848,17 +866,25 @@ export async function splitMixedUrlPathList(
 	entry: string,
 	cwd: string,
 	isUrl: (part: string) => boolean,
+	router: InternalUrlRouter,
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!normalizedEntry.includes(";") || !isUrl(normalizedEntry)) return null;
-	if (!isInternalUrlPath(normalizedEntry)) {
+	if (!isInternalUrlPath(normalizedEntry, router)) {
 		if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
 		const selectorSplit = splitPathAndSel(normalizedEntry);
 		if (selectorSplit.sel !== undefined && (await probeLiteralPathExists(selectorSplit.path, cwd)) !== "missing") {
 			return null;
 		}
 	}
-	const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, parseSearchPath, "semicolon", "none");
+	const parts = await tryDelimitedPathSplit(
+		normalizedEntry,
+		cwd,
+		item => parseSearchPath(item, router),
+		"semicolon",
+		"none",
+		router,
+	);
 	if (!parts) return null;
 	for (const part of parts) {
 		if (isUrl(part)) continue;
@@ -872,6 +898,7 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
+	router: InternalUrlRouter,
 	options: {
 		splitter?: PathEntrySplitter;
 		exclusionParts?: boolean;
@@ -881,7 +908,7 @@ export async function expandDelimitedPathEntries(
 	const expanded: string[] = [];
 	for (const entry of entries) {
 		const normalizedEntry = normalizePathLikeInput(entry);
-		const split = await splitDelimitedPathEntry(normalizedEntry, cwd, options);
+		const split = await splitDelimitedPathEntry(normalizedEntry, cwd, router, options);
 		if (split) expanded.push(...split);
 		else expanded.push(normalizedEntry);
 	}
@@ -951,13 +978,12 @@ function decodeUrlGlobSegment(rawSegment: string, input: string): string {
 }
 
 /**
- * A registered internal URL split like a host path at its first glob segment:
+ * A URL of a scheme `router` handles, split like a host path at its first glob segment:
  * the base stays a percent-encoded URL (`local://*.md` → `local://`), the glob
  * tail matches the raw entry names a native walk reports. Undefined for
- * anything but a registered URL.
+ * anything but such a URL.
  */
-function parseUrlSearchPath(input: string): ParsedSearchPath | undefined {
-	const router = InternalUrlRouter.instance();
+function parseUrlSearchPath(input: string, router: InternalUrlRouter): ParsedSearchPath | undefined {
 	const url = router.normalize(input);
 	if (!router.canHandle(url)) return undefined;
 	if (!router.isGlob(url)) return { basePath: url };
@@ -976,10 +1002,10 @@ function parseUrlSearchPath(input: string): ParsedSearchPath | undefined {
 	};
 }
 
-export function parseSearchPath(filePath: string): ParsedSearchPath {
-	const urlPath = parseUrlSearchPath(filePath);
+export function parseSearchPath(filePath: string, router: InternalUrlRouter): ParsedSearchPath {
+	const urlPath = parseUrlSearchPath(filePath, router);
 	if (urlPath) return urlPath;
-	const normalizedPath = normalizePathSeparators(filePath);
+	const normalizedPath = normalizePathSeparators(filePath, router);
 	const segments = normalizedPath.split("/");
 	const firstGlobIndex = firstGlobSegment(segments);
 
@@ -1008,13 +1034,17 @@ function isBareSearchGlob(raw: string, parsed: ParsedSearchPath): boolean {
  * without this, `[id]` is parsed as a glob character class and silently
  * matches nothing.
  */
-export async function parseSearchPathPreferringLiteral(filePath: string, cwd: string): Promise<ParsedSearchPath> {
-	if (!hasGlobPathChars(filePath) || isInternalUrlPath(filePath)) return parseSearchPath(filePath);
+export async function parseSearchPathPreferringLiteral(
+	filePath: string,
+	cwd: string,
+	router: InternalUrlRouter,
+): Promise<ParsedSearchPath> {
+	if (!hasGlobPathChars(filePath) || isInternalUrlPath(filePath, router)) return parseSearchPath(filePath, router);
 	try {
 		await fs.promises.stat(resolveToCwd(filePath, cwd));
-		return { basePath: normalizePathSeparators(filePath) };
+		return { basePath: normalizePathSeparators(filePath, router) };
 	} catch {
-		return parseSearchPath(filePath);
+		return parseSearchPath(filePath, router);
 	}
 }
 
@@ -1032,15 +1062,15 @@ function globFindPattern(basePath: string, globPattern: string): ParsedFindPatte
 //   **/\*.json -> { basePath: ".", globPattern: "**/*.json", hasGlob: true }
 //   /abs/path/**/\*.ts -> { basePath: "/abs/path", globPattern: "**/*.ts", hasGlob: true }
 //   src/app -> { basePath: "src/app", globPattern: "**/*", hasGlob: false }
-export function parseFindPattern(pattern: string): ParsedFindPattern {
-	const urlPath = parseUrlSearchPath(pattern);
+export function parseFindPattern(pattern: string, router: InternalUrlRouter): ParsedFindPattern {
+	const urlPath = parseUrlSearchPath(pattern, router);
 	if (urlPath) {
 		// A URL names its root explicitly, so its glob stays anchored there like `dir/*`.
 		return urlPath.glob === undefined
 			? { basePath: urlPath.basePath, globPattern: "**/*", hasGlob: false }
 			: globFindPattern(urlPath.basePath, urlPath.glob);
 	}
-	const normalizedPattern = normalizePathSeparators(pattern);
+	const normalizedPattern = normalizePathSeparators(pattern, router);
 	const segments = normalizedPattern.split("/");
 	const firstGlobIndex = firstGlobSegment(segments);
 
@@ -1115,11 +1145,12 @@ function findCommonBasePath(paths: string[]): string {
 	return joined || path.parse(path.resolve(paths[0])).root;
 }
 
-function toScopeDisplay(items: string[], cwd: string): string {
+function toScopeDisplay(items: string[], cwd: string, router: InternalUrlRouter): string {
 	return items
 		.map(item =>
 			formatPathRelativeToCwd(item, cwd, {
 				trailingSlash: item.endsWith("/") || item.endsWith("\\"),
+				router,
 			}),
 		)
 		.join(", ");
@@ -1136,11 +1167,11 @@ async function resolveSearchPathItems(
 		return undefined;
 	}
 
-	const router = InternalUrlRouter.instance();
+	const router = filesystem.router;
 	const parsedItems = await Promise.all(
 		pathItems.map(async item => {
-			const parsedPath = await parseSearchPathPreferringLiteral(item, cwd);
-			const absoluteBasePath = resolveSearchBase(parsedPath.basePath, cwd);
+			const parsedPath = await parseSearchPathPreferringLiteral(item, cwd, router);
+			const absoluteBasePath = resolveSearchBase(parsedPath.basePath, cwd, router);
 			const { type } = await filesystem.stat(absoluteBasePath);
 			return { raw: item, parsedPath, absoluteBasePath, type, isUrl: router.canHandle(absoluteBasePath) };
 		}),
@@ -1206,7 +1237,7 @@ async function resolveSearchPathItems(
 	return {
 		basePath: commonBasePath,
 		glob: buildBraceUnion(combinedPatterns),
-		scopePath: toScopeDisplay(pathItems, cwd),
+		scopePath: toScopeDisplay(pathItems, cwd, router),
 		exactFilePaths: allExactFiles ? parsedItems.map(item => item.absoluteBasePath) : undefined,
 		targets,
 	};
@@ -1225,6 +1256,7 @@ export async function resolveExplicitSearchPaths(
 async function resolveFindPatternItems(
 	patternItems: string[],
 	cwd: string,
+	router: InternalUrlRouter,
 ): Promise<ResolvedMultiFindPattern | undefined> {
 	if (patternItems.length <= 1) {
 		return undefined;
@@ -1236,9 +1268,9 @@ async function resolveFindPatternItems(
 	// $HOME would scan all of $HOME. The find tool fans these targets out in
 	// parallel instead, so every scan stays bounded to exactly one requested path.
 	const targets = patternItems.map(item => {
-		const parsedPattern = parseFindPattern(item);
+		const parsedPattern = parseFindPattern(item, router);
 		return {
-			basePath: resolveSearchBase(parsedPattern.basePath, cwd),
+			basePath: resolveSearchBase(parsedPattern.basePath, cwd, router),
 			globPattern: parsedPattern.globPattern,
 			hasGlob: parsedPattern.hasGlob,
 			directoryOnly: parsedPattern.directoryOnly,
@@ -1247,15 +1279,16 @@ async function resolveFindPatternItems(
 
 	return {
 		targets,
-		scopePath: toScopeDisplay(patternItems, cwd),
+		scopePath: toScopeDisplay(patternItems, cwd, router),
 	};
 }
 
 export async function resolveExplicitFindPatterns(
 	patternItems: string[],
 	cwd: string,
+	router: InternalUrlRouter,
 ): Promise<ResolvedMultiFindPattern | undefined> {
-	return resolveFindPatternItems([...new Set(patternItems)], cwd);
+	return resolveFindPatternItems([...new Set(patternItems)], cwd, router);
 }
 
 /**
@@ -1277,8 +1310,8 @@ export interface PartitionedPaths {
  * Stat each input's base path concurrently; return entries split by existence.
  *
  * `splitter` is expected to be {@link parseFindPattern} or
- * {@link parseSearchPath}: both return a `basePath` field that this helper
- * resolves against `cwd` ({@link resolveSearchBase}) and stats through
+ * {@link parseSearchPath} bound to `filesystem.router`: both return a `basePath`
+ * field that this helper resolves against `cwd` ({@link resolveSearchBase}) and stats through
  * `filesystem`. ENOENT is the only swallowed error — every other stat failure
  * (permission, IO, tier refusal, etc.) propagates so callers do not silently
  * skip paths that exist but are unreadable.
@@ -1296,7 +1329,7 @@ export async function partitionExistingPaths(
 		items.map(async item => {
 			const { basePath } = splitter(item);
 			try {
-				await filesystem.stat(resolveSearchBase(basePath, cwd));
+				await filesystem.stat(resolveSearchBase(basePath, cwd, filesystem.router));
 				return { item, exists: true } as const;
 			} catch (err) {
 				if (err instanceof UrlFsError && err.code === "ENOENT") return { item, exists: false } as const;
@@ -1514,8 +1547,11 @@ export interface ToolScopeResolution {
 	immutableSourcePaths: Set<string>;
 }
 
-/** Approval tier for a search tool's raw `path` (or legacy `paths`) input: the highest scheme read tier named anywhere in it. */
-export function searchPathTier(args: unknown): ToolTier {
+/**
+ * Approval tier for a search tool's raw `path` (or legacy `paths`) input: the highest read tier of a
+ * scheme `router` handles named anywhere in it.
+ */
+export function searchPathTier(args: unknown, router: InternalUrlRouter): ToolTier {
 	const raw = isRecord(args) ? (args.path ?? args.paths) : undefined;
 	// The tools decode JSON-encoded arrays (`["ssh:\/\/host"]`) the same way before resolving.
 	const entries =
@@ -1525,7 +1561,7 @@ export function searchPathTier(args: unknown): ToolTier {
 				? raw.filter(entry => typeof entry === "string")
 				: [];
 	// Substring scan over the raw entries: delimited lists are only split after approval.
-	return InternalUrlRouter.instance().readTier(entries.join("\n"));
+	return router.readTier(entries.join("\n"));
 }
 
 /**
@@ -1538,11 +1574,12 @@ export function searchPathTier(args: unknown): ToolTier {
  */
 export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<ToolScopeResolution> {
 	const { rawPaths: inputs, cwd, internalUrlAction } = opts;
+	const internalRouter = opts.filesystem.router;
 	const normalizedRawPaths = inputs.map(normalizePathLikeInput);
 	if (normalizedRawPaths.some(rawPath => rawPath.length === 0)) {
 		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
-	const rawPaths = await expandDelimitedPathEntries(normalizedRawPaths, cwd);
+	const rawPaths = await expandDelimitedPathEntries(normalizedRawPaths, cwd, internalRouter);
 	if (rawPaths.some(rawPath => rawPath.length === 0)) {
 		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
@@ -1550,7 +1587,6 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	// local-path semantics (expandPath strips it downstream), so it flows through
 	// the ordinary filesystem pipeline instead of the external-URL resolver.
 	const strictExternalUrlRe = /^(?:https?|ftp|ws|wss):\/\//i;
-	const internalRouter = InternalUrlRouter.instance();
 	const resolvedPathInputs: string[] = [];
 	const immutableSourcePaths = new Set<string>();
 	for (const rawPath of rawPaths) {
@@ -1600,7 +1636,12 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	let missingPaths: string[] = [];
 	let effectivePaths = resolvedPathInputs;
 	if (resolvedPathInputs.length > 1) {
-		const partition = await partitionExistingPaths(resolvedPathInputs, cwd, parseSearchPath, opts.filesystem);
+		const partition = await partitionExistingPaths(
+			resolvedPathInputs,
+			cwd,
+			item => parseSearchPath(item, internalRouter),
+			opts.filesystem,
+		);
 		if (partition.valid.length === 0) {
 			throw new ToolError(`Path not found: ${partition.missing.join(", ")}`);
 		}
@@ -1615,11 +1656,11 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	let multiTargets: ResolvedSearchTarget[] | undefined;
 	let exactFilePaths: string[] | undefined;
 	if (effectivePaths.length === 1) {
-		const parsedPath = await parseSearchPathPreferringLiteral(effectivePaths[0] ?? ".", cwd);
-		searchPath = resolveSearchBase(parsedPath.basePath, cwd);
+		const parsedPath = await parseSearchPathPreferringLiteral(effectivePaths[0] ?? ".", cwd, internalRouter);
+		searchPath = resolveSearchBase(parsedPath.basePath, cwd, internalRouter);
 		globFilter = parsedPath.glob;
 		bareGlob = isBareSearchGlob(effectivePaths[0]!, parsedPath);
-		scopePath = formatPathRelativeToCwd(searchPath, cwd);
+		scopePath = formatPathRelativeToCwd(searchPath, cwd, { router: internalRouter });
 	} else {
 		const multiSearchPath = await resolveExplicitSearchPaths(
 			effectivePaths,

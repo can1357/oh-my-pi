@@ -28,6 +28,7 @@ import {
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import {
 	bridgeToolMap,
 	createBridgeEditTool,
@@ -47,6 +48,9 @@ import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { removeWithRetries, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
+
+// The bridge tests run tools on sessions with no URL schemes of their own.
+const urlRouter = InternalUrlRouter.builtins();
 
 function yoloToolContext(): AgentToolContext {
 	return { settings: Settings.isolated({ "tools.approvalMode": "yolo" }) } as AgentToolContext;
@@ -95,6 +99,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 		await Bun.write(path.join(cwd, "sample.txt"), "Hello World\nhello world\n");
 		searchTool = new GrepTool(createTestSession(cwd));
 		handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map([["grep", searchTool as any]]),
 		});
@@ -138,6 +143,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 		const settings = Settings.isolated({ "grep.contextBefore": 2, "grep.contextAfter": 2 });
 		const session = createTestSession(cwd, { settings });
 		const scopedHandlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["grep", new GrepTool(session)]]),
 			createGrepTool: createBridgeGrepFactory(session, passthroughRunner()),
@@ -181,6 +187,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 		// the search returns everything it found.
 		await Bun.write(path.join(cwd, "many.txt"), Array.from({ length: 10 }, (_, i) => `needle ${i}`).join("\n"));
 		const scopedHandlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["grep", searchTool]]),
 			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
@@ -205,6 +212,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 		// through a per-call instance.
 		await Bun.write(path.join(cwd, "ctx.txt"), "before line\nneedle here\nafter line\n");
 		const scopedHandlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["grep", searchTool]]),
 			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
@@ -239,6 +247,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 			Array.from({ length: 25 }, (_, i) => Bun.write(path.join(spread, `f${i}.txt`), "needle here\n")),
 		);
 		const scopedHandlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["grep", searchTool]]),
 			createGrepTool: options => new GrepTool(createTestSession(cwd), options),
@@ -368,6 +377,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const editTool = createBridgeEditTool(createTestSession(cwd), passthroughRunner());
 
 		const withheld = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>(),
 			getEditReplaceTool: () => editTool,
@@ -395,7 +405,12 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const granted = new Map<string, Tool>([["edit", advisorEdit]]);
 
 		const bridged = bridgeToolMap(granted, () => createBridgeEditTool(session, passthroughRunner()));
-		const handlers = new CursorExecHandlers({ cwd, tools: bridged, getToolContext: () => yoloToolContext() });
+		const handlers = new CursorExecHandlers({
+			urlRouter,
+			cwd,
+			tools: bridged,
+			getToolContext: () => yoloToolContext(),
+		});
 		const result = await handlers.piEdit({
 			toolCallId: "e3",
 			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
@@ -420,6 +435,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(configuredEdit.mode).not.toBe("replace");
 
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["edit", configuredEdit]]),
 			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
@@ -442,6 +458,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>(),
 			getEditReplaceTool: () => undefined,
@@ -470,7 +487,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(withheld.has("edit")).toBe(false);
 		expect(built).toBe(0);
 
-		const handlers = new CursorExecHandlers({ cwd, tools: withheld });
+		const handlers = new CursorExecHandlers({ urlRouter, cwd, tools: withheld });
 		const result = await handlers.piEdit({
 			toolCallId: "e4",
 			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
@@ -485,7 +502,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		// over the registry, so a session that withheld `grep` must not install
 		// one — otherwise a frame carrying `context`/`limit` searches anyway.
 		await Bun.write(path.join(cwd, "hit.txt"), "needle\n");
-		const denied = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>() });
+		const denied = new CursorExecHandlers({ urlRouter, cwd, tools: new Map<string, Tool>() });
 		const result = await denied.piGrep({
 			toolCallId: "g0",
 			args: { pattern: "needle", path: cwd, limit: 5 },
@@ -505,6 +522,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const settings = Settings.isolated({ "tools.approval": { edit: "deny" } });
 		const session = createTestSession(cwd, { settings });
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: bridgeToolMap(new Map<string, Tool>([["edit", new EditTool(session)]]), () =>
 				createBridgeEditTool(session, passthroughRunner()),
@@ -529,6 +547,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const settings = Settings.isolated({ "tools.approval": { grep: "deny" } });
 		const session = createTestSession(cwd, { settings });
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>(),
 			createGrepTool: createBridgeGrepFactory(session, passthroughRunner()),
@@ -556,6 +575,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(built).toBeInstanceOf(ExtensionToolWrapper);
 
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>(),
 			createGrepTool: factory,
@@ -582,6 +602,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const writeTool = await BUILTIN_TOOLS.write(session);
 		if (!writeTool) throw new Error("expected a write tool");
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["write", new ExtensionToolWrapper(writeTool, passthroughRunner())]]),
 			getToolContext: () => ({ settings }) as AgentToolContext,
@@ -632,6 +653,7 @@ describe("Cursor MCP StrReplace fallback", () => {
 		await Bun.write(target, "alpha\nbeta\n");
 		const session = createTestSession(cwd);
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["edit", new EditTool(session)]]),
 			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
@@ -660,6 +682,7 @@ describe("Cursor MCP StrReplace fallback", () => {
 		const hashline = new EditTool(session);
 		expect(hashline.mode).not.toBe("replace");
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["edit", hashline]]),
 			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
@@ -685,6 +708,7 @@ describe("Cursor MCP StrReplace fallback", () => {
 		const session = createTestSession(cwd);
 		let replaceBuilt = 0;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["edit", new EditTool(session)]]),
 			getEditReplaceTool: () => {
@@ -709,6 +733,7 @@ describe("Cursor MCP StrReplace fallback", () => {
 		const target = path.join(cwd, "note.txt");
 		await Bun.write(target, "alpha\nbeta\n");
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>(),
 			getEditReplaceTool: () => undefined,
@@ -863,6 +888,7 @@ describe("Cursor MCP exec ordering", () => {
 		const editGate = Promise.withResolvers<void>();
 		let shellStarted = false;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([
 				[
@@ -906,6 +932,7 @@ describe("Cursor MCP exec ordering", () => {
 		const readGate = Promise.withResolvers<void>();
 		let editStarted = false;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([
 				[
@@ -949,6 +976,7 @@ describe("Cursor MCP exec ordering", () => {
 		const writeGate = Promise.withResolvers<void>();
 		let readStarted = false;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([
 				[
@@ -991,7 +1019,7 @@ describe("pi_bash timeout presence", () => {
 	beforeEach(async () => {
 		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-pibash-timeout-"));
 		const bash: Tool = new BashTool(createTestSession(cwd));
-		handlers = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>([["bash", bash]]) });
+		handlers = new CursorExecHandlers({ urlRouter, cwd, tools: new Map<string, Tool>([["bash", bash]]) });
 	});
 
 	afterEach(async () => {
@@ -1054,7 +1082,7 @@ describe("legacy shell timeout unit (issue #13082)", () => {
 	beforeEach(async () => {
 		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-shell-timeout-"));
 		const bash: Tool = new BashTool(createTestSession(cwd));
-		handlers = new CursorExecHandlers({ cwd, tools: new Map<string, Tool>([["bash", bash]]) });
+		handlers = new CursorExecHandlers({ urlRouter, cwd, tools: new Map<string, Tool>([["bash", bash]]) });
 	});
 
 	afterEach(async () => {
@@ -1144,6 +1172,7 @@ describe("CursorExecHandlers error results", () => {
 	it("propagates returned isError through the standard exec bridge", async () => {
 		const events: AgentEvent[] = [];
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map([["read", rewrittenErrorTool("read")]]),
 			emitEvent: event => events.push(event),
@@ -1160,6 +1189,7 @@ describe("CursorExecHandlers error results", () => {
 		const events: AgentEvent[] = [];
 		const stdout: string[] = [];
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map([["bash", rewrittenErrorTool("bash")]]),
 			emitEvent: event => events.push(event),
@@ -1181,6 +1211,7 @@ describe("CursorExecHandlers error results", () => {
 
 	it("names the granted tools when a shell frame asks for an unavailable bash", async () => {
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map([
 				["read", rewrittenErrorTool("read")],
@@ -1217,6 +1248,7 @@ describe("CursorExecHandlers error results", () => {
 			},
 		};
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map([["bash", bashTool]]),
 			emitEvent: event => events.push(event),
@@ -1308,7 +1340,7 @@ describe("CursorExecHandlers native StrReplace materialization", () => {
 		const events: AgentEvent[] = [];
 		// The provider reaches the handlers through the glyph codec's Proxy, which calls them with the proxy as `this`.
 		const handlers = new Proxy(
-			new CursorExecHandlers({ cwd, tools: fileTools, emitEvent: event => events.push(event) }),
+			new CursorExecHandlers({ urlRouter, cwd, tools: fileTools, emitEvent: event => events.push(event) }),
 			{},
 		);
 
@@ -1341,7 +1373,7 @@ describe("CursorExecHandlers native StrReplace materialization", () => {
 	it("diffs only the changed line of a CRLF file with a BOM", async () => {
 		const target = path.join(cwd, "win.txt");
 		await Bun.write(target, "\uFEFFa\r\nb\r\nc\r\n");
-		const handlers = new CursorExecHandlers({ cwd, tools: fileTools, emitEvent: () => {} });
+		const handlers = new CursorExecHandlers({ urlRouter, cwd, tools: fileTools, emitEvent: () => {} });
 
 		const result = await handlers.write(
 			create(WriteArgsSchema, { toolCallId: "edit-2", path: target, fileText: "a\nB\nc\n" }),
@@ -1367,7 +1399,7 @@ describe("CursorExecHandlers argument validation", () => {
 				return { content: [{ type: "text", text: "executed" }] };
 			},
 		};
-		return { handlers: new CursorExecHandlers({ cwd: ".", tools: new Map([[tool.name, tool]]) }), calls };
+		return { handlers: new CursorExecHandlers({ urlRouter, cwd: ".", tools: new Map([[tool.name, tool]]) }), calls };
 	}
 
 	function mcp(
@@ -1396,7 +1428,7 @@ describe("CursorExecHandlers argument validation", () => {
 			}),
 		);
 		return {
-			handlers: new CursorExecHandlers({ cwd: ".", tools: new Map([["todo", tool as AgentTool]]) }),
+			handlers: new CursorExecHandlers({ urlRouter, cwd: ".", tools: new Map([["todo", tool as AgentTool]]) }),
 			phases: () => phases,
 		};
 	}
@@ -1475,6 +1507,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			},
 		};
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map([[mountedTool.name, mountedTool]]),
 			getExecutableTool: name => (name === mountedTool.name ? mountedTool : undefined),
@@ -1513,6 +1546,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		} as unknown as ExtensionRunner);
 		const settings = Settings.isolated({ "tools.approval": { ast_edit: "deny" } });
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			// The canonical map contains the undecorated mounted tool. The execution
 			// override must win or Cursor bypasses the approval gate.
@@ -1540,6 +1574,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		// resources the session holds live connections to. Every entry must
 		// carry the server name, since that is how Cursor addresses the read.
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map(),
 			mcpResources: {
@@ -1570,6 +1605,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		const discovery = Promise.withResolvers<void>();
 		let loaded = false;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map(),
 			mcpResources: {
@@ -1596,6 +1632,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		// and its mime type has to describe that payload rather than whichever
 		// item happened to come first, or the model is told plain text is a PNG.
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map(),
 			mcpResources: {
@@ -1619,6 +1656,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		// MCP hands back a list of content items with base64 blobs; the wire
 		// carries one text or one byte payload.
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map(),
 			mcpResources: {
@@ -1645,6 +1683,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-download-"));
 		try {
 			const handlers = new CursorExecHandlers({
+				urlRouter,
 				cwd: workspace,
 				tools: new Map(),
 				getToolContext: () => yoloToolContext(),
@@ -1685,6 +1724,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			const inner = path.join(workspace, "ws");
 			await fs.mkdir(inner);
 			const handlers = new CursorExecHandlers({
+				urlRouter,
 				cwd: inner,
 				tools: new Map(),
 				getToolContext: () => yoloToolContext(),
@@ -1729,6 +1769,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			await fs.symlink(path.join(inner, "second.txt"), path.join(inner, "chain.txt"));
 			await fs.symlink(path.join(outside, "chained.txt"), path.join(inner, "second.txt"));
 			const handlers = new CursorExecHandlers({
+				urlRouter,
 				cwd: inner,
 				tools: new Map(),
 				getToolContext: () => yoloToolContext(),
@@ -1772,6 +1813,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		try {
 			let payload = "a much longer first payload";
 			const handlers = new CursorExecHandlers({
+				urlRouter,
 				cwd: workspace,
 				tools: new Map(),
 				getToolContext: () => yoloToolContext(),
@@ -1807,6 +1849,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			await Bun.write(victim, "SECRET");
 			await fs.link(victim, path.join(inner, "innocent.txt"));
 			const handlers = new CursorExecHandlers({
+				urlRouter,
 				cwd: inner,
 				tools: new Map(),
 				getToolContext: () => yoloToolContext(),
@@ -1841,6 +1884,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 				const mkfifo = Bun.spawn(["mkfifo", fifo]);
 				if ((await mkfifo.exited) !== 0) throw new Error("mkfifo failed");
 				const handlers = new CursorExecHandlers({
+					urlRouter,
 					cwd: workspace,
 					tools: new Map(),
 					getToolContext: () => yoloToolContext(),
@@ -1884,6 +1928,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			};
 
 			const ungranted = new CursorExecHandlers({
+				urlRouter,
 				cwd: workspace,
 				tools: new Map(),
 				allowDirectFileMutation: false,
@@ -1894,6 +1939,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			).rejects.toThrow(/not available/);
 
 			const denied = new CursorExecHandlers({
+				urlRouter,
 				cwd: workspace,
 				tools: new Map(),
 				mcpResources,
@@ -1919,7 +1965,7 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 	it("answers nothing when the session has no MCP manager", async () => {
 		// A host without MCP must still answer truthfully rather than throwing:
 		// an empty catalog and `not_found` are the honest responses.
-		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map() });
+		const handlers = new CursorExecHandlers({ urlRouter, cwd: ".", tools: new Map() });
 		expect(await handlers.listMcpResources({})).toEqual([]);
 		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://x" })).toBeNull();
 	});
@@ -2016,6 +2062,7 @@ describe("CursorExecHandlers advise routing (issue #5680)", () => {
 		const advised: Array<{ note: string; severity?: string }> = [];
 		const adviseTool = new AdviseTool((note, severity) => advised.push({ note, severity }));
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd: ".",
 			tools: new Map([["advise", adviseTool as unknown as AgentTool]]),
 		});
@@ -2097,6 +2144,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const target = path.join(cwd, "victim.txt");
 		await Bun.write(target, "keep me");
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: false,
@@ -2118,6 +2166,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const target = path.join(cwd, "victim.txt");
 		await Bun.write(target, "remove me");
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: true,
@@ -2132,6 +2181,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 
 	it("returns the deleted file size in details, including zero-byte files", async () => {
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: true,
@@ -2152,6 +2202,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		await Bun.write(target, "remove after upgrade");
 		let mutationGranted = false;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: () => mutationGranted,
@@ -2177,6 +2228,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		await Bun.write(movedTarget, "remove me");
 		let currentCwd = cwd;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			getCwd: () => currentCwd,
 			tools: new Map(),
@@ -2201,6 +2253,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		await Bun.write(target, "keep me\n");
 		const settings = Settings.isolated({ "tools.approval": { delete: "deny" } });
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: true,
@@ -2222,6 +2275,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		await Bun.write(target, "keep me\n");
 		const settings = Settings.isolated({ "tools.approvalMode": "always-ask" });
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: true,
@@ -2238,6 +2292,7 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const target = path.join(cwd, "unwired.txt");
 		await Bun.write(target, "keep me\n");
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map(),
 			allowDirectFileMutation: true,
@@ -2280,6 +2335,7 @@ describe("CursorExecHandlers MCP approval preflight", () => {
 			},
 		} as unknown as AgentTool;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map([[tool.name, tool]]),
 			getToolContext: () => ({ settings }) as AgentToolContext,
@@ -2339,6 +2395,7 @@ describe("CursorExecHandlers MCP approval preflight", () => {
 			execute: async () => ({ content: [{ type: "text", text: "ran" }] }),
 		} as unknown as AgentTool;
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map([[tool.name, tool]]),
 		});
@@ -2375,7 +2432,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 				return { content: [{ type: "text" as const, text: "ok" }] };
 			},
 		};
-		const handlers = new CursorExecHandlers({ cwd, tools: new Map([[toolName, tool]]) });
+		const handlers = new CursorExecHandlers({ urlRouter, cwd, tools: new Map([[toolName, tool]]) });
 		return { handlers, calls };
 	}
 
@@ -2489,6 +2546,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 				`${Array.from({ length: 40 }, (_, i) => `line${i + 1}`).join("\n")}\n`,
 			);
 			const handlers = new CursorExecHandlers({
+				urlRouter,
 				cwd,
 				tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
 			});
@@ -2513,6 +2571,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		await Bun.write(target, `${Array.from({ length: 1000 }, (_, i) => `line${i + 1}`).join("\n")}\n`);
 		const session = createTestSession(cwd);
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["read", new ReadTool(session)]]),
 		});
@@ -2542,6 +2601,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		const target = path.join(cwd, "native-tail.txt");
 		await Bun.write(target, `${Array.from({ length: 1000 }, (_, i) => `line${i + 1}`).join("\n")}\n`);
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
 		});
@@ -2597,6 +2657,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		const target = path.join(cwd, "shot.png");
 		await Bun.write(target, await new Bun.Image(seed).resize(24, 24).png().bytes());
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
 			getToolContext: () => yoloToolContext(),
@@ -2674,6 +2735,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		const sessionDir = path.join(cwd, "session");
 		await Bun.write(path.join(sessionDir, "local", spillFileName(0)), "cursor-spill-content\n");
 		const handlers = new CursorExecHandlers({
+			urlRouter,
 			cwd,
 			tools: new Map<string, Tool>([
 				["read", new ReadTool(createTestSession(cwd, { getArtifactsDir: () => sessionDir }))],
@@ -2785,6 +2847,7 @@ describe("CursorExecHandlers passive tool context", () => {
 			[true, "tool context"],
 		] as const) {
 			const handlers = new CursorExecHandlers({
+				urlRouter,
 				cwd: os.tmpdir(),
 				tools: new Map<string, Tool>([
 					["probe", new ExtensionToolWrapper(probeTool(fail), contextRunner()) as unknown as Tool],

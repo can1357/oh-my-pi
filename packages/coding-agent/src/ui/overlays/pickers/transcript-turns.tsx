@@ -17,6 +17,7 @@ import {
 	type UiNode,
 	untrack,
 } from "@oh-my-pi/pi-tui";
+import type { InternalUrlRouter } from "../../../internal-urls/router";
 import { readArgsCollapseIntoGroup } from "../../../session/transcript/read-tool-group";
 import { textContent } from "../../../session/transcript/transcript-entry";
 import "../../tools";
@@ -36,6 +37,8 @@ function TurnBlocks(props: {
 	readonly expanded: Accessor<boolean>;
 	/** Takes each tool card and read group created. */
 	readonly onExpandable: (item: Expandable) => void;
+	/** The session's URL router: decides which reads join a read group. */
+	readonly router: InternalUrlRouter;
 }): JSXNode {
 	const [message, ...results] = props.messages;
 	if (message?.role === "user") {
@@ -56,7 +59,7 @@ function TurnBlocks(props: {
 	for (const part of message.content) {
 		if (part.type !== "toolCall") continue;
 		const result = resultOf(part.id);
-		if (part.name === "read" && readArgsCollapseIntoGroup(part.arguments)) {
+		if (part.name === "read" && readArgsCollapseIntoGroup(part.arguments, props.router)) {
 			if (!reads) {
 				const group = new ReadGroup();
 				group.setExpanded(expanded);
@@ -94,6 +97,12 @@ export class TurnViews {
 	readonly #views = new Map<string, Accessor<readonly UiNode[]>>();
 	readonly #expanded = signal(false);
 	readonly #expandables: Expandable[] = [];
+	readonly #router: InternalUrlRouter;
+
+	/** `router`: the session's, deciding which reads join a read group. */
+	constructor(router: InternalUrlRouter) {
+		this.#router = router;
+	}
 
 	/** The blocks of the turn keyed `key` drawing `messages`. */
 	blocks(key: string, messages: readonly AgentMessage[]): readonly UiNode[] {
@@ -102,6 +111,7 @@ export class TurnViews {
 				messages={messages}
 				expanded={this.#expanded}
 				onExpandable={item => this.#expandables.push(item)}
+				router={this.#router}
 			/>
 		));
 	}

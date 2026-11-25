@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { recordApprovalGrant, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import {
 	type ApprovalGrantStore,
@@ -92,7 +93,7 @@ describe("search tool approval cache targets", () => {
 	it("reports a file root as the file key a read of it would mint", () => {
 		const grep = new GrepTool(createToolSession(cwd));
 		const glob = new GlobTool(createToolSession(cwd));
-		const fileKey = approvalTargetKey(cwd, "src/notes.txt")!;
+		const fileKey = approvalTargetKey(cwd, "src/notes.txt", InternalUrlRouter.builtins())!;
 
 		expect(grep.approvalCacheTargets?.({ pattern: "hello", path: "src/notes.txt" })).toEqual([fileKey]);
 		expect(glob.approvalCacheTargets?.({ path: "src/notes.txt" })).toEqual([fileKey]);
@@ -105,7 +106,7 @@ describe("search tool approval cache targets", () => {
 
 		expect(grep.approvalCacheTargets?.({ pattern: "hello", path: ["src", "src/notes.txt", "src"] })).toEqual([
 			approvalTreeSearchKey(approvalDirectoryKey(srcDir)),
-			approvalTargetKey(cwd, "src/notes.txt")!,
+			approvalTargetKey(cwd, "src/notes.txt", InternalUrlRouter.builtins())!,
 		]);
 		// `paths` is the legacy alias the approval tier already reads.
 		expect(grep.approvalCacheTargets?.({ pattern: "hello", paths: "src" })).toEqual([

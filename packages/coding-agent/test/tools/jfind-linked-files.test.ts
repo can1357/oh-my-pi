@@ -49,7 +49,11 @@ describe("linked find candidates", () => {
 		await fs.symlink(scope, path.join(dir, "linked-root"), "dir");
 		for (const rootPath of [scope, path.join(dir, "linked-root")]) {
 			const root = await resolveSearchRoot(filesystem, rootPath, dir);
-			const entries = await listFiles(root, { filesystem: filesystem.shellFilesystem(), includeHidden: false });
+			const entries = await listFiles(root, {
+				filesystem: filesystem.shellFilesystem(),
+				router: filesystem.router,
+				includeHidden: false,
+			});
 			expect(entries).toEqual([{ path: path.join(rootPath, "source.ts"), rel: "source.ts", size: source.length }]);
 			expect((await readText(filesystem, entries[0]!.path, 1000)).text).toBe(source);
 		}
@@ -64,12 +68,12 @@ describe("linked find candidates", () => {
 		}
 		const entries = await listFiles(
 			{ path: scope, type: "directory" },
-			{ filesystem: filesystem.shellFilesystem(), includeHidden: false },
+			{ filesystem: filesystem.shellFilesystem(), router: filesystem.router, includeHidden: false },
 		);
 		expect(entries.map(entry => entry.rel)).toEqual(["source.ts"]);
 		const hidden = await listFiles(
 			{ path: scope, type: "directory" },
-			{ filesystem: filesystem.shellFilesystem(), includeHidden: true },
+			{ filesystem: filesystem.shellFilesystem(), router: filesystem.router, includeHidden: true },
 		);
 		expect(hidden.map(entry => entry.rel)).toEqual([".hidden.ts", "source.ts"]);
 	});

@@ -1,11 +1,11 @@
 /**
  * Internal URL routing system: scheme handlers, their declared specs, and the
- * process-global router that dispatches to them.
+ * routers that dispatch to them.
  *
- * One process-global `InternalUrlRouter` is shared across sessions. Handlers
- * are stateless; they pull whatever they need (active skills/rules, active
- * MCP/async managers, AgentRegistry-listed sessions) from the owning module
- * on each resolve call.
+ * The process-wide router holds OMP's built-in schemes only; each session's
+ * router checks the session's own schemes first. Handlers are stateless; they
+ * pull whatever they need (active skills/rules, active MCP/async managers,
+ * AgentRegistry-listed sessions) from the owning module on each resolve call.
  */
 
 export * from "./agent-protocol";
@@ -26,6 +26,7 @@ export * from "./parse";
 export * from "./router";
 export * from "./rule-protocol";
 export * from "./security-protocol";
+export * from "./scheme-table";
 export * from "./skill-protocol";
 export * from "./ssh-protocol";
 export type * from "./types";

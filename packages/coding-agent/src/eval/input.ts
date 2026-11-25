@@ -1,6 +1,5 @@
 import { ToolError } from "../tools/tool-errors";
-import { InternalUrlRouter } from "../internal-urls";
-import { sessionResolveContext } from "../internal-urls/context";
+import { sessionResolveContext, sessionUrlRouter } from "../internal-urls/context";
 import type { ToolSession } from "../tools";
 import { resolveReadPathAsync } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
@@ -66,7 +65,7 @@ export async function prepareEvalSource(
 	const [file] = args;
 	if (args.length !== 1 || !file) throw new ToolError("Usage: %load <script path>. Quote paths containing spaces.");
 	let filename: string;
-	const router = InternalUrlRouter.instance();
+	const router = sessionUrlRouter(session);
 	if (router.canHandle(file)) {
 		filename = await router.requireLocal(file, "load", sessionResolveContext(session, { signal }));
 	} else {

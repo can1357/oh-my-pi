@@ -166,7 +166,7 @@ describe("issue:// protocol handler", () => {
 	it("resolves issue://owner/repo/<n> through the shared cache", async () => {
 		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(42, "issue body", ["c1"]) as never);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const first = await router.resolve("issue://owner/example/42");
 
 		expect(first.contentType).toBe("text/markdown");
@@ -190,7 +190,7 @@ describe("issue:// protocol handler", () => {
 			"github.cache.hardTtlSec": 86400,
 		});
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await router.resolve("issue://owner/example/43");
 		await Bun.sleep(1);
 		spy.mockImplementation(async () => {
@@ -212,7 +212,7 @@ describe("issue:// protocol handler", () => {
 			return issuePayload(42, "issue body") as never;
 		});
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("issue://owner/example/42");
 
 		expect(resource.content).toContain("# Issue #42: Issue #42");
@@ -225,7 +225,7 @@ describe("issue:// protocol handler", () => {
 	it("?comments=0 selects a separate cache row with comments suppressed", async () => {
 		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(9, "body9", ["visible comment"]) as never);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const withComments = await router.resolve("issue://owner/example/9");
 		const without = await router.resolve("issue://owner/example/9?comments=0");
 
@@ -238,7 +238,7 @@ describe("issue:// protocol handler", () => {
 	});
 
 	it("rejects invalid issue:// URLs with a friendly message", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		// 4-or-more segments fall through to the catch-all "Invalid …" error.
 		await expect(router.resolve("issue://owner/example/foo/bar")).rejects.toThrow(/Invalid issue:\/\/ URL/);
 		// Non-numeric single segment fails the number check.
@@ -255,7 +255,7 @@ describe("pr:// protocol handler", () => {
 			return prPayload(77, "pr body") as never;
 		});
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const first = await router.resolve("pr://owner/example/77");
 
 		expect(first.contentType).toBe("text/markdown");
@@ -280,7 +280,7 @@ describe("pr:// protocol handler", () => {
 			return prPayloadWithRequestedFields(args, 78, "pr body") as never;
 		});
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("pr://owner/example/78");
 
 		expect(resource.content).toContain("## Reviews (1)");
@@ -289,13 +289,13 @@ describe("pr:// protocol handler", () => {
 	});
 
 	it("rejects invalid pr:// URLs with a friendly message", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("pr://owner/example/foo/bar")).rejects.toThrow(/Invalid pr:\/\/ URL/);
 		await expect(router.resolve("pr://owner/example/abc")).rejects.toThrow(/Invalid pr:\/\/ number/);
 	});
 
 	it("rejects empty / dot / dotdot path segments", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("pr://owner//77")).rejects.toThrow(
 			/Invalid pr:\/\/ URL: empty or unsafe path segment/,
 		);
@@ -318,7 +318,7 @@ describe("pr:// protocol handler", () => {
 			return prPayload(77, "pr body") as never;
 		});
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("pr://ghe.example.com/owner/example/77");
 
 		expect(resource.content).toContain("# Pull Request #77: PR #77");
@@ -340,7 +340,7 @@ describe("pr:// protocol handler", () => {
 			return prPayload(77, "pr body") as never;
 		});
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		// `ghe` carries no dot, so the number position is what separates
 		// `<host>/<owner>/<repo>/<n>` from `<owner>/<repo>/<n>/diff`.
 		const resource = await router.resolve("pr://ghe/owner/example/77");
@@ -353,7 +353,7 @@ describe("pr:// protocol handler", () => {
 	it("keeps the bare diff form out of the host-prefix branch", async () => {
 		const spy = vi.spyOn(github, "text").mockResolvedValue(makePrDiff([{ name: "a.ts", adds: 1, dels: 0 }]));
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("pr://owner/example/77/diff/1");
 
 		// `owner` is not a host here: the diff slice belongs to owner/example#77.
@@ -370,7 +370,7 @@ describe("pr:// protocol handler", () => {
 			return prPayload(79, "pr body") as never;
 		});
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const prefixed = await router.resolve("pr://github.com/owner/example/79");
 		// An explicit host reaches `gh`, which would otherwise resolve a
 		// host-less --repo against GH_HOST.
@@ -395,7 +395,7 @@ describe("pr:// protocol handler", () => {
 		const saved = process.env.GH_HOST;
 		process.env.GH_HOST = "ghe.example.com";
 		try {
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await router.resolve("pr://owner/example/81");
 			// The bare form above belongs to ghe.example.com, so github.com's #81
 			// is a different pull request and must be fetched, not served from it.
@@ -412,8 +412,8 @@ describe("pr:// protocol handler", () => {
 	});
 
 	it("rejects a host-prefixed URL that names no repository", async () => {
-		const router = InternalUrlRouter.instance();
-		await expect(InternalUrlRouter.instance().resolve("pr://ghe.example.com/owner")).rejects.toThrow(
+		const router = InternalUrlRouter.builtins();
+		await expect(InternalUrlRouter.builtins().resolve("pr://ghe.example.com/owner")).rejects.toThrow(
 			/Invalid pr:\/\/ URL/,
 		);
 		await expect(router.resolve("issue://ghe.example.com")).rejects.toThrow(/Invalid issue:\/\/ URL/);
@@ -429,7 +429,7 @@ describe("pr://.../diff family", () => {
 	it("pr://owner/repo/<n>/diff lists files with per-file hint URLs", async () => {
 		const textSpy = vi.spyOn(github, "text").mockResolvedValue(diffText);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("pr://owner/example/77/diff");
 
 		expect(resource.contentType).toBe("text/markdown");
@@ -445,7 +445,7 @@ describe("pr://.../diff family", () => {
 	it("pr://owner/repo/<n>/diff renders an empty-file body when the PR has no changes", async () => {
 		vi.spyOn(github, "text").mockResolvedValue("");
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("pr://owner/example/77/diff");
 		expect(resource.content).toContain("# Pull Request Diff: owner/example#77 (0 files)");
 		expect(resource.content).toContain("_No file changes._");
@@ -454,7 +454,7 @@ describe("pr://.../diff family", () => {
 	it("pr://owner/repo/<n>/diff/all returns the verbatim unified diff as text/plain", async () => {
 		vi.spyOn(github, "text").mockResolvedValue(diffText);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("pr://owner/example/77/diff/all");
 		expect(resource.contentType).toBe("text/plain");
 		expect(resource.content).toBe(diffText);
@@ -463,7 +463,7 @@ describe("pr://.../diff family", () => {
 	it("pr://owner/repo/<n>/diff/<i> slices the i-th file (1-indexed) as text/plain", async () => {
 		vi.spyOn(github, "text").mockResolvedValue(diffText);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const first = await router.resolve("pr://owner/example/77/diff/1");
 		expect(first.contentType).toBe("text/plain");
 		expect(resourceText(first).startsWith("diff --git a/src/one.ts b/src/one.ts")).toBe(true);
@@ -481,7 +481,7 @@ describe("pr://.../diff family", () => {
 		const oldDiff = makePrDiff([{ name: "src/old.ts", adds: 1, dels: 0 }]);
 		const newDiff = makePrDiff([{ name: "src/new.ts", adds: 4, dels: 0 }]);
 		const textSpy = vi.spyOn(github, "text").mockResolvedValue(oldDiff);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const first = await router.resolve("pr://owner/example/77/diff/1");
 		expect(first.content).toContain("src/old.ts");
@@ -539,7 +539,7 @@ describe("pr://.../diff family", () => {
 			"github.cache.softTtlSec": 60,
 			"github.cache.hardTtlSec": 10,
 		});
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const fetchedAt = Date.now();
 		const authKey = resolveGithubCacheAuthKey();
 		expect(authKey).toBeDefined();
@@ -566,7 +566,7 @@ describe("pr://.../diff family", () => {
 	it("does not serve a pinned diff when the GitHub cache is disabled", async () => {
 		const oldDiff = makePrDiff([{ name: "src/old.ts", adds: 1, dels: 0 }]);
 		const textSpy = vi.spyOn(github, "text").mockResolvedValue(oldDiff);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await router.resolve("pr://owner/example/77/diff/1");
 		const authKey = resolveGithubCacheAuthKey();
 		const stored = getCached("owner/example", "pr-diff", 77, false, authKey);
@@ -595,7 +595,7 @@ describe("pr://.../diff family", () => {
 	it("rejects out-of-range and non-decimal diff indices with friendly errors", async () => {
 		vi.spyOn(github, "text").mockResolvedValue(diffText);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("pr://owner/example/77/diff/9")).rejects.toThrow(/out of range/);
 		await expect(router.resolve("pr://owner/example/77/diff/foo")).rejects.toThrow(/Invalid pr:\/\/ diff sub-path/);
 	});
@@ -603,7 +603,7 @@ describe("pr://.../diff family", () => {
 	it("shares one `gh pr diff` invocation across /diff, /diff/all, and /diff/<i> reads", async () => {
 		const textSpy = vi.spyOn(github, "text").mockResolvedValue(diffText);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await router.resolve("pr://owner/example/77/diff");
 		await router.resolve("pr://owner/example/77/diff/all");
 		await router.resolve("pr://owner/example/77/diff/1");
@@ -614,7 +614,7 @@ describe("pr://.../diff family", () => {
 
 describe("issue://.../diff rejection", () => {
 	it("issue://owner/example/9/diff rejects with 'Invalid issue:// URL'", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("issue://owner/example/9/diff")).rejects.toThrow(/Invalid issue:\/\/ URL/);
 	});
 
@@ -622,7 +622,7 @@ describe("issue://.../diff rejection", () => {
 		// Regression: previously fell through to the `host && parts.length === 1`
 		// branch and was misparsed as a repo named `<N>/diff`, producing a
 		// confusing GraphQL "Could not resolve to a Repository" error instead.
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("issue://9/diff")).rejects.toThrow(/Issue views do not have a diff/);
 		await expect(router.resolve("issue://9/diff/all")).rejects.toThrow(/Issue views do not have a diff/);
 		await expect(router.resolve("issue://9/diff/3")).rejects.toThrow(/Issue views do not have a diff/);
@@ -654,7 +654,7 @@ describe("issue:// / pr:// listing", () => {
 			},
 		] as never);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("issue://owner/example");
 
 		expect(resource.contentType).toBe("text/markdown");
@@ -677,7 +677,7 @@ describe("issue:// / pr:// listing", () => {
 	it("pr://owner/repo passes state and limit query params through to gh", async () => {
 		const spy = vi.spyOn(github, "json").mockResolvedValue([] as never);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const resource = await router.resolve("pr://owner/example?state=merged&limit=5&author=alice&label=bug");
 
 		expect(resource.content).toContain("# Pull Requests in owner/example (merged, up to 5)");
@@ -693,7 +693,7 @@ describe("issue:// / pr:// listing", () => {
 	it("invalid state errors instead of silently falling back to 'open'", async () => {
 		const spy = vi.spyOn(github, "json").mockResolvedValue([] as never);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("issue://owner/example?state=banana")).rejects.toThrow(
 			/Invalid issue:\/\/ list state 'banana'/,
 		);
@@ -704,7 +704,7 @@ describe("issue:// / pr:// listing", () => {
 	it("treats `diff` as a repository name in repo-scoped listing URLs", async () => {
 		const spy = vi.spyOn(github, "json").mockResolvedValue([] as never);
 
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await router.resolve("issue://owner/diff");
 		await router.resolve("pr://owner/diff");
 
@@ -719,7 +719,7 @@ describe("issue:// / pr:// listing", () => {
 	it("issue:// (no repo, no session) surfaces a friendly resolution error", async () => {
 		// resolveDefaultRepoMemoized calls `gh repo view`; intercept it.
 		vi.spyOn(github, "text").mockRejectedValue(new Error("not a git repository"));
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("issue://")).rejects.toThrow(/could not resolve a default repo/);
 	});
 });

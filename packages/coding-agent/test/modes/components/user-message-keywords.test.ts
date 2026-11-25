@@ -11,6 +11,7 @@ import { enabledMagicKeywords } from "../../../src/ui/composer/magic-keywords";
 import { printRows } from "../../../src/ui/print-rows";
 import "../../../src/ui/styles/messages";
 import { UserMessage, type UserMessageModel } from "../../../src/ui/transcript/messages/user-message";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const restoreTheme = currentTheme();
 
@@ -101,6 +102,7 @@ describe("image links on transcript rebuild", () => {
 		const links = imageLinksForMessage(
 			[{ type: "image", data: Buffer.from("image-bytes").toString("base64"), mimeType: "image/png" }],
 			sessionManager as unknown as Parameters<typeof imageLinksForMessage>[1],
+			InternalUrlRouter.builtins(),
 		);
 		expect(links).toEqual([displayPath]);
 	});

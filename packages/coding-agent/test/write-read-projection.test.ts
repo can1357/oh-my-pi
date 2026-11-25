@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import * as capability from "@oh-my-pi/pi-coding-agent/capability";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls/scheme-table";
 import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
@@ -22,9 +23,13 @@ import {
 	cfgToolsOutputMaxColumns,
 } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
+/** Test-only session schemes every {@link createSession} session resolves through. */
+const testSchemes = new UrlSchemeTable("Test scheme");
+
 function createSession(cwd: string, bridge?: ClientBridge, editMode: "replace" | "hashline" = "replace"): ToolSession {
 	return {
 		cwd,
+		urlRouter: new InternalUrlRouter([testSchemes]),
 		hasUI: false,
 		getSessionFile: () => path.join(cwd, "session.jsonl"),
 		getSessionSpawns: () => "*",
@@ -277,7 +282,7 @@ describe("write tool read projection guard", () => {
 				resourceContent = nextContent;
 			},
 		};
-		InternalUrlRouter.instance().register(handler);
+		testSchemes.replace([handler]);
 		const session = createSession(tmpDir);
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-url", { path: `${url}:1-20` }),

@@ -36,8 +36,7 @@ import { applyDirenvPreflight, type BashResult, executeBash, sessionShellEnv } f
 import { BASH_SESSION_ENV } from "../exec/session-processes";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
-import { InternalUrlRouter } from "../internal-urls";
-import { sessionResolveContext } from "../internal-urls/context";
+import { sessionResolveContext, sessionUrlRouter } from "../internal-urls/context";
 import {
 	InternalUrlFilesystem,
 	type InternalUrlFilesystemOptions,
@@ -1852,7 +1851,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		let hoistedShellCwd = false;
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
-			const virtualTarget = cd !== null && InternalUrlRouter.instance().canHandle(cd.path);
+			const virtualTarget = cd !== null && sessionUrlRouter(this.session).canHandle(cd.path);
 			const semicolonDirectory =
 				cd?.separator === ";" &&
 				!virtualTarget &&
@@ -1971,7 +1970,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// starts on the host and enters it, and the client terminal never runs there.
 		const approval = this.approval({ command: rawCommand });
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
-		const router = InternalUrlRouter.instance();
+		const router = sessionUrlRouter(this.session);
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		const commandCwd = virtualCwd ?? resolveCommandCwd(cwd, this.session.cwd, hoistedShellCwd);
 		if (cwd) ran.cwd = commandCwd;

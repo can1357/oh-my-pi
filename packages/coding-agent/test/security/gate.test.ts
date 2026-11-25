@@ -3,6 +3,7 @@ import { Settings } from "../../src/config/settings";
 import { LspTool } from "../../src/lsp";
 import { buildSystemPrompt } from "../../src/system-prompt";
 import { createTools, type ToolSession } from "../../src/tools";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 function toolSession(settings: Settings): ToolSession {
 	return {
@@ -32,6 +33,7 @@ async function promptWithSecurity(securityEnabled: boolean): Promise<string> {
 		activeRepoContext: null,
 		securityEnabled,
 		includeModelInPrompt: false,
+		urlRouter: InternalUrlRouter.builtins(),
 	});
 	return systemPrompt.join("\n");
 }

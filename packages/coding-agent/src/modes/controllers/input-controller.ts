@@ -17,7 +17,7 @@ import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-role
 import { cfgCycleOrder } from "../../config/model-settings";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
-import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
+import { resolveLocalRoot } from "../../internal-urls";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import type { DequeuedMessage, RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -442,7 +442,9 @@ export class InputController {
 		);
 		this.#keyHooks.push(() => composer.setAtomizer(undefined));
 		// Images restored without a link (a recalled or returned draft) get their chip link back.
-		composer.setImageLinkResolver(images => materializeImageChipLinks(images, this.ctx.sessionManager));
+		composer.setImageLinkResolver(images =>
+			materializeImageChipLinks(images, this.ctx.sessionManager, this.ctx.session.urlRouter),
+		);
 		// Push-to-talk uses its own binding, separate from the STT toggle.
 		composer.setSpaceHold(
 			this.ctx.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
@@ -1120,7 +1122,7 @@ export class InputController {
 		if (result?.text !== undefined) text = result.text.trim();
 		if (result?.images !== undefined) {
 			images = result.images;
-			imageLinks = await materializeImageChipLinks(images, this.ctx.sessionManager);
+			imageLinks = await materializeImageChipLinks(images, this.ctx.sessionManager, this.ctx.session.urlRouter);
 		}
 		if (!text && !images?.length) return undefined;
 		return { text, images, imageLinks };
@@ -2491,7 +2493,7 @@ export class InputController {
 			: { type: "image", data: imageData.data, mimeType: imageData.mimeType };
 		// The source URL stays on the image for the model; the chip opens the file itself,
 		// or a stable blob copy of the original bytes behind an internal URL (else the payload).
-		const [imageLink] = await materializeImageChipLinks([image], this.ctx.sessionManager);
+		const [imageLink] = await materializeImageChipLinks([image], this.ctx.sessionManager, this.ctx.session.urlRouter);
 		const dims = await this.#imageDimensions(imageData);
 		const imageNum = this.ctx.composer.pendingImages.length + 1;
 		const kind = source?.kind ?? "image";
@@ -2604,7 +2606,7 @@ export class InputController {
 		const extension = blobExtensionForImageMimeType(image.mimeType) ?? "png";
 		const url = `local://pasted-image-${Bun.hash(bytes).toString(16)}.${extension}`;
 		try {
-			const filePath = InternalUrlRouter.instance().locateSync(url, {
+			const filePath = this.ctx.session.urlRouter.locateSync(url, {
 				localProtocolOptions: {
 					getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
 					getSessionId: () => this.ctx.sessionManager.getSessionId(),
@@ -3098,7 +3100,9 @@ export class InputController {
 				registry: this.ctx.session.modelRegistry,
 				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
 			}),
-			// The interactive host uses the default registry; the receiving session can change with focus.
+			// The interactive host uses the default registry; the receiving session can change with focus,
+			// so its router and caller binding are read per lookup.
+			urlRouter: () => this.ctx.viewSession.urlRouter,
 			internalUrlCaller: () => {
 				const manager = this.ctx.viewSession.sessionManager;
 				return { cwd: manager.getCwd(), sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile() };

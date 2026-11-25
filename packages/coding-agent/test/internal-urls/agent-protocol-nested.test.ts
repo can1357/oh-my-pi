@@ -221,7 +221,7 @@ it("agent:// marks a published output as the previous run while the agent stream
 	expect(whileRunning.content.endsWith(published)).toBe(true);
 	// `read` reads a located file directly, skipping resolve(): a superseded
 	// output must route as a resource so the banner reaches the reader.
-	const router = InternalUrlRouter.instance();
+	const router = InternalUrlRouter.builtins();
 	expect((await router.target("agent://Visuals"))?.kind).toBe("resource");
 	// JSON-path reads stay machine-parseable.
 	const field = await handler.resolve(new URL("agent://Visuals/status") as never);
