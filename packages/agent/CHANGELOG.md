@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for a W3C `TRACEPARENT` environment variable: root telemetry spans now join the launching process's trace instead of starting a separate one ([#18494](https://github.com/can1357/oh-my-pi/pull/18494) by [@AlexShum22](https://github.com/AlexShum22))
+
 ## [19.2.0] - 2026-11-25
 
 ### Added
