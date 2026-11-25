@@ -22,6 +22,7 @@
 ### Fixed
 
 - In Tern, the agent tray no longer keeps showing the previous session's agents after `/resume` switches to another session.
+- The Gemini planning-header loop guard interrupts at most once until the model calls a tool, so long reasoning on hard or tool-free tasks finishes instead of being interrupted and restarted repeatedly.
 
 ## [19.2.1] - 2026-11-25
 
