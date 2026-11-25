@@ -191,3 +191,52 @@ describe("AgentSession session-local rule snapshot reload on session reset", () 
 		}
 	});
 });
+
+describe("AgentSession configured extension-package rules on rebuild", () => {
+	it("keeps rules from a Settings-only `extensions:` package after resetSessionContext()", async () => {
+		using tempDir = TempDir.createSync("@pi-rules-reload-ext-");
+		const marker = Bun.nanoseconds().toString(36);
+		const body = `OVERLAY_EXT_RULE_${marker}`;
+		// The package is named only by the merged `Settings` (as a PI_CONFIG_FILES overlay
+		// would), never by an on-disk config.yml the scopeless discovery fallback could read.
+		const pkgDir = tempDir.join("kept");
+		await fs.mkdir(path.join(pkgDir, "rules"), { recursive: true });
+		await fs.writeFile(
+			path.join(pkgDir, "rules", `overlay-${marker}.md`),
+			`---\ndescription: overlay rule\nalwaysApply: true\n---\n${body}\n`,
+		);
+		const workDir = tempDir.join("work");
+		await fs.mkdir(workDir, { recursive: true });
+
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.keys.setRuntime("managed-primary", "test-key");
+		const { session } = await createAgentSession({
+			cwd: workDir,
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(workDir),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
+			settings: Settings.isolated({ "compaction.enabled": false, extensions: [pkgDir] }),
+			model: buildLocalModel(`rules-reload-ext-${marker}`),
+			skills: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+
+		try {
+			// Runs outside createAgentSession's invocation scope, like a rebuild
+			// triggered later by setActiveTools, /new, or /clear.
+			await session.refreshBaseSystemPrompt();
+			expect(session.systemPrompt.join("\n")).toContain(body);
+
+			expect(await session.resetSessionContext()).toBeTruthy();
+			expect(session.systemPrompt.join("\n")).toContain(body);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+});

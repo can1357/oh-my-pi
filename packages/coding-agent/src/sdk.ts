@@ -4462,7 +4462,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					options.rules ??
 						logger
 							.time("rediscoverRules", () =>
-								loadCapability<Rule>(ruleCapability.id, { cwd: promptCwd, agentDir }),
+								// Rebuilds run outside the creation-time invocation scope; pass the
+								// session's effective roots so overlay/runtime `extensions:` survive.
+								loadCapability<Rule>(ruleCapability.id, {
+									cwd: promptCwd,
+									agentDir,
+									extensionRoots: buildSessionExtensionRoots(),
+								}),
 							)
 							.then(result => result.items),
 				]);
