@@ -46,6 +46,7 @@ import {
 } from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
+import { parseOtariCredential } from "../wire/otari";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
@@ -3469,6 +3470,19 @@ function openCodeModelManagerOptions(
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const name = toModelName(entry.name, reference?.name ?? defaults.name);
+						// Decision models answer only on System One and reject chat
+						// completions. Seeded rows replace these with authored prices.
+						if (entry.type === "decision") {
+							return {
+								...defaults,
+								name,
+								api: "typesafe",
+								baseUrl: basePath,
+								kind: "judge",
+								reasoning: false,
+								supportsTools: false,
+							};
+						}
 						// Pins and bundled routing hints win over the metadata-only
 						// stencil fallback; the fallback never selects a transport.
 						const api = resolveApi(defaults.id, defaults.api);
@@ -3514,7 +3528,11 @@ function openCodeModelManagerOptions(
 					fetch: config?.fetch,
 				});
 				if (!discovered) return null;
-				const seeds = seedModels(providerId).map(seed => ({ ...seed, baseUrl: basePath }));
+				// Seeds on this gateway follow a configured base URL; Go's Jev
+				// row lives on the Console System One endpoint and keeps it.
+				const seeds = seedModels(providerId).map(seed =>
+					seed.baseUrl === defaultBasePath ? { ...seed, baseUrl: basePath } : seed,
+				);
 				const seedIds = new Set(seeds.map(seed => seed.id));
 				return [...discovered.filter(model => !seedIds.has(model.id)), ...seeds];
 			},
@@ -3648,11 +3666,85 @@ function mapOpenRouterThinking(
 	};
 }
 
+/** OpenRouter's public API root; its `/models` roster needs no credential. */
+export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+/** Options for {@link fetchOpenRouterChatModels}. */
+export interface OpenRouterChatModelsOptions {
+	/** API root serving the roster; defaults to {@link OPENROUTER_BASE_URL}. */
+	baseUrl?: string;
+	/** Scopes the roster to the key's workspace guardrails; omit for the public roster. */
+	apiKey?: string;
+	timeoutMs?: number;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Fetch OpenRouter's tool-capable chat roster with each row's own pricing,
+ * limits, input modalities, and reasoning ladder. Backs the `openrouter`
+ * provider and models.yml `discovery.type: openrouter`, which serves the same
+ * roster through an endpoint fronting OpenRouter.
+ *
+ * Returns `null` on transport/protocol failures.
+ */
+export function fetchOpenRouterChatModels(
+	options: OpenRouterChatModelsOptions = {},
+): Promise<ModelSpec<"openrouter">[] | null> {
+	const references = createBundledReferenceMap<"openrouter">("openrouter");
+	return fetchOpenAICompatibleModels({
+		api: "openrouter",
+		provider: "openrouter",
+		baseUrl: options.baseUrl ?? OPENROUTER_BASE_URL,
+		apiKey: options.apiKey,
+		timeoutMs: options.timeoutMs,
+		filterModel: (entry: OpenAICompatibleModelRecord) => {
+			const params = entry.supported_parameters;
+			return Array.isArray(params) && params.includes("tools");
+		},
+		mapModel: (entry: OpenAICompatibleModelRecord, defaults: ModelSpec<"openrouter">): ModelSpec<"openrouter"> => {
+			const reference = references.get(defaults.id);
+			const baseModel = mapWithBundledReference(entry, defaults, reference);
+			const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+			const params = Array.isArray(entry.supported_parameters)
+				? entry.supported_parameters.filter((value): value is string => typeof value === "string")
+				: [];
+			const thinking = mapOpenRouterThinking(entry, baseModel);
+			const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+			const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
+				? toInputCapabilities(architecture.input_modalities)
+				: String(architecture?.modality ?? "").includes("image")
+					? ["text", "image"]
+					: ["text"];
+			const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+
+			const supportsToolChoice = params.includes("tool_choice");
+
+			return {
+				...baseModel,
+				reasoning: params.includes("reasoning"),
+				...(thinking !== undefined ? { thinking } : {}),
+				input,
+				cost: {
+					input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
+					output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
+					cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
+					cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
+				},
+				contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
+				maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
+				...(!supportsToolChoice && {
+					compat: { ...baseModel.compat, supportsToolChoice: false },
+				}),
+			};
+		},
+		fetch: options.fetch,
+	});
+}
+
 export function openrouterModelManagerOptions(config?: OpenRouterModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
-	const baseUrl = (config?.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+	const baseUrl = (config?.baseUrl ?? OPENROUTER_BASE_URL).replace(/\/+$/g, "");
 	const decisionsBaseUrl = openrouterDecisionsBaseUrl(baseUrl);
-	const references = createBundledReferenceMap<"openrouter">("openrouter");
 	return {
 		providerId: "openrouter",
 		// Older builds cached OpenRouter discovery rows as `api: "openai-completions"`;
@@ -3665,57 +3757,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 		fetchDynamicModels: async () => {
 			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
-					fetchOpenAICompatibleModels({
-						api: "openrouter",
-						provider: "openrouter",
-						baseUrl,
-						apiKey,
-						filterModel: (entry: OpenAICompatibleModelRecord) => {
-							const params = entry.supported_parameters;
-							return Array.isArray(params) && params.includes("tools");
-						},
-						mapModel: (
-							entry: OpenAICompatibleModelRecord,
-							defaults: ModelSpec<"openrouter">,
-							_context: OpenAICompatibleModelMapperContext<"openrouter">,
-						): ModelSpec<"openrouter"> => {
-							const reference = references.get(defaults.id);
-							const baseModel = mapWithBundledReference(entry, defaults, reference);
-							const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
-							const params = Array.isArray(entry.supported_parameters)
-								? entry.supported_parameters.filter((value): value is string => typeof value === "string")
-								: [];
-							const thinking = mapOpenRouterThinking(entry, baseModel);
-							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
-							const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
-								? toInputCapabilities(architecture.input_modalities)
-								: String(architecture?.modality ?? "").includes("image")
-									? ["text", "image"]
-									: ["text"];
-							const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
-
-							const supportsToolChoice = params.includes("tool_choice");
-
-							return {
-								...baseModel,
-								reasoning: params.includes("reasoning"),
-								...(thinking !== undefined ? { thinking } : {}),
-								input,
-								cost: {
-									input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
-									output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
-									cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
-									cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
-								},
-								contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
-								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
-								...(!supportsToolChoice && {
-									compat: { ...baseModel.compat, supportsToolChoice: false },
-								}),
-							};
-						},
-						fetch: config?.fetch,
-					}),
+					fetchOpenRouterChatModels({ baseUrl, apiKey, fetch: config?.fetch }),
 					fetchOpenAICompatibleModels({
 						api: "openrouter-images",
 						provider: "openrouter",
@@ -4106,6 +4148,7 @@ export function alibabaTokenPlanModelManagerOptions(
 					provider: "alibaba-token-plan",
 					baseUrl,
 					apiKey,
+					throwOnError: true,
 					filterModel: (_entry, model) => isAlibabaTokenPlanChatModelId(model.id),
 					mapModel: (_entry, defaults) => {
 						const reference = staticModels.find(model => model.id === defaults.id);
@@ -8484,8 +8527,11 @@ export interface OtariModelManagerConfig {
  * models; metadata-less non-chat rows fall to `exclude-models provider="otari"`.
  */
 export function otariModelManagerOptions(config?: OtariModelManagerConfig): ModelManagerOptions<"openai-completions"> {
-	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("otari")!;
+	const credential = config?.apiKey ? parseOtariCredential(config.apiKey) : undefined;
+	const apiKey = credential?.token;
+	// A key only authenticates in the region it was issued in, so the endpoint
+	// chosen at login wins over every other source.
+	const baseUrl = credential?.baseUrl ?? config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("otari")!;
 	return {
 		providerId: "otari",
 		cacheProviderId: resolveModelCacheProviderId("otari", { apiKey, baseUrl }),

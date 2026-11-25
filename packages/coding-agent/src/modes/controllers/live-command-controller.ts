@@ -1,15 +1,13 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { batch } from "@oh-my-pi/pi-tui";
 import { logger, toError } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
 import { LIVE_MODEL } from "../../live/protocol";
-import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { vocalizer } from "../../tts/vocalizer";
-import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext } from "../types";
-import { createAssistantMessageComponent } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
-
+import type { AssistantView, InteractiveModeContext } from "../types";
+import type { OverlayHandle } from "../../ui/shell";
+import { createLiveCallModel, type LiveCallModel, LiveVisualizer } from "../../ui/apps/live-visualizer";
+import { canonicalKeyId } from "../../config/keybindings/key-id";
 import type { ExtensionLiveSession, ExtensionLiveStartOptions } from "../../extensibility/extensions/types";
 import { resolveLiveVoice } from "../../live/settings";
 
@@ -36,20 +34,19 @@ function notifyRemote(callback: () => void): void {
 	}
 }
 
-/** Owns the editor-replacing visualizer and realtime session lifecycle for `/live`. */
+/** Owns the composer-replacing visualizer and realtime session lifecycle for `/live`. */
 export class LiveCommandController {
 	readonly #ctx: InteractiveModeContext;
 	readonly #createSession: LiveSessionFactory | undefined;
 
 	#session: LiveSessionController | undefined;
 	#settling: Promise<void> | undefined;
-	#visualizer: LiveVisualizer | undefined;
-	#detachedEditor: CustomEditor | undefined;
+	#visualizer: LiveCallModel | undefined;
+	/** The visualizer in the composer's place; closing it brings the composer back. */
+	#visualizerHandle: OverlayHandle | undefined;
 	#animationInterval: NodeJS.Timeout | undefined;
-	#previousShowHardwareCursor: boolean | undefined;
-	#previousUseTerminalCursor: boolean | undefined;
 	#resumeVocalizer: (() => void) | undefined;
-	#assistantTranscriptComponent: AssistantMessageComponent | undefined;
+	#assistantTranscript: AssistantView | undefined;
 	#assistantTranscriptTurn = 0;
 	#assistantTranscriptStartedAt = 0;
 
@@ -139,13 +136,7 @@ export class LiveCommandController {
 		if (this.#session) throw new Error("A live session is already active");
 		this.#assistantTranscriptTurn = 0;
 		this.#assistantTranscriptStartedAt = 0;
-		const visualizer = new LiveVisualizer({
-			onStop: () => {
-				void this.stop().catch(cause => this.#ctx.showError(toError(cause).message));
-			},
-			onToggleMute: () => this.#session?.toggleMute(),
-			stopKeys: this.#ctx.keybindings.getKeys("app.live.toggle"),
-		});
+		const visualizer = createLiveCallModel();
 		this.#mountVisualizer(visualizer);
 
 		const options: LiveSessionControllerOptions = {
@@ -159,12 +150,9 @@ export class LiveCommandController {
 					notifyRemote(() => remote?.onPhase?.(phase));
 					if (this.#visualizer !== visualizer) return;
 					visualizer.setPhase(phase);
-					this.#ctx.ui.requestComponentRender(visualizer);
 				},
 				onLevels: input => {
 					if (this.#visualizer !== visualizer) return;
-					// Stored only: the ANIMATION_INTERVAL_MS ticker already renders the
-					// visualizer, so a render per mic chunk just hit the 30fps cap.
 					visualizer.setInputLevel(input);
 				},
 				onTranscript: transcript => {
@@ -172,10 +160,8 @@ export class LiveCommandController {
 					if (this.#visualizer !== visualizer) return;
 					if (!transcript) {
 						visualizer.clearTranscript();
-						this.#ctx.ui.requestComponentRender(visualizer);
 					} else if (transcript.role === "user") {
 						visualizer.setTranscript(transcript.text);
-						this.#ctx.ui.requestComponentRender(visualizer);
 					} else {
 						this.#presentAssistantTranscript(transcript);
 					}
@@ -212,7 +198,7 @@ export class LiveCommandController {
 	#presentAssistantTranscript(transcript: LiveTranscript): void {
 		if (
 			transcript.turn < this.#assistantTranscriptTurn ||
-			(transcript.turn === this.#assistantTranscriptTurn && !this.#assistantTranscriptComponent)
+			(transcript.turn === this.#assistantTranscriptTurn && !this.#assistantTranscript)
 		) {
 			return;
 		}
@@ -221,13 +207,7 @@ export class LiveCommandController {
 			this.#assistantTranscriptTurn = transcript.turn;
 		}
 
-		let component = this.#assistantTranscriptComponent;
-		if (!component) {
-			component = createAssistantMessageComponent(this.#ctx);
-			component.setTextColorTransform(text => theme.fg("borderAccent", text));
-			this.#assistantTranscriptComponent = component;
-			this.#assistantTranscriptStartedAt = Date.now();
-		}
+		if (!this.#assistantTranscript) this.#assistantTranscriptStartedAt = Date.now();
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: transcript.text }],
@@ -238,49 +218,49 @@ export class LiveCommandController {
 			stopReason: "stop",
 			timestamp: this.#assistantTranscriptStartedAt,
 		};
-		component.updateContent(message, { transient: !transcript.final });
+		// The spoken reply reads in the accent, apart from typed turns.
+		const view = this.#assistantTranscript ?? this.#ctx.presentAssistant(message, { tone: "accent" });
+		this.#assistantTranscript = view;
+		batch(() => {
+			view.message.set(message);
+			view.transient.set(!transcript.final);
+		});
 		if (transcript.final) {
-			component.markTranscriptBlockFinalized();
-			this.#assistantTranscriptComponent = undefined;
+			view.finalized.set(true);
+			this.#assistantTranscript = undefined;
 			this.#assistantTranscriptStartedAt = 0;
-		}
-		if (!this.#ctx.chatContainer.children.includes(component)) {
-			this.#ctx.present(component);
-		} else {
-			this.#ctx.ui.requestComponentRender(component);
 		}
 	}
 
 	#finalizeAssistantTranscript(): void {
-		const component = this.#assistantTranscriptComponent;
-		if (!component) return;
-		component.markTranscriptBlockFinalized();
-		this.#assistantTranscriptComponent = undefined;
+		const view = this.#assistantTranscript;
+		if (!view) return;
+		view.finalized.set(true);
+		this.#assistantTranscript = undefined;
 		this.#assistantTranscriptStartedAt = 0;
-		this.#ctx.ui.requestComponentRender(component);
 	}
 
-	#mountVisualizer(visualizer: LiveVisualizer): void {
+	#mountVisualizer(visualizer: LiveCallModel): void {
 		this.#visualizer = visualizer;
-		this.#detachedEditor = this.#ctx.editor;
-		this.#previousShowHardwareCursor = this.#ctx.ui.getShowHardwareCursor();
-		this.#previousUseTerminalCursor = this.#ctx.editor.getUseTerminalCursor();
-		this.#ctx.ui.setShowHardwareCursor(false);
-		this.#ctx.editor.setUseTerminalCursor(false);
-		this.#ctx.editorContainer.clear();
-		this.#ctx.editorContainer.addChild(visualizer);
-		this.#ctx.ui.setFocus(visualizer);
+		const stopKeys = this.#ctx.keybindings.keysFor("app.live.toggle").map(canonicalKeyId);
+		this.#visualizerHandle = this.#ctx.showEditorAreaDialog(() =>
+			LiveVisualizer({
+				model: visualizer,
+				onStop: () => {
+					void this.stop().catch(cause => this.#ctx.showError(toError(cause).message));
+				},
+				onToggleMute: () => this.#session?.toggleMute(),
+				stopKeys,
+			}),
+		);
 		this.#resumeVocalizer = vocalizer.suspend();
 		let frame = 0;
 		this.#animationInterval = setInterval(() => {
 			if (this.#visualizer !== visualizer) return;
 			frame += 1;
 			visualizer.setFrame(frame);
-			this.#ctx.ui.requestComponentRender(visualizer);
 		}, ANIMATION_INTERVAL_MS);
-		this.#ctx.ui.requestRender();
 	}
-
 	#finish(session: LiveSessionController, error?: Error): void {
 		if (this.#session !== session) return;
 		this.#session = undefined;
@@ -303,21 +283,9 @@ export class LiveCommandController {
 		}
 		this.#resumeVocalizer?.();
 		this.#resumeVocalizer = undefined;
-		const editor = this.#detachedEditor;
-		this.#detachedEditor = undefined;
 		this.#visualizer = undefined;
-		if (!editor) return;
-		this.#ctx.editorContainer.clear();
-		this.#ctx.editorContainer.addChild(editor);
-		if (this.#previousShowHardwareCursor !== undefined) {
-			this.#ctx.ui.setShowHardwareCursor(this.#previousShowHardwareCursor);
-		}
-		if (this.#previousUseTerminalCursor !== undefined) {
-			editor.setUseTerminalCursor(this.#previousUseTerminalCursor);
-		}
-		this.#previousShowHardwareCursor = undefined;
-		this.#previousUseTerminalCursor = undefined;
-		this.#ctx.ui.setFocus(editor);
-		this.#ctx.ui.requestRender();
+		const handle = this.#visualizerHandle;
+		this.#visualizerHandle = undefined;
+		handle?.close();
 	}
 }

@@ -11,39 +11,36 @@
  * counter) and memoises each card's node by its face, so an unchanged card is
  * the same node reference and the reconciler skips it.
  */
-import { type TspProps, type TspTrayMain, type TspTrayStatus, toolIntentLabel } from "@oh-my-pi/pi-wire";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { compact, keyed, keyNames, node, span, stableKey } from "@oh-my-pi/pi-tui/native/describe";
-import { sameItems, sameProps } from "@oh-my-pi/pi-tui/native/memo";
-import type { NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
-import { formatCost, liveModelChip, modelChip } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
-import { type AgentRecordLike, MAIN_AGENT_ID } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import { stripInlineMarkdown } from "@oh-my-pi/pi-tui/overlays/plan-toc";
-import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import * as path from "node:path";
+import { type TspTrayMain, type TspTrayStatus, toolIntentLabel } from "@oh-my-pi/pi-wire";
+import { hubModel } from "../ui/overlays/pickers/agent-hub-model";
 import {
-	previewLine,
-	replaceTabs,
-	shortenEmbeddedPaths,
-	shortenToolArgumentPaths,
-	TRUNCATE_LENGTHS,
-} from "@oh-my-pi/pi-tui/render/render-utils";
-import {
-	describeJobWidget,
-	describeJobWidgetMiniSpark,
-	type JobWidgetView,
-	jobWidgetGlance,
-	jobWidgetGlanceSpans,
-} from "@oh-my-pi/pi-tui/tools/job-widget";
-import { jobDisplayLabel } from "@oh-my-pi/pi-tui/tools/job-label";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+	type TrayAgentDetail,
+	type TrayAgentItem,
+	type TrayDoing,
+	type TrayDoneEntry,
+	type TrayDoneItem,
+	type TrayEvent,
+	type TrayItem,
+	type TrayJobItem,
+	type TrayModel,
+	trayDoingText,
+} from "../ui/dock";
+import { formatCost } from "./view-model/overlays/agent-hub-renderer";
+import { type AgentRecordLike, MAIN_AGENT_ID } from "../registry/agent-hub-types";
+import { stripInlineMarkdown } from "../plan-mode/plan-toc";
+import type { ObservableSession } from "../task/session-observer-registry";
+import { previewLine, shortenEmbeddedPaths, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { replaceTabs } from "../utils/text-width";
+import { jobWidgetGlance } from "../ui/tools/jobs/widget";
+import { type JobWidgetView } from "../tools/details/job-widget";
+import { jobDisplayLabel } from "../async/job-label";
+import { type AgentProgress, isWaitingOnOwnWork } from "../task/task-details";
 import { formatCount, formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManagerApi } from "../async";
 import { agentRunOf } from "../async/job-control";
 import type { IrcBusApi } from "../irc/bus";
 import type { AsyncJobSnapshot } from "../session/agent-session-types";
-
-/** Card tone per state: accent running, success done, error failed, muted queued and stopped. */
-type TrayTone = "accent" | "success" | "error" | "muted";
 
 /** A running call earns an elapsed marker in the closer look once it outlasts this (as the ANSI live preview's). */
 const TRAY_CALL_ELAPSED_MIN_MS = 5000;
@@ -62,86 +59,7 @@ const TRAY_QUIET_CARD_LIMIT = 48;
 
 /** Output lines a job card shows, and its closer look with and without a widget. */
 const TRAY_OUT_LINES = 2;
-const TRAY_PEEK_OUT_LINES = 3;
 const TRAY_PEEK_OUT_LINES_BARE = 4;
-
-/** Fields every card face has. Faces are flat, so {@link sameProps} decides whether a card re-describes. */
-interface TrayCardFace {
-	/** `agent:<id>`, `job:<id>` or `done`: the card's identity, hashed into its node key. */
-	readonly key: string;
-	readonly ref: string;
-	readonly name: string;
-	readonly status: TspTrayStatus;
-	readonly aria: string;
-	/** Whether its closer look adds anything to its face; `tray.peek` on one that does not is ignored. */
-	readonly look: boolean;
-}
-
-/** A subagent's card. */
-export interface TrayAgentItem extends TrayCardFace {
-	readonly item: "agent";
-	/** Epoch ms of its latest tool call start, or of the moment it settled. */
-	readonly acted: number;
-	readonly unread: number;
-	/** The call's tool name; empty when the line is plain text. */
-	readonly tool: string;
-	readonly text: string;
-	/** Its agent type (`m2`, `task`), when it says more than the name; on the closer look and the aria only. */
-	readonly type: string;
-	readonly model: string;
-	/** Tool calls so far; undefined before its first progress frame. */
-	readonly tools: number | undefined;
-	/** `22%` (context fill), else `12K tok`; empty when neither is known. */
-	readonly stats: string;
-	/** Epoch ms its run clock counts from. */
-	readonly start: number;
-	/** Its run's length, once settled; a settled agent whose length nobody knows shows no clock. */
-	readonly duration: number | undefined;
-	/** Whether opening it can show its transcript. */
-	readonly openable: boolean;
-}
-
-/** A background job's card. */
-export interface TrayJobItem extends TrayCardFace {
-	readonly item: "job";
-	readonly start: number;
-	readonly duration: number | undefined;
-	/** Its live widget, when it draws one (compared by reference: a refresh swaps the view). */
-	readonly view: JobWidgetView | undefined;
-	/** Its last output lines, newline-joined, at most {@link TRAY_PEEK_OUT_LINES_BARE}. */
-	readonly output: string;
-	/** Its command, when it says more than the name. */
-	readonly command: string;
-}
-
-/** One finished agent in the done card's closer look. */
-export interface TrayDoneEntry {
-	readonly id: string;
-	readonly name: string;
-	readonly status: "done" | "failed" | "stopped";
-	/** `opus-4.5 · high · 4m 12s · 38 tools · $0.12`: the model it ran on, then its run, of what is known; empty when nothing is. */
-	readonly meta: string;
-	/** Its last output or result line; empty when nothing has one. */
-	readonly line: string;
-	/** Whether opening it can show its transcript. */
-	readonly openable: boolean;
-}
-
-/** The card standing for finished agents that have no card of their own. */
-export interface TrayDoneItem extends TrayCardFace {
-	readonly item: "done";
-	readonly count: number;
-	/** Up to {@link TRAY_DONE_NAMES} names, then `+N`. */
-	readonly names: string;
-	/**
-	 * The newest {@link TRAY_DONE_LIST_LIMIT} finished agents, most recently
-	 * active first; the same array while none of them changed, so the face
-	 * compares by reference.
-	 */
-	readonly entries: readonly TrayDoneEntry[];
-}
-
-export type TrayItem = TrayAgentItem | TrayJobItem | TrayDoneItem;
 
 /** What the tray is built from; plain data and lookups, so it builds without a live session. */
 export interface TrayInput {
@@ -284,19 +202,6 @@ function agentStatus(session: ObservableSession | undefined, running: boolean): 
 	}
 }
 
-function toneOf(status: TspTrayStatus): TrayTone {
-	switch (status) {
-		case "running":
-			return "accent";
-		case "done":
-			return "success";
-		case "failed":
-			return "error";
-		default:
-			return "muted";
-	}
-}
-
 /** One line of model-written or tool text, sanitised for a card. */
 function line(value: string, width: number = TRUNCATE_LENGTHS.CONTENT): string {
 	return previewLine(shortenEmbeddedPaths(replaceTabs(sanitizeText(value))), width);
@@ -357,40 +262,59 @@ function callDetail(intent: string | undefined, args: string | undefined, argsKe
 	return "";
 }
 
+/** A card line that names no call. */
+function plainDoing(text: string): TrayDoing {
+	return { tool: "", text, added: 0, removed: 0, callFailed: false };
+}
+
+/** A tool's name as a card's verb: `edit` → `Edit`, `ast_grep` → `Ast grep`. */
+function callVerb(tool: string): string {
+	const words = line(tool.replace(/_+/g, " "), TRUNCATE_LENGTHS.SHORT);
+	return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** What a call acts on, for a card: the file names a path argument lists, else the argument. */
+function callSubject(args: string | undefined, argsKey: string | undefined): string {
+	if (!args) return "";
+	const text = replaceTabs(args);
+	const shown =
+		argsKey === "path" || argsKey === "file_path"
+			? text
+					.split(", ")
+					.map(file => path.basename(file) || file)
+					.join(", ")
+			: shortenToolArgumentPaths(text, argsKey);
+	return previewLine(shown, TRUNCATE_LENGTHS.CONTENT);
+}
+
+/** A call as a card's line; a finished one carries the lines it changed, or its failure. */
+function callDoing(
+	tool: string,
+	args: string | undefined,
+	argsKey: string | undefined,
+	outcome?: { readonly added?: number; readonly removed?: number; readonly isError?: boolean },
+): TrayDoing {
+	return {
+		tool: callVerb(tool),
+		text: callSubject(args, argsKey),
+		added: outcome?.added ?? 0,
+		removed: outcome?.removed ?? 0,
+		callFailed: outcome?.isError === true,
+	};
+}
+
 /**
- * What a running agent is doing: the call it runs, else what its model is producing (a call it is
- * writing, the newest line of its prose, its reasoning), else its last call, else a word.
+ * What a running agent is doing: the call it runs, else the call it is writing, else its last
+ * call (reasoning and prose between calls leave it shown); before its first call, a word.
  */
-function runningDoing(
-	progress: AgentProgress | undefined,
-	activity: string | undefined,
-): { tool: string; text: string } {
+function runningDoing(progress: AgentProgress | undefined, activity: string | undefined): TrayDoing {
 	const current = progress?.currentTool;
-	if (current) {
-		return {
-			tool: line(current, TRUNCATE_LENGTHS.SHORT),
-			text: callDetail(progress.currentToolIntent, progress.currentToolArgs, progress.currentToolArgsKey),
-		};
-	}
+	if (current) return callDoing(current, progress.currentToolArgs, progress.currentToolArgsKey);
 	const streaming = progress?.streaming;
-	if (streaming?.kind === "call") {
-		return {
-			tool: line(streaming.tool, TRUNCATE_LENGTHS.SHORT),
-			text: callDetail(streaming.intent, streaming.args, streaming.argsKey),
-		};
-	}
-	if (streaming?.kind === "thinking") return { tool: "", text: "Thinking" };
-	if (streaming?.kind === "text") {
-		const said = plainLine(progress?.recentOutput ?? []);
-		if (said) return { tool: "", text: said };
-	}
+	if (streaming?.kind === "call") return callDoing(streaming.tool, streaming.args, streaming.argsKey);
 	const recent = progress?.recentTools[0];
-	if (recent)
-		return {
-			tool: line(recent.tool, TRUNCATE_LENGTHS.SHORT),
-			text: callDetail(recent.intent, recent.args, recent.argsKey),
-		};
-	return { tool: "", text: activity ? line(activity) : "Thinking" };
+	if (recent) return callDoing(recent.tool, recent.args, recent.argsKey, recent);
+	return plainDoing(activity ? line(activity) : "Thinking");
 }
 
 function agentDoing(
@@ -398,22 +322,22 @@ function agentDoing(
 	session: ObservableSession | undefined,
 	ref: AgentRecordLike | undefined,
 	job: AsyncJob | undefined,
-): { tool: string; text: string } {
+): TrayDoing {
 	const progress = session?.progress;
 	switch (status) {
 		case "queued":
-			return { tool: "", text: "Queued" };
+			return plainDoing("Queued");
 		case "running":
 			// A revived agent's observer snapshot is its previous run's; the registry's gist is current.
 			return runningDoing(session?.status === "active" ? progress : undefined, ref?.activity);
 		case "done":
-			return { tool: "", text: outcomeLine(session, ref) || "Done" };
+			return plainDoing(outcomeLine(session, ref) || "Done");
 		case "failed": {
 			const error = job?.errorText ?? progress?.retryFailure?.errorMessage ?? "Failed";
-			return { tool: "", text: line(firstLine(error)) };
+			return plainDoing(line(firstLine(error)));
 		}
 		default:
-			return { tool: "", text: "Stopped" };
+			return plainDoing("Stopped");
 	}
 }
 
@@ -423,8 +347,13 @@ function agentDoing(
  * cards name {@link servedModel}.
  */
 function agentModel(session: ObservableSession | undefined, ref: AgentRecordLike | undefined): string {
-	const live = ref?.session && liveModelChip(ref.session);
-	if (live) return line(live.level ? `${live.text} · ${live.level}` : live.text, TRUNCATE_LENGTHS.TITLE);
+	const model = ref?.session?.model;
+	if (model) {
+		const level = model.thinking ? ref?.session?.thinkingLevel : undefined;
+		const shown = level !== undefined && level !== "off" && level !== "inherit" ? level : undefined;
+		const text = sanitizeText(model.id);
+		return line(shown ? `${text} · ${shown}` : text, TRUNCATE_LENGTHS.TITLE);
+	}
 	return servedModel(session, ref);
 }
 
@@ -443,7 +372,7 @@ function servedModel(session: ObservableSession | undefined, ref: AgentRecordLik
 			createdAt: session.lastUpdate,
 			lastActivity: session.lastUpdate,
 		});
-	const chip = record && modelChip(record, session);
+	const chip = record && hubModel(record, session);
 	if (!chip) return "";
 	// The level it ran at, not the one its session holds now (the chip's fallback for a selector without one).
 	const served = session?.progress?.resolvedThinkingLevel;
@@ -558,11 +487,13 @@ function agentItem(
 	const type = agentType(id, session, ref, name);
 	const doing = agentDoing(status, session, ref, job);
 	const tools = session?.progress?.toolCount;
+	// A revived agent's observer snapshot is its previous run's: only a live session says what it is in now.
+	const waiting = status === "running" && session?.status === "active" && isWaitingOnOwnWork(session.progress);
 	const aria = [
 		name,
 		type,
-		status,
-		`${doing.tool ? `${doing.tool} · ` : ""}${doing.text}`,
+		waiting ? "waiting" : status,
+		trayDoingText(doing),
 		tools !== undefined ? formatCount("tool", tools) : "",
 	];
 	return {
@@ -573,9 +504,9 @@ function agentItem(
 		status,
 		aria: aria.filter(Boolean).join(", "),
 		acted: remembered.acted,
+		waiting,
 		unread: input.unread(id),
-		tool: doing.tool,
-		text: doing.text,
+		...doing,
 		type,
 		model: isLive(status) ? agentModel(session, ref) : servedModel(session, ref),
 		tools,
@@ -662,9 +593,9 @@ function finishedAgentItem(
 		status,
 		aria: aria.filter(Boolean).join(", "),
 		acted,
+		waiting: false,
 		unread: input.unread(id),
-		tool: "",
-		text,
+		...plainDoing(text),
 		type,
 		model: servedModel(session, ref),
 		tools,
@@ -895,234 +826,20 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild 
 	return { items: [...cards, ...jobs, ...(done ? [done] : [])], quiet };
 }
 
-/** Whether two builds show the same cards, in the same order, with the same faces. */
+/** Whether two builds show the same cards, in the same order, with the same faces (flat, compared field by field). */
 function sameFaces(a: readonly TrayItem[], b: readonly TrayItem[]): boolean {
 	if (a.length !== b.length) return false;
-	for (let i = 0; i < a.length; i++) if (!sameProps<TrayItem>(a[i], b[i]!)) return false;
+	for (let i = 0; i < a.length; i++) {
+		const x = a[i] as unknown as Record<string, unknown>;
+		const y = b[i] as unknown as Record<string, unknown>;
+		const keys = Object.keys(x);
+		if (keys.length !== Object.keys(y).length || keys.some(key => x[key] !== y[key])) return false;
+	}
 	return true;
 }
 
-// =============================================================================
-// Describers
-// =============================================================================
-
 function isLive(status: TspTrayStatus): boolean {
 	return status === "queued" || status === "running";
-}
-
-function describeDot(status: TspTrayStatus): NativeNode {
-	const tone = toneOf(status);
-	return node(
-		"text",
-		{
-			role: "omp.tray.dot",
-			spans: [span("●", tone, status === "running" ? { fx: "pulse" } : undefined)],
-			wrap: "none",
-		},
-		undefined,
-		"dot",
-	);
-}
-
-function describeName(name: string): NativeNode {
-	return node(
-		"text",
-		{ role: "omp.tray.name", text: name, wrap: "none", truncate: "end", grow: 1 },
-		undefined,
-		"name",
-	);
-}
-
-/** The item's clock: running from `start`, or frozen at `duration` once settled. */
-function describeTime(start: number, duration: number | undefined, now: number): NativeNode {
-	const age = Math.max(0, Math.round(duration ?? now - start));
-	return node(
-		"elapsed",
-		duration === undefined
-			? { role: "omp.tray.time", age, format: "short" }
-			: { role: "omp.tray.time", age, stopped: age, format: "short" },
-		undefined,
-		"time",
-	);
-}
-
-function cardProps(item: TrayItem): TspProps<"col"> {
-	return {
-		role: "omp.tray.card",
-		item: item.item,
-		ref: item.ref,
-		status: item.status,
-		tone: toneOf(item.status),
-		...(item.item === "agent" ? { acted: item.acted } : {}),
-		...(item.look ? {} : { look: false }),
-		aria: item.aria,
-	};
-}
-
-/** An agent's card: name and clock, what it is doing, its model and progress. */
-export function describeTrayAgentCard(item: TrayAgentItem, now: number): NativeNode {
-	const head = node(
-		"row",
-		{ role: "omp.tray.head", gap: "xs", align: "center" },
-		compact([
-			describeDot(item.status),
-			describeName(item.name),
-			item.unread > 0 &&
-				node("badge", { role: "omp.tray.unread", text: String(item.unread), tone: "warning" }, undefined, "unread"),
-			describeTime(item.start, item.duration, now),
-			// `/6⚙` beside the clock: its tool calls so far.
-			item.tools !== undefined &&
-				node(
-					"row",
-					{ role: "omp.tray.tools", align: "center" },
-					[
-						node(
-							"text",
-							{ spans: [span("/", "dim"), span(String(item.tools))], wrap: "none" },
-							undefined,
-							"count",
-						),
-						node("icon", { name: "gear", tone: "muted" }, undefined, "icon"),
-					],
-					"tools",
-				),
-		]),
-		"head",
-	);
-	const doing = node(
-		"text",
-		{
-			role: "omp.tray.doing",
-			spans: item.tool ? [span(item.tool, "dim"), span(" · ", "dim"), span(item.text)] : [span(item.text)],
-			wrap: "none",
-			truncate: "end",
-			...(item.status === "failed" ? { tone: "error" as const } : {}),
-		},
-		undefined,
-		"doing",
-	);
-	const meta = node(
-		"row",
-		{ role: "omp.tray.meta", gap: "sm", align: "center" },
-		compact([
-			item.model !== "" &&
-				node(
-					"text",
-					{ role: "omp.tray.model", text: item.model, wrap: "none", truncate: "end", grow: 1, shrink: 1 },
-					undefined,
-					"model",
-				),
-			item.stats !== "" &&
-				node("text", { role: "omp.tray.stats", text: item.stats, wrap: "none" }, undefined, "stats"),
-		]),
-		"meta",
-	);
-	return node("col", cardProps(item), [head, doing, meta], stableKey(item.key));
-}
-
-/** A job's glance row: its widget's glance, mini spark and stage; undefined when the widget shows none. */
-function describeJobGlance(view: JobWidgetView): NativeNode | undefined {
-	const glance = jobWidgetGlance(view);
-	const spark = describeJobWidgetMiniSpark(view);
-	const stage = view.stage ? line(view.stage) : "";
-	if (!glance && !spark && !stage) return undefined;
-	return node(
-		"row",
-		{ role: "omp.tray.glance", gap: "xs", align: "center" },
-		compact([
-			glance &&
-				node(
-					"text",
-					{
-						role: "omp.hud.glance",
-						spans: jobWidgetGlanceSpans({ text: glance.text, ...(glance.trend ? { trend: glance.trend } : {}) }),
-						wrap: "none",
-					},
-					undefined,
-					"glance",
-				),
-			spark && keyed(spark, "spark"),
-			stage !== "" &&
-				node("text", { role: "omp.tray.stage", text: stage, wrap: "none", truncate: "end" }, undefined, "stage"),
-		]),
-		"glance",
-	);
-}
-
-function describeOut(item: TrayJobItem, lines: number): NativeNode {
-	const parts = item.output ? item.output.split("\n") : [];
-	return node(
-		"text",
-		{
-			role: "omp.tray.out",
-			text: parts.slice(-lines).join("\n"),
-			wrap: "none",
-			...(item.status === "failed" ? { tone: "error" as const } : {}),
-		},
-		undefined,
-		"out",
-	);
-}
-
-/** A job's card: its name, id and clock over its widget's glance, else its last output lines. */
-export function describeTrayJobCard(item: TrayJobItem, now: number): NativeNode {
-	const head = node(
-		"row",
-		{ role: "omp.tray.head", gap: "xs", align: "center" },
-		[
-			describeDot(item.status),
-			describeName(item.name),
-			node("text", { role: "omp.tray.id", text: item.ref, wrap: "none" }, undefined, "id"),
-			describeTime(item.start, item.duration, now),
-		],
-		"head",
-	);
-	const body = (item.view && describeJobGlance(item.view)) ?? describeOut(item, TRAY_OUT_LINES);
-	return node("col", cardProps(item), [head, body], stableKey(item.key));
-}
-
-/** The done card: how many finished agents, and a few of their names. */
-export function describeTrayDoneCard(item: TrayDoneItem): NativeNode {
-	const head = node(
-		"row",
-		{ role: "omp.tray.head", gap: "xs", align: "center" },
-		[describeDot("done"), describeName(item.name)],
-		"head",
-	);
-	const doing = node(
-		"text",
-		{ role: "omp.tray.doing", spans: [span(item.names)], wrap: "none", truncate: "end" },
-		undefined,
-		"doing",
-	);
-	return node("col", cardProps(item), [head, doing], stableKey(item.key));
-}
-
-export function describeTrayCard(item: TrayItem, now: number): NativeNode {
-	switch (item.item) {
-		case "agent":
-			return describeTrayAgentCard(item, now);
-		case "job":
-			return describeTrayJobCard(item, now);
-		default:
-			return describeTrayDoneCard(item);
-	}
-}
-
-/** One operation in an agent's closer look. */
-export interface TrayEvent {
-	readonly tool: string;
-	readonly text: string;
-	readonly state: "ok" | "err" | "run";
-	/** A running call's age, once it outlasts {@link TRAY_CALL_ELAPSED_MIN_MS}. */
-	readonly age: number | undefined;
-}
-
-/** What an agent's closer look adds to its card. */
-export interface TrayAgentDetail {
-	readonly task: string;
-	/** Oldest first, ending with the call the agent is inside. */
-	readonly tail: readonly TrayEvent[];
 }
 
 /** An agent's task and last operations, from its observer session. */
@@ -1179,163 +896,6 @@ function sameDetail(a: TrayAgentDetail | undefined, b: TrayAgentDetail | undefin
 			return false;
 	}
 	return true;
-}
-
-function button(key: string, text: string, act: string, extra: Record<string, unknown> = {}): NativeNode {
-	return node("button", { text, size: "sm", actions: { click: act }, ...extra }, undefined, key);
-}
-
-/**
- * The closer look's actions: Open, Stop or Cancel while live, Dismiss once
- * settled, and close. The done card's has only close: its rows open agents.
- */
-function peekButtons(item: TrayItem): NativeNode[] {
-	const close = button("close", "", "tray.peek=", { icon: "x", aria: "Close", title: "Close" });
-	if (item.item === "done") return [close];
-	const buttons: NativeNode[] = [];
-	if (item.item === "job" || item.openable) {
-		buttons.push(button("open", "Open", `tray.open=${item.ref}`, { keys: keyNames("enter") }));
-	}
-	if (isLive(item.status)) {
-		buttons.push(
-			button("stop", item.item === "agent" ? "Stop" : "Cancel", `tray.stop=${item.ref}`, { tone: "error" }),
-		);
-	} else {
-		buttons.push(button("dismiss", "Dismiss", `tray.dismiss=${item.ref}`));
-	}
-	buttons.push(close);
-	return buttons;
-}
-
-/** One finished agent in the done card's closer look; a click opens its transcript when it can be opened. */
-function describeDoneEntry(entry: TrayDoneEntry): NativeNode {
-	const aria = [entry.name, entry.status, entry.meta, entry.line].filter(Boolean).join(", ");
-	return node(
-		"row",
-		{
-			role: "omp.tray.done.item",
-			ref: entry.id,
-			status: entry.status,
-			gap: "xs",
-			align: "center",
-			aria,
-			...(entry.openable ? { actions: { click: `tray.open=${entry.id}` } } : {}),
-		},
-		compact([
-			describeDot(entry.status),
-			node(
-				"text",
-				{ role: "omp.tray.name", text: entry.name, wrap: "none", truncate: "end", shrink: 1 },
-				undefined,
-				"name",
-			),
-			entry.meta !== "" &&
-				node("text", { role: "omp.tray.meta", spans: [span(entry.meta, "dim")], wrap: "none" }, undefined, "meta"),
-			entry.line !== "" &&
-				node(
-					"text",
-					{ role: "omp.tray.line", text: entry.line, wrap: "none", truncate: "end", grow: 1, shrink: 1 },
-					undefined,
-					"line",
-				),
-		]),
-		stableKey(entry.id),
-	);
-}
-
-/** The done card's closer look: every finished agent it stands for, newest first, capped. */
-function describeDoneList(item: TrayDoneItem): NativeNode {
-	const rows = item.entries.map(describeDoneEntry);
-	const earlier = item.count - item.entries.length;
-	if (earlier > 0) {
-		rows.push(
-			node("text", { role: "omp.tray.done.more", text: `+${earlier} earlier`, wrap: "none" }, undefined, "more"),
-		);
-	}
-	return node("col", { role: "omp.tray.done" }, rows, "done");
-}
-
-function peekMeta(item: TrayItem): string {
-	switch (item.item) {
-		case "agent":
-			return [item.type, item.model, item.tools !== undefined ? formatCount("tool", item.tools) : "", item.stats]
-				.filter(Boolean)
-				.join(" · ");
-		case "job":
-			return item.command;
-		default:
-			return "";
-	}
-}
-
-function describeEvent(event: TrayEvent, index: number): NativeNode {
-	return node(
-		"row",
-		{ role: "omp.tray.ev", state: event.state, gap: "xs", align: "center" },
-		compact([
-			node("text", { role: "omp.tray.ev.tool", text: event.tool, wrap: "none" }, undefined, "tool"),
-			node(
-				"text",
-				{ role: "omp.tray.ev.text", text: event.text, wrap: "none", truncate: "end", grow: 1 },
-				undefined,
-				"text",
-			),
-			event.age !== undefined &&
-				node("elapsed", { role: "omp.tray.time", age: Math.round(event.age), format: "short" }, undefined, "time"),
-		]),
-		String(index),
-	);
-}
-
-/** The closer look at one card (read-only): its head and actions, then what it is doing in more depth. */
-export function describeTrayPeek(item: TrayItem, detail: TrayAgentDetail | undefined, now: number): NativeNode {
-	const meta = peekMeta(item);
-	const head = node(
-		"row",
-		{ role: "omp.tray.peek.head", gap: "xs", align: "center" },
-		compact<NativeNode>([
-			describeDot(item.status),
-			// The meta takes the free space, so the clock and the buttons sit at the end.
-			node(
-				"text",
-				{ role: "omp.tray.name", text: item.name, wrap: "none", truncate: "end", shrink: 1 },
-				undefined,
-				"name",
-			),
-			meta !== "" &&
-				node(
-					"text",
-					{ role: "omp.tray.peek.meta", text: meta, wrap: "none", truncate: "end", grow: 1, shrink: 1 },
-					undefined,
-					"meta",
-				),
-			item.item !== "done" && describeTime(item.start, item.duration, now),
-			...peekButtons(item),
-		]),
-		"head",
-	);
-	const body: NativeNode[] = [];
-	if (item.item === "agent") {
-		if (detail?.task) {
-			body.push(
-				node(
-					"text",
-					{ role: "omp.tray.peek.task", text: detail.task, wrap: "none", truncate: "end" },
-					undefined,
-					"task",
-				),
-			);
-		}
-		if (detail && detail.tail.length > 0) {
-			body.push(node("col", { role: "omp.tray.tail" }, detail.tail.map(describeEvent), "tail"));
-		}
-	} else if (item.item === "job") {
-		if (item.view) body.push(keyed(describeJobWidget(item.view), "widget"));
-		if (item.output) body.push(describeOut(item, item.view ? TRAY_PEEK_OUT_LINES : TRAY_PEEK_OUT_LINES_BARE));
-	} else {
-		body.push(describeDoneList(item));
-	}
-	return node("col", { role: "omp.tray.peek", ref: item.ref }, [head, ...body], "peek");
 }
 
 /** `3 agents, 1 job in the background`: what the idle status row says while the tray has cards. */
@@ -1471,7 +1031,7 @@ export function runsInlineAgent(sessions: readonly ObservableSession[], callId: 
 }
 
 // =============================================================================
-// The tray
+// The tray feed
 // =============================================================================
 
 /** What the tray needs from the session it shows. */
@@ -1487,73 +1047,48 @@ export interface TrayHost {
 	/** Stop agent `id` for good, as cancelling its task job does. */
 	stopAgent(id: string): void;
 	cancelJob(id: string): void;
-	requestRender(): void;
 }
 
 /**
- * The tray's state and its dock component (native-only: it renders no rows,
- * and the composer docks it only on a host advertising `tray`).
+ * Feeds the dock's {@link TrayModel} (native, on a host advertising `tray`):
+ * rebuilds the cards from the registries, keeps the closer look's detail, the
+ * main agent's state and the status row's caption, and handles the cards'
+ * actions.
  */
-export class Tray implements Component {
+export class TrayFeed {
 	readonly #host: TrayHost;
+	readonly #model: TrayModel;
 	readonly #memory = new TrayMemory();
-	#items: readonly TrayItem[] = [];
-	/** The last build's {@link TrayBuild.quiet}. */
-	#quiet = true;
-	/** Whether {@link #items} were built since the tray last described itself. */
-	#fresh = false;
-	/** True while the terminal advertises `tray`; everything else here idles until then. */
-	#onHost = false;
-	#focus = 0;
-	#peekRef: string | undefined;
-	#peekDetail: TrayAgentDetail | undefined;
 	#peekTimer: NodeJS.Timeout | undefined;
-	readonly #cards = new Map<string, { face: TrayItem; node: NativeNode }>();
-	#peekNode: { face: TrayItem; detail: TrayAgentDetail | undefined; node: NativeNode } | undefined;
-	#root:
-		| {
-				children: readonly NativeChild[];
-				focus: number;
-				peek: string | undefined;
-				main: TrayMain | undefined;
-				quiet: boolean;
-				node: NativeNode;
-		  }
-		| undefined;
-	#caption: { text: string; node: NativeNode } | undefined;
 
-	constructor(host: TrayHost) {
+	constructor(host: TrayHost, model: TrayModel) {
 		this.#host = host;
-	}
-
-	/** Whether the last native frame came from a terminal advertising `tray`. */
-	get onHost(): boolean {
-		return this.#onHost;
-	}
-
-	/** Follow the terminal: called with `cx.feature("tray")` on every native frame. */
-	setOnHost(onHost: boolean): void {
-		if (this.#onHost === onHost) return;
-		this.#onHost = onHost;
-		if (!onHost) this.#clearPeekTimer();
+		this.#model = model;
+		model.onAction = (act, ref) => this.#onAction(act, ref);
 	}
 
 	get items(): readonly TrayItem[] {
-		return this.#items;
+		return this.#model.items.peek();
 	}
 
-	/** Rebuild the cards; true when a card, their order or the closer look changed since the last build. */
+	/** Rebuild the cards and the closer look's detail; true when anything shown changed. */
 	refresh(): boolean {
 		const input = this.#host.input();
 		const { items, quiet } = buildTrayItems(input, this.#memory);
-		let changed = !sameFaces(this.#items, items) || quiet !== this.#quiet;
-		this.#items = items;
-		this.#quiet = quiet;
-		this.#fresh = true;
+		const model = this.#model;
+		let changed = false;
+		if (!sameFaces(model.items.peek(), items)) {
+			model.items.set(items);
+			changed = true;
+		}
+		if (model.quiet.peek() !== quiet) {
+			model.quiet.set(quiet);
+			changed = true;
+		}
 		// The closer look goes with its card, and once that card has nothing more to show.
-		const found = this.#peekRef === undefined ? undefined : items.find(item => item.ref === this.#peekRef);
-		const peeked = found?.look ? found : undefined;
-		if (!peeked) this.#peekRef = undefined;
+		const ref = model.peek.peek();
+		const peeked = ref === undefined ? undefined : items.find(item => item.ref === ref && item.look);
+		if (!peeked && ref !== undefined) model.peek.set(undefined);
 		const detail =
 			peeked?.item === "agent"
 				? trayAgentDetail(
@@ -1561,121 +1096,40 @@ export class Tray implements Component {
 						input.now,
 					)
 				: undefined;
-		if (!sameDetail(this.#peekDetail, detail)) changed = true;
-		this.#peekDetail = detail;
-		this.#armPeekTick(detail, input);
-		return changed || this.mainChanged();
-	}
-
-	/**
-	 * Whether the main agent's state differs from what the tray last described;
-	 * never while it shows no cards (its node is not sent then).
-	 */
-	mainChanged(): boolean {
-		if (!this.#onHost || this.#items.length === 0) return false;
-		return this.#root?.main !== this.#host.main();
-	}
-
-	/**
-	 * The status row's caption, in place of its status rows while the main
-	 * agent shows none (`idle`) and the tray has cards, so the row the tray
-	 * hangs from stays; undefined otherwise.
-	 */
-	caption(idle: boolean): NativeNode | undefined {
-		if (!this.#onHost) return undefined;
-		this.refresh();
-		// A quiet tray is out of sight: a caption over it would announce nothing.
-		if (!idle || this.#items.length === 0 || this.#quiet) return undefined;
-		const text = trayCaption(this.#items);
-		if (this.#caption?.text !== text) {
-			this.#caption = {
-				text,
-				node: node("text", { role: "omp.tray.caption", text, wrap: "none", truncate: "end" }, undefined, "caption"),
-			};
+		if (!sameDetail(model.peekDetail.peek(), detail)) {
+			model.peekDetail.set(detail);
+			changed = true;
 		}
-		return this.#caption.node;
+		this.#armPeekTick(detail, input);
+		return this.syncMain() || changed;
 	}
 
-	/** Ask the terminal to move keyboard focus into the tray; false when it shows no cards. */
-	focus(): boolean {
-		if (!this.#onHost || this.#items.length === 0) return false;
-		this.#focus++;
-		this.#host.requestRender();
+	/** Follow the main agent's state (sent while the tray has cards); true when it changed. */
+	syncMain(): boolean {
+		const main = this.#model.items.peek().length > 0 ? this.#host.main() : undefined;
+		if (this.#model.main.peek() === main) return false;
+		this.#model.main.set(main);
 		return true;
 	}
 
-	render(): readonly string[] {
-		return [];
+	/** `3 agents, 1 job in the background`, while the tray has cards and is not quiet. */
+	caption(): string | undefined {
+		const items = this.#model.items.peek();
+		if (items.length === 0 || this.#model.quiet.peek()) return undefined;
+		return trayCaption(items);
 	}
 
-	describe(): NativeNode {
-		if (!this.#fresh) this.refresh();
-		this.#fresh = false;
-		const now = Date.now();
-		const children: NativeChild[] = [];
-		const live = new Set<string>();
-		for (const item of this.#items) {
-			live.add(item.key);
-			const cached = this.#cards.get(item.key);
-			if (cached && sameProps<TrayItem>(cached.face, item)) {
-				children.push(cached.node);
-				continue;
-			}
-			const described = describeTrayCard(item, now);
-			this.#cards.set(item.key, { face: item, node: described });
-			children.push(described);
-		}
-		for (const key of this.#cards.keys()) if (!live.has(key)) this.#cards.delete(key);
-		const peeked = this.#peekRef === undefined ? undefined : this.#items.find(item => item.ref === this.#peekRef);
-		if (peeked) {
-			let memo = this.#peekNode;
-			if (!memo || !sameProps<TrayItem>(memo.face, peeked) || !sameDetail(memo.detail, this.#peekDetail)) {
-				memo = { face: peeked, detail: this.#peekDetail, node: describeTrayPeek(peeked, this.#peekDetail, now) };
-				this.#peekNode = memo;
-			}
-			children.push(memo.node);
-		} else {
-			this.#peekNode = undefined;
-		}
-		const root = this.#root;
-		const peek = peeked?.ref;
-		// No cards, no node to send: the hidden tray does not follow the main agent.
-		const main = children.length > 0 ? this.#host.main() : undefined;
-		const quiet = children.length > 0 && this.#quiet;
-		if (
-			root &&
-			root.focus === this.#focus &&
-			root.peek === peek &&
-			root.main === main &&
-			root.quiet === quiet &&
-			sameItems(root.children, children)
-		)
-			return root.node;
-		const described = node(
-			"col",
-			{
-				role: "omp.tray",
-				...(children.length === 0 ? { hidden: true } : {}),
-				...(quiet ? { quiet: true } : {}),
-				...(main !== undefined ? { main } : {}),
-				...(this.#focus > 0 ? { focus: this.#focus } : {}),
-				...(peek !== undefined ? { peek } : {}),
-			},
-			children,
-		);
-		this.#root = { children, focus: this.#focus, peek, main, quiet, node: described };
-		return described;
+	dispose(): void {
+		this.#clearPeekTimer();
+		this.#model.onAction = undefined;
 	}
 
-	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type !== "action") return;
-		const ref = event.value ?? "";
-		const item = ref ? this.#items.find(candidate => candidate.ref === ref) : undefined;
-		switch (event.act) {
+	#onAction(act: string, ref: string): void {
+		const item = ref ? this.items.find(candidate => candidate.ref === ref) : undefined;
+		switch (act) {
 			case "tray.peek":
-				// Nothing more to show: the open closer look, if any, stays as it is.
 				if (item && !item.look) return;
-				this.#peekRef = item?.ref;
+				this.#model.peek.set(item?.ref);
 				this.refresh();
 				return;
 			case "tray.open": {
@@ -1683,13 +1137,13 @@ export class Tray implements Component {
 				if (item?.item === "done") return;
 				if (item?.item === "agent") {
 					if (!item.openable) return;
-					this.#peekRef = undefined;
+					this.#model.peek.set(undefined);
 					this.#host.focusAgent(item.ref);
 				} else if (item?.item === "job") {
-					this.#peekRef = undefined;
+					this.#model.peek.set(undefined);
 					this.#host.showJobsSheet(item.ref);
 				} else if (ref && this.#doneEntry(ref)?.openable) {
-					this.#peekRef = undefined;
+					this.#model.peek.set(undefined);
 					this.#host.focusAgent(ref);
 				}
 				return;
@@ -1710,33 +1164,30 @@ export class Tray implements Component {
 		}
 	}
 
-	dispose(): void {
-		this.#clearPeekTimer();
-	}
-
-	/** Finished agent `id` as the done card's closer look lists it. */
 	#doneEntry(id: string): TrayDoneEntry | undefined {
-		for (const item of this.#items) if (item.item === "done") return item.entries.find(entry => entry.id === id);
+		for (const item of this.items) if (item.item === "done") return item.entries.find(entry => entry.id === id);
 		return undefined;
 	}
 
-	/** Repaint when the peeked agent's running call crosses the elapsed-marker threshold. */
+	/** Refresh when the peeked agent's running call crosses the elapsed-marker threshold. */
 	#armPeekTick(detail: TrayAgentDetail | undefined, input: TrayInput): void {
 		this.#clearPeekTimer();
+		const ref = this.#model.peek.peek();
 		const running = detail?.tail.at(-1);
-		if (running?.state !== "run" || running.age !== undefined || !this.#peekRef) return;
-		const startMs = input.sessions.find(session => session.id === this.#peekRef)?.progress?.currentToolStartMs;
+		if (running?.state !== "run" || running.age !== undefined || !ref) return;
+		const startMs = input.sessions.find(session => session.id === ref)?.progress?.currentToolStartMs;
 		if (startMs === undefined) return;
-		const delay = Math.max(0, startMs + TRAY_CALL_ELAPSED_MIN_MS + 1 - input.now);
-		this.#peekTimer = setTimeout(() => {
-			this.#peekTimer = undefined;
-			if (this.#onHost) this.#host.requestRender();
-		}, delay);
+		this.#peekTimer = setTimeout(
+			() => {
+				this.#peekTimer = undefined;
+				this.refresh();
+			},
+			Math.max(0, startMs + TRAY_CALL_ELAPSED_MIN_MS + 1 - input.now),
+		);
 		this.#peekTimer.unref?.();
 	}
 
 	#clearPeekTimer(): void {
-		if (!this.#peekTimer) return;
 		clearTimeout(this.#peekTimer);
 		this.#peekTimer = undefined;
 	}

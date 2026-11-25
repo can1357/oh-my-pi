@@ -10,8 +10,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 it("pauses an armed loop after a terminal provider error instead of duplicating its @file attachment", async () => {
 	initTheme();
@@ -51,8 +52,15 @@ it("pauses an armed loop after a terminal provider error instead of duplicating 
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		await mode.init({ suppressWelcomeIntro: true });
 		await Bun.write(path.join(tempDir.path(), "task.md"), "Implement the task.\n");
 		mode.loopModeEnabled = true;

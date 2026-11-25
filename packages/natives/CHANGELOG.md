@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
+### Breaking Changes
+
+- Removed the `watch` and `HEAD_WATCH_INTERVAL_MS` exports from `@oh-my-pi/pi-natives/vcs`; reread repository state when needed instead.
+
+### Added
+
+- Added `@oh-my-pi/pi-natives/file-poll` with `pollFile(file, onChange, intervalMs)` for detecting file metadata changes, including atomic saves and symlink retargets.
+- Added `truncateToTokens(input, maxTokens)` for safely truncating text to a token budget without splitting UTF-16 surrogate pairs.
+- Added `repairHeredocContinuations(script)` to repair supported shell here-document continuations.
+- Added `commitReconciled()` for publishing private-index commits safely when the shared index is locked.
+- Added transcript analysis APIs—`transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`—for inspecting tool calls, reasoning, message content, matches, and call statistics across session transcripts.
+
+### Changed
+
+- OAuth callback handling now polls for callbacks at regular intervals instead of relying on directory watching.
+- Improved `tail -f` reliability for moved files, symlinks, network drives, and file-watcher failures by combining event-driven updates with polling fallback.
+- Persistent shell sessions no longer carry `set -e` into subsequent commands; other shell options continue to persist.
+- `ShellRunResult` now reports whether a command changed the working directory (`movedCwd`) or left errexit enabled (`errexit`).
+
+### Fixed
+
+- Fixed PTY sessions and child-process cleanup consuming native blocking-pool threads, which could prevent new terminals and other blocking operations from starting after enough terminals were open.
+- Fixed the Linux shell `open` command creating an excessive D-Bus thread pool on first use.
+- Fixed Windows Chromium and Electron captures and accessibility trees incorrectly reporting fully covered windows as current when covered by popup, tool, or click-through windows.
+- Fixed standalone binaries failing to start when the natives directory was read-only or owned by another user despite already containing the extracted addon.
+
 ## [19.1.1] - 2026-11-23
 
 ### Fixed

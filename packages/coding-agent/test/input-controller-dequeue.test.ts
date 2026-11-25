@@ -6,10 +6,11 @@
  */
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
+import { splitQueuedMessages } from "@oh-my-pi/pi-coding-agent/modes/view-model/prompt/queue-input";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { DequeuedMessage, RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { Composer } from "../src/ui/composer/composer";
+import { initTheme } from "../src/ui/theme/service";
 
 beforeAll(() => {
 	initTheme();
@@ -25,7 +26,7 @@ type QueueContextOptions = {
 function makeCtx(opts: QueueContextOptions = {}) {
 	const queue = [...(opts.queue ?? [])];
 	const focusedQueue = [...(opts.focusedQueue ?? [])];
-	let editorText = opts.draft ?? "";
+	const composer = new Composer({ text: opts.draft ?? "" });
 	const statuses: string[] = [];
 
 	// Faithful stub of AgentSession.popLastQueuedMessage: removes and returns the
@@ -43,15 +44,7 @@ function makeCtx(opts: QueueContextOptions = {}) {
 		viewSession,
 		focusedAgentId: opts.focusedQueue ? "worker" : undefined,
 		compactionQueuedMessages: [...(opts.compaction ?? [])],
-		editor: {
-			setCollapsedText: (t: string) => {
-				editorText = t;
-			},
-			getText: () => editorText,
-			imageLinks: undefined as (string | undefined)[] | undefined,
-			pendingImages: [],
-			pendingImageLinks: [],
-		},
+		composer,
 		locallySubmittedUserSignatures: new Set<string>(),
 		skillCommands: new Map([["skill:review", []]]),
 		updatePendingMessagesDisplay: () => {},
@@ -61,7 +54,7 @@ function makeCtx(opts: QueueContextOptions = {}) {
 		showError: () => {},
 	} as unknown as InteractiveModeContext;
 
-	return { ctx, session, queue, focusedQueue, clearQueue, statuses, getText: () => editorText };
+	return { ctx, session, queue, focusedQueue, clearQueue, statuses, getText: () => composer.text() };
 }
 
 describe("InputController.handleDequeue (Alt+Up)", () => {

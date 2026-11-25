@@ -94,6 +94,9 @@ rustc-hash = "2.1.1"
 self_cell = "1.0.4"
 serde = { workspace = true, optional = true }
 serde_json = "1"
+# Exact pin keeps `ast-grep test` snapshot bytes identical to ast-grep 0.50.0.
+serde-saphyr = { version = "=2.1.1", default-features = false, features = ["serialize"], optional = true }
+serde_yaml = { version = "0.9", optional = true }
 smallvec.workspace = true
 # `jq` evaluates on a grown stack and bounds its recursion by the stack left.
 stacker = "0.1.25"
@@ -161,7 +164,7 @@ tar = { version = "0.4.46", default-features = false }
 
 [target."cfg(any(unix, windows))".dependencies.tokio]
 version = "1.50.0"
-features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync"]
+features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"]
 
 [target.'cfg(target_family = "wasm")'.dependencies.tokio]
 version = "1.52.1"
@@ -172,7 +175,6 @@ dns-lookup = "3.0.1"
 
 [target."cfg(unix)".dependencies]
 nix = { version = "0.31.3", features = ["fs", "poll", "process", "resource", "signal", "term", "user"] }
-notify = { version = "=8.2.0", features = ["macos_kqueue"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "system", "time"] }
 uucore = { version = "0.8.0", features = ["fsxattr", "safe-traversal"] }
 
@@ -185,10 +187,9 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 
 # `open`: D-Bus activation, the desktop portal and the file manager.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"], optional = true }
+zbus = { version = "5.19", default-features = false, features = ["tokio"], optional = true }
 
 [target."cfg(windows)".dependencies]
-notify = "=8.2.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
 windows-sys = { version = "0.61", features = [
   "Wdk_System_SystemServices",
@@ -224,6 +225,8 @@ default = ["utils"]
   "dep:ast-grep-core",
   "dep:codespan-reporting",
   "dep:serde",
+  "dep:serde-saphyr",
+  "dep:serde_yaml",
 ]
 "util.awk" = []
 "util.b2sum" = ["util.cksum"]

@@ -541,7 +541,7 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 
 /**
  * Entries that start a new request below a user message rather than lead to its reply: a `/clear` and the custom
- * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as pi-tui's
+ * messages that open a user turn (a directly invoked skill, a collab peer's prompt), as the coding agent's
  * `isUserTurnInitiator` defines them.
  */
 function startsNewRequest(entry: SessionEntry): boolean {

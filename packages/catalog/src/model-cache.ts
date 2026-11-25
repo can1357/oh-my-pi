@@ -243,6 +243,8 @@ type PersistedModel<TApi extends Api = Api> = Omit<Model<TApi>, "supportsCompute
 
 /** Materialized provider snapshot with freshness and header-restoration provenance. */
 export interface CacheEntry<TApi extends Api = Api> {
+	/** Identity of the payload and its header provenance, absent on unhashable legacy rows. */
+	payloadIdentity?: string;
 	/** Trusted, fully materialized rows; request headers remain omitted. */
 	models: Model<TApi>[];
 	fresh: boolean;
@@ -366,6 +368,10 @@ function initializeDb(db: Database): void {
 			PRIMARY KEY (provider_id, api, endpoint, wire_model_id)
 		)
 	`);
+	db.run(`CREATE TABLE IF NOT EXISTS composed_catalog (
+		slot INTEGER PRIMARY KEY CHECK(slot = 1), inputs TEXT NOT NULL, created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL, checksum TEXT NOT NULL, payload BLOB NOT NULL
+	)`);
 	migrateCacheSchema(db);
 	// `models_hash` is the only payload-change detector for the read memo and the
 	// unchanged-write skip. Writers here replace whole rows; this keeps an
@@ -476,6 +482,120 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
 	const { resolvedPath, shared } = resolveCacheDb(dbPath);
 	return runModelCacheDb(resolvedPath, shared, useDb);
+}
+
+/** Descriptor only: constructing a registry for a scoped lookup never reads the large catalog blob. */
+export interface ComposedCatalogDescriptor {
+	inputs: string;
+	created_at: number;
+	expires_at: number;
+}
+
+export function readComposedCatalogDescriptor(dbPath?: string): ComposedCatalogDescriptor | null {
+	try {
+		return withModelCacheDb(dbPath, db =>
+			db
+				.query<ComposedCatalogDescriptor, []>(
+					"SELECT inputs, created_at, expires_at FROM composed_catalog WHERE slot=1",
+				)
+				.get(),
+		);
+	} catch {
+		return null;
+	}
+}
+
+function payloadIdentity(row: CacheRowMeta): string | undefined {
+	return row.models_hash
+		? JSON.stringify([
+				row.models_hash,
+				row.static_fingerprint,
+				row.header_restore_version,
+				row.header_omitted_model_ids,
+				row.unrestorable_header_model_ids,
+			])
+		: undefined;
+}
+
+/** An exact identity for the data the static composition reads; timestamp-only refreshes retain it. */
+export function staticCatalogSources(
+	namespaces: readonly string[],
+	ttlMs: number,
+	now: number,
+	dbPath?: string,
+): { identity: string; members: Map<string, string>; updatedAt: Map<string, number> } | undefined {
+	try {
+		return withModelCacheDb(dbPath, db => {
+			const rows = db
+				.query<CacheRowMeta, [string, number]>(`
+				SELECT m.provider_id, m.version, m.materialization_policy, m.models_hash, m.static_fingerprint, m.updated_at, m.authoritative,
+					m.header_omitted_model_ids, m.unrestorable_header_model_ids, m.header_restore_version,
+					${CACHE_ROW_FRESHNESS_COLUMNS}
+				FROM model_cache m LEFT JOIN model_cache_freshness f
+					ON f.provider_id=m.provider_id AND f.materialization_policy=m.materialization_policy
+				WHERE m.materialization_policy=? AND m.version=?`)
+				.all(materializationPolicy(), CACHE_SCHEMA_VERSION);
+			const byNamespace = new Map(rows.map(row => [row.provider_id, row]));
+			const updatedAt = new Map<string, number>();
+			const members = new Map<string, string>();
+			const identities = [];
+			for (const id of namespaces) {
+				const row = byNamespace.get(id);
+				if (!row) {
+					identities.push([id]);
+					continue;
+				}
+				if (!row.models_hash) return undefined;
+				const state = rowState(row);
+				updatedAt.set(id, state.updatedAt);
+				const age = now - state.updatedAt;
+				const member = `${payloadIdentity(row)}:${state.authoritative}:${age >= 0 && age <= ttlMs}`;
+				members.set(id, member);
+				identities.push([id, member]);
+			}
+			return {
+				identity: `${materializationPolicy()}:${Bun.hash(JSON.stringify(identities)).toString(36)}`,
+				members,
+				updatedAt,
+			};
+		});
+	} catch {
+		return undefined;
+	}
+}
+
+export function readComposedCatalog(inputs: string, now: number, dbPath?: string): Uint8Array | undefined {
+	try {
+		return withModelCacheDb(dbPath, db => {
+			const row = db
+				.query<{ payload: Uint8Array; checksum: string }, [string, number]>(
+					"SELECT payload, checksum FROM composed_catalog WHERE slot=1 AND inputs=?1 AND created_at<=?2 AND expires_at>?2",
+				)
+				.get(inputs, now);
+			return row && Bun.hash(row.payload).toString(36) === row.checksum ? row.payload : undefined;
+		});
+	} catch {
+		return undefined;
+	}
+}
+
+export function writeComposedCatalog(
+	inputs: string,
+	createdAt: number,
+	expiresAt: number,
+	payload: Uint8Array,
+	dbPath?: string,
+): void {
+	try {
+		withModelCacheDb(dbPath, db =>
+			db.run(
+				"INSERT OR REPLACE INTO composed_catalog (slot,inputs,created_at,expires_at,checksum,payload) VALUES (1,?,?,?,?,?)",
+				[inputs, createdAt, Math.min(expiresAt, Number.MAX_SAFE_INTEGER), Bun.hash(payload).toString(36), payload],
+			),
+		);
+	} catch {
+		// A derived catalog may always be rebuilt, including on a read-only or busy database.
+	}
 }
 
 /** Secret-free identity of one probed model endpoint and request API. */
@@ -815,6 +935,7 @@ function parseCacheRow<TApi extends Api>(
 		fresh,
 		authoritative,
 		payloadAuthoritative: row.authoritative === 1,
+		payloadIdentity: payloadIdentity(row),
 		updatedAt,
 		headerOmittedModelIds,
 		unrestorableHeaderModelIds,

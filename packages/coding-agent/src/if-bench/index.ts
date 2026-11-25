@@ -15,11 +15,11 @@ import {
 	resolveBenchTargets,
 	type StreamSimpleFn,
 } from "../cli/bench-runtime";
-import type { LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
+import type { LiveBoardOutput } from "../modes/view-model/chrome/live-board";
 import { initialArray } from "./actions";
-import { createIfBenchBoard, formatIfBenchScoreboard } from "@oh-my-pi/pi-tui/apps/if-bench-board";
 import { DEFAULT_NYA_MAX } from "./protocol";
 import { type IfBenchSummary, runIfBench } from "./runner";
+import { createIfBenchBoard, formatIfBenchScoreboard } from "./board";
 
 const DEFAULT_TURNS = 24;
 const DEFAULT_ARRAY_LENGTH = 24;
@@ -128,7 +128,8 @@ export async function runIfBenchCommand(
 		});
 		board?.close();
 		if (json) writeStdout(`${JSON.stringify(summary, null, 2)}\n`);
-		else if (summary.models.length > 0) writeStdout(`\n${formatIfBenchScoreboard(summary)}`);
+		else if (summary.models.length > 0)
+			writeStdout(`\n${formatIfBenchScoreboard(summary, stdout.isTTY ? stdout.columns : undefined)}`);
 		if (summary.models.every(report => report.turnsPassed === 0)) setExitCode(1);
 		return summary;
 	} finally {

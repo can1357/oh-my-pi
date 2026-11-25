@@ -5,7 +5,6 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-
 import {
 	type Api,
 	type AssistantMessage,
@@ -15,26 +14,24 @@ import {
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
-import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
+import { SPINNER_FRAMES } from "../modes/view-model/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
-
 import { roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
-import { formatTitleUserMessage } from "../tiny/message-preproc";
+import { cfgRetryModelFallback } from "../session/settings";
 import { isLowSignalTitleInput, isNoTitleSentinel, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
-
-import { cfgRetryModelFallback } from "../session/settings";
-import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
+import { DEFAULT_TITLE_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "../config/spinner-interval";
+import { createRoot, effect, nativeRendering, untrack } from "@oh-my-pi/pi-tui";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { formatTitleUserMessage } from "../tiny/message-preproc";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -758,7 +755,10 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// cancel. Releasing here would let the emit below, and a re-armed spinner,
 	// write into the parent shell's tab. Only `initTerminalTitleState()`, the
 	// explicit terminal-ownership path, releases the latch.
+	const hadOverride = terminalTitleRuntime.extensionOverride !== undefined;
 	terminalTitleRuntime.extensionOverride = undefined;
+	if (hadOverride && terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled)
+		startTerminalTitleSpinner();
 	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
 	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();
@@ -770,7 +770,7 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  * the title fork then asks the model for a Nerd Fonts glyph to head the title.
  */
 export function nerdGlyphsActive(): boolean {
-	return typeof theme !== "undefined" && theme.getSymbolPreset() === "nerd";
+	return currentTheme().symbols.preset === "nerd";
 }
 
 /** The OSC 1337 user variable Tern reads the session file from. */
@@ -858,6 +858,8 @@ export function setExtensionTerminalTitle(title: string): void {
 	// "releases its claim" means the same thing here as it does at the sink, and
 	// so the stored override is the value that will actually render.
 	terminalTitleRuntime.extensionOverride = sanitizeTerminalTitlePart(title);
+	if (terminalTitleRuntime.extensionOverride !== undefined) stopTerminalTitleSpinner();
+	else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	emitTerminalTitle();
 }
 
@@ -923,6 +925,8 @@ const terminalTitleRuntime: {
 	 *  While latched the working separator stays `:` and no interval is
 	 *  scheduled. */
 	nativeTitleFailed: boolean;
+	/** Another program holds the terminal (see {@link setTerminalTitleHandoff}). */
+	handoff: boolean;
 	/** The console title `initTerminalTitleState()` read on a Windows console.
 	 *  The console has no title stack, so teardown puts it back through
 	 *  `SetConsoleTitleW`. */
@@ -940,11 +944,12 @@ const terminalTitleRuntime: {
 	frame: 0,
 	enabled: true,
 	style: "braille",
-	intervalMs: DEFAULT_SPINNER_INTERVAL_MS,
+	intervalMs: DEFAULT_TITLE_SPINNER_INTERVAL_MS,
 	timer: undefined,
 	extensionOverride: undefined,
 	disposed: false,
 	nativeTitleFailed: false,
+	handoff: false,
 	initialWindowsConsoleTitle: undefined,
 	nativeTitleRestored: false,
 };
@@ -1001,7 +1006,7 @@ function emitTerminalTitle(): void {
 	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
-	const native = isNativeRendering();
+	const native = untrack(nativeRendering) && !terminalTitleRuntime.handoff;
 	const next =
 		terminalTitleRuntime.extensionOverride ??
 		(native
@@ -1037,10 +1042,11 @@ function stopTerminalTitleSpinner(): void {
 
 function startTerminalTitleSpinner(): void {
 	if (
-		isNativeRendering() ||
+		untrack(nativeRendering) ||
 		isStaticTitleHost() ||
 		terminalTitleRuntime.disposed ||
 		terminalTitleRuntime.timer ||
+		terminalTitleRuntime.extensionOverride !== undefined ||
 		terminalTitleRuntime.nativeTitleFailed ||
 		terminalTitleRuntime.intervalMs === SPINNER_INTERVAL_STATIC ||
 		!process.stdout.isTTY
@@ -1050,8 +1056,7 @@ function startTerminalTitleSpinner(): void {
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame =
 			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
-		// An extension override is frame-independent; the sink would dedupe it anyway.
-		if (terminalTitleRuntime.extensionOverride === undefined) emitTerminalTitle();
+		emitTerminalTitle();
 	}, terminalTitleRuntime.intervalMs);
 	// Never keep the event loop alive for a cosmetic animation.
 	terminalTitleRuntime.timer.unref?.();
@@ -1066,6 +1071,17 @@ export function setTerminalTitleState(state: TerminalTitleState): void {
 	terminalTitleRuntime.state = state;
 	if (state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
+	emitTerminalTitle();
+}
+
+/**
+ * The terminal is handed to another program (an external editor, a suspend)
+ * or taken back. A Tern pane shows no surface meanwhile, so its tab gets the
+ * title terminal rows use until the surface is back; in rows nothing changes.
+ */
+export function setTerminalTitleHandoff(on: boolean): void {
+	if (terminalTitleRuntime.handoff === on) return;
+	terminalTitleRuntime.handoff = on;
 	emitTerminalTitle();
 }
 
@@ -1146,10 +1162,20 @@ export function initTerminalTitleState(): void {
 	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	// A TSP terminal takes the plain native title while it renders; the
 	// classic `π > label` (and its spinner) comes back when it stops.
-	terminalTitleRuntime.unwatchNative ??= onNativeRenderingChange(native => {
-		if (native) stopTerminalTitleSpinner();
-		else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
-		emitTerminalTitle();
+	terminalTitleRuntime.unwatchNative ??= createRoot(dispose => {
+		let previous = untrack(nativeRendering);
+		effect(() => {
+			const native = nativeRendering();
+			if (native === previous) return;
+			previous = native;
+			untrack(() => {
+				if (native) stopTerminalTitleSpinner();
+				else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled)
+					startTerminalTitleSpinner();
+				emitTerminalTitle();
+			});
+		});
+		return dispose;
 	});
 }
 
