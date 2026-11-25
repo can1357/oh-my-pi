@@ -645,6 +645,17 @@ export declare class Process {
   /** Launch arguments for this process. */
   args(): Array<string>
   /**
+   * Basename of the running process's OS executable image, not `argv[0]`.
+   * Returns null when the image is unreadable or the process has exited.
+   */
+  executableName(): string | null
+  /**
+   * Send `signal` to an owned POSIX process group, even after its leader
+   * exits. Defaults to hard-kill. Returns false if no signal was delivered
+   * or the platform does not support process groups.
+   */
+  static killGroup(pgid: number, signal?: number | undefined | null): boolean
+  /**
    * Send `signal` to this process and its descendants, children first.
    *
    * On Linux and macOS the signal is forwarded as-is. On Windows there is no
