@@ -93,15 +93,15 @@ export class PendingInteractions {
 		const { signal: _signal, ...rest } = event;
 		const listed = structuredClone(rest);
 		return this.#approvals.open(
-			event.toolCallId,
+			event.approvalId,
 			listed,
 			answer => acceptedApprovalAnswer(listed.prompt, answer),
 			signal,
 		);
 	}
 
-	resolveApproval(toolCallId: string, answer: ExtensionApprovalAnswer): boolean {
-		return this.#approvals.resolve(toolCallId, answer);
+	resolveApproval(approvalId: string, answer: ExtensionApprovalAnswer): boolean {
+		return this.#approvals.resolve(approvalId, answer);
 	}
 
 	pendingApprovals(): ToolApprovalRequestedEvent[] {

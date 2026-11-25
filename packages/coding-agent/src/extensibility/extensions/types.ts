@@ -884,7 +884,7 @@ export interface ExtensionContext {
 	 * `answerable`) or the prompt does not offer `answer` (no `session` label, or a grant scope it does not list).
 	 * An answer given while the call's turn is being aborted is discarded and the call fails closed.
 	 */
-	resolveToolApproval(toolCallId: string, answer: ExtensionApprovalAnswer): boolean;
+	resolveToolApproval(approvalId: string, answer: ExtensionApprovalAnswer): boolean;
 	/** Tool approvals still awaiting an answer, oldest first, as `tool_approval_requested` reported them. */
 	getPendingToolApprovals(): ToolApprovalRequestedEvent[];
 	/**
@@ -1495,6 +1495,11 @@ export interface InputEvent {
 export interface ToolApprovalRequestedEvent {
 	type: "tool_approval_requested";
 	sessionId: string;
+	/**
+	 * Unique to this approval within the runner; pass it to `ctx.resolveToolApproval`. Unlike `toolCallId`
+	 * (the provider's), it never repeats across concurrent agent loops sharing the runner.
+	 */
+	approvalId: string;
 	toolCallId: string;
 	toolName: string;
 	reason?: string;
@@ -1518,6 +1523,8 @@ export interface ToolApprovalRequestedEvent {
 export interface ToolApprovalResolvedEvent {
 	type: "tool_approval_resolved";
 	sessionId: string;
+	/** The `approvalId` of the `tool_approval_requested` event this resolves. */
+	approvalId: string;
 	toolCallId: string;
 	toolName: string;
 	approved: boolean;
@@ -1555,6 +1562,7 @@ export interface AskFieldSummary {
 export interface AskRequestedEvent {
 	type: "ask_requested";
 	sessionId: string;
+	/** Unique to this form; pass it to `ctx.resolveAsk`. Provider tool call ids can repeat across concurrent loops. */
 	askId: string;
 	toolCallId: string;
 	/** The form's HTML as the model wrote it. */

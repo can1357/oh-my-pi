@@ -489,9 +489,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// a restricted folder (which yolo cannot bypass either) the host alone answers, and its policy holds.
 			const answerable =
 				this.runner.hasUI() && pendingSafetyChecks.length === 0 && resolved.source !== "restriction";
+			const approvalId = crypto.randomUUID();
 			const requestedEvent: ToolApprovalRequestedEvent = {
 				type: "tool_approval_requested",
 				sessionId,
+				approvalId,
 				toolName: this.tool.name,
 				toolCallId,
 				...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
@@ -518,6 +520,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				await this.runner.emit({
 					type: "tool_approval_resolved",
 					sessionId,
+					approvalId,
 					toolName: this.tool.name,
 					toolCallId,
 					approved,

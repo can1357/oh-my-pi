@@ -1989,7 +1989,7 @@ export class ExtensionRunner {
 			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
 			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
 			openPlanReview: () => this.#openPlanReviewFn(),
-			resolveToolApproval: (toolCallId, answer) => this.pendingInteractions.resolveApproval(toolCallId, answer),
+			resolveToolApproval: (approvalId, answer) => this.pendingInteractions.resolveApproval(approvalId, answer),
 			getPendingToolApprovals: () => this.pendingInteractions.pendingApprovals(),
 			resolveAsk: (askId, answer) => this.pendingInteractions.resolveAsk(askId, answer),
 			getPendingAsks: () => this.pendingInteractions.pendingAsks(),

@@ -911,9 +911,9 @@ describe("AskTool answered by an extension", () => {
 			{ name: "ttl", kind: "text", question: "Lifetime (days)", required: false, type: "number", value: "30" },
 		]);
 		// Data the form cannot take is refused and leaves the form open.
-		expect(ext.pending.resolveAsk("call-ext-ask", { data: { missing: "x" } })).toBe(false);
-		expect(ext.pending.resolveAsk("call-ext-ask", { data: { ttl: "soon" } })).toBe(false);
-		expect(ext.pending.resolveAsk("call-ext-ask", { data: { store: "redis" } })).toBe(true);
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: { missing: "x" } })).toBe(false);
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: { ttl: "soon" } })).toBe(false);
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: { store: "redis" } })).toBe(true);
 		const result = await outcome;
 
 		expect(signal?.aborted).toBe(true);
@@ -924,13 +924,13 @@ describe("AskTool answered by an extension", () => {
 			{
 				type: "ask_resolved",
 				sessionId: "",
-				askId: "call-ext-ask",
+				askId: ext.requested[0]!.askId,
 				toolCallId: "call-ext-ask",
 				answered: true,
 				by: "extension",
 			},
 		]);
-		expect(ext.pending.resolveAsk("call-ext-ask", { data: {} })).toBe(false);
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: {} })).toBe(false);
 	});
 
 	it("an answer given while handling the request skips the dialog", async () => {
@@ -1015,8 +1015,8 @@ describe("AskTool answered by an extension", () => {
 				withChannel(createContext({ select }), ext.extensionAsk),
 			);
 			await opened.promise;
-			const accepted = ext.pending.resolveAsk("call-choices", { data });
-			if (!accepted) ext.pending.resolveAsk("call-choices", "cancel");
+			const accepted = ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data });
+			if (!accepted) ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", "cancel");
 			const result = await outcome.catch(() => undefined);
 			return { accepted, result };
 		};
@@ -1059,6 +1059,35 @@ describe("AskTool answered by an extension", () => {
 		).rejects.toThrow("Ask input was cancelled");
 	});
 
+	it("two pending forms with the same tool call id are answered separately", async () => {
+		const ext = channel();
+		let opened = 0;
+		const bothOpen = Promise.withResolvers<void>();
+		const select = vi.fn<Select>(async (_title, _options, dialogOptions) => {
+			if (++opened === 2) bothOpen.resolve();
+			await new Promise<void>(resolve => dialogOptions?.signal?.addEventListener("abort", () => resolve()));
+			return undefined;
+		});
+		const ask = () =>
+			new AskTool(createSession()).execute(
+				"call-dup",
+				{ html: DB_FORM },
+				undefined,
+				undefined,
+				withChannel(createContext({ select }), ext.extensionAsk),
+			);
+		const first = ask();
+		const second = ask();
+		await bothOpen.promise;
+		const [a, b] = ext.requested;
+		expect(a!.askId).not.toBe(b!.askId);
+		expect(ext.pending.resolveAsk(a!.askId, { data: { store: "redis" } })).toBe(true);
+		expect(ext.pending.pendingAsks().map(form => form.askId)).toEqual([b!.askId]);
+		expect(ext.pending.resolveAsk(b!.askId, { data: { store: "sqlite" } })).toBe(true);
+		expect(text(await first)).toContain('"store": "redis"');
+		expect(text(await second)).toContain('"store": "sqlite"');
+	});
+
 	it("a timeout is reported as unanswered even when the form's values are valid", async () => {
 		const ext = channel();
 		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 30 }, timedOut: true }));
@@ -1083,7 +1112,7 @@ describe("AskTool answered by an extension", () => {
 			withChannel(createContext({ formDialog }), ext.extensionAsk),
 		);
 		expect(ext.resolved[0]).toMatchObject({ answered: true, by: "user" });
-		expect(ext.pending.resolveAsk("call-user-ask", { data: {} })).toBe(false);
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: {} })).toBe(false);
 		expect(ext.pending.pendingAsks()).toEqual([]);
 	});
 });

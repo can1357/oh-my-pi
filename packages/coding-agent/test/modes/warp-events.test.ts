@@ -764,6 +764,7 @@ describe("Warp CLI-agent events", () => {
 		approvalRequested({
 			type: "tool_approval_requested",
 			sessionId: "session-123",
+			approvalId: "approval-123",
 			toolCallId: "tool-call-123",
 			toolName: "bash",
 			approvalMode: "always-ask",

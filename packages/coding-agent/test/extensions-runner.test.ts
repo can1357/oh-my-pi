@@ -3421,6 +3421,7 @@ describe("ExtensionRunner", () => {
 		describe("ask handlers awaiting remote work", () => {
 			type AskSeen = {
 				ctx?: { resolveAsk(id: string, answer: unknown): boolean };
+				askId?: string;
 				entered: () => void;
 				hold: Promise<void>;
 			};
@@ -3437,9 +3438,10 @@ describe("ExtensionRunner", () => {
 				fs.writeFileSync(
 					path.join(extensionsDir, "ext-ask.ts"),
 					`export default function(pi) {
-						pi.on("ask_requested", async (_event, ctx) => {
+						pi.on("ask_requested", async (event, ctx) => {
 							const seen = globalThis.__extAsk;
 							seen.ctx = ctx;
+							seen.askId = event.askId;
 							seen.entered();
 							await seen.hold;
 						});
@@ -3491,7 +3493,7 @@ describe("ExtensionRunner", () => {
 					value => ({ value }),
 					error => ({ error }),
 				);
-				const late = askState.__extAsk!.ctx!.resolveAsk("call-ask-held", { data: { pick: "a" } });
+				const late = askState.__extAsk!.ctx!.resolveAsk(askState.__extAsk!.askId!, { data: { pick: "a" } });
 				release.resolve();
 				return { outcome, late, select };
 			};
@@ -3514,6 +3516,7 @@ describe("ExtensionRunner", () => {
 		describe("answered by an extension", () => {
 			type Seen = {
 				requested: Array<{
+					approvalId: string;
 					toolCallId: string;
 					prompt: { session?: string };
 					safetyChecks: boolean;
@@ -3540,6 +3543,9 @@ describe("ExtensionRunner", () => {
 				abortResult?: boolean;
 			};
 			const globalState = globalThis as typeof globalThis & { __extApproval?: Seen };
+			/** The approval id a call's request carried (an unknown id when it was never requested). */
+			const approvalIdOf = (seen: Seen, toolCallId: string): string =>
+				seen.requested.find(request => request.toolCallId === toolCallId)?.approvalId ?? `missing:${toolCallId}`;
 			afterEach(() => {
 				delete globalState.__extApproval;
 			});
@@ -3555,9 +3561,9 @@ describe("ExtensionRunner", () => {
 							seen.mutate?.(event);
 							seen.requested.push(event);
 							seen.ctx = ctx;
-							if (seen.inHandler !== undefined) seen.inHandlerResult = ctx.resolveToolApproval(event.toolCallId, seen.inHandler);
+							if (seen.inHandler !== undefined) seen.inHandlerResult = ctx.resolveToolApproval(event.approvalId, seen.inHandler);
 							if (seen.answerOnAbort) event.signal?.addEventListener("abort", () => {
-								seen.abortResult = ctx.resolveToolApproval(event.toolCallId, "once");
+								seen.abortResult = ctx.resolveToolApproval(event.approvalId, "once");
 							});
 							seen.afterHandler?.();
 							if (seen.hold) await seen.hold;
@@ -3626,15 +3632,17 @@ describe("ExtensionRunner", () => {
 				});
 				expect(seen.ctx!.getPendingToolApprovals().map(pending => pending.toolCallId)).toEqual(["call-ext-first"]);
 				// A grant scope this prompt does not offer is refused and leaves the call pending.
-				expect(seen.ctx!.resolveToolApproval("call-ext-first", { grant: "folder", always: false })).toBe(false);
-				expect(seen.ctx!.resolveToolApproval("call-ext-first", "once")).toBe(true);
+				expect(
+					seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-ext-first"), { grant: "folder", always: false }),
+				).toBe(false);
+				expect(seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-ext-first"), "once")).toBe(true);
 				await execution;
 
 				expect(dialogSignal?.aborted).toBe(true);
 				expect(executed).toHaveBeenCalledTimes(1);
 				expect(seen.resolved).toEqual([{ approved: true, by: "extension", reason: undefined }]);
 				// First answer wins: the call is no longer pending.
-				expect(seen.ctx!.resolveToolApproval("call-ext-first", "deny")).toBe(false);
+				expect(seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-ext-first"), "deny")).toBe(false);
 				expect(seen.ctx!.getPendingToolApprovals()).toEqual([]);
 			});
 
@@ -3663,7 +3671,7 @@ describe("ExtensionRunner", () => {
 				const { seen, run } = await setup({ select: async () => "Approve" });
 				await run("call-user-first");
 				expect(seen.resolved).toEqual([{ approved: true, by: "user", reason: undefined }]);
-				expect(seen.ctx!.resolveToolApproval("call-user-first", "deny")).toBe(false);
+				expect(seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-user-first"), "deny")).toBe(false);
 			});
 
 			it("without a UI the call fails closed even when a handler tries to answer", async () => {
@@ -3683,7 +3691,10 @@ describe("ExtensionRunner", () => {
 				let resolvedDuringDialog: boolean | undefined;
 				const select = vi.fn(async () => {
 					pendingDuringDialog = globalState.__extApproval!.ctx!.getPendingToolApprovals();
-					resolvedDuringDialog = globalState.__extApproval!.ctx!.resolveToolApproval("call-safety", "once");
+					resolvedDuringDialog = globalState.__extApproval!.ctx!.resolveToolApproval(
+						approvalIdOf(globalState.__extApproval!, "call-safety"),
+						"once",
+					);
 					return "Deny";
 				});
 				const { seen, executed, run } = await setup({ select });
@@ -3758,6 +3769,33 @@ describe("ExtensionRunner", () => {
 				expect(second.executed).toHaveBeenCalledTimes(1);
 			});
 
+			it("two pending calls with the same tool call id are answered separately", async () => {
+				const opened: Array<() => void> = [];
+				const bothOpen = Promise.withResolvers<void>();
+				const select = vi.fn(
+					async (_title: string, _options: string[], dialogOptions?: ExtensionUIDialogOptions) => {
+						opened.push(() => {});
+						if (opened.length === 2) bothOpen.resolve();
+						await new Promise<void>(resolve => dialogOptions?.signal?.addEventListener("abort", () => resolve()));
+						return undefined;
+					},
+				);
+				const { seen, executed, run } = await setup({ select });
+				// Concurrent loops (advisors) sharing a runner can reuse a provider tool call id.
+				const first = run("call-dup");
+				const second = run("call-dup");
+				await bothOpen.promise;
+				const [a, b] = seen.requested as unknown as Array<{ approvalId: string }>;
+				expect(a!.approvalId).not.toBe(b!.approvalId);
+				expect(seen.ctx!.getPendingToolApprovals()).toHaveLength(2);
+				expect(seen.ctx!.resolveToolApproval(a!.approvalId, "deny")).toBe(true);
+				await expect(first).rejects.toThrow("denied by extension");
+				expect(seen.ctx!.getPendingToolApprovals()).toHaveLength(1);
+				expect(seen.ctx!.resolveToolApproval(b!.approvalId, "once")).toBe(true);
+				await second;
+				expect(executed).toHaveBeenCalledTimes(1);
+			});
+
 			it("a call aborted while its approval is being reported does not run", async () => {
 				const { seen, executed, run } = await setup();
 				const turn = new AbortController();
@@ -3798,7 +3836,7 @@ describe("ExtensionRunner", () => {
 				await expect(execution).rejects.toThrow(/Aborted/);
 				// Closed the moment the call aborted, before the handler (or anyone) could answer it.
 				expect(seen.abortResult).toBe(false);
-				expect(seen.ctx!.resolveToolApproval("call-held", "once")).toBe(false);
+				expect(seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-held"), "once")).toBe(false);
 				expect(seen.ctx!.getPendingToolApprovals()).toEqual([]);
 				expect(executed).not.toHaveBeenCalled();
 				expect(seen.resolved[0]).toMatchObject({ approved: false, by: "user" });

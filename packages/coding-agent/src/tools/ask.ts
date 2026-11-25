@@ -677,6 +677,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// Extensions may answer the form too; the first answer wins and closes the other.
 		const sessionId = this.session.getSessionId?.() ?? "";
+		// Provider tool call ids can repeat across concurrent loops sharing the runner; the form's own id cannot.
+		const askId = crypto.randomUUID();
 		let pending: PendingPrompt<ExtensionAskAnswer> | undefined;
 		let by: "user" | "extension" = "user";
 		let answered: { data: HtmlFormData; notes?: OptionNote[]; timedOut?: boolean } | undefined;
@@ -686,7 +688,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				{
 					type: "ask_requested",
 					sessionId,
-					askId: toolCallId,
+					askId,
 					toolCallId,
 					html,
 					fields: askFieldSummaries(form, questions),
@@ -743,7 +745,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			await context.extensionAsk?.resolved({
 				type: "ask_resolved",
 				sessionId,
-				askId: toolCallId,
+				askId,
 				toolCallId,
 				// A timeout is never an answer, even when it submits valid values the form already held.
 				answered: settled !== undefined && !settled.timedOut,
