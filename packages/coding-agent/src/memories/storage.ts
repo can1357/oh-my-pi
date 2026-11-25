@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { initializeSqliteSchema } from "@oh-my-pi/pi-utils";
 
 export interface MemoryThread {
 	id: string;
@@ -64,14 +65,7 @@ function globalJobKey(cwd: string): string {
 	return `global:${normalizeScopeCwd(cwd)}`;
 }
 
-export function openMemoryDb(dbPath: string): Database {
-	const db = new Database(dbPath);
-	// Install the busy handler BEFORE any lock-taking statement. See #2421.
-	db.exec("PRAGMA busy_timeout = 5000");
-	db.exec(`
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-
+const MEMORY_SCHEMA = `
 CREATE TABLE IF NOT EXISTS threads (
 	id TEXT PRIMARY KEY,
 	updated_at INTEGER NOT NULL,
@@ -105,7 +99,19 @@ CREATE TABLE IF NOT EXISTS jobs (
 	last_success_watermark INTEGER,
 	PRIMARY KEY (kind, job_key)
 );
-`);
+`;
+
+export function openMemoryDb(dbPath: string): Database {
+	const db = new Database(dbPath);
+	try {
+		// Install the busy handler BEFORE any lock-taking statement. See #2421.
+		db.exec("PRAGMA busy_timeout = 5000");
+		db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+		initializeSqliteSchema(db, () => db.exec(MEMORY_SCHEMA));
+	} catch (error) {
+		db.close();
+		throw error;
+	}
 	return db;
 }
 

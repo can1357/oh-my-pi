@@ -36,6 +36,8 @@
 - Renaming a session from `/resume` accepts keyboard input again and returns focus to the picker after saving or cancelling ([#20548](https://github.com/can1357/oh-my-pi/issues/20548)).
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
+- Fixed starts failing with `table settings already exists` when several omp processes create a new `agent.db` at the same moment ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
+- Fixed starts failing with `database is locked` while another omp process writes `agent.db`: a start that finds the agent and memory schema current no longer writes to it ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
 
 ### Removed
 

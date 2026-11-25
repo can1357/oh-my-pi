@@ -5,6 +5,7 @@
 ### Added
 
 - Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `initializeSqliteSchema(db, apply)`, which runs an idempotent schema initializer and takes the write lock only when the schema needs a change ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
 - Removed the unused `getToolsDir()` export. Custom tool discovery is unchanged.

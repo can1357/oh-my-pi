@@ -374,6 +374,49 @@ export function checkpointWal(db: Database): void {
 	db.run("PRAGMA wal_checkpoint(PASSIVE)");
 }
 
+/**
+ * Brings a store's schema up to date, writing nothing when it already is.
+ *
+ * `apply` must be idempotent (`CREATE ... IF NOT EXISTS`, a read before each `ALTER`, `INSERT` or
+ * `UPDATE`) and must let SQLite errors propagate. It first runs in a read transaction under
+ * `PRAGMA query_only`: on a current schema every statement is a no-op, so the start never takes the
+ * write lock and never waits on another process's writer. A statement that needs to write fails with
+ * `SQLITE_READONLY` instead; `apply` then runs again under `BEGIN IMMEDIATE`, which waits for the
+ * write lock through the busy handler (a BUSY result reaches the caller's open retries) and lets
+ * one process migrate at a time. Inside a caller's transaction, `apply` runs in it directly. Set the
+ * journal mode before the call (it cannot change inside a transaction), and create `TEMP` objects
+ * after it (`query_only` refuses them too). The connection keeps the `query_only` setting it had.
+ */
+export function initializeSqliteSchema(db: Database, apply: () => void): void {
+	if (db.inTransaction) {
+		apply();
+		return;
+	}
+	const queryOnly = db.query<{ query_only: number }, []>("PRAGMA query_only").get()?.query_only === 1;
+	db.run("PRAGMA query_only = ON");
+	try {
+		runInTransaction(db, "BEGIN", apply);
+		return;
+	} catch (error) {
+		if (!isSqliteReadOnlyError(error)) throw error;
+	} finally {
+		db.run(`PRAGMA query_only = ${queryOnly ? "ON" : "OFF"}`);
+	}
+	runInTransaction(db, "BEGIN IMMEDIATE", apply);
+}
+
+function runInTransaction(db: Database, begin: string, body: () => void): void {
+	db.run(begin);
+	try {
+		body();
+		db.run("COMMIT");
+	} catch (error) {
+		// Some errors (SQLITE_FULL, SQLITE_IOERR, ...) already rolled the transaction back.
+		if (db.inTransaction) db.run("ROLLBACK");
+		throw error;
+	}
+}
+
 /** A scratch copy of a quarantined store, opened for salvage reads. */
 export interface SalvageSource extends Disposable {
 	db: Database;
@@ -535,6 +578,11 @@ export function isSqliteBusyError(err: unknown): boolean {
 	if (err === null || typeof err !== "object" || !("code" in err)) return false;
 	const code = err.code;
 	return typeof code === "string" && code.startsWith("SQLITE_BUSY");
+}
+
+/** The base `SQLITE_READONLY` that `PRAGMA query_only` gives a statement that would write. */
+function isSqliteReadOnlyError(err: unknown): boolean {
+	return err !== null && typeof err === "object" && "code" in err && err.code === "SQLITE_READONLY";
 }
 
 /**

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed opening a memory bank taking its write lock on every open, which failed opens with `database is locked` while another process wrote the bank ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
+
 ### Removed
 
 - Removed unused `@oh-my-pi/pi-mnemopi/config` exports: `FASTEMBED_CACHE_DIR`, `MODEL_CACHE_DIR`, `DEFAULT_LLM_MODEL_REPO`, `DEFAULT_LLM_MODEL_FILE`, `HOST_LLM_TIMEOUT_SECONDS`, `beamOptimizationsEnabled`, `embeddingsViaApi`, `isApiEmbeddingModel`, `apiEmbeddingsAvailable`, `workingMemoryMaxItems`, `episodicRecallLimit`, `sleepBatchSize`, `scratchpadMaxItems`, `tier2Days`, `tier3Days`, `degradeBatchSize`, `smartCompressEnabled`, `tier3MaxChars`, `veracityWeightOverrides`, `autoMigrateEnabled`, `llmThreads`, `llmRepo`, `llmFile`, `llmModelFiles`, `hostLlmProvider`, `hostLlmModel`, `hostLlmContext` ([#20530](https://github.com/can1357/oh-my-pi/pull/20530))
