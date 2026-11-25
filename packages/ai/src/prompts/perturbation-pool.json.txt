@@ -17604,6 +17604,16 @@
 				"- Every method is async and prints its result; `silent=True` skips printing. `details()` is the exception (synchronous, prints nothing). `print(d)` reprints the current summary.",
 				"- All methods are async and print their result; `silent=True` skips printing. `details()` is the exception (synchronous, prints nothing). `print(d)` repeats the current summary."
 			]
+		},
+		{
+			"source": "- Free input: `<input type=\"text|number|date|email|url\">`, <textarea>; placeholder, min/max, pattern, required are hints: broken answers get flagged, never blocked, so answers MAY break them.",
+			"origin": "tools/ask.md",
+			"variants": [
+				"- Unrestricted inputs: `<input type=\"text|number|date|email|url\">`, <textarea>; placeholder, min/max, pattern, required serve as hints: invalid answers get flagged, never blocked, so answers MAY violate them.",
+				"- Free-form entry: `<input type=\"text|number|date|email|url\">`, <textarea>; placeholder, min/max, pattern, required act as hints: broken answers get flagged, never blocked, so answers MAY break them.",
+				"- Unconstrained input: `<input type=\"text|number|date|email|url\">`, <textarea>; placeholder, min/max, pattern, required are hints only: broken answers get flagged, never blocked, so answers MAY break them.",
+				"- Open input: `<input type=\"text|number|date|email|url\">`, <textarea>; placeholder, min/max, pattern, required are hints: broken answers get flagged, never blocked, hence answers MAY break them."
+			]
 		}
 	]
 }
