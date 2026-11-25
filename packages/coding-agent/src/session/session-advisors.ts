@@ -2898,8 +2898,18 @@ export class SessionAdvisors {
 	 * @returns true when the advisor is actively running after the call.
 	 */
 	setAdvisorEnabled(enabled: boolean): boolean {
+		const wasEnabled = this.#advisorEnabled;
 		this.#advisorEnabled = enabled;
 		if (enabled) {
+			// Discovery ran once at startup; a WATCHDOG.yml edited since then is
+			// invisible to this toggle. On a disabled -> enabled transition,
+			// re-discover in the background and rebuild when the roster or shared
+			// baseline changed so `/advisor on` picks up current rule text (issue
+			// #20541). Re-enable calls that only retune budget/tier settings while
+			// already enabled keep the startup snapshot: they must not trigger a
+			// roster rebuild. The runtime built below may be replaced once; the
+			// toggle itself already rebuilds, so this matches existing semantics.
+			if (!wasEnabled) void this.#refreshDiscoveredAdvisorConfigs();
 			if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) {
 				return this.#rebuildAdvisorRuntime();
 			}
@@ -2907,6 +2917,38 @@ export class SessionAdvisors {
 		}
 		this.#stopAdvisorRuntime();
 		return false;
+	}
+
+	/**
+	 * Re-run WATCHDOG.yml discovery against the session's cwd and config dir and
+	 * swap in the live roster + shared baseline when they differ from the startup
+	 * snapshot, through the same {@link applyAdvisorConfigs} path the
+	 * `/advisor configure` save flow uses. Failures are logged, never thrown —
+	 * the startup discovery result stays authoritative when re-discovery is
+	 * unavailable.
+	 */
+	async #refreshDiscoveredAdvisorConfigs(): Promise<void> {
+		if (this.#host.isDisposed()) return;
+		try {
+			const { advisors, sharedInstructions, sharedMaxNotesPerUpdate, warnings } = await discoverAdvisorConfigs(
+				this.#host.sessionManager.getCwd(),
+				this.#advisorConfigDir,
+			);
+			const changed =
+				JSON.stringify(advisors ?? []) !== JSON.stringify(this.#advisorConfigs ?? []) ||
+				sharedInstructions !== this.#advisorSharedInstructions ||
+				sharedMaxNotesPerUpdate !== this.#advisorSharedMaxNotesPerUpdate;
+			if (!changed) {
+				this.#advisorConfigWarnings = warnings;
+				return;
+			}
+			this.applyAdvisorConfigs(advisors, sharedInstructions, sharedMaxNotesPerUpdate);
+			this.#advisorConfigWarnings = warnings;
+		} catch (error) {
+			logger.debug("advisor config re-discovery failed; keeping startup snapshot", {
+				err: String(error),
+			});
+		}
 	}
 
 	/**

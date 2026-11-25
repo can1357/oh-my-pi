@@ -1,7 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const contentCache = new Map<string, string | null>();
+interface CachedContent {
+	content: string | null;
+	mtimeMs: number | undefined;
+	size: number | undefined;
+	missing: boolean;
+}
+
+const contentCache = new Map<string, CachedContent>();
 const dirCache = new Map<string, fs.Dirent[]>();
 
 function resolvePath(filePath: string): string {
@@ -16,7 +23,44 @@ export function createFileReader(): (filePath: string) => Promise<string | null>
 
 /** Read a discovery file through the process-local content cache. */
 export function readFile(filePath: string): Promise<string | null> {
-	return readFileWithCache(filePath, contentCache);
+	return readFileValidated(filePath);
+}
+
+
+/**
+ * Process-lifetime read with mtime+size validation: advisor @-imports hit this
+ * long after startup, so an edit on disk must be picked up instead of served
+ * stale for the rest of the process. Entries cached as missing re-check too,
+ * so a file created after the first miss is found on the next read.
+ */
+async function readFileValidated(filePath: string): Promise<string | null> {
+	const abs = resolvePath(filePath);
+	const cached = contentCache.get(abs);
+	if (cached) {
+		try {
+			const stats = await fs.promises.stat(abs);
+			if (!cached.missing && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size && stats.isFile()) {
+				return cached.content;
+			}
+		} catch {
+			if (cached.missing) return null;
+		}
+	}
+	try {
+		// Same FIFO/device guard as readFileWithCache: `.text()` on a
+		// FIFO/socket blocks until EOF, hanging the caller forever.
+		const stats = await fs.promises.stat(abs);
+		if (!stats.isFile()) {
+			contentCache.set(abs, { content: null, mtimeMs: undefined, size: undefined, missing: false });
+			return null;
+		}
+		const content = await Bun.file(abs).text();
+		contentCache.set(abs, { content, mtimeMs: stats.mtimeMs, size: stats.size, missing: false });
+		return content;
+	} catch {
+		contentCache.set(abs, { content: null, mtimeMs: undefined, size: undefined, missing: true });
+		return null;
+	}
 }
 
 async function readFileWithCache(filePath: string, cache: Map<string, string | null>): Promise<string | null> {

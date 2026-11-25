@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Editing `WATCHDOG.yml` (or its `@`-imports) after startup now shows up on `/advisor on` and `/advisor configure` instead of serving the process-lifetime stale text.
+
 ### Breaking Changes
 
 - `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
