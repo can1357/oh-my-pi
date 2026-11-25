@@ -1185,10 +1185,8 @@ mod tests {
 	fn anchor_walk_reaches_any_container_the_container_walk_finds() {
 		// Element `n`'s parent is `n + 1`; the container is `depth` parents
 		// above the hit, as under a nested tree item.
-		for (depth, expected) in [
-			(MAX_ANCESTORS, Some(MAX_ANCESTORS - 1)),
-			(MAX_ANCESTORS + 1, None),
-		] {
+		for (depth, expected) in [(MAX_ANCESTORS, Some(MAX_ANCESTORS - 1)), (MAX_ANCESTORS + 1, None)]
+		{
 			let child = child_of(0, |element| Ok(Some(element + 1)), |parent| Ok(*parent == depth));
 			assert_eq!(child.unwrap(), expected, "container {depth} parents up");
 		}
