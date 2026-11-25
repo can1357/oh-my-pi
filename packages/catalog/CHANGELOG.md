@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#10058](https://github.com/can1357/oh-my-pi/pull/10058) by [@Randyopo](https://github.com/Randyopo))
+
 ## [19.2.0] - 2026-11-25
 
 ### Added

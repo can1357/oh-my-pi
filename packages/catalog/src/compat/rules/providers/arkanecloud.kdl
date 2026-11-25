@@ -1,0 +1,8 @@
+// The personal or team key determines which models and prices are visible.
+provider "arkanecloud" {
+	default-model "deepseek-ai/DeepSeek-V4-Flash"
+	env "ARKANECLOUD_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="ArkaneCloud"
+}

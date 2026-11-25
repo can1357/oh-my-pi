@@ -19,6 +19,7 @@ export interface ModelCacheProviderIdOptions extends AccountScope {
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	arkanecloud: true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
@@ -90,6 +91,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
 		case "modal":
 			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
+		case "arkanecloud":
+			return "https://console.arkanecloud.com/api/v2";
 		case "otari":
 			return Bun.env.OTARI_BASE_URL?.trim() || OTARI_US_BASE_URL;
 		case "bifrost":
@@ -210,6 +213,7 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		// both so switching either re-runs discovery.
 		case "muse-code":
 		case "otari":
+		case "arkanecloud":
 		case "bifrost": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;

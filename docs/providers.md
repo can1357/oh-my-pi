@@ -157,6 +157,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | Provider ID                      | Environment variable(s)                                                             |
 | -------------------------------- | ----------------------------------------------------------------------------------- |
 | `abliteration`                   | `ABLITERATION_API_KEY`, then `ABLIT_KEY`                                            |
+| `arkanecloud`                    | `ARKANECLOUD_API_KEY`                                                               |
 | `aiand`                          | `AIAND_API_KEY`                                                                     |
 | `cerebras`                       | `CEREBRAS_API_KEY`                                                                  |
 | `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`                     |
