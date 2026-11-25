@@ -521,6 +521,7 @@
 - `ctrl+x` is silent outside autoresearch instead of toasting "No autoresearch results yet", and expands the dashboard as soon as the mode is on, before the first result
 - `/shake thinking` now clears saved interruption notes as well as reasoning blocks. Switching models or resuming an older session no longer replays those notes to models that reject quoted reasoning.
 - An ACP prompt that runs a `/skill:` command keeps its image blocks, so the skill's turn sees the images ([#20445](https://github.com/can1357/oh-my-pi/issues/20445))
+- Native builds on Linux no longer reference macOS-only process usage types.
 - SIGTERM or SIGHUP during an `omp acp` turn records `Previous OMP process exited before completing the turn.` That turn resumes with `omp --restore` ([#20446](https://github.com/can1357/oh-my-pi/pull/20446) by [@nick-maderight](https://github.com/nick-maderight)).
 - `/fork pane` inside Tern now opens the fork in a new Tern pane, and `/fork window`/`/fork tab` in a new Tern tab, instead of failing with "No terminal multiplexer was detected"
 - A language server that times out during startup now reports the resolved executable and stops the launcher and its process group instead of leaving them running ([#20436](https://github.com/can1357/oh-my-pi/issues/20436)).
