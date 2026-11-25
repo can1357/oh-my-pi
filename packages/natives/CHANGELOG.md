@@ -14,8 +14,6 @@
 ### Fixed
 
 - Fixed `worktree add` and clone giving clean tracked files the wrong executable bit when `core.filemode` is off; each file now keeps the mode its index entry records, as git does ([#17558](https://github.com/can1357/oh-my-pi/issues/17558), [#20393](https://github.com/can1357/oh-my-pi/pull/20393) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed a timed-out or cancelled shell command, or a terminated PTY run, leaving behind descendants in a process group or session of their own (a debugger's stopped inferior, a `setsid` daemon): the termination now snapshots the command's whole process family before the first signal (parent links plus every group and session a member leads), sends TERM to the members outside the command's own group, and KILLs the family after the grace, continuing stopped members.
-- Fixed timed-out or aborted `glob`, `grep`, `fuzzyFind` and `astGrep` calls continuing to walk the tree in the background when several ran at once, pinning CPUs and stalling every later filesystem call in the process.
 - The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
 
 ## [19.2.1] - 2026-11-25
