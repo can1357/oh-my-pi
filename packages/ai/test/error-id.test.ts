@@ -251,6 +251,15 @@ describe("error-id classification", () => {
 		expect(AIError.retriable(id)).toBe(false);
 	});
 
+	it("keeps a transient filter-service outage retryable", () => {
+		const id = AIError.classifyMessage(
+			message({ errorMessage: "500 content filtering service temporarily unavailable" }),
+		);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(false);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
 	it("classifies Codex cyber approval denials as account-scoped policy blocks", () => {
 		const assistant = message({
 			api: "openai-codex-responses",

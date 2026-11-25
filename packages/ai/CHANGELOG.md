@@ -119,6 +119,22 @@
 - Fixed Gemini models on OpenRouter losing reasoning during long tool-call loops.
 - Fixed prompt-cache misses for /btw and other side turns on OpenCode Go and Zen.
 - Fixed antigravity-cli losing conversation context during OAuth refreshes and when restoring saved turns after generation metadata compaction.
+- Error classification now recognizes Bedrock `content_filtered` message stops, Anthropic's "Output blocked by content filtering policy" and Gemini's "blocked by content filters" wording as non-retryable content blocks ([#17304](https://github.com/can1357/oh-my-pi/pull/17304) by [@nick-maderight](https://github.com/nick-maderight))
+- Fixed `generate_image` edits failing on OpenAI-compatible gateways with `400 Missing required parameter: 'images'`; OMP’s auth gateway now accepts the documented JSON edit format ([#20442](https://github.com/can1357/oh-my-pi/issues/20442)).
+- Anthropic OAuth logins explicitly rejected by their organization stay out of account rotation for seven days, across sessions and restarts ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
+- DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
+- Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
+- GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
+- An openai-completions stream that gets HTTP 500 back sends six requests, not twelve: the provider-error replay no longer re-runs a status the transport already retried ([#19729](https://github.com/can1357/oh-my-pi/issues/19729), [#20215](https://github.com/can1357/oh-my-pi/pull/20215) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed `omp usage` showing no data for Synthetic’s weekly-only plans; it now shows weekly credit usage and the next regeneration tick ([#20251](https://github.com/can1357/oh-my-pi/pull/20251) by [@dagurval](https://github.com/dagurval))
+- Fixed `antigravity-cli` quota exhaustion on agy 1.5.14+ being recorded as a normal reply instead of a rate limit, so exhausted accounts now rotate to healthy ones and honor the reported reset time ([#20247](https://github.com/can1357/oh-my-pi/issues/20247))
+- Gemini models on OpenRouter keep thinking throughout long tool loops instead of going silent after the first few steps; replayed reasoning now keeps the `id` and `format` OpenRouter needs to return Gemini's thought signatures
+- Fixed `/btw` and other side turns on OpenCode Go/Zen missing the prompt cache because `x-opencode-session` carried the side request's id instead of the parent conversation's ([#20261](https://github.com/can1357/oh-my-pi/issues/20261))
+- Fixed `antigravity-cli` requests failing with `Unknown model ID` when the signed-in account’s agy roster lacks the model: the rejection now blocks only that model on the account and rotates to a sibling login that offers it ([#20315](https://github.com/can1357/oh-my-pi/pull/20315) by [@qSHEMq](https://github.com/qSHEMq))
+- Fixed `antigravity-cli` losing conversation context when OAuth refreshes during a tool call or when restoring a saved turn after agy compacts generation metadata ([#20437](https://github.com/can1357/oh-my-pi/issues/20437)).
+- OpenAI API requests now send the `session-id` and `thread-id` headers codex-rs sends instead of `session_id`, which proxies that reject underscored header names dropped or refused
+- `omp auth-gateway` now reads the `session-id` and `thread-id` headers current Codex CLI versions send for prompt-cache affinity and forwards them upstream, instead of dropping them
+- `omp auth-gateway` keys prompt caching on Claude Code's session id (`x-claude-code-session-id` or the session in `metadata.user_id`) and OpenCode's `x-session-affinity`, instead of a key derived from the request body
 
 ## [19.1.1] - 2026-11-23
 
@@ -557,7 +573,6 @@
 - Corrected auth-gateway debug logs so they no longer claim a retry occurred when a usage-limit error was returned without retrying.
 - Fixed a cancelled request whose OAuth credential was mid-refresh killing the whole session with `[Unhandled Rejection] AbortError: OAuth refresh ownership aborted by caller` ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
 - Fixed requests that joined an OAuth refresh started by an already-cancelled request failing with that request's cancellation instead of getting the refreshed credential ([#17290](https://github.com/can1357/oh-my-pi/pull/17290) by [@H4vC](https://github.com/H4vC))
-- Error classification now recognizes Bedrock's `content_filtered` message stop ("Response filtered by Amazon Bedrock content filters"), Anthropic's "Output blocked by content filtering policy" and Gemini's "blocked by content filters" wording as content blocks (`Flag.ContentBlocked`, non-retryable), matching the OpenRouter `finish_reason: content_filter` spelling it already matched; Bedrock `guardrail_intervened` stops stay distinct.
 
 ## [18.13.3] - 2026-10-28
 

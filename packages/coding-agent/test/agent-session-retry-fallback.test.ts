@@ -5480,13 +5480,79 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
+	it("keeps the refusal text as the terminal error when the retry budget is already spent", async () => {
+		// `retry.maxRetries: 0` spends the budget on the first refusal. The
+		// refusal is still the terminal error the agent sees, without a
+		// "Retry budget exhausted" wrapper replacing the provider's text.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel({
+			provider: primaryModel.provider,
+			id: primaryModel.id,
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({
+					content: [],
+					stopReason: "error",
+					stopDetails: {
+						type: "refusal",
+						category: "cyber",
+						explanation: "Classifier declined this turn.",
+					},
+					errorMessage: "Refusal (cyber): Classifier declined this turn.",
+				});
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("Refused with no retry budget");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		const settled = session.getLastAssistantMessage();
+		expect(settled?.stopReason).toBe("error");
+		expect(settled?.errorMessage).toBe("Refusal (cyber): Classifier declined this turn.");
+	});
+
 	it("returns a refusal's credit fallback to the primary when the cooldown expires", async () => {
-		// A refusal that redeems its fallback credit lands on the credit target
-		// WITHOUT pinning: the refusal suppresses the primary for the default
-		// cooldown window, and `retry.fallbackRevertPolicy: cooldown-expiry`
-		// restores the primary once that window ends. Before the fix the refusal
-		// pinned the fallback forever, so an unattended session spent its whole
-		// remaining run (12 h, $711) on the fallback.
+	// A refusal that redeems its fallback credit switches to the credit target
+	// WITHOUT pinning. The refusal records the default cooldown window on this
+	// session alone. `retry.fallbackRevertPolicy: cooldown-expiry` restores the
+	// primary once that window ends. Before the fix the refusal pinned the
+	// fallback forever, and an unattended session spent its whole remaining run
+	// (12 h, $711) on the fallback.
 		const primaryModel = getBundledModel("anthropic", "claude-fable-5");
 		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-8");
 		if (!primaryModel || !fallbackModel) {
@@ -5672,25 +5738,26 @@ describe("AgentSession retry fallback", () => {
 			expect(answer.content).toEqual([{ type: "text", text: "Claude answer" }]);
 		});
 
-		it("resamples a mid-stream refusal that carried no reasoning once, then walks the fallback chain", async () => {
-			const { requests } = await promptThroughRefusals([reasoningRefusal(undefined), reasoningRefusal(undefined)]);
+		it("resamples a mid-stream refusal that carried no reasoning once, then hands it back", async () => {
+			const { requests, answer } = await promptThroughRefusals([reasoningRefusal(undefined), reasoningRefusal(undefined)]);
 
 			expect(requests).toEqual([
 				"anthropic/claude-sonnet-4-5 omit=false",
 				"anthropic/claude-sonnet-4-5 omit=false",
-				"openai/gpt-4o-mini omit=false",
 			]);
+			expect(answer.stopReason).toBe("error");
+			expect(answer.errorMessage).toBe("Refusal (reasoning_extraction)");
 		});
 
-		it("walks the fallback chain when the refusal outlives the strip", async () => {
+		it("hands the refusal back when it outlives the strip", async () => {
 			const { requests, answer } = await promptThroughRefusals([reasoningRefusal(2), reasoningRefusal(2)]);
 
 			expect(requests).toEqual([
 				"anthropic/claude-sonnet-4-5 omit=false",
 				"anthropic/claude-sonnet-4-5 omit=true",
-				"openai/gpt-4o-mini omit=false",
 			]);
-			expect(answer.content).toEqual([{ type: "text", text: "GPT answer" }]);
+			expect(answer.stopReason).toBe("error");
+			expect(answer.errorMessage).toBe("Refusal (reasoning_extraction)");
 		});
 	});
 
@@ -5723,7 +5790,7 @@ describe("AgentSession retry fallback", () => {
 			nonTargetFirst: true,
 		},
 	])(
-		"redeems Anthropic fallback credit across a same-provider refusal fallback with signed thinking unless the swap rebuilt the prompt (%o)",
+		"redeems Anthropic fallback credit across a same-provider refusal fallback with signed thinking, undoing a swap that rebuilt the prompt (%o)",
 		async ({ primaryId, fallbackId, swapRebuildsPrompt, nonTargetFirst }) => {
 			const primaryModel = getBundledModel("anthropic", primaryId);
 			const fallbackModel = getBundledModel("anthropic", fallbackId);
@@ -5847,17 +5914,27 @@ describe("AgentSession retry fallback", () => {
 			await session.prompt("Recover from classifier refusal with signed thinking");
 			await session.waitForIdle();
 
-			expect(requestedModels).toEqual([
-				`${primaryModel.provider}/${primaryModel.id}`,
-				`${primaryModel.provider}/${primaryModel.id}`,
-				`${fallbackModel.provider}/${fallbackModel.id}`,
-			]);
-			expect(fallbackAppliedEvents).toHaveLength(1);
-			expect(fallbackAppliedEvents[0].to).toBe(`${fallbackModel.provider}/${fallbackModel.id}`);
-			expect(session.model?.id).toBe(fallbackModel.id);
 			if (swapRebuildsPrompt) {
+				// The swap rebuilt the request surface. The credit cannot be armed, so
+				// the switch is undone and the refusal is handed back on the primary.
+				// The fallback never receives the refused content at full price.
+				expect(requestedModels).toEqual([
+					`${primaryModel.provider}/${primaryModel.id}`,
+					`${primaryModel.provider}/${primaryModel.id}`,
+				]);
+				expect(fallbackAppliedEvents).toHaveLength(1);
+				expect(fallbackAppliedEvents[0].to).toBe(`${fallbackModel.provider}/${fallbackModel.id}`);
+				expect(session.model?.id).toBe(primaryModel.id);
 				expect(fallbackTurnRedemption).toBeUndefined();
 			} else {
+				expect(requestedModels).toEqual([
+					`${primaryModel.provider}/${primaryModel.id}`,
+					`${primaryModel.provider}/${primaryModel.id}`,
+					`${fallbackModel.provider}/${fallbackModel.id}`,
+				]);
+				expect(fallbackAppliedEvents).toHaveLength(1);
+				expect(fallbackAppliedEvents[0].to).toBe(`${fallbackModel.provider}/${fallbackModel.id}`);
+				expect(session.model?.id).toBe(fallbackModel.id);
 				expect(fallbackTurnRedemption?.token).toBe("fct_signed_test");
 			}
 			expect(session.consumeActiveFallbackCreditRedemption(fallbackModel)).toBeUndefined();
