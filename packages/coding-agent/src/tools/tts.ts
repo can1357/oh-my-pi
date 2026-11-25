@@ -1,6 +1,7 @@
 // Ported from NousResearch/hermes-agent (MIT) — tools/tts_tool.py L167-171, L896-959.
 // Speech backends are catalog models selected through the speech role chain.
 
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -15,9 +16,11 @@ import { roleCandidatePool } from "../config/model-roles";
 import { settings, type Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import ttsDescription from "../prompts/tools/tts.md" with { type: "text" };
+import { type ContainedFileAccessOwner, mutateFile, withContainedFileAccess } from "../sandbox/file-access";
 import { DEFAULT_TTS_VOICE, TTS_LOCAL_VOICES } from "../tts/models";
 import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
+import { approvalTargetKey } from "./approval-targets";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 
 import { cfgTtsLocalSpeed, cfgTtsLocalVoice } from "../tts/settings";
@@ -128,7 +131,7 @@ async function synthesizeCloud(
 	);
 	// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
 	assertNotHeldOpen(outputPath);
-	await Bun.write(outputPath, result.audio);
+	await mutateFile({ kind: "write", path: outputPath, data: result.audio });
 	const voiceId = params.voice_id ?? (model.api === "xai-tts" ? DEFAULT_XAI_VOICE_ID : "default");
 	const backend: Exclude<TtsBackend, "local-inference"> = model.api === "xai-tts" ? "xai-tts" : "openai-speech";
 	return {
@@ -168,7 +171,7 @@ async function synthesizeLocal(
 	const { wavPath, substituted } = resolveLocalWavPath(outputPath);
 	const wav = encodeWav(audio.pcm, audio.sampleRate);
 	assertNotHeldOpen(wavPath);
-	await Bun.write(wavPath, wav);
+	await mutateFile({ kind: "write", path: wavPath, data: wav });
 	const displayPath = formatPathRelativeToCwd(wavPath, cwd);
 	const note = substituted
 		? ` No local MP3 encoder is bundled, so WAV (PCM16) was written instead of the requested container.`
@@ -246,3 +249,26 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 		};
 	},
 };
+
+/**
+ * The `tts` tool for `owner`'s workspace. Like `write`, it names its `output_path` for approval and
+ * the OS sandbox's path check, and writes the audio in the contained host when the sandbox is active.
+ */
+export function createTtsTool(owner: ContainedFileAccessOwner): CustomTool<typeof ttsSchema, TtsToolDetails> {
+	return {
+		...ttsTool,
+		approvalCacheTargets: args => {
+			const rawPath = args && typeof args === "object" && "output_path" in args ? args.output_path : undefined;
+			if (typeof rawPath !== "string" || rawPath.length === 0) return undefined;
+			const key = approvalTargetKey(owner.cwd, rawPath);
+			if (key === undefined) return undefined;
+			// Internal URLs are omp's own storage, not filesystem paths.
+			if (!path.isAbsolute(key)) return [key];
+			// Local synthesis saves WAV, beside `output_path` when it names another container or a directory.
+			const { wavPath } = resolveLocalWavPath(resolveToCwd(rawPath, owner.cwd));
+			const wavKey = approvalTargetKey(owner.cwd, wavPath);
+			return wavKey === undefined || wavKey === key ? [key] : [key, wavKey];
+		},
+		execute: (...args) => withContainedFileAccess(owner, () => ttsTool.execute(...args)),
+	};
+}

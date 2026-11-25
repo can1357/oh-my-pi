@@ -14,6 +14,8 @@ import {
 	Shell,
 	type ShellCommands,
 	type ShellFilesystem,
+	type ShellOptions,
+	type ShellRunOptions,
 	type ShellRunResult,
 	type ShellSpeech,
 } from "@oh-my-pi/pi-natives";
@@ -30,6 +32,12 @@ import {
 	resolveOutputSinkArtifactMaxBytes,
 	resolveOutputSinkHeadBytes,
 } from "../tools/output-meta";
+import { containedProcessEnv, sandboxProcessEnv } from "../sandbox/env";
+import type { HostRunEgress } from "../sandbox/host-protocol";
+import { sandboxEnabled } from "../sandbox/policy";
+import { EVAL_EGRESS_SCOPE, SandboxRuntime } from "../sandbox/runtime";
+import { releaseSandboxHosts, sandboxShellFactory } from "../sandbox/shell-client";
+import type { SandboxResultMeta, SandboxScope } from "../sandbox/types";
 import { quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { StreamNewlineNormalizer } from "../utils/stream-newlines";
@@ -101,6 +109,16 @@ export interface BashExecutorOptions {
 	speech?: ShellSpeech;
 	/** Session tool commands the embedded shell resolves during this run. Other shells never see them. */
 	commands?: ShellCommands;
+	/**
+	 * The agent session's workspace (project directory, or an isolated subagent's worktree). When
+	 * the sandbox applies to `bash` there, embedded-shell runs execute inside it; the user-shell
+	 * paths (`useUserShell`) never do.
+	 */
+	sandboxWorkspace?: string;
+	/** Host directories a sandboxed run may also write (the session's `local://` root). */
+	sandboxExtraWrite?: readonly string[];
+	/** Which sandbox scope this run belongs to (`eval` for an eval cell's `sh()`); default `bash`. */
+	sandboxScope?: SandboxScope;
 	/**
 	 * Receives a copy of every byte crossing the command's pipes in the
 	 * embedded shell (`proc://<id>/streams`). The user-shell paths ignore it.
@@ -180,6 +198,8 @@ export interface BashResult extends OutputSummary {
 	 * that command.
 	 */
 	fork?: ShellForkOutcome;
+	/** Set when the command ran inside the OS sandbox. */
+	sandbox?: SandboxResultMeta;
 }
 
 /** How a command that ran in a fork of the busy persistent shell ({@link BashResult.fork}) left the session. */
@@ -205,6 +225,42 @@ const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 /** Cadence of the `onTrace` poll while an embedded run is in flight. */
 const TRACE_POLL_MS = 80;
 
+/** What `pollRunTrace` reads: the native `RunTrace`, or the mirror of one in a sandbox host. */
+interface TraceSource {
+	version(): number;
+	snapshot(): string;
+}
+
+/** The `Shell` surface `executeBash` drives: the native shell, or its proxy in a sandbox host. */
+interface ExecutionShell {
+	run(
+		/** `egress`: the run's proxy credentials, which only a sandboxed shell takes. */
+		options: Omit<ShellRunOptions, "trace"> & { trace?: TraceSource; egress?: HostRunEgress },
+		onChunk: (error: Error | null, chunk: string) => void,
+	): Promise<ShellRunResult>;
+	abort(): Promise<void>;
+	pids(): number[];
+	fork(): ExecutionShell;
+	/** Carries what `fork` (a settled `fork()` of this shell) set into this shell's session. */
+	adopt(fork: ExecutionShell): boolean | Promise<boolean>;
+	liveBackgroundJobCount(): Promise<number>;
+	/** Externals the session holds; the sandboxed proxy asks its host. */
+	heldProcesses(): HeldProcess[] | Promise<HeldProcess[]>;
+	/** Set by sandboxed shells whose host is gone; such a cached session is dropped. */
+	readonly closed?: boolean;
+}
+
+/** Where one `executeBash` call gets its shells and traces; each trace pairs with its own kind of shell. */
+interface ShellFactory {
+	create(options: Omit<ShellOptions, "filesystem">): ExecutionShell;
+	trace(command: string): TraceSource;
+}
+
+const NATIVE_SHELLS: ShellFactory = {
+	create: options => new Shell(options),
+	trace: command => new RunTrace(command),
+};
+
 /**
  * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
  * forwards each changed snapshot, bound to the run so a card presents the
@@ -214,7 +270,10 @@ const TRACE_POLL_MS = 80;
  * where a throw would escape as an uncaught exception and end the session,
  * and the trace is only a visualization of the run.
  */
-function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
+function pollRunTrace(
+	trace: TraceSource,
+	onTrace: (trace: ShellTrace) => void,
+): { stop: () => ShellTrace | undefined } {
 	let last = -1;
 	let latest: ShellTrace | undefined;
 	let warned = false;
@@ -229,7 +288,8 @@ function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { 
 			return;
 		}
 		latest = snapshot;
-		attachShellTrace(latest, trace);
+		// A sandboxed run's trace is a mirror; the renderer restores its visualization from the snapshot.
+		if (trace instanceof RunTrace) attachShellTrace(latest, trace);
 		onTrace(latest);
 	};
 	const timer = setInterval(poll, TRACE_POLL_MS);
@@ -309,7 +369,7 @@ export async function applyDirenvPreflight(
 	return { command: `${unsetPrefix}${withPrefix(command)}`, env: mergedEnv };
 }
 
-const shellSessions = new Map<string, Shell>();
+const shellSessions = new Map<string, ExecutionShell>();
 /** Session keys with a command currently in flight on the persistent Shell. */
 const shellSessionsInUse = new Set<string>();
 
@@ -323,7 +383,7 @@ const shellSessionsInUse = new Set<string>();
  * kill-on-drop, so they still die when the harness tears the Shell down on exit.
  * Each maps to the session key it ran under, for {@link heldShellProcesses}.
  */
-const retainedShells = new Map<Shell, string>();
+const retainedShells = new Map<ExecutionShell, string>();
 const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
@@ -375,7 +435,7 @@ export async function drainAbortedShells(agentSessionKey: string | undefined): P
 }
 
 /** Keeps `shell` alive while it has live background jobs; whether it had any. */
-async function retainShellWithLiveBackgroundJobs(shell: Shell, sessionKey: string): Promise<boolean> {
+async function retainShellWithLiveBackgroundJobs(shell: ExecutionShell, sessionKey: string): Promise<boolean> {
 	let live: number;
 	try {
 		live = await shell.liveBackgroundJobCount();
@@ -415,7 +475,7 @@ function cancelledRunSettleDeadline(): Promise<void> {
 /** A persistent Shell whose command ended, and the command's options. */
 interface ShellRelease {
 	sessionKey: string;
-	shell: Shell;
+	shell: ExecutionShell;
 	options: BashExecutorOptions | undefined;
 }
 
@@ -481,11 +541,12 @@ const SHELL_SESSION_LABEL = /^[A-Za-z][A-Za-z0-9_-]*$/;
  * Whether a shell cache key belongs to `agentSessionKey`, matching the session
  * key the shell was cached under: the id itself (the bash tool's own shells) or
  * one namespace of it, `<label>:<id>` (a `/loop` condition uses
- * `loop-condition:<id>`). A per-job `<id>:async:<jobId>` key names no session,
- * and a label must read like one, so a key whose prefix is
- * a path (`/work/repo:main`) is another session's, not a namespace.
- * The id itself is matched before any colon is read, so a session whose own id
- * contains one (a cwd-derived `/work/repo:main`) still releases its shells.
+ * `loop-condition:<id>`, eval `sh()` uses `eval:<id>`). A per-job
+ * `<id>:async:<jobId>` key names no session, and a label must read like one, so
+ * a key whose prefix is a path (`/work/repo:main`) is another session's, not a
+ * namespace. The id itself is matched before any colon is read, so a session
+ * whose own id contains one (a cwd-derived `/work/repo:main`) still releases
+ * its shells.
  */
 function isShellSessionOwnedBy(key: string, agentSessionKey: string): boolean {
 	const sessionField = key.split("\n", 1)[0];
@@ -503,13 +564,22 @@ function isShellSessionOwnedBy(key: string, agentSessionKey: string): boolean {
  * shell for the life of the process. A Shell with live background jobs is
  * retained until they exit, matching the `:async:` teardown; an in-flight run
  * keeps its own reference and retains live background jobs when it settles.
+ * The sandbox hosts of the session and of each owned namespace are retired:
+ * each exits once its in-flight runs settle, taking its shells' background
+ * jobs with it.
  */
 export function releaseShellSessions(agentSessionKey: string | undefined): void {
 	if (!agentSessionKey) return;
+	// `files:` is the host that performs the session's contained file-tool mutations.
+	const owners = new Set([agentSessionKey, `eval:${agentSessionKey}`, `files:${agentSessionKey}`]);
 	for (const [key, shell] of shellSessions) {
 		if (!isShellSessionOwnedBy(key, agentSessionKey)) continue;
+		owners.add(key.split("\n", 1)[0]);
 		shellSessions.delete(key);
 		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell, key);
+	}
+	for (const owner of owners) {
+		releaseSandboxHosts(owner);
 	}
 }
 
@@ -520,14 +590,14 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
  * Covers what the `OMP_BASH_SESSION` environment scan cannot see (macOS hides platform
  * binaries' env), and tells the shell's `nohup` (which does not mask SIGHUP) apart.
  */
-export function heldShellProcesses(agentSessionKey: string | undefined): HeldProcess[] {
+export async function heldShellProcesses(agentSessionKey: string | undefined): Promise<HeldProcess[]> {
 	if (!agentSessionKey) return [];
 	const asyncPrefix = `${agentSessionKey}:async:`;
 	const owned = (key: string) => isShellSessionOwnedBy(key, agentSessionKey) || key.startsWith(asyncPrefix);
-	const held: HeldProcess[] = [];
-	for (const [key, shell] of shellSessions) if (owned(key)) held.push(...shell.heldProcesses());
-	for (const [shell, key] of retainedShells) if (owned(key)) held.push(...shell.heldProcesses());
-	return held;
+	const shells: ExecutionShell[] = [];
+	for (const [key, shell] of shellSessions) if (owned(key)) shells.push(shell);
+	for (const [shell, key] of retainedShells) if (owned(key)) shells.push(shell);
+	return (await Promise.all(shells.map(shell => shell.heldProcesses()))).flat();
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {
@@ -765,11 +835,35 @@ async function executeUserShellPty(run: {
 	};
 }
 
+/**
+ * Settings the shell configuration of an `executeBash` call comes from. While the sandbox is enabled,
+ * a call that runs on the host (the user's `!` commands, an unsandboxed scope, …) takes it from the
+ * operator layers only: a contained command can write the project's `.omp/config.yml`, and a
+ * project-layer `shellPath` would otherwise run in this trusted process. Contained calls keep the
+ * effective configuration (the shell runs in the container; see the snapshot rule below).
+ */
+function hostShellSettings(settings: Settings, contained: boolean): Settings {
+	if (contained || !sandboxEnabled(settings)) return settings;
+	return settings.grantAuthority();
+}
+
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
-	const baseShellConfig = settings.getShellConfig();
+	// The user's own `!` commands are not agent actions and stay unsandboxed.
+	const workspace = options?.useUserShell === true ? undefined : options?.sandboxWorkspace;
+	// Throws `SandboxUnavailableError` when the sandbox is required but no backend can provide it.
+	const sandbox =
+		workspace === undefined ? undefined : await SandboxRuntime.forScope(workspace, options?.sandboxScope ?? "bash");
+	// Sandbox switched off (or unavailable): the caller's contained hosts in this workspace (its
+	// session's, or the anonymous pool's without one) are no longer used. The pool keys hosts by the
+	// runtime's pinned workspace, which `pinnedWorkspace` resolves without creating a runtime.
+	if (!sandbox && workspace !== undefined) {
+		releaseSandboxHosts(options?.sessionKey?.split(":async:")[0], SandboxRuntime.pinnedWorkspace(workspace));
+	}
+	const shellSettings = hostShellSettings(settings, sandbox !== undefined);
+	const baseShellConfig = shellSettings.getShellConfig();
 	const shellConfig =
-		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
+		options?.useUserShell === true ? resolveUserShellConfig(shellSettings, baseShellConfig) : baseShellConfig;
 	const { shell, args, env: shellEnv, prefix } = shellConfig;
 	const bashShell = isBashShell(shell);
 	// `!` hotkey commands on zsh/fish run in a real PTY: interactive shell
@@ -798,14 +892,21 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// the configured shell `prefix` after any `unset -v` it prepends. A URL cwd
 	// has no `.envrc` on the host. The rc snapshot is independent, so both load
 	// concurrently.
+	// Building the snapshot runs the configured shell here, in the trusted process. A contained call
+	// must never run a shell the project layer chose (a contained command can write `.omp/config.yml`,
+	// and a cloned repo can ship one): such a call gets no host-side snapshot.
+	const hostSnapshot =
+		bashShell && (!sandbox || cfgShellPath.get(settings) === cfgShellPath.get(settings.grantAuthority()));
 	const [snapshotPath, preflight] = await Promise.all([
-		bashShell ? getOrCreateSnapshot(shell, shellEnv) : null,
+		hostSnapshot ? getOrCreateSnapshot(shell, shellEnv) : null,
 		applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
 			callerEnv: options?.env,
 			signal: options?.signal,
 			timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
 			callerTimeoutMs: options?.timeout,
-			direnvSetting: virtualCwd ? "off" : cfgBashDirenv.get(settings),
+			// A contained command never gets the host-side direnv load: `.envrc` and what it sources are
+			// files the contained agent can write, and the load runs in this trusted process.
+			direnvSetting: virtualCwd || sandbox ? "off" : cfgBashDirenv.get(settings),
 			commandPrefix: prefix,
 		}),
 	]);
@@ -895,15 +996,40 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// The embedded shell reads its builtin switches from the session env; a
 	// different env also keys a separate persistent session.
+	const baseSessionEnv = sandbox ? containedProcessEnv(sandbox, shellEnv) : shellEnv;
 	const sessionEnv = options?.gitGuard
-		? { ...shellEnv, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: options.ovnfs ?? "" }
-		: shellEnv;
+		? { ...baseSessionEnv, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: options.ovnfs ?? "" }
+		: baseSessionEnv;
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,
 		minimizer,
 	};
-	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options?.sessionKey, minimizer);
+	// Under the sandbox, shells live in the session's contained host; the policy fingerprint keys a
+	// separate persistent session, so a policy change starts fresh shells in a host under it.
+	const shells: ShellFactory = sandbox
+		? sandboxShellFactory(sandbox, {
+				agentSessionKey: options?.sessionKey?.split(":async:")[0],
+				cwd: workspace!,
+				extraRead: snapshotPath ? [snapshotPath] : undefined,
+				extraWrite: options?.sandboxExtraWrite,
+				// An eval cell's `sh()` host gets its own proxy port: the eval call watching it owns its refusals.
+				egressScope: options?.sandboxScope === "eval" ? EVAL_EGRESS_SCOPE : undefined,
+			})
+		: NATIVE_SHELLS;
+	const sessionKey = buildSessionKey(
+		shell,
+		prefix,
+		snapshotPath,
+		sessionEnv,
+		options?.sessionKey,
+		minimizer,
+		sandbox?.fingerprint(),
+	);
+	// A sandboxed session whose host was retired or died cannot run again.
+	if (shellSessions.get(sessionKey)?.closed) {
+		shellSessions.delete(sessionKey);
+	}
 
 	// A persistent Shell runs one command at a time (the native session is a
 	// mutex-guarded queue and `abort()` kills every in-flight run on it). When
@@ -919,13 +1045,21 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			options?.seedSessionKey === undefined
 				? undefined
 				: shellSessions.get(
-						buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options.seedSessionKey, minimizer),
+						buildSessionKey(
+							shell,
+							prefix,
+							snapshotPath,
+							sessionEnv,
+							options.seedSessionKey,
+							minimizer,
+							sandbox?.fingerprint(),
+						),
 					);
-		shellSession = seed?.fork() ?? new Shell(shellOptions);
+		shellSession = seed?.fork() ?? shells.create(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
 	}
 	const busyShell = sessionBusy ? shellSessions.get(sessionKey) : undefined;
-	const executionShell = shellSession ?? busyShell?.fork() ?? new Shell(shellOptions);
+	const executionShell = shellSession ?? busyShell?.fork() ?? shells.create(shellOptions);
 	if (shellSession) {
 		shellSessionsInUse.add(sessionKey);
 	}
@@ -933,7 +1067,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// the fork alive while background jobs it started run (dropping it kills them).
 	const settleFork = async (): Promise<{ fork?: ShellForkOutcome }> => {
 		if (!sessionBusy) return {};
-		const carried = busyShell?.adopt(executionShell) ?? false;
+		const carried = (await busyShell?.adopt(executionShell)) ?? false;
 		const jobs = await retainShellWithLiveBackgroundJobs(executionShell, sessionKey);
 		return { fork: { carried, jobs } };
 	};
@@ -994,7 +1128,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	let resetSession = false;
 	// Set when the command returns before its native run settled.
 	let unsettled: { run: Promise<ShellRunResult>; cleanup: Promise<void> } | undefined;
-	const runTrace = options?.onTrace ? new RunTrace(finalCommand) : undefined;
+	const runTrace = options?.onTrace ? shells.trace(finalCommand) : undefined;
+	// The result lists the egress refusals from here on, and those of this run's own requests.
+	const blockedSince = Date.now();
+	const egressCall = sandbox?.beginEgressCall();
 	const tracePoll = runTrace && options?.onTrace ? pollRunTrace(runTrace, options.onTrace) : undefined;
 	// The last snapshot once the run settled (any outcome); `stop()` is idempotent past the first call.
 	let finalTrace: ShellTrace | undefined;
@@ -1010,7 +1147,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			{
 				command: finalCommand,
 				cwd: commandCwd,
-				env: commandEnv,
+				// A contained run's overlay gets the same container env rules as its session (temp dir, proxy).
+				env: sandbox ? sandboxProcessEnv(sandbox, commandEnv) : commandEnv,
 				timeoutMs: nativeTimeoutMs,
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
@@ -1018,6 +1156,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				commands: options?.commands,
 				streams: options?.streams,
 				trace: runTrace,
+				// The proxy credentials that mark the run's requests as its own (a sandboxed shell only).
+				...(egressCall ? { egress: { user: egressCall.user, password: egressCall.token } } : {}),
 			},
 			(err, chunk) => {
 				if (!err) {
@@ -1062,6 +1202,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
 				...settleTrace(),
+				sandbox: sandbox?.resultMeta({ blockedSince, call: egressCall }),
 				...(await dump(notice)),
 			};
 		}
@@ -1081,6 +1222,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				timedOut: true,
 				...settleTrace(),
 				...(await settleFork()),
+				sandbox: sandbox?.resultMeta({ blockedSince, call: egressCall }),
 				...(await dump(annotation)),
 			};
 		}
@@ -1092,6 +1234,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				cancelled: true,
 				...settleTrace(),
 				...(await settleFork()),
+				sandbox: sandbox?.resultMeta({ blockedSince, call: egressCall }),
 				...(await dump("Command cancelled")),
 			};
 		}
@@ -1131,22 +1274,33 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 
 		// Normal completion
+		const exitCode = winner.result.exitCode;
+		const trace = settleTrace();
+		const summary = await dump();
 		return {
-			exitCode: winner.result.exitCode,
+			exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
 			...(winner.result.movedCwd ? { movedCwd: true } : {}),
 			...(winner.result.errexit ? { errexit: true } : {}),
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
-			...settleTrace(),
+			...trace,
 			...(await settleFork()),
-			...(await dump()),
+			// `output` only for a non-zero exit (denial heuristic).
+			sandbox: sandbox?.resultMeta({
+				blockedSince,
+				call: egressCall,
+				output: exitCode !== 0 ? summary.output : undefined,
+				exitCode,
+			}),
+			...summary,
 		};
 	} catch (err) {
 		resetSession = true;
 		throw err;
 	} finally {
 		settleTrace();
+		egressCall?.end();
 		await sink.dispose();
 		if (timeoutTimer) {
 			clearTimeout(timeoutTimer);
@@ -1172,12 +1326,13 @@ function buildSessionKey(
 	env: Record<string, string>,
 	agentSessionKey?: string,
 	minimizer?: MinimizerOptions,
+	sandboxFingerprint?: string,
 ): string {
 	const entries = Object.entries(env);
 	entries.sort(([a], [b]) => a.localeCompare(b));
 	const envSerialized = entries.map(([key, value]) => `${key}=${value}`).join("\n");
 	const minimizerSerialized = minimizer ? JSON.stringify(minimizer) : "";
-	return [agentSessionKey ?? "", shell, prefix ?? "", snapshotPath ?? "", envSerialized, minimizerSerialized].join(
-		"\n",
-	);
+	const parts = [agentSessionKey ?? "", shell, prefix ?? "", snapshotPath ?? "", envSerialized, minimizerSerialized];
+	if (sandboxFingerprint !== undefined) parts.push(`sandbox:${sandboxFingerprint}`);
+	return parts.join("\n");
 }

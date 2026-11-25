@@ -11,12 +11,15 @@ import { sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import type { JSXNode, UiEvent } from "@oh-my-pi/pi-tui";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
+import type { SandboxResultMeta } from "../../sandbox/types";
 import type { OutputMeta } from "../../tools/output-meta-format";
+import { isSandboxNoticeLine } from "../../tools/details/sandbox";
 import { stripOutputNotice, stripTrailingNotice } from "../../tools/output-meta-format";
 import { resultText } from "./default";
 import type { ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { registerToolPresenter } from "./registry";
 import { type ToolCommandDispatch, ToolCommandNode, type ToolCommandResolver } from "./tool-command";
+import { sandboxBadge, sandboxNoteNodes } from "./sandbox-meta";
 import {
 	displayWorkdir,
 	formatMinimized,
@@ -53,6 +56,8 @@ export interface BashDetails {
 		readonly pid?: number;
 	};
 	readonly async?: { readonly state: "running" | "completed" | "failed" | "cancelled"; readonly jobId: string };
+	/** OS sandbox the command ran in; absent when it ran uncontained. */
+	readonly sandbox?: SandboxResultMeta;
 }
 
 /** The transcript's shell viewport context (`state.renderContext`). */
@@ -235,7 +240,12 @@ function callIntent(args: unknown): string | undefined {
 	return typeof value === "string" ? toolIntentLabel(value).replace(/\s+/g, " ").trim() || undefined : undefined;
 }
 
-/** Output with the LLM-facing notices (background, exit, wall time, artifact, truncation) removed. */
+/** Whether the command ran to a non-zero exit (the details carry an exit code only then), as the tool decides it. */
+function shellFailed(details: BashDetails | undefined): boolean {
+	return details?.exitCode !== undefined && details.exitCode !== 0;
+}
+
+/** Output with the LLM-facing notices (background, exit, sandbox, wall time, artifact, truncation) removed. */
 function stripNotices(raw: string, details: BashDetails | undefined): { text: string; artifactId?: string } {
 	const job = details?.async;
 	let text =
@@ -248,6 +258,9 @@ function stripNotices(raw: string, details: BashDetails | undefined): { text: st
 	text = stripOutputNotice(text, details?.meta);
 	if (details?.exitCode !== undefined)
 		text = stripTrailingNotice(text, `Command exited with code ${details.exitCode}`);
+	// The sandbox notice follows the wall time and precedes the exit line; it hides the raw-output footer until stripped.
+	// Without sandbox meta a trailing `[OS sandbox: …]` line is the command's own output.
+	if (details?.sandbox) text = stripTrailingNotice(text, isSandboxNoticeLine);
 	if (details?.wallTimeMs !== undefined && details.wallTimeNoticeEmitted !== false)
 		text = stripTrailingNotice(text, `Wall time: ${(details.wallTimeMs / 1000).toFixed(2)} seconds`);
 	return stripRawOutputNotice(text);
@@ -375,6 +388,7 @@ function shellHead(
 		command,
 		...(exit !== undefined ? { exit } : {}),
 		...(settled && details?.timedOut === true ? { note: "timed out" } : {}),
+		...(details?.sandbox ? { badges: [sandboxBadge(details.sandbox)] } : {}),
 	};
 }
 
@@ -510,7 +524,7 @@ export function shellPresenter<TArgs>(config: ShellConfig<TArgs>): ToolPresenter
 					/>
 				);
 			});
-			const body: JSXNode = (
+			const body: JSXNode = [
 				<RunBox nodeKey="run" tone={RUN_BOX_TONE[runStateValue]}>
 					{presentation ? (
 						<ShellInput
@@ -533,8 +547,9 @@ export function shellPresenter<TArgs>(config: ShellConfig<TArgs>): ToolPresenter
 						facts={footFacts(details, stripped.artifactId)}
 						meta={meta ? { ...meta, truncation: showingFull ? undefined : meta.truncation } : undefined}
 					/>
-				</RunBox>
-			);
+				</RunBox>,
+				...sandboxNoteNodes(details?.sandbox, shellFailed(details)),
+			];
 			const timedOut = details?.timedOut === true;
 			const warning = outputNotices(
 				meta ? { ...meta, truncation: showingFull ? undefined : meta.truncation } : undefined,

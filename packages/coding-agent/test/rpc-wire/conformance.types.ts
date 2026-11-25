@@ -52,6 +52,13 @@ import type {
 	RpcPromptResultFrame,
 	RpcReadyFrame,
 	RpcResponse,
+	RpcSandboxAccessRequestCancelledFrame,
+	RpcSandboxAccessRequestFrame,
+	RpcSandboxHostRequestCancelledFrame,
+	RpcSandboxHostRequestFrame,
+	RpcSandboxState,
+	RpcSandboxStatus,
+	RpcSandboxUpdateFrame,
 	RpcSessionSettledFrame,
 	RpcSessionState,
 	RpcSubagentEventFrame,
@@ -239,6 +246,14 @@ export type Frames = Assert<
 		uiAnswers: Inbound<Wire.AnswersUiResponse, Extract<RpcExtensionUIResponse, { answers: unknown }>>;
 		uiData: Inbound<Wire.DataUiResponse, Extract<RpcExtensionUIResponse, { data: unknown }>>;
 		responseFailure: Outbound<Extract<RpcResponse, { success: false }>, Wire.RpcResponse>;
+		sandboxUpdate: Outbound<RpcSandboxUpdateFrame, Wire.SandboxUpdateEvent>;
+		sandboxHostRequest: Outbound<RpcSandboxHostRequestFrame, Wire.SandboxHostRequestEvent>;
+		sandboxHostRequestCancelled: Outbound<RpcSandboxHostRequestCancelledFrame, Wire.SandboxHostRequestCancelledEvent>;
+		sandboxAccessRequest: Outbound<RpcSandboxAccessRequestFrame, Wire.SandboxAccessRequestEvent>;
+		sandboxAccessRequestCancelled: Outbound<
+			RpcSandboxAccessRequestCancelledFrame,
+			Wire.SandboxAccessRequestCancelledEvent
+		>;
 	}>
 >;
 /** Every inbound frame type the server reads is a wire inbound frame. */
@@ -291,6 +306,24 @@ export type State = Assert<
 		thinkingConfig: OutboundSubset<NonNullable<Model["thinking"]>, Wire.ThinkingConfig>;
 		usage: Outbound<Usage, Wire.Usage>;
 		image: Outbound<ImageContent, Wire.ImageContent>;
+		bashSandboxMeta: Outbound<NonNullable<BashResult["sandbox"]>, Wire.SandboxResultMeta>;
+		sandboxSummary: Outbound<RpcSessionState["sandbox"], Wire.SandboxSummary>;
+		sandboxState: Outbound<RpcSandboxState, Wire.SandboxState>;
+		sandboxSettings: Outbound<RpcSandboxState["settings"], Wire.SandboxSettingValues>;
+		sandboxLocked: Outbound<RpcSandboxState["locked"], Wire.SandboxLocked>;
+		sandboxNetworkUnavailable: Outbound<RpcSandboxState["networkUnavailable"], Wire.SandboxNetworkUnavailable>;
+		sandboxListNotes: Outbound<RpcSandboxState["listNotes"], Wire.SandboxListNotes>;
+		sandboxIgnored: Outbound<RpcSandboxState["ignored"][number], Wire.SandboxIgnoredValue>;
+		sandboxEffective: Outbound<RpcSandboxState["effective"], Wire.SandboxEffectivePolicy>;
+		sandboxSessionPaths: Outbound<RpcSandboxState["sessionPaths"], Wire.SandboxSessionPaths>;
+		sandboxCreatedPath: Outbound<RpcSandboxState["created"][number], Wire.SandboxCreatedPath>;
+		sandboxStatusOff: Outbound<Extract<RpcSandboxStatus, { state: "off" }>, Wire.SandboxStatusOff>;
+		sandboxStatusActive: Outbound<Extract<RpcSandboxStatus, { state: "active" }>, Wire.SandboxStatusActive>;
+		sandboxStatusUnavailable: Outbound<
+			Extract<RpcSandboxStatus, { state: "unavailable" }>,
+			Wire.SandboxStatusUnavailable
+		>;
+		sandboxStatusStates: Same<RpcSandboxStatus["state"], Wire.SandboxStatus["state"]>;
 	}>
 >;
 

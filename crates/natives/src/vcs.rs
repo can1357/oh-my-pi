@@ -1,12 +1,13 @@
 //! N-API bindings for in-process Git and Jujutsu operations.
 
 use std::{
+	collections::HashMap,
 	path::{Path, PathBuf},
 	sync::Arc,
 	time::Duration,
 };
 
-use napi::{Env, Result, bindgen_prelude::*};
+use napi::{Env, Result, Status, bindgen_prelude::*, threadsafe_function::ThreadsafeFunction};
 use napi_derive::napi;
 use omp_vcs::types as core;
 use tokio_util::sync::CancellationToken;
@@ -216,7 +217,7 @@ pub struct VcsStatusOptions {
 	pub nul_terminated: Option<bool>,
 }
 /// Commit creation options.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Default)]
 pub struct VcsCommitOptions {
 	pub author:        Option<VcsCommitAuthor>,
@@ -229,6 +230,74 @@ pub struct VcsCommitOptions {
 	pub expected_head: Option<String>,
 	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
 	pub no_verify:     Option<bool>,
+	/// Run each commit hook through this callback instead of spawning it: it
+	/// starts `argv` in `cwd` with `env` over its own environment and stdin
+	/// closed, and resolves with the exit code and the interleaved output. A
+	/// rejection fails the hook as one that could not start.
+	#[napi(ts_type = "(run: VcsHookRun) => Promise<VcsHookExit>")]
+	pub hook_runner:   Option<VcsHookRunner>,
+}
+/// One commit hook handed to `VcsCommitOptions.hookRunner`.
+#[napi(object, object_from_js = false)]
+pub struct VcsHookRun {
+	/// `pre-commit`, `commit-msg` or `post-commit`.
+	pub name: String,
+	/// The hook file, or `git hook run …` when git must run it.
+	pub argv: Vec<String>,
+	/// The checkout root.
+	pub cwd:  String,
+	/// Variables to set over the inherited environment.
+	pub env:  HashMap<String, String>,
+}
+/// How a hook started by `VcsCommitOptions.hookRunner` ended.
+#[napi(object, object_to_js = false)]
+pub struct VcsHookExit {
+	/// Exit code; anything but 0 fails the hook.
+	pub exit_code: i32,
+	/// stdout and stderr, interleaved as written.
+	pub output:    String,
+}
+/// Unhandled by the callee, so the callback takes the run alone; weak, since
+/// the pending commit promise keeps the event loop alive while it is called.
+type VcsHookRunner = ThreadsafeFunction<
+	VcsHookRun,
+	napi::bindgen_prelude::Promise<VcsHookExit>,
+	VcsHookRun,
+	Status,
+	false,
+	true,
+>;
+
+/// Adapt the JS hook runner to the blocking commit: every hook waits on one
+/// round trip to the JS thread, which stays free while the commit runs.
+fn hook_runner(runner: VcsHookRunner) -> core::HookRunner {
+	let runner = Arc::new(runner);
+	core::HookRunner::new(move |run: core::HookRun| {
+		let utf8 = |value: std::ffi::OsString| {
+			value.into_string().map_err(|value| {
+				std::io::Error::other(format!("hook argument is not UTF-8: {}", value.display()))
+			})
+		};
+		let run = VcsHookRun {
+			name: run.name,
+			argv: run
+				.argv
+				.into_iter()
+				.map(utf8)
+				.collect::<std::io::Result<_>>()?,
+			cwd:  utf8(run.cwd.into_os_string())?,
+			env:  run
+				.env
+				.into_iter()
+				.map(|(key, value)| Ok((key, utf8(value)?)))
+				.collect::<std::io::Result<_>>()?,
+		};
+		let runner = Arc::clone(&runner);
+		let exit =
+			futures::executor::block_on(async move { runner.call_async_catch(run).await?.await })
+				.map_err(|err| std::io::Error::other(err.reason))?;
+		Ok(core::HookExit { exit_code: exit.exit_code, output: exit.output })
+	})
 }
 
 /// Published private-index commit and any shared-index entries left staged.
@@ -422,6 +491,7 @@ impl From<VcsCommitOptions> for core::CommitOptions {
 			index_path:    v.index_path.map(PathBuf::from),
 			expected_head: v.expected_head,
 			no_verify:     v.no_verify.unwrap_or(false),
+			hook_runner:   v.hook_runner.map(hook_runner),
 		}
 	}
 }
@@ -1263,17 +1333,54 @@ impl VcsGitRepo {
 	}
 
 	/// Create commit.
-	#[napi]
-	pub fn commit_create(
+	#[napi(ts_return_type = "Promise<string>")]
+	pub fn commit_create<'e>(
 		&self,
 		message: String,
 		options: VcsCommitOptions,
 		signal: Option<Unknown>,
-	) -> Promise<String> {
-		let options = options.into();
-		blocking("vcs.commitCreate", self.inner.clone(), signal, move |r| {
-			r.commit_create(&message, &options)
+		env: &'e Env,
+	) -> Result<Either<Promise<String>, Object<'e>>> {
+		let options: core::CommitOptions = options.into();
+		if options.hook_runner.is_none() {
+			return Ok(Either::A(blocking(
+				"vcs.commitCreate",
+				self.inner.clone(),
+				signal,
+				move |r| r.commit_create(&message, &options),
+			)));
+		}
+		// The hooks wait on JS, and JS may itself need a blocking thread: any
+		// native `blocking` call takes libuv's pool, and the contained hook spawn
+		// (`SandboxProcess.spawn`) takes Tokio's blocking pool, which is capped
+		// on Windows. Holding a thread of either pool while waiting on JS can
+		// starve the very call the hook awaits, so each hook-runner commit runs
+		// on its own dedicated thread.
+		let tag = "vcs.commitCreate";
+		let repo = self.inner.clone();
+		let ct = task::CancelToken::new(None, signal);
+		vcs_future(env, tag, async move {
+			if ct.heartbeat().is_err() {
+				return Err(omp_vcs::Error::Canceled);
+			}
+			let (tx, rx) = tokio::sync::oneshot::channel();
+			std::thread::Builder::new()
+				.name("omp-vcs-commit".to_owned())
+				.spawn(move || {
+					let _ = tx.send(catch_panic(tag, || repo.commit_create(&message, &options)));
+				})
+				.map_err(|err| {
+					omp_vcs::Error::backend(tag, format!("commit thread spawn failed: {err}"))
+				})?;
+			let sha = rx
+				.await
+				.map_err(|err| omp_vcs::Error::backend(tag, format!("commit task failed: {err}")))??;
+			if ct.abort_reason().is_some() {
+				return Err(omp_vcs::Error::Canceled);
+			}
+			Ok(sha)
 		})
+		.map(Either::B)
 	}
 
 	/// Publish a private-index commit after preparing the shared index.

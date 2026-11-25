@@ -2,13 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { $which, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { disposeAllKernelSessions } from "../../src/eval/py/executor";
 import { disposePyToolBridge } from "../../src/eval/py/tool-bridge";
+import { AgentStorage } from "../../src/session/agent-storage";
 import type { ToolSession } from "../../src/tools";
 import { EvalTool } from "../../src/tools/eval";
+import { TEST_PYTHON } from "../helpers/python";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
 let tempDir: TempDir;
@@ -26,6 +28,8 @@ afterEach(async () => {
 	await disposeAllKernelSessions();
 	await disposePyToolBridge();
 	restoreSettingsTestState(settingsState);
+	// The eval sandbox check opened <agentDir>/agent.db; Windows cannot delete an open file.
+	AgentStorage.close();
 	tempDir.removeSync();
 });
 
@@ -37,7 +41,7 @@ function makeSession(...tools: AgentTool[]): ToolSession {
 		settings: Settings.isolated({
 			"async.enabled": false,
 			"eval.autoProvision": false,
-			"python.interpreter": Bun.env.PYTHON ?? $which("python3") ?? $which("python") ?? "",
+			"python.interpreter": TEST_PYTHON ?? "",
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",

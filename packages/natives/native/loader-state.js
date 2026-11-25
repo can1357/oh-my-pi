@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { parseEnv } from "node:util";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
 import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionStamp } from "./version-sentinel.js";
@@ -55,16 +56,110 @@ function startupMarker(text) {
 	}
 }
 
+/**
+ * The process's exec environment, or `undefined` when unknown. Bun autoloads
+ * the project's dotenv files into `process.env` before any module runs, so only
+ * procfs (Linux) or a `--no-env-file` launch gives the pre-dotenv values.
+ * Mirrors `readLaunchEnv` in pi-utils `env.ts` (this loader cannot depend on it).
+ * @returns {ReadonlyMap<string, string> | undefined}
+ */
+function readLaunchEnv() {
+	if (process.platform === "linux") {
+		try {
+			const values = new Map();
+			for (const entry of fs.readFileSync("/proc/self/environ", "utf8").split("\0")) {
+				const separator = entry.indexOf("=");
+				if (separator > 0) values.set(entry.slice(0, separator), entry.slice(separator + 1));
+			}
+			return values;
+		} catch {}
+	}
+	if (!process.execArgv.includes("--no-env-file")) return undefined;
+	const values = new Map();
+	for (const key in process.env) {
+		const value = process.env[key];
+		if (value !== undefined) values.set(key, value);
+	}
+	return values;
+}
+
+/** @type {ReadonlyMap<string, string> | undefined | null} `null` until first read. */
+let launchEnvCache = null;
+
+/**
+ * Every value `cwd`'s dotenv files define for `name`, raw and `$VAR`-expanded
+ * against `env` (Bun expands references while autoloading). Covers each mode
+ * file Bun may have picked, so a value from any of them counts.
+ * @param {string} cwd
+ * @param {string} name
+ * @param {Record<string, string | undefined>} env
+ * @param {string | undefined} launchNodeEnv
+ * @returns {Set<string>}
+ */
+function projectDotenvValues(cwd, name, env, launchNodeEnv) {
+	const modes = new Set(["development", "production", "test"]);
+	if (launchNodeEnv) modes.add(launchNodeEnv);
+	if (env.NODE_ENV) modes.add(env.NODE_ENV);
+	const files = [".env", ".env.local"];
+	for (const mode of modes) files.push(`.env.${mode}`, `.env.${mode}.local`);
+	const values = new Set();
+	for (const file of files) {
+		let parsed;
+		try {
+			parsed = parseEnv(fs.readFileSync(path.join(cwd, file), "utf-8"));
+		} catch {
+			continue;
+		}
+		const value = parsed[name];
+		if (value === undefined) continue;
+		values.add(value);
+		values.add(
+			value.replace(/(\\)?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (match, escaped, braced, bare) =>
+				escaped ? match.slice(1) : (env[braced ?? bare] ?? parsed[braced ?? bare] ?? ""),
+			),
+		);
+	}
+	return values;
+}
+
+/**
+ * `name`'s value unless it came from the project's dotenv files (repository
+ * content) rather than the launch environment: a value equal to one those
+ * files define yields the launch environment's own value (`undefined` when the
+ * launcher set none or it is unknown). Same provenance rule pi-utils `env.ts`
+ * applies to its operator-only names; the loader runs before that scrub, and a
+ * repository must not choose where the addon is extracted or loaded from.
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+function launchOwnedEnvValue(name) {
+	const value = process.env[name];
+	if (value === undefined) return undefined;
+	if (launchEnvCache === null) launchEnvCache = readLaunchEnv();
+	const launchEnv = launchEnvCache;
+	const launchValue = launchEnv?.get(name);
+	// Fast path: the launcher set this exact value, whatever the dotenv files say.
+	if (launchValue === value) return value;
+	let cwd;
+	try {
+		cwd = process.cwd();
+	} catch {
+		return value;
+	}
+	const dotenvValues = projectDotenvValues(cwd, name, process.env, launchEnv?.get("NODE_ENV"));
+	return dotenvValues.has(value) ? launchValue : value;
+}
+
 function getNativesDir() {
 	// Match pi-utils directory overrides without depending on pi-utils.
-	const override = process.env.PI_NATIVES_DIR?.trim();
+	const override = launchOwnedEnvValue("PI_NATIVES_DIR")?.trim();
 	if (override) {
 		let dir = override;
 		if (dir === "~") dir = os.homedir();
 		else if (dir.startsWith("~/") || dir.startsWith("~\\")) dir = os.homedir() + dir.slice(1);
 		if (path.isAbsolute(dir)) return path.normalize(dir);
 	}
-	const xdgDataHome = process.env.XDG_DATA_HOME;
+	const xdgDataHome = launchOwnedEnvValue("XDG_DATA_HOME");
 	if (xdgDataHome && fs.existsSync(path.join(xdgDataHome, "omp"))) {
 		return path.join(xdgDataHome, "omp", "natives");
 	}
@@ -607,8 +702,30 @@ function embeddedProbeFiles(ctx) {
 	return { primary: selectEmbeddedAddonFile(ctx.selectedVariant), fallback };
 }
 
+/**
+ * Processes spawned inside the OS sandbox (`OMP_SANDBOX=1`, set by the
+ * coding-agent sandbox runtime) see the natives cache read-only. They must load
+ * what the unsandboxed host already provisioned for this version and never
+ * create, touch, copy into, or prune cache directories.
+ */
+function isSandboxedProcess() {
+	return process.env.OMP_SANDBOX === "1";
+}
+
 function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(ctx.selectedVariant)) {
 	if (!hasMatchingEmbeddedAddon(ctx) || !file) return null;
+	const targetPath = embeddedAddonPath(ctx.versionedDir, file);
+
+	if (isSandboxedProcess()) {
+		try {
+			if (isEmbeddedAddonFileCurrent(targetPath, file)) return targetPath;
+			errors.push(`embedded addon (${file.filename}): not extracted by the host; sandboxed processes cannot extract it`);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			errors.push(`embedded addon (${file.filename}): ${message}`);
+		}
+		return null;
+	}
 
 	startupMarker("native:extractEmbeddedAddon:start");
 	try {
@@ -655,7 +772,8 @@ function maybeStageNodeModulesAddon(ctx, errors) {
 			stagedPath = stagedPath || targetPath;
 			continue;
 		}
-		if (!fs.existsSync(sourcePath)) continue;
+		// Sandboxed: load the host-staged copy or fall back to the node_modules candidate.
+		if (isSandboxedProcess() || !fs.existsSync(sourcePath)) continue;
 
 		try {
 			prepareNativeVersionDir(ctx.versionedDir);
@@ -956,7 +1074,7 @@ export function initLoaderContext(overrides = {}) {
 	const versionedDir = path.join(nativesDir, packageVersion);
 	const userDataDir =
 		platform === "win32"
-			? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "omp")
+			? path.join(launchOwnedEnvValue("LOCALAPPDATA") || path.join(os.homedir(), "AppData", "Local"), "omp")
 			: path.join(os.homedir(), ".local", "bin");
 
 	const isCompiledBinary =
@@ -1084,12 +1202,14 @@ export function loadNative() {
 			installNativeTokioRuntime(bindings);
 			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
-			cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
-			if (hasEmbedded) {
-				pruneStaleEmbeddedAddons({
-					targetDir: ctx.versionedDir,
-					keepHashes: [primaryEmbeddedFile, fallbackEmbeddedFile].filter(Boolean).map(file => file.hash),
-				});
+			if (!isSandboxedProcess()) {
+				cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
+				if (hasEmbedded) {
+					pruneStaleEmbeddedAddons({
+						targetDir: ctx.versionedDir,
+						keepHashes: [primaryEmbeddedFile, fallbackEmbeddedFile].filter(Boolean).map(file => file.hash),
+					});
+				}
 			}
 			startupMarker("native:loadNative:done");
 			return bindings;

@@ -181,7 +181,7 @@ export function unionLeaves(model: WireModel, name: string): string[] {
 export function unionDispatch(model: WireModel, name: string): WireDispatch | undefined {
 	const members = unionMembers(model.defs.get(name));
 	if (!members) return undefined;
-	for (const property of ["type", "role", "method", "stage"]) {
+	for (const property of ["type", "role", "method", "stage", "state"]) {
 		const cases = new Map<string, string>();
 		let routes = true;
 		for (const member of members) {

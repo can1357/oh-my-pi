@@ -1,4 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { SandboxResultMeta } from "../../sandbox/types";
 import type { OutputMeta } from "../output-meta-format";
 import { type ConfiguredThinkingLevel } from "../../utils/render-utils";
 
@@ -88,6 +89,8 @@ export interface EvalToolDetails {
 		jobId: string;
 		type: "eval";
 	};
+	/** OS sandbox the cells ran in; absent when they ran uncontained. */
+	sandbox?: SandboxResultMeta;
 }
 
 /**

@@ -11,6 +11,8 @@
  * — if the env var is set, omp trusts that the migration has been done.
  */
 
+// First: drops directory/profile names a project's dotenv files set before anything below resolves them.
+import "./dotenv-provenance";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";

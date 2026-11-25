@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ConversionResult, Markit, StreamInfo } from "../markit";
+import { readFileBytes } from "../sandbox/file-access";
 import { ToolAbortError } from "../tools/tool-errors";
 import {
 	type MarkitConversionCacheStatus,
@@ -135,13 +136,20 @@ export async function convertFileWithMarkit(
 	signal?: AbortSignal,
 	options?: MarkitFileConversionOptions,
 ): Promise<MarkitConversionResult> {
+	const streamInfo: StreamInfo = {
+		localPath: filePath,
+		extension: path.extname(filePath).toLowerCase(),
+		filename: path.basename(filePath),
+	};
 	if (options?.imageDir) {
 		// Image extraction writes files into imageDir as a side effect; a
 		// markdown-only cache hit would leave the directory missing members, so
 		// this path stays uncached.
 		try {
+			// The bytes come through `readFileBytes` (contained: a verified handle), never a by-path read.
 			const result = await runMarkitConversion(
-				markit => markit.convertFile(filePath, { imageDir: options.imageDir }),
+				async markit =>
+					markit.convert(await readFileBytes(filePath), { ...streamInfo, imageDir: options.imageDir }),
 				signal,
 			);
 			return { ...finalizeConversion(result.markdown), cache: "skipped" };
@@ -156,17 +164,12 @@ export async function convertFileWithMarkit(
 	throwIfAborted(signal);
 	let bytes: Uint8Array;
 	try {
-		bytes = await untilAborted(signal, () => Bun.file(filePath).bytes());
+		bytes = await untilAborted(signal, () => readFileBytes(filePath));
 	} catch (error) {
 		if (error instanceof ToolAbortError) throw error;
 		if (error instanceof Error && error.name === "AbortError") throw new ToolAbortError();
 		return { content: "", ok: false, error: normalizeError(error), cache: "miss" };
 	}
-	const streamInfo: StreamInfo = {
-		localPath: filePath,
-		extension: path.extname(filePath).toLowerCase(),
-		filename: path.basename(filePath),
-	};
 	return runCachedBufferConversion(bytes, streamInfo, signal, true);
 }
 

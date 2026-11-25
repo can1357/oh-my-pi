@@ -268,6 +268,8 @@ import {
 	SPOTLIGHT_NOTICE_SOURCE,
 	startSpotlightExperiment,
 } from "./spotlight/session";
+import { installSandboxRepoGuard } from "./sandbox/ledger";
+import { buildSandboxPrompt } from "./sandbox/prompt";
 import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPToolCommandGuidance,
@@ -373,7 +375,7 @@ import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
-import { ttsTool } from "./tools/tts";
+import { createTtsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
@@ -1801,6 +1803,7 @@ const CAPTURE_DROPPED_KEYS = [
 	"approvalCacheTargets",
 	"bindApprovalTargets",
 	"approvalRestrictionPaths",
+	"sandboxSubjects",
 	"renderCall",
 	"renderResult",
 ] as const satisfies readonly (keyof AgentTool)[];
@@ -2025,6 +2028,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	registerSshCleanup();
 	registerEvalCleanup();
+	// Host git refuses repositories whose metadata a sandboxed command created or replaced.
+	installSandboxRepoGuard();
 
 	const settings = await (options.settings ??
 		options.settingsManager ??
@@ -4138,7 +4143,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (cfgGenerateImageEnabled.get(settings) && imageGenRequested) {
 				wanted.push(imageGenTool as unknown as CustomTool);
 			}
-			if (cfgSpeechgenEnabled.get(settings)) wanted.push(ttsTool as unknown as CustomTool);
+			if (cfgSpeechgenEnabled.get(settings)) wanted.push(createTtsTool(toolSession) as unknown as CustomTool);
 			const wantedNames = new Set(wanted.map(tool => tool.name));
 			for (const [name, entry] of settingsGatedCustomEntries) {
 				if (wantedNames.has(name)) continue;
@@ -4551,6 +4556,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			// What the OS sandbox contains, only while it is active for this workspace.
+			const sandboxPrompt = await buildSandboxPrompt(promptCwd, {
+				requestTool: hasSession
+					? session.hasBuiltInTool("sandbox_request")
+					: builtInRegistryToolNames.has("sandbox_request"),
+			}).catch((error: unknown) => {
+				logger.warn("Sandbox prompt block unavailable", { error: String(error) });
+				return undefined;
+			});
+			if (sandboxPrompt) appendParts.push(sandboxPrompt);
 			// List each mounted MCP tool once. A routed tool that the command catalog
 			// would list carries its catalog summary on the route line and gets no
 			// catalog line; a tool the route bound omits keeps its catalog line.

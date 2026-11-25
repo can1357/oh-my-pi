@@ -4,19 +4,21 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { $ } from "bun";
 
 describe("issue #899 — sync Git metadata reads survive interrupted JS filesystem access", () => {
 	let tempDir: string;
 	let headPath: string;
-	const commit = "0123456789abcdef0123456789abcdef01234567";
+	let commit: string;
 
 	beforeEach(async () => {
 		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "issue-899-"));
-		const gitDir = path.join(tempDir, ".git");
-		await fsp.mkdir(path.join(gitDir, "refs", "heads"), { recursive: true });
-		await fsp.writeFile(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
-		await fsp.writeFile(path.join(gitDir, "refs", "heads", "main"), `${commit}\n`);
-		headPath = path.join(gitDir, "HEAD");
+		// A real repository: native reads resolve a ref only to an object present in the repository.
+		await $`git init -q -b main && git -c user.name=T -c user.email=t@t -c commit.gpgsign=false commit -q --allow-empty -m init`
+			.cwd(tempDir)
+			.quiet();
+		commit = (await $`git rev-parse HEAD`.cwd(tempDir).text()).trim();
+		headPath = path.join(tempDir, ".git", "HEAD");
 	});
 
 	afterEach(async () => {

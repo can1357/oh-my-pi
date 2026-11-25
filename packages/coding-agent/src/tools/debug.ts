@@ -1,11 +1,12 @@
 import { type DebugToolDetails, formatLocation, formatSessionSnapshot } from "./details/debug";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	SandboxSubject,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
@@ -492,7 +493,7 @@ function formatAdapterUnavailable(adapterName: string, command: string, cwd: str
 
 async function classifyLaunchProgram(program: string): Promise<LaunchProgramKind> {
 	try {
-		return (await fs.stat(program)).isDirectory() ? "directory" : "file";
+		return (await fs.promises.stat(program)).isDirectory() ? "directory" : "file";
 	} catch (error) {
 		if (isEnoent(error)) return "missing";
 		throw error;
@@ -547,6 +548,32 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 		const rawAction = (args as Partial<DebugParams>).action;
 		const action = typeof rawAction === "string" ? rawAction.toLowerCase() : "";
 		return DEBUG_READONLY_ACTIONS.has(action) ? "read" : "exec";
+	};
+	/**
+	 * `launch` and `attach` start or join a process through an adapter omp runs on the host, outside
+	 * the sandbox; the gate asks for that exact target. Every other action works on an existing session.
+	 */
+	readonly sandboxSubjects = (args: unknown): readonly SandboxSubject[] => {
+		const params = args as Partial<DebugParams>;
+		if (params.action === "launch") {
+			if (typeof params.program !== "string" || params.program.length === 0) return [];
+			const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
+			const program = resolveToCwd(params.program, commandCwd);
+			let real = program;
+			try {
+				real = fs.realpathSync(program);
+			} catch {
+				// Not on disk (yet): the lexical path is the target.
+			}
+			return [{ kind: "exec", target: `debug:launch ${real}` }];
+		}
+		if (params.action !== "attach") return [];
+		let target = "debug:attach";
+		if (params.adapter) target += ` adapter ${params.adapter}`;
+		if (params.pid !== undefined) target += ` pid ${params.pid}`;
+		if (params.port !== undefined) target += params.host ? ` ${params.host}:${params.port}` : ` port ${params.port}`;
+		else if (params.host) target += ` host ${params.host}`;
+		return [{ kind: "exec", target }];
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<DebugParams>;

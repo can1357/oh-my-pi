@@ -40,6 +40,7 @@ import { notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { FileChangeType } from "../lsp/types";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
+import { containToolExecute, mutateFile } from "../sandbox/file-access";
 import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { approvalTargetKey } from "../tools/approval-targets";
@@ -328,7 +329,7 @@ function capPerFileSnapshots(entries: EditToolPerFileResult[]): EditToolPerFileR
 
 async function mkdirAllowingFallback(directory: string): Promise<void> {
 	try {
-		await fs.mkdir(directory, { recursive: true });
+		await mutateFile({ kind: "mkdir", path: directory });
 	} catch (error) {
 		if (!hasFileWriteFallback() || !isPermissionDeniedError(error)) throw error;
 	}
@@ -356,7 +357,7 @@ async function movedFileMode(filePath: string): Promise<number | undefined> {
  */
 async function chmodMovedFile(filePath: string, mode: number): Promise<void> {
 	try {
-		await fs.chmod(filePath, mode);
+		await mutateFile({ kind: "chmod", path: filePath, mode });
 	} catch (error) {
 		if (!isPermissionDeniedError(error)) throw error;
 	}
@@ -543,6 +544,10 @@ export class EditTool implements AgentTool<TInput> {
 				this.#streamedArgs.delete(init.toolCallId);
 			},
 		};
+	}
+
+	static {
+		containToolExecute(this, tool => tool.session);
 	}
 
 	async execute(

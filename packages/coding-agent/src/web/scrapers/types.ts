@@ -1,8 +1,10 @@
 /**
  * Shared types and utilities for web-fetch handlers
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { scheduler } from "node:timers/promises";
-import { ptree } from "@oh-my-pi/pi-utils";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
 import { decodeEntities } from "@oh-my-pi/pi-utils/dom/parser";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
@@ -10,6 +12,7 @@ import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 import type { ModelRegistry } from "../../config/model-registry";
 import { settings as globalSettings, isSettingsInitialized, Settings } from "../../config/settings";
 import type { AgentStorageApi } from "../../session/agent-storage";
+import { canonicalHost } from "../../sandbox/policy";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { decodeBody } from "../response-body";
 
@@ -154,6 +157,212 @@ export interface LoadPageResult {
 	blockedBy?: string;
 }
 
+/**
+ * Asked about each host a request in its scope is about to contact, in {@link canonicalHost} form
+ * (punycode, lowercase, no port, no IPv6 brackets); throws to refuse the host, or a {@link HostUndecided}
+ * when it could not decide.
+ */
+export type RequestHostGuard = (host: string) => Promise<void> | void;
+
+/** The guard's verdict on a host: `undefined` admits, `{ denial }` refuses, `{ failure }` could not decide. */
+type HostVerdict = { denial: unknown } | { failure: Error } | undefined;
+
+interface RequestHostScope {
+	readonly guard: RequestHostGuard;
+	/** The guard's verdict per host, asked once; a `failure` is dropped, so the next request asks again. */
+	readonly decisions: Map<string, Promise<HostVerdict>>;
+	/** Notes on what the scope skipped: refused optional requests and host-side tools that fetch on their own. */
+	readonly skipped: string[];
+	/** Inside {@link primaryRequest}: a refused host fails the read instead of being skipped. */
+	readonly primary: boolean;
+}
+
+const requestHostScopes = new AsyncLocalStorage<RequestHostScope>();
+
+/**
+ * Runs `run` with `guard` asked about every host the requests inside it contact through {@link loadPage},
+ * `fetchBinary`, {@link fetchWithHostGuard} and {@link guardedFetch}: the first request's host and each redirect's,
+ * the call's own hosts included. A refused host fails a {@link primaryRequest} and skips any other request,
+ * with a note in `skipped`. Without a guard, `run` runs as is.
+ */
+export async function withRequestHostGuard<T>(
+	guard: RequestHostGuard | undefined,
+	run: () => Promise<T>,
+): Promise<{ result: T; skipped: string[] }> {
+	if (!guard) return { result: await run(), skipped: [] };
+	const scope: RequestHostScope = { guard, decisions: new Map(), skipped: [], primary: false };
+	return { result: await requestHostScopes.run(scope, run), skipped: scope.skipped };
+}
+
+/** Runs `run` as the read's primary chain: a host the guard refuses there fails the read with its denial. */
+export function primaryRequest<T>(run: () => Promise<T>): Promise<T> {
+	const scope = requestHostScopes.getStore();
+	return scope ? requestHostScopes.run({ ...scope, primary: true }, run) : run();
+}
+
+/**
+ * True while a guard is in scope, with a note that `name` was skipped: a host-side tool that fetches on its
+ * own (trafilatura, lynx) would contact hosts the guard never sees, so it does not run.
+ */
+export function hostProcessSkipped(name: string): boolean {
+	const scope = requestHostScopes.getStore();
+	if (!scope) return false;
+	addSkippedNote(scope, `Skipped ${name}: it fetches outside the sandbox's network policy`);
+	return true;
+}
+
+function addSkippedNote(scope: RequestHostScope, note: string): void {
+	if (!scope.skipped.includes(note)) scope.skipped.push(note);
+}
+
+/** A request to a host the guard refused, never sent. {@link rethrowOnPrimary} turns it into the read's failure. */
+export class HostRefusal extends Error {
+	constructor(
+		readonly host: string,
+		readonly denial: unknown,
+	) {
+		super(`${host} is not allowed by the sandbox's network policy`);
+		this.name = "HostRefusal";
+	}
+}
+
+/**
+ * Thrown by a {@link RequestHostGuard} that could not decide a host (its name did not resolve, the read was
+ * cancelled): not a refusal. The request fails with `failure` as a transport error does, unrecorded, and the
+ * next request to the host asks again.
+ */
+export class HostUndecided extends Error {
+	constructor(readonly failure: Error) {
+		super(failure.message, { cause: failure });
+		this.name = "HostUndecided";
+	}
+}
+
+/** Throws the guard's denial when `refusal` happened on the primary chain; an optional request just failed. */
+export function rethrowOnPrimary(refusal: HostRefusal): void {
+	if (requestHostScopes.getStore()?.primary) throw refusal.denial;
+}
+
+/** The host of `url` as the sandbox compares hosts; `undefined` for a URL that does not parse. */
+export function requestHost(url: string | URL): string | undefined {
+	try {
+		return canonicalHost(new URL(url).hostname);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Waits for the guard's verdict on the host of `url`, shared by every request to it, at most until `signal`
+ * (the request's own limit) aborts: the request then fails as a transport error, and the shared decision
+ * runs on within the read's limit.
+ */
+async function admitHost(scope: RequestHostScope, url: URL, signal?: AbortSignal | null): Promise<void> {
+	const host = requestHost(url) ?? url.hostname;
+	let decision = scope.decisions.get(host);
+	if (!decision) {
+		decision = (async (): Promise<HostVerdict> => {
+			try {
+				await scope.guard(host);
+				return undefined;
+			} catch (error) {
+				return error instanceof HostUndecided ? { failure: error.failure } : { denial: error };
+			}
+		})();
+		scope.decisions.set(host, decision);
+		// A failure is not cached: it is dropped when it settles, even when every request gave up waiting.
+		const settled = decision;
+		void settled.then(verdict => {
+			if (verdict && "failure" in verdict && scope.decisions.get(host) === settled) scope.decisions.delete(host);
+		});
+	}
+	// The decision never rejects: a rejection is `signal` aborting.
+	const verdict = await untilAborted(signal, decision).catch((error: unknown) => {
+		throw new Error(`checking ${host} timed out`, { cause: error });
+	});
+	if (!verdict) return;
+	if ("failure" in verdict) throw verdict.failure;
+	if (!scope.primary)
+		addSkippedNote(scope, `Skipped requests to ${host}: not allowed by the sandbox's network policy`);
+	throw new HostRefusal(host, verdict.denial);
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** Redirects `fetch` follows before it gives up. */
+const MAX_REDIRECTS = 20;
+const CROSS_ORIGIN_STRIPPED_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+
+/**
+ * `fetchImpl(url, init)` with the guard of the surrounding {@link withRequestHostGuard} asked about the host of
+ * the request and of each redirect before it is contacted. With no guard in scope this is a plain fetch,
+ * redirects followed by the runtime. With one, redirects are followed here with `fetch`'s own rules (a 301/302
+ * POST and a 303 become a GET without body, a cross-origin hop drops credentials, 20 hops at most), and a
+ * refused host rejects with a {@link HostRefusal}.
+ */
+export async function fetchWithHostGuard(
+	url: string,
+	init: RequestInit,
+	fetchImpl: FetchImpl = fetch,
+): Promise<{ response: Response; finalUrl: string }> {
+	const scope = requestHostScopes.getStore();
+	if (!scope) {
+		const response = await fetchImpl(url, init);
+		return { response, finalUrl: response.url };
+	}
+	let current = new URL(url);
+	await admitHost(scope, current, init.signal);
+	if (init.redirect === "manual" || init.redirect === "error") {
+		return { response: await fetchImpl(current.href, init), finalUrl: current.href };
+	}
+	let method = init.method;
+	let body = init.body;
+	let headers = new Headers(init.headers);
+	for (let hops = 0; ; hops++) {
+		const response = await fetchImpl(current.href, { ...init, method, body, headers, redirect: "manual" });
+		const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("location") : null;
+		if (location === null) return { response, finalUrl: current.href };
+		void response.body?.cancel().catch(() => {});
+		if (hops >= MAX_REDIRECTS) throw new TypeError("Too many redirects");
+		const next = new URL(location, current);
+		if (next.protocol !== "http:" && next.protocol !== "https:") {
+			throw new TypeError(`Redirect to a ${next.protocol} URL is not followed`);
+		}
+		await admitHost(scope, next, init.signal);
+		const verb = (method ?? "GET").toUpperCase();
+		if (
+			((response.status === 301 || response.status === 302) && verb === "POST") ||
+			(response.status === 303 && verb !== "GET" && verb !== "HEAD")
+		) {
+			method = "GET";
+			body = undefined;
+			headers = new Headers(headers);
+			headers.delete("content-type");
+		}
+		if (next.origin !== current.origin) {
+			headers = new Headers(headers);
+			for (const name of CROSS_ORIGIN_STRIPPED_HEADERS) headers.delete(name);
+		}
+		current = next;
+	}
+}
+
+/** `fetchImpl` whose requests inside a {@link withRequestHostGuard} scope go through {@link fetchWithHostGuard}. */
+export function guardedFetch(fetchImpl: FetchImpl = fetch): FetchImpl {
+	return async (input, init) => {
+		if (!requestHostScopes.getStore()) return fetchImpl(input, init);
+		if (!(input instanceof Request)) return (await fetchWithHostGuard(String(input), init ?? {}, fetchImpl)).response;
+		const requestInit: RequestInit = {
+			method: input.method,
+			headers: input.headers,
+			body: input.body,
+			signal: input.signal,
+			redirect: input.redirect,
+			...init,
+		};
+		return (await fetchWithHostGuard(input.url, requestInit, fetchImpl)).response;
+	};
+}
+
 const RETRY_AFTER_MAX_MS = 10_000;
 
 /** Parse a Retry-After header (seconds or HTTP-date) into a bounded delay. */
@@ -207,11 +416,10 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				requestInit.body = body;
 			}
 
-			const response = await fetch(url, requestInit);
+			const { response, finalUrl } = await fetchWithHostGuard(url, requestInit);
 
 			const rawContentType = response.headers.get("content-type") ?? "";
 			const contentType = rawContentType.split(";")[0]?.trim().toLowerCase() ?? "";
-			const finalUrl = response.url;
 
 			const lastAgent = !rotates || attempt === USER_AGENTS.length - 1;
 			if (!lastAgent && BLOCKED_STATUSES.has(response.status)) {
@@ -290,6 +498,10 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			}
 			return result;
 		} catch (error) {
+			if (error instanceof HostRefusal) {
+				rethrowOnPrimary(error);
+				return { content: "", contentType: "", finalUrl: url, ok: false, error: error.message };
+			}
 			if (signal?.aborted) {
 				throw new ToolAbortError();
 			}

@@ -569,13 +569,22 @@ class PythonEmitter {
 		}
 		const inner = nonNull(type);
 		if (inner) return `${this.#paramAnnotation(inner, where)} | None`;
+		// Each member is annotated as a parameter, so an array member accepts any `Sequence`.
+		if (type.kind === "union") return type.members.map(member => this.#paramAnnotation(member, where)).join(" | ");
 		return this.#annotation(type, "record");
 	}
 
+	/** The JSON value of parameter `name`: sequences become lists, so a tuple or other `Sequence` serializes. */
 	#paramValue(type: WireType, name: string): string {
-		const inner = nonNull(type);
-		if (inner?.kind === "array") return `list(${name}) if ${name} is not None else None`;
-		return type.kind === "array" ? `list(${name})` : name;
+		const inner = nonNull(type) ?? type;
+		if (inner.kind === "array")
+			return inner === type ? `list(${name})` : `list(${name}) if ${name} is not None else None`;
+		if (inner.kind === "union" && inner.members.some(member => member.kind === "array")) {
+			// A `str` member is a `Sequence` too: it passes through whole, like every non-sequence member.
+			this.#typing.add("Sequence");
+			return `list(${name}) if isinstance(${name}, Sequence) and not isinstance(${name}, str) else ${name}`;
+		}
+		return name;
 	}
 
 	#commandResult(command: RpcWireCommand, call: string): { returns: string; statement: string } {

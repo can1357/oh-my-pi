@@ -1,9 +1,13 @@
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { type PtyArgvStartOptions, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { Settings } from "../config/settings";
 import { buildNonInteractiveEnv } from "../exec/non-interactive-env";
 import { cfgPtyNotify } from "../modes/settings";
+import { containedProcessEnv } from "../sandbox/env";
+import { SandboxRuntime } from "../sandbox/runtime";
+import { SandboxedPtySession } from "../sandbox/shell-client";
+import type { SandboxResultMeta } from "../sandbox/types";
 import { type ArtifactAllocator, OutputSink, type OutputSummary } from "./streaming-output";
 import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { holdBlockedStatus } from "../utils/run-status";
@@ -21,6 +25,22 @@ export interface BashInteractiveResult extends OutputSummary {
 	timedOut: boolean;
 	/** Terminal graphics extracted from raw PTY output before transcript sanitization. */
 	images?: ImageContent[];
+	/** Set when the command ran inside the OS sandbox. */
+	sandbox?: SandboxResultMeta;
+}
+
+/** The `PtySession` surface this runner drives: native, or relayed from a sandbox host. */
+interface InteractivePty {
+	startArgv(
+		options: PtyArgvStartOptions,
+		onChunk?: (error: Error | null, chunk: string) => void,
+		onStart?: (error: Error | null, pid: number) => void,
+	): Promise<PtyRunResult>;
+	write(data: string): void;
+	resize(cols: number, rows: number): void;
+	kill(): void;
+	/** Whether the program waits on terminal input; `null` when that cannot be inspected. */
+	awaitsInput(): boolean | null;
 }
 
 /**
@@ -64,7 +84,7 @@ const USER_PRESENT_MS = 10_000;
 class InputWaitWatch {
 	readonly #command: string;
 	readonly #settings: Settings;
-	readonly #session: PtySession;
+	readonly #session: InteractivePty;
 	readonly #screen: PtyConsoleModel;
 	readonly #timer: NodeJS.Timeout;
 	#lastOutput = Date.now();
@@ -72,7 +92,7 @@ class InputWaitWatch {
 	#streak = 0;
 	#release: (() => void) | undefined;
 
-	constructor(command: string, settings: Settings, session: PtySession, screen: PtyConsoleModel) {
+	constructor(command: string, settings: Settings, session: InteractivePty, screen: PtyConsoleModel) {
 		this.#command = command;
 		this.#settings = settings;
 		this.#session = session;
@@ -146,9 +166,16 @@ export async function runInteractiveBashPty(
 		allocateArtifact?: ArtifactAllocator;
 		/** Called with the program's pid once the terminal spawned it. */
 		onStart?: (pid: number) => void;
+		/** The agent session's workspace; the command runs in the OS sandbox when it applies there. */
+		sandboxWorkspace?: string;
+		/** Host directories a contained run may also write (the session's `local://` root). */
+		sandboxExtraWrite?: readonly string[];
 	},
 ): Promise<BashInteractiveResult> {
 	const settings = await Settings.init();
+	// Throws when the sandbox is required but unavailable: never a silent uncontained PTY.
+	const workspace = options.sandboxWorkspace;
+	const sandbox = workspace === undefined ? undefined : await SandboxRuntime.forScope(workspace, "bash");
 	const graphics = new TerminalGraphicsDecoder();
 	const newlines = new StreamNewlineNormalizer();
 	const sink = new OutputSink({
@@ -160,10 +187,20 @@ export async function runInteractiveBashPty(
 	let watch: InputWaitWatch | undefined;
 	let stopFitting: (() => void) | undefined;
 	let consoleModel: PtyConsoleModel | undefined;
+	// The PTY's dedicated host gets its own proxy port; this call owns the refusals on it.
+	const egressScope = sandbox ? `pty:${crypto.randomUUID()}` : undefined;
+	const egressCall = egressScope ? sandbox?.beginEgressCall([egressScope]) : undefined;
 	try {
 		const result = await ui.custom<BashInteractiveResult>(
 			(host, _theme, _keybindings, done) => {
-				const session = new PtySession();
+				const session: InteractivePty = sandbox
+					? new SandboxedPtySession(sandbox, {
+							cwd: workspace!,
+							extraWrite: options.sandboxExtraWrite,
+							egressScope,
+						})
+					: new PtySession();
+				const blockedSince = Date.now();
 				const kill = (): void => {
 					try {
 						session.kill();
@@ -216,6 +253,12 @@ export async function runInteractiveBashPty(
 							...summary,
 							output,
 							...(images.length > 0 ? { images } : {}),
+							sandbox: sandbox?.resultMeta({
+								blockedSince,
+								call: egressCall,
+								output: run.exitCode !== 0 ? summary.output : undefined,
+								exitCode: run.exitCode,
+							}),
 						});
 					})();
 				};
@@ -228,7 +271,8 @@ export async function runInteractiveBashPty(
 							args: options.args,
 							cwd: options.cwd,
 							timeoutMs: options.timeoutMs,
-							env: terminalEnv(options.env),
+							// Contained: the container's temp dir and (allowlist) proxy apply over the terminal env.
+							env: sandbox ? containedProcessEnv(sandbox, terminalEnv(options.env)) : terminalEnv(options.env),
 							signal: options.signal,
 							cols: grid.cols,
 							rows: grid.rows,
@@ -255,6 +299,7 @@ export async function runInteractiveBashPty(
 		);
 		return result;
 	} finally {
+		egressCall?.end();
 		watch?.stop();
 		stopFitting?.();
 		consoleModel?.dispose();

@@ -207,14 +207,17 @@ async function fixture(maxTimeout = 0) {
 	};
 	let db = await connect();
 	let backend: DisasmBackendId | undefined = "ida";
+	/** Whether the session reaches the fixture's database: false once its sandbox changed, so lookups miss it too. */
+	let reachable = true;
 	vi.spyOn(cfgDisasmBackend, "get").mockImplementation(() => backend);
 	const find = vi
 		.spyOn(client, "findOpenDatabase")
-		.mockImplementation(async (selected, ref) =>
-			open && selected === backend && (ref === status.id || ref === db.name) ? db : undefined,
+		.mockImplementation(async (_session, selected, ref) =>
+			open && reachable && selected === backend && (ref === status.id || ref === db.name) ? db : undefined,
 		);
-	const list = vi.spyOn(client, "listDatabases").mockImplementation(async () => (open ? [db] : []));
-	const byHandle = vi.spyOn(client, "findDatabaseHandle").mockImplementation(async handle => {
+	const list = vi.spyOn(client, "listDatabases").mockImplementation(async () => (open && reachable ? [db] : []));
+	vi.spyOn(client, "reachesDatabase").mockImplementation(async () => reachable);
+	const byHandle = vi.spyOn(client, "findDatabaseHandle").mockImplementation(async (_session, handle) => {
 		if (!open || formatDatabaseHandle(handle) !== status.handle) throw new Error("dsm handle has expired");
 		return db;
 	});
@@ -287,6 +290,9 @@ async function fixture(maxTimeout = 0) {
 		},
 		setBackend(value: DisasmBackendId | undefined) {
 			backend = value;
+		},
+		setReachable(value: boolean) {
+			reachable = value;
 		},
 		setOpen(value: boolean) {
 			open = value;
@@ -375,7 +381,10 @@ describe("dsm host capability", () => {
 		const parent = await f.invoke({ action: "open", path: "sample" });
 		const child = f.child();
 		const imported = await child.invoke({ action: "open", path: field(parent, "handle") });
-		expect(f.byHandle).toHaveBeenCalledWith(expect.objectContaining({ backend: "ida", id: f.status.id }));
+		expect(f.byHandle).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ backend: "ida", id: f.status.id }),
+		);
 		await child.invoke({ action: "close", lease: field(imported, "lease"), backend: "ida" });
 		expect(f.status.references).toBe(1);
 		expect(
@@ -466,6 +475,23 @@ describe("dsm host capability", () => {
 		controller.abort(new Error("stop this cell"));
 		await expect(pending).rejects.toThrow("stop this cell");
 		await f.canceled;
+	});
+
+	it("drops a reference whose database the session no longer reaches once its sandbox changed", async () => {
+		const f = await fixture();
+		const handle = await f.getHandle();
+		expect(f.status.references).toBe(1);
+		f.setReachable(false);
+		// Neither listed nor found through the reference this session still holds.
+		expect(await f.invoke({ action: "list" })).toEqual([]);
+		await expect(f.invoke({ action: "get", ref: f.status.id })).rejects.toThrow("dsm.open");
+		expect(f.status.references).toBe(1);
+		await expect(f.invoke({ ...handle, action: "exec", code: "42" })).rejects.toThrow("sandbox changed");
+		expect(f.requests.filter(request => request.op === "call")).toHaveLength(0);
+		expect(f.status.references).toBe(0);
+		// Dropped for good, even where the database is reachable again.
+		f.setReachable(true);
+		await expect(f.invoke({ ...handle, action: "view" })).rejects.toThrow("dsm.open");
 	});
 });
 

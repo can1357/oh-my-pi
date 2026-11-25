@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { closeDaemonClient, daemonClient, probeDaemon } from "@oh-my-pi/pi-coding-agent/daemon/client";
 import { GLOBAL_SCOPE, type UnitSnapshot } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { DisasmDatabase, findDatabaseHandle, releaseDatabases } from "@oh-my-pi/pi-coding-agent/disasm/client";
@@ -20,6 +21,7 @@ import {
 	disasmUnitKey,
 	parseDatabaseHandle,
 } from "@oh-my-pi/pi-coding-agent/disasm/protocol";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { daemonLockHeld, IsolatedDaemon, waitFor } from "../fixtures/daemon-harness";
 
 const PYTHON3 = Bun.which("python3");
@@ -384,7 +386,8 @@ describe.skipIf(!PYTHON3 || process.platform === "win32")("daemon disasm module"
 
 			const parsed = parseDatabaseHandle(handle);
 			if (!parsed) throw new Error(`${handle} is not a dsm handle`);
-			const reopened = await findDatabaseHandle(parsed);
+			// Session settings of its own (sandbox off): the daemon serves it, whatever the user's config says.
+			const reopened = await findDatabaseHandle({ cwd: tmp, settings: Settings.isolated() } as ToolSession, parsed);
 			expect(reopened.handle).toBe(handle);
 			const after = await reopened.request<ExecResult>("exec", { tag: "after-restart" });
 			expect(after.pid).toBe(pid);
@@ -407,7 +410,9 @@ describe.skipIf(!PYTHON3 || process.platform === "win32")("daemon disasm module"
 			expect(current.handle).not.toBe(staleHandle);
 			const parsed = parseDatabaseHandle(staleHandle);
 			if (!parsed) throw new Error(`${staleHandle} is not a dsm handle`);
-			await expect(findDatabaseHandle(parsed)).rejects.toThrow("dsm handle has expired");
+			await expect(
+				findDatabaseHandle({ cwd: tmp, settings: Settings.isolated() } as ToolSession, parsed),
+			).rejects.toThrow("dsm handle has expired");
 			await expect(current.retain(staleHandle)).rejects.toThrow("dsm handle has expired");
 			expect((await current.refresh()).references).toBe(0);
 		},

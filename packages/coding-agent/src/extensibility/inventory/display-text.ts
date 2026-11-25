@@ -16,6 +16,11 @@ export function sanitizeDisplayLine(text: string): string {
 	return sanitizeDisplaySingleLine(text).trim();
 }
 
+/** Model text as one display-safe line: escapes and controls gone, whitespace runs one space. */
+export function plainLine(text: string): string {
+	return sanitizeText(text.replace(/\s/g, " ")).replace(/\s+/g, " ").trim();
+}
+
 /** Like {@link sanitizeDisplayText}, dropping empty results. */
 export function sanitizeDisplayField(text: string | undefined | null): string | undefined {
 	if (typeof text !== "string" || text.length === 0) return undefined;

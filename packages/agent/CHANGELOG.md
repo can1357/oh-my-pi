@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AgentTool.sandboxSubjects` and `SandboxSubject`, letting a tool declare the paths, hosts and host-side actions an OS sandbox gate checks before it runs ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

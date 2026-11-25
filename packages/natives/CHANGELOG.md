@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OS process containment through MXC (seatbelt, bubblewrap, processcontainer): `sandboxSupport()`, `sandboxDiscoverPaths(env)` and `SandboxProcess.spawn()` run an argv under read-write/read-only/denied path lists with an `allow`, `deny` or loopback-`proxy` network; `SandboxSupport.networkMissing`/`networkReason` explain unavailable network modes ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Added `VcsCommitOptions.hookRunner` (runs a commit's hooks in place of the host) and `setRepoGuard()` in `@oh-my-pi/pi-natives/vcs` (refuses git operations on a repository with a `Refused` `VcsError`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
+### Changed
+
+- Git operations no longer follow symlinks planted in `.git` in place of `HEAD`, refs, the commit message or worktree and submodule entries, and return only commit ids present in the repository ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
+### Fixed
+
+- The native addon loader ignores `PI_NATIVES_DIR`, `XDG_DATA_HOME` and `LOCALAPPDATA` from a project's dotenv files ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

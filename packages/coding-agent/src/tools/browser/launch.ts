@@ -618,10 +618,27 @@ async function resolveSystemChromium(): Promise<string | undefined> {
 	return undefined;
 }
 
+/**
+ * How omp's own Chromium is contained while the OS sandbox is active: launched without file access
+ * from `file:` pages, page downloads kept in its profile and, unless the network mode is `allow`,
+ * with every request (loopback too) sent through the sandbox's egress proxy, whose host approval
+ * then decides each host.
+ */
+export interface ChromiumSandbox {
+	/** The realpath'd workspace of the sandbox runtime that contains it. */
+	workspace: string;
+	/** The sandbox network mode at launch. */
+	network: "allow" | "allowlist";
+	/** The egress proxy URL (`allowlist` mode). */
+	proxyServer?: string;
+}
+
 /** Per-process launch features controlled by browser.open options. */
 export interface HeadlessLaunchFeatures {
 	/** Trust invalid HTTPS certificates in this Chromium process. */
 	insecure?: boolean;
+	/** Launch contained by the active OS sandbox. */
+	sandbox?: ChromiumSandbox;
 }
 
 /** Options shared by headless Chromium consumers. */
@@ -649,18 +666,20 @@ export interface LaunchHeadlessResult {
 
 /**
  * Base Chromium argv shared by process-local puppeteer launches and the
- * daemon-owned shared browser unit: sandbox/stealth flags, window size, and
- * PUPPETEER_PROXY* env-derived proxy flags.
+ * daemon-owned shared browser unit: sandbox/stealth flags, window size, and the
+ * proxy flags (the sandbox's egress proxy, else PUPPETEER_PROXY* env).
  */
 export function buildHeadlessLaunchArgs(
 	viewport: { width: number; height: number },
 	features: HeadlessLaunchFeatures = {},
 ): string[] {
+	const { sandbox } = features;
 	const launchArgs = [
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
 		DISABLE_AUTOMATION_CONTROLLED_ARG,
-		"--allow-file-access-from-files",
+		// A `file:` page may read other local files with this; under the OS sandbox only files the sandbox lets omp read load.
+		...(sandbox ? [] : ["--allow-file-access-from-files"]),
 		"--hide-scrollbars",
 		// Chromium 157 removed `WebMCPTesting`, which used to imply `WebMCP`.
 		"--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport",
@@ -669,7 +688,17 @@ export function buildHeadlessLaunchArgs(
 	];
 	if (features.insecure) launchArgs.push("--ignore-certificate-errors");
 	const proxy = process.env.PUPPETEER_PROXY;
-	if (proxy) {
+	if (sandbox?.proxyServer) {
+		launchArgs.push(
+			`--proxy-server=${sandbox.proxyServer}`,
+			"--proxy-bypass-list=<-loopback>",
+			// WebRTC would otherwise send UDP straight from this host; the proxy carries no UDP.
+			"--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+			// Chromium's own update, clock and Safe Browsing key fetches would each ask the proxy's host approval.
+			"--disable-component-update",
+			"--disable-features=NetworkTimeServiceQuerying,SafeBrowsingHashPrefixRealTimeLookups",
+		);
+	} else if (proxy) {
 		launchArgs.push(`--proxy-server=${proxy}`);
 		// Chrome (since v72) bypasses proxies for localhost by default. When PUPPETEER_PROXY_BYPASS_LOOPBACK
 		// is true, add <-loopback> so traffic to localhost reaches the proxy (e.g. for mitmdump/auth capture).
@@ -698,6 +727,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	const puppeteer = await loadPuppeteer();
 	const launchArgs = buildHeadlessLaunchArgs(initialViewport, {
 		insecure: opts.insecure,
+		sandbox: opts.sandbox,
 	});
 	for (const arg of opts.args ?? []) {
 		if (!launchArgs.includes(arg)) launchArgs.push(arg);
@@ -731,7 +761,9 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	try {
 		// A reused profile can hold the file of a browser that was killed.
 		const staleActivePort = pipe ? await readActivePort(activePortFile) : undefined;
-		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
+		// Chromium resets downloads to this folder when a tab that pointed them elsewhere closes.
+		if (userDataDir)
+			await seedOwnedProfilePreferences(userDataDir, opts.sandbox && path.join(userDataDir, "Downloads"));
 		const executablePath = await ensureChromiumExecutable();
 		const browser = await puppeteer.launch({
 			headless: opts.headless,
@@ -822,12 +854,15 @@ async function readActivePort(file: BunFile): Promise<string | undefined> {
  * with printing off, `print()` returns at once and `Page.printToPDF` still works.
  * Chromium reads `Preferences` only at startup and rewrites it from memory, so
  * call this before a Chromium process starts on the profile. Best-effort: the
- * preferences only suppress dialogs, so a failure is logged and never blocks the launch.
+ * preferences only suppress dialogs, so a failure is logged and never blocks the launch,
+ * except with `downloadDirectory`, where page downloads would otherwise land in the user's
+ * own download folder.
  */
-export async function seedOwnedProfilePreferences(userDataDir: string): Promise<void> {
+export async function seedOwnedProfilePreferences(userDataDir: string, downloadDirectory?: string): Promise<void> {
 	try {
-		await writeOwnedProfilePreferences(path.join(userDataDir, "Default", "Preferences"));
+		await writeOwnedProfilePreferences(path.join(userDataDir, "Default", "Preferences"), downloadDirectory);
 	} catch (error) {
+		if (downloadDirectory) throw error;
 		logger.warn("Could not seed browser profile preferences", {
 			userDataDir,
 			error: error instanceof Error ? error.message : String(error),
@@ -835,7 +870,7 @@ export async function seedOwnedProfilePreferences(userDataDir: string): Promise<
 	}
 }
 
-async function writeOwnedProfilePreferences(file: string): Promise<void> {
+async function writeOwnedProfilePreferences(file: string, downloadDirectory: string | undefined): Promise<void> {
 	let prefs: Record<string, unknown> = {};
 	try {
 		const parsed: unknown = JSON.parse(await fs.promises.readFile(file, "utf8"));
@@ -846,11 +881,23 @@ async function writeOwnedProfilePreferences(file: string): Promise<void> {
 	}
 	const profile = isRecord(prefs.profile) ? prefs.profile : {};
 	const printing = isRecord(prefs.printing) ? prefs.printing : {};
-	if (profile.password_manager_leak_detection === false && printing.enabled === false) return;
+	const download = isRecord(prefs.download) ? prefs.download : {};
+	if (
+		profile.password_manager_leak_detection === false &&
+		printing.enabled === false &&
+		(!downloadDirectory || download.default_directory === downloadDirectory)
+	) {
+		return;
+	}
 	profile.password_manager_leak_detection = false;
 	printing.enabled = false;
 	prefs.profile = profile;
 	prefs.printing = printing;
+	if (downloadDirectory) {
+		download.default_directory = downloadDirectory;
+		download.prompt_for_download = false;
+		prefs.download = download;
+	}
 	const staged = `${file}.omp-${process.pid}`;
 	try {
 		await Bun.write(staged, JSON.stringify(prefs));

@@ -37,6 +37,7 @@ import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
+import { ConfigError } from "./config-file";
 import { loadCapability } from "../discovery";
 import { AgentStorage, type AgentStorageApi } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
@@ -134,8 +135,13 @@ type MainYamlReadResult = {
 	configPath: string | null;
 };
 
+/** One config file's own raw settings, kept to name the file that set a value in a load error. */
+type FileLayer = { path: string; settings: RawSettings };
+
 type ProjectSettingsReadResult = {
 	settings: RawSettings;
+	/** Each contributing project file's own settings, in merge order (later wins). */
+	fileLayers: FileLayer[];
 	fileSettings: RawSettings;
 	shellPathSource: string | undefined;
 	/** Discovered project files to invalidate and watch, including filtered or temporarily missing sources. */
@@ -168,6 +174,8 @@ const CONFIG_POLL_INTERVAL_MS = 500;
 
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
+	/** Each overlay file's own settings, in merge order (later wins). */
+	files: FileLayer[];
 	shellPathSource: string | undefined;
 };
 
@@ -321,6 +329,33 @@ interface OwnLayers {
 	overrides: RawSettings;
 }
 
+/** One layer's own value of a setting and the source it was loaded from ({@link Settings} load errors). */
+interface ContributingLayer {
+	value: unknown;
+	source: string;
+	/** The runtime-override layer. */
+	runtime: boolean;
+	/** The layer's files in merge order, to name the one at fault; empty when not known. */
+	files: readonly FileLayer[];
+}
+
+/**
+ * Where each own layer of a {@link Settings} candidate was read from, to name the file at fault in
+ * a load error: a label per layer, and the overlay and project files that layer merges when known.
+ */
+interface LayerSources {
+	global: string;
+	configOverlay: string;
+	overlayFiles: readonly FileLayer[];
+	project: string;
+	projectFiles: readonly FileLayer[];
+}
+
+/** Label naming a project layer read from `sourcePaths` (live, reload and re-scope agree on it). */
+function projectSourceLabel(sourcePaths: readonly string[]): string {
+	return sourcePaths.join(", ") || "project settings";
+}
+
 /** The layers an {@link Settings.overlay} child writes locally; see {@link Settings.overlayLayers}. */
 export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides"> & { derived: boolean }>;
 
@@ -383,6 +418,8 @@ interface LayerRefresh {
 	layer: "global" | "project" | "configOverlay";
 	settings: RawSettings;
 	source: string;
+	/** Where the re-read layer came from, replacing the live layer's {@link LayerSources} entries. */
+	sources: Partial<LayerSources>;
 	commit(): void;
 }
 
@@ -762,10 +799,14 @@ export class Settings {
 	#projectShellPathSource: string | undefined;
 	/** Project files to invalidate and watch, including filtered or temporarily missing sources. */
 	#projectSourcePaths: string[] = [];
+	/** Each contributing project file's own settings of the last project read, for load errors. */
+	#projectFileLayers: FileLayer[] = [];
 	/** Capability warnings already surfaced for the current project scope; reloads stay quiet. */
 	#projectSettingsWarningsSeen = new Set<string>();
 	/** Explicit config overlay that most recently supplied shellPath. */
 	#overlayShellPathSource: string | undefined;
+	/** Each overlay file's own settings of the last overlay read, for load errors. */
+	#overlayFileLayers: FileLayer[] = [];
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
 	/** Settings whose runtime override is a soft-pinned default ({@link pinDefaultValue}). */
@@ -1558,7 +1599,8 @@ export class Settings {
 	 * project layer re-read for `cwd` (persisted instances). An {@link overlay} clones its parent for
 	 * `cwd` and re-applies its own layers on top, so inherited values carry over.
 	 *
-	 * @throws Error when a configured value fails its definition's `validate` check.
+	 * @throws ConfigError when a value a layer configures fails its definition's checks (`validate`,
+	 * or `strict`); see {@link #validateAll}.
 	 */
 	async cloneForCwd(cwd: string): Promise<Settings> {
 		if (this.#mirror) return this.#mirror.cloneForCwd(cwd);
@@ -1608,8 +1650,9 @@ export class Settings {
 	 * readers never observe a partially refreshed or invalid configuration.
 	 * Concurrent callers share the same reload.
 	 *
-	 * @throws Error when a source fails to load or a value fails its definition's
-	 * `validate` check; the previous layers stay in effect.
+	 * @throws Error when a source fails to load; ConfigError when a value a layer configures fails its
+	 * definition's checks (`validate`, or `strict`), see {@link #validateAll}. The previous layers
+	 * stay in effect.
 	 */
 	async reloadFromDisk(options?: { includeParents?: boolean }): Promise<void> {
 		if (this.#mirror) {
@@ -1679,23 +1722,27 @@ export class Settings {
 				const quarantined = this.#configPath !== null && this.#quarantinedYamlTargets.has(this.#configPath);
 				const settings = globalResult.value.settings ?? (quarantined ? structuredClone(this.#global) : {});
 				this.#applyPendingGlobalWrites(settings);
+				const source = configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
 				refreshed.push({
 					layer: "global",
 					settings,
-					source: configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]),
+					source,
+					sources: { global: source },
 					commit: () => {
 						this.#configPath = configPath;
 					},
 				});
 			}
 			if (overlayResult.status === "fulfilled") {
-				const { settings, shellPathSource } = overlayResult.value;
+				const { settings, shellPathSource, files } = overlayResult.value;
 				refreshed.push({
 					layer: "configOverlay",
 					settings,
 					source: this.#configFiles.join(", "),
+					sources: { overlayFiles: files },
 					commit: () => {
 						this.#overlayShellPathSource = shellPathSource;
+						this.#overlayFileLayers = files;
 					},
 				});
 			}
@@ -1703,12 +1750,15 @@ export class Settings {
 			// Accept global and overlay edits before resolving the project read: a rejected layer
 			// cannot disable a provider in the project layer. Strict mode validates the final set.
 			let layers = this.#ownLayers();
+			let sources = this.#layerSources();
 			const adopted: LayerRefresh[] = [];
 			for (const refresh of refreshed) {
 				if (keepLastGood) this.#keepReadableValues(refresh.settings, layers[refresh.layer], refresh.source);
 				const trial: OwnLayers = { ...layers, [refresh.layer]: refresh.settings };
-				if (keepLastGood && !this.#acceptsLayers(trial, refresh.source)) continue;
+				const trialSources = { ...sources, ...refresh.sources };
+				if (keepLastGood && !this.#acceptsLayers(trial, trialSources, refresh.source)) continue;
 				layers = trial;
+				sources = trialSources;
 				adopted.push(refresh);
 			}
 			if (projectResult.status === "fulfilled") {
@@ -1716,18 +1766,25 @@ export class Settings {
 				this.#applyPendingProjectWrites(project.settings);
 				const source = project.sourcePaths.join(", ") || getProjectAgentDir(this.#cwd);
 				const trial: OwnLayers = { ...layers, project: project.settings };
-				if (!keepLastGood || this.#acceptsLayers(trial, source)) {
+				const projectSources = {
+					project: projectSourceLabel(project.sourcePaths),
+					projectFiles: project.fileLayers,
+				};
+				const trialSources = { ...sources, ...projectSources };
+				if (!keepLastGood || this.#acceptsLayers(trial, trialSources, source)) {
 					layers = trial;
+					sources = trialSources;
 					adopted.push({
 						layer: "project",
 						settings: project.settings,
 						source,
+						sources: projectSources,
 						commit: () => this.#commitProjectRead(project),
 					});
 				}
 			}
 			const settled = this.#settlePins(layers);
-			if (!keepLastGood) this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
+			if (!keepLastGood) this.#validateAll(layers, this.#cwd, sources);
 
 			const previous = this.#snapshot();
 			for (const refresh of adopted) refresh.commit();
@@ -1748,7 +1805,8 @@ export class Settings {
 	 * old value was readable. Reading an unreadable value falls back to the default, so a config
 	 * written for another version would otherwise move a running session to a value neither config
 	 * chose — and rebuild every tool description and prompt derived from it, losing the session's
-	 * prompt cache. The file keeps the edit; instances loading it fresh read it as before.
+	 * prompt cache. The file keeps the edit; instances loading it fresh apply their own checks (a
+	 * strict setting fails the load).
 	 */
 	#keepReadableValues(fresh: RawSettings, live: RawSettings, source: string): void {
 		for (const setting of allSettings()) {
@@ -1767,14 +1825,15 @@ export class Settings {
 	}
 
 	/**
-	 * Whether `layers`, as they would be committed (soft pins they configure dropped), pass every
-	 * definition's `validate` check; otherwise logs that the last good config stays, naming `source`.
+	 * Whether `layers`, as they would be committed (soft pins they configure dropped), pass
+	 * {@link #validateAll} (errors naming `sources`); otherwise logs that the last good config stays,
+	 * naming `source`.
 	 */
-	#acceptsLayers(layers: OwnLayers, source: string): boolean {
+	#acceptsLayers(layers: OwnLayers, sources: LayerSources, source: string): boolean {
 		const committed = { ...layers };
 		this.#settlePins(committed);
 		try {
-			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(committed)), this.#cwd);
+			this.#validateAll(committed, this.#cwd, sources);
 			return true;
 		} catch (error) {
 			logger.warn("Settings: keeping last good config; on-disk change is invalid", {
@@ -1798,8 +1857,9 @@ export class Settings {
 	 * directory mid-run (`/move`, cross-project resume). No-op when `cwd` is
 	 * already the current scope. Serialized with disk reloads.
 	 *
-	 * @throws Error when a value configured for the new scope fails its definition's
-	 * `validate` check; the instance then stays on its previous scope.
+	 * @throws ConfigError when a value a layer configures for the new scope fails its definition's
+	 * checks (`validate`, or `strict`), see {@link #validateAll}; the instance then stays on its
+	 * previous scope.
 	 */
 	async reloadForCwd(cwd: string): Promise<void> {
 		if (this.#mirror) return this.#forwardRefresh(this.#mirror, { op: "reloadForCwd", cwd });
@@ -1826,7 +1886,12 @@ export class Settings {
 			const project = read ? this.#resolveProjectRead(read, layers) : undefined;
 			const candidate: OwnLayers = { ...layers, project: project?.settings ?? this.#project };
 			const settledPins = this.#settlePins(candidate);
-			this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(candidate)), normalized);
+			const sources = this.#layerSources();
+			if (project) {
+				sources.project = projectSourceLabel(project.sourcePaths);
+				sources.projectFiles = project.fileLayers;
+			}
+			this.#validateAll(candidate, normalized, sources);
 
 			const previous = this.#snapshot();
 			this.#cwd = normalized;
@@ -2862,6 +2927,7 @@ export class Settings {
 		}
 		return {
 			settings: this.#migrateRawSettings(project.settings, read.quarantineInvalid),
+			fileLayers: project.fileLayers,
 			fileSettings: read.fileSettings,
 			shellPathSource: project.shellPathSource,
 			sourcePaths: [
@@ -2878,19 +2944,20 @@ export class Settings {
 	#mergeProjectItems(
 		items: readonly SettingsCapabilityItem[],
 		nativeModelRoles: unknown,
-	): { settings: RawSettings; sourcePaths: string[]; shellPathSource: string | undefined } {
+	): { settings: RawSettings; sourcePaths: string[]; fileLayers: FileLayer[]; shellPathSource: string | undefined } {
 		let settings: RawSettings = {};
 		const sourcePaths: string[] = [];
+		const fileLayers: FileLayer[] = [];
 		let shellPathSource: string | undefined;
 		for (const item of items) {
-			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path), {
-				arrays: "combine",
-			});
+			const own = dropSettingsGroupShadows(item.data as RawSettings, item.path);
+			settings = this.#deepMerge(settings, own, { arrays: "combine" });
 			sourcePaths.push(item.path);
+			fileLayers.push({ path: item.path, settings: own });
 			if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 		}
 		if (nativeModelRoles !== undefined) settings = this.#deepMerge(settings, { modelRoles: nativeModelRoles });
-		return { settings, sourcePaths, shellPathSource };
+		return { settings, sourcePaths, fileLayers, shellPathSource };
 	}
 
 	/** Provider ids `disabledProviders` resolves to for `cwd` when `layers` are merged (over the overlay parent). */
@@ -2914,23 +2981,27 @@ export class Settings {
 		this.#projectFileSettings = result.fileSettings;
 		this.#projectShellPathSource = result.shellPathSource;
 		this.#projectSourcePaths = result.sourcePaths;
+		this.#projectFileLayers = result.fileLayers;
 		this.#projectSettingsWarningsSeen = result.warningsSeen;
 	}
 
 	async #readConfigOverlays(captureLegacyChangelogVersion = true): Promise<ConfigOverlayReadResult> {
 		let shellPathSource: string | undefined;
 		let settings: RawSettings = {};
+		const files: FileLayer[] = [];
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
 			settings = this.#deepMerge(settings, overlay, { arrays: "combine" });
+			files.push({ path: filePath, settings: overlay });
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
-		return { settings, shellPathSource };
+		return { settings, files, shellPathSource };
 	}
 
 	async #loadConfigOverlays(): Promise<RawSettings> {
 		const result = await this.#readConfigOverlays();
 		this.#overlayShellPathSource = result.shellPathSource;
+		this.#overlayFileLayers = result.files;
 		return result.settings;
 	}
 
@@ -4252,7 +4323,8 @@ export class Settings {
 	#adoptSavedGlobal(saved: RawSettings, source: string): void {
 		this.#applyPendingGlobalWrites(saved);
 		this.#keepReadableValues(saved, this.#global, source);
-		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
+		const sources = { ...this.#layerSources(), global: source };
+		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, sources, source)) return;
 		const previous = this.#snapshot();
 		this.#global = saved;
 		this.#rebuildMerged();
@@ -4390,12 +4462,169 @@ export class Settings {
 		return this.#parent ? this.#deepMerge(this.#parent.#mergedView(), own) : own;
 	}
 
+	/** Where each own layer of the live instance was loaded from ({@link LayerSources}). */
+	#layerSources(): LayerSources {
+		return {
+			global: this.#configPath ?? "global settings",
+			configOverlay: this.#configFiles.join(", ") || "config overlay",
+			overlayFiles: this.#overlayFileLayers,
+			project: projectSourceLabel(this.#projectSourcePaths),
+			projectFiles: this.#projectFileLayers,
+		};
+	}
+
 	/**
-	 * Checks every value configured in `merged` (path-scoped entries resolved for `cwd`) against its
-	 * definition: `validate` throws, unknown `items` warn. Defaults to the live layers.
+	 * Checks every value `layers` configure (path-scoped entries resolved for `cwd`) against its
+	 * definition; defaults to the live layers and their `sources`. A value that fails is raised as a
+	 * {@link ConfigError} naming the file that set it, so the failure says what to fix. A non-record
+	 * setting declaring `validate` or `strict` is checked in each committed layer that sets it (runtime
+	 * overrides, the merged `--config` overlays, the merged project layer, the global config), highest
+	 * first, so a bad value a higher layer masks still fails rather than surfacing later as a silent
+	 * default. Then the merged value is checked: `validate` and strict checks throw, unknown `items` of
+	 * other settings warn. Every load, reload, re-scope and save-adopt validates through here.
 	 */
-	#validateAll(merged: RawSettings = this.#mergedView(), cwd: string = this.#cwd): void {
-		for (const setting of allSettings()) setting.checkConfigured(this, configuredValue(merged, setting, cwd));
+	#validateAll(layers?: OwnLayers, cwd: string = this.#cwd, sources: LayerSources = this.#layerSources()): void {
+		const own = layers ?? this.#ownLayers();
+		const merged = layers ? this.#mergeOverParent(this.#mergeOwnLayers(layers)) : this.#mergedView();
+		// The project layer as it merges, computed once for every setting's committed-layer lookup.
+		const committedOwn: OwnLayers = { ...own, project: projectLayerForMerge(own.project) };
+		for (const setting of allSettings()) {
+			const stage = `Validate(${setting.id})`;
+			const { definition } = setting;
+			if (definition.type !== "record" && (definition.validate || definition.strict)) {
+				for (const layer of this.#committedLayers(setting, committedOwn, cwd, sources)) {
+					try {
+						setting.assertConfigured(layer.value);
+					} catch (err) {
+						throw new ConfigError(this.#failingSourceOf(setting, layer, cwd), undefined, { err, stage });
+					}
+				}
+			}
+			try {
+				setting.checkConfigured(this, configuredValue(merged, setting, cwd));
+			} catch (err) {
+				const committed = this.#committedLayers(setting, committedOwn, cwd, sources);
+				const source = this.#loadedSourceOf(setting, this.#perFileLayers(setting, committed, cwd));
+				throw new ConfigError(source, undefined, { err, stage });
+			}
+		}
+	}
+
+	/**
+	 * The source naming committed `layer`, whose value of `setting` fails its checks: the layer's files
+	 * whose own value fails, highest first; the layer's label when none does alone (or none is known).
+	 */
+	#failingSourceOf(setting: AnySetting, layer: ContributingLayer, cwd: string): string {
+		const failing: string[] = [];
+		for (const file of [...layer.files].reverse()) {
+			const value = configuredValue(file.settings, setting, cwd);
+			if (value === undefined) continue;
+			try {
+				setting.assertConfigured(value);
+			} catch {
+				failing.push(file.path);
+			}
+		}
+		return failing.length > 0 ? failing.join(", ") : layer.source;
+	}
+
+	/**
+	 * `committed` ({@link #committedLayers}) with each layer split into its files that set `setting`,
+	 * highest first, so only those files are named; a layer stands for itself when no file does.
+	 */
+	#perFileLayers(setting: AnySetting, committed: readonly ContributingLayer[], cwd: string): ContributingLayer[] {
+		const layers: ContributingLayer[] = [];
+		for (const layer of committed) {
+			let found = false;
+			// Files merge in order, so the last one sets the highest value.
+			for (const file of [...layer.files].reverse()) {
+				const value = configuredValue(file.settings, setting, cwd);
+				if (value === undefined) continue;
+				layers.push({ value, source: file.path, runtime: false, files: [] });
+				found = true;
+			}
+			if (!found) layers.push(layer);
+		}
+		return layers;
+	}
+
+	/**
+	 * Where a setting's effective value was loaded from, for load errors, given its `layers`
+	 * ({@link #perFileLayers}). Only what the load recorded is named: a source the load did not
+	 * record is named by its layer, never by a guessed path.
+	 *
+	 * A setting whose layers merge (a record deep-merges per key, an array declaring `merge` combines)
+	 * is supplied by several layers, so the highest one is not necessarily the one at fault: the layers
+	 * whose own contribution fails the setting's checks are named. A record entry a higher layer
+	 * overrides is not the lower layer's contribution. When no layer fails alone (only the merged value
+	 * does) every contributing layer is named.
+	 */
+	#loadedSourceOf(setting: AnySetting, layers: ContributingLayer[]): string {
+		if (layers.length === 0) return "default settings";
+		const top = layers[0];
+		const merges = Array.isArray(top.value)
+			? setting.definition.type === "array" && setting.definition.merge !== undefined
+			: isRecord(top.value);
+		if (!merges) return top.source;
+		// A runtime array replaces the lower layers wholesale; lower layers contribute nothing to it.
+		let effective = Array.isArray(top.value) && top.runtime ? [top] : layers;
+		if (isRecord(top.value)) {
+			// Highest first: what a layer contributes is its value minus the entries higher layers set.
+			let higher: RawSettings = {};
+			effective = [];
+			for (const layer of layers) {
+				// A non-record value replaces every layer below it.
+				if (!isRecord(layer.value)) break;
+				const remainder = this.#withoutEntriesOf(layer.value, higher);
+				higher = this.#deepMerge(layer.value, higher);
+				if (Object.keys(remainder).length > 0) effective.push({ ...layer, value: remainder });
+			}
+		}
+		const failing = effective.filter(layer => {
+			try {
+				setting.assertConfigured(layer.value);
+				return false;
+			} catch {
+				return true;
+			}
+		});
+		const named = failing.length > 0 ? failing : effective;
+		return [...new Set(named.map(layer => layer.source))].join(", ");
+	}
+
+	/** `value` without the entries `higher` sets: a record entry `higher` replaces, or one it merges over, is not `value`'s. */
+	#withoutEntriesOf(value: RawSettings, higher: RawSettings): RawSettings {
+		const remainder: RawSettings = {};
+		for (const key of Object.keys(value)) {
+			const own = value[key];
+			if (!Object.hasOwn(higher, key)) {
+				setOwn(remainder, key, own);
+				continue;
+			}
+			const over = higher[key];
+			if (!isRecord(own) || !isRecord(over)) continue;
+			const nested = this.#withoutEntriesOf(own, over);
+			if (Object.keys(nested).length > 0) setOwn(remainder, key, nested);
+		}
+		return remainder;
+	}
+
+	/**
+	 * Committed layers of `own` that set `setting`, highest precedence first: the layer's own value
+	 * with path-scoped entries resolved for `cwd`, its label and its files from `sources`. `own.project`
+	 * must already be in merge form ({@link projectLayerForMerge}); the caller applies it.
+	 */
+	#committedLayers(setting: AnySetting, own: OwnLayers, cwd: string, sources: LayerSources): ContributingLayer[] {
+		const layers: ContributingLayer[] = [];
+		const add = (layer: RawSettings, source: string, files: readonly FileLayer[], runtime = false): void => {
+			const value = configuredValue(layer, setting, cwd);
+			if (value !== undefined) layers.push({ value, source, runtime, files });
+		};
+		add(own.overrides, "runtime override", [], true);
+		add(own.configOverlay, sources.configOverlay, sources.overlayFiles);
+		add(own.project, sources.project, sources.projectFiles);
+		add(own.global, sources.global, []);
+		return layers;
 	}
 
 	/**

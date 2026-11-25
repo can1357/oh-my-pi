@@ -4,7 +4,7 @@
 //! (`utils/git.ts`, `utils/jj.ts`): shapes consumed by the coding agent's
 //! commit pipeline, status line, review flow, and worktree isolation machinery.
 
-use std::{path::PathBuf, time::Duration};
+use std::{ffi::OsString, io, path::PathBuf, sync::Arc, time::Duration};
 
 /// Which VCS backs a working directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +269,57 @@ pub struct CommitOptions {
 	pub expected_head: Option<String>,
 	/// Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`).
 	pub no_verify:     bool,
+	/// Start each commit hook through this runner instead of spawning it
+	/// directly. Which hook runs, when, and what its exit means are unchanged.
+	pub hook_runner:   Option<HookRunner>,
+}
+
+/// One commit hook a [`HookRunner`] starts in place of the native spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookRun {
+	/// Hook name: `pre-commit`, `commit-msg` or `post-commit`.
+	pub name: String,
+	/// Program and arguments: the hook file itself, or `git hook run …` when
+	/// git must run it (config-defined hooks, Windows).
+	pub argv: Vec<OsString>,
+	/// Working directory: the checkout root.
+	pub cwd:  PathBuf,
+	/// Variables set over the inherited environment (`GIT_DIR`,
+	/// `GIT_WORK_TREE`, `GIT_INDEX_FILE`, …).
+	pub env:  Vec<(String, OsString)>,
+}
+
+/// How a hook started by a [`HookRunner`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookExit {
+	/// Exit code; anything but 0 is a failure (a signal death reports 1).
+	pub exit_code: i32,
+	/// The hook's stdout and stderr, interleaved as written (`git commit`
+	/// sends a hook's stdout to its stderr).
+	pub output:    String,
+}
+
+/// Runs a commit hook to completion with its stdin closed; an `Err` means it
+/// could not be started.
+#[derive(Clone)]
+pub struct HookRunner(Arc<dyn Fn(HookRun) -> io::Result<HookExit> + Send + Sync>);
+
+impl HookRunner {
+	/// Wrap `run`.
+	pub fn new(run: impl Fn(HookRun) -> io::Result<HookExit> + Send + Sync + 'static) -> Self {
+		Self(Arc::new(run))
+	}
+
+	/// Start `hook` and wait for it.
+	pub fn run(&self, hook: HookRun) -> io::Result<HookExit> {
+		(self.0)(hook)
+	}
+}
+
+impl std::fmt::Debug for HookRunner {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("HookRunner")
+	}
 }
 
 /// Which hunks of a file a selection covers.

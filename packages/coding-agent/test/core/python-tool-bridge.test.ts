@@ -1,4 +1,6 @@
 import { afterAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isEvalTimeoutControlEvent } from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
 import {
@@ -8,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { runPrelude } from "../eval/py/run-prelude";
 
@@ -386,5 +388,128 @@ else:
 			process.off("unhandledRejection", onUnhandled);
 			await disposePyToolBridge();
 		}
+	});
+
+	describe.skipIf(process.platform === "win32")("Unix-socket bridge restart", () => {
+		async function postUnix(info: { url: string; token: string }, body: Record<string, unknown>): Promise<unknown> {
+			const res = await fetch("http://localhost/v1/tool", {
+				unix: info.url.slice("unix:".length),
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: `Bearer ${info.token}` },
+				body: JSON.stringify(body),
+			});
+			return await res.json();
+		}
+
+		function textSession(name: string, text: string): ToolSession {
+			return makeSession(new Map([[name, makeFakeTool(name, [], { content: [{ type: "text", text }] })]]));
+		}
+
+		it("replaces a bridge whose socket file was deleted, keeping its path and token", async () => {
+			using dir = TempDir.createSync("@omp-py-bridge-sock-");
+			const first = await ensurePyToolBridge(dir.path());
+			const socketPath = first.url.slice("unix:".length);
+			// A contained `rm -rf "$TMPDIR"/*`: the socket directory is writable from inside the sandbox.
+			fs.rmSync(socketPath);
+			const unregister = registerPyToolBridge("unix-session", "run-unix", {
+				toolSession: textSession("read", "after restart"),
+			});
+			try {
+				const info = await ensurePyToolBridge(dir.path());
+				expect(info).not.toBe(first);
+				expect(info.url).toBe(first.url);
+				expect(info.token).toBe(first.token);
+				expect(fs.lstatSync(socketPath).isSocket()).toBe(true);
+				expect(await postUnix(info, { session: "unix-session", run: "run-unix", name: "read", args: {} })).toEqual({
+					ok: true,
+					value: "after restart",
+				});
+				// An intact socket keeps the running server.
+				expect(await ensurePyToolBridge(dir.path())).toBe(info);
+			} finally {
+				unregister();
+				await disposePyToolBridge();
+			}
+		});
+
+		it("gives concurrent callers after a socket deletion one replacement", async () => {
+			using dir = TempDir.createSync("@omp-py-bridge-sock-");
+			const first = await ensurePyToolBridge(dir.path());
+			fs.rmSync(first.url.slice("unix:".length));
+			const unregister = registerPyToolBridge("unix-concurrent", "run-concurrent", {
+				toolSession: textSession("read", "shared"),
+			});
+			try {
+				const [a, b] = await Promise.all([ensurePyToolBridge(dir.path()), ensurePyToolBridge(dir.path())]);
+				expect(a).toBe(b);
+				expect(a).not.toBe(first);
+				expect(
+					await postUnix(a, { session: "unix-concurrent", run: "run-concurrent", name: "read", args: {} }),
+				).toEqual({ ok: true, value: "shared" });
+			} finally {
+				unregister();
+				await disposePyToolBridge();
+			}
+		});
+
+		it("recovers when a directory replaced the socket file", async () => {
+			using dir = TempDir.createSync("@omp-py-bridge-sock-");
+			const first = await ensurePyToolBridge(dir.path());
+			const socketPath = first.url.slice("unix:".length);
+			fs.rmSync(socketPath);
+			fs.mkdirSync(path.join(socketPath, "inner"), { recursive: true });
+			const unregister = registerPyToolBridge("unix-dir", "run-dir", {
+				toolSession: textSession("read", "recovered"),
+			});
+			try {
+				const info = await ensurePyToolBridge(dir.path());
+				expect(fs.lstatSync(socketPath).isSocket()).toBe(true);
+				expect(await postUnix(info, { session: "unix-dir", run: "run-dir", name: "read", args: {} })).toEqual({
+					ok: true,
+					value: "recovered",
+				});
+			} finally {
+				unregister();
+				await disposePyToolBridge();
+			}
+		});
+
+		it("lets a call in flight on the replaced bridge finish", async () => {
+			using dir = TempDir.createSync("@omp-py-bridge-sock-");
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const slow = {
+				name: "slow",
+				label: "slow",
+				description: "slow",
+				parameters: { type: "object" },
+				async execute(): Promise<AgentToolResult> {
+					started.resolve();
+					await release.promise;
+					return { content: [{ type: "text", text: "done" }] };
+				},
+			} as unknown as AgentTool;
+			const unregister = registerPyToolBridge("unix-inflight", "run-inflight", {
+				toolSession: makeSession(new Map([["slow", slow]])),
+			});
+			try {
+				const first = await ensurePyToolBridge(dir.path());
+				const inFlight = postUnix(first, { session: "unix-inflight", run: "run-inflight", name: "slow", args: {} });
+				await started.promise;
+				fs.rmSync(first.url.slice("unix:".length));
+				const info = await ensurePyToolBridge(dir.path());
+				release.resolve();
+				expect(await inFlight).toEqual({ ok: true, value: "done" });
+				// Retiring the old server leaves the replacement's socket in place.
+				expect(fs.lstatSync(first.url.slice("unix:".length)).isSocket()).toBe(true);
+				expect(
+					await postUnix(info, { session: "unix-inflight", run: "run-inflight", name: "slow", args: {} }),
+				).toEqual({ ok: true, value: "done" });
+			} finally {
+				release.resolve();
+				unregister();
+				await disposePyToolBridge();
+			}
+		});
 	});
 });

@@ -1,0 +1,888 @@
+/**
+ * Parent side of the sandbox host ({@link ./host}): {@link SandboxedShell} and
+ * {@link SandboxedPtySession} stand in for the native `Shell` / `PtySession` and forward every
+ * call to an `omp __omp_sandbox_host` process running inside the MXC container.
+ *
+ * Shell hosts are pooled per (agent session, policy fingerprint, extra readable and writable paths).
+ * A host that fails to start, dies, or stops answering is an error for the calls on it; nothing
+ * here ever falls back to an unsandboxed shell.
+ */
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+	type GrepMatch,
+	type HeldProcess,
+	type PtyArgvStartOptions,
+	type PtyRunResult,
+	type ShellCommands,
+	type ShellFilesystem,
+	type ShellFsResponse,
+	type ShellRunOptions,
+	type ShellRunResult,
+	sandboxSupport,
+} from "@oh-my-pi/pi-natives";
+import { errorMessage, logger, settleWithin } from "@oh-my-pi/pi-utils";
+import { SANDBOX_HOST_ARG } from "../cli/worker-selectors";
+import { resolveCliEntryCmd, StderrTail, workerEnvFromParent } from "../subprocess/worker-client";
+import { quotePosixArgv } from "../utils/shell-quote";
+import {
+	decodeHostMessage,
+	encodeHostMessage,
+	type HostCommandOutcome,
+	type HostEvent,
+	type HostPtyStart,
+	type HostRequest,
+	type HostResults,
+	type HostRunEgress,
+	type HostShellOptions,
+	MAX_HOST_LINE_BYTES,
+	readHostLines,
+	SANDBOX_HOST_PROTOCOL_VERSION,
+} from "./host-protocol";
+import { containedProcessEnv } from "./env";
+import { isWithin } from "./platform";
+import { killDescendants } from "./process";
+import { SandboxRuntime } from "./runtime";
+import type { SandboxChild, SandboxNetworkMode } from "./types";
+
+/** How long a host may take to announce `ready`. */
+const HOST_START_TIMEOUT_MS = 30_000;
+/**
+ * How long an aborted run may take to settle before its host is treated as wedged and killed.
+ * Native cancellation itself takes up to ~2s.
+ */
+const ABORT_SETTLE_GRACE_MS = 5_000;
+/** Host stderr kept for the error of a host that died. */
+const STDERR_TAIL_BYTES = 4 * 1024;
+
+/** argv that starts the sandbox host under the running distribution (source, npm bundle, binary). */
+export function sandboxHostArgv(): string[] {
+	return [...resolveCliEntryCmd(), SANDBOX_HOST_ARG];
+}
+
+/** Live trace of a sandboxed run: the latest `RunTrace` snapshot the host sent. */
+export class SandboxRunTrace {
+	#version = -1;
+	#snapshot = "";
+
+	version(): number {
+		return this.#version;
+	}
+
+	snapshot(): string {
+		return this.#snapshot;
+	}
+
+	/** @internal */
+	update(snapshot: string): void {
+		this.#snapshot = snapshot;
+		this.#version++;
+	}
+}
+
+/** Per-run callbacks the connection routes host events to. */
+interface RunRoutes {
+	onChunk?: (chunk: string) => void;
+	trace?: SandboxRunTrace;
+	filesystem?: ShellFilesystem;
+	commands?: ShellCommands;
+	onPids?: (pids: number[]) => void;
+	onMatches?: (matches: GrepMatch[]) => void;
+	/** Aborts the request in the host (`call.abort`); its reply then settles it. */
+	signal?: AbortSignal;
+}
+
+/** Numeric fields each host event must carry; a reply carries `id`. */
+const HOST_EVENT_FIELDS: Record<Exclude<HostEvent, { ok: boolean }>["ev"], readonly string[]> = {
+	ready: ["version"],
+	"shell.chunk": ["id"],
+	"shell.trace": ["id"],
+	"shell.pids": ["id"],
+	"fs.request": ["id", "req"],
+	"cmd.request": ["id", "req"],
+	"search.matches": ["id"],
+	"pty.data": ["pty"],
+	"pty.exit": ["pty"],
+	log: [],
+};
+
+/** Shallow shape check: a malformed event must fail the connection, not throw deep in dispatch. */
+function isHostEvent(value: unknown): value is HostEvent {
+	if (typeof value !== "object" || value === null) return false;
+	const record = value as Record<string, unknown>;
+	if ("ok" in record) return typeof record.id === "number" && typeof record.ok === "boolean";
+	const fields =
+		typeof record.ev === "string" ? HOST_EVENT_FIELDS[record.ev as keyof typeof HOST_EVENT_FIELDS] : undefined;
+	return fields !== undefined && fields.every(field => typeof record[field] === "number");
+}
+
+interface PendingRequest {
+	resolve(value: unknown): void;
+	reject(error: Error): void;
+	run?: RunRoutes;
+}
+
+interface PtyRoutes {
+	onData(data: string): void;
+	onExit(result: PtyRunResult, error?: string): void;
+	onFail(error: Error): void;
+}
+
+type Notification = Extract<HostRequest, { op: "pty.write" | "pty.resize" | "fs.reply" | "cmd.reply" | "call.abort" }>;
+/** A request awaiting a reply, before the connection numbers it. */
+type HostCall =
+	Exclude<HostRequest, Notification> extends infer R ? (R extends unknown ? Omit<R, "id"> : never) : never;
+
+/** One JSONL connection to a running host process. */
+export class SandboxHostConnection {
+	readonly #child: SandboxChild;
+	readonly #pending = new Map<number, PendingRequest>();
+	readonly #ptys = new Map<number, PtyRoutes>();
+	readonly #ready = Promise.withResolvers<void>();
+	#nextId = 0;
+	#failure: Error | undefined;
+	readonly #stderrTail = new StderrTail(STDERR_TAIL_BYTES);
+	#closeWhenIdle = false;
+	readonly #exitListeners = new Set<() => void>();
+
+	private constructor(child: SandboxChild) {
+		this.#child = child;
+	}
+
+	/** Attaches to `child` (a host process) and resolves once it announced a compatible `ready`. */
+	static async connect(child: SandboxChild): Promise<SandboxHostConnection> {
+		const connection = new SandboxHostConnection(child);
+		connection.#start();
+		const timer = setTimeout(
+			() => connection.kill(`Sandbox host did not start within ${HOST_START_TIMEOUT_MS / 1000}s`),
+			HOST_START_TIMEOUT_MS,
+		);
+		try {
+			await connection.#ready.promise;
+		} finally {
+			clearTimeout(timer);
+		}
+		return connection;
+	}
+
+	get pid(): number {
+		return this.#child.pid;
+	}
+
+	/** True once the host died or was shut down; every later request rejects. */
+	get closed(): boolean {
+		return this.#failure !== undefined;
+	}
+
+	/** Settles with the host's exit code once its process is gone. */
+	get exited(): Promise<number> {
+		return this.#child.exited;
+	}
+
+	/** Runs `listener` once the connection fails or closes. */
+	onExit(listener: () => void): void {
+		if (this.#failure) listener();
+		else this.#exitListeners.add(listener);
+	}
+
+	request<M extends HostCall>(message: M, run?: RunRoutes): Promise<HostResults[M["op"]]> {
+		if (this.#failure) return Promise.reject(this.#failure);
+		const signal = run?.signal;
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		const id = ++this.#nextId;
+		const call: HostCall = message;
+		const line = encodeHostMessage({ ...call, id });
+		// The host drops (and exits on) a line over the cap; refuse it here so the host survives.
+		if (Buffer.byteLength(line) > MAX_HOST_LINE_BYTES) {
+			const error = new Error(`Sandbox host request too large (${message.op}, over ${MAX_HOST_LINE_BYTES} bytes)`);
+			return Promise.reject(Object.assign(error, { code: "E2BIG" }));
+		}
+		const { promise, resolve, reject } = Promise.withResolvers<HostResults[M["op"]]>();
+		this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, run });
+		this.#write(line);
+		if (signal) {
+			const onAbort = (): void => this.notify({ op: "call.abort", target: id });
+			signal.addEventListener("abort", onAbort, { once: true });
+			void promise.then(
+				() => signal.removeEventListener("abort", onAbort),
+				() => signal.removeEventListener("abort", onAbort),
+			);
+		}
+		return promise;
+	}
+
+	notify(message: Notification): void {
+		if (!this.#failure) this.#write(encodeHostMessage(message));
+	}
+
+	/** Routes `pty.data`/`pty.exit` of `pty` until it exits. */
+	attachPty(pty: number, routes: PtyRoutes): void {
+		if (this.#failure) {
+			routes.onFail(this.#failure);
+			return;
+		}
+		this.#ptys.set(pty, routes);
+	}
+
+	/** Kills the host and everything it started now; in-flight calls reject with `reason`. */
+	kill(reason: string): void {
+		this.#fail(new Error(reason));
+		this.#killDescendants();
+		this.#child.kill();
+	}
+
+	/** Lets the host exit (stdin EOF) once no call is in flight; its background jobs end with it. */
+	retire(): void {
+		this.#closeWhenIdle = true;
+		this.#closeIfIdle();
+	}
+
+	/**
+	 * Ends the processes the host's shells started. They `setsid` into their own sessions, so neither
+	 * the host's exit nor the backend's kill of the host reaches them; they are still its descendants.
+	 */
+	#killDescendants(): void {
+		if (this.#child.exitCode !== null || this.#child.pid <= 0) return;
+		killDescendants(this.#child.pid);
+	}
+
+	#start(): void {
+		void this.#readStdout();
+		const stderrDone = this.#readStderr();
+		void this.#child.exited.then(async code => {
+			// Let the last stderr lines (the reason it died) land first.
+			await settleWithin(stderrDone, 200);
+			this.#fail(new Error(`Sandbox host exited unexpectedly (exit code ${code})${this.#stderrTail.suffix()}`));
+		});
+	}
+
+	/** Sends one encoded protocol line. */
+	#write(line: string): void {
+		try {
+			this.#child.stdin.write(line);
+			this.#child.stdin.flush();
+		} catch (error) {
+			this.kill(`Sandbox host stdin failed: ${errorMessage(error)}`);
+		}
+	}
+
+	#fail(error: Error): void {
+		if (this.#failure) return;
+		this.#failure = error;
+		this.#ready.reject(error);
+		// Settle `connect()`'s await without an unhandled rejection when nobody awaits `ready` anymore.
+		this.#ready.promise.catch(() => {});
+		for (const pending of this.#pending.values()) pending.reject(error);
+		this.#pending.clear();
+		for (const pty of this.#ptys.values()) pty.onFail(error);
+		this.#ptys.clear();
+		for (const listener of this.#exitListeners) listener();
+		this.#exitListeners.clear();
+	}
+
+	#closeIfIdle(): void {
+		if (!this.#closeWhenIdle || this.#pending.size > 0 || this.#ptys.size > 0 || this.#failure) return;
+		this.#fail(new Error("Sandbox host was shut down"));
+		this.#killDescendants();
+		try {
+			this.#child.stdin.end();
+		} catch {
+			this.#child.kill();
+		}
+	}
+
+	async #readStdout(): Promise<void> {
+		try {
+			for await (const line of readHostLines(this.#child.stdout)) {
+				try {
+					const event: unknown = decodeHostMessage<HostEvent>(line);
+					if (!isHostEvent(event)) throw new Error("unexpected shape");
+					this.#dispatch(event);
+				} catch (error) {
+					const reason = `Sandbox host sent an invalid message (${errorMessage(error)}): ${line.slice(0, 200)}`;
+					// A host that died mid-line leaves a cut line; its exit (with the stderr tail) is the real cause.
+					await settleWithin(this.#child.exited, 200);
+					if (this.#child.exitCode === null) this.kill(reason);
+					return;
+				}
+			}
+		} catch (error) {
+			this.kill(`Sandbox host output failed: ${errorMessage(error)}`);
+		}
+	}
+
+	async #readStderr(): Promise<void> {
+		const decoder = new TextDecoder();
+		try {
+			for await (const chunk of this.#child.stderr) {
+				this.#stderrTail.append(chunk);
+				logger.debug("sandbox host stderr", {
+					pid: this.#child.pid,
+					text: decoder.decode(chunk, { stream: true }),
+				});
+			}
+		} catch {
+			// The exit handler reports what was collected.
+		}
+	}
+
+	#dispatch(event: HostEvent): void {
+		if ("ok" in event) {
+			const pending = this.#pending.get(event.id);
+			if (!pending) return;
+			this.#pending.delete(event.id);
+			if (event.ok) pending.resolve(event.result);
+			// Keep the errno name, so file tools classify a contained denial or missing path as natively.
+			else
+				pending.reject(Object.assign(new Error(event.error), event.code === undefined ? {} : { code: event.code }));
+			this.#closeIfIdle();
+			return;
+		}
+		switch (event.ev) {
+			case "ready":
+				if (event.version !== SANDBOX_HOST_PROTOCOL_VERSION) {
+					this.kill(`Sandbox host speaks protocol ${event.version}, expected ${SANDBOX_HOST_PROTOCOL_VERSION}`);
+					return;
+				}
+				this.#ready.resolve();
+				return;
+			case "shell.chunk":
+				this.#pending.get(event.id)?.run?.onChunk?.(event.data);
+				return;
+			case "shell.trace":
+				this.#pending.get(event.id)?.run?.trace?.update(event.snapshot);
+				return;
+			case "shell.pids":
+				this.#pending.get(event.id)?.run?.onPids?.(event.pids);
+				return;
+			case "search.matches":
+				this.#pending.get(event.id)?.run?.onMatches?.(event.matches);
+				return;
+			case "fs.request": {
+				const filesystem = this.#pending.get(event.id)?.run?.filesystem;
+				const reply = (response: ShellFsResponse): void =>
+					this.notify({ op: "fs.reply", req: event.req, response });
+				if (!filesystem) {
+					reply({ error: { code: "ENOTSUP", message: "No filesystem for this run" } });
+					return;
+				}
+				filesystem
+					.handler(null, event.request)
+					.then(reply, (error: unknown) => reply({ error: { code: "EIO", message: errorMessage(error) } }));
+				return;
+			}
+			case "cmd.request": {
+				const commands = this.#pending.get(event.id)?.run?.commands;
+				const reply = (outcome: HostCommandOutcome): void =>
+					this.notify({ op: "cmd.reply", req: event.req, outcome });
+				if (!commands) {
+					reply({ ok: false, error: `${event.request.name}: no tool commands for this run` });
+					return;
+				}
+				commands.handler(event.request).then(
+					result => reply({ ok: true, result }),
+					(error: unknown) => reply({ ok: false, error: errorMessage(error) }),
+				);
+				return;
+			}
+			case "pty.data":
+				this.#ptys.get(event.pty)?.onData(event.data);
+				return;
+			case "pty.exit": {
+				const routes = this.#ptys.get(event.pty);
+				this.#ptys.delete(event.pty);
+				routes?.onExit(event.result, event.error);
+				this.#closeIfIdle();
+				return;
+			}
+			case "log":
+				logger.emitForeign({ ...event.record, timestamp: new Date(event.record.timestamp) });
+				return;
+		}
+	}
+}
+
+// ── Host pool ────────────────────────────────────────────────────────────────
+
+/** What a contained host is started for. */
+export interface SandboxHostScope {
+	/** Agent session owning the shells (`undefined`: the shared anonymous pool). */
+	agentSessionKey: string | undefined;
+	/** Working directory of the host process. */
+	cwd: string;
+	/** Host-side paths the contained shell must read (the rc snapshot). */
+	extraRead?: readonly string[];
+	/** omp-owned roots the contained shell may write in every sandbox mode (the session's `local://` root). */
+	extraWrite?: readonly string[];
+	/** Network mode overriding the configured one (the file-access host needs none). */
+	network?: SandboxNetworkMode;
+	/** The host's own egress proxy port, tagged with this id (`SandboxSpawnRequest.egressScope`). */
+	egressScope?: string;
+}
+
+const hostPool = new Map<string, Promise<SandboxHostConnection>>();
+
+/**
+ * Key prefix of pooled hosts. Every key names its owner (an agent session, or the shared anonymous
+ * pool without one) and the runtime's pinned workspace, so a policy change in one workspace never
+ * retires another's hosts. Without a workspace the prefix names every host of a session; the
+ * anonymous pool then names none (`undefined`). A key of `""` is a session like any other; the
+ * owner tags keep it from matching the anonymous pool.
+ */
+function poolPrefix(agentSessionKey: string | undefined, workspace: string | undefined): string | undefined {
+	const owner = agentSessionKey === undefined ? "a" : `s:${agentSessionKey}`;
+	if (workspace !== undefined) return `${owner}\0${workspace}\n`;
+	return agentSessionKey === undefined ? undefined : `${owner}\0`;
+}
+
+/** Starts a host contained by `runtime` and attaches to it. */
+export async function startSandboxHost(
+	runtime: SandboxRuntime,
+	options: Omit<SandboxHostScope, "agentSessionKey">,
+): Promise<SandboxHostConnection> {
+	const child = await runtime.spawn({
+		argv: sandboxHostArgv(),
+		cwd: options.cwd,
+		env: containedProcessEnv(runtime, workerEnvFromParent(), undefined, options.network),
+		extraRead: options.extraRead,
+		extraWrite: options.extraWrite,
+		network: options.network,
+		egressScope: options.egressScope,
+	});
+	try {
+		return await SandboxHostConnection.connect(child);
+	} catch (error) {
+		child.kill();
+		throw error;
+	}
+}
+
+/**
+ * The pooled host for `scope` under `runtime`'s current policy. Hosts of the same agent session (or
+ * anonymous pool) in the same workspace under another policy are retired (they exit once their
+ * in-flight calls settle).
+ */
+export function acquireSandboxHost(runtime: SandboxRuntime, scope: SandboxHostScope): Promise<SandboxHostConnection> {
+	const prefix = poolPrefix(scope.agentSessionKey, runtime.workspace);
+	const extra = [...(scope.extraRead ?? []), "\0", ...(scope.extraWrite ?? [])].join("\0");
+	const key = `${prefix}${runtime.fingerprint()}\n${scope.network ?? ""}\n${scope.egressScope ?? ""}\n${extra}`;
+	const existing = hostPool.get(key);
+	if (existing) return existing;
+	releaseSandboxHosts(scope.agentSessionKey, runtime.workspace);
+	const started = startSandboxHost(runtime, scope);
+	hostPool.set(key, started);
+	started.then(
+		connection => connection.onExit(() => hostPool.get(key) === started && hostPool.delete(key)),
+		() => hostPool.get(key) === started && hostPool.delete(key),
+	);
+	return started;
+}
+
+/**
+ * Retires pooled hosts: each exits once its in-flight calls settle, and its persistent shells and
+ * background jobs end with it. With a session key and no `workspace`, every host of that session
+ * in any workspace; with a `workspace` (a runtime's pinned one), only that workspace's. Without a
+ * session key, the anonymous hosts of `workspace`; with neither, nothing (an unsandboxed caller
+ * owns no host).
+ */
+export function releaseSandboxHosts(agentSessionKey: string | undefined, workspace?: string): void {
+	const prefix = poolPrefix(agentSessionKey, workspace);
+	if (prefix === undefined) return;
+	for (const [key, host] of hostPool) {
+		if (!key.startsWith(prefix)) continue;
+		hostPool.delete(key);
+		void host.then(
+			connection => connection.retire(),
+			() => {},
+		);
+	}
+}
+
+/** The pooled hosts {@link releaseSandboxHosts} would retire for the same arguments. */
+function sessionHosts(
+	agentSessionKey: string | undefined,
+	workspace: string | undefined,
+): Promise<SandboxHostConnection>[] {
+	const prefix = poolPrefix(agentSessionKey, workspace);
+	if (prefix === undefined) return [];
+	return [...hostPool].filter(([key]) => key.startsWith(prefix)).map(([, host]) => host);
+}
+
+/** Number of live pooled hosts of an agent session (test seam). @internal */
+export function sandboxHostPoolSize(agentSessionKey: string | undefined, workspace?: string): number {
+	return sessionHosts(agentSessionKey, workspace).length;
+}
+
+/** Pids of an agent session's pooled hosts that started (test seam). @internal */
+export async function sandboxHostPids(agentSessionKey: string | undefined, workspace?: string): Promise<number[]> {
+	const settled = await Promise.allSettled(sessionHosts(agentSessionKey, workspace));
+	return settled.flatMap(outcome => (outcome.status === "fulfilled" ? [outcome.value.pid] : []));
+}
+
+// ── Shell ────────────────────────────────────────────────────────────────────
+
+/**
+ * `ShellRunOptions` as `SandboxedShell.run` takes it; `streams` (pipe taps) is not relayed out of
+ * the sandbox and ignored. `commands` run in this process: the host forwards each invocation.
+ * `signal` is only checked before the run starts; abort a running command with `abort()`.
+ * `egress`: the run's proxy credentials ({@link HostRunEgress}), put into its proxy URLs by the host.
+ */
+type SandboxedRunOptions = Omit<ShellRunOptions, "trace"> & { trace?: SandboxRunTrace; egress?: HostRunEgress };
+
+let nextShellId = 0;
+
+/** Drops the host-side shell once its proxy is collected, matching the native kill-on-drop. */
+const shellFinalizer = new FinalizationRegistry<{ host: Promise<SandboxHostConnection>; shell: number }>(
+	({ host, shell }) => {
+		void host.then(
+			connection => connection.request({ op: "shell.dispose", shell }).catch(() => {}),
+			() => {},
+		);
+	},
+);
+
+/** The `Shell` surface `bash-executor` uses, served by a shell inside a sandbox host. */
+export class SandboxedShell {
+	readonly #host: Promise<SandboxHostConnection>;
+	readonly #id = ++nextShellId;
+	readonly #created: Promise<unknown>;
+	#pids: number[] = [];
+	#running: Promise<unknown> | undefined;
+	/** Abort state of the in-flight run; `abort()` may land before the host even started. */
+	#runAbort = { requested: false };
+	#connection: SandboxHostConnection | undefined;
+	#unusable = false;
+
+	constructor(host: Promise<SandboxHostConnection>, init: { options: HostShellOptions } | { from: SandboxedShell }) {
+		this.#host = host;
+		const shell = this.#id;
+		this.#created =
+			"from" in init
+				? init.from.#created.then(() =>
+						host.then(connection => connection.request({ op: "shell.fork", shell, from: init.from.#id })),
+					)
+				: host.then(connection => connection.request({ op: "shell.create", shell, options: init.options }));
+		host.then(
+			connection => {
+				this.#connection = connection;
+			},
+			() => {
+				this.#unusable = true;
+			},
+		);
+		// Surfaced by the first call that awaits it.
+		this.#created.catch(() => {
+			this.#unusable = true;
+		});
+		shellFinalizer.register(this, { host, shell });
+	}
+
+	/** True once this shell can never run again: its host failed to start, died, or was retired. */
+	get closed(): boolean {
+		return this.#unusable || this.#connection?.closed === true;
+	}
+
+	fork(): SandboxedShell {
+		return new SandboxedShell(this.#host, { from: this });
+	}
+
+	/**
+	 * `Shell.adopt` in the host: carries what `fork` (settled) set into this shell's session.
+	 * `false` when the host cannot answer, as when there is nothing to carry.
+	 */
+	async adopt(fork: SandboxedShell): Promise<boolean> {
+		try {
+			await Promise.all([this.#created, fork.#created]);
+			const connection = await this.#host;
+			return await connection.request({ op: "shell.adopt", shell: this.#id, from: fork.#id });
+		} catch {
+			return false;
+		}
+	}
+
+	run(options: SandboxedRunOptions, onChunk?: (error: Error | null, chunk: string) => void): Promise<ShellRunResult> {
+		const abort = { requested: false };
+		this.#runAbort = abort;
+		const running = this.#run(options, abort, onChunk);
+		this.#running = running;
+		void running
+			.finally(() => {
+				if (this.#running === running) this.#running = undefined;
+				this.#pids = [];
+			})
+			.catch(() => {});
+		return running;
+	}
+
+	async #run(
+		options: SandboxedRunOptions,
+		abort: { requested: boolean },
+		onChunk?: (error: Error | null, chunk: string) => void,
+	): Promise<ShellRunResult> {
+		await this.#created;
+		const connection = await this.#host;
+		const signal = options.signal instanceof AbortSignal ? options.signal : undefined;
+		// Cancelled while the host was starting: the command never runs. A later abort reaches the
+		// run through the caller's `abort()`.
+		if (abort.requested || signal?.aborted) {
+			return { exitCode: undefined, cancelled: true, timedOut: false, movedCwd: false, errexit: false };
+		}
+		return connection.request(
+			{
+				op: "shell.run",
+				shell: this.#id,
+				run: { command: options.command, cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs },
+				trace: options.trace !== undefined,
+				fs: options.filesystem ? { nativeLocalPaths: options.filesystem.nativeLocalPaths } : null,
+				commands: options.commands ? options.commands.names : null,
+				egress: options.egress,
+			},
+			{
+				onChunk: onChunk ? chunk => onChunk(null, chunk) : undefined,
+				trace: options.trace,
+				filesystem: options.filesystem,
+				commands: options.commands,
+				onPids: pids => {
+					this.#pids = pids;
+				},
+			},
+		);
+	}
+
+	/**
+	 * Aborts the running command. A host that has not settled the run (or, idle, answered the
+	 * abort) within {@link ABORT_SETTLE_GRACE_MS} is wedged and gets killed.
+	 */
+	async abort(): Promise<void> {
+		const running = this.#running;
+		if (running) this.#runAbort.requested = true;
+		const connection = await this.#host.catch(() => undefined);
+		if (!connection) return;
+		const aborted = connection.request({ op: "shell.abort", shell: this.#id });
+		// The reply only matters as the idle case's liveness signal below.
+		aborted.catch(() => {});
+		let settled = false;
+		await settleWithin(
+			(running ?? aborted).finally(() => {
+				settled = true;
+			}),
+			ABORT_SETTLE_GRACE_MS,
+		);
+		if (!settled) connection.kill("Sandbox host did not stop the aborted command; killed");
+	}
+
+	/** Live pids of the in-flight run as last reported by the host; empty when idle. */
+	pids(): number[] {
+		return this.#pids;
+	}
+
+	async liveBackgroundJobCount(): Promise<number> {
+		await this.#created;
+		const connection = await this.#host;
+		return connection.request({ op: "shell.jobs", shell: this.#id });
+	}
+
+	/** Externals the host's shell holds; none once the host is gone, which took them down with it. */
+	async heldProcesses(): Promise<HeldProcess[]> {
+		if (this.closed) return [];
+		await this.#created;
+		const connection = await this.#host;
+		try {
+			return await connection.request({ op: "shell.held", shell: this.#id });
+		} catch (error) {
+			if (this.closed) return [];
+			throw error;
+		}
+	}
+}
+
+/** Shells (and traces) of one `executeBash` call, served by the pooled host of `scope` under `runtime`. */
+export function sandboxShellFactory(runtime: SandboxRuntime, scope: SandboxHostScope) {
+	return {
+		create: (options: HostShellOptions) => new SandboxedShell(acquireSandboxHost(runtime, scope), { options }),
+		trace: () => new SandboxRunTrace(),
+	};
+}
+
+// ── PTY ──────────────────────────────────────────────────────────────────────
+
+let nextPtyId = 0;
+
+/**
+ * The `PtySession` surface `tools/bash-interactive.ts` uses, relayed from a PtySession inside a
+ * dedicated sandbox host that exits with the command. Input sent before the PTY started is
+ * delivered once it has.
+ */
+export class SandboxedPtySession {
+	readonly #runtime: SandboxRuntime;
+	readonly #hostCwd: string;
+	readonly #extraWrite: readonly string[] | undefined;
+	readonly #egressScope: string | undefined;
+	readonly #id = ++nextPtyId;
+	#connection: SandboxHostConnection | undefined;
+	#started = false;
+	#killed = false;
+	#queued: Notification[] = [];
+
+	/** `egressScope` tags the dedicated host's egress proxy port (`SandboxSpawnRequest.egressScope`). */
+	constructor(
+		runtime: SandboxRuntime,
+		options: { cwd: string; extraWrite?: readonly string[]; egressScope?: string },
+	) {
+		this.#runtime = runtime;
+		this.#hostCwd = options.cwd;
+		this.#extraWrite = options.extraWrite;
+		this.#egressScope = options.egressScope;
+	}
+
+	/** `onStart` gets the host pid of the dedicated sandbox host (the PTY's own pid is the container's). */
+	async startArgv(
+		options: PtyArgvStartOptions,
+		onChunk?: (error: Error | null, chunk: string) => void,
+		onStart?: (error: Error | null, pid: number) => void,
+	): Promise<PtyRunResult> {
+		const { signal: rawSignal, ...start } = options;
+		const signal = rawSignal instanceof AbortSignal ? rawSignal : undefined;
+		// Cancelled before it began: no dedicated host (a container and its proxy listeners) is worth starting.
+		if (this.#killed || signal?.aborted) return { exitCode: undefined, cancelled: true, timedOut: false };
+		const connection = await startSandboxHost(this.#runtime, {
+			cwd: this.#hostCwd,
+			extraWrite: this.#extraWrite,
+			egressScope: this.#egressScope,
+		});
+		this.#connection = connection;
+		const exit = Promise.withResolvers<PtyRunResult>();
+		// Awaited only once the PTY started; an early return or a failed start must not leave it unhandled.
+		exit.promise.catch(() => {});
+		connection.attachPty(this.#id, {
+			onData: data => onChunk?.(null, data),
+			onExit: (result, error) => (error ? exit.reject(new Error(error)) : exit.resolve(result)),
+			onFail: exit.reject,
+		});
+		const onAbort = (): void => this.kill();
+		signal?.addEventListener("abort", onAbort, { once: true });
+		try {
+			if (this.#killed || signal?.aborted) {
+				return { exitCode: undefined, cancelled: true, timedOut: false };
+			}
+			await connection.request({ op: "pty.start", pty: this.#id, start: start satisfies HostPtyStart });
+			this.#started = true;
+			onStart?.(null, connection.pid);
+			for (const message of this.#queued) connection.notify(message);
+			this.#queued = [];
+			if (this.#killed) void connection.request({ op: "pty.kill", pty: this.#id }).catch(() => {});
+			return await exit.promise;
+		} finally {
+			signal?.removeEventListener("abort", onAbort);
+			// The host is this command's alone: ending it also ends anything the command left behind.
+			connection.kill("Sandboxed PTY session ended");
+		}
+	}
+
+	write(data: string): void {
+		this.#send({ op: "pty.write", pty: this.#id, data });
+	}
+
+	resize(cols: number, rows: number): void {
+		this.#send({ op: "pty.resize", pty: this.#id, cols, rows });
+	}
+
+	kill(): void {
+		this.#killed = true;
+		if (this.#started) void this.#connection?.request({ op: "pty.kill", pty: this.#id }).catch(() => {});
+	}
+
+	/** The PTY lives in the sandbox host, out of reach of a synchronous check; the caller falls back to output silence. */
+	awaitsInput(): null {
+		return null;
+	}
+
+	#send(message: Notification): void {
+		if (this.#started && this.#connection) this.#connection.notify(message);
+		else this.#queued.push(message);
+	}
+}
+
+// ── Smoke probe ──────────────────────────────────────────────────────────────
+
+/**
+ * `omp --smoke-test` probe: where a backend exists, starts the host contained (network denied),
+ * runs `echo` through it, and checks that a write outside the workspace is refused. Where none
+ * exists it reports why and passes; that is the expected state of hosts without one.
+ */
+export async function smokeTestSandboxHost(): Promise<void> {
+	const support = sandboxSupport();
+	if (!support.supported) {
+		process.stdout.write(`smoke-test: sandbox unavailable (${support.reason ?? "no backend"}); probe skipped\n`);
+		return;
+	}
+	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-sandbox-smoke-")));
+	const runtime = await SandboxRuntime.for(workspace);
+	let connection: SandboxHostConnection | undefined;
+	let outsideDir: string | undefined;
+	try {
+		outsideDir = makeEscapeProbeDir(runtime.effectivePolicy().readwritePaths);
+		connection = await startSandboxHost(runtime, { cwd: workspace, network: "deny" });
+		const shell = new SandboxedShell(Promise.resolve(connection), { options: {} });
+		let output = "";
+		const echoed = await shell.run(
+			{ command: "echo sandbox-ok", cwd: workspace, timeoutMs: SMOKE_RUN_TIMEOUT_MS },
+			(error, chunk) => {
+				if (!error) output += chunk;
+			},
+		);
+		if (echoed.exitCode !== 0 || output !== "sandbox-ok\n") {
+			throw new Error(`sandbox smoke failed: echo exited ${echoed.exitCode} with ${JSON.stringify(output)}`);
+		}
+		if (outsideDir === undefined) {
+			process.stdout.write("smoke-test: sandbox escape check skipped (no directory outside the writable roots)\n");
+		} else {
+			const target = path.join(outsideDir, "escaped.txt");
+			const escaped = await shell.run({
+				command: `echo x > ${quotePosixArgv([target])}`,
+				cwd: workspace,
+				timeoutMs: SMOKE_RUN_TIMEOUT_MS,
+			});
+			if (escaped.exitCode === 0 || escaped.timedOut || fs.existsSync(target)) {
+				throw new Error(`sandbox smoke failed: a write outside the writable roots succeeded (${target})`);
+			}
+		}
+		process.stdout.write(`smoke-test: sandbox ok (${support.backend ?? "unknown"})\n`);
+	} finally {
+		if (connection) {
+			connection.kill("smoke test done");
+			// Windows refuses to delete the workspace while the host still has it as its cwd.
+			await connection.exited;
+		}
+		await runtime.dispose();
+		if (outsideDir !== undefined) fs.rmSync(outsideDir, { recursive: true, force: true });
+		fs.rmSync(workspace, { recursive: true, force: true });
+	}
+}
+
+/** Per-run deadline of the smoke probe's commands. */
+const SMOKE_RUN_TIMEOUT_MS = 30_000;
+
+/**
+ * A fresh directory the parent can write but the contained host must not: under the first of
+ * home and the working directory that lies outside every writable root. `undefined` when neither does
+ * (CI may put both under the temp dir).
+ */
+function makeEscapeProbeDir(writable: readonly string[]): string | undefined {
+	for (const base of [os.homedir(), process.cwd()]) {
+		let real: string;
+		try {
+			real = fs.realpathSync(base);
+		} catch {
+			continue;
+		}
+		if (writable.some(root => isWithin(real, root, process.platform))) continue;
+		try {
+			return fs.mkdtempSync(path.join(real, ".omp-sandbox-smoke-"));
+		} catch {
+			// Not writable by the parent either; try the next base.
+		}
+	}
+	return undefined;
+}

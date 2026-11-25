@@ -1,9 +1,10 @@
 import * as path from "node:path";
-import { $ } from "bun";
 import { Settings } from "../config/settings";
 import { DisasmUnavailableError, type WorkerRuntime } from "../disasm/backend";
 import { memoizeWorkerRuntime } from "../disasm/python-runtime";
-import { filterEnv, resolveExplicitPythonRuntime } from "../eval/py/runtime";
+import { filterEnv, probeInterpreter, resolveExplicitPythonRuntime } from "../eval/py/runtime";
+import { containingSandbox } from "../sandbox/file-access";
+import type { SandboxRuntime } from "../sandbox/runtime";
 import type { ToolSession } from "../tools";
 import { ensureGhidraInstall, ensureJdk, ensurePyGhidraVenv } from "./install";
 import { cfgGhidraInstallDir, cfgGhidraPython } from "./settings";
@@ -22,15 +23,18 @@ interface PendingInstallation {
 let installation: PendingInstallation | undefined;
 
 /**
- * Resolve the Ghidra worker interpreter and environment, memoized per Python/install setting and cwd.
+ * Resolve the Ghidra worker interpreter and environment, memoized per Python/install setting, cwd and
+ * containment. While the OS sandbox is active an explicit `ghidra.python` is probed inside it, so a
+ * workspace-controlled interpreter never runs on the host.
  * First-use installation is shared and uncancellable; failed resolutions are evicted for a later retry.
  * Explicit install and interpreter settings are authoritative and never fall back to managed alternatives.
  */
-export function resolveGhidraRuntime(session: ToolSession): Promise<WorkerRuntime> {
+export async function resolveGhidraRuntime(session: ToolSession): Promise<WorkerRuntime> {
 	const python = cfgGhidraPython.get(session.settings)?.trim() || undefined;
 	const configured = cfgGhidraInstallDir.get(session.settings)?.trim() || undefined;
-	return memoizeWorkerRuntime("ghidra", [python, configured, session.cwd], () =>
-		resolveRuntime(python, configured, session.cwd),
+	const sandbox = await containingSandbox(session.cwd);
+	return memoizeWorkerRuntime("ghidra", [python, configured, session.cwd, sandbox ? "contained" : ""], () =>
+		resolveRuntime(python, configured, session.cwd, sandbox),
 	);
 }
 
@@ -66,6 +70,7 @@ async function resolveRuntime(
 	python: string | undefined,
 	configured: string | undefined,
 	cwd: string,
+	sandbox: SandboxRuntime | undefined,
 ): Promise<WorkerRuntime> {
 	try {
 		const baseEnv = filterEnv((await Settings.init()).getShellConfig().env);
@@ -88,8 +93,7 @@ async function resolveRuntime(
 		env.JAVA_HOME_OVERRIDE = installed.javaHome;
 		if (python) {
 			try {
-				const result = await $`${candidate.pythonPath} -c ${"import pyghidra"}`.cwd(cwd).env(env).quiet().nothrow();
-				if (result.exitCode !== 0)
+				if (!(await probeInterpreter(sandbox, cwd, candidate, "import pyghidra", env, cwd)))
 					throw new DisasmUnavailableError(`ghidra.python cannot import pyghidra: ${candidate.pythonPath}`);
 			} catch {
 				throw new DisasmUnavailableError(`ghidra.python cannot import pyghidra: ${candidate.pythonPath}`);

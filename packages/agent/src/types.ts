@@ -1139,6 +1139,19 @@ export type ToolApprovalDecision =
 export type ToolApproval = ToolApprovalDecision | ((args: unknown, context?: AgentToolContext) => ToolApprovalDecision);
 
 /**
+ * One host-side effect of a tool call that the OS sandbox gate checks: a path read or written
+ * (`recursive`: the call reaches below it), a host reached, or an action omp performs on the host
+ * that the sandbox cannot contain (`exec`; its `target` is an opaque canonical string such as
+ * `debug:launch /usr/bin/node`, compared verbatim). A `read`/`write` target is an absolute path:
+ * the gate does not know the session's working directory.
+ */
+export interface SandboxSubject {
+	kind: "read" | "write" | "host" | "exec";
+	target: string;
+	recursive?: boolean;
+}
+
+/**
  * Context passed to tool execution.
  * Apps can extend via declaration merging.
  */
@@ -1323,6 +1336,14 @@ export interface AgentTool<
 	 * Unlike cache targets these paths never key a remembered grant.
 	 */
 	approvalRestrictionPaths?: (args: unknown) => readonly string[] | undefined;
+
+	/**
+	 * What this call does on the host that the OS sandbox must allow: paths it reads or writes,
+	 * hosts it reaches, actions omp performs outside the sandbox (`exec`). The sandbox gate checks
+	 * them before the call runs; omit it and the gate derives read/write subjects from
+	 * {@link approvalCacheTargets} / {@link approvalRestrictionPaths} and the approval tier.
+	 */
+	sandboxSubjects?: (args: unknown) => readonly SandboxSubject[] | undefined;
 
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;

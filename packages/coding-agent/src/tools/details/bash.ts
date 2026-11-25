@@ -1,3 +1,4 @@
+import type { SandboxResultMeta } from "../../sandbox/types";
 import { type OutputMeta } from "../output-meta-format";
 import type { RenderResultOptions } from "./renderer";
 import { type ShellTrace } from "@oh-my-pi/pi-wire";
@@ -65,6 +66,8 @@ export interface BashToolDetails {
 		jobId: string;
 		type: "bash";
 	};
+	/** OS sandbox the command ran in; absent when it ran uncontained. */
+	sandbox?: SandboxResultMeta;
 }
 
 function formatWallTimeSeconds(wallTimeMs: number): string {

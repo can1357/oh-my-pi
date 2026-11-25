@@ -261,7 +261,7 @@ export class HostLink implements MCPTransport {
 	 */
 	async hostMoved(): Promise<boolean> {
 		if (this.#injectedAccess || !this.#access) return false;
-		return (await mcpHostAccess()).shared !== this.#access.shared;
+		return (await mcpHostAccess(this.#spec)).shared !== this.#access.shared;
 	}
 
 	/**
@@ -363,7 +363,7 @@ export class HostLink implements MCPTransport {
 		mayRefresh: boolean,
 		resolvedEra?: McpEra,
 	): Promise<void> {
-		const access = this.#injectedAccess ?? (await mcpHostAccess());
+		const access = this.#injectedAccess ?? (await mcpHostAccess(this.#spec));
 		// Checked before the listener is registered: a link closed meanwhile would never remove it.
 		this.#assertCurrent(generation);
 		if (access !== this.#access) {

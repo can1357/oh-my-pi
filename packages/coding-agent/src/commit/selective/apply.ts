@@ -8,7 +8,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { VcsGitRepo, VcsReconciledCommit } from "@oh-my-pi/pi-natives";
+import type { VcsCommitOptions, VcsGitRepo, VcsReconciledCommit } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { shortenPath } from "../../utils/render-utils";
 import type { Draft, SelectedChange } from "./draft";
@@ -109,7 +109,13 @@ async function patchFor(repo: VcsGitRepo, change: SelectedChange, signal?: Abort
 export async function commitSelection(
 	draft: Draft,
 	request: CommitRequest,
-	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
+	context: {
+		journal: ChangeJournal | null;
+		agent: JournalAgent;
+		signal?: AbortSignal;
+		/** Starts the commit hooks in place of the native spawn (the OS sandbox's contained spawn). */
+		hookRunner?: VcsCommitOptions["hookRunner"];
+	},
 ): Promise<CommitOutcome> {
 	const changes = draft.selection();
 	if (changes.length === 0) {
@@ -183,6 +189,7 @@ export async function commitSelection(
 						expectedHead: head ?? undefined,
 						amend: request.amend ?? false,
 						noVerify: request.noVerify ?? false,
+						hookRunner: context.hookRunner,
 					},
 					joined,
 					context.signal,

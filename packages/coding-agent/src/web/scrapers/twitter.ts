@@ -11,7 +11,7 @@ import {
 } from "../search/providers/xai";
 import { parseXUrl, type XProfileTab, type XTarget } from "../x";
 import type { RenderResult, SpecialHandler } from "./types";
-import { buildResult, handlerSettings } from "./types";
+import { buildResult, guardedFetch, handlerSettings } from "./types";
 
 /** Search operators narrowing `from:<handle>` to what each profile tab shows. */
 const PROFILE_TAB_FILTERS: Record<XProfileTab, string> = {
@@ -83,6 +83,8 @@ export const handleTwitter: SpecialHandler = async (url, timeout, signal, _stora
 	const failures: string[] = [];
 	for (const model of models) {
 		try {
+			// Grok reads the post for the read: the guard of the read's scope sees the endpoint the request really goes
+			// to (an `XAI_BASE_URL` override included) and every redirect hop, and a refusal throws before any request.
 			const { response } = await requestXAIResponses(
 				{
 					model,
@@ -90,6 +92,7 @@ export const handleTwitter: SpecialHandler = async (url, timeout, signal, _stora
 					authStorage: modelRegistry.authStorage,
 					signal,
 					timeoutMs: Math.max(timeout * 1000, SEARCH_HARD_TIMEOUT_MS),
+					fetch: guardedFetch(),
 				},
 				{
 					model: model.id,

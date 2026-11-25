@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type { AstEditToolDetails } from "./details/ast-edit";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -8,13 +9,14 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFilesystem } from "@oh-my-pi/pi-natives";
+import type { AstReplaceChange, AstReplaceFileChange, ShellFilesystem } from "@oh-my-pi/pi-natives";
 
 import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
+import { containedAstEdit, containToolExecute, readFileText, withContainedFileAccess } from "../sandbox/file-access";
 import { formatHashlineHeader } from "./hashline-format";
 
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
@@ -28,7 +30,15 @@ import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { formatGroupedFiles } from "./grouped-file-output";
 
-import { relativeSearchResultPath, resolveTargetResultPath, resolveToolSearchScope } from "./path-utils";
+import {
+	normalizePathLikeInput,
+	parseSearchPath,
+	relativeSearchResultPath,
+	resolveTargetResultPath,
+	resolveToCwd,
+	resolveToolSearchScope,
+} from "./path-utils";
+import { approvalRootCandidates } from "./search-approval-targets";
 import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "../utils/render-utils";
 import { formatCount } from "@oh-my-pi/pi-utils";
 import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
@@ -87,7 +97,7 @@ async function runAstEditTargets(
 	// (an ambiguous overlap) must not leave the targets before it written.
 	if (!options.dryRun && targets.length > 1) {
 		for (const target of targets) {
-			await astEdit({
+			await containedAstEdit({
 				rewrites: options.rewrites,
 				path: target.basePath,
 				glob: target.glob,
@@ -100,7 +110,7 @@ async function runAstEditTargets(
 		}
 	}
 	for (const target of targets) {
-		const targetResult = await astEdit({
+		const targetResult = await containedAstEdit({
 			rewrites: options.rewrites,
 			path: target.basePath,
 			glob: target.glob,
@@ -152,7 +162,7 @@ function runAstEditOnce(
 	if (targets) {
 		return runAstEditTargets(targets, resolvedSearchPath, options);
 	}
-	return astEdit({
+	return containedAstEdit({
 		rewrites: options.rewrites,
 		path: resolvedSearchPath,
 		glob: globFilter,
@@ -180,6 +190,35 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			decisions.push(router.writeTier(target, undefined, undefined));
 		}
 		return strictestApproval(decisions);
+	};
+	/**
+	 * The folder (or file) each local path entry rewrites below — a glob's non-glob base — so
+	 * restricted folders and the sandbox's file policy see where the rewrite writes. Internal URLs
+	 * name no local folder.
+	 */
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
+		const paths = isRecord(args) ? args.paths : undefined;
+		if (!Array.isArray(paths)) return undefined;
+		const router = InternalUrlRouter.instance();
+		const bases: string[] = [];
+		for (const entry of paths) {
+			if (typeof entry !== "string") continue;
+			const normalized = normalizePathLikeInput(entry);
+			if (normalized.length === 0) continue;
+			// Execution splits `a;b` / `a,b` / whitespace lists only when the whole entry is not itself a
+			// path, so keep the whole entry and add a split part only when it names something on disk.
+			const candidates = approvalRootCandidates(normalized);
+			for (const [index, candidate] of candidates.entries()) {
+				if (router.canHandle(router.normalize(candidate))) continue;
+				try {
+					const base = resolveToCwd(parseSearchPath(candidate).basePath, this.session.cwd);
+					if (index === 0 || fs.existsSync(base)) bases.push(base);
+				} catch {
+					// Not a local path: nothing on disk to match.
+				}
+			}
+		}
+		return bases;
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<AstEditSchemaInfer>;
@@ -252,6 +291,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(astEditDescription);
+	}
+
+	static {
+		containToolExecute(this, tool => tool.session);
 	}
 
 	async execute(
@@ -365,7 +408,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					const snapshotPath = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
 					if (snapshotPath === undefined) continue;
 					try {
-						const fullText = normalizeToLF(await Bun.file(snapshotPath).text());
+						const fullText = normalizeToLF(await readFileText(snapshotPath));
 						const tag = snapshotStore.recordSnapshot(snapshotPath, fullText);
 						hashContexts.set(relativePath, { tag });
 					} catch {
@@ -453,112 +496,126 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				queueResolveHandler(this.session, {
 					label: `AST Edit: ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}`,
 					sourceToolName: this.name,
-					apply: async (_reason: string) => {
-						// The apply outlives the preview call: its filesystem carries no signal.
-						const applyContext = sessionResolveContext(this.session);
-						// Snapshot the previewed files so each rewrite is journaled with its before/after.
-						const journaled: Array<{ path: string; before: FileSnapshot }> = [];
-						if (this.session.recordFileChange) {
-							for (const relativePath of fileList) {
-								const absolute = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
-								const before = absolute === undefined ? undefined : await readSnapshot(absolute);
-								if (absolute !== undefined && before) journaled.push({ path: absolute, before });
-							}
-						}
-						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
-							rewrites: normalizedRewrites,
-							dryRun: false,
-							maxFiles,
-							failOnParseError: false,
-							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
-						});
-						for (const { path: file, before } of journaled) {
-							const after = await readSnapshot(file);
-							if (!after || after.text === before.text) continue;
-							this.session.recordFileChange?.({
-								path: file,
-								tool: "ast_edit",
-								before: before.text,
-								after: after.text,
-							});
-						}
-						const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
-							applyResult.parseErrors,
-						);
-						const { record: recordAppliedFile, list: appliedFileList } = createFileRecorder();
-						const appliedFileReplacementCounts = new Map<string, number>();
-						for (const fileChange of applyResult.fileChanges) {
-							const relativePath = formatPath(fileChange.path);
-							recordAppliedFile(relativePath);
-							appliedFileReplacementCounts.set(
-								relativePath,
-								(appliedFileReplacementCounts.get(relativePath) ?? 0) + fileChange.count,
-							);
-						}
-						for (const change of applyResult.changes) {
-							recordAppliedFile(formatPath(change.path));
-						}
-						// The preview minted tags from pre-apply content; the rewrite just
-						// invalidated them. Re-record post-apply snapshots (canonical keys)
-						// so the model's next hashline edit anchors against fresh tags.
-						const freshTagLines: string[] = [];
-						if (useHashLines) {
-							const snapshotStore = getEditStore(this.session);
-							for (const relativePath of appliedFileList) {
-								const appliedPath = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
-								if (appliedPath === undefined) continue;
-								try {
-									const fullText = normalizeToLF(await Bun.file(appliedPath).text());
-									const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
-									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
-								} catch {
-									// File disappeared between apply and re-read; skip its tag.
+					// The apply outlives the preview call (and its contained file access): contain it again,
+					// so the journaling reads, the rewrite and the re-read all go through the contained host.
+					apply: (_reason: string) =>
+						withContainedFileAccess(this.session, async () => {
+							// The apply outlives the preview call: its filesystem carries no signal.
+							const applyContext = sessionResolveContext(this.session);
+							// Snapshot the previewed files so each rewrite is journaled with its before/after.
+							const journaled: Array<{ path: string; before: FileSnapshot }> = [];
+							if (this.session.recordFileChange) {
+								for (const relativePath of fileList) {
+									const absolute = await resultSnapshotPath(relativePath, this.session.cwd, applyContext);
+									const before = absolute === undefined ? undefined : await readSnapshot(absolute);
+									if (absolute !== undefined && before) journaled.push({ path: absolute, before });
 								}
 							}
-						}
-						const appliedFileReplacements = appliedFileList.map(filePath => ({
-							path: filePath,
-							count: appliedFileReplacementCounts.get(filePath) ?? 0,
-						}));
-						const appliedDetails: AstEditToolDetails = {
-							totalReplacements: applyResult.totalReplacements,
-							filesTouched: applyResult.filesTouched,
-							filesSearched: applyResult.filesSearched,
-							applied: applyResult.applied,
-							limitReached: applyResult.limitReached,
-							...(cappedApplyParseErrors.length > 0
-								? { parseErrors: cappedApplyParseErrors, parseErrorsTotal: applyParseErrorsTotal }
-								: {}),
-							scopePath,
-							files: appliedFileList,
-							fileReplacements: appliedFileReplacements,
-						};
-						const stalePreview =
-							applyResult.totalReplacements !== result.totalReplacements ||
-							applyResult.filesTouched !== result.filesTouched ||
-							fileList.some(
-								filePath => appliedFileReplacementCounts.get(filePath) !== fileReplacementCounts.get(filePath),
-							) ||
-							appliedFileList.some(
-								filePath => fileReplacementCounts.get(filePath) !== appliedFileReplacementCounts.get(filePath),
+							// Under the OS sandbox the rewrite runs in the contained host, which writes the files.
+							const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+								rewrites: normalizedRewrites,
+								dryRun: false,
+								maxFiles,
+								failOnParseError: false,
+								filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
+							});
+							for (const { path: file, before } of journaled) {
+								const after = await readSnapshot(file);
+								if (!after || after.text === before.text) continue;
+								this.session.recordFileChange?.({
+									path: file,
+									tool: "ast_edit",
+									before: before.text,
+									after: after.text,
+								});
+							}
+							const { errors: cappedApplyParseErrors, total: applyParseErrorsTotal } = capParseErrors(
+								applyResult.parseErrors,
 							);
-						if (stalePreview) {
-							const staleText =
-								applyResult.totalReplacements === 0
-									? `Preview is stale / no longer matches; no replacements were applied. Preview expected ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}.`
-									: applyResult.totalReplacements < result.totalReplacements
-										? `Preview is stale / no longer matches; only ${applyResult.totalReplacements} of ${result.totalReplacements} replacements were applied in ${applyResult.filesTouched} of ${result.filesTouched} files.`
-										: `Preview is stale / no longer matches; applied ${applyResult.totalReplacements} replacements but preview expected ${result.totalReplacements}.`;
-							const staleWithTags =
-								freshTagLines.length > 0 ? `${staleText}\n${freshTagLines.join("\n")}` : staleText;
-							return { ...toolResult(appliedDetails).text(staleWithTags).done(), isError: true };
-						}
-						const appliedReplacementPlural = applyResult.totalReplacements !== 1 ? "s" : "";
-						const appliedFilePlural = applyResult.filesTouched !== 1 ? "s" : "";
-						const appliedText = `Applied ${applyResult.totalReplacements} replacement${appliedReplacementPlural} in ${applyResult.filesTouched} file${appliedFilePlural}.`;
-						const text = freshTagLines.length > 0 ? `${appliedText}\n${freshTagLines.join("\n")}` : appliedText;
-						return toolResult(appliedDetails).text(text).done();
-					},
+							const { record: recordAppliedFile, list: appliedFileList } = createFileRecorder();
+							const appliedFileReplacementCounts = new Map<string, number>();
+							for (const fileChange of applyResult.fileChanges) {
+								const relativePath = formatPath(fileChange.path);
+								recordAppliedFile(relativePath);
+								appliedFileReplacementCounts.set(
+									relativePath,
+									(appliedFileReplacementCounts.get(relativePath) ?? 0) + fileChange.count,
+								);
+							}
+							for (const change of applyResult.changes) {
+								recordAppliedFile(formatPath(change.path));
+							}
+							// The preview minted tags from pre-apply content; the rewrite just
+							// invalidated them. Re-record post-apply snapshots (canonical keys)
+							// so the model's next hashline edit anchors against fresh tags.
+							const freshTagLines: string[] = [];
+							if (useHashLines) {
+								const snapshotStore = getEditStore(this.session);
+								// The re-read of the rewritten files goes through the container's verified handle too.
+								{
+									for (const relativePath of appliedFileList) {
+										const appliedPath = await resultSnapshotPath(
+											relativePath,
+											this.session.cwd,
+											applyContext,
+										);
+										if (appliedPath === undefined) continue;
+										try {
+											const fullText = normalizeToLF(await readFileText(appliedPath));
+											const freshTag = snapshotStore.recordSnapshot(appliedPath, fullText);
+											freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
+										} catch {
+											// File disappeared between apply and re-read; skip its tag.
+										}
+									}
+								}
+							}
+							const appliedFileReplacements = appliedFileList.map(filePath => ({
+								path: filePath,
+								count: appliedFileReplacementCounts.get(filePath) ?? 0,
+							}));
+							const appliedDetails: AstEditToolDetails = {
+								totalReplacements: applyResult.totalReplacements,
+								filesTouched: applyResult.filesTouched,
+								filesSearched: applyResult.filesSearched,
+								applied: applyResult.applied,
+								limitReached: applyResult.limitReached,
+								...(cappedApplyParseErrors.length > 0
+									? { parseErrors: cappedApplyParseErrors, parseErrorsTotal: applyParseErrorsTotal }
+									: {}),
+								scopePath,
+								files: appliedFileList,
+								fileReplacements: appliedFileReplacements,
+							};
+							const stalePreview =
+								applyResult.totalReplacements !== result.totalReplacements ||
+								applyResult.filesTouched !== result.filesTouched ||
+								fileList.some(
+									filePath =>
+										appliedFileReplacementCounts.get(filePath) !== fileReplacementCounts.get(filePath),
+								) ||
+								appliedFileList.some(
+									filePath =>
+										fileReplacementCounts.get(filePath) !== appliedFileReplacementCounts.get(filePath),
+								);
+							if (stalePreview) {
+								const staleText =
+									applyResult.totalReplacements === 0
+										? `Preview is stale / no longer matches; no replacements were applied. Preview expected ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}.`
+										: applyResult.totalReplacements < result.totalReplacements
+											? `Preview is stale / no longer matches; only ${applyResult.totalReplacements} of ${result.totalReplacements} replacements were applied in ${applyResult.filesTouched} of ${result.filesTouched} files.`
+											: `Preview is stale / no longer matches; applied ${applyResult.totalReplacements} replacements but preview expected ${result.totalReplacements}.`;
+								const staleWithTags =
+									freshTagLines.length > 0 ? `${staleText}\n${freshTagLines.join("\n")}` : staleText;
+								return { ...toolResult(appliedDetails).text(staleWithTags).done(), isError: true };
+							}
+							const appliedReplacementPlural = applyResult.totalReplacements !== 1 ? "s" : "";
+							const appliedFilePlural = applyResult.filesTouched !== 1 ? "s" : "";
+							const appliedText = `Applied ${applyResult.totalReplacements} replacement${appliedReplacementPlural} in ${applyResult.filesTouched} file${appliedFilePlural}.`;
+							const text =
+								freshTagLines.length > 0 ? `${appliedText}\n${freshTagLines.join("\n")}` : appliedText;
+							return toolResult(appliedDetails).text(text).done();
+						}),
 				});
 				// The renderer's ⟨proposed⟩ badge is TUI-only; this line is the model's
 				// in-result signal that the diff above is staged, not applied.

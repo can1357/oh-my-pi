@@ -4,11 +4,11 @@
  * an in-place `execReplace` of the daemon.
  */
 import { FdStream, Process, reapChild, spawnRaw } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, settleWithin } from "@oh-my-pi/pi-utils";
 import type { ChildExit, ChildSpawn, ManagedChild, ManagedChildState } from "./module";
 
 /** How long a reaped child's pipes get to deliver output written right before its exit. */
-const OUTPUT_DRAIN_GRACE_MS = 2_000;
+export const OUTPUT_DRAIN_GRACE_MS = 2_000;
 
 /** Allowed skew between a recorded and an observed process start time. */
 const START_TIME_TOLERANCE_MS = 1_000;
@@ -28,7 +28,7 @@ export function isSameProcess(pid: number, startedAt: number | undefined): boole
 }
 
 /** Output delivered to a sink, buffered until the sink is attached. */
-class OutputChannel {
+export class OutputChannel {
 	#sink: ((chunk: Uint8Array) => void) | undefined;
 	#pending: Uint8Array[] = [];
 
@@ -104,13 +104,7 @@ class RawManagedChild implements ManagedChild {
 			}
 			// Output written right before exit is still in the pipes. The grace timer is cleared
 			// once they close: left pending it would hold an in-process host's exit for its full length.
-			const grace = Promise.withResolvers<void>();
-			const graceTimer = setTimeout(grace.resolve, OUTPUT_DRAIN_GRACE_MS);
-			try {
-				await Promise.race([Promise.all([stdoutClosed.promise, stderrClosed.promise]), grace.promise]);
-			} finally {
-				clearTimeout(graceTimer);
-			}
+			await settleWithin(Promise.all([stdoutClosed.promise, stderrClosed.promise]), OUTPUT_DRAIN_GRACE_MS);
 			this.#done = true;
 			this.closeInput();
 			stdout.close();

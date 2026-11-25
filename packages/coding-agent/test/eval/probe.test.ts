@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { probeCandidates, runBoundedProbe } from "../../src/eval/probe";
+import { awaitBoundedProbe, probeCandidates, runBoundedProbe } from "../../src/eval/probe";
 
 // A cross-platform "hangs forever" command: re-invoke the running Bun to sleep.
 const bun = process.execPath;
@@ -106,6 +106,29 @@ describe("runBoundedProbe", () => {
 			timeoutMs: 5_000,
 		});
 		expect(failing).toEqual({ exitCode: 3, timedOut: false, aborted: false });
+	});
+});
+
+describe("awaitBoundedProbe", () => {
+	test("an already-aborted signal kills the probe and returns at once, not after the bound", async () => {
+		let kills = 0;
+		const start = Date.now();
+		const result = await awaitBoundedProbe(
+			Promise.withResolvers<number>().promise,
+			() => {
+				kills++;
+			},
+			30_000,
+			AbortSignal.abort(),
+		);
+		expect(result).toEqual({ exitCode: null, timedOut: false, aborted: true });
+		expect(kills).toBe(1);
+		expect(Date.now() - start).toBeLessThan(5_000);
+	});
+
+	test("a live signal leaves the real exit code alone", async () => {
+		const result = await awaitBoundedProbe(Promise.resolve(0), () => {}, 30_000, new AbortController().signal);
+		expect(result).toEqual({ exitCode: 0, timedOut: false, aborted: false });
 	});
 });
 

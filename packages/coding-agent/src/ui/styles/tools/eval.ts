@@ -17,6 +17,7 @@ import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type EvalStatusEvent, splitEvalOutput } from "../../../tools/details/eval";
+import { SANDBOX_BADGE_TEXT } from "../../../tools/details/sandbox";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice } from "../../../tools/output-meta-format";
 import { FEED_MODEL_BADGE_WIDTH, isFeedModelBadgeEnabled, shortenPath } from "../../../utils/render-utils";
 import { expandKeyLabel } from "../../keys/hints";
@@ -28,6 +29,7 @@ import { codeCellRows } from "./code-cell";
 import { bracketed, frameInner, PREVIEW_WINDOW_ROWS } from "./frame";
 import { COLLAPSED_TREE, EXPANDED_TREE, jsonTreeRows } from "./json-tree";
 import { defineToolLook, isExpanded, toolProps } from "./look";
+import { isSandboxed, sandboxNoteLines } from "./sandbox";
 
 /** Status lines a collapsed cell shows. */
 const COLLAPSED_STATUS = 3;
@@ -455,6 +457,9 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 	}
 	const previewLines = Math.min(term.previewLines ?? 10, PREVIEW_WINDOW_ROWS);
 	const notes = callNotes(theme, term);
+	// A contained run: one `⟦sandboxed⟧` marker (clipped to the width), then its warnings wrapped to it.
+	if (isSandboxed(props)) notes.push(truncate(theme.fg("dim", bracketed(theme, SANDBOX_BADGE_TEXT)), width));
+	for (const line of sandboxNoteLines(node, theme)) notes.push(...wrap(line, Math.max(1, width)));
 	if (term.phase === "cells") {
 		const rows: string[] = [];
 		cells.forEach((cell, i) => {

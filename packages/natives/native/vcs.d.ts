@@ -33,7 +33,9 @@ export interface VcsError extends Error {
 		| "Backend"
 		| "Canceled"
 		| "Unsupported"
-		| "OutputTooLarge";
+		| "OutputTooLarge"
+		/** The installed repo guard ({@link setRepoGuard}) refused the repository. */
+		| "Refused";
 	exitCode: number;
 	stdout: string;
 	stderr: string;
@@ -44,6 +46,18 @@ export declare function isVcsError(error: unknown): error is VcsError;
 
 /** True when a cherry-pick failed because the commit is already applied. */
 export declare function isEmptyCherryPick(error: unknown): error is VcsError & { code: "EmptyCherryPick" };
+
+/**
+ * Install `guard` (`undefined` removes it): before every git operation on a repository (each async
+ * method and `headSync` of any handle {@link git}, {@link repo} or {@link repoForDisplay} returned,
+ * before or after the install, {@link detachGitDir}, {@link copyGitObjects} and
+ * {@link runPostCheckoutHook}) it is asked about the repository's git entry (`.git`), git dir and
+ * common dir; `false` fails the operation with a `Refused` {@link VcsError}, like a failed git call
+ * (`headSync` throws it synchronously).
+ */
+export declare function setRepoGuard(
+	guard: ((paths: readonly [gitEntryPath: string, gitDir: string, commonDir: string]) => boolean) | undefined,
+): void;
 
 /** Discover the git repository containing `dir`; `null` outside any checkout. */
 export declare function git(dir: string): VcsGitRepo | null;
@@ -82,7 +96,10 @@ export declare function detachGitDir(
 	signal?: AbortSignal,
 ): Promise<"no-git" | "independent" | "detached">;
 
-/** Preserve isolation-local Git objects in the source without changing its refs or index. */
+/**
+ * Preserve isolation-local Git objects in the source without changing its refs or index. Symlinked
+ * object files are skipped, never followed; both repositories are subject to the repo guard.
+ */
 export declare function copyGitObjects(isolationRoot: string, sourceRoot: string): Promise<void>;
 
 /** Run Git's checkout hook in a new linked worktree and return its output and exit status. */

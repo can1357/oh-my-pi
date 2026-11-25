@@ -2,14 +2,16 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+	io::{BufRead, BufReader, Read},
 	path::{Path, PathBuf},
 };
 
 use gix::bstr::ByteSlice;
 
 use super::{
-	GitRepo,
+	GitRepo, HEAD_LIMIT,
 	open::{load_index_or_empty, status_with_fresh_index},
+	open_git_file, read_git_file,
 };
 use crate::{
 	error::{Error, Result},
@@ -38,16 +40,14 @@ impl GitRepo {
 				None => HeadState::Detached { commit },
 			});
 		}
-		let content = std::fs::read_to_string(&self.info().head_path)?;
-		let value = content.trim();
-		if let Some(ref_name) = value.strip_prefix("ref:").map(str::trim) {
-			return Ok(HeadState::Ref {
-				ref_name: ref_name.to_owned(),
-				branch:   ref_name.strip_prefix("refs/heads/").map(str::to_owned),
-				commit:   self.peel_symbolic(self.read_ref(ref_name)?)?,
-			});
-		}
-		Ok(HeadState::Detached { commit: nonempty(value) })
+		Ok(match read_head_file(&self.info().head_path)? {
+			HeadFile::Symbolic(ref_name) => HeadState::Ref {
+				branch: ref_name.strip_prefix("refs/heads/").map(str::to_owned),
+				commit: self.peel_symbolic(self.read_ref(&ref_name)?)?,
+				ref_name,
+			},
+			HeadFile::Detached(commit) => HeadState::Detached { commit: self.known_object(commit)? },
+		})
 	}
 
 	/// Return the commit currently named by HEAD, if HEAD is born.
@@ -543,25 +543,40 @@ impl GitRepo {
 			})
 			.unwrap_or_else(|| self.root())
 			.to_owned();
-		let primary_head =
-			parse_head_with_refs(&self.info().common_dir.join("HEAD"), &self.info().common_dir)?;
+		let primary_head = self.worktree_head(&self.info().common_dir.join("HEAD"))?;
 		let mut out = vec![entry_from_head(primary_root, &primary_head)];
 		let admin_root = self.info().common_dir.join("worktrees");
+		// Sandboxed code can plant `worktrees` (or an entry in it) as a link to
+		// a host directory; only real directories are admin dirs.
+		if !std::fs::symlink_metadata(&admin_root).is_ok_and(|meta| meta.is_dir()) {
+			return Ok(out);
+		}
 		let Ok(admins) = std::fs::read_dir(admin_root) else {
 			return Ok(out);
 		};
-		let mut admins: Vec<_> = admins.filter_map(std::result::Result::ok).collect();
+		let Ok(resolved_root) = self
+			.info()
+			.common_dir
+			.canonicalize()
+			.map(|common| common.join("worktrees"))
+		else {
+			return Ok(out);
+		};
+		let mut admins: Vec<_> = admins
+			.filter_map(std::result::Result::ok)
+			.filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+			.collect();
 		admins.sort_by_key(std::fs::DirEntry::file_name);
 		for admin in admins {
-			let dir = admin.path();
-			let Ok(pointer) = std::fs::read_to_string(dir.join("gitdir")) else {
+			let Some((dir, root)) = linked_worktree(&resolved_root, &admin.path()) else {
 				continue;
 			};
-			let dotgit = PathBuf::from(pointer.trim());
-			let Some(root) = dotgit.parent().map(Path::to_owned) else {
+			// An admin dir whose `HEAD` is unreadable or holds neither a ref nor
+			// an object id (sandboxed code can create one) is skipped rather
+			// than failing the whole listing.
+			let Ok(head) = self.worktree_head(&dir.join("HEAD")) else {
 				continue;
 			};
-			let head = parse_head_with_refs(&dir.join("HEAD"), &self.info().common_dir)?;
 			out.push(entry_from_head(root, &head));
 		}
 		Ok(out)
@@ -948,10 +963,9 @@ impl GitRepo {
 		let mut queue = VecDeque::from([(self.root().to_owned(), String::new())]);
 		while let Some((root, prefix)) = queue.pop_front() {
 			for path in parse_gitmodules(&root.join(".gitmodules")) {
-				let full = root.join(&path);
-				if !full.join(".git").exists() {
+				let Some(full) = submodule_checkout(&root, &path) else {
 					continue;
-				}
+				};
 				let joined = if prefix.is_empty() {
 					path
 				} else {
@@ -1023,30 +1037,14 @@ impl GitRepo {
 			}
 			return cli_try(self.root(), &["rev-parse", "--verify", name]);
 		}
-		for dir in [&self.info().git_dir, &self.info().common_dir] {
-			if let Ok(value) = std::fs::read_to_string(dir.join(name))
-				&& let Some(value) = nonempty(value.trim())
-			{
-				return Ok(Some(value));
-			}
-		}
-		for dir in [&self.info().git_dir, &self.info().common_dir] {
-			let Ok(content) = std::fs::read_to_string(dir.join("packed-refs")) else {
-				continue;
-			};
-			for line in content
-				.lines()
-				.map(str::trim)
-				.filter(|line| !line.is_empty() && !line.starts_with(['#', '^']))
-			{
-				if let Some((sha, ref_name)) = line.split_once(' ')
-					&& ref_name == name
-				{
-					return Ok(Some(sha.to_owned()));
-				}
-			}
-		}
-		Ok(None)
+		let info = self.info();
+		let both = [info.git_dir.as_path(), info.common_dir.as_path()];
+		let dirs = if info.git_dir == info.common_dir {
+			&both[..1]
+		} else {
+			&both[..]
+		};
+		self.known_object(lookup_ref(dirs, name))
 	}
 
 	fn peel_symbolic(&self, value: Option<String>) -> Result<Option<String>> {
@@ -1062,6 +1060,42 @@ impl GitRepo {
 			value = self.read_ref(target)?;
 		}
 		Ok(None)
+	}
+
+	/// `value` unless it is an object id this repository's object database
+	/// lacks. Ref files are opened by path, and a link on a directory above
+	/// one (`.git/refs -> /`, planted by sandboxed code) makes a host file
+	/// holding 40 or 64 hex digits read as a ref; sandboxed code cannot create
+	/// an object whose id equals an unknown secret, so only ids of existing
+	/// objects are returned. Other values (`ref: <target>`) pass through.
+	fn known_object(&self, value: Option<String>) -> Result<Option<String>> {
+		let Some(value) = value else {
+			return Ok(None);
+		};
+		if !is_object_id(&value) {
+			return Ok(Some(value));
+		}
+		let repo = self.gix()?;
+		Ok(gix::ObjectId::from_hex(value.as_bytes())
+			.is_ok_and(|id| id.kind() == repo.object_hash() && repo.has_object(id))
+			.then_some(value))
+	}
+
+	/// The state of the main or a linked worktree's `HEAD` at `head_path`,
+	/// its branch resolved through the loose and packed refs of the common
+	/// dir, its commit only when the object exists ([`Self::known_object`]).
+	fn worktree_head(&self, head_path: &Path) -> Result<HeadState> {
+		Ok(match read_head_file(head_path)? {
+			HeadFile::Symbolic(ref_name) => HeadState::Ref {
+				branch: ref_name.strip_prefix("refs/heads/").map(str::to_owned),
+				commit: self.known_object(
+					lookup_ref(&[&self.info().common_dir], &ref_name)
+						.filter(|value| is_object_id(value)),
+				)?,
+				ref_name,
+			},
+			HeadFile::Detached(commit) => HeadState::Detached { commit: self.known_object(commit)? },
+		})
 	}
 
 	/// The first `limit` commits reachable from `rev`, newest first. Like
@@ -1093,14 +1127,193 @@ impl GitRepo {
 fn nonempty(value: &str) -> Option<String> {
 	(!value.is_empty()).then(|| value.to_owned())
 }
+/// Whether `name` is a ref path that stays inside the git dir it is joined
+/// to: relative, no `.`/`..`/empty components, no `\` and no `:` (a Windows
+/// drive prefix replaces the base on join; git refnames forbid both).
 fn valid_ref_path(name: &str) -> bool {
 	!name.is_empty()
 		&& !name.starts_with('/')
-		&& !name.contains('\\')
+		&& !name.contains(['\\', ':'])
 		&& name
 			.split('/')
 			.all(|component| !matches!(component, "" | "." | ".."))
 }
+
+/// Whether `value` is a full SHA-1 or SHA-256 object id in hex.
+fn is_object_id(value: &str) -> bool {
+	matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Largest `packed-refs` read. A line is an object id, a space and a ref
+/// name (about 100 bytes), so this covers a few million refs, beyond the
+/// largest monorepos, while bounding what a planted file can make the host
+/// allocate.
+const PACKED_REFS_LIMIT: u64 = 256 << 20;
+
+/// Longest `packed-refs` line: an object id and a ref name, which is a path
+/// in a git dir (loose refs are capped at the same size).
+const PACKED_REF_LINE_LIMIT: u64 = HEAD_LIMIT;
+
+/// Largest `.gitmodules` read: a submodule entry takes about 150 bytes, so
+/// this covers about a hundred thousand submodules.
+const GITMODULES_LIMIT: u64 = 16 << 20;
+
+/// A `HEAD` file's content: a symbolic ref or a (possibly empty) detached
+/// object id.
+enum HeadFile {
+	Symbolic(String),
+	Detached(Option<String>),
+}
+
+/// Read and classify the `HEAD` at `path`. Sandboxed code can plant links,
+/// FIFOs and arbitrary content there, so the file is read without following
+/// links and its content is only returned when it is `ref: <ref path>` or an
+/// object id; anything else fails without echoing it.
+fn read_head_file(path: &Path) -> Result<HeadFile> {
+	let bytes = read_git_file(path, HEAD_LIMIT, false)?;
+	let content = String::from_utf8_lossy(&bytes);
+	let value = content.trim();
+	if let Some(name) = value.strip_prefix("ref:").map(str::trim) {
+		if !valid_ref_path(name) {
+			return Err(Error::backend("git read HEAD", "HEAD names an invalid ref path"));
+		}
+		return Ok(HeadFile::Symbolic(name.to_owned()));
+	}
+	if value.is_empty() {
+		return Ok(HeadFile::Detached(None));
+	}
+	if !is_object_id(value) {
+		return Err(Error::backend("git read HEAD", "HEAD holds neither a ref nor an object id"));
+	}
+	Ok(HeadFile::Detached(Some(value.to_owned())))
+}
+
+/// The value of ref `name` from the first of `dirs` holding it as a loose
+/// ref, else from their `packed-refs`: `ref: <target>` or an object id.
+/// Files are read without following links (sandboxed code can plant links
+/// and FIFOs in a git dir); unreadable files and content that is neither a
+/// symbolic ref nor an object id are skipped, never returned.
+fn lookup_ref(dirs: &[&Path], name: &str) -> Option<String> {
+	if !valid_ref_path(name) {
+		return None;
+	}
+	for dir in dirs {
+		if let Ok(bytes) = read_git_file(&dir.join(name), HEAD_LIMIT, false) {
+			let content = String::from_utf8_lossy(&bytes);
+			let value = content.trim();
+			let valid = match value.strip_prefix("ref:") {
+				Some(target) => valid_ref_path(target.trim()),
+				None => is_object_id(value),
+			};
+			if valid {
+				return Some(value.to_owned());
+			}
+		}
+	}
+	for dir in dirs {
+		let Ok((file, _)) = open_git_file(&dir.join("packed-refs"), PACKED_REFS_LIMIT, false) else {
+			continue;
+		};
+		if let Some(sha) = find_packed_ref(file, name) {
+			return Some(sha);
+		}
+	}
+	None
+}
+
+/// The object id the `packed-refs` content in `reader` records for ref
+/// `name`. Read a line at a time, holding one line at most: up to
+/// [`PACKED_REFS_LIMIT`] bytes overall (the file may grow after its size
+/// check) and [`PACKED_REF_LINE_LIMIT`] per line. A longer line ends the
+/// search; git rejects such a file as malformed too.
+fn find_packed_ref(reader: impl Read, name: &str) -> Option<String> {
+	let mut reader = BufReader::new(reader.take(PACKED_REFS_LIMIT));
+	let mut line = Vec::new();
+	loop {
+		line.clear();
+		let read = (&mut reader)
+			.take(PACKED_REF_LINE_LIMIT)
+			.read_until(b'\n', &mut line)
+			.ok()?;
+		if read == 0
+			|| (!line.ends_with(b"\n")
+				&& u64::try_from(read).is_ok_and(|read| read >= PACKED_REF_LINE_LIMIT))
+		{
+			return None;
+		}
+		let text = line.trim_ascii();
+		if text.starts_with(b"#") || text.starts_with(b"^") {
+			continue;
+		}
+		let Some(space) = text.iter().position(|&byte| byte == b' ') else {
+			continue;
+		};
+		if &text[space + 1..] == name.as_bytes()
+			&& let Ok(sha) = std::str::from_utf8(&text[..space])
+			&& is_object_id(sha)
+		{
+			return Some(sha.to_owned());
+		}
+	}
+}
+
+/// The admin dir (resolved) and checkout of the linked worktree whose
+/// admin entry is `admin`. Git lists every admin entry whose `gitdir` it can
+/// read, and marks one prunable (still listed, its branch still checked out)
+/// when the `.git` that `gitdir` names no longer exists. This accepts such
+/// an entry when `admin` resolves to a directory directly under `admins`
+/// (the resolved `<common>/worktrees`) and, when the named `.git` exists,
+/// only if it points back at `admin`; when nothing exists at the checkout
+/// path (its folder was deleted), the entry is listed as git lists it.
+/// Sandboxed code can plant admin entries, swap them for links to another
+/// repository's, and write any path into `gitdir`; such an entry is
+/// skipped. Files are read without following links.
+fn linked_worktree(admins: &Path, admin: &Path) -> Option<(PathBuf, PathBuf)> {
+	let admin = admin.canonicalize().ok()?;
+	if admin.parent() != Some(admins) {
+		return None;
+	}
+	let pointer = read_git_file(&admin.join("gitdir"), HEAD_LIMIT, false).ok()?;
+	let dotgit = admin.join(String::from_utf8_lossy(&pointer).trim());
+	let root = dotgit.parent()?.to_owned();
+	let back = match read_git_file(&dotgit, HEAD_LIMIT, false) {
+		Ok(back) => back,
+		Err(err)
+			if err.kind() == std::io::ErrorKind::NotFound
+				&& std::fs::symlink_metadata(&root)
+					.is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound) =>
+		{
+			return Some((admin, root));
+		},
+		Err(_) => return None,
+	};
+	let back = String::from_utf8_lossy(&back);
+	let target = root.join(back.trim().strip_prefix("gitdir:")?.trim());
+	(target.canonicalize().ok()? == admin).then_some((admin, root))
+}
+
+/// `<root>/<path>`, a submodule checkout listed in `root`'s `.gitmodules`,
+/// when it has a `.git` and neither it, a directory on the way to it below
+/// `root`, nor its `.git` is a link. Sandboxed code can plant
+/// `sub -> <host repo>`; following it would probe host paths, read the host
+/// repo's `.gitmodules` and hand its directory on as a submodule (Git's
+/// leading-symlink check refuses such paths too).
+fn submodule_checkout(root: &Path, path: &str) -> Option<PathBuf> {
+	let mut full = root.to_owned();
+	for component in Path::new(path).components() {
+		full.push(component);
+		if std::fs::symlink_metadata(&full)
+			.ok()?
+			.file_type()
+			.is_symlink()
+		{
+			return None;
+		}
+	}
+	let dotgit = std::fs::symlink_metadata(full.join(".git")).ok()?;
+	(!dotgit.file_type().is_symlink()).then_some(full)
+}
+
 fn bytes_to_path(value: &gix::bstr::BStr) -> String {
 	value.to_str_lossy().into_owned()
 }
@@ -1258,29 +1471,6 @@ fn entry_from_head(path: PathBuf, head: &HeadState) -> WorktreeEntry {
 		detached: matches!(head, HeadState::Detached { .. }),
 	}
 }
-fn parse_head_with_refs(head_path: &Path, common_dir: &Path) -> Result<HeadState> {
-	let content = std::fs::read_to_string(head_path)?;
-	let value = content.trim();
-	if let Some(name) = value.strip_prefix("ref:").map(str::trim) {
-		let commit = std::fs::read_to_string(common_dir.join(name))
-			.ok()
-			.and_then(|value| nonempty(value.trim()))
-			.or_else(|| {
-				std::fs::read_to_string(common_dir.join("packed-refs"))
-					.ok()?
-					.lines()
-					.filter_map(|line| line.split_once(' '))
-					.find_map(|(sha, candidate)| (candidate == name).then(|| sha.to_owned()))
-			});
-		Ok(HeadState::Ref {
-			ref_name: name.to_owned(),
-			branch: name.strip_prefix("refs/heads/").map(str::to_owned),
-			commit,
-		})
-	} else {
-		Ok(HeadState::Detached { commit: nonempty(value) })
-	}
-}
 fn parse_worktree_cli(raw: &str) -> Vec<WorktreeEntry> {
 	let mut out = Vec::new();
 	for record in raw.split("\n\n") {
@@ -1353,12 +1543,14 @@ fn path_matches(path: &str, wanted: &str) -> bool {
 }
 /// `path =` values from `.gitmodules`, keeping only plain relative paths:
 /// like Git, reject absolute, `.`, and `..` components, which could escape
-/// the checkout or make the recursive walk revisit a parent forever.
+/// the checkout or make the recursive walk revisit a parent forever. The
+/// file is in a checkout sandboxed code can write, so a link (Git refuses to
+/// index a symlinked `.gitmodules` too), FIFO or oversized file reads as none.
 fn parse_gitmodules(path: &Path) -> Vec<String> {
-	let Ok(content) = std::fs::read_to_string(path) else {
+	let Ok(bytes) = read_git_file(path, GITMODULES_LIMIT, false) else {
 		return Vec::new();
 	};
-	content
+	String::from_utf8_lossy(&bytes)
 		.lines()
 		.filter_map(|line| {
 			let line = line.trim();
@@ -1885,6 +2077,484 @@ mod tests {
 		// resolved locations rather than spellings.
 		assert_eq!(worktrees[1].path.canonicalize()?, linked.canonicalize()?);
 		assert_eq!(worktrees[1].branch.as_deref(), Some("refs/heads/linked-branch"));
+		Ok(())
+	}
+
+	/// Content that would pass as an object id, so only refusing the link or
+	/// the escaping ref path (not content validation) keeps it out.
+	fn secret_id() -> String {
+		format!("5ec2e7{}", "d".repeat(34))
+	}
+
+	/// A result rendered with its value or its error (`Display` and `Debug`),
+	/// to check that no secret leaks through either.
+	fn shown<T: std::fmt::Debug>(result: &Result<T>) -> String {
+		match result {
+			Ok(value) => format!("{value:?}"),
+			Err(err) => format!("{err} {err:?}"),
+		}
+	}
+
+	/// Run `f` on another thread, failing instead of hanging when a planted
+	/// FIFO blocks it.
+	#[cfg(unix)]
+	fn without_blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+		let (sender, receiver) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let _ = sender.send(f());
+		});
+		receiver
+			.recv_timeout(std::time::Duration::from_secs(20))
+			.expect("blocked, presumably opening a FIFO")
+	}
+
+	#[cfg(unix)]
+	fn mkfifo(path: &Path) {
+		assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+	}
+
+	/// A repository at `<outer>/repo` with one commit, so `../../<name>` from
+	/// its git dir names `<outer>/<name>`.
+	fn nested_repo()
+	-> std::result::Result<(TempDir, PathBuf, GitRepo, String), Box<dyn std::error::Error>> {
+		nested_repo_with_format("sha1")
+	}
+
+	/// [`nested_repo`] hashing with `object_format` (`sha1` or `sha256`).
+	fn nested_repo_with_format(
+		object_format: &str,
+	) -> std::result::Result<(TempDir, PathBuf, GitRepo, String), Box<dyn std::error::Error>> {
+		let outer = tempfile::tempdir()?;
+		let root = outer.path().join("repo");
+		fs::create_dir(&root)?;
+		git(&root, &["init", "-q", "-b", "main", &format!("--object-format={object_format}")])?;
+		git(&root, &["config", "user.name", "Test User"])?;
+		git(&root, &["config", "user.email", "test@example.com"])?;
+		commit(&root, "one", "one\n", "one")?;
+		let sha = git(&root, &["rev-parse", "HEAD"])?.trim().to_owned();
+		let repo = GitRepo::require(&root)?;
+		Ok((outer, root, repo, sha))
+	}
+
+	#[test]
+	fn ref_paths_and_object_ids_are_recognized() {
+		assert!(valid_ref_path("refs/heads/main"));
+		for name in ["", "/etc/passwd", "../x", "refs/../x", "refs//x", "refs\\x", "C:/x", "C:x"] {
+			assert!(!valid_ref_path(name), "{name}");
+		}
+		assert!(is_object_id(&"a".repeat(40)));
+		assert!(is_object_id(&"0".repeat(64)));
+		for value in ["a".repeat(39), "a".repeat(41), "g".repeat(40), String::new()] {
+			assert!(!is_object_id(&value), "{value}");
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn head_and_refs_linked_to_host_files_are_not_followed() -> TestResult {
+		use std::os::unix::fs::symlink;
+		let (outer, root, repo, sha) = nested_repo()?;
+		let secret = secret_id();
+		let secret_file = outer.path().join("secret");
+		fs::write(&secret_file, format!("{secret}\n"))?;
+		let words = outer.path().join("words");
+		fs::write(&words, "token=hunter2\n")?;
+		let git_dir = root.join(".git");
+		let head = git_dir.join("HEAD");
+
+		for target in [&secret_file, &words] {
+			fs::remove_file(&head)?;
+			symlink(target, &head)?;
+			let state = repo.head();
+			assert!(state.is_err(), "{state:?}");
+			let listed = repo.worktrees();
+			assert!(listed.is_err(), "{listed:?}");
+			for text in [shown(&state), shown(&listed)] {
+				assert!(!text.contains(&secret) && !text.contains("hunter2"), "{text}");
+			}
+		}
+		fs::remove_file(&head)?;
+		fs::write(&head, "ref: refs/heads/main\n")?;
+
+		// A loose ref linked to a host file is skipped for `packed-refs`.
+		let loose = git_dir.join("refs/heads/main");
+		fs::remove_file(&loose)?;
+		symlink(&secret_file, &loose)?;
+		let packed = git_dir.join("packed-refs");
+		fs::write(&packed, format!("{sha} refs/heads/main\n"))?;
+		assert_eq!(repo.head_sha()?, Some(sha.clone()));
+		assert_eq!(repo.worktrees()?[0].head, Some(sha));
+
+		// So is a linked `packed-refs`.
+		fs::remove_file(&packed)?;
+		symlink(&words, &packed)?;
+		fs::write(&words, format!("{secret} refs/heads/main\n"))?;
+		assert_eq!(repo.head_sha()?, None);
+		assert_eq!(repo.worktrees()?[0].head, None);
+		Ok(())
+	}
+
+	#[test]
+	fn head_refs_escaping_the_git_dir_are_rejected() -> TestResult {
+		let (outer, root, repo, _) = nested_repo()?;
+		let secret = secret_id();
+		let secret_file = outer.path().join("secret");
+		fs::write(&secret_file, format!("{secret}\n"))?;
+		let linked = outer.path().join("linked");
+		git(&root, &["worktree", "add", "-q", "-b", "linked", &linked.to_string_lossy()])?;
+		let head = root.join(".git/HEAD");
+		let linked_head = root.join(".git/worktrees/linked/HEAD");
+		let absolute = format!("ref: {}\n", secret_file.display());
+
+		for content in [absolute.as_str(), "ref: ../../secret\n"] {
+			fs::write(&linked_head, content)?;
+			let listed = repo.worktrees();
+			assert_eq!(listed.as_ref().map(Vec::len).ok(), Some(1), "{listed:?}");
+			assert!(!shown(&listed).contains(&secret));
+
+			fs::write(&head, content)?;
+			let state = repo.head();
+			assert!(state.is_err(), "{state:?}");
+			let listed = repo.worktrees();
+			assert!(listed.is_err(), "{listed:?}");
+			for text in [shown(&state), shown(&listed)] {
+				assert!(!text.contains(&secret), "{text}");
+			}
+			fs::write(&head, "ref: refs/heads/main\n")?;
+		}
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn fifos_planted_in_the_git_dir_and_checkout_do_not_block() -> TestResult {
+		let (outer, root, repo, sha) = nested_repo()?;
+		let linked = outer.path().join("linked");
+		git(&root, &["worktree", "add", "-q", "-b", "linked", &linked.to_string_lossy()])?;
+		let git_dir = root.join(".git");
+		mkfifo(&outer.path().join("fifo"));
+
+		// A linked worktree's HEAD naming a FIFO outside, or being one.
+		let admin = git_dir.join("worktrees/linked");
+		fs::write(admin.join("HEAD"), "ref: ../../fifo\n")?;
+		let repo = std::sync::Arc::new(repo);
+		let listed = without_blocking({
+			let repo = repo.clone();
+			move || repo.worktrees().map(|list| list.len())
+		});
+		assert_eq!(listed?, 1);
+		fs::remove_file(admin.join("HEAD"))?;
+		mkfifo(&admin.join("HEAD"));
+		let listed = without_blocking({
+			let repo = repo.clone();
+			move || repo.worktrees().map(|list| list.len())
+		});
+		assert_eq!(listed?, 1);
+		fs::remove_dir_all(&admin)?;
+
+		// A planted admin dir whose `gitdir` is a FIFO.
+		fs::create_dir(git_dir.join("worktrees/planted"))?;
+		mkfifo(&git_dir.join("worktrees/planted/gitdir"));
+		let listed = without_blocking({
+			let repo = repo.clone();
+			move || repo.worktrees().map(|list| list.len())
+		});
+		assert_eq!(listed?, 1);
+
+		// A loose ref that is a FIFO falls back to `packed-refs`.
+		let loose = git_dir.join("refs/heads/main");
+		fs::remove_file(&loose)?;
+		mkfifo(&loose);
+		fs::write(git_dir.join("packed-refs"), format!("{sha} refs/heads/main\n"))?;
+		let commit = without_blocking({
+			let repo = repo.clone();
+			move || repo.head_sha()
+		});
+		assert_eq!(commit?, Some(sha));
+
+		// `HEAD` itself.
+		let head = git_dir.join("HEAD");
+		fs::remove_file(&head)?;
+		mkfifo(&head);
+		let state = without_blocking({
+			let repo = repo.clone();
+			move || repo.head()
+		});
+		assert!(state.is_err(), "{state:?}");
+
+		// `.gitmodules` in the checkout.
+		mkfifo(&root.join(".gitmodules"));
+		let modules = without_blocking(move || repo.submodule_paths());
+		assert!(modules?.is_empty());
+		Ok(())
+	}
+
+	#[test]
+	fn head_and_ref_content_that_is_no_ref_or_object_id_is_not_echoed() -> TestResult {
+		let (_outer, root, repo, sha) = nested_repo()?;
+		let git_dir = root.join(".git");
+		let head = git_dir.join("HEAD");
+		fs::write(&head, "token=hunter2 not an id\n")?;
+		let state = repo.head();
+		assert!(state.is_err(), "{state:?}");
+		let listed = repo.worktrees();
+		assert!(listed.is_err(), "{listed:?}");
+		for text in [shown(&state), shown(&listed)] {
+			assert!(!text.contains("hunter2"), "{text}");
+		}
+
+		// A detached object id that exists, and an empty HEAD, still read.
+		fs::write(&head, format!("{sha}\n"))?;
+		assert_eq!(repo.head()?, HeadState::Detached { commit: Some(sha.clone()) });
+		fs::write(&head, "")?;
+		assert_eq!(repo.head()?, HeadState::Detached { commit: None });
+
+		// A loose ref or packed line with junk is skipped, never returned.
+		fs::write(&head, "ref: refs/heads/main\n")?;
+		fs::write(git_dir.join("refs/heads/main"), "token=hunter2\n")?;
+		assert_eq!(repo.head_sha()?, None);
+		fs::write(
+			git_dir.join("packed-refs"),
+			format!("hunter2 refs/heads/main\n{sha} refs/heads/main\n"),
+		)?;
+		assert_eq!(repo.head_sha()?, Some(sha.clone()));
+		assert_eq!(repo.worktrees()?[0].head, Some(sha));
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn worktree_admin_dirs_linked_to_host_directories_are_skipped() -> TestResult {
+		use std::os::unix::fs::symlink;
+		let (outer, root, repo, sha) = nested_repo()?;
+		// A host directory shaped like a worktree admin dir.
+		let host = outer.path().join("host");
+		let host_admin = host.join("admin");
+		fs::create_dir_all(&host_admin)?;
+		fs::write(host_admin.join("gitdir"), "/host/secret-path/.git\n")?;
+		fs::write(host_admin.join("HEAD"), format!("{sha}\n"))?;
+
+		let worktrees = root.join(".git/worktrees");
+		symlink(&host, &worktrees)?;
+		let listed = repo.worktrees()?;
+		assert_eq!(listed.len(), 1, "{listed:?}");
+		fs::remove_file(&worktrees)?;
+
+		fs::create_dir(&worktrees)?;
+		symlink(&host_admin, worktrees.join("planted"))?;
+		let listed = repo.worktrees()?;
+		assert_eq!(listed.len(), 1, "{listed:?}");
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn gitmodules_linked_to_a_host_file_is_ignored() -> TestResult {
+		use std::os::unix::fs::symlink;
+		let (outer, root, repo, _) = nested_repo()?;
+		fs::create_dir(root.join("sub"))?;
+		git(&root.join("sub"), &["init", "-q"])?;
+		let host = outer.path().join("modules");
+		fs::write(&host, "[submodule \"sub\"]\n\tpath = sub\n")?;
+		symlink(&host, root.join(".gitmodules"))?;
+		assert!(repo.submodule_paths()?.is_empty());
+		fs::remove_file(root.join(".gitmodules"))?;
+		fs::copy(&host, root.join(".gitmodules"))?;
+		assert_eq!(repo.submodule_paths()?, ["sub"]);
+		Ok(())
+	}
+
+	/// `.git/refs` or `.git/refs/heads` linked to a host directory holding a
+	/// file of 40 or 64 hex digits (an id of either hash length), with HEAD
+	/// naming that file, resolves to no commit; so does a detached HEAD
+	/// naming no object. Real commits of either hash still resolve.
+	#[cfg(unix)]
+	#[test]
+	fn refs_resolve_only_to_objects_the_repository_has() -> TestResult {
+		use std::os::unix::fs::symlink;
+		for object_format in ["sha1", "sha256"] {
+			let (outer, root, repo, sha) = nested_repo_with_format(object_format)?;
+			let git_dir = root.join(".git");
+			let head = git_dir.join("HEAD");
+			let host = outer.path().join("host");
+			fs::create_dir(&host)?;
+			let saved = outer.path().join("saved");
+			for secret in [secret_id(), format!("5ec2e7{}", "d".repeat(58))] {
+				fs::write(host.join("key"), format!("{secret}\n"))?;
+				for (linked, name) in [("refs", "refs/key"), ("refs/heads", "refs/heads/key")] {
+					let link = git_dir.join(linked);
+					fs::rename(&link, &saved)?;
+					symlink(&host, &link)?;
+					fs::write(&head, format!("ref: {name}\n"))?;
+					let state = repo.head();
+					let listed = repo.worktrees();
+					let resolved = repo.resolve_ref(name);
+					fs::remove_file(&link)?;
+					fs::rename(&saved, &link)?;
+					assert_eq!(state?, HeadState::Ref {
+						ref_name: name.to_owned(),
+						branch:   name.strip_prefix("refs/heads/").map(str::to_owned),
+						commit:   None,
+					});
+					assert_eq!(listed?[0].head, None);
+					assert_eq!(resolved?, None);
+				}
+				fs::write(&head, format!("{secret}\n"))?;
+				assert_eq!(repo.head()?, HeadState::Detached { commit: None });
+				assert_eq!(repo.worktrees()?[0].head, None);
+			}
+			fs::write(&head, "ref: refs/heads/main\n")?;
+			assert_eq!(repo.head_sha()?, Some(sha.clone()));
+			assert_eq!(repo.worktrees()?[0].head, Some(sha.clone()));
+			assert_eq!(repo.resolve_ref("refs/heads/main")?, Some(sha.clone()));
+			fs::write(&head, format!("{sha}\n"))?;
+			assert_eq!(repo.head()?, HeadState::Detached { commit: Some(sha) });
+		}
+		Ok(())
+	}
+
+	/// A planted admin dir whose `gitdir` names another repository's
+	/// worktree (whose `.git` points at that repository's admin dir) is
+	/// skipped; a real linked worktree is listed, and resolves its branch
+	/// through the common dir.
+	#[test]
+	fn worktree_admin_entries_not_pointed_back_at_are_skipped() -> TestResult {
+		let (outer, root, repo, sha) = nested_repo()?;
+		let linked = outer.path().join("linked");
+		git(&root, &["worktree", "add", "-q", "-b", "linked", &linked.to_string_lossy()])?;
+		let other = outer.path().join("other");
+		fs::create_dir(&other)?;
+		git(&other, &["init", "-q", "-b", "main"])?;
+		git(&other, &["config", "user.name", "Test User"])?;
+		git(&other, &["config", "user.email", "test@example.com"])?;
+		commit(&other, "two", "two\n", "two")?;
+		let other_tree = outer.path().join("other-tree");
+		git(&other, &[
+			"worktree",
+			"add",
+			"-q",
+			"-b",
+			"secret-branch",
+			&other_tree.to_string_lossy(),
+		])?;
+
+		let planted = root.join(".git/worktrees/planted");
+		fs::create_dir(&planted)?;
+		fs::write(planted.join("gitdir"), format!("{}\n", other_tree.join(".git").display()))?;
+		fs::write(planted.join("HEAD"), format!("{sha}\n"))?;
+		let listed = repo.worktrees()?;
+		assert_eq!(listed.len(), 2, "{listed:?}");
+		assert_eq!(listed[1].path.canonicalize()?, linked.canonicalize()?);
+		assert_eq!(listed[1].head, Some(sha.clone()));
+		assert_eq!(GitRepo::require(&linked)?.head_sha()?, Some(sha));
+		Ok(())
+	}
+
+	/// A linked worktree whose folder was deleted is still listed with its
+	/// branch and commit, as git lists it (prunable); one whose folder exists
+	/// without a `.git` pointing back is not.
+	#[test]
+	fn linked_worktree_with_deleted_folder_is_still_listed() -> TestResult {
+		let (outer, root, repo, sha) = nested_repo()?;
+		let linked = outer.path().join("linked");
+		git(&root, &["worktree", "add", "-q", "-b", "linked", &linked.to_string_lossy()])?;
+		let before = repo.worktrees()?;
+		assert_eq!(before.len(), 2, "{before:?}");
+
+		fs::remove_dir_all(&linked)?;
+		let listed = repo.worktrees()?;
+		assert_eq!(listed.len(), 2, "{listed:?}");
+		assert_eq!(listed[1].path, before[1].path);
+		assert_eq!(listed[1].branch.as_deref(), Some("refs/heads/linked"));
+		assert_eq!(listed[1].head, Some(sha));
+		assert!(!listed[1].detached);
+
+		fs::create_dir(&linked)?;
+		assert_eq!(repo.worktrees()?.len(), 1);
+		Ok(())
+	}
+
+	/// An admin entry that resolves outside `<common>/worktrees` (a link to
+	/// another repository's admin dir, swapped in after the directory check)
+	/// is skipped even though that admin dir is consistent in itself.
+	#[cfg(unix)]
+	#[test]
+	fn linked_worktree_requires_the_admin_dir_under_the_common_dir() -> TestResult {
+		let (outer, root, ..) = nested_repo()?;
+		let other = outer.path().join("other");
+		fs::create_dir(&other)?;
+		git(&other, &["init", "-q", "-b", "main"])?;
+		git(&other, &["config", "user.name", "Test User"])?;
+		git(&other, &["config", "user.email", "test@example.com"])?;
+		commit(&other, "two", "two\n", "two")?;
+		let other_tree = outer.path().join("other-tree");
+		git(&other, &[
+			"worktree",
+			"add",
+			"-q",
+			"-b",
+			"secret-branch",
+			&other_tree.to_string_lossy(),
+		])?;
+		let other_admin = other.join(".git/worktrees/other-tree");
+		let other_admins = other.join(".git/worktrees").canonicalize()?;
+		assert!(linked_worktree(&other_admins, &other_admin).is_some());
+
+		let admins = root.join(".git/worktrees");
+		fs::create_dir(&admins)?;
+		let alias = admins.join("alias");
+		std::os::unix::fs::symlink(&other_admin, &alias)?;
+		assert_eq!(linked_worktree(&admins.canonicalize()?, &alias), None);
+		Ok(())
+	}
+
+	/// A submodule path that is a link, runs through one, or whose `.git` is
+	/// one is not listed, and the linked repository's `.gitmodules` is not
+	/// followed; a real submodule checkout is.
+	#[cfg(unix)]
+	#[test]
+	fn submodules_reached_through_links_are_skipped() -> TestResult {
+		use std::os::unix::fs::symlink;
+		let (outer, root, repo, _) = nested_repo()?;
+		let host_repo = outer.path().join("host-repo");
+		fs::create_dir_all(host_repo.join("inner"))?;
+		git(&host_repo, &["init", "-q"])?;
+		git(&host_repo.join("inner"), &["init", "-q"])?;
+		fs::write(host_repo.join(".gitmodules"), "[submodule \"inner\"]\n\tpath = inner\n")?;
+		let host_dir = outer.path().join("host-dir");
+		fs::create_dir_all(host_dir.join("nested"))?;
+		git(&host_dir.join("nested"), &["init", "-q"])?;
+
+		symlink(&host_repo, root.join("sub"))?;
+		symlink(&host_dir, root.join("dir"))?;
+		fs::create_dir(root.join("dotgit"))?;
+		symlink(host_repo.join(".git"), root.join("dotgit/.git"))?;
+		fs::create_dir(root.join("real"))?;
+		git(&root.join("real"), &["init", "-q"])?;
+		let modules = ["sub", "dir/nested", "dotgit", "real"]
+			.map(|path| format!("[submodule \"{path}\"]\n\tpath = {path}\n"))
+			.concat();
+		fs::write(root.join(".gitmodules"), modules)?;
+		assert_eq!(repo.submodule_paths()?, ["real"]);
+		Ok(())
+	}
+
+	#[test]
+	fn packed_refs_are_read_a_bounded_line_at_a_time() -> TestResult {
+		let name = "refs/heads/main";
+		let sha = "a".repeat(40);
+		let line_limit = usize::try_from(PACKED_REF_LINE_LIMIT)?;
+		// A comment line of exactly the cap is read past; the match is found.
+		let fits = format!("#{}\n{sha} {name}\n", "x".repeat(line_limit - 2));
+		assert_eq!(find_packed_ref(fits.as_bytes(), name), Some(sha.clone()));
+		// One byte longer ends the search.
+		let long = format!("#{}\n{sha} {name}\n", "x".repeat(line_limit - 1));
+		assert_eq!(find_packed_ref(long.as_bytes(), name), None);
+		// An endless line is given up on after about one line's worth.
+		let mut endless = std::io::repeat(b'x').take(PACKED_REFS_LIMIT);
+		assert_eq!(find_packed_ref(&mut endless, name), None);
+		let consumed = PACKED_REFS_LIMIT - endless.limit();
+		assert!(consumed <= 2 * PACKED_REF_LINE_LIMIT, "read {consumed} bytes");
 		Ok(())
 	}
 }

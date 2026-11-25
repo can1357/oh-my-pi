@@ -6,13 +6,22 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
-import { isRecord, prompt, relativePathWithinNormalizedRoot, sanitizeText } from "@oh-my-pi/pi-utils";
+import {
+	getConfigRootDir,
+	isRecord,
+	MAIN_CONFIG_FILENAMES,
+	prompt,
+	relativePathWithinNormalizedRoot,
+	sanitizeText,
+} from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "../utils/text-width";
 import { shortenPath } from "../utils/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
 import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
+import { sandboxEnabled } from "../sandbox/policy";
 import type {
 	ExtensionApprovalAnswer,
 	ExtensionApprovalGrant,
@@ -54,9 +63,14 @@ export interface ResolvedExecuteTimeApproval {
 	userPolicies: Record<string, unknown>;
 }
 
-type ApprovalSubject = Pick<
+export type ApprovalSubject = Pick<
 	AgentTool,
-	"name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets" | "approvalRestrictionPaths"
+	| "name"
+	| "approval"
+	| "formatApprovalDetails"
+	| "approvalCacheTargets"
+	| "approvalRestrictionPaths"
+	| "sandboxSubjects"
 > & {
 	/**
 	 * Previous public name of this tool, when a rename changed how it mints.
@@ -318,7 +332,7 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
 
 /** `tools.restrictedFolders` as one call sees it. */
 export interface ApprovalRestrictions {
-	/** Folders where every action needs an explicit approval, whatever the mode, policy, or grant. */
+	/** Folders (or single files) where every action needs an explicit approval, whatever the mode, policy, or grant. */
 	restrictedFolders: readonly string[];
 	/**
 	 * Directory the call runs in: a tool that names no path is matched by it (or by its own `cwd`
@@ -327,13 +341,35 @@ export interface ApprovalRestrictions {
 	cwd?: string;
 }
 
-/** The restrictions `settings` configure for calls running in `cwd`; `undefined` when none are. */
+/**
+ * omp's global settings files, which hold the operator's sandbox policy (`config.yml`) and can
+ * enable or redirect it (the agent-dir, config-root and `~/.env` files: `PI_SANDBOX`,
+ * `PI_CONFIG_FILES`, `PI_CODING_AGENT_DIR`, ...). While the sandbox is enabled the in-process file
+ * tools must not rewrite them unnoticed; contained commands cannot anyway.
+ */
+function sandboxProtectedConfigFiles(settings: Settings): string[] {
+	const agentDir = settings.getAgentDir();
+	return [
+		...MAIN_CONFIG_FILENAMES.map(name => path.join(agentDir, name)),
+		path.join(agentDir, ".env"),
+		path.join(getConfigRootDir(), ".env"),
+		path.join(os.homedir(), ".env"),
+	];
+}
+
+/**
+ * The restrictions `settings` configure for calls running in `cwd`; `undefined` when none are.
+ * While the sandbox is enabled, omp's global settings files are restricted too.
+ */
 export function approvalRestrictions(
 	settings: Settings | undefined,
 	cwd: string | undefined,
 ): ApprovalRestrictions | undefined {
 	if (!settings) return undefined;
-	const restrictedFolders = cfgToolsRestrictedFolders.get(settings);
+	const configured = cfgToolsRestrictedFolders.get(settings);
+	const restrictedFolders = sandboxEnabled(settings)
+		? [...configured, ...sandboxProtectedConfigFiles(settings)]
+		: configured;
 	if (restrictedFolders.length === 0) return undefined;
 	return cwd === undefined ? { restrictedFolders } : { restrictedFolders, cwd };
 }
@@ -497,18 +533,16 @@ function isWithinFolder(root: string, candidate: string): boolean {
 }
 
 /**
- * Absolute filesystem paths a call touches, keyed like grants (symlinks resolved, case-folded on
- * Windows); `recursive` marks a search that reads the whole tree below its path. A call whose tool
- * reports no targets is matched by the directory it runs in — its own `cwd` argument when it names
- * one, else the session's — plus any `approvalRestrictionPaths`. Non-filesystem targets (internal
- * and web URLs) touch no folder.
+ * Absolute filesystem paths a call names, keyed like grants (symlinks resolved, case-folded on
+ * Windows): its cache targets, else its `approvalRestrictionPaths`. `recursive` marks a path the
+ * call reaches below: a tree search, or a restriction path (which may be a folder a glob walks).
+ * Non-filesystem targets (internal and web URLs) are left out.
  */
-function restrictionSubjects(
+export function approvalPathSubjects(
 	tool: ApprovalSubject,
 	args: unknown,
-	cwd: string | undefined,
+	targets: string[] = approvalCacheTargets(tool, args),
 ): { path: string; recursive: boolean }[] {
-	const targets = approvalCacheTargets(tool, args);
 	if (targets.length > 0) {
 		const subjects: { path: string; recursive: boolean }[] = [];
 		for (const target of targets) {
@@ -521,10 +555,24 @@ function restrictionSubjects(
 		}
 		return subjects;
 	}
-	const subjects = (tool.approvalRestrictionPaths?.(args) ?? [])
+	return (tool.approvalRestrictionPaths?.(args) ?? [])
 		.filter(target => path.isAbsolute(target))
-		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: false }));
-	if (cwd === undefined) return subjects;
+		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: true }));
+}
+
+/**
+ * The paths a call touches ({@link approvalPathSubjects}); a call that names none, or only
+ * `approvalRestrictionPaths`, is also matched by the directory it runs in — its own `cwd` argument
+ * when it names one, else the session's.
+ */
+function restrictionSubjects(
+	tool: ApprovalSubject,
+	args: unknown,
+	cwd: string | undefined,
+): { path: string; recursive: boolean }[] {
+	const targets = approvalCacheTargets(tool, args);
+	const subjects = approvalPathSubjects(tool, args, targets);
+	if (targets.length > 0 || cwd === undefined) return subjects;
 	let workingDirectory = cwd;
 	const requested = isRecord(args) ? args.cwd : undefined;
 	if (typeof requested === "string" && requested.trim().length > 0) {

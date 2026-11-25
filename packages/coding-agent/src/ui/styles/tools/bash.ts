@@ -16,6 +16,7 @@ import { highlightCode } from "@oh-my-pi/pi-tui/text/highlight";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
 import type { BashStat, BashTerm } from "../../tools/bash";
+import { SANDBOX_BADGE_TEXT } from "../../../tools/details/sandbox";
 import { resultPictures, withoutDrawnPlaceholders } from "./file-common";
 import {
 	bracketed,
@@ -31,6 +32,7 @@ import {
 } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
 import { shellVizRows } from "./shell-viz";
+import { isSandboxed, sandboxNoteLines } from "./sandbox";
 import { toolCommandRows } from "./tool-command";
 
 /** A child of `node` by key, searched depth-first. */
@@ -96,6 +98,9 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	const inputRows = expanded ? lines : capLines(theme, lines, PREVIEW_WINDOW_ROWS);
 	const outcome = term.outcome;
 	const title = typeof props.title === "string" ? props.title : "";
+	// A contained run names it dim after the head, or as the head when there is none.
+	const sandboxed = isSandboxed(props);
+	const meta = sandboxed ? [SANDBOX_BADGE_TEXT] : undefined;
 	let header: string | undefined;
 	if (term.header) {
 		const glyph = !term.result
@@ -103,9 +108,10 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 			: outcome === "success"
 				? theme.fg("accent", theme.symbols.symbol("tool.bash"))
 				: statusIcon(cx, outcome === "running" ? "pending" : outcome === "warning" ? "warning" : "error");
-		const line: StatusLine = { glyph, title, ...(term.intent ? { description: term.intent } : {}) };
+		const line: StatusLine = { glyph, title, ...(term.intent ? { description: term.intent } : {}), meta };
 		header = statusLine(theme, line);
-	} else if (term.intent) header = statusLine(theme, { title: term.intent, titleColor: "muted" });
+	} else if (term.intent) header = statusLine(theme, { title: term.intent, titleColor: "muted", meta });
+	else if (sandboxed) header = theme.fg("dim", SANDBOX_BADGE_TEXT);
 
 	if (!term.result) {
 		// A call sealed while running keeps the time it ran.
@@ -139,6 +145,7 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	const limit = Math.min(term.previewLines ?? PREVIEW_WINDOW_ROWS, PREVIEW_WINDOW_ROWS);
 	const shown = expanded ? outputLines : tailRows(theme, outputLines, limit, frameInner(width));
 	if (term.warning) shown.push(theme.fg("warning", bracketed(theme, term.warning)));
+	shown.push(...sandboxNoteLines(node, theme));
 	const stats = (term.stats ?? []).map(stat => statText(theme, stat));
 	if (term.liveClock) {
 		const seconds = Math.floor(runningMs(props, cx) / 1000);

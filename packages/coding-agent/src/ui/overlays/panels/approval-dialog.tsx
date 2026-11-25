@@ -157,6 +157,11 @@ export function ApprovalDialog(props: ApprovalDialogProps): JSXNode {
 		else if (id === "session") props.onApprove({ kind: "session" });
 		else props.onApprove({ kind: "grant", index: Number(id.slice(5)), remember: untrack(remember) });
 	};
+	/** A row picked by pointer: input like a key, so the remember toggle restarts the countdown. */
+	const pick = (id: string) => {
+		if (id === "remember" && ids.includes(id)) resetCountdown();
+		choose(id);
+	};
 	const move = (delta: number) => {
 		const at = ids.indexOf(untrack(selected));
 		selected.set(ids[(at + delta + ids.length) % ids.length]!);
@@ -288,7 +293,7 @@ export function ApprovalDialog(props: ApprovalDialogProps): JSXNode {
 					</list>
 				)
 			}
-			<list key="choices" role="omp.approval.choices" selected={current} onSelect={choose} onActivate={choose}>
+			<list key="choices" role="omp.approval.choices" selected={current} onSelect={pick} onActivate={pick}>
 				{ids.map(id => (
 					<item
 						key={id}

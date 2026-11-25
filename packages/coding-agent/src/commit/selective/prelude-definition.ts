@@ -1,6 +1,8 @@
 import { type } from "@oh-my-pi/omptype";
+import type { VcsHookExit, VcsHookRun } from "@oh-my-pi/pi-natives";
 import { ToolError } from "../../tools/tool-errors";
 import type { HostEvalPreludeDefinition } from "../../eval/preludes";
+import { execContained } from "../../exec/exec";
 import commitDocumentation from "../../prompts/tools/commit.md" with { type: "text" };
 import commitGuidance from "../../prompts/tools/commit-guidance.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -8,7 +10,12 @@ import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import { cfgCommitEnabled } from "../../tools/settings";
-import { commitSelection } from "./apply";
+import { sessionSandboxWritableRoots } from "../../internal-urls/context";
+import { renderSandboxDenialNotice } from "../../sandbox/denial-notice";
+import { containedProcessEnv } from "../../sandbox/env";
+import { SandboxRuntime } from "../../sandbox/runtime";
+import type { SandboxResultMeta } from "../../sandbox/types";
+import { type CommitOutcome, commitSelection } from "./apply";
 import { createDraft, type Draft, type ScopeSpec } from "./draft";
 import { ChangeJournal } from "./journal";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
@@ -90,6 +97,37 @@ function describeCall(parameters: unknown): string | undefined {
 }
 
 /**
+ * Commit hooks started through `sandbox`, under the policy of contained eval cells, and the
+ * sandbox annotation of the last hook whose failure failed the commit.
+ */
+function containedHooks(
+	sandbox: SandboxRuntime,
+	extraWrite: readonly string[],
+	signal?: AbortSignal,
+): { run: (hook: VcsHookRun) => Promise<VcsHookExit>; failure: () => SandboxResultMeta | undefined } {
+	let failure: SandboxResultMeta | undefined;
+	const run = async (hook: VcsHookRun): Promise<VcsHookExit> => {
+		const startedAt = Date.now();
+		// As under `git commit`, the hook's stdout goes to its stderr, keeping the output in order.
+		// Windows has no `sh` outside git's own; there git runs every hook (`git hook run`).
+		const argv = process.platform === "win32" ? hook.argv : ["/bin/sh", "-c", 'exec "$@" 1>&2', "sh", ...hook.argv];
+		const result = await execContained(sandbox, argv, {
+			cwd: hook.cwd,
+			env: containedProcessEnv(sandbox, Bun.env, hook.env),
+			extraWrite,
+			signal,
+		});
+		const output = result.stdout + result.stderr;
+		// Git ignores a failed `post-commit`: the commit landed, so a later error is not the hook's.
+		if (result.code !== 0 && hook.name !== "post-commit") {
+			failure = sandbox.resultMeta({ blockedSince: startedAt, output, exitCode: result.code });
+		}
+		return { exitCode: result.code, output };
+	};
+	return { run, failure: () => failure };
+}
+
+/**
  * Create the `commit` eval prelude: draft the session agent tree's changes from its change
  * journal, adjust the selection, and commit it without touching other agents' work.
  */
@@ -143,21 +181,32 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 			}
 			case "commit": {
 				const { agent, artifactsDir } = context(signal);
-				const outcome = await commitSelection(
-					draft,
-					{
-						subject: params.subject,
-						body: params.body,
-						fixes: params.fixes,
-						amend: params.amend,
-						noVerify: params.noVerify,
-					},
-					{
-						journal: artifactsDir ? ChangeJournal.at(artifactsDir) : null,
-						agent: { agent, parent: AgentRegistry.global().get(agent)?.parentId },
-						signal,
-					},
-				);
+				// Contained cells run their hooks contained too: a hook is workspace code.
+				const sandbox = await SandboxRuntime.forScope(session.cwd, "eval");
+				const hooks = sandbox ? containedHooks(sandbox, sessionSandboxWritableRoots(session), signal) : undefined;
+				let outcome: CommitOutcome;
+				try {
+					outcome = await commitSelection(
+						draft,
+						{
+							subject: params.subject,
+							body: params.body,
+							fixes: params.fixes,
+							amend: params.amend,
+							noVerify: params.noVerify,
+						},
+						{
+							journal: artifactsDir ? ChangeJournal.at(artifactsDir) : null,
+							agent: { agent, parent: AgentRegistry.global().get(agent)?.parentId },
+							signal,
+							hookRunner: hooks?.run,
+						},
+					);
+				} catch (error) {
+					const notice = renderSandboxDenialNotice(hooks?.failure(), session, true);
+					if (!notice) throw error;
+					throw new ToolError(`${error instanceof Error ? error.message : String(error)}\n\n${notice}`);
+				}
 				drafts.delete(draft.id);
 				const remaining = await draftFor(context(signal, draft.root), scope);
 				remember(remaining, scope);

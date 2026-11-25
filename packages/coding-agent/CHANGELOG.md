@@ -2,17 +2,33 @@
 
 ## [Unreleased]
 
-### Removed
+### Breaking Changes
 
-- Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
+- Rust SDK: `SessionState` and `BashResult` struct literals need `sandbox: None` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- A project `.env` can no longer set the names that choose omp's config or natives dir (`PI_CONFIG_FILES`, agent/config dirs, profile, XDG roots); set them in your shell or omp's own `.env` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Added
 
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added an opt-in OS sandbox (seatbelt on macOS, bubblewrap on Linux, processcontainer on Windows) for `bash`, eval cells, the file tools, `read`'s binary analysis, eval's `dsm`, extension and hook commands, opted-in MCP and language servers, and the `browser` helper's Chromium: writes stay in the workspace, secret stores are unreadable, and the network is off, open, or allowlisted through an egress proxy that `read`, `grep` and `ast_grep` web reads follow too. Configure it with `/sandbox`, `sandbox.*` settings (a project can only tighten them) or `PI_SANDBOX=1`; `omp --smoke-test` checks it (see `docs/sandbox.md`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- With the sandbox on, git config and hooks and the project config omp loads (`.omp/`, `.claude/`, `.mcp.json`, …) are read-only to sandboxed commands; one they create or replace is ignored until you trust it in `/sandbox`, and the eval `commit` helper runs commit hooks contained ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Added the `sandbox_request` tool: a sandbox refusal names the path, host or host-side action the agent can ask for; RPC clients can read and edit the sandbox, answer its prompts and revoke grants (see `docs/rpc.md#sandbox`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Added the `/sandbox` panel (terminal and Tern), the sandbox access dialog, the `sandbox_request` tool card, and a `sandboxed` badge with blocked-host and likely-denial notes on bash and eval cards ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
+### Changed
+
+- Approval modes now gate `read` and search URLs on `192.0.0.0/24`, `198.18.0.0/15` and the TEST-NET ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) like other non-public addresses ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- omp's own git no longer follows symlinks planted in `.git` in place of `HEAD`, refs, the commit message file or worktree entries, and treats a ref to a missing object as unresolved ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Fixed
 
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- On Windows, a cancelled JavaScript eval cell keeps the output it printed just before the cancel, and a hung Python probe no longer delays backend discovery ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- A config file that fails validation now prints one `Error:` line naming the file and setting instead of a stack trace ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
+### Removed
+
+- Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
 
 ## [19.2.1] - 2026-11-25
 
