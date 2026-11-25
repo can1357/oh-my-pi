@@ -19,30 +19,6 @@ export interface ShellCommandArgs {
 	noSnapshot?: boolean;
 }
 
-export function parseShellArgs(args: string[]): ShellCommandArgs | undefined {
-	if (args.length === 0 || args[0] !== "shell") {
-		return undefined;
-	}
-
-	const result: ShellCommandArgs = {};
-
-	for (let i = 1; i < args.length; i++) {
-		const arg = args[i];
-		if (arg === "--cwd" || arg === "-C") {
-			result.cwd = args[++i];
-		} else if (arg === "--timeout" || arg === "-t") {
-			const parsed = Number.parseInt(args[++i], 10);
-			if (Number.isFinite(parsed)) {
-				result.timeoutMs = parsed;
-			}
-		} else if (arg === "--no-snapshot") {
-			result.noSnapshot = true;
-		}
-	}
-
-	return result;
-}
-
 export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 	if (!process.stdin.isTTY) {
 		process.stderr.write("Error: shell console requires an interactive TTY.\n");
@@ -155,23 +131,4 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 		process.off("SIGINT", interruptHandler);
 		rl.close();
 	}
-}
-
-export function printShellHelp(): void {
-	process.stdout.write(`${chalk.bold(`${APP_NAME} shell`)} - Interactive shell console for testing
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} shell [options]
-
-${chalk.bold("Options:")}
-  --cwd, -C <path>     Set working directory for commands
-  --timeout, -t <ms>   Timeout per command in milliseconds
-  --no-snapshot        Skip sourcing snapshot from user shell
-  -h, --help           Show this help
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} shell
-  ${APP_NAME} shell --cwd ./tmp
-  ${APP_NAME} shell --timeout 2000
-`);
 }
