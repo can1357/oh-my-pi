@@ -6,6 +6,10 @@
 
 - Requests that ask for a fast service tier now prefer a credential that offers it: Codex accounts whose plan advertises the tier (Ultrafast), Claude accounts with fast mode available, or a stored or environment API key. Such an account keeps serving on paid overage and inside its reserve, and ordinary balancing across the rest takes over once it is blocked or refused the tier.
 
+### Changed
+
+- Embeddings, transcription and video errors now show the upstream message for flat `{ "error": "..." }` and `{ "message": "..." }` responses instead of the raw JSON body ([#20490](https://github.com/can1357/oh-my-pi/pull/20490) by [@H4vC](https://github.com/H4vC))
+
 ### Fixed
 
 - Codex requests no longer send a service tier to an account whose own plan does not offer it.
