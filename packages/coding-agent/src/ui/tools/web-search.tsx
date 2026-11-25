@@ -2,12 +2,15 @@
 /**
  * Web search: the query as the head target, the provider and source count as
  * meta, the model as a badge; the answer as markdown, then the sources (site
- * letter, linked title, domain and age).
+ * letter, linked title, domain and age). When there is no answer, the
+ * sources carry their own excerpts instead.
  *
  * Terminal look: `web_search` (`src/ui/styles/tools/web-search.ts`): a card
  * with Query / Answer / Sources / Metadata sections; plain-text results as a
  * `Response` tree.
  */
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { PREVIEW_LIMITS, sanitizeDisplayLines } from "../../utils/render-utils";
 import type { ToolHead, ToolPresenter, ToolView } from "./contract";
 import { resultText } from "./default";
 import { registerToolPresenter } from "./registry";
@@ -23,8 +26,10 @@ export interface WebSearchArgs {
 /** One cited source. */
 export interface WebSearchSource {
 	readonly title?: string;
-	readonly url: string;
+	readonly url?: string;
 	readonly ageSeconds?: number;
+	readonly publishedDate?: string;
+	readonly snippet?: string;
 }
 
 /** A provider's response. */
@@ -33,6 +38,7 @@ export interface WebSearchResponse {
 	/** How the provider was reached (`api_key`, `oauth`). */
 	readonly authMode?: string;
 	readonly answer?: string;
+	readonly searchQueries?: readonly string[];
 	readonly sources?: readonly WebSearchSource[];
 	readonly model?: string;
 	readonly usage?: {
@@ -55,6 +61,10 @@ export interface WebSearchTermSource {
 	readonly domain: string;
 	/** `1d`, `3w`. */
 	readonly age?: string;
+	/** Publication date when a relative age is unavailable. */
+	readonly publishedDate?: string;
+	/** Sanitized page excerpts when no synthesized answer is available. */
+	readonly excerpt?: readonly string[];
 	/** The page the title links to. */
 	readonly url?: string;
 }
@@ -68,8 +78,8 @@ export type WebSearchTerm = {
 	readonly sourceCount?: number;
 	/** Markdown answer. */
 	readonly answer?: string;
-	/** Plain answer text (no markdown answer). */
-	readonly fallback?: string;
+	/** Plain answer lines when neither an answer nor any sources were returned. */
+	readonly fallback?: readonly string[];
 	readonly sources?: readonly WebSearchTermSource[];
 	readonly maxAnswerLines?: number;
 	/** `m @ Anthropic`. */
@@ -94,6 +104,20 @@ const PROVIDER_NAMES: Readonly<Record<string, string>> = {
 };
 
 const AUTH_MODES: Readonly<Record<string, string>> = { api_key: "API", oauth: "OAuth" };
+
+const EXCERPT_LINES = PREVIEW_LIMITS.COLLAPSED_LINES;
+
+function excerptLines(snippet: string | undefined): string[] | undefined {
+	if (!snippet) return undefined;
+	const lines: string[] = [];
+	for (const raw of sanitizeDisplayLines(snippet)) {
+		const line = raw.replace(/\s+/g, " ").trim();
+		if (!/[\p{L}\p{N}]/u.test(line)) continue;
+		lines.push(line);
+		if (lines.length === EXCERPT_LINES) break;
+	}
+	return lines.length > 0 ? lines : undefined;
+}
 
 /** A provider id as people read it. */
 export function providerName(provider: string | undefined): string {
@@ -123,10 +147,10 @@ function domainOf(url: string): string {
 	}
 }
 
-function searchHead(args: WebSearchArgs | undefined, extra?: Partial<ToolHead>): ToolHead {
+function searchHead(query: string | undefined, extra?: Partial<ToolHead>): ToolHead {
 	return {
 		title: "Web search",
-		...(args?.query ? { target: args.query } : {}),
+		...(query ? { target: query } : {}),
 		targetKind: "query",
 		...extra,
 	};
@@ -142,21 +166,23 @@ function usageText(usage: WebSearchResponse["usage"]): string | undefined {
 	return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
+/** Present search answers and linked sources in the transcript. */
 export const webSearchPresenter: ToolPresenter<WebSearchArgs, WebSearchDetails> = {
 	merge: true,
 	call: args => ({
-		head: searchHead(args),
+		head: searchHead(args?.query),
 		inline: true,
 		term: { look: "web_search", query: args?.query } satisfies WebSearchTerm,
 	}),
 	result(result, _state, args): ToolView {
 		const response = result.details?.response;
-		const query = args?.query;
+		const rawQuery = args?.query || response?.searchQueries?.[0];
+		const query = rawQuery ? flatText(sanitizeText(rawQuery)) : undefined;
 		if (!response) {
 			const text = resultText(result).trim();
 			const message = text || "No response data";
 			return {
-				head: searchHead(args),
+				head: searchHead(query),
 				tone: "warning",
 				body: <text spans={[{ s: "muted", t: message }]} wrap="word" />,
 				term: {
@@ -171,13 +197,13 @@ export const webSearchPresenter: ToolPresenter<WebSearchArgs, WebSearchDetails> 
 		if (error) {
 			const message = flatText(error);
 			return {
-				head: searchHead(args, { meta: [provider] }),
+				head: searchHead(args?.query, { meta: [provider] }),
 				tone: "error",
 				body: <text role="omp.tool.error" spans={[{ s: "error", t: message }]} wrap="word" />,
 				term: {
 					look: "web_search",
 					result: true,
-					query,
+					query: args?.query,
 					provider,
 					error: message,
 				} satisfies WebSearchTerm,
@@ -190,43 +216,54 @@ export const webSearchPresenter: ToolPresenter<WebSearchArgs, WebSearchDetails> 
 		const providerLine = response.model ? `${response.model} @ ${reached}` : reached;
 		const detail = usage ? `${providerLine}\n${usage}` : providerLine;
 		const answer = response.answer?.trimEnd();
-		const fallback = answer ? undefined : resultText(result).trim();
-		const termSources = sources.map(source => {
-			const domain = domainOf(source.url);
+		// Without a synthesized answer the raw text repeats the source listing.
+		let fallback: string[] | undefined;
+		if (!answer && sources.length === 0) {
+			fallback = sanitizeDisplayLines(resultText(result).trim()).filter(line => line.trim());
+			if (fallback.length === 0) fallback.push("No answer text returned");
+		}
+		const termSources = sources.map((source): WebSearchTermSource => {
+			const url = source.url?.trim() || undefined;
+			const age = formatAge(source.ageSeconds);
 			return {
-				title: flatText(source.title || domain),
-				domain,
-				age: formatAge(source.ageSeconds),
-				...(source.url ? { url: source.url } : {}),
+				title: flatText(sanitizeText(source.title?.trim() || url || "Untitled")),
+				domain: url ? flatText(sanitizeText(domainOf(url))) : "",
+				age,
+				publishedDate: !age && source.publishedDate ? flatText(sanitizeText(source.publishedDate)) : undefined,
+				excerpt: answer ? undefined : excerptLines(source.snippet),
+				url,
 			};
 		});
 		return {
-			head: searchHead(args, {
+			head: searchHead(query, {
 				meta: [`${provider} · ${sources.length} ${sources.length === 1 ? "source" : "sources"}`],
 				...(response.model ? { badges: [{ text: response.model, title: detail }] } : {}),
 			}),
-			...(answer ? {} : { tone: "warning" as const }),
+			tone: sources.length === 0 ? "warning" : undefined,
 			body: [
 				answer ? (
 					<md key="answer" text={answer} title={detail} />
 				) : fallback ? (
-					<text spans={[{ s: "muted", t: fallback }]} wrap="word" />
+					<text spans={[{ s: "muted", t: fallback.join("\n") }]} wrap="word" />
 				) : undefined,
 				sources.length > 0 ? (
 					<col key="sources" role="omp.tool.sources">
-						{sources.map((source, i) => {
-							const { title, domain, age } = termSources[i]!;
+						{termSources.map(({ title, domain, age, publishedDate, excerpt, url }, i) => {
+							const date = age || publishedDate;
+							const meta = domain && date ? `${domain} · ${date}` : domain || date;
 							return (
-								<row
-									key={`${i}:${source.url}`}
-									role="omp.tool.source"
-									gap="sm"
-									align="baseline"
-									href={source.url}
-								>
-									<badge text={domain[0]?.toUpperCase() ?? "?"} title={domain} />
-									<text spans={[{ s: "link", t: title, href: source.url }]} lines={2} truncate="end" />
-									<text spans={[{ s: "muted", t: age ? `${domain} · ${age}` : domain }]} lines={1} />
+								<row key={`${i}:${url ?? ""}`} role="omp.tool.source" gap="sm" align="baseline" href={url}>
+									<badge text={domain[0]?.toUpperCase() ?? "?"} title={domain || undefined} />
+									<text spans={[{ s: "link", t: title, href: url }]} lines={2} truncate="end" />
+									{meta ? <text spans={[{ s: "muted", t: meta }]} lines={1} /> : undefined}
+									{excerpt ? (
+										<text
+											role="omp.tool.excerpt"
+											spans={[{ s: "muted", t: excerpt.join("\n") }]}
+											wrap="word"
+											lines={EXCERPT_LINES}
+										/>
+									) : undefined}
 								</row>
 							);
 						})}
