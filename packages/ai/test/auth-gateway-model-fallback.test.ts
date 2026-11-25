@@ -170,6 +170,42 @@ describe("auth-gateway model fallback", () => {
 		}
 	});
 
+	it.each([
+		["/v1/chat/completions", 32],
+		["/v1/embeddings", 8],
+	] as const)("stops %s at its %i MiB limit despite an understated Content-Length", async (route, limit) => {
+		const fallbackModels = vi.fn(toBackup);
+		const router = createAuthGatewayRouter({ storage, resolveModel: () => primary, fallbackModels });
+		const chunk = new Uint8Array(MiB).fill(0x20);
+		const cancel = vi.fn();
+		let sent = 0;
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				// Leave the upload open after crossing the limit. A 413 must not wait for EOF.
+				if (sent <= limit) {
+					controller.enqueue(chunk);
+					sent++;
+				}
+			},
+			cancel,
+		});
+		try {
+			const response = await router.route(
+				new Request(`http://gateway.test${route}`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", "Content-Length": "1" },
+					body: stream,
+				}),
+				"sdk-host",
+			);
+			expect(response.status).toBe(413);
+			expect(cancel).toHaveBeenCalledTimes(1);
+			expect(fallbackModels).not.toHaveBeenCalled();
+		} finally {
+			router.close();
+		}
+	});
+
 	it("answers 413 for a body over the route's limit without reading it for a fallback", async () => {
 		const fallbackModels = vi.fn(toBackup);
 		const { url } = boot(fallbackModels);

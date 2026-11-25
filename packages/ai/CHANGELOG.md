@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Auth-gateway hosts can set `fallbackModels` to retry failed JSON requests with other models ([#18406](https://github.com/can1357/oh-my-pi/pull/18406) by [@enieuwy](https://github.com/enieuwy))
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes
@@ -21,9 +25,6 @@
 - Requests waiting for maxInFlightRequests capacity now begin immediately when capacity is released, rather than relying on periodic polling.
 - omp auth-gateway now preserves Codex session and thread headers and uses Claude Code and OpenCode session identifiers for prompt-cache affinity, improving cache reuse through the gateway.
 - Anthropic (Claude Pro/Max) logins now refresh the way Claude Code 2.1.332 does and are disabled only when Anthropic rejects the refresh token with `invalid_grant`; a failed background refresh no longer fails requests while the access token is still valid, and a 403 "OAuth token has been revoked" refreshes the same login before switching accounts.
-### Added
-
-- Auth-gateway hosts can pass `fallbackModels` to resend a failed request to other models; `shouldTryFallbackModel()` and `answerWithFallbacks()` are the status rule and walk that the router and `stdio` share ([#18406](https://github.com/can1357/oh-my-pi/pull/18406) by [@enieuwy](https://github.com/enieuwy))
 
 ### Fixed
 

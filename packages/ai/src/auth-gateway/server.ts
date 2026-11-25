@@ -57,8 +57,8 @@ import {
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
 } from "./dispatch";
-import { answerWithFallbacks, shouldTryFallbackModel } from "./fallback";
 import {
+	codedErrorResponse,
 	corsHeaders,
 	gatewayResponseHeaders,
 	hasMisplacedBearer,
@@ -922,6 +922,7 @@ function scopeRouteOptions(opts: AuthGatewayRouteOptions, client: AuthGatewayCli
 
 /** Largest request body the router keeps a copy of to resend to a fallback model. */
 const MAX_FALLBACK_BODY_BYTES = 32 * 1024 * 1024;
+const FALLBACK_BODY_TOO_LARGE = "Request payload exceeds the 32 MiB fallback limit";
 
 /**
  * POST routes whose JSON body names its model in a top-level `model`, so a
@@ -944,32 +945,12 @@ const FALLBACK_ROUTES: Record<string, true> = {
 	"/v1/videos": true,
 };
 
-/**
- * Whether a request to `pathname` can move on to a fallback model: the host
- * supplies fallbacks, and it is a POST to a fallback route with a body that is
- * not multipart and declares a length of at most
- * {@link MAX_FALLBACK_BODY_BYTES}. The declared length bounds the router's copy
- * and lets a route stop reading at its own limit, which a streamed body's
- * unread copy would hold open until the upload ends.
- */
+/** The declared length selects candidates. The actual byte count limits replay. */
 function mayFallBack(req: Request, pathname: string, opts: AuthGatewayRouteOptions): boolean {
 	if (!opts.fallbackModels || req.method !== "POST" || !Object.hasOwn(FALLBACK_ROUTES, pathname)) return false;
 	if (req.headers.get("content-type")?.toLowerCase().startsWith("multipart/")) return false;
 	const declared = Number(req.headers.get("content-length"));
-	return declared > 0 && declared <= MAX_FALLBACK_BODY_BYTES;
-}
-
-/**
- * A clone of `req`, kept to resend its body; undefined when the body is
- * already read or locked, as when an SDK host consumed it before routing, so
- * the request is answered without fallback instead of `route` rejecting.
- */
-function cloneBody(req: Request) {
-	try {
-		return req.clone();
-	} catch {
-		return undefined;
-	}
+	return Number.isSafeInteger(declared) && declared > 0 && declared <= MAX_FALLBACK_BODY_BYTES;
 }
 
 /** A failed request that can move on: its JSON body and the models to resend it to. */
@@ -1101,21 +1082,40 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 			return json(500, { error: "internal error" });
 		}
 	};
-	/**
-	 * Answers `req`. When the requested model fails with a status
-	 * {@link shouldTryFallbackModel} admits, the request is resent, with only
-	 * the body's `model` swapped, to the host's `fallbackModels` for it through
-	 * {@link answerWithFallbacks}.
-	 */
 	const route = async (req: Request, peer: string, client?: AuthGatewayClientScope): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;
 		const opts = client ? scopeRouteOptions(hostOpts, client) : hostOpts;
-		// Kept before the first attempt consumes the body; read only if that attempt fails.
-		const copy = mayFallBack(req, pathname, opts) ? cloneBody(req) : undefined;
-		if (!copy) return dispatch(req, peer, opts);
+		if (!mayFallBack(req, pathname, opts) || req.bodyUsed || !req.body || req.body.locked) {
+			return dispatch(req, peer, opts);
+		}
+		// Capture only bytes the route reads. Its reader can stop at a smaller limit
+		// without waiting for a second consumer or for the end of the upload.
+		const replay = new Bun.ArrayBufferSink();
+		replay.start();
+		let received = 0;
+		const bodyStream = req.body.pipeThrough(
+			new TransformStream<Uint8Array, Uint8Array>({
+				transform(chunk, controller) {
+					received += chunk.byteLength;
+					if (received > MAX_FALLBACK_BODY_BYTES) {
+						controller.error(new RangeError(FALLBACK_BODY_TOO_LARGE));
+						return;
+					}
+					replay.write(chunk);
+					controller.enqueue(chunk);
+				},
+			}),
+			{ signal: req.signal },
+		);
+		const request = new Request(req.url, {
+			method: req.method,
+			headers: req.headers,
+			body: bodyStream,
+			signal: req.signal,
+		});
 		// The model the first attempt ran on, so its chain applies even if a catalog rebuild changes the lookup meanwhile.
 		const first: { model?: Model<Api> } = {};
-		const failure = await dispatch(req, peer, {
+		const failure = await dispatch(request, peer, {
 			...opts,
 			resolveModel: (id, options) => {
 				const resolved = opts.resolveModel(id, options);
@@ -1123,11 +1123,23 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 				return resolved;
 			},
 		});
+		// Some routes reject a declared length or content type before reading.
+		if (!bodyStream.locked) void bodyStream.cancel().catch(() => {});
+		if (received > MAX_FALLBACK_BODY_BYTES) {
+			const formatError =
+				FORMAT_ROUTES[pathname]?.module.formatError ??
+				(pathname === "/v1/systemone" || pathname === "/alpha/decisions"
+					? noStoreErrorResponse
+					: codedErrorResponse);
+			return formatError(413, "invalid_request_error", FALLBACK_BODY_TOO_LARGE);
+		}
 		const model = first.model;
-		if (!model || !shouldTryFallbackModel(failure.status) || req.signal.aborted) return failure;
+		if (!model || failure.status <= 400 || failure.status === 413 || failure.status === 499 || req.signal.aborted) {
+			return failure;
+		}
 		let plan: FallbackPlan | undefined;
 		try {
-			plan = fallbackPlan(await copy.json().catch(() => undefined), model, opts);
+			plan = fallbackPlan(JSON.parse(new TextDecoder().decode(replay.end())), model, opts);
 		} catch (error) {
 			// `route` never rejects: a chain lookup that throws leaves the failure as the answer.
 			logger.error("auth-gateway fallback lookup failed", {
@@ -1148,32 +1160,32 @@ export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): Auth
 		});
 		const headers = new Headers(req.headers);
 		headers.delete("content-length");
-		return answerWithFallbacks(
-			failure,
-			fallbacks,
-			fallback => {
-				const id = `${fallback.provider}/${fallback.id}`;
-				const attempt = new Request(req.url, {
-					method: req.method,
-					headers,
-					body: JSON.stringify({ ...body, model: id }),
-					signal: req.signal,
-				});
-				// Dispatch the chain's own model, so an `@upstream` pin or variant it carries reaches the provider.
-				return dispatch(attempt, peer, {
-					...opts,
-					resolveModel: (requested, options) =>
-						requested === id ? fallback : opts.resolveModel(requested, options),
-				});
-			},
-			(fallback, status) =>
-				logger.warn("auth-gateway fallback model failed", {
-					client: client?.name,
-					model: `${fallback.provider}/${fallback.id}`,
-					status,
-				}),
-			req.signal,
-		);
+		for (const fallback of fallbacks) {
+			if (req.signal.aborted) break;
+			const id = `${fallback.provider}/${fallback.id}`;
+			const attempt = new Request(req.url, {
+				method: req.method,
+				headers,
+				body: JSON.stringify({ ...body, model: id }),
+				signal: req.signal,
+			});
+			// Use the chain's model so its upstream pin reaches the provider.
+			const response = await dispatch(attempt, peer, {
+				...opts,
+				resolveModel: (requested, options) => (requested === id ? fallback : opts.resolveModel(requested, options)),
+			});
+			if (response.status < 400) {
+				await failure.body?.cancel().catch(() => {});
+				return response;
+			}
+			logger.warn("auth-gateway fallback model failed", {
+				client: client?.name,
+				model: id,
+				status: response.status,
+			});
+			await response.body?.cancel().catch(() => {});
+		}
+		return failure;
 	};
 	return { route, close: () => sessionStates.close() };
 }
