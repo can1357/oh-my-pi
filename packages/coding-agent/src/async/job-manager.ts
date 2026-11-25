@@ -389,9 +389,9 @@ export interface AsyncJobManagerApi {
 	/**
 	 * Calls `listener` whenever what a job view shows may have moved: a job was
 	 * registered, started, reported progress, settled, was promoted to the
-	 * background, had its result consumed, or was evicted. Returns the unsubscribe.
+	 * background, had its result consumed, or was evicted. Pass ids to watch only those jobs.
 	 */
-	onJobsChanged(listener: () => void): () => void;
+	onJobsChanged(listener: () => void, ids?: readonly string[]): () => void;
 	/** Start tracking `run` as a job; returns its id. */
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string;
 	/** Deliver an already-completed result without consuming a running-job slot. */
@@ -503,7 +503,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	/** Live widgets of this root's jobs; set by the root session when widgets are available. */
 	widgets: JobWidgetRegistry | undefined;
 	readonly #settleListeners = new Set<() => void>();
-	readonly #changeListeners = new Set<() => void>();
+	readonly #changeListeners = new Set<(id: string) => void>();
 
 	/**
 	 * Calls `listener` whenever a job settles (completed, failed or cancelled), so
@@ -517,17 +517,18 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		};
 	}
 
-	onJobsChanged(listener: () => void): () => void {
-		this.#changeListeners.add(listener);
+	onJobsChanged(listener: () => void, ids?: readonly string[]): () => void {
+		const notify = ids ? (id: string) => { if (ids.includes(id)) listener(); } : listener;
+		this.#changeListeners.add(notify);
 		return () => {
-			this.#changeListeners.delete(listener);
+			this.#changeListeners.delete(notify);
 		};
 	}
 
 	#notifyJobsChanged(jobId: string): void {
 		for (const listener of this.#changeListeners) {
 			try {
-				listener();
+				listener(jobId);
 			} catch (error) {
 				logger.warn("Async job change listener failed", {
 					jobId,

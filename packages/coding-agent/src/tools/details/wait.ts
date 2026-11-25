@@ -24,6 +24,8 @@ export interface JobSnapshot {
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */
 	intent?: string;
 	durationMs: number;
+	/** Epoch ms for the visible elapsed clock; only a running job in a live wait update carries it. */
+	startedAtMs?: number;
 	/**
 	 * When the run settled (epoch ms); absent while it is still running. Lets a
 	 * snapshot tell a result that finished during the call from one recovered

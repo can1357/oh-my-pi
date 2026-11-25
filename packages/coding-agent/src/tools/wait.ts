@@ -52,7 +52,8 @@ const AGENT_WAIT_TOP_MAX_MS = 30 * 60_000;
 const WAIT_LADDER_RESET_MS = 60_000;
 /** After one watched job settles, keep collecting briefly so near-simultaneous completions share one wait result. */
 const WAIT_SETTLE_WINDOW_MS = 1500;
-const PROGRESS_INTERVAL_MS = 500;
+/** Coalesce job and widget change notifications at the wait card's update cadence. */
+const PROGRESS_COALESCE_MS = 500;
 /** How long after its row is evicted a job is still named by a wait that finds nothing to wait for. */
 const RECENTLY_EVICTED_MS = 10 * 60_000;
 /** Most evicted jobs such a wait names. */
@@ -530,15 +531,26 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			if (signal.aborted) onAbort();
 			else signal.addEventListener("abort", onAbort, { once: true });
 		}
-		const emitProgress = () =>
-			onUpdate?.({
-				content: [{ type: "text", text: "" }],
-				details: { op: "wait", jobs: snapshotJobs(this.session, jobs) },
-			});
-		const progressTimer = onUpdate && jobs.length > 0 ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
-		if (jobs.length > 0) emitProgress();
+		let progressTimer: NodeJS.Timeout | undefined;
+		let watching = true;
 		let wake: "job" | "message" | "service" | "unanswerable" | "timeout" | "abort";
 		try {
+			if (onUpdate && manager && jobs.length > 0) {
+				const emitProgress = () => {
+					progressTimer = undefined;
+					onUpdate({
+						content: [{ type: "text", text: "" }],
+						details: { op: "wait", jobs: snapshotJobs(this.session, jobs, true) },
+					});
+				};
+				const changed = () => {
+					// A worker may receive an in-flight notification after it unsubscribed.
+					if (watching && !progressTimer) progressTimer = setTimeout(emitProgress, PROGRESS_COALESCE_MS);
+				};
+				unsubscribers.push(manager.onJobsChanged(changed, watchedIds));
+				if (manager.widgets) unsubscribers.push(manager.widgets.subscribe(changed));
+				emitProgress();
+			}
 			const otherLegs = [
 				...(busLeg ? [busLeg.then(() => "message" as const)] : []),
 				...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
@@ -562,7 +574,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 		} finally {
 			clearTimeout(timer);
-			clearInterval(progressTimer);
+			watching = false;
+			clearTimeout(progressTimer);
 			busAbort.abort();
 			serviceAbort.abort();
 			for (const unsubscribe of unsubscribers) unsubscribe();
