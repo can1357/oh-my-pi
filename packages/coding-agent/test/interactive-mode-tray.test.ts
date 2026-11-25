@@ -261,6 +261,8 @@ describe("InteractiveMode tray", () => {
 			TASK_SUBAGENT_PROGRESS_CHANNEL,
 			progress("TrayScan", {
 				currentTool: "read",
+				currentToolArgs: "config/app.toml",
+				currentToolArgsKey: "path",
 				currentToolIntent: "Reading the config",
 				currentToolStartMs: callStart,
 				toolCount: 3,
@@ -348,7 +350,7 @@ describe("InteractiveMode tray", () => {
 			status: "running",
 			tone: "accent",
 			acted: callStart,
-			aria: "TrayScan, m2, running, read · Reading the config, 3 tools",
+			aria: "TrayScan, m2, running, Read app.toml, 3 tools",
 		});
 		expect(children(scan).map(role)).toEqual(["omp.tray.head", "omp.tray.doing", "omp.tray.meta"]);
 		const scanHead = children(children(scan)[0]);
@@ -364,15 +366,16 @@ describe("InteractiveMode tray", () => {
 			],
 			key: "tools",
 		});
-		expect(children(scan)[1]!.p).toMatchObject({
-			spans: [{ t: "read", s: "dim" }, { t: " · ", s: "dim" }, { t: "Reading the config" }],
-		});
+		// The call's verb and file name, no intent; nothing changed yet.
+		expect(children(children(scan)[1]).map(node => [role(node), node.p?.spans])).toEqual([
+			["omp.tray.call", [{ t: "Read", s: "strong" }, { t: " app.toml" }]],
+		]);
 		expect(children(children(scan)[2]).map(node => node.p?.text)).toEqual(["claude-sonnet-4-5 · low", "22%"]);
 		// The status row carries only the caption: no counts.
 		expect(children(described[activity]).map(role)).toEqual(["omp.tray.caption"]);
 
 		expect(review!.p).toMatchObject({ status: "done", tone: "success" });
-		expect(children(review)[1]!.p).toMatchObject({ spans: [{ t: "Cross-check regressions" }] });
+		expect(children(children(review)[1])[0]!.p).toMatchObject({ spans: [{ t: "Cross-check regressions" }] });
 
 		expect(done!.p).toMatchObject({ status: "done" });
 		expect(JSON.stringify(children(done)[1]!.p)).toContain("TrayOld");
