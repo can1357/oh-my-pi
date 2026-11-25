@@ -12,7 +12,7 @@
  * pane's hunk and line actions, and routes keys and the pointer to the pane
  * with the keyboard.
  */
-import { type Accessor, batch, type KeyEvent, signal, untrack } from "@oh-my-pi/pi-tui";
+import { type Accessor, batch, type KeyEvent, type ScrollRequest, signal, untrack } from "@oh-my-pi/pi-tui";
 import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
 import { buildLineSelectionPatch, type HunkBlock, type WhitespaceMode } from "../../../cli/git-tui/model/diff-pane";
 import type { GitTuiHost } from "../../../cli/git-tui/model/git-tui";
@@ -515,6 +515,12 @@ export class GitAppModel {
 
 	// ── input ──────────────────────────────────────────────────────────────
 
+	#moveDiffCursor(delta: number, by: ScrollRequest["by"]): true {
+		this.pane.moveCursor(delta, false);
+		if (this.pane.doc) this.pane.requestScroll(by);
+		return true;
+	}
+
 	/** A key nothing else consumed. */
 	handleKey(key: KeyEvent): boolean {
 		if (key.kind === "release") return false;
@@ -560,14 +566,14 @@ export class GitAppModel {
 				return (this.pane.moveCursor(1, true), true);
 			case "up":
 			case "k":
-				return (this.pane.moveCursor(-1, false), true);
+				return this.#moveDiffCursor(-1, "line-up");
 			case "down":
 			case "j":
-				return (this.pane.moveCursor(1, false), true);
+				return this.#moveDiffCursor(1, "line-down");
 			case "pageUp":
-				return (this.pane.moveCursor(-page, false), true);
+				return this.#moveDiffCursor(-page, "page-up");
 			case "pageDown":
-				return (this.pane.moveCursor(page, false), true);
+				return this.#moveDiffCursor(page, "page-down");
 			case "left":
 			case "h":
 				return (this.pane.scrollLeftBy(-8), true);

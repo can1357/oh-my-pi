@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- The focused diff in Tern's native `/git` preview now scrolls with the arrow keys and Page Up/Page Down ([#20537](https://github.com/can1357/oh-my-pi/issues/20537)).
 - In a compiled omp with no `bun` on PATH, `bun` in a JS eval cell now reports that bun is not installed instead of starting a headless omp ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ## [19.2.1] - 2026-11-25
