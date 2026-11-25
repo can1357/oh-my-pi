@@ -222,8 +222,10 @@ export interface RpcSessionState {
 	/** Displayable queue-chip text for pending user-authored messages, mirroring
 	 *  `AgentSession.getQueuedMessages()`. Render the queue from this snapshot
 	 *  (and the `queue_update` event) instead of tracking chips independently.
-	 *  `liveSteered` counts the leading `steering` entries already sent into the
-	 *  streaming response; `remove_queued_message` cannot reach them. */
+	 *  Input the agent already took leads its list until the transcript records
+	 *  it; `liveSteered` counts the leading `steering` entries among it (live
+	 *  steering inside the streaming response, or steering on its way into the
+	 *  next request), which `remove_queued_message` cannot reach. */
 	queuedMessages: { steering: string[]; followUp: string[]; liveSteered: number };
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
