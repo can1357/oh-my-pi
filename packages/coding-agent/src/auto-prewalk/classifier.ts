@@ -31,6 +31,12 @@ export const AUTO_PREWALK_MIN_PROBABILITY = 0.7;
 /** A judgment slower than this gives way to the unmodified turn; an optimization never makes the user wait longer. */
 export const AUTO_PREWALK_TIMEOUT_MS = 4000;
 
+/**
+ * `escalate` budget: every routed task waits for the judge before setup, so a slow answer gives way sooner. Measured
+ * p50 194 ms, p95 240 ms.
+ */
+export const AUTO_PREWALK_ESCALATE_TIMEOUT_MS = 1000;
+
 const ROUTES: readonly PrewalkRoute[] = ["prewalk", "primary", "direct"];
 
 const QUESTIONS = judgeQuestions(questionFile);
@@ -109,11 +115,12 @@ function toDecision({ choice, probabilities, confidence }: ChoiceAnswer<PrewalkR
  * Classify where `input.request`'s reasoning belongs.
  * @returns `undefined` when the request is low-signal or the `judge` role does not resolve first to a native
  * System One backend.
- * @throws when the judge cannot produce a usable answer within {@link AUTO_PREWALK_TIMEOUT_MS}.
+ * @throws when the judge cannot produce a usable answer within `timeoutMs`.
  */
 export async function classifyAutoPrewalk(
 	input: AutoPrewalkInput,
 	deps: NativeJudgmentDeps,
+	timeoutMs = AUTO_PREWALK_TIMEOUT_MS,
 ): Promise<AutoPrewalkDecision | undefined> {
 	if (isLowSignalTitleInput(input.request) || !hasNativeJudge(deps.settings, deps.registry, deps.sessionModel))
 		return undefined;
@@ -121,7 +128,7 @@ export async function classifyAutoPrewalk(
 		"auto-prewalk",
 		{ state: buildState(input), questions: QUESTIONS },
 		deps,
-		AUTO_PREWALK_TIMEOUT_MS,
+		timeoutMs,
 	);
 	return toDecision(answers.route);
 }

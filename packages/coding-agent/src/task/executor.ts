@@ -178,6 +178,7 @@ import {
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
 	cfgPrewalkAutoTarget,
+	PREWALK_INITIAL_TARGET,
 } from "../session/settings";
 import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
@@ -5161,10 +5162,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
 					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
 					: undefined;
+			const autoTarget = cfgPrewalkAutoTarget.get(settings);
 			const autoPattern = autoEntry
 				? resolveAgentPrewalkPattern({
 						settingsOverride: autoEntry,
-						agentPrewalk: cfgPrewalkAutoTarget.get(settings),
+						// A subagent never moves to a planner, so there is no starting model to hand back to.
+						agentPrewalk: autoTarget === PREWALK_INITIAL_TARGET ? cfgPrewalkAutoTarget.default : autoTarget,
 					})
 				: undefined;
 			const prewalkPattern = unconditionalPattern ?? autoPattern;
