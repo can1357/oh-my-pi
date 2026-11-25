@@ -14,6 +14,7 @@ import {
 	normalizePathForComparison,
 	parseFrontmatter,
 	pathIsWithin,
+	relativePathWithinNormalizedRoot,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled } from "../capability";
@@ -716,11 +717,12 @@ function samePath(left: string, right: string): boolean {
 function isWithin(parent: string, child: string): boolean {
 	const normalizedParent = path.resolve(parent);
 	const normalizedChild = path.resolve(child);
-	const relative = path.relative(
-		process.platform === "win32" ? normalizedParent.toLowerCase() : normalizedParent,
-		process.platform === "win32" ? normalizedChild.toLowerCase() : normalizedChild,
+	return (
+		relativePathWithinNormalizedRoot(
+			process.platform === "win32" ? normalizedParent.toLowerCase() : normalizedParent,
+			process.platform === "win32" ? normalizedChild.toLowerCase() : normalizedChild,
+		) !== null
 	);
-	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
 /**
