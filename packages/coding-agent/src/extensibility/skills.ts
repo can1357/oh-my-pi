@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
 import {
 	getProjectDir,
 	isEnoent,
@@ -253,6 +254,19 @@ export function isNameClaimedByAuthoredSkill(name: string): boolean {
 	return getActiveSkills().some(
 		skill => skill.name === name && skill._source?.provider !== MANAGED_SKILLS_PROVIDER_ID,
 	);
+}
+
+/** Never let an unscoped edit reach behind an authored skill or an on-disk alias. */
+export function assertVisibleSkillIsAddressable(name: string): void {
+	const visible = getActiveSkills().find(skill => skill.name === name);
+	if (
+		visible &&
+		(visible._source?.provider !== MANAGED_SKILLS_PROVIDER_ID || path.basename(visible.baseDir) !== name)
+	) {
+		throw new Error(
+			`The visible skill "${name}" is not an addressable managed copy. Specify a managed scope to edit a hidden copy.`,
+		);
+	}
 }
 
 export interface LoadSkillsFromDirOptions {
@@ -558,7 +572,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		if (admit(skill, body, frontmatter, namespace) !== undefined) realPathSet.add(resolvedPath);
 	}
 
-	// Managed (auto-learn) skills resolve dead-last with first-wins. Source from
+	// Managed (auto-learn) skills resolve dead-last with first-wins; the provider
+	// lists the project store before the global one, so project wins. Source from
 	// result.all (pre-dedup): capability-level dedup runs BEFORE isSourceEnabled,
 	// so a managed skill can be shadowed by a higher-priority authored skill that
 	// is itself disabled here — managed must stay visible regardless of toggles.

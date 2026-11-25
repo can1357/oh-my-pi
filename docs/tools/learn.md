@@ -20,12 +20,12 @@
 
 ## Inputs
 
-| Field     | Type                                                                                | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| --------- | ----------------------------------------------------------------------------------- | -------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory`  | `string`                                                                            |      Yes | Durable, self-contained lesson to remember: what, when, and why. The schema has no minimum length; backend-specific sanitization/storage determines whether an empty value succeeds.                                                                                                                                                                                                                                                                                                                                                        |
-| `context` | `string`                                                                            |       No | Source context for the lesson.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `scope`   | `"project" \| "global"`                                                             |       No | `global` stores the lesson where every project recalls it: the shared Mnemopi bank, or an untagged Hindsight memory. In the schema and tool description only when `memory.backend` is `"mnemopi"` or `"hindsight"` and that backend's scoping (`mnemopi.scoping` / `hindsight.scoping`) is `global` or `per-project-tagged`, and for Hindsight only with `hindsight.globalScope = true` (default `false`), read from the session's Hindsight state so a subagent follows its parent's config from when it started; omitted means `project`. |
-| `skill`   | `{ action: "create" \| "update"; name: string; description: string; body: string }` |       No | Managed skill to create or enhance after the lesson succeeds. `body` is Markdown without frontmatter.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Field     | Type                                                                                                               | Required | Description                                                                                                                                                                                                                                                                                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------------------------ | -------: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory`  | `string`                                                                                                           |      Yes | Durable, self-contained lesson to remember: what, when, and why. The schema has no minimum length; backend-specific sanitization/storage determines whether an empty value succeeds.                                                                                                                                                                            |
+| `context` | `string`                                                                                                           |       No | Source context for the lesson.                                                                                                                                                                                                                                                                                                                                  |
+| `scope`   | `"project" \| "global"`                                                                                            |       No | Lesson scope; defaults to `project`. Global lessons use the shared Mnemopi bank or an untagged Hindsight memory. The schema offers this field only with `global` or `per-project-tagged` backend scoping. Hindsight also requires `hindsight.globalScope = true` (default `false`) in the session state; a subagent uses its parent's configuration at startup. |
+| `skill`   | `{ action: "create" \| "update"; name: string; scope?: "project" \| "global"; description: string; body: string }` |       No | Create or update a managed skill after the lesson succeeds. Supply Markdown without frontmatter. `skill.scope` selects the store for this call independently of lesson `scope`. Without `skill.scope`, create uses global and update targets the visible managed copy. A linked target cannot be updated.                                                       |
 
 ## Outputs
 
@@ -33,8 +33,8 @@
    - `content[0].text = "Lesson stored."` or `"Lesson queued for retention."`
    - `details = { skill: null }`
 - Lesson plus skill:
-   - `content[0].text = "<lesson result>. Created managed skill \"<name>\"."` or `"... Updated ..."`
-   - `details = { skill: "<name>" }`
+   - `content[0].text = "<lesson result>. Created <scope> managed skill \"<name>\"."` or `"... Updated ..."`
+   - `details = { skill: "<name>", scope }`
 - Authored-skill name conflict returns `isError: true` after storing/queueing the lesson and reports `details = { skill: null, shadowed: true }`.
 
 ## Flow
@@ -48,7 +48,7 @@
 3. If `skill` is absent, the tool returns after the memory write/queue.
 4. If `skill.action == "create"`, the tool checks the lowercased/validated name against active authored skills. A conflict returns an error result after the lesson has already been stored or queued.
 5. Otherwise, it calls `writeManagedSkill(...)`. Skill-write failure is rethrown as a partial outcome because lesson persistence already happened.
-6. Unlike `manage_skill`, `learn` does not call the session's `refreshSkills` callback after writing. The managed skill is discovered on a later skill refresh/session.
+6. After a skill write, `learn` calls the session's `refreshSkills` callback when available. A refresh error reports that both writes succeeded; it does not undo them.
 
 ## Modes / Variants
 
@@ -61,11 +61,11 @@
 
 - Filesystem:
    - Local backend writes `<agent-dir>/memories/<encoded-cwd>/learned.md`.
-   - Managed skills write `<agent-dir>/managed-skills/<sanitized-name>/SKILL.md`; the default agent directory is `~/.omp/agent`.
+   - Managed skills use `<agent-dir>/managed-skills/<name>/SKILL.md` (global) or `<agent-dir>/project-managed-skills/<project-key>/<name>/SKILL.md` (project). The default agent directory is `~/.omp/agent`.
    - Mnemopi writes its scoped SQLite database.
    - Hindsight writes a private event file under `<agent-dir>/hindsight-outbox/` until the server accepts it.
 - Network: Hindsight queue flushes to the configured server later. Mnemopi can schedule configured embedding/fact-extraction provider work after the synchronous row write; local file-backed storage itself is offline.
-- Session state: reads backend state, settings, cwd, and session id. A skill created here is not immediately injected into the active skill list.
+- Session state: a successful refresh updates the skill registry without rebuilding the base prompt. The next user turn can include a skill notice.
 - Background work: Hindsight retention and Mnemopi extraction/embedding can continue after the tool result.
 
 ## Limits & Caps
@@ -91,4 +91,4 @@
 - Use this tool sparingly. One precise reusable lesson is better than several vague memories.
 - Put `skill` only on repeatable procedures; ordinary facts should remain memory-only.
 - Managed skill frontmatter is generated from the normalized name and sanitized description; `body` must not include frontmatter.
-- Managed skills are isolated from authored skills. `learn` writes them for a later discovery refresh; use `manage_skill` when the active session must refresh immediately after a mutation.
+- See [`manage_skill`](./manage_skill.md) for store precedence and link restrictions.

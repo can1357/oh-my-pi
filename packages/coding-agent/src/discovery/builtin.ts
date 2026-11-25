@@ -3,10 +3,24 @@
  *
  * Primary provider for OMP native configs. Supports all capabilities.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, logger, normalizePathForComparison, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	isEnoent,
+	logger,
+	normalizePathForComparison,
+	parseFrontmatter,
+	tryParseJson,
+} from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
+import {
+	assertProjectManagedRootSafe,
+	getManagedSkillsDir,
+	getProjectManagedSkillsDir,
+	MANAGED_SKILLS_PROVIDER_ID,
+	readAddressableManagedSkill,
+} from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { type Extension, type ExtensionManifest, extensionCapability } from "../capability/extension";
@@ -340,14 +354,52 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 // priority, so an authored skill of the same name from ANY other provider wins
 // the capability-level priority dedup. Discovery is unconditional (an empty
 // managed dir is a no-op); only writing/nudging is gated by `autolearn.enabled`.
+// The cwd's project store is scanned first so a project-scoped managed skill
+// wins over a same-named global one (`loadSkills` resolves managed first-wins).
 const MANAGED_SKILLS_PRIORITY = 5;
+async function loadProjectManagedSkills(cwd: string): Promise<LoadResult<Skill>> {
+	const items: Skill[] = [];
+	const warnings: string[] = [];
+	try {
+		const root = getProjectManagedSkillsDir(cwd);
+		await assertProjectManagedRootSafe(root);
+		const entries = await fs.readdir(root, { withFileTypes: true });
+		await Promise.all(
+			entries.map(async entry => {
+				if (!entry.isDirectory() && !entry.isSymbolicLink()) return;
+				try {
+					const doc = await readAddressableManagedSkill(root, entry.name);
+					if (doc)
+						items.push({
+							...doc,
+							level: "project",
+							_source: createSourceMeta(MANAGED_SKILLS_PROVIDER_ID, doc.path, "project"),
+						});
+				} catch (err) {
+					warnings.push(`Failed to read project managed skill ${entry.name}: ${String(err)}`);
+				}
+			}),
+		);
+	} catch (err) {
+		if (!isEnoent(err)) warnings.push(`Failed to discover project managed skills for ${cwd}: ${String(err)}`);
+	}
+	return { items, warnings };
+}
+
 async function loadManagedSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	return scanSkillsFromDir(ctx, {
-		dir: getManagedSkillsDir(),
-		providerId: MANAGED_SKILLS_PROVIDER_ID,
-		level: "user",
-		requireDescription: true,
-	});
+	const results = await Promise.all([
+		loadProjectManagedSkills(ctx.cwd),
+		scanSkillsFromDir(ctx, {
+			dir: getManagedSkillsDir(),
+			providerId: MANAGED_SKILLS_PROVIDER_ID,
+			level: "user",
+			requireDescription: true,
+		}),
+	]);
+	return {
+		items: results.flatMap(r => r.items),
+		warnings: results.flatMap(r => r.warnings ?? []),
+	};
 }
 
 registerProvider<Skill>(skillCapability.id, {
@@ -361,7 +413,7 @@ registerProvider<Skill>(skillCapability.id, {
 registerProvider<Skill>(skillCapability.id, {
 	id: MANAGED_SKILLS_PROVIDER_ID,
 	displayName: "Managed Skills (auto-learn)",
-	description: "Auto-generated managed skills from ~/.omp/agent/managed-skills",
+	description: "Auto-generated managed skills from ~/.omp/agent/managed-skills and the project's managed store",
 	priority: MANAGED_SKILLS_PRIORITY,
 	load: loadManagedSkills,
 });

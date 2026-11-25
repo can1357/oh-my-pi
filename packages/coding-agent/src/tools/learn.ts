@@ -1,8 +1,8 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
-import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
+import { type ManagedSkillScope, sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
+import { assertVisibleSkillIsAddressable, isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { localBackend } from "../memory-backend/local-backend";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
@@ -15,6 +15,9 @@ import { cfgMemoryBackend } from "../memory-backend/settings";
 const learnSkillSchema = type({
 	action: "'create' | 'update'",
 	name: type("string").describe("kebab-case skill name"),
+	"scope?": type("'project' | 'global'").describe(
+		"where the skill lives: global (every session) or project (only this repository); omitted: create → global, update → the visible copy",
+	),
 	description: type("string").describe("one-line description of when to use the skill"),
 	body: type("string").describe("the SKILL.md body in markdown (no frontmatter)"),
 }).describe("also create or enhance a managed skill in the same call");
@@ -163,24 +166,28 @@ export class LearnTool implements AgentTool<LearnSchema> {
 					details: { skill: null, shadowed: true },
 				};
 			}
+			const { scope: requestedScope, ...skill } = params.skill;
+			let scope: ManagedSkillScope;
 			try {
-				await writeManagedSkill(params.skill);
+				if (!requestedScope && skill.action === "update" && safeSkillName)
+					assertVisibleSkillIsAddressable(safeSkillName);
+				({ scope } = await writeManagedSkill(skill, { scope: requestedScope, cwd: this.session.cwd }));
 			} catch (err) {
 				const reason = err instanceof Error ? err.message : String(err);
 				throw new Error(`${memoryMessage}, but the managed skill could not be written: ${reason}`);
 			}
-			const verb = params.skill.action === "create" ? "Created" : "Updated";
+			const verb = skill.action === "create" ? "Created" : "Updated";
 			try {
 				await this.session.refreshSkills?.();
 			} catch (err) {
 				const reason = err instanceof Error ? err.message : String(err);
 				throw new Error(
-					`${memoryMessage}. ${verb} managed skill "${params.skill.name}", but refreshing session skills failed: ${reason}`,
+					`${memoryMessage}. ${verb} ${scope} managed skill "${skill.name}", but refreshing session skills failed: ${reason}`,
 				);
 			}
 			return {
-				content: [{ type: "text", text: `${memoryMessage}. ${verb} managed skill "${params.skill.name}".` }],
-				details: { skill: params.skill.name },
+				content: [{ type: "text", text: `${memoryMessage}. ${verb} ${scope} managed skill "${skill.name}".` }],
+				details: { skill: skill.name, scope },
 			};
 		}
 
