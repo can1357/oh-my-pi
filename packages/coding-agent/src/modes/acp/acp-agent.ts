@@ -63,7 +63,8 @@ import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
-import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
+import { type AgentSession, type AgentSessionEvent, cutsTurnOff } from "../../session/agent-session";
+import { INTERRUPTED_TURN_ERROR } from "../../session/exit-diagnostics";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
@@ -1591,11 +1592,8 @@ export class AcpAgent implements Agent {
 	}
 
 	/**
-	 * Transition a still-running turn into cancellation: mark intent, drop the live-event
-	 * subscription, start the bounded `abort()` race, and resolve the ACP prompt response
-	 * with `stopReason: "cancelled"` so the client sees acceptance immediately. The
-	 * returned promise is the cleanup barrier — it resolves when `abort()` completes and
-	 * rejects when the timeout fires. Idempotent: a second call returns the same barrier.
+	 * Mark the turn canceled, stop event delivery and begin bounded abort cleanup.
+	 * The reason labels the aborted turn. Client cancels keep the user-interrupt label.
 	 */
 	#beginCancelCleanup(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
 		if (promptTurn.cleanup) {
@@ -1604,7 +1602,7 @@ export class AcpAgent implements Agent {
 		promptTurn.cancelRequested = true;
 		promptTurn.abortController.abort();
 		promptTurn.unsubscribe?.();
-		const cleanup = this.#runCancelCleanup(record, promptTurn);
+		const cleanup = this.#runCancelCleanup(record, promptTurn, reason);
 		promptTurn.cleanup = cleanup;
 		this.#finishPrompt(record, {
 			stopReason: "cancelled",
@@ -1613,7 +1611,7 @@ export class AcpAgent implements Agent {
 		return cleanup;
 	}
 
-	async #runCancelCleanup(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
+	async #runCancelCleanup(record: ManagedSessionRecord, promptTurn: PromptTurnState, reason: string): Promise<void> {
 		let timer: NodeJS.Timeout | undefined;
 		const timeout = new Promise<never>((_, reject) => {
 			timer = setTimeout(
@@ -1622,7 +1620,7 @@ export class AcpAgent implements Agent {
 			);
 		});
 		try {
-			await Promise.race([record.session.abort({ reason: USER_INTERRUPT_LABEL }), timeout]);
+			await Promise.race([record.session.abort({ reason }), timeout]);
 		} finally {
 			if (timer) clearTimeout(timer);
 			// Order matters: clear `cleanup` before evicting the slot so the slot-eviction
@@ -3504,12 +3502,12 @@ export class AcpAgent implements Agent {
 		await this.#disposeSessionRecord(record);
 	}
 
-	async #cancelPromptForClose(record: ManagedSessionRecord): Promise<void> {
+	async #cancelPromptForClose(record: ManagedSessionRecord, reason: string = USER_INTERRUPT_LABEL): Promise<void> {
 		const promptTurn = record.promptTurn;
 		if (!isPromptTurnInFlight(promptTurn)) {
 			return;
 		}
-		const cleanup = promptTurn.cleanup ?? this.#beginCancelCleanup(record, promptTurn);
+		const cleanup = promptTurn.cleanup ?? this.#beginCancelCleanup(record, promptTurn, reason);
 		try {
 			await cleanup;
 		} catch (error) {
@@ -3554,11 +3552,12 @@ export class AcpAgent implements Agent {
 		this.#disposePromise = (async () => {
 			const records = Array.from(this.#sessions.entries());
 			this.#sessions.clear();
+			const abortReason = cutsTurnOff(reason) ? INTERRUPTED_TURN_ERROR : USER_INTERRUPT_LABEL;
 			await Promise.all(
 				records.map(async ([sessionId, record]) => {
 					try {
 						record.closedError ??= RequestError.resourceNotFound(sessionId);
-						await this.#cancelPromptForClose(record);
+						await this.#cancelPromptForClose(record, abortReason);
 						await this.#disposeSessionRecord(record, reason);
 					} catch (error) {
 						logger.warn("Failed to clean up ACP session", { acpSessionId: sessionId, error });

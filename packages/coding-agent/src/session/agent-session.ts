@@ -1070,7 +1070,7 @@ function isEvalActivity(message: AgentMessage): boolean {
  * host's SIGTERM or SIGHUP, a crash) rather than the user stopping it (a quit, Ctrl+C,
  * manual cleanup); see {@link AgentSessionDisposeOptions.reason}.
  */
-function cutsTurnOff(reason: postmortem.Reason | undefined): boolean {
+export function cutsTurnOff(reason: postmortem.Reason | undefined): boolean {
 	switch (reason) {
 		case undefined:
 		case postmortem.Reason.MANUAL:
