@@ -63,6 +63,7 @@ export type Glyph = (key: string) => string;
 /** What rows are built against. */
 export interface RowContext {
 	readonly glyph: Glyph;
+	readonly expandKey: () => string;
 	readonly expanded: boolean;
 	/** The transcript clock (ms) time-derived rows sample. */
 	readonly nowMs: number;
@@ -167,9 +168,9 @@ function bracket(cx: RowContext, label: string): string {
 	return `${cx.glyph("format.bracketLeft")}${label}${cx.glyph("format.bracketRight")}`;
 }
 
-/** `⟦⌃O: Expand⟧`, dim. */
+/** The bracketed hint to expand the task, dim. */
 function expandHint(cx: RowContext): Seg {
-	return seg(bracket(cx, "⌃O: Expand"), "dim");
+	return seg(bracket(cx, `${cx.expandKey()}: Expand`), "dim");
 }
 
 type IconStatus = "success" | "error" | "warning" | "pending" | "running" | "aborted";
@@ -970,7 +971,7 @@ function nestedLines(
 
 // ─── Card body ──────────────────────────────────────────────────────────────
 
-/** `… 21 more agents (18 pending · 3 done) ⟦⌃O: Expand⟧`: live rows folded above the visible ones. */
+/** Count of live rows folded above the visible ones, with the tool expansion hint. */
 function hiddenProgressLine(cx: RowContext, hidden: readonly AgentProgress[]): Line {
 	const counts = { completed: 0, running: 0, pending: 0, failed: 0, aborted: 0 };
 	for (const p of hidden) counts[p.status]++;

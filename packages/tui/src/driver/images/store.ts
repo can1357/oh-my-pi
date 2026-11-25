@@ -69,6 +69,12 @@ export interface ImageSource {
 export interface ImageRequest extends ImageBounds {
 	/** Fallback label (already styled), cut to `maxColumns`. */
 	readonly fallback: string;
+	/**
+	 * Draw only as cells of text (kitty Unicode placeholders), which other text may share a row
+	 * with (a thumbnail inside a border). A terminal that draws images any other way gets the
+	 * one-row fallback, and the image is neither held nor transmitted.
+	 */
+	readonly cells?: boolean;
 }
 
 /** What the rows show. */
@@ -193,6 +199,9 @@ export class TerminalImages {
 		const protocol = caps.images;
 		if (protocol === null) return { rows: [label], columns: visibleWidth(label), state: "fallback" };
 		const box = fitImage(source.widthPx, source.heightPx, request, caps.cell ?? DEFAULT_CELL);
+		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
+		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
+		if (request.cells && !placeholders) return { rows: [label], columns: visibleWidth(label), state: "fallback" };
 		const entry = this.#acquire(source);
 		const fallback = (): ImageRows => ({
 			rows: [label, ...Array.from({ length: box.rows - 1 }, () => RESERVED_ROW)],
@@ -208,7 +217,7 @@ export class TerminalImages {
 					return { rows: reservedRows(box.rows), columns: box.columns, state: "pending" };
 				}
 				const slot = this.#slot(entry, box);
-				if (this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows)) {
+				if (placeholders) {
 					const rows = kittyPlaceholderRows({
 						id: entry.id,
 						placement: slot + 1,

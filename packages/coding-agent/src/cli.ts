@@ -166,8 +166,7 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
 	}
 }
 /**
- * Smoke-test entry. Spawns bundled workers, serves the stats dashboard once,
- * pings everything, then exits.
+ * Smoke-test entry. Exercises bundled workers and serves the stats dashboard once.
  *
  * Purpose: catch the silent worker-load and bundled-asset regressions that hit
  * compiled binaries and the npm CLI bundle. Version/help paths do not spawn
@@ -529,29 +528,23 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
-	// Declare this module as the worker-host entry now that the active profile
-	// is resolved. The worker-host module is side-effect-free; importing
-	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
-	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
-	// worker host. Worker-thread re-entry has `!Bun.isMainThread` (isProcessEntry === false),
-	// and importers (`runCli` in profile-CLI tests, SDK embedding) have `import.meta.main === false`
-	// — declaring there would poison `workerHostEntry()` for the whole test process, forcing eval/stats/
-	// browser workers onto the same-realm inline fallback.
-	// This must run before worker selector dispatch so that worker subprocesses
-	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
-	if (isProcessEntry) declareWorkerHostEntry();
+	const workerSelector = resolvedArgv[0];
+	const isWorker = isWorkerHostSelector(workerSelector);
+	// A worker thread re-entering the CLI still hosts nested workers, even
+	// though Bun reports import.meta.main as false. SDK importers are not hosts.
+	if (isProcessEntry || (!Bun.isMainThread && isWorker)) declareWorkerHostEntry();
 
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
 	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
 	// worker's parked initial messages as soon as the entry module's
 	// top-level evaluation finishes.
-	if (isWorkerHostSelector(resolvedArgv[0])) {
+	if (isWorker) {
 		// Invoke dispatch first so its inbox is installed before asynchronous
 		// process-name setup yields; neither dependency belongs in prepaint.
-		const [dispatched] = await Promise.all([runWorkerEntrypoint(resolvedArgv[0]), setFullProcessName()]);
+		const [dispatched] = await Promise.all([runWorkerEntrypoint(workerSelector), setFullProcessName()]);
 		if (!dispatched) {
-			process.stderr.write(`Error: unknown worker selector: ${resolvedArgv[0]}\n`);
+			process.stderr.write(`Error: unknown worker selector: ${workerSelector}\n`);
 			process.exitCode = 1;
 		}
 		return;

@@ -267,8 +267,8 @@ export class ExtensionUiController {
 			custom: (factory, options) => this.showHookCustom(factory, options),
 			setEditorText: text => this.ctx.composer.setText(text),
 			pasteToEditor: text => {
-				// Through the paste pipeline (large-paste markers, image paths) while the composer
-				// takes the keys; otherwise straight into the draft.
+				// Through the composer's paste handling (image paths, large pastes collapsed into a
+				// chip) while the composer takes the keys; otherwise straight into the draft.
 				if (this.#composerFocused() && this.ctx.shell.paste(text)) return;
 				this.ctx.composer.insertText(text);
 			},
