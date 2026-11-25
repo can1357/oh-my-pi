@@ -1,4 +1,4 @@
-import { expect, it } from "bun:test";
+import { afterAll, beforeAll, expect, it } from "bun:test";
 import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
 import type { GitTuiHost } from "../../../../src/cli/git-tui/model/git-tui";
 import type {
@@ -10,12 +10,17 @@ import type {
 } from "../../../../src/cli/git-tui/model/state";
 import { GitApp, GitAppModel } from "../../../../src/ui/apps/git";
 import { presentGitApp } from "../../../../src/cli/git-tui";
+import { setKeyHintPlatform } from "../../../../src/ui/keys/format";
 import { ensureTheme } from "../../../../src/ui/theme/service";
 import { createModeTerminal, type ModeTerminal } from "../../../helpers/mode-terminal";
 import { nativeShell } from "../../../helpers/native-shell";
 import { type AppDriver, appSuite } from "../harness";
 
 process.env.TZ = "UTC";
+
+// Key hints draw macOS modifier glyphs (`⌥↑`) here on every host; Linux spells them out (`Alt+↑`).
+beforeAll(() => setKeyHintPlatform("darwin"));
+afterAll(() => setKeyHintPlatform(undefined));
 
 interface AppInputs {
 	readonly model: GitViewState;

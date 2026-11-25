@@ -1376,6 +1376,8 @@ export type TspEvent =
 	/** The terminal's features changed (a setting: Tern's Agents tray drops `tray`); the list replaces `hello.features`. */
 	| { ev: "features"; features: readonly string[] }
 	| { ev: "visible"; sf?: string; visible: boolean }
+	/** The window reads and shows this pane's checkout (branch, changes, pull request) itself: show them from `shown` and read none of it yourself while `true`. */
+	| { ev: "checkout"; sf?: string; shown: boolean }
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
 	/** Menu opening/closing; a toggle of a named sub-item also reports its id. */
 	| { ev: "toggle"; sf: string; id: string; open: boolean; item?: string }

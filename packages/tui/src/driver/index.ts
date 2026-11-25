@@ -140,8 +140,11 @@ export function createTerminalDriver(
 	const capabilities: Signal<TerminalCapabilities> = signal(terminal.capabilities);
 	const replayListeners = new Set<() => void>();
 	const inputListeners = new Set<(event: InputEvent) => void>();
+	// DOM dispatch semantics: a listener subscribed while an event is delivered waits for the next
+	// one, and one unsubscribed before its turn is skipped. A key that opens a page (Esc Esc's
+	// rewind) starts that page's backend mid-dispatch; a live Set would hand it the same key.
 	const deliver = (event: InputEvent): void => {
-		for (const listener of inputListeners) listener(event);
+		for (const listener of Array.from(inputListeners)) if (inputListeners.has(listener)) listener(event);
 	};
 	terminal.onInput(deliver);
 	const resizeListeners = new Set<(columns: number, rows: number) => void>();
@@ -201,14 +204,14 @@ export function createTerminalDriver(
 		stallPoll = undefined;
 		watchdog.reset();
 	};
-	const sampleStall = (): void => {
-		if (!stream || dead) return;
-		if (watchdog.sample(stream.pending(), performance.now())) {
+	const sampleStall = (pending: number): void => {
+		if (dead) return;
+		if (watchdog.sample(pending, performance.now())) {
 			disconnected("output stalled");
 			return;
 		}
 		if (watchdog.armed && !stallPoll) {
-			stallPoll = setInterval(sampleStall, STALL_POLL_MS);
+			stallPoll = setInterval(() => sampleStall(stream!.pending()), STALL_POLL_MS);
 			stallPoll.unref?.();
 		} else if (!watchdog.armed && stallPoll) {
 			stopStallPoll();
@@ -218,8 +221,9 @@ export function createTerminalDriver(
 	let deferred = false;
 	const backlogged = (): boolean => {
 		if (!stream) return false;
-		sampleStall();
-		if (stream.pending() <= BACKLOG_DEFER_BYTES) return false;
+		const pending = stream.pending();
+		sampleStall(pending);
+		if (pending <= BACKLOG_DEFER_BYTES) return false;
 		if (!deferred) {
 			deferred = true;
 			stream.onDrain(() => {

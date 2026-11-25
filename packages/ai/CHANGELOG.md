@@ -2,19 +2,39 @@
 
 ## [Unreleased]
 
+## [19.2.0] - 2026-11-25
+
+### Breaking Changes
+
+- maxInFlightRequests limits are now scoped per process unless the host configures a ProviderSlotBroker; the previous cross-process lease-directory mechanism has been removed.
+
 ### Added
 
-- Added `AssistantMessage.errorFromAgentLoop`, set when the agent loop rather than the provider ended the turn with the error ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
+- Added ProviderSlotBroker support through configureProviderSlotBroker(broker), allowing hosts such as coding-agent to coordinate maxInFlightRequests limits across processes.
+- Added AssistantMessage.errorFromAgentLoop to distinguish errors caused by the agent loop from errors returned by the provider.
+- OpenAI- and Anthropic-compatible requests to custom hosts now include an x-session-id header when the host does not provide its own session header, preserving conversation affinity through gateways and proxies. Official OpenAI, Anthropic, and Codex APIs are unchanged.
+- Added an "Anthropic (Claude Pro/Max, 1-year token)" login that lasts a year instead of 30 days and never refreshes; image uploads to Anthropic's Files API stay with the regular login.
+- Added regional and custom endpoint selection to /login otari, storing non-US endpoints with the account so EU and self-hosted deployments do not need OTARI_BASE_URL configured separately.
+
+### Changed
+
+- Requests waiting for maxInFlightRequests capacity now begin immediately when capacity is released, rather than relying on periodic polling.
+- omp auth-gateway now preserves Codex session and thread headers and uses Claude Code and OpenCode session identifiers for prompt-cache affinity, improving cache reuse through the gateway.
+- Anthropic (Claude Pro/Max) logins now refresh the way Claude Code 2.1.332 does and are disabled only when Anthropic rejects the refresh token with `invalid_grant`; a failed background refresh no longer fails requests while the access token is still valid, and a 403 "OAuth token has been revoked" refreshes the same login before switching accounts.
+- Reduced CPU spent scanning streamed DeepSeek prose and long inline code spans that quote template tokens.
 
 ### Fixed
 
-- DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
-- Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
-- GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
-- An openai-completions stream that gets HTTP 500 back sends six requests, not twelve: the provider-error replay no longer re-runs a status the transport already retried ([#19729](https://github.com/can1357/oh-my-pi/issues/19729), [#20215](https://github.com/can1357/oh-my-pi/pull/20215) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed `omp usage` showing no data for Synthetic’s weekly-only plans; it now shows weekly credit usage and the next regeneration tick ([#20251](https://github.com/can1357/oh-my-pi/pull/20251) by [@dagurval](https://github.com/dagurval))
-- Fixed `antigravity-cli` quota exhaustion on agy 1.5.14+ being recorded as a normal reply instead of a rate limit, so exhausted accounts now rotate to healthy ones and honor the reported reset time ([#20247](https://github.com/can1357/oh-my-pi/issues/20247))
-- Gemini models on OpenRouter keep thinking throughout long tool loops instead of going silent after the first few steps; replayed reasoning now keeps the `id` and `format` OpenRouter needs to return Gemini's thought signatures
+- Fixed generate_image edits through OpenAI-compatible gateways that rejected the documented JSON image-edit format.
+- Anthropic OAuth accounts explicitly rejected by an organization are now excluded from account rotation for seven days, including across sessions and restarts.
+- Fixed text-encoded tool calls from DeepSeek, Kimi K2, and Qwen models on OpenRouter Responses-compatible routes, allowing them to stream as normal tool calls instead of failing or triggering retries.
+- Fixed GitHub Copilot Gemini requests failing when MCP tool schemas contain union types such as ["string", "null"].
+- Reduced duplicate retries for openai-completions streams that receive an HTTP 500 response.
+- Fixed omp usage for Synthetic weekly-only plans so it displays weekly credit usage and the next regeneration time.
+- Fixed antigravity-cli quota exhaustion and unavailable-model handling so affected accounts are correctly rotated or blocked and reported reset times are honored.
+- Fixed Gemini models on OpenRouter losing reasoning during long tool-call loops.
+- Fixed prompt-cache misses for /btw and other side turns on OpenCode Go and Zen.
+- Fixed antigravity-cli losing conversation context during OAuth refreshes and when restoring saved turns after generation metadata compaction.
 
 ## [19.1.1] - 2026-11-23
 
@@ -2147,27 +2167,4 @@
 - Fixed every Claude (`anthropic-messages`) model on the `opencode-zen` provider failing with `401 Missing API key`: the gateway requires `x-api-key`, so `opencode-zen` now uses X-Api-Key auth like `opencode-go`/`umans` instead of bearer-only, and no longer sends the `context_management` field its Anthropic proxy rejects on thinking requests ([#6510](https://github.com/can1357/oh-my-pi/issues/6510)).
 - Fixed Anthropic native server-tool blocks being dropped from persisted assistant turns, preserving signed web-search continuations in their original response order ([#6495](https://github.com/can1357/oh-my-pi/issues/6495))
 
-## [17.1.1] - 2026-07-24
-
-### Added
-
-- Added `setCodexAttestationProvider` API for injecting `x-oai-attestation` headers in ChatGPT-OAuth Codex requests
-- Added OAuth account session pinning and active status tracking in storage
-- Added OpenAI Responses native computer-use transport, including batched actions and exact `computer_call`/`computer_call_output` replay with pending/acknowledged safety checks and `image_url`/`file_id` output references. Models without native support receive the same action surface as a regular function tool; provider-specific tool-choice forcing is used where supported.
-- Added `PI_CODEX_RESPONSES_LITE` to override the catalog-selected Codex Responses transport for diagnostics (`1`/`true` forces Lite; `0`/`false` forces the standard body).
-- Added caller-owned `cachedContent` on `google-generative-ai` and `google-vertex` GenerateContent options: pass an opaque cache resource name through the shared builder (blank values rejected); no create/refresh/delete lifecycle and no guessed model/project/location validation; existing `cachedContentTokenCount` → `Usage.cacheRead` normalization is unchanged.
-- Added Anthropic extra-usage reporting across `omp usage`, interactive `/usage`, and ACP `/usage`: the OAuth usage endpoint's authoritative `spend` payload (or legacy `extra_usage` fallback when absent) is normalized into a `Claude Extra Usage` USD row; capped accounts show limit/remaining/fractions and status, while uncapped spend exposes only its absolute used amount—rendered as `$… used` in CLI/TUI and `123.45 usd used` in ACP—without a fabricated cap, percentage, or status. ([#5575](https://github.com/can1357/oh-my-pi/issues/5575))
-- Added process-scoped OAuth account pools for trusted auth-broker clients via `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`, consistently filtering snapshots, streaming updates, refreshes, and usage reports to selected OAuth identities while leaving API-key credentials and the shared encrypted snapshot cache unrestricted.
-- Added opt-in Vercel AI Gateway automatic prompt caching for OpenAI Chat Completions while preserving `only` and `order` routing preferences.
-- Added Vercel AI Gateway Responses cache anchors and cache lifetimes, emitted only with automatic caching.
-- Added opt-in OpenAI GPT-5.6 explicit prompt-cache controls for Responses and Chat Completions. Existing requests remain implicit; the policy marks at most one existing stable-history block and is rejected locally on unsupported explicit routes.
-- Forwarded `statefulResponses` through `streamSimple`, so diagnostic callers can explicitly disable OpenAI Responses `previous_response_id` chaining.
-- Added native QwenCloud Token Plan API-key login, model discovery, and an optional interactive console-Cookie prompt for 5-hour and 7-day quota reporting ([#6151](https://github.com/can1357/oh-my-pi/issues/6151)).
-- Added model-scoped usage health and same-provider reselection for native coding-plan credential pools, preserving OAuth/login-pool precedence, scoped broker blocks, sibling rotation state, and conservative unknown-account handling while excluding ordinary configured API keys ([#5018](https://github.com/can1357/oh-my-pi/issues/5018)).
-
-### Fixed
-
-- Fixed stateful OpenAI Responses explicit cache breakpoints being restored onto edited historical messages, ensuring full replays recompute the latest stable cache boundary.
-- Fixed ChatGPT Codex standard and Lite transports rejecting or hiding native computer-use payloads by unrolling the tool definition, forced choice, `computer_call`, and `computer_call_output` into ordinary function-tool forms.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@02eb912b7688](https://github.com/can1357/oh-my-pi/blob/02eb912b76887f1a06bc65e2352ef96742ec1067/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@483bfd489943](https://github.com/can1357/oh-my-pi/blob/483bfd48994357938b5996cfabec020e388ee87b/packages/ai/CHANGELOG.md).

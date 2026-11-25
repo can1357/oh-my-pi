@@ -52,7 +52,8 @@ const AGENT_WAIT_TOP_MAX_MS = 30 * 60_000;
 const WAIT_LADDER_RESET_MS = 60_000;
 /** After one watched job settles, keep collecting briefly so near-simultaneous completions share one wait result. */
 const WAIT_SETTLE_WINDOW_MS = 1500;
-const PROGRESS_INTERVAL_MS = 500;
+/** Coalesce job and widget change notifications at the wait card's update cadence. */
+const PROGRESS_COALESCE_MS = 500;
 /** How long after its row is evicted a job is still named by a wait that finds nothing to wait for. */
 const RECENTLY_EVICTED_MS = 10 * 60_000;
 /** Most evicted jobs such a wait names. */
@@ -89,7 +90,7 @@ interface WaitMessaging {
  * message that ended the wait, plus mailbox mail (a failed live hand-off,
  * which reaches the caller only through here). Returns the hand-off when a
  * message that ends a wait now waits for the caller: mail handed over here,
- * or a direct message already queued in its session. Broadcast legs and
+ * or a direct message already queued in its session. Peer broadcast legs and
  * progress notes queued there alone end nothing; they inject once the wait
  * returns. With no mail the check stays synchronous, so a wait registers its
  * bus waiter before a message sent right after the call can slip past it.
@@ -299,9 +300,10 @@ export function hasWaitTool(session: ToolSession): boolean {
  * waits), the top for each back-to-back one. A
  * direct message arriving mid-wait ends any wait. Messages never ride in the wait's result: each one
  * reaches the caller as a user turn right after it (see `handOffMail`).
- * Broadcast legs and progress notes ask the caller nothing, so they never end
- * a wait and inject as asides once it returns; the exception is a broadcast
- * from an agent a reply wait asked, which interrupts it without settling the
+ * A progress note, or a broadcast leg from a peer, asks the caller nothing, so
+ * it never ends a wait and injects as an aside once it returns. A broadcast
+ * from an agent a reply wait asked, or from the waiter's own ancestor (the only
+ * broadcaster, the main agent), interrupts the wait without settling the
  * question (see `IrcBus.unansweredSends`). A progress note leaves its sender's
  * reply owed, so the reply wait goes on.
  */
@@ -529,15 +531,26 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			if (signal.aborted) onAbort();
 			else signal.addEventListener("abort", onAbort, { once: true });
 		}
-		const emitProgress = () =>
-			onUpdate?.({
-				content: [{ type: "text", text: "" }],
-				details: { op: "wait", jobs: snapshotJobs(this.session, jobs) },
-			});
-		const progressTimer = onUpdate && jobs.length > 0 ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
-		if (jobs.length > 0) emitProgress();
+		let progressTimer: NodeJS.Timeout | undefined;
+		let watching = true;
 		let wake: "job" | "message" | "service" | "unanswerable" | "timeout" | "abort";
 		try {
+			if (onUpdate && manager && jobs.length > 0) {
+				const emitProgress = () => {
+					progressTimer = undefined;
+					onUpdate({
+						content: [{ type: "text", text: "" }],
+						details: { op: "wait", jobs: snapshotJobs(this.session, jobs, true) },
+					});
+				};
+				const changed = () => {
+					// A worker may receive an in-flight notification after it unsubscribed.
+					if (watching && !progressTimer) progressTimer = setTimeout(emitProgress, PROGRESS_COALESCE_MS);
+				};
+				unsubscribers.push(manager.onJobsChanged(changed, watchedIds));
+				if (manager.widgets) unsubscribers.push(manager.widgets.subscribe(changed));
+				emitProgress();
+			}
 			const otherLegs = [
 				...(busLeg ? [busLeg.then(() => "message" as const)] : []),
 				...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
@@ -561,7 +574,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 		} finally {
 			clearTimeout(timer);
-			clearInterval(progressTimer);
+			watching = false;
+			clearTimeout(progressTimer);
 			busAbort.abort();
 			serviceAbort.abort();
 			for (const unsubscribe of unsubscribers) unsubscribe();

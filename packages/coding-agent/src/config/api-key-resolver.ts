@@ -2,9 +2,9 @@ import {
 	type ApiKeyResolution,
 	type ApiKeyResolver,
 	createOAuthProvenance,
+	refreshReasonFor,
 	resolveAfterRotation,
 } from "@oh-my-pi/pi-ai/auth-retry";
-import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 
@@ -100,6 +100,6 @@ export function createApiKeyResolver(
 			});
 			return resolveAfterRotation(rotation, error, () => resolveKey(undefined));
 		}
-		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined, rejectedAccessToken);
+		return resolveKey(true, signal, refreshReasonFor(error), rejectedAccessToken);
 	};
 }

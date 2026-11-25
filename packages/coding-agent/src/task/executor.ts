@@ -34,7 +34,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { formatModelSelectorValue } from "../config/model-selector";
 import { previewLine, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { replaceTabs } from "../utils/text-width";
-import { type EditMode, getEditInputPaths } from "../tools/details/edit";
+import { diffStats, type EditMode, getEditInputPaths } from "../tools/details/edit";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
@@ -178,6 +178,7 @@ import {
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
 	cfgPrewalkAutoTarget,
+	PREWALK_INITIAL_TARGET,
 } from "../session/settings";
 import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
@@ -941,6 +942,17 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
 }
 
+/** Whether `toolName` edits files by a payload naming them (`edit`, `apply_patch`). */
+function isEditTool(toolName: string): boolean {
+	return toolName === "edit" || toolName === "apply_patch";
+}
+
+/** Lines an edit call's result added and removed, by its diff; undefined when it changed nothing. */
+function editResultStats(result: unknown): { added: number; removed: number } | undefined {
+	const details = isRecord(result) ? result.details : undefined;
+	return isRecord(details) && typeof details.diff === "string" && details.diff ? diffStats(details.diff) : undefined;
+}
+
 function formatToolArgsPreview(value: string, key: string): { value: string; key: string } {
 	const safe = shortenToolArgumentPaths(replaceTabs(sanitizeText(value)), key);
 	return { value: previewLine(safe, TRUNCATE_LENGTHS.CONTENT), key };
@@ -958,7 +970,7 @@ function extractToolArgsPreview(
 ): { value: string; key: string } | undefined {
 	// Priority order for preview
 	const previewKeys = ["command", "file_path", "path", "pattern", "query", "url", "task", "prompt"];
-	const isEdit = toolName === "edit" || toolName === "apply_patch";
+	const isEdit = isEditTool(toolName);
 	if (isEdit && typeof args.input === "string") {
 		const paths = getEditInputPaths(args.input, editMode);
 		if (paths.length > 0) return formatToolArgsPreview(paths.join(", "), "path");
@@ -2105,12 +2117,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const finished = activeTools.get(event.toolCallId);
 				activeTools.delete(event.toolCallId);
 				if (finished) {
+					const changed = !event.isError && isEditTool(event.toolName) ? editResultStats(event.result) : undefined;
 					progress.recentTools.unshift({
 						tool: finished.tool,
 						args: finished.args ?? "",
 						argsKey: finished.argsKey,
 						intent: finished.intent,
 						isError: event.isError,
+						...changed,
 						endMs: now,
 					});
 					// Keep only last 5
@@ -5161,10 +5175,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
 					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
 					: undefined;
+			const autoTarget = cfgPrewalkAutoTarget.get(settings);
 			const autoPattern = autoEntry
 				? resolveAgentPrewalkPattern({
 						settingsOverride: autoEntry,
-						agentPrewalk: cfgPrewalkAutoTarget.get(settings),
+						// A subagent never moves to a planner, so there is no starting model to hand back to.
+						agentPrewalk: autoTarget === PREWALK_INITIAL_TARGET ? cfgPrewalkAutoTarget.default : autoTarget,
 					})
 				: undefined;
 			const prewalkPattern = unconditionalPattern ?? autoPattern;

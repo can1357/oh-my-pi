@@ -6,6 +6,7 @@
  * (TSP) tree. A reimplemented screen passes a stage when its tree describes
  * to the same native tree and the terminal backend paints the same rows.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { UiNode } from "../node";
 import { untrack } from "../reactive";
@@ -38,14 +39,28 @@ export interface CorpusCase {
 /** Where the corpus lives. */
 export const CORPUS_DIR = path.join(import.meta.dir, "../../test/corpus");
 
+/**
+ * Whether the corpus (or one subdirectory/file of it, e.g. `tools/edit`) is
+ * present. The corpus is local-only (gitignored), so corpus-backed tests skip
+ * without it.
+ */
+export function hasCorpus(relative = ""): boolean {
+	return fs.existsSync(path.join(CORPUS_DIR, relative));
+}
+
 /** Load a case by `<screen>/<case>.<theme>` (relative to the corpus) or absolute path. */
 export async function loadCase(id: string): Promise<CorpusCase> {
 	const file = path.isAbsolute(id) ? id : path.join(CORPUS_DIR, id.endsWith(".json") ? id : `${id}.json`);
 	return (await Bun.file(file).json()) as CorpusCase;
 }
 
-/** Every case file of a screen (`tools/bash`), optionally one theme. */
+/**
+ * Every case file of a screen (`tools/bash`), optionally one theme; none when
+ * the corpus is absent. Bun runs even a skipped `describe`'s callback, so
+ * listing inside one must not throw.
+ */
 export async function listCases(screen: string, theme?: string): Promise<string[]> {
+	if (!hasCorpus()) return [];
 	const glob = new Bun.Glob(`${screen}/*.${theme ?? "*"}.json`);
 	const out: string[] = [];
 	for await (const file of glob.scan({ cwd: CORPUS_DIR })) out.push(file);

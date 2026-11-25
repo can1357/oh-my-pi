@@ -311,7 +311,8 @@ fn load_average(loads: &mut [f64; 3]) -> &[f64] {
 #[derive(Debug, Default)]
 struct UtmpSummary {
 	/// The last `BOOT_TIME` record's time, or the system's boot time when the
-	/// default file has none; `None` when unknown (or recorded as 0).
+	/// default file has none (on macOS, always for the default file);
+	/// `None` when unknown (or recorded as 0).
 	boot_time: Option<i64>,
 	/// `USER_PROCESS` records with a user name.
 	users:     usize,
@@ -367,7 +368,9 @@ fn read_utmp(host: &Host, name: &OsStr, check_pids: bool) -> UtmpSummary {
 			summary.boot_time = Some(seconds);
 		}
 	}
-	if is_default && first_boot {
+	// Darwin's w(1) reads the boot time from `kern.boottime`, not utmpx, whose
+	// boot record can carry a wrong time (1976 on a macOS 27.2 boot).
+	if is_default && (first_boot || cfg!(target_vendor = "apple")) {
 		summary.boot_time = system_boot_time(host);
 	}
 	summary.boot_time = summary.boot_time.filter(|&boot| boot != 0);

@@ -2,19 +2,33 @@
 
 ## [Unreleased]
 
-### Fixed
+## [19.2.0] - 2026-11-25
 
-- Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
+### Breaking Changes
+
+- Removed the `watch` and `HEAD_WATCH_INTERVAL_MS` exports from `@oh-my-pi/pi-natives/vcs`; reread repository state when needed instead.
+
 ### Added
 
-- Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
-- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
-- Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
+- Added `@oh-my-pi/pi-natives/file-poll` with `pollFile(file, onChange, intervalMs)` for detecting file metadata changes, including atomic saves and symlink retargets.
+- Added `truncateToTokens(input, maxTokens)` for safely truncating text to a token budget without splitting UTF-16 surrogate pairs.
+- Added `repairHeredocContinuations(script)` to repair supported shell here-document continuations.
+- Added `commitReconciled()` for publishing private-index commits safely when the shared index is locked.
+- Added transcript analysis APIs—`transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`—for inspecting tool calls, reasoning, message content, matches, and call statistics across session transcripts.
 
 ### Changed
 
-- A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
-- `ShellRunResult` now reports `movedCwd` (the command ended in another directory than it started in) and `errexit` (it ended with `set -e` on)
+- OAuth callback handling now polls for callbacks at regular intervals instead of relying on directory watching.
+- Improved `tail -f` reliability for moved files, symlinks, network drives, and file-watcher failures by combining event-driven updates with polling fallback.
+- Persistent shell sessions no longer carry `set -e` into subsequent commands; other shell options continue to persist.
+- `ShellRunResult` now reports whether a command changed the working directory (`movedCwd`) or left errexit enabled (`errexit`).
+
+### Fixed
+
+- Fixed PTY sessions and child-process cleanup consuming native blocking-pool threads, which could prevent new terminals and other blocking operations from starting after enough terminals were open.
+- Fixed the Linux shell `open` command creating an excessive D-Bus thread pool on first use.
+- Fixed Windows Chromium and Electron captures and accessibility trees incorrectly reporting fully covered windows as current when covered by popup, tool, or click-through windows.
+- Fixed standalone binaries failing to start when the natives directory was read-only or owned by another user despite already containing the extracted addon.
 
 ## [19.1.1] - 2026-11-23
 
