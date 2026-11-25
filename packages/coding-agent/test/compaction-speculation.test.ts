@@ -841,7 +841,7 @@ describe("async speculative compaction", () => {
 	});
 
 	it("discards an armed summary when the idle order selects a different method", async () => {
-		const generateHandoffDocument = vi.fn(async () => ({ document: "idle handoff document" }));
+		const generateHandoffDocument = vi.fn(async () => "idle handoff document");
 		maintenance = createMaintenance({ generateHandoffDocument });
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "armed summary",
@@ -858,7 +858,7 @@ describe("async speculative compaction", () => {
 
 		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
-		expect(entry?.type === "compaction" ? entry.summary : undefined).not.toBe("armed summary");
+		expect(entry?.summary).toBe("idle handoff document");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 	});
 
