@@ -578,7 +578,7 @@ fn drop_landmarks(tree: &Tree, dropped: &mut [bool], controlled: &[bool]) {
 	let nodes = tree.nodes;
 	let all = 0..nodes.len();
 	let removed = outermost(nodes, dropped, all.clone(), |tag| {
-		is_landmark(tree, tag) && !is_data_aside(nodes, controlled, tag)
+		is_landmark(tree, tag) && !is_data_aside(tree, controlled, tag)
 	});
 	if removed.is_empty() {
 		return;
@@ -734,6 +734,7 @@ const TEASER_HEADINGS: &[&str] = &[
 	"continue reading",
 	"explore more",
 	"popular",
+	"latest news",
 ];
 
 /// An h2–h4 without an anchor id whose text opens like a teaser section.
@@ -1118,7 +1119,8 @@ const DATA_ASIDE_MIN_LABELS: usize = 3;
 /// A complementary aside holding labelled data (a package's install command,
 /// repository, downloads and version under their own headings) rather than
 /// links: it is content.
-fn is_data_aside(nodes: &[Node], dropped: &[bool], tag: &Element) -> bool {
+fn is_data_aside(tree: &Tree, dropped: &[bool], tag: &Element) -> bool {
+	let nodes = tree.nodes;
 	let complementary = match tag.attr("role") {
 		Some(roles) if !roles.trim().is_empty() => has_role(tag, &["complementary"]),
 		_ => tag.name() == "aside",
@@ -1127,9 +1129,17 @@ fn is_data_aside(nodes: &[Node], dropped: &[bool], tag: &Element) -> bool {
 		return false;
 	}
 	let labels = walk(nodes, dropped, tag.children.clone())
-		.filter(|(_, node)| {
-			matches!(node, Node::Tag(inner)
-				if matches!(inner.name(), "h2" | "h3" | "h4" | "h5" | "h6" | "dt" | "th"))
+		.filter(|&(index, node)| {
+			let Node::Tag(inner) = node else { return false };
+			if !matches!(inner.name(), "h2" | "h3" | "h4" | "h5" | "h6" | "dt" | "th") {
+				return false;
+			}
+			let count = LinkCount::of(nodes, dropped, inner.children.clone());
+			count.text > count.link
+				&& !std::iter::successors(tree.parent(index), |&parent| tree.parent(parent))
+					.take_while(|&parent| parent != tag.index())
+					.filter_map(|parent| tree.tag(parent))
+					.any(|parent| parent.name() == "a" && parent.has_attr("href"))
 		})
 		.count();
 	let count = LinkCount::of(nodes, dropped, tag.children.clone());
@@ -1393,7 +1403,7 @@ fn controls(
 		};
 		if values.contains(&index) {
 			// A labelled select states a value; the writers show its option.
-		} else if is_control(nodes, tag, label)
+		} else if is_control(nodes, tag, label || content_button(tree, dropped, tag))
 			|| ((is_tailwind_hidden(tag) || is_off_screen(tag)) && !frames_content(nodes, tag))
 		{
 			dropped[index] = true;
@@ -1403,6 +1413,21 @@ fn controls(
 		}
 		index = tag.children.end;
 	}
+}
+
+/// Buttons can be the visible labels of list entries, or words embedded in
+/// a sentence. Their popovers and other controls are still pruned normally.
+fn content_button(tree: &Tree, dropped: &[bool], tag: &Element) -> bool {
+	if tag.name() != "button" {
+		return false;
+	}
+	let Some(parent) = tree.parent(tag.index()).and_then(|index| tree.tag(index)) else {
+		return false;
+	};
+	(tag.has_attr("popovertarget") && parent.name() == "li")
+		|| (parent.name() == "p"
+			&& text_len(tree.nodes, dropped, parent.children.clone())
+				> text_len(tree.nodes, dropped, tag.children.clone()))
 }
 
 /// Words naming a picker that changes the page rather than stating a value.
@@ -1906,7 +1931,9 @@ fn token_words(token: &str) -> impl Iterator<Item = &str> {
 		at += 1;
 		while at < bytes.len() && word(bytes[at]) {
 			let (previous, current) = (bytes[at - 1], bytes[at]);
-			if (previous.is_ascii_lowercase() && current.is_ascii_uppercase())
+			if (previous.is_ascii_alphabetic() && current.is_ascii_digit())
+				|| (previous.is_ascii_digit() && current.is_ascii_alphabetic())
+				|| (previous.is_ascii_lowercase() && current.is_ascii_uppercase())
 				|| (previous.is_ascii_uppercase()
 					&& current.is_ascii_uppercase()
 					&& bytes.get(at + 1).is_some_and(u8::is_ascii_lowercase))
@@ -2001,7 +2028,7 @@ fn narrow_to_region(tree: &Tree, dropped: &mut [bool], controlled: &[bool]) -> O
 		let mut sibling = tag.children.start;
 		while sibling < tag.children.end {
 			if sibling != child
-				&& !matches!(&nodes[sibling], Node::Tag(aside) if is_data_aside(nodes, controlled, aside))
+				&& !matches!(&nodes[sibling], Node::Tag(aside) if is_data_aside(tree, controlled, aside))
 			{
 				dropped[sibling] = true;
 			}
@@ -2261,7 +2288,7 @@ fn names_chrome(tag: &Element) -> bool {
 		return false;
 	}
 	class_and_id(tag).any(|token| {
-		if token.contains(':') {
+		if token.contains(':') || token.starts_with("border-") {
 			return false;
 		}
 		let mut version = false;

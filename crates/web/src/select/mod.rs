@@ -266,6 +266,67 @@ mod tests {
 		"The researchers compared notes, checked the evidence, and revised the report. ";
 
 	#[test]
+	fn reader_keeps_content_buttons_and_table_rows_with_border_utilities() {
+		let html = format!(
+			"<main><h1>Models</h1><p>Using an agent instead? <button>Set it up with one \
+			 command</button>.</p><ul><li><button popovertarget='details'>Project \
+			 Alpha</button><div id='details' popover role='dialog'>Hidden details</div></li></ul>\
+			 <table><tr class='border-b border-nav'><th>Model</th><th>Speed</th></tr><tr \
+			 class='border-b border-nav'><td>Example model</td><td>500</td></tr></table>\
+			 <p>{}</p><button>Copy page</button></main>",
+			PROSE.repeat(4)
+		);
+		let output = selected(&html, reader);
+		for text in ["Set it up with one command", "Project Alpha", "Example model", "500"] {
+			assert!(output.contains(text), "{text} missing from {output}");
+		}
+		for text in ["Hidden details", "Copy page"] {
+			assert!(!output.contains(text), "{text} in {output}");
+		}
+	}
+
+	#[test]
+	fn reader_drops_digit_prefixed_footer_chrome() {
+		let html = format!(
+			"<main><h1>Article</h1><p>{}</p></main><div class='_2016footer2TopWrapper'>\
+			 <p>Footer copyright and company information</p></div>",
+			PROSE.repeat(4)
+		);
+		let output = selected(&html, reader);
+		assert!(output.contains(PROSE.trim()), "{output}");
+		assert!(!output.contains("Footer copyright"), "{output}");
+	}
+
+	#[test]
+	fn reader_drops_news_aside_even_with_non_link_widget_text() {
+		let html = format!(
+			"<main><article><h1>Article</h1><p>{}</p></article><aside><h2>Latest news</h2>\
+			 <div><a href='/one'><h2>Unrelated story one</h2></a><a href='/two'><h2>\
+			 Unrelated story two</h2></a><a href='/three'><h2>Unrelated story three</h2></a>\
+			 </div><div>{}</div></aside></main>",
+			PROSE.repeat(8),
+			"Subscription widget markup and promotional text. ".repeat(20)
+		);
+		let output = selected(&html, reader);
+		assert!(output.contains(PROSE.trim()), "{output}");
+		assert!(!output.contains("Unrelated story"), "{output}");
+		assert!(!output.contains("Subscription widget"), "{output}");
+	}
+
+	#[test]
+	fn reader_drops_latest_news_card_section() {
+		let html = format!(
+			"<main><h1>Article</h1><p>{}</p><div><h2>Latest news</h2><ul><li><a \
+			 href='/one'>Unrelated story one</a></li><li><a href='/two'>Unrelated story \
+			 two</a></li></ul></div></main>",
+			PROSE.repeat(4)
+		);
+		let output = selected(&html, reader);
+		assert!(output.contains(PROSE.trim()), "{output}");
+		assert!(!output.contains("Unrelated story"), "{output}");
+	}
+
+	#[test]
 	fn reader_drops_controls_and_chrome_and_keeps_the_heading() {
 		let prose = PROSE.repeat(4);
 		let html = format!(

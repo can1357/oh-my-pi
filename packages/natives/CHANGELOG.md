@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
+
 - The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
 
 ## [19.2.1] - 2026-11-25
