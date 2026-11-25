@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed `generate_image` edits failing on OpenAI-compatible gateways with `400 Missing required parameter: 'images'`; OMP’s auth gateway now accepts the documented JSON edit format ([#20442](https://github.com/can1357/oh-my-pi/issues/20442)).
 - Anthropic OAuth logins explicitly rejected by their organization stay out of account rotation for seven days, across sessions and restarts ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
 - Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
