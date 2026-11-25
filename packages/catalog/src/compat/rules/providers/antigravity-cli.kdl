@@ -10,6 +10,13 @@ provider "antigravity-cli" {
 	preserves-max-output-tokens #false
 	// agy executes its control tools internally alongside the IDE MCP tools.
 	requires-native-tools #true
+	// Google answers 429 RESOURCE_EXHAUSTED to requests whose system instruction
+	// carries omp's stock prompt lines (e.g. the persona opener, the hashline edit
+	// rules); the same text in a user turn passes. The match is not byte-exact (a
+	// one-word paraphrase of the hashline rule still drew a 429), so this fix is
+	// empirical: after regenerating the pool, re-check the hashline and persona
+	// variants against a live `agy acp` session (agy 1.5.16 when last verified).
+	prompt-perturbation #true
 
 	// The roster `agy acp` 1.5.12 advertises in `session/new` config options
 	// (orchestrators omitted: they drive agy's own subagents, which this

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `antigravity-cli` requests no longer fail with `RESOURCE_EXHAUSTED (code 429)` after about two minutes of retries; the provider now sends per-install paraphrased prompt prose ([#20378](https://github.com/can1357/oh-my-pi/pull/20378) by [@wtfsayo](https://github.com/wtfsayo))
 - A Codex service tier offered by only some logged-in accounts (such as Ultrafast) is no longer hidden when the first account's plan lacks it.
 
 ## [19.2.0] - 2026-11-25
