@@ -784,7 +784,6 @@ mod tests {
 	/// Windows lets it, where a test process outside the foreground is refused.
 	const FRONT: u32 = WM_APP + 14;
 	const BACK: u32 = WM_APP + 15;
-	const SWAP: u32 = WM_APP + 16;
 	const WPF_LIST: &str = r#"
 Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml,UIAutomationProvider,UIAutomationTypes,WindowsFormsIntegration,System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System; using System.Windows; using System.Windows.Controls; using System.Windows.Interop;
@@ -832,7 +831,7 @@ public class TestPeer : ListBoxAutomationPeer, IScrollProvider {
 	public TestPeer(ListBox owner) : base(owner) {}
 	IScrollProvider Inner { get { return (IScrollProvider)base.GetPattern(PatternInterface.Scroll); } }
 	public override object GetPattern(PatternInterface pattern) { return pattern == PatternInterface.Scroll ? this : base.GetPattern(pattern); }
-	public void Scroll(ScrollAmount across, ScrollAmount down) { if (!Fixture.Grow()) Inner.Scroll(across, down); if (across != ScrollAmount.NoAmount) Fixture.Swap(Inner); }
+	public void Scroll(ScrollAmount across, ScrollAmount down) { if (!Fixture.Grow()) Inner.Scroll(across, down); }
 	public void SetScrollPercent(double across, double down) { Inner.SetScrollPercent(across, down); }
 	public double HorizontalScrollPercent { get { return Inner.HorizontalScrollPercent; } }
 	public double VerticalScrollPercent { get { return Inner.VerticalScrollPercent; } }
@@ -842,7 +841,7 @@ public class TestPeer : ListBoxAutomationPeer, IScrollProvider {
 	public bool VerticallyScrollable { get { return Inner.VerticallyScrollable; } }
 }
 public static class Fixture {
-	static ListBox list, page2; static System.Windows.Forms.ListBox hosted;
+	static ListBox list; static System.Windows.Forms.ListBox hosted;
 	static DecorativeHost decorative;
 	delegate bool EnumChild(IntPtr hwnd, IntPtr parameter);
 	[DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr hwnd, EnumChild callback, IntPtr parameter);
@@ -853,7 +852,7 @@ public static class Fixture {
 			return true;
 		}, IntPtr.Zero);
 	}
-	static bool grow, swap; static double offset, across, page2Offset; static Window other;
+	static bool grow; static double offset, across; static Window other;
 	static int calls;
 	public static bool Grow() {
 		calls++; if (!grow) return false;
@@ -862,17 +861,11 @@ public static class Fixture {
 		list.UpdateLayout();
 		return true;
 	}
-	public static void Swap(IScrollProvider inner) {
-		if (!swap) return;
-		list.UpdateLayout();
-		if (inner.HorizontalScrollPercent > 0) return;
-		swap = false; page2.Visibility = Visibility.Visible; page2.UpdateLayout();
-	}
 	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
 		if (message == 0x020A || message == 0x020E) { Console.WriteLine("wheel"); Console.Out.Flush(); }
 		else if (message == 0x8007) {
 			list.UpdateLayout();
-			Console.WriteLine("{0} {1} {2} {3} {4} {5} {6}", offset, list.Items.Count, hosted.TopIndex, calls, across, WheelMarker.Wheels, page2Offset);
+			Console.WriteLine("{0} {1} {2} {3} {4} {5}", offset, list.Items.Count, hosted.TopIndex, calls, across, WheelMarker.Wheels);
 			Console.Out.Flush();
 		}
 		else if (message == 0x800B) grow = true;
@@ -880,15 +873,9 @@ public static class Fixture {
 		else if (message == 0x800E) Window.GetWindow(HwndSource.FromHwnd(hwnd).RootVisual).Activate();
 		else if (message == 0x800F) other.Activate();
 		else if (message == 0x800D) { ((IScrollProvider)UIElementAutomationPeer.CreatePeerForElement(list).GetPattern(PatternInterface.Scroll)).SetScrollPercent(100, -1); list.UpdateLayout(); }
-		else if (message == 0x8010) swap = true;
 		return IntPtr.Zero; }
 	public static void Run() {
 		list = new TestList();
-		page2 = new ListBox { Visibility = Visibility.Hidden };
-		ScrollViewer.SetCanContentScroll(page2, true);
-		VirtualizingPanel.SetScrollUnit(page2, ScrollUnit.Item);
-		for (var row = 1; row <= 60; row++) page2.Items.Add("Page 2 row " + row);
-		page2.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler((sender, e) => { page2Offset = e.VerticalOffset; }));
 		hosted = new System.Windows.Forms.ListBox { IntegralHeight = false };
 		for (var row = 1; row <= 60; row++) { list.Items.Add("Row " + row + new string('x', 100)); hosted.Items.Add("Hosted " + row); }
 		ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Auto);
@@ -898,8 +885,7 @@ public static class Fixture {
 		DockPanel.SetDock(decorative, Dock.Right); header.Children.Add(decorative);
 		DockPanel.SetDock(header, Dock.Top); panel.Children.Add(header);
 		var host = new System.Windows.Forms.Integration.WindowsFormsHost { Width = 120, Child = hosted };
-		DockPanel.SetDock(host, Dock.Right); panel.Children.Add(host);
-		var pages = new Grid(); pages.Children.Add(list); pages.Children.Add(page2); panel.Children.Add(pages);
+		DockPanel.SetDock(host, Dock.Right); panel.Children.Add(host); panel.Children.Add(list);
 		var window = new Window { Title = "omp test: wpf list", Left = 40, Top = 40, Width = 420, Height = 240, Content = panel };
 		other = new Window { Title = "omp test: wpf other", Left = 500, Top = 40, Width = 240, Height = 160 };
 		window.SourceInitialized += (sender, e) => HwndSource.FromHwnd(new WindowInteropHelper(window).Handle).AddHook(Hook);
@@ -909,6 +895,40 @@ public static class Fixture {
 '@
 [Fixture]::Run()
 "#;
+	/// Two lists side by side in a horizontal `ScrollViewer`, each scrolling
+	/// vertically on its own: a horizontal scroll brings the second list under
+	/// a point the first list held. MARK prints the strip's horizontal offset,
+	/// then each list's vertical offset.
+	const WPF_PAGER: &str = r#"
+Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml -TypeDefinition @'
+using System; using System.Windows; using System.Windows.Controls; using System.Windows.Interop;
+public static class Pager {
+	static ScrollViewer strip; static double across; static double[] offsets = new double[2];
+	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
+		if (message == 0x8007) { strip.UpdateLayout(); Console.WriteLine("{0} {1} {2}", across, offsets[0], offsets[1]); Console.Out.Flush(); }
+		else if (message == 0x800E) Window.GetWindow(HwndSource.FromHwnd(hwnd).RootVisual).Activate();
+		return IntPtr.Zero; }
+	public static void Run() {
+		var pages = new StackPanel { Orientation = Orientation.Horizontal };
+		for (var page = 0; page < 2; page++) {
+			var list = new ListBox { Width = 360 };
+			VirtualizingPanel.SetScrollUnit(list, ScrollUnit.Item);
+			for (var row = 1; row <= 60; row++) list.Items.Add("Page " + (page + 1) + " row " + row);
+			var index = page;
+			list.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler((sender, e) => { offsets[index] = e.VerticalOffset; }));
+			pages.Children.Add(list);
+		}
+		strip = new ScrollViewer { HorizontalScrollBarVisibility = ScrollBarVisibility.Visible, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = pages };
+		strip.ScrollChanged += (sender, e) => { if (e.OriginalSource == strip) across = e.HorizontalOffset; };
+		var window = new Window { Title = "omp test: wpf list", Left = 40, Top = 40, Width = 420, Height = 240, Content = strip };
+		var other = new Window { Title = "omp test: wpf other", Left = 500, Top = 40, Width = 240, Height = 160 };
+		window.SourceInitialized += (sender, e) => HwndSource.FromHwnd(new WindowInteropHelper(window).Handle).AddHook(Hook);
+		window.ContentRendered += (sender, e) => { other.Show(); Console.WriteLine("ready"); Console.Out.Flush(); };
+		window.ShowDialog(); }
+}
+'@
+[Pager]::Run()
+"#;
 	struct WpfList {
 		host:   Child,
 		output: std::io::Lines<BufReader<ChildStdout>>,
@@ -917,8 +937,12 @@ public static class Fixture {
 	}
 	impl WpfList {
 		fn open() -> Self {
+			Self::launch(WPF_LIST)
+		}
+
+		fn launch(script: &str) -> Self {
 			let mut host = Command::new("powershell")
-				.args(["-NoProfile", "-Command", WPF_LIST])
+				.args(["-NoProfile", "-Command", script])
 				.stdout(Stdio::piped())
 				.spawn()
 				.unwrap();
@@ -940,7 +964,11 @@ public static class Fixture {
 			assert_ne!(unsafe { PostMessageW(self.window, message, 0, 0) }, 0);
 		}
 
-		fn state(&mut self) -> [f64; 7] {
+		fn state(&mut self) -> [f64; 6] {
+			self.read()
+		}
+
+		fn read<const N: usize>(&mut self) -> [f64; N] {
 			self.post(MARK);
 			// MARK is a queue barrier: every native child counts wheels, and
 			// an unexpected root wheel marker fails this parse.
@@ -966,7 +994,6 @@ public static class Fixture {
 		const CALLS: usize = 3;
 		const ACROSS: usize = 4;
 		const NATIVE_WHEELS: usize = 5;
-		const PAGE2_OFFSET: usize = 6;
 		let mut list = WpfList::open();
 		let mut worker = Worker::new(DisplaySelector::Active, Arc::default(), Arc::default());
 		let token = CancellationSource::default().token();
@@ -1085,20 +1112,57 @@ public static class Fixture {
 		assert_eq!(wheel[OFFSET], grown[OFFSET] - f64::from(per_notch));
 		assert_eq!(wheel[CALLS], grown[CALLS]);
 		assert_eq!(foreground(), list.other);
-		list.post(FRONT);
-		assert!(window::wait_for_foreground(list.window, Duration::from_secs(2)).unwrap());
-		let before_swap = list.state();
-		assert!(before_swap[ACROSS] > 0.0);
-		list.post(SWAP);
-		let result = scroll(x, y, (-27_300.0, 100.0), None);
-		let swapped = list.state();
-		assert_eq!(swapped[ACROSS], 0.0, "the horizontal axis must reach the left edge");
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn wpf_mixed_scroll_scrolls_the_list_the_horizontal_axis_brings_under_the_point() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		const ACROSS: usize = 0;
+		const FIRST: usize = 1;
+		const SECOND: usize = 2;
+		let mut pager = WpfList::launch(WPF_PAGER);
+		let mut worker = Worker::new(DisplaySelector::Active, Arc::default(), Arc::default());
+		let token = CancellationSource::default().token();
+		let target = Target::Window(pager.window.expose_provenance().to_string());
+		let mut per_notch = 3_u32;
+		// SAFETY: this action writes one u32 to the pointer given.
+		unsafe {
+			SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, (&raw mut per_notch).cast(), 0);
+		}
+		assert!((1..=20).contains(&per_notch), "the test needs 1 to 20 wheel lines per notch");
+		pager.post(FRONT);
+		assert!(window::wait_for_foreground(pager.window, Duration::from_secs(2)).unwrap());
+		let request = Request::Capture {
+			target: target.clone(),
+			caps:   CaptureCaps::default(),
+			reply:  flume::unbounded().0,
+		};
+		let Response::Capture(frame) = worker.execute(&request, &token).unwrap() else {
+			panic!("expected capture")
+		};
+		let (x, y) =
+			(f64::from(frame.coordinate_width) / 3.0, f64::from(frame.coordinate_height) / 2.0);
+		let start: [f64; 3] = pager.read();
+		let request = Request::Scroll {
+			target,
+			x,
+			y,
+			dx: 27_300.0,
+			dy: 100.0,
+			takeover: Takeover::new(None, None),
+			reply: flume::unbounded().0,
+		};
+		let result = worker.execute(&request, &token).map(drop);
+		let end: [f64; 3] = pager.read();
+		assert!(end[ACROSS] > start[ACROSS], "the horizontal axis must move the strip: {result:?}");
 		assert_eq!(
-			swapped[PAGE2_OFFSET],
-			before_swap[PAGE2_OFFSET] + f64::from(per_notch),
-			"the vertical axis must scroll the page now under the point: {result:?}"
+			end[SECOND],
+			start[SECOND] + f64::from(per_notch),
+			"the vertical axis must scroll the list now under the point: {result:?}"
 		);
-		assert_eq!(swapped[OFFSET], before_swap[OFFSET], "the covered page must not scroll");
+		assert_eq!(end[FIRST], start[FIRST], "the list that left the point must not scroll");
 		result.unwrap();
 	}
 }
