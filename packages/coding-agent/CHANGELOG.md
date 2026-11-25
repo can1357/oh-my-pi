@@ -18,6 +18,7 @@
 
 - A broadcast from the main agent that arrives while a subagent is finishing no longer replaces that subagent's report; the subagent answers it in a separate turn, and the broadcast still interrupts a waiting subagent.
 - On Linux, `time -l` and `time -v` in the bash tool report the program's own maximum resident set size instead of at least omp's.
+- In the Pseudo shell visualization, words of a zsh script (`zsh -c '…'`, sourced zsh files) show their source text instead of `�` where `$`, `(`, `-`, quotes and other shell syntax stood.
 
 ### Added
 
