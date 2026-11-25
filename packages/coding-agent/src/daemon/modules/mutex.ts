@@ -21,7 +21,7 @@
  */
 import { isRecord, logger, toError } from "@oh-my-pi/pi-utils";
 import { lineReader } from "../../irc/mesh-protocol";
-import { daemonClient } from "../client";
+import { daemonClient, openTunnel } from "../client";
 import type { DaemonModule, ModuleTunnel, ModuleUnit } from "../module";
 import { type DaemonClient, type DaemonTunnel, GLOBAL_SCOPE, type UnitPolicy } from "../protocol";
 
@@ -245,19 +245,14 @@ export class DaemonMutex {
 		const daemon = await this.#connect();
 		// A daemon of another build may not serve this module or this protocol.
 		if (daemon.welcome.caps[MUTEX_KIND] !== MUTEX_VERSION) return undefined;
-		const signal = AbortSignal.timeout(ATTACH_TIMEOUT_MS);
-		const opened = await daemon.open({ kind: MUTEX_KIND, scope: GLOBAL_SCOPE, key: this.#namespace }, signal);
-		let tunnel: DaemonTunnel;
-		try {
-			tunnel = await daemon.attach(opened.unit.id, undefined, signal);
-		} catch (error) {
-			// Not attached: the lease would keep the unit alive for nothing.
-			if (opened.lease) void daemon.release(opened.lease).catch(() => {});
-			throw error;
-		}
+		const { tunnel, lease } = await openTunnel(
+			daemon,
+			{ kind: MUTEX_KIND, scope: GLOBAL_SCOPE, key: this.#namespace },
+			AbortSignal.timeout(ATTACH_TIMEOUT_MS),
+		);
 		// Waiting for a key never keeps the process alive.
 		tunnel.unref();
-		const link: MutexLink = { daemon, tunnel, lease: opened.lease, offReconnect: () => {} };
+		const link: MutexLink = { daemon, tunnel, lease, offReconnect: () => {} };
 		// Leases and tunnels die with the daemon connection.
 		link.offReconnect = daemon.onReconnect(() => this.#drop(link));
 		// Current before the tunnel can close, so a close is never missed.

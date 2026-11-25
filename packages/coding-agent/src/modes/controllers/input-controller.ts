@@ -33,6 +33,7 @@ import { resolveReadPath } from "../../tools/path-utils";
 import { vocalizer } from "../../tts/vocalizer";
 import { collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
+import { attachQueueShorthand } from "../../ui/composer/queue-shorthand";
 import { combineAtomizers, FOCUS_ACTION } from "../../ui/composer/composer";
 import { modelMentionAtomizer } from "../../ui/composer/model-mention-chips";
 import { skillAtomizer } from "../../ui/composer/skill-chips";
@@ -422,6 +423,7 @@ export class InputController {
 				}),
 				isSuggestionsKey: key => this.ctx.keybindings.matches(key, "tui.editor.spellingSuggestions"),
 			}),
+			attachQueueShorthand(composer, () => currentTheme().symbols.symbol("nav.selected")),
 		);
 		// A `/skill:<name>` of a known skill shows as a chip linking to its SKILL.md; a `^provider/id`
 		// mention of a taggable model as a model chip.
@@ -1167,7 +1169,11 @@ export class InputController {
 			// agent-core queue.
 			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
 				if (this.ctx.session.hasInterruptibleInput) {
-					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					const aborting = this.ctx.session.abort({
+						reason: USER_INTERRUPT_LABEL,
+						deliverQueuedMessages: true,
+						detachTools: true,
+					});
 					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
 				}
@@ -1692,7 +1698,11 @@ export class InputController {
 				: undefined;
 		if (!text && !images) {
 			if (target.isStreaming && target.hasInterruptibleInput) {
-				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+				const aborting = target.abort({
+					reason: USER_INTERRUPT_LABEL,
+					deliverQueuedMessages: true,
+					detachTools: true,
+				});
 				await aborting;
 				this.ctx.updatePendingMessagesDisplay();
 			}
@@ -2354,7 +2364,7 @@ export class InputController {
 		];
 		const restored = this.#restoreEntriesToEditor(allQueued, { currentText: options?.currentText });
 		if (options?.abort) {
-			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, detachTools: allQueued.length > 0 });
 		}
 		return restored;
 	}

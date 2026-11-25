@@ -53,7 +53,6 @@ use darwin as platform;
 use linux as platform;
 use napi::{Env, Error, Result, bindgen_prelude::PromiseRaw};
 use napi_derive::napi;
-use notify::{RecursiveMode, Watcher as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -88,14 +87,11 @@ static WSL_KERNEL: LazyLock<bool> = LazyLock::new(|| false);
 const JOURNAL_VERSION: u32 = 1;
 const JOURNAL_LIMIT: u64 = 1024 * 1024;
 const CALLBACK_LIMIT: u64 = 16 * 1024;
-// Fallback for a directory watch that failed to start or missed an event; the
-// watch itself wakes the claim as soon as the relay links the callback in.
-#[cfg(not(test))]
+// How often a wait retries claiming the callback. A person finishing a browser
+// flow sets the pace, so polling adds no noticeable latency and needs no
+// directory watch (whose failure modes, such as exhausted inotify instances,
+// would only cost latency anyway).
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-// Long enough in tests that a wake by the watch and a wake by the poll stay
-// far apart even on a loaded runner, so the tests can tell them apart.
-#[cfg(test)]
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CLEANUP_TIMEOUT_MS: u32 = 15_000;
 const SETUP_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_WAIT_TIMEOUT_MS: u32 = 300_000;
@@ -650,34 +646,6 @@ async fn wait_for_callback_async(
 	cancel: &CancelToken,
 ) -> AnyResult<String> {
 	let claim = path.with_file_name(format!("callback.claimed-{transaction}-{wait}"));
-	// Any change in the transaction directory retries the claim; the permit
-	// `notify_one` stores covers an event landing between a failed rename and
-	// the next await, so the watch is armed before the first attempt.
-	let changed = Arc::new(tokio::sync::Notify::new());
-	let watcher = path.parent().and_then(|directory| {
-		let changed = Arc::clone(&changed);
-		// A failed watch (e.g. exhausted inotify instances) only costs latency,
-		// so the wait falls back to polling; logged because that fallback
-		// is otherwise invisible.
-		let mut watcher =
-			match notify::recommended_watcher(move |_: notify::Result<notify::Event>| {
-				changed.notify_one();
-			}) {
-				Ok(watcher) => watcher,
-				Err(error) => {
-					log::warn!("OAuth callback watcher unavailable, polling instead: {error}");
-					return None;
-				},
-			};
-		if let Err(error) = watcher.watch(directory, RecursiveMode::NonRecursive) {
-			log::warn!(
-				"OAuth callback watch on {} failed, polling instead: {error}",
-				directory.display()
-			);
-			return None;
-		}
-		Some(watcher)
-	});
 	loop {
 		cancel
 			.heartbeat()
@@ -689,7 +657,6 @@ async fn wait_for_callback_async(
 			Ok(()) => break,
 			Err(error) if error.kind() == io::ErrorKind::NotFound => {
 				tokio::select! {
-					() = changed.notified() => {},
 					() = tokio::time::sleep(POLL_INTERVAL) => {},
 					_ = cancel.wait() => {
 						cancel.heartbeat().map_err(|error| anyhow!(error.to_string()))?;
@@ -700,7 +667,6 @@ async fn wait_for_callback_async(
 			Err(error) => return Err(error).context("failed to claim native OAuth callback"),
 		}
 	}
-	drop(watcher);
 	let result = async {
 		cancel
 			.heartbeat()

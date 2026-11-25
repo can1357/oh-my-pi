@@ -204,7 +204,8 @@ export class FrameWriter {
 	#started = false;
 
 	/** The last viewport's rows, raw to normalized at {@link #normalizedWidth} ({@link #normalizeViewport}). */
-	#normalized = new Map<string, string>();
+	#normalized = new Map<string, { text: string; graphics: boolean }>();
+	#shownGraphics = false;
 	#normalizedWidth = 0;
 	// Inline viewport on the normal screen.
 	/** Rows shown, normalized. */
@@ -464,6 +465,7 @@ export class FrameWriter {
 		if (rows > 0) {
 			this.#pushed.push(...this.#shown.slice(0, rows));
 			this.#shown = this.#shown.slice(rows);
+			if (this.#shownGraphics) this.#shownGraphics = this.#shown.some(hasGraphics);
 			this.#cursorRow -= rows;
 			// The anchor's cursor report confirms the model: a terminal that pushed fewer rows (or dropped
 			// rows below the cursor instead) leaves the cursor elsewhere, and nothing is skipped then.
@@ -548,17 +550,25 @@ export class FrameWriter {
 	}
 
 	/** `rows` normalized at `width`, reusing the previous frame's results: most rows repeat frame to frame. */
-	#normalizeViewport(rows: readonly string[], width: number): string[] {
+	#normalizeViewport(rows: readonly string[], width: number, first: number): string[] {
 		const previous = width === this.#normalizedWidth ? this.#normalized : undefined;
-		const next = new Map<string, string>();
-		const out = rows.map(row => {
-			let text = next.get(row) ?? previous?.get(row);
-			if (text === undefined) text = normalizeRow(row, width);
-			next.set(row, text);
-			return text;
-		});
+		const next = new Map<string, { text: string; graphics: boolean }>();
+		const out: string[] = [];
+		let graphics = false;
+		for (let i = first; i < rows.length; i++) {
+			const row = rows[i]!;
+			let entry = next.get(row) ?? previous?.get(row);
+			if (!entry) {
+				const text = normalizeRow(row, width);
+				entry = { text, graphics: hasGraphics(text) };
+			}
+			next.set(row, entry);
+			out.push(entry.text);
+			graphics ||= entry.graphics;
+		}
 		this.#normalized = next;
 		this.#normalizedWidth = width;
+		this.#shownGraphics = graphics;
 		return out;
 	}
 
@@ -584,11 +594,11 @@ export class FrameWriter {
 			this.#topLo = this.#topHi = 0;
 			this.#extent = height;
 		}
-		let viewport = this.#normalizeViewport(frame.viewport, width);
+		const previousGraphics = this.#shown.length > 0 && this.#shownGraphics;
+		this.#clipped = Math.max(0, frame.viewport.length - height);
+		let viewport = this.#normalizeViewport(frame.viewport, width, this.#clipped);
 		let cursor = frame.cursor;
-		this.#clipped = Math.max(0, viewport.length - height);
 		if (this.#clipped > 0) {
-			viewport = viewport.slice(this.#clipped);
 			cursor = cursor && cursor.row >= this.#clipped ? { row: cursor.row - this.#clipped, col: cursor.col } : null;
 		}
 		let past = history ? history.rows.map(row => normalizeRow(row, width)) : [];
@@ -604,8 +614,12 @@ export class FrameWriter {
 		// every row past the bottom: the next frame (or the shell) writes there, never over history.
 		if (past.length > 0 && viewport.length === 0) viewport = [""];
 		const stream = past.length > 0 ? [...past, ...viewport] : viewport;
-		const graphics = stream.some(hasGraphics) || this.#shown.some(hasGraphics);
-		const shift = !this.#options.synchronizedOutput() && this.#topKnown() && !graphics;
+		const shift =
+			!this.#options.synchronizedOutput() &&
+			this.#topKnown() &&
+			!previousGraphics &&
+			!this.#shownGraphics &&
+			!past.some(hasGraphics);
 		const pen = shift ? this.#shifted(stream, past.length, viewport.length) : this.#rewritten(stream);
 		body += pen.out;
 		const written = pen.out !== "" || past.length > 0;
@@ -878,6 +892,7 @@ export class FrameWriter {
 		// What remains of the old viewport is unknown text: the next frame rewrites or erases it.
 		const stale = Math.min(total, this.#topKnown() ? height - this.#topLo : total);
 		this.#shown = Array.from({ length: stale }, () => UNKNOWN_ROW);
+		this.#shownGraphics = false;
 		this.#extent = Math.max(stale, this.#cursorRow + 1);
 		this.#stale = false;
 		if (
