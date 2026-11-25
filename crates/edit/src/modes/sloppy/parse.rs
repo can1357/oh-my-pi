@@ -6,10 +6,9 @@ use std::{
 	borrow::Cow,
 	collections::{HashMap, HashSet},
 	fmt::Write as _,
-	sync::LazyLock,
 };
 
-use regex::Regex;
+use xutf::{GeneralCategoryGroup, Ucd};
 
 use super::{
 	apply::{
@@ -18,7 +17,7 @@ use super::{
 	},
 	types::{InlineSloppyRegion, Operation, OperationRewrite, Placement, SloppySection, markers},
 };
-use crate::error::EditError;
+use crate::{error::EditError, scan};
 
 const OPENER: &str = markers::OPEN;
 const REWRITE_HEADER: &str = markers::PUT;
@@ -47,51 +46,6 @@ const REMOVE_LINE: &str = markers::REMOVE;
 const LITERAL_OPEN: &str = "\0V8LITOPEN\0";
 const LITERAL_CLOSE: &str = "\0V8LITCLOSE\0";
 const LITERAL_DIVIDER: &str = "\0V8LITDIV\0";
-
-macro_rules! regex {
-	($name:ident, $pattern:literal) => {
-		static $name: LazyLock<Regex> = LazyLock::new(|| {
-			Regex::new($pattern).expect(concat!("valid ", stringify!($name), " regex"))
-		});
-	};
-}
-
-regex!(
-	HEADER_RE,
-	r"(?iu)^\*{3}[ \t]+(Edit[ \t]+File|Find|(?:(?:Replace|Delete|Cut|Insert(?:[ \t]+(?:Before|After))?|Paste[ \t]+(?:Before|After))[ \t]+)?Block|Replace|Insert[ \t]+After|Insert[ \t]+Before|Cut|Paste[ \t]+After|Paste[ \t]+Before)(:|[ \t]|$)(.*)$"
-);
-regex!(ENVELOPE_WORDS_RE, r"(?iu)^\s*(?:Begin|End)(?:\s+of)?\s+(?:patch|edits?|file)\b");
-regex!(
-	ENVELOPE_LINE_RE,
-	r"(?iu)^\*{3}\s*(?:(?:Begin|End)(?:\s+of)?\s+(?:patch|edits?|file)|Abort|Update File:|Add File:|Delete File:)"
-);
-regex!(ENVELOPE_END_RE, r"(?iu)^\*{3}\s*End\b");
-regex!(FENCE_LINE_RE, r"^\s*(?:```|~~~)");
-regex!(ORDINAL_OPENER_RE, r"^«[1-9]\d*$");
-regex!(OUTER_FENCE_RE, r"(?iu)^```(?:text|xml|html|typescript|ts|tsx|javascript|js)?\s*$");
-regex!(GLUED_CONTROL_RE, r"^[ \t]*(«\*?|»)([ \t]+\S.*)$");
-regex!(SHOWING_LINES_RE, r"(?iu)^\[(?:Showing lines\b|(?:…|\.\.\.)\d+ln elided\b).*\]$");
-regex!(ELIDED_LINE_RE, r"^\d+(?:-\d+)?:\s*(?:…|\.\.\.)\s*$");
-regex!(
-	READ_MORE_NOTICE_RE,
-	r"(?iu)^\[\s*(?:\d+\s+)?more\s+lines?\s+in\s+.+\.\s+use\s+.+\s+to\s+continue\]$"
-);
-regex!(NUMBERED_LINE_RE, r"^\s*\d+\s*[:|]");
-regex!(NUMBERED_LITERAL_RE, r#"^\s*\d+\s*[:|]\s*(?:\d|[\"'`])"#);
-regex!(SELECTION_ONLY_RE, r"^\x{27EA}([^\x{27EA}\x{27EB}]*)\x{27EB}$");
-regex!(REFERENCE_RE, r"^»([1-9]\d*)$");
-regex!(BARE_DESIRED_RE, r"\x{27EA}[^\x{27EA}\x{27EB}\x{2502}\n…]+\x{27EB}");
-regex!(BARE_DESIRED_CAPTURE_RE, r"\x{27EA}([^\x{27EA}\x{27EB}\x{2502}\n…]+)\x{27EB}");
-regex!(UNICODE_TOKEN_RE, r"[\p{L}\p{N}_$]+");
-regex!(
-	STRAY_DIVIDER_RE,
-	r"\x{27EA}([^\x{27EA}\x{27EB}\x{2502}\n]*)\x{27EB}([^\x{27EA}\x{27EB}\x{2502}\n]*)\x{27EB}"
-);
-regex!(
-	DIRECTIVE_RE,
-	r"^\x{27EA}([^\x{27EA}\x{27EB}\x{2502}]+)\x{2502}([^\x{27EA}\x{27EB}\x{2502}]*)\x{27EB}$"
-);
-regex!(EMPTY_SELECTION_TAIL_RE, r"(?:^|\n)[ \t]*\x{27EA}\x{27EB}[ \t]*$");
 
 #[derive(Debug)]
 enum Header<'a> {
@@ -242,39 +196,44 @@ fn js_len(text: &str) -> usize {
 	text.encode_utf16().count()
 }
 
+/// Whether `c` separates the words of an edit header.
+const fn header_space(c: char) -> bool {
+	matches!(c, ' ' | '\t')
+}
+
+/// Consumes a header keyword only if it ends before a delimiter or EOF.
+fn header_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+	let rest = scan::keyword(text, word)?;
+	(rest.is_empty() || rest.starts_with([':', ' ', '\t'])).then_some(rest)
+}
+
+/// Consumes a required run of header spaces and tabs.
+fn header_gap(text: &str) -> Option<&str> {
+	let rest = text.trim_start_matches(header_space);
+	(rest.len() < text.len()).then_some(rest)
+}
+
+/// Reads the placement in `Insert Before` or `Paste After`.
+fn header_placement(text: &str) -> Option<(Placement, &str)> {
+	let text = header_gap(text)?;
+	header_word(text, "Before")
+		.map(|rest| (Placement::Before, rest))
+		.or_else(|| header_word(text, "After").map(|rest| (Placement::After, rest)))
+}
+
+/// Parses `*** Edit File`, `*** Find` or an action or block header.
 fn parse_header(line: &str) -> Option<Header<'_>> {
 	let trimmed = line.trim_start();
-	if !trimmed.starts_with("***") {
+	let text = trimmed.strip_prefix("***")?;
+	let text = text.trim_end();
+	let trailing = trimmed.len() - "***".len() - text.len();
+	let text = header_gap(text)?;
+	if text.contains('\n') {
 		return None;
 	}
-	let captures = HEADER_RE.captures(trimmed.trim_end())?;
-	let name = captures.get(1)?.as_str().to_ascii_lowercase();
-	let tail = &trimmed[captures.get(3)?.start()..];
-	if name.ends_with("block") {
-		let action = match name.split_ascii_whitespace().next()? {
-			"cut" => BlockAction::Cut,
-			"delete" => BlockAction::Delete,
-			"replace" => BlockAction::Replace,
-			"paste" if name.contains("before") => BlockAction::Paste(Placement::Before),
-			"paste" => BlockAction::Paste(Placement::After),
-			"insert" => {
-				return Some(Header::InvalidBlock(
-					"Invalid block edit: for insertion use *** Find followed by *** Insert Before or \
-					 *** Insert After.",
-				));
-			},
-			_ => return Some(Header::InvalidBlock(OLD_BLOCK_ERROR)),
-		};
-		if &captures[2] != ":" || tail.trim().is_empty() {
-			return Some(Header::InvalidBlock(BLOCK_SELECTOR_ERROR));
-		}
-		// One optional separator space belongs to the header. Everything else,
-		// including source indentation, annotations and trailing spaces, is
-		// literal.
-		return Some(Header::Block(action, tail.strip_prefix(' ').unwrap_or(tail)));
-	}
-	let rest = tail.trim();
-	if name.starts_with("edit") {
+	if let Some(file) = header_word(text, "Edit") {
+		let tail = header_word(header_gap(file)?, "File")?;
+		let rest = tail.strip_prefix(':').unwrap_or(tail).trim();
 		let (path, all) = if rest.eq_ignore_ascii_case("all") {
 			("", true)
 		} else if let Some((path, flag)) = rest.rsplit_once(char::is_whitespace)
@@ -293,28 +252,102 @@ fn parse_header(line: &str) -> Option<Header<'_>> {
 		};
 		return Some(Header::Edit { path, all });
 	}
-	if name == "find" && rest.eq_ignore_ascii_case("all") {
-		return Some(Header::Find { all: true });
+	if let Some(tail) = header_word(text, "Find") {
+		let rest = tail.strip_prefix(':').unwrap_or(tail).trim();
+		return if rest.eq_ignore_ascii_case("all") {
+			Some(Header::Find { all: true })
+		} else {
+			rest.is_empty().then_some(Header::Find { all: false })
+		};
 	}
-	if !rest.is_empty() {
-		return None;
+	if header_word(text, "Block").is_some() {
+		return Some(Header::InvalidBlock(OLD_BLOCK_ERROR));
 	}
-	let at = if name.ends_with("before") {
-		Placement::Before
+	let (action, block, tail) = if let Some(tail) = header_word(text, "Replace") {
+		(Some(Action::Replace), Ok(BlockAction::Replace), tail)
+	} else if let Some(tail) = header_word(text, "Cut") {
+		(Some(Action::Cut), Ok(BlockAction::Cut), tail)
+	} else if let Some(tail) = header_word(text, "Delete") {
+		(None, Ok(BlockAction::Delete), tail)
+	} else if let Some(tail) = header_word(text, "Paste") {
+		let (at, tail) = header_placement(tail)?;
+		(Some(Action::Paste(at)), Ok(BlockAction::Paste(at)), tail)
 	} else {
-		Placement::After
+		let tail = header_word(text, "Insert")?;
+		let (action, tail) =
+			header_placement(tail).map_or((None, tail), |(at, tail)| (Some(Action::Insert(at)), tail));
+		(
+			action,
+			Err(
+				"Invalid block edit: for insertion use *** Find followed by *** Insert Before or *** \
+				 Insert After.",
+			),
+			tail,
+		)
 	};
-	Some(match name.as_str() {
-		"find" => Header::Find { all: false },
-		"replace" => Header::Action(Action::Replace),
-		"cut" => Header::Action(Action::Cut),
-		name if name.starts_with("paste") => Header::Action(Action::Paste(at)),
-		_ => Header::Action(Action::Insert(at)),
+	if let Some(tail) = header_gap(tail).and_then(|rest| header_word(rest, "Block")) {
+		let action = match block {
+			Ok(action) => action,
+			Err(message) => return Some(Header::InvalidBlock(message)),
+		};
+		if let Some(selector) = tail.strip_prefix(':')
+			&& !selector.trim().is_empty()
+		{
+			// One optional space belongs to the header; the rest, including
+			// indentation and trailing spaces, is literal.
+			let selector = &trimmed[trimmed.len() - trailing - selector.len()..];
+			return Some(Header::Block(action, selector.strip_prefix(' ').unwrap_or(selector)));
+		}
+		return Some(Header::InvalidBlock(BLOCK_SELECTOR_ERROR));
+	}
+	tail
+		.strip_prefix(':')
+		.unwrap_or(tail)
+		.trim()
+		.is_empty()
+		.then_some(Header::Action(action?))
+}
+
+/// Consumes the words `Begin [of] Patch`, `End Edit`, or `End File`.
+fn envelope_label(text: &str) -> Option<&str> {
+	let rest = scan::keyword(text, "Begin").or_else(|| scan::keyword(text, "End"))?;
+	let rest = scan::space(rest)?;
+	let rest = scan::keyword(rest, "of")
+		.and_then(scan::space)
+		.unwrap_or(rest);
+	["patch", "edits", "edit", "file"]
+		.into_iter()
+		.find_map(|word| scan::keyword(rest, word))
+}
+
+/// Whether a standalone envelope label follows a bare `***` row.
+fn envelope_words(line: &str) -> bool {
+	envelope_label(line.trim_start()).is_some_and(scan::ends_word)
+}
+
+/// Whether `line` starts with a foreign patch envelope or action prefix.
+fn is_envelope_prefix(line: &str) -> bool {
+	line.strip_prefix("***").is_some_and(|rest| {
+		let rest = rest.trim_start();
+		envelope_label(rest).is_some()
+			|| ["Abort", "Update File:", "Add File:", "Delete File:"]
+				.into_iter()
+				.any(|word| scan::keyword(rest, word).is_some())
 	})
 }
 
-fn envelope_words(line: &str) -> bool {
-	ENVELOPE_WORDS_RE.is_match(line)
+/// Whether `line` starts with `*** End` as a word.
+fn is_envelope_end(line: &str) -> bool {
+	line
+		.strip_prefix("***")
+		.and_then(|rest| scan::keyword(rest.trim_start(), "End"))
+		.is_some_and(scan::ends_word)
+}
+
+/// Whether `line` begins a backtick or tilde fence.
+fn is_fence_line(line: &str) -> bool {
+	let rest = line.trim_start();
+	rest.starts_with("```") || rest.starts_with("~~~")
 }
 
 /// These spellings are ambiguous with source text. Never teach them to
@@ -346,7 +379,7 @@ fn foreign_action(line: &str) -> bool {
 fn envelope_line(line: &str) -> bool {
 	// File instructions aren't noise. An unaccompanied one in a Find or
 	// replacement can itself be the line being edited.
-	ENVELOPE_LINE_RE.is_match(line) && file_alias(line).is_none() && !foreign_action(line)
+	is_envelope_prefix(line) && file_alias(line).is_none() && !foreign_action(line)
 }
 
 /// Remove foreign patch envelopes and the noise following end sentinels.
@@ -377,10 +410,10 @@ fn clean_envelope(mut lines: Vec<String>) -> Vec<String> {
 					Header::Action(Action::Insert(_)) | Header::Block(BlockAction::Replace, _)
 				);
 			writing = inserting || !skipping && matches!(header, Header::Action(Action::Replace));
-		} else if writing && ENVELOPE_END_RE.is_match(line.trim()) {
+		} else if writing && is_envelope_end(line.trim()) {
 			match lines[index + 1..]
 				.iter()
-				.find(|rest| !rest.trim().is_empty() && !FENCE_LINE_RE.is_match(rest))
+				.find(|rest| !rest.trim().is_empty() && !is_fence_line(rest))
 			{
 				None => break,
 				Some(next) if parse_header(next).is_some() || envelope_line(next.trim()) => {
@@ -400,7 +433,7 @@ fn clean_envelope(mut lines: Vec<String>) -> Vec<String> {
 			index += 1;
 		}
 		if envelope_line(line.trim()) {
-			skipping = ENVELOPE_END_RE.is_match(line.trim());
+			skipping = is_envelope_end(line.trim());
 			index += 1;
 			continue;
 		}
@@ -794,7 +827,7 @@ fn tool_lines(input: &str, partial: bool) -> Result<(Vec<String>, bool), EditErr
 			// The model closed each replacement, not the file. Let the same
 			// envelope pass as canonical input remove the intervening marker.
 			body_closers = true;
-		} else if envelope_line(line) || ENVELOPE_END_RE.is_match(line) {
+		} else if envelope_line(line) || is_envelope_end(line) {
 			return Err(mixed());
 		}
 	}
@@ -906,7 +939,7 @@ pub fn extract_inline_sloppy_regions(text: &str) -> Vec<InlineSloppyRegion> {
 	let mut index = 0;
 	while index < lines.len() {
 		let line = lines[index];
-		if FENCE_LINE_RE.is_match(line) {
+		if is_fence_line(line) {
 			in_fence = !in_fence;
 			index += 1;
 			continue;
@@ -920,7 +953,7 @@ pub fn extract_inline_sloppy_regions(text: &str) -> Vec<InlineSloppyRegion> {
 		let mut collecting_body = false;
 		let mut scan = index + 1;
 		while scan < lines.len() {
-			if ENVELOPE_END_RE.is_match(lines[scan].trim()) {
+			if is_envelope_end(lines[scan].trim()) {
 				break;
 			}
 			let Some(header) = parse_header(lines[scan]) else {
@@ -980,8 +1013,46 @@ fn parse_opener(line: &str) -> Option<OpenerKind> {
 	}
 }
 
+/// Extracts a positive decimal ordinal after an internal control marker.
+fn control_ordinal<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+	let ordinal = line.strip_prefix(marker)?;
+	matches!(ordinal.as_bytes(), [b'1'..=b'9', rest @ ..] if rest.iter().all(u8::is_ascii_digit))
+		.then_some(ordinal)
+}
+
+/// Whether the trimmed line is an ordinal opener such as `«2`.
 fn is_ordinal_opener(line: &str) -> bool {
-	ORDINAL_OPENER_RE.is_match(line.trim())
+	control_ordinal(line.trim(), OPENER).is_some()
+}
+
+/// Whether `line` opens a plain-text or recognized code fence.
+fn is_outer_fence(line: &str) -> bool {
+	let Some(label) = line.strip_prefix("```") else {
+		return false;
+	};
+	let label = label.trim_end();
+	label.is_empty()
+		|| ["text", "xml", "html", "typescript", "ts", "tsx", "javascript", "js"]
+			.into_iter()
+			.any(|tag| label.eq_ignore_ascii_case(tag))
+}
+
+/// Splits a glued control such as `«*   source` into its marker and body.
+fn glued_control(line: &str) -> Option<(&'static str, &str)> {
+	let line = line.trim_start_matches(header_space);
+	let marker = if line.starts_with("«*") {
+		"«*"
+	} else if line.starts_with(OPENER) {
+		OPENER
+	} else if line.starts_with(REWRITE_HEADER) {
+		REWRITE_HEADER
+	} else {
+		return None;
+	};
+	let body = &line[marker.len()..];
+	let text = header_gap(body)?;
+	(!text.starts_with(char::is_whitespace) && !text.is_empty() && !text.contains('\n'))
+		.then_some((marker, body))
 }
 
 /// Normalize section headers or internal IR into a canonical op stream.
@@ -996,7 +1067,7 @@ fn normalize_section(input: &str, streaming: bool) -> Result<String, EditError> 
 	}
 	if lines
 		.first()
-		.is_some_and(|line| OUTER_FENCE_RE.is_match(line.trim()))
+		.is_some_and(|line| is_outer_fence(line.trim()))
 	{
 		lines.remove(0);
 		while lines.last().is_some_and(|line| line.trim().is_empty()) {
@@ -1010,15 +1081,16 @@ fn normalize_section(input: &str, streaming: bool) -> Result<String, EditError> 
 			.flat_map(|section| section.ir)
 			.collect();
 	} else {
-		lines = lines
-			.into_iter()
-			.flat_map(|line| {
-				GLUED_CONTROL_RE.captures(&line).map_or_else(
-					|| vec![line.clone()],
-					|captures| vec![captures[1].to_owned(), captures[2].to_owned()],
-				)
-			})
-			.collect();
+		let mut split = Vec::with_capacity(lines.len());
+		for mut line in lines {
+			if let Some((marker, body)) = glued_control(&line) {
+				let prefix = line.len() - body.len();
+				line.replace_range(..prefix, "");
+				split.push(marker.to_owned());
+			}
+			split.push(line);
+		}
+		lines = split;
 	}
 	while lines.first().is_some_and(|line| line.trim().is_empty()) {
 		lines.remove(0);
@@ -1041,29 +1113,105 @@ enum Side {
 	},
 }
 
+/// Splits a numbered output row such as ` 12:source` into number and body.
+fn numbered_line(line: &str) -> Option<(&str, &str)> {
+	let (number, rest) = scan::digits(line.trim_start())?;
+	Some((number, rest.trim_start().strip_prefix([':', '|'])?))
+}
+
+/// Whether the body of a numbered row begins with a number or quote.
+fn is_numbered_literal(line: &str) -> bool {
+	numbered_line(line).is_some_and(|(_, body)| {
+		body
+			.trim_start()
+			.as_bytes()
+			.first()
+			.is_some_and(|&unit| unit.is_ascii_digit() || matches!(unit, b'"' | b'\'' | b'`'))
+	})
+}
+
 /// Line number of a row copied from numbered tool output (`12:text`,
 /// `12|text`); `None` when the row is code that merely starts with a number
 /// (`0 || x`, `1 |= mask`, `a ? 1 :: b`).
 fn copied_line_number(line: &str) -> Option<usize> {
-	let prefix = NUMBERED_LINE_RE.find(line)?.as_str();
-	if line[prefix.len()..].starts_with([':', '|', '=']) {
+	let (number, body) = numbered_line(line)?;
+	if body.starts_with([':', '|', '=']) {
 		return None;
 	}
-	prefix
-		.trim_start()
-		.trim_end_matches([':', '|'])
-		.trim_end()
-		.parse()
-		.ok()
-		.filter(|number| *number > 0)
+	number.parse().ok().filter(|number| *number > 0)
+}
+
+/// Whether `line` is a `[Showing lines …]` or `[…10ln elided]` notice.
+fn is_showing_lines(line: &str) -> bool {
+	let Some(body) = line
+		.strip_prefix('[')
+		.and_then(|rest| rest.strip_suffix(']'))
+	else {
+		return false;
+	};
+	let rest = scan::keyword(body, "Showing lines").or_else(|| {
+		let count = body
+			.strip_prefix(GAP)
+			.or_else(|| body.strip_prefix("..."))?;
+		let (_, rest) = scan::digits(count)?;
+		scan::keyword(rest, "ln elided")
+	});
+	rest.is_some_and(|rest| scan::ends_word(rest) && !rest.contains('\n'))
+}
+
+/// Whether `line` is an omitted row range such as `12-17: …`.
+fn is_elided_line(line: &str) -> bool {
+	(|| {
+		let (_, mut rest) = scan::digits(line)?;
+		if let Some(last) = rest.strip_prefix('-') {
+			rest = scan::digits(last)?.1;
+		}
+		let marker = rest.strip_prefix(':')?.trim();
+		Some(matches!(marker, GAP | "..."))
+	})()
+	.unwrap_or(false)
+}
+
+/// Strips the trailing notice word and one required whitespace separator.
+fn notice_tail<'a>(line: &'a str, word: &str) -> Option<&'a str> {
+	let (rest, tail) = line.split_at_checked(line.len().checked_sub(word.len())?)?;
+	if !tail.eq_ignore_ascii_case(word) {
+		return None;
+	}
+	rest.strip_suffix(char::is_whitespace)
+}
+
+/// Recognizes the `[more lines in file. use … to continue]` notice.
+fn is_read_more_notice(line: &str) -> bool {
+	let parse = || {
+		let mut rest = line.strip_prefix('[')?.trim_start();
+		if let Some((_, after)) = scan::digits(rest) {
+			rest = scan::space(after)?;
+		}
+		rest = scan::space(scan::keyword(rest, "more")?)?;
+		rest = scan::keyword(rest, "line")?;
+		rest = scan::space(scan::keyword(rest, "s").unwrap_or(rest))?;
+		rest = scan::keyword(rest, "in")?;
+		// Consume just one separator: a nonempty operand may itself be
+		// whitespace.
+		let after_in = rest.strip_prefix(char::is_whitespace)?;
+		let before_continue = notice_tail(after_in, "continue]")?.trim_end();
+		let before_to = notice_tail(before_continue, "to")?;
+		Some(before_to.match_indices('.').any(|(at, _)| {
+			at > 0
+				&& scan::space(&before_to[at + 1..])
+					.and_then(|rest| scan::keyword(rest, "use"))
+					.and_then(|rest| rest.strip_prefix(char::is_whitespace))
+					.is_some_and(|operand| !operand.is_empty())
+		}))
+	};
+	parse().unwrap_or(false)
 }
 
 /// Whether `line` is a notice or fold row of tool output, never file text.
 fn is_read_notice(line: &str) -> bool {
 	let trimmed = line.trim();
-	SHOWING_LINES_RE.is_match(trimmed)
-		|| READ_MORE_NOTICE_RE.is_match(trimmed)
-		|| ELIDED_LINE_RE.is_match(trimmed)
+	is_showing_lines(trimmed) || is_read_more_notice(trimmed) || is_elided_line(trimmed)
 }
 
 /// Whether every row of file text carries an ascending line-number prefix,
@@ -1101,7 +1249,7 @@ fn normalize_block(lines: &[String], side: Side) -> String {
 		&& cleaned
 			.iter()
 			.filter(|line| !line.trim().is_empty())
-			.all(|line| NUMBERED_LITERAL_RE.is_match(line));
+			.all(|line| is_numbered_literal(line));
 	let all_non_blank_plus = has_non_blank
 		&& cleaned
 			.iter()
@@ -1109,7 +1257,10 @@ fn normalize_block(lines: &[String], side: Side) -> String {
 			.all(|line| line.starts_with('+'));
 	if numbered_lines && !numbered_literals {
 		for line in &mut cleaned {
-			*line = NUMBERED_LINE_RE.replace(line, "").into_owned();
+			if let Some((_, body)) = numbered_line(line) {
+				let prefix = line.len() - body.len();
+				line.replace_range(..prefix, "");
+			}
 		}
 	}
 	if rewrite {
@@ -1431,12 +1582,18 @@ fn parse_inline_pattern(
 	Ok((pattern_text, replacements, notes))
 }
 
+/// Extracts the contents of a single `⟪selection⟫` spanning the whole line.
+fn selection_only(line: &str) -> Option<&str> {
+	let body = line.strip_prefix(SELECT_OPEN)?.strip_suffix(SELECT_CLOSE)?;
+	(!body.contains(['⟪', '⟫'])).then_some(body)
+}
+
 fn relocate_selection_lines(pattern_text: &str) -> String {
 	let mut lines: Vec<String> = pattern_text.split('\n').map(str::to_owned).collect();
 	let mut index = 1;
 	while index < lines.len() {
 		let previous = lines[index - 1].clone();
-		let Some(captures) = SELECTION_ONLY_RE.captures(lines[index].trim()) else {
+		let Some(selection) = selection_only(lines[index].trim()) else {
 			index += 1;
 			continue;
 		};
@@ -1444,7 +1601,7 @@ fn relocate_selection_lines(pattern_text: &str) -> String {
 			index += 1;
 			continue;
 		}
-		let old = normalize_text(captures.get(1).map_or("", |value| value.as_str())).text;
+		let old = normalize_text(selection).text;
 		if old.is_empty() {
 			index += 1;
 			continue;
@@ -1472,22 +1629,54 @@ fn relocate_selection_lines(pattern_text: &str) -> String {
 	lines.join("\n")
 }
 
+/// Extracts the operation ordinal from a `»2` reference.
+fn register_reference(line: &str) -> Option<&str> {
+	control_ordinal(line, REWRITE_HEADER)
+}
+
 fn pattern_reference(pattern: &str) -> Option<String> {
-	pattern.split('\n').find_map(|line| {
-		REFERENCE_RE
-			.captures(line.trim())
-			.map(|captures| captures[1].to_owned())
+	pattern
+		.split('\n')
+		.find_map(|line| register_reference(line.trim()).map(str::to_owned))
+}
+
+/// Finds the start of bare selected text, excluding gaps, dividers and line
+/// breaks.
+fn bare_desired_starts(text: &str) -> impl Iterator<Item = usize> {
+	text.match_indices(SELECT_OPEN).filter_map(|(at, _)| {
+		let start = at + SELECT_OPEN.len();
+		let content = &text[start..];
+		let end = content.find(['⟪', '⟫', '│', '\n', '…'])?;
+		(end > 0 && content[end..].starts_with(SELECT_CLOSE)).then_some(start)
 	})
 }
 
-fn has_bare_desired(pattern_text: &str) -> bool {
-	BARE_DESIRED_RE.is_match(pattern_text)
+/// Whether `text` has the leading byte of a selection opener.
+fn has_selection_lead(text: &str) -> bool {
+	text.as_bytes().contains(&SELECT_OPEN.as_bytes()[0])
 }
 
+/// Whether a pattern contains a bare desired-text selection.
+fn has_bare_desired(pattern_text: &str) -> bool {
+	has_selection_lead(pattern_text) && bare_desired_starts(pattern_text).next().is_some()
+}
+
+/// Rewrites bare selected text as `⟪…│desired⟫`.
 fn embed_bare_desired(pattern_text: &str) -> String {
-	BARE_DESIRED_CAPTURE_RE
-		.replace_all(pattern_text, "⟪…│$1⟫")
-		.into_owned()
+	let mut starts = bare_desired_starts(pattern_text);
+	let Some(first) = starts.next() else {
+		return pattern_text.to_owned();
+	};
+	let mut out = String::with_capacity(pattern_text.len() + GAP.len() + SELECT_DIVIDER.len());
+	let mut from = 0;
+	for start in std::iter::once(first).chain(starts) {
+		out.push_str(&pattern_text[from..start]);
+		out.push_str(GAP);
+		out.push_str(SELECT_DIVIDER);
+		from = start;
+	}
+	out.push_str(&pattern_text[from..]);
+	out
 }
 
 fn expand_echoed_line_selection(pattern_text: &str, rewrite_text: &str) -> Option<String> {
@@ -1578,6 +1767,24 @@ pub(crate) fn missing_unmarked_lines(content: &str, source_pattern_text: &str) -
 	missing
 }
 
+/// Whether a non-ASCII scalar is a letter or number in a source token.
+#[cold]
+fn wide_token_char(c: char) -> bool {
+	matches!(c.general_category_group(), GeneralCategoryGroup::Letter | GeneralCategoryGroup::Number)
+}
+
+/// Whether a scalar can occur in a source token, including `$` and `_`.
+fn is_token_char(c: char) -> bool {
+	c.is_ascii_alphanumeric() || matches!(c, '$' | '_') || !c.is_ascii() && wide_token_char(c)
+}
+
+/// Finds maximal source tokens made of letters, numbers, `$` and `_`.
+fn source_tokens(line: &str) -> impl Iterator<Item = &str> {
+	line
+		.split(|c| !is_token_char(c))
+		.filter(|token| !token.is_empty())
+}
+
 fn is_near_variant(anchor: &str, added: &str) -> bool {
 	if anchor.contains(SELECT_OPEN) || anchor.trim().is_empty() {
 		return false;
@@ -1588,13 +1795,14 @@ fn is_near_variant(anchor: &str, added: &str) -> bool {
 		return false;
 	}
 
-	let tokens = |line: &str| {
+	/// Counts the occurrences of each source token.
+	fn tokens(line: &str) -> HashMap<&str, usize> {
 		let mut counts = HashMap::new();
-		for token in UNICODE_TOKEN_RE.find_iter(line).map(|item| item.as_str()) {
-			*counts.entry(token.to_owned()).or_insert(0usize) += 1;
+		for token in source_tokens(line) {
+			*counts.entry(token).or_insert(0) += 1;
 		}
 		counts
-	};
+	}
 	let left_tokens = tokens(left);
 	let right_tokens = tokens(right);
 	let left_total: usize = left_tokens.values().sum();
@@ -1713,23 +1921,51 @@ fn embed_marker_lines(pattern_text: &str) -> String {
 	out.join("\n")
 }
 
+/// Repairs `⟪old⟫new⟫` when the stray closes explain all unbalanced markers.
 fn recover_stray_close_divider(pattern_text: &str) -> Option<String> {
+	if !has_selection_lead(pattern_text) {
+		return None;
+	}
 	let opens = pattern_text.matches(SELECT_OPEN).count();
 	let closes = pattern_text.matches(SELECT_CLOSE).count();
-	if closes <= opens {
+	if closes <= opens || opens == 0 {
 		return None;
 	}
 
-	let repaired = STRAY_DIVIDER_RE
-		.replace_all(pattern_text, "⟪$1│$2⟫")
-		.into_owned();
-	if repaired == pattern_text
-		|| repaired.matches(SELECT_OPEN).count() != repaired.matches(SELECT_CLOSE).count()
-	{
-		None
-	} else {
-		Some(repaired)
+	let mut surplus = closes - opens;
+	let mut repaired = String::with_capacity(pattern_text.len());
+	let mut from = 0;
+	for (at, _) in pattern_text.match_indices(SELECT_OPEN) {
+		let content_at = at + SELECT_OPEN.len();
+		let content = &pattern_text[content_at..];
+		let Some(first) = content.find(['⟪', '⟫', '│', '\n']) else {
+			break;
+		};
+		let Some(after) = content[first..].strip_prefix(SELECT_CLOSE) else {
+			continue;
+		};
+		let Some(second) = after.find(['⟪', '⟫', '│', '\n']) else {
+			break;
+		};
+		if after[second..].starts_with(SELECT_CLOSE) {
+			surplus = surplus.checked_sub(1)?;
+			repaired.push_str(&pattern_text[from..content_at + first]);
+			repaired.push_str(SELECT_DIVIDER);
+			from = content_at + first + SELECT_CLOSE.len();
+		}
 	}
+	if surplus != 0 {
+		return None;
+	}
+	repaired.push_str(&pattern_text[from..]);
+	Some(repaired)
+}
+
+/// Splits an inline `⟪old│new⟫` directive into its two literal operands.
+fn rewrite_directive(line: &str) -> Option<(&str, &str)> {
+	let content = selection_only(line)?;
+	let (old, new) = content.split_once(SELECT_DIVIDER)?;
+	(!old.is_empty() && !new.contains(SELECT_DIVIDER)).then_some((old, new))
 }
 
 fn recover_directive_rewrite(
@@ -1746,17 +1982,17 @@ fn recover_directive_rewrite(
 	if lines.is_empty() {
 		return Ok(None);
 	}
-	let mut unique = Vec::<(String, String)>::new();
+	let mut unique = Vec::new();
 	let mut seen = HashSet::new();
 	for line in lines {
-		let Some(directive) = DIRECTIVE_RE.captures(line) else {
+		let Some((old, new)) = rewrite_directive(line) else {
 			return Ok(None);
 		};
-		if seen.insert(directive[1].to_owned()) {
-			unique.push((directive[1].to_owned(), directive[2].to_owned()));
+		if seen.insert(old) {
+			unique.push((old, new));
 		}
 	}
-	unique.sort_by_key(|entry| std::cmp::Reverse(js_len(&entry.0)));
+	unique.sort_by_key(|entry| std::cmp::Reverse(js_len(entry.0)));
 	let mut segments = vec![(pattern_text.to_owned(), false)];
 	let mut matched_any = false;
 	for (old, next) in unique {
@@ -1767,7 +2003,7 @@ fn recover_directive_rewrite(
 				continue;
 			}
 			let mut from = 0;
-			while let Some(relative) = segment[from..].find(&old) {
+			while let Some(relative) = segment[from..].find(old) {
 				let at = from + relative;
 				if at > from {
 					rewritten.push((segment[from..at].to_owned(), false));
@@ -1876,6 +2112,12 @@ fn recover_mixed_rewrite_forms(
 	}
 }
 
+/// Returns the text before an empty `⟪⟫` selection on the final row.
+fn before_empty_selection_tail(text: &str) -> Option<&str> {
+	let (before, line) = text.rsplit_once('\n').unwrap_or((&text[..0], text));
+	(line.trim_matches(header_space) == "⟪⟫").then_some(before)
+}
+
 fn create_operation_text(
 	source_pattern_text: &str,
 	rewrite_text: &str,
@@ -1923,22 +2165,20 @@ fn create_operation_text(
 			parse_inline_pattern(&embedded, operation_number)?;
 		if replacements.len() == 1
 			&& replacements[0].is_empty()
-			&& let Some(tail) = EMPTY_SELECTION_TAIL_RE.find(&inline_pattern)
+			&& let Some(remainder) = before_empty_selection_tail(&inline_pattern)
+			&& !normalize_text(remainder).text.is_empty()
 		{
-			let remainder = &inline_pattern[..tail.start()];
-			if !normalize_text(remainder).text.is_empty() {
-				return Ok(Operation {
-					pattern_text: remainder.to_owned(),
-					source_pattern_text: source_pattern_text.to_owned(),
-					rewrite: OperationRewrite::Explicit { text: String::new() },
-					all,
-					block: false,
-					assumed_deletion: false,
-					desired_state: false,
-					recovery_note: (!notes.is_empty()).then(|| notes.join("\n")),
-					whitespace_matched: false,
-				});
-			}
+			return Ok(Operation {
+				pattern_text: remainder.to_owned(),
+				source_pattern_text: source_pattern_text.to_owned(),
+				rewrite: OperationRewrite::Explicit { text: String::new() },
+				all,
+				block: false,
+				assumed_deletion: false,
+				desired_state: false,
+				recovery_note: (!notes.is_empty()).then(|| notes.join("\n")),
+				whitespace_matched: false,
+			});
 		}
 		if let Some(reference) = pattern_reference(&inline_pattern) {
 			return Err(parse_error(format!(
@@ -2388,7 +2628,7 @@ pub(super) fn parse_section(
 		block = line.strip_prefix(BLOCK_HEADER);
 		let parsed_opener = parse_opener(line);
 		let trimmed = line.trim();
-		let register_reference = REFERENCE_RE.captures(trimmed);
+		let has_reference = register_reference(trimmed).is_some();
 		let literal_action = strip_insert_header(line)
 			.map(|(at, body)| (Action::Insert(at), body))
 			.or_else(|| {
@@ -2484,9 +2724,7 @@ pub(super) fn parse_section(
 		}
 		if parsed_opener.is_none()
 			&& (trimmed.starts_with(OPENER)
-				|| (trimmed.starts_with(REWRITE_HEADER)
-					&& trimmed != REWRITE_HEADER
-					&& register_reference.is_none()))
+				|| (trimmed.starts_with(REWRITE_HEADER) && trimmed != REWRITE_HEADER && !has_reference))
 		{
 			let json = serde_json::to_string(trimmed).expect("string serialization cannot fail");
 			return Err(parse_error(format!(
@@ -2516,7 +2754,7 @@ pub(super) fn parse_section(
 				|| (trimmed == SELECT_CLOSE && balanced && pattern.has_content)
 			{
 				state = State::Rewrite;
-			} else if register_reference.is_some() && balanced {
+			} else if has_reference && balanced {
 				if !pattern.has_content {
 					return Err(parse_error(format!(
 						"{trimmed} is valid only in REWRITE, never MATCH."
@@ -2633,14 +2871,14 @@ pub(super) fn parse_section(
 		};
 		for rewrite in rewrites {
 			for line in rewrite.split('\n') {
-				if let Some(reference) = REFERENCE_RE.captures(line.trim())
-					&& reference[1]
+				if let Some(reference) = register_reference(line.trim())
+					&& reference
 						.parse::<usize>()
 						.is_ok_and(|number| number > index)
 				{
 					return Err(parse_error(format!(
-						"{REWRITE_HEADER}{} must reference an earlier operation, not self/forward.",
-						&reference[1]
+						"{REWRITE_HEADER}{reference} must reference an earlier operation, not \
+						 self/forward."
 					)));
 				}
 			}

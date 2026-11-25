@@ -6335,7 +6335,6 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "rayon",
- "regex",
  "serde",
  "serde_json",
  "xutf",
