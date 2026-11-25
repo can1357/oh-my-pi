@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed model discovery that timed out still replacing the cached model list afterwards, which could hide available models until the cache expired ([#20269](https://github.com/can1357/oh-my-pi/pull/20269) by [@lij113](https://github.com/lij113))
