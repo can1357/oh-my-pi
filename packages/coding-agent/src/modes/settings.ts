@@ -888,7 +888,8 @@ export const cfgTuiImeSafeCursor = register({
 		tab: "appearance",
 		group: "Display",
 		label: "IME-Safe Prompt Layout",
-		description: "Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it",
+		description:
+			"Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it. Requires Show Hardware Cursor.",
 	},
 });
 

@@ -46,6 +46,19 @@ import {
 	type ShellMinimizerSettings,
 } from "./settings";
 
+/**
+ * Environment naming the agent session a command runs for: `PI_SESSION_ID` and
+ * `PI_SESSION_FILE` (its transcript's absolute path). Every command omp runs
+ * for a session carries it (bash tool calls and their services, eval `sh()`,
+ * `!` commands, loop conditions, autoresearch runs), so programs such as
+ * `ovnfs new` can tie what they create to the session. Both keys are always
+ * set: an empty value replaces a stale one inherited from a parent omp
+ * process, since an env overlay cannot unset.
+ */
+export function sessionShellEnv(session: { id?: string | null; file?: string | null }): Record<string, string> {
+	return { PI_SESSION_ID: session.id ?? "", PI_SESSION_FILE: session.file ?? "" };
+}
+
 export interface BashExecutorOptions {
 	cwd?: string;
 	/** Milliseconds before aborting the command; 0 disables the executor deadline. */
@@ -260,7 +273,7 @@ export interface DirenvPreflightOptions {
  * variables the `.envrc` removes (skipping any the caller re-supplied).
  *
  * Returns the possibly-prefixed command plus the merged env, or the inputs
- * unchanged (`env` = `callerEnv`) when direnv is off, absent, or has no `.envrc`.
+ * unchanged (`env` = `callerEnv`) when direnv is off or no trusted environment loaded.
  * Pure transform: does NOT layer non-interactive env defaults — that stays the
  * caller's job (so interactive PTY/ACP paths keep their own env shape).
  */
@@ -276,7 +289,7 @@ export async function applyDirenvPreflight(
 	// backend routes through here, so the clamp lives in one place.
 	const loadTimeoutMs =
 		opts.callerTimeoutMs !== undefined && opts.callerTimeoutMs > 0
-			? Math.min(opts.timeoutMs ?? opts.callerTimeoutMs, opts.callerTimeoutMs)
+			? Math.min(opts.timeoutMs ?? cfgBashDirenvLoadTimeoutMs.default, opts.callerTimeoutMs)
 			: opts.timeoutMs;
 	const direnvDiff =
 		opts.direnvSetting === "off" ? null : await loadDirenvEnv(cwd, { timeoutMs: loadTimeoutMs, signal: opts.signal });
@@ -290,7 +303,7 @@ export async function applyDirenvPreflight(
 	// real `unset` for those — unless the caller re-supplied the same var
 	// explicitly, in which case the caller wins.
 	const direnvUnsets = direnvDiff.unset.filter(
-		name => !(opts.callerEnv && name in opts.callerEnv) && SAFE_ENV_NAME.test(name),
+		name => !(opts.callerEnv && Object.hasOwn(opts.callerEnv, name)) && SAFE_ENV_NAME.test(name),
 	);
 	const unsetPrefix = direnvUnsets.length > 0 ? `unset -v ${direnvUnsets.join(" ")}; ` : "";
 	return { command: `${unsetPrefix}${withPrefix(command)}`, env: mergedEnv };

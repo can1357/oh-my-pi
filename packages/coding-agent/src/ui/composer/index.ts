@@ -8,6 +8,7 @@ export * from "./vim-editor";
 export {
 	type ComposerChromeContext,
 	type ComposerRowContext,
+	type ComposerRowRender,
 	type ComposerShape,
 	type ComposerStatus,
 	composerShape,
