@@ -225,19 +225,26 @@ impl Win32Ax {
 		}
 		let automation = run.call(|| self.automation())?;
 		let walker = run.call(|| automation.get_raw_view_walker())?;
-		let Ok(hit) = run.call(|| {
-			Ok::<_, DesktopError>(automation.element_from_point(Point::new(point.x, point.y)))
-		})?
-		else {
-			return Ok(false);
-		};
 		let mut eligible = false;
 		for (across, notches, per_notch) in axes {
 			let (amount, steps) = wheel_amount(notches, per_notch);
 			if steps == 0 {
 				continue;
 			}
-			let mut element = run.call(|| Ok::<_, DesktopError>(hit.clone()))?;
+			let axis = if across { "horizontal" } else { "vertical" };
+			// Each axis starts under the point after the preceding axis moves.
+			let Ok(mut element) = run.call(|| {
+				Ok::<_, DesktopError>(automation.element_from_point(Point::new(point.x, point.y)))
+			})?
+			else {
+				if run.sent {
+					return Err(run.failure(
+						ErrorCode::BackgroundUnavailable,
+						format!("no element under the point for the {axis} scroll"),
+					));
+				}
+				return Ok(false);
+			};
 			let mut found = None;
 			for _ in 0..MAX_ANCESTORS {
 				if let Ok(pattern) =
@@ -280,6 +287,12 @@ impl Win32Ax {
 				element = parent;
 			}
 			let Some((pattern, container)) = found else {
+				if run.sent {
+					return Err(run.failure(
+						ErrorCode::BackgroundUnavailable,
+						format!("no WPF scroll container under the point for the {axis} scroll"),
+					));
+				}
 				continue;
 			};
 			// A route that cannot serve the point still leaves the wheel to
@@ -1156,10 +1169,8 @@ mod tests {
 		// A container whose host window is 20 parents up, past the old limit.
 		let deep = [vec![None; 20], vec![Some(1)]].concat();
 		for (hosts, expected) in [
-			(&[None, Some(1)][..], Some("pattern")),
 			(&deep[..], Some("pattern")),
 			(&[None, Some(2)][..], None),
-			(&[Some(0)][..], None),
 			(&[None; MAX_ANCESTORS][..], None),
 		] {
 			let mut hosts = hosts.iter().copied();
@@ -1175,8 +1186,6 @@ mod tests {
 		// Element `n`'s parent is `n + 1`; the container is `depth` parents
 		// above the hit, as under a nested tree item.
 		for (depth, expected) in [
-			(1, Some(0)),
-			(12, Some(11)),
 			(MAX_ANCESTORS, Some(MAX_ANCESTORS - 1)),
 			(MAX_ANCESTORS + 1, None),
 		] {

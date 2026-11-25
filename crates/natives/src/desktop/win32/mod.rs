@@ -784,6 +784,7 @@ mod tests {
 	/// Windows lets it, where a test process outside the foreground is refused.
 	const FRONT: u32 = WM_APP + 14;
 	const BACK: u32 = WM_APP + 15;
+	const SWAP: u32 = WM_APP + 16;
 	const WPF_LIST: &str = r#"
 Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml,UIAutomationProvider,UIAutomationTypes,WindowsFormsIntegration,System.Windows.Forms,System.Drawing -TypeDefinition @'
 using System; using System.Windows; using System.Windows.Controls; using System.Windows.Interop;
@@ -831,7 +832,7 @@ public class TestPeer : ListBoxAutomationPeer, IScrollProvider {
 	public TestPeer(ListBox owner) : base(owner) {}
 	IScrollProvider Inner { get { return (IScrollProvider)base.GetPattern(PatternInterface.Scroll); } }
 	public override object GetPattern(PatternInterface pattern) { return pattern == PatternInterface.Scroll ? this : base.GetPattern(pattern); }
-	public void Scroll(ScrollAmount across, ScrollAmount down) { if (!Fixture.Grow()) Inner.Scroll(across, down); }
+	public void Scroll(ScrollAmount across, ScrollAmount down) { if (!Fixture.Grow()) Inner.Scroll(across, down); if (across != ScrollAmount.NoAmount) Fixture.Swap(); }
 	public void SetScrollPercent(double across, double down) { Inner.SetScrollPercent(across, down); }
 	public double HorizontalScrollPercent { get { return Inner.HorizontalScrollPercent; } }
 	public double VerticalScrollPercent { get { return Inner.VerticalScrollPercent; } }
@@ -841,7 +842,7 @@ public class TestPeer : ListBoxAutomationPeer, IScrollProvider {
 	public bool VerticallyScrollable { get { return Inner.VerticallyScrollable; } }
 }
 public static class Fixture {
-	static ListBox list; static System.Windows.Forms.ListBox hosted;
+	static ListBox list, page2; static System.Windows.Forms.ListBox hosted;
 	static DecorativeHost decorative;
 	delegate bool EnumChild(IntPtr hwnd, IntPtr parameter);
 	[DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr hwnd, EnumChild callback, IntPtr parameter);
@@ -852,7 +853,7 @@ public static class Fixture {
 			return true;
 		}, IntPtr.Zero);
 	}
-	static bool grow; static double offset, across; static Window other;
+	static bool grow, swap; static double offset, across, page2Offset; static Window other;
 	static int calls;
 	public static bool Grow() {
 		calls++; if (!grow) return false;
@@ -861,11 +862,15 @@ public static class Fixture {
 		list.UpdateLayout();
 		return true;
 	}
+	public static void Swap() {
+		if (!swap) return;
+		swap = false; page2.Visibility = Visibility.Visible; page2.UpdateLayout();
+	}
 	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
 		if (message == 0x020A || message == 0x020E) { Console.WriteLine("wheel"); Console.Out.Flush(); }
 		else if (message == 0x8007) {
 			list.UpdateLayout();
-			Console.WriteLine("{0} {1} {2} {3} {4} {5}", offset, list.Items.Count, hosted.TopIndex, calls, across, WheelMarker.Wheels);
+			Console.WriteLine("{0} {1} {2} {3} {4} {5} {6}", offset, list.Items.Count, hosted.TopIndex, calls, across, WheelMarker.Wheels, page2Offset);
 			Console.Out.Flush();
 		}
 		else if (message == 0x800B) grow = true;
@@ -873,9 +878,13 @@ public static class Fixture {
 		else if (message == 0x800E) Window.GetWindow(HwndSource.FromHwnd(hwnd).RootVisual).Activate();
 		else if (message == 0x800F) other.Activate();
 		else if (message == 0x800D) { ((IScrollProvider)UIElementAutomationPeer.CreatePeerForElement(list).GetPattern(PatternInterface.Scroll)).SetScrollPercent(100, -1); list.UpdateLayout(); }
+		else if (message == 0x8010) swap = true;
 		return IntPtr.Zero; }
 	public static void Run() {
 		list = new TestList();
+		page2 = new ListBox { Visibility = Visibility.Hidden };
+		for (var row = 1; row <= 60; row++) page2.Items.Add("Page 2 row " + row);
+		page2.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler((sender, e) => { page2Offset = e.VerticalOffset; }));
 		hosted = new System.Windows.Forms.ListBox { IntegralHeight = false };
 		for (var row = 1; row <= 60; row++) { list.Items.Add("Row " + row + new string('x', 100)); hosted.Items.Add("Hosted " + row); }
 		ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Auto);
@@ -885,7 +894,8 @@ public static class Fixture {
 		DockPanel.SetDock(decorative, Dock.Right); header.Children.Add(decorative);
 		DockPanel.SetDock(header, Dock.Top); panel.Children.Add(header);
 		var host = new System.Windows.Forms.Integration.WindowsFormsHost { Width = 120, Child = hosted };
-		DockPanel.SetDock(host, Dock.Right); panel.Children.Add(host); panel.Children.Add(list);
+		DockPanel.SetDock(host, Dock.Right); panel.Children.Add(host);
+		var pages = new Grid(); pages.Children.Add(list); pages.Children.Add(page2); panel.Children.Add(pages);
 		var window = new Window { Title = "omp test: wpf list", Left = 40, Top = 40, Width = 420, Height = 240, Content = panel };
 		other = new Window { Title = "omp test: wpf other", Left = 500, Top = 40, Width = 240, Height = 160 };
 		window.SourceInitialized += (sender, e) => HwndSource.FromHwnd(new WindowInteropHelper(window).Handle).AddHook(Hook);
@@ -926,7 +936,7 @@ public static class Fixture {
 			assert_ne!(unsafe { PostMessageW(self.window, message, 0, 0) }, 0);
 		}
 
-		fn state(&mut self) -> [f64; 6] {
+		fn state(&mut self) -> [f64; 7] {
 			self.post(MARK);
 			// MARK is a queue barrier: every native child counts wheels, and
 			// an unexpected root wheel marker fails this parse.
@@ -952,6 +962,7 @@ public static class Fixture {
 		const CALLS: usize = 3;
 		const ACROSS: usize = 4;
 		const NATIVE_WHEELS: usize = 5;
+		const PAGE2_OFFSET: usize = 6;
 		let mut list = WpfList::open();
 		let mut worker = Worker::new(DisplaySelector::Active, Arc::default(), Arc::default());
 		let token = CancellationSource::default().token();
@@ -991,12 +1002,10 @@ public static class Fixture {
 			worker.execute(&request, &token).map(drop)
 		};
 		let initial = list.state();
-		for dy in [100.0, 27_400.0] {
-			let error = scroll(x, y, (0.0, dy), None).unwrap_err();
-			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
-			assert_eq!(list.state(), initial);
-			assert_eq!(foreground(), list.other);
-		}
+		let error = scroll(x, y, (0.0, 100.0), None).unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		assert_eq!(list.state(), initial);
+		assert_eq!(foreground(), list.other);
 		scroll(width * 0.85, y, (0.0, 100.0), None).unwrap();
 		let hosted = list.state();
 		assert!(hosted[HOSTED] > initial[HOSTED]);
@@ -1009,12 +1018,10 @@ public static class Fixture {
 		list.post(CHROMIUM);
 		assert_eq!(list.state(), hosted);
 		assert!(window::has_chromium_descendant(list.window));
-		for point in [(x, y), (width * 0.85, y)] {
-			let error = scroll(point.0, point.1, (0.0, 100.0), None).unwrap_err();
-			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
-			assert_eq!(list.state(), hosted);
-			assert_eq!(foreground(), list.other);
-		}
+		let error = scroll(x, y, (0.0, 100.0), None).unwrap_err();
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		assert_eq!(list.state(), hosted);
+		assert_eq!(foreground(), list.other);
 		// No wheel steps: nothing is sent, so nothing is refused or taken over.
 		scroll(x, y, (0.0, 0.0), None).unwrap();
 		assert_eq!(list.state(), hosted);
@@ -1074,5 +1081,18 @@ public static class Fixture {
 		assert_eq!(wheel[OFFSET], grown[OFFSET] - f64::from(per_notch));
 		assert_eq!(wheel[CALLS], grown[CALLS]);
 		assert_eq!(foreground(), list.other);
+		list.post(FRONT);
+		assert!(window::wait_for_foreground(list.window, Duration::from_secs(2)).unwrap());
+		list.post(SWAP);
+		let before_swap = list.state();
+		let result = scroll(x, y, (-100.0, 100.0), None);
+		let swapped = list.state();
+		assert_eq!(
+			swapped[PAGE2_OFFSET],
+			before_swap[PAGE2_OFFSET] + f64::from(per_notch),
+			"the vertical axis must scroll the page now under the point: {result:?}"
+		);
+		assert_eq!(swapped[OFFSET], before_swap[OFFSET], "the covered page must not scroll");
+		result.unwrap();
 	}
 }

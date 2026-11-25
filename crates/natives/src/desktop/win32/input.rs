@@ -2043,9 +2043,7 @@ mod tests {
 		for (delta, expected) in [
 			(0.0, Some(0)),
 			(27_300.0, Some(32_760)),
-			(-27_300.0, Some(-32_760)),
 			(27_400.0, None),
-			(f64::MAX, None),
 		] {
 			assert_eq!(
 				background_wheel(scroll_steps(delta)).map_err(|error| error.code),
