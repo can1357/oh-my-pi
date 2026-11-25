@@ -93,6 +93,7 @@ class LazyFakeSession {
 	disposed = false;
 	settings = Settings.isolated({ "plan.enabled": false });
 	scopedModels: AgentSession["scopedModels"] = [];
+	hasScopedModels = false;
 	#disposers: Array<() => void> = [];
 	refreshScopedModels?: () => Promise<void>;
 
@@ -104,8 +105,9 @@ class LazyFakeSession {
 		this.refreshScopedModels = refresh;
 	}
 
-	setScopedModels(models: AgentSession["scopedModels"]): void {
-		this.scopedModels = models;
+	setScopedModels(models: AgentSession["scopedModels"] | undefined): void {
+		this.hasScopedModels = models !== undefined;
+		this.scopedModels = models ?? [];
 	}
 
 	get isDisposed(): boolean {
@@ -462,7 +464,7 @@ describe("ACP lazy startup", () => {
 							const session = new LazyFakeSession(workspace.path());
 							session.model = options?.model;
 							session.settings = options?.settings ?? session.settings;
-							session.scopedModels = options?.scopedModels ?? [];
+							session.setScopedModels(options?.scopedModels);
 							created = session;
 							return { session, setToolUIContext: () => {} } as unknown as CreateAgentSessionResult;
 						},

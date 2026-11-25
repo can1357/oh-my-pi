@@ -61,7 +61,7 @@ export type ResolvedModelMention = Omit<ModelMention, "agent">;
 export interface ModelMentionHost {
 	sessionManager: SessionManager;
 	modelRegistry: ModelRegistry;
-	scopedModels(): ReadonlyArray<Model>;
+	scopedModels(): ReadonlyArray<Model> | undefined;
 	/** User-authorized model agents inherited from the parent session. */
 	inheritedAgents?: readonly AgentDefinition[];
 }
@@ -106,7 +106,7 @@ export class ModelMentionRegistry {
 	 */
 	resolve(selector: string): ResolvedModelMention | undefined {
 		const scoped = this.#host.scopedModels();
-		const models = scoped.length > 0 ? scoped : this.#host.modelRegistry.getAvailable();
+		const models = scoped ?? this.#host.modelRegistry.getAvailable();
 		const exact = models.find(model => formatModelString(model) === selector);
 		if (exact) return { selector, name: modelMentionDisplayName(exact) };
 		const colon = selector.lastIndexOf(":");
@@ -120,7 +120,7 @@ export class ModelMentionRegistry {
 		if (effort === undefined || !getSupportedEfforts(model).includes(effort)) return undefined;
 		const canonical = `${base}:${effort}`;
 		const isModelId = (candidate: Model) => formatModelString(candidate) === canonical;
-		if (models.some(isModelId) || (scoped.length > 0 && this.#host.modelRegistry.getAvailable().some(isModelId))) {
+		if (models.some(isModelId) || (scoped && this.#host.modelRegistry.getAvailable().some(isModelId))) {
 			return undefined;
 		}
 		return {

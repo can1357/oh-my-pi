@@ -116,11 +116,17 @@ describe("web search directive pipeline", () => {
 		expect(result.details.response.provider).toBe(expectedProvider);
 	});
 
-	it.each<[string, SearchQueryParams, SearchProviderId]>([
+	it.each<[string, SearchQueryParams, SearchProviderId, boolean?]>([
 		[
 			"routes a Hacker News-only query to the HN engine ahead of the role's engine",
 			{ query: "tern site:news.ycombinator.com/item" },
 			"hackernews",
+		],
+		[
+			"keeps the role's engine when only the session denies Hacker News",
+			{ query: "tern site:news.ycombinator.com/item" },
+			"brave",
+			true,
 		],
 		[
 			"keeps the role's engine when another site shares the query",
@@ -132,7 +138,7 @@ describe("web search directive pipeline", () => {
 			{ query: "tern site:news.ycombinator.com", model: "web/brave" },
 			"brave",
 		],
-	])("%s", async (_caseName, params, expectedProvider) => {
+	])("%s", async (_caseName, params, expectedProvider, denyHackerNews = false) => {
 		const context = await stubRoleProvider("brave", async () => ({ provider: "brave", sources: SOURCES }));
 		const brave = await provider.getSearchProvider("brave");
 		context.getProvider.mockImplementation(async requested => {
@@ -151,9 +157,15 @@ describe("web search directive pipeline", () => {
 			};
 		});
 
-		const result = await runSearchQuery(params, context);
+		const session = Settings.isolated({
+			modelRoles: { web: "web/brave" },
+			"retry.fallbackChains": { web: [] },
+			disabledModels: denyHackerNews ? ["web/hackernews"] : [],
+		});
+		const result = await runSearchQuery(params, { ...context, settings: session });
 
 		expect(result.details.response.provider).toBe(expectedProvider);
+		if (denyHackerNews) expect(context.getProvider).not.toHaveBeenCalledWith("hackernews");
 	});
 
 	it("skips an engine that answered 429 on later calls instead of paying the rate limit again", async () => {

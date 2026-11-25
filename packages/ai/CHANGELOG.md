@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Factory Droid callers can restrict server-side refusal fallbacks, including through a pi-native gateway ([#16494](https://github.com/can1357/oh-my-pi/pull/16494) by [@enieuwy](https://github.com/enieuwy)).
+
 ## [19.2.0] - 2026-11-25
 
 ### Breaking Changes

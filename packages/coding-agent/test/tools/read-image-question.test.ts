@@ -2,13 +2,21 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type completeSimple, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
+import { completeSimple, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ImageAttachmentEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as pdfRead from "@oh-my-pi/pi-coding-agent/tools/read-pdf";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import {
+	anthropicChunks,
+	type CapturedRequest,
+	captureFetch,
+	factoryModel,
+	WORKOS_TOKEN,
+} from "../../../ai/test/helpers/factory-droid";
 
 import { cfgImagesAutoResize } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -44,8 +52,8 @@ const reasoningVisionModel: Model<"openai-responses"> = {
 };
 
 interface CreateSessionOptions {
-	availableModels?: Model<"openai-responses">[];
-	activeModel?: Model<"openai-responses">;
+	availableModels?: Model[];
+	activeModel?: Model;
 	configureVisionRole?: boolean;
 	imageAttachments?: ImageAttachmentEntry[];
 }
@@ -57,7 +65,7 @@ interface CompleteSimpleStub {
 
 function createSession(
 	cwd: string,
-	model: Model<"openai-responses">,
+	model: Model,
 	apiKey: string | undefined = "test-key",
 	settings = Settings.isolated(),
 	options: CreateSessionOptions = {},
@@ -191,6 +199,39 @@ describe("read image questions", () => {
 		const parts = (Array.isArray(content) ? content : []) as Array<{ type: string; text?: string }>;
 		expect(parts[0]?.type).toBe("image");
 		expect(parts[1]).toEqual({ type: "text", text: "What text is visible?" });
+	});
+
+	it("offers neither a denied vision model nor a denied Factory fallback for the question", async () => {
+		const factory = factoryModel("claude-fable-5", ["anthropic"]);
+		const settings = Settings.isolated({ disabledModels: ["openai/gpt-4o", "factory-droid/claude-opus-5"] });
+		const session = createSession(testDir, visionModel, WORKOS_TOKEN, settings, {
+			availableModels: [visionModel, factory],
+		});
+		const requests: CapturedRequest[] = [];
+		const fetch = captureFetch(requests, anthropicChunks("Red"));
+		const tool = new ReadTool(session, (model, context, options) =>
+			completeSimple(model, context, { ...options, fetch }),
+		);
+
+		const result = await tool.execute("call", { path: `${imagePath}?q=What color?` });
+
+		expect(result.content).toEqual([{ type: "text", text: "Red" }]);
+		expect(requests.map(request => request.body.model)).toEqual([factory.id]);
+		expect(requests[0]!.body.fallbacks).toBeUndefined();
+	});
+
+	it("sends no image or question if the session disables the model during credential lookup", async () => {
+		const stub = createCompleteSimpleForbiddenStub();
+		const session = createSession(testDir, visionModel);
+		session.modelRegistry!.getApiKey = async () => {
+			cfgDisabledModels.set(session.settings, ["openai/gpt-4o"]);
+			return "test-key";
+		};
+
+		await expect(
+			new ReadTool(session, stub.fn).execute("call", { path: `${imagePath}?q=What color?` }),
+		).rejects.toThrow('disabled by disabledModels rule "openai/gpt-4o"');
+		expect(stub.calls).toHaveLength(0);
 	});
 
 	it("answers questions about attachment URLs", async () => {

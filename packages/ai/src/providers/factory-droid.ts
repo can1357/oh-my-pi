@@ -85,6 +85,8 @@ const FACTORY_DROID_COMPLETIONS_TEMPERATURE = 1;
 export interface FactoryDroidOptions extends StreamOptions {
 	/** Per-call workers only: send no refusal fallbacks or fallback-credit beta, and fail a response served by another model. */
 	disableServerSideFallback?: boolean;
+	/** Only offer refusal targets in this list, even when the route and account permit more. */
+	factoryDroidRefusalFallbacks?: readonly string[];
 	reasoning?: Effort;
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
@@ -419,11 +421,13 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 	const discoveredFor = a.model.factoryDroidOrgId;
 	const available =
 		discoveredFor !== undefined && discoveredFor !== a.orgId ? [] : a.model.factoryDroidRefusalFallbacks;
-	const fallbackModels = a.route.serverSideFallbackModels?.filter(model => available?.includes(model) ?? true);
-	const refusalFallbacks =
-		options?.disableServerSideFallback || !fallbackModels?.length
-			? undefined
-			: fallbackModels.map(model => ({ model }));
+	const fallbackModels = options?.disableServerSideFallback
+		? undefined
+		: a.route.serverSideFallbackModels?.filter(
+				model =>
+					(available?.includes(model) ?? true) && (options?.factoryDroidRefusalFallbacks?.includes(model) ?? true),
+			);
+	const refusalFallbacks = fallbackModels?.length ? fallbackModels.map(model => ({ model })) : undefined;
 	// Check raw frames before the shared transport can emit content events.
 	// Diagnostic observers cannot throw through that transport, so abort the
 	// attempt and let the outer stream surface the model-switch error instead.

@@ -6,6 +6,7 @@ import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { assertModelSupportsEffortCeiling } from "../thinking/levels";
 import type { ModelRegistry } from "../config/model-registry";
+import { disabledSelectorRule, formatDisabledModelError } from "../config/disabled-models";
 import {
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
@@ -264,6 +265,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 					`Cannot revive subagent "${ref.id}": its per-call model identity and thinking level were not recorded separately, so they cannot be restored exactly. The agent was not revived.`,
 				);
 			}
+			const denied = disabledSelectorRule(init.perCallModelIdentity, spec.settings);
+			if (denied) throw new PerCallModelUnavailableError(formatDisabledModelError(denied.label, denied.rule));
 			await spec.modelRegistry.awaitBackgroundRefresh();
 			perCallModel = resolveExactModelIdentity(init.perCallModelIdentity, spec.modelRegistry);
 			if (!perCallModel) {
@@ -410,7 +413,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			subagentEventBus: spec.subagentEventBus,
 			modelRegistry: spec.modelRegistry,
 			...(perCallModel ? { model: perCallModel, thinkingLevel: init.perCallThinkingLevel ?? undefined } : {}),
-			...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
+			...(persistedModelPattern ? { modelPattern: persistedModelPattern, restoreModelPattern: true } : {}),
 			modelPatternParentFallback: init.perCallModel ? undefined : init.resolvedModel,
 			settings: subagentSettings,
 			sessionManager: reopened,
@@ -470,6 +473,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		}));
 	} catch (error) {
 		mcpFollower?.dispose();
+		await reopened.close();
 		throw error;
 	}
 	// A per-call worker runs only on its exact saved model, never a similarly named survivor.

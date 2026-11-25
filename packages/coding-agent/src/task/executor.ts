@@ -31,6 +31,7 @@ import {
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
+import { disabledSelectorRule, formatDisabledModelError } from "../config/disabled-models";
 import { formatModelSelectorValue } from "../config/model-selector";
 import { previewLine, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { replaceTabs } from "../utils/text-width";
@@ -5004,6 +5005,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				explicitThinkingLevel,
 				authFallbackUsed,
 				warning: modelResolutionWarning,
+				disabledModel,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
 					modelPatterns,
@@ -5014,6 +5016,20 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					{ exactOnly: !!options.perCallModelGrants, allowedProvider },
 				),
 			);
+			if (disabledModel) {
+				// A later explicit alternative can still appear when the SDK loads extensions.
+				// Neither offline nor per-call selection may defer to a different model.
+				const canDeferAlternative =
+					allowedProvider === undefined &&
+					!options.perCallModelGrants &&
+					modelOverride !== undefined &&
+					configuredModelPatterns.length > 1 &&
+					configuredModelPatterns.some(pattern => !disabledSelectorRule(pattern, settings));
+				if (!canDeferAlternative) {
+					const reason = formatDisabledModelError(disabledModel.label, disabledModel.rule);
+					throw options.perCallModelGrants ? new PerCallModelError(reason) : new Error(reason);
+				}
+			}
 			if (cfgOffline.get(settings) && !model) {
 				throw new Error("Offline mode: no subagent model is available on the active parent provider.");
 			}

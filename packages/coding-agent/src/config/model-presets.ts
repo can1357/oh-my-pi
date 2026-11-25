@@ -19,6 +19,7 @@ import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { cfgDefaultThinkingLevel } from "../session/settings";
+import { disabledModelMatcher, formatDisabledModelError } from "./disabled-models";
 import { pickDefaultAvailableModel, resolveModelRoleValue, scopeAllowList } from "./model-resolver";
 import { cfgModelPresets, type ModelPreset } from "./model-settings";
 import type { Settings, SettingProvenance } from "./settings";
@@ -213,6 +214,7 @@ export type ModelPresetSession = Pick<
 	| "setThinkingLevel"
 	| "getAvailableModels"
 	| "scopedModels"
+	| "hasScopedModels"
 	| "scopedModelsFromSettings"
 	| "refreshScopedModels"
 	| "modelRegistry"
@@ -224,10 +226,13 @@ export type ModelPresetSession = Pick<
  * `enabledModels` is skipped because a role change can outdate it.
  */
 export function roleModelCandidates(
-	session: Pick<ModelPresetSession, "getAvailableModels" | "scopedModels" | "scopedModelsFromSettings">,
+	session: Pick<
+		ModelPresetSession,
+		"getAvailableModels" | "hasScopedModels" | "scopedModels" | "scopedModelsFromSettings"
+	>,
 	roleLookup?: ModelRoleLookup,
 ): Model[] {
-	if (!session.scopedModelsFromSettings && session.scopedModels.length > 0) {
+	if (!session.scopedModelsFromSettings && session.hasScopedModels) {
 		return scopeAllowList(session.scopedModels);
 	}
 	return session.getAvailableModels(roleLookup);
@@ -238,9 +243,10 @@ function errorMessage(error: unknown): string {
 }
 
 /** First authed model for a preset with no `default`, mirroring startup's automatic pick. */
-function pickAutomaticDefault(session: ModelPresetSession, candidates: Model[]): Model | undefined {
+function pickAutomaticDefault(session: ModelPresetSession, candidates: Model[], settings: Settings): Model | undefined {
+	const isDisabled = disabledModelMatcher(settings);
 	return pickDefaultAvailableModel(
-		candidates.filter(candidate => session.modelRegistry.hasConfiguredAuth(candidate)),
+		candidates.filter(candidate => !isDisabled(candidate) && session.modelRegistry.hasConfiguredAuth(candidate)),
 		provider => session.modelRegistry.hasConcreteAuth(provider),
 	);
 }
@@ -261,10 +267,12 @@ function resolvePresetDefault(
 	const fallbackLevel =
 		preset.defaultThinkingLevel ?? parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(options.settings));
 	if (!roleValue) {
-		const model = pickAutomaticDefault(session, candidates);
+		const model = pickAutomaticDefault(session, candidates, options.settings);
 		return model ? { model, thinkingLevel: fallbackLevel } : "no model with configured credentials is available";
 	}
 	const resolved = resolveModelRoleValue(roleValue, candidates, options);
+	if (resolved.disabledModel)
+		return formatDisabledModelError(resolved.disabledModel.label, resolved.disabledModel.rule);
 	if (!resolved.model) return `default model \`${roleValue}\` is not available`;
 	if (!session.modelRegistry.hasConfiguredAuth(resolved.model)) {
 		return `no credentials for ${resolved.model.provider}/${resolved.model.id}`;

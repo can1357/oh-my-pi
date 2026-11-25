@@ -1470,6 +1470,23 @@ describe("per-call model preflight", () => {
 		expect(policy.parentActiveModelPattern).toBeUndefined();
 	});
 
+	it.each([true, false])(
+		"rejects a denied per-call selector before dispatch, even during discovery (warm=%s)",
+		async warm => {
+			mockDiscovery({ ...AGENT, model: ["mock/target"] });
+			const dispatch = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+			await expect(
+				runStructuredSubagent(
+					request({
+						session: perCallSession({ "task.perCallModel": "on", disabledModels: ["mock/tar*"] }, warm, true),
+						perCallModel: "mock/target:high",
+					}),
+				),
+			).rejects.toThrow('disabledModels rule "mock/tar*"');
+			expect(dispatch).not.toHaveBeenCalled();
+		},
+	);
+
 	it.each(["SDK overlay", "nested subagent"])("reloads removed on-disk role grants through an %s", async kind => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-grant-reload-"));
 		const projectDir = path.join(root, "project");

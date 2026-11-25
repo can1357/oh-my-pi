@@ -1,6 +1,8 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { disabledModelRule, formatDisabledModelError, withoutDisabledModels } from "../config/disabled-models";
+import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ApiKeyResolverRegistry } from "../config/api-key-resolver";
 import {
 	getModelMatchPreferences,
@@ -30,7 +32,7 @@ export interface ResolvedCommitModel {
 }
 
 type CommitModelRegistry = ModelLookupRegistry &
-	ApiKeyResolverRegistry & {
+	Pick<ApiKeyResolverRegistry, "resolver"> & {
 		getApiKey: (model: Model<Api>) => Promise<string | undefined>;
 	};
 
@@ -44,6 +46,8 @@ export async function resolvePrimaryModel(
 	const resolved = override
 		? resolveModelRoleValue(override, available, { settings, matchPreferences })
 		: resolveRoleSelection(["commit", "smol", ...CHAT_MODEL_ROLE_IDS], settings, available);
+	const denied = resolved && "disabledModel" in resolved ? resolved.disabledModel : undefined;
+	if (denied) throw new Error(formatDisabledModelError(denied.label, denied.rule));
 	const model = resolved?.model;
 	if (!model) {
 		throw new Error("No model available for commit generation");
@@ -53,7 +57,7 @@ export async function resolvePrimaryModel(
 		throw new Error(`No API key available for model ${model.provider}/${model.id}`);
 	}
 	return {
-		model,
+		model: withDisabledModelFallbackPolicy(model, settings),
 		apiKey: modelRegistry.resolver(model),
 		thinkingLevel: concreteThinkingLevel(resolved?.thinkingLevel),
 	};
@@ -65,13 +69,13 @@ export async function resolveSmolModel(
 	fallbackModel: Model<Api>,
 	fallbackApiKey: ApiKey,
 ): Promise<ResolvedCommitModel> {
-	const available = modelRegistry.getAvailable();
+	const available = withoutDisabledModels(modelRegistry.getAvailable(), settings);
 	const resolvedSmol = resolveRoleSelection(["smol"], settings, available);
 	if (resolvedSmol?.model) {
 		const apiKey = await modelRegistry.getApiKey(resolvedSmol.model);
 		if (apiKey) {
 			return {
-				model: resolvedSmol.model,
+				model: withDisabledModelFallbackPolicy(resolvedSmol.model, settings),
 				apiKey: modelRegistry.resolver(resolvedSmol.model),
 				thinkingLevel: concreteThinkingLevel(resolvedSmol.thinkingLevel),
 			};
@@ -85,11 +89,13 @@ export async function resolveSmolModel(
 		const apiKey = await modelRegistry.getApiKey(candidate);
 		if (apiKey) {
 			return {
-				model: candidate,
+				model: withDisabledModelFallbackPolicy(candidate, settings),
 				apiKey: modelRegistry.resolver(candidate),
 			};
 		}
 	}
 
-	return { model: fallbackModel, apiKey: fallbackApiKey };
+	const denied = disabledModelRule(fallbackModel, settings);
+	if (denied) throw new Error(formatDisabledModelError(fallbackModel, denied));
+	return { model: withDisabledModelFallbackPolicy(fallbackModel, settings), apiKey: fallbackApiKey };
 }

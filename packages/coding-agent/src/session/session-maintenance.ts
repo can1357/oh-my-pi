@@ -77,6 +77,8 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import * as fs from "node:fs/promises";
 import { writeArtifact } from "./artifacts";
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import { disabledModelRule, withoutDisabledModels } from "../config/disabled-models";
+import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -4011,7 +4013,7 @@ export class SessionMaintenance {
 		const configured = resolveContextPromotionConfiguredTarget(currentModel, availableModels);
 		// Judge the window this session would actually run the target with.
 		const candidate = configured && this.#host.modelRegistry.fitContextWindow(configured, this.#host.settings);
-		if (!candidate) return undefined;
+		if (!candidate || disabledModelRule(candidate, this.#host.settings)) return undefined;
 		if (modelsAreEqual(candidate, currentModel)) return undefined;
 		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
 		// A larger window only helps when the target reads this same context. One
@@ -4042,7 +4044,9 @@ export class SessionMaintenance {
 		// and compact with the window this session's settings select.
 		const registry = this.#host.modelRegistry;
 		const settings = this.#host.settings;
-		availableModels = availableModels.map(model => registry.fitContextWindow(model, settings));
+		availableModels = withoutDisabledModels(availableModels, settings).map(model =>
+			registry.fitContextWindow(model, settings),
+		);
 		const candidates: Model[] = [];
 		const seen = new Set<string>();
 		const activeProvider = this.#model?.provider;
@@ -4065,8 +4069,8 @@ export class SessionMaintenance {
 
 		if (preferredModel) {
 			addCandidate(resolveCompactionConfiguredTarget(preferredModel, availableModels));
+			if (!disabledModelRule(preferredModel, settings)) addCandidate(preferredModel);
 		}
-		addCandidate(preferredModel ?? undefined);
 		for (const role of CHAT_MODEL_ROLE_IDS) {
 			addCandidate(
 				resolveRoleModelFull(this.#host.settings, role, availableModels, preferredModel ?? undefined).model,
@@ -4085,6 +4089,14 @@ export class SessionMaintenance {
 		}
 
 		return candidates;
+	}
+
+	/** Native compaction can send the history to an explicit target other than the candidate. */
+	#compactionDenied(model: Model, method: CompactionMethod): boolean {
+		const settings = this.#host.settings;
+		if (disabledModelRule(model, settings)) return true;
+		const id = method === "remote" && model.remoteCompaction?.model;
+		return !!id && !!disabledModelRule({ ...model, id }, settings);
 	}
 
 	#buildCompactionAuthError(): Error {
@@ -4154,6 +4166,7 @@ export class SessionMaintenance {
 					};
 
 		for (const candidate of candidates) {
+			if (this.#compactionDenied(candidate, method)) continue;
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
 			if (
@@ -4166,9 +4179,10 @@ export class SessionMaintenance {
 
 			try {
 				const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, signal);
+				if (this.#compactionDenied(candidate, method)) continue;
 				return await compact(
 					this.#host.obfuscatePreparationForProvider(preparation),
-					candidate,
+					withDisabledModelFallbackPolicy(candidate, this.#host.settings),
 					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 					this.#host.obfuscateTextForProvider(customInstructions),
 					signal,
@@ -6332,6 +6346,7 @@ export class SessionMaintenance {
 
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
+					if (this.#compactionDenied(candidate, method)) continue;
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 					if (!apiKey) continue;
@@ -6347,9 +6362,10 @@ export class SessionMaintenance {
 					while (true) {
 						try {
 							const convertToLlm = await this.#summaryConvertToLlm(preparation, candidate, autoCompactionSignal);
+							if (this.#compactionDenied(candidate, method)) break;
 							compactResult = await compact(
 								this.#host.obfuscatePreparationForProvider(preparation),
-								candidate,
+								withDisabledModelFallbackPolicy(candidate, this.#host.settings),
 								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 								undefined,
 								autoCompactionSignal,

@@ -157,6 +157,7 @@ import {
 
 import { cfgAdvisorSyncBacklog } from "../../advisor/settings";
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
+import { disabledModelRule, formatDisabledModelError } from "../../config/disabled-models";
 import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
 import { cfgDefaultThinkingLevel, cfgRetryFallbackChains, cfgSessionWorktreeScope } from "../../session/settings";
 import { cfgTreeFilterMode } from "../settings";
@@ -514,20 +515,17 @@ export class SelectorController {
 			};
 			// Label the seeded implicit-default row with the actual advisor-role model
 			// (NOT the first live advisor, which may be a named advisor from another scope).
-			const advisorRoleSel = resolveAdvisorRoleSelection(
-				this.ctx.settings,
-				this.ctx.session.modelRegistry.getAvailable(),
-			);
+			const advisorRoleSel = resolveAdvisorRoleSelection(this.ctx.settings, this.ctx.session.getAvailableModels());
 			const defaultAdvisorModel = advisorRoleSel?.model;
 			const deps: AdvisorConfigDeps = {
-				getAvailableModels: () => this.ctx.session.modelRegistry.getAvailable(),
+				getAvailableModels: () => this.ctx.session.getAvailableModels(),
 				mruOrder: createModelBrowserSource(this.ctx.settings).mruOrder,
 				defaultToolNames: ADVISOR_DEFAULT_TOOL_NAMES,
 				externalEditor: text => {
 					const command = getEditorCommand();
 					return command ? openInEditor(command, text) : Promise.resolve(null);
 				},
-				scopedModels: this.ctx.session.scopedModels,
+				scopedModels: this.#modelScope(),
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
 				syncBacklog: cfgAdvisorSyncBacklog.get(this.ctx.settings),
 				defaultModelLabel: defaultAdvisorModel
@@ -736,6 +734,11 @@ export class SelectorController {
 		this.#showModelHub({});
 	}
 
+	#modelScope() {
+		const session = this.ctx.session;
+		return session.hasScopedModels ? session.scopedModels : undefined;
+	}
+
 	/**
 	 * Builds what the first alt+p reads ahead of it, in background slices
 	 * ({@link prewarmModelPicker}), once the startup model discovery settled:
@@ -749,7 +752,7 @@ export class SelectorController {
 		await prewarmModelPicker({
 			source: createModelBrowserSource(this.ctx.settings, model => viewed.effectiveServiceTier(model)),
 			registry,
-			scopedModels: this.ctx.session.scopedModels.map(entry => entry.model),
+			scopedModels: this.#modelScope()?.map(entry => entry.model),
 			currentContextTokens: viewed.getContextUsage()?.tokens ?? 0,
 			signal,
 		});
@@ -908,8 +911,13 @@ export class SelectorController {
 					release();
 				}
 			},
-			onPickTask: (_model, selector) => {
+			onPickTask: (model, selector) => {
 				if (!isCurrent()) return;
+				const denied = disabledModelRule(model, this.ctx.settings);
+				if (denied) {
+					this.ctx.showError(formatDisabledModelError(model, denied));
+					return;
+				}
 				// Session-only: layer the Task override onto the runtime settings
 				// layer so it is never persisted, mirroring the session-model pick.
 				cfgTaskAgentModelOverrides.override(this.ctx.settings, {
@@ -927,7 +935,7 @@ export class SelectorController {
 			},
 			onCatalogRefreshed: async () => {
 				await this.ctx.session.refreshScopedModels();
-				return this.ctx.session.scopedModels;
+				return this.#modelScope();
 			},
 			onCancel: done,
 		};
@@ -948,7 +956,7 @@ export class SelectorController {
 				const picker = ModelPicker({
 					source,
 					registry: this.ctx.session.modelRegistry,
-					scopedModels: this.ctx.session.scopedModels,
+					scopedModels: this.#modelScope(),
 					callbacks,
 					options,
 					terminalRows: () => size().rows,
@@ -995,6 +1003,8 @@ export class SelectorController {
 					configuredStorage === "project" ? `${targetScope === "project" ? "Project" : "Global"} ` : "";
 				const defaultStatusLabel = configuredStorage === "project" ? `${scopeLabel}default` : "Default";
 				try {
+					const denied = disabledModelRule(model, this.ctx.settings);
+					if (denied) throw new Error(formatDisabledModelError(model, denied));
 					if (role === "default") {
 						// `auto` on the default role configures the active session. Other roles
 						// persist an explicit `:auto` suffix and must not mutate the current model.
@@ -1166,7 +1176,7 @@ export class SelectorController {
 			},
 			onCatalogRefreshed: async () => {
 				await this.ctx.session.refreshScopedModels();
-				return this.ctx.session.scopedModels;
+				return this.#modelScope();
 			},
 			onCycleOrderChange: order => {
 				try {
@@ -1249,7 +1259,7 @@ export class SelectorController {
 						this.ctx.session.effectiveServiceTier(model),
 					),
 					registry: this.ctx.session.modelRegistry,
-					scopedModels: this.ctx.session.scopedModels,
+					scopedModels: this.#modelScope(),
 					callbacks,
 					options: {
 						initialProviderId: hubOptions.initialProviderId,

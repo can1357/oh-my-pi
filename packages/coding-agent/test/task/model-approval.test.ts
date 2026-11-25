@@ -6,6 +6,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { getModelMatchPreferences, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -339,6 +340,29 @@ describe("per-call model advertisement", () => {
 		expect(getPerCallModelAdvertisement(unlisted, sonnet).parentModelWithheld).toBe(true);
 	});
 
+	it("stops offering a denied parent and its grants even when the SDK registry still lists it", () => {
+		const settings = Settings.isolated({
+			modelRoles: { smol: "target", slow: "mock/target:high", review: "mock/other" },
+			"task.perCallModelAllow": ["mock/target", "mock/other"],
+			disabledModels: ["mock/tar*"],
+		});
+		expect(getPerCallModelAdvertisement(settings, target, registry)).toEqual({
+			roles: [{ role: "review", patterns: ["mock/other"] }],
+			allowlist: ["mock/other"],
+			parentModelWithheld: true,
+		});
+	});
+
+	it("does not offer or grant a fuzzy sibling when the registry hides the model a bare grant names", () => {
+		const sibling = createMockModel({ id: "target-mini" });
+		const registry = { getAll: () => [sibling], getAvailable: () => [sibling] };
+		const settings = Settings.isolated({ modelRoles: { review: "target" }, disabledModels: ["mock/target"] });
+		expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([]);
+		expect(() => assertPerCallModelApproved(sibling, { settings, agentName: "worker" }, registry)).toThrow(
+			"not approved",
+		);
+	});
+
 	it("reads live grant authority: derived settings never grant, host overlays do", () => {
 		const root = Settings.isolated({
 			modelRoles: { smol: "mock/target" },
@@ -564,6 +588,17 @@ describe("per-call model grants", () => {
 		expect(approved(sonnet, { settings: nitroRole, agentName: "worker" })).toBe(false);
 		expect(approved(nitro, { settings: baseRole, agentName: "worker" })).toBe(false);
 		expect(approved(sonnet, { settings: baseRole, agentName: "worker" })).toBe(true);
+	});
+
+	it("refuses an already granted OpenRouter variant when a live edit denies its base", () => {
+		const nitro = parseModelPattern("openrouter/anthropic/claude-sonnet-4.5:nitro", [sonnet]).model!;
+		const settings = Settings.isolated({ modelRoles: { fast: "openrouter/anthropic/claude-sonnet-4.5:nitro" } });
+		const grants = { settings, agentName: "worker" };
+		assertPerCallModelApproved(nitro, grants, registry);
+		cfgDisabledModels.override(settings, ["openrouter/anthropic/claude-sonnet-4.5"]);
+		expect(() => assertPerCallModelApproved(nitro, grants, registry)).toThrow(
+			'disabledModels rule "openrouter/anthropic/claude-sonnet-4.5"',
+		);
 	});
 
 	it("never trusts a project agent file that claims a user source", () => {

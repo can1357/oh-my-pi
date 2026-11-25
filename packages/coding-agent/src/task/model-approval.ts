@@ -18,6 +18,7 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { AgentSource } from "./task-details";
 import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "../config/model-selector";
 import type { ModelRegistry } from "../config/model-registry";
+import { disabledModelRule, disabledSelectorRule, formatDisabledModelError } from "../config/disabled-models";
 import {
 	findOpenRouterRouteVariant,
 	formatModelString,
@@ -210,6 +211,7 @@ function advertisedGrants(
 	const advertise = (pattern: string): string | undefined => {
 		if (/[*?]/.test(pattern)) return undefined;
 		if (pattern.includes("/")) {
+			if (disabledSelectorRule(pattern, settings)) return undefined;
 			const base = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base;
 			return allowlistsAdmitIdentity(allowlists, base) || allowlistsAdmitIdentity(allowlists, pattern)
 				? pattern
@@ -221,8 +223,9 @@ function advertisedGrants(
 			catalog: registry.getAll(),
 			preferences: getModelMatchPreferences(authority),
 		};
+		if (disabledSelectorRule(pattern, settings, models.chat)) return undefined;
 		const resolved = resolveGrantPattern(pattern, models.chat, models.catalog, models.preferences);
-		if (!resolved.model) return undefined;
+		if (!resolved.model || disabledModelRule(resolved.model, settings)) return undefined;
 		const identity = formatModelStringWithRouting(resolved.model);
 		if (!allowlistsAdmitIdentity(allowlists, identity)) return undefined;
 		return resolved.explicitThinkingLevel && resolved.thinkingLevel
@@ -239,7 +242,7 @@ function advertisedGrants(
 		catalog: models?.catalog,
 		roles,
 		allowlist: [...new Set((operatorAllow.length > 0 ? operatorAllow : liveAllow).map(entry => entry.trim()))].filter(
-			entry => allowlistsAdmitIdentity(allowlists, entry),
+			entry => allowlistsAdmitIdentity(allowlists, entry) && !disabledSelectorRule(entry, settings),
 		),
 		allowlists,
 	};
@@ -266,7 +269,9 @@ export function getPerCallModelAdvertisement(
 		// Same literal comparison dispatch applies to the allowlist.
 		parentModelWithheld:
 			parentModel !== undefined &&
-			(parentPattern === undefined || !allowlistsAdmitIdentity(grants.allowlists, parentPattern)),
+			(parentPattern === undefined ||
+				!!disabledModelRule(parentModel, settings) ||
+				!allowlistsAdmitIdentity(grants.allowlists, parentPattern)),
 	};
 }
 
@@ -298,6 +303,8 @@ function computeGranted(
 ): boolean {
 	if (!allowlistsAdmitIdentity(perCallAllowlists(grants.settings), target)) return false;
 	return perCallModelGrantPatterns(grants).some(pattern => {
+		// A grant for a denied model never widens to a fuzzy sibling left in the catalog.
+		if (disabledSelectorRule(pattern, grants.settings, chat)) return false;
 		// Full-catalog literals win even when unavailable, so :low and [1m] never broaden a grant.
 		const exact = exactIdentity(pattern, catalog);
 		if (exact !== undefined) return exact === target;
@@ -325,6 +332,8 @@ export function assertPerCallModelApproved(
 	registry: ApprovalRegistry,
 ): void {
 	const target = formatModelStringWithRouting(model);
+	const rule = disabledModelRule(model, grants.settings);
+	if (rule) throw new PerCallModelUnavailableError(formatDisabledModelError(target, rule));
 	let cache = decisionCache.get(grants);
 	if (!cache || !isCurrent(cache, grants.settings, registry)) {
 		cache = {

@@ -62,14 +62,14 @@ let auth: AuthStorage;
 let registry: ModelRegistry;
 let session: SessionManager;
 let mentions: ModelMentionRegistry;
-let scoped: Model[];
+let scoped: Model[] | undefined;
 
 beforeEach(async () => {
 	auth = await AuthStorage.create(":memory:");
 	registry = new ModelRegistry(auth, "/nonexistent/model-mentions/models.yml");
 	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 	session = SessionManager.inMemory();
-	scoped = [];
+	scoped = undefined;
 	mentions = new ModelMentionRegistry({
 		sessionManager: session,
 		modelRegistry: registry,
@@ -417,6 +417,12 @@ describe("model mentions", () => {
 		session.resetLeaf();
 		mentions.syncFromBranch();
 		expect(mentions.expandMentions("^b/y")).toBe('<model agent="m1" name="Y"/>');
+	});
+
+	test("does not authorize model mentions when an explicit scope is empty", () => {
+		scoped = [];
+		expect(mentions.expandMentions("^a/x")).toBe("^a/x");
+		expect(mentions.mentions).toEqual([]);
 	});
 
 	test("honors picker scope and restores only known tags", () => {

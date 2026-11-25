@@ -23,6 +23,13 @@ import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import {
+	disabledModelRule,
+	disabledSelectorRule,
+	formatDisabledModelError,
+	withoutDisabledModels,
+} from "../config/disabled-models";
+import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	expandRoleAlias,
@@ -271,8 +278,8 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
 	const lookup = completionModelLookup(session, modelRegistry);
-	const available = lookup.getAvailable();
-	if (available.length === 0) return [];
+	const catalog = lookup.getAvailable();
+	const available = withoutDisabledModels(catalog, session.settings);
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
 	const resolve = (
@@ -280,6 +287,10 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	): { model: Model<Api>; selector: string; configuredEffort?: ConfiguredThinkingLevel } | undefined => {
 		if (!pattern) return undefined;
 		const selector = expandRoleAlias(pattern, session.settings);
+		// Refuse a denied selector outright: fuzzy matching over the filtered list could
+		// otherwise substitute an allowed sibling on the same provider.
+		const denied = disabledSelectorRule(selector, session.settings, available, catalog);
+		if (denied) throw new ToolError(formatDisabledModelError(denied.label, denied.rule));
 		const model = resolveModelFromString(selector, available, matchPreferences);
 		if (!model) return undefined;
 		const configuredEffort =
@@ -380,6 +391,8 @@ function resolveTaggedAgentCandidates(agentName: string, session: ToolSession): 
 	const resolved = resolveModelOverride([selector], lookup, session.settings, {
 		exactOnly: cfgOffline.get(session.settings),
 	});
+	if (resolved.disabledModel)
+		throw new ToolError(formatDisabledModelError(resolved.disabledModel.label, resolved.disabledModel.rule));
 	if (!resolved.model) return [];
 	const reasoning = reasoningForCandidate("default", resolved.model, resolved.thinkingLevel ?? agent?.thinkingLevel);
 	return [{ selector, model: resolved.model, ...reasoning }];
@@ -446,9 +459,12 @@ async function executeCompletion(
 				);
 				continue;
 			}
+			// Credentials can resolve after the user changes the session policy.
+			const denied = disabledModelRule(model, session.settings);
+			if (denied) throw new ToolError(formatDisabledModelError(model, denied));
 			if (index > 0) retriesUsed += 1;
 			response = await instrumentedCompleteSimple(
-				model,
+				withDisabledModelFallbackPolicy(model, session.settings),
 				{
 					systemPrompt,
 					messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],

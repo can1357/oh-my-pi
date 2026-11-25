@@ -257,7 +257,7 @@ describe("composer completion sources", () => {
 				getError: () => undefined,
 				retryUnavailableDiscovery: () => (discovered ? undefined : discovery.promise),
 			},
-			scopedModels: () => [],
+			scopedModels: () => undefined,
 		});
 		const provider = new PromptActionAutocompleteProvider([], process.cwd(), [], undefined, undefined, candidates);
 		const composer = new Composer({ autocomplete: provider });

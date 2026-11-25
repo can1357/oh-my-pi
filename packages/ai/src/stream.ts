@@ -1973,6 +1973,7 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				disableServerSideFallback: options?.disableServerSideFallback,
+				factoryDroidRefusalFallbacks: options?.factoryDroidRefusalFallbacks,
 				hideThinkingSummary: options?.hideThinkingSummary,
 				textVerbosity: options?.textVerbosity,
 				serviceTier: options?.serviceTier,

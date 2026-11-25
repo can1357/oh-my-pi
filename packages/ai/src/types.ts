@@ -913,6 +913,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	fallbacks?: FallbackParam[];
 	/** Factory Droid only: omit refusal fallbacks and reject responses served by another model. */
 	disableServerSideFallback?: boolean;
+	/** Factory Droid only: narrow the route's refusal targets. An empty list permits none. */
+	factoryDroidRefusalFallbacks?: readonly string[];
 }
 
 // Generic StreamFunction with typed options

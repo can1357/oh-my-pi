@@ -59,7 +59,7 @@ export interface ModelHubCallbacks {
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
-	/** Returns the rebuilt `--models` scope for the hub to list; `undefined` keeps the current one. */
+	/** Returns the rebuilt scope; `undefined` means the session no longer has a scope. */
 	onCatalogRefreshed?: (
 		providerId?: string,
 	) => ReadonlyArray<ScopedModelItem> | undefined | Promise<ReadonlyArray<ScopedModelItem> | undefined>;

@@ -138,6 +138,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import { disabledModelRule, formatDisabledModelError } from "../config/disabled-models";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	disabledProviderIds,
@@ -146,6 +147,7 @@ import {
 	type ResolvedModelRoleValue,
 	resolveCliModel,
 	resolveSessionModelSelector,
+	scopeAllowList,
 	sessionModelDiscoveryProviders,
 	withUpstreamPinOf,
 } from "../config/model-resolver";
@@ -2430,7 +2432,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#modelMentions = new ModelMentionRegistry({
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
-			scopedModels: () => this.scopedModels.map(s => s.model),
+			scopedModels: () => (this.hasScopedModels ? this.scopedModels.map(s => s.model) : this.getAvailableModels()),
 			inheritedAgents: config.inheritedSessionAgents,
 		});
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
@@ -3401,11 +3403,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Resolves a prewalk target selector like `--prewalk-into`: role aliases, scoped models, match preferences. */
 	#resolvePrewalkTarget(selector: string): Prewalk | string {
-		const scoped = this.scopedModels.map(entry => entry.model);
+		const scoped = this.hasScopedModels ? this.scopedModels.map(entry => entry.model) : undefined;
 		const resolved = resolveCliModel({
 			cliModel: selector,
 			modelRegistry: this.#modelRegistry,
-			availableModels: scoped.length > 0 ? scoped : undefined,
+			availableModels: scoped,
 			settings: this.settings,
 			preferences: getModelMatchPreferences(this.settings),
 		});
@@ -8592,13 +8594,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.sessionManager.getSessionName();
 	}
 
+	/** True even when the session has a declared scope with no remaining candidates. */
+	get hasScopedModels(): boolean {
+		return this.#models.hasScopedModels;
+	}
+
 	/** Scoped models for cycling (from --models flag) */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		return this.#models.scopedModels;
 	}
 
 	/** Replace the Ctrl+P/`/models` cycle scope (post-discovery rebuild; see {@link ModelControls.setScopedModels}). */
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
+	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined): void {
 		this.#models.setScopedModels(scopedModels);
 	}
 
@@ -13268,8 +13275,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.cycleRoleModels(roleOrder, direction);
 	}
 
-	/** Lists available models after applying the configured enabled-model filter; see {@link ModelControls.getAvailableModels}. */
+	/** Lists the explicit session scope, or the available models that current session settings permit. */
 	getAvailableModels(roleLookup?: ModelRoleLookup): Model[] {
+		if (!this.scopedModelsFromSettings && this.hasScopedModels) {
+			return scopeAllowList(
+				this.scopedModels.filter(
+					({ model }) =>
+						this.#modelRegistry.hasConfiguredAuth(model) && !this.#modelRegistry.getDisabledModelRule(model),
+				),
+			);
+		}
 		return this.#models.getAvailableModels(roleLookup);
 	}
 
@@ -13838,6 +13853,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
+		const denied = disabledModelRule(model, this.settings);
+		if (denied) throw new Error(formatDisabledModelError(model, denied));
 		const currentModel = this.model;
 		const isChanging = !routedModelsAreEqual(currentModel, model);
 		if (currentModel) {

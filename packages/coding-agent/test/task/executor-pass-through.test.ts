@@ -182,6 +182,26 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[0]?.[0]?.getApiKey).toBe(getApiKey);
 	});
 
+	it("reports an offline subagent refusal without dispatching on the allowed parent", async () => {
+		const model = getBundledModel("openai", "gpt-4o");
+		const parent = getBundledModel("openai", "gpt-4o-mini");
+		if (!model || !parent) throw new Error("Expected bundled OpenAI models");
+		const createSession = vi
+			.spyOn(sdkModule, "createAgentSession")
+			.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+		const result = await runSubprocess({
+			...baseOptions,
+			modelRegistry: createModelRegistry([model, parent]),
+			modelOverride: ["openai/gpt-4o"],
+			parentActiveModelPattern: "openai/gpt-4o-mini",
+			settings: Settings.isolated({ "models.offline": true, disabledModels: ["openai/gpt-4o"] }),
+		});
+		expect(result.exitCode).not.toBe(0);
+		expect(result.error).toContain('disabledModels rule "openai/gpt-4o"');
+		expect(result.requests).toBe(0);
+		expect(createSession).not.toHaveBeenCalled();
+	});
+
 	it("forwards undefined when the parent has not pre-discovered state", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
@@ -757,17 +777,17 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		const result = await runSubprocess({
 			...baseOptions,
 			agent: { ...baseAgent, name: "scout", model: ["extension/deferred-model"] },
-			modelOverride: ["extension/deferred-model"],
+			modelOverride: ["openai/gpt-4o", "extension/deferred-model"],
 			serviceTierOverride: "priority",
 			id: "subagent-agent-service-tier-deferred-model",
-			settings: Settings.isolated({ "tier.subagent": "none" }),
+			settings: Settings.isolated({ "tier.subagent": "none", disabledModels: ["openai/gpt-4o"] }),
 			modelRegistry: createModelRegistry([]),
 		});
 
 		expect(result.exitCode).toBe(0);
 		const sessionOptions = spy.mock.calls[0]?.[0];
 		expect(sessionOptions?.model).toBeUndefined();
-		expect(sessionOptions?.modelPattern).toEqual(["extension/deferred-model"]);
+		expect(sessionOptions?.modelPattern).toEqual(["openai/gpt-4o", "extension/deferred-model"]);
 		// Whichever family the session settles on gets the tier — and only that family.
 		expect(childTiers(sessionOptions, anthropicModel)).toEqual({ anthropic: "priority" });
 		expect(childTiers(sessionOptions, openAIModel)).toEqual({ openai: "priority" });

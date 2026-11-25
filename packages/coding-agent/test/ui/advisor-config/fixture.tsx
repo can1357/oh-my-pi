@@ -153,7 +153,6 @@ export function buildAdvisorConfig(
 		getAvailableModels: () => models,
 		mruOrder: ["anthropic/claude-haiku"],
 		defaultToolNames: new Set(["read", "grep", "glob"]),
-		scopedModels: [],
 		availableToolNames: ["read", "grep", "glob", "lsp", "web_search"],
 		syncBacklog: "3",
 		defaultModelLabel: "anthropic/claude-haiku",

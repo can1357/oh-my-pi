@@ -287,7 +287,7 @@ disabledProviders:
    - groq # project array REPLACES the global array
 ```
 
-Array replacement is the most common surprise for non-merged lists: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every array setting other than `bash.patterns` and `bashInterceptor.patterns` (which prepend project entries ahead of global ones).
+The project's `disabledProviders` replaces the global list. The same rule applies to `enabledModels`, `disabledModels`, `cycleOrder`, and `extensions`. Only `bash.patterns` and `bashInterceptor.patterns` prepend project entries to global entries.
 
 ## Project-local config
 
@@ -332,7 +332,7 @@ Overlay paths are resolved relative to the process working directory (and `~` is
 
 ## Path-scoped arrays
 
-Five array settings — `enabledModels`, `enabledProviders`, `disabledProviders`, `bash.patterns`, and `bashInterceptor.patterns` — accept path-scoped entries in addition to unscoped entries, so a single global config can behave differently per directory without maintaining separate `<repo>/.omp/config.yml` files:
+These settings accept path-scoped entries as well as unscoped entries: `enabledModels`, `disabledModels`, `enabledProviders`, `disabledProviders`, `bash.patterns`, and `bashInterceptor.patterns`.
 
 ```yaml
 enabledModels:
@@ -360,6 +360,13 @@ bash:
              approval: allow
       - match: "git status*" # applies everywhere
         approval: allow
+
+disabledModels:
+   - opencode-zen/claude-* # hide a whole family
+   - google-gemini-cli/gemini-2.0-flash
+   - path: ~/work/local-only
+     models:
+        - lm-studio/*
 ```
 
 Unscoped entries (bare strings for model/provider lists, or direct rule objects for `bash.patterns` and `bashInterceptor.patterns`) apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
@@ -368,7 +375,7 @@ Accepted **path** keys (any of them, combined): `path`, `paths`, `pathPrefix`, `
 
 Accepted **value** keys:
 
-- `models` (for `enabledModels`), `providers` (for `enabledProviders` and `disabledProviders`), or `patterns` (for `bash.patterns` and `bashInterceptor.patterns`)
+- `models` (for `enabledModels` and `disabledModels`), `providers` (for `enabledProviders` and `disabledProviders`), or `patterns` (for `bash.patterns` and `bashInterceptor.patterns`)
 - `values` or `items` (for any path-scoped setting)
 
 For `bash.patterns` and `bashInterceptor.patterns`, a scoped entry may wrap a list under `patterns` / `values` / `items`, carry the rule fields itself (`{ path, match, approval }`), or both; inside its scope it contributes its own rule first, then the listed rules in order. Listed rules may be path-scoped themselves, narrowing the outer scope. An entry whose path keys hold no string (for example `path: ~`, which YAML reads as null; quote it as `"~"` for your home directory) is not scoped and applies everywhere. When `bashInterceptor.patterns` contains only path-scoped entries, the built-in interceptor rules still apply after any matching scoped rules; one unscoped rule in that list makes it replace the built-ins, but rules a project or `--config` overlay prepends onto it do not. For the other settings, malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array for the active working directory.
@@ -483,6 +490,9 @@ modelProviderOrder:
 
 enabledModels:
    - claude-sonnet-4-5
+
+disabledModels:
+   - opencode-zen/claude-*
 ```
 
 Built-in chat roles are `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `memory`, `task`, `advisor`, and `widget`. The `tiny` and `memory` roles accept both `tiny` catalog models and ordinary chat models. `widget` writes the spec behind each background job's live widget and resolves like `smol` until assigned. Built-in model-kind roles are `image`, `web`, `speech`, `dictation`, and `judge`; they select image, search/grounded-chat, TTS, STT, and judgment runners respectively. `judge` also accepts tiny and chat models, which is why aliases such as `@tiny` are valid fallbacks. Catalog kinds are `chat`, `tiny`, `image`, `tts`, `stt`, `search`, and `judge`; a custom model with no `kind` remains a chat model.
@@ -506,6 +516,7 @@ Existing configs are migrated automatically when loaded. Retired backend selecto
 | `modelProviderOrder`   | array   | `[]`                        | Preferred provider order when a model id is ambiguous.                                                                                                                                                                                                                                                                                                  |
 | `cycleOrder`           | array   | `["smol","default","slow"]` | Chat roles cycled by the model switcher.                                                                                                                                                                                                                                                                                                                |
 | `enabledModels`        | array   | `[]`                        | Allow-list of models; supports [path-scoped entries](#path-scoped-arrays). Empty means all available models.                                                                                                                                                                                                                                            |
+| `disabledModels`       | array   | `[]`                        | Deny-list of exact `provider/modelId` rules or globs; wins over `enabledModels`; supports [path-scoped entries](#path-scoped-arrays). See [Models](./models.md#disabledmodels).                                                                                                                                                                         |
 | `enabledProviders`     | array   | `[]`                        | Foreign user-level discovery sources to load; supports path-scoped entries. See [above](#provider-and-source-disabling).                                                                                                                                                                                                                                |
 | `disabledProviders`    | array   | `[]`                        | Disabled model/discovery providers; supports [path-scoped entries](#path-scoped-arrays). See [above](#provider-and-source-disabling).                                                                                                                                                                                                                   |
 | `includeModelInPrompt` | boolean | `true`                      | Include the active model name in the system prompt.                                                                                                                                                                                                                                                                                                     |

@@ -44,4 +44,38 @@ describe("commit role thinking selection", () => {
 			authStorage.close();
 		}
 	});
+
+	it("refuses an explicit denied commit model with the matching rule", async () => {
+		const denied = getModelOrThrow("claude-opus-4-5");
+		const settings = Settings.isolated({ disabledModels: ["anthropic/claude-opus-*"] });
+		const authStorage = createInMemoryAuthStorage();
+		try {
+			const registry = {
+				getAvailable: () => [getModelOrThrow("claude-sonnet-4-5")],
+				getApiKey: async () => "test-key",
+				getApiKeyForProvider: async () => "test-key",
+				getApiKeyWithCredentialForProvider: async () => "test-key",
+				authStorage,
+				resolver: () => async () => "test-key",
+			};
+			await expect(resolvePrimaryModel(`${denied.provider}/${denied.id}`, settings, registry)).rejects.toThrow(
+				'is disabled by disabledModels rule "anthropic/claude-opus-*"',
+			);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("does not return a denied model from an independent registry or the caller's fallback", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({ disabledModels: ["anthropic/*"] });
+		const registry = {
+			getAvailable: () => [model],
+			getApiKey: async () => "test-key",
+			resolver: () => async () => "test-key",
+		};
+		await expect(resolveSmolModel(settings, registry, model, "test-key")).rejects.toThrow(
+			/disabledModels.*anthropic/,
+		);
+	});
 });

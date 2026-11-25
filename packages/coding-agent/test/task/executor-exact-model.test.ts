@@ -8,6 +8,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
@@ -137,6 +138,26 @@ describe("per-call exact selection after background discovery", () => {
 			expect(result.exitCode).not.toBe(0);
 			expect(failure(result)).toMatch(/exact model|unavailable/);
 		}
+	});
+
+	it("refuses a model denied during discovery without starting a child or sending its assignment", async () => {
+		const model = createMockModel({ id: "late-denial" });
+		const settings = perCallSettings(model);
+		const createSession = vi.spyOn(sdk, "createAgentSession");
+		const result = await runWorker({
+			model,
+			settings,
+			perCallModel: "mock/late-denial",
+			setup: registry => {
+				vi.spyOn(registry, "awaitBackgroundRefresh").mockImplementation(async () => {
+					cfgDisabledModels.override(settings, ["mock/late-*"]);
+				});
+			},
+		});
+		expect(result.exitCode).not.toBe(0);
+		expect(failure(result)).toContain('disabledModels rule "mock/late-*"');
+		expect(createSession).not.toHaveBeenCalled();
+		expect(model.calls).toHaveLength(0);
 	});
 
 	it("refuses the next request once the operator revokes the grant mid-run", async () => {

@@ -3094,7 +3094,8 @@ export class InputController {
 			modelMentions: createModelMentionSource({
 				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
 				registry: this.ctx.session.modelRegistry,
-				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
+				scopedModels: () =>
+					this.ctx.session.hasScopedModels ? this.ctx.session.scopedModels.map(s => s.model) : undefined,
 			}),
 			// The interactive host uses the default registry; the receiving session can change with focus.
 			internalUrlCaller: () => {

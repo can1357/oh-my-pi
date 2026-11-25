@@ -5,6 +5,13 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import {
+	disabledModelRule,
+	disabledSelectorRule,
+	formatDisabledModelError,
+	withoutDisabledModels,
+} from "../config/disabled-models";
+import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
+import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	getModelMatchPreferences,
@@ -48,19 +55,24 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	const offlineProvider = offline ? session.getActiveModel?.()?.provider : undefined;
 	let availableModels: Model<Api>[] = [];
 	if (!offline) {
-		availableModels = modelRegistry.getAvailable();
+		availableModels = withoutDisabledModels(modelRegistry.getAvailable(), session.settings);
 		if (availableModels.length === 0) {
 			throw new ToolError("No models available for image questions.");
 		}
 	} else if (offlineProvider) {
-		availableModels = modelRegistry.getAvailableForProviders(new Set([offlineProvider]));
+		availableModels = withoutDisabledModels(
+			modelRegistry.getAvailableForProviders(new Set([offlineProvider])),
+			session.settings,
+		);
 	}
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
 		const expanded = expandRoleAlias(pattern, session.settings);
-		return resolveModelFromString(expanded, availableModels, matchPreferences);
+		if (disabledSelectorRule(expanded, session.settings, availableModels)) return undefined;
+		const candidate = resolveModelFromString(expanded, availableModels, matchPreferences);
+		return candidate && disabledModelRule(candidate, session.settings) === undefined ? candidate : undefined;
 	};
 
 	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
@@ -98,6 +110,11 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	return { model, selectedPattern };
 }
 
+function assertImageQuestionModelAllowed(model: Model<Api>, session: ToolSession): void {
+	const rule = disabledModelRule(model, session.settings);
+	if (rule !== undefined) throw new ToolError(formatDisabledModelError(model, rule));
+}
+
 /** Ask the resolved vision model a question about an already-loaded image. */
 export async function askImageQuestion(
 	session: ToolSession,
@@ -117,12 +134,13 @@ export async function askImageQuestion(
 	if (!modelRegistry) {
 		throw new ToolError("Model registry is unavailable for image questions.");
 	}
+	const { model, selectedPattern } = resolved;
+	assertImageQuestionModelAllowed(model, session);
 	const availableModels = modelRegistry.getAvailable();
 	if (availableModels.length === 0) {
 		throw new ToolError("No models available for image questions.");
 	}
 
-	const { model, selectedPattern } = resolved;
 	const apiKey = await modelRegistry.getApiKey(model);
 	if (!apiKey) {
 		throw new ToolError(
@@ -153,13 +171,15 @@ export async function askImageQuestion(
 		}),
 	);
 	const reasoning = toReasoningEffort(resolveThinkingLevelForModel(model, configuredThinking));
+	// The owner can change its rules while the registry obtains a credential.
+	assertImageQuestionModelAllowed(model, session);
 
 	session.costGate?.admit();
 	const journal = journalCompletion(session.sessionManager, { purpose: "image-question" });
 	let response: AssistantMessage;
 	try {
 		response = await instrumentedCompleteSimple(
-			model,
+			withDisabledModelFallbackPolicy(model, session.settings),
 			{
 				systemPrompt: [prompt.render(imageQuestionSystemPromptTemplate)],
 				messages: [

@@ -15,6 +15,8 @@ import { replaceTabs, truncateToWidth } from "../utils/text-width";
 import { SPINNER_FRAMES } from "../modes/view-model/theme/symbols";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { formatDisabledModelError } from "../config/disabled-models";
+import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
@@ -561,18 +563,22 @@ async function resolveDryBalanceModel(
 	}
 
 	const allowedModels = await resolveAllowedModels(modelRegistry, settings, preferences);
-	if (allowedModels.length === 0) {
-		throw new Error(
-			"No models available. Use --model to select a model or configure enabledModels/default model settings.",
-		);
-	}
 
 	const defaultRoleSpec = resolveModelRoleValue(settings?.getModelRole("default"), allowedModels, {
 		settings,
 		matchPreferences: preferences,
 	});
+	if (defaultRoleSpec.disabledModel) {
+		const { label, rule } = defaultRoleSpec.disabledModel;
+		throw new Error(formatDisabledModelError(label, rule));
+	}
 	if (defaultRoleSpec.model) {
 		return { model: defaultRoleSpec.model, warning: defaultRoleSpec.warning };
+	}
+	if (allowedModels.length === 0) {
+		throw new Error(
+			"No models available. Use --model to select a model or configure enabledModels/default model settings.",
+		);
 	}
 
 	for (const candidate of allowedModels) {
@@ -822,7 +828,7 @@ export async function runDryBalanceCommand(
 				: (deps.stdoutColumns ?? process.stdout.columns ?? 80);
 			progress = createBenchProgressSink(targets.length, progressWrite, progressInteractive, progressColumns);
 			benchResults = await runBenchTargets(
-				model,
+				withDisabledModelFallbackPolicy(model, runtime.settings),
 				targets,
 				runtime.modelRegistry.authStorage,
 				randomSessionId,

@@ -54,8 +54,8 @@ export interface ModelPickerRegistry extends ModelBrowserRegistry {
 export interface ModelPickerProps {
 	readonly source: ModelBrowserSource;
 	readonly registry: ModelPickerRegistry;
-	/** The `--models` scope (empty: every available chat model). */
-	readonly scopedModels: ReadonlyArray<ScopedModelItem>;
+	/** The `--models` scope; omit it to list every available chat model. */
+	readonly scopedModels?: ReadonlyArray<ScopedModelItem>;
 	readonly callbacks: ModelPickerCallbacks;
 	readonly options?: ModelPickerOptions;
 	/** Terminal height; the sheet takes 40% of it (default 40 rows). */
@@ -118,8 +118,8 @@ export interface ModelPickerPrewarm {
 		/** Compose the catalog ahead of its first reader, in slices (`ModelRegistry.prewarmCatalog`). */
 		prewarmCatalog(): Promise<void> | undefined;
 	};
-	/** The `--models` scope (empty: every available chat model). */
-	readonly scopedModels: ReadonlyArray<Model>;
+	/** The `--models` scope; omit it to list every available chat model. */
+	readonly scopedModels?: ReadonlyArray<Model>;
 	readonly currentContextTokens?: number;
 	/** Stops the work between slices. */
 	readonly signal?: AbortSignal;
@@ -274,7 +274,7 @@ export function ModelPicker(props: ModelPickerProps): JSXNode {
 		const scoped = buildSessionModelScope(
 			source,
 			registry,
-			scopedModels.map(entry => entry.model),
+			scopedModels?.map(entry => entry.model),
 		);
 		batch(() => {
 			configError.set(scoped.error);
@@ -365,8 +365,7 @@ export function ModelPicker(props: ModelPickerProps): JSXNode {
 		.refreshIfStale()
 		.then(async changed => {
 			if (!changed) return;
-			const scope = await callbacks.onCatalogRefreshed?.();
-			if (scope) scopedModels = scope;
+			if (callbacks.onCatalogRefreshed) scopedModels = await callbacks.onCatalogRefreshed();
 			syncFromRegistry();
 		})
 		.catch(error => configError.set(error instanceof Error ? error.message : String(error)));

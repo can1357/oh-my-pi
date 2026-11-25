@@ -34,7 +34,6 @@ async function createHub(state: ProviderDiscoveryState): Promise<LayerTerminal> 
 			ModelHub({
 				source: createModelBrowserSource(Settings.isolated({})),
 				registry: modelRegistry,
-				scopedModels: [],
 				callbacks: {
 					onAssign: () => {},
 					onUnassign: () => {},

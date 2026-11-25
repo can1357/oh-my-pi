@@ -271,12 +271,14 @@ describe("createAcpSessionFactory scope rebuild after discovery", () => {
 		const scopeWrites: string[][] = [];
 		const fakeSession = {
 			isDisposed: false,
+			hasScopedModels: false,
 			scopedModels: [] as Array<{ model: Model }>,
 			addDisposer: mock(),
 			setScopedModelsRefresher: mock(),
-			setScopedModels(models: Array<{ model: Model }>) {
-				scopeWrites.push(models.map(entry => entry.model.id));
-				this.scopedModels = models;
+			setScopedModels(models: Array<{ model: Model }> | undefined) {
+				this.hasScopedModels = models !== undefined;
+				this.scopedModels = models ?? [];
+				scopeWrites.push(this.scopedModels.map(entry => entry.model.id));
 			},
 		};
 		const factory = createAcpSessionFactory({

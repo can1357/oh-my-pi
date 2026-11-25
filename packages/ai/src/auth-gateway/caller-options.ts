@@ -44,6 +44,8 @@ const OPTION_TIERS = {
 	// A session that learned to leave other models' reasoning out of Claude
 	// requests must keep doing so through the gateway.
 	omitDemotedReasoning: "client",
+	// This can only narrow the route's own account-eligible refusal targets.
+	factoryDroidRefusalFallbacks: "client",
 
 	// Attribution.
 	headers: "gateway",

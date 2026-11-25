@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AuthStorage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -6,7 +7,11 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { cfgEnabledModels, cfgModelProviderOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import {
+	cfgDisabledModels,
+	cfgEnabledModels,
+	cfgModelProviderOrder,
+} from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSessionOptions,
@@ -68,15 +73,17 @@ class FakeRegistry {
 
 class FakeSession implements ScopedModelSink {
 	isDisposed = false;
+	hasScopedModels = true;
 	scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	setCalls = 0;
 	disposers: Array<() => void> = [];
 	constructor(initial: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>) {
 		this.scopedModels = initial;
 	}
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
+	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined): void {
 		this.setCalls += 1;
-		this.scopedModels = scopedModels;
+		this.hasScopedModels = scopedModels !== undefined;
+		this.scopedModels = scopedModels ?? [];
 	}
 	addDisposer(dispose: () => void): void {
 		this.disposers.push(dispose);
@@ -92,6 +99,41 @@ async function startupScope(
 }
 
 describe("watchScopedModelSettings", () => {
+	it("keeps a denied --models scope empty and restores its entry when the deny rule is removed", async () => {
+		const settings = Settings.isolated();
+		const registry = new FakeRegistry([model("a"), model("b")]);
+		const parsed = parseArgs(["--models", "prov/a"]);
+		const session = new FakeSession(await startupScope(["prov/a"], registry, settings));
+		watchScopedModelSettings(session, parsed, registry, settings);
+		try {
+			cfgDisabledModels.set(settings, ["prov/a"]);
+			await nextTurn();
+			expect(session.hasScopedModels).toBe(true);
+			expect(session.scopedModels).toEqual([]);
+			cfgDisabledModels.set(settings, []);
+			await nextTurn();
+			expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a"]);
+		} finally {
+			for (const dispose of session.disposers) dispose();
+		}
+	});
+
+	it("preserves the edited cycling order even when scope membership does not change", async () => {
+		const original = ["prov/a", "prov/b"];
+		const settings = Settings.isolated();
+		cfgEnabledModels.set(settings, original);
+		const registry = new FakeRegistry([model("a"), model("b")]);
+		const session = new FakeSession(await startupScope(original, registry, settings));
+		watchScopedModelSettings(session, parseArgs([]), registry, settings);
+		try {
+			cfgEnabledModels.set(settings, ["prov/b", "prov/a"]);
+			await nextTurn();
+			expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["b", "a"]);
+		} finally {
+			for (const dispose of session.disposers) dispose();
+		}
+	});
+
 	it("replaces the scope when an enabled model changes only its upstream pin", async () => {
 		const source = "openrouter/z-ai/glm-4.7@sambanova";
 		const target = "openrouter/z-ai/glm-4.7@cerebras";
@@ -337,7 +379,7 @@ describe("buildSessionOptions --models scope selection", () => {
 
 		expect(options.model).toBeUndefined();
 		expect(options.modelPattern).toEqual(["extprov/model-x", "extprov/model-y"]);
-		expect(options.scopedModels).toBeUndefined();
+		expect(options.scopedModels).toEqual([]);
 	});
 
 	it("seeds the startup thinking level from the scope entry the session starts on", async () => {

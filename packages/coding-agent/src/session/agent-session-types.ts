@@ -223,7 +223,7 @@ export interface AgentSessionConfig {
 	autoApprove?: boolean;
 	/** User-authorized model agents inherited from the parent session for nested delegation. */
 	inheritedSessionAgents?: readonly AgentDefinition[];
-	/** Models to cycle through with Ctrl+P (from --models flag). */
+	/** Ctrl+P cycle scope. An omitted scope permits all available models; an empty scope permits none. */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Whether the cycle scope is derived from enabledModels rather than supplied explicitly. */
 	scopedModelsFromSettings?: boolean;

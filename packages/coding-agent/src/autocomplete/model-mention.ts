@@ -128,7 +128,7 @@ export function applyModelMentionCompletion(
 export function createModelMentionSource(host: {
 	source: ModelBrowserSource;
 	registry: DiscoveryRetryRegistry;
-	scopedModels: () => ReadonlyArray<Model>;
+	scopedModels: () => ReadonlyArray<Model> | undefined;
 }): ModelMentionCandidateSource {
 	let ranker: ModelItemRanker | undefined;
 	let rankerProviderOrder: readonly string[] | undefined;

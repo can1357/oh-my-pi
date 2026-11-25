@@ -4,6 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -34,7 +35,11 @@ describe("issue #986 compaction auth fallback", () => {
 		tempDir.removeSync();
 	});
 
-	async function createSession(options?: { fallbackModelRole?: string; configureFallbackAuth?: boolean }) {
+	async function createSession(options?: {
+		fallbackModelRole?: string;
+		configureFallbackAuth?: boolean;
+		remoteModel?: string;
+	}) {
 		const bundledCurrentModel = getTestModel(
 			"openai-codex",
 			model => model.api === "openai-codex-responses" && model.input.includes("text"),
@@ -44,6 +49,7 @@ describe("issue #986 compaction auth fallback", () => {
 			remoteCompaction: {
 				...bundledCurrentModel.remoteCompaction,
 				enabled: true,
+				...(options?.remoteModel && { model: options.remoteModel }),
 				endpoint: "https://compact.example/v1/responses/compact",
 			},
 		};
@@ -199,6 +205,39 @@ describe("issue #986 compaction auth fallback", () => {
 
 		return { apiKeySpy, crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction };
 	}
+
+	it.each(["manual", "automatic"] as const)(
+		"never sends %s compaction history to a session-denied active model",
+		async mode => {
+			const { apiKeySpy, currentModel, sameProviderModel, triggerAutoCompaction } =
+				await createAutoNativeFallbackSession();
+			cfgDisabledModels.set(session.settings, [`${currentModel.provider}/${currentModel.id}`]);
+			const compact = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: "allowed fallback summary",
+				shortSummary: "fallback",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			}));
+			if (mode === "manual") await session.compact();
+			else await triggerAutoCompaction();
+			expect(compact.mock.calls.map(([, model]) => model.id)).toEqual([sameProviderModel.id]);
+			expect(apiKeySpy.mock.calls.map(([model]) => model.id)).not.toContain(currentModel.id);
+		},
+	);
+
+	it("falls back to soft compaction without contacting a denied native override", async () => {
+		const { currentModel } = await createSession({ remoteModel: "private-summarizer" });
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([currentModel]);
+		cfgDisabledModels.set(session.settings, [`${currentModel.provider}/private-summarizer`]);
+		const compact = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "soft summary",
+			shortSummary: "soft",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+		}));
+		await session.compact();
+		expect(compact.mock.calls.map(([preparation]) => preparation.settings.remoteEnabled)).toEqual([false]);
+	});
 
 	it("continues same-provider native candidates but stops before crossing providers on non-auth failure", async () => {
 		const { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =

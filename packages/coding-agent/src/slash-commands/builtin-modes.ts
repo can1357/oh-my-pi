@@ -60,11 +60,11 @@ function resolveSessionModelSelector(
 	session: AgentSession,
 	settings: Settings,
 ): ResolveCliModelResult {
-	const scoped = session.scopedModels.map(entry => entry.model);
+	const scoped = session.hasScopedModels ? session.scopedModels.map(entry => entry.model) : undefined;
 	return resolveCliModel({
 		cliModel: selector,
 		modelRegistry: session.modelRegistry,
-		availableModels: scoped.length > 0 ? scoped : undefined,
+		availableModels: scoped,
 		settings,
 		preferences: getModelMatchPreferences(settings),
 	});

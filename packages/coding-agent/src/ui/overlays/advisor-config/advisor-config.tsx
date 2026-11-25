@@ -366,15 +366,14 @@ export function AdvisorConfigOverlay(props: AdvisorConfigOverlayProps): JSXNode 
 	};
 
 	const catalogue = (): ModelEntry[] => {
-		let models = deps.scopedModels.map(scoped => scoped.model);
-		if (models.length === 0) {
-			try {
-				models = deps.getAvailableModels();
-			} catch {
-				models = [];
-			}
+		try {
+			return modelCatalogue(
+				deps.scopedModels?.map(scoped => scoped.model) ?? deps.getAvailableModels(),
+				deps.mruOrder,
+			);
+		} catch {
+			return [];
 		}
-		return modelCatalogue(models, deps.mruOrder);
 	};
 	const models = computed(catalogue);
 

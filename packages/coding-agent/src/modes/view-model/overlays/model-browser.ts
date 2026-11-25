@@ -121,6 +121,8 @@ export interface ModelBrowserSource extends ModelRoleLookup {
 	readonly knownRoleIds: readonly string[];
 	readonly mruOrder: readonly string[];
 	readonly modelPerf: ReadonlyMap<string, ModelBrowserPerf>;
+	/** Apply the owning session's model policy, even for a separately configured registry. */
+	readonly disabledModel?: (model: Model) => string | undefined;
 	/** Service tier the host would send for `model`: rows with a measured `selector@tier` aggregate show that tier. */
 	serviceTierFor?(model: Model): string | undefined;
 	getRoleInfo(role: string): ModelBrowserRoleInfo;
@@ -557,8 +559,11 @@ function errorText(cause: unknown): string {
 	return cause instanceof Error ? cause.message : String(cause);
 }
 
-function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyArray<Model>): SessionModelScopeInputs {
-	if (scopedModels.length > 0) {
+function readScopeInputs(
+	registry: ModelBrowserRegistry,
+	scopedModels: ReadonlyArray<Model> | undefined,
+): SessionModelScopeInputs {
+	if (scopedModels !== undefined) {
 		try {
 			const pool = scopedRolePool(scopedModels, registry);
 			return { scoped: scopedModels, allModels: pool, roleModels: pool, error: undefined };
@@ -657,7 +662,7 @@ function cachedSessionModelScope(
 export function buildSessionModelScope(
 	settings: ModelBrowserSource,
 	registry: ModelBrowserRegistry,
-	scopedModels: ReadonlyArray<Model>,
+	scopedModels: ReadonlyArray<Model> | undefined,
 ): SessionModelScope {
 	return drainWork(sessionModelScopeWork(settings, registry, scopedModels));
 }
@@ -671,12 +676,23 @@ export function buildSessionModelScope(
 export function* sessionModelScopeWork(
 	settings: ModelBrowserSource,
 	registry: ModelBrowserRegistry,
-	scopedModels: ReadonlyArray<Model>,
+	scopedModels: ReadonlyArray<Model> | undefined,
 ): Generator<void, SessionModelScope, undefined> {
+	const inputs = readScopeInputs(registry, scopedModels);
+	const denied = settings.disabledModel;
+	if (denied) {
+		// Keep the picker rows, configured roles and automatic roles under the same policy.
+		const all = inputs.allModels;
+		const roles = inputs.roleModels;
+		const visible = (model: Model) => !denied(model);
+		inputs.allModels = all.filter(visible);
+		inputs.roleModels = roles === all ? inputs.allModels : roles.filter(visible);
+		if (inputs.scoped) inputs.scoped = inputs.scoped.filter(visible);
+	}
 	const key: SessionModelScopeKey = {
 		preferences: settings.preferences ?? settings,
 		revision: settings.revision,
-		inputs: readScopeInputs(registry, scopedModels),
+		inputs,
 		mruOrder: settings.mruOrder,
 	};
 	const cached = cachedSessionModelScope(registry, key);
@@ -684,7 +700,6 @@ export function* sessionModelScopeWork(
 	const scope = yield* scopeFromInputs(settings, key.inputs, key.mruOrder);
 	const raced = cachedSessionModelScope(registry, key);
 	if (raced) return raced;
-	const { inputs } = key;
 	(registry as ModelBrowserRegistry & ScopeTagged)[kSessionModelScope] = {
 		preferences: key.preferences,
 		revision: key.revision,

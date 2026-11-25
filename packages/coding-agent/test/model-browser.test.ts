@@ -159,6 +159,30 @@ describe("resolveRoleAssignments", () => {
 });
 
 describe("createModelMentionSource", () => {
+	test("a picker with a separate catalog honors the session denylist and distinguishes an empty scope", () => {
+		const denied = makeModel("test", "denied");
+		const allowed = makeModel("test", "allowed");
+		const catalog = [denied, allowed];
+		let scope: Model[] | undefined;
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(Settings.isolated({ disabledModels: ["test/denied"] })),
+			registry: {
+				getError: () => undefined,
+				getAvailable: () => catalog,
+				getAll: () => catalog,
+				retryUnavailableDiscovery: () => undefined,
+			},
+			scopedModels: () => scope,
+		});
+		expect(candidates("").map(item => item.selector)).toEqual(["test/allowed"]);
+		scope = [];
+		expect(candidates("")).toEqual([]);
+		scope = [denied];
+		expect(candidates("")).toEqual([]);
+		scope = undefined;
+		expect(candidates("").map(item => item.selector)).toEqual(["test/allowed"]);
+	});
+
 	test("refreshes candidates when role settings or availability change between queries", () => {
 		const a = makeModel("a", "example-2");
 		const b = makeModel("b", "example-2");
@@ -174,7 +198,7 @@ describe("createModelMentionSource", () => {
 				getAll: () => [...available],
 				retryUnavailableDiscovery: () => undefined,
 			},
-			scopedModels: () => [],
+			scopedModels: () => undefined,
 		});
 		const selectors = (query: string) => candidates(query).map(item => item.selector);
 

@@ -14,6 +14,8 @@ import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgTaskAgentModelOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
@@ -21,10 +23,11 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { signal, type UiNode } from "@oh-my-pi/pi-tui";
 import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
 import * as modelHubModule from "../../../src/ui/overlays/pickers/model-hub";
-import type { ModelHubState } from "../../../src/ui/overlays/pickers/model-hub-state";
+import { ModelHubState } from "../../../src/ui/overlays/pickers/model-hub-state";
 import * as modelPickerModule from "../../../src/ui/overlays/pickers/model-picker";
 import { Overlays } from "../../../src/ui/shell/overlays";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../../helpers/settings-test-state";
+import { keyFromRaw } from "../../ui/overlays/pickers/harness";
 
 const model = (id: string) => getBundledModel("anthropic", id) as Model;
 
@@ -59,12 +62,13 @@ describe("SelectorController model selector writes", () => {
 		settings: Settings,
 		initial: Model,
 		scope?: Pick<AgentSessionConfig, "scopedModels" | "scopedModelsFromSettings">,
+		registry: ModelRegistry = new ModelRegistry(authStorage),
 	): { controller: SelectorController; showError: () => unknown } {
 		const live = new AgentSession({
 			agent: new Agent({ initialState: { model: initial, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: SessionManager.inMemory(),
 			settings,
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry: registry,
 			obfuscator: new SecretObfuscator([]),
 			...scope,
 		});
@@ -330,6 +334,75 @@ describe("SelectorController model selector writes", () => {
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(session?.model && formatModelStringWithRouting(session.model)).toBe(fallback);
+	});
+
+	it("does not write a stale role or task pick after the session denies the model", async () => {
+		const settings = Settings.isolated();
+		const { controller, showError } = start(settings, model("claude-sonnet-4-5"));
+		const opus = model("claude-opus-4-5");
+		const previousRole = settings.getModelRole("smol");
+		const previousTask = cfgTaskAgentModelOverrides.get(settings).task;
+		const selector = `anthropic/${opus.id}`;
+		const hub = openModelHub(controller);
+		cfgDisabledModels.set(settings, [selector]);
+		expect(await hub.onAssign(opus, "smol", undefined, selector)).toBe(false);
+		expect(settings.getModelRole("smol")).toBe(previousRole);
+		hub.onCancel();
+
+		cfgDisabledModels.set(settings, []);
+		const { callbacks } = openModelPicker(controller);
+		cfgDisabledModels.set(settings, [selector]);
+		callbacks.onPickTask?.(opus, selector);
+		expect(cfgTaskAgentModelOverrides.get(settings).task).toBe(previousTask);
+		expect(showError).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps denied stored entries and enabledModels untouched when a hub edit saves a fallback chain", async () => {
+		const agentDir = tempDir.join("agent");
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({
+				enabledModels: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-5"],
+				disabledModels: ["anthropic/claude-sonnet-4-5"],
+				modelRoles: { smol: "anthropic/claude-sonnet-4-5" },
+				retry: { fallbackChains: { default: ["anthropic/claude-sonnet-4-5"] } },
+			}),
+		);
+		const settings = await Settings.init({ agentDir, cwd: tempDir.path() });
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"), { settings });
+		// The denied model is really filtered from what the hub is offered.
+		const offered = registry.getAvailable().map(candidate => `${candidate.provider}/${candidate.id}`);
+		expect(offered).toContain("anthropic/claude-opus-4-5");
+		expect(offered).not.toContain("anthropic/claude-sonnet-4-5");
+		expect(registry.find("anthropic", "claude-sonnet-4-5")).toBeUndefined();
+
+		const opus = model("claude-opus-4-5");
+		const { controller, showError } = start(settings, opus, { scopedModels: [{ model: opus }] }, registry);
+		let opened: ModelHubState | undefined;
+		vi.spyOn(modelHubModule, "ModelHub").mockImplementation(props => {
+			opened = new ModelHubState(props.source, props.registry, props.scopedModels, props.callbacks);
+			return jsx("picker", {});
+		});
+		controller.showModelSelector();
+		if (!opened) throw new Error("model hub was not opened");
+		try {
+			opened.clickSidebarEntry("roles");
+			opened.handleKey(keyFromRaw("f"));
+			opened.browser.selectSelector("anthropic/claude-opus-4-5");
+			opened.handleKey(keyFromRaw("\r"));
+		} finally {
+			opened.dispose();
+		}
+		await settings.flush();
+
+		expect(showError).not.toHaveBeenCalled();
+		const saved = YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text()) as RawSettings;
+		expect(saved).toEqual({
+			enabledModels: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-5"],
+			disabledModels: ["anthropic/claude-sonnet-4-5"],
+			modelRoles: { smol: "anthropic/claude-sonnet-4-5" },
+			retry: { fallbackChains: { default: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-5"] } },
+		});
 	});
 
 	it("refreshes the open hub once a confirmed compaction point has moved the model to its extended window", async () => {

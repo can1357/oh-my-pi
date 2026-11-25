@@ -92,7 +92,7 @@ export class RpcModelPicker {
 		const scope = buildSessionModelScope(
 			this.#source,
 			session.modelRegistry,
-			session.scopedModels.map(entry => entry.model),
+			session.hasScopedModels ? session.scopedModels.map(entry => entry.model) : undefined,
 		);
 		if (scope.error !== undefined && scope.items.length === 0) throw new Error(scope.error);
 		const ranked = query.trim() ? this.#rank(scope, query) : scope.items;

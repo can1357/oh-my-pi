@@ -69,7 +69,7 @@ function createPicker(options: {
 			ModelPicker({
 				source: createModelBrowserSource(settings),
 				registry,
-				scopedModels: options.scoped ? modelsFn().map(model => ({ model })) : [],
+				scopedModels: options.scoped ? modelsFn().map(model => ({ model })) : undefined,
 				callbacks: {
 					onPick,
 					onPickRole,
@@ -206,6 +206,19 @@ describe("ModelPicker", () => {
 		picker.handleInput("new-model");
 		picker.handleInput("\n");
 		expect(onPick.mock.calls[0]?.[0]).toBe(added);
+	});
+
+	test("does not offer out-of-scope chat models after a refresh leaves the scope empty", async () => {
+		const outside = makeModel("test", "outside");
+		const { picker, onPick } = createPicker({
+			models: [outside],
+			registry: { refreshIfStale: async () => true },
+			onCatalogRefreshed: async () => [],
+		});
+		await settle();
+		picker.handleInput("\n");
+		expect(onPick).not.toHaveBeenCalled();
+		expect(picker.render(100).join("\n")).not.toContain("outside");
 	});
 
 	test("highlights and preselects the session's current model", () => {

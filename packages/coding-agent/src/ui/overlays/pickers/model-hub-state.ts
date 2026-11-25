@@ -217,7 +217,7 @@ export class ModelHubState {
 	readonly #version = signal(0);
 	readonly #rows: () => number;
 
-	#scopedModels: ReadonlyArray<ScopedModelItem>;
+	#scopedModels: ReadonlyArray<ScopedModelItem> | undefined;
 	#roles: RoleAssignments = {};
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
@@ -264,7 +264,7 @@ export class ModelHubState {
 	constructor(
 		source: ModelHubSource,
 		registry: ModelHubRegistry,
-		scopedModels: ReadonlyArray<ScopedModelItem>,
+		scopedModels: ReadonlyArray<ScopedModelItem> | undefined,
 		callbacks: ModelHubCallbacks,
 		options: ModelHubOptions & { terminalRows?: () => number } = {},
 	) {
@@ -290,7 +290,7 @@ export class ModelHubState {
 		);
 
 		// Online discovery only (no credential helpers); a --models scope does not depend on it.
-		if (this.#scopedModels.length === 0) {
+		if (!this.scoped) {
 			this.#catalogRefreshing = true;
 			this.registry
 				.refresh("online")
@@ -391,7 +391,7 @@ export class ModelHubState {
 	}
 
 	get scoped(): boolean {
-		return this.#scopedModels.length > 0;
+		return this.#scopedModels !== undefined;
 	}
 
 	get currentSelector(): string | undefined {
@@ -603,7 +603,7 @@ export class ModelHubState {
 	/** Catalog models of a signed-out provider (none in a --models scope). */
 	lockedCatalog(entry: SidebarEntry): Model[] {
 		if (this.scoped) return [];
-		return this.registry.getAll("all").filter(model => model.provider === entry.providerId);
+		return this.#visibleModels(this.registry.getAll("all")).filter(model => model.provider === entry.providerId);
 	}
 
 	/** A strip chip's spans (`symbol` resolves glyphs: the theme's in the terminal). */
@@ -637,36 +637,42 @@ export class ModelHubState {
 		this.#version.update(v => v + 1);
 	}
 
+	#visibleModels(models: Model[]): Model[] {
+		const denied = this.source.disabledModel;
+		return denied ? models.filter(model => !denied(model)) : models;
+	}
+
 	#sync(): void {
 		const anchorIndex = this.#entries.findIndex(entry => entry.id === this.#activeEntryId);
 		const anchor = { id: this.#activeEntryId, index: anchorIndex, offset: anchorIndex - this.#sidebarScroll };
 		let allModels: ReadonlyArray<Model>;
 		let availableModels: ReadonlyArray<Model>;
-		if (this.scoped) {
+		if (this.#scopedModels) {
 			this.#configError = undefined;
 			try {
-				allModels = scopedRolePool(
-					this.#scopedModels.map(entry => entry.model),
-					this.registry,
+				allModels = this.#visibleModels(
+					scopedRolePool(
+						this.#scopedModels.map(entry => entry.model),
+						this.registry,
+					),
 				);
 			} catch (error) {
 				this.#configError = errorText(error);
-				allModels = this.#scopedModels.map(entry => entry.model);
+				allModels = this.#visibleModels(this.#scopedModels.map(entry => entry.model));
 			}
 			availableModels = allModels;
 		} else {
 			const loadError = this.registry.getError();
 			this.#configError = loadError ? String(loadError) : undefined;
-			allModels = this.registry.getAll("all");
+			allModels = this.#visibleModels(this.registry.getAll("all"));
 			try {
-				availableModels = this.registry.getAvailable("all");
+				availableModels = this.#visibleModels(this.registry.getAvailable("all"));
 			} catch (error) {
 				this.#configError = errorText(error);
 				availableModels = [];
 			}
 		}
-		const rolePool = this.scoped ? availableModels : this.registry.getAll("all");
-		this.#roles = resolveRoleAssignments(this.source, rolePool, availableModels);
+		this.#roles = resolveRoleAssignments(this.source, allModels, availableModels);
 		this.#buildRolesRows();
 
 		const mruOrder = this.source.mruOrder;
@@ -991,8 +997,7 @@ export class ModelHubState {
 	}
 
 	async #afterRegistryRefresh(providerId?: string): Promise<void> {
-		const scope = await this.callbacks.onCatalogRefreshed?.(providerId);
-		if (scope) this.#scopedModels = scope;
+		if (this.callbacks.onCatalogRefreshed) this.#scopedModels = await this.callbacks.onCatalogRefreshed(providerId);
 		this.#sync();
 	}
 
@@ -1032,7 +1037,7 @@ export class ModelHubState {
 
 	#roleForScope(role: string, scope: ModelRoleSelectionScope): ResolvedModelRoleValue {
 		const value = scope === "project" ? this.source.getProjectModelRole(role) : this.source.getGlobalModelRole(role);
-		const allModels = this.scoped
+		const allModels = this.#scopedModels
 			? scopedRolePool(
 					this.#scopedModels.map(entry => entry.model),
 					this.registry,
@@ -1044,7 +1049,7 @@ export class ModelHubState {
 					? (this.source.getProjectModelRole(other) ?? this.source.getGlobalModelRole(other))
 					: this.source.getGlobalModelRole(other),
 		};
-		return this.source.resolveRoleValue(value, allModels, lookup);
+		return this.source.resolveRoleValue(value, this.#visibleModels(allModels), lookup);
 	}
 
 	#thinkingLevelForScope(role: string, scope: ModelRoleSelectionScope): ConfiguredThinkingLevel {
@@ -1185,7 +1190,7 @@ export class ModelHubState {
 	/** Registry lookup (case-insensitive, alias-aware; signed-out providers too) of a fallback entry's model. */
 	#findFallbackModel(provider: string, id: string): ModelBrowserItem | undefined {
 		const model = this.registry.find(provider, id);
-		return model ? itemOf(model) : undefined;
+		return model && !this.source.disabledModel?.(model) ? itemOf(model) : undefined;
 	}
 
 	/** A chain entry's model, effort and `@upstream` routing (an exact literal id wins over routing). */

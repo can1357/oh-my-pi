@@ -64,13 +64,23 @@ function isPiNativeProgressEvent(event: unknown): boolean {
 	return event.type !== "start";
 }
 
-function buildWireOptions(options: SimpleStreamOptions | undefined): Record<string, unknown> {
-	if (!options) return {};
+function buildWireOptions(model: Model, options: SimpleStreamOptions | undefined): Record<string, unknown> {
 	const wire: Record<string, unknown> = {};
-	for (const [k, v] of Object.entries(options)) {
+	for (const [k, v] of Object.entries(options ?? {})) {
 		if (v === undefined) continue;
 		if (NON_WIRE_KEYS.has(k as keyof SimpleStreamOptions)) continue;
 		wire[k] = v;
+	}
+	if (model.api === "factory-droid-agent") {
+		// The gateway resolves its own model by ID. Carry the caller's model restrictions
+		// across that lookup; neither the caller nor the gateway can widen the other's list.
+		const targets = model.factoryDroidRefusalFallbacks;
+		const requested = options?.factoryDroidRefusalFallbacks;
+		if (options?.disableServerSideFallback) {
+			wire.factoryDroidRefusalFallbacks = [];
+		} else if (targets !== undefined) {
+			wire.factoryDroidRefusalFallbacks = requested ? targets.filter(id => requested.includes(id)) : targets;
+		}
 	}
 	return wire;
 }
@@ -189,7 +199,7 @@ export function streamPiNative<TApi extends Api>(
 			const body = JSON.stringify({
 				modelId: `${model.provider}/${model.id}`,
 				context,
-				options: buildWireOptions(options),
+				options: buildWireOptions(model, options),
 				stream: true,
 			});
 

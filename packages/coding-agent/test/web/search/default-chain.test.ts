@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { runSearchQuery, WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { SearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
@@ -128,6 +130,81 @@ describe("default web chain", () => {
 
 		expect(attempted).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
+
+	it("never searches through a session model that disabledModels denies after the session started", async () => {
+		const active = sessionModel("anthropic", "claude-sonnet-4-5");
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { disabledModels: ["anthropic/claude-sonnet-4-5"] } });
+
+		await runSearchQuery(
+			{ query: "anything", model: "web/hosted" },
+			{ authStorage, modelRegistry, sessionModel: active },
+		);
+
+		expect(attempted).toEqual(["anthropic/claude-haiku-4-5"]);
+	});
+
+	it("applies the owning session's disabledModels when its registry was built with other settings", async () => {
+		// The registry carries the process settings, which deny nothing; only the session denies the model.
+		const session: ToolSession = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({ disabledModels: ["anthropic/claude-sonnet-4-5"] }),
+			authStorage,
+			modelRegistry,
+			getActiveModel: () => sessionModel("anthropic", "claude-sonnet-4-5"),
+		};
+
+		await new WebSearchTool(session).execute("search-call", { query: "anything" });
+
+		expect(attempted).toContain("anthropic/claude-haiku-4-5");
+		expect(attempted).not.toContain("anthropic/claude-sonnet-4-5");
+	});
+
+	it.each(["x.com", "news.ycombinator.com"])("does not substitute site:%s for a denied web role", async site => {
+		const session = Settings.isolated({
+			disabledModels: ["openai/gpt-4o"],
+			modelRoles: { web: "openai/gpt-4o" },
+		});
+
+		const result = await runSearchQuery(
+			{ query: `site:${site} anything` },
+			{ authStorage, modelRegistry, settings: session },
+		);
+
+		expect(result.details.response.provider).toBe("none");
+		expect(attempted).toEqual([]);
+	});
+
+	it.each(["built-in backend", "extension hook"])(
+		"blocks the %s if the session denies the final model",
+		async target => {
+			const model = "anthropic/claude-sonnet-4-5";
+			const session = Settings.isolated();
+			const context = { authStorage, modelRegistry, settings: session };
+			const queries: string[] = [];
+			const search = async ({ query }: SearchParams): Promise<SearchResponse> => {
+				queries.push(query);
+				return { provider: "anthropic", sources: [{ title: "Guide", url: "https://example.org/guide" }] };
+			};
+			if (target === "extension hook") modelRegistry.registerProvider("anthropic", { webSearch: search });
+			else vi.spyOn(RecordingProvider.prototype, "search").mockImplementation(search);
+
+			await runSearchQuery({ model, query: "allowed" }, context);
+			vi.spyOn(RecordingProvider.prototype, "isAvailable").mockImplementationOnce(() => {
+				// Selection has finished. Only the owning session's settings change.
+				cfgDisabledModels.set(session, [model]);
+				return true;
+			});
+			const denied = await runSearchQuery({ model, query: "private" }, context);
+
+			expect(denied.details.response.provider).toBe("none");
+			expect(queries).toEqual(["allowed"]);
+			expect(attempted).toEqual([]);
+		},
+	);
 
 	it("skips web/hosted when the session model has no search grounding", async () => {
 		const realtime = sessionModel("openai", "gpt-realtime-2.1");

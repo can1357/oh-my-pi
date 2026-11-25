@@ -268,6 +268,39 @@ describe("model presets", () => {
 		expect(settings.getModelRoles()).toEqual({ default: SONNET, slow: SONNET });
 	});
 
+	it("does not escape an explicitly empty scope when a preset needs an automatic default", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "auto", { modelRoles: {} });
+		const session = createSession(settings, SONNET, Effort.High, { scopedModels: [] });
+		expect((await applyModelPreset(settings, session, "auto")).kind).toBe("unavailable");
+		expect(settings.getModelRole("default")).toBe(SONNET);
+		expect(session.model?.id).toBe(bundled(SONNET).id);
+	});
+
+	it("rejects a denied default before a preset writes roles or switches the live model", async () => {
+		const settings = Settings.isolated({ disabledModels: [OPUS] });
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "blocked", { modelRoles: { default: OPUS } });
+		const session = createSession(settings);
+		const result = await applyModelPreset(settings, session, "blocked");
+		expect(result.kind).toBe("unavailable");
+		if (result.kind === "unavailable") expect(result.reason).toContain(`disabledModels rule "${OPUS}"`);
+		expect(settings.getModelRole("default")).toBe(SONNET);
+		expect(session.model?.id).toBe(bundled(SONNET).id);
+	});
+
+	it("will not select a denied automatic default from an unfiltered candidate source", async () => {
+		const settings = Settings.isolated({ disabledModels: [OPUS] });
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "auto", { modelRoles: {} });
+		const session = createSession(settings);
+		vi.spyOn(session, "getAvailableModels").mockReturnValue([bundled(OPUS)]);
+		expect((await applyModelPreset(settings, session, "auto")).kind).toBe("unavailable");
+		expect(settings.getModelRole("default")).toBe(SONNET);
+		expect(session.model?.id).toBe(bundled(SONNET).id);
+	});
+
 	it("resolves allowlist aliases through the layer that will still own the role", async () => {
 		const settings = await projectSettings({
 			overlay: `enabledModels: ['@slow']\nmodelRoles:\n  slow: ${SONNET}\n`,
@@ -325,22 +358,25 @@ describe("model presets", () => {
 	const cerebras = "openrouter/z-ai/glm-4.7@cerebras";
 	const sambanova = "openrouter/z-ai/glm-4.7@sambanova";
 
-	it("rejects a preset pinned to an upstream outside enabledModels", async () => {
-		const settings = Settings.isolated({ enabledModels: [cerebras] });
-		settings.setModelRole("default", cerebras);
-		cfgModelPresets.setEntry(settings, "sambanova", { modelRoles: { default: sambanova } });
-		const session = createSession(settings);
-		const available = session.getAvailableModels();
-		expect(available.map(formatModelStringWithRouting)).toEqual([cerebras]);
-		await session.setModel(available[0]!);
+	it.each([{ disabledModels: [] }, { disabledModels: [OPUS] }])(
+		"rejects a preset pinned outside enabledModels with deny rules %j",
+		async ({ disabledModels }) => {
+			const settings = Settings.isolated({ enabledModels: [cerebras], disabledModels });
+			settings.setModelRole("default", cerebras);
+			cfgModelPresets.setEntry(settings, "sambanova", { modelRoles: { default: sambanova } });
+			const session = createSession(settings);
+			const available = session.getAvailableModels();
+			expect(available.map(formatModelStringWithRouting)).toEqual([cerebras]);
+			await session.setModel(available[0]!);
 
-		const result = await applyModelPreset(settings, session, "sambanova");
+			const result = await applyModelPreset(settings, session, "sambanova");
 
-		expect(result.kind).toBe("unavailable");
-		expect(settings.getModelRole("default")).toBe(cerebras);
-		expect(session.model && formatModelStringWithRouting(session.model)).toBe(cerebras);
-		expect(session.getAvailableModels().map(formatModelStringWithRouting)).toEqual([cerebras]);
-	});
+			expect(result.kind).toBe("unavailable");
+			expect(settings.getModelRole("default")).toBe(cerebras);
+			expect(session.model && formatModelStringWithRouting(session.model)).toBe(cerebras);
+			expect(session.getAvailableModels().map(formatModelStringWithRouting)).toEqual([cerebras]);
+		},
+	);
 
 	it("reports a failed live switch instead of success", async () => {
 		const settings = Settings.isolated();

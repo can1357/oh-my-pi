@@ -16,10 +16,11 @@ import { ToolError } from "./tool-errors";
 import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, logger, parseImageMetadata, prompt, ptree, truncate, untilAborted } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import { disabledModelRule } from "../config/disabled-models";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
-import { settings } from "../config/settings";
+import { type Settings, settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { journalCompletion } from "../session/model-usage-journal";
@@ -131,12 +132,21 @@ function resolveHostedImageCarrier(
 	modelRegistry: ModelRegistry,
 	selectedModel: Model,
 	activeModel: Model | undefined,
+	sessionSettings: Settings,
 ): Model | undefined {
-	if (activeModel?.provider === selectedModel.provider && activeModel.hostedImage) return activeModel;
+	// The carrier receives the request too, so one the session denies is never chosen.
+	if (
+		activeModel?.provider === selectedModel.provider &&
+		activeModel.hostedImage &&
+		disabledModelRule(activeModel, sessionSettings) === undefined
+	) {
+		return activeModel;
+	}
 	let carrier: Model | undefined;
 	let carrierInput = Infinity;
 	for (const model of modelRegistry.getAvailable()) {
 		if (model.provider !== selectedModel.provider || !model.hostedImage) continue;
+		if (disabledModelRule(model, sessionSettings) !== undefined) continue;
 		const input = getEffectiveTokenCost(model.cost).input;
 		if (!carrier || input < carrierInput) {
 			carrier = model;
@@ -263,6 +273,12 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			const failures: ProviderHttpError[] = [];
 			const skipped: string[] = [];
+			const skipIfDisabled = (candidate: Model): boolean => {
+				const rule = disabledModelRule(candidate, effectiveSettings);
+				if (rule === undefined) return false;
+				skipped.push(`${candidate.provider}/${candidate.id} (disabled by disabledModels rule "${rule}")`);
+				return true;
+			};
 			const offline = cfgOffline.get(effectiveSettings);
 			const activeProvider = ctx.model?.provider;
 			let inputImages: ImageGenerationRequest["inputImages"];
@@ -271,6 +287,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					skipped.push(`${model.provider}/${model.id} (offline provider restriction)`);
 					continue;
 				}
+				if (skipIfDisabled(model)) continue;
 				if (!isImageGenerationApi(model.api)) {
 					logger.warn("Skipping unsupported image model API", {
 						provider: model.provider,
@@ -294,7 +311,9 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 				let carrier: Model | undefined;
 				let apiKey = ctx.modelRegistry.resolver(model, sessionId);
 				if (model.api === "openai-responses" || model.api === "openai-codex-responses") {
-					carrier = model.hostedImage ? model : resolveHostedImageCarrier(ctx.modelRegistry, model, ctx.model);
+					carrier = model.hostedImage
+						? model
+						: resolveHostedImageCarrier(ctx.modelRegistry, model, ctx.model, effectiveSettings);
 					if (!carrier) {
 						skipped.push(`${model.provider}/${model.id} (hosted chat carrier unavailable)`);
 						continue;
@@ -317,6 +336,8 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						inputImages.push(await resolveInputImage(input, ctx.sessionManager.getCwd()));
 					}
 				}
+				// Credentials and input files load asynchronously. Recheck both recipients before dispatch.
+				if (skipIfDisabled(model) || (carrier && carrier !== model && skipIfDisabled(carrier))) continue;
 				const request: ImageGenerationRequest = {
 					prompt: assemblePrompt(params),
 					inputImages,

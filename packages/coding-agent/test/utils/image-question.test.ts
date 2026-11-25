@@ -1,8 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { Api, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { CostCapError, CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
@@ -88,6 +89,21 @@ describe("resolveImageQuestionModel offline mode", () => {
 		empty.getActiveModel = () => undefined;
 		expect(() => resolveImageQuestionModel(empty)).toThrow(/models\.offline/);
 	});
+});
+
+it("refuses a previously resolved image question model before looking up credentials", async () => {
+	const model = makeProxyModel("vision");
+	const session = makeSession(model, [model]);
+	const resolved = resolveImageQuestionModel(session);
+	const getApiKey = vi.fn(async () => "test-key");
+	session.modelRegistry!.getApiKey = getApiKey;
+	cfgDisabledModels.set(session.settings, ["myproxy/vision"]);
+
+	const image = { resolvedPath: "/x.png", mimeType: "image/png", data: "AAAA", textNote: "", bytes: 3 };
+	await expect(askImageQuestion(session, resolved, image, "what?", undefined)).rejects.toThrow(
+		'disabled by disabledModels rule "myproxy/vision"',
+	);
+	expect(getApiKey).not.toHaveBeenCalled();
 });
 
 describe("askImageQuestion cost cap", () => {

@@ -1,6 +1,5 @@
 import {
 	MAX_THINKING_SUFFIX_OPTIONS,
-	parseThinkingSuffix,
 	splitThinkingSuffix,
 	parseModelString,
 	splitUpstreamRouting,
@@ -66,6 +65,16 @@ import {
 import type { Settings } from "./settings";
 
 import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder } from "./model-settings";
+import {
+	type DisabledModelSelection,
+	disabledModelMatcher,
+	disabledModelRule,
+	disabledSelectorRule,
+	formatDisabledModelError,
+	NO_DISABLED_MODELS,
+	withoutDisabledModels,
+} from "./disabled-models";
+import { getOpenRouterFallbackModelIds, getOpenRouterRouteSuffix } from "./openrouter-model-ids";
 import { cfgRetryFallbackChains } from "../session/settings";
 
 function isKnownProvider(provider: string): provider is KnownProvider {
@@ -215,63 +224,13 @@ export function resolveExactModelIdentity(
 	if (literal) return literal;
 	const routing = splitUpstreamRouting(identity);
 	if (!routing) return findOpenRouterRouteVariant(identity, models);
+	const scoped = isAllowList(models);
+	const pool = scoped ? preferredRoutes(models, routing.upstream) : models;
 	const base =
-		models.find(model => formatModelString(model) === routing.base) ??
-		findOpenRouterRouteVariant(routing.base, models);
-	if (!base || !supportsUpstreamRouting(base)) return undefined;
+		pool.find(model => formatModelString(model) === routing.base) ?? findOpenRouterRouteVariant(routing.base, pool);
+	if (!base || !supportsUpstreamRouting(base) || (scoped && routeRank(base, routing.upstream) === 0)) return undefined;
 	const routed = applyUpstreamRouting(base, routing.upstream);
 	return formatModelStringWithRouting(routed) === identity ? routed : undefined;
-}
-
-function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
-	const colonIdx = modelId.lastIndexOf(":");
-	if (colonIdx === -1) {
-		return undefined;
-	}
-
-	const suffix = modelId.slice(colonIdx + 1).trim();
-	// `max` is a thinking-level suffix, never an OpenRouter route suffix, so
-	// `openrouter/<id>:max` falls through to the max-aware selector split instead of
-	// being cloned into a literal `<id>:max` model id with the reasoning level lost.
-	if (!suffix || parseThinkingSuffix(suffix, MAX_THINKING_SUFFIX_OPTIONS)) {
-		return undefined;
-	}
-
-	// `model@rev:free` can derive from `model@rev`; `model:free@host` must resolve its pin separately.
-	if (suffix.includes("@") && splitUpstreamRouting(modelId)) return undefined;
-	return { baseId: modelId.slice(0, colonIdx), suffix };
-}
-
-function stripOpenRouterDateSuffix(modelId: string): string | undefined {
-	const stripped = modelId.replace(/-\d{8}(?=$|:)/i, "");
-	return stripped !== modelId ? stripped : undefined;
-}
-
-function getOpenRouterFallbackModelIds(modelId: string): string[] {
-	const orderedCandidates: string[] = [];
-	const queue = [modelId];
-	const seen = new Set<string>();
-
-	while (queue.length > 0) {
-		const candidate = queue.shift();
-		if (!candidate || seen.has(candidate)) {
-			continue;
-		}
-		seen.add(candidate);
-		orderedCandidates.push(candidate);
-
-		const routedSuffix = getOpenRouterRouteSuffix(candidate);
-		if (routedSuffix) {
-			queue.push(routedSuffix.baseId);
-		}
-
-		const strippedDate = stripOpenRouterDateSuffix(candidate);
-		if (strippedDate) {
-			queue.push(strippedDate);
-		}
-	}
-
-	return orderedCandidates;
 }
 
 function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Model<Api> {
@@ -386,6 +345,12 @@ function markAllowList(allowed: Model<Api>[]): Model<Api>[] {
 
 function isAllowList(models: readonly Model<Api>[]): boolean {
 	return (models as AllowList)[kAllowList] === true;
+}
+
+/** Filtering a scoped pool must not turn its allowed routes back into an unrestricted catalog. */
+function allowedModelCandidates(candidates: Model<Api>[], settings: Settings | undefined): Model<Api>[] {
+	const allowed = withoutDisabledModels(candidates, settings);
+	return allowed !== candidates && isAllowList(candidates) ? markAllowList(allowed) : allowed;
 }
 
 /** An explicit session or startup scope as an allow-list. */
@@ -1604,6 +1569,12 @@ export interface ResolvedModelRoleValue {
 	matchedPatternIndex?: number;
 	explicitThinkingLevel: boolean;
 	warning: string | undefined;
+	/**
+	 * First configured pattern that named a `disabledModels` model. Denied patterns are
+	 * skipped like unavailable ones; when no later pattern resolves, callers MUST refuse
+	 * with this rule instead of substituting another model.
+	 */
+	disabledModel?: DisabledModelSelection;
 }
 
 function toResolvedRoleValue(
@@ -1649,7 +1620,7 @@ export function resolveImplicitDefaultRole(
 
 export function resolveModelRoleValue(
 	roleValue: string | undefined,
-	availableModels: Model<Api>[],
+	candidateModels: Model<Api>[],
 	options?: { settings?: Settings; roleLookup?: ModelRoleLookup; matchPreferences?: ModelMatchPreferences },
 ): ResolvedModelRoleValue {
 	if (!roleValue) {
@@ -1667,13 +1638,31 @@ export function resolveModelRoleValue(
 	}
 
 	let warning: string | undefined;
+	let disabledModel: DisabledModelSelection | undefined;
 	const matchPreferences = mergeModelMatchPreferences(options?.settings, options?.matchPreferences);
+	// The session's own `disabledModels` narrows the candidates first, so a list from a
+	// registry built with other settings still resolves to an allowed exact match.
+	const availableModels = allowedModelCandidates(candidateModels, options?.settings);
 	// Build the O(n) preference context (model-order map over all available
 	// models) once and reuse it across every fallback pattern instead of
 	// rebuilding it per pattern inside parseModelPattern.
 	const preferenceContext = buildPreferenceContext(availableModels, matchPreferences);
 	for (const [patternIndex, effectivePattern] of effectivePatterns.entries()) {
+		// A pattern naming a denied model is unavailable, even when fuzzy matching
+		// over the (already deny-filtered) list would find a different sibling.
+		const denied = disabledSelectorRule(effectivePattern, options?.settings, availableModels, candidateModels);
+		if (denied) {
+			disabledModel ??= denied;
+			continue;
+		}
 		const resolved = matchPatternWithContext(effectivePattern, availableModels, preferenceContext);
+		// The candidate list may come from a registry whose settings differ from the
+		// caller's (an SDK-supplied registry), so the resolved model is checked too.
+		const resolvedRule = resolved.model ? disabledModelRule(resolved.model, options?.settings) : undefined;
+		if (resolved.model && resolvedRule !== undefined) {
+			disabledModel ??= { label: formatModelString(resolved.model), rule: resolvedRule };
+			continue;
+		}
 		if (resolved.model) {
 			return toResolvedRoleValue(resolved.model, resolved, patternIndex);
 		}
@@ -1682,6 +1671,15 @@ export function resolveModelRoleValue(
 		}
 	}
 
+	if (disabledModel) {
+		return {
+			model: undefined,
+			thinkingLevel: undefined,
+			explicitThinkingLevel: false,
+			warning: formatDisabledModelError(disabledModel.label, disabledModel.rule),
+			disabledModel,
+		};
+	}
 	return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning };
 }
 
@@ -1785,7 +1783,11 @@ export interface RoleChainCandidate {
 	replaces?: string;
 }
 
-/** Resolve a role's primary and retry candidates in effective attempt order. */
+/**
+ * Resolve a role's primary and retry candidates in effective attempt order. A configured
+ * role that resolves only to `disabledModels` models yields no candidates: the role is
+ * refused (the rule is logged), never replaced by its fallbacks or built-in defaults.
+ */
 export function resolveRoleChain(role: string, settings: Settings, pool: Model<Api>[]): RoleChainCandidate[] {
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
@@ -1802,8 +1804,14 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 	// First explicitly configured provider-qualified selector that resolved to
 	// nothing; the next candidate carries it so callers can say what replaced it.
 	let unresolvedExplicit: string | undefined;
-	for (const { selector, explicit } of selectors) {
+	for (const [index, { selector, explicit }] of selectors.entries()) {
 		const resolved = resolveModelRoleValue(selector, pool, { settings });
+		if (index === 0 && explicit && !resolved.model && resolved.disabledModel) {
+			logger.warn(`Model role "${role}" refused`, {
+				reason: formatDisabledModelError(resolved.disabledModel.label, resolved.disabledModel.rule),
+			});
+			return [];
+		}
 		// An explicit value that resolved nothing, or a list that matched on a later
 		// entry, skipped expanded patterns (role aliases included): record the first
 		// provider-qualified one among them.
@@ -1842,20 +1850,29 @@ export function resolveModelOverride(
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
 	options?: { exactOnly?: boolean },
-): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
+): {
+	model?: Model<Api>;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	explicitThinkingLevel: boolean;
+	warning?: string;
+	/** Set when no pattern resolved and one named a `disabledModels` model (see {@link ResolvedModelRoleValue}). */
+	disabledModel?: DisabledModelSelection;
+} {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
-	const availableModels = modelRegistry.getAvailable();
+	const catalog = modelRegistry.getAvailable();
 	if (options?.exactOnly) {
-		const find = (selector: string) =>
-			availableModels.find(model => `${model.provider}/${model.id}` === selector) ??
-			findOpenRouterRouteVariant(selector, availableModels);
-		const exact = (selector: string) => {
+		const availableModels = allowedModelCandidates(catalog, settings);
+		const scoped = isAllowList(availableModels);
+		const defaultPool = scoped ? preferredRoutes(availableModels, undefined) : availableModels;
+		const find = (selector: string, pool: Model<Api>[]) =>
+			pool.find(model => `${model.provider}/${model.id}` === selector) ?? findOpenRouterRouteVariant(selector, pool);
+		const exact = (selector: string, pool = defaultPool) => {
 			// Some real ids end in a level-shaped segment, so the literal id wins over a suffix split.
-			const literal = find(selector);
+			const literal = find(selector, pool);
 			if (literal) return { model: literal, explicitThinkingLevel: false };
 			const { base, level } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
 			if (!level) return undefined;
-			const model = find(base);
+			const model = find(base, pool);
 			if (!model) return undefined;
 			return {
 				model,
@@ -1864,37 +1881,64 @@ export function resolveModelOverride(
 				explicitThinkingLevel: true,
 			};
 		};
+		let disabledModel: DisabledModelSelection | undefined;
 		for (const pattern of modelPatterns) {
 			const selector = pattern.trim();
+			// Exact selection still honors the caller's `disabledModels`, whatever the registry's settings.
+			const denied = disabledSelectorRule(selector, settings, availableModels, catalog);
+			if (denied) {
+				disabledModel ??= denied;
+				continue;
+			}
 			const direct = exact(selector);
 			if (direct) return direct;
 			// The pin is part of the selection: it rides the resolved model to dispatch.
 			const routing = splitUpstreamRouting(selector);
-			const routed = routing ? exact(routing.base) : undefined;
-			if (routing && routed && supportsUpstreamRouting(routed.model)) {
+			if (!routing) continue;
+			const pool = scoped ? preferredRoutes(availableModels, routing.upstream) : availableModels;
+			const routed = exact(routing.base, pool);
+			if (
+				routed &&
+				supportsUpstreamRouting(routed.model) &&
+				(!scoped || routeRank(routed.model, routing.upstream) > 0)
+			) {
 				return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream) };
 			}
 		}
-		return { explicitThinkingLevel: false };
+		return disabledModel
+			? {
+					explicitThinkingLevel: false,
+					warning: formatDisabledModelError(disabledModel.label, disabledModel.rule),
+					disabledModel,
+				}
+			: { explicitThinkingLevel: false };
 	}
 	const matchPreferences = getModelMatchPreferences(settings);
 	let warning: string | undefined;
+	let disabledModel: DisabledModelSelection | undefined;
 	for (const pattern of modelPatterns) {
-		const {
-			model,
-			thinkingLevel,
-			explicitThinkingLevel,
-			warning: patternWarning,
-		} = resolveModelRoleValue(pattern, availableModels, {
+		const resolved = resolveModelRoleValue(pattern, catalog, {
 			settings,
 			matchPreferences,
 		});
-		if (model) {
-			return { model, thinkingLevel, explicitThinkingLevel, warning: patternWarning };
+		if (resolved.model) {
+			return {
+				model: resolved.model,
+				thinkingLevel: resolved.thinkingLevel,
+				explicitThinkingLevel: resolved.explicitThinkingLevel,
+				warning: resolved.warning,
+			};
 		}
-		if (!warning && patternWarning) warning = patternWarning;
+		disabledModel ??= resolved.disabledModel;
+		if (!warning && resolved.warning) warning = resolved.warning;
 	}
-	return { explicitThinkingLevel: false, warning };
+	return disabledModel
+		? {
+				explicitThinkingLevel: false,
+				warning: formatDisabledModelError(disabledModel.label, disabledModel.rule),
+				disabledModel,
+			}
+		: { explicitThinkingLevel: false, warning };
 }
 
 /**
@@ -2027,22 +2071,26 @@ export async function resolveModelOverrideWithAuthFallback(
 	explicitThinkingLevel: boolean;
 	authFallbackUsed: boolean;
 	warning?: string;
+	/** Set when no pattern resolved and one named a `disabledModels` model; callers MUST refuse with it. */
+	disabledModel?: DisabledModelSelection;
 }> {
 	const disabledProviders = disabledProviderIds(settings);
 	let lookupRegistry: ModelLookupRegistry = modelRegistry;
 	if (disabledProviders.size > 0 || options?.allowedProvider !== undefined) {
-		const enabledModels = modelRegistry
-			.getAvailable()
-			.filter(
-				model =>
-					!disabledProviders.has(model.provider) &&
-					(options?.allowedProvider === undefined || model.provider === options.allowedProvider),
-			);
+		const catalog = modelRegistry.getAvailable();
+		const enabledModels = catalog.filter(
+			model =>
+				!disabledProviders.has(model.provider) &&
+				(options?.allowedProvider === undefined || model.provider === options.allowedProvider),
+		);
+		if (isAllowList(catalog)) markAllowList(enabledModels);
 		lookupRegistry = { getAvailable: () => enabledModels };
 	}
 	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings, options);
+	if (primary.disabledModel) return { ...primary, authFallbackUsed: false };
 	if (!primary.model && options?.allowedProvider !== undefined && parentActiveModelPattern && !options.exactOnly) {
 		const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
+		if (fallback.disabledModel) return { ...fallback, authFallbackUsed: false };
 		if (fallback.model) return { ...fallback, authFallbackUsed: true };
 	}
 	if (!primary.model || !parentActiveModelPattern) {
@@ -2080,7 +2128,8 @@ export async function resolveModelOverrideWithAuthFallback(
 }
 
 /**
- * Resolve a list of role patterns to the first matching model.
+ * Resolve a list of role patterns to the first matching model. A configured role that
+ * resolves only to `disabledModels` models ends the walk: later roles never stand in for it.
  */
 export function resolveRoleSelection(
 	roles: readonly string[],
@@ -2095,6 +2144,12 @@ export function resolveRoleSelection(
 		});
 		if (resolved.model) {
 			return { role, model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+		}
+		if (resolved.disabledModel) {
+			logger.warn(`Model role "${role}" refused`, {
+				reason: formatDisabledModelError(resolved.disabledModel.label, resolved.disabledModel.rule),
+			});
+			return undefined;
 		}
 	}
 	return undefined;
@@ -2136,11 +2191,13 @@ export async function resolveModelScope(
 	preferences?: ModelMatchPreferences,
 	settings?: Settings,
 ): Promise<ScopedModel[]> {
-	const availableModels = modelRegistry.getAvailable();
+	const catalog = modelRegistry.getAvailable();
+	const availableModels = allowedModelCandidates(catalog, settings);
 	const matchPreferences = mergeModelMatchPreferences(settings, preferences);
 	const context = buildPreferenceContext(availableModels, matchPreferences);
 	const scopedModels: ScopedModel[] = [];
 	const addScopedModel = (model: Model<Api>, thinkingLevel: ThinkingLevel | undefined, explicit: boolean) => {
+		if (disabledModelRule(model, settings) !== undefined) return;
 		if (scopedModels.some(sm => routedModelsAreEqual(sm.model, model))) return;
 		scopedModels.push({
 			model,
@@ -2194,7 +2251,7 @@ export async function resolveModelScope(
 		// entry exactly like `--model` would pick. (Bare `*` stays a match-all
 		// glob above; scope semantics, not the default-role alias.)
 		if (settings && modelRoleAliasPrefixLength(pattern) !== undefined) {
-			const resolved = resolveModelRoleValue(pattern, availableModels, { settings, matchPreferences: preferences });
+			const resolved = resolveModelRoleValue(pattern, catalog, { settings, matchPreferences: preferences });
 			if (resolved.warning) logger.warn(resolved.warning);
 			if (!resolved.model) {
 				logger.warn(`No models match pattern "${pattern}"`);
@@ -2208,6 +2265,13 @@ export async function resolveModelScope(
 			continue;
 		}
 
+		// A scope entry naming a denied model contributes nothing; fuzzy matching over
+		// the deny-filtered list must not widen it to a sibling the user never listed.
+		const denied = disabledSelectorRule(pattern, settings, availableModels, catalog);
+		if (denied) {
+			logger.warn(formatDisabledModelError(denied.label, denied.rule));
+			continue;
+		}
 		const { model, thinkingLevel, warning, explicitThinkingLevel } = matchPatternWithContext(
 			pattern,
 			availableModels,
@@ -2252,7 +2316,9 @@ export async function resolveAllowedModels(
 	settings: Settings | undefined,
 	preferences?: ModelMatchPreferences,
 ): Promise<Model<Api>[]> {
-	const available = modelRegistry.getAvailable();
+	// The session's own `disabledModels` applies even when the registry was built
+	// with different settings (an SDK-supplied registry).
+	const available = allowedModelCandidates(modelRegistry.getAvailable(), settings);
 	const patterns = settings ? cfgEnabledModels.get(settings) : undefined;
 	if (!patterns || patterns.length === 0) {
 		return available;
@@ -2286,17 +2352,20 @@ export async function resolveAllowedModels(
  * surfaces the same misconfiguration during session initialization.
  */
 export function filterAvailableModelsByEnabledPatterns(
-	available: Model<Api>[],
+	allAvailable: Model<Api>[],
 	patterns: readonly string[],
 	settings?: Settings,
 	roleLookup?: ModelRoleLookup,
 ): Model<Api>[] {
+	// The session's own `disabledModels` applies even when the list came from a
+	// registry built with different settings (an SDK-supplied registry).
+	const available = allowedModelCandidates(allAvailable, settings);
 	if (patterns.length === 0) return available;
 
 	const context = buildPreferenceContext(available, getModelMatchPreferences(settings));
 	const allowedModels: Model<Api>[] = [];
 	const addAllowed = (model: Model<Api>) => {
-		allowedModels.push(model);
+		if (disabledModelRule(model, settings) === undefined) allowedModels.push(model);
 	};
 
 	for (const pattern of patterns) {
@@ -2309,11 +2378,14 @@ export function filterAvailableModelsByEnabledPatterns(
 
 		// Mirror resolveModelScope: role aliases resolve to the role's model.
 		if ((roleLookup || settings) && modelRoleAliasPrefixLength(pattern) !== undefined) {
-			const { model } = resolveModelRoleValue(pattern, available, { settings, roleLookup });
+			const { model } = resolveModelRoleValue(pattern, allAvailable, { settings, roleLookup });
 			if (model) addAllowed(model);
 			continue;
 		}
 
+		// An allow entry naming a denied model allows nothing; fuzzy matching over the
+		// deny-filtered list must not widen it to a sibling the user never listed.
+		if (disabledSelectorRule(pattern, settings, available, allAvailable)) continue;
 		const { model } = matchPatternWithContext(pattern, available, context);
 		if (model) {
 			addAllowed(model);
@@ -2376,6 +2448,8 @@ export interface ResolveCliModelResult {
 	 * instead of deferring it to a later resolution pass.
 	 */
 	disabledProvider?: string;
+	/** `disabledModels` rule the selector hit. Set only alongside `error`; callers refuse outright. */
+	disabledModel?: DisabledModelSelection;
 }
 
 /** Inputs accepted by {@link resolveCliModel}. */
@@ -2413,6 +2487,54 @@ interface CliModelScope {
  * failed, to report which disabled provider the selector wanted.
  */
 export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult {
+	// `disabledModels` refuses an explicit pin outright, naming the rule: first when the
+	// selector itself names a denied model (a bare id would otherwise fuzzy-match an allowed
+	// sibling over the deny-filtered list), then when it resolved to one (role names).
+	const { cliProvider, cliModel, settings } = options;
+	// Skip the catalog read entirely when no rule is set: an empty list must cost nothing.
+	if (cliModel && disabledModelMatcher(settings) !== NO_DISABLED_MODELS) {
+		const trimmed = cliModel.trim();
+		const catalog = options.availableModels ?? options.modelRegistry.getAvailable();
+		const available = allowedModelCandidates(catalog, settings);
+		const named = disabledSelectorRule(
+			cliProvider ? `${cliProvider}/${trimmed}` : trimmed,
+			settings,
+			available,
+			catalog,
+		);
+		if (named) {
+			// A supplied registry may still list the denied row. Name its concrete provider when known.
+			const row =
+				!cliProvider &&
+				catalog.find(
+					model =>
+						model.id.toLowerCase() === named.label.toLowerCase() &&
+						disabledModelRule(model, settings) === named.rule,
+				);
+			return disabledCliModelResult(row ? { ...named, label: formatModelString(row) } : named, undefined);
+		}
+		options = { ...options, availableModels: available };
+	}
+	const result = resolveCliModelHonoringProviders(options);
+	const resolvedRule = result.model ? disabledModelRule(result.model, settings) : undefined;
+	if (result.model && resolvedRule !== undefined) {
+		return disabledCliModelResult({ label: formatModelString(result.model), rule: resolvedRule }, result.warning);
+	}
+	return result;
+}
+
+function disabledCliModelResult(denied: DisabledModelSelection, warning: string | undefined): ResolveCliModelResult {
+	return {
+		model: undefined,
+		selector: undefined,
+		thinkingLevel: undefined,
+		warning,
+		error: formatDisabledModelError(denied.label, denied.rule),
+		disabledModel: denied,
+	};
+}
+
+function resolveCliModelHonoringProviders(options: CliModelOptions): ResolveCliModelResult {
 	const { cliProvider, cliModel, modelRegistry, settings, availableModels: preferredModels } = options;
 
 	if (!cliModel) {
@@ -2675,6 +2797,7 @@ function resolveCliModelInScope(
 				};
 			}
 			if (configuredPatterns && configuredPatterns.length > 0) {
+				const denied = availableResolved.disabledModel ?? resolved.disabledModel;
 				return {
 					model: undefined,
 					configuredPatterns,
@@ -2682,7 +2805,10 @@ function resolveCliModelInScope(
 					selector: undefined,
 					thinkingLevel: undefined,
 					warning: resolved.warning,
-					error: `Model "${trimmedModel}" not found. Run "omp models" to see available models.`,
+					error: denied
+						? formatDisabledModelError(denied.label, denied.rule)
+						: `Model "${trimmedModel}" not found. Run "omp models" to see available models.`,
+					disabledModel: denied,
 				};
 			}
 		}

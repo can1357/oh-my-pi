@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, vi } from "bun:test";
 import { type Api, type FetchImpl, type Model, type OAuthAccess, streamSimple } from "@oh-my-pi/pi-ai";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -49,6 +49,27 @@ test("dry-balance resolves configured bare role names", async () => {
 
 	expect(summary.model).toBe("acme/balance-model");
 	expect(summary.success.total).toBe(1);
+});
+
+test("dry-balance refuses a denied default without sampling a different account", async () => {
+	const models = [fakeModel("acme", "blocked"), fakeModel("acme", "available")];
+	const access = vi.fn(async () => undefined);
+	const registry: DryBalanceModelRegistry = {
+		authStorage: { oauth: { access, accessAll: async () => [], accessById: async () => undefined } },
+		getAll: () => models,
+		getAvailable: () => models,
+		getApiKey: async () => "test-token",
+	};
+	const settings = Settings.isolated({ modelRoles: { default: "acme/blocked" }, disabledModels: ["acme/blocked"] });
+	await expect(
+		runDryBalanceCommand(
+			{ flags: { count: 1, json: true } },
+			{
+				createRuntime: async () => ({ modelRegistry: registry, settings }),
+			},
+		),
+	).rejects.toThrow(/disabledModels.*acme\/blocked/);
+	expect(access).not.toHaveBeenCalled();
 });
 
 const openRouterModel = "openrouter/z-ai/glm-4.7";

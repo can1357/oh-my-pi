@@ -12,6 +12,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../../config/auxiliary-model-policy";
+import { disabledModelRule } from "../../config/disabled-models";
 import { ModelRegistry } from "../../config/model-registry";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
 import { roleCandidatePool } from "../../config/model-roles";
@@ -170,6 +171,7 @@ interface ExecuteSearchOptions {
 	sessionId?: string;
 	/** The session's active model; `web/hosted` searches through it. */
 	sessionModel?: Model<Api>;
+	/** The owning session's settings: its web role, `disabledModels` and limits. Defaults to the process settings. */
 	settings?: Settings;
 	signal?: AbortSignal;
 	/** Session journal each provider response's usage is billed to; unjournaled when omitted. */
@@ -223,11 +225,15 @@ function expandHostedCandidate(
 	candidate: RoleChainCandidate,
 	sessionModel: Model<Api> | undefined,
 	pool: Model<Api>[],
+	searchSettings: Settings,
 ): RoleChainCandidate[] {
 	if (!isHostedPlaceholder(candidate.model) || !sessionModel) return [candidate];
 	const swap = resolveConfiguredModelTarget(sessionModel.webSearchModel, sessionModel, pool);
 	const distinctSwap = swap?.provider === sessionModel.provider && swap.id === sessionModel.id ? undefined : swap;
-	const models = [distinctSwap, sessionModel].filter((model): model is Model<Api> => !!model?.webSearch);
+	// The session model is not drawn from the filtered pool, so disabledModels may deny it.
+	const models = [distinctSwap, sessionModel].filter(
+		(model): model is Model<Api> => !!model?.webSearch && disabledModelRule(model, searchSettings) === undefined,
+	);
 	if (models.length === 0) return [candidate];
 	return models.map(model => ({ ...candidate, model }));
 }
@@ -247,6 +253,13 @@ function preferXAI(
 	return [...xaiModelChain(modelRegistry, activeSettings).map(model => ({ model, explicit: false })), ...chain];
 }
 
+/** A site-specific engine must not replace a refused web role. */
+function webRoleRefused(candidates: RoleChainCandidate[], searchSettings: Settings, pool: Model<Api>[]): boolean {
+	if (candidates.length > 0 || !Object.hasOwn(searchSettings.getModelRoles(), "web")) return false;
+	const resolved = resolveModelRoleValue(searchSettings.getModelRole("web"), pool, { settings: searchSettings });
+	return resolved.model === undefined && resolved.disabledModel !== undefined;
+}
+
 function isHackerNewsEngine(model: Model<Api>): boolean {
 	return model.provider === "web" && model.id === "hackernews";
 }
@@ -255,10 +268,15 @@ function isHackerNewsEngine(model: Model<Api>): boolean {
  * Move the chain's `web/hackernews` candidate to the front, or prepend the
  * pool's as an automatic candidate when the chain has none.
  */
-function preferHackerNews(chain: RoleChainCandidate[], pool: Model<Api>[]): RoleChainCandidate[] {
+function preferHackerNews(
+	chain: RoleChainCandidate[],
+	pool: Model<Api>[],
+	activeSettings: Settings,
+): RoleChainCandidate[] {
 	const listed = chain.filter(candidate => isHackerNewsEngine(candidate.model));
 	if (listed.length > 0) return [...listed, ...chain.filter(candidate => !isHackerNewsEngine(candidate.model))];
 	const model = pool.find(isHackerNewsEngine);
+	if (model && disabledModelRule(model, activeSettings) !== undefined) return chain;
 	return model ? [{ model, explicit: false }, ...chain] : chain;
 }
 
@@ -284,17 +302,20 @@ async function executeSearch(
 		: resolveRoleChain("web", activeSettings, pool);
 	const parsedQuery = parseSearchQuery(params.query);
 	let expanded = rankXAIProviders(
-		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool)),
+		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool, activeSettings)),
 		candidate => candidate.model,
 		activeSettings,
 	);
-	// Only xAI reaches X posts; X-only queries try it first even when the role prefers another engine.
-	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry, activeSettings);
-	// General engines index HN threads sparsely and late; a query whose every
-	// `site:` is Hacker News (with or without a path) tries the HN Search API first.
-	const hnOnly =
-		parsedQuery.sites.length > 0 && parsedQuery.sites.every(site => site.split("/", 1)[0] === "news.ycombinator.com");
-	if (!params.model && hnOnly) expanded = preferHackerNews(expanded, pool);
+	if (!params.model && !webRoleRefused(candidates, activeSettings, pool)) {
+		// Only xAI reaches X posts; general engines index HN threads sparsely and late.
+		if (targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry, activeSettings);
+		if (
+			parsedQuery.sites.length > 0 &&
+			parsedQuery.sites.every(site => site.split("/", 1)[0] === "news.ycombinator.com")
+		) {
+			expanded = preferHackerNews(expanded, pool, activeSettings);
+		}
+	}
 
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
@@ -383,6 +404,8 @@ async function executeSearch(
 					`${provider.label} web search is unavailable. Configure its credentials or select the automatic provider chain.`,
 				);
 			}
+			// Availability can yield to a settings edit. Neither the extension nor the backend may receive a denied query.
+			if (disabledModelRule(model, activeSettings) !== undefined) continue;
 			availableProviderCount++;
 			lastProvider = provider;
 
@@ -655,6 +678,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchResul
 			modelRegistry: ctx.modelRegistry,
 			sessionId,
 			sessionModel: ctx.model,
+			settings: ctx.settings,
 			signal,
 		});
 	},

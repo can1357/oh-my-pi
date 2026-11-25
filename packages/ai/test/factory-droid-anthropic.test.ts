@@ -4,6 +4,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamAnthropic } from "../src/providers/anthropic";
 import { streamFactoryDroid } from "../src/providers/factory-droid";
+import { encodeStream, parseRequest } from "../src/providers/pi-native-server";
 import { streamSimple } from "../src/stream";
 import type {
 	AnthropicFallbackCreditHandle,
@@ -154,6 +155,42 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		const betas = request.headers["anthropic-beta"] ?? "";
 		expect(betas.includes("server-side-fallback-2026-06-01")).toBe(!disabled);
 		expect(betas.includes("fallback-credit-2026-06-01")).toBe(!disabled);
+	});
+
+	it.each([
+		{ client: [], gateway: undefined, requested: ["claude-opus-5"], disabled: false, offered: false },
+		{ client: ["claude-opus-5"], gateway: [], requested: ["claude-opus-5"], disabled: false, offered: false },
+		{ client: ["claude-opus-5"], gateway: undefined, requested: [], disabled: false, offered: false },
+		{ client: undefined, gateway: undefined, requested: undefined, disabled: true, offered: false },
+		{ client: ["claude-opus-5"], gateway: undefined, requested: undefined, disabled: false, offered: true },
+	])("intersects the pi-native client, request and gateway refusal targets: %p", async row => {
+		const client = factoryModel("claude-fable-5", ["anthropic"]);
+		client.factoryDroidRefusalFallbacks = row.client?.slice();
+		const gateway = factoryModel("claude-fable-5", ["anthropic"]);
+		gateway.factoryDroidRefusalFallbacks = row.gateway?.slice();
+		const captured: CapturedRequest[] = [];
+		const result = await streamSimple(
+			{ ...client, transport: "pi-native", baseUrl: "http://gateway.test" },
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: "test-gateway-token",
+				factoryDroidRefusalFallbacks: row.requested,
+				disableServerSideFallback: row.disabled,
+				fetch: async (_url, init) => {
+					const { context, options } = parseRequest(JSON.parse(String(init?.body)));
+					const upstream = streamSimple(gateway, context, {
+						...options,
+						apiKey: WORKOS_TOKEN,
+						fetch: captureFetch(captured, anthropicChunks("OK")),
+					});
+					return new Response(encodeStream(upstream), { headers: { "Content-Type": "text/event-stream" } });
+				},
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(captured).toHaveLength(1);
+		expect(captured[0]!.body.fallbacks).toEqual(row.offered ? [{ model: "claude-opus-5" }] : undefined);
+		expect((captured[0]!.headers["anthropic-beta"] ?? "").includes("server-side-fallback")).toBe(row.offered);
 	});
 
 	it("offers Opus 5.5's refusal fallback on Anthropic only while the account can run it", async () => {

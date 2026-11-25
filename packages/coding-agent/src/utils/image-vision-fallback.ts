@@ -26,6 +26,8 @@ import { isEnoent, logger, prompt, toError, untilAborted } from "@oh-my-pi/pi-ut
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { extractTextContent } from "../commit/utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import { disabledModelRule, disabledSelectorRule, withoutDisabledModels } from "../config/disabled-models";
+import { withDisabledModelFallbackPolicy } from "../config/model-fallback-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	expandRoleAlias,
@@ -136,16 +138,22 @@ function formatImageBlock(localUrl: string, description: string): string {
  * Offline mode (`models.offline`) keeps every candidate on the active model's provider.
  */
 function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | undefined {
-	const available = cfgOffline.get(deps.settings)
-		? deps.modelRegistry.getAvailableForProviders(new Set([deps.activeModel.provider]))
-		: deps.modelRegistry.getAvailable();
+	const available = withoutDisabledModels(
+		cfgOffline.get(deps.settings)
+			? deps.modelRegistry.getAvailableForProviders(new Set([deps.activeModel.provider]))
+			: deps.modelRegistry.getAvailable(),
+		deps.settings,
+	);
 	if (available.length === 0) return undefined;
 	const preferences = getModelMatchPreferences(deps.settings);
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
 		const expanded = expandRoleAlias(pattern, deps.settings);
+		if (disabledSelectorRule(expanded, deps.settings, available)) return undefined;
 		const model = resolveModelFromString(expanded, available, preferences);
-		return model && sendsImageInputOnWire(model) ? model : undefined;
+		return model && sendsImageInputOnWire(model) && disabledModelRule(model, deps.settings) === undefined
+			? model
+			: undefined;
 	};
 	const preferred = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(deps.activeModelString);
 	if (preferred) return preferred;
@@ -181,7 +189,7 @@ async function describeImage(
 	const journal = journalCompletion(deps.usageLedger, { purpose: "image-describe", usageOnly: true });
 	try {
 		const response = await instrumentedCompleteSimple(
-			visionModel,
+			withDisabledModelFallbackPolicy(visionModel, deps.settings),
 			{
 				systemPrompt: [prompt.render(describeSystemPrompt)],
 				messages: [
@@ -240,7 +248,11 @@ async function createImageDescriber(deps: DescribeAttachedImagesDeps): Promise<I
 	const visionModel = resolveVisionModel(deps);
 	const apiKey = visionModel ? await deps.modelRegistry.getApiKey(visionModel, deps.sessionId) : undefined;
 	const telemetry = resolveTelemetry(deps.telemetryConfig, deps.sessionId);
-	const canRequest = () => Boolean(visionModel && apiKey) && !deps.costGate?.check();
+	const canRequest = () =>
+		!!visionModel &&
+		!!apiKey &&
+		disabledModelRule(visionModel, deps.settings) === undefined &&
+		!deps.costGate?.check();
 	const describe = async (image: ImageContent, signal?: AbortSignal): Promise<ImageDescription> => {
 		const localUrl = await saveImage(image, localRoot);
 		// Kept beside the saved image, so a resumed session does not pay for the description again.
@@ -258,7 +270,7 @@ async function createImageDescriber(deps: DescribeAttachedImagesDeps): Promise<I
 					: NO_VISION_MODEL_NOTE;
 			return { text: formatImageBlock(localUrl, note), outcome: "unrequested" };
 		}
-		if (deps.costGate?.check()) {
+		if (!canRequest()) {
 			return { text: formatImageBlock(localUrl, DESCRIPTION_UNAVAILABLE_NOTE), outcome: "unrequested" };
 		}
 		const description = await describeImage(image, visionModel, deps, telemetry, signal);

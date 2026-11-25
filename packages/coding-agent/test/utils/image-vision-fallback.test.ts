@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Api, AssistantMessage, Context, completeSimple, Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, type Context, completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import type { ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ImageDescriptions,
@@ -15,6 +16,13 @@ import {
 import { CostGate } from "@oh-my-pi/pi-coding-agent/session/cost-gate";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import {
+	anthropicChunks,
+	type CapturedRequest,
+	captureFetch,
+	factoryModel,
+	WORKOS_TOKEN,
+} from "../../../ai/test/helpers/factory-droid";
 
 // 1x1 transparent PNG.
 const TINY_PNG_BASE64 =
@@ -372,6 +380,50 @@ describe("ImageDescriptions", () => {
 			],
 		};
 	}
+
+	it("offers neither a denied vision model nor a denied Factory fallback for the description", async () => {
+		const factory = factoryModel("claude-fable-5", ["anthropic"]);
+		const requests: CapturedRequest[] = [];
+		const fetch = captureFetch(requests, anthropicChunks("A red pixel."));
+		const deps = makeDeps(
+			testDir,
+			[textModel, cheaperVisionModel, factory],
+			(model, context, options) => completeSimple(model, context, { ...options, fetch }),
+			WORKOS_TOKEN,
+		);
+		deps.settings = Settings.isolated({
+			modelRoles: { vision: "openai/gpt-4o-mini" },
+			disabledModels: ["openai/gpt-4o-mini", "factory-droid/claude-opus-5"],
+		});
+
+		const described = await new ImageDescriptions(() => deps).transform(imageContext(), textModel);
+
+		expect(JSON.stringify(described.messages)).toContain("A red pixel.");
+		expect(requests.map(request => request.body.model)).toEqual([factory.id]);
+		expect(requests[0]!.body.fallbacks).toBeUndefined();
+	});
+
+	it("keeps an image local when its description model becomes disabled before dispatch", async () => {
+		const stub = makeCompleteStub("A red pixel.");
+		const deps = makeDeps(testDir, [textModel, visionModel], stub.fn);
+		vi.spyOn(deps.modelRegistry, "getApiKey").mockImplementationOnce(async () => {
+			cfgDisabledModels.set(deps.settings, ["openai/gpt-4o"]);
+			return "test-key";
+		});
+		const { transform } = new ImageDescriptions(() => deps);
+
+		const withheld = await transform(imageContext(), textModel);
+		expect(stub.calls).toHaveLength(0);
+		expect(withheld.messages[0]?.content).toContainEqual({
+			type: "text",
+			text: expect.stringContaining('path="local://image-'),
+		});
+
+		cfgDisabledModels.set(deps.settings, []);
+		const described = await transform(imageContext(), textModel);
+		expect(JSON.stringify(described.messages)).toContain("A red pixel.");
+		expect(stub.calls).toHaveLength(1);
+	});
 
 	it("describes an image once, for later requests and for a resumed session", async () => {
 		const stub = makeCompleteStub("A red pixel.");

@@ -32,6 +32,7 @@ import { CostGate } from "../../src/session/cost-gate";
 import { SessionManager } from "../../src/session/session-manager";
 import { rejectionOf } from "../helpers/rejection";
 
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 async function runEvalCompletionAndWait(
@@ -286,6 +287,46 @@ describe("runEvalCompletion", () => {
 		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown } | undefined;
 		expect(opts?.reasoning).toBe(Effort.High);
 		expect(result.details).toEqual({ model: "p/tagged", structured: false });
+	});
+
+	it("refuses a tagged model before sending the prompt, even when the registry still offers it", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "unexpected" }));
+		const session = makeSession({ available: [SMOL, DEFAULT] });
+		session.getSessionAgents = () => [{ name: "m1", model: ["p/smol"] } as AgentDefinition];
+		cfgDisabledModels.set(session.settings, ["p/smol"]);
+
+		await expect(runEvalCompletion({ prompt: "private", model: "m1" }, { session })).rejects.toThrow(
+			/disabledModels.*p\/smol/,
+		);
+		expect(spy).not.toHaveBeenCalled();
+	});
+
+	it("sends no HTTP request when a model becomes denied while credentials resolve", async () => {
+		const bodies: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				bodies.push(await request.text());
+				return new Response("unexpected provider request", { status: 400 });
+			},
+		});
+		try {
+			const model = makeModel("p", "smol", { baseUrl: server.url.href, api: "openai-completions" });
+			const session = makeSession({ available: [model] });
+			const registry = session.modelRegistry;
+			if (!registry) throw new Error("test requires a model registry");
+			registry.getApiKey = async () => {
+				cfgDisabledModels.set(session.settings, ["p/smol"]);
+				return "test-key";
+			};
+			await expect(runEvalCompletionAndWait({ model: "smol", prompt: "private" }, { session })).rejects.toThrow(
+				/disabledModels.*p\/smol/,
+			);
+			expect(bodies).toEqual([]);
+		} finally {
+			await server.stop(true);
+		}
 	});
 
 	it("refuses a `model` that names neither a tier nor a tagged agent", async () => {
@@ -1111,6 +1152,28 @@ describe("runEvalCompletion", () => {
 		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toBeInstanceOf(
 			ToolError,
 		);
+	});
+
+	it("refuses a tier whose role names a denied model instead of matching an allowed sibling", async () => {
+		// The registry drops the denied model, leaving a same-provider sibling a fuzzy match would pick.
+		const session = makeSession({ available: [makeModel("p", "smol-mini"), DEFAULT] });
+		cfgDisabledModels.set(session.settings, ["p/smol"]);
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toBeInstanceOf(
+			ToolError,
+		);
+		expect(spy).not.toHaveBeenCalled();
+	});
+
+	it("never sends to a denied model that a registry built with other settings still lists", async () => {
+		// A fuzzy role pattern names no model exactly, so only the resolved model can be checked.
+		const session = makeSession({ available: [SMOL, DEFAULT], roles: { smol: "smo" } });
+		cfgDisabledModels.set(session.settings, ["p/smol"]);
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }).catch(() => undefined);
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).not.toContain("smol");
 	});
 
 	it("throws ToolError when the resolved model has no API key", async () => {

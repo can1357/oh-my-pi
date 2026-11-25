@@ -38,7 +38,7 @@ export interface ModelPickerCallbacks {
 	 * (clamped to that model) as the session's thinking level. {@link onCancel} follows.
 	 */
 	onKeepThinking?: (level: ConfiguredThinkingLevel) => void;
-	/** Returns the rebuilt `--models` scope after the catalog moved; `undefined` keeps the current one. */
+	/** Returns the rebuilt scope; `undefined` means the session no longer has a scope. */
 	onCatalogRefreshed?: () =>
 		| ReadonlyArray<ScopedModelItem>
 		| undefined

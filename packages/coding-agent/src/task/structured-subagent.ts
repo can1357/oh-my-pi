@@ -10,6 +10,7 @@ import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "../utils/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
+import { formatDisabledModelError } from "../config/disabled-models";
 import {
 	resolveAgentModelSelection,
 	resolveConfiguredModelPatterns,
@@ -455,11 +456,12 @@ function preflightPerCallModel(
 		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
 	// A cold registry is checked again in the executor once models are loaded.
-	const available = modelRegistry?.getAvailable("all");
-	if (!modelRegistry || !available?.length) return grants;
-	const model = resolveModelOverride([perCallModel], { getAvailable: () => available }, settings, {
+	const available = modelRegistry?.getAvailable("all") ?? [];
+	const { model, disabledModel } = resolveModelOverride([perCallModel], { getAvailable: () => available }, settings, {
 		exactOnly: true,
-	}).model;
+	});
+	if (disabledModel) fail(formatDisabledModelError(disabledModel.label, disabledModel.rule));
+	if (!modelRegistry || available.length === 0) return grants;
 	// Discovery still running may add it; the executor checks again once the refresh settles.
 	if (!model && modelRegistry.isBackgroundRefreshPending()) return grants;
 	if (!model || modelKind(model) !== "chat") {

@@ -57,7 +57,7 @@ export interface AdvisorConfigDeps {
 	/** Ctrl+G in the instructions editor. */
 	externalEditor?(text: string): Promise<string | null>;
 	/** When set, the model picker offers only these. */
-	readonly scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	readonly scopedModels?: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	readonly availableToolNames: readonly string[];
 	/** The global catch-up policy advisors inherit. */
 	readonly syncBacklog?: AdvisorSyncBacklog;

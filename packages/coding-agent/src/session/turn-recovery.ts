@@ -31,6 +31,13 @@ import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
+import {
+	DISABLED_MODELS_NOTICE_SOURCE,
+	type DisabledModelSelection,
+	disabledModelRule,
+	disabledSelectorRule,
+	formatDisabledModelError,
+} from "../config/disabled-models";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
 import type { Settings } from "../config/settings";
@@ -428,6 +435,8 @@ export class TurnRecovery {
 	readonly #refusalWalkTried = new Set<string>();
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
 	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
+	/** `disabledModels` diagnostics from the latest fallback walk; quoted by the final retry error. */
+	readonly #fallbackWalkDenials = new Set<string>();
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
@@ -2096,6 +2105,42 @@ export class TurnRecovery {
 		return candidates.filter(candidate => provider !== undefined && candidate.provider === provider);
 	}
 
+	/**
+	 * Skips an automatic-fallback candidate denied by `disabledModels`. Emits a
+	 * warning notice naming the rule once per walk and records it so the final
+	 * retry error can quote it. Returns true when the candidate is denied.
+	 */
+	async #skipDeniedFallbackCandidate(
+		raw: string,
+		resolvedDenial: DisabledModelSelection | undefined,
+		model?: Model,
+		reported = this.#fallbackWalkDenials,
+	): Promise<boolean> {
+		let denied = resolvedDenial ?? disabledSelectorRule(raw, this.#host.settings);
+		if (!denied && model) {
+			const rule = disabledModelRule(model, this.#host.settings);
+			if (rule) denied = { label: `${model.provider}/${model.id}`, rule };
+		}
+		if (!denied) return false;
+		const message = formatDisabledModelError(denied.label, denied.rule);
+		if (!reported.has(message)) {
+			reported.add(message);
+			await this.#host.emitSessionEvent({
+				type: "notice",
+				level: "warning",
+				source: DISABLED_MODELS_NOTICE_SOURCE,
+				message,
+			});
+		}
+		return true;
+	}
+
+	/** Appends the `disabledModels` diagnostics from the last failed fallback walk to a final retry error. */
+	#withFallbackDenials(text: string): string {
+		if (this.#fallbackWalkDenials.size === 0) return text;
+		return `${text} Fallback skipped: ${[...this.#fallbackWalkDenials].join(" ")}`;
+	}
+
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
 		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
 		const currentModel = this.#host.model();
@@ -2226,13 +2271,27 @@ export class TurnRecovery {
 	): Promise<{ role: string; selector: RetryFallbackSelector; apiKey: string } | undefined> {
 		const stale = () => signal.aborted || !routedModelsAreEqual(this.#host.model(), currentModel);
 		const ceiling = this.#host.thinkingLevelCeiling();
+		const deniedReported = new Set<string>();
 		for (const role of this.retryFallbackChainKeys(currentSelector, currentModel)) {
 			for (const candidate of this.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 				if (this.isRetryFallbackSelectorSuppressed(candidate)) continue;
 				const resolved = resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings);
-				const candidateModel = resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id);
-				if (!candidateModel || !this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
+				const candidateModel = resolved.disabledModel
+					? undefined
+					: (resolved.model ?? this.#host.modelRegistry.find(candidate.provider, candidate.id));
+				if (
+					await this.#skipDeniedFallbackCandidate(
+						candidate.raw,
+						resolved.disabledModel,
+						candidateModel,
+						deniedReported,
+					)
+				) {
+					continue;
+				}
+				if (!candidateModel) continue;
 				if (cfgOffline.get(this.#host.settings) && candidateModel.provider !== currentModel.provider) continue;
+				if (!this.#host.modelRegistry.hasConfiguredAuth(candidateModel)) continue;
 				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidateModel, ceiling)) continue;
 				// Skip a candidate whose window cannot hold the live context so we
 				// never switch onto an oversized request (issue #8065).
@@ -2328,11 +2387,15 @@ export class TurnRecovery {
 		options: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; cause: RetryFallbackCause },
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
+		const denied = resolved.disabledModel ?? disabledSelectorRule(selector.raw, this.#host.settings);
+		if (denied) throw new Error(formatDisabledModelError(denied.label, denied.rule));
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
 		if (cfgOffline.get(this.#host.settings) && candidate.provider !== this.#host.model()?.provider) return false;
+		const candidateRule = disabledModelRule(candidate, this.#host.settings);
+		if (candidateRule) throw new Error(formatDisabledModelError(candidate, candidateRule));
 		const apiKey =
 			options.apiKey ??
 			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options.signal }));
@@ -2461,7 +2524,10 @@ export class TurnRecovery {
 				// has already been refused on, and the budget no longer stops it.
 				if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector))) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
-				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+				const candidate = resolved.disabledModel
+					? undefined
+					: (resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id));
+				if (await this.#skipDeniedFallbackCandidate(selector.raw, resolved.disabledModel, candidate)) continue;
 				if (!candidate) continue;
 				if (cfgOffline.get(this.#host.settings) && candidate.provider !== sourceModel?.provider) continue;
 				// A candidate that would leave the request exactly as it is — same
@@ -2688,7 +2754,9 @@ export class TurnRecovery {
 	async #tryFireworksFastFallback(currentSelector: string, failedMessage: AssistantMessage): Promise<boolean> {
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
-		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
+		const baseId = toFireworksBaseModelId(model.id);
+		const baseModel = this.#host.modelRegistry.find("fireworks", baseId);
+		if (await this.#skipDeniedFallbackCandidate(`fireworks/${baseId}`, undefined, baseModel)) return false;
 		if (!baseModel) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
@@ -2755,9 +2823,12 @@ export class TurnRecovery {
 			this.#host.modelRegistry,
 			this.#host.settings,
 		);
+		// Restoring to a denied primary is not allowed; stay on the fallback.
+		if (resolvedPrimary.disabledModel || disabledSelectorRule(originalSelector.raw, this.#host.settings))
+			return false;
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
-		if (!primaryModel) return false;
+		if (!primaryModel || disabledModelRule(primaryModel, this.#host.settings)) return false;
 		if (cfgOffline.get(this.#host.settings) && primaryModel.provider !== currentModel.provider) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
@@ -2824,6 +2895,7 @@ export class TurnRecovery {
 	 */
 	async #applyRetryPolicy(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
 		const retrySettings = cfgRetry.get(this.#host.settings);
+		this.#fallbackWalkDenials.clear();
 		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches
@@ -3286,7 +3358,9 @@ export class TurnRecovery {
 			}
 		}
 
-		const terminalError = poolUnavailableReason ? `${errorMessage}\n\n${poolUnavailableReason}` : errorMessage;
+		const terminalError = this.#withFallbackDenials(
+			poolUnavailableReason ? `${errorMessage}\n\n${poolUnavailableReason}` : errorMessage,
+		);
 
 		if (retryBudgetExhausted && staleUsageLimit) {
 			// The spent attempts and their backoff belong to the replaced provider.
@@ -3319,7 +3393,6 @@ export class TurnRecovery {
 			!stripDemotedReasoning &&
 			!resampleMidStreamRefusal
 		) {
-			if (poolUnavailableReason) message.errorMessage = terminalError;
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this
@@ -3327,6 +3400,7 @@ export class TurnRecovery {
 			// `auto_retry_end` so subscribers tracking retry-outstanding state
 			// (e.g. suppressing a duplicate error toast) don't stay latched on
 			// an announcement that never resolves.
+			message.errorMessage = terminalError;
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
 					{ success: false, attempt: this.#retryAttempt - 1, finalError: terminalError },
@@ -3348,9 +3422,10 @@ export class TurnRecovery {
 			!this.isRetryableError(message)
 		) {
 			// Same auto_retry_end backstop as the classifier-refusal branch above.
+			message.errorMessage = terminalError;
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{ success: false, attempt: this.#retryAttempt - 1, finalError: terminalError },
 					{ terminalTurn: message },
 				);
 			}
@@ -3363,6 +3438,7 @@ export class TurnRecovery {
 		if (!switchedCredential && !switchedModel && (billingCap || exceedsDelayCap(delayMs))) {
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
+			if (terminalError !== errorMessage) message.errorMessage = terminalError;
 			await this.#closeRetrySaga(
 				{
 					success: false,
@@ -3370,8 +3446,8 @@ export class TurnRecovery {
 					// A billing cap has no wait to report — the account is out of
 					// money — so the message the user acts on is the provider's own.
 					finalError: billingCap
-						? errorMessage
-						: `${delayMs === parsedRetryAfterMs ? "Provider requested" : "Retry requires"} ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+						? terminalError
+						: `${delayMs === parsedRetryAfterMs ? "Provider requested" : "Retry requires"} ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${terminalError}`,
 				},
 				{ terminalTurn: message },
 			);

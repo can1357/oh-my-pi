@@ -637,6 +637,53 @@ describe("persisted subagent revival", () => {
 			getAll: () => models,
 		}) as unknown as ModelRegistry;
 
+	it("refuses an exact saved OpenRouter variant when its base is now denied", async () => {
+		const identity = "openrouter/z-ai/glm-4.7:nitro@cerebras";
+		const rule = "openrouter/z-ai/glm-4.7";
+		const cwd = makeTempDir("@pi-revive-denied-variant-");
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+			perCallModel: true,
+			resolvedModel: identity,
+			perCallModelIdentity: identity,
+			perCallThinkingLevel: null,
+		});
+		const ref = createRef(sessionFile);
+		const createSession = vi.spyOn(sdkModule, "createAgentSession");
+		const reviver = await createFactory(cwd, undefined, {
+			settings: Settings.isolated({ disabledModels: [rule], modelRoles: { review: identity } }),
+			modelRegistry: stubRegistry([]),
+		})(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await expect(reviver(ref)).rejects.toThrow(`disabledModels rule "${rule}"`);
+		expect(createSession).not.toHaveBeenCalled();
+	});
+
+	it("does not revive a denied role onto its allowed saved model", async () => {
+		const cwd = makeTempDir("@pi-revive-denied-role-");
+		const sessionFile = await createPersistedSession(cwd, true, "review-fast");
+		const rule = "openai/gpt-4o-mini";
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const registry = AgentRegistry.global();
+		const ref = registry.register({ ...createRef(sessionFile), id: "denied-role-revive" });
+		try {
+			const reviver = await createFactory(cwd, undefined, {
+				settings: Settings.isolated({ modelRoles: { "review-fast": rule }, disabledModels: [rule] }),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(cwd, "models.yml"), {
+					settings: Settings.isolated(),
+				}),
+			})(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await expect(reviver(ref)).rejects.toThrow(`disabledModels rule "${rule}"`);
+			expect(registry.get(ref.id)?.session).toBeNull();
+		} finally {
+			await registry.get(ref.id)?.session?.dispose();
+			registry.unregister(ref.id);
+			authStorage.close();
+		}
+	});
+
 	it("re-checks a revived per-call worker against current grants and keeps it off fallbacks", async () => {
 		const own = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!own) throw new Error("Expected bundled anthropic/claude-sonnet-4-5");

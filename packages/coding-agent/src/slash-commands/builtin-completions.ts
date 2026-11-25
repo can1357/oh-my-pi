@@ -304,7 +304,10 @@ export function buildModelSelectorCompletions(
 					runtime.ctx.session.effectiveServiceTier(model),
 				),
 				registry: runtime.ctx.session.modelRegistry,
-				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
+				scopedModels: () =>
+					runtime.ctx.session.hasScopedModels
+						? runtime.ctx.session.scopedModels.map(entry => entry.model)
+						: undefined,
 			});
 			// Later keystrokes list whatever a retry of failed provider discovery recovers.
 			void rankModels.retryDiscovery?.();

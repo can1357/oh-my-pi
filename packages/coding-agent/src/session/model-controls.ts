@@ -17,6 +17,12 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import {
+	disabledModelMatcher,
+	disabledModelRule,
+	formatDisabledModelError,
+	NO_DISABLED_MODELS,
+} from "../config/disabled-models";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
@@ -26,6 +32,7 @@ import {
 	type ResolvedModelRoleValue,
 	resolveImplicitDefaultRole,
 	resolveModelRoleValue,
+	scopeAllowList,
 } from "../config/model-resolver";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
@@ -90,10 +97,11 @@ export function resolveRoleModelCycle(
 	const models: ResolvedRoleModel[] = [];
 	for (const role of roleOrder) {
 		const configuredRole = settings.getModelRole(role);
-		const resolved =
-			role === "default" && !configuredRole
-				? resolveImplicitDefaultRole(currentModel, availableModels, matchPreferences)
-				: resolveModelRoleValue(configuredRole, availableModels, { settings, matchPreferences });
+		const implicit = role === "default" && !configuredRole;
+		if (implicit && disabledModelRule(currentModel, settings)) continue;
+		const resolved = implicit
+			? resolveImplicitDefaultRole(currentModel, availableModels, matchPreferences)
+			: resolveModelRoleValue(configuredRole, availableModels, { settings, matchPreferences });
 		if (!resolved.model) continue;
 		models.push({
 			role,
@@ -160,10 +168,12 @@ export interface ModelControlsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 }
 
+const NO_SCOPED_MODELS: readonly never[] = [];
+
 /** Owns model selection, thinking effort, role cycling, and service tiers. */
 export class ModelControls {
 	readonly #host: ModelControlsHost;
-	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined;
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** Hard per-session effort ceiling (e.g. a task spawn's `task.maxEffort` cap); recovery paths re-clamp to it. */
 	readonly #thinkingLevelCeiling: Effort | undefined;
@@ -181,7 +191,7 @@ export class ModelControls {
 		},
 	) {
 		this.#host = host;
-		this.#scopedModels = options.scopedModels ?? [];
+		this.#scopedModels = options.scopedModels;
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
 		if (options.thinkingLevel === AUTO_THINKING) {
@@ -231,11 +241,19 @@ export class ModelControls {
 		return this.#autoResolvedLevel;
 	}
 
-	/** Models explicitly scoped to the session's cycle command, minus currently disabled providers. */
+	/** A declared scope remains active even if no models match its current policy. */
+	get hasScopedModels(): boolean {
+		return this.#scopedModels !== undefined;
+	}
+
+	/** Scope entries permitted by the session's current provider and model policies. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
-		const disabledProviders = cfgDisabledProviders.get(this.#host.settings);
-		if (disabledProviders.length === 0) return this.#scopedModels;
-		return this.#scopedModels.filter(scoped => !disabledProviders.includes(scoped.model.provider));
+		if (!this.#scopedModels) return NO_SCOPED_MODELS;
+		const settings = this.#host.settings;
+		const disabledProviders = cfgDisabledProviders.get(settings);
+		const denied = disabledModelMatcher(settings);
+		if (disabledProviders.length === 0 && denied === NO_DISABLED_MODELS) return this.#scopedModels;
+		return this.#scopedModels.filter(({ model }) => !disabledProviders.includes(model.provider) && !denied(model));
 	}
 
 	/**
@@ -244,7 +262,7 @@ export class ModelControls {
 	 * completes so a newly-discovered `enabledModels` model joins the cycle and the
 	 * scoped `/models` picker (issue #9220).
 	 */
-	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
+	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined): void {
 		this.#scopedModels = scopedModels;
 	}
 
@@ -292,6 +310,14 @@ export class ModelControls {
 		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model);
 	}
 
+	#requireSelectableModel(model: Model): void {
+		const denied = disabledModelRule(model, this.#host.settings);
+		if (denied) throw new Error(formatDisabledModelError(model, denied));
+		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
+			throw new Error(`No API key for ${model.provider}/${model.id}`);
+		}
+	}
+
 	async setModel(
 		model: Model,
 		role: string = "default",
@@ -302,9 +328,7 @@ export class ModelControls {
 		},
 	): Promise<{ switched: boolean }> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
-		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		}
+		this.#requireSelectableModel(model);
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 
@@ -347,9 +371,7 @@ export class ModelControls {
 		isCurrent?: () => boolean,
 	): Promise<boolean> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
-		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		}
+		this.#requireSelectableModel(model);
 
 		// A caller that loaded the metadata ahead of time (auto-prewalk, while its judge ran) skips the second probe.
 		const targetModel = options?.metadataResolved
@@ -394,7 +416,7 @@ export class ModelControls {
 	 * @returns The new model info, or undefined if only one model available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		if (this.scopedModels.length > 0) {
+		if (this.hasScopedModels) {
 			return this.#cycleScopedModel(direction);
 		}
 		return this.#cycleAvailableModel(direction);
@@ -411,7 +433,7 @@ export class ModelControls {
 	 * still guard on `models.length`).
 	 */
 	getRoleModelCycle(roleOrder: readonly string[]): RoleModelCycle | undefined {
-		const availableModels = this.#host.modelRegistry.getAvailable();
+		const availableModels = this.hasScopedModels ? scopeAllowList(this.scopedModels) : this.getAvailableModels();
 		if (availableModels.length === 0 || !this.#model) return undefined;
 		return resolveRoleModelCycle(
 			this.#host.settings,
@@ -504,7 +526,7 @@ export class ModelControls {
 
 	async #cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
-		const availableModels = this.#host.modelRegistry.getAvailable();
+		const availableModels = this.getAvailableModels();
 		if (availableModels.length <= 1) return undefined;
 
 		const currentModel = this.#model;
@@ -540,7 +562,6 @@ export class ModelControls {
 	getAvailableModels(roleLookup?: ModelRoleLookup): Model[] {
 		const all = this.#host.modelRegistry.getAvailable();
 		const patterns = cfgEnabledModels.get(this.#host.settings);
-		if (!patterns || patterns.length === 0) return all;
 		return filterAvailableModelsByEnabledPatterns(all, patterns, this.#host.settings, roleLookup);
 	}
 

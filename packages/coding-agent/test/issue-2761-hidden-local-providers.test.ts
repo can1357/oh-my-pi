@@ -81,7 +81,6 @@ function createHub(registry: ModelRegistry): LayerTerminal {
 			ModelHub({
 				source: createModelBrowserSource(settings),
 				registry,
-				scopedModels: [],
 				callbacks,
 				terminalRows: () => 40,
 			}),

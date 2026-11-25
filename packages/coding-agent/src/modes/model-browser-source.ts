@@ -1,4 +1,5 @@
 import { type Model, resolveModelServiceTier, type ServiceTier, shouldSendServiceTier } from "@oh-my-pi/pi-ai";
+import { disabledModelMatcher, NO_DISABLED_MODELS } from "../config/disabled-models";
 import { findActiveModelPreset, getModelPresetNames } from "../config/model-presets";
 import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
@@ -36,6 +37,10 @@ export function createModelBrowserSource(
 			return settings.revision;
 		},
 		preferences: settings,
+		get disabledModel() {
+			const deny = disabledModelMatcher(settings);
+			return deny === NO_DISABLED_MODELS ? undefined : deny;
+		},
 		get defaultThinkingLevel() {
 			return cfgDefaultThinkingLevel.get(settings);
 		},

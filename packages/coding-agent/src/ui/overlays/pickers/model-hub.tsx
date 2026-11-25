@@ -59,7 +59,7 @@ const ROLE_PICKER_COLUMNS: readonly TspPickerColumn[] = [
 export interface ModelHubProps {
 	readonly source: ModelHubSource;
 	readonly registry: ModelHubRegistry;
-	readonly scopedModels: ReadonlyArray<ScopedModelItem>;
+	readonly scopedModels?: ReadonlyArray<ScopedModelItem>;
 	readonly callbacks: ModelHubCallbacks;
 	readonly options?: ModelHubOptions;
 	/** Terminal height (the hub fills it; default 40 rows). */

@@ -27,8 +27,10 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-selector";
 import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -642,7 +644,8 @@ describe("AgentSession retry fallback", () => {
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"retry.fallbackChains": { "anthropic/*": [fallbackSelector] },
+			disabledModels: ["openai/gpt-4o-mini"],
+			"retry.fallbackChains": { "anthropic/*": ["openai/gpt-4o-mini", fallbackSelector] },
 		});
 		settings.setModelRole("default", primarySelector);
 		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
@@ -665,9 +668,15 @@ describe("AgentSession retry fallback", () => {
 		]);
 
 		primaryCredential = true;
+		cfgDisabledModels.override(settings, [primarySelector]);
+		await session.prompt("Keep working on the fallback while the primary is disabled");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([fallbackSelector, fallbackSelector]);
+
+		cfgDisabledModels.override(settings, []);
 		await session.prompt("Work after the primary logs back in");
 		await session.waitForIdle();
-		expect(requestedModels).toEqual([fallbackSelector, primarySelector]);
+		expect(requestedModels).toEqual([fallbackSelector, fallbackSelector, primarySelector]);
 		expect(session.model?.provider).toBe(primaryModel.provider);
 	});
 
@@ -1101,6 +1110,234 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
 		expect(getLastAssistantMessage(session).stopReason).toBe("error");
 		expect(session.model?.provider).toBe(primaryModel.provider);
+	});
+
+	describe("disabledModels", () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const deniedModel = getBundledModel("openai", "gpt-4o-mini");
+		const nextModel = getBundledModel("openai", "gpt-4o");
+
+		function startDeniedFallbackSession(chain: string[], requestedModels: string[]): AgentSession {
+			if (!primaryModel) throw new Error("Expected bundled primary model");
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				disabledModels: ["openai/gpt-4o-mini"],
+				"retry.fallbackChains": { default: chain },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-denied.yml"), { settings });
+			const agent = createFallbackAgent(primaryModel, requestedModels, {
+				firstError: new AIError.ProviderResponseError("Devin API error: empty response body", {
+					provider: "devin",
+					kind: "empty-body",
+				}),
+			});
+			return new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		}
+
+		function collectDeniedNotices(target: AgentSession): string[] {
+			const notices: string[] = [];
+			target.subscribe(event => {
+				if (event.type === "notice" && event.source === "disabled-models") notices.push(event.message);
+			});
+			return notices;
+		}
+
+		it("skips a denied fallback target with a notice naming the rule and continues to the next", async () => {
+			if (!primaryModel || !deniedModel || !nextModel) throw new Error("Expected bundled fallback models");
+			const requestedModels: string[] = [];
+			session = startDeniedFallbackSession(
+				[`openai/${deniedModel.id}:high`, `${nextModel.provider}/${nextModel.id}`],
+				requestedModels,
+			);
+			const notices = collectDeniedNotices(session);
+
+			await session.prompt("Recover past the denied model");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${primaryModel.provider}/${primaryModel.id}`,
+				`${nextModel.provider}/${nextModel.id}`,
+			]);
+			expect(session.model?.id).toBe(nextModel.id);
+			expect(notices).toEqual([
+				'Model "openai/gpt-4o-mini" is disabled by disabledModels rule "openai/gpt-4o-mini". Remove or narrow that rule to use it.',
+			]);
+		});
+
+		it("reports the rule in the final error when every fallback target is denied", async () => {
+			if (!primaryModel || !deniedModel) throw new Error("Expected bundled fallback models");
+			const requestedModels: string[] = [];
+			session = startDeniedFallbackSession([`${deniedModel.provider}/${deniedModel.id}`], requestedModels);
+
+			await session.prompt("Nothing left to fall back to");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+			const last = getLastAssistantMessage(session);
+			expect(last.stopReason).toBe("error");
+			expect(last.errorMessage).toContain('disabledModels rule "openai/gpt-4o-mini"');
+			expect(session.model?.id).toBe(primaryModel.id);
+		});
+
+		it("validates routed keys and entries without treating stored denied selectors as missing models", () => {
+			const routed = "openrouter/openai/gpt-4o@openai";
+			const denied = "openai/retired-model";
+			const missing = "openai/no-such-model";
+			const settings = Settings.isolated({
+				disabledModels: [denied],
+				"retry.fallbackChains": { [routed]: [denied, missing], [denied]: [routed] },
+			});
+			const warnings: string[] = [];
+			validateRetryFallbackChains(settings, modelRegistry, warning => warnings.push(warning));
+			expect(warnings).toEqual([`Fallback chain for model '${routed}' references unknown model: ${missing}`]);
+		});
+
+		it.each([
+			{
+				name: "an exhausted account pool",
+				firstError: "This content was flagged for possible cybersecurity risk. (code=cyber_policy)",
+				poolReason: "No account in the session pool is available.",
+				maxRetries: 0,
+			},
+			{
+				name: "a retry wait above the configured cap",
+				firstError: "429 rate limit exceeded retry-after=11180",
+				poolReason: undefined,
+				maxRetries: 2,
+			},
+		])(
+			"reports $name and the denied fallback rule at the end of a retry",
+			async ({ firstError, poolReason, maxRetries }) => {
+				if (!primaryModel || !deniedModel) throw new Error("Expected bundled fallback models");
+				const rule = `${deniedModel.provider}/${deniedModel.id}`;
+				const requestedModels: string[] = [];
+				const settings = Settings.isolated({
+					"compaction.enabled": false,
+					"retry.maxRetries": maxRetries,
+					"retry.maxDelayMs": 100,
+					disabledModels: [rule],
+					"retry.fallbackChains": { default: [rule] },
+				});
+				settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+				if (poolReason) {
+					vi.spyOn(modelRegistry.authStorage.limits, "rotate").mockResolvedValue({
+						switched: false,
+						poolUnavailableReason: poolReason,
+					});
+				}
+				session = new AgentSession({
+					agent: createFallbackAgent(primaryModel, requestedModels, { firstError }),
+					sessionManager: SessionManager.inMemory(),
+					settings,
+					modelRegistry,
+				});
+				const { retryEndEvents } = trackRetryEvents(session);
+				await session.prompt("Recover from the provider error");
+				await session.waitForIdle();
+
+				expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+				for (const error of [getLastAssistantMessage(session).errorMessage, retryEndEvents.at(-1)?.finalError]) {
+					expect(error).toContain(firstError);
+					if (poolReason) expect(error).toContain(poolReason);
+					expect(error).toContain(`disabledModels rule "${rule}"`);
+				}
+				if (!poolReason) expect(retryEndEvents.at(-1)?.finalError).toContain("exceeds retry.maxDelayMs");
+			},
+		);
+
+		it("refuses the automatic Fireworks Standard tier after a Fast request fails", async () => {
+			const fast = getBundledModel("fireworks", "kimi-k3-fast");
+			if (!fast) throw new Error("Expected the bundled Fireworks Fast model");
+			const rule = `${fast.provider}/${fast.id.replace(/-fast$/, "")}`;
+			const requestedModels: string[] = [];
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.maxRetries": 0,
+				disabledModels: [rule],
+			});
+			session = new AgentSession({
+				agent: createFallbackAgent(fast, requestedModels),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+			await session.prompt("Try the Fast tier");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([`${fast.provider}/${fast.id}`]);
+			expect(getLastAssistantMessage(session).errorMessage).toContain(`disabledModels rule "${rule}"`);
+		});
+
+		it("does not retry a wire-level refusal and advances to the next fallback target", async () => {
+			// The routing variant turns the allowed primary into a denied wire model; the
+			// settings-aware stream wrapper refuses it before any request is built.
+			const routed = getBundledModel("openrouter", "openai/gpt-4o");
+			if (!routed || !nextModel) throw new Error("Expected bundled models");
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"providers.openrouterVariant": "floor",
+				disabledModels: ["openrouter/openai/gpt-4o:floor"],
+				"retry.fallbackChains": { default: [`${nextModel.provider}/${nextModel.id}`] },
+			});
+			settings.setModelRole("default", `${routed.provider}/${routed.id}`);
+			modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-wire.yml"), { settings });
+			const dispatched: string[] = [];
+			const attempted: string[] = [];
+			const mock = createMockModel();
+			const guarded = createSettingsAwareStreamFn(settings, (model, context, options) => {
+				dispatched.push(`${model.provider}/${model.id}`);
+				mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				return mock.stream(model, context, options);
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: routed, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					attempted.push(`${model.provider}/${model.id}`);
+					return guarded(model, context, options);
+				},
+			});
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			await session.prompt("Refused on the wire");
+			await session.waitForIdle();
+
+			// One attempt on the refused model (no same-model retry), then the next chain target.
+			expect(attempted).toEqual([`${routed.provider}/${routed.id}`, `${nextModel.provider}/${nextModel.id}`]);
+			expect(dispatched).toEqual([`${nextModel.provider}/${nextModel.id}`]);
+			expect(session.model?.id).toBe(nextModel.id);
+		});
+
+		it("refuses a side-channel turn on a session-denied model even when the registry allows it", async () => {
+			if (!primaryModel) throw new Error("Expected bundled primary model");
+			const settings = Settings.isolated({ disabledModels: [`${primaryModel.provider}/${primaryModel.id}`] });
+			// The registry carries no deny rules: only the session settings deny the model.
+			modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-side.yml"), {
+				settings: Settings.isolated({}),
+			});
+			const dispatched: string[] = [];
+			const mock = createMockModel();
+			const sideStreamFn = createSettingsAwareStreamFn(settings, (model, context, options) => {
+				dispatched.push(`${model.provider}/${model.id}`);
+				mock.push({ content: ["side reply"] });
+				return mock.stream(model, context, options);
+			});
+			session = new AgentSession({
+				agent: new Agent({
+					initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				sideStreamFn,
+			});
+
+			await expect(session.runEphemeralTurn({ promptText: "side question", tools: false })).rejects.toThrow(
+				`disabledModels rule "${primaryModel.provider}/${primaryModel.id}"`,
+			);
+			expect(dispatched).toEqual([]);
+		});
 	});
 
 	it("forwards retry fallback events to extension handlers", async () => {

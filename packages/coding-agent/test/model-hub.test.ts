@@ -142,7 +142,7 @@ function createHub(options: {
 			ModelHub({
 				source: createModelBrowserSource(settings),
 				registry,
-				scopedModels: options.scoped ? modelsFn().map(model => ({ model })) : [],
+				scopedModels: options.scoped ? modelsFn().map(model => ({ model })) : undefined,
 				callbacks,
 				options: options.hub,
 				terminalRows: () => rows,
@@ -171,6 +171,20 @@ const CTRL_RIGHT = "\x1b[1;5C";
 const ESC = "\x1b";
 
 describe("ModelHub", () => {
+	test("a fully denied scope does not offer the other chat models in the registry", () => {
+		const denied = makeModel("test", "forbidden-model");
+		const outside = makeModel("test", "outside-model");
+		const { hub } = createHub({
+			models: [],
+			scoped: true,
+			registry: { getAvailable: () => [denied, outside], getAll: () => [denied, outside] },
+			settings: Settings.isolated({ disabledModels: ["test/forbidden-model"] }),
+		});
+		const rows = hub.render(120).join("\n");
+		expect(rows).not.toContain("outside-model");
+		expect(rows).not.toContain("forbidden-model");
+	});
+
 	test("a native /model role action changes the quick-switch cycle in isolated settings", async () => {
 		await using ui = await nativeShell();
 		const settings = Settings.isolated();
@@ -180,6 +194,7 @@ describe("ModelHub", () => {
 			session: {
 				model,
 				modelRegistry: makeRegistry(() => [model]),
+				hasScopedModels: true,
 				scopedModels: [{ model }],
 				effectiveServiceTier: () => undefined,
 				refreshScopedModels: async () => {},

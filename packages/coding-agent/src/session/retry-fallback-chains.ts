@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { disabledSelectorRule } from "../config/disabled-models";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgModelRoles } from "../config/model-settings";
 import { formatModelSelectorValue, parseModelString } from "../config/model-selector";
@@ -295,6 +296,7 @@ export function validateRetryFallbackChains(
 				if (!parsedKey) {
 					report(`Invalid model selector key in retry.fallbackChains: ${key}`);
 				} else if (
+					!disabledSelectorRule(key, settings) &&
 					!resolveRoutedModelSelector(modelRegistry, parsedKey.raw) &&
 					!isDiscoveryPending(parsedKey.provider)
 				) {
@@ -323,6 +325,7 @@ export function validateRetryFallbackChains(
 			}
 			if (kindRole) {
 				const patterns = resolveConfiguredModelPatterns(selectorStr, settings);
+				if (patterns.some(pattern => disabledSelectorRule(pattern, settings))) continue;
 				if (resolvesForKindRole(selectorStr, providerScopedPool(modelRegistry, patterns))) continue;
 				kindRoleCatalog ??= modelRegistry.getAll("all");
 				if (resolvesForKindRole(selectorStr, kindRoleCatalog)) continue;
@@ -352,6 +355,8 @@ export function validateRetryFallbackChains(
 				report(`Invalid fallback selector format in ${keyKind} '${key}': ${selectorStr}`);
 				continue;
 			}
+			// Keep stored entries that the runtime walk will skip under the current policy.
+			if (disabledSelectorRule(selectorStr, settings)) continue;
 			if (!resolveRoutedModelSelector(modelRegistry, parsed.raw) && !isDiscoveryPending(parsed.provider)) {
 				report(`Fallback chain for ${keyKind} '${key}' references unknown model: ${selectorStr}`);
 			}
