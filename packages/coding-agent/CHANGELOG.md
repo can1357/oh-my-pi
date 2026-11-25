@@ -5,6 +5,7 @@
 ### Fixed
 
 - Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
+- `tab.uploadFile` on Linux and Windows no longer copies files into the temp folder when the browser can read them, so a large upload needs no room there; the page then reads the file itself, so it must stay unchanged until the site has read it ([#20360](https://github.com/can1357/oh-my-pi/pull/20360) by [@xiaolikt](https://github.com/xiaolikt))
 
 ## [19.2.0] - 2026-11-25
 
