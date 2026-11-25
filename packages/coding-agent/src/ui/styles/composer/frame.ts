@@ -13,7 +13,6 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, type Cell, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
-import { caretCell, caretOf, type EditorProps, lastLayout } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { fgSgr } from "@oh-my-pi/pi-tui/theme/color";
 import { type ComposerChromeContext, type ComposerStatus, caretOverflow, composerShape } from "./shapes";
 
@@ -31,7 +30,7 @@ export type ComposerTerm = {
 	readonly borderFaint?: boolean;
 	/** Dim every cell. */
 	readonly faint?: boolean;
-	/** Move the box bottom border to its own row when the caret ends the input (macOS IME preedit). */
+	/** Move the box bottom border to its own row while the hardware cursor is active (macOS IME preedit). */
 	readonly imeSafeCursor?: boolean;
 };
 
@@ -103,13 +102,7 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 	if (top !== undefined) rows.push(top);
 	let cursor: Cell | undefined;
 	const fieldRows = block.rows.length > 0 ? block.rows : [""];
-	const fieldProps = field?.props() as EditorProps | undefined;
-	const layout = field ? lastLayout(field) : [];
-	const caret = fieldProps ? caretCell(fieldProps.text ?? "", layout, caretOf(fieldProps)) : undefined;
-	const last = layout.at(-1);
-	const cursorAtEnd =
-		caret !== undefined && last !== undefined && caret.row === layout.length - 1 && caret.col >= last.width;
-	const imeSafeCursorTail = term.imeSafeCursor === true && shape.sideBorders && cursorAtEnd;
+	const imeSafeCursorTail = term.imeSafeCursor === true && shape.sideBorders;
 	for (let i = 0; i < fieldRows.length; i++) {
 		const text = fieldRows[i]!;
 		const width = visibleWidth(text);
