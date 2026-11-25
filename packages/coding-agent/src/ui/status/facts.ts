@@ -23,6 +23,8 @@ export interface StatusModel {
 	readonly id: string;
 	/** Display name (`Claude Opus`); the id stands in when absent. */
 	readonly name?: string;
+	/** Provider id, shown before the model under `segmentOptions.model.showProvider`. */
+	readonly provider?: string;
 	/** The model accepts a thinking level. */
 	readonly thinking: boolean;
 	readonly contextWindow?: number;
