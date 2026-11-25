@@ -32,7 +32,7 @@ import {
 } from "../async";
 import { shellChangeSnapshots } from "../commit/selective/journal";
 import { type BoardEntry, registerOnBoard } from "../daemon/client";
-import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { applyDirenvPreflight, type BashResult, executeBash, sessionShellEnv } from "../exec/bash-executor";
 import { BASH_SESSION_ENV } from "../exec/session-processes";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
@@ -55,7 +55,7 @@ import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "./streaming-output";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
-import type { ToolSession } from ".";
+import { owningSessionId, type ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
@@ -1128,21 +1128,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	/**
-	 * Session identity for a command, read when its tool call starts, so
-	 * `/fork`, `/new`, and `/resume` take effect on the next call while a call
-	 * already under way keeps the session it began in. `PI_TOOL_CALL_ID` is the
-	 * id this call runs under: the agent's call in the transcript, or the eval
-	 * tool bridge's own id for a call made from an eval cell. Always
-	 * set every key: an empty value replaces a stale one inherited from a parent
-	 * omp process, since an env overlay cannot unset.
+	 * Session identity for a command ({@link sessionShellEnv}), read when its
+	 * tool call starts, so `/fork`, `/new`, and `/resume` take effect on the next
+	 * call while a call already under way keeps the session it began in.
+	 * `PI_TOOL_CALL_ID` is the id this call runs under: the agent's call in the
+	 * transcript, or the eval tool bridge's own id for a call made from an eval
+	 * cell.
 	 */
 	#sessionEnv(toolCallId: string): Record<string, string> {
-		const sessionId = this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "";
+		const sessionId = owningSessionId(this.session) ?? "";
 		return {
-			PI_SESSION_ID: sessionId,
+			...sessionShellEnv({ id: sessionId, file: this.session.getSessionFile() }),
 			// Membership tag for processes the call leaves running (session-processes.ts).
 			[BASH_SESSION_ENV]: sessionId,
-			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
 			PI_TOOL_CALL_ID: toolCallId,
 		};
 	}

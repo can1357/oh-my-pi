@@ -2853,6 +2853,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				timeoutMs: cfgLoopConditionTimeoutMs.get(settings),
 				signal: controller.signal,
 				sessionId,
+				sessionFile: this.sessionManager.getSessionFile(),
 				isSessionCurrent: () => this.sessionManager.getSessionId() === sessionId,
 			});
 		} finally {
