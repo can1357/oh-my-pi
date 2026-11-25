@@ -10,6 +10,7 @@
 
 - Sloppy edits now recover common file-header typos and unambiguous update-only patch hunks instead of asking the model to resend an edit that already names its target.
 - A broadcast from the main agent now interrupts its waiting subagents: it reaches them as a parent steer (or interrupt) instead of sitting queued until their current `wait` window elapses. Broadcasts between peers still queue without interrupting.
+- Fixed the shared mnemopi embedding server and local tiny-model workers staying loaded for as long as any session that used them stays open; they now unload 15 minutes after their last request ([#20452](https://github.com/can1357/oh-my-pi/issues/20452))
 
 ## [19.2.0] - 2026-11-25
 
