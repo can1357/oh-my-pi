@@ -167,8 +167,10 @@ export class NativeBackend {
 	#cancelStall: (() => void) | undefined;
 	#stalledSince: number | undefined;
 	#stallResets = 0;
-	/** User input arrived that the next frame echoes (it may overdraw the credits). */
+	/** Unsent changes echo user input (the next frame may overdraw the credits). */
 	#inputPending = false;
+	/** Input is being routed: whatever it changes is an echo. */
+	#echoing = false;
 	#unsubscribe: (() => void)[] = [];
 
 	constructor(options: NativeBackendOptions) {
@@ -209,7 +211,10 @@ export class NativeBackend {
 			this.#surface,
 			this.id,
 			{ cols: connection.cols, rows: () => connection.driver.rows, hasFeature: name => connection.hasFeature(name) },
-			() => this.requestFrame(),
+			() => {
+				if (this.#echoing) this.#inputPending = true;
+				this.requestFrame();
+			},
 		);
 		this.#running = true;
 		this.#unacked = [];
@@ -493,11 +498,10 @@ export class NativeBackend {
 			)
 				return;
 		}
-		// The field is controlled: it shows the change once a frame echoes it.
-		if (event.ev === "edit" || event.ev === "undo" || event.ev === "send") this.#inputPending = true;
 		const reconciler = this.#reconciler!;
 		const ui = toUiEvent(event, keypathOf(path), item => reconciler.itemKey(event.id, item));
-		batch(() => {
+		// The field is controlled: it shows the change once a frame echoes it.
+		this.#route(event.ev === "edit" || event.ev === "undo" || event.ev === "send", () => {
 			// A native caret move/replacement ends a raw-key selection, even if
 			// the text and cursor happen to be unchanged (e.g. clicking its end).
 			const field = path.at(-1)!;
@@ -550,8 +554,7 @@ export class NativeBackend {
 
 	#onInput(event: InputEvent): void {
 		if (event.type === "key") {
-			this.#inputPending = true;
-			batch(() => {
+			this.#route(true, () => {
 				const path = this.#focusPath();
 				if (bubbleKey(path, event.key)) return;
 				// Tern forwards keys raw (it leaves editing to the program): the focused node's widget
@@ -561,13 +564,23 @@ export class NativeBackend {
 				this.#options.onKey?.(event.key);
 			});
 		} else if (event.type === "paste") {
-			this.#inputPending = true;
-			batch(() => {
+			this.#route(true, () => {
 				const path = this.#focusPath();
 				if (bubblePaste(path, event.paste)) return;
 				const focused = path.at(-1);
 				if (focused) widgetFor(focused)?.paste?.(focused, event.paste, this.#widgetContext(path));
 			});
+		}
+	}
+
+	/** Run `route` in one batch; with `echo`, whatever it changes is an echo that may overdraw the credits. */
+	#route(echo: boolean, route: () => void): void {
+		const outer = this.#echoing;
+		this.#echoing ||= echo;
+		try {
+			batch(route);
+		} finally {
+			this.#echoing = outer;
 		}
 	}
 
