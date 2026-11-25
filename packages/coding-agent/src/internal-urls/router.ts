@@ -431,6 +431,17 @@ export class InternalUrlRouter {
 		return registered.handler.enumerate(parseInternalUrl(registered.url), context);
 	}
 
+	/**
+	 * {@link registrationId} of the handler a session source registered to serve `input`; undefined
+	 * for a built-in scheme or a non-URL. Another session may register the same scheme with another
+	 * handler, so state that outlives one call (remembered approvals) keys session URLs by it.
+	 */
+	sessionRegistration(input: string): string | undefined {
+		const registered = this.#registered(input);
+		if (!registered || this.#builtinHandlers.get(registered.scheme) === registered.handler) return undefined;
+		return registrationId(registered.handler);
+	}
+
 	/** Parsed URL and scheme spec of a registered `input`, for the `write` tool's routing and gates; undefined for non-URLs. */
 	writeTarget(input: string): { url: InternalUrl; spec: SchemeSpec } | undefined {
 		const registered = this.#registered(input);

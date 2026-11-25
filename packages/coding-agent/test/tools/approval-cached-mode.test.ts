@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, ToolTier } from "@oh-my-pi/pi-agent-core";
-import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -30,12 +30,12 @@ import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-ag
 import { getAgentDir, isRecord, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 
-// Approval targets here are host paths and built-in URLs only.
+// Approval targets here are host paths and built-in URLs, unless a case passes a session router.
 const router = InternalUrlRouter.builtins();
 const offerGrants = { grants: { router } };
 
 /** Tool that keys `args.path` like read/write/edit do. */
-function pathTool(name: string, tier: ToolTier, cwd: string): AgentTool {
+function pathTool(name: string, tier: ToolTier, cwd: string, urlRouter = router): AgentTool {
 	return {
 		name,
 		label: name,
@@ -43,7 +43,7 @@ function pathTool(name: string, tier: ToolTier, cwd: string): AgentTool {
 		parameters: {} as never,
 		approval: tier,
 		approvalCacheTargets: (args: unknown) =>
-			isRecord(args) && typeof args.path === "string" ? [approvalTargetKey(cwd, args.path, router)!] : undefined,
+			isRecord(args) && typeof args.path === "string" ? [approvalTargetKey(cwd, args.path, urlRouter)!] : undefined,
 		execute: async () => ({ content: [{ type: "text" as const, text: "executed" }] }),
 	};
 }
@@ -141,6 +141,48 @@ describe("always-ask-cached resolution", () => {
 			policy: "prompt",
 			source: "tool",
 		});
+	});
+
+	it("keeps a remembered grant on a session scheme to the registration that served it", () => {
+		const agentDir = freshAgentDir();
+		// Two sessions each register their own `db://`, as RPC hosts do.
+		const sessionRouter = (): InternalUrlRouter => {
+			const schemes = new UrlSchemeTable("Host URI scheme");
+			schemes.replace([
+				{
+					scheme: "db",
+					spec: {
+						backing: "remote",
+						selectors: "none",
+						immutable: false,
+						write: { via: "handler", payload: "text", scope: "workspace", tier: () => "write" },
+					},
+					resolve: async () => {
+						throw new Error("db:// is never resolved here");
+					},
+					write: async () => {},
+				},
+			]);
+			return new InternalUrlRouter([schemes]);
+		};
+		const routerA = sessionRouter();
+		const writeA = pathTool("write", "write", agentDir, routerA);
+		const writeB = pathTool("write", "write", agentDir, sessionRouter());
+		const args = { path: "db://rows/42" };
+		getApprovalGrants(agentDir, "session-a").record(
+			approvalGrantKey("write", approvalTargetKey(agentDir, args.path, routerA)!),
+			"write",
+			"global",
+		);
+
+		expect(
+			resolveApproval(writeA, args, "always-ask-cached", {}, getApprovalGrants(agentDir, "session-a")).policy,
+		).toBe("allow");
+		expect(
+			resolveApproval(writeB, args, "always-ask-cached", {}, getApprovalGrants(agentDir, "session-b")).policy,
+		).toBe("prompt");
+		// A built-in scheme's grant still holds in every session.
+		expect(approvalTargetKey(agentDir, "local://notes.md", routerA)).toBe("local://notes.md");
 	});
 });
 
