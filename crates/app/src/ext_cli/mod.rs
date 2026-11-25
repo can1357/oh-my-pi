@@ -95,7 +95,7 @@ fn grants_update_failure(error: GrantPersistenceError) -> miette::Report {
 /// Why `omp ext grant` wrote nothing after it took the grants lock: the store
 /// or the extension no longer matches what the operator confirmed. The grant
 /// file is unchanged.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Diagnostic)]
 enum GrantRefusal {
 	/// The store or the extension root no longer passes its checks.
 	#[error("the grant store or the extension root changed before the grant was written")]
@@ -2113,7 +2113,7 @@ fn grant_with(
 	// A grant is refused on a store or extension root that group or others can
 	// write. Revoke stays allowed: it only removes authority.
 	omp_driver::discovery::native::check_grant_directory_modes(data_dir, &extension_root)
-		.map_err(|error| miette::Report::from_err(GrantRefusal::from(error)))?;
+		.map_err(|error| miette::Report::new(GrantRefusal::from(error)))?;
 	let identity =
 		omp_driver::discovery::native::user_extension_grant_identity(home, args.id.as_str())
 			.map_err(|error| miette!("{error}"))?
@@ -2186,7 +2186,7 @@ fn grant_with(
 		Ok::<(), GrantRefusal>(())
 	})
 	.map_err(grants_update_failure)?
-	.map_err(miette::Report::from_err)?;
+	.map_err(miette::Report::new)?;
 	println!("{}: granted {capabilities}", args.id);
 	Ok(())
 }
