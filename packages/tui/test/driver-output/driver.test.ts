@@ -198,6 +198,48 @@ describe("createTerminalDriver", () => {
 });
 
 describe("createTerminalDriver terminal quirks", () => {
+	it.each([
+		{ policy: "default", forceInPlace: undefined, borrows: false },
+		{ policy: "forced borrow", forceInPlace: "0", borrows: true },
+	])("resizes a Herdr pane with $policy without losing the viewport", async ({ forceInPlace, borrows }) => {
+		vi.useFakeTimers();
+		const env: Record<string, string> = { PI_TUI_RESIZE_SCROLLBACK: "rebuild" };
+		if (forceInPlace !== undefined) env.PI_TUI_RESIZE_IN_PLACE = forceInPlace;
+		const { driver, input, output } = setup({ multiplexer: "herdr" }, {}, env);
+		const rows = ["committed transcript"];
+		try {
+			await driver.start();
+			driver.present({ history: { id: 1, rows }, viewport: ["live at 6 rows"], cursor: null });
+			const painted = Promise.withResolvers<void>();
+			const mark = output().length;
+			let replay = false;
+			driver.onReplay(() => (replay = true));
+			driver.onResize(() => {
+				driver.present({
+					history: replay ? { id: 2, rows, kind: "replay" } : undefined,
+					viewport: [`live at ${driver.rows} rows`],
+					cursor: null,
+				});
+				if (output().slice(mark).includes("live at 5 rows")) painted.resolve();
+			});
+
+			input.resize(20, 5);
+			vi.advanceTimersByTime(100);
+			await painted.promise;
+			const resized = output().slice(mark);
+			expect(resized.includes("\x1b[?1049h")).toBe(borrows);
+			expect(resized.includes("\x1b[?1049l")).toBe(borrows);
+			expect(resized.includes("\x1b[3J")).toBe(borrows);
+			expect(resized.includes("committed transcript")).toBe(borrows);
+		} finally {
+			try {
+				await driver.stop();
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	});
+
 	it("re-asserts bracketed paste ahead of every write while the input half asks for it", async () => {
 		const { driver, input, output } = setup();
 		await driver.start();

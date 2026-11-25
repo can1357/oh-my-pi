@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Herdr panes repaint in place on resize, preventing flicker, repeated transcript replays, and wheel input moving through prompt history during a resize ([#20567](https://github.com/can1357/oh-my-pi/issues/20567)).
 - Code blocks in a streaming reply now reach scrollback line by line as they scroll off screen, instead of staying out of reach until the block ends ([#13676](https://github.com/can1357/oh-my-pi/issues/13676), [#20561](https://github.com/can1357/oh-my-pi/pull/20561) by [@Frexxis](https://github.com/Frexxis))
 - Reduced idle CPU use on Windows after `/restart` ([#20518](https://github.com/can1357/oh-my-pi/pull/20518) by [@ethancawse](https://github.com/ethancawse)).
 - Reopened lost Tern surfaces on an `unknown surface` reply, stopped frames if the reopen was rejected, and kept recognizable broken TSP replies out of the editor ([#20550](https://github.com/can1357/oh-my-pi/issues/20550)).

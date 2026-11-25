@@ -198,9 +198,9 @@ a loss).
 The raw default is `preserve`; the coding agent sets `rebuild`. A replay keeps
 the commit frontier and acknowledges only after the write returned.
 
-In-place resize (Warp by default outside multiplexers/ConPTY, or forced with
-`PI_TUI_RESIZE_IN_PLACE=1`) skips resize replay and repaints once the drag
-settles. `PI_TUI_RESIZE_IN_PLACE=0` forces the borrowed-buffer path.
+In-place resize (default in Herdr panes and in Warp outside multiplexers/ConPTY,
+or forced with `PI_TUI_RESIZE_IN_PLACE=1`) skips resize replay and repaints once
+the drag settles. `PI_TUI_RESIZE_IN_PLACE=0` forces the borrowed-buffer path.
 See [runtime resize details](./tui-runtime-internals.md#resize).
 
 The renderer never probes the user's scroll position.
