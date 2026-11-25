@@ -5,11 +5,13 @@
 ### Added
 
 - Added `AssistantMessage.errorFromAgentLoop`, set when the agent loop rather than the provider ended the turn with the error ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
+- OpenAI- and Anthropic-protocol requests to hosts without their own session header now carry `x-session-id`, so gateways and proxies that route on it (bifrost, llmgateway, agentgateway, …) keep a conversation on one upstream; the official OpenAI, Anthropic, and Codex APIs are unchanged
 - `/login otari` asks for the region (US, EU, or a custom self-hosted API root) and stores a non-US endpoint with the key, so EU workspaces no longer need `OTARI_BASE_URL` exported for login, discovery, and requests ([#20300](https://github.com/can1357/oh-my-pi/pull/20300) by [@tbille](https://github.com/tbille))
 
 ### Fixed
 
 - Fixed Codex WebSocket turns staying on SSE for the rest of the session after one WebSocket failure; the WebSocket is retried after `PI_CODEX_WEBSOCKET_FALLBACK_COOLDOWN_MS` (default five minutes) ([#13102](https://github.com/can1357/oh-my-pi/issues/13102), [#20416](https://github.com/can1357/oh-my-pi/pull/20416) by [@JamieJ5926](https://github.com/JamieJ5926))
+- Fixed `generate_image` edits failing on OpenAI-compatible gateways with `400 Missing required parameter: 'images'`; OMP’s auth gateway now accepts the documented JSON edit format ([#20442](https://github.com/can1357/oh-my-pi/issues/20442)).
 - Anthropic OAuth logins explicitly rejected by their organization stay out of account rotation for seven days, across sessions and restarts ([#20373](https://github.com/can1357/oh-my-pi/issues/20373)).
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
 - Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
@@ -21,6 +23,9 @@
 - Fixed `/btw` and other side turns on OpenCode Go/Zen missing the prompt cache because `x-opencode-session` carried the side request's id instead of the parent conversation's ([#20261](https://github.com/can1357/oh-my-pi/issues/20261))
 - Fixed `antigravity-cli` requests failing with `Unknown model ID` when the signed-in account’s agy roster lacks the model: the rejection now blocks only that model on the account and rotates to a sibling login that offers it ([#20315](https://github.com/can1357/oh-my-pi/pull/20315) by [@qSHEMq](https://github.com/qSHEMq))
 - Fixed `antigravity-cli` losing conversation context when OAuth refreshes during a tool call or when restoring a saved turn after agy compacts generation metadata ([#20437](https://github.com/can1357/oh-my-pi/issues/20437)).
+- OpenAI API requests now send the `session-id` and `thread-id` headers codex-rs sends instead of `session_id`, which proxies that reject underscored header names dropped or refused
+- `omp auth-gateway` now reads the `session-id` and `thread-id` headers current Codex CLI versions send for prompt-cache affinity and forwards them upstream, instead of dropping them
+- `omp auth-gateway` keys prompt caching on Claude Code's session id (`x-claude-code-session-id` or the session in `metadata.user_id`) and OpenCode's `x-session-affinity`, instead of a key derived from the request body
 
 ## [19.1.1] - 2026-11-23
 
