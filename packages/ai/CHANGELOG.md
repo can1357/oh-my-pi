@@ -16,6 +16,7 @@
 ### Fixed
 
 - Successful OAuth refreshes now clear refresh-failure backoff so healthy accounts stop triggering usage-aware fallback after an outage ([#20454](https://github.com/can1357/oh-my-pi/issues/20454)).
+- Fixed Kimi Code OAuth accounts staying skipped until a quota window's stated reset even after the provider restored quota early; a fresh live usage report now lifts the stale cooldown ([#20290](https://github.com/can1357/oh-my-pi/pull/20290) by [@AstralSolipsism](https://github.com/AstralSolipsism))
 
 ## [19.2.0] - 2026-11-25
 
