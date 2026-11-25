@@ -4,22 +4,22 @@
 
 ### Added
 
-- Added checkout event support to TSP connection and host
-- Added `@oh-my-pi/pi-tui`, the terminal UI that replaces `@oh-my-pi/pi-tui`: one tree of Tern Surface Protocol nodes drawn natively by Tern and as terminal rows elsewhere, with signals and a compiler-free JSX runtime, role-based painters and widgets, a terminal driver (input, capabilities, multiplexers, images, resize policies, notifications), Markdown and text utilities, themes, and test utilities (`testing/terminal`, `testing/cells`)
+- Added `@oh-my-pi/pi-tui`, a terminal UI with a unified Tern Surface Protocol node tree, native and terminal rendering, reactive signals, compiler-free JSX, role-based painters and widgets, terminal input and capability support, multiplexer and image handling, resize policies, notifications, Markdown and text utilities, themes, and terminal testing utilities.
+- Added checkout event support to TSP connections and hosts.
 
 ### Changed
 
-- Host now reports when the terminal shows the checkout itself via checkoutShown
-- Custom theme files are polled every 500ms instead of watched, so live reload keeps working after editors save by renaming a new file over the theme.
+- Hosts now report when the terminal displays the checkout itself through `checkoutShown`.
+- Theme files are polled for changes, keeping live reload working when editors replace files during save.
 
 ### Fixed
 
-- In Tern, a block that keeps redrawing after the blocks above it changed (a streaming `/btw` note) no longer flashes in as new on every update.
-- In Tern, a key that opens a page no longer reaches that page too: Esc Esc opens the rewind view again instead of flashing it shut.
-- Corrected math environment detection to properly handle blocks starting with `\begin`
-- Cmd+A highlights the full text of editors and inputs when the terminal forwards the shortcut. Typing, deleting or pasting replaces the selected range.
-- Native overlays follow the field they are anchored to, including when the field moves or shares its local key with another field.
-- Native menu and tree toggles now reach the intended control or branch. Clicking behind an explicitly modal sheet no longer moves keyboard focus out of it.
-- In terminal rows, modal sheets block clicks into the screen behind them. Inline clicks and hover follow the visible content after scrolling, and closing a fullscreen view restores the previous mouse setting.
-- Returning to the shell after a native session no longer leaves terminal replies in the shell prompt, including after a fatal error.
-- Tern receives large transcript redraws in smaller frames when resuming sessions or returning from a subagent view ([#20374](https://github.com/can1357/oh-my-pi/issues/20374)).
+- Fixed streaming Tern content being unnecessarily redrawn as newly inserted when content above it changes.
+- Fixed keyboard events used to open a page from being delivered to the newly opened page as well.
+- Fixed detection of LaTeX blocks beginning with `\begin`.
+- Fixed Cmd+A selection in terminal-forwarded editors and inputs so typing, deletion, and paste replace the selected text.
+- Fixed native overlays losing alignment with their anchored fields when the fields move or share local keys.
+- Fixed native menu and tree interactions being delivered to the wrong control or branch, and prevented clicks behind modal sheets from moving focus outside the modal.
+- Fixed terminal-row modal sheets allowing interaction with the content behind them, incorrect click and hover targets after scrolling, and mouse settings not being restored after closing fullscreen views.
+- Fixed terminal replies leaking into the shell prompt after returning from a native session, including after fatal errors.
+- Improved handling of large Tern transcript redraws when resuming sessions or returning from a subagent view.

@@ -4,28 +4,29 @@
 
 ### Breaking Changes
 
-- Removed `watch` and `HEAD_WATCH_INTERVAL_MS` from `@oh-my-pi/pi-natives/vcs`; read the repository again when its state matters instead
+- Removed the `watch` and `HEAD_WATCH_INTERVAL_MS` exports from `@oh-my-pi/pi-natives/vcs`; reread repository state when needed instead.
 
-### Fixed
-
-- Fixed open PTY sessions and `reapChild()` waits each holding a native blocking-pool thread, which stalled new PTY starts and other native blocking work once 8 terminals were open on Windows (512 elsewhere) ([#20283](https://github.com/can1357/oh-my-pi/pull/20283) by [@iliaal](https://github.com/iliaal))
-- Fixed the shell's `open` command on Linux starting a private D-Bus thread pool, one thread per CPU, the first time it reached the session bus ([#20278](https://github.com/can1357/oh-my-pi/pull/20278) by [@iliaal](https://github.com/iliaal))
-- Fixed Windows captures and accessibility trees of a fully covered Chromium or Electron window passing as current when the cover is a popup, tool or click-through window, under which a paused page can stay paused; they now report `covered` there too ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed standalone binaries failing to start when the natives directory is read-only (or owned by another user) even though it already holds this build's extracted addon ([#20266](https://github.com/can1357/oh-my-pi/issues/20266))
 ### Added
 
-- Added `@oh-my-pi/pi-natives/file-poll` with `pollFile(file, onChange, intervalMs)`: stat-polls one file and reports mtime, size or inode changes, so atomic saves and symlink retargets are not missed
-- Added `truncateToTokens(input, maxTokens)`: the UTF-16 length of the longest prefix of `input` within `maxTokens` `Jev` tokens, never ending on half a surrogate pair; pieces after the one that crosses the budget are not merged ([#20384](https://github.com/can1357/oh-my-pi/pull/20384) by [@iliaal](https://github.com/iliaal))
-- Added `repairHeredocContinuations(script)`: drops the `\` after `<<EOF &&` (or `||`, `|`, `|&`) so the here-document body starts on the next line, or returns `null`
-- Added `commitReconciled()` to publish private-index commits without leaving staged reversals when the shared index is locked ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
-- Added `transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`: parallel scans of session transcript files for tool calls with their results and reasoning, regex matches over message text, thinking, arguments, and results, call counts, and one transcript's records.
+- Added `@oh-my-pi/pi-natives/file-poll` with `pollFile(file, onChange, intervalMs)` for detecting file metadata changes, including atomic saves and symlink retargets.
+- Added `truncateToTokens(input, maxTokens)` for safely truncating text to a token budget without splitting UTF-16 surrogate pairs.
+- Added `repairHeredocContinuations(script)` to repair supported shell here-document continuations.
+- Added `commitReconciled()` for publishing private-index commits safely when the shared index is locked.
+- Added transcript analysis APIs—`transcriptCalls()`, `transcriptGrep()`, `transcriptStats()`, and `transcriptMessages()`—for inspecting tool calls, reasoning, message content, matches, and call statistics across session transcripts.
 
 ### Changed
 
-- The OAuth callback wait polls for the callback every 200ms instead of watching the transaction directory
-- `tail -f` checks every followed file once per `--sleep-interval`, and at once when the file-system watcher reports a change, so a file moved to another directory, a symlink target or a file on a network drive no longer stalls; if the watcher fails, `tail` falls back to polling instead of exiting
-- A persistent `Shell` session no longer carries `set -e` into later commands: errexit stops only the command that turned it on, while other options (`set -u`, `pipefail`, `shopt`) still persist
-- `ShellRunResult` now reports `movedCwd` (the command ended in another directory than it started in) and `errexit` (it ended with `set -e` on)
+- OAuth callback handling now polls for callbacks at regular intervals instead of relying on directory watching.
+- Improved `tail -f` reliability for moved files, symlinks, network drives, and file-watcher failures by combining event-driven updates with polling fallback.
+- Persistent shell sessions no longer carry `set -e` into subsequent commands; other shell options continue to persist.
+- `ShellRunResult` now reports whether a command changed the working directory (`movedCwd`) or left errexit enabled (`errexit`).
+
+### Fixed
+
+- Fixed PTY sessions and child-process cleanup consuming native blocking-pool threads, which could prevent new terminals and other blocking operations from starting after enough terminals were open.
+- Fixed the Linux shell `open` command creating an excessive D-Bus thread pool on first use.
+- Fixed Windows Chromium and Electron captures and accessibility trees incorrectly reporting fully covered windows as current when covered by popup, tool, or click-through windows.
+- Fixed standalone binaries failing to start when the natives directory was read-only or owned by another user despite already containing the extracted addon.
 
 ## [19.1.1] - 2026-11-23
 
