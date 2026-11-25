@@ -55,7 +55,7 @@ import type { BlockOptions, Shell, TranscriptBlock, ViewList } from "../../ui/sh
 import { mountNode } from "../../ui/shell";
 import { type ExecRun, ExecRunBlock } from "../../ui/transcript/exec-run";
 import { cardExpansion } from "../../ui/transcript/expansion";
-import { PresentedBlock } from "../../ui/transcript/figures/presented-block";
+import { PresentedBlock, presentedMode } from "../../ui/transcript/figures/presented-block";
 import { SpotlightNotice } from "../../ui/transcript/figures/spotlight";
 import type { FigureCell } from "../../ui/transcript/figures/svg";
 import {
@@ -387,6 +387,7 @@ export class TranscriptPresenter {
 		const { display } = this.#host;
 		if (face.reaction) this.#reactionTarget = face.reaction;
 		const presented = face.presented;
+		const packed = signal(false);
 		const factory = presented
 			? () => {
 					const fold = cardExpansion(display.toolOutputExpanded);
@@ -399,13 +400,16 @@ export class TranscriptPresenter {
 							expanded={fold.expanded}
 							onToggle={fold.toggle}
 							activityVisible={() => !display.hideToolActivity()}
+							packed={packed}
 						>
 							{face.face({ expanded: fold.expanded, onToggle: expanded => fold.toggle(!expanded) })}
 						</PresentedBlockNode>
 					);
 				}
 			: face.face;
-		const block = this.#mount(factory, options?.before, face.compact ? { compact: face.compact } : undefined);
+		const own = face.compact;
+		const compact = presented ? (own ? () => packed() || own() : packed) : own;
+		const block = this.#mount(factory, options?.before, compact ? { compact } : undefined);
 		this.register(block, { kind: "message", message });
 		if (!options?.live) this.#settle(block);
 		return block;
@@ -484,7 +488,7 @@ export class TranscriptPresenter {
 				return result && !call.facts.partial() ? this.#spotlightNotice(call.id, result) : undefined;
 			};
 			return [<ToolBlock call={call} />, notice];
-		}, before);
+		}, before, { compact: () => call.facts.presentation() !== "full" });
 		const settleIfFinal = (result: ToolCallResult, partial: boolean): void => {
 			if (partial) return;
 			if (result.isError !== true) {
@@ -595,7 +599,7 @@ export class TranscriptPresenter {
 			const notices = (): JSXNode[] =>
 				[...finals().entries()].map(([id, result]) => this.#spotlightNotice(id, result));
 			return [ReadGroupBlock({ group }), notices];
-		}, options?.before);
+		}, options?.before, { compact: group.compact });
 		const pending: PendingTool = {
 			block,
 			group,
@@ -662,21 +666,30 @@ export class TranscriptPresenter {
 	}
 
 	#mountRun(run: ExecRun, message: Signal<BashExecutionMessage | PythonExecutionMessage>): TranscriptBlock {
-		const block = this.#mount(() => {
-			effect(() => {
-				if (run.status() !== "running") this.#settleSoon(() => block);
-			});
-			return this.#runFace(run, message, () => block);
-		}, undefined);
+		const packed = signal(false);
+		const block = this.#mount(
+			() => {
+				effect(() => {
+					if (run.status() !== "running") this.#settleSoon(() => block);
+				});
+				return this.#runFace(run, message, () => block, packed);
+			},
+			undefined,
+			{ compact: packed },
+		);
 		this.register(block, { kind: "exec", run });
 		return block;
 	}
 
-	/** A `!`/`$` run's face; `block` is its transcript block once mounted (none while deferred). */
+	/**
+	 * A `!`/`$` run's face; `block` is its transcript block once mounted (none while deferred), and
+	 * `packed` follows whether presenters draw it compact or hidden.
+	 */
 	#runFace(
 		run: ExecRun,
 		message: Signal<BashExecutionMessage | PythonExecutionMessage>,
 		block: () => TranscriptBlock | undefined,
+		packed?: Signal<boolean>,
 	): JSXNode {
 		const { display } = this.#host;
 		effect(() => {
@@ -693,6 +706,7 @@ export class TranscriptPresenter {
 				expanded={run.expanded}
 				onToggle={collapsed => run.toggle(collapsed)}
 				activityVisible={() => !display.hideToolActivity()}
+				{...(packed ? { packed } : {})}
 			>
 				<ExecRunBlock run={run} />
 			</PresentedBlockNode>
@@ -721,8 +735,16 @@ function PresentedBlockNode(props: {
 	readonly expanded: () => boolean;
 	readonly onToggle: (collapsed: boolean) => void;
 	readonly activityVisible: () => boolean;
+	/** Set while the block draws compact or hidden: its transcript block then packs against compact neighbours. */
+	readonly packed?: Signal<boolean>;
 	readonly children: JSXNode;
 }): JSXNode {
+	const packed = props.packed;
+	if (packed)
+		effect(() => {
+			const value = presentedMode(props.block(), props.presentation(), props.expanded()) !== "full";
+			untrack(() => packed.set(value));
+		});
 	return () => (
 		<PresentedBlock
 			block={props.block()}
@@ -736,21 +758,22 @@ function PresentedBlockNode(props: {
 	);
 }
 
-/** A presenters' answer as a tool card's presentation. */
+/** A presenters' answer as a tool card's presentation (a string label or row loses its control sequences). */
 function toolPresentation(answer: TranscriptPresentation): ToolPresentation {
 	if (answer === undefined || answer === "full") return "full";
 	if (answer === "hidden" || answer === "compact") return answer;
 	const { label, rows } = answer.compact;
 	return {
 		compact: {
-			...(label !== undefined ? { label: spanText(label) } : {}),
-			...(rows ? { rows: rows.map(spanText) } : {}),
+			...(label !== undefined ? { label: plainText(label) } : {}),
+			...(rows ? { rows: rows.map(plainText) } : {}),
 		},
 	};
 }
 
-function spanText(text: TspText): string {
-	return typeof text === "string" ? stripEscapes(text) : text.map(part => part.t).join("");
+/** `text` without control sequences when a string; spans keep their theme tokens. */
+function plainText(text: TspText): TspText {
+	return typeof text === "string" ? stripEscapes(text) : text;
 }
 
 function textOf(message: AssistantMessage | undefined): string {

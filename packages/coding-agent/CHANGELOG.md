@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Extension transcript presenters' compact tool-call and read rows draw their `TspSpan` theme styles again, and consecutive compact tool, read, `!`/`$` run and message blocks pack without blank rows between them ([#20512](https://github.com/can1357/oh-my-pi/issues/20512)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

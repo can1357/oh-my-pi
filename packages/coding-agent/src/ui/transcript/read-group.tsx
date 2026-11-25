@@ -26,7 +26,8 @@ import type { ReadToolDetails } from "../../tools/details/read";
 import { shortenPath } from "../../utils/render-utils";
 import { fileHref } from "../tools/file-common";
 import { ContentCode, firstSelectorLine, readLinkPath, splitTarget } from "../tools/read";
-import type { ToolPresentation } from "./tool-block";
+import { presenterRows } from "./figures/presented-block";
+import type { CompactRow, ToolPresentation } from "./tool-block";
 
 /** A read's state in the group. */
 export type ReadStatus = "pending" | "success" | "warning" | "error";
@@ -399,6 +400,11 @@ export class ReadGroup {
 	};
 	readonly activityVisible: Accessor<boolean> = () => this.#activityVisible();
 	readonly sealed: Accessor<boolean> = () => this.#sealed();
+	/** Every read draws compact or hidden: the group's block packs against compact neighbours. */
+	readonly compact: Accessor<boolean> = computed(() => {
+		const entries = this.#entries();
+		return entries.length > 0 && entries.every(entry => this.presentation(entry) !== "full");
+	});
 
 	#update(id: string, change: (entry: ReadEntry) => ReadEntry): void {
 		this.#entries.set(this.#entries().map(entry => (entry.id === id ? change(entry) : entry)));
@@ -694,9 +700,10 @@ export type ReadGroupTerm = {
 	readonly presented?: {
 		readonly status: ReadStatus;
 		/** The presenter's label, else the read's path after `Read`. */
-		readonly label?: string;
+		readonly label?: TspText;
 		readonly path: string;
-		readonly rows: readonly string[];
+		/** The presenter's rows as `presenterRows` spans. */
+		readonly rows: readonly TspSpan[];
 	};
 	/** Every displayed row (rows 0: ` • Read`; one: `Read <path>`; several: `Read (N)` and a tree). */
 	readonly count?: number;
@@ -841,10 +848,7 @@ interface GroupNodeProps {
 	readonly nodeKey?: string;
 	readonly hidden?: boolean;
 	/** A presenter's compact presentation of the (single) read. */
-	readonly compact?: {
-		readonly label?: string;
-		readonly rows?: readonly string[];
-	};
+	readonly compact?: CompactRow;
 	readonly onToggle: (collapsed: boolean) => void;
 }
 
@@ -963,10 +967,7 @@ function GroupNode(props: GroupNodeProps): JSXNode {
 				onToggle={props.onToggle}
 			>
 				{compactRows.length > 0 ? (
-					<text
-						spans={compactRows.flatMap((row, i) => (i === 0 ? [{ t: row }] : [{ t: "\n" }, { t: row }]))}
-						wrap="none"
-					/>
+					<text spans={presenterRows(compactRows)} wrap="none" />
 				) : (
 					body
 				)}
@@ -1003,7 +1004,7 @@ function GroupNode(props: GroupNodeProps): JSXNode {
 function groupTerm(
 	group: ReadGroup,
 	entries: readonly ReadEntry[],
-	compact: { readonly label?: string; readonly rows?: readonly string[] } | undefined,
+	compact: CompactRow | undefined,
 ): ReadGroupTerm {
 	if (compact) {
 		const entry = entries[0]!;
@@ -1013,7 +1014,7 @@ function groupTerm(
 				status: entry.status,
 				...(compact.label !== undefined ? { label: compact.label } : {}),
 				path: shortenPath(entry.path),
-				rows: compact.rows ?? [],
+				rows: presenterRows(compact.rows ?? []),
 			},
 		};
 	}
