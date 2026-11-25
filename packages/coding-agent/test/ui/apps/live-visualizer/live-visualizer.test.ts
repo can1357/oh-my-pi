@@ -1,5 +1,15 @@
+import { expect, test } from "bun:test";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { createLiveCallModel, LiveVisualizer } from "../../../../src/ui/apps/live-visualizer";
-import { appSuite } from "../harness";
+import { appSuite, paintAppRows } from "../harness";
+
+test("the live visualizer shows ASCII key names for mute and end", () => {
+	const env = staticEnvironment(loadThemeSync("dark", { symbolPreset: "ascii" }));
+	const view = () => LiveVisualizer({ model: createLiveCallModel(), onStop: () => {}, onToggleMute: () => {} });
+	const rows = paintAppRows(view, env, 100);
+	expect(rows.find(row => row.includes("mute"))).toContain("Space mute · Esc end");
+});
 
 const TRANSCRIPT = "hello   world\nthis is a long transcript 日本語 ".repeat(5);
 
