@@ -99,6 +99,7 @@ import type { LiveTranscript } from "../../live/controller";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { ProtocolHandler } from "../../internal-urls/types";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
@@ -2196,6 +2197,26 @@ export interface ExtensionAPI {
 	registerLinkScheme(scheme: string): void;
 
 	/**
+	 * Serve the internal URL scheme `handler.scheme` (`<scheme>://…`) in the sessions this load
+	 * belongs to: `read` resolves it, `write` writes it when `handler.spec.write.via` is `"handler"`,
+	 * the composer completes it when the handler has `complete()`, the write approval gate applies
+	 * `spec.write.tier`, and the session's system prompt lists its `promptDoc`. Handlers receive the
+	 * calling session in `context` (`cwd`, `sessionId`, `sessionFile`, the tool `session` for tool
+	 * calls).
+	 *
+	 * Only records the handler on this extension; nothing process-wide changes. A session resolves
+	 * the schemes of its active extensions, so a load suspended by a live `disabledExtensions` edit
+	 * stops serving its schemes until it resumes. Two active extensions of one session registering
+	 * the same scheme is reported as an extension error when the session is built; the earlier
+	 * extension serves it. Throws for invalid scheme syntax (two or more characters of
+	 * `[a-z0-9+.-]`, starting with a letter, after lowercasing), a built-in or standard scheme
+	 * (`local`, `http`, …), a scheme this extension already registered, or a spec the handler
+	 * contradicts. The returned function removes the registration. Registering one keeps the
+	 * extension out of startup deferral.
+	 */
+	registerUrlScheme(handler: ProtocolHandler): () => void;
+
+	/**
 	 * Register a composer shape for the interactive editor: the chrome drawn around the
 	 * composer's text rows (see {@link ComposerShape}). It joins the shape picker under its
 	 * `label` and can be selected with `ctx.ui.composer.setShape(id)`.
@@ -2617,6 +2638,8 @@ export interface Extension {
 	transcriptPresenters: TranscriptPresenter[];
 	/** Link schemes claimed with `registerLinkScheme`, lowercase. */
 	linkSchemes: string[];
+	/** Internal URL scheme handlers registered with `registerUrlScheme`, by lowercase scheme. */
+	urlSchemes: Map<string, ProtocolHandler>;
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;

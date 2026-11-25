@@ -31,7 +31,8 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { NATIVE_TODO_BACKEND } from "../../tools/settings";
-import { InternalUrlRouter } from "../../internal-urls/router";
+import { assertProtocolHandlerSpec, InternalUrlRouter } from "../../internal-urls/router";
+import type { ProtocolHandler } from "../../internal-urls/types";
 import { isStandardScheme } from "../../internal-urls/url-scheme";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
@@ -339,6 +340,26 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
 	}
 
+	registerUrlScheme(handler: ProtocolHandler): () => void {
+		const scheme = handler.scheme.toLowerCase();
+		if (!LINK_SCHEME_PATTERN.test(scheme)) {
+			throw new Error(
+				`registerUrlScheme: "${handler.scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
+			);
+		}
+		if (InternalUrlRouter.isBuiltin(scheme)) {
+			throw new Error(`registerUrlScheme: ${scheme}:// is an OMP built-in scheme`);
+		}
+		if (isStandardScheme(scheme)) throw new Error(`registerUrlScheme: ${scheme}:// is a standard scheme`);
+		const { urlSchemes } = this.extension;
+		if (urlSchemes.has(scheme)) throw new Error(`registerUrlScheme: ${scheme}:// is already registered`);
+		assertProtocolHandlerSpec(handler);
+		urlSchemes.set(scheme, handler);
+		return () => {
+			if (urlSchemes.get(scheme) === handler) urlSchemes.delete(scheme);
+		};
+	}
+
 	registerComposerShape(shape: ComposerShape & { readonly label: string }): void {
 		const id = shape.id;
 		if (typeof id !== "string" || id.length === 0 || id !== id.trim()) {
@@ -478,6 +499,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		assistantTextRenderers: [],
 		transcriptPresenters: [],
 		linkSchemes: [],
+		urlSchemes: new Map(),
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),

@@ -47,6 +47,7 @@ function extension(name: string, handler: (event: BeforeAgentStartEvent) => Prom
 		assistantTextRenderers: [],
 		transcriptPresenters: [],
 		linkSchemes: [],
+		urlSchemes: new Map(),
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),

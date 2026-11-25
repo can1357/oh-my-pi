@@ -8,7 +8,9 @@
  * (installed at UI init), file-mutation fallbacks (installed at runner init), or
  * custom message renderers, assistant reply renderers and link schemes (the
  * first frame replays the transcript with them, and the schemes reach the
- * markdown renderer at UI init), or the todo backend `todo.backend` selects
+ * markdown renderer at UI init), internal URL schemes (their promptDoc enters
+ * the first system prompt, and the composer completes them from the first
+ * keystroke), or the todo backend `todo.backend` selects
  * (a resumed session's list goes to it at `session_start`; an extension whose
  * backends are all unselected may defer). Each load records that verdict in agent.db,
  * keyed by the module's resolved path and fingerprinted by its size and mtime.
@@ -23,7 +25,7 @@ import type { Extension } from "./types";
 
 // Bumped whenever canBindAfterStartup counts a new registration, so verdicts recorded without it
 // are not trusted.
-const CACHE_PREFIX = "extension_startup:v3:";
+const CACHE_PREFIX = "extension_startup:v4:";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface StartupVerdict {
@@ -83,6 +85,7 @@ export function canBindAfterStartup(extension: Extension): boolean {
 		extension.assistantTextRenderers.length === 0 &&
 		extension.assistantThinkingRenderers.length === 0 &&
 		extension.linkSchemes.length === 0 &&
+		extension.urlSchemes.size === 0 &&
 		extension.messageRenderers.size === 0
 	);
 }

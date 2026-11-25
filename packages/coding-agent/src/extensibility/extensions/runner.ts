@@ -1339,6 +1339,11 @@ export class ExtensionRunner {
 		return this.#loadOrder ?? this.extensions;
 	}
 
+	/** The extensions this runner loaded and has not suspended, in load order. */
+	getActiveExtensions(): readonly Extension[] {
+		return this.extensions;
+	}
+
 	/** Whether the extension loaded from `extensionPath` is present and not suspended. */
 	isExtensionActive(extensionPath: string): boolean {
 		return this.extensions.some(ext => ext.path === extensionPath);

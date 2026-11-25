@@ -10,10 +10,15 @@ import { isStandardScheme } from "./url-scheme";
 export class UrlSchemeTable implements UrlSchemeSource {
 	#handlers = new Map<string, ProtocolHandler>();
 	readonly #owner: string;
+	readonly #taken: readonly UrlSchemeSource[];
 
-	/** `owner` names the registrant in refusal messages (e.g. "Host URI scheme"). */
-	constructor(owner: string) {
+	/**
+	 * `owner` names the registrant in refusal messages (e.g. "Host URI scheme"); a scheme one of
+	 * `taken` holds is refused too.
+	 */
+	constructor(owner: string, taken: readonly UrlSchemeSource[] = []) {
 		this.#owner = owner;
+		this.#taken = taken;
 	}
 
 	get(scheme: string): ProtocolHandler | undefined {
@@ -26,8 +31,8 @@ export class UrlSchemeTable implements UrlSchemeSource {
 
 	/**
 	 * Replace every handler with `handlers`. Throws, changing nothing, when one
-	 * names a built-in or standard scheme, repeats a scheme, or fails
-	 * {@link assertProtocolHandlerSpec}.
+	 * names a built-in or standard scheme, a scheme a `taken` source holds,
+	 * repeats a scheme, or fails {@link assertProtocolHandlerSpec}.
 	 */
 	replace(handlers: readonly ProtocolHandler[]): void {
 		const next = new Map<string, ProtocolHandler>();
@@ -38,6 +43,9 @@ export class UrlSchemeTable implements UrlSchemeSource {
 			}
 			if (isStandardScheme(scheme)) {
 				throw new Error(`${this.#owner} is a standard scheme: ${scheme}://`);
+			}
+			if (this.#taken.some(source => source.get(scheme))) {
+				throw new Error(`${this.#owner} is already registered in this session: ${scheme}://`);
 			}
 			if (next.has(scheme)) throw new Error(`${this.#owner} is registered twice: ${scheme}://`);
 			assertProtocolHandlerSpec(handler);
@@ -52,28 +60,34 @@ export class UrlSchemeTable implements UrlSchemeSource {
 	}
 }
 
+/** A source owning no scheme. */
+const NO_SCHEMES: UrlSchemeSource = { get: () => undefined, handlers: () => [] };
+
 /**
  * One session's own schemes and the router over them. Sources are checked in
  * order, then the built-ins: RPC host URIs first, then extension schemes.
  */
 export class SessionUrlSchemes {
-	/** Schemes the RPC host registered for this session (`set_host_uri_schemes`). */
-	readonly hostUris = new UrlSchemeTable("Host URI scheme");
+	/** Schemes the RPC host registered for this session (`set_host_uri_schemes`); never one an extension holds. */
+	readonly hostUris: UrlSchemeTable;
 	/**
 	 * The host URI schemes this session resolves: its own {@link hostUris}, then the
 	 * ones it inherited from the session that spawned it. Read live, never written.
 	 */
 	readonly hostUriSources: readonly UrlSchemeSource[];
-	/** The session's router: {@link hostUriSources}, then the built-ins. */
+	/** The session's router: {@link hostUriSources}, then the extension schemes, then the built-ins. */
 	readonly router: InternalUrlRouter;
 
 	/**
 	 * `parentHostUris` is the spawning session's {@link hostUriSources}: a task
 	 * subagent on the parent's thread resolves the RPC host's schemes the parent
 	 * resolves, including ones the host registers after the spawn.
+	 * `extensionSchemes` reads the schemes the session's active extensions registered
+	 * (`pi.registerUrlScheme`); a host URI scheme may not be one of them.
 	 */
-	constructor(parentHostUris: readonly UrlSchemeSource[] = []) {
+	constructor(parentHostUris: readonly UrlSchemeSource[] = [], extensionSchemes: UrlSchemeSource = NO_SCHEMES) {
+		this.hostUris = new UrlSchemeTable("Host URI scheme", [extensionSchemes]);
 		this.hostUriSources = [this.hostUris, ...parentHostUris];
-		this.router = new InternalUrlRouter(this.hostUriSources);
+		this.router = new InternalUrlRouter([...this.hostUriSources, extensionSchemes]);
 	}
 }

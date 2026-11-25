@@ -895,8 +895,10 @@ Every built-in scheme (`local://`, `skill://`, `security://`,
 `mcp://`, …) is reserved: RPC hosts cannot register or shadow one, and the
 request fails with `Host URI scheme is reserved by OMP: <scheme>://`. Standard
 schemes (`http`, `https`, `file`, `ftp`, `mailto`, …) are refused with
-`Host URI scheme is a standard scheme: <scheme>://`. A refused request changes
-nothing.
+`Host URI scheme is a standard scheme: <scheme>://`, and a scheme one of the
+session's extensions registered (`pi.registerUrlScheme`) with
+`Host URI scheme is already registered in this session: <scheme>://`. A refused
+request changes nothing.
 
 ## Event Stream Schema
 

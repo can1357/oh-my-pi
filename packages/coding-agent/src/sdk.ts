@@ -143,6 +143,7 @@ import {
 import type { UserWaitTracker } from "./extensibility/extensions/user-wait";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { partitionStartupExtensions, recordStartupVerdicts } from "./extensibility/extensions/startup-deferral";
+import { ExtensionUrlSchemes, urlSchemeConflicts } from "./extensibility/extensions/url-schemes";
 import {
 	createSkillDescriptionCompressor,
 	openSessionSkillDescriptionStore,
@@ -2096,6 +2097,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
+	// The session's extension runner, for its URL schemes; set once it exists.
+	let urlSchemeRunner: ExtensionRunner | undefined;
 	// Set once the session exists; the built-in warning covers disables from then on.
 	let credentialNoticeSession: AgentSession | undefined;
 	const unsubscribeCredentialDisabled = authStorage.credentials.onDisabled(event => {
@@ -2707,7 +2710,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		};
 		// This session's own URL schemes; its tools and the AgentSession resolve through one router.
-		const urlSchemes = new SessionUrlSchemes(options.parentHostUriSources);
+		// Extension schemes come from the runner's active extensions, read per lookup once it exists.
+		const urlSchemes = new SessionUrlSchemes(
+			options.parentHostUriSources,
+			new ExtensionUrlSchemes(() => urlSchemeRunner?.getActiveExtensions() ?? []),
+		);
 		const toolSession: ToolSession = {
 			urlRouter: urlSchemes.router,
 			hostUriSources: urlSchemes.hostUriSources,
@@ -4011,6 +4018,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createAnnotationsAPI,
 			urlSchemes.router,
 		);
+		urlSchemeRunner = extensionRunner;
+		// Two active extensions registering one URL scheme: the earlier serves it, the rest are errors.
+		// A new list, so a caller's preloaded result is left as it was.
+		const urlSchemeErrors = urlSchemeConflicts(extensionRunner.getActiveExtensions());
+		if (urlSchemeErrors.length > 0) {
+			for (const conflict of urlSchemeErrors) logger.error("Extension URL scheme conflict", conflict);
+			extensionsResult = { ...extensionsResult, errors: [...extensionsResult.errors, ...urlSchemeErrors] };
+		}
 		// A dialog waits for the user, not the agent: the session lets the display sleep while one is open.
 		const trackUserWait: UserWaitTracker = dialog => (hasSession ? session.waitForUser(dialog) : dialog());
 		extensionRunner.setUserWaitTracker(trackUserWait);
