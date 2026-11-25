@@ -4020,8 +4020,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		urlSchemeRunner = extensionRunner;
 		// Two active extensions registering one URL scheme: the earlier serves it, the rest are errors.
-		// A new list, so a caller's preloaded result is left as it was.
-		const urlSchemeErrors = urlSchemeConflicts(extensionRunner.getActiveExtensions());
+		// The loader already reported conflicts among the extensions it bound together; this adds the
+		// ones only the whole session sees (inline factories beside loaded paths). A new list, so a
+		// caller's preloaded result is left as it was.
+		const reported = new Set(extensionsResult.errors.map(({ path, error }) => `${path}\0${error}`));
+		const urlSchemeErrors = urlSchemeConflicts(extensionRunner.getActiveExtensions()).filter(
+			({ path, error }) => !reported.has(`${path}\0${error}`),
+		);
 		if (urlSchemeErrors.length > 0) {
 			for (const conflict of urlSchemeErrors) logger.error("Extension URL scheme conflict", conflict);
 			extensionsResult = { ...extensionsResult, errors: [...extensionsResult.errors, ...urlSchemeErrors] };

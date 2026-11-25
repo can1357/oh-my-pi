@@ -2207,12 +2207,12 @@ export interface ExtensionAPI {
 	 * Only records the handler on this extension; nothing process-wide changes. A session resolves
 	 * the schemes of its active extensions, so a load suspended by a live `disabledExtensions` edit
 	 * stops serving its schemes until it resumes. Two active extensions of one session registering
-	 * the same scheme is reported as an extension error when the session is built; the earlier
-	 * extension serves it. Throws for invalid scheme syntax (two or more characters of
-	 * `[a-z0-9+.-]`, starting with a letter, after lowercasing), a built-in or standard scheme
-	 * (`local`, `http`, …), a scheme this extension already registered, or a spec the handler
-	 * contradicts. The returned function removes the registration. Registering one keeps the
-	 * extension out of startup deferral.
+	 * the same scheme is reported as an extension load error (an `omp` startup warning; fatal under
+	 * `--trusted-extension`); the earlier extension serves it. Throws for invalid scheme syntax
+	 * (two or more characters of `[a-z0-9+.-]`, starting with a letter, after lowercasing), a
+	 * built-in or standard scheme (`local`, `http`, …), a scheme this extension already registered,
+	 * or a spec the handler contradicts. The returned function removes the registration.
+	 * Registering one keeps the extension out of startup deferral.
 	 */
 	registerUrlScheme(handler: ProtocolHandler): () => void;
 

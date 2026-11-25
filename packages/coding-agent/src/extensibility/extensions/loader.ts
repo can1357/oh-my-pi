@@ -37,6 +37,7 @@ import { isStandardScheme } from "../../internal-urls/url-scheme";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
+import { urlSchemeConflicts } from "./url-schemes";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loader";
 
@@ -618,6 +619,9 @@ export async function loadExtensions(
  * Bind previously imported extension factories. A fresh session runtime is
  * created unless `runtime` is given: deferred startup extensions bind into the
  * live session's runtime so they share its flag values and wired actions.
+ * Two bound extensions registering one URL scheme are reported in `errors`
+ * (the earlier one serves it), so every caller that surfaces load errors —
+ * the CLI's notifications and its `--trusted-extensions` gate included — shows them.
  */
 export async function bindPreparedExtensions(
 	preparedExtensions: readonly PreparedExtension[],
@@ -644,7 +648,7 @@ export async function bindPreparedExtensions(
 
 	return {
 		extensions,
-		errors,
+		errors: [...errors, ...urlSchemeConflicts(extensions)],
 		runtime,
 		preparedExtensions: [...preparedExtensions],
 	};

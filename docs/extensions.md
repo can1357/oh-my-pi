@@ -419,7 +419,8 @@ export default function (pi: ExtensionAPI) {
   `spec.write.via: "handler"`, and so on). An RPC host's `set_host_uri_schemes` cannot take a
   scheme an extension of the session registered.
 - **Conflicts.** Two active extensions of one session registering the same scheme is reported as
-  an extension error when the session is built; the extension loaded first serves it.
+  an extension load error (an `omp` startup warning; fatal under `--trusted-extension`); the
+  extension loaded first serves it.
 - **Suspension.** While a live `disabledExtensions` edit suspends your extension, its schemes
   stop serving in that session; they serve again on resume.
 - **Startup.** An extension that registers a URL scheme always binds before the session starts,
