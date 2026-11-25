@@ -128,6 +128,21 @@ function modelName(facts: StatusFacts): string {
 	return name.startsWith("Claude ") ? name.slice(7) : name;
 }
 
+/** `id` and `full` show the selector instead of the display name; `showProvider` prefixes the provider. */
+function modelLabel(facts: StatusFacts, options: StatusLineSegmentOptions["model"] = {}): string {
+	const model = facts.model;
+	let name: string;
+	if (options.display === "id") {
+		name = model?.id || model?.name || "no-model";
+	} else if (options.display === "full") {
+		const id = model?.id || "no-model";
+		name = model?.name && model.name !== id ? `${id} (${model.name})` : id;
+	} else {
+		name = modelName(facts);
+	}
+	return options.showProvider && model?.provider ? `${model.provider}/${name}` : name;
+}
+
 const ADVISOR_COLORS = { error: "error", quota_exhausted: "warning", running: "success", idle: "dim" } as const;
 
 function piSeg(input: SegInput): SegView {
@@ -173,7 +188,7 @@ function statusSeg(input: SegInput): SegView | null {
 
 function modelSeg(input: SegInput): SegView {
 	const { facts } = input;
-	const name = modelName(facts);
+	const name = modelLabel(facts, input.options.model);
 	const native = nativeAccent(input, "statusLineModel");
 	const look = lookAccent(input, "statusLineModel");
 	const showLevel = input.options.model?.showThinkingLevel !== false;

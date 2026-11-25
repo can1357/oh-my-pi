@@ -107,6 +107,31 @@ test("the native composer cache fact describes the next message only when cache 
 	});
 });
 
+test("the composer model chip keeps the user's model display options", () => {
+	createRoot(dispose => {
+		try {
+			const facts = signal<StatusFacts>({
+				...corpusStatusFacts(),
+				model: { id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "anthropic", thinking: true },
+			});
+			const label = (model: { showProvider?: boolean; display?: "name" | "id" | "full" }) =>
+				composerFacts({
+					settings: () => ({ preset: "default", segmentOptions: { model } }),
+					facts,
+					click: action => ({ click: action }),
+				})
+					.model()
+					.map(span => span.t)
+					.join("");
+			expect(label({ showProvider: true })).toBe("anthropic/Opus 4.8");
+			expect(label({ showProvider: true, display: "id" })).toBe("anthropic/claude-opus-4-8");
+			expect(label({})).toBe("Opus 4.8");
+		} finally {
+			dispose();
+		}
+	});
+});
+
 const dir = path.join(CORPUS_DIR, SCREEN);
 const files = fs.existsSync(dir)
 	? fs
