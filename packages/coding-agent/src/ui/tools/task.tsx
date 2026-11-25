@@ -346,12 +346,8 @@ function callView(args: Partial<TaskParams> | undefined, state: ToolViewState): 
 	};
 }
 
-function resultView(
-	result: ToolResult<TaskToolDetails>,
-	state: ToolViewState,
-	args: Partial<TaskParams> | undefined,
-): ToolView {
-	const details = result.details;
+function resultView(result: ToolResult, state: ToolViewState, args: Partial<TaskParams> | undefined): ToolView {
+	const details = isTaskToolDetails(result.details) ? result.details : undefined;
 	const text = resultText(result);
 	const label = flatAgentLabel(args);
 	const term = termFacts(state, args, {

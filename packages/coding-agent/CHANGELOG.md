@@ -5,6 +5,11 @@
 ### Added
 
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Fixed a rewind crash when the saved transcript contains a Task that was aborted before execution ([#20515](https://github.com/can1357/oh-my-pi/issues/20515)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

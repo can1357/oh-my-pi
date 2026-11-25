@@ -9,6 +9,7 @@ import type { TaskToolDetails } from "../../../src/task/task-details";
 import { noteAgentArrival, resetAgentIdentities } from "../../../src/ui/tools/agent-identity";
 import { NestedTaskResults, taskPresenter } from "../../../src/ui/tools/task";
 import { registerSubprocessToolView } from "../../../src/ui/tools/task/subprocess-views";
+import { toolText } from "../../helpers/tool-text";
 import { checkFlowCase, flowCaseFiles, loadFlowCase } from "../transcript/tool-flows";
 import { loadScreenCase, screenCaseFiles, type ToolScreen, toolScreenSuite } from "./screens";
 
@@ -45,6 +46,20 @@ export const taskScreen: ToolScreen = {
 };
 
 toolScreenSuite(taskScreen);
+
+test("shows the cancellation reason when a saved Task was aborted before execution", () => {
+	const text = toolText({
+		name: "task",
+		args: {},
+		result: {
+			isError: true,
+			details: {},
+			content: [{ type: "text", text: "Tool was not executed because the run was aborted: Interrupted by user." }],
+		},
+	});
+
+	expect(text).toContain("Interrupted by user.");
+});
 
 const NESTED = "tools/task-nested";
 const nestedFiles = screenCaseFiles(NESTED);
