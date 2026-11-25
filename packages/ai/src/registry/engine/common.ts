@@ -198,7 +198,8 @@ export interface RequestContext {
 /**
  * Performs one declared token-style POST. `standardParams` are the grant's
  * baseline (included when the rule keeps `standard=#true`), `params` the
- * rule's declared extras; both are templated with `vars`.
+ * rule's declared extras; string values are templated with `vars`, numeric
+ * ones stay numbers in JSON bodies.
  */
 export async function postTokenRequest(
 	request: CompiledOAuthRequest,
@@ -208,19 +209,30 @@ export async function postTokenRequest(
 	errorKind: "token-exchange" | "token-refresh" | "device-auth",
 ): Promise<{ body: unknown; response: Response }> {
 	const url = template(await resolveValue(request.url, context.signal), vars);
-	const params: Record<string, string> = {};
+	const params: Record<string, string | number> = {};
 	if (request.standard) {
 		for (const key in standardParams) {
 			const value = standardParams[key];
 			if (value !== undefined) params[key] = value;
 		}
 	}
-	Object.assign(params, templateMap(request.params, vars));
+	for (const key in request.params) {
+		const value = request.params[key];
+		params[key] = typeof value === "string" ? template(value, vars) : value;
+	}
 	const headers: Record<string, string> = {
 		...context.headers,
 		...templateMap(request.headers, vars),
 		"Content-Type": request.body === "json" ? "application/json" : "application/x-www-form-urlencoded",
 	};
+	let payload: string;
+	if (request.body === "json") {
+		payload = JSON.stringify(params);
+	} else {
+		const form = new URLSearchParams();
+		for (const key in params) form.set(key, String(params[key]));
+		payload = form.toString();
+	}
 	const timeoutSignal = AbortSignal.timeout(request.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 	const signal = context.signal ? AbortSignal.any([context.signal, timeoutSignal]) : timeoutSignal;
 	let response: Response;
@@ -228,7 +240,7 @@ export async function postTokenRequest(
 		response = await context.fetch(url, {
 			method: "POST",
 			headers,
-			body: request.body === "json" ? JSON.stringify(params) : new URLSearchParams(params).toString(),
+			body: payload,
 			signal,
 		});
 	} catch (cause) {

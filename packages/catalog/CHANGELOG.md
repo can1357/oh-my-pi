@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Anthropic long-lived login support with a 1‑year inference token
 - Added Otari credential helpers and endpoint-aware model discovery, supporting stored `{ token, baseUrl }` credentials and US/EU endpoints.
 - Added GLM-5.4 to the Zhipu Coding Plan with image input, a 1M-token context window, and low/high/max thinking levels; it is preferred for the `slow` role over GLM-5.3.
 - Added OpenRouter chat-model discovery for tool-capable models through the OpenAI-compatible provider-models API.
@@ -11,6 +12,7 @@
 
 ### Changed
 
+- Changed auth rule compiler to preserve numeric parameters as numbers in token requests
 - Updated the `judge` role for OpenCode Go and Zen to prefer OpenCode's free `jev-1.13-free` model, with Zen's `jev-1.14` as a fallback.
 - Changed ai&'s default model to `moonshotai/kimi-k3`, replacing the unavailable `moonshotai/kimi-k2.7-code`.
 - Classified OpenCode Zen's Jev 1.14, Gemini Decision 1, GPT-6 Luna Decision, and future decision models as judge models rather than chat models.

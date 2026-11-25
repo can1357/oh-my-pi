@@ -40,6 +40,9 @@ auth "anthropic" {
 				User-Agent "anthropic-sdk-typescript/{claude_code_sdk_version} userOAuthProvider"
 			}
 		}
+		// Long-lived logins (`anthropic-long-lived.kdl`) store no refresh token;
+		// fail them locally with a re-login error instead of posting an empty grant.
+		require "refresh"
 		// Org fields are deliberately not remapped on refresh: the org a
 		// credential is scoped to is fixed at login and merged from the stored row.
 		credential {

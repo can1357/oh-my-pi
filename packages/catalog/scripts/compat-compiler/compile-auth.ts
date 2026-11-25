@@ -133,6 +133,19 @@ function stringMap(node: KdlNodeView): Record<string, string> {
 	return map;
 }
 
+/** `params { key "value"; n 42 }`: strings are templated at request time, numbers sent as numbers. */
+function paramMap(node: KdlNodeView): Record<string, string | number> {
+	const map: Record<string, string | number> = {};
+	for (const child of children(node, [])) {
+		leaf(child, []);
+		if (child.name in map || child.args.length !== 1) malformed(child);
+		const value = child.args[0];
+		if (typeof value !== "string" && typeof value !== "number") malformed(child);
+		map[child.name] = value;
+	}
+	return map;
+}
+
 /** `token url="…" body="form" standard=#false timeout-ms=N { params {…}; headers {…} }` */
 function request(node: KdlNodeView, defaults?: Partial<CompiledOAuthRequest>): CompiledOAuthRequest {
 	validateProps(node, ["url", "url-env", "url-hook", "body", "standard", "timeout-ms"]);
@@ -167,7 +180,7 @@ function request(node: KdlNodeView, defaults?: Partial<CompiledOAuthRequest>): C
 	for (const child of node.children ?? []) {
 		switch (child.name) {
 			case "params":
-				result.params = stringMap(child);
+				result.params = paramMap(child);
 				break;
 			case "headers":
 				result.headers = stringMap(child);

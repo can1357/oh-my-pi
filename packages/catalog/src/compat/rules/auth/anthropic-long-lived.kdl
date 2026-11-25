@@ -1,0 +1,40 @@
+// Claude Code's `claude setup-token` as a login: one browser sign-in mints a
+// `user:inference` access token that lives a year and never refreshes, so the
+// account skips the 30-day re-login of the refreshing `anthropic` grant
+// (`ANTHROPIC_OAUTH_GRANT_TTL_MS`). The scope cannot read `/api/oauth/usage`
+// or `/profile`; usage comes from inference rate-limit headers instead.
+auth "anthropic-long-lived" {
+	name "Anthropic (Claude Pro/Max, 1-year token)"
+	login "oauth-code" {
+		// Public OAuth client id, stored base64 so secret scanners stay quiet.
+		client-id "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl" encoding="base64"
+		authorize-url "https://claude.ai/oauth/authorize"
+		scopes "user:inference"
+		pkce #true
+		authorize-params { code "true" }
+		instructions "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted."
+		callback port=54545 path="/callback"
+		token url="https://api.anthropic.com/v1/oauth/token" body="json" {
+			params {
+				state "{state}"
+				// One year, as `claude setup-token` requests it; the server may grant less.
+				expires_in 31536000
+			}
+		}
+		credential {
+			access "access_token"
+			// Refresh tokens die 30 days after login, long before this token does.
+			// Storing none is what marks the row long-lived: refresh and usage
+			// probes skip it.
+			refresh literal=""
+			expires "seconds" path="expires_in" skew-ms=300000
+			account-id "account.uuid"
+			email "account.email_address"
+			org-id "organization.uuid"
+			org-name "organization.name"
+		}
+		after-exchange hook="anthropic-identity"
+	}
+	refresh "none"
+	store-as "anthropic"
+}
