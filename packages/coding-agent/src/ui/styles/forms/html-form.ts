@@ -22,12 +22,12 @@ import { spansText } from "../../../tools/html-form/parse";
 import { type FormPart, isFoldCaption } from "../../forms/html-form/layout";
 import type { MediaState } from "../../forms/html-form/media";
 import { rasterLabel } from "../../transcript/figures/svg";
-import { type Active, type HtmlFormModel, isDropdown, OTHER_ROW } from "../../forms/html-form/model";
+import { type Active, CANCEL_ENTRY, type HtmlFormModel, isDropdown, OTHER_ROW } from "../../forms/html-form/model";
 import { foldPills } from "../../overlays/panels/ask-dialog";
 import { defineAskCardLook } from "../panels/ask-dialog";
 import { bindingGlyph, boxRows } from "../panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
-import { actionKey, formatKeyHint } from "../../keys/hints";
+import { actionKey, formatKeyHint, formatKeyHints } from "../../keys/hints";
 
 /** Terminal facts of the dialog card. */
 export type HtmlFormLook = {
@@ -77,8 +77,7 @@ export function htmlFormKeyHints(model: HtmlFormModel): string {
 	let action: string;
 	if (!field) {
 		const press = `${enter} ${model.pressed()?.label.toLowerCase() ?? "submit"}`;
-		action =
-			model.actions.length > 0 ? `${formatKeyHint("left")}/${formatKeyHint("right")} choose · ${press}` : press;
+		action = model.actions.length > 0 ? `${formatKeyHints(["left", "right"])} choose · ${press}` : press;
 	} else if (field.kind === "text") action = `${enter} ${next}`;
 	else if (dropdown)
 		action = `${formatKeyHint("space")} open · ${formatKeyHint("left")}/${formatKeyHint("right")} change · ${enter} ${next}`;
@@ -554,14 +553,16 @@ function buildColumn(cx: PaintContext, look: HtmlFormLook, view: View, width: nu
 	const submitFocused = view.active === "submit" && view.focused;
 	if (view.active === "submit") column.groupStart = column.focusStart = lines.length;
 	const fix = errors > 0 ? theme.fg("error", `  ${errors} flagged`) : "";
-	// Submit and the form's actions side by side; the one Enter presses is highlighted while the row is focused.
-	const button = model.button();
-	const buttons = ["Submit", ...model.actions.map(action => action.label)]
-		.map((label, index) =>
-			submitFocused && index === button
+	// Submit, then a form's actions and Cancel in ←/→ order; the one Enter presses is highlighted while focused.
+	const pressed = model.pressed();
+	const entries = model.actions.length > 0 ? [undefined, ...model.actions, CANCEL_ENTRY] : [undefined];
+	const buttons = entries
+		.map(entry => {
+			const label = entry?.label ?? "Submit";
+			return submitFocused && entry === pressed
 				? theme.style("strong", theme.fg("accent", `❯ ${label}`))
-				: theme.fg("muted", `  ${label}`),
-		)
+				: theme.fg("muted", `  ${label}`);
+		})
 		.join("  ");
 	lines.push(truncate(`${buttons}${fix}`, width, "…"));
 	if (view.active === "submit") column.focusEnd = lines.length;

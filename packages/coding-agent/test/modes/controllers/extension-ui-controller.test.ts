@@ -126,6 +126,27 @@ describe("ExtensionUiController form dialog", () => {
 		expect(dismissed).toEqual(["decline"]);
 		expect(harness.askSlot()).toBe(false);
 		expect(harness.composerFocused()).toBe(true);
+
+		// The form's own Cancel reports a cancel to the same caller.
+		const again = harness.controller.showFormDialog(html, { onDismiss: action => dismissed.push(action) });
+		harness.term.press("tab");
+		harness.term.press("left"); // wraps back to Cancel
+		harness.term.press("enter");
+		expect(await again).toBeUndefined();
+		expect(dismissed).toEqual(["decline", "cancel"]);
+
+		// A caller whose report throws still gets the dialog closed and the composer back.
+		const throwing = harness.controller.showFormDialog(html, {
+			onDismiss: () => {
+				throw new Error("caller broke");
+			},
+		});
+		harness.term.press("tab");
+		harness.term.press("right"); // Decline
+		harness.term.press("enter");
+		expect(await throwing).toBeUndefined();
+		expect(harness.askSlot()).toBe(false);
+		expect(harness.composerFocused()).toBe(true);
 	});
 
 	it("gives the form's text boxes the app's Vim mode: Esc leaves Insert before handing the keys back", async () => {

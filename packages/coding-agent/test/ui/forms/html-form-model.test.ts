@@ -45,32 +45,36 @@ function clipboardRead() {
 }
 
 describe("html form model", () => {
-	it("presses an action beside Submit without submitting, whatever the fields hold", () => {
+	it("picks Submit, an action or Cancel with ←/→ on the Submit row, and presses it without submitting", () => {
 		const onAction = vi.fn();
+		const onCancel = vi.fn();
 		const onSubmit = vi.fn<(data: HtmlFormData, notes: OptionNote[]) => void>();
-		const actions = [
-			{ id: "decline", label: "Decline" },
-			{ id: "cancel", label: "Cancel" },
-		];
 		const model = new HtmlFormModel(
 			parseHtmlForm(`<form><label>Name <input name="name" required></label></form>`),
-			{ onSubmit, onCancel: vi.fn(), onAction },
-			{ actions },
+			{ onSubmit, onCancel, onAction },
+			{ actions: [{ id: "decline", label: "Decline" }] },
 		);
 		model.key(keyEvent("tab")); // the Submit row
 		model.key(keyEvent("right")); // Decline
-		expect(model.pressed()?.id).toBe("decline");
 		model.key(keyEvent("enter"));
-		// The required name is still empty: declining needs no valid answers.
 		expect(onAction).toHaveBeenCalledWith("decline");
-		model.key(keyEvent("left"));
-		model.key(keyEvent("left")); // wraps past Submit to Cancel
+		model.key(keyEvent("left")); // Submit
+		model.key(keyEvent("left")); // wraps to Cancel, the form's own
 		model.key(keyEvent("enter"));
-		expect(onAction).toHaveBeenLastCalledWith("cancel");
-		// A click on an action button in Tern.
+		expect(onCancel).toHaveBeenCalledTimes(1);
+		// A click on the action's button in Tern.
 		model.action("action:decline", "actions/action:decline");
-		expect(onAction).toHaveBeenLastCalledWith("decline");
+		expect(onAction).toHaveBeenCalledTimes(2);
 		expect(onSubmit).not.toHaveBeenCalled();
+
+		// Leaving the row forgets the pick: back on it, Enter submits.
+		model.key(keyEvent("left")); // Decline
+		model.key(keyEvent("shift+tab")); // the name field
+		for (const ch of "ada") model.key(keyEvent(ch));
+		model.key(keyEvent("tab")); // the Submit row again
+		model.key(keyEvent("enter"));
+		expect(onSubmit).toHaveBeenCalledWith({ name: "ada" }, []);
+		expect(onAction).toHaveBeenCalledTimes(2);
 	});
 
 	it("flags rule breaks without blocking Submit, an empty required field once passed over", () => {

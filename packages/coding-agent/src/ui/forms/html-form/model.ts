@@ -65,11 +65,14 @@ export interface NoteDraft {
 	readonly images: readonly ImageContent[];
 }
 
-/** A button beside Submit that ends the form without submitting it (e.g. Decline): its `label`, and the `id` {@link HtmlFormCallbacks.onAction} receives. */
+/** A button beside Cancel and Submit that ends the form without submitting it (e.g. Decline): its `label`, and the `id` {@link HtmlFormCallbacks.onAction} receives. */
 export interface HtmlFormAction {
 	readonly id: string;
 	readonly label: string;
 }
+
+/** The form's own Cancel button as a Submit-row entry: once a form has actions, ←/→ reaches it too. */
+export const CANCEL_ENTRY: HtmlFormAction = { id: "cancel", label: "Cancel" };
 
 /** How the host hears from the dialog. */
 export interface HtmlFormCallbacks {
@@ -187,10 +190,10 @@ export class HtmlFormModel {
 	 */
 	readonly scrollAnchor = signal<"top" | "bottom">("top");
 	readonly focused: Signal<boolean>;
-	/** The buttons beside Submit; empty when the host passed none. */
+	/** The buttons beside Cancel and Submit; empty when the host passed none. */
 	readonly actions: readonly HtmlFormAction[];
-	/** The Submit row's button Enter presses: 0 for Submit, else `actions[button - 1]`. */
-	readonly button = signal(0);
+	/** The Submit row's button Enter presses: undefined for Submit, else an action or {@link CANCEL_ENTRY}. */
+	readonly pressed = signal<HtmlFormAction | undefined>(undefined);
 	readonly #callbacks: HtmlFormCallbacks;
 	#done = false;
 	/** Clipboard pastes still reading, oldest first; a submit waits for them. */
@@ -211,8 +214,8 @@ export class HtmlFormModel {
 			/** Whether Tern draws the form (reactive); a plain terminal when omitted. */
 			native?: () => boolean;
 			/**
-			 * Buttons beside Submit that end the form without submitting it. On the Submit row ←/→ pick
-			 * one and Enter presses it; they replace the Cancel button, so include a cancel when wanted.
+			 * Buttons beside Cancel and Submit that end the form without submitting it. With any, ←/→ on
+			 * the Submit row picks among Submit, them and Cancel, and Enter presses the one picked.
 			 */
 			actions?: readonly HtmlFormAction[];
 		} = {},
@@ -477,6 +480,8 @@ export class HtmlFormModel {
 			this.active.set(index);
 			this.row.set(row);
 			this.dropdown.set(undefined);
+			// Leaving the Submit row forgets the button picked on it: back on it, Enter submits again.
+			this.pressed.set(undefined);
 		});
 	}
 
@@ -594,12 +599,6 @@ export class HtmlFormModel {
 		if (this.#done) return;
 		this.#submitAfterPastes = false;
 		this.#callbacks.onAction?.(id);
-	}
-
-	/** The action the Submit row's Enter presses, or undefined for Submit itself. */
-	pressed(): HtmlFormAction | undefined {
-		const button = this.button();
-		return button > 0 ? this.actions[button - 1] : undefined;
 	}
 
 	timeout(): void {
@@ -766,14 +765,16 @@ export class HtmlFormModel {
 	#submitKey(key: KeyEvent): boolean {
 		const id = listKeyId(key);
 		if (this.actions.length > 0 && (id === "left" || id === "right")) {
-			const buttons = this.actions.length + 1;
-			this.button.set((untrack(this.button) + (id === "right" ? 1 : buttons - 1)) % buttons);
+			const row = [undefined, ...this.actions, CANCEL_ENTRY];
+			const at = row.indexOf(untrack(this.pressed));
+			this.pressed.set(row[(at + (id === "right" ? 1 : row.length - 1)) % row.length]);
 			return true;
 		}
 		switch (id) {
 			case "enter": {
-				const action = untrack(() => this.pressed());
-				if (action) this.act(action.id);
+				const pressed = untrack(this.pressed);
+				if (pressed === CANCEL_ENTRY) this.cancel();
+				else if (pressed) this.act(pressed.id);
 				else this.submit();
 				return true;
 			}
