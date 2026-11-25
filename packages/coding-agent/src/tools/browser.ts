@@ -3,6 +3,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getWebKitHostPath, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
+import { redactUrlForLog } from "../utils/redact-url";
 import { enforceInlineByteCap } from "./streaming-output";
 import { CmuxUnavailableError, resolveCmuxKind } from "./browser/cmux/rpc";
 import { type CdpTarget, describeCdpTargets, listCdpTargets, resolveSpawnArgs } from "./browser/attach";
@@ -822,12 +823,13 @@ async function openOnKind(
 		const tab = result.tab;
 		const url = tab.info.url;
 		const title = tab.info.title ?? "";
-		details.url = url;
+		// Both the open line and the persisted Eval status use this display URL.
+		details.url = kind.kind === "relay" ? redactUrlForLog(url, "omit") : url;
 		details.viewport = tab.info.viewport;
 		const verb = result.created ? "Opened" : "Reused";
 		// One line: the tab and its browser, where it landed unless that is the URL the call asked for, and its title.
 		let opened = `${verb} tab ${JSON.stringify(name)} on ${describeBrowser(tab)}`;
-		if (!params.url || !sameAddress(params.url, url)) opened += `, at ${url}`;
+		if (!params.url || !sameAddress(params.url, url)) opened += `, at ${details.url}`;
 		if (title) opened += `, titled ${JSON.stringify(title)}`;
 		const lines = [
 			opened,

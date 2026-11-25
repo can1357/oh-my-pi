@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeVmContextsByOwner } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import * as rewriteImports from "@oh-my-pi/pi-coding-agent/eval/js/shared/rewrite-imports";
 import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
@@ -13,6 +14,7 @@ import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import * as tabSupervisor from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { getTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -336,8 +338,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 		return { text, value: isRecord(result.details) ? result.details.value : undefined };
 	}
 
-	/** Adopt a page through the relay and leave state on it that only survives a re-adoption without reload. */
-	async function openRelayTab(query = "", owned = false): Promise<ChromeBackedExtension> {
+	async function connectRelay(query = ""): Promise<ChromeBackedExtension> {
 		if (!chromium || !site) throw new Error("Chromium not launched");
 		page = await chromium.newPage();
 		pageUrl = `${site.url}login?case=${crypto.randomUUID()}${query}`;
@@ -361,9 +362,15 @@ describe("relay tabs Chrome detaches omp from", () => {
 				"tools.maxTimeout": 0,
 			}),
 		};
+		return extension;
+	}
+
+	/** Open a page through the relay and leave state on it that only survives re-adoption without reload. */
+	async function openRelayTab(query = "", owned = false): Promise<ChromeBackedExtension> {
+		const extension = await connectRelay(query);
 		await invoke({ action: "open", app: "relay", ...(owned ? { url: pageUrl } : { target: "case=" }), timeout: 20 });
 		if (owned) {
-			page = (await chromium.pages()).find(candidate => {
+			page = (await chromium?.pages())?.find(candidate => {
 				// Puppeteer exposes the CDP target id only on its private field.
 				const target = candidate.target() as unknown as { _targetId: string };
 				return target._targetId === extension?.targetId;
@@ -415,6 +422,51 @@ describe("relay tabs Chrome detaches omp from", () => {
 			unavailable.mockRestore();
 		}
 	}
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"omits auth redirect queries from relay open output and status without changing navigation",
+		async () => {
+			const canary = "CANARY_DO_NOT_LOG";
+			const login = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				routes: {
+					"/start": () => Response.redirect(`/login?state=${canary}&return_to=%2Fdashboard`),
+					"/login": () => new Response("<title>Sign in</title>", { headers: { "content-type": "text/html" } }),
+				},
+			});
+			try {
+				await connectRelay();
+				const session: ToolSession = {
+					...tool,
+					getEvalKernelOwnerId: () => name,
+					getEvalSessionId: () => name,
+					getEvalPreludes: () => [prelude],
+				};
+				const prelude = createBrowserPrelude(session);
+				const result = await new EvalTool(session).execute("relay-auth-redirect", {
+					language: "js",
+					timeout: 30,
+					code: `const tab = await browser.open({ app: "relay", name: ${JSON.stringify(name)}, url: ${JSON.stringify(new URL("/start", login.url).href)}, timeout: 20 });`,
+				});
+				const landing = new URL("/login", login.url).href;
+				expect((await chromium?.pages())?.map(page => page.url())).toContain(
+					`${landing}?state=${canary}&return_to=%2Fdashboard`,
+				);
+				expect(JSON.stringify(result)).not.toContain(canary);
+				const text = result.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
+				expect(text).toStartWith(`Opened tab "${name}"`);
+				expect(text).toContain(`, at ${landing}, titled "Sign in"`);
+				expect(result.details?.cells?.[0]?.statusEvents).toContainEqual(
+					expect.objectContaining({ op: "browser", detail: `open ${name} ${landing}` }),
+				);
+			} finally {
+				await disposeVmContextsByOwner(name);
+				login.stop(true);
+			}
+		},
+		60_000,
+	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE).each(["fresh", "reuse", "refused", "cancelled"] as const)(
 		"keeps an open's page unless the open was cancelled (%s)",
