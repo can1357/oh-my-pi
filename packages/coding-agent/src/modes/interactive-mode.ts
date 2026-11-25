@@ -418,7 +418,7 @@ import { PLAN_SAVE_SHEET, PlanSave } from "../ui/overlays/panels/plan-save";
 import { SESSION_INFO_SHEET, SessionInfo } from "../ui/overlays/panels/session-info";
 import { JOBS_SHEET, JobsPanel } from "../ui/overlays/pickers/jobs-panel";
 import { hasExtensionLinks, LinkBrowser, type LinkReply } from "../ui/overlays/pickers/link-browser";
-import { sheetScreen, showSheet } from "../ui/overlays/sheet";
+import { showSheet } from "../ui/overlays/sheet";
 import {
 	type BlockOptions,
 	type InputInterceptor,
@@ -5386,26 +5386,21 @@ export class InteractiveMode implements InteractiveModeContext {
 						handle.close();
 					},
 				}),
-			{ onClose: () => resolve(result) },
+			{
+				focus: root => root.children().find(node => node.kind === "input") ?? root,
+				onClose: () => resolve(result),
+			},
 		);
 		return (await promise)?.path;
 	}
 
 	/**
-	 * The plan review's Save: write `planContent` to `presetPath`, or to a path the
-	 * operator picks (prefilled), and report it. The review stays open: its focus
-	 * comes back after the path prompt.
+	 * Export the plan to a chosen or preset path without resolving the review.
+	 * The review owns focus again when the path sheet closes.
 	 */
 	async #savePlan(planContent: string, title: string, presetPath?: string): Promise<void> {
-		let selectedPath = presetPath;
-		if (selectedPath === undefined) {
-			try {
-				selectedPath = await this.#promptPlanSavePath(planContent, title);
-			} finally {
-				const review = this.#planReviewOverlayHandle;
-				if (review && !review.closed) this.shell.focus(sheetScreen(this.shell, review));
-			}
-		}
+		const review = presetPath === undefined ? this.#planReview : undefined;
+		const selectedPath = presetPath ?? (await this.#promptPlanSavePath(planContent, title));
 		if (!selectedPath) return;
 
 		let destination: string;
@@ -5423,7 +5418,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			return;
 		}
-		this.showStatus(`Saved plan to ${shortenPath(destination)}`);
+		const message = `Saved plan to ${shortenPath(destination)}`;
+		if (review && this.#planReview === review && !this.shell.native()) review.setSaveNotice(message);
+		this.showStatus(message);
 	}
 
 	async #openPlanInExternalEditor(planFilePath: string): Promise<void> {
