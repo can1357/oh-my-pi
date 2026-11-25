@@ -1,7 +1,9 @@
 /**
  * Scope benchmark tasks: one directory per task under `tasks/`, holding the user prompt
  * (`prompt.md`), the expectations (`task.json`), and the fixture workspace (`repo/`) every
- * run starts from. The fixture's suites stay out of this package's `bun test` via `bunfig.toml`.
+ * run starts from. An optional `hidden/` tree is laid over the workspace after the agent stops,
+ * before `verify` runs: checks the agent never sees. The fixture's suites stay out of this
+ * package's `bun test` via `bunfig.toml`.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -14,6 +16,8 @@ export interface VerifySpec {
 	absent?: string[];
 	/** Commands that MUST exit 0 (and print `stdout`, a regex, when given). `cwd` is workspace-relative. */
 	commands?: Array<{ argv: string[]; cwd?: string; stdout?: string }>;
+	/** The run MUST execute a test, typecheck, lint, build, or program: a request to verify or measure is not met by reading. */
+	ranCheck?: boolean;
 	/** Case-insensitive regexes the final reply MUST match. */
 	answer?: string[];
 }
@@ -26,8 +30,6 @@ interface TaskFile {
 	cwd?: string;
 	/** Globs (workspace-relative) of files the request may change; `[]` = read-only. */
 	scope: string[];
-	/** Regexes over command segments the request warrants; any other test/build/run segment is unrequested. */
-	allowedChecks: string[];
 	verify: VerifySpec;
 }
 
@@ -37,6 +39,8 @@ export interface ScopeTask extends Required<TaskFile> {
 	prompt: string;
 	/** Absolute path of the fixture workspace. */
 	repoDir: string;
+	/** Absolute path of the tree laid over the workspace before `verify`; `null` when the task has none. */
+	hiddenDir: string | null;
 }
 
 /** Directory holding the built-in tasks. */
@@ -56,21 +60,22 @@ export async function loadTasks(dir = TASKS_DIR): Promise<ScopeTask[]> {
 		ids.map(async id => {
 			const taskDir = path.join(dir, id);
 			const spec: TaskFile = await Bun.file(path.join(taskDir, "task.json")).json();
-			if (typeof spec.trap !== "string" || !Array.isArray(spec.scope) || !Array.isArray(spec.allowedChecks)) {
-				throw new Error(`${id}/task.json needs "trap", "scope", and "allowedChecks"`);
+			if (typeof spec.trap !== "string" || !Array.isArray(spec.scope)) {
+				throw new Error(`${id}/task.json needs "trap" and "scope"`);
 			}
 			if (typeof spec.verify !== "object" || spec.verify === null) throw new Error(`${id}/task.json needs "verify"`);
 			const repoDir = path.join(taskDir, "repo");
 			if (!(await fs.stat(repoDir)).isDirectory()) throw new Error(`${id}/repo is not a directory`);
+			const hasHidden = (await fs.readdir(taskDir)).includes("hidden");
 			return {
 				id,
 				trap: spec.trap,
 				cwd: spec.cwd ?? ".",
 				scope: spec.scope,
-				allowedChecks: spec.allowedChecks,
 				verify: spec.verify,
 				prompt: (await Bun.file(path.join(taskDir, "prompt.md")).text()).trim(),
 				repoDir,
+				hiddenDir: hasHidden ? path.join(taskDir, "hidden") : null,
 			};
 		}),
 	);

@@ -12,6 +12,8 @@ import { descriptionRows, inputLine, scrolled, selectList, settingRow } from "@o
 import { padTo, spaces, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { keyLabel } from "../../keys/hints";
+import { bindingGlyph } from "../panels/common";
 
 /** A row of a panel's settings list. */
 export interface PanelSetting {
@@ -56,9 +58,6 @@ export interface PanelTerm {
 	readonly blocks?: readonly PanelBlock[];
 }
 
-/** The settings list hint: what its keys do. */
-const SETTINGS_HINT = "  ⏎/␣ to change · Type to search · ⎋ to cancel";
-
 function settingsBlock(theme: Theme, block: Extract<PanelBlock, { k: "settings" }>, width: number): string[] {
 	const lines: string[] = [];
 	const stable = block.maxVisible + 4 + 1 + 2;
@@ -68,7 +67,8 @@ function settingsBlock(theme: Theme, block: Extract<PanelBlock, { k: "settings" 
 		lines.push(theme.fg("dim", truncate(`  Search: ${block.query}`, width, "")));
 		lines.push(theme.fg("dim", "  No matching settings"));
 		lines.push("");
-		lines.push(truncate(theme.fg("dim", "  ⌫ to edit search · ⎋ to cancel"), width));
+		const hint = `  ${bindingGlyph("tui.editor.deleteCharBackward", "backspace", theme)} to edit search · ${bindingGlyph("tui.select.cancel", "escape", theme)} to cancel`;
+		lines.push(truncate(theme.fg("dim", hint), width));
 	} else {
 		const height = Math.min(block.maxVisible, block.rows.length);
 		const start = Math.max(0, Math.min(block.selected - Math.floor(height / 2), block.rows.length - height));
@@ -99,7 +99,8 @@ function settingsBlock(theme: Theme, block: Extract<PanelBlock, { k: "settings" 
 		const query = block.query.replace(/\s+/g, " ").trim();
 		lines.push(theme.fg("dim", truncate(query ? `  Search: ${query}` : "  Type to search", width, "")));
 		lines.push("");
-		lines.push(truncate(theme.fg("dim", SETTINGS_HINT), width));
+		const hint = `  ${bindingGlyph("tui.select.confirm", "enter", theme)}/${keyLabel(theme, "space")} to change · Type to search · ${bindingGlyph("tui.select.cancel", "escape", theme)} to cancel`;
+		lines.push(truncate(theme.fg("dim", hint), width));
 	}
 	while (lines.length < stable) lines.push("");
 	return lines;

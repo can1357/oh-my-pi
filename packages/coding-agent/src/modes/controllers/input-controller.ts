@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { createRoot, effect, type KeyEvent, type UiNode, untrack } from "@oh-my-pi/pi-tui";
+import { createRoot, effect, type KeyEvent, type PasteEvent, type UiNode, untrack } from "@oh-my-pi/pi-tui";
 import type { InputEvent } from "@oh-my-pi/pi-tui/driver/index";
 import { emergencyTerminalRestore } from "@oh-my-pi/pi-tui/driver/session";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -31,9 +31,9 @@ import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import { resolveReadPath } from "../../tools/path-utils";
 import { vocalizer } from "../../tts/vocalizer";
-import { chipLabel, collapsesPaste } from "../../ui/composer/attachments";
+import { collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
-import { combineAtomizers } from "../../ui/composer/composer";
+import { combineAtomizers, FOCUS_ACTION } from "../../ui/composer/composer";
 import { modelMentionAtomizer } from "../../ui/composer/model-mention-chips";
 import { skillAtomizer } from "../../ui/composer/skill-chips";
 import { getSkillSlashCommandName } from "../../extensibility/skills";
@@ -245,9 +245,6 @@ function safeAbort(label: string, fn: () => void): void {
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
 
-/** Native composer action prefix for the viewing header's agent crumbs. */
-const FOCUS_ACTION = "focus:";
-
 /** Whether `node` is `root` or lies below it. */
 function containsNode(root: UiNode, node: UiNode): boolean {
 	if (root === node) return true;
@@ -343,7 +340,7 @@ export class InputController {
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 	}
 
-	/** Paste `text` into the composer: a marker-sized paste goes through the large-paste flow. */
+	/** Paste `text` read from the clipboard into the composer: one big enough to collapse goes through the large-paste flow. */
 	#pasteIntoComposer(text: string): void {
 		const normalized = text.replace(/\r\n?/g, "\n");
 		if (collapsesPaste(normalized)) this.handleLargePaste(normalized, normalized.split("\n").length);
@@ -384,9 +381,9 @@ export class InputController {
 	}
 
 	/**
-	 * Wire the composer's key bindings, the app-wide shortcuts, input interception (link hints,
-	 * pastes into the composer, enhanced paste) and draft tracking. Re-running replaces the earlier
-	 * wiring.
+	 * Wire the composer's key bindings and paste handling, the app-wide shortcuts, input
+	 * interception (link hints, enhanced paste) and draft tracking. Re-running replaces the
+	 * earlier wiring.
 	 */
 	setupKeyHandlers(): void {
 		for (const remove of this.#keyHooks.splice(0)) remove();
@@ -394,8 +391,9 @@ export class InputController {
 		this.#draftText ??= composer.text();
 		this.#keyHooks.push(
 			composer.addKeyHandler(key => this.#onComposerKey(key)),
+			composer.addPasteHandler(paste => this.#onComposerPaste(paste)),
 			this.ctx.addGlobalKeyHandler(key => this.#onGlobalKey(key)),
-			this.ctx.interceptInput(event => this.#onComposerInput(event)),
+			this.ctx.interceptInput(event => this.#stagePendingPaste(event)),
 			// Newest interceptor first: a tag letter typed in link-hint mode reaches nothing else.
 			this.ctx.interceptInput(event => this.#handleLinkHintInput(event)),
 			// Input arriving while an image paste lands waits for it, ahead of every other hook.
@@ -677,28 +675,33 @@ export class InputController {
 	}
 
 	/**
-	 * A paste into the composer: an empty bracketed paste is the terminal's cue that the clipboard
-	 * holds an image (#3601), explicit image or video paths attach (#3506), and a marker-sized
-	 * paste goes through the large-paste flow. Anything else is the composer's own paste. A submit
-	 * key sent in the same read as a menu-sized paste stages the paste before it submits.
+	 * A submit key sent in the same read as a menu-sized paste stages the paste before it
+	 * submits: nobody could have answered the menu in between.
 	 */
-	#onComposerInput(event: InputEvent): boolean {
-		if (event.type === "key") {
-			const pending = this.#pendingLargePaste;
-			if (
-				pending &&
-				event.key.afterPaste &&
-				event.key.raw !== "\n" &&
-				this.ctx.keybindings.matches(event.key, "tui.input.submit")
-			) {
-				this.#pendingLargePaste = undefined;
-				this.ctx.composer.insertTextAttachment(pending.text);
-			}
-			return false;
+	#stagePendingPaste(event: InputEvent): boolean {
+		const pending = this.#pendingLargePaste;
+		if (
+			pending &&
+			event.type === "key" &&
+			event.key.afterPaste &&
+			event.key.raw !== "\n" &&
+			this.ctx.keybindings.matches(event.key, "tui.input.submit")
+		) {
+			this.#pendingLargePaste = undefined;
+			this.ctx.composer.insertTextAttachment(pending.text);
 		}
-		if (event.type !== "paste") return false;
-		if (!this.#composerFocused() && !(this.ctx.approvalOwnsComposer && this.#composerTakesPaste())) return false;
-		const content = event.paste.text;
+		return false;
+	}
+
+	/**
+	 * A paste into the composer, however it got there (the terminal's bracketed paste, an
+	 * enhanced paste's text, a dialog or an extension handing one over): an empty one is the
+	 * terminal's cue that the clipboard holds an image (#3601), explicit image or video paths
+	 * attach (#3506), and a menu-sized one waits for the large-paste menu. Anything else is the
+	 * composer's own paste: typed, or collapsed into a text chip.
+	 */
+	#onComposerPaste(paste: PasteEvent): boolean {
+		const content = paste.text;
 		if (content.length === 0) {
 			void this.handleImagePaste();
 			return true;
@@ -713,9 +716,8 @@ export class InputController {
 			return true;
 		}
 		const text = content.replace(/\r\n?/g, "\n");
-		if (!collapsesPaste(text)) return false;
 		const lineCount = text.split("\n").length;
-		if (!this.#largePasteOpensMenu(lineCount)) return this.handleLargePaste(text, lineCount);
+		if (!collapsesPaste(text) || !this.#largePasteOpensMenu(lineCount)) return false;
 		// The menu opens once the rest of this read is in: a submit key sent with the paste takes it.
 		const pending = { text, lineCount };
 		this.#pendingLargePaste = pending;
@@ -2485,7 +2487,8 @@ export class InputController {
 		const kind = source?.kind ?? "image";
 		// The buffer holds the compact chip token; the atom table expands it to the bracketed
 		// marker (the wire/transcript format) on submit.
-		this.ctx.composer.insertAtom(chipLabel(kind, imageNum), formatVisionMarker(kind, imageNum, dims), {
+		const composer = this.ctx.composer;
+		composer.insertAtom(composer.chipLabel(kind, imageNum), formatVisionMarker(kind, imageNum, dims), {
 			kind,
 			image,
 			link: imageLink,
@@ -2957,20 +2960,13 @@ export class InputController {
 	}
 
 	/**
-	 * A marker-sized paste into the composer: gate it behind the large-paste menu. Returns
-	 * `true` to intercept (the editor skips its default `[Paste]` marker) once the paste reaches the
-	 * configured `paste.largeMenuThreshold` line count; otherwise `false` for default collapse-to-marker
-	 * behavior. The async menu is fired and forgotten — the editor only needs the synchronous verdict.
+	 * A paste big enough to collapse, read from the clipboard into the composer: at the configured
+	 * `paste.largeMenuThreshold` line count the large-paste menu decides what it becomes (fired and
+	 * forgotten); below it, or with the menu off, it is staged as a text chip.
 	 */
-	handleLargePaste(text: string, lineCount: number): boolean {
-		if (!this.#largePasteOpensMenu(lineCount)) {
-			// Below the menu threshold: stage the paste as a text-attachment chip
-			// (a compact token in the draft).
-			this.ctx.composer.insertTextAttachment(text);
-			return true;
-		}
-		void this.presentLargePasteMenu(text, lineCount);
-		return true;
+	handleLargePaste(text: string, lineCount: number): void {
+		if (this.#largePasteOpensMenu(lineCount)) void this.presentLargePasteMenu(text, lineCount);
+		else this.ctx.composer.insertTextAttachment(text);
 	}
 
 	/** Whether a paste of `lineCount` lines reaches the large-paste menu (`paste.largeMenuThreshold`). */
@@ -2980,10 +2976,10 @@ export class InputController {
 	}
 
 	/**
-	 * Present the large-paste menu and apply the chosen action: wrap in `<attachment>` tags (collapsed
-	 * to a `[Paste]` marker that expands on submit), save the text to a file and reference its path so
-	 * the agent can `read` it on demand, or paste inline. Cancelling (Esc) falls back to the default
-	 * inline paste marker, so the pasted content is never lost.
+	 * Present the large-paste menu and apply the chosen action: wrap in `<attachment>` tags (a text
+	 * chip that expands to the wrapped block on submit), save the text to a file and reference its
+	 * path so the agent can `read` it on demand, or paste inline (a text chip). Cancelling (Esc)
+	 * falls back to the inline chip, so the pasted content is never lost.
 	 */
 	async presentLargePasteMenu(text: string, lineCount: number): Promise<void> {
 		const WRAPPED_BLOCK = "Attach as a wrapped block";
@@ -2995,12 +2991,12 @@ export class InputController {
 			choice = await this.ctx.showHookSelector(
 				`Pasted ${lineCount} lines`,
 				[
-					{ label: WRAPPED_BLOCK, description: "Wrap the text in <attachment> tags, collapsed to a marker" },
+					{ label: WRAPPED_BLOCK, description: "Wrap the text in <attachment> tags, collapsed to a chip" },
 					{
 						label: LOCAL_FILE,
 						description: "Save the text to a local://paste file",
 					},
-					{ label: INLINE, description: "Collapse the text to an inline paste marker" },
+					{ label: INLINE, description: "Collapse the text to an inline chip" },
 				],
 				{
 					helpText: `${actionKey("tui.select.cancel", this.ctx.keybindings)} to paste inline`,
@@ -3031,7 +3027,7 @@ export class InputController {
 	/**
 	 * Save a large paste to the session's `local://` store and insert a clean `local://paste-N.md`
 	 * reference into the editor so the agent can `read` it on demand — instead of inlining the text or
-	 * leaking a raw temp path. Falls back to an inline paste marker when the write fails, so the
+	 * leaking a raw temp path. Falls back to an inline text chip when the write fails, so the
 	 * content is never lost.
 	 */
 	async #attachPasteAsFile(text: string, lineCount: number): Promise<void> {

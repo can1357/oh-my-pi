@@ -24,7 +24,9 @@ import { UserMessage } from "../../src/ui/transcript/messages/user-message";
 import { ReadGroup, ReadGroupBlock } from "../../src/ui/transcript/read-group";
 import { ToolBlock } from "../../src/ui/transcript/tool-block";
 import { type ToolTextInput, toolCall } from "../helpers/tool-text";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
@@ -395,6 +397,29 @@ describe("transcript OSC 8 links", () => {
 			{ hyperlinks: true },
 		).join("\n");
 		expect(extractLinkUris(message)).toContain(fileUri(skill));
+	});
+
+	it("draws a skill message's inline chip in the symbol preset's glyph, still linked to its SKILL.md", () => {
+		const skill = path.join(PROJECT, ".omp/skills/demo/SKILL.md");
+		const glyph = presetSymbols("nerd")["icon.extensionSkill"];
+		setCurrentTheme(loadThemeSync("dark", { symbolPreset: "nerd" }));
+		try {
+			// The token sits mid-prompt: the draft is a user bubble with the chip inline.
+			const message = printRows(
+				() =>
+					SkillMessage({
+						content: "Skill body",
+						details: { name: "demo", path: skill, prompt: "please /skill:demo this file" },
+						expanded: signal(false),
+					}),
+				80,
+				{ hyperlinks: true },
+			).join("\n");
+			expect(Bun.stripANSI(message)).toContain(`please ${glyph} demo this file`);
+			expect(extractLinkUris(message)).toContain(fileUri(skill));
+		} finally {
+			setCurrentTheme(restoreTheme);
+		}
 	});
 
 	it("links an embed's note to its file, and a frame's [Visit] to its page", () => {
