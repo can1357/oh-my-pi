@@ -1,3 +1,4 @@
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TodoItem, TodoPhase } from "../../tools/details/todo";
 import {
 	applyOpsToPhases,
@@ -7,7 +8,7 @@ import {
 	resolveTodoMarkdownPath,
 } from "../../tools/todo";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
-import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
+import { commandConsumed, parseSubcommand, usage } from "./parse";
 
 type TodoMutationVerb = "done" | "drop" | "rm";
 
