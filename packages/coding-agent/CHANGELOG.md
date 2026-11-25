@@ -5,6 +5,7 @@
 ### Fixed
 
 - Restored the composer's `->` / `=>` queue shorthand display: typing the prefix opens a dim `Queueing ➤` header line again, sequential list markers (`1.`, `2.`, …) are highlighted, and Tern keeps the dimmed prefix inline.
+- Browser tool now lists and adopts pages from every running relay when the omp extension runs in several Chrome profiles ([#20293](https://github.com/can1357/oh-my-pi/pull/20293) by [@xiaolikt](https://github.com/xiaolikt))
 
 ## [19.2.0] - 2026-11-25
 

@@ -10,7 +10,7 @@ Drive real browser tabs; start with `const tab = await browser.open({ name, url 
 await browser.open({name, url, app, argv, target, viewport, wait_until, dialogs, allowed_domains, init_scripts, downloads, user_agent, insecure, headed, timeout, persist}) → BrowserTab
 browser.tab(name) → handle of an open tab
 await browser.tabs() → managed tabs
-await browser.targets({app?, timeout?}) → [{target, title, url, shown?, docked?, driven?, tab?}]
+await browser.targets({app?, timeout?}) → [{target, title, url, shown?, docked?, driven?, tab?, relay?}]
 await browser.close({name, all, kill, timeout})
 
 BrowserTab, every helper awaited:
@@ -42,7 +42,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
 
 - `targets` resolves the browser like `open` (pass the same `app`, e.g. `"relay"`) and lists pages `target` can adopt:
   - a Tern window's browser blocks (`tab`: the omp tab holding one), or
-  - the relay's Chrome pages (`shown`: the active tab).
+  - the Chrome pages of every running relay, one per Chrome profile with the omp extension (`shown`: the active tab; `relay`: the relay listing the page).
   - Pass an entry's `target`; never guess.
 - `viewportOnly`: on-screen elements only (ignored on cmux). `includeAll`: non-interactive nodes too. `text()` and `html()` without a selector read `<body>`.
 - `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once.
@@ -94,7 +94,7 @@ Browser choice:
   - `"relay"` (the user's Chrome), `"tern"`, `"webkit"`, `"chromium"` (managed)
   - `"own"` (omp's own browser: WebKit when installed, else Chromium; skips the relay, `browser.cdpUrl`, Tern and cmux)
   - `"auto"` (the choice above without the relay)
-  - a CDP endpoint URL (`http://127.0.0.1:9222`) to attach to
+  - a CDP endpoint URL (`http://127.0.0.1:9222`) to attach to; when it is the URL of a running relay (`browser.targets()` lists them), that relay is driven instead
   - or an executable path to launch (Chromium-family browsers use an omp-owned profile unless `argv` supplies `--user-data-dir`)
 - `headed`: visible or hidden tab per open.
   - A WebKit tab gets its own window where the engine ships a viewer (macOS), and an open of a live WebKit tab shows or hides it at once.
@@ -124,6 +124,7 @@ Relay (`app: "relay"`: the user's Chrome through the omp relay):
 - No `target`: a new name opens omp's own background tab, leaving the user's tab alone (an outdated relay extension selects it instead).
   - `url` navigates that tab.
 - `target` borrows an existing tab by URL/title substring. Reopening an open name keeps its tab.
+- With the extension in several Chrome profiles, a relay runs per profile: `targets()` lists the pages of each (only that relay's when `app` is a relay's URL), `target` adopts a page from whichever relay has it, and a new tab opens in the most recently started relay unless `app` is another relay's URL.
 - `app: "auto"` skips the relay however it is enabled; the next default applies.
 - It is the user's real logged-in browser: sites attribute actions to the user. NEVER navigate a borrowed tab without authorization.
 {{{x11Guidance}}}

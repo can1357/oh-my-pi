@@ -5,7 +5,13 @@ import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/prel
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "./streaming-output";
 import { CmuxUnavailableError, resolveCmuxKind } from "./browser/cmux/rpc";
-import { type CdpTarget, describeCdpTargets, listCdpTargets, resolveSpawnArgs } from "./browser/attach";
+import {
+	type CdpTarget,
+	describeCdpTargets,
+	findRelayForTarget,
+	listCdpTargets,
+	resolveSpawnArgs,
+} from "./browser/attach";
 import {
 	acquireBrowser,
 	browserKey,
@@ -21,7 +27,8 @@ import { type EmulationViewport, viewportSchema } from "./browser/emulation";
 import { sameAddress } from "./browser/navigation";
 import { resolveInitScriptSources } from "./browser/open-options";
 import type { BrowserRelayGuidance } from "./browser/prelude-definition";
-import { isRelayOnly, resolveRelayKind } from "./browser/relay/kind";
+import { isRelayEndpointUrl, relayEndpointsToSearch } from "./browser/relay/discovery";
+import { isRelayOnly, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
 import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
@@ -127,7 +134,7 @@ const browserSchema = type({
 	"name?": type("string").describe("tab id (default 'main')"),
 	"url?": type("string").describe("url to open"),
 	"app?": type("string").describe(
-		"browser to drive: 'relay' (the user's Chrome), 'tern' (Tern picture-in-picture), 'webkit', 'chromium' (managed), 'own' (omp's own browser: WebKit if installed, else Chromium), 'auto' (default choice without the relay), a CDP endpoint URL to attach to, or an executable path to spawn",
+		"browser to drive: 'relay' (the user's Chrome), 'tern' (Tern picture-in-picture), 'webkit', 'chromium' (managed), 'own' (omp's own browser: WebKit if installed, else Chromium), 'auto' (default choice without the relay), a CDP endpoint URL to attach to (the URL of a running relay drives that relay; browser.targets() lists one per Chrome profile), or an executable path to spawn",
 	),
 	"argv?": type("string[]").describe("extra cli args when app is an executable path"),
 	"target?": type("string").describe(
@@ -181,6 +188,8 @@ interface BrowserPreludeDetails {
  * started from the extension's side panel) every open, a subagent's included,
  * goes to the relay, and any `app` but `"relay"` throws. `app: "tern"` and `app: "webkit"` are explicit:
  * they throw when Tern or omp's WebKit host is unavailable.
+ * A relay's URL as `app` drives that relay (one runs per Chrome profile with the
+ * extension), where `relay` alone takes the most recently started one.
  */
 export function resolveBrowserKind(
 	params: BrowserParams,
@@ -200,8 +209,15 @@ export function resolveBrowserKind(
 		);
 		if (relayKind) return relayKind;
 	}
+	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	if (app !== undefined && URL_SCHEME.test(app)) {
-		return { kind: "connected", cdpUrl: app.replace(/\/+$/, "") };
+		const cdpUrl = app.replace(/\/+$/, "");
+		// A relay's URL drives that relay as app: "relay" does, not a bare CDP attach;
+		// PI_BROWSER_RELAY=0 leaves it a browser to attach to.
+		const relayKind = isRelayEndpointUrl(cdpUrl, relayUrl)
+			? resolveRelayKind({ settingEnabled: true, url: cdpUrl }, env)
+			: null;
+		return relayKind ?? { kind: "connected", cdpUrl };
 	}
 	if (app && !APP_KEYWORDS.includes(app)) {
 		const exe = resolveToCwd(app, session.cwd);
@@ -214,7 +230,6 @@ export function resolveBrowserKind(
 		}
 		return { kind: "spawned", path: exe, args };
 	}
-	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app: "relay" wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
 	if (app === "relay") {
@@ -558,6 +573,21 @@ async function openBrowser(
 		// A tab that fell back to Chromium keeps it, as does one opened while the WebKit host was not installed.
 		const chromium = chromiumKind(params, session);
 		if (browserKey(existing.browser.kind) === browserKey(chromium)) kind = chromium;
+	} else if (
+		existingKind?.kind === "relay" &&
+		resolved.kind === "relay" &&
+		!(params.app !== undefined && URL_SCHEME.test(params.app))
+	) {
+		// Reopening by name keeps the relay the tab was adopted from. The open would otherwise resolve the newest
+		// relay, and openOnKind would refuse the name as bound to a different browser. An app that is a relay URL
+		// still names one explicitly.
+		kind = existingKind;
+	}
+	if (kind.kind === "relay" && params.target) {
+		// With a relay per Chrome profile, the page `target` names may be open in another profile than the one a
+		// new tab goes to: adopt it from the relay that lists it.
+		const listing = await relayListingTarget(kind.cdpUrl, params.target, boundRelayUrl(params, session), signal);
+		if (listing) kind = listing;
 	}
 	const startedAt = performance.now();
 	/** Why each browser tried before `kind` could not take the open. */
@@ -886,8 +916,11 @@ async function listTargets(
 			let targets: TernTarget[] | CdpTarget[];
 			let text: string;
 			if (kind.kind === "relay") {
-				targets = await untilAborted(listSignal, () => listCdpTargets(kind.cdpUrl, listSignal));
-				text = describeCdpTargets(targets, "Chrome pages via the relay");
+				const pages = await untilAborted(listSignal, () =>
+					listRelayPages(kind.cdpUrl, boundRelayUrl(params, session), listSignal),
+				);
+				targets = pages.targets;
+				text = pages.text;
 			} else if ("tern" in browser) {
 				const blocks = await listTernBlocks(browser.tern, { timeoutMs, signal: listSignal });
 				const taken = ternBlocksTaken();
@@ -906,6 +939,76 @@ async function listTargets(
 		if (timeoutSignal.aborted) throw new ToolError(`Listing browser targets timed out after ${timeoutMs}ms`);
 		throw error;
 	}
+}
+
+/**
+ * The one relay an open or a listing is bound to: the configured `browser.relayUrl` (or a side panel's
+ * `PI_PANEL_RELAY_URL`), else the relay `app` names by URL. Undefined looks in every running relay.
+ */
+function boundRelayUrl(
+	params: BrowserParams,
+	session: ToolSession,
+	env: Record<string, string | undefined> = process.env,
+): string | undefined {
+	const configured = (env.PI_PANEL_RELAY_URL ?? cfgBrowserRelayUrl.get(session.settings))?.trim();
+	if (configured) return configured;
+	const app = params.app;
+	return app !== undefined && URL_SCHEME.test(app) ? app : undefined;
+}
+
+/**
+ * The pages `target` can adopt from the relays an open looks in ({@link relayEndpointsToSearch}). One relay lists
+ * its Chrome pages as before; with several (one per Chrome profile running the omp extension) each is listed under
+ * its URL and every page carries its `relay`, since the default relay alone hides the other profiles' pages.
+ */
+async function listRelayPages(
+	preferred: string,
+	configuredUrl: string | undefined,
+	signal: AbortSignal,
+): Promise<{ targets: CdpTarget[]; text: string }> {
+	const relays = relayEndpointsToSearch(preferred, configuredUrl);
+	if (relays.length <= 1) {
+		const targets = await listCdpTargets(preferred, signal);
+		return { targets, text: describeCdpTargets(targets, "Chrome pages via the relay") };
+	}
+	const pages = await Promise.all(
+		relays.map(async relay => {
+			try {
+				return { relay, targets: await listCdpTargets(relay, signal), answering: true };
+			} catch (error) {
+				throwIfAborted(signal);
+				if (relay === preferred) throw error;
+				return { relay, targets: [] as CdpTarget[], answering: false };
+			}
+		}),
+	);
+	const targets: CdpTarget[] = [];
+	const lines = [
+		`Chrome pages via the relay. ${relays.length} relays are running, one per Chrome profile with the omp extension: target adopts a page from any of them, and a new tab opens in the first unless app is another relay's URL.`,
+	];
+	for (const { relay, targets: listed, answering } of pages) {
+		for (const page of listed) targets.push({ ...page, relay });
+		const source = `relay ${relay}${relay === preferred ? " (new tabs open here)" : ""}`;
+		const block = answering ? describeCdpTargets(listed, source).replace(/\n/g, "\n  ") : `${source}: not answering.`;
+		lines.push(`- ${block}`);
+	}
+	return { targets, text: lines.join("\n") };
+}
+
+/**
+ * The relay that lists a page matching `target` when it is not `preferred`: with a relay per Chrome profile, that
+ * page may be open in another profile than the one a new tab goes to. Null keeps `preferred`.
+ */
+async function relayListingTarget(
+	preferred: string,
+	matcher: string,
+	configuredUrl: string | undefined,
+	signal?: AbortSignal,
+): Promise<RelayKind | null> {
+	const relays = relayEndpointsToSearch(preferred, configuredUrl);
+	if (relays.length <= 1) return null;
+	const listing = await findRelayForTarget(relays, matcher, signal);
+	return listing && listing !== preferred ? { kind: "relay", cdpUrl: listing } : null;
 }
 
 async function closeBrowser(
