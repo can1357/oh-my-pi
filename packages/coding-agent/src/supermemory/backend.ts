@@ -45,6 +45,8 @@ export const supermemoryBackend: MemoryBackend = {
 			return;
 		}
 		try {
+			// Retire the previous state first: its stop must precede this state's cursors in the file.
+			await session.setSupermemorySessionState(undefined)?.dispose();
 			// A subagent without a Supermemory parent gets its own tool-only state: it never
 			// auto-recalls or auto-retains, which stays with the top-level session.
 			const state = new SupermemorySessionState({
@@ -55,7 +57,7 @@ export const supermemoryBackend: MemoryBackend = {
 				automatic: options.taskDepth === 0,
 				agentDir: options.agentDir,
 			});
-			await session.setSupermemorySessionState(state)?.dispose();
+			session.setSupermemorySessionState(state);
 			state.attachSessionListeners();
 			// Deliver what earlier processes left in this destination's outbox.
 			if (state.automatic) void state.drainOutbox();

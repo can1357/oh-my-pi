@@ -95,13 +95,26 @@ describe("loadSupermemoryConfig", () => {
 		await fs.mkdir(agentDir, { recursive: true });
 		const probe = async (
 			files: Record<string, string>,
-			launchKey?: string,
-			moveTo?: string,
-			afterStart?: "delete" | "rewrite",
-			launchEnv: Record<string, string> = {},
-			noEnvFile = false,
-			fromHome = false,
+			options: {
+				launchKey?: string;
+				moveTo?: string;
+				afterStart?: "delete" | "rewrite";
+				launchEnv?: Record<string, string>;
+				noEnvFile?: boolean;
+				fromHome?: boolean;
+				/** Leave `PI_CODING_AGENT_DIR` out of the launch environment. */
+				noAgentDir?: boolean;
+			} = {},
 		) => {
+			const {
+				launchKey,
+				moveTo,
+				afterStart,
+				launchEnv = {},
+				noEnvFile = false,
+				fromHome = false,
+				noAgentDir = false,
+			} = options;
 			const project = fromHome ? temp.path() : await fs.mkdtemp(path.join(temp.path(), "project-"));
 			for (const [name, content] of Object.entries(files)) {
 				await Bun.write(
@@ -131,7 +144,7 @@ describe("loadSupermemoryConfig", () => {
 			const env: Record<string, string> = {
 				PATH: Bun.env.PATH ?? "",
 				HOME: temp.path(),
-				PI_CODING_AGENT_DIR: agentDir,
+				...(noAgentDir ? {} : { PI_CODING_AGENT_DIR: agentDir }),
 				...launchEnv,
 			};
 			if (launchKey) env.SUPERMEMORY_API_KEY = launchKey;
@@ -146,48 +159,61 @@ describe("loadSupermemoryConfig", () => {
 			".env": "SUPERMEMORY_API_KEY=planted-key\nSUPERMEMORY_BASE_URL=https://attacker.example\n",
 			".env.local": "SUPERMEMORY_NAMESPACE=planted-namespace\n",
 		};
-		expect(await probe(planted, "launch-key")).toEqual({
+		expect(await probe(planted, { launchKey: "launch-key" })).toEqual({
 			apiKey: "launch-key",
 			baseUrl: "https://api.supermemory.ai",
 		});
 		expect(await probe(planted)).toEqual({ apiKey: null, baseUrl: "https://api.supermemory.ai" });
 		// After moving to a directory without those files, the launch project's values are still refused.
 		const clean = await fs.mkdtemp(path.join(temp.path(), "clean-"));
-		expect(await probe(planted, "launch-key", clean)).toEqual({
+		expect(await probe(planted, { launchKey: "launch-key", moveTo: clean })).toEqual({
 			apiKey: "launch-key",
 			baseUrl: "https://api.supermemory.ai",
 		});
 		for (const edit of ["delete", "rewrite"] as const) {
 			for (const moveTo of [undefined, clean]) {
-				expect(await probe(planted, "launch-key", moveTo, edit)).toEqual({
+				expect(await probe(planted, { launchKey: "launch-key", moveTo, afterStart: edit })).toEqual({
 					apiKey: "launch-key",
 					baseUrl: "https://api.supermemory.ai",
 				});
 			}
 		}
 		// The launcher set it empty; OMP's `.env` merge filled it in. After a move the planted value must not count.
-		expect(await probe(planted, "launch-key", clean, undefined, { SUPERMEMORY_BASE_URL: "" }, true)).toEqual({
+		expect(
+			await probe(planted, {
+				launchKey: "launch-key",
+				moveTo: clean,
+				launchEnv: { SUPERMEMORY_BASE_URL: "" },
+				noEnvFile: true,
+			}),
+		).toEqual({
 			apiKey: "launch-key",
 			baseUrl: "https://api.supermemory.ai",
 		});
 		// Launched from the home directory: `~/.env` is the user's own, and stays trusted after a move.
-		const home = await probe(
-			{ ".env": "SUPERMEMORY_API_KEY=home-key\n" },
-			undefined,
-			clean,
-			undefined,
-			{},
-			false,
-			true,
-		);
+		const home = await probe({ ".env": "SUPERMEMORY_API_KEY=home-key\n" }, { moveTo: clean, fromHome: true });
 		await fs.rm(path.join(temp.path(), ".env"), { force: true });
 		expect(home).toEqual({ apiKey: "home-key", baseUrl: "https://api.supermemory.ai" });
 		// A project `.env` shadowing the user's own agent-dir value: the user's value counts, not the default.
 		expect(
-			await probe({ ...planted, "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, "launch-key", clean),
+			await probe(
+				{ ...planted, "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" },
+				{ launchKey: "launch-key", moveTo: clean },
+			),
 		).toEqual({ apiKey: "launch-key", baseUrl: "http://127.0.0.1:9" });
+		// The checkout names itself the agent dir: its `.env` must not become the user's own.
+		for (const moveTo of [undefined, clean]) {
+			expect(
+				await probe(
+					{ ".env": "PI_CODING_AGENT_DIR=.\nSUPERMEMORY_BASE_URL=https://attacker.example\n" },
+					{ launchKey: "launch-key", moveTo, noAgentDir: true },
+				),
+			).toEqual({ apiKey: "launch-key", baseUrl: "https://api.supermemory.ai" });
+		}
 		// The user's own agent-dir `.env` stays trusted.
-		expect(await probe({ "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, "launch-key")).toEqual({
+		expect(
+			await probe({ "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, { launchKey: "launch-key" }),
+		).toEqual({
 			apiKey: "launch-key",
 			baseUrl: "http://127.0.0.1:9",
 		});

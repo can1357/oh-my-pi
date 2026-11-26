@@ -811,7 +811,7 @@ describe("supermemoryBackend", () => {
 		expect(contents.join("\n")).not.toContain("off-period");
 	});
 
-	it("still sends the turns left in an open window before the stop, without the off-period turns", async () => {
+	it("a window left open at a stop continues after switching back on, without the off-period turns", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")
 			.mockResolvedValue({ id: "d", status: "queued" });
@@ -824,11 +824,12 @@ describe("supermemoryBackend", () => {
 		await session.setSupermemorySessionState(undefined)?.dispose();
 		session.addTurn("off-period");
 		await start(session);
-		await session.getSupermemorySessionState()?.flush();
+		session.addTurn("three");
+		await session.endTurn();
 		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
 		expect(contents).toHaveLength(1);
 		expect(contents[0]).toContain("reply to one");
-		expect(contents[0]).toContain("reply to two");
+		expect(contents[0]).toContain("reply to three");
 		expect(contents[0]).not.toContain("off-period");
 	});
 
@@ -907,6 +908,58 @@ describe("supermemoryBackend", () => {
 		expect(contents).toHaveLength(1);
 		expect(contents[0]).toContain("reply to two");
 		expect(contents[0]).toContain("reply to four");
+	});
+
+	it("a turn exchanged while off on another branch is never uploaded after switching back on", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		const answerOne = session.sessionManager
+			.getEntries()
+			.find(entry => entry.type === "message" && JSON.stringify(entry).includes("reply to one"))!.id;
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		// Off: `/tree` back to turn one's answer, then a turn there; the stop is not on this branch.
+		session.navigate(answerOne);
+		session.addTurn("off-period");
+		await start(session);
+		await session.endTurn();
+		session.addTurn("three");
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to three");
+		expect(contents).not.toContain("off-period");
+	});
+
+	it("a queued /memory enqueue never uploads the transcript that /new swapped in", async () => {
+		const first = Promise.withResolvers<{ id: string; status: string }>();
+		const sent = Promise.withResolvers<void>();
+		const create = vi.spyOn(SupermemoryClient.prototype, "addDocument").mockImplementation(() => {
+			if (create.mock.calls.length > 1) return Promise.resolve({ id: "d", status: "queued" });
+			sent.resolve();
+			return first.promise;
+		});
+		const session = makeSession({
+			settings: { "supermemory.retainEveryNTurns": 3, "supermemory.autoRetain": false },
+		});
+		await start(session);
+		session.addTurn("old-one");
+		const slow = supermemoryBackend.enqueue!(temp.path(), "/tmp", session as never);
+		await sent.promise;
+		const queued = supermemoryBackend.enqueue!(temp.path(), "/tmp", session as never);
+		// `/new`: another transcript, and a turn in it, before the first upload returns.
+		session.sessionManager.getEntries().length = 0;
+		session.transcriptId = "t2";
+		session.getSupermemorySessionState()?.resetConversationTracking();
+		session.addTurn("new-transcript");
+		first.resolve({ id: "d", status: "queued" });
+		await Promise.all([slow, queued]);
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("old-one");
+		expect(contents).not.toContain("new-transcript");
 	});
 
 	it("an answer that lands after an exit mid-run is still retained on resume", async () => {

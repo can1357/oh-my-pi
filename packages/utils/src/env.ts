@@ -400,7 +400,6 @@ for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 const foldEnvName = (name: string) => (process.platform === "win32" ? name.toUpperCase() : name);
 const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string | undefined }> = (() => {
 	const values = new Map<string, { planted: string; trusted: string | undefined }>();
-	// Launched from the home, config root or agent dir: its `.env` is the user's own, not a project's.
 	const real = (dir: string) => {
 		try {
 			return fs.realpathSync(dir);
@@ -408,15 +407,25 @@ const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string
 			return path.resolve(dir);
 		}
 	};
-	const userDirs = new Set([os.homedir(), getConfigRootDir(), getAgentDir()].map(real));
-	const userValue = (key: string) => agentEnv[key] || piEnv[key] || homeEnv[key] || undefined;
-	for (const dir of new Set([launchProjectDir, process.cwd()].map(real))) {
+	const home = real(os.homedir());
+	const launchDirs = [...new Set([launchProjectDir, process.cwd()].map(real))].filter(dir => dir !== home);
+	const kept = new Map(launchDirs.map(dir => [dir, filterChildShellEnvInternal(Bun.env, dir)]));
+	// The agent and config dirs (and their `.env`) are the user's own only if nothing a project dotenv
+	// file supplied relocated them: a checkout must not designate its own trusted root.
+	const dirAffecting = /^(PI_CODING_AGENT_DIR|PI_CONFIG_DIR|PI_PROFILE|OMP_PROFILE|OMP_APP_NAME|XDG_[A-Z_]+)$/i;
+	const dirsPlanted = [...kept.values()].some(filtered =>
+		Object.keys(Bun.env).some(key => dirAffecting.test(key) && filtered[key] !== Bun.env[key]),
+	);
+	const userDirs = new Set([home, ...(dirsPlanted ? [] : [getConfigRootDir(), getAgentDir()].map(real))]);
+	const userValue = (key: string) =>
+		(dirsPlanted ? homeEnv[key] : agentEnv[key] || piEnv[key] || homeEnv[key]) || undefined;
+	for (const [dir, filtered] of kept) {
+		// Launched from the home (or a trusted agent/config) dir: its `.env` is the user's own.
 		if (userDirs.has(dir)) continue;
-		const kept = filterChildShellEnvInternal(Bun.env, dir);
 		for (const key in Bun.env) {
 			const planted = Bun.env[key];
-			if (planted === undefined || kept[key] === planted) continue;
-			const candidate = kept[key] ?? userValue(key);
+			if (planted === undefined || filtered[key] === planted) continue;
+			const candidate = filtered[key] ?? userValue(key);
 			// Two directories disagreeing on what to trust: trust neither.
 			const previous = values.get(foldEnvName(key));
 			const trusted = previous && previous.trusted !== candidate ? undefined : candidate;

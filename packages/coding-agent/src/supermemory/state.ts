@@ -232,8 +232,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	#hasCursor = false;
 	/** An entry of the branch the in-memory cursor describes; a branch without it is another one (see {@link #followBranch}). */
 	#anchor: string | undefined;
-	/** Adopted a stop cursor on resume; the first run then writes a plain cursor after it. */
-	#stopAdopted = false;
+	/** {@link dispose} has begun. */
+	#stopping = false;
 	#unsubscribe?: () => void;
 
 	constructor(options: SupermemorySessionStateOptions | SupermemoryAliasOptions) {
@@ -298,49 +298,45 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/**
 	 * Resumes automatic retention at the active branch's latest retention cursor, so a window that
 	 * failed or was cut by the dispose timeout is retried; its document id makes the retry add to the
-	 * same document. A branch without a cursor was never retained here (retention writes one at its
-	 * first run): its turns were exchanged while Supermemory or `autoRetain` was off, or copied from
-	 * another transcript, so retention starts at the current turn and never uploads them. An open window keeps its start-based document id, so completing it later re-sends a superset
-	 * into that document. A latest cursor from another scope (namespace, account or server switch)
-	 * means every turn so far belongs to that scope, and turns added after a stop cursor were
-	 * exchanged while retention was off: either way retention here starts at the current turn (after a
-	 * stop, turns left unsent before it are still sent once, see {@link #sendBeforeStop}).
+	 * same document. Messages written while retention was off are not counted (see {@link #retainable}),
+	 * so a window open at a stop continues with the turns after it. A branch without a cursor was
+	 * never retained here (retention writes one at its first run), so retention starts at the current
+	 * turn; a copy continues after its source's last retained turn. An open window keeps its
+	 * start-based document id, so completing it later re-sends a superset into that document. A latest
+	 * cursor from another scope (namespace, account or server switch) means every turn so far belongs
+	 * to that scope: retention here starts at the current turn.
 	 */
 	#resumeRetention(): void {
+		this.#resumeCursor();
+		// Starting after a stop (on any branch): a plain cursor now closes the off period for
+		// {@link #retainable} before this state's first turn.
+		if (this.automatic && this.#config.autoRetain && !this.#disposed && this.#afterStop()) {
+			this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart);
+		}
+	}
+
+	#resumeCursor(): void {
 		const [path, start] = this.#retainedEntries();
 		this.#anchor = path.at(-1)?.id;
 		const data = this.#pathCursor(path, start);
 		this.#hasCursor = data !== undefined;
-		const turns = countUserTurns(path, start);
-		const scoped = data?.scope === this.#scope() ? data : undefined;
-		const stop = scoped?.stoppedAt;
-		// Anything added after the stop (a user turn, or an answer without one) was exchanged while off.
-		const offPeriod =
-			stop !== undefined &&
-			(turns > stop ||
-				(scoped?.stoppedMessages !== undefined && extractMessages(path, start).length > scoped.stoppedMessages));
-		this.#stopAdopted = false;
-		if (scoped && !offPeriod) {
-			this.lastRetainedTurn = scoped.turn;
-			this.#retainedMessages = scoped.messages;
-			this.#windowStart = scoped.windowStart;
-			// The stop must stop reading as the latest cursor once turns follow it, or a later resume
-			// would take them for off-period turns: the first run writes a plain cursor (see the listener).
-			this.#stopAdopted = stop !== undefined;
+		// Off-period messages are not in this view, so a stop resumes like any cursor: a window open or
+		// cut off at the stop continues with the turns after it.
+		const turns = countUserTurns(this.#retainable(path, start));
+		if (data?.scope === this.#scope()) {
+			this.lastRetainedTurn = data.turn;
+			this.#retainedMessages = data.messages;
+			this.#windowStart = data.windowStart;
 			return;
 		}
 		if (data) {
+			// Another scope (namespace, account or server switch): every turn so far belongs to it.
 			this.lastRetainedTurn = turns;
 			this.#retainedMessages = 0;
 			this.#windowStart = turns;
 			// Only a state that retains records where retention resumes: otherwise a later retaining state
 			// would adopt this cursor and upload turns exchanged while nothing retained.
-			if (this.automatic && this.#config.autoRetain && !this.#disposed) {
-				this.#appendCursor(turns, 0, turns);
-				// Turns exchanged before the stop that were never sent (an open window, or one that failed
-				// or was cut off) still go out once, best effort, without what was exchanged while off.
-				if (scoped && stop !== undefined) this.#sendBeforeStop(scoped, stop);
-			}
+			if (!this.#disposed) this.#appendCursor(turns, 0, turns);
 			return;
 		}
 		// A copy (`/fork`, `/branch`, `/btw`) holds its source's cursors under the source's id: continue
@@ -352,12 +348,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			entry => entry.type === "custom" && entry.customType === TAN_FORK_BOUNDARY_CUSTOM_TYPE,
 		);
 		const copied = tanDerived ? undefined : this.#pathCursor(path, start, true);
-		const copiedStop = copied?.stoppedAt;
-		const copiedOff =
-			copiedStop !== undefined &&
-			(turns > copiedStop ||
-				(copied?.stoppedMessages !== undefined && extractMessages(path, start).length > copied.stoppedMessages));
-		if (copied && copied.scope === this.#scope() && !copiedOff && this.automatic && this.#config.autoRetain) {
+		if (copied && copied.scope === this.#scope() && this.automatic && this.#config.autoRetain) {
 			const from = Math.min(copied.turn, turns);
 			this.lastRetainedTurn = from;
 			this.#windowStart = from;
@@ -423,12 +414,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#unsubscribe = this.session.subscribe(event => {
 			if (event.type !== "agent_start" && event.type !== "agent_pause" && event.type !== "agent_end") return;
 			this.#followBranch();
-			if (this.#config.autoRetain && (!this.#hasCursor || this.#stopAdopted)) {
+			if (this.#config.autoRetain && !this.#hasCursor) {
 				// Record where retention starts before any upload: a branch without a cursor reads as
-				// pre-cursor on resume, which skips every turn it already holds; after an adopted stop, a
-				// later resume would read this run's turns as exchanged while off.
+				// never retained on resume, which skips every turn it already holds.
 				this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart);
-				this.#stopAdopted = false;
 			}
 			// The run's agent_end waits until no job, child agent or peer can resume it; a yielded pause is
 			// the model finishing its turn while such work keeps the run open (as for Hindsight and
@@ -702,9 +691,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 	/** `/memory enqueue`: retain every due window, then the unretained tail. */
 	async forceRetainCurrentSession(): Promise<void> {
+		// Snapshot now, like the automatic path: a job queued behind a slow upload must not read a
+		// transcript that `/new` or a reset swapped in meanwhile (its identity check then refuses it).
+		this.#followBranch();
+		const history = this.#settledHistory();
 		await this.#enqueueRetention(async () => {
-			this.#followBranch();
-			const history = this.#settledHistory();
 			await this.#retainDue(history);
 			const { messages } = history;
 			const userStarts = userTurnStarts(messages);
@@ -724,17 +715,56 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		return [entries, retentionStart(entries, manager.getHeader?.())];
 	}
 
+	/**
+	 * The branch's entries from `start` that automatic retention may send: never a message written while
+	 * retention was off, on any branch. A stop cursor opens an off period in file order and the next
+	 * retention cursor closes it (every start after a stop writes one before its first turn). A stop
+	 * without a message bound (an exit mid-run) lets the aborted run's answer in, up to the next user turn.
+	 * `/memory enqueue` without automatic retention sends what the user asked for, off periods included.
+	 */
+	#retainable(path: readonly SessionEntry[], start: number): SessionEntry[] {
+		const own = path.slice(start);
+		if (!this.automatic || !this.#config.autoRetain) return own;
+		const off = new Set<string>();
+		let state: "on" | "off" | "untilUser" = "on";
+		for (const entry of this.session.sessionManager.getEntries()) {
+			if (entry.type === "custom" && entry.customType === RETENTION_CURSOR_ENTRY_TYPE) {
+				if (!isRetentionCursor(entry.data)) continue;
+				const { stoppedAt, stoppedMessages } = entry.data;
+				state = stoppedAt === undefined ? "on" : stoppedMessages === undefined ? "untilUser" : "off";
+				continue;
+			}
+			if (entry.type !== "message") continue;
+			if (state === "untilUser" && entry.message.role === "user") state = "off";
+			if (state === "off") off.add(entry.id);
+		}
+		return off.size === 0 ? own : own.filter(entry => !off.has(entry.id));
+	}
+
+	/** Whether the file's latest retention cursor is a stop: this state starts after an off period. */
+	#afterStop(): boolean {
+		const entries = this.session.sessionManager.getEntries();
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const entry = entries[index];
+			if (entry?.type !== "custom" || entry.customType !== RETENTION_CURSOR_ENTRY_TYPE) continue;
+			if (isRetentionCursor(entry.data)) return entry.data.stoppedAt !== undefined;
+		}
+		return false;
+	}
+
 	/** The active branch as it stands now, bound to its identity so a later `/new`, reset or `/tree` move discards it. */
 	#settledHistory(): SettledHistory {
-		const [entries, start] = this.#retainedEntries();
-		const messages = extractMessages(entries, start);
+		const [path, start] = this.#retainedEntries();
+		const entries = this.#retainable(path, start);
+		const messages = extractMessages(entries);
 		return {
 			messages,
 			openTail: messages.at(-1)?.role === "user" || lastTurnUnfinished(entries),
 			generation: this.#transcriptGeneration,
 			transcriptId: this.transcriptId,
-			userIds: userTurnEntryIds(entries, start),
-			leaf: entries.at(-1)?.id,
+			userIds: userTurnEntryIds(entries),
+			// The branch's leaf, even when off-period entries end it: a `/tree` move off it stales the job.
+			leaf: path.at(-1)?.id,
 		};
 	}
 
@@ -786,30 +816,6 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#retainedMessages = userStarts[endTurn] ?? messages.length;
 		this.#appendCursor(endTurn, this.#retainedMessages, startTurn);
 		return true;
-	}
-
-	/**
-	 * After a stop followed by turns exchanged while retention was off: sends what the stopped state
-	 * left unsent before the stop (a grown last window, then every later window up to the stop),
-	 * from a snapshot cut at the first turn after the stop. Best effort: a transient failure is not retried.
-	 */
-	#sendBeforeStop(cursor: RetentionCursorData, stoppedAt: number): void {
-		if (!this.automatic || !this.#config.autoRetain) return;
-		const history = this.#settledHistory();
-		const userStarts = userTurnStarts(history.messages);
-		const cut = cursor.stoppedMessages ?? userStarts[stoppedAt] ?? history.messages.length;
-		const messages = history.messages.slice(0, cut);
-		const every = this.#config.retainEveryNTurns;
-		void this.#enqueueRetention(async () => {
-			const closedEnd = Math.min(userStarts[cursor.turn] ?? messages.length, messages.length);
-			if (cursor.turn > cursor.windowStart && closedEnd > cursor.messages) {
-				if (!(await this.#sendWindow(messages, userStarts, cursor.windowStart, cursor.turn, history))) return;
-			}
-			for (let turn = cursor.turn; turn < stoppedAt; turn += every) {
-				if (!(await this.#sendWindow(messages, userStarts, turn, Math.min(turn + every, stoppedAt), history)))
-					return;
-			}
-		});
 	}
 
 	/** Uploads user turns `[startTurn, endTurn)` under the window's document id; resolves whether it was sent (or refused for good). */
@@ -948,7 +954,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		const own = this.#own;
-		if (!own) return;
+		// A second dispose must not record a second stop after a successor's cursor.
+		if (!own || this.#stopping) return;
+		this.#stopping = true;
 		if (this.#writes.size > 0 || own.outbox.flushing) {
 			// Joins a running delivery (a retry timer's included) rather than starting a second one.
 			void this.drainOutbox();
@@ -974,14 +982,15 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (!this.automatic || !this.#config.autoRetain) return;
 		this.#followBranch();
 		const [path, start] = this.#retainedEntries();
-		const stoppedAt = countUserTurns(path, start);
+		const retainable = this.#retainable(path, start);
+		const stoppedAt = countUserTurns(retainable);
 		// Nothing to protect yet: no turn, no cursor (keeps an untouched draft session empty).
 		if (stoppedAt === 0 && !this.#hasCursor) return;
 		// Session teardown mid-run: the aborted run appends its answer after this, so no message bound
 		// (that answer still reads as on-period; only later user turns count as exchanged while off).
 		// A backend switch mid-run keeps the bound: the rest of that run happens while retention is off.
 		const midRunExit = this.session.isDisposed && this.session.isStreaming;
-		const stoppedMessages = midRunExit ? undefined : extractMessages(path, start).length;
+		const stoppedMessages = midRunExit ? undefined : extractMessages(retainable).length;
 		const last = this.#pathCursor(path, start);
 		if (
 			last?.stoppedAt === stoppedAt &&
