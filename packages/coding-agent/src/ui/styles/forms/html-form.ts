@@ -14,6 +14,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { layoutText, rowOf } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { paintPicture } from "@oh-my-pi/pi-tui/term/painters/image";
 import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
@@ -400,6 +401,11 @@ function dropdownRows(
 	return out;
 }
 
+/** Cells a textarea's rows wrap at in a column `width` wide: past its bar, a cell short for the caret after a full row. */
+function textareaWrap(width: number): number {
+	return Math.max(1, width - 5);
+}
+
 function openFieldLines(
 	theme: Theme,
 	model: HtmlFormModel,
@@ -441,23 +447,24 @@ function openFieldLines(
 		const bar = view.focused ? theme.fg("accent", "│") : theme.fg("dim", "│");
 		if (field.multiline) {
 			const text = answer.text.text;
-			const rows = text === "" ? [""] : text.split("\n");
-			const shown = Math.max(4, rows.length);
+			const cursor = answer.text.cursor;
 			const room = Math.max(1, width - 4);
-			// The caret's row and column (a bar after the row's end, else the character under it inverted).
-			const before = text.slice(0, answer.text.cursor).split("\n");
-			const caretRow = before.length - 1;
-			const caretCol = before[caretRow]!.length;
+			const rows = layoutText(text, textareaWrap(width));
+			const caretRow = rowOf(rows, cursor);
+			const shown = Math.max(4, rows.length);
 			for (let r = 0; r < shown; r++) {
-				const row = rows[r] ?? "";
-				let content = theme.fgResolved("text", row);
-				if (r === caretRow && view.focused) {
-					if (caretCol >= row.length) content = theme.fgResolved("text", `${row}▏`);
+				const row = rows[r];
+				const part = row ? text.slice(row.start, row.textEnd) : "";
+				let content = theme.fgResolved("text", part);
+				// The caret: a bar after the row's text, else the character under it inverted.
+				if (row && r === caretRow && view.focused) {
+					const at = cursor - row.start;
+					if (cursor >= row.textEnd) content = theme.fgResolved("text", `${part}▏`);
 					else {
-						const ch = String.fromCodePoint(row.codePointAt(caretCol)!);
+						const ch = String.fromCodePoint(part.codePointAt(at)!);
 						content = theme.fgResolved(
 							"text",
-							`${row.slice(0, caretCol)}${theme.style("inverse", ch)}${row.slice(caretCol + ch.length)}`,
+							`${part.slice(0, at)}${theme.style("inverse", ch)}${part.slice(at + ch.length)}`,
 						);
 					}
 				}
@@ -468,6 +475,8 @@ function openFieldLines(
 					content = theme.fgResolved("text", `▏${gap >= 1 ? `${" ".repeat(gap)}${placeholder}` : ""}`);
 				}
 				lines.push(truncate(`  ${bar} ${content}`, width, "…"));
+				// A textarea taller than the box scrolls to the caret's row.
+				if (r === caretRow) column.focusEnd = lines.length;
 			}
 		} else {
 			const secret = field.type === "password";
@@ -627,6 +636,8 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 		column = buildColumn(cx, look, view, inner - 1);
 		body = Math.min(tallest(cx, look, inner - 1, view), limit);
 	}
+	// Up/Down in a textarea step through the rows drawn here.
+	model.wrapWidth = textareaWrap(overflow ? inner - 1 : inner);
 	const rows = body - skip.length;
 	const lines = column.lines;
 	if (column.overlay) {
