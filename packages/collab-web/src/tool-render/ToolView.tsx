@@ -4,7 +4,7 @@
  */
 import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { resolveToolRenderer } from "./registry";
 import type { ToolRenderHost, ToolRenderProps, ToolResultLike } from "./types";
 import { isRecord, replaceTabs, stripAnsi } from "./util";
@@ -70,6 +70,7 @@ function toolCommandRecords(result: ToolResultLike | undefined): ToolCommandReco
 
 export function ToolView(props: ToolViewProps): ReactNode {
 	const [open, setOpen] = useState(props.defaultOpen ?? false);
+	const bodyId = useId();
 	const { args, intent: argIntent } = normalizeArgs(props.args);
 	const intent = props.intent?.trim() || argIntent;
 	const label = intent ? toolIntentLabel(intent) : undefined;
@@ -94,6 +95,7 @@ export function ToolView(props: ToolViewProps): ReactNode {
 					type="button"
 					className="tv-head"
 					aria-expanded={open}
+					aria-controls={open ? bodyId : undefined}
 					onClick={() => setOpen(v => !v)}
 					title={label}
 				>
@@ -109,7 +111,7 @@ export function ToolView(props: ToolViewProps): ReactNode {
 					<span className="tv-chev" aria-hidden="true" />
 				</button>
 				{open && (
-					<div className="tv-body">
+					<div id={bodyId} className="tv-body">
 						{label && <div className="tv-intent">{label}</div>}
 						{renderer.Body ? <renderer.Body {...renderProps} /> : null}
 					</div>

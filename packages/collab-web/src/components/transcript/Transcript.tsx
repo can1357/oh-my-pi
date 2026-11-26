@@ -1,7 +1,7 @@
 import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ActiveTool, ConnectionPhase } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
@@ -66,13 +66,24 @@ function Row({
 
 function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean }): ReactNode {
 	const [open, setOpen] = useState(false);
+	const bodyId = useId();
 	return (
 		<div className="tr-think">
-			<button type="button" className="tr-think-head" onClick={() => setOpen(v => !v)}>
-				<ChevronRight size={11} className={`tr-chev${open ? " tr-chev--open" : ""}`} />
+			<button
+				type="button"
+				className="tr-think-head"
+				aria-expanded={open}
+				aria-controls={open ? bodyId : undefined}
+				onClick={() => setOpen(v => !v)}
+			>
+				<ChevronRight size={12} aria-hidden="true" className={`tr-chev${open ? " tr-chev--open" : ""}`} />
 				thinking{redacted ? " · redacted" : ""}
 			</button>
-			{open && <div className="tr-think-body">{redacted ? "(redacted by provider)" : text}</div>}
+			{open && (
+				<div id={bodyId} className="tr-think-body">
+					{redacted ? "(redacted by provider)" : text}
+				</div>
+			)}
 		</div>
 	);
 }
@@ -371,6 +382,10 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		<div
 			ref={rootRef}
 			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
+			role="log"
+			aria-live="polite"
+			aria-relevant="additions"
+			aria-label="Session transcript"
 			onScroll={() => {
 				const el = rootRef.current;
 				if (el === null) return;
@@ -424,7 +439,9 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			)}
 			{working && stream === null && activeTools.size === 0 && (
 				<Row kind="assistant" gutter="agent">
-					<div className="tr-shimmer">thinking…</div>
+					<div className="tr-shimmer" role="status">
+						thinking…
+					</div>
 				</Row>
 			)}
 		</div>

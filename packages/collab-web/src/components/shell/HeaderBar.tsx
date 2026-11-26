@@ -22,6 +22,7 @@ export interface HeaderBarProps {
 	readOnly: boolean;
 	subCount: number;
 	railOpen: boolean;
+	railControlsId?: string;
 	onToggleRail(): void;
 	onLeave(): void;
 }
@@ -34,6 +35,7 @@ export const HeaderBar = memo(function HeaderBar({
 	readOnly,
 	subCount,
 	railOpen,
+	railControlsId = "agents-rail",
 	onToggleRail,
 	onLeave,
 }: HeaderBarProps): ReactNode {
@@ -53,24 +55,32 @@ export const HeaderBar = memo(function HeaderBar({
 			<div className="sh-header-left">
 				<span className="sh-brand" aria-label="omp collab">
 					<OmpMark />
-					<span className="sh-brand-slash">/</span>
+					<span className="sh-brand-slash" aria-hidden="true">
+						/
+					</span>
 				</span>
-				<span className="sh-title" title={title}>
+				<h1 className="sh-title" title={title}>
 					{title}
-				</span>
+				</h1>
 				{state?.cwd && (
 					<span className="sh-cwd" title={state.cwd}>
 						{shortenPath(state.cwd)}
 					</span>
 				)}
 			</div>
-			<div className="sh-header-right">
-				<span className={`sh-status sh-status-${phase}`} title={`connection: ${phase}`}>
-					<span className={`sh-dot sh-dot-${phase}`} />
-					{PHASE_LABEL[phase]}
+			<nav className="sh-header-right" aria-label="Session controls">
+				<span
+					className={`sh-status sh-status-${phase}`}
+					role="status"
+					aria-live="polite"
+					aria-label={`Connection status: ${PHASE_LABEL[phase]}`}
+					title={`connection: ${phase}`}
+				>
+					<span className={`sh-dot sh-dot-${phase}`} aria-hidden="true" />
+					<span className="sh-status-text">{PHASE_LABEL[phase]}</span>
 				</span>
 				{readOnly && (
-					<span className="sh-chip" title="you joined with a read-only link — watching only">
+					<span className="sh-chip sh-chip-readonly" title="you joined with a read-only link — watching only">
 						read-only
 					</span>
 				)}
@@ -80,15 +90,16 @@ export const HeaderBar = memo(function HeaderBar({
 					<span
 						className={pct > 80 ? "sh-gauge sh-gauge-warn" : "sh-gauge"}
 						title={`context · ${fmtPercent(pct)}`}
+						aria-label={`Context usage ${fmtPercent(pct)}`}
 					>
-						<span className="sh-gauge-track">
+						<span className="sh-gauge-track" aria-hidden="true">
 							<span className="sh-gauge-fill" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
 						</span>
 						<span className="sh-gauge-pct">{fmtPercent(pct)}</span>
 					</span>
 				)}
 				{state && state.participants.length > 0 && (
-					<span className="sh-avatars">
+					<span className="sh-avatars" aria-label={`${state.participants.length} participants`}>
 						{state.participants.map((p, i) => (
 							<span
 								key={`${p.name}:${i}`}
@@ -105,15 +116,28 @@ export const HeaderBar = memo(function HeaderBar({
 					type="button"
 					className={railOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}
 					onClick={onToggleRail}
+					aria-expanded={railOpen}
+					aria-controls={railControlsId}
+					aria-label={railOpen ? "Hide agents panel" : "Show agents panel"}
 					title={railOpen ? "hide agents" : "show agents"}
 				>
-					<PanelRight size={14} />
-					{subCount > 0 && <span className="sh-badge">{subCount}</span>}
+					<PanelRight size={16} aria-hidden="true" />
+					{subCount > 0 && (
+						<span className="sh-badge" aria-label={`${subCount} subagents`}>
+							{subCount}
+						</span>
+					)}
 				</button>
-				<button type="button" className="sh-btn sh-btn-icon" onClick={onLeave} title="leave session">
-					<LogOut size={14} />
+				<button
+					type="button"
+					className="sh-btn sh-btn-icon"
+					onClick={onLeave}
+					aria-label="Leave session"
+					title="leave session"
+				>
+					<LogOut size={16} aria-hidden="true" />
 				</button>
-			</div>
+			</nav>
 		</header>
 	);
 });

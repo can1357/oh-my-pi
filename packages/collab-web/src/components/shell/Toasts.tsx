@@ -48,13 +48,19 @@ export function Toasts({ notices }: { notices: readonly Notice[] }): ReactNode {
 	};
 
 	return (
-		<div className="sh-toasts">
+		<div className="sh-toasts" aria-live="polite" aria-relevant="additions text">
 			{visible.map(n => (
-				<div key={n.id} className={`sh-toast sh-toast-${n.level}`} role="status">
+				<div key={n.id} className={`sh-toast sh-toast-${n.level}`} role={n.level === "error" ? "alert" : "status"}>
 					<span className="sh-toast-msg">{n.message}</span>
 					{n.level === "error" && (
-						<button type="button" className="sh-toast-close" onClick={() => close(n.id)} title="dismiss">
-							<X size={12} />
+						<button
+							type="button"
+							className="sh-toast-close"
+							onClick={() => close(n.id)}
+							aria-label="Dismiss notification"
+							title="dismiss"
+						>
+							<X size={14} aria-hidden="true" />
 						</button>
 					)}
 				</div>

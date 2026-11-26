@@ -14,6 +14,8 @@ import type { ToolRenderHost } from "./tool-render";
 import "./components/shell/shell.css";
 
 const NAME_KEY = "omp.collab.name";
+const MOBILE_RAIL_QUERY = "(max-width: 900px)";
+const AGENTS_RAIL_ID = "agents-rail";
 
 interface Creds {
 	link: string;
@@ -34,6 +36,25 @@ function hashLink(): string | null {
 	const i = href.indexOf("#");
 	if (i < 0 || i + 1 >= href.length) return null;
 	return href.slice(i + 1);
+}
+
+function useMediaQuery(query: string): boolean {
+	const [matches, setMatches] = useState(() =>
+		typeof window !== "undefined" && typeof window.matchMedia === "function"
+			? window.matchMedia(query).matches
+			: false,
+	);
+
+	useEffect(() => {
+		if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+		const mq = window.matchMedia(query);
+		const onChange = () => setMatches(mq.matches);
+		onChange();
+		mq.addEventListener("change", onChange);
+		return () => mq.removeEventListener("change", onChange);
+	}, [query]);
+
+	return matches;
 }
 
 export function App(): ReactNode {
@@ -124,6 +145,8 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	const [railOpen, setRailOpen] = useState(false);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const autoOpenedRef = useRef(false);
+	const railRef = useRef<HTMLElement | null>(null);
+	const isMobileRail = useMediaQuery(MOBILE_RAIL_QUERY);
 
 	const subCount = useMemo(() => snap.agents.filter(a => a.kind === "sub").length, [snap.agents]);
 
@@ -139,13 +162,13 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 		[agentIds],
 	);
 
-	// Auto-open the rail the first time a subagent appears.
+	// Auto-open the rail the first time a subagent appears on desktop viewports.
 	useEffect(() => {
 		if (subCount > 0 && !autoOpenedRef.current) {
 			autoOpenedRef.current = true;
-			setRailOpen(true);
+			if (!isMobileRail) setRailOpen(true);
 		}
-	}, [subCount]);
+	}, [subCount, isMobileRail]);
 
 	const title = snap.header?.title ?? snap.state?.sessionName ?? "session";
 	useEffect(() => {
@@ -154,11 +177,32 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
 	const toggleRail = useCallback(() => setRailOpen(open => !open), []);
+	const closeRail = useCallback(() => setRailOpen(false), []);
 	const closeDrawer = useCallback(() => setSelectedId(null), []);
+
+	// Close the mobile agents overlay on Escape (when no AgentDrawer is on top of it).
+	useEffect(() => {
+		if (!railOpen || !isMobileRail || drawerAgent) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") closeRail();
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [railOpen, isMobileRail, drawerAgent, closeRail]);
+
+	// Move focus into the mobile agents dialog when it opens.
+	useEffect(() => {
+		if (railOpen && isMobileRail) {
+			railRef.current?.focus();
+		}
+	}, [railOpen, isMobileRail]);
 
 	return (
 		<div className="sh-app">
-			<div className="sh-ambient" />
+			<a className="skip-link" href="#main-content">
+				Skip to transcript
+			</a>
+			<div className="sh-ambient" aria-hidden="true" />
 			<HeaderBar
 				header={snap.header}
 				state={snap.state}
@@ -166,11 +210,12 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 				readOnly={snap.readOnly}
 				subCount={subCount}
 				railOpen={railOpen}
+				railControlsId={AGENTS_RAIL_ID}
 				onToggleRail={toggleRail}
 				onLeave={onLeave}
 			/>
-			<main className="sh-main">
-				<section className="sh-panel" data-rail={railOpen ? "true" : "false"}>
+			<main id="main-content" className="sh-main" tabIndex={-1}>
+				<section className="sh-panel" data-rail={railOpen ? "true" : "false"} aria-label="Session transcript">
 					<div className="sh-transcript">
 						<Transcript
 							entries={snap.entries}
@@ -193,14 +238,23 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 				</section>
 				{railOpen && (
 					<>
-						<div className="sh-rail-backdrop" onClick={() => setRailOpen(false)} />
-						<aside className="sh-rail">
+						<div className="sh-rail-backdrop" aria-hidden="true" onClick={closeRail} />
+						<aside
+							ref={railRef}
+							id={AGENTS_RAIL_ID}
+							className="sh-rail"
+							role={isMobileRail ? "dialog" : undefined}
+							aria-modal={isMobileRail ? true : undefined}
+							aria-label="Agents"
+							tabIndex={isMobileRail ? -1 : undefined}
+						>
 							<AgentsPanel
 								agents={snap.agents}
 								progress={snap.progress}
 								lifecycle={snap.lifecycle}
 								selectedId={selectedId}
 								onSelect={setSelectedId}
+								onClose={isMobileRail ? closeRail : undefined}
 							/>
 						</aside>
 					</>
@@ -208,7 +262,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 			</main>
 			{drawerAgent && (
 				<>
-					<div className="ag-drawer-backdrop" onClick={closeDrawer} />
+					<div className="ag-drawer-backdrop" aria-hidden="true" onClick={closeDrawer} />
 					<AgentDrawer
 						agent={drawerAgent}
 						progress={snap.progress.get(drawerAgent.id)}

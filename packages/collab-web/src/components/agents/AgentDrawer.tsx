@@ -1,7 +1,7 @@
 import type { AgentSnapshot, SessionEntry, SubagentLifecyclePayload, SubagentProgressPayload } from "@oh-my-pi/pi-wire";
 import { OctagonX, RotateCcw, SendHorizontal, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { GuestClient } from "../../lib/client";
 import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
 import { decideTranscriptPoll } from "../../lib/transcript-poll";
@@ -28,10 +28,16 @@ export function AgentDrawer(props: {
 	const [entries, setEntries] = useState<readonly SessionEntry[]>([]);
 	const [fetchError, setFetchError] = useState<string | null>(null);
 	const [draft, setDraft] = useState("");
+	const headingId = useId();
+	const closeBtnRef = useRef<HTMLButtonElement | null>(null);
 	/** Resumes a stopped poll loop; null while no loop is mounted. */
 	const resumePollingRef = useRef<(() => void) | null>(null);
 	const quiescentRef = useRef(false);
 	quiescentRef.current = agent.status !== "running";
+
+	useEffect(() => {
+		closeBtnRef.current?.focus();
+	}, [agent.id]);
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
@@ -138,10 +144,12 @@ export function AgentDrawer(props: {
 			: null;
 
 	return (
-		<aside className="ag-drawer" role="dialog" aria-label={agent.displayName}>
+		<aside className="ag-drawer" role="dialog" aria-modal="true" aria-labelledby={headingId}>
 			<header className="ag-drawer-head">
 				<div className="ag-drawer-title">
-					<span className="ag-drawer-name">{agent.displayName}</span>
+					<h2 id={headingId} className="ag-drawer-name">
+						{agent.displayName}
+					</h2>
 					<span className={`ag-chip ag-chip--${agent.status}`}>{agent.status}</span>
 					{model ? <span className="ag-chip ag-chip--model">{model}</span> : null}
 				</div>
@@ -152,18 +160,24 @@ export function AgentDrawer(props: {
 							className="ag-btn ag-btn--danger"
 							onClick={() => client.sendAgentCmd("kill", agent.id)}
 						>
-							<OctagonX size={13} aria-hidden />
+							<OctagonX size={13} aria-hidden="true" />
 							kill
 						</button>
 					) : null}
 					{(agent.status === "parked" || agent.status === "aborted") && !readOnly ? (
 						<button type="button" className="ag-btn" onClick={() => client.sendAgentCmd("revive", agent.id)}>
-							<RotateCcw size={13} aria-hidden />
+							<RotateCcw size={13} aria-hidden="true" />
 							revive
 						</button>
 					) : null}
-					<button type="button" className="ag-iconbtn" aria-label="close" onClick={onClose}>
-						<X size={15} aria-hidden />
+					<button
+						ref={closeBtnRef}
+						type="button"
+						className="ag-iconbtn"
+						aria-label="Close agent drawer"
+						onClick={onClose}
+					>
+						<X size={16} aria-hidden="true" />
 					</button>
 				</div>
 			</header>
@@ -176,7 +190,7 @@ export function AgentDrawer(props: {
 					{ctxPct !== null ? (
 						<span className="ag-stat" title={`context ${fmtTokens(p.contextTokens ?? 0)}`}>
 							<span className="ag-stat-label">ctx</span>
-							<span className="ag-gauge">
+							<span className="ag-gauge" aria-hidden="true">
 								<span
 									className={ctxPct > 80 ? "ag-gauge-fill ag-gauge-fill--warn" : "ag-gauge-fill"}
 									style={{ width: `${ctxPct}%` }}
@@ -230,11 +244,17 @@ export function AgentDrawer(props: {
 					<input
 						className="ag-chat-input"
 						value={draft}
-						placeholder={`message ${agent.displayName}…`}
+						placeholder={`Message ${agent.displayName}…`}
+						aria-label={`Message ${agent.displayName}`}
 						onChange={e => setDraft(e.target.value)}
 					/>
-					<button type="submit" className="ag-iconbtn" aria-label="send" disabled={draft.trim().length === 0}>
-						<SendHorizontal size={15} aria-hidden />
+					<button
+						type="submit"
+						className="ag-iconbtn"
+						aria-label={`Send message to ${agent.displayName}`}
+						disabled={draft.trim().length === 0}
+					>
+						<SendHorizontal size={16} aria-hidden="true" />
 					</button>
 				</form>
 			)}
