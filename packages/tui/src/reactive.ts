@@ -103,7 +103,7 @@ export class Owner {
 
 let currentOwner: Owner | null = null;
 let currentObserver: Computation<unknown> | null = null;
-/** Sources the running computation read this run, in first-read order. */
+/** Sources the running computation read this run, in first-read order (a nested run can add repeats; `#resubscribe` drops them). */
 let currentSources: Source[] | null = null;
 /** Source of every stamp: run ids and resubscribe marks never repeat. */
 let stampClock = 0;
