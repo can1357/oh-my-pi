@@ -18,6 +18,24 @@ export class AbortError extends Error {
 }
 
 /**
+ * Whether an aborted signal's `reason` is a bare cancellation (no caller-supplied
+ * reason, an empty string, or a default `AbortError`), independent of whether it
+ * carries non-empty display text.
+ */
+export function isBareAbortReason(reason: unknown): boolean {
+	if (reason === undefined || reason === null) return true;
+	if (typeof reason === "string") return reason.trim().length === 0;
+	if (typeof reason === "object") {
+		try {
+			return Reflect.get(reason, "name") === "AbortError";
+		} catch {
+			return false;
+		}
+	}
+	return false;
+}
+
+/**
  * The text a caller gave `AbortController.abort(reason)`, a string, an `Error` other than an abort (such as the coding
  * agent's user-interrupt label), or a tool-scoped abort object; `undefined` for a bare `abort()`, whose reason is the
  * default `AbortError`.

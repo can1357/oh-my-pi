@@ -318,44 +318,124 @@ describe("register-builtins lazy streams", () => {
 		expect(AIError.is(result.errorId, AIError.Flag.Abort)).toBe(false);
 	});
 
-	it("keeps structural flags from the original caller abort reason", async () => {
-		const reason = new AIError.StreamTimeoutError("budget spent");
-		const result = await resultAfterCallerAbort(reason);
+	it("keeps structural flags from the original caller abort reason, even with an empty message", async () => {
+		const labelled = await resultAfterCallerAbort(new AIError.StreamTimeoutError("budget spent"));
+		expect(labelled.stopReason).toBe("aborted");
+		expect(labelled.errorMessage).toBe("budget spent");
+		expect(AIError.is(labelled.errorId, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.is(labelled.errorId, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(labelled.errorId, AIError.Flag.Abort)).toBe(false);
 
-		expect(result.stopReason).toBe("aborted");
-		expect(result.errorMessage).toBe("budget spent");
-		expect(AIError.is(result.errorId, AIError.Flag.Timeout)).toBe(true);
-		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
-		expect(AIError.is(result.errorId, AIError.Flag.Abort)).toBe(false);
+		const emptyMessage = await resultAfterCallerAbort(new AIError.StreamTimeoutError(""));
+		expect(emptyMessage.stopReason).toBe("aborted");
+		expect(emptyMessage.errorMessage).toBe("Request was aborted");
+		expect(AIError.is(emptyMessage.errorId, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.is(emptyMessage.errorId, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(emptyMessage.errorId, AIError.Flag.Abort)).toBe(false);
 	});
 
-	it("keeps a provider HTTP status when a bare cancellation wins the race", async () => {
-		const abortController = new AbortController();
+	it("does not fabricate an HTTP status from a status-looking caller abort label", async () => {
+		const result = await resultAfterCallerAbort("Stopped after HTTP 404");
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("Stopped after HTTP 404");
+		expect(result.errorStatus).toBeUndefined();
+		expect(result.errorId).toBeUndefined();
+	});
+
+	it("preserves an already-settled terminal HTTP result during an iterator abort race without waiting on a pending provider", async () => {
 		const partialMessage = createAssistantMessage("stop");
-		const providerError = new AIError.ProviderHttpError("missing model", 404);
-		const source = {
+
+		// 1. Abort while iterator.next() is pending and source.result() already published a 404 AssistantMessage.
+		const abortFulfilled = new AbortController();
+		const terminalMessage = createAssistantMessage("error", "404 Not Found");
+		terminalMessage.errorStatus = 404;
+		const fulfilledSource = {
 			async *[Symbol.asyncIterator]() {
 				yield { type: "start", partial: partialMessage } as const;
+				await Promise.withResolvers<never>().promise;
 			},
-			result: async () => {
-				abortController.abort();
-				throw providerError;
-			},
+			result: () => Promise.resolve(terminalMessage),
 		} as unknown as AssistantMessageEventStream;
-		setBedrockProviderModule({ streamBedrock: () => source });
+		setBedrockProviderModule({ streamBedrock: () => fulfilledSource });
 
-		const result = await streamBedrock(createModel(), baseContext, {
-			signal: abortController.signal,
+		const fulfilledStream = streamBedrock(createModel(), baseContext, {
+			signal: abortFulfilled.signal,
 			streamIdleTimeoutMs: 500,
-		}).result();
+		});
+		const fulfilledIterator = fulfilledStream[Symbol.asyncIterator]();
+		expect((await fulfilledIterator.next()).value?.type).toBe("start");
+		abortFulfilled.abort();
+		const fulfilledResult = await Promise.race([
+			fulfilledStream.result(),
+			Bun.sleep(500).then(() => "timeout" as const),
+		]);
+		expect(fulfilledResult).not.toBe("timeout");
+		if (fulfilledResult === "timeout") throw new Error("Timed out waiting for aborted race result");
+		expect(fulfilledResult.stopReason).toBe("aborted");
+		expect(fulfilledResult.errorMessage).toBe("Request was aborted");
+		expect(fulfilledResult.errorStatus).toBe(404);
+		expect(AIError.is(fulfilledResult.errorId, AIError.Flag.Abort)).toBe(true);
 
-		expect(result.stopReason).toBe("aborted");
-		expect(result.errorMessage).toBe("Request was aborted");
-		expect(result.errorStatus).toBe(404);
-		expect(AIError.is(result.errorId, AIError.Flag.Abort)).toBe(true);
+		// 2. Abort while iterator.next() is pending and source.result() already rejected with ProviderHttpError(404).
+		const abortRejected = new AbortController();
+		const rejectedPromise = Promise.reject(new AIError.ProviderHttpError("missing model", 404));
+		rejectedPromise.catch(() => {});
+		const rejectedSource = {
+			async *[Symbol.asyncIterator]() {
+				yield { type: "start", partial: partialMessage } as const;
+				await Promise.withResolvers<never>().promise;
+			},
+			result: () => rejectedPromise,
+		} as unknown as AssistantMessageEventStream;
+		setBedrockProviderModule({ streamBedrock: () => rejectedSource });
+
+		const rejectedStream = streamBedrock(createModel(), baseContext, {
+			signal: abortRejected.signal,
+			streamIdleTimeoutMs: 500,
+		});
+		const rejectedIterator = rejectedStream[Symbol.asyncIterator]();
+		expect((await rejectedIterator.next()).value?.type).toBe("start");
+		abortRejected.abort();
+		const rejectedResult = await Promise.race([
+			rejectedStream.result(),
+			Bun.sleep(500).then(() => "timeout" as const),
+		]);
+		expect(rejectedResult).not.toBe("timeout");
+		if (rejectedResult === "timeout") throw new Error("Timed out waiting for aborted rejected-result race");
+		expect(rejectedResult.stopReason).toBe("aborted");
+		expect(rejectedResult.errorMessage).toBe("Request was aborted");
+		expect(rejectedResult.errorStatus).toBe(404);
+		expect(AIError.is(rejectedResult.errorId, AIError.Flag.Abort)).toBe(true);
+
+		// 3. Abort while both iterator.next() and source.result() stay pending: settles without waiting on the provider.
+		const abortPending = new AbortController();
+		const pendingSource = {
+			async *[Symbol.asyncIterator]() {
+				yield { type: "start", partial: partialMessage } as const;
+				await Promise.withResolvers<never>().promise;
+			},
+			result: () => Promise.withResolvers<AssistantMessage>().promise,
+		} as unknown as AssistantMessageEventStream;
+		setBedrockProviderModule({ streamBedrock: () => pendingSource });
+
+		const pendingStream = streamBedrock(createModel(), baseContext, {
+			signal: abortPending.signal,
+			streamIdleTimeoutMs: 500,
+		});
+		const pendingIterator = pendingStream[Symbol.asyncIterator]();
+		expect((await pendingIterator.next()).value?.type).toBe("start");
+		abortPending.abort();
+		const pendingResult = await Promise.race([pendingStream.result(), Bun.sleep(500).then(() => "timeout" as const)]);
+		expect(pendingResult).not.toBe("timeout");
+		if (pendingResult === "timeout") throw new Error("Timed out waiting for still-running provider abort");
+		expect(pendingResult.stopReason).toBe("aborted");
+		expect(pendingResult.errorMessage).toBe("Request was aborted");
+		expect(pendingResult.errorStatus).toBeUndefined();
+		expect(AIError.is(pendingResult.errorId, AIError.Flag.Abort)).toBe(true);
 	});
 
-	it("reads a tool-scoped caller reason", async () => {
+	it("reads a tool-scoped caller reason and settles even if its cause getter throws", async () => {
 		const toolScopedResult = await resultAfterCallerAbort({
 			kind: "tool-scoped-abort",
 			message: "Streaming edit preview failed",
@@ -364,6 +444,25 @@ describe("register-builtins lazy streams", () => {
 		});
 		expect(toolScopedResult.errorMessage).toBe("Streaming edit preview failed");
 		expect(AIError.is(toolScopedResult.errorId, AIError.Flag.Abort)).toBe(false);
+
+		const throwingCauseResult = await Promise.race([
+			resultAfterCallerAbort({
+				kind: "tool-scoped-abort",
+				message: "Streaming edit preview failed",
+				toolCallMessages: {},
+				defaultToolCallMessage: "Streaming edit preview failed",
+				get cause() {
+					throw new Error("boom");
+				},
+			}),
+			Bun.sleep(500).then(() => "timeout" as const),
+		]);
+		expect(throwingCauseResult).not.toBe("timeout");
+		if (throwingCauseResult === "timeout")
+			throw new Error("Stream result stayed pending after throwing cause getter");
+		expect(throwingCauseResult.stopReason).toBe("aborted");
+		expect(throwingCauseResult.errorMessage).toBe("Streaming edit preview failed");
+		expect(AIError.is(throwingCauseResult.errorId, AIError.Flag.Abort)).toBe(false);
 	});
 
 	it("preserves caller aborts while forwarding lazy provider streams", async () => {

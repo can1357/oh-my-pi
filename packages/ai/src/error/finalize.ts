@@ -1,8 +1,8 @@
 import type { Api } from "../types";
-import { callerAbortReason } from "./abort";
 import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
-import { classify, classifyMessage, create, Flag, status } from "./flags";
+import { AbortError, callerAbortReason, isBareAbortReason } from "./abort";
+import { classify, classifyMessage, create, Flag, is, status } from "./flags";
 import { formatMessage } from "./format";
 
 /** Context a provider catch block hands to {@link finalize}. */
@@ -35,6 +35,50 @@ export interface FinalizeResult {
 	message: string;
 }
 
+function safeStatus(error: unknown): number | undefined {
+	try {
+		return status(error);
+	} catch {
+		return undefined;
+	}
+}
+
+function safeErrorText(error: unknown): string {
+	try {
+		return error instanceof Error ? error.message : String(error);
+	} catch {
+		return "Unknown error";
+	}
+}
+
+function isAbortErrorLike(error: unknown): boolean {
+	try {
+		if (error instanceof AbortError) return true;
+		if (error instanceof Error) return error.name === "AbortError";
+		return error !== null && typeof error === "object" && Reflect.get(error, "name") === "AbortError";
+	} catch {
+		return false;
+	}
+}
+
+function isCallerCancellationError(
+	error: unknown,
+	callerError: unknown,
+	callerReason: string | undefined,
+	bareAbort: boolean,
+): boolean {
+	if (error === undefined || error === null) return true;
+	if (error === callerError) return true;
+	if (!isAbortErrorLike(error)) return false;
+	if (bareAbort) return true;
+	try {
+		const message = error instanceof Error ? error.message : Reflect.get(error as object, "message");
+		return message === callerReason || message === callerError;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Build the complete error bundle for a provider catch block, replacing the
  * `stopReason` / `errorStatus` / `errorId` / `errorMessage` boilerplate.
@@ -44,14 +88,14 @@ export interface FinalizeResult {
  * local abort reason (e.g. a first-event timeout), the reason the caller passed
  * to `abort()` (e.g. "Interrupted by user"), generic text for a bare caller
  * abort, or the formatted error. Caller-supplied reasons are classified from
- * their original value so attached flags survive. Message formatting is wrapped
- * so a formatter throw can never skip the caller's `stream.end()`.
+ * their original value so attached flags survive even with empty display text,
+ * and classification/formatting errors fall back so the stream always settles.
  */
 export async function finalize(error: unknown, opts: FinalizeOptions = {}): Promise<FinalizeResult> {
 	const aborted = opts.abortTracker ? opts.abortTracker.wasCallerAbort() : opts.signal?.aborted === true;
-	const errorStatus = status(error);
 	let callerReason: string | undefined;
 	let callerError: unknown;
+	let bareAbort = true;
 
 	let message: string;
 	try {
@@ -59,40 +103,57 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		// The tracker keeps the caller's own signal, so the caller's reason and any
 		// flags attached to it survive; providers without a tracker pass the signal.
 		const callerSignal = opts.abortTracker ? opts.abortTracker.callerSignal : opts.signal;
-		callerReason = opts.abortTracker ? opts.abortTracker.getCallerAbortReason() : callerAbortReason(opts.signal);
 		callerError = callerSignal?.reason;
+		bareAbort = isBareAbortReason(callerError);
+		callerReason = opts.abortTracker ? opts.abortTracker.getCallerAbortReason() : callerAbortReason(opts.signal);
 		message =
 			localReason?.message ?? callerReason ?? (aborted ? "Request was aborted" : await formatMessage(error, opts));
 	} catch {
-		message = aborted
-			? (callerReason ?? "Request was aborted")
-			: error instanceof Error
-				? error.message
-				: String(error);
+		message = aborted ? (callerReason ?? "Request was aborted") : safeErrorText(error);
 	}
 
+	const errorStatus =
+		aborted && isCallerCancellationError(error, callerError, callerReason, bareAbort) ? undefined : safeStatus(error);
 	const currentStatus = errorStatus ?? opts.capturedErrorResponse?.status;
 
-	// A captured status is transport context for the original error. Put it at
-	// the root of the classification cause chain so terminal 4xx policy governs
-	// nested diagnostics before they can contribute transient flags.
-	const errorId = aborted
-		? callerReason === undefined
-			? create(Flag.Abort)
-			: classify(callerError, opts.api)
-		: classify(
+	let id: number;
+	if (aborted) {
+		if (bareAbort) {
+			id = create(Flag.Abort);
+		} else {
+			try {
+				const classified = classify(callerError, opts.api);
+				id = is(classified, Flag.Class) ? classified : 0;
+			} catch {
+				id = 0;
+			}
+		}
+	} else {
+		// A captured status is transport context for the original error. Put it at
+		// the root of the classification cause chain so terminal 4xx policy governs
+		// nested diagnostics before they can contribute transient flags.
+		let errorId: number;
+		try {
+			errorId = classify(
 				errorStatus === undefined && currentStatus !== undefined ? { status: currentStatus, cause: error } : error,
 				opts.api,
 			);
-
-	const id = classifyMessage({
-		api: opts.api,
-		provider: opts.provider,
-		model: opts.model,
-		errorId,
-		errorMessage: message,
-		errorStatus: currentStatus,
-	});
+		} catch {
+			errorId = currentStatus ?? 0;
+		}
+		try {
+			id = classifyMessage({
+				api: opts.api,
+				provider: opts.provider,
+				model: opts.model,
+				errorId,
+				errorMessage: message,
+				errorStatus: currentStatus,
+			});
+		} catch {
+			id = errorId;
+		}
+	}
 
 	return {
 		id,

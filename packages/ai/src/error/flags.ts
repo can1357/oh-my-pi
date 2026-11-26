@@ -647,7 +647,7 @@ function matchesOverflowText(text: string): boolean {
  * request replays identically, so a transient signal riding on it (e.g. a
  * truncation phrase in the body) must not flip it to retryable.
  */
-function isTerminalClientErrorStatus(status: number | undefined): boolean {
+export function isTerminalClientErrorStatus(status: number | undefined): boolean {
 	return status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 

@@ -49,6 +49,48 @@ function hasFinalResult(
 	return typeof (source as { result?: unknown }).result === "function";
 }
 
+function providerErrorFromSettledMessage(message: AssistantMessage): unknown {
+	if (message.stopReason !== "error" && message.stopReason !== "aborted") return undefined;
+	if (message.errorStatus !== undefined) {
+		return { status: message.errorStatus };
+	}
+	if (message.errorId !== undefined && message.errorId >= 100 && message.errorId <= 599) {
+		return { status: message.errorId };
+	}
+	if (message.stopReason === "error" && message.errorMessage) {
+		const inferred = AIError.status({ message: message.errorMessage });
+		if (inferred !== undefined) return { status: inferred };
+	}
+	return undefined;
+}
+
+/**
+ * Inspect an already-settled `source.result()` without waiting on a still-running
+ * provider. When the watchdog aborts iteration on a caller cancel, this preserves
+ * an HTTP error the provider already published while letting a hung stream settle
+ * immediately.
+ */
+async function peekSettledProviderError(source: AsyncIterable<AssistantMessageEvent>): Promise<unknown> {
+	if (!hasFinalResult(source)) return undefined;
+	let resultPromise: Promise<AssistantMessage>;
+	try {
+		resultPromise = source.result();
+	} catch (reason) {
+		return reason;
+	}
+	void resultPromise.catch(() => {});
+	const settled = await Promise.race([
+		resultPromise.then(
+			value => ({ state: "fulfilled" as const, value }),
+			reason => ({ state: "rejected" as const, reason }),
+		),
+		Promise.resolve().then(() => ({ state: "pending" as const })),
+	]);
+	if (settled.state === "rejected") return settled.reason;
+	if (settled.state === "fulfilled") return providerErrorFromSettledMessage(settled.value);
+	return undefined;
+}
+
 /**
  * floor used when neither caller option nor env var pins a value. Generic env
  * vars (`PI_STREAM_FIRST_EVENT_TIMEOUT_MS`, `PI_STREAM_IDLE_TIMEOUT_MS`) still
@@ -102,6 +144,7 @@ function forwardStream<TApi extends Api>(
 	limits?: StreamLimits,
 ): void {
 	(async () => {
+		let abortedByWatchdog = false;
 		try {
 			const providerHandlesStreamTimeouts = limits?.providerHandlesStreamTimeouts === true;
 			const providerHandlesFirstEventTimeouts = limits?.providerHandlesFirstEventTimeouts === true;
@@ -141,6 +184,9 @@ function forwardStream<TApi extends Api>(
 				onIdle: () => abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_IDLE_TIMEOUT_ERROR)),
 				onFirstItemTimeout: () =>
 					abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
+				onAbort: () => {
+					abortedByWatchdog = true;
+				},
 				abortSignal: abortTracker.callerSignal,
 				// The synthetic `start` event is yielded immediately by every provider before
 				// the upstream model has emitted any tokens. Treating it as the first "real"
@@ -160,7 +206,8 @@ function forwardStream<TApi extends Api>(
 				target.end();
 			}
 		} catch (error) {
-			const message = await createProviderStreamError(model, error, abortTracker);
+			const providerError = abortedByWatchdog ? await peekSettledProviderError(source) : error;
+			const message = await createProviderStreamError(model, providerError, abortTracker);
 			target.push({ type: "error", reason: message.stopReason, error: message });
 			target.end(message);
 		}
