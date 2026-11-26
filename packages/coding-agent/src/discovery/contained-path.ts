@@ -11,13 +11,7 @@
  * imports nothing from either to stay cycle-free.
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
-
-/** Lexical containment: `target` is `base` itself or a descendant of it. */
-function isContained(base: string, target: string): boolean {
-	const relative = path.relative(base, target);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
+import { pathIsWithinLexical } from "@oh-my-pi/pi-utils";
 
 /** Resolve symlinks and equivalents; `null` when the path is missing or unresolvable. */
 export async function realpathIfExists(p: string): Promise<string | null> {
@@ -39,10 +33,10 @@ export type ContainedPathResolution =
  * plugin root is rejected before any I/O could consume outside content.
  */
 export async function resolveContainedPath(realBase: string, target: string): Promise<ContainedPathResolution> {
-	if (!isContained(realBase, target)) return { status: "outside" };
+	if (!pathIsWithinLexical(realBase, target)) return { status: "outside" };
 	const real = await realpathIfExists(target);
 	if (real === null) return { status: "missing" };
-	return isContained(realBase, real) ? { status: "ok", realPath: real } : { status: "outside" };
+	return pathIsWithinLexical(realBase, real) ? { status: "ok", realPath: real } : { status: "outside" };
 }
 
 /**
@@ -55,9 +49,9 @@ export async function resolveContainedPath(realBase: string, target: string): Pr
  * which fails closed on unresolvable targets.
  */
 export async function isContainedResolved(realBase: string, target: string): Promise<boolean> {
-	if (!isContained(realBase, target)) return false;
+	if (!pathIsWithinLexical(realBase, target)) return false;
 	const real = await realpathIfExists(target);
-	return real === null || isContained(realBase, real);
+	return real === null || pathIsWithinLexical(realBase, real);
 }
 
 /**
@@ -65,7 +59,7 @@ export async function isContainedResolved(realBase: string, target: string): Pro
  * (bash `skill://` expansion).
  */
 export function resolveContainedPathSync(realBase: string, target: string): ContainedPathResolution {
-	if (!isContained(realBase, target)) return { status: "outside" };
+	if (!pathIsWithinLexical(realBase, target)) return { status: "outside" };
 	let real: string | null;
 	try {
 		real = fs.realpathSync(target);
@@ -73,5 +67,5 @@ export function resolveContainedPathSync(realBase: string, target: string): Cont
 		real = null;
 	}
 	if (real === null) return { status: "missing" };
-	return isContained(realBase, real) ? { status: "ok", realPath: real } : { status: "outside" };
+	return pathIsWithinLexical(realBase, real) ? { status: "ok", realPath: real } : { status: "outside" };
 }

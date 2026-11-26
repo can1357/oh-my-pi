@@ -2472,7 +2472,7 @@
 				},
 				"liveSteered": {
 					"type": "integer",
-					"description": "Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
+					"description": "Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.",
 					"default": 0
 				}
 			},
@@ -2480,7 +2480,7 @@
 				"steering",
 				"followUp"
 			],
-			"description": "Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`."
+			"description": "Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`. Input the agent already took leads its list until the transcript records it."
 		},
 		"ToolDescriptor": {
 			"type": "object",
@@ -4596,7 +4596,7 @@
 				},
 				"liveSteered": {
 					"type": "integer",
-					"description": "Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
+					"description": "Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.",
 					"default": 0
 				}
 			},

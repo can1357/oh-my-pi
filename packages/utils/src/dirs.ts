@@ -208,11 +208,26 @@ export function normalizePathForComparison(inputPath: string): string {
  * candidate against several static roots can normalize each side once and
  * reuse the public helpers' containment semantics without repeating realpath
  * work.
+ *
+ * The comparison itself is lexical: it never resolves symlinks. Callers that
+ * want a purely lexical check may pass `path.resolve()`d paths instead, as long
+ * as both sides are prepared the same way.
  */
 export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
 	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	// `..name` is a child; only a `..` segment leaves the root.
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
 	return relative;
+}
+
+/**
+ * Lexical containment: `candidate` is `root` itself or below it. Symlinks are not resolved; the
+ * comparison is `path.relative`'s, so it follows the platform (case-insensitive on Windows).
+ * Callers resolve or normalize both sides first. Use {@link pathIsWithin} to compare through
+ * symlinks.
+ */
+export function pathIsWithinLexical(root: string, candidate: string): boolean {
+	return relativePathWithinNormalizedRoot(root, candidate) !== null;
 }
 
 /** `options` apply to `candidate` only. */
@@ -933,6 +948,11 @@ export function getAvatarCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");
 }
 
+/** Get the directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH (~/.omp/cache/bun-stub). */
+export function getBunStubDir(): string {
+	return dirs.rootSubdir(path.join("cache", "bun-stub"), "cache");
+}
+
 /** Get the local FastEmbed model cache directory (~/.omp/cache/fastembed). */
 export function getFastembedCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "fastembed"), "cache");
@@ -1059,11 +1079,6 @@ export function getBlobsDir(agentDir?: string): string {
 /** Get the custom themes directory (~/.omp/agent/themes). */
 export function getCustomThemesDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "themes");
-}
-
-/** Get the tools directory (~/.omp/agent/tools). */
-export function getToolsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "tools");
 }
 
 /** Get the slash commands directory (~/.omp/agent/commands). */

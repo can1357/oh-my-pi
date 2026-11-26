@@ -6,7 +6,7 @@
  * (the daemon closes the least recently used idle one beyond `disassembler.maxOpen`), attaches a
  * tunnel to each, and forwards NDJSON requests over it.
  */
-import { logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
+import { errorMessage, logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "../tools/tool-errors";
 import { daemonClient } from "../daemon/client";
 import { type DaemonTunnel, GLOBAL_SCOPE, type UnitSnapshot } from "../daemon/protocol";
@@ -17,7 +17,6 @@ import {
 	DISASM_UNIT_KIND,
 	type DisasmUnitParams,
 	disasmUnitKey,
-	errorMessage,
 	formatDatabaseHandle,
 	type HostCallMethod,
 	type HostRequest,

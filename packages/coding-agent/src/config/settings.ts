@@ -28,6 +28,7 @@ import {
 	isRecord,
 	logger,
 	MAIN_CONFIG_FILENAMES,
+	pathIsWithinLexical,
 	procmgr,
 } from "@oh-my-pi/pi-utils";
 import { pollFile } from "@oh-my-pi/pi-natives/file-poll";
@@ -439,8 +440,7 @@ function normalizePathPrefix(prefix: string): string {
 }
 
 function pathMatchesPrefix(cwd: string, prefix: string): boolean {
-	const relative = path.relative(normalizePathPrefix(prefix), path.resolve(cwd));
-	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+	return pathIsWithinLexical(normalizePathPrefix(prefix), path.resolve(cwd));
 }
 
 /**

@@ -32,7 +32,8 @@ import {
 } from "../async";
 import { shellChangeSnapshots } from "../commit/selective/journal";
 import { type BoardEntry, registerOnBoard } from "../daemon/client";
-import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { applyDirenvPreflight, type BashResult, executeBash, sessionShellEnv } from "../exec/bash-executor";
+import { BASH_SESSION_ENV } from "../exec/session-processes";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { InternalUrlRouter } from "../internal-urls";
@@ -55,6 +56,7 @@ import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
 import type { ToolSession } from ".";
+import { owningSessionId } from "./session-id";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
@@ -66,6 +68,7 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
+import { O2CTL_COMMAND, runO2ctlCommand } from "../launch/o2ctl-command";
 import { findHintVisible } from "./jfind";
 import { formatArtifactErrorNotice } from "./output-meta-format";
 import { formatOutputNotice } from "./output-meta-format";
@@ -1083,9 +1086,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	/**
-	 * Session tool commands for one embedded shell run, or undefined when the session mounts none.
-	 * The handler lives as long as the run: `signal` is the run's own, and every dispatch lands in
-	 * `recorder`, after which `onChange` re-emits the run's frame.
+	 * Session tool commands for one embedded shell run, plus `o2ctl` while services can launch;
+	 * undefined when there are none. The handler lives as long as the run: `signal` is the run's
+	 * own, and every tool dispatch lands in `recorder`, after which `onChange` re-emits the run's
+	 * frame.
 	 */
 	#shellCommands(
 		names: readonly string[],
@@ -1097,40 +1101,47 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			onChange?: () => void;
 		},
 	): ShellCommands | undefined {
-		if (names.length === 0) return undefined;
+		// A mounted tool of that name keeps it.
+		const o2ctl = this.#launchEnabled && !names.includes(O2CTL_COMMAND);
+		if (names.length === 0 && !o2ctl) return undefined;
 		const { recorder, onChange } = options;
+		const tools = createToolCommandHandler({
+			session: this.session,
+			toolCallId: options.toolCallId,
+			signal: options.signal,
+			context: options.context,
+			onDispatch: (dispatch, index) => {
+				recorder.finish(dispatch, index);
+				onChange?.();
+			},
+			onProgress: (dispatch, index) => {
+				recorder.progress(dispatch, index);
+				onChange?.();
+			},
+		});
 		return {
-			names: [...names],
-			handler: createToolCommandHandler({
-				session: this.session,
-				toolCallId: options.toolCallId,
-				signal: options.signal,
-				context: options.context,
-				onDispatch: (dispatch, index) => {
-					recorder.finish(dispatch, index);
-					onChange?.();
-				},
-				onProgress: (dispatch, index) => {
-					recorder.progress(dispatch, index);
-					onChange?.();
-				},
-			}),
+			names: o2ctl ? [...names, O2CTL_COMMAND] : [...names],
+			handler: request =>
+				o2ctl && request.name === O2CTL_COMMAND
+					? runO2ctlCommand(this.session, request, options.signal)
+					: tools(request),
 		};
 	}
 
 	/**
-	 * Session identity for a command, read when its tool call starts, so
-	 * `/fork`, `/new`, and `/resume` take effect on the next call while a call
-	 * already under way keeps the session it began in. `PI_TOOL_CALL_ID` is the
-	 * id this call runs under: the agent's call in the transcript, or the eval
-	 * tool bridge's own id for a call made from an eval cell. Always
-	 * set every key: an empty value replaces a stale one inherited from a parent
-	 * omp process, since an env overlay cannot unset.
+	 * Session identity for a command ({@link sessionShellEnv}), read when its
+	 * tool call starts, so `/fork`, `/new`, and `/resume` take effect on the next
+	 * call while a call already under way keeps the session it began in.
+	 * `PI_TOOL_CALL_ID` is the id this call runs under: the agent's call in the
+	 * transcript, or the eval tool bridge's own id for a call made from an eval
+	 * cell.
 	 */
 	#sessionEnv(toolCallId: string): Record<string, string> {
+		const sessionId = owningSessionId(this.session) ?? "";
 		return {
-			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
-			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
+			...sessionShellEnv({ id: sessionId, file: this.session.getSessionFile() }),
+			// Membership tag for processes the call leaves running (session-processes.ts).
+			[BASH_SESSION_ENV]: sessionId,
 			PI_TOOL_CALL_ID: toolCallId,
 		};
 	}

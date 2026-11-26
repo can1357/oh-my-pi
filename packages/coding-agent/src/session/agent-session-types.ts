@@ -231,6 +231,8 @@ export interface AgentSessionConfig {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
+	/** Validate a candidate for a model change against the session's dispatch restrictions. */
+	assertDispatchModel?: (model: Model) => void;
 	/**
 	 * Disable retry fallback, context promotion and usage-aware fallback: the turn retries on, or fails
 	 * with, its own model instead. Startup model selection, and the return to the primary after a
@@ -450,6 +452,8 @@ export interface AgentSessionConfig {
 	advisorConfigs?: AdvisorConfig[];
 	/** Config problems collected during WATCHDOG.yml discovery. */
 	advisorConfigWarnings?: string[];
+	/** User configuration directory used to rediscover the advisor roster. */
+	advisorConfigDir?: string;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/**

@@ -19,6 +19,7 @@ export interface ModelCacheProviderIdOptions extends AccountScope {
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	arkanecloud: true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
@@ -51,6 +52,9 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// A Modal proxy token is workspace-scoped and the roster is the endpoints it
 	// may call, so a shared namespace would serve one workspace's ids to another.
 	modal: true,
+	// A Refuseless key lists its account's private models and bills its
+	// account rates, and discovery is authoritative.
+	refuseless: true,
 };
 
 /**
@@ -90,8 +94,12 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
 		case "modal":
 			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
+		case "arkanecloud":
+			return "https://console.arkanecloud.com/api/v2";
 		case "otari":
 			return Bun.env.OTARI_BASE_URL?.trim() || OTARI_US_BASE_URL;
+		case "refuseless":
+			return "https://api.refuseless.com/v1";
 		case "bifrost":
 			return Bun.env.BIFROST_BASE_URL?.trim() || "http://localhost:8080/v1";
 		case "opencode-go":
@@ -206,11 +214,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return `kimi-code:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		// Per-key rosters (Otari: one workspace's enabled models; Bifrost: one
-		// virtual key's allowed models) behind a configurable endpoint: scope by
-		// both so switching either re-runs discovery.
+		// virtual key's allowed models; Refuseless: one account's private models
+		// and rates) behind a configurable endpoint: scope by both so switching
+		// either re-runs discovery.
 		case "muse-code":
 		case "otari":
-		case "bifrost": {
+		case "arkanecloud":
+		case "bifrost":
+		case "refuseless": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
