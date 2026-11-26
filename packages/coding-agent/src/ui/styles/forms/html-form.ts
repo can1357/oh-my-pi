@@ -18,7 +18,15 @@ import { type EditorRow, layoutText, rowOf } from "@oh-my-pi/pi-tui/term/painter
 import { paintPicture } from "@oh-my-pi/pi-tui/term/painters/image";
 import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
-import { padTo, sliceCells, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import {
+	padTo,
+	replaceTabs,
+	sliceCells,
+	sliceColumns,
+	truncate,
+	visibleWidth,
+	wrap,
+} from "@oh-my-pi/pi-tui/text/width";
 import type { ChoiceField, FormBlock, FormField, FormSpan } from "../../../tools/html-form/parse";
 import { spansText } from "../../../tools/html-form/parse";
 import { type FormPart, isFoldCaption } from "../../forms/html-form/layout";
@@ -142,6 +150,23 @@ function styled(theme: Theme, spans: readonly FormSpan[], base: string): string 
 		.join("");
 }
 
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** Crop a styled input around the caret, marking the edges with more text. */
+function caretViewport(theme: Theme, line: string, width: number, caretEnd: number, caretWidth: number): string {
+	line = replaceTabs(line);
+	const cells = visibleWidth(line);
+	if (cells <= width) return line;
+	if (width <= caretWidth) return sliceColumns(line, caretEnd - caretWidth, caretEnd - caretWidth + width);
+	const left = caretEnd >= width;
+	const room = width - Number(left);
+	const start = left ? Math.min(cells - room, Math.max(1, caretEnd - Math.max(caretWidth, Math.ceil(room / 2)))) : 0;
+	const right = start + room < cells && caretEnd < start + room;
+	const leading = left ? theme.fg("dim", "‹") : "";
+	const trailing = right ? theme.fg("dim", "›") : "";
+	return leading + sliceColumns(line, start, start + room - Number(right)) + trailing;
+}
+
 /**
  * A one-line box: the text with its caret (an inverted cell), or a Vim Visual `selection` inverted
  * instead. A line break Vim put in the box (`o`, a linewise put) shows as a space.
@@ -152,17 +177,21 @@ function caretLine(
 	cursor: number,
 	placeholder?: string,
 	selection?: { readonly from: number; readonly to: number } | null,
+	width?: number,
 ): string {
 	const flat = text.replaceAll("\n", " ");
-	if (selection && selection.to > selection.from)
-		return `${flat.slice(0, selection.from)}${theme.style("inverse", flat.slice(selection.from, selection.to))}${flat.slice(selection.to)}`;
 	const at = Math.max(0, Math.min(cursor, flat.length));
-	if (at >= flat.length) {
-		const caret = theme.style("inverse", " ");
-		return `${flat}${caret}${!flat && placeholder ? theme.fg("dim", placeholder) : ""}`;
-	}
-	const ch = String.fromCodePoint(flat.codePointAt(at)!);
-	return `${flat.slice(0, at)}${theme.style("inverse", ch)}${flat.slice(at + ch.length)}`;
+	const grapheme = graphemes.segment(flat).containing(at);
+	const start = grapheme?.index ?? at;
+	const ch = grapheme?.segment ?? " ";
+	const before = flat.slice(0, start);
+	const line =
+		selection && selection.to > selection.from
+			? `${flat.slice(0, selection.from)}${theme.style("inverse", flat.slice(selection.from, selection.to))}${flat.slice(selection.to)}`
+			: `${before}${theme.style("inverse", ch)}${flat.slice(start + ch.length)}${!flat && placeholder ? theme.fg("dim", placeholder) : ""}`;
+	if (width === undefined) return line;
+	const caretWidth = Math.max(1, visibleWidth(ch));
+	return caretViewport(theme, line, width, visibleWidth(before) + caretWidth, caretWidth);
 }
 
 // ─── Content blocks ─────────────────────────────────────────────────────────
@@ -305,27 +334,31 @@ function optionRows(
 		if (row === OTHER_ROW) {
 			const checked = answer.otherChosen;
 			const editing = view.row === OTHER_ROW && view.active === index;
-			const text = editing
-				? caretLine(
+			// Chosen only counts once something is typed.
+			const on = checked && answer.other.text.trim() !== "";
+			const glyph = field.multi ? (on ? "☑" : "☐") : on ? "◉" : "○";
+			const label = theme.fg(selected ? "accent" : on ? "muted" : "text", "Other: ");
+			const head = `${cursor}${theme.fg(on ? "success" : "dim", glyph)} ${label}`;
+			if (editing) {
+				const room = width - visibleWidth(head);
+				if (room <= 0) lines.push(clip(head, width));
+				else {
+					const text = caretLine(
 						theme,
 						answer.other.text,
 						answer.other.cursor,
 						"type your own",
 						model.vim({ kind: "other", field: index })?.selection(),
-					)
-				: answer.other.text
-					? theme.fg(
-							checked && answer.other.text.trim() ? "muted" : "text",
-							answer.other.text.replaceAll("\n", " "),
-						)
+						room,
+					);
+					lines.push(head + text);
+				}
+			} else {
+				const text = answer.other.text
+					? theme.fg(on ? "muted" : "text", answer.other.text.replaceAll("\n", " "))
 					: theme.fg("dim", "type your own");
-			// Chosen only counts once something is typed.
-			const on = checked && answer.other.text.trim() !== "";
-			const glyph = field.multi ? (on ? "☑" : "☐") : on ? "◉" : "○";
-			const label = theme.fg(selected ? "accent" : on ? "muted" : "text", "Other: ");
-			const line = `${cursor}${theme.fg(on ? "success" : "dim", glyph)} ${label}${text}`;
-			// The field being typed in cuts like an editor: its ellipsis keeps the text's style.
-			lines.push(editing ? clip(line, width) : truncate(line, width, "…"));
+				lines.push(truncate(head + text, width, "…"));
+			}
 		} else {
 			const option = field.options[row]!;
 			const checked = answer.checked.has(row);

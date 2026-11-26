@@ -158,6 +158,42 @@ test("wraps a long textarea line and keeps the caret row visible in a short term
 	}
 });
 
+test.each(["radio", "checkbox"])("keeps a long %s Other answer visible and editable at both ends", type => {
+	const onSubmit = vi.fn();
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form>
+			<label><input type="${type}" name="route" value="road" checked> Road</label>
+			<label><input type="${type}" name="route" value="river"> River</label>
+		</form>`),
+		{ onSubmit, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} /> }), {
+		columns: 42,
+		rows: 16,
+		theme: loadThemeSync("dark"),
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.press("down");
+		term.press("down");
+		const answer = "Use the marked trail past the river and meet at sunrise";
+		term.paste(answer + "界");
+		expect(term.screen().join("\n")).toMatch(/Other: ‹.*at sunrise界/);
+		term.press("left");
+		expect(highlighted(term.rows())).toContain("界");
+		term.press("delete");
+		term.type("!");
+		term.press("home");
+		expect(term.screen().join("\n")).toMatch(/Other: Use the marked trail.*›/);
+		term.type("Please ");
+		term.press("enter");
+		const edited = `Please ${answer}!`;
+		expect(onSubmit).toHaveBeenCalledWith({ route: type === "checkbox" ? ["road", edited] : edited }, []);
+	} finally {
+		term.dispose();
+	}
+});
+
 corpusSuite({
 	dir: "forms/html-form",
 	mount(caseName, corpusCase, env): Mounted {
