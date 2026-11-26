@@ -44,6 +44,13 @@ fn rich_error(env: Env, err: omp_vcs::Error) -> napi::Error {
 fn canceled_error(env: Env, _reason: task::AbortReason) -> napi::Error {
 	rich_error(env, omp_vcs::Error::Canceled)
 }
+/// Build the deferred resolver that converts [`omp_vcs::Error`] into a rich JS
+/// `VcsError` on the JS thread.
+fn vcs_resolver<T: ToNapiValue + Send + 'static>(
+	outcome: omp_vcs::Result<T>,
+) -> impl FnOnce(Env) -> Result<T> {
+	move |env| outcome.map_err(|err| rich_error(env, err))
+}
 /// Run a tokio-backed VCS future, rejecting with the rich `VcsError` built on
 /// the JS thread. A deferred promise is used because napi future rejections
 /// can only carry a message string; the deferred resolver runs with `Env` and
@@ -57,7 +64,7 @@ fn vcs_future<'env, T: ToNapiValue + Send + 'static>(
 	spawn(async move {
 		let _guard = crate::prof::profile_region(tag);
 		let outcome = work.await;
-		deferred.resolve(move |env| outcome.map_err(|err| rich_error(env, err)));
+		deferred.resolve(vcs_resolver(outcome));
 	});
 	Ok(promise)
 }
@@ -535,6 +542,10 @@ fn blocking<T: Send + 'static + ToNapiValue + TypeName>(
 /// Run a commit operation off libuv's shared thread pool so parked hooks and
 /// waiters on `.omp-commit-editmsg.lock` cannot starve unrelated native tasks.
 /// Cancellation propagates into the lock wait via `cancel`.
+///
+/// Settled directly through `env.create_deferred()` rather than `vcs_future` so
+/// commits do not depend on napi-rs's Tokio runtime (on Windows, a failed
+/// worker probe falls back to an undriven current-thread runtime).
 fn commit_off_pool<'env, T: ToNapiValue + Send + 'static>(
 	env: &'env Env,
 	tag: &'static str,
@@ -545,25 +556,35 @@ fn commit_off_pool<'env, T: ToNapiValue + Send + 'static>(
 	+ 'static,
 ) -> Result<Object<'env>> {
 	let cancel = cancellation_token(signal);
-	vcs_future(env, tag, async move {
-		if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
-			return Err(omp_vcs::Error::Canceled);
+	let (deferred, promise) = env.create_deferred()?;
+	if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+		deferred.resolve(vcs_resolver(Err(omp_vcs::Error::Canceled)));
+		return Ok(promise);
+	}
+	let deferred_slot = Arc::new(parking_lot::Mutex::new(Some(deferred)));
+	let worker_deferred = Arc::clone(&deferred_slot);
+	if let Err(err) = std::thread::Builder::new()
+		.name("pi-vcs-commit".into())
+		.spawn(move || {
+			let _guard = crate::prof::profile_region(tag);
+			let _work = crate::memory::native_work();
+			let outcome = crate::crash_handler::blocking_task_panic_scope(|| {
+				catch_panic(tag, || f(&repo, cancel.as_ref()))
+			});
+			let deferred = worker_deferred.lock().take();
+			if let Some(deferred) = deferred {
+				deferred.resolve(vcs_resolver(outcome));
+			}
+		}) {
+		let deferred = deferred_slot.lock().take();
+		if let Some(deferred) = deferred {
+			deferred.resolve(vcs_resolver(Err(omp_vcs::Error::backend(
+				tag,
+				format!("spawn commit worker: {err}"),
+			))));
 		}
-		let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-		match std::thread::Builder::new()
-			.name("pi-vcs-commit".into())
-			.spawn(move || {
-				let result = crate::crash_handler::blocking_task_panic_scope(|| {
-					catch_panic(tag, || f(&repo, cancel.as_ref()))
-				});
-				let _ = done_tx.send(result);
-			}) {
-			Ok(_) => done_rx
-				.await
-				.map_err(|err| omp_vcs::Error::backend(tag, format!("commit worker failed: {err}")))?,
-			Err(err) => Err(omp_vcs::Error::backend(tag, format!("spawn commit worker: {err}"))),
-		}
-	})
+	}
+	Ok(promise)
 }
 fn repo_blocking<T: Send + 'static + ToNapiValue + TypeName>(
 	tag: &'static str,

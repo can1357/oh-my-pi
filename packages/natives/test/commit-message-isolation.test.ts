@@ -381,6 +381,53 @@ describe("commitCreate message isolation", () => {
 		}
 	});
 
+	test.skipIf(process.platform === "win32")(
+		"applies core.sharedRepository permissions to the commit lock and COMMIT_EDITMSG",
+		async () => {
+			const root = await repository();
+			const gitDir = path.join(root, ".git");
+			const lockPath = path.join(gitDir, ".omp-commit-editmsg.lock");
+			const shared = path.join(gitDir, "COMMIT_EDITMSG");
+			await fs.rm(shared, { force: true });
+			await installHook(root, "#!/bin/sh\nexit 0\n");
+
+			// Explicit octal mode must override the process umask on both files so
+			// group members can reopen the lock read-write (required for NFS flock).
+			await git(root, "config", "core.sharedRepository", "0660");
+			const repoOctal = vcsGitDiscover(root)!;
+			const sha1 = await repoOctal.commitCreate("shared octal\n", { allowEmpty: true });
+			expect(sha1).toBe(await git(root, "rev-parse", "HEAD"));
+			expect((await fs.stat(lockPath)).mode & 0o777).toBe(0o660);
+			expect((await fs.stat(shared)).mode & 0o777).toBe(0o660);
+
+			// `group` policy makes an existing 0644 lock file and COMMIT_EDITMSG
+			// group-writable while preserving existing world-read bits.
+			await fs.chmod(lockPath, 0o644);
+			await fs.chmod(shared, 0o644);
+			await git(root, "config", "core.sharedRepository", "group");
+			const repoGroup = vcsGitDiscover(root)!;
+			const sha2 = await repoGroup.commitCreate("shared group\n", { allowEmpty: true });
+			expect(sha2).toBe(await git(root, "rev-parse", "HEAD"));
+			expect((await fs.stat(lockPath)).mode & 0o777).toBe(0o664);
+			expect((await fs.stat(shared)).mode & 0o777).toBe(0o664);
+		},
+	);
+
+	test("rejects immediately when commitCreate receives an already-aborted signal", async () => {
+		const root = await repository();
+		const gitDir = path.join(root, ".git");
+		const hookMarker = path.join(gitDir, "aborted-hook-ran");
+		await installHook(root, ["#!/bin/sh", 'echo ran > "$GIT_DIR/aborted-hook-ran"', "exit 0", ""].join("\n"));
+		const head = await git(root, "rev-parse", "HEAD");
+		const repo = vcsGitDiscover(root)!;
+
+		await expect(
+			within(repo.commitCreate("should not run\n", { allowEmpty: true }, AbortSignal.abort()), 5_000, "pre-aborted"),
+		).rejects.toMatchObject({ name: "VcsError", code: "Canceled" });
+		expect(await git(root, "rev-parse", "HEAD")).toBe(head);
+		expect(await Bun.file(hookMarker).exists()).toBe(false);
+	});
+
 	test("leaves no message file behind when noVerify skips the hook", async () => {
 		const root = await repository();
 		const gitDir = path.join(root, ".git");
