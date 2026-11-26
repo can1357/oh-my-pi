@@ -730,6 +730,43 @@ async fn launcher_option_urls_before_omp_still_resolve_to_host_paths() {
 	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
 }
 
+/// An `omp` whose path contains spaces is still the command that runs, so its
+/// URL operands stay literal. A file-backed copy of that path is resolved to
+/// the host file so the program can start; the spaces are not a packed command
+/// line.
+#[cfg(unix)]
+#[tokio::test]
+async fn omp_path_with_spaces_keeps_url_operands_and_still_resolves() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let docs = directory.path().join("docs");
+	fs::create_dir(&docs).expect("provider directory");
+	fs::write(docs.join("a.txt"), b"alpha\n").expect("document");
+	let bin = tempfile::tempdir().expect("program directory");
+	let spaced = bin.path().join("My Tools");
+	fs::create_dir(&spaced).expect("spaced program directory");
+	let omp = spaced.join("omp");
+	fs::write(&omp, b"#!/bin/sh\nprintf 'host:%s\\n' \"$*\"\n").expect("stand-in omp");
+	fs::set_permissions(&omp, fs::Permissions::from_mode(0o755)).expect("executable stand-in");
+	let virtual_dir = directory.path().join("My Tools");
+	fs::create_dir(&virtual_dir).expect("virtual program directory");
+	let virtual_omp = virtual_dir.join("omp");
+	fs::write(&virtual_omp, b"#!/bin/sh\nprintf 'url:%s\\n' \"$*\"\n").expect("virtual stand-in");
+	fs::set_permissions(&virtual_omp, fs::Permissions::from_mode(0o755))
+		.expect("executable virtual stand-in");
+	let script = format!(
+		"nice -n 5 '{omp}' read virtual://docs/a.txt; nice -n 5 'virtual://My Tools/omp' read \
+		 virtual://docs/a.txt",
+		omp = omp.display(),
+	);
+	let run = run_virtual(directory.path(), &script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	let expected =
+		["host:read virtual://docs/a.txt".to_owned(), "url:read virtual://docs/a.txt".to_owned()];
+	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
+}
+
 /// A provider directory that aliases a real one is a usable working directory
 /// for a child process, and the `PWD` the child inherits names that same host
 /// directory rather than the URL it cannot open; one that aliases nothing is

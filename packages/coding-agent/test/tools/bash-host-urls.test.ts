@@ -168,6 +168,43 @@ describe("hostCommandUrls", () => {
 		expect(await hostAny("local://bin/omp read local://x.md")).toBe("/host/bin/omp read local://x.md");
 	});
 
+	it("keeps omp's URLs when its path contains spaces or a line continuation precedes it", async () => {
+		expect(await host("'/opt/My Tools/omp' read local://x.md:1")).toBe("'/opt/My Tools/omp' read local://x.md:1");
+		expect(await host("nice -n 5 '/opt/My Tools/omp' read local://x.md:1")).toBe(
+			"nice -n 5 '/opt/My Tools/omp' read local://x.md:1",
+		);
+		expect(await host("/opt/My\\ Tools/omp read local://x.md:1")).toBe("/opt/My\\ Tools/omp read local://x.md:1");
+		expect(await host("'/opt/My Tools/grep' omp local://x.md")).toBe("'/opt/My Tools/grep' omp /host/x.md");
+		expect(await host('env -S "/opt/My Tools/omp" read local://x.md')).toBe(
+			'env -S "/opt/My Tools/omp" read /host/x.md',
+		);
+
+		expect(await host("REF=foo \\\nomp read local://x.md:1")).toBe("REF=foo \\\nomp read local://x.md:1");
+		expect(await host("REF=foo \\\n omp read local://x.md:1")).toBe("REF=foo \\\n omp read local://x.md:1");
+		expect(await host("nice \\\nomp read local://x.md:1")).toBe("nice \\\nomp read local://x.md:1");
+		expect(await host("REF=foo \\\ngrep omp local://x.md")).toBe("REF=foo \\\ngrep omp /host/x.md");
+	});
+
+	it("resolves a file-backed omp whose path contains spaces and keeps its own URLs", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-spaced-"));
+		try {
+			const omp = path.join(dir, "My Tools", "omp");
+			fs.mkdirSync(path.dirname(omp), { recursive: true });
+			fs.writeFileSync(omp, "");
+			const backing: UrlBacking = async url =>
+				url === "local://My Tools/omp"
+					? omp
+					: url.startsWith("local://")
+						? `/host/${url.slice("local://".length)}`
+						: undefined;
+			expect(await hostCommandUrls("nice 'local://My Tools/omp' read local://x.md", backing)).toBe(
+				`nice '${omp}' read local://x.md`,
+			);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("treats a here-document body as input, not command text", async () => {
 		const command = [
 			"python3 - local://args.json <<'PY' && cat local://after.txt",

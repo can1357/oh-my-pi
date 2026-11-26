@@ -115,21 +115,31 @@ pub(super) fn names_url(spec: &SpawnSpec<'_>) -> bool {
 		|| (omp_at != Some(0) && spec.env.iter().any(|(name, value)| env_url(name, value)))
 }
 
-/// Index of `omp` in `argv` when `path`/`argv` invokes `omp` locally: `0` when
-/// `omp` is the spawned program itself, or the target index behind known
-/// wrappers (`nice`, `nohup`, `npx`, `bunx`, `sudo`, `env`, `time`, `xargs`,
-/// `uv run`, …) and their options. Returns `None` for non-`omp` commands and
+/// The launch of `omp` in `argv` when `path`/`argv` invokes it locally: `at`
+/// is `0` when `omp` is the spawned program itself, or the target index behind
+/// known wrappers (`nice`, `nohup`, `npx`, `bunx`, `sudo`, `env`, `time`,
+/// `xargs`, `uv run`, …) and their options. `None` for non-`omp` commands and
 /// remote (`ssh`) launches.
-fn omp_argv_index(path: &[u8], argv: &[BString]) -> Option<usize> {
+fn omp_command(path: &[u8], argv: &[BString]) -> Option<crate::bash::launch::Launch> {
 	if is_omp(path) {
-		return Some(0);
+		return Some(crate::bash::launch::Launch {
+			at:     0,
+			remote: false,
+			offset: 0,
+			packed: false,
+		});
 	}
 	let launch = crate::bash::launch::launch(argv);
-	if launch.remote {
+	if launch.remote || launch.at >= argv.len() {
 		return None;
 	}
 	let program = launch.program(argv)?;
-	is_omp(program.as_bytes()).then_some(launch.at)
+	is_omp(program.as_bytes()).then_some(launch)
+}
+
+/// Index of `omp` in `argv` when `path`/`argv` invokes `omp` locally.
+fn omp_argv_index(path: &[u8], argv: &[BString]) -> Option<usize> {
+	omp_command(path, argv).map(|launch| launch.at)
 }
 
 /// Whether `word` names the `omp` program, by any path.
@@ -253,14 +263,16 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 		},
 		_ => names.path.clone(),
 	};
-	let omp_at = omp_argv_index(&names.path, &names.argv);
+	let command = omp_command(&names.path, &names.argv);
+	let omp_at = command.map(|launch| launch.at);
 	let mut argv = Vec::with_capacity(names.argv.len());
 	for (i, arg) in names.argv.iter().enumerate() {
 		let host = if i == 0 || omp_at.is_some_and(|at| i > at) {
 			None
-		} else if omp_at == Some(i) && arg.iter().any(u8::is_ascii_whitespace) {
+		} else if command.is_some_and(|launch| launch.packed && launch.at == i) {
 			// A command line split into words (`env -S "omp read x"`): its
 			// words are the program's own and cannot be resolved apart.
+			// Spaces in an ordinary path are not that line.
 			None
 		} else {
 			host_arg(fs, arg.as_bstr()).await
@@ -408,6 +420,8 @@ mod tests {
 			&["uv", "run", "-m", "omp", "local://out.txt"][..],
 			&["ssh", "host", "omp", "read", "local://out.txt"][..],
 			&["env", "-S", "grep", "omp", "local://out.txt"][..],
+			&["nice", "/opt/My Tools/grep", "omp", "local://out.txt"][..],
+			&["env", "-S", "/opt/My Tools/omp", "read", "local://out.txt"][..],
 		] {
 			let args = bvec(non_omp);
 			assert_eq!(
@@ -439,6 +453,10 @@ mod tests {
 			(&["env", "--split-string", "omp", "read", "local://out.txt"][..], 2),
 			(&["env", "-Somp", "read", "local://out.txt"][..], 1),
 			(&["env", "--split-string=omp", "read", "local://out.txt"][..], 1),
+			(&["nice", "/opt/My Tools/omp", "read", "local://out.txt"][..], 1),
+			(&["nice", "-n", "5", "/opt/My Tools/omp", "read", "local://out.txt"][..], 3),
+			(&["env", "-S", "omp read local://out.txt"][..], 2),
+			(&["env", "--split-string=omp read local://out.txt"][..], 1),
 		] {
 			let args = bvec(omp_cmd);
 			assert_eq!(

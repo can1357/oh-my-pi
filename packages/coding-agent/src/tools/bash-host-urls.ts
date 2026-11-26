@@ -88,6 +88,60 @@ function isRedirectSeparator(tokens: readonly ShellToken[], index: number, start
 }
 
 /**
+ * Quote-removed word with bash line continuations deleted.
+ *
+ * `lexShellCommand` keeps a backslash followed by a newline and glues it to
+ * the next text, so a continued `omp` is not seen as the command name. Bash
+ * deletes that pair before the command runs, including inside double quotes.
+ * A single-quoted pair stays literal.
+ */
+function continuedWord(raw: string): string {
+	let value = "";
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i];
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			else value += ch;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < raw.length) {
+				const next = raw[i + 1];
+				if (next === "\n") {
+					i++;
+					continue;
+				}
+				if (next === '"' || next === "\\" || next === "$" || next === "`") {
+					value += next;
+					i++;
+					continue;
+				}
+			}
+			if (ch === '"') inDouble = false;
+			else value += ch;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+		} else if (ch === '"') {
+			inDouble = true;
+		} else if (ch === "\\" && i + 1 < raw.length) {
+			if (raw[i + 1] === "\n") {
+				i++;
+				continue;
+			}
+			value += raw[i + 1];
+			i++;
+		} else {
+			value += ch;
+		}
+	}
+	return value;
+}
+
+/**
  * Token indices in `tokens[start..end]` whose literal URLs belong to `omp` itself
  * (directly or behind launchers), so their bare/option URLs stay as written while
  * redirections, wrapper options, and `$(…)` substitutions are still rewritten.
@@ -109,7 +163,12 @@ function ompLiteralTokens(tokens: readonly ShellToken[], start: number, end: num
 		if (ATTACHED_REDIRECT.test(token.raw)) {
 			continue;
 		}
-		words.push({ index: i, raw: token.raw, value: token.value });
+		// Bash deletes a backslash-newline before it runs the command. The raw
+		// spelling stays in the rewritten command; only the launcher walk uses
+		// the word bash will see. A continuation by itself is not a command word.
+		const value = !cmd && token.raw.includes("\\\n") ? continuedWord(token.raw) : token.value;
+		if (value.length === 0) continue;
+		words.push({ index: i, raw: token.raw, value });
 	}
 
 	let cmdStart = 0;
@@ -150,10 +209,11 @@ function ompLiteralTokens(tokens: readonly ShellToken[], start: number, end: num
 	if (launch.index === 0) {
 		for (const idx of leadingAssignIndices) literal.add(idx);
 	}
-	// The program word resolves like any other (a file-backed `omp` must run), unless it
-	// carries a whole command line (`env -S "omp read x"`), whose words cannot be rewritten apart.
+	// A packed `env -S` line comes back as only its first word, so the name is
+	// shorter than the word that holds it. An ordinary path with spaces comes
+	// back whole and must still be resolved (`nice 'local://My Tools/omp'`).
 	const program = cmdWords[launch.index];
-	if (/\s/.test(program.value)) literal.add(program.index);
+	if (launch.program !== program.value && /\s/.test(program.value)) literal.add(program.index);
 	for (let i = launch.index + 1; i < cmdWords.length; i++) {
 		literal.add(cmdWords[i].index);
 	}

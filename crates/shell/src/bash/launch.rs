@@ -21,19 +21,27 @@ pub struct Launch {
 	/// Byte offset in the word at `at` where the program's name starts: past
 	/// an option carrying it (`env -S=omp`, `env --split-string=omp`).
 	pub offset: usize,
+	/// The word at `at`, from `offset`, is an `env -S`/`--split-string`
+	/// command line: only its first word is the program. An ordinary path
+	/// keeps its spaces.
+	pub packed: bool,
 }
 
 impl Launch {
-	/// The program the command line runs: the word at `at` past `offset`, or
-	/// its first word, for a command line split into words (`env -S "omp read
-	/// x"`).
+	/// The program the command line runs: the word at `at` past `offset`.
+	/// A packed `env -S` command line (`env -S "omp read x"`) yields its
+	/// first word; an ordinary path keeps its spaces (`/opt/My Tools/omp`).
 	pub fn program<'a, W: AsRef<[u8]>>(&self, words: &'a [W]) -> Option<&'a str> {
 		let word = words.get(self.at)?.as_ref();
 		let word = word.get(self.offset..).unwrap_or(word);
-		let end = word
-			.iter()
-			.position(|b| b.is_ascii_whitespace())
-			.unwrap_or(word.len());
+		let end = if self.packed {
+			word
+				.iter()
+				.position(|b| b.is_ascii_whitespace())
+				.unwrap_or(word.len())
+		} else {
+			word.len()
+		};
 		std::str::from_utf8(&word[..end]).ok()
 	}
 }
@@ -46,11 +54,16 @@ pub fn launch<W: AsRef<[u8]>>(words: &[W]) -> Launch {
 /// Walk past launchers at the start of `words`, stripping `\` path prefixes and
 /// `.exe` suffixes when `windows` is `true`.
 pub fn launch_with<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Launch {
-	let mut launch = Launch { at: 0, remote: false, offset: 0 };
-	while let Some((skip, remote, offset)) = launcher(&words[launch.at..], windows) {
+	let mut launch = Launch { at: 0, remote: false, offset: 0, packed: false };
+	while let Some((skip, remote, offset, packed)) = launcher(&words[launch.at..], windows) {
 		launch.at = (launch.at + skip).min(words.len());
 		launch.remote |= remote;
 		launch.offset = offset;
+		launch.packed = packed;
+		// The rest of a packed command line is inside this word, not later words.
+		if packed {
+			break;
+		}
 	}
 	launch
 }
@@ -135,16 +148,26 @@ fn skip_options<W: AsRef<[u8]>>(
 }
 
 /// Words a launcher at the start of `words` takes before the command it runs
-/// (`timeout 5 cmd` → 2), whether that command runs on an `ssh` host, and the
-/// byte offset in the word naming it where the program's name starts.
-fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, usize)> {
+/// (`timeout 5 cmd` → 2), whether that command runs on an `ssh` host, the
+/// byte offset where the program's name starts, and whether that word is an
+/// `env -S` command line to split on whitespace.
+fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, usize, bool)> {
 	let skip = match command_name(words.first()?.as_ref(), windows)? {
 		"env" => {
 			// `-S`/`--split-string` takes the command line it splits into the
 			// words it runs: `env -S omp read x` runs `omp read x`.
 			if let Some((at, offset)) = env_split_value(words) {
-				return Some((at, false, offset));
+				let packed = words.get(at).is_some_and(|word| {
+					let bytes = word.as_ref();
+					bytes
+						.get(offset..)
+						.unwrap_or(bytes)
+						.iter()
+						.any(u8::is_ascii_whitespace)
+				});
+				return Some((at, false, offset, packed));
 			}
+
 			let mut at = skip_options(
 				words,
 				1,
@@ -278,11 +301,11 @@ fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, 
 		)?,
 		"ssh" => {
 			let host = skip_options(words, 1, b"BbcDEeFIiJLlmOopQRSWw", &[], b"", &[])?;
-			return (host < words.len()).then_some((host + 1, true, 0));
+			return (host < words.len()).then_some((host + 1, true, 0, false));
 		},
 		_ => return None,
 	};
-	Some((skip, false, 0))
+	Some((skip, false, 0, false))
 }
 
 /// The word `env -S`/`--split-string` takes, and the byte offset in it where
