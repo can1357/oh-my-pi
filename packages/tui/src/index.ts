@@ -7,5 +7,5 @@ export * from "./reactive";
 export * from "./surface";
 export * from "./types";
 export * from "./host";
-export { decodeKey, type KeyDecodeContext } from "./driver/input/keys";
-export { rawBackspaceIsCtrl } from "./driver/caps/env";
+export * from "./driver/input/keys";
+export * from "./driver/caps/env";
