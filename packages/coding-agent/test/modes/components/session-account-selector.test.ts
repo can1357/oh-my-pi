@@ -1,53 +1,43 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { afterAll, describe, expect, it } from "bun:test";
 import { toSessionPinAccounts } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/session-pin";
+import { SessionAccountSelector } from "../../../src/ui/overlays/pickers/session-account-selector";
+import { mountOverlay } from "../../helpers/overlay-terminal";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await initTheme();
-});
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const accounts = toSessionPinAccounts([
 	{ position: 0, credentialId: 11, email: "first@example.com", active: false },
 	{ position: 1, credentialId: 12, email: "second@example.com", active: true },
 ]);
 
-describe("SessionAccountSelectorComponent", () => {
+describe("session account selector", () => {
 	it("handles navigation, selection, Escape, and Ctrl+C while focused", () => {
 		const selected: number[] = [];
 		let cancellations = 0;
-		const component = new SessionAccountSelectorComponent(
-			"Anthropic",
-			accounts,
-			account => selected.push(account.credentialId),
-			() => {
-				cancellations += 1;
-			},
-		);
+		const open = () =>
+			mountOverlay(() =>
+				SessionAccountSelector({
+					provider: "Anthropic",
+					accounts,
+					onSelect: account => selected.push(account.credentialId),
+					onCancel: () => cancellations++,
+				}),
+			);
 
-		component.handleInput("\x1b[A");
-		component.handleInput("\n");
+		const picker = open();
+		picker.press("up");
+		picker.press("enter");
+		picker.dispose();
 		expect(selected).toEqual([11]);
 
-		const escapeComponent = new SessionAccountSelectorComponent(
-			"Anthropic",
-			accounts,
-			() => {},
-			() => {
-				cancellations += 1;
-			},
-		);
-		escapeComponent.handleInput("\x1b");
-
-		const ctrlCComponent = new SessionAccountSelectorComponent(
-			"Anthropic",
-			accounts,
-			() => {},
-			() => {
-				cancellations += 1;
-			},
-		);
-		ctrlCComponent.handleInput("\x03");
+		const escape = open();
+		escape.press("escape");
+		escape.dispose();
+		const ctrlC = open();
+		ctrlC.press("ctrl+c");
+		ctrlC.dispose();
 		expect(cancellations).toBe(2);
 	});
 });

@@ -17,13 +17,15 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal, type ModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode pre-quit extension gate", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let mode: InteractiveMode;
+	let term: ModeTerminal;
 	let session: AgentSession;
 	let beforeShutdown: ExtensionHandler<SessionBeforeShutdownEvent, SessionBeforeShutdownResult>;
 	let attempts: number;
@@ -92,9 +94,10 @@ describe("InteractiveMode pre-quit extension gate", () => {
 			modelRegistry,
 			extensionRunner: runner,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
-		mode.ui.terminal.drainInput = async () => {};
+		// The prompts run on the shell: keys reach them through the terminal.
+		term = createModeTerminal();
+		await term.start();
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
 		vi.spyOn(postmortem, "quit").mockImplementation(async () => {
 			quitCalled.resolve();
 		});
@@ -103,6 +106,8 @@ describe("InteractiveMode pre-quit extension gate", () => {
 
 	afterEach(async () => {
 		mode.stop();
+		await mode.shell.stop();
+		term.dispose();
 		await session.dispose();
 		vi.restoreAllMocks();
 		authStorage.close();
@@ -125,8 +130,8 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(postmortem.quit).not.toHaveBeenCalled();
 		const prompt = mode.hookInput;
 		if (!prompt) throw new Error("metadata input was not presented");
-		prompt.handleInput("reached");
-		prompt.handleInput("\r");
+		term.type("reached");
+		term.press("enter");
 		await quitting;
 		expect(metadataAtShutdown).toEqual({ goal: "reached" });
 		expect(session.isDisposed).toBe(true);
@@ -145,9 +150,11 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		};
 		const quitting = mode.shutdown();
 		await entered.promise;
-		for (const key of ["a", "b", "\x1b[D", "\x04"]) mode.ui.injectDebugInput(key);
+		term.type("ab");
+		term.press("left");
+		term.press("ctrl+d");
 		expect(session.isDisposed).toBe(false);
-		mode.ui.injectDebugInput("\r");
+		term.press("enter");
 		await quitting;
 		expect(answer).toBe("a");
 		expect(laterHandlers).toBe(1);

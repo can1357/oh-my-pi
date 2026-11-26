@@ -1,18 +1,17 @@
 /**
- * Owns the `/cleanse` overlay lifecycle: mounts the {@link CleansePanelComponent}
- * above the editor, drives the shared cleanse core against it, and maps Esc to
+ * Owns the `/cleanse` panel lifecycle: mounts the {@link CleansePanel} in the
+ * `cleanse` dock slot above the editor, drives the shared cleanse core against it, and maps Esc to
  * cancel-then-dismiss (mirroring the `/omfg` panel).
  */
 import { runCleanse } from "../../cleanse";
-import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { CleanseBoardModel } from "@oh-my-pi/pi-tui/apps/cleanse-board";
 import type { CleanseCheckerDescriptor } from "../../cleanse/checkers";
-import type { CleanseTargetChoice } from "@oh-my-pi/pi-tui/apps/cleanse-picker";
-import { CleansePanelComponent } from "@oh-my-pi/pi-tui/overlays/cleanse-panel";
+import { actionKey } from "../../ui/keys/hints";
+import { CleansePanel, CleanseRun } from "../../ui/overlays/panels/cleanse-panel";
+import type { CleanseTargetChoice } from "../view-model/apps/cleanse-picker";
 import type { InteractiveModeContext } from "../types";
 
-interface CleanseRun {
-	panel: CleansePanelComponent;
+interface ActiveCleanse {
+	panel: CleanseRun;
 	abortController: AbortController;
 	settled: boolean;
 }
@@ -30,7 +29,7 @@ const CLEANSE_USAGE = "Usage: /cleanse [request] [--all] [--tests] [-n <agents>]
 const CUSTOM_REQUEST_OPTION = "Describe what to fix…";
 
 export class CleanseCommandController {
-	#active: CleanseRun | undefined;
+	#active: ActiveCleanse | undefined;
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -60,7 +59,7 @@ export class CleanseCommandController {
 	async start(args: string): Promise<void> {
 		if (this.#active) {
 			this.ctx.showStatus(
-				`A /cleanse run is already active — ${appKey(this.ctx.keybindings, "app.interrupt")} cancels it.`,
+				`A /cleanse run is already active — ${actionKey("app.interrupt", this.ctx.keybindings)} cancels it.`,
 			);
 			return;
 		}
@@ -69,23 +68,24 @@ export class CleanseCommandController {
 			this.ctx.showStatus(parsed.error);
 			return;
 		}
-		const run: CleanseRun = {
-			panel: new CleansePanelComponent({
-				request: parsed.request,
-				tui: this.ctx.ui,
-				model: new CleanseBoardModel(),
-			}),
+		const run: ActiveCleanse = {
+			panel: new CleanseRun(),
 			abortController: new AbortController(),
 			settled: false,
 		};
 		this.#active = run;
-		this.ctx.cleanseContainer.clear();
-		this.ctx.cleanseContainer.addChild(run.panel);
-		this.ctx.ui.requestRender();
+		this.ctx.shell.dock.slot("cleanse").set(() =>
+			CleansePanel({
+				run: run.panel,
+				request: parsed.request,
+				onCancel: () => this.handleEscape(),
+				onDismiss: () => this.handleEscape(),
+			}),
+		);
 		await this.#run(run, parsed);
 	}
 
-	async #run(run: CleanseRun, options: ParsedCleanseArgs): Promise<void> {
+	async #run(run: ActiveCleanse, options: ParsedCleanseArgs): Promise<void> {
 		try {
 			const result = await runCleanse(
 				{
@@ -140,12 +140,11 @@ export class CleanseCommandController {
 		return trimmed ? trimmed : null;
 	}
 
-	#close(run: CleanseRun): void {
+	#close(run: ActiveCleanse): void {
 		if (this.#active !== run) return;
 		this.#active = undefined;
-		run.panel.dispose();
-		this.ctx.cleanseContainer.clear();
-		this.ctx.ui.requestRender();
+		run.panel.close();
+		this.ctx.shell.dock.slot("cleanse").clear();
 	}
 }
 

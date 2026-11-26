@@ -4,12 +4,7 @@
 //! never rewrite a patch: each either lets it apply as written or rejects it
 //! with the change that would make it read as intended.
 
-use std::{
-	collections::{HashMap, HashSet},
-	sync::LazyLock,
-};
-
-use regex::Regex;
+use std::collections::{HashMap, HashSet};
 
 use super::{
 	clipboard::resolve_clipboard_edits,
@@ -28,22 +23,49 @@ use super::{
 };
 use crate::{
 	error::{EditError, Rejection},
+	scan,
 	store::Clipboard,
 };
 
-/// A line containing only closing delimiters and an optional trailing
-/// separator.
-pub static STRUCTURAL_CLOSER_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\s*[)\]}]+[;,]?\s*$").expect("valid structural-closer regex"));
+/// A line of closing delimiters and an optional separator: `})`, `];`.
+pub fn is_structural_closer(line: &str) -> bool {
+	let line = line.trim();
+	let closers = line.strip_suffix([';', ',']).unwrap_or(line);
+	!closers.is_empty()
+		&& closers
+			.bytes()
+			.all(|byte| matches!(byte, b')' | b']' | b'}'))
+}
 
-/// A C-family preprocessor directive row. Written at column 0 whatever the
-/// surrounding depth, so it says nothing about a body's indentation.
-static PREPROCESSOR_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(
-		r"^\s*#\s*(if|ifdef|ifndef|elif|elifdef|elifndef|else|endif|define|undef|include|pragma|error|warning|line|region|endregion)\b",
-	)
-	.expect("valid preprocessor regex")
-});
+/// Whether a row is a C-family preprocessor directive, independent of body
+/// indentation.
+fn is_preprocessor_directive(row: &str) -> bool {
+	let Some(directive) = row.trim_start().strip_prefix('#') else {
+		return false;
+	};
+	let directive = directive.trim_start();
+	let end = directive.bytes().take_while(u8::is_ascii_lowercase).count();
+	matches!(
+		&directive[..end],
+		"if"
+			| "ifdef"
+			| "ifndef"
+			| "elif"
+			| "elifdef"
+			| "elifndef"
+			| "else"
+			| "endif"
+			| "define"
+			| "undef"
+			| "include"
+			| "pragma"
+			| "error"
+			| "warning"
+			| "line"
+			| "region"
+			| "endregion"
+	) && scan::ends_word(&directive[end..])
+}
 
 /// Behavior when an anonymous paste has no available cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -655,7 +677,7 @@ fn group_variants(
 				let before_first = nearest_content(lines, group.start as isize - 2, -1);
 				let selected_boundary =
 					enclosing_boundaries(lines, path, group.start + 1, group.end).contains(&group.start);
-				let structural_edge = STRUCTURAL_CLOSER_RE.is_match(first.trim())
+				let structural_edge = is_structural_closer(first)
 					&& indent_columns(first) == indent_columns(lead)
 					&& indent_columns(first)
 						== indent_columns(lines.get((group.end - 1) as usize).copied().unwrap_or(""));
@@ -906,13 +928,9 @@ fn body_indent(rows: &[&str]) -> Option<String> {
 	let non_blank: Vec<_> = rows
 		.iter()
 		.copied()
-		.filter(|row| has_content(row) && !PREPROCESSOR_RE.is_match(row))
+		.filter(|row| has_content(row) && !is_preprocessor_directive(row))
 		.collect();
-	if non_blank.is_empty()
-		|| non_blank
-			.iter()
-			.all(|row| STRUCTURAL_CLOSER_RE.is_match(row))
-	{
+	if non_blank.iter().copied().all(is_structural_closer) {
 		return None;
 	}
 	let mut target = leading_indent(non_blank[0]).to_owned();
@@ -1030,7 +1048,7 @@ fn landing_rejection(edits: &[Edit], lines: &[&str], path: &str) -> Option<EditE
 				if !has_content(text) {
 					continue;
 				}
-				if !STRUCTURAL_CLOSER_RE.is_match(text) || !leading_indent(text).starts_with(&target) {
+				if !is_structural_closer(text) || !leading_indent(text).starts_with(&target) {
 					break;
 				}
 				if targeted.contains(&line) {
@@ -1048,8 +1066,7 @@ fn landing_rejection(edits: &[Edit], lines: &[&str], path: &str) -> Option<EditE
 			}
 		}
 		if let Some(block_start) = group.block_start {
-			if STRUCTURAL_CLOSER_RE.is_match(anchor_text)
-				&& indent_deeper(&target, leading_indent(anchor_text))
+			if is_structural_closer(anchor_text) && indent_deeper(&target, leading_indent(anchor_text))
 			{
 				let mut landing = group.anchor;
 				let mut blocked = false;
@@ -1059,9 +1076,7 @@ fn landing_rejection(edits: &[Edit], lines: &[&str], path: &str) -> Option<EditE
 						landing = line - 1;
 						continue;
 					}
-					if !STRUCTURAL_CLOSER_RE.is_match(text)
-						|| !indent_deeper(&target, leading_indent(text))
-					{
+					if !is_structural_closer(text) || !indent_deeper(&target, leading_indent(text)) {
 						break;
 					}
 					if line != group.anchor && targeted.contains(&line) {

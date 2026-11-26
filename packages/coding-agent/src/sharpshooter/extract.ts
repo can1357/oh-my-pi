@@ -2,7 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getSegmenter } from "@oh-my-pi/pi-tui";
+import { getSegmenter } from "../utils/text-width";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";

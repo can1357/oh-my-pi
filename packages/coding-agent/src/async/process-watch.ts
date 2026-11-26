@@ -27,7 +27,7 @@ import {
 	PROCESS_WATCH_MESSAGE_TYPE,
 	type ProcessWatchFlag,
 	type ProcessWatchNotice,
-} from "@oh-my-pi/pi-tui/chat/messages";
+} from "../session/transcript/messages";
 import { formatDuration, logger, prompt, truncate, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import questionFile from "../prompts/judge/process-watch.json" with { type: "json" };

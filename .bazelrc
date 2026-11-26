@@ -51,14 +51,15 @@ build:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Clink-arg=-Wl,-S
 
 
 # --- Rust validation (replaces cargo clippy/nextest in CI) --------------------
-# Mirrors cargo semantics: crates with `[lints] workspace = true` (omp-ast,
-# omp-iso, omp-natives, omp-shell, omp-voice, omp-xfs) get the strict workspace
-# policy
-# (clippy-strict; bazel/clippy.bazelrc is generated from Cargo.toml); everything
-# else gets default clippy + -Dwarnings (clippy). omp-builtins allows every
-# clippy group in its manifest (ported uutils/jaq code) while keeping
-# rustc warnings at zero; the aspect ignores Cargo `[lints]`, so clippy-ported
-# re-states those allows on top of -Dwarnings.
+# Mirrors cargo semantics. Crates with `[lints] workspace = true` set
+# `lint_config = "//bazel/lints:workspace_lints"` (generated from Cargo.toml).
+# The clippy aspect applies that policy before command-line flags, so
+# `--config=clippy` (`-Dwarnings`) still enforces workspace lints when the CI
+# strict query omits an opted-in crate. `--config=clippy-strict` repeats the
+# same policy from bazel/clippy.bazelrc. omp-builtins allows every clippy group
+# in its manifest (ported uutils/jaq code) while keeping rustc warnings at
+# zero; the aspect ignores Cargo `[lints]`, so clippy-ported re-states those
+# allows on top of -Dwarnings.
 build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:clippy --output_groups=+clippy_checks
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings

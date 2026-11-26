@@ -16,7 +16,7 @@
  * {@link fromWireReason} maps it back on the receiving thread.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetView } from "../../tools/details/job-widget";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	type AsyncJob,
@@ -121,7 +121,7 @@ export type AsyncJobManagerProtocol = {
 	hasWidgets: RpcMethod<[], boolean>;
 	atCapacity: RpcMethod<[], boolean>;
 	onJobSettled: RpcMethod<[listener: WireCallback<[]>], WireUnsubscribe>;
-	onJobsChanged: RpcMethod<[listener: WireCallback<[]>], WireUnsubscribe>;
+	onJobsChanged: RpcMethod<[listener: WireCallback<[]>, ids: readonly string[] | undefined], WireUnsubscribe>;
 	register: RpcMethod<
 		[type: AsyncJobType, label: string, run: WireJobRun, options: WireRegisterOptions | undefined],
 		string

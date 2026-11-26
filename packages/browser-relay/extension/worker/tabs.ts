@@ -3,6 +3,7 @@
  */
 import type { TabSnapshot } from "../../../coding-agent/src/tools/browser/relay/protocol";
 import type { Size, TabContext } from "../messages";
+import { ungroupRelayTab } from "./groups";
 import { pageTargetId } from "./identity";
 
 const REMOVE_TAB_ATTEMPTS = 3;
@@ -51,8 +52,12 @@ export async function tabContext(tabId: number): Promise<TabContext> {
 	return await contextOf({ ...tab, id: tabId });
 }
 
-/** Chrome can refuse a tab close for a moment (a tab being dragged, an unload in progress); try again before failing. */
+/**
+ * Close a relay tab, out of the relay's group first so Chrome keeps no saved group for it. Chrome can refuse a tab
+ * close for a moment (a tab being dragged, an unload in progress); try again before failing.
+ */
 export async function removeTab(tabId: number): Promise<void> {
+	await ungroupRelayTab(tabId);
 	for (let attempt = 1; ; attempt++) {
 		try {
 			await chrome.tabs.remove(tabId);

@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { CELL_BUDGET_SLACK_MS } from "../run-scope";
 import { renderCallChain, renderRunArg } from "../run-code";
 import { TOOL_TIMEOUTS } from "../tool-timeouts";

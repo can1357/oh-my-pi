@@ -6,7 +6,7 @@ import type { HostPressure } from "@oh-my-pi/pi-coding-agent/async/host-pressure
 import { ProcessWatch, registerProcessWatchDelivery } from "@oh-my-pi/pi-coding-agent/async/process-watch";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
-import { PROCESS_WATCH_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
+import { PROCESS_WATCH_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
 
 type Probabilities = Record<string, number>;
 
