@@ -338,9 +338,10 @@ describe("SessionManager + indexed backend durability", () => {
 		expect(body).toContain("second turn");
 	});
 
-	// The size-check conflict after pruning is covered against the real backend in
-	// sql-session-storage-manager.test.ts.
-	it("recovers IndexedSessionStorage after a rejected deferred publish", async () => {
+	// Entries recorded during a held rewrite wait for it and follow it as one append; the real SQL
+	// backends are covered in sql-session-storage-manager.test.ts. Here the store rejects that
+	// append, and the session must still store every entry with the size it holds.
+	it("recovers IndexedSessionStorage after it rejects the append of entries recorded during a rewrite", async () => {
 		const { backend, storage, manager } = await makeManager();
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("expected a session file");
@@ -354,7 +355,7 @@ describe("SessionManager + indexed backend durability", () => {
 		backend.holdNextWrite = hold;
 		const rewritePublished = manager.rewriteEntries();
 		await backend.writeHeld.promise;
-		backend.failWrites = 1;
+		backend.failAppends = 1;
 		manager.appendMessage({ role: "user", content: "fenced append", timestamp: Date.now() });
 		manager.appendMessage({ role: "user", content: "after fenced append", timestamp: Date.now() });
 		hold.resolve();
@@ -372,6 +373,8 @@ describe("SessionManager + indexed backend durability", () => {
 			expect(body).toContain(turn);
 		}
 		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
+		// The rejected append this test is named for ran.
+		expect(backend.failAppends).toBe(0);
 		await manager.close();
 	});
 });

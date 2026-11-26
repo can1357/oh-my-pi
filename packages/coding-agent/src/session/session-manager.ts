@@ -1120,6 +1120,12 @@ export class SessionManager {
 	/** Set by synchronous appends that land while an atomic replacement is active. */
 	#atomicRewriteDirty = false;
 	/**
+	 * Set when {@link seal} superseded a fenced rewrite that entries waited on
+	 * (see `#appendToCurrentSessionFile`): {@link close} publishes the whole
+	 * transcript with them.
+	 */
+	#sealSupersededWaitingEntries = false;
+	/**
 	 * Active {@link moveTo} relocation. Concurrent completed appends write a
 	 * full body to the live path: source while it still exists, destination
 	 * once rename has landed (source gone). Never recreates a vacated source.
@@ -1835,13 +1841,7 @@ export class SessionManager {
 					// this body is no longer on the backend, so record nothing.
 					if (generation !== this.#deferredPublishGen) return;
 					this.#recordFullRewrite(bytes);
-					const entries = this.#entries;
-					const bodyIsCurrent =
-						stamp.entries === entries &&
-						stamp.entryCount === entries.length &&
-						stamp.lastEntry === entries.at(-1) &&
-						stamp.revision === this.#bodyRevision &&
-						stamp.prefix === this.#titleSlotLine() + this.#lineFor(this.#header);
+					const bodyIsCurrent = this.#entriesRecordedSince(stamp)?.length === 0;
 					if (!bodyIsCurrent) {
 						// Entries raced the unconfirmed publish: the confirmed
 						// body predates them. Stay non-current and re-issue the
@@ -1917,9 +1917,12 @@ export class SessionManager {
 	 * `#persistTitleChangeEntry` fallback. Holds `#atomicRewriteActive` across
 	 * the writer close and the full-file replace, and loops on
 	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
-	 * is captured before the task resolves. Returns `false` when the disk epoch
-	 * moved so callers skip current-marking updates; a body that landed before
-	 * that change still advances the durable byte record after readback.
+	 * is captured before the task resolves. On a store that defers its
+	 * publishes, entries recorded while the body published follow it as one
+	 * append when they are all the body lacks, instead of another full
+	 * rewrite. Returns `false` when the disk epoch moved so callers skip
+	 * current-marking updates; a body that landed before that change still
+	 * advances the durable byte record after readback.
 	 */
 	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
 		if (this.#released) return false;
@@ -1969,6 +1972,9 @@ export class SessionManager {
 					return false;
 				}
 				this.#recordFullRewrite(body.bytes);
+				if (this.#atomicRewriteDirty && this.#appendEntriesRecordedSince(sessionFile, body.stamp)) {
+					this.#atomicRewriteDirty = false;
+				}
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -1979,7 +1985,57 @@ export class SessionManager {
 			// this stale rewrite was still awaiting storage. Clearing it here
 			// unconditionally would strand appends during the newer publish.
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			if (this.#released && this.#atomicRewriteDirty && this.#storage.defersSyncPublish) {
+				this.#sealSupersededWaitingEntries = true;
+			}
 		}
+	}
+
+	/**
+	 * The entries recorded since `stamp`'s body was serialized, when appending
+	 * them is all that body lacks; `undefined` when the journal changed in
+	 * another way since (an entry updated in place, a new title slot or
+	 * header, a replaced history), which only a full rewrite saves.
+	 */
+	#entriesRecordedSince(stamp: SessionBodyStamp): readonly SessionEntry[] | undefined {
+		const entries = this.#entries;
+		if (
+			stamp.entries !== entries ||
+			entries.length < stamp.entryCount ||
+			entries[stamp.entryCount - 1] !== stamp.lastEntry ||
+			stamp.revision !== this.#bodyRevision ||
+			stamp.prefix !== this.#titleSlotLine() + this.#lineFor(this.#header)
+		) {
+			return undefined;
+		}
+		return entries.slice(stamp.entryCount);
+	}
+
+	/**
+	 * On a store that defers its publishes, save the entries that waited for the
+	 * fenced rewrite of `sessionFile` (see `#appendToCurrentSessionFile`) as one
+	 * append after its landed body. Returns `false`, leaving them to another
+	 * full rewrite, on any other store, during an atomic entry batch or a move,
+	 * when the journal changed in another way than by those entries, or when
+	 * that append fails before it reaches the store.
+	 */
+	#appendEntriesRecordedSince(sessionFile: string, stamp: SessionBodyStamp): boolean {
+		if (
+			!this.#storage.defersSyncPublish ||
+			this.#atomicEntryBatch ||
+			this.#sessionFileRelocating ||
+			sessionFile !== this.#sessionFile
+		) {
+			return false;
+		}
+		const recorded = this.#entriesRecordedSince(stamp);
+		if (!recorded) return false;
+		// The body and the entries after it hold the whole journal: an entry
+		// recorded before the caller marks the file current appends after them.
+		this.#fileIsCurrent = true;
+		this.#rewriteRequired = false;
+		if (recorded.length > 0) this.#appendEntriesToWriter(recorded);
+		return this.#fileIsCurrent;
 	}
 
 	#appendToSessionFile(entry: SessionEntry): void {
@@ -2035,13 +2091,19 @@ export class SessionManager {
 		//   without recreating a vacated source.
 		// - in-place atomic fence: supersede the pending publish with a
 		//   synchronous full-body rewrite; bumping `#diskEpoch` abandons the
-		//   in-flight atomic via its `commitGuard`.
+		//   in-flight atomic via its `commitGuard`. Not on a store that defers
+		//   its publishes (`defersSyncPublish`): its index can already hold the
+		//   in-flight body, so a synchronous rewrite stated against the size
+		//   before it is refused. There the entry waits: the fenced rewrite
+		//   appends it once its body lands, and an authoritative repair
+		//   publishes the whole transcript again with it.
 		if (this.#sessionFileRelocating) {
 			this.#rewriteSynchronously();
 			return;
 		}
 		if (this.#atomicRewriteFenceEpoch !== null && this.#atomicRewriteFenceEpoch === this.#diskEpoch) {
 			this.#atomicRewriteDirty = true;
+			if (this.#storage.defersSyncPublish) return;
 			this.#rewriteSynchronously();
 			return;
 		}
@@ -2054,30 +2116,38 @@ export class SessionManager {
 		}
 
 		// Hot path: write the entry directly on the writer, outside the async disk
-		// chain. Prefer appendSync so write failures latch `#diskFailure` before
-		// this call returns (not via a discarded rejected Promise after a later
-		// microtask). Callers stay non-throwing here — the core turn loop invokes
-		// appendMessage/appendCustomEntry without try/catch. A later entry retries
-		// all in-memory state through a full rewrite. File writers apply each line
-		// to the OS page cache before return.
-		// A mid-close writer leaves `#writer` undefined, so `#appendWriter` simply
-		// opens a fresh append handle and the entry still lands.
+		// chain. A mid-close writer leaves `#writer` undefined, so `#appendWriter`
+		// simply opens a fresh append handle and the entry still lands.
+		this.#appendEntriesToWriter([entry]);
+	}
+
+	/**
+	 * Write `entries` on the append writer as one append. Prefer appendSync so
+	 * write failures latch `#diskFailure` before this call returns (not via a
+	 * discarded rejected Promise after a later microtask). Callers stay
+	 * non-throwing here — the core turn loop invokes
+	 * appendMessage/appendCustomEntry without try/catch. A later entry retries
+	 * all in-memory state through a full rewrite. File writers apply each line
+	 * to the OS page cache before return.
+	 */
+	#appendEntriesToWriter(entries: readonly SessionEntry[]): void {
 		try {
 			const writer = this.#appendWriter();
-			const line = this.#lineFor(entry);
+			let text = "";
+			for (const entry of entries) text += this.#lineFor(entry);
 			if (writer.appendSync && !this.#storage.defersSyncPublish) {
-				writer.appendSync(line);
-				this.#recordDurableAppend(line);
+				writer.appendSync(text);
+				this.#recordDurableAppend(text);
 			} else {
 				// A backend that only queues the publish (indexed) has no synchronous
 				// durability, so the durable size may advance only once it confirms
-				// the line: a lost publish must not leave the record describing bytes
+				// the text: a lost publish must not leave the record describing bytes
 				// the store never accepted, or the next recovery rewrite hands the
 				// backend CAS an impossible `expectedSize`.
-				if (writer.appendSync) writer.appendSync(line);
-				const confirmed = writer.appendSync ? writer.flush() : writer.append(line);
+				if (writer.appendSync) writer.appendSync(text);
+				const confirmed = writer.appendSync ? writer.flush() : writer.append(text);
 				void confirmed
-					.then(() => this.#recordDurableAppend(line))
+					.then(() => this.#recordDurableAppend(text))
 					.catch(err => {
 						this.#fileIsCurrent = false;
 						this.#rewriteRequired = true;
@@ -3123,7 +3193,7 @@ export class SessionManager {
 			{ ignorePriorError: true },
 		);
 		if (
-			this.#diskFailure &&
+			(this.#diskFailure || this.#sealSupersededWaitingEntries) &&
 			this.#sessionFile &&
 			this.#storage.defersSyncPublish &&
 			!this.#entriesReleased &&
@@ -3133,8 +3203,11 @@ export class SessionManager {
 			// no-op, so any failure there is a genuine external conflict or a
 			// permanent write failure, not a self-race this retry can catch
 			// up on. seal() disabled the ordinary mid-life repair path, so
-			// close() issues the terminal write directly instead.
-			const operationError = this.#diskFailure;
+			// close() issues the terminal write directly instead, also for
+			// entries that waited on a rewrite the seal superseded.
+			const operationError =
+				this.#diskFailure ?? new Error("Session entries recorded during a superseded rewrite were not saved.");
+			this.#sealSupersededWaitingEntries = false;
 			const sessionFile = this.#sessionFile;
 			await this.#scheduleDiskWork(
 				async () => {

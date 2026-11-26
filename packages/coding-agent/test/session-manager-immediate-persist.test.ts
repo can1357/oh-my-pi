@@ -3,7 +3,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { MemorySessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	MemorySessionStorage,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { parseJsonlLenient, TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
@@ -346,6 +350,47 @@ describe("SessionManager JSONL software-crash durability", () => {
 		// Fenced events remain after the paused atomic settles (commitGuard may
 		// reject a stale body, or a superseding rewrite already owns the file).
 		expect(afterKinds).toEqual(crashKinds);
+	});
+
+	it("replaces a paused rewrite with a synchronous full write on file storage", async () => {
+		// File storage writes a full body before writeLinesSync returns, so an entry recorded while a rewrite is
+		// paused still supersedes that rewrite at once. Stores that defer their publishes (SQL, Redis) let the entry
+		// wait for the rewrite instead: sql-session-storage-manager.test.ts covers them.
+		const cwd = makeTempDir("@pi-file-paused-rewrite-");
+		const storage = new FileSessionStorage();
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"), storage);
+		manager.appendMessage(assistantMessage("seed"));
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+
+		const rewriteStarted = Promise.withResolvers<void>();
+		const allowRewrite = Promise.withResolvers<void>();
+		const writeLinesAtomic = storage.writeLinesAtomic.bind(storage);
+		storage.writeLinesAtomic = async (filePath, lines, options) => {
+			rewriteStarted.resolve();
+			await allowRewrite.promise;
+			return writeLinesAtomic(filePath, lines, options);
+		};
+		let synchronousWrites = 0;
+		const writeLinesSync = storage.writeLinesSync.bind(storage);
+		storage.writeLinesSync = (filePath, lines, options) => {
+			synchronousWrites++;
+			writeLinesSync(filePath, lines, options);
+		};
+
+		const rewrite = manager.rewriteEntries();
+		await rewriteStarted.promise;
+		manager.appendMessage({ role: "user", content: "fenced-user", timestamp: Date.now() });
+		const whilePaused = { synchronousWrites, kinds: readJsonl(sessionFile).map(entryKind) };
+		allowRewrite.resolve();
+		await rewrite;
+		await manager.flush();
+
+		expect({ whilePaused, after: readJsonl(sessionFile).map(entryKind) }).toEqual({
+			whilePaused: { synchronousWrites: 1, kinds: ["session", "assistant", "user"] },
+			after: ["session", "assistant", "user"],
+		});
 	});
 
 	it("alerts once and retries all in-memory entries after a transient write failure", () => {

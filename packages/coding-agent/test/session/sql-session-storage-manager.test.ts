@@ -4,13 +4,22 @@
  * genuinely pluggable — append → flush → reload via `open()` works against
  * a real `Bun.SQL` connection, and `SessionManager.list()` enumerates rows
  * out of the table.
+ *
+ * The second block holds the session's own full rewrite at the store while an
+ * entry is recorded, on SQLite always and on PostgreSQL when
+ * `OMP_TEST_SQL_POSTGRES_URL` names a database.
  */
 
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import {
+	type SqlSessionStorageAdapter,
+	SqlSessionStorage,
+	type SqlSessionStorageClient,
+	type SqlSessionStorageTransaction,
+} from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { SQL } from "bun";
 
@@ -33,6 +42,8 @@ class HeldSqlClient implements SqlSessionStorageClient {
 	readonly options: SqlSessionStorageClient["options"];
 	holdNextReplace = false;
 	holdQueryPrefix = "UPDATE omp_session_files SET content";
+	/** Every statement sent, those of transactions included, in order. */
+	readonly statements: string[] = [];
 	readonly replaceStarted = Promise.withResolvers<void>();
 	readonly allowReplace = Promise.withResolvers<void>();
 	readonly #client: InstanceType<typeof SQL>;
@@ -43,16 +54,23 @@ class HeldSqlClient implements SqlSessionStorageClient {
 	}
 
 	unsafe(query: string, values?: unknown[]) {
+		return this.#run(this.#client, query, values);
+	}
+
+	transaction(callback: (transaction: SqlSessionStorageTransaction) => Promise<void>): Promise<void> {
+		return this.#client.transaction(transaction =>
+			callback({ unsafe: (query, values) => this.#run(transaction, query, values) }),
+		);
+	}
+
+	#run(executor: SqlSessionStorageTransaction, query: string, values?: unknown[]) {
+		this.statements.push(query);
 		if (this.holdNextReplace && query.startsWith(this.holdQueryPrefix)) {
 			this.holdNextReplace = false;
 			this.replaceStarted.resolve();
-			return this.allowReplace.promise.then(() => this.#client.unsafe(query, values));
+			return this.allowReplace.promise.then(() => executor.unsafe(query, values));
 		}
-		return this.#client.unsafe(query, values);
-	}
-
-	transaction(callback: (transaction: SqlSessionStorageClient) => Promise<void>): Promise<void> {
-		return this.#client.transaction(transaction => callback(transaction));
+		return executor.unsafe(query, values);
 	}
 }
 
@@ -175,51 +193,6 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		expect(await secondStorage.readText(sessionFile)).toContain("durable SQL peer turn");
 		await client.end();
 	});
-	it("recovers a fenced rewrite size conflict with the real SQLite backend", async () => {
-		const client = new SQL("sqlite::memory:");
-		const heldClient = new HeldSqlClient(client);
-		const storage = await SqlSessionStorage.create({ client: heldClient });
-		const manager = SessionManager.create("/cwd", virtualDir("/sessions/rewrite-race"), storage);
-		await manager.ensureOnDisk();
-		const sessionFile = manager.getSessionFile();
-		if (!sessionFile) throw new Error("Expected session file");
-
-		manager.appendMessage({
-			role: "assistant",
-			provider: "anthropic",
-			model: "claude-3-7-sonnet",
-			content: [{ type: "text", text: "seed reply" }],
-			usage: fakeUsage(1, 1),
-			api: "anthropic-messages",
-			stopReason: "stop",
-			timestamp: Date.now(),
-		});
-		manager.appendMessage({ role: "user", content: "before rewrite", timestamp: Date.now() });
-		await manager.flush();
-		await storage.drain();
-		const turn = manager.getEntries().find(entry => entry.type === "message" && entry.message.role === "user");
-		if (turn?.type !== "message" || turn.message.role !== "user") throw new Error("Expected user turn");
-		turn.message.content = "pruned before rewrite";
-
-		heldClient.holdNextReplace = true;
-		const rewritePublished = manager.rewriteEntries();
-		await heldClient.replaceStarted.promise;
-		manager.appendMessage({ role: "user", content: "fenced append", timestamp: Date.now() });
-		heldClient.allowReplace.resolve();
-		await rewritePublished.catch(() => {});
-		await manager.flush().catch(() => {});
-
-		manager.appendMessage({ role: "user", content: "later turn", timestamp: Date.now() });
-		await manager.flush().catch(() => {});
-		await storage.drain().catch(() => {});
-
-		const body = await storage.readText(sessionFile);
-		expect(body).toContain("fenced append");
-		expect(body).toContain("later turn");
-		expect(manager.captureState().expectedDiskSize).toBe(Buffer.byteLength(body, "utf8"));
-		await manager.close();
-		await client.end();
-	});
 
 	it("counts a new session as resumable only once SQL confirms its first write", async () => {
 		// The index entry appears before the backend acknowledges the write; an exit-time
@@ -271,3 +244,263 @@ describe("SessionManager + SqlSessionStorage (SQLite)", () => {
 		await client.end();
 	});
 });
+
+/** SQLite always; PostgreSQL when `OMP_TEST_SQL_POSTGRES_URL` names a database. Each case uses a table of its own. */
+const BACKENDS: ReadonlyArray<{ adapter: SqlSessionStorageAdapter; url: string | undefined }> = [
+	{ adapter: "sqlite", url: "sqlite::memory:" },
+	{ adapter: "postgres", url: process.env.OMP_TEST_SQL_POSTGRES_URL || undefined },
+];
+
+const WAITING_ENTRY = "entry recorded during the rewrite";
+
+interface HeldSession extends AsyncDisposable {
+	readonly client: HeldSqlClient;
+	readonly storage: SqlSessionStorage;
+	readonly manager: SessionManager;
+	readonly sessionFile: string;
+	/** What `onPersistenceError` reported, in order. */
+	readonly failures: string[];
+	/** A full write of the table's rows, stated against a size or not; an append never runs it. */
+	readonly fullWrite: RegExp;
+	/** An append to a row. */
+	readonly append: RegExp;
+	/**
+	 * Edit an entry in place and start `rewriteEntries()`, as closing a retried model call does when it records the
+	 * outcome on the refused attempt (`#markPendingRetryErrors` in turn-recovery.ts). Its full write waits at the store,
+	 * after the storage index already holds its size, until `client.allowReplace` resolves.
+	 */
+	startHeldRewrite(): Promise<void>;
+	/** The session's row as the table holds it, read past the storage index. */
+	stored(): Promise<string>;
+}
+
+/** A session of two stored turns whose SQL statements go through a {@link HeldSqlClient}. */
+async function openHeldSession(adapter: SqlSessionStorageAdapter, url: string): Promise<HeldSession> {
+	const raw = new SQL(url);
+	const table = `omp_rewrite_${Bun.randomUUIDv7().replaceAll("-", "").slice(-12)}`;
+	const client = new HeldSqlClient(raw);
+	client.holdQueryPrefix = `UPDATE ${table} SET content`;
+	const close = async (): Promise<void> => {
+		client.allowReplace.resolve();
+		if (adapter !== "sqlite") await raw.unsafe(`DROP TABLE IF EXISTS ${table}`).catch(() => undefined);
+		await raw.end();
+	};
+	try {
+		const storage = await SqlSessionStorage.create({ client, adapter, table });
+		const manager = SessionManager.create("/cwd", virtualDir(`/sessions/${table}`), storage);
+		const failures: string[] = [];
+		manager.onPersistenceError(error => failures.push(error.message));
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		manager.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: "claude-3-7-sonnet",
+			content: [{ type: "text", text: "seed reply" }],
+			usage: fakeUsage(1, 1),
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		manager.appendMessage({ role: "user", content: "before rewrite", timestamp: Date.now() });
+		await manager.flush();
+		await storage.drain();
+		const placeholder = adapter === "postgres" ? "$1" : "?";
+		return {
+			client,
+			storage,
+			manager,
+			sessionFile,
+			failures,
+			fullWrite: new RegExp(`^(UPDATE ${table} SET content|INSERT INTO ${table} \\(path, content, mtime_ms, title)`),
+			append: new RegExp(`^INSERT INTO ${table} \\(path, content, mtime_ms\\) VALUES`),
+			startHeldRewrite() {
+				const turn = manager.getEntries().find(entry => entry.type === "message" && entry.message.role === "user");
+				if (turn?.type !== "message" || turn.message.role !== "user") throw new Error("Expected user turn");
+				turn.message.content = "annotated before rewrite";
+				client.holdNextReplace = true;
+				return manager.rewriteEntries();
+			},
+			async stored() {
+				const rows = (await raw.unsafe(`SELECT content FROM ${table} WHERE path = ${placeholder}`, [
+					sessionFile,
+				])) as Array<{ content: string }>;
+				return rows[0]?.content ?? "";
+			},
+			async [Symbol.asyncDispose]() {
+				client.allowReplace.resolve();
+				await manager.close().catch(() => undefined);
+				await close();
+			},
+		};
+	} catch (err) {
+		await close();
+		throw err;
+	}
+}
+
+function copies(content: string, text: string): number {
+	return content.split(text).length - 1;
+}
+
+/** Whether `content` holds exactly the journal's entries, in its order: every line but the title slot and header. */
+function holdsTheJournal(content: string, manager: SessionManager): boolean {
+	const ids = content
+		.split("\n")
+		.filter(line => line.length > 0)
+		.map(line => JSON.parse(line) as { type?: unknown; id?: unknown })
+		.filter(record => record.type !== "title" && record.type !== "session")
+		.map(record => record.id);
+	return JSON.stringify(ids) === JSON.stringify(manager.getEntries().map(entry => entry.id));
+}
+
+for (const { adapter, url } of BACKENDS) {
+	describe.skipIf(!url)(
+		`SessionManager + SqlSessionStorage: an entry recorded during its own rewrite (${adapter})`,
+		() => {
+			// Before the fix each case reported "Session file changed before rewrite": the entry replaced the held rewrite
+			// with a synchronous full write stated against the size before it, which the storage index, already holding the
+			// rewrite's size, refused.
+			it("stores the entry with no conflict, and the entries after it", async () => {
+				await using s = await openHeldSession(adapter, url ?? "");
+				const rewrite = s.startHeldRewrite();
+				await s.client.replaceStarted.promise;
+				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
+				s.client.allowReplace.resolve();
+				await rewrite.catch(() => undefined);
+				s.manager.appendMessage({ role: "user", content: "later turn", timestamp: Date.now() });
+				await s.manager.flush().catch(() => undefined);
+
+				const body = await s.stored();
+				expect({
+					failures: s.failures,
+					copies: [WAITING_ENTRY, "later turn"].map(text => copies(body, text)),
+					holdsTheJournal: holdsTheJournal(body, s.manager),
+					expectsWhatIsStored: s.manager.captureState().expectedDiskSize === Buffer.byteLength(body, "utf8"),
+				}).toEqual({ failures: [], copies: [1, 1], holdsTheJournal: true, expectsWhatIsStored: true });
+			}, 120_000);
+
+			it("appends the entry once after the landed rewrite, with no second full write", async () => {
+				await using s = await openHeldSession(adapter, url ?? "");
+				const rewrite = s.startHeldRewrite();
+				await s.client.replaceStarted.promise;
+				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
+				const landedAt = s.client.statements.length;
+				s.client.allowReplace.resolve();
+				await rewrite.catch(() => undefined);
+				await s.manager.flush().catch(() => undefined);
+
+				const afterLanding = s.client.statements.slice(landedAt);
+				const body = await s.stored();
+				expect({
+					failures: s.failures,
+					copies: copies(body, WAITING_ENTRY),
+					holdsTheJournal: holdsTheJournal(body, s.manager),
+					fullWritesAfterLanding: afterLanding.filter(query => s.fullWrite.test(query)).length,
+					appendsAfterLanding: afterLanding.filter(query => s.append.test(query)).length,
+				}).toEqual({
+					failures: [],
+					copies: 1,
+					holdsTheJournal: true,
+					fullWritesAfterLanding: 0,
+					appendsAfterLanding: 1,
+				});
+			}, 120_000);
+
+			// Before the fix the entry also moved the disk epoch, so the landed rewrite was recorded only once a read of the
+			// whole transcript matched it. That read can fail on a transcript of a few hundred megabytes; the session then
+			// kept the size from before the rewrite, and every later full write stated it and was refused. Now the epoch does
+			// not move and nothing reads the transcript back: a change that reads it again meets the failure injected here.
+			it("records the landed rewrite without reading the transcript back, so a failing read cannot keep the old size", async () => {
+				await using s = await openHeldSession(adapter, url ?? "");
+				let landed = false;
+				let readsAfterLanding = 0;
+				const readText = s.storage.readText.bind(s.storage);
+				s.storage.readText = async requested => {
+					if (landed && requested === s.sessionFile) {
+						readsAfterLanding++;
+						throw new Error("canceling statement due to statement timeout");
+					}
+					return readText(requested);
+				};
+				const rewrite = s.startHeldRewrite();
+				await s.client.replaceStarted.promise;
+				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
+				landed = true;
+				s.client.allowReplace.resolve();
+				await rewrite.catch(() => undefined);
+				s.manager.appendMessage({ role: "user", content: "later turn", timestamp: Date.now() });
+				await s.manager.rewriteEntries().catch(() => undefined);
+				await s.manager.flush().catch(() => undefined);
+
+				const body = await s.stored();
+				expect({
+					failures: s.failures,
+					readsAfterLanding,
+					copies: [WAITING_ENTRY, "later turn"].map(text => copies(body, text)),
+					expectsWhatIsStored: s.manager.captureState().expectedDiskSize === Buffer.byteLength(body, "utf8"),
+				}).toEqual({ failures: [], readsAfterLanding: 0, copies: [1, 1], expectsWhatIsStored: true });
+			}, 120_000);
+
+			// A process that exits while its rewrite publishes seals the session and closes it: the entry that waited on the
+			// rewrite the seal superseded goes out with close()'s write of the whole transcript.
+			it("stores the entry when the session is sealed and closed during the rewrite", async () => {
+				await using s = await openHeldSession(adapter, url ?? "");
+				const rewrite = s.startHeldRewrite();
+				await s.client.replaceStarted.promise;
+				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
+				s.manager.seal();
+				s.client.allowReplace.resolve();
+				await rewrite.catch(() => undefined);
+				const closed = await s.manager.close().then(
+					() => "closed",
+					(err: unknown) => String(err),
+				);
+
+				const body = await s.stored();
+				expect({
+					closed,
+					failures: s.failures,
+					copies: copies(body, WAITING_ENTRY),
+					holdsTheJournal: holdsTheJournal(body, s.manager),
+				}).toEqual({ closed: "closed", failures: [], copies: 1, holdsTheJournal: true });
+			}, 120_000);
+
+			// The append that carries the waiting entries can fail before it reaches the store, as preparing an entry does
+			// for a blob it cannot write. The failure is reported, and the rewrite publishes the whole transcript again
+			// instead of leaving the entries out of a file it marks current.
+			it("saves the entry with the rewrite's next full write when its append fails", async () => {
+				await using s = await openHeldSession(adapter, url ?? "");
+				const failure = "the append of the waiting entries failed";
+				let failNextAppend = false;
+				const openWriter = s.storage.openWriter.bind(s.storage);
+				s.storage.openWriter = (writerPath, options) => {
+					const writer = openWriter(writerPath, options);
+					const appendSync = writer.appendSync?.bind(writer);
+					if (appendSync) {
+						writer.appendSync = line => {
+							if (!failNextAppend) return appendSync(line);
+							failNextAppend = false;
+							throw new Error(failure);
+						};
+					}
+					return writer;
+				};
+				const rewrite = s.startHeldRewrite();
+				await s.client.replaceStarted.promise;
+				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
+				failNextAppend = true;
+				s.client.allowReplace.resolve();
+				await rewrite.catch(() => undefined);
+
+				const body = await s.stored();
+				expect({
+					failures: s.failures,
+					copies: copies(body, WAITING_ENTRY),
+					holdsTheJournal: holdsTheJournal(body, s.manager),
+				}).toEqual({ failures: [failure], copies: 1, holdsTheJournal: true });
+			}, 120_000);
+		},
+	);
+}
