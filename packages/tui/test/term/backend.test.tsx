@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
 import type { FramePlan, InputEvent, TerminalCapabilities, TerminalDriver } from "@oh-my-pi/pi-tui/driver/contract";
+import { anchoredRows, RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { createSurface, settle } from "@oh-my-pi/pi-tui/surface";
 import { TermBackend } from "@oh-my-pi/pi-tui/term/backend";
 import { defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
@@ -269,6 +270,29 @@ describe("TermBackend main surface", () => {
 		backend.renderNow();
 		expect(driver.history).toEqual([]);
 		expect(driver.viewport).toEqual([...lines("a", 3), "b0", "b1", "> /x"]);
+		backend.stop();
+	});
+
+	it("leaves out a live image whose first row the viewport cuts off, until that row fits again", () => {
+		defineRolePainter("rows", "test.anchored-image", node => {
+			const props = node.props() as { lines: readonly string[] };
+			return { rows: props.lines };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const dock = signal(lines("d", 3));
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			main: <rows key="reply" role="test.anchored-image" lines={["a0", ...image, "a1"]} />,
+			dock: <rows key="dock" lines={dock} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		const main = () => driver.frames.at(-1)!.viewport.slice(0, -dock().length);
+		// Three rows for five: the tail shows, and its last image row would move up into the dock.
+		expect(main()).toEqual([RESERVED_ROW, RESERVED_ROW, "a1"]);
+		dock.set(lines("d", 2));
+		backend.renderNow();
+		expect(main()).toEqual([...image, "a1"]);
 		backend.stop();
 	});
 

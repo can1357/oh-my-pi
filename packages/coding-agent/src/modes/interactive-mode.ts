@@ -280,7 +280,7 @@ import type {
 } from "./types";
 import type { TodoItem, TodoPhase } from "../tools/details/todo";
 import type { ConversationPosition } from "./utils/conversation-position";
-import { DEFAULT_FIGURE_CELL, type FigureCell } from "../ui/transcript/figures/svg";
+import { DEFAULT_FIGURE_CELL, type FigureCell, figureMaxRows } from "../ui/transcript/figures/svg";
 import { setImageBlobWriter } from "../ui/transcript/image-links";
 import { followInlineImageLimits } from "../ui/transcript/messages/image";
 import { imageLinksForMessage, UiHelpers } from "./utils/ui-helpers";
@@ -388,6 +388,7 @@ import {
 	type JSXNode,
 	jsx,
 	type KeyEvent,
+	nativeRendering,
 	type PresentedFrame,
 	type Signal,
 	signal,
@@ -694,6 +695,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		renderSvg: signal(true),
 		renderEmbeds: signal(true),
 		figureCell: signal<FigureCell | undefined>(undefined),
+		// Tern lays figures out itself: its rasters keep their full size.
+		figureRows: () => (nativeRendering() ? undefined : figureMaxRows(this.shell.size().rows)),
 		tableCharts: () => this.tableChartsVisible,
 		shellVisualization: signal(true),
 		mcpMarkdown: signal(false),
