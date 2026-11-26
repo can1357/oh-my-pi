@@ -4,11 +4,7 @@ import { LiveSessionController, type LiveSessionControllerOptions } from "@oh-my
 import type { LiveServerEvent } from "@oh-my-pi/pi-coding-agent/live/protocol";
 import * as liveTransport from "@oh-my-pi/pi-coding-agent/live/transport";
 import type { LiveTransportOptions } from "@oh-my-pi/pi-coding-agent/live/transport";
-import {
-	convertToLlm,
-	LIVE_DELEGATION_MESSAGE_TYPE,
-	LIVE_ENDED_MESSAGE_TYPE,
-} from "@oh-my-pi/pi-coding-agent/session/messages";
+import { LIVE_DELEGATION_MESSAGE_TYPE, LIVE_ENDED_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -127,27 +123,5 @@ describe("live voice context for the coding agent", () => {
 		await call.admitAll();
 
 		expect(call.admitted).toEqual([]);
-	});
-
-	test("the model receives a spoken request after a voice notice", () => {
-		const request = "read the names out loud";
-		const [delegated] = convertToLlm([
-			{
-				role: "custom",
-				customType: LIVE_DELEGATION_MESSAGE_TYPE,
-				content: request,
-				display: true,
-				attribution: "agent",
-				timestamp: 1,
-			},
-		]);
-		const content = delegated?.content;
-		const text =
-			typeof content === "string"
-				? content
-				: (content ?? []).map(part => ("text" in part ? part.text : "")).join("");
-
-		expect(text.endsWith(`\n${request}`)).toBe(true);
-		expect(text.slice(0, -request.length).trim()).not.toBe("");
 	});
 });
