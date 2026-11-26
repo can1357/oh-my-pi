@@ -37,7 +37,7 @@ export interface TerminalDriverOptions extends ProcessInputOptions {
 	readonly sink?: OutputSink | StreamSink;
 	/** Retained history after a settled resize. Default: `PI_TUI_RESIZE_SCROLLBACK`, else `preserve`. */
 	readonly resizeScrollback?: ResizeScrollback;
-	/** Repaint in place after resizes. Default: `PI_TUI_RESIZE_IN_PLACE`, else Warp outside multiplexers/ConPTY. */
+	/** Repaint in place after resizes. Default: `PI_TUI_RESIZE_IN_PLACE`, else Warp outside multiplexers/ConPTY, or Herdr (see #8433: an alt-screen switch toggles Herdr's scrollbar gutter and width, looping the resize). */
 	readonly inPlaceResize?: boolean;
 	/** Quiet window ending a resize burst, in ms. */
 	readonly resizeSettleMs?: number;
@@ -248,7 +248,11 @@ export function createTerminalDriver(
 		// Inside a multiplexer the mux, not conhost, owns the grid and answers the cursor report.
 		hostOwnsGrid: () => terminal.identity.conpty && !multiplexed(),
 		warp,
-		inPlaceResize: () => forcedInPlace ?? (warp() && !multiplexed() && !terminal.identity.conpty),
+		// Herdr: an alt-screen switch toggles its scrollbar gutter (#8433), changing pane width by one
+		// column and looping resize -> ?1049h/l -> SIGWINCH. Repaint in place like Warp outside muxes.
+		inPlaceResize: () =>
+			forcedInPlace ??
+			((warp() && !multiplexed() && !terminal.identity.conpty) || terminal.identity.multiplexer === "herdr"),
 		resizeAvoidsAlternate: () =>
 			forcedInPlace !== false &&
 			resizeScrollback === "rebuild" &&

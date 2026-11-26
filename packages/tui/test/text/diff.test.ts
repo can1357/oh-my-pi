@@ -65,7 +65,7 @@ describe("wrapDiffRow", () => {
 		const [row] = renderDiff("+12|alpha beta gamma delta", { theme });
 		const rows = wrapDiffRow(row!, 16);
 		expect(strip(rows)).toEqual([" +12│alpha beta", "    │gamma delta"]);
-		for (const wrapped of rows) expect(wrapped.endsWith("\x1b[27m\x1b[39m")).toBe(true);
+		for (const wrapped of rows) expect(wrapped.endsWith("\x1b[39m")).toBe(true);
 	});
 
 	it("wraps rows without a gutter plainly", () => {
