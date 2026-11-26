@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
+import { singleLine, stripControl } from "@oh-my-pi/pi-tui/text/sanitize";
 import { textContent } from "./transcript/transcript-entry";
 import type { SessionListing } from "../modes/view-model/overlays/session-selector";
 import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
@@ -136,6 +137,16 @@ function sanitizeSessionName(value: string | undefined): string | undefined {
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
+/**
+ * `provider/model` as one row-safe label: C0/C1 controls and complete escape
+ * sequences gone (`sanitizeSessionName` keeps an escape sequence's payload and
+ * only covers C0, so a crafted identity could recolour the row).
+ */
+function sanitizeModelLabel(value: string): string | undefined {
+	const label = singleLine(stripControl(value)).trim();
+	return label.length > 0 ? label : undefined;
+}
+
 /** Format a time difference as a human-readable string */
 function formatTimeAgo(date: Date): string {
 	const now = Date.now();
@@ -179,8 +190,9 @@ interface SessionTail {
  * a tail window of a session file. Entries are newline-terminated on write,
  * so within the window only the first line can be a partial fragment — it
  * simply fails to parse and is skipped. We walk backwards to the last
- * `message` entry and classify it by role / stop reason, and on to the last
- * assistant turn for the model; neither is guessed past the window.
+ * `message` entry and classify it by role / stop reason, and on to the newest
+ * assistant turn for the model — identity present or not, nothing older can
+ * stand in for it; neither is guessed past the window.
  */
 function deriveSessionTail(suffix: string): SessionTail {
 	const tail: SessionTail = { status: "unknown" };
@@ -205,13 +217,22 @@ function deriveSessionTail(suffix: string): SessionTail {
 			tail.status = statusFromTailMessage(message);
 			statusFound = true;
 		}
-		if (tail.model === undefined && message.role === "assistant" && message.provider && message.model) {
-			// Transcript text: it reaches the terminal row, the Tern column and the
-			// search haystack, so control characters are stripped here, once.
-			const model = sanitizeSessionName(`${message.provider}/${message.model}`);
+		if (message.role !== "assistant") continue;
+		// The newest assistant reply decides, identity or not: a missing one
+		// leaves the model unknown rather than falling back to an older reply.
+		// Parsed JSON owes us nothing, so both fields must be nonempty strings.
+		if (
+			typeof message.provider === "string" &&
+			message.provider !== "" &&
+			typeof message.model === "string" &&
+			message.model !== ""
+		) {
+			// Transcript text: it reaches the terminal row, the Tern column and
+			// the search haystack, so control characters are stripped here, once.
+			const model = sanitizeModelLabel(`${message.provider}/${message.model}`);
 			if (model) tail.model = model;
 		}
-		if (statusFound && tail.model !== undefined) break;
+		break;
 	}
 	return tail;
 }

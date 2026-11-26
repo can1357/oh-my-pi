@@ -4,7 +4,7 @@
 
 ### Added
 
-- `/resume` rows and the session preview show the `provider/model` of each session's last reply, and the search finds sessions by it ([#20513](https://github.com/can1357/oh-my-pi/pull/20513) by [@thekitaev](https://github.com/thekitaev))
+- `/resume` rows and the session preview show the `provider/model` of a session's last reply when it is available, and the search finds sessions by it ([#20513](https://github.com/can1357/oh-my-pi/pull/20513) by [@thekitaev](https://github.com/thekitaev))
 
 ## [19.2.1] - 2026-11-25
 

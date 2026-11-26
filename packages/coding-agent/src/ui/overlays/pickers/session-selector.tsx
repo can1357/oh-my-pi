@@ -379,6 +379,15 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 			try {
 				const listing = await props.loadAllSessions();
 				global.set(listing.sessions);
+				// The indexed rows carry no tail-scan facts: the completed listing
+				// replaces them once it settles, like `completeSessions` does for
+				// the folder — including for a query typed meanwhile.
+				listing.complete?.then(
+					sessions => {
+						if (alive) global.set(sessions);
+					},
+					() => {},
+				);
 				message.set(undefined);
 			} catch (err) {
 				toggling = false;

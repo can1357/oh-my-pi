@@ -10,6 +10,13 @@ const assistant = (provider: string, model: string, stopReason = "stop"): string
 		message: { role: "assistant", provider, model, stopReason, content: [{ type: "text", text: "ok" }] },
 	});
 
+/** The newest reply of an assistant whose provider/model went unrecorded. */
+const anonymousAssistant = (stopReason = "stop"): string =>
+	JSON.stringify({
+		type: "message",
+		message: { role: "assistant", stopReason, content: [{ type: "text", text: "ok" }] },
+	});
+
 const header = (id: string): string =>
 	JSON.stringify({ type: "session", id, cwd: "/repo", timestamp: "2026-06-27T00:00:00.000Z" });
 
@@ -59,12 +66,28 @@ describe("session listing model", () => {
 		expect(sessions.unanswered).not.toHaveProperty("model");
 	});
 
-	it("strips control characters from the model before it reaches the picker", async () => {
+	it("leaves the model unknown when the newest assistant reply has no identity", async () => {
 		const sessions = await scan([
-			"crafted",
-			[header("crafted"), assistant("acme", "model\x1b[31mred\x1b[0m\tevil\x07")],
+			"anonymous",
+			[header("anonymous"), assistant("anthropic", "claude-sonnet-4-5"), anonymousAssistant()],
 		]);
-		// A regression lets a session file recolour the terminal row or set the window title.
-		expect(sessions.crafted).toMatchObject({ model: "acme/model[31mred[0mevil" });
+		// A regression shows the older reply's model for a session whose newest
+		// reply came from a source that recorded no provider/model.
+		expect(sessions.anonymous).toMatchObject({ status: "complete" });
+		expect(sessions.anonymous).not.toHaveProperty("model");
+	});
+
+	it("strips control characters, C1 included, from the model before it reaches the picker", async () => {
+		const sessions = await scan(
+			// C0 escapes (ESC CSI, BEL) and a tab: the sequences go whole, the
+			// tab becomes spaces — no "[31m" fragments survive.
+			["crafted", [header("crafted"), assistant("acme", "model\u001b[31mred\u001b[0m\tevil\u0007")]],
+			// C1 controls alone (CSI U+009B, OSC U+009D) never reach the row.
+			["crafted1", [header("crafted1"), assistant("acme", "m\u009b31m\u009d")]],
+		);
+		// A regression lets a session file recolour the terminal row, set the
+		// window title, or leave escape fragments like "[31m" on the row.
+		expect(sessions.crafted).toMatchObject({ model: "acme/modelred   evil" });
+		expect(sessions.crafted1).toMatchObject({ model: "acme/m31m" });
 	});
 });

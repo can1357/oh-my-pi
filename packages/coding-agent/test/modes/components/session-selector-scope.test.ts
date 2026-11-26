@@ -87,6 +87,46 @@ describe("session selector scope toggle", () => {
 		}
 	});
 
+	it("applies the completed all-projects listing, including a query typed before it settles", async () => {
+		const preliminary = [createSession("local", "Local", "/work/current")];
+		const completed = [
+			createSession("local", "Local", "/work/current"),
+			sessionEntry("remote", "Remote", "2024-01-02T00:00:00Z", { model: "openai/gpt-5.2" }),
+		];
+		let resolveListing!: (sessions: SessionSelectorEntry[]) => void;
+		const complete = new Promise<SessionSelectorEntry[]>(resolve => {
+			resolveListing = resolve;
+		});
+		const picker = mountSessionSelector({
+			sessions: preliminary,
+			loadAllSessions: async () => ({ sessions: preliminary, complete }),
+		});
+		try {
+			picker.press("tab");
+			await settle();
+			// The preliminary rows show at once, but carry no model facts.
+			expect(picker.screen()).toContain("Local");
+			expect(picker.screen()).not.toContain("openai/gpt-5.2");
+
+			picker.press("g");
+			picker.press("p");
+			picker.press("t");
+			await settle();
+			// A query entered before the full scan resolves matches nothing yet.
+			expect(picker.screen()).not.toContain("openai/gpt-5.2");
+
+			resolveListing(completed);
+			await settle();
+			const rendered = picker.screen();
+			// The completed rows replace the indexed ones and the query already
+			// in place now finds the session by its model.
+			expect(rendered).toContain("openai/gpt-5.2");
+			expect(rendered).not.toContain("first message local");
+		} finally {
+			picker.term.dispose();
+		}
+	});
+
 	it("returns the full selected session, including its cwd", async () => {
 		const remote = createSession("remote", "Remote", "/work/other-project");
 		const picker = mountSessionSelector({

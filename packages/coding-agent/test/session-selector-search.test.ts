@@ -120,6 +120,28 @@ describe("session picker search", () => {
 		expect(harness.filtered()).toEqual(["b"]);
 	});
 
+	it("keeps the folder on the row when a long model truncates at a narrow width", () => {
+		const sessions = [
+			makeSession("a", {
+				path: "/work/project-a/a.jsonl",
+				model: "anthropic/claude-sonnet-4-5-20261015-very-long-name",
+				cwd: "/work/project-a",
+			}),
+			makeSession("b", { path: "/work/project-b/b.jsonl", model: "openai/gpt-5.2", cwd: "/work/project-b" }),
+		];
+		const harness = makeHarness(sessions);
+
+		// A truncation from the right of the combined facts lets a long model
+		// push the folder off the row, hiding what tells same-title sessions apart.
+		const text = harness.selector.text(80);
+		// The short model leaves the folder whole; the long one truncates on its
+		// own and the folder keeps its place, truncated only by the row's own end.
+		expect(text).toContain("/work/project-b");
+		expect(text).toContain("/work/projec");
+		expect(text).toContain("…");
+		expect(text).not.toContain("claude-sonnet-4-5-20261015-very-long-name");
+	});
+
 	it("follows the latest query when it changes mid-typing", () => {
 		const sessions = makeCorpus();
 		const harness = makeHarness(sessions);

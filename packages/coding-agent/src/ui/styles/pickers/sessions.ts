@@ -173,8 +173,14 @@ function listRows(
 			facts += ` ${dot} ${theme.style(tone, `${theme.symbols.symbol(symbol)} ${label}`)}`;
 		}
 		if (row.fork) facts += ` ${dot} ${dim(`${theme.symbols.icon("branch")} fork`)}`;
-		if (row.model) facts += ` ${dot} ${dim(row.model)}`;
-		if (row.cwd) facts += ` ${dot} ${dim(row.cwd)}`;
+		const folder = row.cwd ? ` ${dot} ${dim(row.cwd)}` : "";
+		if (row.model) {
+			// The folder keeps its room: the model alone truncates so a long one
+			// cannot push the folder off the row (the search keeps the full value).
+			const room = rowWidth - visibleWidth(facts) - visibleWidth(folder) - 3;
+			if (room > 0) facts += ` ${dot} ${dim(truncate(row.model, room))}`;
+		}
+		facts += folder;
 		rows.push(truncate(facts, rowWidth));
 		// The last session ends flush against the hints, whose blank row stands in for its own.
 		if (i < window.end - 1) rows.push("");
