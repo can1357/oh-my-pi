@@ -7,6 +7,11 @@ mod tables;
 
 use std::{collections::HashMap, ops::Range};
 
+use super::markdown::{
+	admonition_kind, admonition_title, cf_email, chrome_label, contains_code, image_alt,
+	is_admonition, is_code_decoration, is_gutter, is_invisible, is_lang, is_layout, own_number,
+	pre_follows, script_text, word_boundary,
+};
 use crate::{
 	dom::{Element, Node},
 	select::Selection,
@@ -212,12 +217,25 @@ impl Layout {
 	}
 
 	fn text(&mut self, text: &str) {
-		for c in text.chars() {
+		let mut chars = text.chars().peekable();
+		while let Some(c) = chars.next() {
 			if matches!(c, ' ' | '\n' | '\t' | '\r') {
 				self.space = !self.line.is_empty();
 				continue;
 			}
-			if c.is_ascii_control() {
+			if c.is_ascii_control() || is_invisible(c) {
+				continue;
+			}
+			// A joiner that joins nothing (at a heading's edge) is dropped,
+			// as in Markdown.
+			if c == '\u{200D}'
+				&& (self.space
+					|| self.line.is_empty()
+					|| self.line.ends_with(' ')
+					|| chars
+						.peek()
+						.is_none_or(|&next| matches!(next, ' ' | '\n' | '\t' | '\r')))
+			{
 				continue;
 			}
 			self.flush_space();
@@ -249,7 +267,7 @@ impl Layout {
 				},
 				'\u{ad}' => {},
 				'\u{a0}' => self.push(' '),
-				c if !c.is_ascii_control() => self.push(c),
+				c if !c.is_ascii_control() && !is_invisible(c) => self.push(c),
 				_ => {},
 			}
 		}
@@ -314,6 +332,14 @@ fn selected_nodes<'a>(
 struct Reader<'a> {
 	dom:           &'a [Node],
 	dropped:       &'a [bool],
+	/// End of the selection root; image lookahead never reads past it.
+	root_end:      usize,
+	/// Inside a `pre` that holds a `code` element, outside that element:
+	/// toolbars and gutters here are not code.
+	pre_code:      bool,
+	/// Arena index of an ordered item's own visible number, which its list
+	/// marker already shows.
+	skip:          Option<usize>,
 	layout:        Layout,
 	lists:         lists::Lists,
 	forms:         forms::Forms,
@@ -335,6 +361,9 @@ pub fn write(nodes: &[Node], selection: &Selection, width: usize) -> String {
 	let mut reader = Reader {
 		dom:           nodes,
 		dropped:       &selection.dropped,
+		root_end:      selection.root.end,
+		pre_code:      false,
+		skip:          None,
 		layout:        Layout::new(width.clamp(1, 1024)),
 		lists:         lists::Lists::default(),
 		forms:         forms::Forms::scan(nodes, selection),
@@ -375,6 +404,47 @@ fn dump(html: &str) -> Result<String, String> {
 
 #[cfg(test)]
 #[test]
+fn shares_the_markdown_writers_word_rules() {
+	// Separated labels, Unicode scripts, an image whose alt the caption
+	// repeats, and a decoded Cloudflare address.
+	assert_eq!(
+		dump(
+			"<p><time>May 1</time><span class=b>2 min</span> x<sup>2</sup> <img alt=\"Chart\" \
+			 src=\"/c.png\">Chart <span class=\"__cf_email__\" \
+			 data-cfemail=\"422a2b023a6c2b2d\">[email protected]</span></p>"
+		)
+		.unwrap()
+		.trim(),
+		"May 1 2 min x² Chart hi@x.io"
+	);
+	// An item's own number, an edge joiner and a CSS-drawn separator.
+	assert_eq!(
+		dump("<ol><li><span>1</span>Vercel</li></ol>")
+			.unwrap()
+			.trim(),
+		"1. Vercel"
+	);
+	assert_eq!(
+		dump("<p>\u{200d}Gdk<span class=\"sep\"></span>get\u{200d}</p>")
+			.unwrap()
+			.trim(),
+		"Gdk get"
+	);
+	// A code block's language toolbar, copy button and line numbers are not
+	// text.
+	assert_eq!(
+		dump(
+			"<div><div>lua<button>Copy</button></div><pre><code>local x</code><div \
+			 class=\"line-numbers-wrapper\"><span class=\"line-number\">1</span></div></pre></div>"
+		)
+		.unwrap()
+		.trim(),
+		"local x"
+	);
+}
+
+#[cfg(test)]
+#[test]
 fn renders_only_the_selected_range_and_skips_whole_dropped_subtrees() {
 	let nodes = crate::dom::parse("outside<main>keep<aside>hidden</aside> tail</main>").unwrap();
 	let selection = Selection {
@@ -390,22 +460,55 @@ impl Reader<'_> {
 		self.dropped.get(index).copied().unwrap_or(false)
 	}
 
+	/// Write a range of sibling nodes. The word-level rules shared with the
+	/// Markdown writer apply here: line-number gutters and code-block
+	/// toolbars are skipped, and adjacent elements that CSS keeps apart get a
+	/// space.
 	fn nodes(&mut self, range: Range<usize>) {
-		let parent = match range.start.checked_sub(1).and_then(|i| self.dom.get(i)) {
-			Some(Node::Tag(tag)) if tag.children == range => tag.name(),
-			_ => "",
+		let dom = self.dom;
+		let parent_tag = match range.start.checked_sub(1).and_then(|i| dom.get(i)) {
+			Some(Node::Tag(tag)) if tag.children == range => Some(tag),
+			_ => None,
 		};
-		let previous = std::mem::replace(&mut self.parent, parent);
+		let layout = parent_tag.is_some_and(is_layout);
+		let previous_parent =
+			std::mem::replace(&mut self.parent, parent_tag.map_or("", |tag| tag.name()));
+		let mut previous: Option<&Node> = None;
 		let mut i = range.start;
 		while i < range.end {
 			if self.is_skipped(i) {
-				i = match &self.dom[i] {
+				i = match &dom[i] {
 					Node::Text(_) => i + 1,
 					Node::Tag(tag) => tag.children.end,
 				};
 				continue;
 			}
-			match &self.dom[i] {
+			let node = &dom[i];
+			if let Node::Tag(tag) = node
+				&& (is_gutter(tag)
+					|| self.skip == Some(i)
+					|| (self.pre && is_code_decoration(tag))
+					|| (self.pre_code && tag.name() != "code" && !contains_code(dom, self.dropped, tag)))
+			{
+				i = tag.children.end;
+				continue;
+			}
+			if !self.pre
+				&& !self.layout.space
+				&& self.parent != "option"
+				&& let Some(previous) = previous
+				&& word_boundary(
+					dom,
+					self.dropped,
+					previous,
+					node,
+					layout,
+					self.layout.line.chars().next_back(),
+				) {
+				self.layout.space = true;
+			}
+			previous = Some(node);
+			match node {
 				Node::Text(text) => {
 					if self.parent == "option" {
 						self.orphan_option.push_str(text);
@@ -425,12 +528,31 @@ impl Reader<'_> {
 					i += 1;
 				},
 				Node::Tag(tag) => {
-					self.element(tag);
 					i = tag.children.end;
+					if !self.pre
+						&& pre_follows(dom, self.dropped, i..range.end)
+						&& let Some(label) = chrome_label(dom, self.dropped, tag)
+					{
+						// A code-block toolbar: a language label is not text
+						// (Markdown makes it the fence's info string).
+						if !label.is_empty() && !is_lang(&label) {
+							self.layout.boundary(0);
+							self.layout.text(&label);
+							self.layout.boundary(0);
+						}
+						continue;
+					}
+					if self.pre_code && tag.name() == "code" {
+						self.pre_code = false;
+						self.element(tag);
+						self.pre_code = true;
+					} else {
+						self.element(tag);
+					}
 				},
 			}
 		}
-		self.parent = previous;
+		self.parent = previous_parent;
 	}
 
 	fn element(&mut self, tag: &Element) {
@@ -440,6 +562,18 @@ impl Reader<'_> {
 		let old = self.layout.style;
 		let body = self.layout.body();
 		let address = self.layout.address();
+		if let Some(email) = tag.attr("data-cfemail").and_then(cf_email) {
+			self.layout.text(&email);
+			return;
+		}
+		if is_admonition(tag)
+			&& admonition_title(self.dom, self.dropped, tag).is_none()
+			&& let Some(kind) = admonition_kind(tag)
+		{
+			self.layout.boundary(1);
+			self.layout.text(kind);
+			self.layout.boundary(0);
+		}
 		let (before, after, style) = match tag_name {
 			"title" | "script" | "style" | "base" => return,
 			"meta" => return self.refresh(tag),
@@ -560,9 +694,12 @@ impl Reader<'_> {
 					.layout
 					.style(Style { left: 0, end: self.layout.columns, align: Align::Left });
 				let was_pre = std::mem::replace(&mut self.pre, true);
+				let was_code =
+					std::mem::replace(&mut self.pre_code, contains_code(self.dom, self.dropped, tag));
 				self.pre_first = tag_name == "pre";
 				self.nodes(children);
 				self.pre = was_pre;
+				self.pre_code = was_code;
 				if tag_name == "pre" || !self.layout.line.is_empty() {
 					self.layout.literal_newline();
 				}
@@ -664,10 +801,22 @@ impl Reader<'_> {
 					.text(if self.quotes % 2 == 0 { "\"" } else { "'" });
 				return;
 			},
-			"sub" | "sup" | "del" | "ins" | "s" | "strike" => {
+			"sub" | "sup" => {
+				// The same rendering as Markdown: `τ²`, `1st`, `x^(n + 1)`.
+				let inner = self.inner(tag);
+				let body = inner.split_whitespace().collect::<Vec<_>>().join(" ");
+				let before = if self.layout.space {
+					None
+				} else {
+					self.layout.line.chars().next_back()
+				};
+				self
+					.layout
+					.text(&script_text(&body, tag_name == "sup", before));
+				return;
+			},
+			"del" | "ins" | "s" | "strike" => {
 				let (prefix, suffix) = match tag_name {
-					"sup" => ("^", ""),
-					"sub" => ("[", "]"),
 					"ins" => ("[INS: ", " :INS] "),
 					_ => ("[DEL: ", " :DEL] "),
 				};
