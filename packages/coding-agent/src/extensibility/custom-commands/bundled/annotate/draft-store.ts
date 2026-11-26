@@ -25,6 +25,24 @@ type DraftSession = Pick<ReadonlySessionManager, "getArtifactsDir" | "getSession
 const DRAFT_FILE = /^draft-([0-9a-f]{64})\.json$/;
 /** Draft directories with an overlay open in this process; their session is kept until the draft is saved. */
 const OPEN_DRAFTS = new Set<string>();
+const OPEN_DRAFT_KEYS = new Map<string, number>();
+
+function scopedDraftKey(scope: string, key: string): string {
+	return `${scope}\0${key}`;
+}
+
+function holdDraftKey(scope: string, key: string): void {
+	const scopedKey = scopedDraftKey(scope, key);
+	OPEN_DRAFT_KEYS.set(scopedKey, (OPEN_DRAFT_KEYS.get(scopedKey) ?? 0) + 1);
+}
+
+function releaseDraftKey(scope: string, key: string): void {
+	const scopedKey = scopedDraftKey(scope, key);
+	const count = OPEN_DRAFT_KEYS.get(scopedKey);
+	if (count === undefined) return;
+	if (count > 1) OPEN_DRAFT_KEYS.set(scopedKey, count - 1);
+	else OPEN_DRAFT_KEYS.delete(scopedKey);
+}
 
 function hash(value: string): string {
 	return new Bun.CryptoHasher("sha256").update(value).digest("hex");
@@ -119,6 +137,8 @@ export interface OpenAnnotationDraft {
 	readonly restored: boolean;
 	/** Replay the saved state into `review` and track it for saving. */
 	restore(review: AnnotationReviewModel): void;
+	/** Change the persisted source only when no separate draft already owns it. */
+	replaceSource(source: AnnotationDraftSource, replace: () => boolean): Promise<boolean>;
 	/** Save the review's state, or drop the draft once its notes were sent or emptied. */
 	close(result: { action: string } | undefined): Promise<void>;
 }
@@ -134,19 +154,32 @@ export async function openAnnotationDraft(
 	source: AnnotationDraftSource,
 	resumed?: AnnotationDraft,
 ): Promise<OpenAnnotationDraft> {
-	const key = annotationDraftKey(source);
+	let key = annotationDraftKey(source);
+	let activeSource = source;
+	const previousKeys = new Set<string>();
 	const saved = resumed ?? (await loadAnnotationDrafts(session)).find(draft => draft.key === key);
 	// An open overlay holds the session: a close-time cleanup (or shutdown) racing the save must not delete it.
 	const artifactsDir = session.getArtifactsDir();
 	const openDirectory = artifactsDir ? draftDirectory(artifactsDir, session.getSessionId()) : undefined;
+	const draftScope = openDirectory ?? session.getSessionId();
 	if (openDirectory) OPEN_DRAFTS.add(openDirectory);
+	holdDraftKey(draftScope, key);
 	let overlay: AnnotationReviewModel | undefined;
 	const persist = async (sent: boolean) => {
-		const state = overlay?.getDraft();
-		if (!state) return;
+		const current = overlay?.getDraft();
+		if (!current) return;
+		const state =
+			current.kind === "text" && activeSource.kind === "text" && current.editedText === activeSource.source.text
+				? { kind: "text" as const, annotations: current.annotations, editor: current.editor }
+				: current;
 		const empty = !state.annotations.length && !state.editor?.text && !("editedText" in state && state.editedText);
-		if (sent || empty) await removeAnnotationDraft(session, key);
-		else await saveDraft(session, { key, updatedAt: Date.now(), source, state });
+		if (sent || empty) {
+			await removeAnnotationDraft(session, key);
+		} else {
+			await saveDraft(session, { key, updatedAt: Date.now(), source: activeSource, state });
+		}
+		for (const previousKey of previousKeys) await removeAnnotationDraft(session, previousKey);
+		previousKeys.clear();
 	};
 	const unregister = postmortem.register(`annotation-draft:${key}`, () => persist(false));
 	return {
@@ -155,11 +188,33 @@ export async function openAnnotationDraft(
 			overlay = mounted;
 			if (saved) mounted.restoreDraft(saved.state);
 		},
+		async replaceSource(nextSource, replace) {
+			if (nextSource.kind !== activeSource.kind) return false;
+			const nextKey = annotationDraftKey(nextSource);
+			if (nextKey !== key) {
+				if (OPEN_DRAFT_KEYS.has(scopedDraftKey(draftScope, nextKey))) return false;
+				if (!previousKeys.has(nextKey)) {
+					const drafts = await loadAnnotationDrafts(session);
+					if (drafts.some(draft => draft.key === nextKey)) return false;
+				}
+			}
+			if (!replace()) return false;
+			if (nextKey !== key) {
+				previousKeys.delete(nextKey);
+				previousKeys.add(key);
+				releaseDraftKey(draftScope, key);
+				holdDraftKey(draftScope, nextKey);
+				key = nextKey;
+			}
+			activeSource = nextSource;
+			return true;
+		},
 		async close(result) {
 			unregister();
 			try {
 				await persist(result?.action === "review");
 			} finally {
+				releaseDraftKey(draftScope, key);
 				if (openDirectory) OPEN_DRAFTS.delete(openDirectory);
 			}
 		},

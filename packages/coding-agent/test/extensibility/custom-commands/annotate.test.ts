@@ -31,6 +31,7 @@ import type {
 	CustomCommandAPI,
 	CustomCommandContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
+import * as review from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import type { ReviewPrRef } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import {
 	createResolvedReviewTarget,
@@ -101,7 +102,8 @@ interface ContextOptions {
 	selectResults?: Array<string | undefined>;
 	branch?: SessionMessageEntry[];
 	cwd?: string;
-	customKeys?: readonly string[];
+	artifactsDir?: string | null;
+	customKeys?: readonly (string | ((term: TestTerminal) => Promise<void>))[];
 	customResult?: unknown;
 	inputResult?: string | undefined;
 	editorResult?: string | undefined;
@@ -139,7 +141,13 @@ function createContext(options: ContextOptions = {}) {
 		}
 		const term = mountView(output);
 		try {
-			for (const key of options.customKeys ?? [ENTER]) feed(term, key);
+			for (const key of options.customKeys ?? [ENTER]) {
+				if (typeof key === "function") await key(term);
+				else feed(term, key);
+				const eventLoop = Promise.withResolvers<void>();
+				setImmediate(eventLoop.resolve);
+				await eventLoop.promise;
+			}
 		} finally {
 			term.dispose();
 		}
@@ -153,7 +161,8 @@ function createContext(options: ContextOptions = {}) {
 			getBranch: () => branch,
 			getCwd: () => options.cwd ?? "/workspace",
 			getSessionId: () => "session-1",
-			getArtifactsDir: () => null,
+			getArtifactsDir: () => options.artifactsDir ?? null,
+			ensureOnDisk: async () => {},
 		},
 		ui: { select, input, editor, custom, pasteToEditor, notify, setStatus },
 	} as unknown as CustomCommandContext;
@@ -347,6 +356,74 @@ describe("/annotate contracts", () => {
 		expect(showCodeReviewOverlay).toHaveBeenCalledWith(ctx, target, undefined, undefined);
 		expect(pasteToEditor).toHaveBeenCalledTimes(1);
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain(annotation.note);
+	});
+
+	it("preserves annotations on a refreshed PR diff when reopening its saved draft", async () => {
+		await withTempDir(async directory => {
+			const artifactsDir = join(directory, "artifacts");
+			const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff", {
+				refreshSource: {
+					kind: "remote",
+					cwd: directory,
+					ref: { forge: "github", repo: "acme/project", number: 42 },
+				},
+			});
+			const refreshed = createResolvedReviewTarget(
+				"pr",
+				target.mode,
+				SAMPLE_DIFF.replace("+const value = 2;", "+const value = 3;"),
+				target.emptyMessage,
+				{ refreshSource: target.refreshSource },
+			);
+			spyOn(review, "refreshReviewTarget").mockResolvedValue(refreshed);
+			const refreshedShown = Promise.withResolvers<string>();
+			const first = createContext({
+				cwd: directory,
+				artifactsDir,
+				customKeys: [
+					RIGHT,
+					"a",
+					"survives refresh",
+					ENTER,
+					"\x1b[B",
+					"a",
+					"obsolete note",
+					ENTER,
+					"r",
+					async term => {
+						expect(await refreshedShown.promise).toMatch(/^Dropped 1 note/);
+						term.render();
+						expect(term.screen().join("\n")).toContain("const value = 3;");
+					},
+					ENTER,
+					ENTER,
+				],
+			});
+			first.notify.mockImplementation(message => {
+				refreshedShown.resolve(message);
+				return undefined;
+			});
+			await runAnnotateCommand(API, "code-review https://github.com/acme/project/pull/42", first.ctx, {
+				resolvePrReviewTarget: async () => target,
+				showCodeReviewOverlay,
+			});
+			expect(first.pasteToEditor.mock.calls[0]?.[0]).toContain("survives refresh");
+			expect(first.pasteToEditor.mock.calls[0]?.[0]).not.toContain("obsolete note");
+			const [saved] = await loadAnnotationDrafts(first.ctx.sessionManager);
+			if (saved?.source.kind !== "diff") throw new Error("expected a saved diff draft");
+			expect(saved.source.target.rawDiff).toBe(refreshed.rawDiff);
+
+			const resumed = createContext({
+				cwd: directory,
+				artifactsDir,
+				selectResults: ["Saved draft", `1. ${saved.source.target.mode} — 1 note(s)`],
+				customKeys: [RIGHT, ENTER, UP, ENTER],
+			});
+			const feedback = await runAnnotateCommand(API, "", resumed.ctx, { showCodeReviewOverlay });
+			expect(feedback).toContain("+const value = 3;");
+			expect(feedback).not.toContain("+const value = 2;");
+			expect(feedback).toContain("survives refresh");
+		});
 	});
 
 	it("resolves a PR picked from the open pull request list in the live session repo", async () => {

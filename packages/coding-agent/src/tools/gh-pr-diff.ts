@@ -49,6 +49,7 @@ export interface PrDiffLookupOptions {
 	signal?: AbortSignal;
 	settings?: Settings;
 	cacheAuthKey?: string | null;
+	forceFresh?: boolean;
 }
 /**
  * Split `gh pr diff` output on `^diff --git ` boundaries and parse per-file
@@ -467,6 +468,7 @@ export async function getOrFetchPrDiff(options: PrDiffLookupOptions): Promise<Vi
 		includeComments: false,
 		settings: options.settings,
 		authKey,
+		forceFresh: options.forceFresh,
 		fetchFresh: doFetch,
 	});
 	return {

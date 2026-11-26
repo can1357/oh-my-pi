@@ -44,7 +44,11 @@ async function resolveTextSource(ctx: AnnotationContext, source: AnnotationTextS
 	}
 }
 
-async function resolveDiffTarget(ctx: AnnotationContext, source: AnnotationDiffSource): Promise<ResolvedReviewTarget> {
+async function resolveDiffTarget(
+	ctx: AnnotationContext,
+	source: AnnotationDiffSource,
+	allowRefreshableEmpty = false,
+): Promise<ResolvedReviewTarget> {
 	const cwd = ctx.sessionManager.getCwd?.() ?? ctx.cwd;
 	let target: ResolvedReviewTarget;
 	switch (source.kind) {
@@ -67,7 +71,7 @@ async function resolveDiffTarget(ctx: AnnotationContext, source: AnnotationDiffS
 		}
 	}
 	const issue = getReviewTargetIssue(target);
-	if (issue) throw new Error(issue);
+	if (issue && !(allowRefreshableEmpty && target.refreshSource)) throw new Error(issue);
 	return target;
 }
 
@@ -230,13 +234,16 @@ export function createAnnotationsAPI(
 					...(result.editedText === undefined ? {} : { editedText: result.editedText }),
 				};
 			}
-			const target = await resolveDiffTarget(ctx, request.source);
+			const target = await resolveDiffTarget(ctx, request.source, true);
+			const issue = getReviewTargetIssue(target);
+			if (issue) ctx.ui.notify(issue, "warning");
 			// The overlay defaults to a review request; reject before the operator writes notes it would drop.
 			assertReviewablePatchSize(target);
 			const result = await showCodeReviewOverlay(ctx, target);
 			if (!result) return undefined;
+			const refreshedTarget = result.refreshedTarget ?? target;
 			const review = result.action === "review";
-			const text = buildCodeReviewFeedback(target, result.annotations, review, request.focus);
+			const text = buildCodeReviewFeedback(refreshedTarget, result.annotations, review, request.focus);
 			return {
 				kind: "diff",
 				text,

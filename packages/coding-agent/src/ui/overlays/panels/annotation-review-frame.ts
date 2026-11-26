@@ -348,8 +348,11 @@ function helpText(model: AnnotationReviewModel): string {
 			: model.focus === "diff"
 				? `${upDown} line · ${key("shift")} faster · ${key("pageUp")}/${key("pageDown")} · g/${key("shift+g")} ends · a line note · ${key("shift+a")} ${model.textSource ? "text" : "file"} note · e edit note`
 				: `${upDown} select · ${key("confirm")} confirm`;
-	const editor = model.callbacks.onExternalEditor ? ` · ${key(model.externalEditorKey)} editor` : "";
-	return `${focus} · u undo · ${key("tab")} regions${editor} · ${key(model.cancelKey)} cancel`;
+	const refresh = model.callbacks.onRefresh ? (model.refreshing ? "Refreshing…" : `${key("r")} refresh`) : undefined;
+	const editor = model.callbacks.onExternalEditor ? `${key(model.externalEditorKey)} editor` : undefined;
+	return [refresh, focus, "u undo", `${key("tab")} regions`, editor, `${key(model.cancelKey)} cancel`]
+		.filter((part): part is string => part !== undefined)
+		.join(" · ");
 }
 
 function footerRows(model: AnnotationReviewModel, width: number, chooserRowsMax: number, height: number, theme: Theme) {

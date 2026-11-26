@@ -52,7 +52,7 @@ interface CodeReviewDependencies {
 		target: ResolvedReviewTarget,
 		focus?: string,
 		resumed?: AnnotationDraft,
-	): Promise<CodeReviewOverlayResult | undefined>;
+	): Promise<(CodeReviewOverlayResult & { refreshedTarget?: ResolvedReviewTarget }) | undefined>;
 }
 
 interface TextAnnotationDependencies {
@@ -189,12 +189,12 @@ async function finishCodeReview(
 	const issue = getReviewTargetIssue(target);
 	if (issue) {
 		ctx.ui.notify(issue, "warning");
-		return undefined;
+		if (!target.refreshSource) return undefined;
 	}
 	const result = await showOverlay(ctx, target, focus, resumed);
 	if (!result) return undefined;
 	const review = result.action === "review";
-	const feedback = buildCodeReviewFeedback(target, result.annotations, review, focus);
+	const feedback = buildCodeReviewFeedback(result.refreshedTarget ?? target, result.annotations, review, focus);
 	if (review) return feedback;
 	if (feedback) ctx.ui.pasteToEditor(feedback);
 	return undefined;

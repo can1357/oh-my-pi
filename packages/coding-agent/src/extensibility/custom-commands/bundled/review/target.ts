@@ -4,6 +4,10 @@ import { errorMessage } from "@oh-my-pi/pi-utils";
 import { parseReviewDiffSnapshot, type ReviewDiffSnapshot } from "./diff";
 
 export type LocalReviewKind = "base-branch" | "uncommitted" | "commit";
+export type ReviewRefreshSource =
+	| { kind: "remote"; cwd: string; ref: { forge: "github" | "gitlab"; repo: string; number: number } }
+	| { kind: "uncommitted"; cwd: string }
+	| { kind: "base-branch"; cwd: string; base: string; head: string };
 
 /** One frozen diff: the annotation view and the reviewer prompt both read this snapshot. */
 export interface ResolvedReviewTarget {
@@ -20,6 +24,7 @@ export interface ResolvedReviewTarget {
 	prDiffUrl?: string;
 	/** Leading `?at=<generation>` when `prDiffUrl` is pinned, otherwise empty. */
 	prDiffQuery?: string;
+	refreshSource?: ReviewRefreshSource;
 	/** Checkout root of a local review run outside the session cwd; diff paths are relative to it. */
 	repository?: string;
 }
@@ -46,7 +51,7 @@ export function createResolvedReviewTarget(
 	emptyMessage: string,
 	options: Pick<
 		ResolvedReviewTarget,
-		"filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl" | "prDiffQuery"
+		"filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl" | "prDiffQuery" | "refreshSource"
 	> = {},
 ): ResolvedReviewTarget {
 	return {
@@ -83,7 +88,10 @@ export async function readUncommittedReviewTarget(cwd: string): Promise<Resolved
 		isJj ? "Reviewing JJ working-copy changes" : "Reviewing uncommitted changes (staged + unstaged)",
 		diffText,
 		isJj || !diffText.trim() ? "No uncommitted changes found" : "No diff content found",
-		{ diffInstruction: isJj ? JJ_UNCOMMITTED_DIFF_INSTRUCTION : GIT_UNCOMMITTED_DIFF_INSTRUCTION },
+		{
+			diffInstruction: isJj ? JJ_UNCOMMITTED_DIFF_INSTRUCTION : GIT_UNCOMMITTED_DIFF_INSTRUCTION,
+			refreshSource: { kind: "uncommitted", cwd },
+		},
 	);
 }
 
@@ -101,6 +109,24 @@ async function currentGitBranch(cwd: string): Promise<string> {
 	} catch {
 		return "HEAD";
 	}
+}
+
+export async function readBaseBranchReviewTarget(
+	cwd: string,
+	base: string,
+	head: string,
+): Promise<ResolvedReviewTarget | undefined> {
+	const repository = vcs.requireGit(cwd);
+	const mergeBase = await repository.mergeBase(base, head);
+	if (!mergeBase) return undefined;
+	const diffText = await repository.diffText({ base: mergeBase, head });
+	return createResolvedReviewTarget(
+		"base-branch",
+		`Reviewing changes between \`${base}\` and \`${head}\` (PR-style)`,
+		diffText,
+		`No changes between ${base} and ${head}`,
+		{ refreshSource: { kind: "base-branch", cwd, base, head } },
+	);
 }
 
 async function recentCommits(cwd: string, count: number): Promise<string[]> {
@@ -126,29 +152,15 @@ export async function resolveLocalReviewTarget(
 			const baseBranch = await ui.select("Select base branch to compare against", branches);
 			if (!baseBranch) return undefined;
 			const currentBranch = await currentGitBranch(cwd);
-			let diffText: string;
 			try {
-				const repository = vcs.requireGit(cwd);
-				// PR-style review compares the merge base against the current
-				// branch (`base...head`), so base-only commits are excluded.
-				const mergeBase = await repository.mergeBase(baseBranch, currentBranch);
-				if (!mergeBase) {
-					// No common ancestor: `git diff base...head` aborts here
-					// rather than comparing unrelated trees tip-to-tip.
-					ui.notify(`No common history between ${baseBranch} and ${currentBranch}`, "error");
-					return undefined;
-				}
-				diffText = await repository.diffText({ base: mergeBase, head: currentBranch });
+				const target = await readBaseBranchReviewTarget(cwd, baseBranch, currentBranch);
+				if (target) return target;
+				ui.notify(`No common history between ${baseBranch} and ${currentBranch}`, "error");
+				return undefined;
 			} catch (error) {
 				ui.notify(`Failed to get diff: ${errorMessage(error)}`, "error");
 				return undefined;
 			}
-			return createResolvedReviewTarget(
-				"base-branch",
-				`Reviewing changes between \`${baseBranch}\` and \`${currentBranch}\` (PR-style)`,
-				diffText,
-				`No changes between ${baseBranch} and ${currentBranch}`,
-			);
 		}
 		case "uncommitted":
 			try {

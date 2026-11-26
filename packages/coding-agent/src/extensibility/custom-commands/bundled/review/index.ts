@@ -24,6 +24,7 @@ import {
 	LOCAL_REVIEW_CHOICES,
 	type LocalReviewKind,
 	type ResolvedReviewTarget,
+	readBaseBranchReviewTarget,
 	readUncommittedReviewTarget,
 	resolveLocalReviewTarget,
 	reviewRepository,
@@ -162,7 +163,7 @@ export function parseReviewPrRef(text: string): ReviewPrRef | undefined {
 }
 
 /** `PR owner/repo#N` for GitHub, `MR host/group/project!N` for GitLab. */
-export function formatReviewRefLabel(ref: ReviewPrRef): string {
+export function formatReviewRefLabel(ref: Pick<ReviewPrRef, "forge" | "repo" | "number">): string {
 	return ref.forge === "gitlab" ? `MR ${ref.repo}!${ref.number}` : `PR ${ref.repo}#${ref.number}`;
 }
 
@@ -217,6 +218,14 @@ function extractReviewPrRefsFromText(text: string): ReviewPrRef[] {
 
 /** Fetch one PR/MR patch and freeze it before any overlay or LLM prompt is built; throws on fetch failure. */
 export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promise<ResolvedReviewTarget> {
+	return fetchPrReviewTargetWithOptions(cwd, ref, false);
+}
+
+async function fetchPrReviewTargetWithOptions(
+	cwd: string,
+	ref: Pick<ReviewPrRef, "forge" | "repo" | "number">,
+	forceFresh: boolean,
+): Promise<ResolvedReviewTarget> {
 	const label = formatReviewRefLabel(ref);
 	// Session settings are the active scope (set around `/review`). Without them,
 	// `resolveCacheTtl(undefined)` uses the default enabled cache and a kill switch
@@ -228,6 +237,7 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 				cwd,
 				project: ref.repo,
 				iid: ref.number,
+				...(forceFresh ? { forceFresh: true } : {}),
 				...(settings ? { settings } : {}),
 			});
 			return createResolvedReviewTarget(
@@ -237,6 +247,7 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 				`${label} has no diff content available`,
 				{
 					prDiffUrl: `mr://${ref.repo}/${ref.number}/diff`,
+					refreshSource: { kind: "remote", cwd, ref: { forge: "gitlab", repo: ref.repo, number: ref.number } },
 				},
 			);
 		} catch (error) {
@@ -250,6 +261,7 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 			cwd,
 			repo: ref.repo,
 			number: ref.number,
+			...(forceFresh ? { forceFresh: true } : {}),
 			...(settings ? { settings } : {}),
 		});
 		const generationAt =
@@ -265,12 +277,35 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 		return createResolvedReviewTarget("pr", label, lookup.payload.unified, `${label} has no diff content available`, {
 			prDiffUrl: `pr://${ref.repo}/${ref.number}/diff`,
 			prDiffQuery: generationAt !== null ? `?at=${generationAt}` : "",
+			refreshSource: { kind: "remote", cwd, ref: { forge: "github", repo: ref.repo, number: ref.number } },
 		});
 	} catch (error) {
 		throw new Error(
 			`Failed to fetch PR diff for ${ref.repo}#${ref.number}: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
+}
+
+export async function refreshReviewTarget(target: ResolvedReviewTarget): Promise<ResolvedReviewTarget> {
+	const source = target.refreshSource;
+	if (!source) throw new Error("Review target has no live source to refresh");
+
+	let refreshed: ResolvedReviewTarget;
+	switch (source.kind) {
+		case "remote":
+			refreshed = await fetchPrReviewTargetWithOptions(source.cwd, source.ref, true);
+			break;
+		case "uncommitted":
+			refreshed = await readUncommittedReviewTarget(source.cwd);
+			break;
+		case "base-branch": {
+			const baseTarget = await readBaseBranchReviewTarget(source.cwd, source.base, source.head);
+			if (!baseTarget) throw new Error(`No common history between ${source.base} and ${source.head}`);
+			refreshed = baseTarget;
+			break;
+		}
+	}
+	return { ...refreshed, repository: target.repository };
 }
 
 /** Interactive wrapper: notifies instead of throwing when a UI is available. */

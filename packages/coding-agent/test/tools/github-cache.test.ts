@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getOrFetchIssue, getOrFetchPr } from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { getOrFetchPrDiff, getPinnedPrDiff, retainPrDiffGeneration } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
 import { Database } from "bun:sqlite";
 import {
 	getCached,
@@ -651,6 +652,180 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(getCached(TEST_REPO, "pr-diff", 54, false)?.rendered).toBe("head B");
 	});
 
+	it("force-refreshes a cached PR diff and keeps its earlier generation readable", async () => {
+		const firstDiff = `diff --git a/src/version.ts b/src/version.ts
+--- a/src/version.ts
++++ b/src/version.ts
+@@ -1 +1 @@
+-export const version = 1;
++export const version = 2;
+`;
+		const refreshedDiff = firstDiff.replace("version = 2", "version = 3");
+		const fetch = vi.spyOn(github, "text").mockResolvedValueOnce(firstDiff).mockResolvedValueOnce(refreshedDiff);
+		const options = {
+			cwd: "/tmp/test",
+			repo: TEST_REPO,
+			number: 301,
+			cacheAuthKey: TEST_AUTH_KEY,
+		};
+
+		const initial = await getOrFetchPrDiff(options);
+		expect(initial.status).toBe("miss");
+		const generation = retainPrDiffGeneration({
+			repo: TEST_REPO,
+			number: 301,
+			fetchedAt: initial.fetchedAt,
+			rendered: initial.rendered,
+			files: initial.payload.files,
+			cacheAuthKey: TEST_AUTH_KEY,
+		});
+		if (generation === null) throw new Error("Could not retain the initial PR diff generation");
+
+		const refreshed = await getOrFetchPrDiff({ ...options, forceFresh: true });
+		expect(refreshed.status).toBe("refreshed");
+		expect(refreshed.payload.unified).toBe(refreshedDiff);
+		expect(
+			getPinnedPrDiff({ repo: TEST_REPO, number: 301, fetchedAt: generation, cacheAuthKey: TEST_AUTH_KEY })?.payload
+				.unified,
+		).toBe(firstDiff);
+
+		const subsequent = await getOrFetchPrDiff(options);
+		expect(subsequent.status).toBe("fresh");
+		expect(subsequent.payload.unified).toBe(refreshedDiff);
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it("preserves a cached PR diff when an explicit refresh fails", async () => {
+		putCached({
+			authKey: TEST_AUTH_KEY,
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 302,
+			includeComments: false,
+			payload: { unified: "", files: [] },
+			rendered: "previous-live-diff",
+			fetchedAt: Date.now(),
+		});
+		vi.spyOn(github, "text").mockRejectedValue(new Error("offline"));
+
+		await expect(
+			getOrFetchPrDiff({
+				cwd: "/tmp/test",
+				repo: TEST_REPO,
+				number: 302,
+				cacheAuthKey: TEST_AUTH_KEY,
+				forceFresh: true,
+			}),
+		).rejects.toThrow("offline");
+		expect(getCached(TEST_REPO, "pr-diff", 302, false, TEST_AUTH_KEY)?.rendered).toBe("previous-live-diff");
+	});
+
+	it("does not let an in-flight stale diff refresh overwrite an explicit refresh", async () => {
+		const background = Promise.withResolvers<{
+			rendered: string;
+			sourceUrl: undefined;
+			payload: { head: string };
+		}>();
+		const started = Promise.withResolvers<void>();
+		const settings = Settings.isolated({ "github.cache.softTtlSec": 60, "github.cache.hardTtlSec": 86400 });
+		putCached({
+			authKey: TEST_AUTH_KEY,
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 303,
+			includeComments: false,
+			rendered: "head A",
+			payload: { head: "A" },
+			fetchedAt: Date.now() - 300_000,
+		});
+		const options = {
+			authKey: TEST_AUTH_KEY,
+			repo: TEST_REPO,
+			kind: "pr-diff" as const,
+			number: 303,
+			includeComments: false,
+			settings,
+		};
+		const stale = await getOrFetchView({
+			...options,
+			fetchFresh: () => {
+				started.resolve();
+				return background.promise;
+			},
+		});
+		expect(stale.status).toBe("stale");
+		await started.promise;
+
+		const explicit = await getOrFetchView({
+			...options,
+			forceFresh: true,
+			fetchFresh: async () => ({ rendered: "head B", sourceUrl: undefined, payload: { head: "B" } }),
+		});
+		expect(explicit.status).toBe("refreshed");
+		background.resolve({ rendered: "head A", sourceUrl: undefined, payload: { head: "A" } });
+		await background.promise;
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(getCached(TEST_REPO, "pr-diff", 303, false, TEST_AUTH_KEY)?.rendered).toBe("head B");
+		const subsequent = await getOrFetchView({
+			...options,
+			fetchFresh: vi.fn(async () => ({ rendered: "should-not-run", sourceUrl: undefined, payload: { head: "C" } })),
+		});
+		expect(subsequent.status).toBe("fresh");
+		expect(subsequent.rendered).toBe("head B");
+	});
+
+	it("does not start a background diff fetch while an explicit refresh is pending", async () => {
+		const explicitFetch = Promise.withResolvers<{
+			rendered: string;
+			sourceUrl: undefined;
+			payload: { head: string };
+		}>();
+		const started = Promise.withResolvers<void>();
+		const settings = Settings.isolated({ "github.cache.softTtlSec": 60, "github.cache.hardTtlSec": 86400 });
+		putCached({
+			authKey: TEST_AUTH_KEY,
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 304,
+			includeComments: false,
+			rendered: "previous-diff",
+			payload: { head: "previous" },
+			fetchedAt: Date.now() - 300_000,
+		});
+		const options = {
+			authKey: TEST_AUTH_KEY,
+			repo: TEST_REPO,
+			kind: "pr-diff" as const,
+			number: 304,
+			includeComments: false,
+			settings,
+		};
+		const forced = getOrFetchView({
+			...options,
+			forceFresh: true,
+			fetchFresh: () => {
+				started.resolve();
+				return explicitFetch.promise;
+			},
+		});
+		await started.promise;
+
+		const backgroundFetch = vi.fn(async () => ({
+			rendered: "outdated-background-diff",
+			sourceUrl: undefined,
+			payload: { head: "background" },
+		}));
+		const concurrentRead = await getOrFetchView({ ...options, fetchFresh: backgroundFetch });
+		expect(concurrentRead.status).toBe("stale");
+		await Promise.resolve();
+		expect(backgroundFetch).not.toHaveBeenCalled();
+
+		explicitFetch.resolve({ rendered: "latest-diff", sourceUrl: undefined, payload: { head: "latest" } });
+		expect((await forced).rendered).toBe("latest-diff");
+		expect(getCached(TEST_REPO, "pr-diff", 304, false, TEST_AUTH_KEY)?.rendered).toBe("latest-diff");
+	});
 	it("treats past-hard-TTL rows as cache misses (fetcher runs)", async () => {
 		const settings = Settings.isolated({
 			"github.cache.softTtlSec": 60,

@@ -140,6 +140,7 @@ export interface MrDiffLookupOptions {
 	settings?: Settings;
 	/** `null` bypasses the cache; `undefined` derives the key from glab credentials. */
 	cacheAuthKey?: string | null;
+	forceFresh?: boolean;
 }
 
 /**
@@ -158,6 +159,7 @@ export async function getOrFetchMrDiff(options: MrDiffLookupOptions): Promise<Vi
 		includeComments: false,
 		settings: options.settings,
 		authKey,
+		forceFresh: options.forceFresh,
 		fetchFresh: () => fetchMrDiffFresh(options.cwd, options.project, options.iid, options.signal),
 	});
 	return {

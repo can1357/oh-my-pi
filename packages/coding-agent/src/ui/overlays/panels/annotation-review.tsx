@@ -73,6 +73,7 @@ function FooterButton(props: {
 	readonly tone?: TspTone;
 	readonly keys?: readonly string[];
 	readonly mark?: () => "pick" | "drop" | undefined;
+	readonly busy?: boolean;
 }): JSXNode {
 	return (
 		<ActionButton
@@ -82,6 +83,7 @@ function FooterButton(props: {
 			tone={props.tone}
 			mark={props.mark}
 			keys={props.keys}
+			busy={props.busy}
 		/>
 	);
 }
@@ -444,6 +446,8 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 			if (model.callbacks.onAnnotationExternalEditor)
 				out.push({ keys: [keysOf(model.externalEditorKey)], label: "editor" });
 		} else {
+			if (model.callbacks.onRefresh)
+				out.push({ keys: [["r"]], label: model.refreshing ? "refreshing…" : "refresh" });
 			const undo = model.undoStack.length > 0 ? [{ keys: [["u"]], label: "undo" }] : [];
 			if (model.focus === "files") {
 				out.push(
@@ -475,6 +479,19 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 		return out;
 	};
 
+	const refreshButton = () => {
+		rev();
+		if (!model.callbacks.onRefresh || editing()) return undefined;
+		return (
+			<FooterButton
+				act="refresh"
+				label={() => (model.refreshing ? "Refreshing…" : "Refresh")}
+				title={() => (model.refreshing ? "Refreshing review" : "Refresh review  r")}
+				keys={["r"]}
+				busy={model.refreshing}
+			/>
+		);
+	};
 	const mark = (index: number) => () => {
 		rev();
 		if (editing() || model.actionDisabled(index)) return "drop" as const;
@@ -488,6 +505,7 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 	const footer = () => (
 		<row key="actions" role="omp.actions" gap="sm" align="center">
 			<KeycapHints nodeKey="hints" hints={hints} />
+			{refreshButton}
 			<FooterButton act="close" label={() => "Cancel"} title={() => "Cancel  esc"} keys={["escape"]} />
 			<FooterButton
 				act="discard"

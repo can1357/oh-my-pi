@@ -17,6 +17,7 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type {
 	AnnotationOverlayDraft,
 	CodeReviewAnnotation,
+	CodeReviewAnnotationBase,
 	CodeReviewOverlayResult,
 	ReviewDiffFile,
 	ReviewDiffRow,
@@ -45,6 +46,8 @@ export interface AnnotationReviewCallbacks {
 	onAnnotationExternalEditor?(draft: string, commit: (text: string | null) => void): void | Promise<void>;
 	/** Open the source in the host's editor; the review stays open. */
 	onExternalEditor?(): void | Promise<void>;
+	/** Refresh the source under review. */
+	onRefresh?(): Promise<void>;
 }
 
 export interface AnnotationReviewOptions {
@@ -91,10 +94,57 @@ export function fileLabel(file: ReviewDiffFile): string {
 export function splitTextLines(text: string): string[] {
 	return text.split(/\r\n|\n|\r/);
 }
+function sourceRowIndex(
+	rows: readonly ReviewSourceRow[],
+	raw: string,
+	oldLine: number | undefined,
+	newLine: number | undefined,
+	allowUniqueRawFallback: boolean,
+): number | undefined {
+	const rawMatches: number[] = [];
+	const coordinateMatches: number[] = [];
+	rows.forEach((row, index) => {
+		if (row.raw !== raw) return;
+		rawMatches.push(index);
+		if (row.oldLine === oldLine && row.newLine === newLine) coordinateMatches.push(index);
+	});
+	if (coordinateMatches.length > 0) return coordinateMatches.length === 1 ? coordinateMatches[0] : undefined;
+	return allowUniqueRawFallback && rawMatches.length === 1 ? rawMatches[0] : undefined;
+}
+
+function fileIndexes(files: readonly ReviewDiffFile[]): Map<string, number[]> {
+	const indexes = new Map<string, number[]>();
+	files.forEach((file, index) => {
+		const matches = indexes.get(file.path);
+		if (matches) matches.push(index);
+		else indexes.set(file.path, [index]);
+	});
+	return indexes;
+}
+
+function sectionIndexes(files: readonly ReviewDiffFile[], indexes: readonly number[]): Map<string, number[]> {
+	const sections = new Map<string, number[]>();
+	for (const index of indexes) {
+		const rawDiff = files[index]!.rawDiff;
+		const matches = sections.get(rawDiff);
+		if (matches) matches.push(index);
+		else sections.set(rawDiff, [index]);
+	}
+	return sections;
+}
+function annotationBaseForFile(annotation: CodeReviewAnnotationBase, file: ReviewDiffFile): CodeReviewAnnotationBase {
+	return {
+		path: file.path,
+		...(file.oldPath === undefined ? {} : { oldPath: file.oldPath }),
+		...(file.newPath === undefined ? {} : { newPath: file.newPath }),
+		occurrence: file.occurrence,
+		note: annotation.note,
+	};
+}
 
 export class AnnotationReviewModel {
 	readonly rev = signal(0);
-	readonly files: readonly ReviewDiffFile[];
+	files: readonly ReviewDiffFile[];
 	readonly mode: string;
 	readonly actions: readonly string[];
 	readonly cancelKey: string;
@@ -113,6 +163,7 @@ export class AnnotationReviewModel {
 	discardArmed = false;
 	finished = false;
 	notes: DiffNote[] = [];
+	refreshing = false;
 	textNotes: TextNote[] = [];
 	undoStack: { notes: DiffNote[]; textNotes: TextNote[] }[] = [];
 	/** The lines' scroll offset (in the terminal's geometry). */
@@ -331,6 +382,145 @@ export class AnnotationReviewModel {
 		this.touch();
 		return dropped;
 	}
+	/**
+	 * Replace the diff under review, retaining only notes whose file and line
+	 * anchors can be matched unambiguously. Returns the number of dropped notes.
+	 */
+	replaceDiffSource(files: readonly ReviewDiffFile[]): number {
+		if (this.textSource) return 0;
+		const previousFiles = this.files;
+		const previousFileIndex = this.fileIndex;
+		const previousSourceIndex = this.sourceIndex;
+		const rowsByFile = new Map<ReviewDiffFile, ReviewSourceRow[]>();
+		const sourceRowsFor = (file: ReviewDiffFile): ReviewSourceRow[] => {
+			const cached = rowsByFile.get(file);
+			if (cached !== undefined) return cached;
+			const rows = file.rows.filter(isSourceRow);
+			rowsByFile.set(file, rows);
+			return rows;
+		};
+		const rawCountsByFile = new Map<ReviewDiffFile, Map<string, number>>();
+		const rawCountFor = (file: ReviewDiffFile, raw: string): number => {
+			let counts = rawCountsByFile.get(file);
+			if (counts === undefined) {
+				counts = new Map();
+				for (const row of sourceRowsFor(file)) counts.set(row.raw, (counts.get(row.raw) ?? 0) + 1);
+				rawCountsByFile.set(file, counts);
+			}
+			return counts.get(raw) ?? 0;
+		};
+		const previousFile = previousFiles[previousFileIndex];
+		const previousRow = previousFile ? sourceRowsFor(previousFile)[previousSourceIndex] : undefined;
+		const oldIndexes = fileIndexes(previousFiles);
+		const newIndexes = fileIndexes(files);
+		const oldToNew = new Map<number, number>();
+		for (const [path, oldMatches] of oldIndexes) {
+			const newMatches = newIndexes.get(path);
+			if (newMatches === undefined) continue;
+			if (oldMatches.length === 1 && newMatches.length === 1) {
+				const oldIndex = oldMatches[0]!;
+				const newIndex = newMatches[0]!;
+				if (previousFiles[oldIndex]!.occurrence === files[newIndex]!.occurrence) oldToNew.set(oldIndex, newIndex);
+				continue;
+			}
+			const oldSections = sectionIndexes(previousFiles, oldMatches);
+			const newSections = sectionIndexes(files, newMatches);
+			for (const oldIndex of oldMatches) {
+				const rawDiff = previousFiles[oldIndex]!.rawDiff;
+				const oldSection = oldSections.get(rawDiff);
+				const newSection = newSections.get(rawDiff);
+				if (oldSection?.length === 1 && newSection?.length === 1) oldToNew.set(oldIndex, newSection[0]!);
+			}
+		}
+
+		let dropped = 0;
+		const kept: DiffNote[] = [];
+		for (const entry of this.notes) {
+			const oldFile = previousFiles[entry.fileIndex];
+			const newFileIndex = oldToNew.get(entry.fileIndex);
+			const annotation = entry.annotation;
+			if (
+				!oldFile ||
+				newFileIndex === undefined ||
+				annotation.path !== oldFile.path ||
+				annotation.occurrence !== oldFile.occurrence
+			) {
+				dropped++;
+				continue;
+			}
+			const newFile = files[newFileIndex]!;
+			const base = annotationBaseForFile(annotation, newFile);
+			if (annotation.scope === "file") {
+				kept.push({ ...entry, fileIndex: newFileIndex, annotation: { ...base, scope: "file" } });
+				continue;
+			}
+			const oldRows = sourceRowsFor(oldFile);
+			const oldRow = oldRows[entry.sourceIndex];
+			if (
+				!oldRow ||
+				oldRow.raw !== annotation.rawLine ||
+				oldRow.oldLine !== annotation.oldLine ||
+				oldRow.newLine !== annotation.newLine
+			) {
+				dropped++;
+				continue;
+			}
+			const newRows = sourceRowsFor(newFile);
+			const newSourceIndex = sourceRowIndex(
+				newRows,
+				annotation.rawLine,
+				annotation.oldLine,
+				annotation.newLine,
+				rawCountFor(oldFile, annotation.rawLine) === 1,
+			);
+			if (newSourceIndex === undefined) {
+				dropped++;
+				continue;
+			}
+			const newRow = newRows[newSourceIndex];
+			if (newRow === undefined) {
+				dropped++;
+				continue;
+			}
+			kept.push({
+				fileIndex: newFileIndex,
+				sourceIndex: newSourceIndex,
+				annotation: {
+					...base,
+					scope: "line",
+					hunkHeader: newRow.hunkHeader,
+					...(newRow.oldLine === undefined ? {} : { oldLine: newRow.oldLine }),
+					...(newRow.newLine === undefined ? {} : { newLine: newRow.newLine }),
+					rawLine: newRow.raw,
+				},
+			});
+		}
+
+		this.files = files;
+		this.notes = kept;
+		this.undoStack = [];
+		const mappedFileIndex = oldToNew.get(previousFileIndex);
+		this.fileIndex =
+			files.length === 0 ? 0 : (mappedFileIndex ?? Math.max(0, Math.min(previousFileIndex, files.length - 1)));
+		const currentFile = files[this.fileIndex];
+		const currentRows = currentFile ? sourceRowsFor(currentFile) : [];
+		const mappedSourceIndex =
+			mappedFileIndex === this.fileIndex && previousFile && previousRow
+				? sourceRowIndex(
+						currentRows,
+						previousRow.raw,
+						previousRow.oldLine,
+						previousRow.newLine,
+						rawCountFor(previousFile, previousRow.raw) === 1,
+					)
+				: undefined;
+		this.sourceIndex = mappedSourceIndex ?? Math.max(0, Math.min(previousSourceIndex, currentRows.length - 1));
+		this.viewportDriven = false;
+		this.viewportTowardEnd = false;
+		this.offset = 0;
+		this.touch();
+		return dropped;
+	}
 
 	dispose(): void {
 		this.finished = true;
@@ -360,6 +550,7 @@ export class AnnotationReviewModel {
 
 	actionDisabled(index: number): boolean {
 		if (this.actions[index] === DISCARD_ANNOTATIONS_ACTION) return false;
+		if (this.actions[index] === CONTINUE_CODE_REVIEW_ACTION) return this.files.length === 0;
 		return this.textSource ? !this.hasNotes() : index === 1 && !this.hasNotes();
 	}
 
@@ -391,6 +582,7 @@ export class AnnotationReviewModel {
 	/** A key; false when it belongs to the note editor's field. */
 	key(id: string, text: string | undefined, raw: string): boolean {
 		if (this.finished || this.#external) return true;
+		if (this.refreshing && id !== this.cancelKey) return true;
 		this.drawnAt(this.terminal.size().columns);
 		const armed = this.discardArmed;
 		this.discardArmed = false;
@@ -425,6 +617,10 @@ export class AnnotationReviewModel {
 			return true;
 		}
 		// List keys follow the selector bindings (`tui.select.*`).
+		if (text === "r" && this.callbacks.onRefresh) {
+			void this.#refreshSource();
+			return true;
+		}
 		id = selectKeyId(id);
 		if (this.callbacks.onExternalEditor && id === this.externalEditorKey) {
 			void this.#editSourceExternally();
@@ -748,17 +944,37 @@ export class AnnotationReviewModel {
 			this.touch();
 		}
 	}
+	async #refreshSource(): Promise<void> {
+		const refresh = this.callbacks.onRefresh;
+		if (!refresh || this.refreshing || this.finished) return;
+		this.refreshing = true;
+		this.touch();
+		try {
+			await refresh();
+		} catch (error) {
+			if (!this.finished)
+				this.callbacks.onWarning?.(
+					`Failed to refresh review: ${error instanceof Error ? error.message : String(error)}`,
+				);
+		} finally {
+			this.refreshing = false;
+			if (!this.finished) this.touch();
+		}
+	}
 
 	// ─── Native events ──────────────────────────────────────────────────────
 
 	/** A footer button. */
 	action(act: string): void {
 		if (this.finished || this.#external) return;
+		if (this.refreshing && act !== "close") return;
 		const armed = this.discardArmed;
 		this.discardArmed = false;
 		if (act === "close") {
 			if (this.chooser) this.chooser = undefined;
 			else this.#finish(undefined);
+		} else if (act === "refresh") {
+			if (!this.annotating && !this.chooser) void this.#refreshSource();
 		} else if (!this.annotating && !this.chooser) {
 			const index =
 				act === "discard"
@@ -777,10 +993,9 @@ export class AnnotationReviewModel {
 		}
 		this.touch();
 	}
-
 	/** A pick in the files, lines or chooser list. */
 	pick(leaf: string, item: string, activate: boolean): void {
-		if (this.finished || this.#external) return;
+		if (this.finished || this.#external || this.refreshing) return;
 		this.discardArmed = false;
 		const index = (prefix: string): number =>
 			item.startsWith(prefix) && /^\d+$/.test(item.slice(prefix.length)) ? Number(item.slice(prefix.length)) : -1;

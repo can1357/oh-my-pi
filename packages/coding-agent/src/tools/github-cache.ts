@@ -75,6 +75,43 @@ let openAttempted = false;
  */
 let invalidationEpoch = 0;
 
+interface CacheRefreshState {
+	epoch: number;
+	active: number;
+	explicit: number;
+}
+
+interface CacheRefreshToken {
+	identity: string;
+	state: CacheRefreshState;
+	epoch: number;
+	explicit: boolean;
+}
+
+const cacheRefreshStates = new Map<string, CacheRefreshState>();
+
+function beginCacheRefresh(identity: string, explicit = false): CacheRefreshToken {
+	let state = cacheRefreshStates.get(identity);
+	if (!state) {
+		state = { epoch: 0, active: 0, explicit: 0 };
+		cacheRefreshStates.set(identity, state);
+	}
+	if (explicit) {
+		state.epoch++;
+		state.explicit++;
+	}
+	state.active++;
+	// A concurrent ordinary cache miss may fetch, but must not replace the explicit result.
+	return { identity, state, epoch: !explicit && state.explicit > 0 ? -1 : state.epoch, explicit };
+}
+
+function finishCacheRefresh(token: CacheRefreshToken): void {
+	if (cacheRefreshStates.get(token.identity) !== token.state) return;
+	token.state.active--;
+	if (token.explicit) token.state.explicit--;
+	if (token.state.active === 0) cacheRefreshStates.delete(token.identity);
+}
+
 function ensureParentDir(filePath: string): void {
 	try {
 		const dir = path.dirname(filePath);
@@ -333,6 +370,16 @@ export function resolveGitlabCacheAuthKey(host: string): string | undefined {
 function normalizeRepo(repo: string): string {
 	const ref = parseRepoRef(repo.toLowerCase());
 	return ref.host && ref.host !== defaultGhHost() ? `${ref.host}/${ref.slug}` : ref.slug;
+}
+
+function cacheRowIdentity(
+	authKey: string,
+	repo: string,
+	kind: CacheKind,
+	number: number,
+	includeComments: boolean,
+): string {
+	return `${authKey}|${normalizeRepo(repo)}|${kind}|${number}|${includeComments ? 1 : 0}`;
 }
 
 export function getCached<T = unknown>(
@@ -704,6 +751,7 @@ export function invalidatePullRequestsForRepo(repo: string): void {
  */
 export function resetForTests(): void {
 	invalidationEpoch++;
+	cacheRefreshStates.clear();
 	if (cachedDb) {
 		try {
 			cachedDb.close();
@@ -741,6 +789,7 @@ export interface CacheLookupOptions<T> {
 	fetchFresh: () => Promise<FreshResult<T>>;
 	settings?: Settings | undefined;
 	now?: number;
+	forceFresh?: boolean;
 }
 
 export type CacheStatus = "miss" | "fresh" | "refreshed" | "stale" | "disabled";
@@ -804,12 +853,23 @@ async function fetchAndStore<T>(
 	includeComments: boolean,
 	fetchFresh: () => Promise<FreshResult<T>>,
 	status: "miss" | "refreshed",
+	token: CacheRefreshToken = beginCacheRefresh(cacheRowIdentity(authKey, repo, kind, number, includeComments)),
 ): Promise<CacheLookupResult<T>> {
 	const epoch = invalidationEpoch;
-	const fresh = await fetchFresh();
-	const fetchedAt = Date.now();
-	if (epoch === invalidationEpoch) storeResult(authKey, repo, kind, number, includeComments, fresh, fetchedAt);
-	return { ...fresh, status, fetchedAt };
+	try {
+		const fresh = await fetchFresh();
+		const fetchedAt = Date.now();
+		if (
+			epoch === invalidationEpoch &&
+			cacheRefreshStates.get(token.identity) === token.state &&
+			token.state.epoch === token.epoch
+		) {
+			storeResult(authKey, repo, kind, number, includeComments, fresh, fetchedAt);
+		}
+		return { ...fresh, status, fetchedAt };
+	} finally {
+		finishCacheRefresh(token);
+	}
 }
 
 /**
@@ -826,11 +886,12 @@ function scheduleBackgroundRefresh<T>(
 	includeComments: boolean,
 	fetchFresh: () => Promise<FreshResult<T>>,
 ): void {
-	const key = `${authKey}|${normalizeRepo(repo)}|${kind}|${number}|${includeComments ? 1 : 0}`;
-	if (inflightRefreshes.has(key)) return;
+	const key = cacheRowIdentity(authKey, repo, kind, number, includeComments);
+	if (inflightRefreshes.has(key) || (cacheRefreshStates.get(key)?.explicit ?? 0) > 0) return;
+	const token = beginCacheRefresh(key);
 	inflightRefreshes.add(key);
 	queueMicrotask(() => {
-		fetchAndStore(authKey, repo, kind, number, includeComments, fetchFresh, "refreshed")
+		fetchAndStore(authKey, repo, kind, number, includeComments, fetchFresh, "refreshed", token)
 			.catch(err => {
 				logger.debug("github cache: background refresh failed", {
 					err: String(err),
@@ -872,6 +933,22 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 	// makes `github.cache.hardTtlSec` a real retention cap rather than a soft
 	// suggestion the next `openDb()` call eventually honors.
 	sweepIfDue(ttl.hardMs);
+	if (options.forceFresh) {
+		const token = beginCacheRefresh(
+			cacheRowIdentity(authKey, options.repo, options.kind, options.number, options.includeComments),
+			true,
+		);
+		return fetchAndStore(
+			authKey,
+			options.repo,
+			options.kind,
+			options.number,
+			options.includeComments,
+			options.fetchFresh,
+			"refreshed",
+			token,
+		);
+	}
 
 	const cached: CachedView<T> | null = getCached<T>(
 		options.repo,
