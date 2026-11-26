@@ -958,6 +958,38 @@ describe("supermemoryBackend", () => {
 		expect(contents).not.toContain("off-period");
 	});
 
+	it("a later state's dispose never validates a run a crash left open", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const settings = { "supermemory.retainEveryNTurns": 1 };
+		const first = makeSession({ settings });
+		await start(first);
+		first.addTurn("one");
+		await first.endTurn();
+		// A is killed mid-run.
+		first.addTurn("crashed-run");
+		// B uses the transcript with memory off.
+		const second = makeSession({ settings });
+		second.sessionManager.getEntries().push(...first.sessionManager.getEntries());
+		second.addTurn("off-period");
+		// C enables memory but never starts a turn, then exits.
+		const third = makeSession({ settings });
+		third.sessionManager.getEntries().push(...second.sessionManager.getEntries());
+		await start(third);
+		await third.getSupermemorySessionState()?.dispose();
+		// D reopens and settles.
+		const fourth = makeSession({ settings });
+		fourth.sessionManager.getEntries().push(...third.sessionManager.getEntries());
+		await start(fourth);
+		fourth.addTurn("four");
+		await fourth.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to four");
+		expect(contents).not.toContain("off-period");
+		expect(contents).not.toContain("crashed-run");
+	});
+
 	it("switching memory on while a turn begun with it off streams keeps that turn out of older windows", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")

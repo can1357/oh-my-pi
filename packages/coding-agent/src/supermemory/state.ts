@@ -74,7 +74,7 @@ interface RetentionCursorData {
 	windowStart: number;
 	/** Written when automatic retention began a run (`agent_start`): messages after it are retainable. */
 	started?: true;
-	/** With {@link started}: the writing state's run id. Another state's run counts only once a stop closed it, so a crash mid-run cannot leave the file open to later turns. */
+	/** The run a start opens or a stop closes (the writing state's id). A start counts only once a stop of the same run closed it, or while its own state runs, so a crash mid-run cannot leave the file open to later turns. */
 	run?: string;
 	/** Written when a run ended or retention stopped (`agent_end`, dispose): user turns the branch held then. Messages after it were exchanged while retention was off, until the next start. */
 	stoppedAt?: number;
@@ -760,15 +760,16 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		const own = path.slice(start);
 		if (!this.automatic || !this.#config.autoRetain) return own;
 		const entries = this.session.sessionManager.getEntries();
-		// Runs a stop closed. Another state's unclosed run ended in a crash: whatever follows it (another
-		// process with retention off) cannot be told apart from its turns, so none of it counts.
+		// Runs a stop closed: a stop names the run it closes, and only that run's own state writes it.
+		// Another state's unclosed run ended in a crash: whatever follows it (another process with
+		// retention off) cannot be told apart from its turns, so none of it counts.
 		const closed = new Set<number>();
 		let open: number | undefined;
 		for (let index = 0; index < entries.length; index++) {
 			const marker = retentionMarker(entries[index]);
 			if (marker?.started) open = index;
 			else if (marker?.stoppedAt !== undefined && open !== undefined) {
-				closed.add(open);
+				if (retentionMarker(entries[open])?.run === marker.run) closed.add(open);
 				open = undefined;
 			}
 		}
@@ -940,7 +941,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		turn: number,
 		messages: number,
 		windowStart: number,
-		marker?: { started: true; run: string } | { stoppedAt: number; stoppedMessages?: number },
+		marker?: { started: true; run: string } | { stoppedAt: number; stoppedMessages?: number; run: string },
 	): void {
 		// A state that does not retain automatically (`/memory enqueue` with `autoRetain` off) records
 		// nothing: a later retaining state would adopt its cursor and upload the turns after it, which
@@ -1044,20 +1045,20 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		// (that answer still counts; later user turns do not). A backend switch mid-run keeps the bound:
 		// the rest of that run happens while retention is off.
 		const midRunExit = this.session.isDisposed && this.session.isStreaming;
-		// Already closed (a run's end, then dispose): nothing new to mark. A file without any marker has
-		// no run to close (keeps an untouched draft session empty).
+		// Only this state's own open run is closed here: a run another state left open (a crash) must
+		// not be validated by a later state's stop. Already closed, or never opened (no turn since this
+		// state started): nothing to mark, which also keeps an untouched draft session empty.
 		const latest = this.#latestMarker();
-		if (!latest || (latest.stoppedAt !== undefined && !midRunExit)) return;
+		if (!latest?.started || latest.run !== this.#runId) return;
 		const [path, start] = this.#retainedEntries();
 		const retainable = this.#retainable(path, start);
 		const stoppedAt = countUserTurns(retainable);
 		const stoppedMessages = midRunExit ? undefined : extractMessages(retainable).length;
-		this.#appendCursor(
-			this.lastRetainedTurn,
-			this.#retainedMessages,
-			this.#windowStart,
-			stoppedMessages === undefined ? { stoppedAt } : { stoppedAt, stoppedMessages },
-		);
+		this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart, {
+			stoppedAt,
+			...(stoppedMessages === undefined ? {} : { stoppedMessages }),
+			run: this.#runId,
+		});
 	}
 }
 
