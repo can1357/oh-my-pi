@@ -16,9 +16,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { TASK_EFFORTS, type TaskEffort } from "../thinking/levels";
 
 /** Directory name probed at every level of the search path. */
 const WORKLOAD_DIR = "workloads";
