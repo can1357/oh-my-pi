@@ -192,6 +192,34 @@ describe("SshProtocolHandler", () => {
 		await expect(handler.resolve(parseInternalUrl("ssh://icaro/nope"))).rejects.toThrow(/No such file or directory/);
 	});
 
+	it("propagates a canceled stat without starting a remote read", async () => {
+		mockHosts();
+		const controller = new AbortController();
+		const cancellation = new Error("Operation cancelled: Idle for 30s");
+		vi.spyOn(fileTransfer, "statRemotePath").mockImplementation(async () => {
+			controller.abort(cancellation);
+			throw cancellation;
+		});
+		const readSpy = vi
+			.spyOn(fileTransfer, "readRemoteFile")
+			.mockRejectedValue(new Error("second remote read rejected"));
+		await expect(
+			handler.resolve(parseInternalUrl("ssh://icaro/etc/hosts"), { signal: controller.signal }),
+		).rejects.toBe(cancellation);
+		expect(readSpy).not.toHaveBeenCalled();
+	});
+
+	it("falls through to the remote read when stat fails without cancellation", async () => {
+		mockHosts();
+		vi.spyOn(fileTransfer, "statRemotePath").mockRejectedValue(new Error("stat failed"));
+		const readSpy = vi
+			.spyOn(fileTransfer, "readRemoteFile")
+			.mockResolvedValue({ bytes: new TextEncoder().encode("hello"), truncated: false });
+		const resource = await handler.resolve(parseInternalUrl("ssh://icaro/etc/hosts"));
+		expect(resource.content).toBe("hello");
+		expect(readSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("rejects a remote special file (FIFO/device) without reading it", async () => {
 		mockHosts();
 		vi.spyOn(fileTransfer, "statRemotePath").mockResolvedValue("other");

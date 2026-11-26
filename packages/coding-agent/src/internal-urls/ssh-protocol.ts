@@ -302,7 +302,9 @@ export class SshProtocolHandler implements ProtocolHandler {
 		let kind: RemotePathKind | undefined;
 		try {
 			kind = await statRemotePath(target, remotePath, { signal: context?.signal });
-		} catch {
+		} catch (error) {
+			// A cancelled caller is not a stat failure: a read with the same aborted signal would only fail again.
+			if (context?.signal?.aborted) throw error;
 			// stat failed (host/connection issue) — fall through; the read gives a clearer error.
 		}
 		if (kind === "directory") {
