@@ -13,6 +13,7 @@ import {
 } from "../config/status-line-schema";
 import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion";
 import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
+import { MAX_RPC_REASSEMBLED_BYTES } from "./rpc/rpc-frame";
 import { parseSpinnerInterval } from "../config/spinner-interval";
 import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
 import { setTightLayout } from "../ui/styles/terminal-padding";
@@ -1571,3 +1572,18 @@ export const cfgRecapIdleSeconds = register({
 
 /** Idle recap policy (`recap.*`). */
 export const cfgRecap = combine({ enabled: cfgRecapEnabled, idleSeconds: cfgRecapIdleSeconds });
+
+/** RPC transport (`rpc.*`). */
+export const cfgRpcMaxInputRecordBytes = register({
+	id: "rpc.maxInputRecordBytes",
+	type: "number",
+	default: MAX_RPC_REASSEMBLED_BYTES,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+			throw new Error(`rpc.maxInputRecordBytes must be a whole number of bytes, got ${JSON.stringify(raw)}.`);
+		}
+	},
+	description:
+		"Largest RPC stdin record in bytes, JSON included. A larger record is refused as a parse error, and its bytes are skipped through its newline. Read when RPC mode starts.",
+});

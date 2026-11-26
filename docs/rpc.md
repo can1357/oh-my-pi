@@ -38,6 +38,8 @@ Behavior notes:
 
 Protocol v1 stdout frames are a single JSON object followed by `\n`. The server caps each physical stdout frame at 1 MiB, including the newline. Inbound frames are always one unchunked JSONL object; clients SHOULD keep them within the advertised physical-frame limit. Input is not reassembled from `rpc_chunk` frames.
 
+A stdin record over the `rpc.maxInputRecordBytes` setting (default 64 MiB, `67108864` bytes; see [settings](settings.md)) is reported as a `parse` error once it passes the cap, and its bytes are skipped through its newline, so the next record still runs. A record that is not valid UTF-8 is reported as a `parse` error and is not run. The ready frame's `maxReassembledFrameBytes` is the protocol ceiling and does not change with the setting.
+
 The initial ready frame uses protocol v1 and advertises the opt-in lossless transport:
 
 ```json
