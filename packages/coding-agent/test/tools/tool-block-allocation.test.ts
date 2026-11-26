@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
 import { anchoredRows, RESERVED_ROW, reservedRows } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { textSized } from "@oh-my-pi/pi-tui/text/osc";
 import { defaultPresenter } from "../../src/ui/tools/default";
 import { legacyPresenter } from "../../src/ui/tools/legacy";
 import { type Block, type PaintImages, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
@@ -205,6 +206,26 @@ describe("tool block viewport allocation", () => {
 		expect(rows).toHaveLength(5);
 		expect(rows[0]?.trim()).toBe("");
 		expect(rows.slice(1).map(row => row.trim())).toEqual(["text 0", "text 7", "text 8", "text 9"]);
+	});
+
+	it("keeps a scaled heading's spacer row under it in a boxed legacy card", () => {
+		// A 2x OSC 66 heading takes its own row and the blank one under it.
+		const drawn = [...lines("text", 10).split("\n"), textSized("Title", { scale: 2, widthCells: 10 }), "", "after"];
+		const call = new ToolCall({
+			id: "call-legacy-sized",
+			name: "ext_tool",
+			args: {},
+			presenter: legacyPresenter({ renderResult: () => ({ render: () => drawn }) }, defaultPresenter),
+		});
+		call.setArgsComplete();
+		call.setExecutionStarted();
+		call.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+
+		const rows = paint(call, 5).rows;
+		expect(rows).toHaveLength(5);
+		expect(rows[2]).toContain("\x1b]66;");
+		expect(Bun.stripANSI(rows[3]!).trim()).toBe("");
+		expect(text(rows)[4]).toContain("after");
 	});
 
 	it("keeps every row of a wrapped search header", () => {

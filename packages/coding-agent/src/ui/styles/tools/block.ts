@@ -17,7 +17,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { anchoredRise } from "@oh-my-pi/pi-tui/driver/images/anchor";
-import { hasGraphics } from "@oh-my-pi/pi-tui/driver/output/ansi";
+import { coveredCells, hasGraphics } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
@@ -124,7 +124,8 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
  * which a look's tint or indent does not hide), so a cut image would paint
  * over the rows above it; older rows fill the room a dropped image leaves.
  * Rows that draw nothing (blank rows, a pending or demoted image's reserved
- * rows, tinted or not, the separator above a dropped image) spend no room.
+ * rows, tinted or not, the separator above a dropped image) spend no room,
+ * but a row under a scaled (OSC 66) glyph above it is that glyph's and stays.
  * Hits are clipped to the rows kept; a cursor in a dropped row goes.
  * Undefined when the heading leaves no room or no row fits.
  */
@@ -138,7 +139,8 @@ function headAndTail(block: Block, rows: number): Block | undefined {
 	for (let end = total; end > head && room > 0;) {
 		const row = block.rows[end - 1]!;
 		const start = end - 1 - anchoredRise(row);
-		const drawsNothing = !hasGraphics(row) && Bun.stripANSI(row).trim().length === 0;
+		const drawsNothing =
+			!hasGraphics(row) && Bun.stripANSI(row).trim().length === 0 && coveredCells(block.rows, end - 1) === 0;
 		if (!drawsNothing && start >= head && end - start <= room) {
 			for (let source = end - 1; source >= start; source--) tail.push(source);
 			room -= end - start;
