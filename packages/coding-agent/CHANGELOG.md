@@ -9,8 +9,8 @@
 ### Added
 
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
-- Added `task.namedModelFallback`: set to `false`, a subagent whose model its agent definition, `task.agentModelOverrides` or an SDK `modelOverride` names runs only on the models listed there, in order, and its spawn fails when none of them can serve, instead of moving to the parent's model, a `retry.fallbackChains` entry, a context promotion model or a prewalk model; role aliases such as `@task` keep their role's chain
-- Added `retry.fallbackNotice`: set to `true`, a session that a retry fallback moved to another model, or back to its primary, gets one hidden notice naming the model that now serves it and why
+- Added `task.namedModelFallback`: set to `false`, a subagent whose model its agent definition, `task.agentModelOverrides` or an SDK `modelOverride` names runs only on the models listed there, in order, and its spawn fails when none of them can serve, instead of moving to the parent's model, a `retry.fallbackChains` entry, a context promotion model or a prewalk model; role aliases such as `@task` keep their role's chain ([#20573](https://github.com/can1357/oh-my-pi/pull/20573) by [@sjawhar](https://github.com/sjawhar))
+- Added `retry.fallbackNotice`: set to `true`, a session that a retry fallback moved to another model, or back to its primary, gets one hidden notice naming the model that now serves it and why ([#20573](https://github.com/can1357/oh-my-pi/pull/20573) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
