@@ -184,13 +184,17 @@ export class StatsLive {
 				}, SYNC_RETRY_MS);
 			}
 		}
-		// Another process may have ingested too; its commits move SQLite's data_version.
-		if (this.#externalWrites()) this.#changed();
-		// A full sync held its last bump back: show its data now rather than at the end of the throttle.
-		if (visible && this.#versionTimer) this.#advanceVersion();
-		this.#emit();
-		// Spaced from the end, so a full sync slower than the interval never runs back to back with the next.
-		if (visible && this.#started) this.#scheduleFullSync();
+		try {
+			// Another process may have ingested too; its commits move SQLite's data_version.
+			if (this.#externalWrites()) this.#changed();
+			// A full sync held its last bump back: show its data now rather than at the end of the throttle.
+			if (visible && this.#versionTimer) this.#advanceVersion();
+			this.#emit();
+		} finally {
+			// Spaced from the end, so a full sync slower than the interval never runs back to back with the next.
+			// Armed even if the reporting above throws: the schedule is a chain, and a lost link ends it.
+			if (visible && this.#started) this.#scheduleFullSync();
+		}
 	}
 
 	#scheduleFullSync(): void {
