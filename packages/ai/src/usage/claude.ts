@@ -442,8 +442,9 @@ export function claudeProfilePlan(profile: unknown): string | undefined {
 	if (!isRecord(profile) || !isRecord(profile.organization)) return undefined;
 	const { rate_limit_tier: tier, organization_type: type } = profile.organization;
 	const multiplier = typeof tier === "string" ? /max_(\d+x)/i.exec(tier)?.[1]?.toLowerCase() : undefined;
+	const key = typeof type === "string" ? type.toLowerCase() : undefined;
 	const plan =
-		(typeof type === "string" ? CLAUDE_ORGANIZATION_PLANS[type.toLowerCase()] : undefined) ??
+		(key && Object.hasOwn(CLAUDE_ORGANIZATION_PLANS, key) ? CLAUDE_ORGANIZATION_PLANS[key] : undefined) ??
 		(multiplier ? "Max" : undefined);
 	if (!plan) return undefined;
 	return multiplier ? `${plan} ${multiplier}` : plan;
