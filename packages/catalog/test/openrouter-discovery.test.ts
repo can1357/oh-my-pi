@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 
@@ -348,6 +349,15 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		);
 
 		expect(result.models.some(model => model.id === "openai/gpt-5.5" && model.api === "openrouter")).toBe(true);
+	});
+
+	it("serves the bundled Jev Router as a chat model on the openrouter transport", () => {
+		// The openrouter transport serves only chat and tiny kinds; a judge row here fails the
+		// provider registration check for every custom provider that registers this roster.
+		const router = getBundledModels("openrouter").find(model => model.id === "typesafe/jev-router");
+		if (!router) throw new Error("OpenRouter bundled Jev Router is missing");
+		expect(router.api).toBe("openrouter");
+		expect(modelKind(router)).toBe("chat");
 	});
 
 	it("never serves one key's cached roster to another key", async () => {

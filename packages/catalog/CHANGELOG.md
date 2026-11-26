@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Fixed custom providers that register the OpenRouter roster failing at startup because `typesafe/jev-router` was classified as a judge model instead of chat ([#15244](https://github.com/can1357/oh-my-pi/issues/15244), [#19953](https://github.com/can1357/oh-my-pi/pull/19953) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Antigravity CLI models showing as free in the model browser: they now show as included in the Google AI plan, can be selected as the cheapest vision fallback when configured roles do not resolve, and report $0 instead of unavailable cost in OTLP telemetry. ([#20577](https://github.com/can1357/oh-my-pi/pull/20577) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Added
