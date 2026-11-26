@@ -23,7 +23,14 @@ import type {
 	TextReviewSource,
 	TextReviewSourceProvenance,
 } from "./annotation-types";
-import { type AnnotationDraft, type OpenAnnotationDraft, openAnnotationDraft } from "./draft-store";
+import {
+	annotationDraftKey,
+	type AnnotationDraft,
+	type AnnotationDraftSource,
+	loadAnnotationDrafts,
+	type OpenAnnotationDraft,
+	openAnnotationDraft,
+} from "./draft-store";
 
 /** What the overlay host reads: the UI surface plus the live session cwd for editor paths. */
 export type AnnotationOverlayContext = Pick<CustomCommandContext, "ui" | "cwd" | "sessionManager">;
@@ -111,28 +118,104 @@ function reviewKeys(keybindings: KeybindingsManager): AnnotationReviewOptions {
 	};
 }
 
+type DiffAnnotationDraftSource = Extract<AnnotationDraftSource, { kind: "diff" }>;
+type TextAnnotationDraftSource = Extract<AnnotationDraftSource, { kind: "text" }>;
+
+type RefreshHandoff<Source> = {
+	readonly action: "refresh";
+	readonly source: Source;
+	readonly saved: AnnotationDraft | null;
+};
+
+function isRefreshHandoff<Source, Result extends { action: string }>(
+	outcome: Result | RefreshHandoff<Source> | undefined,
+): outcome is RefreshHandoff<Source> {
+	return outcome?.action === "refresh" && "source" in outcome;
+}
+
+async function confirmSourceRefresh<Source extends AnnotationDraftSource>(
+	ctx: AnnotationOverlayContext,
+	review: AnnotationReviewModel,
+	current: Source,
+	source: Source,
+	completeRefresh: (handoff: RefreshHandoff<Source>) => void,
+): Promise<boolean> {
+	if (review.finished || !(await review.confirmDiscardForRefresh()) || review.finished) return false;
+	const key = annotationDraftKey(source);
+	// Read the destination while the old pane is still open: a lookup failure is a canceled refresh.
+	const saved =
+		key === annotationDraftKey(current)
+			? null
+			: ((await loadAnnotationDrafts(ctx.sessionManager)).find(draft => draft.key === key) ?? null);
+	if (review.finished) return false;
+	completeRefresh({ action: "refresh", source, saved });
+	return true;
+}
+
+async function refreshDiffSource(
+	ctx: AnnotationOverlayContext,
+	review: AnnotationReviewModel,
+	source: DiffAnnotationDraftSource,
+	completeRefresh: (handoff: RefreshHandoff<DiffAnnotationDraftSource>) => void,
+): Promise<void> {
+	const refreshed = await refreshReviewTarget(source.target);
+	if (review.finished || source.target.rawDiff === refreshed.rawDiff) return;
+	const nextSource: DiffAnnotationDraftSource = {
+		kind: "diff",
+		target: refreshed,
+		focus: source.focus,
+	};
+	if (await confirmSourceRefresh(ctx, review, source, nextSource, completeRefresh)) {
+		const issue = getReviewTargetIssue(refreshed);
+		if (issue) ctx.ui.notify(issue, "info");
+	}
+}
+
+async function refreshTextFileSource(
+	ctx: AnnotationOverlayContext,
+	review: AnnotationReviewModel,
+	source: TextAnnotationDraftSource,
+	path: string,
+	completeRefresh: (handoff: RefreshHandoff<TextAnnotationDraftSource>) => void,
+): Promise<void> {
+	const refreshed = await readFileTextReviewSource(
+		path,
+		ctx.sessionManager.getCwd?.() ?? ctx.cwd,
+		source.source.sessionId ?? ctx.sessionManager.getSessionId(),
+	);
+	if (review.finished || review.textSourceText() === refreshed.text) return;
+	const nextSource: TextAnnotationDraftSource = {
+		kind: "text",
+		source: { ...source.source, text: refreshed.text },
+	};
+	if ((await confirmSourceRefresh(ctx, review, source, nextSource, completeRefresh)) && !refreshed.text) {
+		ctx.ui.notify("The annotation file is now empty.", "info");
+	}
+}
+
 /**
  * Show the annotation review fullscreen until it completes, resuming `draft`'s saved notes.
  * `callbacks` builds the review's host callbacks once the model exists.
  */
-async function showAnnotationReview<T>(
+async function showAnnotationReview<Result extends { action: string }, Source>(
 	ctx: AnnotationOverlayContext,
 	input: AnnotationReviewInput,
 	draft: OpenAnnotationDraft,
 	callbacks: (
 		ui: ExtensionUiHost,
 		review: () => AnnotationReviewModel,
+		completeRefresh: (handoff: RefreshHandoff<Source>) => void,
 	) => Omit<AnnotationReviewCallbacks, "onComplete">,
-): Promise<T | undefined> {
+): Promise<Result | RefreshHandoff<Source> | undefined> {
 	let review: AnnotationReviewModel | undefined;
 	try {
-		return await ctx.ui.custom<T | undefined>(
+		return await ctx.ui.custom<Result | RefreshHandoff<Source> | undefined>(
 			(ui, _theme, keybindings, done) => {
 				review = new AnnotationReviewModel(
 					input,
 					{
-						...callbacks(ui, () => review!),
-						onComplete: result => done(result as T | undefined),
+						...callbacks(ui, () => review!, done),
+						onComplete: result => done(result as Result | undefined),
 						onWarning: message => ctx.ui.notify(message, "warning"),
 					},
 					{ theme: currentTheme, size: () => ui.size() },
@@ -152,6 +235,43 @@ async function showAnnotationReview<T>(
 	}
 }
 
+async function runAnnotationReview<Source extends AnnotationDraftSource, Result extends { action: string }>(
+	ctx: AnnotationOverlayContext,
+	initialSource: Source,
+	resumed: AnnotationDraft | undefined,
+	mount: (source: Source, draft: OpenAnnotationDraft) => Promise<Result | RefreshHandoff<Source> | undefined>,
+): Promise<{ source: Source; result: Result | undefined }> {
+	let source = initialSource;
+	let draft = await openAnnotationDraft(ctx.sessionManager, source, resumed);
+	if (draft.restored && !resumed) ctx.ui.notify("Restored the saved annotation draft.", "info");
+
+	while (true) {
+		let outcome: Result | RefreshHandoff<Source> | undefined;
+		try {
+			outcome = await mount(source, draft);
+		} catch (error) {
+			await draft
+				.close(undefined)
+				.catch(closeError => ctx.ui.notify(`Could not save the annotation draft: ${closeError}`, "warning"));
+			throw error;
+		}
+
+		if (isRefreshHandoff<Source, Result>(outcome)) {
+			// "refresh" explicitly drops this source without saving any notes, even if they still anchor.
+			await draft.close(outcome);
+			source = outcome.source;
+			draft = await openAnnotationDraft(ctx.sessionManager, source, outcome.saved);
+			if (draft.restored) ctx.ui.notify("Restored the saved annotation draft.", "info");
+			continue;
+		}
+
+		await draft
+			.close(outcome)
+			.catch(error => ctx.ui.notify(`Could not save the annotation draft: ${error}`, "warning"));
+		return { source, result: outcome };
+	}
+}
+
 /** Mount a frozen diff in the review overlay, resuming its saved draft. */
 export async function showCodeReviewOverlay(
 	ctx: AnnotationOverlayContext,
@@ -159,57 +279,30 @@ export async function showCodeReviewOverlay(
 	focus?: string,
 	resumed?: AnnotationDraft,
 ): Promise<(CodeReviewOverlayResult & { refreshedTarget?: ResolvedReviewTarget }) | undefined> {
-	let currentTarget = target;
-	const draft = await openAnnotationDraft(ctx.sessionManager, { kind: "diff", target, focus }, resumed);
-	if (draft.restored && !resumed) ctx.ui.notify("Restored the saved annotation draft.", "info");
-	const result = await showAnnotationReview<CodeReviewOverlayResult>(
+	const initialSource: DiffAnnotationDraftSource = { kind: "diff", target, focus };
+	const { source, result } = await runAnnotationReview<DiffAnnotationDraftSource, CodeReviewOverlayResult>(
 		ctx,
-		{ kind: "diff", files: target.snapshot.files, mode: target.mode },
-		draft,
-		(ui, review) => ({
-			onAnnotationExternalEditor: (text, commit) => editAnnotationDraft(ui, text, commit),
-			onRefresh: target.refreshSource
-				? async () => {
-						const refreshed = await refreshReviewTarget(currentTarget);
-						if (review().finished) return;
-						let dropped = 0;
-						const replaced = await draft.replaceSource({ kind: "diff", target: refreshed, focus }, () => {
-							if (review().finished) return false;
-							if (currentTarget.rawDiff !== refreshed.rawDiff) {
-								dropped = review().replaceDiffSource(refreshed.snapshot.files);
-							}
-							currentTarget = refreshed;
-							return true;
-						});
-						if (review().finished) return;
-						if (!replaced) {
-							ctx.ui.notify(
-								"A separate annotation draft already exists for the refreshed target; kept the current review and notes.",
-								"warning",
-							);
-							return;
-						}
-						const issue = getReviewTargetIssue(refreshed);
-						if (issue) ctx.ui.notify(issue, "info");
-						if (dropped > 0) {
-							ctx.ui.notify(
-								dropped === 1
-									? "Dropped 1 note that no longer matches the refreshed diff."
-									: `Dropped ${dropped} notes that no longer match the refreshed diff.`,
-								"warning",
-							);
-						}
-					}
-				: undefined,
-			// PR and caller-supplied diffs need not match the local checkout, so only local reviews open the working-tree file.
-			onExternalEditor:
-				currentTarget.kind === "pr" || currentTarget.kind === "patch"
-					? undefined
-					: () => editReviewedFile(ui, ctx, review(), currentTarget.repository),
-		}),
+		initialSource,
+		resumed,
+		(currentSource, draft) =>
+			showAnnotationReview<CodeReviewOverlayResult, DiffAnnotationDraftSource>(
+				ctx,
+				{ kind: "diff", files: currentSource.target.snapshot.files, mode: currentSource.target.mode },
+				draft,
+				(ui, review, completeRefresh) => ({
+					onAnnotationExternalEditor: (text, commit) => editAnnotationDraft(ui, text, commit),
+					onRefresh: currentSource.target.refreshSource
+						? () => refreshDiffSource(ctx, review(), currentSource, completeRefresh)
+						: undefined,
+					// PR and caller-supplied diffs need not match the local checkout, so only local reviews open the working-tree file.
+					onExternalEditor:
+						currentSource.target.kind === "pr" || currentSource.target.kind === "patch"
+							? undefined
+							: () => editReviewedFile(ui, ctx, review(), currentSource.target.repository),
+				}),
+			),
 	);
-	await draft.close(result).catch(error => ctx.ui.notify(`Could not save the annotation draft: ${error}`, "warning"));
-	return result && currentTarget !== target ? { ...result, refreshedTarget: currentTarget } : result;
+	return result && source.target !== target ? { ...result, refreshedTarget: source.target } : result;
 }
 
 /** Mount a frozen text source in the same annotation review, resuming its saved draft. */
@@ -218,57 +311,28 @@ export async function showTextReviewOverlay(
 	source: TextReviewSource,
 	resumed?: AnnotationDraft,
 ): Promise<TextReviewOverlayResult | undefined> {
-	let currentSource = source;
-	const draft = await openAnnotationDraft(ctx.sessionManager, { kind: "text", source }, resumed);
-	if (draft.restored && !resumed) ctx.ui.notify("Restored the saved annotation draft.", "info");
-	const provenance = source.provenance;
-	const editable = provenance?.kind === "file" || provenance?.kind === "prompt" ? provenance : undefined;
-	const result = await showAnnotationReview<TextReviewOverlayResult>(
-		ctx,
-		{ kind: "text", source },
-		draft,
-		(ui, review) => ({
-			onAnnotationExternalEditor: (text, commit) => editAnnotationDraft(ui, text, commit),
-			onRefresh:
-				provenance?.kind === "file"
-					? async () => {
-							const refreshed = await readFileTextReviewSource(
-								provenance.path,
-								ctx.sessionManager.getCwd?.() ?? ctx.cwd,
-								source.sessionId ?? ctx.sessionManager.getSessionId(),
-							);
-							if (review().finished) return;
-							const nextSource = { ...currentSource, text: refreshed.text };
-							const changed = review().textSourceText() !== refreshed.text;
-							let dropped = 0;
-							const replaced = await draft.replaceSource({ kind: "text", source: nextSource }, () => {
-								if (review().finished) return false;
-								if (changed) dropped = review().replaceTextSource(refreshed.text);
-								currentSource = nextSource;
-								return true;
-							});
-							if (review().finished) return;
-							if (!replaced) {
-								ctx.ui.notify(
-									"A separate annotation draft already exists for the refreshed file; kept the current review and notes.",
-									"warning",
-								);
-								return;
-							}
-							if (!refreshed.text) ctx.ui.notify("The annotation file is now empty.", "info");
-							if (dropped > 0) {
-								ctx.ui.notify(
-									dropped === 1
-										? "Dropped 1 line note that no longer matches the refreshed text."
-										: `Dropped ${dropped} line notes that no longer match the refreshed text.`,
-									"warning",
-								);
-							}
-						}
-					: undefined,
-			onExternalEditor: editable ? () => editTextSource(ui, ctx, review(), editable) : undefined,
-		}),
-	);
-	await draft.close(result).catch(error => ctx.ui.notify(`Could not save the annotation draft: ${error}`, "warning"));
-	return result;
+	const { source: finalSource, result } = await runAnnotationReview<
+		TextAnnotationDraftSource,
+		TextReviewOverlayResult
+	>(ctx, { kind: "text", source }, resumed, (currentSource, draft) => {
+		const provenance = currentSource.source.provenance;
+		const editable = provenance?.kind === "file" || provenance?.kind === "prompt" ? provenance : undefined;
+		return showAnnotationReview<TextReviewOverlayResult, TextAnnotationDraftSource>(
+			ctx,
+			{ kind: "text", source: currentSource.source },
+			draft,
+			(ui, review, completeRefresh) => ({
+				onAnnotationExternalEditor: (text, commit) => editAnnotationDraft(ui, text, commit),
+				onRefresh:
+					provenance?.kind === "file"
+						? () => refreshTextFileSource(ctx, review(), currentSource, provenance.path, completeRefresh)
+						: undefined,
+				onExternalEditor: editable ? () => editTextSource(ui, ctx, review(), editable) : undefined,
+			}),
+		);
+	});
+	if (!result) return undefined;
+	return result.editedText === undefined && finalSource.source.text !== source.text
+		? { ...result, editedText: finalSource.source.text }
+		: result;
 }

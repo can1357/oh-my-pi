@@ -6,6 +6,7 @@ import type { AnnotationOverlayDraft } from "@oh-my-pi/pi-coding-agent/extensibi
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	annotationDraftKey,
+	hasAnnotationDraftsSync,
 	loadAnnotationDrafts,
 	openAnnotationDraft,
 } from "../../../src/extensibility/custom-commands/bundled/annotate/draft-store";
@@ -58,117 +59,31 @@ describe("annotation drafts", () => {
 		await Bun.write(file, JSON.stringify({ key, updatedAt: 1, source, state: null }));
 		expect(await loadAnnotationDrafts(session)).toEqual([]);
 	});
-
-	it("keeps the current snapshot when refresh cycles back to a previously saved draft", async () => {
+	it("retains an open draft's session and discards its notes without saving them", async () => {
 		using tempDir = TempDir.createSync("@pi-annotation-drafts-");
 		const session = { getArtifactsDir: () => tempDir.path(), getSessionId: () => "s1", ensureOnDisk: vi.fn() };
-		const targetA = createResolvedReviewTarget("uncommitted", "Uncommitted changes", DIFF, "No changes");
-		const targetB = createResolvedReviewTarget(
-			"uncommitted",
-			"Uncommitted changes",
-			DIFF.replace("+export const value = 2;", "+export const value = 3;"),
-			"No changes",
-		);
-		const sourceA = { kind: "diff", target: targetA } as const;
-		const sourceB = { kind: "diff", target: targetB } as const;
-		const state = (note: string): AnnotationOverlayDraft => ({
+		const target = createResolvedReviewTarget("uncommitted", "Uncommitted changes", DIFF, "No changes");
+		const source = { kind: "diff", target } as const;
+		const state: AnnotationOverlayDraft = {
 			kind: "diff",
 			annotations: [
 				{
 					fileIndex: 0,
 					sourceIndex: -1,
-					annotation: { scope: "file", path: "src/value.ts", occurrence: 1, note },
+					annotation: { scope: "file", path: "src/value.ts", occurrence: 1, note: "discard me" },
 				},
 			],
-		});
-		const overlay = (draft: AnnotationOverlayDraft) =>
-			({ getDraft: () => draft, restoreDraft: vi.fn() }) as unknown as AnnotationReviewModel;
-
-		const seed = await openAnnotationDraft(session, sourceA);
-		seed.restore(overlay(state("seed note")));
-		await seed.close(undefined);
-
-		const active = await openAnnotationDraft(session, sourceA);
-		active.restore(overlay(state("latest note")));
-		expect(await active.replaceSource(sourceB, () => true)).toBe(true);
-		expect(await active.replaceSource(sourceA, () => true)).toBe(true);
-		await active.close(undefined);
-
-		const drafts = await loadAnnotationDrafts(session);
-		expect(drafts).toHaveLength(1);
-		expect(drafts[0]?.source.kind).toBe("diff");
-		if (drafts[0]?.source.kind !== "diff") throw new Error("expected a diff draft");
-		expect(drafts[0].source.target.rawDiff).toBe(targetA.rawDiff);
-		expect(drafts[0].state.annotations).toMatchObject([{ annotation: { note: "latest note" } }]);
-	});
-
-	it("does not save a reread text baseline as an empty edited-text draft", async () => {
-		using tempDir = TempDir.createSync("@pi-annotation-drafts-");
-		const session = { getArtifactsDir: () => tempDir.path(), getSessionId: () => "s1", ensureOnDisk: vi.fn() };
-		const source = {
-			kind: "text",
-			source: {
-				id: "file:/source.txt",
-				kind: "file",
-				label: "source.txt",
-				text: "before",
-				provenance: { kind: "file", path: "/source.txt" },
-				sessionId: "s1",
-			},
-		} as const;
-		const refreshedSource = { ...source, source: { ...source.source, text: "after" } };
-		const state: AnnotationOverlayDraft = { kind: "text", annotations: [], editedText: "after" };
-		const review = { getDraft: () => state, restoreDraft: vi.fn() } as unknown as AnnotationReviewModel;
+		};
 		const draft = await openAnnotationDraft(session, source);
-		draft.restore(review);
-		expect(await draft.replaceSource(refreshedSource, () => true)).toBe(true);
-		await draft.close(undefined);
+		draft.restore({
+			getDraft: () => state,
+			restoreDraft: vi.fn(),
+		} as unknown as AnnotationReviewModel);
 
+		expect(hasAnnotationDraftsSync(tempDir.path(), "s1")).toBe(true);
+		await draft.close({ action: "refresh" });
 		expect(await loadAnnotationDrafts(session)).toEqual([]);
-	});
-
-	it("leaves an independent draft untouched when refresh would reuse its source key", async () => {
-		using tempDir = TempDir.createSync("@pi-annotation-drafts-");
-		const session = { getArtifactsDir: () => tempDir.path(), getSessionId: () => "s1", ensureOnDisk: vi.fn() };
-		const targetA = createResolvedReviewTarget("uncommitted", "Uncommitted changes", DIFF, "No changes");
-		const targetB = createResolvedReviewTarget(
-			"uncommitted",
-			"Uncommitted changes",
-			DIFF.replace("+export const value = 2;", "+export const value = 3;"),
-			"No changes",
-		);
-		const sourceA = { kind: "diff", target: targetA } as const;
-		const sourceB = { kind: "diff", target: targetB } as const;
-		const overlay = (note: string) =>
-			({
-				getDraft: () => ({
-					kind: "diff",
-					annotations: [
-						{
-							fileIndex: 0,
-							sourceIndex: -1,
-							annotation: { scope: "file", path: "src/value.ts", occurrence: 1, note },
-						},
-					],
-				}),
-				restoreDraft: vi.fn(),
-			}) as unknown as AnnotationReviewModel;
-
-		const independent = await openAnnotationDraft(session, sourceB);
-		independent.restore(overlay("independent"));
-		await independent.close(undefined);
-		const active = await openAnnotationDraft(session, sourceA);
-		active.restore(overlay("current"));
-		const replace = vi.fn(() => true);
-
-		expect(await active.replaceSource(sourceB, replace)).toBe(false);
-		expect(replace).not.toHaveBeenCalled();
-		await active.close(undefined);
-
-		const drafts = await loadAnnotationDrafts(session);
-		expect(drafts).toHaveLength(2);
-		expect(drafts.find(draft => draft.key === annotationDraftKey(sourceB))?.state.annotations).toMatchObject([
-			{ annotation: { note: "independent" } },
-		]);
+		expect(hasAnnotationDraftsSync(tempDir.path(), "s1")).toBe(false);
+		expect(session.ensureOnDisk).not.toHaveBeenCalled();
 	});
 });

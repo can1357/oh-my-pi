@@ -25,7 +25,12 @@ import {
 	showCodeReviewOverlay,
 	showTextReviewOverlay,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/fullscreen";
-import { loadAnnotationDrafts } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/draft-store";
+import {
+	loadAnnotationDrafts,
+	openAnnotationDraft,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/draft-store";
+import type { AnnotationReviewModel } from "@oh-my-pi/pi-coding-agent/ui/overlays/panels/annotation-review-model";
+import type { AnnotationOverlayDraft } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/annotation-types";
 import * as externalEditor from "@oh-my-pi/pi-coding-agent/utils/external-editor";
 import type {
 	CustomCommandAPI,
@@ -88,6 +93,19 @@ function feed(term: TestTerminal, raw: string): void {
 	else term.type(raw);
 }
 
+async function waitForScreen(term: TestTerminal, text: string): Promise<string> {
+	const deadline = performance.now() + 1_000;
+	while (performance.now() < deadline) {
+		term.render();
+		const screen = term.screen().join("\n");
+		if (screen.toLowerCase().includes(text.toLowerCase())) return screen;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		await promise;
+	}
+	throw new Error(`terminal did not render ${JSON.stringify(text)}`);
+}
+
 const SAMPLE_DIFF = `diff --git a/src/value.ts b/src/value.ts
 --- a/src/value.ts
 +++ b/src/value.ts
@@ -98,15 +116,18 @@ const SAMPLE_DIFF = `diff --git a/src/value.ts b/src/value.ts
 
 const API = { cwd: "/workspace" } as unknown as CustomCommandAPI;
 
+type TestOverlayKey = string | ((term: TestTerminal, waitForCompletion: () => Promise<void>) => Promise<void>);
 interface ContextOptions {
 	selectResults?: Array<string | undefined>;
 	branch?: SessionMessageEntry[];
 	cwd?: string;
 	artifactsDir?: string | null;
-	customKeys?: readonly (string | ((term: TestTerminal) => Promise<void>))[];
+	customSessions?: readonly (readonly TestOverlayKey[])[];
+	customKeys?: readonly TestOverlayKey[];
 	customResult?: unknown;
 	inputResult?: string | undefined;
 	editorResult?: string | undefined;
+	customResults?: readonly unknown[];
 }
 
 function createContext(options: ContextOptions = {}) {
@@ -135,15 +156,19 @@ function createContext(options: ContextOptions = {}) {
 			completion.resolve(result);
 		};
 		const output = await factory(HOST, extensionTheme(currentTheme()), KeybindingsManager.inMemory(), done);
-		if (options.customResult !== undefined) {
-			done(options.customResult as T);
+		const customResult = options.customResults ? options.customResults[customCalls - 1] : options.customResult;
+		if (customResult !== undefined) {
+			done(customResult as T);
 			return completion.promise;
 		}
 		const term = mountView(output);
 		try {
-			for (const key of options.customKeys ?? [ENTER]) {
-				if (typeof key === "function") await key(term);
-				else feed(term, key);
+			for (const key of options.customSessions?.[customCalls - 1] ?? options.customKeys ?? [ENTER]) {
+				if (typeof key === "function") {
+					await key(term, async () => {
+						await completion.promise;
+					});
+				} else feed(term, key);
 				const eventLoop = Promise.withResolvers<void>();
 				setImmediate(eventLoop.resolve);
 				await eventLoop.promise;
@@ -358,7 +383,7 @@ describe("/annotate contracts", () => {
 		expect(pasteToEditor.mock.calls[0]?.[0]).toContain(annotation.note);
 	});
 
-	it("preserves annotations on a refreshed PR diff when reopening its saved draft", async () => {
+	it("keeps the saved source and every note when refresh confirmation is canceled, then drops them all when approved", async () => {
 		await withTempDir(async directory => {
 			const artifactsDir = join(directory, "artifacts");
 			const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff", {
@@ -376,7 +401,6 @@ describe("/annotate contracts", () => {
 				{ refreshSource: target.refreshSource },
 			);
 			spyOn(review, "refreshReviewTarget").mockResolvedValue(refreshed);
-			const refreshedShown = Promise.withResolvers<string>();
 			const first = createContext({
 				cwd: directory,
 				artifactsDir,
@@ -391,38 +415,226 @@ describe("/annotate contracts", () => {
 					ENTER,
 					"r",
 					async term => {
-						expect(await refreshedShown.promise).toMatch(/^Dropped 1 note/);
-						term.render();
-						expect(term.screen().join("\n")).toContain("const value = 3;");
+						const screen = await waitForScreen(term, "discard");
+						expect(screen.toLowerCase()).toContain("discard");
+						feed(term, "\x1b");
 					},
-					ENTER,
-					ENTER,
+					"\x1b",
 				],
-			});
-			first.notify.mockImplementation(message => {
-				refreshedShown.resolve(message);
-				return undefined;
 			});
 			await runAnnotateCommand(API, "code-review https://github.com/acme/project/pull/42", first.ctx, {
 				resolvePrReviewTarget: async () => target,
 				showCodeReviewOverlay,
 			});
-			expect(first.pasteToEditor.mock.calls[0]?.[0]).toContain("survives refresh");
-			expect(first.pasteToEditor.mock.calls[0]?.[0]).not.toContain("obsolete note");
-			const [saved] = await loadAnnotationDrafts(first.ctx.sessionManager);
-			if (saved?.source.kind !== "diff") throw new Error("expected a saved diff draft");
-			expect(saved.source.target.rawDiff).toBe(refreshed.rawDiff);
+			expect(first.pasteToEditor).not.toHaveBeenCalled();
+			const [canceled] = await loadAnnotationDrafts(first.ctx.sessionManager);
+			if (canceled?.source.kind !== "diff" || canceled.state.kind !== "diff") {
+				throw new Error("expected the canceled draft to preserve its diff source");
+			}
+			expect(canceled.source.target.rawDiff).toBe(target.rawDiff);
+			expect(canceled.state.annotations.map(entry => entry.annotation.note).sort()).toEqual([
+				"obsolete note",
+				"survives refresh",
+			]);
 
-			const resumed = createContext({
+			const accepted = createContext({
 				cwd: directory,
 				artifactsDir,
-				selectResults: ["Saved draft", `1. ${saved.source.target.mode} — 1 note(s)`],
-				customKeys: [RIGHT, ENTER, UP, ENTER],
+				selectResults: ["Saved draft", `1. ${target.mode} — 2 note(s)`],
+				customSessions: [
+					[
+						"r",
+						async (term, waitForCompletion) => {
+							const screen = await waitForScreen(term, "discard");
+							expect(screen.toLowerCase()).toContain("discard");
+							feed(term, "y");
+							await waitForCompletion();
+						},
+					],
+					[
+						async term => {
+							const screen = await waitForScreen(term, "const value = 3;");
+							expect(screen).not.toContain("survives refresh");
+							expect(screen).not.toContain("obsolete note");
+						},
+						"\x1b",
+					],
+				],
 			});
-			const feedback = await runAnnotateCommand(API, "", resumed.ctx, { showCodeReviewOverlay });
-			expect(feedback).toContain("+const value = 3;");
-			expect(feedback).not.toContain("+const value = 2;");
-			expect(feedback).toContain("survives refresh");
+			await runAnnotateCommand(API, "", accepted.ctx, { showCodeReviewOverlay });
+			expect(accepted.customCalls()).toBe(2);
+			expect(accepted.pasteToEditor).not.toHaveBeenCalled();
+			expect(await loadAnnotationDrafts(accepted.ctx.sessionManager)).toEqual([]);
+		});
+	});
+
+	it("keeps the old draft when the approved refresh lookup fails", async () => {
+		await withTempDir(async directory => {
+			const artifactsDir = join(directory, "artifacts");
+			const unavailableArtifacts = join(directory, "unavailable");
+			await mkdir(unavailableArtifacts);
+			await writeFile(join(unavailableArtifacts, "annotation-drafts"), "");
+			const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff", {
+				refreshSource: {
+					kind: "remote",
+					cwd: directory,
+					ref: { forge: "github", repo: "acme/project", number: 42 },
+				},
+			});
+			const refreshed = createResolvedReviewTarget(
+				"pr",
+				target.mode,
+				SAMPLE_DIFF.replace("+const value = 2;", "+const value = 3;"),
+				target.emptyMessage,
+				{ refreshSource: target.refreshSource },
+			);
+			spyOn(review, "refreshReviewTarget").mockResolvedValue(refreshed);
+			const context = createContext({
+				cwd: directory,
+				artifactsDir,
+				customKeys: [
+					RIGHT,
+					"a",
+					"old note survives failed refresh",
+					ENTER,
+					"r",
+					async (term, waitForCompletion) => {
+						await waitForScreen(term, "Discard this annotation draft and reload?");
+						spyOn(context.ctx.sessionManager, "getArtifactsDir").mockReturnValueOnce(unavailableArtifacts);
+						feed(term, "y");
+						const deadline = performance.now() + 1_000;
+						while (!context.notify.mock.calls.some(([, type]) => type === "warning")) {
+							if (performance.now() >= deadline) throw new Error("refresh failure was not reported");
+							const { promise, resolve } = Promise.withResolvers<void>();
+							setImmediate(resolve);
+							await promise;
+						}
+						term.render();
+						const screen = term.screen().join("\n");
+						expect(screen).toContain("old note survives failed refresh");
+						expect(screen).toContain("const value = 2;");
+						expect(screen).not.toContain("const value = 3;");
+						feed(term, "\x1b");
+						await waitForCompletion();
+					},
+				],
+			});
+			await runAnnotateCommand(API, "code-review https://github.com/acme/project/pull/42", context.ctx, {
+				resolvePrReviewTarget: async () => target,
+				showCodeReviewOverlay,
+			});
+
+			const [saved] = await loadAnnotationDrafts(context.ctx.sessionManager);
+			if (saved?.source.kind !== "diff" || saved.state.kind !== "diff") {
+				throw new Error("expected the old draft to remain saved");
+			}
+			expect(saved.source.target.rawDiff).toBe(target.rawDiff);
+			expect(saved.state.annotations).toMatchObject([{ annotation: { note: "old note survives failed refresh" } }]);
+		});
+	});
+
+	it("restores an existing destination draft after refreshing a diff", async () => {
+		await withTempDir(async directory => {
+			const artifactsDir = join(directory, "artifacts");
+			const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff", {
+				refreshSource: {
+					kind: "remote",
+					cwd: directory,
+					ref: { forge: "github", repo: "acme/project", number: 42 },
+				},
+			});
+			const refreshed = createResolvedReviewTarget(
+				"pr",
+				target.mode,
+				SAMPLE_DIFF.replace("+const value = 2;", "+const value = 3;"),
+				target.emptyMessage,
+				{ refreshSource: target.refreshSource },
+			);
+			spyOn(review, "refreshReviewTarget").mockResolvedValue(refreshed);
+			const session = {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "session-1",
+				ensureOnDisk: async () => {},
+			};
+			const destinationSource = { kind: "diff", target: refreshed } as const;
+			const destinationState: AnnotationOverlayDraft = {
+				kind: "diff",
+				annotations: [
+					{
+						fileIndex: 0,
+						sourceIndex: -1,
+						annotation: {
+							scope: "file",
+							path: "src/value.ts",
+							occurrence: 1,
+							note: "destination draft note",
+						},
+					},
+				],
+			};
+			const destination = await openAnnotationDraft(session, destinationSource);
+			destination.restore({
+				getDraft: () => destinationState,
+				restoreDraft: vi.fn(),
+			} as unknown as AnnotationReviewModel);
+			await destination.close(undefined);
+
+			const context = createContext({
+				cwd: directory,
+				artifactsDir,
+				customSessions: [
+					["r", async (_term, waitForCompletion) => waitForCompletion()],
+					[
+						async term => {
+							const screen = await waitForScreen(term, "destination draft note");
+							expect(screen).toContain("const value = 3;");
+						},
+						"\x1b",
+					],
+				],
+			});
+			await runAnnotateCommand(API, "code-review https://github.com/acme/project/pull/42", context.ctx, {
+				resolvePrReviewTarget: async () => target,
+				showCodeReviewOverlay,
+			});
+			expect(context.customCalls()).toBe(2);
+
+			const [saved] = await loadAnnotationDrafts(context.ctx.sessionManager);
+			if (saved?.source.kind !== "diff" || saved.state.kind !== "diff") {
+				throw new Error("expected the destination draft to remain saved");
+			}
+			expect(saved.source.target.rawDiff).toBe(refreshed.rawDiff);
+			expect(saved.state.annotations).toMatchObject([{ annotation: { note: "destination draft note" } }]);
+		});
+	});
+
+	it("uses refreshed file text in the eventual text annotation prompt", async () => {
+		await withTempDir(async directory => {
+			const filePath = join(directory, "refresh-source.txt");
+			const oldText = "original file text";
+			const refreshedText = "new file text after refresh";
+			await writeFile(filePath, oldText, "utf8");
+			const context = createContext({
+				cwd: directory,
+				customSessions: [
+					[
+						async (term, waitForCompletion) => {
+							await writeFile(filePath, refreshedText, "utf8");
+							feed(term, "r");
+							await waitForCompletion();
+						},
+					],
+					["a", "review the reloaded line", ENTER, ENTER, ENTER],
+				],
+			});
+
+			await runAnnotateCommand(API, filePath, context.ctx, { showTextReviewOverlay });
+
+			expect(context.customCalls()).toBe(2);
+			const prompt = context.pasteToEditor.mock.calls[0]?.[0];
+			expect(prompt).toContain(refreshedText);
+			expect(prompt).toContain("review the reloaded line");
+			expect(prompt).not.toContain(oldText);
 		});
 	});
 

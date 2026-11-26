@@ -12,6 +12,8 @@ import { parseInternalUrl } from "../../../../internal-urls/parse";
 import reviewCustomRequestTemplate from "../../../../prompts/review-custom-request.md" with { type: "text" };
 import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-request.md" with { type: "text" };
 import * as gh from "../../../../tools/gh";
+import { fetchPrDiffFresh } from "../../../../tools/gh-pr-diff";
+import { resolveCacheTtl, resolveGithubCacheAuthKey } from "../../../../tools/github-cache";
 import * as glab from "../../../../tools/glab-mr";
 import { resolveToCwd } from "../../../../tools/path-utils";
 import { listDirectChildRepos } from "../../../../utils/active-repo-context";
@@ -218,66 +220,57 @@ function extractReviewPrRefsFromText(text: string): ReviewPrRef[] {
 
 /** Fetch one PR/MR patch and freeze it before any overlay or LLM prompt is built; throws on fetch failure. */
 export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promise<ResolvedReviewTarget> {
-	return fetchPrReviewTargetWithOptions(cwd, ref, false);
+	return fetchRemoteReviewTarget(cwd, ref, false);
 }
 
-async function fetchPrReviewTargetWithOptions(
+async function fetchRemoteReviewTarget(
 	cwd: string,
 	ref: Pick<ReviewPrRef, "forge" | "repo" | "number">,
-	forceFresh: boolean,
+	live: boolean,
 ): Promise<ResolvedReviewTarget> {
 	const label = formatReviewRefLabel(ref);
-	// Session settings are the active scope (set around `/review`). Without them,
-	// `resolveCacheTtl(undefined)` uses the default enabled cache and a kill switch
-	// still stores a generation.
+	const emptyMessage = `${label} has no diff content available`;
 	const settings = findScopedSettings(cwd);
+	const refreshSource = {
+		kind: "remote" as const,
+		cwd,
+		ref: { forge: ref.forge, repo: ref.repo, number: ref.number },
+	};
 	if (ref.forge === "gitlab") {
 		try {
-			const lookup = await glab.getOrFetchMrDiff({
-				cwd,
-				project: ref.repo,
-				iid: ref.number,
-				...(forceFresh ? { forceFresh: true } : {}),
-				...(settings ? { settings } : {}),
+			const lookup = live
+				? await glab.fetchMrDiffFreshGuarded(cwd, ref.repo, ref.number, undefined)
+				: await glab.getOrFetchMrDiff({
+						cwd,
+						project: ref.repo,
+						iid: ref.number,
+						...(settings ? { settings } : {}),
+					});
+			return createResolvedReviewTarget("pr", label, lookup.rendered, emptyMessage, {
+				prDiffUrl: `mr://${ref.repo}/${ref.number}/diff`,
+				refreshSource,
 			});
-			return createResolvedReviewTarget(
-				"pr",
-				label,
-				lookup.payload.unified,
-				`${label} has no diff content available`,
-				{
-					prDiffUrl: `mr://${ref.repo}/${ref.number}/diff`,
-					refreshSource: { kind: "remote", cwd, ref: { forge: "gitlab", repo: ref.repo, number: ref.number } },
-				},
-			);
 		} catch (error) {
 			throw new Error(
 				`Failed to fetch MR diff for ${ref.repo}!${ref.number}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}
+
 	try {
-		const lookup = await gh.getOrFetchPrDiff({
-			cwd,
-			repo: ref.repo,
-			number: ref.number,
-			...(forceFresh ? { forceFresh: true } : {}),
-			...(settings ? { settings } : {}),
-		});
-		const generationAt =
-			lookup.status === "disabled"
-				? null
-				: gh.retainPrDiffGeneration({
-						repo: ref.repo,
-						number: ref.number,
-						rendered: lookup.rendered,
-						files: lookup.payload.files,
-						fetchedAt: lookup.fetchedAt,
-					});
-		return createResolvedReviewTarget("pr", label, lookup.payload.unified, `${label} has no diff content available`, {
+		const cacheAuthKey = resolveCacheTtl(settings).enabled ? resolveGithubCacheAuthKey() : undefined;
+		const lookup = live
+			? await fetchPrDiffFresh(cwd, ref.repo, ref.number, undefined)
+			: await gh.getOrFetchPrDiff({ cwd, repo: ref.repo, number: ref.number, ...(settings ? { settings } : {}) });
+		const fetchedAt = "fetchedAt" in lookup ? lookup.fetchedAt : Date.now();
+		const pendingPrDiffGeneration =
+			cacheAuthKey && (!("status" in lookup) || lookup.status !== "disabled")
+				? { fetchedAt, cacheAuthKey }
+				: undefined;
+		return createResolvedReviewTarget("pr", label, lookup.rendered, emptyMessage, {
 			prDiffUrl: `pr://${ref.repo}/${ref.number}/diff`,
-			prDiffQuery: generationAt !== null ? `?at=${generationAt}` : "",
-			refreshSource: { kind: "remote", cwd, ref: { forge: "github", repo: ref.repo, number: ref.number } },
+			refreshSource,
+			pendingPrDiffGeneration,
 		});
 	} catch (error) {
 		throw new Error(
@@ -293,7 +286,7 @@ export async function refreshReviewTarget(target: ResolvedReviewTarget): Promise
 	let refreshed: ResolvedReviewTarget;
 	switch (source.kind) {
 		case "remote":
-			refreshed = await fetchPrReviewTargetWithOptions(source.cwd, source.ref, true);
+			refreshed = await fetchRemoteReviewTarget(source.cwd, source.ref, true);
 			break;
 		case "uncommitted":
 			refreshed = await readUncommittedReviewTarget(source.cwd);

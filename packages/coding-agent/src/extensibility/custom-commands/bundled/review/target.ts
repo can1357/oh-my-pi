@@ -9,6 +9,12 @@ export type ReviewRefreshSource =
 	| { kind: "uncommitted"; cwd: string }
 	| { kind: "base-branch"; cwd: string; base: string; head: string };
 
+/** Serializable fetch identity retained until a diff is handed to a reviewer. */
+interface PendingPrDiffGeneration {
+	fetchedAt: number;
+	cacheAuthKey: string;
+}
+
 /** One frozen diff: the annotation view and the reviewer prompt both read this snapshot. */
 export interface ResolvedReviewTarget {
 	/** `patch` is a caller-supplied diff (annotations API); `pr` (a PR/MR) never maps to the local checkout. */
@@ -25,6 +31,8 @@ export interface ResolvedReviewTarget {
 	/** Leading `?at=<generation>` when `prDiffUrl` is pinned, otherwise empty. */
 	prDiffQuery?: string;
 	refreshSource?: ReviewRefreshSource;
+	/** GitHub snapshot awaiting a review handoff; paste does not retain it. */
+	pendingPrDiffGeneration?: PendingPrDiffGeneration;
 	/** Checkout root of a local review run outside the session cwd; diff paths are relative to it. */
 	repository?: string;
 }
@@ -51,7 +59,13 @@ export function createResolvedReviewTarget(
 	emptyMessage: string,
 	options: Pick<
 		ResolvedReviewTarget,
-		"filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl" | "prDiffQuery" | "refreshSource"
+		| "filteredMessage"
+		| "diffInstruction"
+		| "contextInstruction"
+		| "prDiffUrl"
+		| "prDiffQuery"
+		| "refreshSource"
+		| "pendingPrDiffGeneration"
 	> = {},
 ): ResolvedReviewTarget {
 	return {
