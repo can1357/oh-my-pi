@@ -18,6 +18,8 @@
  * the probe down instead of leaking the subprocess.
  */
 
+import { Process } from "@oh-my-pi/pi-natives";
+
 /** Wall-clock ceiling for a runtime-availability probe when no smaller bound is supplied. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 
@@ -86,52 +88,25 @@ export async function runBoundedProbe(
 		windowsHide: true,
 		detached,
 	});
+	const root = detached ? null : Process.fromPid(proc.pid);
 	let timedOut = false;
 	let aborted = false;
-	const killDirectChild = (): void => {
+	const forceKill = (): void => {
+		if (detached) {
+			// Bun makes the spawned PID the group ID. Signal it even if the
+			// leader has exited, because its interpreter can still be in the group.
+			if (Process.killGroup(proc.pid)) return;
+		} else {
+			root?.killTree();
+			if (root?.status() === "exited") return;
+		}
+		// If native teardown could not reach the root, use the original Bun
+		// spawn handle rather than trying to reopen its numeric PID.
 		try {
 			proc.kill("SIGKILL");
 		} catch {
 			// Already exited; nothing to reap.
 		}
-	};
-	const forceKill = (): void => {
-		// Availability probes own no persistent state. Kill their whole process
-		// tree so a shim cannot strand the real interpreter after the bound.
-		if (detached) {
-			try {
-				process.kill(-proc.pid, "SIGKILL");
-				return;
-			} catch (error) {
-				if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") return;
-				// Fall back to the direct child if the group signal is denied.
-			}
-		} else {
-			try {
-				const killer = Bun.spawn(["taskkill.exe", "/PID", String(proc.pid), "/T", "/F"], {
-					stdin: "ignore",
-					stdout: "ignore",
-					stderr: "ignore",
-					windowsHide: true,
-				});
-				const fallback = setTimeout(killDirectChild, 1_000);
-				fallback.unref();
-				void killer.exited.then(
-					exitCode => {
-						clearTimeout(fallback);
-						if (exitCode !== 0) killDirectChild();
-					},
-					() => {
-						clearTimeout(fallback);
-						killDirectChild();
-					},
-				);
-				return;
-			} catch {
-				// taskkill unavailable; at least bound the direct child.
-			}
-		}
-		killDirectChild();
 	};
 	const timer = setTimeout(() => {
 		timedOut = true;

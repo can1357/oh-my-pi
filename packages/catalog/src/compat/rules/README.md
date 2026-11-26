@@ -196,7 +196,7 @@ An `on-api` nested inside `on` under a class requires both the selected provider
 
 A `models` string without `*` is an exact, case-sensitive match against the provider-relative model identifier. A string containing `*` is an anchored, ASCII-case-insensitive wildcard match. Prefer taxonomy ranks; retain exact/glob lists only when they isolate the census member set exactly, and keep a `// residue:` comment explaining why ranks do not.
 
-A row whose own id classifies as `unknown` but whose `requestModelId` does not resolves under the wire id: classification and `models` matching both use it, so the model the row sends gets its own rules. Devin Fusion pairings (`fusion-<lead>-sidekick-*`) resolve as their lead this way.
+A row whose own id classifies as `unknown` but whose `requestModelId` does not resolves under the wire id: classification and `models` matching both use it, so the model the row sends gets its own rules.
 
 `priority=N` is an optional signed integer property on the block that owns axis assignments. Its default is zero. Use it only to resolve an intentional equal-specificity overlap; do not use it to encode declaration order.
 
@@ -222,6 +222,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 `context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
 
 `long-context-window-uncapped #true` keeps a model's `long-context-cost` tier from capping its runtime context window while extended context is off: the coding agent normally lowers the window to the tier's input threshold so compaction fires before a request crosses into premium pricing. Use it where the tier is an API-equivalent estimate on a subscription host (`xai-oauth`) or where the model is served at its full window regardless (GPT-5.4, except on GitHub Copilot). `buildModel` materializes it as `Model.longContextWindowUncapped`; explicit user context overrides still apply.
+
+`thinking-effort-map` maps served efforts to wire values. An entry for an effort the ladder does not serve whose value is a served effort is an alias instead: clamping a request for that effort follows it rather than stepping down to the next lower tier (Refuseless sends `medium` to `high` on its `low|high|max` ladder). `reasoning-effort-map` entries never alias.
 
 `max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it); the ceiling also lowers discovered Antigravity per-SKU `maxOutputTokens` (`antigravityWireProfiles`, row and per-account), which the transport sends verbatim. Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
 
