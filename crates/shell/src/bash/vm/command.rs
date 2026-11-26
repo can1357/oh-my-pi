@@ -2346,6 +2346,14 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				let s = st(vp);
 				(s.argv.clone(), s.tag)
 			};
+			let source_snapshot = match argv.as_slice() {
+				[name, subcommand]
+					if name.as_slice() == b"direnv" && subcommand.as_slice() == b"dotenv-snapshot" =>
+				{
+					vp.source_snapshot.clone()
+				},
+				_ => None,
+			};
 			let call = ToolCall {
 				tool,
 				argv,
@@ -2356,6 +2364,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				extra_fds: extra_fds(vp),
 				env,
 				umask,
+				source_snapshot,
 			};
 			k.emit_op(cx, vp, op.node, EventData::Call { id, argv: &call.argv });
 			k.calls_out.push_back((id, call));

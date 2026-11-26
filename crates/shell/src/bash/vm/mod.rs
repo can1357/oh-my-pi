@@ -218,46 +218,50 @@ impl Default for ShellInit {
 /// A script to run ([`Shell::submit`]).
 pub struct Script {
 	/// Source bytes.
-	pub source:       Arc<[u8]>,
+	pub source:          Arc<[u8]>,
 	/// Where they came from (diagnostic prefixes, events).
-	pub origin:       Origin,
+	pub origin:          Origin,
 	/// Mode to parse and run in; the vproc's mode before the run comes
 	/// back when it ends (`None`: the shell's current mode, which an
 	/// `emulate` in the script changes for later runs too).
-	pub mode:         Option<ModeId>,
+	pub mode:            Option<ModeId>,
 	/// Positional parameters for the script, replacing the inherited current
 	/// positional scope in a new subshell without changing its caller.
-	pub args:         Option<Vec<BString>>,
+	pub args:            Option<Vec<BString>>,
 	/// Which virtual process runs it.
-	pub vproc:        VprocSel,
+	pub vproc:           VprocSel,
 	/// Opaque host tag, echoed in `RunStart`.
-	pub tag:          u64,
+	pub tag:             u64,
 	/// Working directory for the run.
-	pub cwd:          Option<BString>,
+	pub cwd:             Option<BString>,
 	/// Exported variables for the run.
-	pub env:          Vec<(BString, BString)>,
+	pub env:             Vec<(BString, BString)>,
 	/// Changes to inherited non-shell environment entries for a new subshell.
 	/// A `None` name clears them; otherwise `None` removes and `Some` sets.
-	pub foreign_env:  Vec<(Option<BString>, Option<BString>)>,
+	pub foreign_env:     Vec<(Option<BString>, Option<BString>)>,
 	/// Shell variable names whose inherited bindings must not be exported in
 	/// the new subshell, including bindings hidden by local scopes.
-	pub unexport_env: Vec<BString>,
+	pub unexport_env:    Vec<BString>,
+	/// Immutable source input for a new subshell and its children only.
+	/// Host-owned, like its stdio files; not part of a restored image.
+	pub source_snapshot: Option<Arc<omp_builtins::extras::SourceSnapshot>>,
 }
 
 impl Script {
 	/// A command script (`-c` semantics) on the root vproc.
 	pub fn command(source: impl Into<Arc<[u8]>>) -> Self {
 		Self {
-			source:       source.into(),
-			origin:       Origin::Command,
-			mode:         None,
-			args:         None,
-			vproc:        VprocSel::Root,
-			tag:          0,
-			cwd:          None,
-			env:          Vec::new(),
-			foreign_env:  Vec::new(),
-			unexport_env: Vec::new(),
+			source:          source.into(),
+			origin:          Origin::Command,
+			mode:            None,
+			args:            None,
+			vproc:           VprocSel::Root,
+			tag:             0,
+			cwd:             None,
+			env:             Vec::new(),
+			foreign_env:     Vec::new(),
+			unexport_env:    Vec::new(),
+			source_snapshot: None,
 		}
 	}
 }
@@ -343,23 +347,25 @@ pub enum Step {
 #[derive(Clone, Debug)]
 pub struct ToolCall {
 	/// From [`Resolved::Tool`](crate::bash::Resolved::Tool).
-	pub tool:      ToolRef,
+	pub tool:            ToolRef,
 	/// Expanded argv.
-	pub argv:      Vec<BString>,
+	pub argv:            Vec<BString>,
 	/// Calling vproc.
-	pub vpid:      Vpid,
+	pub vpid:            Vpid,
 	/// Output tag of this execution.
-	pub tag:       CmdTag,
+	pub tag:             CmdTag,
 	/// Working directory.
-	pub cwd:       BString,
+	pub cwd:             BString,
 	/// fds 0, 1, 2 (also reachable by number through [`ShellApi`]).
-	pub stdio:     [FdRef; 3],
+	pub stdio:           [FdRef; 3],
 	/// Further open fds.
-	pub extra_fds: Vec<(i32, FdRef)>,
+	pub extra_fds:       Vec<(i32, FdRef)>,
 	/// Environment.
-	pub env:       EnvView,
+	pub env:             EnvView,
 	/// File-creation mask: the shell's `umask`.
-	pub umask:     u32,
+	pub umask:           u32,
+	/// File snapshot available to the source loader, if any.
+	pub source_snapshot: Option<Arc<omp_builtins::extras::SourceSnapshot>>,
 }
 
 /// How a host callout ended.
@@ -1895,6 +1901,7 @@ impl Shell {
 		let parent_lineage = self.procs[parent].lineage;
 		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(Image::default()), true);
 		vp.lineage = lineage.unwrap_or(parent_lineage);
+		vp.source_snapshot = script.source_snapshot;
 		vp.status = status;
 		vp.mode = mode;
 		vp.runs.push_back(run);
@@ -3099,6 +3106,7 @@ impl Vproc {
 			restore_opts: Vec::new(),
 			rlimits: Vec::new(),
 			lineage: crate::bash::host::Lineage::default(),
+			source_snapshot: None,
 			usage: None,
 			trace_base: 0,
 			subshell: 0,
@@ -3198,6 +3206,7 @@ impl Vproc {
 		vp.command.clone_from(&self.command);
 		vp.rlimits.clone_from(&self.rlimits);
 		vp.lineage = self.lineage;
+		vp.source_snapshot.clone_from(&self.source_snapshot);
 		jobctl::inherit(k, vp.vpid, self.vpid);
 		vp.mode = self.mode;
 		vp.zle.clone_from(&self.zle);
