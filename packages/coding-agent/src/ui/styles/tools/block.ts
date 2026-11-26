@@ -16,7 +16,7 @@
  *   placeholders out.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
-import { holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { anchoredRise, holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { hasGraphics } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
@@ -120,11 +120,12 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
  * `block` cut to `rows` rows: its heading (the look's `heading` rows, else
  * through its first non-blank row: a framed look's titled edge) over the
  * newest rows that fit. An image is kept whole or dropped: its draw rides on
- * its last row and moves up over the reserved rows above it (`anchoredRows`),
- * so a cut image would paint over the rows above it; older rows fill the room
- * a dropped image leaves. Reserved rows that draw nothing (a fallback label's
- * or a pending encode's) are skipped, the label kept as text. Hits are clipped
- * to the rows kept; a cursor in a dropped row goes. Undefined when the heading
+ * its last row and moves up over the reserved rows above it (`anchoredRise`,
+ * which a look's tint or indent does not hide), so a cut image would paint
+ * over the rows above it; older rows fill the room a dropped image leaves.
+ * Undecorated reserved rows that draw nothing (a fallback label's or a
+ * pending encode's) are skipped, the label kept as text. Hits are clipped to
+ * the rows kept; a cursor in a dropped row goes. Undefined when the heading
  * leaves no room or no row fits.
  */
 function headAndTail(block: Block, rows: number): Block | undefined {
@@ -135,10 +136,10 @@ function headAndTail(block: Block, rows: number): Block | undefined {
 	const tail: number[] = [];
 	let room = rows - head;
 	for (let end = total; end > head && room > 0;) {
-		let start = end - 1;
-		while (start > head && holdsImage(block.rows[start]!) && holdsImage(block.rows[start - 1]!)) start--;
-		const draws = !holdsImage(block.rows[end - 1]!) || block.rows.slice(start, end).some(hasGraphics);
-		if (draws && end - start <= room) {
+		const row = block.rows[end - 1]!;
+		const start = end - 1 - anchoredRise(row);
+		const drawsNothing = holdsImage(row) && !hasGraphics(row);
+		if (!drawsNothing && start >= head && end - start <= room) {
 			for (let source = end - 1; source >= start; source--) tail.push(source);
 			room -= end - start;
 		}
