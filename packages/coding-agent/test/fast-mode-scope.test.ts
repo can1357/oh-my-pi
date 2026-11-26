@@ -143,6 +143,39 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.isFastModeActive()).toBe(false);
 	});
 
+	const devinModel = (priorityLane?: { id: string; routes: Record<string, string> }) =>
+		buildModel({
+			id: "claude-opus-5",
+			name: "Claude Opus 5",
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			requestModelId: "claude-opus-5-medium",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...(priorityLane && {
+				priorityLane: { ...priorityLane, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+			}),
+		});
+
+	it("enables Devin's fast lanes on a Devin model that has one, and refuses without one", async () => {
+		const laned = await createSessionForModel(
+			devinModel({ id: "claude-opus-5-fast", routes: { "claude-opus-5-medium": "claude-opus-5-medium-fast" } }),
+		);
+		expect(laned.setFastMode(true)).toBe(true);
+		expect(laned.serviceTierByFamily).toEqual({ devin: "priority" });
+		expect(laned.isFastModeActive()).toBe(true);
+		await laned.dispose();
+
+		const plain = await createSessionForModel(devinModel());
+		expect(plain.setFastMode(true)).toBe(false);
+		expect(plain.serviceTierByFamily).toEqual({});
+		expect(plain.isFastModeActive()).toBe(false);
+	});
+
 	it("clears only the current model's family when disabled", async () => {
 		const session = await createSession("anthropic", "claude-sonnet-4-5");
 		session.setFastMode(true);
