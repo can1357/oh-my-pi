@@ -135,6 +135,7 @@ function styled(theme: Theme, spans: readonly FormSpan[], base: string): string 
 			if (span.style === "code") return theme.fg("mdCode", span.text);
 			if (span.style === "strong") return theme.style("strong", theme.fg(base, span.text));
 			if (span.style === "em") return theme.style("em", theme.fg(base, span.text));
+			if (span.style === "mark") return theme.style("inverse", theme.fg(base, span.text));
 			return theme.fg(base, span.text);
 		})
 		.join("");
@@ -192,9 +193,9 @@ function blockLines(cx: PaintContext, block: FormBlock, width: number, media: Me
 				truncate(
 					row
 						.map((cell, j) => {
-							const text = spansText(cell);
-							const pad = j === cols - 1 ? "" : " ".repeat(widths[j]! - visibleWidth(text) + 2);
-							return `${head ? theme.style("strong", text) : theme.fg("muted", text)}${pad}`;
+							const pad = j === cols - 1 ? "" : " ".repeat(widths[j]! - visibleWidth(spansText(cell)) + 2);
+							const text = styled(theme, cell, head ? "text" : "muted");
+							return `${head ? theme.style("strong", text) : text}${pad}`;
 						})
 						.join(""),
 					width,
@@ -270,7 +271,7 @@ function foldLines(theme: Theme, model: HtmlFormModel, index: number, width: num
 
 function labelLine(theme: Theme, model: HtmlFormModel, field: FormField, view: View, width: number): string {
 	const pointer = view.focused ? theme.fg("accent", "❯ ") : "  ";
-	let label = theme.fg(view.focused ? "accent" : "text", spansText(field.label));
+	let label = styled(theme, field.label, view.focused ? "accent" : "text");
 	if (field.required) label += theme.fg("error", " *");
 	if (field.kind === "text" && field.type === "number" && (field.min !== undefined || field.max !== undefined)) {
 		const range =
@@ -336,12 +337,11 @@ function optionRows(
 					: theme.fg("dim", "  ✎ draft");
 			// Long labels wrap under themselves.
 			const color = selected ? "accent" : checked ? "muted" : "text";
-			const wrapped = wrap(flattenLine(spansText(option.label)), Math.max(1, width - 4 - visibleWidth(marker)));
+			const flat = option.label.map(span => ({ text: span.text.replaceAll("\n", " "), style: span.style }));
+			const wrapped = wrap(styled(theme, flat, color), Math.max(1, width - 4 - visibleWidth(marker)));
 			wrapped.forEach((part, i) => {
 				const head = i === 0 ? `${cursor}${theme.fg(checked ? "success" : "dim", glyph)} ` : "    ";
-				lines.push(
-					truncate(`${head}${theme.fg(color, part)}${i === wrapped.length - 1 ? marker : ""}`, width, "…"),
-				);
+				lines.push(truncate(`${head}${part}${i === wrapped.length - 1 ? marker : ""}`, width, "…"));
 			});
 		}
 		if (selected) column.focusEnd = lines.length;
