@@ -365,8 +365,8 @@ export class SelectorController {
 	/**
 	 * Open a history picker with `open`: at once, or, when the terminal renderer would take a while
 	 * to paint its `slow` history, after a frame showing the loading notice. A request while one
-	 * waits joins it: the composer still holds the keys then, and a second picker would stack on
-	 * the first.
+	 * waits joins it and opens nothing of its own: the composer still holds the keys then, and a
+	 * second picker would stack on the first.
 	 */
 	#openHistoryPicker(slow: boolean, open: () => void): Promise<void> {
 		if (this.#historyPickerOpening) return this.#historyPickerOpening;

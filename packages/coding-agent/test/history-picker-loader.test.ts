@@ -136,13 +136,17 @@ it("opens the picker over a dialog in the composer's place, whose frame never re
 	mode.showEditorAreaDialog(() => jsx("text", { text: "a dialog" }));
 	await term.settle();
 	// Nothing on screen reads the notice: the wait asks for its frame instead of waiting on the next change.
-	await mode.showUserMessageSelector();
+	const opening = mode.showUserMessageSelector();
+	expect(mode.shell.overlays.open()).toBe(false);
+	await opening;
 	expect(mode.shell.overlays.open()).toBe(true);
 });
 
 it("opens one picker for repeated requests while the first waits for its loading frame", async () => {
 	await start(LONG);
 	// Esc Esc twice in one terminal read: the composer still holds the keys until the picker opens.
-	await Promise.all([mode.showUserMessageSelector(), mode.showUserMessageSelector()]);
+	const first = mode.showUserMessageSelector();
+	expect(mode.shell.overlays.open()).toBe(false);
+	await Promise.all([first, mode.showUserMessageSelector()]);
 	expect(mode.shell.overlays.nodes()).toHaveLength(1);
 });

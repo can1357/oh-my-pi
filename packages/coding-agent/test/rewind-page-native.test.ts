@@ -273,7 +273,7 @@ describe("native rewind page and session reset", () => {
 		manager.appendMessage(trigger);
 		manager.appendMessage(assistant("the build passes"));
 		await using ui = await nativeShell(mode.shell);
-		mode.showUserMessageSelector();
+		await mode.showUserMessageSelector();
 
 		const reply = ui.surface("screen")!.main.at(-1)!;
 		expect(sig(reply)).toBe("col:omp.assistant [pick]");
