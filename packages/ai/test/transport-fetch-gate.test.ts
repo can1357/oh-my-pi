@@ -102,11 +102,16 @@ it("does not send a Request whose own signal aborted before it reached the trans
 	const cancelled = new AbortController();
 	const reason = new Error("caller cancelled the request");
 	cancelled.abort(reason);
-	await expect(fetch(new Request(url, { method: "POST", signal: cancelled.signal }))).rejects.toBe(reason);
+	const request = new Request(url, { method: "POST", signal: cancelled.signal });
+	await expect(fetch(request)).rejects.toBe(reason);
+	await expect(fetch(request, { signal: undefined })).rejects.toBe(reason);
 	expect(sent).toBe(0);
 	expect(admitted).toBe(0);
 	expect(lastDispatchOrigin(model)).toBeUndefined();
 
-	await fetch(new Request(url, { method: "POST", signal: new AbortController().signal }));
+	// As with `fetch`, a live `init.signal` replaces the request's own signal, and `signal: null` clears it.
+	await fetch(request, { signal: new AbortController().signal });
 	expect(sent).toBe(1);
+	await fetch(request, { signal: null });
+	expect(sent).toBe(2);
 });
