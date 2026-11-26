@@ -8,9 +8,11 @@ use std::{
 	io::{self, Read, Write},
 	path::{Path, PathBuf},
 	process::{Command, Stdio},
+	time::Duration,
 };
 
 use gix::bstr::{BString, ByteSlice};
+use tokio_util::sync::CancellationToken;
 
 use super::{
 	GitRepo,
@@ -229,8 +231,19 @@ impl GitRepo {
 	/// the object is written by `git commit-tree -S` so Git runs the
 	/// configured signer; a signer failure leaves HEAD unchanged.
 	pub fn commit_create(&self, message: &str, options: &CommitOptions) -> Result<String> {
+		self.commit_create_cancellable(message, options, None)
+	}
+
+	/// Like [`GitRepo::commit_create`], honoring `cancel` while waiting on the
+	/// repository's `COMMIT_EDITMSG` lock.
+	pub fn commit_create_cancellable(
+		&self,
+		message: &str,
+		options: &CommitOptions,
+		cancel: Option<&CancellationToken>,
+	) -> Result<String> {
 		self
-			.commit_with_index(message, options, None)
+			.commit_with_index(message, options, None, cancel)
 			.map(|(id, _)| id)
 	}
 
@@ -244,13 +257,25 @@ impl GitRepo {
 		options: &CommitOptions,
 		selection: &str,
 	) -> Result<(String, Vec<String>)> {
+		self.commit_reconciled_cancellable(message, options, selection, None)
+	}
+
+	/// Like [`GitRepo::commit_reconciled`], honoring `cancel` while waiting on
+	/// the repository's `COMMIT_EDITMSG` lock.
+	pub fn commit_reconciled_cancellable(
+		&self,
+		message: &str,
+		options: &CommitOptions,
+		selection: &str,
+		cancel: Option<&CancellationToken>,
+	) -> Result<(String, Vec<String>)> {
 		if options.index_path.is_none() || !options.files.is_empty() {
 			return Err(Error::backend(
 				"git commit",
 				"reconciliation requires a complete private index",
 			));
 		}
-		self.commit_with_index(message, options, Some(selection))
+		self.commit_with_index(message, options, Some(selection), cancel)
 	}
 
 	fn commit_with_index(
@@ -258,7 +283,11 @@ impl GitRepo {
 		message: &str,
 		options: &CommitOptions,
 		reconcile: Option<&str>,
+		cancel: Option<&CancellationToken>,
 	) -> Result<(String, Vec<String>)> {
+		if cancel.is_some_and(CancellationToken::is_cancelled) {
+			return Err(Error::Canceled);
+		}
 		let repo = self.gix()?;
 		// Git rejects a malformed value before doing any work; reading it as
 		// `false` would silently write unsigned commits.
@@ -379,9 +408,18 @@ impl GitRepo {
 		// landed last, including when `no_verify` skips the hook.
 		let message_file = CommitMessageFile::create(&self.info().git_dir, message)?;
 		// Hooks that read `.git/COMMIT_EDITMSG` instead of `$1` still see this
-		// message, as under `git commit`; only the private copy is read back.
-		let _ = fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message);
-		if !options.no_verify {
+		// message, as under `git commit`. Only calls that will actually run a
+		// `commit-msg` hook write the shared file, and each holds a repository
+		// lock from that write until the hook returns, so neither another
+		// verified commit nor an unverified (`no_verify`) or hookless call can
+		// replace the file under a running hook. The guard ends here: signing
+		// and later hooks must not keep the next commit waiting.
+		let editmsg_read = !options.no_verify
+			&& (self.hook_path("commit-msg")?.is_some() || hook_configured(self, "commit-msg")?);
+		if editmsg_read {
+			let shared = shared_repository_policy(&repo)?;
+			let _editmsg_lock = lock_commit_editmsg(&self.info().git_dir, shared, cancel)?;
+			write_commit_editmsg(&self.info().git_dir.join("COMMIT_EDITMSG"), message, shared)?;
 			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
 		}
 		let message = fs::read_to_string(&message_file.path)
@@ -1245,6 +1283,249 @@ impl Drop for CommitMessageFile {
 	}
 }
 
+/// File permission policy parsed from `core.sharedRepository`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+enum SharedRepository {
+	Umask,
+	Group,
+	All,
+	Mode(u32),
+}
+
+/// Resolve Git's `core.sharedRepository` setting for regular files inside
+/// `.git`. Matches Git's `git_config_perm` rules so shared checkouts keep new
+/// administrative files writable by group/shared writers even under `umask
+/// 022`.
+#[cfg(unix)]
+fn shared_repository_policy(repo: &gix::Repository) -> Result<SharedRepository> {
+	let config = repo.config_snapshot();
+	let mut latest: Option<Option<Cow<'_, gix::bstr::BStr>>> = None;
+	for section in config.sections_by_name("core").into_iter().flatten() {
+		if section.header().subsection_name().is_some() {
+			continue;
+		}
+		if let Some(entry) = section.value_implicit("sharedRepository") {
+			latest = Some(entry);
+		}
+	}
+	let Some(entry) = latest else {
+		return Ok(SharedRepository::Umask);
+	};
+	let Some(raw) = entry else {
+		// Bare `[core] sharedRepository` (no `=`) is implicit true -> group.
+		return Ok(SharedRepository::Group);
+	};
+	if raw.is_empty() {
+		// Explicit empty `sharedRepository =` disables sharing -> umask.
+		return Ok(SharedRepository::Umask);
+	}
+	let value = std::str::from_utf8(raw.as_ref()).map_err(|_| {
+		Error::backend(
+			"git commit read core.sharedRepository",
+			format!("invalid core.sharedRepository value: {}", raw.to_str_lossy()),
+		)
+	})?;
+	match value {
+		"umask" => Ok(SharedRepository::Umask),
+		"group" => Ok(SharedRepository::Group),
+		"all" | "world" | "everybody" => Ok(SharedRepository::All),
+		_ if value.bytes().all(|b| matches!(b, b'0'..=b'7')) => {
+			let mode = u32::from_str_radix(value, 8).map_err(|err| {
+				Error::backend(
+					"git commit read core.sharedRepository",
+					format!("invalid core.sharedRepository mode '{value}': {err}"),
+				)
+			})?;
+			match mode {
+				0 => Ok(SharedRepository::Umask),
+				1 => Ok(SharedRepository::Group),
+				2 => Ok(SharedRepository::All),
+				m if m & 0o600 == 0o600 => Ok(SharedRepository::Mode(m & 0o666)),
+				m => Err(Error::backend(
+					"git commit read core.sharedRepository",
+					format!(
+						"problem with core.sharedRepository filemode value (0{m:03o}): owner must have \
+						 read and write permissions"
+					),
+				)),
+			}
+		},
+		_ => match config.try_boolean("core.sharedRepository") {
+			Some(Ok(true)) => Ok(SharedRepository::Group),
+			Some(Ok(false)) => Ok(SharedRepository::Umask),
+			_ => Err(Error::backend(
+				"git commit read core.sharedRepository",
+				format!("bad config value '{value}' for core.sharedRepository"),
+			)),
+		},
+	}
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::missing_const_for_fn, reason = "matches unix signature")]
+fn shared_repository_policy(_repo: &gix::Repository) -> Result<SharedRepository> {
+	Ok(SharedRepository::Umask)
+}
+
+/// Apply `core.sharedRepository` permissions to a regular (non-executable) file
+/// descriptor via `fchmod`.
+///
+/// When `created` is `false`, `PermissionDenied` (`EPERM`) is tolerated because
+/// another group member may already own a writable shared file.
+#[cfg(unix)]
+fn apply_shared_file_permissions(
+	file: &fs::File,
+	shared: SharedRepository,
+	created: bool,
+) -> io::Result<()> {
+	use std::os::unix::fs::PermissionsExt;
+	if shared == SharedRepository::Umask {
+		return Ok(());
+	}
+	let current = file.metadata()?.permissions().mode() & 0o777;
+	let target = match shared {
+		SharedRepository::Umask => return Ok(()),
+		SharedRepository::Group => current | 0o660,
+		SharedRepository::All => current | 0o664,
+		SharedRepository::Mode(mode) => mode & 0o666,
+	};
+	if target == current {
+		return Ok(());
+	}
+	match file.set_permissions(fs::Permissions::from_mode(target)) {
+		Ok(()) => Ok(()),
+		Err(err) if !created && err.kind() == io::ErrorKind::PermissionDenied => Ok(()),
+		Err(err) => Err(err),
+	}
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::missing_const_for_fn, reason = "matches unix signature")]
+fn apply_shared_file_permissions(
+	_file: &fs::File,
+	_shared: SharedRepository,
+	_created: bool,
+) -> io::Result<()> {
+	Ok(())
+}
+
+/// Open `.git/.omp-commit-editmsg.lock` writable where possible and apply the
+/// repository's shared-file permission policy so other repository writers (for
+/// example group members on Linux NFS, where exclusive `flock(2)` requires a
+/// writable descriptor) can reopen it read-write. Only on `PermissionDenied`
+/// (such as a lock file owned by another user on a local filesystem) do we fall
+/// back to a read-only descriptor.
+fn open_commit_editmsg_lock(path: &Path, shared: SharedRepository) -> io::Result<fs::File> {
+	let open_rw = || fs::OpenOptions::new().read(true).write(true).open(path);
+	let (file, created) = match open_rw() {
+		Ok(file) => (file, false),
+		Err(err) if err.kind() == io::ErrorKind::NotFound => {
+			match fs::OpenOptions::new()
+				.read(true)
+				.write(true)
+				.create_new(true)
+				.open(path)
+			{
+				Ok(file) => (file, true),
+				// Another caller won the create; open writable so NFS exclusive
+				// locks still work, falling back to read-only only on EACCES.
+				Err(err) if err.kind() == io::ErrorKind::AlreadyExists => match open_rw() {
+					Ok(file) => (file, false),
+					Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+						return fs::File::open(path);
+					},
+					Err(err) => return Err(err),
+				},
+				Err(err) => return Err(err),
+			}
+		},
+		Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+			return fs::File::open(path);
+		},
+		Err(err) => return Err(err),
+	};
+	apply_shared_file_permissions(&file, shared, created)?;
+	Ok(file)
+}
+
+/// Write `.git/COMMIT_EDITMSG` while honoring `core.sharedRepository` so later
+/// writers in a shared checkout can overwrite it too.
+fn write_commit_editmsg(path: &Path, message: &str, shared: SharedRepository) -> Result<()> {
+	let mut created = false;
+	let mut file = match fs::OpenOptions::new().write(true).truncate(true).open(path) {
+		Ok(file) => file,
+		Err(err) if err.kind() == io::ErrorKind::NotFound => {
+			created = true;
+			fs::OpenOptions::new()
+				.write(true)
+				.create_new(true)
+				.open(path)
+				.or_else(|err| {
+					if err.kind() == io::ErrorKind::AlreadyExists {
+						created = false;
+						fs::OpenOptions::new().write(true).truncate(true).open(path)
+					} else {
+						Err(err)
+					}
+				})
+				.map_err(|err| Error::backend("git commit write COMMIT_EDITMSG", err))?
+		},
+		Err(err) => return Err(Error::backend("git commit write COMMIT_EDITMSG", err)),
+	};
+	file
+		.write_all(message.as_bytes())
+		.map_err(|err| Error::backend("git commit write COMMIT_EDITMSG", err))?;
+	apply_shared_file_permissions(&file, shared, created)
+		.map_err(|err| Error::backend("git commit write COMMIT_EDITMSG", err))?;
+	Ok(())
+}
+
+/// Lock `.git/COMMIT_EDITMSG` so a hook that reads the documented path instead
+/// of its argument observes its own call's message. The caller holds the guard
+/// from the shared write until `commit-msg` returns, then drops it; signing and
+/// later hooks do not keep the next commit waiting.
+///
+/// The held lock is an `flock(2)` / `LockFileEx` on a persistent file inside
+/// the git dir, so it also orders commits driven by other omp processes.
+/// `git commit` takes no such lock and can still interleave.
+///
+/// Opening or locking failure returns an error rather than falling back to an
+/// unlocked write, so a broken or unsupported lock cannot corrupt another
+/// caller's `COMMIT_EDITMSG`. When `cancel` is supplied, contention polls with
+/// short backoff so aborting a waiter interrupts the wait promptly.
+fn lock_commit_editmsg(
+	git_dir: &Path,
+	shared: SharedRepository,
+	cancel: Option<&CancellationToken>,
+) -> Result<fs::File> {
+	let path = git_dir.join(".omp-commit-editmsg.lock");
+	let file = open_commit_editmsg_lock(&path, shared)
+		.map_err(|err| Error::backend("git commit lock COMMIT_EDITMSG", err))?;
+	let Some(cancel) = cancel else {
+		file
+			.lock()
+			.map_err(|err| Error::backend("git commit lock COMMIT_EDITMSG", err))?;
+		return Ok(file);
+	};
+	let mut backoff = Duration::from_millis(5);
+	loop {
+		if cancel.is_cancelled() {
+			return Err(Error::Canceled);
+		}
+		match file.try_lock() {
+			Ok(()) => return Ok(file),
+			Err(fs::TryLockError::WouldBlock) => {
+				std::thread::sleep(backoff);
+				backoff = (backoff * 2).min(Duration::from_millis(25));
+			},
+			Err(fs::TryLockError::Error(err)) => {
+				return Err(Error::backend("git commit lock COMMIT_EDITMSG", err));
+			},
+		}
+	}
+}
+
 /// Run a commit hook; `index_path` is exported as `GIT_INDEX_FILE` when the
 /// commit is built from an alternate index, as `git commit --only` does.
 ///
@@ -1314,22 +1595,41 @@ fn run_commit_hook(
 	})
 }
 
-/// Whether any `hook.<id>.event` names the hook `name`. Git (2.54+) runs such
-/// config-defined hooks in addition to the hooks-directory file; whether one is
-/// disabled or lacks a command is left to `git hook run`.
+/// Whether any enabled `hook.<id>.event` names the hook `name`. Git (2.54+)
+/// runs such config-defined hooks in addition to the hooks-directory file;
+/// `hook.<id>.enabled = false` disables the hook, and an empty `event =`
+/// clears earlier event entries for that hook.
 fn hook_configured(repository: &GitRepo, name: &str) -> Result<bool> {
-	Ok(repository
-		.gix()?
-		.config_snapshot()
-		.sections_by_name("hook")
-		.into_iter()
-		.flatten()
-		.any(|section| {
-			section
-				.values("event")
-				.iter()
-				.any(|event| event.as_ref() == name)
-		}))
+	let repo = repository.gix()?;
+	let config = repo.config_snapshot();
+	let mut seen = HashSet::new();
+	for section in config.sections_by_name("hook").into_iter().flatten() {
+		let Some(subsection) = section.header().subsection_name() else {
+			continue;
+		};
+		if !seen.insert(subsection) {
+			continue;
+		}
+		if matches!(config.boolean_by("hook", Some(subsection), "enabled"), Some(Ok(false))) {
+			continue;
+		}
+		let mut active = false;
+		for event in config
+			.strings_by("hook", Some(subsection), "event")
+			.into_iter()
+			.flatten()
+		{
+			if event.is_empty() {
+				active = false;
+			} else if event.as_ref() == name {
+				active = true;
+			}
+		}
+		if active {
+			return Ok(true);
+		}
+	}
+	Ok(false)
 }
 
 /// Write a signed commit object through `git commit-tree -S`, which runs the
@@ -4197,5 +4497,137 @@ mod tests {
 				 prefix neighbors"
 			);
 		}
+	}
+
+	#[test]
+	fn hook_configured_skips_disabled_and_cleared_hooks() {
+		let (temp, _) = fixture();
+		git(temp.path(), &["config", "hook.disabled.event", "commit-msg"]);
+		git(temp.path(), &["config", "hook.disabled.enabled", "false"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert!(!hook_configured(&repo, "commit-msg").unwrap());
+
+		git(temp.path(), &["config", "hook.cleared.event", "commit-msg"]);
+		git(temp.path(), &["config", "--add", "hook.cleared.event", ""]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert!(!hook_configured(&repo, "commit-msg").unwrap());
+
+		git(temp.path(), &["config", "hook.active.event", "commit-msg"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert!(hook_configured(&repo, "commit-msg").unwrap());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn lock_commit_editmsg_opens_existing_file_writable_and_respects_cancel() {
+		use std::os::fd::AsRawFd;
+		let temp = tempfile::tempdir().unwrap();
+		let git_dir = temp.path();
+
+		// First acquisition creates the lock file; reopening it must keep write
+		// access so Linux NFS exclusive flock(2) succeeds for later callers.
+		let first = lock_commit_editmsg(git_dir, SharedRepository::Umask, None).unwrap();
+		drop(first);
+
+		let second = lock_commit_editmsg(git_dir, SharedRepository::Umask, None).unwrap();
+		// SAFETY: F_GETFL takes no extra arguments on a valid open descriptor.
+		let flags = unsafe { libc::fcntl(second.as_raw_fd(), libc::F_GETFL) };
+		assert_eq!(flags & libc::O_ACCMODE, libc::O_RDWR);
+
+		// A cancelled waiter must return Canceled instead of falling back to an
+		// unlocked write while `second` still holds the lock.
+		let cancel = CancellationToken::new();
+		let trigger = cancel.clone();
+		let handle = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(20));
+			trigger.cancel();
+		});
+		let err = lock_commit_editmsg(git_dir, SharedRepository::Umask, Some(&cancel)).unwrap_err();
+		handle.join().unwrap();
+		assert!(matches!(err, Error::Canceled), "expected Canceled, got {err:?}");
+		drop(second);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn shared_repository_policy_parses_git_config_values() {
+		let (temp, _) = fixture();
+		let check = |value: Option<&str>, expected: SharedRepository| {
+			if let Some(val) = value {
+				git(temp.path(), &["config", "core.sharedRepository", val]);
+			}
+			let repo = GitRepo::require(temp.path()).unwrap().gix().unwrap();
+			assert_eq!(
+				shared_repository_policy(&repo).unwrap(),
+				expected,
+				"core.sharedRepository={value:?}"
+			);
+		};
+		check(None, SharedRepository::Umask);
+		check(Some("umask"), SharedRepository::Umask);
+		check(Some("false"), SharedRepository::Umask);
+		check(Some("0"), SharedRepository::Umask);
+		check(Some("group"), SharedRepository::Group);
+		check(Some("true"), SharedRepository::Group);
+		check(Some("1"), SharedRepository::Group);
+		check(Some("all"), SharedRepository::All);
+		check(Some("world"), SharedRepository::All);
+		check(Some("everybody"), SharedRepository::All);
+		check(Some("2"), SharedRepository::All);
+		check(Some("0660"), SharedRepository::Mode(0o660));
+		check(Some("0640"), SharedRepository::Mode(0o640));
+		check(Some("0770"), SharedRepository::Mode(0o660));
+		check(Some("02770"), SharedRepository::Mode(0o660));
+
+		// Bare `[core] sharedRepository` (no `=`) is implicit true -> group.
+		let config_path = temp.path().join(".git/config");
+		let mut config_text = fs::read_to_string(&config_path).unwrap();
+		config_text.push_str("\n[core]\n\tsharedRepository\n");
+		fs::write(&config_path, &config_text).unwrap();
+		let repo = GitRepo::require(temp.path()).unwrap().gix().unwrap();
+		assert_eq!(shared_repository_policy(&repo).unwrap(), SharedRepository::Group);
+
+		// Explicit empty `sharedRepository =` disables sharing -> umask.
+		config_text.push_str("[core]\n\tsharedRepository =\n");
+		fs::write(&config_path, &config_text).unwrap();
+		let repo = GitRepo::require(temp.path()).unwrap().gix().unwrap();
+		assert_eq!(shared_repository_policy(&repo).unwrap(), SharedRepository::Umask);
+
+		// Invalid values fail instead of silently downgrading permissions.
+		for bad in ["bogus", "0440", "3"] {
+			let bad_config = format!("{config_text}[core]\n\tsharedRepository = {bad}\n");
+			fs::write(&config_path, &bad_config).unwrap();
+			let repo = GitRepo::require(temp.path()).unwrap().gix().unwrap();
+			assert!(
+				shared_repository_policy(&repo).is_err(),
+				"expected error for core.sharedRepository={bad}"
+			);
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn lock_commit_editmsg_applies_shared_repository_permissions() {
+		use std::os::unix::fs::PermissionsExt;
+		let temp = tempfile::tempdir().unwrap();
+		let git_dir = temp.path();
+		let lock_path = git_dir.join(".omp-commit-editmsg.lock");
+
+		// Explicit octal mode overrides umask on creation.
+		let guard = lock_commit_editmsg(git_dir, SharedRepository::Mode(0o660), None).unwrap();
+		assert_eq!(fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777, 0o660);
+		drop(guard);
+
+		// Group policy adds g+rw to a 0644 lock file while keeping existing o+r.
+		fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+		let guard = lock_commit_editmsg(git_dir, SharedRepository::Group, None).unwrap();
+		assert_eq!(fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777, 0o664);
+		drop(guard);
+
+		// All policy adds g+rw and o+r even from a restrictive 0600 mode.
+		fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
+		let guard = lock_commit_editmsg(git_dir, SharedRepository::All, None).unwrap();
+		assert_eq!(fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777, 0o664);
+		drop(guard);
 	}
 }

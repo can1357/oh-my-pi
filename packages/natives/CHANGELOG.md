@@ -19,6 +19,7 @@
 - Preserved source-code indentation and linked content cards in URL reads.
 
 - The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+- Fixed concurrent `commitCreate` calls overwriting the shared `.git/COMMIT_EDITMSG` that a `commit-msg` hook reads, so a legacy hook could validate another call's message ([#20626](https://github.com/can1357/oh-my-pi/pull/20626) by [@eggpeat](https://github.com/eggpeat))
 
 ## [19.2.1] - 2026-11-25
 
