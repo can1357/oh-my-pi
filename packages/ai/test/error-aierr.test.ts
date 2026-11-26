@@ -146,11 +146,79 @@ describe("AIError.finalize", () => {
 		expect(result.message.length).toBeGreaterThan(0);
 	});
 
-	it("reports aborted when the caller signal is aborted", async () => {
+	it("reports a bare caller abort consistently instead of surfacing the transport error", async () => {
 		const controller = new AbortController();
 		controller.abort();
-		const result = await AIError.finalize(new Error("cancelled"), { signal: controller.signal });
+		const result = await AIError.finalize(new Error("fetch failed"), { signal: controller.signal });
 		expect(result.stopReason).toBe("aborted");
+		expect(result.message).toBe("Request was aborted");
+		expect(result.id).toBe(AIError.create(AIError.Flag.Abort));
+	});
+
+	it("keeps a provider status when a bare caller abort has no status of its own", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const result = await AIError.finalize(new AIError.ProviderHttpError("missing model", 404), {
+			signal: controller.signal,
+		});
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.status).toBe(404);
+		expect(result.message).toBe("Request was aborted");
+	});
+
+	it("does not invent an HTTP status or raw status id from a status-looking caller abort label", async () => {
+		const stringController = new AbortController();
+		stringController.abort("Stopped after HTTP 404");
+		const fromWrappedString = await AIError.finalize(new AIError.AbortError("Stopped after HTTP 404"), {
+			signal: stringController.signal,
+		});
+		expect(fromWrappedString.stopReason).toBe("aborted");
+		expect(fromWrappedString.message).toBe("Stopped after HTTP 404");
+		expect(fromWrappedString.status).toBeUndefined();
+		expect(fromWrappedString.id).toBe(0);
+
+		const errorController = new AbortController();
+		const callerError = new Error("Stopped after HTTP 404");
+		errorController.abort(callerError);
+		const fromCallerError = await AIError.finalize(callerError, { signal: errorController.signal });
+		expect(fromCallerError.stopReason).toBe("aborted");
+		expect(fromCallerError.message).toBe("Stopped after HTTP 404");
+		expect(fromCallerError.status).toBeUndefined();
+		expect(fromCallerError.id).toBe(0);
+	});
+
+	it("keeps structural flags on a caller abort error even when its message is empty", async () => {
+		const controller = new AbortController();
+		const reason = new AIError.StreamTimeoutError("");
+		controller.abort(reason);
+		const result = await AIError.finalize(reason, { signal: controller.signal });
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.message).toBe("Request was aborted");
+		expect(result.status).toBeUndefined();
+		expect(AIError.is(result.id, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.is(result.id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(result.id, AIError.Flag.Abort)).toBe(false);
+	});
+
+	it("falls back without rejecting when a caller abort reason has a throwing cause getter", async () => {
+		const controller = new AbortController();
+		controller.abort({
+			kind: "tool-scoped-abort",
+			message: "Streaming edit preview failed",
+			toolCallMessages: {},
+			defaultToolCallMessage: "Streaming edit preview failed",
+			get cause() {
+				throw new Error("getter exploded");
+			},
+		});
+
+		const result = await AIError.finalize(undefined, { signal: controller.signal });
+		expect(result.stopReason).toBe("aborted");
+		expect(result.message).toBe("Streaming edit preview failed");
+		expect(result.status).toBeUndefined();
+		expect(result.id).toBe(0);
 	});
 
 	it("surfaces the HTTP status from a ProviderHttpError", async () => {

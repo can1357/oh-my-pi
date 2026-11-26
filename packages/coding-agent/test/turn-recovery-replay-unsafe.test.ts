@@ -1619,5 +1619,61 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			]);
 			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(withOutput)).toBe(false);
 		});
+
+		it("retries only plain cancellations without a terminal provider status or structured non-abort flags", () => {
+			const plain = abortedTurn([]);
+			plain.errorId = AIError.create(AIError.Flag.Abort);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(plain)).toBe(true);
+
+			const labelled = abortedTurn([]);
+			labelled.errorMessage = "Streaming edit preview failed";
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(labelled)).toBe(false);
+
+			const terminal = abortedTurn([]);
+			terminal.errorId = AIError.create(AIError.Flag.Abort);
+			terminal.errorStatus = 404;
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(terminal)).toBe(false);
+
+			// A caller abort with an empty-message StreamTimeoutError keeps Timeout|Transient and
+			// falls back to generic display text; TurnRecovery must not rewrite it as reasonless.
+			const emptyTimeout = abortedTurn([]);
+			emptyTimeout.errorId = AIError.create(AIError.Flag.Timeout, AIError.Flag.Transient);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(emptyTimeout)).toBe(
+				false,
+			);
+			expect(AIError.is(emptyTimeout.errorId, AIError.Flag.Timeout)).toBe(true);
+			expect(AIError.is(emptyTimeout.errorId, AIError.Flag.Abort)).toBe(false);
+		});
+
+		it("does not retry a raw 401 status id cancellation when tool-turn classification runs first", () => {
+			// Mirror agent-session.ts call order: classifyResolvedInterruptedToolTurn before isRetryableReasonlessAbort.
+			const emptyRawAuth = abortedTurn([]);
+			emptyRawAuth.errorId = 401;
+			const emptyRecovery = new TurnRecovery(createHost(model, modelRegistry, { messages: [emptyRawAuth] }));
+			expect(emptyRecovery.classifyResolvedInterruptedToolTurn(emptyRawAuth)).toBeUndefined();
+			expect(emptyRecovery.isRetryableReasonlessAbort(emptyRawAuth)).toBe(false);
+
+			const toolCall: AssistantMessage["content"][number] = {
+				type: "toolCall",
+				id: "call-401",
+				name: "bash",
+				arguments: { command: "pwd" },
+			};
+			const toolRawAuth = abortedTurn([toolCall]);
+			toolRawAuth.errorId = 401;
+			const toolResult: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "call-401",
+				toolName: "bash",
+				content: [{ type: "text", text: "/workspace" }],
+				isError: false,
+				timestamp: Date.now(),
+			};
+			const toolRecovery = new TurnRecovery(
+				createHost(model, modelRegistry, { messages: [toolRawAuth, toolResult] }),
+			);
+			expect(toolRecovery.classifyResolvedInterruptedToolTurn(toolRawAuth)).toBeUndefined();
+			expect(toolRecovery.isRetryableReasonlessAbort(toolRawAuth)).toBe(false);
+		});
 	});
 });

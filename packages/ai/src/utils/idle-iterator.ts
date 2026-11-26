@@ -132,6 +132,7 @@ export interface IdleTimeoutIteratorOptions {
 	firstItemErrorMessage?: string;
 	onIdle?: () => void;
 	onFirstItemTimeout?: () => void;
+	onAbort?: () => void;
 	/**
 	 * Optional semantic-progress predicate. Non-progress items are still yielded,
 	 * but they do not reset the idle deadline. This prevents provider
@@ -188,6 +189,7 @@ export async function* iterateWithIdleTimeout<T>(
 	};
 
 	if (abortSignal?.aborted) {
+		options.onAbort?.();
 		closeIterator();
 		throw abortReason(abortSignal);
 	}
@@ -390,6 +392,7 @@ export async function* iterateWithIdleTimeout<T>(
 					pendingNext = undefined;
 				}
 				if (outcome.kind === "abort") {
+					options.onAbort?.();
 					closeIterator();
 					throw abortReason(abortSignal!);
 				}

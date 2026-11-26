@@ -146,6 +146,18 @@ const GENERIC_ABORT_MESSAGES: Record<string, true> = {
 	"The operation was aborted.": true,
 };
 
+/** Terminal provider rejections stay terminal even if a bare cancellation wins the error race. */
+function hasTerminalProviderStatus(message: Pick<AssistantMessage, "errorId" | "errorStatus">): boolean {
+	const rawStatusId =
+		message.errorId !== undefined && message.errorId >= 400 && message.errorId <= 599 ? message.errorId : undefined;
+	return AIError.isTerminalClientErrorStatus(message.errorStatus ?? rawStatusId);
+}
+
+/** Structured classification other than bare `Flag.Abort` (e.g. timeout, auth, user interrupt). */
+function hasNonAbortClassification(id: number): boolean {
+	return AIError.is(id, AIError.Flag.Class) && !AIError.is(id, AIError.Flag.Abort);
+}
+
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }
@@ -1614,13 +1626,15 @@ export class TurnRecovery {
 			message.content.some(block => block.type !== "fallback") ||
 			this.#host.abortInProgress() ||
 			this.#host.isDisposed() ||
-			this.#host.streamingEditAbortTriggered()
+			this.#host.streamingEditAbortTriggered() ||
+			hasTerminalProviderStatus(message)
 		) {
 			return false;
 		}
 
 		const id = this.#classifyRetryMessage(message);
 		if (message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) return true;
+		if (hasNonAbortClassification(id)) return false;
 		if (message.errorMessage === undefined || !Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage)) {
 			return false;
 		}
@@ -1773,11 +1787,24 @@ export class TurnRecovery {
 	 * unexecuted call must be reissued.
 	 */
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
+		const resolvedToolCallIds: string[] = [];
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			resolvedToolCallIds.push(block.id);
+		}
+		if (resolvedToolCallIds.length === 0) return undefined;
+
+		// Check raw HTTP status ids before `#classifyRetryMessage` can rewrite them
+		// (e.g. `401` -> `Flag.AuthFailed`) and mask the terminal status guard.
+		const terminalProviderStatus = hasTerminalProviderStatus(message);
 		const id = this.#classifyRetryMessage(message);
 		const genericAbort =
-			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
+			!hasNonAbortClassification(id) &&
+			message.errorMessage !== undefined &&
+			Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
 		const reasonlessAbort =
 			(message.stopReason === "aborted" || message.stopReason === "error") &&
+			!terminalProviderStatus &&
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&
 			!this.#host.streamingEditAbortTriggered() &&
@@ -1791,13 +1818,6 @@ export class TurnRecovery {
 		// race, so unmarked MCP/todo blocks can continue once every emitted
 		// call has a matching result. A reasonless abort ends the turn and
 		// the agent loop pairs leftover calls with `executed: false`.
-		const resolvedToolCallIds: string[] = [];
-		for (const block of message.content) {
-			if (block.type !== "toolCall") continue;
-			resolvedToolCallIds.push(block.id);
-		}
-		if (resolvedToolCallIds.length === 0) return undefined;
-
 		const messages = this.#host.agent.state.messages;
 		let assistantIndex = -1;
 		for (let i = messages.length - 1; i >= 0; i--) {
