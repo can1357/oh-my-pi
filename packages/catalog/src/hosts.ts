@@ -176,11 +176,6 @@ export function isVertexAnthropicRawPredictUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/publishers/anthropic/") && isVertexRawPredictUrl(baseUrl);
 }
 
-/** Azure OpenAI deployment-scoped path (`…/deployments/<name>/…`). */
-export function isAzureDeploymentsUrl(baseUrl: string): boolean {
-	return baseUrl.includes("/deployments/");
-}
-
 // Bedrock inference endpoints, per AWS's endpoint and PrivateLink docs:
 // - bedrock-runtime: `bedrock-runtime.<region>.amazonaws.com`, FIPS `bedrock-runtime-fips.<region>.amazonaws.com`
 // - bedrock-mantle: `bedrock-mantle.<region>.api.aws`; the bundled provider keeps a `{region}`
