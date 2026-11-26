@@ -124,6 +124,36 @@ describe("tool block viewport allocation", () => {
 		});
 	});
 
+	it("keeps an image fallback's label and skips the reserved rows that draw nothing", () => {
+		// A demoted image on a graphics terminal: its fallback label, then reserved rows for its box.
+		let label = "";
+		const images: PaintImages = {
+			rows: (_source, request) => {
+				label = Bun.stripANSI(request.fallback);
+				return { rows: [request.fallback, RESERVED_ROW, RESERVED_ROW], columns: 8, state: "fallback" };
+			},
+			cell: () => ({ w: 10, h: 20 }),
+		};
+		const call = toolCall({
+			name: "bash",
+			args: { command: "x" },
+			result: {
+				content: [
+					{ type: "text", text: lines("out", 30) },
+					{ type: "image", data: PNG, mimeType: "image/png" },
+				],
+			},
+			expanded: true,
+		});
+
+		// Head plus two tail rows: exactly the room the two reserved rows would take.
+		const rows = paint(call, 3, images).rows;
+		expect(rows).toHaveLength(3);
+		expect(label).not.toBe("");
+		expect(text(rows).at(-1)).toContain(label);
+		expect(rows.filter(row => row.trim() === RESERVED_ROW)).toEqual([]);
+	});
+
 	it("keeps a running agent's newest rows clickable when its row run starts above the cut", () => {
 		const progress = {
 			index: 0,

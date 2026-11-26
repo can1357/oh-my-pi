@@ -17,6 +17,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { hasGraphics } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
@@ -121,8 +122,10 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
  * newest rows that fit. An image is kept whole or dropped: its draw rides on
  * its last row and moves up over the reserved rows above it (`anchoredRows`),
  * so a cut image would paint over the rows above it; older rows fill the room
- * a dropped image leaves. Hits are clipped to the rows kept; a cursor in a
- * dropped row goes. Undefined when the heading leaves no room or no row fits.
+ * a dropped image leaves. Reserved rows that draw nothing (a fallback label's
+ * or a pending encode's) are skipped, the label kept as text. Hits are clipped
+ * to the rows kept; a cursor in a dropped row goes. Undefined when the heading
+ * leaves no room or no row fits.
  */
 function headAndTail(block: Block, rows: number): Block | undefined {
 	const total = block.rows.length;
@@ -134,7 +137,8 @@ function headAndTail(block: Block, rows: number): Block | undefined {
 	for (let end = total; end > head && room > 0;) {
 		let start = end - 1;
 		while (start > head && holdsImage(block.rows[start]!) && holdsImage(block.rows[start - 1]!)) start--;
-		if (end - start <= room) {
+		const draws = !holdsImage(block.rows[end - 1]!) || block.rows.slice(start, end).some(hasGraphics);
+		if (draws && end - start <= room) {
 			for (let source = end - 1; source >= start; source--) tail.push(source);
 			room -= end - start;
 		}
