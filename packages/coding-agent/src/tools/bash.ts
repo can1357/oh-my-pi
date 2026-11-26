@@ -15,6 +15,7 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
+	ToolApprovalQuery,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -921,7 +922,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return isToolCommandLine(command, new Set(toolCommandNames(this.session)));
 	}
 
-	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision => {
+	readonly approval = (args: unknown, ctx?: AgentToolContext, query?: ToolApprovalQuery): ToolApprovalDecision => {
 		const input = (args ?? {}) as Partial<BashToolInput>;
 		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
@@ -934,6 +935,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
 		const { session: policy, authority } = this.#patternPolicies();
+		// Without `bash.patterns` rules the native analysis only feeds critical-command prompts,
+		// which a caller that cannot prompt (yolo, tier-only reads) never shows.
+		if (query?.prompts === false && policy.rules.length === 0 && authority.rules.length === 0) {
+			return isToolCommandLine(command, toolCommands) ? "read" : "exec";
+		}
 		const allowCompound = cfgBashAllowCompoundCommands.get(this.session.settings);
 		const shell = this.session.settings.getShellConfig().shell;
 		const dialect = bashApprovalDialect(shell);
@@ -2087,7 +2093,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// tier this command was approved at. A URL cwd stays a URL: only that
 		// filesystem can enter it, so a service's or pty command's shell process
 		// starts on the host and enters it, and the client terminal never runs there.
-		const approval = this.approval({ command: rawCommand });
+		const approval = this.approval({ command: rawCommand }, undefined, { prompts: false });
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;

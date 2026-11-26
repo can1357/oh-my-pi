@@ -83,6 +83,7 @@
 ### Removed
 
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
+- Fixed `bash` running its command approval analysis in yolo mode without `bash.patterns` rules, which failed every command when the native addon was out of date.
 - Fixed terminal completion, focus, scrolling, and keyboard handling across prompts, ask forms, plugin and agent views, debugger and plan review screens, session management, and external editors.
 - Fixed transcript rebuilding so compaction, shaking, display changes, forks, and worktree operations remain responsive while preserving terminal scrollback and background-task status.
 - Fixed rendering of images and rich content in the terminal, including image sizing, edge placement, WebP and GIF embeds, annotated pasted images, Markdown styling, and syntax-highlighted paths.
