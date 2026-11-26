@@ -1088,6 +1088,64 @@ describe("ReviewCommand", () => {
 		expect(prompt).not.toContain(rawDiff);
 	});
 
+	it("keeps both sides of renamed paths in delegated large-diff assignments", () => {
+		const rename = [
+			"diff --git a/src/old.ts b/src/new.ts",
+			"similarity index 90%",
+			"rename from src/old.ts",
+			"rename to src/new.ts",
+			"--- a/src/old.ts",
+			"+++ b/src/new.ts",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+		].join("\n");
+		const filler = Array.from({ length: 20 }, (_, index) =>
+			[
+				`diff --git a/src/file-${index}.ts b/src/file-${index}.ts`,
+				`--- a/src/file-${index}.ts`,
+				`+++ b/src/file-${index}.ts`,
+				"@@ -1 +1 @@",
+				"-old",
+				"+new",
+			].join("\n"),
+		).join("\n");
+		const target = createResolvedReviewTarget(
+			"base-branch",
+			"Reviewing a large range (PR-style)",
+			`${rename}\n${filler}`,
+			"No changes",
+			{ rangeBase: "111111111111", rangeHead: "222222222222" },
+		);
+
+		const prompt = buildReviewPrompt(target);
+
+		expect(prompt).toContain("src/new.ts (from `src/old.ts`)");
+		expect(prompt).toContain(
+			"for a renamed or copied file include both its source and destination paths from the Changed Files table",
+		);
+	});
+
+	it("directs submodule paths to tree or submodule diff context", () => {
+		const rawDiff = [
+			"diff --git a/vendor b/vendor",
+			"index 1111111..2222222 160000",
+			"--- a/vendor",
+			"+++ b/vendor",
+			"@@ -1 +1 @@",
+			"-Subproject commit 1111111",
+			"+Subproject commit 2222222",
+		].join("\n");
+		const target = createResolvedReviewTarget("base-branch", "Reviewing a range (PR-style)", rawDiff, "No changes", {
+			rangeBase: "111111111111",
+			rangeHead: "222222222222",
+		});
+
+		const prompt = buildReviewPrompt(target);
+
+		expect(prompt).toContain("for submodule/gitlink paths use `git ls-tree` or the submodule diff");
+	});
+
 	it("fails an explicit CLI range on an invalid ref", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-bad-ref-"));
 		try {

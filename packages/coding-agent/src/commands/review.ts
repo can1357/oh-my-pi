@@ -4,6 +4,7 @@
 
 import { errorMessage } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { runRootCommand } from "../main";
 import { parseArgs, reportCliUsageError } from "../cli/args";
 import { reviewHelp as commandHelp } from "../cli/command-help";
 import { CliUsageError } from "../cli/usage-error";
@@ -72,7 +73,6 @@ export default class Review extends Command {
 			throw error;
 		}
 
-		const { runRootCommand } = await import("../main");
 		await runRootCommand(parseArgs(["--print", "--allow-home"]), [], {
 			initialPrompt: prompt,
 			freshSession: true,
