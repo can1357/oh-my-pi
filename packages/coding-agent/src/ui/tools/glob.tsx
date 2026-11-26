@@ -9,7 +9,9 @@
  */
 import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { ToolHead, ToolPresenter, ToolView } from "./contract";
-import { toPathList } from "../../utils/render-utils";
+import { splitUrlScheme } from "../../internal-urls/url-scheme";
+import { globSearchPath } from "../../tools/details/glob";
+import { splitTopLevelDelimitedPath, toPathList } from "../../utils/render-utils";
 import { resultText } from "./default";
 import { registerToolPresenter } from "./registry";
 import { countText, FileChip, FileRow, inlineErrorView, spansText, StatsFoot } from "./search-common";
@@ -50,7 +52,7 @@ export type GlobTerm = {
 	readonly look: "glob";
 	/** The view is a result (not the pending call). */
 	readonly result?: boolean;
-	/** The call named a path: results show it after the title. */
+	/** The call named a path or pattern: results show it after the title. */
 	readonly target?: boolean;
 	/** Listed paths. */
 	readonly files?: readonly string[];
@@ -73,79 +75,93 @@ function limitMeta(args: GlobArgs | undefined): TspText[] {
 	return args?.limit !== undefined ? [`limit:${args.limit}`] : [];
 }
 
-// Theme keys the regex grammar gives the equivalent regex tokens, so glob and grep heads read alike.
-// No escapes: glob reads every `\` as a path separator.
-/** Wildcards, class brackets, alternation braces and commas. */
-const OPERATOR = "syntaxKeyword";
-/** A class range (`a-z`). */
-const RANGE = "syntaxNumber";
+/** The regex grammar's operator style, so glob syntax reads like grep's. */
+const GLOB_OPERATOR = "syntaxKeyword";
 
-/** The index of the `]` closing the class opened at `start`; -1 when it never closes (the `[` is literal). */
-function classEnd(glob: string, start: number): number {
-	let i = start + 1;
-	if (glob[i] === "!" || glob[i] === "^") i++;
-	if (glob[i] === "]") i++; // A leading `]` is a member.
-	return glob.indexOf("]", i);
+/**
+ * Where the class opened at `open` closes: the first `]` after its `!`/`^`
+ * negation and a leading `]` member; -1 when none follows (the `[` is drawn plain).
+ */
+function classClose(glob: string, open: number): number {
+	let first = open + 1;
+	if (glob[first] === "!" || glob[first] === "^") first++;
+	if (glob[first] === "]") first++;
+	return glob.indexOf("]", first);
 }
 
-/** The class `[start, end]` (`[!a-z_]`) as spans: brackets and negation operators, ranges numbers, members plain. */
-function classSpans(glob: string, start: number, end: number): TspSpan[] {
-	const open = glob[start + 1] === "!" || glob[start + 1] === "^" ? 2 : 1;
-	const spans: TspSpan[] = [{ t: glob.slice(start, start + open), s: OPERATOR }];
-	for (let i = start + open; i < end;) {
-		const range = glob[i + 1] === "-" && i + 2 < end;
-		const length = range ? 3 : 1;
-		const t = glob.slice(i, i + length);
-		spans.push(range ? { t, s: RANGE } : { t });
-		i += length;
+/**
+ * One glob as spans: wildcards (`*`, `**`, `?`), class brackets with their
+ * negation, and `{a,b}` braces and commas as operators; the rest plain. Spans
+ * are cut only at those ASCII characters, so no character splits. A `\` is
+ * plain: glob reads it as a path separator, not an escape. A URL stays plain:
+ * which of its parts glob depends on its scheme.
+ */
+function globSpans(glob: string): TspSpan[] {
+	if (splitUrlScheme(glob)) return [{ t: glob }];
+
+	const spans: TspSpan[] = [];
+	let plainFrom = 0;
+	const operator = (from: number, to: number): void => {
+		if (plainFrom < from) spans.push({ t: glob.slice(plainFrom, from) });
+		spans.push({ t: glob.slice(from, to), s: GLOB_OPERATOR });
+		plainFrom = to;
+	};
+
+	let braceDepth = 0;
+	// Once a `[` finds no `]` after it, no later `[` can: they are all literal.
+	let classesClose = true;
+	for (let i = 0; i < glob.length; i++) {
+		const ch = glob[i];
+		if (ch === "*" || ch === "?") {
+			operator(i, i + 1);
+		} else if (ch === "{") {
+			braceDepth++;
+			operator(i, i + 1);
+		} else if ((ch === "," || ch === "}") && braceDepth > 0) {
+			if (ch === "}") braceDepth--;
+			operator(i, i + 1);
+		} else if (ch === "[" && classesClose) {
+			const close = classClose(glob, i);
+			if (close === -1) {
+				classesClose = false;
+			} else {
+				const negated = glob[i + 1] === "!" || glob[i + 1] === "^";
+				operator(i, negated ? i + 2 : i + 1);
+				operator(close, close + 1);
+				i = close;
+			}
+		}
 	}
-	spans.push({ t: "]", s: OPERATOR });
+	if (plainFrom < glob.length) spans.push({ t: glob.slice(plainFrom) });
 	return spans;
 }
 
 /**
- * A glob (or a `;` list of them) as spans: wildcards (`*`, `**`, `?`), classes
- * and `{a,b}` alternations styled as the regex grammar styles the equivalent
- * tokens; path text unstyled.
+ * The globs a call searches, highlighted: its path with a separate `pattern`
+ * scoped under it, then listed and split at top-level `;`, as the tool does.
+ * Empty when the call names none.
  */
-function globSpans(glob: string): TspSpan[] {
-	const spans: TspSpan[] = [];
-	let i = 0;
-	const take = (length: number, s?: string): void => {
-		const t = glob.slice(i, i + length);
-		spans.push(s === undefined ? { t } : { t, s });
-		i += length;
-	};
-	let depth = 0; // Open `{` alternations.
-	while (i < glob.length) {
-		const ch = glob[i]!;
-		const classClose = ch === "[" ? classEnd(glob, i) : -1;
-		if (ch === "*" || ch === "?") take(1, OPERATOR);
-		else if (classClose >= 0) {
-			spans.push(...classSpans(glob, i, classClose));
-			i = classClose + 1;
-		} else if (ch === "{") {
-			depth++;
-			take(1, OPERATOR);
-		} else if ((ch === "}" || ch === ",") && depth > 0) {
-			if (ch === "}") depth--;
-			take(1, OPERATOR);
-		} else take(1);
-	}
-	return spans;
-}
-
-/** The searched paths as one label (`src/*.ts, test`), each highlighted as a glob; empty when the call names none. */
 function scopeText(args: GlobArgs | undefined): TspText {
-	// Lenient arg validation lets malformed entries through; skip them as grep does.
-	const entries = toPathList(args?.path ?? args?.paths).filter(entry => typeof entry === "string" && entry !== "");
-	return spansText(entries.flatMap((entry, i) => (i === 0 ? globSpans(entry) : [{ t: ", " }, ...globSpans(entry)])));
+	// An array (old transcripts' `paths`, a lenient model's `path`) is the `;` list it
+	// stands for; malformed entries are skipped.
+	const raw = args?.path ?? args?.paths;
+	const path = Array.isArray(raw) ? raw.filter(entry => typeof entry === "string" && entry !== "").join(";") : raw;
+	const searched = globSearchPath({ path, pattern: args?.pattern });
+	if (!searched) return "";
+
+	const entries = toPathList(searched).flatMap(entry => splitTopLevelDelimitedPath(entry, "semicolon"));
+	const spans: TspSpan[] = [];
+	for (let i = 0; i < entries.length; i++) {
+		if (i > 0) spans.push({ t: ";" });
+		spans.push(...globSpans(entries[i]!));
+	}
+	return spansText(spans);
 }
 
-function globHead(args: GlobArgs | undefined, meta: readonly TspText[]): ToolHead {
+function globHead(target: TspText, meta: readonly TspText[]): ToolHead {
 	return {
 		title: "Glob",
-		target: scopeText(args) || "*",
+		target: target || "*",
 		targetKind: "pattern",
 		meta,
 	};
@@ -184,23 +200,24 @@ export const globPresenter: ToolPresenter<GlobArgs, GlobDetails> = {
 	merge: true,
 	call(args) {
 		return {
-			head: globHead(args, limitMeta(args)),
+			head: globHead(scopeText(args), limitMeta(args)),
 			term: { look: "glob" } satisfies GlobTerm,
 		};
 	},
 	result(result, _state, args): ToolView {
 		const details = result.details;
+		const target = scopeText(args);
 		if (result.isError || details?.error) {
 			const message = details?.error || resultText(result) || "Unknown error";
-			return inlineErrorView(globHead(args, limitMeta(args)), message, {
+			return inlineErrorView(globHead(target, limitMeta(args)), message, {
 				term: { look: "glob", result: true, error: message } satisfies GlobTerm,
 			});
 		}
 		const head = (meta: TspText[], extra?: Partial<ToolHead>): ToolHead => ({
-			...globHead(args, meta),
+			...globHead(target, meta),
 			...extra,
 		});
-		const scoped = scopeText(args) !== "";
+		const scoped = target !== "";
 		if (details?.fileCount === undefined) {
 			const text = resultText(result);
 			const files = text.split("\n").filter(line => line.trim() !== "");
