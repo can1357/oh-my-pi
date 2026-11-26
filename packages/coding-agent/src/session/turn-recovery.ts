@@ -2911,14 +2911,19 @@ export class TurnRecovery {
 		if (signal?.aborted) {
 			// The swap landed but the prompt was cancelled while the post-swap
 			// synchronization awaited: restore the fallback selection so a cancelled
-			// prompt never leaves the primary selected and persisted.
+			// prompt never leaves the primary selected and persisted. A manual
+			// `setModel()` completing while the synchronization awaited advances
+			// `#fallbackGeneration` and owns the session, so leave its newer
+			// selection in place instead of rolling it back to the stale fallback.
+			if (generation !== this.#fallbackGeneration) return false;
 			this.#activeRetryFallback = activeFallback;
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			await this.#host.setModelWithProviderSessionReset(currentModel);
-			// A manual `setModel()` may have completed while the restore awaited:
-			// it advances `#fallbackGeneration` and installs the newer model and its
-			// configured effort. Only reapply the fallback's effort when this
-			// continuation still owns the session and the fallback model is active.
+			// The model restore's reconciliation awaited: this is a fresh ownership
+			// and liveness check. A manual change landing in that window advances
+			// `#fallbackGeneration` and installs the newer model and its configured
+			// effort. Only reapply the fallback's effort when this continuation
+			// still owns the session and the fallback model is active.
 			if (generation !== this.#fallbackGeneration || this.#host.model() !== currentModel) return false;
 			// `setThinkingLevel(thinkingToApply)` already installed the primary's
 			// effort; reapply the fallback's after reinstating the fallback model
