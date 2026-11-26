@@ -12,18 +12,16 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { setTranscriptPresenters } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { isSettled } from "@oh-my-pi/pi-tui";
+import { initTheme } from "../../../src/ui/theme/service";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { blockText, transcriptText } from "../../helpers/transcript-text";
 
-beforeAll(async () => {
-	await initTheme();
+beforeAll(() => {
+	initTheme();
 });
 
 function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMessage {
@@ -46,29 +44,30 @@ function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMe
 	};
 }
 
-// Components the controller mounts during a dispatch (pending tool previews).
-// Sealed in afterEach so their spinner intervals never outlive the test file.
-const mountedComponents: Component[] = [];
+// Contexts built by a test; their pending tool cards are sealed in afterEach.
+const contexts: InteractiveModeContext[] = [];
 
 function createFixture(streamingMessage: AssistantMessage) {
-	const streamingComponent = new AssistantMessageComponent();
-	const ctx = createInteractiveModeContext({ streamingComponent, streamingMessage });
-	ctx.chatContainer.addChild(streamingComponent);
-	const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
-	vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(child => {
-		mountedComponents.push(child);
-		addChild(child);
-	});
+	const ctx = createInteractiveModeContext({ streamingMessage });
+	ctx.streaming = ctx.presentAssistant();
+	contexts.push(ctx);
 	const controller = new EventController(ctx);
 	return { controller, ctx };
 }
 
+/** Tool cards in the transcript. */
+function cards(ctx: InteractiveModeContext): PendingTool[] {
+	const found: PendingTool[] = [];
+	for (const block of ctx.shell.transcript.blocks()) {
+		const entry = ctx.transcriptEntry(block);
+		if (entry?.kind === "tool" && entry.tool.call) found.push(entry.tool);
+	}
+	return found;
+}
+
 describe("EventController reconciles streamed tool-call ids at message_end", () => {
 	afterEach(() => {
-		for (const component of mountedComponents.splice(0)) {
-			if (component instanceof ToolExecutionComponent || component instanceof ReadToolGroupComponent)
-				component.seal();
-		}
+		for (const ctx of contexts.splice(0)) for (const tool of ctx.pendingTools.values()) tool.seal();
 		resetSettingsForTest();
 		vi.restoreAllMocks();
 	});
@@ -108,8 +107,7 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 		expect(ctx.pendingTools.get("call_1")).toBe(streamedCard);
 		expect(ctx.pendingTools.has("")).toBe(false);
 		expect([...ctx.pendingTools.keys()]).toEqual(["call_1"]);
-		const cards = ctx.chatContainer.children.filter(child => child instanceof ToolExecutionComponent);
-		expect(cards).toHaveLength(1);
+		expect(cards(ctx)).toHaveLength(1);
 		controller.dispose();
 	});
 
@@ -188,10 +186,10 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 
 		// Exactly one card per id in the transcript: the streamed card the kept id
 		// owns, plus the card the split sibling picked up at execution start.
-		const cards = ctx.chatContainer.children.filter(child => child instanceof ToolExecutionComponent);
-		expect(cards).toHaveLength(2);
-		expect(cards.some(card => card === sharedCard)).toBe(true);
-		expect(cards.some(card => card === splitCard)).toBe(true);
+		const shown = cards(ctx);
+		expect(shown).toHaveLength(2);
+		expect(shown.some(card => card === sharedCard)).toBe(true);
+		expect(shown.some(card => card === splitCard)).toBe(true);
 
 		await controller.handleEvent({
 			type: "tool_execution_end",
@@ -240,7 +238,7 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 				update: {},
 			});
 			const staleCard = ctx.pendingTools.get(staleCall.id);
-			expect(staleCard).toBeInstanceOf(ToolExecutionComponent);
+			expect(staleCard?.call).toBeDefined();
 
 			const restart = makeStreamingMessage([]);
 			const recoveredCall = {
@@ -277,22 +275,18 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 				isError: false,
 			});
 
-			ctx.chatContainer.addChild(
-				new AssistantMessageComponent(makeStreamingMessage([{ type: "text", text: "Following final answer" }])),
-			);
-			const history: string[] = [];
-			for (let index = 0; index <= ctx.chatContainer.children.length; index++) {
-				const batch = ctx.chatContainer.peekFinalizedBatch(100, 0);
-				if (!batch) break;
-				history.push(...batch.rows);
-				ctx.chatContainer.acknowledgeFinalizedBatch(batch.id);
-			}
-			const renderedHistory = Bun.stripANSI(history.join("\n"));
-			expect(renderedHistory).toContain("Following final answer");
-			expect(renderedHistory).toContain("Recovered attempt");
-			expect(renderedHistory).not.toContain("First attempt");
-			expect(renderedHistory).not.toContain("stale.ts");
-			expect(ctx.chatContainer.children).not.toContain(staleCard);
+			ctx.presentAssistant(makeStreamingMessage([{ type: "text", text: "Following final answer" }]));
+			// A finished reply settles on the next microtask.
+			await Promise.resolve();
+			// Nothing pins retirement: every block is settled, so the terminal can move all of
+			// them into scrollback.
+			for (const block of ctx.shell.transcript.blocks()) expect(isSettled(block.node)).toBe(true);
+			const rendered = transcriptText(ctx.shell, 100);
+			expect(rendered).toContain("Following final answer");
+			expect(rendered).toContain("Recovered attempt");
+			expect(rendered).not.toContain("First attempt");
+			expect(rendered).not.toContain("stale.ts");
+			expect(ctx.shell.transcript.blocks()).not.toContain(staleCard!.block);
 			expect(ctx.pendingTools.size).toBe(0);
 		} finally {
 			controller.dispose();
@@ -327,7 +321,7 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 					args: { path: "/tmp/running.ts" },
 				});
 				const group = ctx.pendingTools.get("executing-read");
-				if (!(group instanceof ReadToolGroupComponent)) throw new Error("Expected a grouped read");
+				if (!group?.group) throw new Error("Expected a grouped read");
 				expect(ctx.pendingTools.get("discarded-read")).toBe(previewState === "mounted" ? group : undefined);
 				await controller.handleEvent({
 					type: "message_update",
@@ -335,8 +329,8 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 					assistantMessageEvent: { type: "start", partial: empty },
 				});
 
-				expect(Bun.stripANSI(group.render(100).join("\n"))).not.toContain("discarded.ts");
-				expect(group.isTranscriptBlockFinalized()).toBe(false);
+				expect(blockText(group.block, 100)).not.toContain("discarded.ts");
+				expect(isSettled(group.block.node)).toBe(false);
 				await controller.handleEvent({
 					type: "tool_execution_end",
 					toolCallId: "executing-read",
@@ -344,7 +338,7 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 					result: { content: [{ type: "text", text: "Read completed" }], details: {} },
 					isError: false,
 				});
-				expect(group.isTranscriptBlockFinalized()).toBe(true);
+				expect(isSettled(group.block.node)).toBe(true);
 				expect(ctx.pendingTools.size).toBe(0);
 			} finally {
 				controller.dispose();
@@ -391,7 +385,7 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 					partial: recovered,
 				},
 			});
-			const rendered = Bun.stripANSI(ctx.chatContainer.render(100).join("\n"));
+			const rendered = transcriptText(ctx.shell, 100);
 			expect(rendered).toContain("Recovered assistant segment");
 			expect(rendered).not.toContain("Discarded assistant segment");
 		} finally {
@@ -399,36 +393,30 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 		}
 	});
 
-	it("hands presenters, and refreshTranscript, the migrated card's final id", async () => {
+	it("hands the migrated card its final id, so presenters and refreshes see it", async () => {
 		// Regression guard: the reused card keeping its streamed id, so presenters saw `""` and a
 		// refresh by the final id missed the live card.
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		setTranscriptPresenters([
-			block => (block.type === "toolCall" ? { compact: { label: `ROW-${block.id}` } } : undefined),
-		]);
-		try {
-			const args = { file_path: "/tmp/a.ts", content: "x" };
-			const streamed = makeStreamingMessage([{ type: "toolCall", id: "", name: "write", arguments: args }]);
-			const minted = makeStreamingMessage([{ type: "toolCall", id: "call_1", name: "write", arguments: args }]);
-			const { controller, ctx } = createFixture(streamed);
-			await controller.handleEvent({
-				type: "message_update",
-				message: streamed,
-				assistantMessageEvent: undefined as never,
-			} as Extract<AgentSessionEvent, { type: "message_update" }>);
-			const card = ctx.pendingTools.get("");
-			if (!(card instanceof ToolExecutionComponent)) throw new Error("Expected the streamed card");
-			card.render(120);
+		const args = { file_path: "/tmp/a.ts", content: "x" };
+		const streamed = makeStreamingMessage([{ type: "toolCall", id: "", name: "write", arguments: args }]);
+		const minted = makeStreamingMessage([{ type: "toolCall", id: "call_1", name: "write", arguments: args }]);
+		const { controller, ctx } = createFixture(streamed);
+		await controller.handleEvent({
+			type: "message_update",
+			message: streamed,
+			assistantMessageEvent: undefined as never,
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		const card = ctx.pendingTools.get("");
+		if (!card?.rename) throw new Error("Expected the streamed card");
+		const rename = vi.spyOn(card, "rename");
 
-			await controller.handleEvent({
-				type: "message_end",
-				message: minted,
-			} as Extract<AgentSessionEvent, { type: "message_end" }>);
-			expect(card.refreshTranscriptPresentation(new Set(["call_1"]))).toBe(true);
-			expect(Bun.stripANSI(card.render(120).join("\n"))).toContain("ROW-call_1");
-			controller.dispose();
-		} finally {
-			setTranscriptPresenters([]);
-		}
+		await controller.handleEvent({ type: "message_end", message: minted } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+
+		expect(rename).toHaveBeenCalledWith("call_1");
+		expect(ctx.pendingTools.get("call_1")).toBe(card);
+		controller.dispose();
 	});
 });

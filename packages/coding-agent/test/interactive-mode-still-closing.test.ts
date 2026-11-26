@@ -6,11 +6,12 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode long shutdown status", () => {
 	let authStorage: AuthStorage;
@@ -36,9 +37,15 @@ describe("InteractiveMode long shutdown status", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
-		mode.ui.terminal.drainInput = async () => {};
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		vi.spyOn(postmortem, "quit").mockResolvedValue(undefined);
 	});
 
@@ -98,7 +105,8 @@ describe("InteractiveMode long shutdown status", () => {
 		vi.spyOn(session, "dispose").mockResolvedValue(undefined);
 		const draining = Promise.withResolvers<void>();
 		const drained = Promise.withResolvers<void>();
-		vi.spyOn(mode.ui.terminal, "drainInput").mockImplementation(() => {
+		// The shell stops last: its driver drains in-flight keys and restores the terminal.
+		vi.spyOn(mode.shell, "stop").mockImplementation(() => {
 			draining.resolve();
 			return drained.promise;
 		});

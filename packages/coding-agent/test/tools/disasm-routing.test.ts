@@ -13,7 +13,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { readBinary } from "@oh-my-pi/pi-coding-agent/tools/read-binary";
 import { parseSel } from "@oh-my-pi/pi-coding-agent/tools/read-selector";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/read";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const BOUNDARY = "analysis boundary reached";

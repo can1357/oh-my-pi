@@ -7,7 +7,7 @@ import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { commitHelp as commandHelp } from "../cli/command-help";
 import { CommitAbortedError, runCommitCommand } from "../commit";
 import type { CommitCommandArgs } from "../commit/types";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 export default class Commit extends Command {
 	static description = commandHelp.description;
@@ -32,7 +32,7 @@ export default class Commit extends Command {
 			model: flags.model,
 		};
 
-		await initTheme();
+		initTheme();
 		// The agentic commit flow opens keep-alive sockets to the model provider
 		// and spins up an AgentSession with background async-job + extension
 		// machinery. `session.dispose()` releases what it can, but Bun's fetch

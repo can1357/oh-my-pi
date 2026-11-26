@@ -12,8 +12,8 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { UnitPolicy, UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { UnitPolicy, UnitSnapshot } from "../../daemon/daemon-types";
+import { ToolError } from "../tool-errors";
 import {
 	acquireFileLock,
 	type FileLockHandle,

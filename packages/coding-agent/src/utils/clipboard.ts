@@ -4,8 +4,8 @@ import {
 	readImageFromClipboard as nativeReadImageFromClipboard,
 	readTextFromClipboard as nativeReadTextFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
-import { isSshSession } from "@oh-my-pi/pi-tui/terminal-capabilities";
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
+import { isSsh } from "@oh-my-pi/pi-tui/driver/mux/detect";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
@@ -77,7 +77,7 @@ function hasDisplay(): boolean {
  * session (possibly another user's) can own, so SSH never reads the system clipboard.
  */
 export function isClipboardTerminalLocal(env: NodeJS.ProcessEnv = process.env): boolean {
-	return !isSshSession(env);
+	return !isSsh(env);
 }
 
 /**

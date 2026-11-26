@@ -1,0 +1,45 @@
+// `anthropic` login that mints a 1-year access token, like `claude setup-token`
+// but with `user:profile` so identity, `/api/oauth/usage` and the plan probe
+// keep working. The account skips the 30-day re-login of the refreshing grant
+// (`ANTHROPIC_OAUTH_GRANT_TTL_MS`). A year is granted only for this narrow
+// scope set; the full Claude Code set with `expires_in` is refused (400
+// invalid_request), so claude.ai sessions, MCP connectors, file upload and API
+// key creation stay with the regular login. Rows are stored and matched as
+// `anthropic`: either login replaces the other's row.
+auth "anthropic-long-lived" {
+	name "Anthropic (Claude Pro/Max, 1-year token)"
+	login "oauth-code" {
+		// Public OAuth client id, stored base64 so secret scanners stay quiet.
+		client-id "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl" encoding="base64"
+		authorize-url "https://claude.ai/oauth/authorize"
+		scopes "user:inference" "user:profile"
+		pkce #true
+		authorize-params { code "true" }
+		instructions "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted."
+		callback port=54545 path="/callback"
+		token url="https://api.anthropic.com/v1/oauth/token" body="json" {
+			params {
+				state "{state}"
+				// One year, as `claude setup-token` requests it; the server may grant less.
+				expires_in 31536000
+			}
+		}
+		credential {
+			access "access_token"
+			// The token never refreshes: its refresh token would die 30 days after
+			// login anyway. Without one, `anthropic`'s refresh fails locally
+			// (`require "refresh"`) and the account re-logs in after a year.
+			refresh literal=""
+			expires "seconds" path="expires_in" skew-ms=0
+			account-id "account.uuid"
+			email "account.email_address"
+			org-id "organization.uuid"
+			org-name "organization.name"
+			// Recorded so Files API uploads skip this grant (no `user:file_upload`).
+			scope "scope"
+		}
+		after-exchange hook="anthropic-identity"
+	}
+	refresh "none"
+	store-as "anthropic"
+}

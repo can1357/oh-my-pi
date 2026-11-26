@@ -2,7 +2,7 @@
  * Puppeteer-style key names (`Enter`, `ArrowLeft`, `KeyA`, `Shift`, `a`, `Control+a`)
  * as Tern trusted-input steps (`{"type":"key","action","key","code","mods"}`).
  */
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 
 /** A modifier as Tern's input steps name it. */
 export type TernModifier = "shift" | "ctrl" | "alt" | "meta";

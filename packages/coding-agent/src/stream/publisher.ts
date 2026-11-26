@@ -1,8 +1,8 @@
+import type { PresentedFrame } from "@oh-my-pi/pi-tui";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
 import type { StreamChatMessage } from "@oh-my-pi/pi-wire";
-import type { TUI } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
-import { STREAM_FLUSH_INTERVAL_MS, StreamPaintEncoder } from "./paint-encoder";
+import { STREAM_FLUSH_INTERVAL_MS, type StreamFrameSource, StreamPaintEncoder, seedFrame } from "./paint-encoder";
 import { streamSocketEndpoint } from "./paths";
 import { STREAM_LOCAL_PROTO, type StreamSessionFrame, type StreamStreamerFrame } from "./protocol";
 import type { StreamRedactor } from "./redactor";
@@ -19,7 +19,7 @@ export interface StreamPublisherOptions {
 	cwd: string;
 	sessionId: string;
 	title: string;
-	tui: TUI;
+	frames: StreamFrameSource;
 	redactor: StreamRedactor;
 	onStatus: (status: { viewers: number } | null) => void;
 	onChat?: (message: StreamChatMessage) => void;
@@ -149,8 +149,8 @@ async function openStreamSocket(options: Omit<StreamPublisherOptions, "redactor"
 		proto: STREAM_LOCAL_PROTO,
 		sessionId: options.sessionId,
 		title: options.title,
-		cols: options.tui.terminal.columns,
-		rows: options.tui.terminal.rows,
+		cols: options.frames.size().columns,
+		rows: options.frames.size().rows,
 	};
 	conn.send(JSON.stringify(hello));
 	return promise;
@@ -159,7 +159,7 @@ async function openStreamSocket(options: Omit<StreamPublisherOptions, "redactor"
 /** Publishes one interactive session's already-redacted terminal rows. */
 export class StreamPublisher {
 	readonly #conn: IpcConnection;
-	readonly #tui: TUI;
+	readonly #frames: StreamFrameSource;
 	readonly #encoder: StreamPaintEncoder;
 	readonly #onStatus: StreamPublisherOptions["onStatus"];
 	readonly #onChat: StreamPublisherOptions["onChat"];
@@ -203,31 +203,34 @@ export class StreamPublisher {
 			publisher.#detach();
 		});
 		publisher.#onStatus({ viewers: 0 });
-		publisher.#unsubscribePaint = publisher.#tui.addPaintListener(paint => {
+		const observe = (frame: PresentedFrame): void => {
 			if (publisher.#disposed) return;
-			publisher.#encoder.push(paint);
+			publisher.#encoder.push(frame);
 			publisher.#scheduleFlush();
-		});
+		};
+		publisher.#unsubscribePaint = publisher.#frames.onFrame(observe);
+		const seed = seedFrame(publisher.#frames);
+		if (seed) observe(seed);
 		for (const frame of opened.takeQueuedFrames()) publisher.#handleFrame(frame);
 		return publisher;
 	}
 
 	constructor(conn: IpcConnection, options: Omit<StreamPublisherOptions, "redactor">, redactor: StreamRedactor) {
 		this.#conn = conn;
-		this.#tui = options.tui;
-		this.#encoder = new StreamPaintEncoder(
-			{ columns: options.tui.terminal.columns, rows: options.tui.terminal.rows },
-			redactor,
-		);
+		this.#frames = options.frames;
+		this.#encoder = new StreamPaintEncoder(options.frames.size(), redactor);
 		this.#onStatus = options.onStatus;
 		this.#onChat = options.onChat;
 	}
 
-	/** Swap the row redactor and force a full repaint so the live viewport is re-redacted. */
+	/** Swap the row redactor and send the live viewport again, re-redacted. */
 	setRedactor(redactor: StreamRedactor): void {
 		if (this.#disposed) return;
 		this.#encoder.setRedactor(redactor);
-		this.#tui.requestRender(true);
+		const seed = seedFrame(this.#frames);
+		if (!seed) return;
+		this.#encoder.push(seed);
+		this.#scheduleFlush();
 	}
 
 	#scheduleFlush(): void {

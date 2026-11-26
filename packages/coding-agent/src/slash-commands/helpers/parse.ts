@@ -81,10 +81,6 @@ export function parseSubcommand(input: string): ParsedSubcommand {
 	return { verb: trimmed.slice(0, spaceIdx).toLowerCase(), rest: trimmed.slice(spaceIdx + 1).trim() };
 }
 
-export function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 /**
  * Parse `<name?> [--scope project|user]`-style argument strings used by
  * remove/rm-style subcommands. `name` is optional so callers can surface

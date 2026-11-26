@@ -12,10 +12,9 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
-import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
-
-import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import { noteAgentArrival } from "@oh-my-pi/pi-tui/overlays/agent-identity";
+import { oneLineLabel } from "../task/task-details";
+import { type AgentMetricsSummary, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
+import { noteAgentArrival } from "../ui/tools/agent-identity";
 export { MAIN_AGENT_ID };
 export type { AgentStatus, AgentMetricsSummary };
 
@@ -71,6 +70,8 @@ export interface AgentRef {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Identity of the live spawner, independent of its registry name. */
+	parentSessionKey?: string;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSessionHandle | null;
@@ -118,6 +119,8 @@ export interface RegisterInput {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Live identity of the session that spawned this agent. */
+	parentSessionKey?: string;
 	session: AgentSessionHandle | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
@@ -223,6 +226,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: input.displayName,
 			kind: input.kind,
 			parentId: input.parentId,
+			parentSessionKey: input.parentSessionKey,
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
@@ -267,6 +271,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: current.displayName,
 			kind: current.kind,
 			parentId: current.parentId,
+			parentSessionKey: current.parentSessionKey,
 			session: null,
 			sessionFile: current.sessionFile,
 			status: "parked",

@@ -1,7 +1,7 @@
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { $flag } from "@oh-my-pi/pi-utils";
 
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditMode } from "../tools/details/edit";
 import type { Settings } from "../config/settings";
 import { cfgEditMode, type EditModeSetting, editModelVariants } from "../edit/settings";
 import { matchModelPattern } from "./model-patterns";
@@ -45,4 +45,14 @@ export function resolveEditMode(session: EditModeSessionLike): EditModeSetting {
 		}
 	}
 	return mode;
+}
+
+/**
+ * The grammar `edit` calls take under `session`, as an `EditTool` without a pinned mode reads
+ * them: `magic` applies its model-written batch through `replace`, and `none` keeps a valid
+ * schema until the next built-in reconcile unregisters the tool.
+ */
+export function resolveEditToolMode(session: EditModeSessionLike): EditMode {
+	const mode = resolveEditMode(session);
+	return mode === "none" || mode === "magic" ? "replace" : mode;
 }

@@ -31,7 +31,7 @@ function createRuntimeHarness(options?: {
 		showSessionPinSelector,
 		runtime: {
 			ctx: {
-				editor: { setText } as unknown as InteractiveModeContext["editor"],
+				composer: { setText } as unknown as InteractiveModeContext["composer"],
 				handleSessionCommand,
 				handleSessionDeleteCommand,
 				showSessionPinSelector,
