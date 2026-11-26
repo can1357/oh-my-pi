@@ -59,6 +59,7 @@ import {
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
 import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
+import { setAwsAuthRefreshPresenter } from "../../session/aws-auth-refresh";
 import { disposeLocalMcpHost } from "../../mcp/host/local";
 import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
@@ -1914,6 +1915,28 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// correct waiting promise regardless of which code path created the request.
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
+	// A lapsed Bedrock AWS SSO sign-in reaches the client through the same
+	// `open_url` request `/login` uses; the request retries once it completes.
+	setAwsAuthRefreshPresenter(sso => {
+		rpcUiContext.notify(`Signing in to AWS SSO: ${sso.sessionName ?? sso.startUrl}`, "info");
+		return {
+			onAuth: info =>
+				output({
+					type: "extension_ui_request",
+					id: Snowflake.next() as string,
+					method: "open_url",
+					url: info.url,
+					launchUrl: info.launchUrl,
+					instructions: info.instructions,
+				} as RpcExtensionUIRequest),
+			onProgress: message => rpcUiContext.notify(message, "info"),
+			finish: error =>
+				rpcUiContext.notify(
+					error ? `AWS SSO sign-in failed: ${error}` : "AWS SSO sign-in renewed",
+					error ? "error" : "info",
+				),
+		};
+	});
 	const setAskDialog = (command: RpcCommand & { type: "set_ask_dialog" }): RpcResponse => {
 		rpcUiContext.askDialogEnabled = command.enabled === true;
 		return success(command.id, "set_ask_dialog", { enabled: rpcUiContext.askDialogEnabled });

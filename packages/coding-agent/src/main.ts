@@ -1992,8 +1992,8 @@ export async function runRootCommand(
 ): Promise<void> {
 	logger.startTiming();
 	startStartupWatchdog();
-	// Every session mode (interactive, print, RPC, ACP) renews a lapsed Bedrock
-	// SSO sign-in through the configured refresh command; subagent workers forward here.
+	// Every session mode renews a lapsed Bedrock SSO sign-in by signing that
+	// session in again (where a presenter is installed); subagent workers forward here.
 	setAwsAuthRefreshHandler(runAwsAuthRefresh);
 	try {
 		// Non-prepaint commands still need a default theme; an existing Composer

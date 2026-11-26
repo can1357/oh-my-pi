@@ -8,7 +8,7 @@
 
 ### Added
 
-- Bedrock can sign in to AWS SSO again on its own: set `providers.amazon-bedrock.authRefreshCommand` (e.g. `aws sso login --sso-session <name>`) and, in the TUI or print mode, omp runs it when the SSO session expires, shows its output, and retries the request; without it, the error shows the `omp config set` command to set it up ([#20160](https://github.com/can1357/oh-my-pi/pull/20160) by [@lericson](https://github.com/lericson))
+- Bedrock signs in to AWS SSO again on its own when the SSO session expires: the browser opens (or, over SSH, a device code shows) in the TUI, print mode or RPC, and the request retries; turn off with `providers.amazon-bedrock.ssoSignIn` ([#20160](https://github.com/can1357/oh-my-pi/pull/20160) by [@lericson](https://github.com/lericson))
 ### Breaking Changes
 
 - Processes a bash call leaves running (`cmd &`, `(cmd &)`, `nohup cmd &`) no longer leak: the agent is reminded of them when it stops so it can register them as services or kill them, and the `&` ones are killed when the session ends (`nohup` ones never are). Turn off with `bash.reapBackground`; RPC mode never reaps.

@@ -92,8 +92,6 @@ function credentialCacheKey(profile: string, region: string, loadSharedConfig: b
 export interface AwsAuthRefreshRequest {
 	kind: "sso-token-missing" | "sso-token-expired";
 	sso: AIError.AwsSsoSession;
-	/** The `aws sso login …` invocation that renews {@link sso}. */
-	loginCommand: string;
 	/**
 	 * `Date.now()` when the failing resolution started. A renewal of the same
 	 * session that completed since then already fixed what this request read.
@@ -101,21 +99,33 @@ export interface AwsAuthRefreshRequest {
 	startedAt: number;
 }
 
-export type AwsAuthRefreshOutcome =
-	/** The host signed in again; resolution is retried once. */
-	| { refreshed: true }
-	/** Nothing was attempted; a `hint` is appended to the original error. */
-	| { refreshed: false; hint?: string };
+/** `refreshed`: the host signed in again, so resolution is retried once; otherwise the SSO error stands. */
+export interface AwsAuthRefreshOutcome {
+	refreshed: boolean;
+}
 
 /**
- * Host hook that renews a lapsed SSO sign-in (e.g. by running `aws sso login`).
- * Throwing reports a failed attempt; its message is appended to the SSO error.
+ * Host hook that renews a lapsed SSO sign-in. `signal` aborts once every
+ * request waiting on this renewal was cancelled. Throwing reports a failed
+ * attempt; its message is appended to the SSO error.
  */
-export type AwsAuthRefreshHandler = (request: AwsAuthRefreshRequest) => Promise<AwsAuthRefreshOutcome>;
+export type AwsAuthRefreshHandler = (
+	request: AwsAuthRefreshRequest,
+	signal: AbortSignal,
+) => Promise<AwsAuthRefreshOutcome>;
+
+interface AuthRefreshFlight {
+	promise: Promise<AwsAuthRefreshOutcome>;
+	abort: AbortController;
+	/** Waiters that can still cancel; the renewal aborts when the last one does. */
+	cancellable: number;
+	/** A waiter without a signal joined, so the renewal runs to completion. */
+	pinned: boolean;
+}
 
 let authRefreshHandler: AwsAuthRefreshHandler | undefined;
 /** One renewal per SSO session at a time; concurrent failures share it. */
-const authRefreshInflight: Map<string, Promise<AwsAuthRefreshOutcome>> = new Map();
+const authRefreshInflight: Map<string, AuthRefreshFlight> = new Map();
 /** `Date.now()` when each SSO session's latest successful renewal completed. */
 const authRefreshCompletedAt: Map<string, number> = new Map();
 
@@ -146,28 +156,19 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 			throw error;
 		}
 		const sso = error.sso;
-		const request: AwsAuthRefreshRequest = {
-			kind: error.kind,
-			sso,
-			loginCommand: awsSsoLoginCommand(sso),
-			startedAt,
-		};
 		let outcome: AwsAuthRefreshOutcome;
 		try {
-			outcome = await raceWithSignal(requestAwsAuthRefresh(request), opts.signal);
+			outcome = await requestAwsAuthRefresh({ kind: error.kind, sso, startedAt }, opts.signal);
 		} catch (refreshError) {
 			if (opts.signal?.aborted) throw refreshError;
 			const detail = refreshError instanceof Error ? refreshError.message : String(refreshError);
-			throw new AIError.AwsCredentialsError(`${error.message} Automatic refresh failed: ${detail}`, error.kind, {
+			throw new AIError.AwsCredentialsError(`${error.message} Automatic sign-in failed: ${detail}`, error.kind, {
 				cause: refreshError,
 				sso,
 			});
 		}
-		if (!outcome.refreshed) {
-			if (!outcome.hint) throw error;
-			throw new AIError.AwsCredentialsError(`${error.message} ${outcome.hint}`, error.kind, { sso });
-		}
-		// One retry: a refresh that "succeeded" without renewing this session
+		if (!outcome.refreshed) throw error;
+		// One retry: a renewal that "succeeded" without renewing this session
 		// surfaces the fresh SSO error instead of looping.
 		return resolveCachedCredentials(opts);
 	}
@@ -179,30 +180,70 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
  * completed after the request started. Hosts that forward renewals from other
  * threads (subagent workers) call this on the owning thread, so every caller
  * shares one flight per session. Without a handler, nothing is attempted.
+ *
+ * `signal` cancels this caller's wait; the renewal itself aborts once every
+ * waiter has cancelled, and keeps running while any unsignalled waiter remains.
  */
-export async function requestAwsAuthRefresh(request: AwsAuthRefreshRequest): Promise<AwsAuthRefreshOutcome> {
+export async function requestAwsAuthRefresh(
+	request: AwsAuthRefreshRequest,
+	signal?: AbortSignal,
+): Promise<AwsAuthRefreshOutcome> {
 	const handler = authRefreshHandler;
 	if (!handler) return { refreshed: false };
+	if (signal?.aborted) throw signal.reason ?? new AIError.AbortError();
 	const key = request.sso.sessionName ? `session\x00${request.sso.sessionName}` : `url\x00${request.sso.startUrl}`;
-	const existing = authRefreshInflight.get(key);
-	if (existing) return existing;
-	// `>=`: a renewal finishing in the same millisecond may postdate this request's read.
-	if ((authRefreshCompletedAt.get(key) ?? Number.NEGATIVE_INFINITY) >= request.startedAt) return { refreshed: true };
-	// Register the flight before invoking the handler, so a synchronous throw
-	// still settles and clears it. Detached from every caller's signal like the
-	// shared resolution below; the host bounds the attempt itself.
-	const flight = Promise.withResolvers<AwsAuthRefreshOutcome>();
-	authRefreshInflight.set(key, flight.promise);
-	try {
-		const outcome = await handler(request);
-		if (outcome.refreshed) authRefreshCompletedAt.set(key, Date.now());
-		flight.resolve(outcome);
-	} catch (error) {
-		flight.reject(error);
-	} finally {
-		authRefreshInflight.delete(key);
+	let flight = authRefreshInflight.get(key);
+	if (!flight) {
+		// `>=`: a renewal finishing in the same millisecond may postdate this request's read.
+		if ((authRefreshCompletedAt.get(key) ?? Number.NEGATIVE_INFINITY) >= request.startedAt) {
+			return { refreshed: true };
+		}
+		flight = startAuthRefreshFlight(key, handler, request);
 	}
-	return flight.promise;
+	if (!signal) {
+		flight.pinned = true;
+		return flight.promise;
+	}
+	const joined = flight;
+	joined.cancellable++;
+	const onAbort = () => {
+		if (--joined.cancellable > 0 || joined.pinned) return;
+		// A request arriving now starts a fresh renewal instead of joining this cancelled one.
+		if (authRefreshInflight.get(key) === joined) authRefreshInflight.delete(key);
+		joined.abort.abort(signal.reason);
+	};
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await raceWithSignal(joined.promise, signal);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
+function startAuthRefreshFlight(
+	key: string,
+	handler: AwsAuthRefreshHandler,
+	request: AwsAuthRefreshRequest,
+): AuthRefreshFlight {
+	const abort = new AbortController();
+	const settled = Promise.withResolvers<AwsAuthRefreshOutcome>();
+	// Rejections reach waiters; a renewal every waiter abandoned still settles quietly.
+	void settled.promise.catch(() => {});
+	const flight: AuthRefreshFlight = { promise: settled.promise, abort, cancellable: 0, pinned: false };
+	authRefreshInflight.set(key, flight);
+	void (async () => {
+		// Invoked inside the async body, so a synchronous throw still settles and clears the flight.
+		try {
+			const outcome = await handler(request, abort.signal);
+			if (outcome.refreshed) authRefreshCompletedAt.set(key, Date.now());
+			settled.resolve(outcome);
+		} catch (error) {
+			settled.reject(error);
+		} finally {
+			if (authRefreshInflight.get(key) === flight) authRefreshInflight.delete(key);
+		}
+	})();
+	return flight;
 }
 
 async function resolveCachedCredentials(opts: CredentialResolveOptions): Promise<ResolvedCredentials> {
@@ -519,7 +560,8 @@ async function stsAssumeRole(
 	return parseStsCredentials(xml, "AWS AssumeRole", "assume-role");
 }
 
-interface SsoCachedToken {
+/** An `~/.aws/sso/cache` token file, in the shape the AWS CLI reads and writes. */
+export interface SsoCachedToken {
 	accessToken?: string;
 	expiresAt?: string;
 	startUrl?: string;
@@ -555,16 +597,22 @@ async function readSsoCredentials(
 	let startUrl = profileCfg.sso_start_url;
 	let ssoRegion = profileCfg.sso_region;
 	const sessionName = profileCfg.sso_session;
+	let registrationScopes: string[] | undefined;
 	if (sessionName && configIni) {
 		const session = configIni[`sso-session:${sessionName}`];
 		if (session) {
 			startUrl = startUrl || session.sso_start_url;
 			ssoRegion = ssoRegion || session.sso_region;
+			registrationScopes = session.sso_registration_scopes
+				?.split(",")
+				.map(scope => scope.trim())
+				.filter(scope => scope.length > 0);
 		}
 	}
 	if (!startUrl || !ssoRegion) return undefined;
 	const sso: AIError.AwsSsoSession = { profile, startUrl, region: ssoRegion };
 	if (sessionName) sso.sessionName = sessionName;
+	if (registrationScopes?.length) sso.registrationScopes = registrationScopes;
 
 	const cached = await loadSsoCachedToken(startUrl, sessionName);
 	if (!cached?.token.accessToken) {
@@ -742,8 +790,7 @@ async function refreshSsoToken(
 		...token,
 		accessToken: json.accessToken,
 		// `expiresIn` is seconds from now; the cache records an absolute instant.
-		// Trim milliseconds to match the format the AWS CLI writes.
-		expiresAt: new Date(Date.now() + (json.expiresIn ?? 0) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"),
+		expiresAt: ssoCacheInstant(Date.now() + (json.expiresIn ?? 0) * 1000),
 		// The service may rotate the refresh token; persisting the new one keeps
 		// the following refresh working.
 		refreshToken: json.refreshToken ?? token.refreshToken,
@@ -752,21 +799,45 @@ async function refreshSsoToken(
 	return { token: updated };
 }
 
+/** An instant as the AWS CLI writes it in the SSO cache: ISO 8601 UTC without milliseconds. */
+export function ssoCacheInstant(ms: number): string {
+	return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+/** The cache file the AWS CLI reads for `sso`: SHA-1 of the session name, or of the start URL for legacy profiles. */
+export async function ssoCacheFileName(sso: AIError.AwsSsoSession): Promise<string> {
+	return `${await sha1Hex(sso.sessionName || sso.startUrl)}.json`;
+}
+
 /**
- * Persist a refreshed token so the AWS CLI, other SDKs, and the next OMP process
- * all start from a live token. Written via temp file + rename so a concurrent
- * reader never observes a half-written cache entry; a failure here is logged and
- * ignored, since the in-memory token is still usable for this run.
+ * Write `token` to `~/.aws/sso/cache/<file>`, creating the directory, via temp
+ * file + rename so a concurrent reader (the AWS CLI, another omp) never sees a
+ * half-written entry.
  */
-async function writeSsoCachedToken(file: string, token: SsoCachedToken): Promise<void> {
-	const target = path.join(os.homedir(), ".aws", "sso", "cache", file);
+export async function persistSsoCachedToken(file: string, token: SsoCachedToken): Promise<void> {
+	const dir = path.join(os.homedir(), ".aws", "sso", "cache");
+	const target = path.join(dir, file);
 	const tmp = `${target}.${process.pid}.tmp`;
 	try {
+		await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 		await fs.promises.writeFile(tmp, JSON.stringify(token), { mode: 0o600 });
 		await fs.promises.rename(tmp, target);
 	} catch (err) {
-		logger.debug("aws-credentials: failed to persist refreshed SSO token", { file, err: String(err) });
 		await fs.promises.rm(tmp, { force: true }).catch(() => {});
+		throw err;
+	}
+}
+
+/**
+ * Persist a refreshed token so the AWS CLI, other SDKs, and the next OMP process
+ * all start from a live token. A failure is logged and ignored, since the
+ * in-memory token is still usable for this run.
+ */
+async function writeSsoCachedToken(file: string, token: SsoCachedToken): Promise<void> {
+	try {
+		await persistSsoCachedToken(file, token);
+	} catch (err) {
+		logger.debug("aws-credentials: failed to persist refreshed SSO token", { file, err: String(err) });
 	}
 }
 

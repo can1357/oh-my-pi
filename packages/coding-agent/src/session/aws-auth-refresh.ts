@@ -1,97 +1,69 @@
 /**
  * Bedrock AWS SSO renewal. When credential resolution fails because the SSO
  * sign-in lapsed (the refresh grant outlived the IAM Identity Center session),
- * `resolveAwsCredentials` asks the host to renew it; this runs the
- * operator-configured `providers.amazon-bedrock.authRefreshCommand` (typically
- * `aws sso login --sso-session <name>`), after which the request retries.
+ * `resolveAwsCredentials` asks the host to renew it; this signs that session in
+ * again with `loginAwsSso`, after which the request retries.
  *
  * Installed on the main thread by `runRootCommand`; subagent workers forward
  * their requests to main's `requestAwsAuthRefresh` (`thread/services/aws-auth-refresh.ts`),
- * so one flight per SSO session covers every thread. The command only runs
- * where its output can reach the user (verification URL, device code): the
- * interactive TUI and print mode install a {@link setAwsAuthRefreshPresenter};
- * RPC and ACP install none and keep the plain error.
+ * so one sign-in per SSO session covers every thread. The sign-in only starts
+ * where its URL can reach the user: the interactive TUI, print mode and RPC
+ * install a {@link setAwsAuthRefreshPresenter}; ACP installs none and keeps the
+ * plain error. `providers.amazon-bedrock.ssoSignIn: false` turns it off.
  */
+import type { AwsSsoSession } from "@oh-my-pi/pi-ai/error";
+import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
 import type { AwsAuthRefreshOutcome, AwsAuthRefreshRequest } from "@oh-my-pi/pi-ai/providers/aws-credentials";
-import { executeShell } from "@oh-my-pi/pi-natives";
-import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { loginAwsSso } from "@oh-my-pi/pi-ai/providers/aws-sso-login";
+import { isSsh } from "@oh-my-pi/pi-tui/driver/mux/detect";
+import { logger } from "@oh-my-pi/pi-utils";
 import { effect } from "../config/registry";
-import { cfgOperatorBedrockAuthRefreshCommand, cfgProvidersBedrockAuthRefreshCommand } from "./settings";
+import { cfgProvidersBedrockSsoSignIn } from "./settings";
 
-/** `aws sso login` waits for the user to approve in the browser. */
-const REFRESH_TIMEOUT_MS = 5 * 60_000;
-/** Output kept for the failure message and log. */
-const OUTPUT_TAIL_CHARS = 4_000;
-
-/** Live view of one refresh command run. */
-export interface AwsAuthRefreshView {
-	output(chunk: string): void;
-	/** `error` is set when the command failed. */
+/** Live view of one sign-in: the verification URL, progress, and the outcome. */
+export interface AwsAuthRefreshView extends Required<Pick<OAuthController, "onAuth">> {
+	onProgress?(message: string): void;
+	/** `error` is set when the sign-in failed or was cancelled. */
 	finish(error?: string): void;
 }
 
-/** Opens a view when a refresh command starts. */
-export type AwsAuthRefreshPresenter = (command: string) => AwsAuthRefreshView;
+/** Opens a view when a sign-in starts. */
+export type AwsAuthRefreshPresenter = (sso: AwsSsoSession) => AwsAuthRefreshView;
 
 let presenter: AwsAuthRefreshPresenter | undefined;
-/** The process's operator-configured command, like other process-wide operator settings. */
-let configuredCommand: string | undefined;
-effect(cfgOperatorBedrockAuthRefreshCommand, value => {
-	configuredCommand = value?.trim() || undefined;
+let enabled = true;
+effect(cfgProvidersBedrockSsoSignIn, value => {
+	enabled = value;
 });
 
-/** Install (or clear) the UI that shows refresh command output; without one the command never runs. */
+/** Install (or clear) the UI that shows the sign-in; without one no sign-in starts. */
 export function setAwsAuthRefreshPresenter(next: AwsAuthRefreshPresenter | undefined): void {
 	presenter = next;
 }
 
-/** `AwsAuthRefreshHandler` backed by the configured refresh command. */
-export async function runAwsAuthRefresh(request: AwsAuthRefreshRequest): Promise<AwsAuthRefreshOutcome> {
-	const view = presenter;
-	if (!view) return { refreshed: false };
-	const command = configuredCommand;
-	if (!command) {
-		const quoted = `'${request.loginCommand.replaceAll("'", `'\\''`)}'`;
-		return {
-			refreshed: false,
-			hint: `To have omp run it automatically: omp config set ${cfgProvidersBedrockAuthRefreshCommand.id} ${quoted}`,
-		};
-	}
-
-	logger.info("aws-auth-refresh: running refresh command", { command, profile: request.sso.profile });
-	const run = view(command);
-	let tail = "";
-	let failure: string | undefined;
+/** `AwsAuthRefreshHandler`: sign the failed session in again. */
+export async function runAwsAuthRefresh(
+	request: AwsAuthRefreshRequest,
+	signal: AbortSignal,
+): Promise<AwsAuthRefreshOutcome> {
+	const present = presenter;
+	if (!enabled || !present) return { refreshed: false };
+	const { sso } = request;
+	logger.info("aws-auth-refresh: signing in to AWS SSO", { startUrl: sso.startUrl, session: sso.sessionName });
+	const view = present(sso);
 	try {
-		const result = await executeShell(
-			{
-				command,
-				cwd: getProjectDir(),
-				timeoutMs: REFRESH_TIMEOUT_MS,
-				// A bare `aws sso login` picks the profile from the environment; point
-				// it at the profile that holds the SSO settings, not a role on top of it.
-				env: { AWS_PROFILE: request.sso.profile },
-			},
-			(error, chunk) => {
-				if (error) return;
-				tail = (tail + chunk).slice(-OUTPUT_TAIL_CHARS);
-				run.output(chunk);
-			},
+		await loginAwsSso(
+			sso,
+			{ onAuth: info => view.onAuth(info), onProgress: message => view.onProgress?.(message), signal },
+			// A loopback redirect only reaches omp when the browser runs on this machine.
+			{ remote: isSsh(process.env) },
 		);
-		if (result.timedOut) {
-			failure = `'${command}' timed out after ${REFRESH_TIMEOUT_MS / 60_000} minutes`;
-		} else if (result.cancelled || result.exitCode !== 0) {
-			const lastLine = sanitizeText(tail).trim().split("\n").at(-1)?.trim();
-			failure = `'${command}' exited with code ${result.exitCode ?? "unknown"}${lastLine ? `: ${lastLine}` : ""}`;
-		}
 	} catch (error) {
-		failure = `'${command}' could not run: ${error instanceof Error ? error.message : String(error)}`;
+		const detail = signal.aborted ? "cancelled" : error instanceof Error ? error.message : String(error);
+		logger.warn("aws-auth-refresh: AWS SSO sign-in failed", { startUrl: sso.startUrl, error: detail });
+		view.finish(detail);
+		throw error;
 	}
-	run.finish(failure);
-	if (failure) {
-		logger.warn("aws-auth-refresh: refresh command failed", { command, failure, output: tail });
-		throw new Error(failure);
-	}
-	logger.debug("aws-auth-refresh: refresh command succeeded", { command, output: tail });
+	view.finish();
 	return { refreshed: true };
 }

@@ -20,7 +20,7 @@ export const AWS_AUTH_REFRESHER_KIND = "aws-auth-refresher";
 
 /** Methods of the main thread's refresher. */
 export type AwsAuthRefresherProtocol = {
-	refresh: RpcMethod<[request: AwsAuthRefreshRequest], AwsAuthRefreshOutcome>;
+	refresh: RpcMethod<[request: AwsAuthRefreshRequest, signal: AbortSignal], AwsAuthRefreshOutcome>;
 };
 
 /** Main-thread refresher; crosses to workers by reference. */
@@ -36,8 +36,8 @@ export class RemoteAwsAuthRefresher {
 		this.#remote = remote;
 	}
 
-	refresh(request: AwsAuthRefreshRequest): Promise<AwsAuthRefreshOutcome> {
-		return this.#remote.call("refresh", request);
+	refresh(request: AwsAuthRefreshRequest, signal: AbortSignal): Promise<AwsAuthRefreshOutcome> {
+		return this.#remote.call("refresh", request, signal);
 	}
 }
 
@@ -53,7 +53,7 @@ export const awsAuthRefreshThreadService: ThreadService = {
 		peer.link.exportClass<MainAwsAuthRefresher, AwsAuthRefresherProtocol>(
 			AWS_AUTH_REFRESHER_KIND,
 			(value): value is MainAwsAuthRefresher => value instanceof MainAwsAuthRefresher,
-			{ refresh: (_refresher, request) => requestAwsAuthRefresh(request) },
+			{ refresh: (_refresher, request, signal) => requestAwsAuthRefresh(request, signal) },
 		);
 	},
 
@@ -73,6 +73,7 @@ export const awsAuthRefreshThreadService: ThreadService = {
 			throw new Error("aws-auth-refresh service: boot globals lack the main thread's refresher");
 		}
 		const refresher = globals.refresher;
-		setAwsAuthRefreshHandler(request => refresher.refresh(request));
+		// The worker's own flight aborts once its waiters cancel; that ends its wait on main's sign-in.
+		setAwsAuthRefreshHandler((request, signal) => refresher.refresh(request, signal));
 	},
 };

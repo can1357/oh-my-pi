@@ -29,6 +29,7 @@ import {
 	formatPersistenceFailure,
 	formatPersistenceNotice,
 } from "./persistence-failure";
+import { openPath } from "../utils/open";
 import { initializeExtensions } from "./runtime-init";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
@@ -179,15 +180,20 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		}
 		await stdout.drained();
 	});
-	// The AWS SSO refresh command's output (verification URL, device code) goes
-	// to stderr: stdout carries the answer or the JSON event stream.
-	setAwsAuthRefreshPresenter(command => {
-		process.stderr.write(`Refreshing AWS SSO sign-in: ${sanitizeText(command)}\n`);
+	// The AWS SSO sign-in's URL and progress go to stderr: stdout carries the
+	// answer or the JSON event stream.
+	setAwsAuthRefreshPresenter(sso => {
+		process.stderr.write(`Signing in to AWS SSO: ${sanitizeText(sso.sessionName ?? sso.startUrl)}\n`);
 		return {
-			output: chunk => process.stderr.write(chunk),
+			onAuth: info => {
+				const instructions = info.instructions ? `${sanitizeText(info.instructions)}\n` : "";
+				process.stderr.write(`${instructions}${sanitizeText(info.url)}\n`);
+				openPath(info.url);
+			},
+			onProgress: message => process.stderr.write(`${sanitizeText(message)}\n`),
 			finish: error =>
 				process.stderr.write(
-					error ? `AWS SSO refresh failed: ${sanitizeText(error)}\n` : "AWS SSO sign-in refreshed\n",
+					error ? `AWS SSO sign-in failed: ${sanitizeText(error)}\n` : "AWS SSO sign-in renewed\n",
 				),
 		};
 	});

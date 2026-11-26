@@ -27,6 +27,8 @@ export interface AwsSsoSession {
 	region: string;
 	/** `[sso-session <name>]` block; absent for legacy `sso_start_url` profiles. */
 	sessionName?: string;
+	/** The session's `sso_registration_scopes`, when set. */
+	registrationScopes?: string[];
 }
 
 /** A failure resolving AWS credentials for the Bedrock provider. */

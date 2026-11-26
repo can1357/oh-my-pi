@@ -23,25 +23,27 @@ import {
 	kiroProfileRegions,
 } from "@oh-my-pi/pi-catalog/wire/kiro";
 import {
-	type KiroCliAttempt,
 	KIRO_CLI_SOCIAL_CLIENT_ID,
 	KIRO_CLI_SOCIAL_HEADERS,
 	kiroCliOidcHeaders,
 } from "@oh-my-pi/pi-catalog/wire/kiro-cli";
-import { fetchWithRetry, isRecord, prompt } from "@oh-my-pi/pi-utils";
-import { readBoundedJson } from "@oh-my-pi/pi-utils/bounded-json";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import * as AIError from "../../error";
 import { throwIfCancelled } from "../engine/common";
+import {
+	createJsonApi,
+	type RequestContext,
+	registerSsoOidcClient,
+	ssoOidcDeviceGrant,
+	ssoOidcEndpoint,
+} from "./aws-sso-oidc";
 import { pollOAuthDeviceCodeFlow } from "./device-code";
 import kiroLoginMethodPrompt from "./prompts/kiro-login-method.md" with { type: "text" };
 import kiroProfileSelectPrompt from "./prompts/kiro-profile-select.md" with { type: "text" };
 import type { OAuthController, OAuthCredentials, OAuthPrompt } from "./types";
 
 const PROVIDER = "kiro";
-const REQUEST_TIMEOUT_MS = 30_000;
-const MAX_RESPONSE_BYTES = 128 * 1024;
-const MAX_ATTEMPTS = 3;
 /** Access-token lifetime assumed when a token response names none (the social service omits it). */
 const DEFAULT_TOKEN_LIFETIME_MS = 3_600_000;
 const SCOPES = ["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"];
@@ -63,83 +65,13 @@ const DEFINITIVE_OIDC_ERRORS: Record<string, true> = {
 };
 const LOGIN_METHODS = ["idc", "builder", "api", "google", "github"] as const;
 
-type RequestContext = Pick<OAuthController, "fetch" | "signal">;
-type JsonResponse = { ok: boolean; status: number; data: unknown };
-
-function oauthError(message: string, options: AIError.OAuthErrorOptions): AIError.OAuthError {
-	return new AIError.OAuthError(message, { kind: "validation", provider: PROVIDER, ...options });
-}
+const KIRO = createJsonApi(PROVIDER, "Kiro");
+const { error: oauthError, post: postJson, poll: pollJson, requireOk, field, positive, showCode } = KIRO;
 
 const incompleteRefreshState = (): AIError.OAuthError =>
 	oauthError("Kiro refresh state is incomplete; run /login kiro again", { kind: "configuration", definitive: true });
 
-/**
- * POST a JSON body and read a bounded JSON reply (`data` is undefined when the
- * body is not JSON). Transport errors, 429 and 5xx retry; each attempt rebuilds
- * its headers so `amz-sdk-request` carries the attempt number.
- */
-async function postJson(
-	ctx: RequestContext,
-	url: string,
-	body: unknown,
-	headers: (attempt: KiroCliAttempt) => Record<string, string>,
-): Promise<JsonResponse> {
-	throwIfCancelled(ctx.signal);
-	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-	try {
-		const response = await fetchWithRetry(url, {
-			method: "POST",
-			body: JSON.stringify(body),
-			signal: ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout,
-			fetch: ctx.fetch,
-			maxAttempts: MAX_ATTEMPTS,
-			prepareInit: attempt => ({ headers: headers({ attempt: attempt + 1, maxAttempts: MAX_ATTEMPTS }) }),
-		});
-		const data = await readBoundedJson(response, MAX_RESPONSE_BYTES).catch(() => undefined);
-		return { ok: response.ok, status: response.status, data };
-	} catch (cause) {
-		throwIfCancelled(ctx.signal);
-		throw timeout.aborted
-			? oauthError("Kiro request timed out", { kind: "timeout", cause })
-			: oauthError("Kiro request failed", { kind: "http", cause });
-	}
-}
-
-/** A device poll; a timed-out poll request is retried on the next interval rather than failing the login. */
-async function pollJson(
-	ctx: RequestContext,
-	url: string,
-	body: unknown,
-	headers: (attempt: KiroCliAttempt) => Record<string, string>,
-): Promise<JsonResponse | undefined> {
-	try {
-		return await postJson(ctx, url, body, headers);
-	} catch (error) {
-		if (error instanceof AIError.OAuthError && error.kind === "timeout") return undefined;
-		throw error;
-	}
-}
-
 const socialHeaders = (): Record<string, string> => ({ ...KIRO_CLI_SOCIAL_HEADERS });
-
-function requireOk(response: JsonResponse, message: string): Record<string, unknown> {
-	if (!response.ok)
-		throw oauthError(`${message}: HTTP ${response.status}`, { kind: "device-auth", status: response.status });
-	if (!isRecord(response.data)) throw oauthError("Kiro returned an invalid response", {});
-	return response.data;
-}
-
-function field(data: Record<string, unknown>, key: string): string {
-	const value = data[key];
-	if (typeof value !== "string" || value.length === 0) throw oauthError(`Kiro response missing ${key}`, {});
-	return value;
-}
-
-function positive(data: Record<string, unknown>, key: string): number {
-	const value = data[key];
-	if (typeof value !== "number" || !(value > 0)) throw oauthError(`Kiro response has invalid ${key}`, {});
-	return value;
-}
 
 /**
  * Tokens from an OIDC or social token response. Refresh replies may omit the
@@ -167,12 +99,6 @@ async function ask(ctrl: OAuthController, request: OAuthPrompt, field: string): 
 	const answer = await ctrl.onPrompt(request);
 	throwIfCancelled(ctrl.signal);
 	return answer;
-}
-
-function showCode(ctrl: OAuthController, url: string, instructions: string): void {
-	if (!ctrl.onAuth) throw new AIError.OnPromptRequiredError("Kiro browser authorization");
-	ctrl.onAuth({ url, instructions });
-	ctrl.onProgress?.("Waiting for device authorization...");
 }
 
 /**
@@ -224,39 +150,15 @@ async function pickProfile(
 
 /** IAM Identity Center or Builder ID: register an OIDC client, run the device grant, then pick a profile. */
 async function loginDevice(ctrl: OAuthController, startUrl: string, oidcRegion: string): Promise<OAuthCredentials> {
-	const oidc = `https://oidc.${oidcRegion}.amazonaws.com`;
-	const registration = { clientName: "Kiro CLI", clientType: "public", scopes: SCOPES };
-	const client = requireOk(
-		await postJson(ctrl, `${oidc}/client/register`, registration, kiroCliOidcHeaders),
-		"Kiro client registration failed",
+	const client = await registerSsoOidcClient(
+		KIRO,
+		ctrl,
+		oidcRegion,
+		{ clientName: "Kiro CLI", scopes: SCOPES },
+		kiroCliOidcHeaders,
 	);
-	const clientId = field(client, "clientId");
-	const clientSecret = field(client, "clientSecret");
-	const device = requireOk(
-		await postJson(ctrl, `${oidc}/device_authorization`, { clientId, clientSecret, startUrl }, kiroCliOidcHeaders),
-		"Kiro device authorization failed",
-	);
-	const deviceCode = field(device, "deviceCode");
-	showCode(ctrl, field(device, "verificationUriComplete"), `Confirm code ${field(device, "userCode")} in the browser`);
-	const tokens = await pollOAuthDeviceCodeFlow<OAuthCredentials>({
-		poll: async () => {
-			const grant = {
-				clientId,
-				clientSecret,
-				deviceCode,
-				grantType: "urn:ietf:params:oauth:grant-type:device_code",
-			};
-			const response = await pollJson(ctrl, `${oidc}/token`, grant, kiroCliOidcHeaders);
-			if (!response) return { status: "pending" };
-			const error = isRecord(response.data) ? response.data.error : undefined;
-			if (error === "authorization_pending") return { status: "pending" };
-			if (error === "slow_down") return { status: "slow_down" };
-			return { status: "complete", value: parseTokens(requireOk(response, "Kiro device authorization rejected")) };
-		},
-		intervalSeconds: positive(device, "interval"),
-		expiresInSeconds: positive(device, "expiresIn"),
-		signal: ctrl.signal,
-	});
+	const { clientId, clientSecret } = client;
+	const tokens = parseTokens(await ssoOidcDeviceGrant(KIRO, ctrl, oidcRegion, client, startUrl, kiroCliOidcHeaders));
 	const login: OAuthCredentials = {
 		...tokens,
 		accountId: crypto.randomUUID(),
@@ -408,7 +310,7 @@ export async function refreshKiroHook(current: OAuthCredentials, signal?: AbortS
 	if (!current.kiroClientSecret || !current.kiroOidcRegion) throw incompleteRefreshState();
 	const response = await postJson(
 		{ signal },
-		`https://oidc.${current.kiroOidcRegion}.amazonaws.com/token`,
+		`${ssoOidcEndpoint(current.kiroOidcRegion)}/token`,
 		{
 			grantType: "refresh_token",
 			refreshToken: current.refresh,

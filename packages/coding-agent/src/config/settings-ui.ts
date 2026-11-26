@@ -4,7 +4,6 @@ import { orderedSettings } from "./all-settings";
 import { type AnySetting, lookup } from "./registry";
 import { cfgPlanAutosave, cfgPlanEnabled } from "../plan-mode/settings";
 import {
-	cfgProvidersBedrockAuthRefreshCommand,
 	cfgDefaultThinkingLevel,
 	cfgRetryUsageAwareFallback,
 	normalizeProviderMaxInFlightRequests,
@@ -45,7 +44,6 @@ const CONDITIONS: Record<string, () => boolean> = {
 	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
 	perCallModelAllowNotProject: whenSettings(s => cfgTaskPerCallModelAllow.provenance(s) !== "project"),
 	unpausedProvidersNotProject: whenSettings(s => cfgAuthUnpausedProviders.provenance(s) !== "project"),
-	bedrockAuthRefreshNotProject: whenSettings(s => cfgProvidersBedrockAuthRefreshCommand.provenance(s) !== "project"),
 };
 
 /** Description suffix telling the panel user that an environment variable is in play. */

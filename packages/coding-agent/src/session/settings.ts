@@ -1,14 +1,6 @@
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import {
-	combine,
-	effect,
-	operatorValue,
-	register,
-	type ScopeLike,
-	type Setting,
-	type SettingValueOf,
-} from "../config/registry";
+import { combine, effect, register, type ScopeLike, type Setting, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -1055,26 +1047,21 @@ export const cfgProvidersAnthropicSlowMode = register({
 });
 
 /**
- * Shell command that renews a lapsed AWS SSO sign-in (typically `aws sso login --sso-session <name>`);
- * run when Bedrock credentials fail with an expired/missing SSO token, then the request retries.
- * Read through {@link cfgOperatorBedrockAuthRefreshCommand}: a repository must not pick commands omp runs.
+ * When Bedrock credentials fail because the AWS SSO sign-in lapsed, sign in to
+ * IAM Identity Center again (`loginAwsSso`) and retry the request.
  */
-export const cfgProvidersBedrockAuthRefreshCommand = register({
-	id: "providers.amazon-bedrock.authRefreshCommand",
-	type: "string",
-	default: undefined,
+export const cfgProvidersBedrockSsoSignIn = register({
+	id: "providers.amazon-bedrock.ssoSignIn",
+	type: "boolean",
+	default: true,
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Bedrock Auth Refresh Command",
+		label: "Bedrock SSO Sign-in",
 		description:
-			"Command omp runs when the AWS SSO sign-in behind Bedrock has expired, e.g. `aws sso login --sso-session <name>`; the request retries once it succeeds. Project settings cannot set this",
-		condition: "bedrockAuthRefreshNotProject",
+			"Sign in to AWS IAM Identity Center again when the SSO session behind Bedrock has expired, then retry the request",
 	},
 });
-
-/** `providers.amazon-bedrock.authRefreshCommand` from operator layers only; the command omp runs. */
-export const cfgOperatorBedrockAuthRefreshCommand = operatorValue(cfgProvidersBedrockAuthRefreshCommand);
 
 // Provider selection
 export const cfgProvidersOllamaCloudMaxConcurrency = register({
