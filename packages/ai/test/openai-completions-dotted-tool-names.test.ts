@@ -3,7 +3,7 @@ import { convertMessages, streamOpenAICompletions } from "@oh-my-pi/pi-ai/provid
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { AssistantMessage, Context, Model, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { Type } from "@sinclair/typebox";
+import { type TSchema, Type } from "@sinclair/typebox";
 
 const completionsModel: Model<"openai-completions"> = buildModel({
 	id: "local/assistant",
@@ -18,11 +18,11 @@ const completionsModel: Model<"openai-completions"> = buildModel({
 	maxTokens: 4096,
 });
 
-function makeTool(name: string): Tool {
+function makeTool(name: string, parameters: TSchema = Type.Object({})): Tool {
 	return {
 		name,
 		description: `Run ${name}`,
-		parameters: Type.Object({}),
+		parameters,
 	};
 }
 
@@ -65,59 +65,96 @@ function toolResult(id: string, name: string, text: string, timestamp = 3): Tool
 	};
 }
 
+async function captureWirePayload(context: Context): Promise<{
+	tools?: Array<{ type: string; function?: { name?: string } }>;
+	messages?: Array<{
+		role: string;
+		content?: unknown;
+		tool_call_id?: string;
+		tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }>;
+	}>;
+}> {
+	const controller = new AbortController();
+	controller.abort();
+	const { promise, resolve } = Promise.withResolvers<unknown>();
+	void streamOpenAICompletions(completionsModel, context, {
+		apiKey: "test-key",
+		signal: controller.signal,
+		onPayload: payload => resolve(payload),
+	});
+	return (await promise) as {
+		tools?: Array<{ type: string; function?: { name?: string } }>;
+		messages?: Array<{
+			role: string;
+			content?: unknown;
+			tool_call_id?: string;
+			tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }>;
+		}>;
+	};
+}
+
 describe("openai-completions dotted declared tool-name replay", () => {
-	it.each(["power.state", "display.list"])(
-		"preserves assistant tool_call and tool result in wire payload for declared dotted tool %s",
-		async toolName => {
-			const context: Context = {
-				systemPrompt: ["You are a local assistant."],
-				tools: [makeTool(toolName)],
-				messages: [
-					{ role: "user", content: "run it", timestamp: 1 },
-					assistantToolCalls([{ id: "tc_0", name: toolName }]),
-					toolResult("tc_0", toolName, `RESULT:${toolName}`),
-				],
-			};
+	it("preserves assistant tool_call and tool result in wire payload for a declared dotted tool", async () => {
+		const payload = await captureWirePayload({
+			systemPrompt: ["You are a local assistant."],
+			tools: [makeTool("power.state")],
+			messages: [
+				{ role: "user", content: "run it", timestamp: 1 },
+				assistantToolCalls([{ id: "tc_0", name: "power.state" }]),
+				toolResult("tc_0", "power.state", "RESULT:power.state"),
+			],
+		});
 
-			const controller = new AbortController();
-			controller.abort();
-			const { promise, resolve } = Promise.withResolvers<unknown>();
-			void streamOpenAICompletions(completionsModel, context, {
-				apiKey: "test-key",
-				signal: controller.signal,
-				onPayload: payload => resolve(payload),
-			});
+		expect(payload.tools?.map(tool => tool.function?.name)).toEqual(["power.state"]);
+		expect(payload.messages?.map(message => message.role)).toEqual(["system", "user", "assistant", "tool"]);
 
-			const payload = (await promise) as {
-				tools?: Array<{ type: string; function?: { name?: string } }>;
-				messages?: Array<{
-					role: string;
-					content?: unknown;
-					tool_call_id?: string;
-					tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }>;
-				}>;
-			};
+		const assistantWire = payload.messages?.find(message => message.role === "assistant");
+		expect(assistantWire?.tool_calls).toEqual([
+			{
+				id: "tc_0",
+				type: "function",
+				function: { name: "power.state", arguments: "{}" },
+			},
+		]);
 
-			expect(payload.tools?.map(tool => tool.function?.name)).toEqual([toolName]);
-			expect(payload.messages?.map(message => message.role)).toEqual(["system", "user", "assistant", "tool"]);
+		const toolWire = payload.messages?.find(message => message.role === "tool");
+		expect(toolWire).toMatchObject({
+			role: "tool",
+			tool_call_id: "tc_0",
+			content: "RESULT:power.state",
+		});
+	});
 
-			const assistantWire = payload.messages?.find(message => message.role === "assistant");
-			expect(assistantWire?.tool_calls).toEqual([
-				{
-					id: "tc_0",
-					type: "function",
-					function: { name: toolName, arguments: "{}" },
-				},
-			]);
+	it("does not allowlist a dotted tool omitted by schema quarantine", async () => {
+		const quarantinedSchema = {
+			type: "object",
+			properties: {
+				mode: { type: "null", enum: ["on", "off"] },
+			},
+		} as unknown as TSchema;
+		const payload = await captureWirePayload({
+			systemPrompt: ["You are a local assistant."],
+			tools: [makeTool("power.state", quarantinedSchema), makeTool("display.list")],
+			messages: [
+				{ role: "user", content: "run it", timestamp: 1 },
+				assistantToolCalls([
+					{ id: "tc_quarantined", name: "power.state" },
+					{ id: "tc_kept", name: "display.list" },
+				]),
+				toolResult("tc_quarantined", "power.state", "RESULT:power.state", 3),
+				toolResult("tc_kept", "display.list", "RESULT:display.list", 4),
+			],
+		});
 
-			const toolWire = payload.messages?.find(message => message.role === "tool");
-			expect(toolWire).toMatchObject({
-				role: "tool",
-				tool_call_id: "tc_0",
-				content: `RESULT:${toolName}`,
-			});
-		},
-	);
+		expect(payload.tools?.map(tool => tool.function?.name)).toEqual(["display.list"]);
+		const assistantWire = payload.messages?.find(message => message.role === "assistant");
+		expect(assistantWire?.tool_calls?.map(call => ({ id: call.id, name: call.function?.name }))).toEqual([
+			{ id: "tc_kept", name: "display.list" },
+		]);
+		const toolWires = payload.messages?.filter(message => message.role === "tool") ?? [];
+		expect(toolWires).toHaveLength(1);
+		expect(toolWires[0]).toMatchObject({ tool_call_id: "tc_kept", content: "RESULT:display.list" });
+	});
 
 	it("still drops undeclared dotted or malformed tool names and empty-id calls", () => {
 		const context: Context = {
