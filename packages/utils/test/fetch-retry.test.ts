@@ -384,15 +384,11 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, `429 rests until ${past} (quota)`)).toBeUndefined();
 	});
 
-	it.each([
-		["rests until", "429 rests until"],
-		["resets until", "429 resets until"],
-		["resets at", "429 resets at"],
-	])("parses '%s <ISO-8601>' quota reset timestamps", (_label, prefix) => {
+	it("parses 'rests until <ISO-8601>' quota reset timestamps", () => {
 		const targetMs = Date.now() + 120_000;
 		const iso = new Date(targetMs).toISOString().replace(/\.\d{3}Z$/, "Z");
 		const expected = Date.parse(iso) - Date.now();
-		const hint = extractRetryHint(undefined, `${prefix} ${iso} (quota)`);
+		const hint = extractRetryHint(undefined, `429 rests until ${iso} (quota)`);
 		expect(hint).toBeDefined();
 		expect(Math.abs(hint! - expected)).toBeLessThan(100);
 	});

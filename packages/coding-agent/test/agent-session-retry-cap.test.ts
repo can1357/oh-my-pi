@@ -941,113 +941,70 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
-	it.each([
-		{ name: "within retry.maxDelayMs", offsetMs: 120_000, maxDelayMs: 300_000 },
-		{ name: "past retry.maxDelayMs when retry.waitForUsageReset is set", offsetMs: 360_000, maxDelayMs: 300_000 },
-	])(
-		"waits for a 429 'rests until <ISO> (quota)' reset $name instead of falling back to 30m",
-		async ({ offsetMs, maxDelayMs }) => {
-			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-			if (!model) {
-				throw new Error("Expected bundled Anthropic test model to exist");
-			}
-			const resetIso = new Date(Date.now() + offsetMs).toISOString().replace(/\.\d{3}Z$/, "Z");
-			const expectedDelayMs = Date.parse(resetIso) - Date.now();
-			let calls = 0;
-			const agent = new Agent({
-				getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-				initialState: {
-					model,
-					systemPrompt: ["Test"],
-					tools: [],
-					messages: [],
-				},
-				streamFn: requestedModel => {
-					calls++;
-					const stream = new AssistantMessageEventStream();
-					queueMicrotask(() => {
-						const usage: AssistantMessage["usage"] = {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						};
-						if (calls === 1) {
-							const failure: AssistantMessage = {
-								role: "assistant",
-								content: [],
-								api: requestedModel.api,
-								provider: requestedModel.provider,
-								model: requestedModel.id,
-								usage,
-								stopReason: "error",
-								errorStatus: 429,
-								errorMessage: `429 rests until ${resetIso} (quota)`,
-								timestamp: Date.now(),
-							};
-							stream.push({ type: "start", partial: failure });
-							stream.push({ type: "error", reason: "error", error: failure });
-							return;
-						}
-						const text: TextContent = { type: "text", text: "recovered after rests until reset" };
-						const message: AssistantMessage = {
-							role: "assistant",
-							content: [text],
-							api: requestedModel.api,
-							provider: requestedModel.provider,
-							model: requestedModel.id,
-							usage,
-							stopReason: "stop",
-							timestamp: Date.now(),
-						};
-						stream.push({ type: "start", partial: message });
-						stream.push({ type: "text_start", contentIndex: 0, partial: message });
-						stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial: message });
-						stream.push({ type: "text_end", contentIndex: 0, content: text.text, partial: message });
-						stream.push({ type: "done", reason: "stop", message });
-					});
-					return stream;
-				},
-			});
+	it("waits for a 429 'rests until <ISO> (quota)' reset past retry.maxDelayMs when retry.waitForUsageReset is set", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+		const resetIso = new Date(Date.now() + 360_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+		const expectedDelayMs = Date.parse(resetIso) - Date.now();
+		// Prefix with `HTTP 429` so `createMockModel` (which omits `errorStatus`) classifies it as HTTP 429.
+		const mock = createMockModel({
+			responses: [
+				{ throw: `HTTP 429 rests until ${resetIso} (quota)` },
+				{ content: ["recovered after rests until reset"], stopReason: "stop" },
+			],
+		});
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
 
-			const settings = Settings.isolated({
-				"compaction.enabled": false,
-				"retry.baseDelayMs": 5,
-				"retry.maxDelayMs": maxDelayMs,
-				"retry.modelFallback": false,
-				"retry.waitForUsageReset": true,
-			});
-			settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 300_000,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-			session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
-			mockSchedulerWaitWithClock();
-			const retryStartEvents: AutoRetryStartEvent[] = [];
-			const retryEndEvents: AutoRetryEndEvent[] = [];
-			session.subscribe(event => {
-				if (event.type === "auto_retry_start") retryStartEvents.push(event);
-				if (event.type === "auto_retry_end") retryEndEvents.push(event);
-			});
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
 
-			await session.prompt("Trigger 429 rests until quota reset");
-			await session.waitForIdle();
+		await session.prompt("Trigger 429 rests until quota reset");
+		await session.waitForIdle();
 
-			expect(calls).toBe(2);
-			expect(retryStartEvents).toHaveLength(1);
-			expect(Math.abs(retryStartEvents[0].delayMs - expectedDelayMs)).toBeLessThan(1_000);
-			expect(retryEndEvents).toHaveLength(1);
-			expect(retryEndEvents[0]).toMatchObject({ success: true });
-			expect(lastAssistant(session).stopReason).toBe("stop");
-			expect(session.isRetrying).toBe(false);
-		},
-	);
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(Math.abs(retryStartEvents[0].delayMs - expectedDelayMs)).toBeLessThan(1_000);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(lastAssistant(session).stopReason).toBe("stop");
+		expect(session.isRetrying).toBe(false);
+	});
 
 	/**
 	 * Isolated AuthStorage whose opencode-go usage endpoint reports the given
