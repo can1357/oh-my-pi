@@ -3,7 +3,8 @@
  * their {@link ResolveContext}/{@link WriteContext} here instead of assembling
  * per-tool literals, so every handler sees the same caller identity.
  */
-import { owningSessionId, type ToolSession } from "../tools";
+import type { ToolSession } from "../tools";
+import { owningSessionId } from "../tools/session-id";
 import { getExperimentalContextSession } from "../tools/context-notes";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { ResolveContext, WriteContext } from "./types";

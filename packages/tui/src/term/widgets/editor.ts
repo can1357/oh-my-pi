@@ -29,7 +29,7 @@
  * cancel). A `readonly` field only moves the caret. The `input` kind shares
  * this behaviour (`./input`).
  */
-import type { KeyEvent, PasteEvent } from "../../events";
+import type { KeyEvent, PasteEvent, TextEdit } from "../../events";
 import type { UiNode } from "../../node";
 import { caretCell, caretOf, type EditorProps, graphemes, lastLayout, offsetAt, rowOf } from "../painters/editor";
 import { type WidgetAction, widgetActionOf, widgetKeyMatches } from "../keymap";
@@ -177,8 +177,15 @@ function openField(node: UiNode, cx: WidgetContext): Field {
 	return { node, cx, props, text, cursor, state, selection: node.fieldSelection!, multiline: node.kind === "editor" };
 }
 
-/** Emit an edit replacing `[from, to)` with `insert`, caret to `cursor`. */
-function emitEdit(field: Field, from: number, to: number, insert: string, cursor: number): void {
+/** Emit an edit replacing `[from, to)` with `insert`, caret to `cursor`; `origin` marks a paste. */
+function emitEdit(
+	field: Field,
+	from: number,
+	to: number,
+	insert: string,
+	cursor: number,
+	origin: Pick<TextEdit, "paste"> = {},
+): void {
 	field.cx.emit({
 		type: "edit",
 		key: field.cx.keypath,
@@ -187,6 +194,7 @@ function emitEdit(field: Field, from: number, to: number, insert: string, cursor
 		text: insert,
 		cursor,
 		len: field.text.length,
+		...origin,
 	});
 }
 
@@ -196,19 +204,25 @@ function moveTo(field: Field, cursor: number, anchor: number | null): void {
 	field.selection.anchor = anchor === target ? null : anchor;
 }
 
-function replaceSelectionOr(field: Field, from: number, to: number, insert: string): void {
+function replaceSelectionOr(
+	field: Field,
+	from: number,
+	to: number,
+	insert: string,
+	origin: Pick<TextEdit, "paste"> = {},
+): void {
 	const selection = field.selection.range(field.cursor);
 	field.selection.anchor = null;
 	if (selection) {
-		emitEdit(field, selection.from, selection.to, insert, selection.from + insert.length);
+		emitEdit(field, selection.from, selection.to, insert, selection.from + insert.length, origin);
 		return;
 	}
 	if (from === to && insert === "") return;
-	emitEdit(field, from, to, insert, from + insert.length);
+	emitEdit(field, from, to, insert, from + insert.length, origin);
 }
 
-function insertText(field: Field, insert: string): void {
-	replaceSelectionOr(field, field.cursor, field.cursor, insert);
+function insertText(field: Field, insert: string, origin: Pick<TextEdit, "paste"> = {}): void {
+	replaceSelectionOr(field, field.cursor, field.cursor, insert, origin);
 }
 
 /** Delete `[from, to)` as a kill (merged into the newest ring entry after another kill). */
@@ -442,7 +456,7 @@ export const fieldWidget: Widget = {
 		const field = openField(node, cx);
 		if (field.props.readonly === true) return false;
 		const normalized = paste.text.replace(/\r\n?/g, "\n");
-		insertText(field, field.multiline ? normalized : normalized.replace(/\n/g, " "));
+		insertText(field, field.multiline ? normalized : normalized.replace(/\n/g, " "), { paste: true });
 		settleField(field, "other");
 		return true;
 	},
