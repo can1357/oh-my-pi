@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { relativeLuminance } from "@oh-my-pi/pi-utils";
-import { resolveVarRefs } from "@oh-my-pi/pi-tui/theme/color";
 import { loadTheme, loadThemeJson } from "@oh-my-pi/pi-tui/theme/loader";
+import { resolveColorValue } from "@oh-my-pi/pi-tui/theme/theme";
 
 const MIN_TEXT_CONTRAST = 4.5;
 
@@ -20,16 +20,16 @@ function contrastRatio(foreground: string | number, background: string | number)
 describe("Obsidian muted text contrast (#9712)", () => {
 	test("task instructions and usage limits remain readable on their backgrounds", async () => {
 		const [theme, themeJson] = await Promise.all([
-			loadTheme("obsidian", { mode: "truecolor" }),
+			loadTheme("obsidian", { depth: "truecolor" }),
 			loadThemeJson("obsidian"),
 		]);
 		const pageBgToken = themeJson.export?.pageBg;
 		if (pageBgToken === undefined) throw new Error("Obsidian does not define export.pageBg");
 
-		const muted = theme.getColorHex("muted");
+		const muted = theme.hex("muted");
 		const surfaces: [string, string | number][] = [
-			["task/page", resolveVarRefs(pageBgToken, themeJson.vars ?? {})],
-			["usage/status", theme.getBgHex("statusLineBg")],
+			["task/page", resolveColorValue(pageBgToken, themeJson.vars ?? {})],
+			["usage/status", theme.hex("statusLineBg")],
 		];
 		for (const [name, background] of surfaces) {
 			expect(contrastRatio(muted, background), name).toBeGreaterThanOrEqual(MIN_TEXT_CONTRAST);

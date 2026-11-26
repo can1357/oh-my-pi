@@ -1,0 +1,25 @@
+# Perl corpus: arrays. Format and regeneration: crates/builtins/src/perl/tests.rs.
+clear	my @a=(1,2,3); @a=(); print scalar(@a),"\n";	0␊
+delete-element	my @a=(1,2,3); my $v=delete $a[1]; print "$v|$#a|",exists $a[1]?1:0,"\n";	2|2|0␊
+delete-final	my @a=(1,2,3); delete $a[-1]; print "$#a|@a\n";	1|1 2␊
+exists-hole	my @a; $a[3]=undef; print exists $a[2]?1:0, '|', exists $a[3]?1:0, "\n";	0|1␊
+extend	my @a=(1); $#a=3; print scalar(@a),'|',join(',',map {$_//'-'} @a),"\n";	4|1,-,-,-␊
+foreach-alias	my @a=(1,2,3); for my $v (@a) { $v *= 2 } print "@a\n";	2 4 6␊
+index-hole	my @a; $a[3]='x'; print join('|', map {defined($_)?$_:'u'} @a), "\n";	u|u|u|x␊
+last-index-empty	my @a; print "$#a\n";	-1␊
+last-index	my @a=(4,5,6); print "$#a\n";	2␊
+negative-element	my @a=(4,5,6); print "$a[-2]\n";	5␊
+pop-empty	my @a; print defined(pop @a)?1:0,"\n";	0␊
+pop	my @a=(1,2,3); my $x=pop @a; print "$x|@a\n";	3|1 2␊
+push	my @a=(1); my $n=push @a,2,3; print "$n|@a\n";	3|1 2 3␊
+scalar-copy	my @a=(3,5); my @b=@a; $b[0]=10; print "@a|@b\n";	3 5|10 5␊
+shift	my @a=(1,2,3); my $x=shift @a; print "$x|@a\n";	1|2 3␊
+splice-add	my @a=(1,4); splice @a,1,0,2,3; print "@a\n";	1 2 3 4␊
+splice-negative-length	my @a=(1,2,3,4,5); my @r=splice @a,1,-1; print "@r|@a\n";	2 3 4|1 5␊
+splice-negative	my @a=(1,2,3,4); my @r=splice @a,-2,1; print "@r|@a\n";	3|1 2 4␊
+splice-remove	my @a=(1,2,3,4); my @r=splice @a,1,2; print "@r|@a\n";	2 3|1 4␊
+splice-replace	my @a=(1,2,3,4); my @r=splice @a,1,2,'x','y','z'; print "@r|@a\n";	2 3|1 x y z 4␊
+splice-scalar	my @a=(1,2,3,4); my $r=splice @a,1,2; print "$r|@a\n";	3|1 4␊
+splice-tail	my @a=(1,2,3,4); my @r=splice @a,2; print "@r|@a\n";	3 4|1 2␊
+truncate	my @a=(1,2,3,4); $#a=1; print "@a\n";	1 2␊
+unshift	my @a=(3); my $n=unshift @a,1,2; print "$n|@a\n";	3|1 2 3␊

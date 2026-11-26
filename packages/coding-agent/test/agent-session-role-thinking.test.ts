@@ -13,8 +13,12 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
-import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
+import { thinkingLevelWord } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/segments";
+import {
+	AUTO_THINKING,
+	clampAutoThinkingEffort,
+	resolveProvisionalAutoLevel,
+} from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -481,6 +485,38 @@ describe("AgentSession role model thinking behavior", () => {
 		await prompt;
 
 		expect(session.sessionManager.getEntries().some(entry => entry.type === "model_usage")).toBe(false);
+	});
+
+	it("drops a classification that finishes after another model is selected", async () => {
+		const classified = getAnthropicModelOrThrow("claude-opus-4-7");
+		const picked = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: classified.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${classified.provider}/${classified.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierStarted = Promise.withResolvers<void>();
+		const releaseClassifier = Promise.withResolvers<void>();
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async () => {
+			classifierStarted.resolve();
+			await releaseClassifier.promise;
+			return Effort.Max;
+		});
+
+		session.setThinkingLevel(AUTO_THINKING);
+		const prompt = session.prompt("Plan the storage migration");
+		await classifierStarted.promise;
+		await session.setModel(picked);
+		releaseClassifier.resolve();
+		await prompt;
+
+		// The picked model keeps the level auto starts it on, as when classification fails.
+		const fallback = resolveProvisionalAutoLevel(picked);
+		expect(session.model?.id).toBe(picked.id);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		expect(session.thinkingLevel).toBe(fallback);
+		expect(session.agent.state.thinkingLevel).toBe(fallback);
 	});
 
 	it("classifies a user-invoked /skill turn under auto (resolves concrete effort)", async () => {

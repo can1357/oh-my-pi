@@ -1,4 +1,4 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tools/tool-errors";
 import { getEnabledEvalPreludes } from "../eval/preludes";
 import helpReferenceDoc from "../prompts/internal-urls/help-reference.md" with { type: "text" };
 import type { ToolSession } from "../tools";

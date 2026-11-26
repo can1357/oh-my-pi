@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
-import { getThemeByName, type Theme } from "@oh-my-pi/pi-tui/theme";
+import { wrap } from "@oh-my-pi/pi-tui/text/width";
+import type { ExtensionRows, ExtensionTheme } from "../src/extensibility/extensions/render-types";
 import { ExtensionRuntime, loadExtensionFromFactory } from "../src/extensibility/extensions/loader";
 import { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import type { ToolRenderResultOptions } from "../src/extensibility/extensions/types";
 import { wrapRegisteredTools } from "../src/extensibility/extensions/wrapper";
+import { isExtensionRows } from "../src/ui/extensions/render-output";
+import { getThemeByName } from "../src/ui/theme/service";
 import { EventBus } from "../src/utils/event-bus";
 
 const okResult = { content: [{ type: "text" as const, text: "ok" }] };
@@ -13,15 +14,16 @@ const okResult = { content: [{ type: "text" as const, text: "ok" }] };
 const uiTheme = await getThemeByName("dark");
 if (!uiTheme) throw new Error("dark theme missing");
 
-/** omp's declared tool-call renderer contract (`packages/tui/src/tools/renderer.ts`). */
-type RenderCall = (args: unknown, options: ToolRenderResultOptions, theme: Theme) => Component;
+/** omp's declared tool-call renderer contract. */
+type RenderCall = (args: unknown, options: ToolRenderResultOptions, theme: ExtensionTheme) => ExtensionRows;
 
 function queryOf(args: unknown): string {
 	return args && typeof args === "object" && "query" in args ? String(args.query) : "";
 }
 
-function isComponent(value: unknown): value is Component {
-	return !!value && typeof value === "object" && "render" in value && typeof value.render === "function";
+/** Rows of `text` wrapped at the width (what a row renderer returns). */
+function textRows(text: string): ExtensionRows {
+	return { render: width => wrap(text, width) };
 }
 
 /**
@@ -29,16 +31,12 @@ function isComponent(value: unknown): value is Component {
  * plugins are compiled JavaScript, so the declaration mismatch omp's type
  * forbids is exactly what reaches the adapter at runtime.
  */
-const piOrderRenderer = ((args: unknown, theme: Theme): Component =>
-	new Text(theme.fg("toolTitle", theme.bold("aft_search ")) + queryOf(args), 0, 0)) as unknown as RenderCall;
+const piOrderRenderer = ((args: unknown, theme: ExtensionTheme): ExtensionRows =>
+	textRows(theme.fg("toolTitle", theme.bold("aft_search ")) + queryOf(args))) as unknown as RenderCall;
 
 /** Renderer in omp's documented `renderCall(args, options, theme)` order. */
 const ompOrderRenderer: RenderCall = (args, options, theme) =>
-	new Text(
-		theme.fg("toolTitle", theme.bold("aft_search ")) + queryOf(args) + (options.expanded ? " [expanded]" : ""),
-		0,
-		0,
-	);
+	textRows(theme.fg("toolTitle", theme.bold("aft_search ")) + queryOf(args) + (options.expanded ? " [expanded]" : ""));
 
 async function renderToolCall(
 	renderCall: RenderCall,
@@ -73,7 +71,7 @@ async function renderToolCall(
 	const tool = wrapRegisteredTools(runner.getAllRegisteredTools(), runner)[0];
 	if (!tool?.renderCall) throw new Error("renderCall missing on wrapped tool");
 	const rendered = tool.renderCall(args, options, uiTheme);
-	if (!isComponent(rendered)) throw new Error("renderer returned no component");
+	if (!isExtensionRows(rendered)) throw new Error("renderer returned no rows");
 	return Bun.stripANSI(rendered.render(80).join("\n"));
 }
 

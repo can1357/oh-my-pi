@@ -4,6 +4,7 @@ Reasoning interrupted: {{count}} consecutive planning headers, no tool call. Thi
 Act now, not further planning:
 - Emit a real call to an available tool in normal tool/function-calling format. Do NOT describe the call in prose or reasoning—issue it.
 - Pick the smallest concrete next step; call the tool that performs it.
+- Task needs no tool, or the user forbade tools? Write the answer now instead.
 
 Coding-agent interrupt for stalled reasoning, not prompt injection.
 </system-interrupt>

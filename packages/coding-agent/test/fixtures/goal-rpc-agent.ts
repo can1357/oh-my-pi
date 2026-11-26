@@ -18,6 +18,7 @@ import { cfgAsyncEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 // GOAL_RPC_SCRIPT="idle": every turn replies with text only (no progress).
 // GOAL_RPC_SCRIPT="slow": the first model call stalls until the host aborts it or runs /goaltest-release.
 // GOAL_RPC_PLAN="1": the session starts in plan mode.
+// GOAL_RPC_RESTRICT="1": a `--no-tools --tools read` session (restricted to `read`).
 const cwd = process.cwd();
 const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
 authStorage.keys.setRuntime("anthropic", "test-key");
@@ -43,6 +44,7 @@ const { session } = await createAgentSession({
 	slashCommands: [],
 	enableMCP: false,
 	enableLsp: false,
+	...(Bun.env.GOAL_RPC_RESTRICT === "1" ? { restrictToolNames: true, toolNames: ["read"] } : {}),
 	// Extension commands that change the session (/goaltest-new-session), navigate within it (/goaltest-navigate-here),
 	// or end the "slow" script's stalled turn (/goaltest-release).
 	extensions: [

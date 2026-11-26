@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { getTerminalId } from "@oh-my-pi/pi-tui";
+import { getTerminalId } from "@oh-my-pi/pi-coding-agent/utils/ttyid";
 import {
 	getAgentDir,
 	getCustomSessionFilesDir,
@@ -187,6 +187,15 @@ describe("custom session-file registry", () => {
 			writeTerminalBreadcrumb(cwd, managedFile);
 			const managedMarker = path.join(getCustomSessionFilesDir(agentDir), hashPath(managedFile));
 			expect(fs.existsSync(managedMarker)).toBe(false);
+
+			// The root scan skips dot entries, so a transcript under a dot-leading
+			// directory of the sessions root is registered or the collector never sees it.
+			for (const hidden of ["..hidden", ".hidden"]) {
+				const hiddenFile = path.join(getSessionsDir(agentDir), hidden, "chat.jsonl");
+				writeTerminalBreadcrumb(cwd, hiddenFile);
+				const hiddenMarker = path.join(getCustomSessionFilesDir(agentDir), hashPath(hiddenFile));
+				expect(fs.readFileSync(hiddenMarker, "utf8")).toBe(hiddenFile);
+			}
 		} finally {
 			setAgentDir(originalAgentDir);
 		}

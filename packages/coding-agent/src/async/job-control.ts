@@ -17,20 +17,15 @@ import {
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { AGENT_KILL_LABEL, type InterruptReason } from "../session/messages";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
-import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { StructuredSubagentOutput } from "../task/task-details";
+import { parseConfiguredThinkingLevel } from "../thinking/levels";
 
 import type { ToolSession } from "../tools";
 
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-tui/render/render-utils";
-import type {
-	AgentActivitySnapshot,
-	CancelOutcome,
-	CoordinationDetails,
-	JobSnapshot,
-} from "@oh-my-pi/pi-tui/tools/wait";
+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import type { AgentActivitySnapshot, CancelOutcome, CoordinationDetails, JobSnapshot } from "../tools/details/wait";
 
-import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import { isWaitingPollDetails } from "../tools/details/wait";
 
 /**
  * Resolve a list of job ids to job records visible to the calling agent.
@@ -168,7 +163,7 @@ interface TrackedJobLike {
 	agentOutputPublished?: boolean;
 }
 
-export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
+export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[], live = false): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
 		const current = session.asyncJobManager?.getJob(j.id);
@@ -228,6 +223,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			label: latest.label,
 			...(latest.intent ? { intent: latest.intent } : {}),
 			durationMs: Math.max(0, (latest.endTime ?? now) - latest.startTime),
+			...(live && running ? { startedAtMs: latest.startTime } : {}),
 			...(latest.endTime !== undefined ? { settledAtMs: latest.endTime } : {}),
 			...(exitCode !== undefined ? { exitCode } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),

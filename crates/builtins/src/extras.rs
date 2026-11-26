@@ -15,7 +15,7 @@ use futures::future::BoxFuture;
 #[allow(unused_imports, reason = "the table names whichever modules the enabled features compile")]
 use super::*;
 pub use crate::{
-	host::{CommandRunner, CommandStatus, EnvChange, Invocation, ShellCommand},
+	host::{CommandRunner, CommandStatus, EnvChange, Invocation, ShellCommand, SourceSnapshot},
 	openfile::Fd,
 	speech::{SpeechAudio, SpeechHost, SpeechOutcome, SpeechRequest, SpeechVoice},
 };
@@ -94,6 +94,7 @@ macro_rules! for_each_extra {
 			)] "xdg-open" open::Open;
 			utility [all(feature = "util.open", windows)] "start" open::windows::Start;
 			utility [feature = "util.paste"] "paste" paste::Paste;
+			utility [feature = "util.perl"] "perl" perl::Perl;
 			utility [feature = "util.printenv"] "printenv" printenv::Printenv;
 			utility [feature = "util.readlink"] "readlink" readlink::Readlink;
 			utility [feature = "util.realpath"] "realpath" realpath::Realpath;
@@ -190,9 +191,17 @@ fn unknown_argument<T: clap::Parser>(argv: &[std::ffi::OsString]) -> bool {
 }
 
 fn utility_lacks<U: Utility>(argv: Vec<String>) -> bool {
+	utility_lacks_with::<U>(argv, |_| false)
+}
+
+fn utility_lacks_with<U: Utility>(argv: Vec<String>, unsupported: impl FnOnce(&U) -> bool) -> bool {
 	U::DEFERS_TO_PATH
-		&& U::rewrite_argv(argv.into_iter().map(Into::into).collect())
-			.is_ok_and(|argv| unknown_argument::<U>(&argv))
+		&& U::rewrite_argv(argv.into_iter().map(Into::into).collect()).is_ok_and(|argv| {
+			match U::try_parse_from(argv) {
+				Ok(parsed) => unsupported(&parsed),
+				Err(err) => err.kind() == clap::error::ErrorKind::UnknownArgument,
+			}
+		})
 }
 
 fn async_utility_lacks<U: AsyncUtility>(argv: Vec<String>) -> bool {
@@ -265,6 +274,10 @@ pub fn kind(name: &str) -> Option<ExtraKind> {
 /// shell then runs `PATH`'s program instead. `false` for any other name.
 #[must_use]
 pub fn lacks_option(name: &str, argv: Vec<String>) -> bool {
+	#[cfg(all(feature = "util.chmod", target_os = "macos"))]
+	if name == chmod::Chmod::NAME {
+		return utility_lacks_with(argv, chmod::Chmod::has_acl_mode);
+	}
 	find(name).is_some_and(|extra| (extra.lacks)(argv))
 }
 

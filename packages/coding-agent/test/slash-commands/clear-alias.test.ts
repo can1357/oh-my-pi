@@ -3,7 +3,7 @@ import {
 	BUILTIN_SLASH_COMMANDS,
 	lookupBuiltinSlashCommand,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
+import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/autocomplete/autocomplete";
 
 describe("/clear slash command", () => {
 	it("resolves /clear to the context reset command and removed /clear alias from /new", async () => {

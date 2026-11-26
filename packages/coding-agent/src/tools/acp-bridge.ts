@@ -13,7 +13,7 @@ import { notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { FileChangeType } from "../lsp/types";
 import type { ToolSession } from ".";
 import { resolvePlanPath, targetsLocalSandbox } from "./plan-mode-guard";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 
 /**
  * Return `true` when an ACP client bridge write is appropriate for this path.
