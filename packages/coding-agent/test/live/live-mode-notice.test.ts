@@ -35,6 +35,7 @@ async function liveCall() {
 		};
 	});
 	let transcript = "a";
+	let disposed = false;
 	const admitted: { transcript: string; customType: string }[] = [];
 	const pending: (() => void)[] = [];
 	const session = {
@@ -43,6 +44,9 @@ async function liveCall() {
 		settings: Settings.isolated({}),
 		sessionId: "s1",
 		sessionManager: { getSessionId: () => transcript },
+		get isDisposed() {
+			return disposed;
+		},
 		subscribe: () => () => {},
 		sendCustomMessage: async (message: { customType: string }) => {
 			const target = transcript;
@@ -50,6 +54,8 @@ async function liveCall() {
 				const { promise, resolve } = Promise.withResolvers<void>();
 				pending.push(resolve);
 				await promise;
+				// AgentSession drops a request whose session was disposed while it waited.
+				if (disposed) return false;
 			}
 			admitted.push({ transcript: target, customType: message.customType });
 			return false;
@@ -67,6 +73,9 @@ async function liveCall() {
 		admitted,
 		switchTranscript: (id: string) => {
 			transcript = id;
+		},
+		dispose: () => {
+			disposed = true;
 		},
 		delegate: (text: string) => {
 			if (!onEvent) throw new Error("live transport was not created");
@@ -108,6 +117,16 @@ describe("live voice context for the coding agent", () => {
 		await Bun.sleep(0);
 
 		expect(call.admitted).toEqual([{ transcript: "a", customType: LIVE_DELEGATION_MESSAGE_TYPE }]);
+	});
+
+	test("a call whose request was dropped by a disposed session sends no end notice", async () => {
+		const call = await liveCall();
+		call.delegate("list the names");
+		await call.controller.stop();
+		call.dispose();
+		await call.admitAll();
+
+		expect(call.admitted).toEqual([]);
 	});
 
 	test("the model receives a spoken request after a voice notice", () => {
