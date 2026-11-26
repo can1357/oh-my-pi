@@ -13,6 +13,7 @@
  * Merged presenters (`merge`) show the result view in place of the call's;
  * others stack the result body under the call body.
  */
+import { base64ImageSize } from "@oh-my-pi/pi-agent-core/image-tokens";
 import {
 	type Accessor,
 	computed,
@@ -504,14 +505,10 @@ export function imagePlaceholder(block: { readonly data?: string; readonly mimeT
 	return `[Image: [${mime}]${size ? ` ${size.w}x${size.h}` : ""}]`;
 }
 
-/** Pixel size of a base64 PNG/GIF/JPEG, when its header says. */
+/** Pixel size of a base64 PNG/JPEG/GIF/WebP, when its header says. */
 export function imageSize(base64: string): { w: number; h: number } | undefined {
-	const bytes = Buffer.from(base64.slice(0, 64), "base64");
-	if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50)
-		return { w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) };
-	if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49)
-		return { w: bytes.readUInt16LE(6), h: bytes.readUInt16LE(8) };
-	return undefined;
+	const size = base64ImageSize(base64);
+	return size ? { w: size.width, h: size.height } : undefined;
 }
 
 /** Call view then result view: the result's head facts win; bodies stack. */

@@ -143,6 +143,27 @@ test("a read picture draws once beneath the details card and only while images a
 	});
 });
 
+test.each(["jpeg", "webp"] as const)("a %s tool result draws inline instead of its placeholder", async format => {
+	const source = new Bun.Image(Buffer.from(RED_PNG, "base64")).resize(1200, 600);
+	const data = await (format === "jpeg" ? source.jpeg() : source.webp()).toBase64();
+	const settings = sizingSettings(() => 50);
+	cfgTuiMaxInlineImageColumns.override(settings, 40);
+	cfgTuiMaxInlineImageRows.override(settings, 10);
+	createRoot(dispose => {
+		try {
+			const call = new ToolCall({ id: "shot", name: "eval", args: {} });
+			call.updateResult({ content: [{ type: "image", data, mimeType: `image/${format}` }] }, false);
+			const node = ToolBlock({ call });
+			if (!isUiNode(node)) throw new Error("expected a tool node");
+			const drawn = paintRows(node)().join("\n");
+			expect(drawn).toContain("File=inline=1;width=40;height=10:");
+			expect(drawn).not.toContain("[Image:");
+		} finally {
+			dispose();
+		}
+	});
+});
+
 test("a bash run paints a capped picture or its placeholder according to the terminal and display setting", async () => {
 	const image = await largeImage();
 	const settings = sizingSettings(() => 50);
