@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "19.2.0",
+	"version": "19.2.1",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -508,10 +508,6 @@
 		"./web/*": {
 			"types": "./src/web/*.ts",
 			"import": "./src/web/*.ts"
-		},
-		"./web/scrapers": {
-			"types": "./src/web/scrapers/index.ts",
-			"import": "./src/web/scrapers/index.ts"
 		},
 		"./web/scrapers/*": {
 			"types": "./src/web/scrapers/*.ts",

@@ -106,6 +106,21 @@ impl Process {
 		self.inner.args()
 	}
 
+	/// Basename of the running process's OS executable image, not `argv[0]`.
+	/// Returns null when the image is unreadable or the process has exited.
+	#[napi]
+	pub fn executable_name(&self) -> Option<String> {
+		self.inner.executable_name()
+	}
+
+	/// Send `signal` to an owned POSIX process group, even after its leader
+	/// exits. Defaults to hard-kill. Returns false if no signal was delivered
+	/// or the platform does not support process groups.
+	#[napi]
+	pub fn kill_group(pgid: i32, signal: Option<i32>) -> bool {
+		kill_process_group(pgid, signal.unwrap_or(KILL_SIGNAL))
+	}
+
 	/// Send `signal` to this process and its descendants, children first.
 	///
 	/// On Linux and macOS the signal is forwarded as-is. On Windows there is no
@@ -293,7 +308,9 @@ pub struct KillProcessFamilyOptions {
 }
 
 /// Live processes (never the caller) whose environment contains exactly
-/// `name=value`. Reads the environment each process was exec'd with: only
+/// `name=value`.
+///
+/// Reads the environment each process was exec'd with: only
 /// the caller's user's processes are readable, others are skipped. macOS
 /// also withholds the environment of Apple platform binaries (`/bin/sh`,
 /// `/bin/sleep`, …) even from the same user, so those never match there.
@@ -318,11 +335,13 @@ pub fn process_output_files(pid: i32) -> ProcessOutputFiles {
 	ProcessOutputFiles { stdout: scan::output_file(pid, 1), stderr: scan::output_file(pid, 2) }
 }
 
-/// SIGKILL every process of the family of `pids`: one process-table
-/// snapshot, the ppid walk plus every group/session a member leads, then
-/// SIGCONT the stopped ones. With `spareHangupIgnoring`, members ignoring
-/// SIGHUP and everything descended (ppid chain) from them are left alone.
-/// Returns the number signalled. Windows kills each pid's tree.
+/// SIGKILL every process of the family of `pids`; returns the number
+/// signalled.
+///
+/// One process-table snapshot, the ppid walk plus every group/session a
+/// member leads, then SIGCONT the stopped ones. With `spareHangupIgnoring`,
+/// members ignoring SIGHUP and everything descended (ppid chain) from them
+/// are left alone. Windows kills each pid's tree.
 #[napi]
 pub fn kill_process_family(
 	pids: Vec<i32>,
