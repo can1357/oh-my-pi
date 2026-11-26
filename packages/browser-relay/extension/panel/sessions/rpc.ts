@@ -56,6 +56,7 @@ import type {
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
 } from "../../../../coding-agent/src/modes/rpc/wire/rpc-wire.generated";
+import { errorMessage } from "@oh-my-pi/pi-utils/type-guards";
 import type { RpcSessionInfo } from "../../messages";
 import type { PanelModel, PanelSession, PanelSnapshot, PanelThinking, PanelWorker, QueuedDraft } from "../session";
 
@@ -196,10 +197,6 @@ function entryId(value: unknown): string | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	const id: unknown = Reflect.get(value, "id");
 	return typeof id === "string" ? id : undefined;
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 /** {@link PanelSession} over one rpc session the worker owns. */

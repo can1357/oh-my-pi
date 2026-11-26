@@ -233,6 +233,13 @@ export class StreamingEditGuard {
 export class LoopGuards {
 	readonly #host: StreamGuardsHost;
 	#geminiHeaderDetector: GeminiHeaderRunDetector | undefined;
+	/**
+	 * Prompt sequence whose header reminder is spent. Each interrupt discards the
+	 * whole reasoning turn, so re-tripping before the model acts would restart a
+	 * legitimately long reasoning pass forever; the guard stays disarmed until the
+	 * model starts a tool call or a new prompt begins.
+	 */
+	#headerReminderSequence: number | undefined;
 	#toolCallLoopGuard: ToolCallLoopGuard | undefined;
 	#toolCallLoopGuardSettingsKey: string | undefined;
 
@@ -255,8 +262,9 @@ export class LoopGuards {
 
 	/** Feeds a streamed assistant event to the Gemini header-runaway detector. */
 	onAssistantEvent(message: AssistantMessage, event: AssistantMessageEvent): void {
+		if (event.type === "toolcall_start") this.#headerReminderSequence = undefined;
 		if (event.type === "thinking_start") {
-			this.#geminiHeaderDetector = this.#geminiHeaderGuardActive() ? new GeminiHeaderRunDetector() : undefined;
+			this.#geminiHeaderDetector = this.#geminiHeaderGuardArmed() ? new GeminiHeaderRunDetector() : undefined;
 			return;
 		}
 		const detector = this.#geminiHeaderDetector;
@@ -301,9 +309,10 @@ export class LoopGuards {
 		);
 	}
 
-	#geminiHeaderGuardActive(): boolean {
+	#geminiHeaderGuardArmed(): boolean {
 		const model = this.#host.model();
 		return (
+			this.#headerReminderSequence !== this.#host.promptSequence() &&
 			cfgModelLoopGuardEnabled.get(this.#host.settings) === true &&
 			cfgModelLoopGuardToolCallReminder.get(this.#host.settings) === true &&
 			model !== undefined &&
@@ -323,6 +332,7 @@ export class LoopGuards {
 			`Interrupted ${headerCount} planning headers with no tool call; reminded the model to issue one.`,
 			"loop-guard",
 		);
+		this.#headerReminderSequence = this.#host.promptSequence();
 		this.#host.agent.abort(GEMINI_HEADER_INTERRUPT_REASON);
 		const generation = this.#host.promptGeneration();
 		this.#host.schedulePostPromptTask(async signal => {

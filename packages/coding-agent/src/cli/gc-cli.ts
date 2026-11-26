@@ -7,6 +7,7 @@ import { createGunzip, createGzip } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { isCompressScratchPath } from "@oh-my-pi/omp-stats/parser";
 import {
+	errorMessage,
 	formatBytes,
 	getAgentDir,
 	getBlobsDir,
@@ -21,6 +22,7 @@ import {
 	hashPath,
 	isPidAlive,
 	normalizePathForComparison,
+	pathExists,
 	readLines,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
@@ -393,24 +395,10 @@ function getArchivedSessionsDir(agentDir: string): string {
 	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
 }
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 function codeOf(error: unknown): string | undefined {
 	return typeof error === "object" && error !== null && "code" in error
 		? String((error as { code?: unknown }).code)
 		: undefined;
-}
-
-async function pathExists(target: string): Promise<boolean> {
-	try {
-		await fs.stat(target);
-		return true;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return false;
-		throw error;
-	}
 }
 
 async function statIfPresent(target: string) {

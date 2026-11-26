@@ -4,7 +4,7 @@
     extract_pkg.py <pkg> <member> <dest> [--exclude <subpath>]...
 
 Copies the payload entries under <member> (a path inside the package payload,
-e.g. Library/Developer/CommandLineTools/SDKs/MacOSX27.0.sdk) into <dest>,
+e.g. Library/Developer/CommandLineTools/SDKs/MacOSX27.2.sdk) into <dest>,
 dropping the <member> prefix and every entry under an excluded <subpath>
 (relative to <member>). Regular files, directories and symlinks are supported;
 anything else fails the extraction. Symlinks to one of their own ancestors

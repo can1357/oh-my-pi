@@ -1,0 +1,18 @@
+# Perl corpus: special-vars. Format and regeneration: crates/builtins/src/perl/tests.rs.
+env-child	$ENV{OMP_PERL_CORPUS_VALUE}='abc'; print qx{printf '%s\\n' "\$OMP_PERL_CORPUS_VALUE"};	abc␊
+env-delete	$ENV{OMP_PERL_CORPUS_VALUE}='abc'; delete $ENV{OMP_PERL_CORPUS_VALUE}; print exists $ENV{OMP_PERL_CORPUS_VALUE}?1:0,"\n";	0␊
+env-local	$ENV{OMP_PERL_CORPUS_VALUE}='old'; {local $ENV{OMP_PERL_CORPUS_VALUE}='new'; print $ENV{OMP_PERL_CORPUS_VALUE}} print "|$ENV{OMP_PERL_CORPUS_VALUE}\n";	new|old␊
+env-set	$ENV{OMP_PERL_CORPUS_VALUE}='abc'; print "$ENV{OMP_PERL_CORPUS_VALUE}\n";	abc␊
+errno-local	open my $f,'<','missing-file'; my $before=0+$!; {local $!=0; print 0+$!,'|'} print 0+$! == $before ?1:0,"\n";	0|1␊
+errno-number	open my $f,'<','missing-file'; print 0+$!,"\n";	2␊
+errno-truth	{local $!=0; print $!?1:0,'|'} open my $f,'<','missing-file'; print $!?1:0,"\n";	0|1␊
+error-text	eval {die "expected\n"}; print $@;	expected␊
+input-line-reset	open my $f,"<","data" or die $!; scalar <$f>; print $.,"|"; close $f; open $f,"<","data" or die $!; scalar <$f>; print $.,"\n";	1|1␊	file:data=abc␊def␊
+input-record	local $/="|"; while (<STDIN>) {print "[$_]"}	[a|][b|][c]	stdin=a|b|c
+interpolation-separator	local $"=','; my @a=(1,2,3); print "<@a>\n";	<1,2,3>␊
+multidimensional-default	my %h; $h{'a','b'}=7; print unpack('H*', (keys %h)[0]),"\n";	611c62␊
+multidimensional-key	local $;='!'; my %h; $h{1,2}=3; print "$h{'1!2'}\n";	3␊
+output-combined	local $,=':'; local $\="!\n"; print 'a','b';	a:b!␊
+output-field	local $,='|'; print 'a','b',"c\n";	a|b|c␊
+output-record	local $\="!\n"; print 'a'; print 'b';	a!␊b!␊
+stdin-line	while (<STDIN>) {print "$.=$_"}	1=abc␊2=def␊3=xyz␊	stdin=abc␊def␊xyz␊
