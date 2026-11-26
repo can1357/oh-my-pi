@@ -1895,16 +1895,6 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	serviceTierCost?: Readonly<Partial<Record<"flex" | "priority" | "ultrafast", number>>>;
 	/**
-	 * Alternate serving lane for the priority service tier. Devin folds each
-	 * `<id>-fast` catalog row onto its standard model here so `/fast` swaps the
-	 * wire id (`routes`) and bills the lane's own rate card (`cost`).
-	 */
-	priorityLane?: {
-		id: string;
-		routes: Record<string, string>;
-		cost: ModelCost;
-	};
-	/**
 	 * Provider-supplied one-line blurb for this model. Set only when an upstream
 	 * ships one (Devin's `GetCliModelConfigs`); never synthesized locally.
 	 */
