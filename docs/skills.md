@@ -219,7 +219,7 @@ Resolution details:
 - absolute paths are rejected
 - path traversal (`..`) is rejected
 - resolved path must remain lexically within `baseDir`
-- Agent Plugins and Skillshare skills also realpath-check containment within their package root, preventing symlink escapes; symlinks to another location inside that package are allowed
+- Agent Plugins and Skillshare skills also realpath-check containment within their package root, preventing symlink escapes; symlinks to another location inside that package are allowed. Claude marketplace plugin skills and the conventional `.mcp.json` get the same check against their plugin root, so a skill or `.mcp.json` symlink that resolves outside it is skipped with a warning
 - directories return directory listings
 - missing files return an explicit `File not found` error
 - a name no loaded skill owns rediscovers the main session's skills before failing, so a skill created or installed after the session started resolves (and joins the session's skill list and system prompt); such misses start at most one rediscovery every 2 seconds, and a subagent's inherited list gains no new skills

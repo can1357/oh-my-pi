@@ -9,6 +9,7 @@ import {
 	listClaudePluginRoots,
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { loadSkills, loadSkillPromptBody } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
@@ -796,6 +797,271 @@ describe("listClaudePluginRoots", () => {
 			expect(result.all.find(skill => skill.name === "skill-creator")).toBeUndefined();
 		});
 	}
+
+	test("a symlinked skills directory that points outside the plugin root does not load its skills", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "linked-skills");
+		const outsidePath = path.join(tempDir, "outside-skills");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.join(outsidePath, "escaped"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+		]);
+		await fs.writeFile(
+			path.join(outsidePath, "escaped", "SKILL.md"),
+			"---\nname: escaped\ndescription: Lives outside the plugin root\n---\nBody\n",
+		);
+		await fs.symlink(outsidePath, path.join(pluginPath, "skills"));
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "./skills" })),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"linked-skills@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+		expect(result.all.find(skill => skill.name === "escaped")).toBeUndefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
+
+	test("a symlinked MCP config that points outside the plugin root does not load its servers", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "linked-mcp");
+		const outsidePath = path.join(tempDir, "outside-mcp.json");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+			fs.writeFile(outsidePath, JSON.stringify({ mcpServers: { escaped: { command: "echo" } } })),
+		]);
+		await fs.symlink(outsidePath, path.join(pluginPath, "mcp.json"));
+		await Promise.all([
+			fs.writeFile(
+				path.join(pluginPath, ".claude-plugin", "plugin.json"),
+				JSON.stringify({ mcpServers: "./mcp.json" }),
+			),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"linked-mcp@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir, providers: ["claude-plugins"] });
+
+		expect(result.all.find(server => server.name.endsWith("escaped"))).toBeUndefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
+
+	test("a plugin with no skills declaration does not load a conventional skills/ symlink that points outside the plugin root", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "linked-fallback");
+		const outsidePath = path.join(tempDir, "outside-fallback-skills");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.join(outsidePath, "escaped"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+		]);
+		await fs.writeFile(
+			path.join(outsidePath, "escaped", "SKILL.md"),
+			"---\nname: escaped\ndescription: Lives outside the plugin root\n---\nBody\n",
+		);
+		await fs.symlink(outsidePath, path.join(pluginPath, "skills"));
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({})),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"linked-fallback@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+		expect(result.all.find(skill => skill.name === "escaped")).toBeUndefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
+
+	test("a symlink inside a plugin's skills directory that points at a skill outside the plugin root does not load", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "linked-entry");
+		const outsidePath = path.join(tempDir, "outside-entry");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.join(pluginPath, "skills"), { recursive: true }),
+			fs.mkdir(path.join(outsidePath, "escaped"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+		]);
+		await fs.writeFile(
+			path.join(outsidePath, "escaped", "SKILL.md"),
+			"---\nname: escaped\ndescription: Lives outside the plugin root\n---\nBody\n",
+		);
+		await fs.symlink(path.join(outsidePath, "escaped"), path.join(pluginPath, "skills", "escaped"));
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "./skills" })),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"linked-entry@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+		expect(result.all.find(skill => skill.name === "escaped")).toBeUndefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
+
+	test("a conventional root .mcp.json that is a symlink to a file outside the plugin root does not load its servers", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "linked-root-mcp");
+		const outsidePath = path.join(tempDir, "outside-root-mcp.json");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+			fs.writeFile(outsidePath, JSON.stringify({ mcpServers: { escaped: { command: "echo" } } })),
+		]);
+		await fs.symlink(outsidePath, path.join(pluginPath, ".mcp.json"));
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({})),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"linked-root-mcp@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir, providers: ["claude-plugins"] });
+
+		expect(result.all.find(server => server.name.endsWith("escaped"))).toBeUndefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
+
+	test("a symlink inside skills/ that points at a file inside the plugin root loads no outside-root warning", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "inner-link");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.join(pluginPath, "skills", "real"), { recursive: true }),
+			fs.mkdir(path.join(pluginPath, "shared"), { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+		]);
+		await Promise.all([
+			fs.writeFile(
+				path.join(pluginPath, "skills", "real", "SKILL.md"),
+				"---\nname: real\ndescription: Stays in the plugin root\n---\nBody\n",
+			),
+			fs.writeFile(path.join(pluginPath, "shared", "notes.md"), "notes\n"),
+		]);
+		await fs.symlink(path.join("..", "shared", "notes.md"), path.join(pluginPath, "skills", "notes"));
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "./skills" })),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"inner-link@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+		expect(result.all.find(skill => skill.name === "real")).toBeDefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(false);
+	});
+
+	test("a declared skills path that cannot be resolved for a reason other than a missing file is refused", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "looping-skills");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true });
+		await fs.mkdir(path.dirname(registryPath), { recursive: true });
+		// A self-referencing link cannot be resolved (ELOOP), which is not a missing file.
+		await fs.symlink("skills", path.join(pluginPath, "skills"));
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "./skills" })),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"looping-skills@market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+		expect(result.all.filter(skill => skill.path.startsWith(pluginPath))).toHaveLength(0);
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
+
+	test("a skills path named ..shared inside the plugin root loads, and a ../ path outside it is refused", async () => {
+		const dottedPath = path.join(tempDir, "plugins", "dotted-skills");
+		const escapingPath = path.join(tempDir, "plugins", "escaping-skills");
+		const siblingSkillPath = path.join(tempDir, "plugins", "x", "x-skill");
+		const registryPath = path.join(tempDir, ".omp", "plugins", "installed_plugins.json");
+		await Promise.all([
+			fs.mkdir(path.join(dottedPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(path.join(dottedPath, "..shared", "shared-skill"), { recursive: true }),
+			fs.mkdir(path.join(escapingPath, ".claude-plugin"), { recursive: true }),
+			fs.mkdir(siblingSkillPath, { recursive: true }),
+			fs.mkdir(path.dirname(registryPath), { recursive: true }),
+		]);
+		await Promise.all([
+			fs.writeFile(
+				path.join(dottedPath, "..shared", "shared-skill", "SKILL.md"),
+				"---\nname: shared-skill\ndescription: Lives in a child named ..shared\n---\nBody\n",
+			),
+			fs.writeFile(
+				path.join(siblingSkillPath, "SKILL.md"),
+				"---\nname: x-skill\ndescription: A sibling of the plugin root\n---\nBody\n",
+			),
+			fs.writeFile(path.join(dottedPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "./..shared" })),
+			fs.writeFile(path.join(escapingPath, ".claude-plugin", "plugin.json"), JSON.stringify({ skills: "../x" })),
+			fs.writeFile(
+				registryPath,
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"dotted-skills@market": [{ scope: "user", installPath: dottedPath, version: "1.0.0" }],
+						"escaping-skills@market": [{ scope: "user", installPath: escapingPath, version: "1.0.0" }],
+					},
+				}),
+			),
+		]);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+
+		expect(result.all.find(skill => skill.name === "shared-skill")).toBeDefined();
+		expect(result.all.find(skill => skill.name === "x-skill")).toBeUndefined();
+		expect(result.warnings.some(warning => warning.includes("outside plugin root"))).toBe(true);
+	});
 
 	test("defaults scope to user when not specified", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");

@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isRecord, logger, pathIsWithinLexical } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, pathIsWithinLexical } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
@@ -17,6 +17,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
+import { realpathIfExists } from "./contained-path";
 import {
 	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
@@ -133,6 +134,25 @@ async function readMarketplaceRootManifest(root: ClaudePluginRoot): Promise<Clau
 }
 
 /**
+ * Whether a path a plugin manifest names stays inside the plugin root. The lexical
+ * check runs first. When the target exists, its symlinks are resolved and the real
+ * target must sit under the real root, so a link inside the root that points outside
+ * it is refused. A missing target has nothing to read and passes; any other failure
+ * to resolve the target means it cannot be checked, so it is refused.
+ */
+async function isWithinPluginRoot(rootPath: string, targetPath: string): Promise<boolean> {
+	if (!pathIsWithinLexical(rootPath, targetPath)) return false;
+	let realTarget: string;
+	try {
+		realTarget = await fs.realpath(targetPath);
+	} catch (error) {
+		return isEnoent(error);
+	}
+	const realRoot = (await realpathIfExists(rootPath)) ?? rootPath;
+	return pathIsWithinLexical(realRoot, realTarget);
+}
+
+/**
  * Resolve manifest-declared component paths within a plugin root.
  *
  * Manifest path fields may be `string` or `string[]`
@@ -176,20 +196,26 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 		}
 	}
 
+	const outsideFallbackWarning = `[claude-plugins] Ignoring ${options.fallback} directory outside plugin root for ${root.id}`;
 	if (configured.length === 0) {
-		return { dirs: [fallbackDir], warnings: [] };
+		if (await isWithinPluginRoot(root.path, fallbackDir)) return { dirs: [fallbackDir], warnings: [] };
+		return { dirs: [], warnings: [outsideFallbackWarning] };
 	}
 
 	const seen = new Set<string>();
 	const dirs: string[] = [];
 	const warnings: string[] = [];
 	if (options.includeFallback && !options.marketplaceRootManifest) {
-		seen.add(fallbackDir);
-		dirs.push(fallbackDir);
+		if (await isWithinPluginRoot(root.path, fallbackDir)) {
+			seen.add(fallbackDir);
+			dirs.push(fallbackDir);
+		} else {
+			warnings.push(outsideFallbackWarning);
+		}
 	}
 	for (const { entryPath, key } of configured) {
 		const resolved = path.resolve(root.path, entryPath);
-		if (!pathIsWithinLexical(root.path, resolved)) {
+		if (!(await isWithinPluginRoot(root.path, resolved))) {
 			warnings.push(
 				`[claude-plugins] Ignoring ${String(key)} path outside plugin root for ${root.id}: ${entryPath}`,
 			);
@@ -228,6 +254,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						providerId: PROVIDER_ID,
 						level: root.scope,
 						includeSelf: true,
+						isWithinRoot: skillPath => isWithinPluginRoot(root.path, skillPath),
 						origin: root.origin,
 						pluginName: root.plugin,
 					}),
@@ -478,7 +505,7 @@ function extractServerMap(obj: Record<string, unknown>): Record<string, unknown>
  * The field may be an inline object (the server map itself) or a string path to
  * a config file within the plugin root; a path escaping the root is rejected
  * with a warning. When no manifest declares the field, `<root>/.mcp.json` is the
- * fallback source.
+ * fallback source, refused with a warning when it resolves outside the root.
  */
 async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedMCPConfig> {
 	const fallback = path.join(root.path, ".mcp.json");
@@ -514,7 +541,7 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 			const configured = pointer.trim();
 			if (configured.length === 0) continue;
 			const resolved = path.resolve(root.path, configured);
-			if (!pathIsWithinLexical(root.path, resolved)) {
+			if (!(await isWithinPluginRoot(root.path, resolved))) {
 				return {
 					path: null,
 					inlineServers: null,
@@ -537,6 +564,16 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 		}
 	}
 
+	if (!(await isWithinPluginRoot(root.path, fallback))) {
+		return {
+			path: null,
+			inlineServers: null,
+			sourcePath: fallback,
+			baseDir: root.path,
+			declared: false,
+			warnings: [`[claude-plugins] Ignoring .mcp.json outside plugin root for ${root.id}`],
+		};
+	}
 	return {
 		path: fallback,
 		inlineServers: null,
