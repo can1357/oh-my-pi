@@ -15,6 +15,7 @@ import type {
 	streamSimple,
 	TextContent,
 	Tool,
+	ToolCall,
 	ToolCallProviderMetadata,
 	ToolChoice,
 	ToolResultMessage,
@@ -1239,8 +1240,8 @@ export interface AgentTool<
 	speculation?: ToolSpeculationPolicy;
 	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM, and unknown root keys a closed schema would drop stay on the args. Malformed argument JSON still returns the parse error. */
 	lenientArgValidation?: boolean;
-	/** Return an error to forbid converting the supplied value at an argument path to a string. */
-	stringCoercionError?: (path: readonly string[]) => string | undefined;
+	/** Return an error to reject string coercion at a path. Receives the original call arguments. */
+	stringCoercionError?: (path: readonly string[], args: Readonly<ToolCall["arguments"]>) => string | undefined;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution — or skip it
 	 * before it starts — to deliver a queued steering message. A function

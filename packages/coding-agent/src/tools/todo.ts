@@ -485,9 +485,11 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
 	return undefined;
 }
 
-function todoItemStringError(path: readonly string[]): string | undefined {
+function todoItemStringError(path: readonly string[], args: unknown): string | undefined {
 	if (path[0] === "items" && path.length === 2) {
-		return `items[${path[1]}] must be a string. Use list to initialize phases.`;
+		const op = isRecord(args) ? args.op : undefined;
+		const hint = typeof op === "string" && op.trim() === "init" ? " Use list to initialize phases." : "";
+		return `items[${path[1]}] must be a string.${hint}`;
 	}
 	if (path[0] === "list" && path[2] === "items" && path.length === 4) {
 		return `list[${path[1]}].items[${path[3]}] must be a string.`;
@@ -513,7 +515,7 @@ function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntr
 		}
 	}
 	for (const issue of direct) {
-		const message = todoItemStringError(issue.path.map(String));
+		const message = todoItemStringError(issue.path.map(String), raw);
 		if (message) return `Invalid todo arguments: ${message}`;
 	}
 	return `Invalid todo arguments: ${direct.summary}`;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Tools can use `AgentTool.stringCoercionError` to reject string coercion at specific argument paths and tailor the error to the original call ([#20709](https://github.com/can1357/oh-my-pi/pull/20709) by [@softsock](https://github.com/softsock)).
+
 ### Fixed
 
 - Fixed tool definitions sent to providers carrying each tool's host state (such as its session), which made auth-gateway requests megabytes large

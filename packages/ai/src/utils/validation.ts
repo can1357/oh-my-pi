@@ -669,14 +669,24 @@ function childStringCoercionError(
 	return check && (path => check([key, ...path]));
 }
 
+interface ArgumentNormalizationOptions {
+	isRoot?: boolean;
+	root?: unknown;
+	insideContent?: boolean;
+	speculativeUnion?: boolean;
+	stringCoercionError?: StringCoercionError;
+}
+
 function normalizeOptionalNullsForSchema(
 	schema: unknown,
 	value: unknown,
-	isRoot = true,
-	root: unknown = schema,
-	insideContent = false,
-	speculativeUnion = false,
-	stringCoercionError?: StringCoercionError,
+	{
+		isRoot = true,
+		root = schema,
+		insideContent = false,
+		speculativeUnion = false,
+		stringCoercionError,
+	}: ArgumentNormalizationOptions = {},
 ): { value: unknown; changed: boolean } {
 	if (value === null || value === undefined) return { value, changed: false };
 	if (schema === null || typeof schema !== "object") return { value, changed: false };
@@ -693,15 +703,13 @@ function normalizeOptionalNullsForSchema(
 		// still requires that data.
 		for (const branch of branches) {
 			if (!branchMatchesSchema(branch, value, root)) continue;
-			const normalized = normalizeOptionalNullsForSchema(
-				branch,
-				value,
+			const normalized = normalizeOptionalNullsForSchema(branch, value, {
 				isRoot,
 				root,
 				insideContent,
 				speculativeUnion,
 				stringCoercionError,
-			);
+			});
 			if (
 				branchMatchesSchema(branch, normalized.value, root) &&
 				branchMatchesSchema(schemaObject, normalized.value, root)
@@ -714,15 +722,13 @@ function normalizeOptionalNullsForSchema(
 		for (const branch of branches) {
 			// Only unresolved ancestors restrict descendants. A failed branch
 			// with a unique discriminator is still authoritative.
-			const normalized = normalizeOptionalNullsForSchema(
-				branch,
-				value,
+			const normalized = normalizeOptionalNullsForSchema(branch, value, {
 				isRoot,
 				root,
 				insideContent,
-				speculativeUnion || selectedBranch !== branch,
+				speculativeUnion: speculativeUnion || selectedBranch !== branch,
 				stringCoercionError,
-			);
+			});
 			if (!normalized.changed) continue;
 
 			const branchContext: ValidationContext = {
@@ -739,14 +745,11 @@ function normalizeOptionalNullsForSchema(
 			// Diagnose against the enclosing union to retain authoritative vs.
 			// speculative issue provenance, but normalize only this candidate's
 			// branch. Failed candidates never escape to a sibling.
-			const repaired = runCoercionPasses(
-				branchContext,
-				normalized.value,
-				result,
+			const repaired = runCoercionPasses(branchContext, normalized.value, result, {
 				isRoot,
 				insideContent,
 				stringCoercionError,
-			);
+			});
 			if (repaired.result.success && branchMatchesSchema(branch, repaired.args, root)) {
 				return { value: repaired.args, changed: true };
 			}
@@ -766,15 +769,13 @@ function normalizeOptionalNullsForSchema(
 		let changed = false;
 		let nextValue: unknown = value;
 		for (const branch of schemaObject.allOf) {
-			const normalized = normalizeOptionalNullsForSchema(
-				branch,
-				nextValue,
+			const normalized = normalizeOptionalNullsForSchema(branch, nextValue, {
 				isRoot,
 				root,
 				insideContent,
 				speculativeUnion,
 				stringCoercionError,
-			);
+			});
 			if (!normalized.changed) continue;
 			nextValue = normalized.value;
 			changed = true;
@@ -791,15 +792,13 @@ function normalizeOptionalNullsForSchema(
 		let changed = false;
 		let nextValue = value;
 		for (let i = 0; i < value.length; i += 1) {
-			const normalized = normalizeOptionalNullsForSchema(
-				itemSchema,
-				value[i],
-				false,
+			const normalized = normalizeOptionalNullsForSchema(itemSchema, value[i], {
+				isRoot: false,
 				root,
 				insideContent,
 				speculativeUnion,
-				childStringCoercionError(stringCoercionError, String(i)),
-			);
+				stringCoercionError: childStringCoercionError(stringCoercionError, String(i)),
+			});
 			if (!normalized.changed) continue;
 			if (!changed) {
 				nextValue = [...value];
@@ -871,15 +870,13 @@ function normalizeOptionalNullsForSchema(
 				continue;
 			}
 		}
-		const normalized = normalizeOptionalNullsForSchema(
-			propertySchema,
-			currentValue,
-			false,
+		const normalized = normalizeOptionalNullsForSchema(propertySchema, currentValue, {
+			isRoot: false,
 			root,
-			insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
+			insideContent: insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
 			speculativeUnion,
-			childStringCoercionError(stringCoercionError, key),
-		);
+			stringCoercionError: childStringCoercionError(stringCoercionError, key),
+		});
 		if (!normalized.changed) continue;
 
 		if (!changed) {
@@ -2117,15 +2114,7 @@ export function validateToolArguments(
 	}
 
 	const { stringCoercionError } = options;
-	const initialNormalization = normalizeOptionalNullsForSchema(
-		json,
-		normalizedArgs,
-		true,
-		json,
-		false,
-		false,
-		stringCoercionError,
-	);
+	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs, { stringCoercionError });
 	if (initialNormalization.changed) {
 		normalizedArgs = initialNormalization.value;
 		changed = true;
@@ -2176,15 +2165,8 @@ export function validateToolArguments(
 	if (result.success) return result.value as ToolCall["arguments"];
 
 	const droppedRootKeys = options.keepUnknownRootKeys ? new Map<string, unknown>() : undefined;
-	const coercionOutcome = runCoercionPasses(
-		ctx,
-		normalizedArgs,
-		result,
-		true,
-		false,
-		stringCoercionError,
-		droppedRootKeys,
-	);
+	const coercionOptions = { stringCoercionError, droppedRootKeys };
+	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result, coercionOptions);
 	normalizedArgs = coercionOutcome.args;
 	changed ||= coercionOutcome.changed;
 	result = coercionOutcome.result;
@@ -2200,15 +2182,7 @@ export function validateToolArguments(
 		changed = true;
 		result = validateContext(ctx, normalizedArgs);
 		if (!result.success) {
-			const healedOutcome = runCoercionPasses(
-				ctx,
-				normalizedArgs,
-				result,
-				true,
-				false,
-				stringCoercionError,
-				droppedRootKeys,
-			);
+			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result, coercionOptions);
 			normalizedArgs = healedOutcome.args;
 			result = healedOutcome.result;
 		}
@@ -2244,6 +2218,13 @@ export function validateToolArguments(
 	throw new AIError.ValidationError(errorMessage);
 }
 
+interface CoercionPassOptions {
+	isRoot?: boolean;
+	insideContent?: boolean;
+	stringCoercionError?: StringCoercionError;
+	droppedRootKeys?: Map<string, unknown>;
+}
+
 /**
  * Runs up to {@link MAX_COERCION_PASSES} repair rounds, re-applying the schema
  * normalizations even when issue-driven coercion cannot change the value.
@@ -2254,10 +2235,7 @@ function runCoercionPasses(
 	ctx: ValidationContext,
 	args: unknown,
 	initial: ContextValidationResult,
-	isRoot = true,
-	insideContent = false,
-	stringCoercionError?: StringCoercionError,
-	droppedRootKeys?: Map<string, unknown>,
+	{ isRoot = true, insideContent = false, stringCoercionError, droppedRootKeys }: CoercionPassOptions = {},
 ): { args: unknown; result: ContextValidationResult; changed: boolean } {
 	const { json } = ctx;
 	const root = ctx.kind === "json" ? (ctx.root ?? json) : json;
@@ -2284,15 +2262,13 @@ function runCoercionPasses(
 			ctx.kind === "json" &&
 			(ctx.speculativeUnion === true ||
 				(ctx.unionBranches !== undefined && getTagSelectedUnionBranch(ctx.unionBranches, normalizedArgs) !== json));
-		const nullNormalization = normalizeOptionalNullsForSchema(
-			json,
-			normalizedArgs,
+		const nullNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs, {
 			isRoot,
 			root,
 			insideContent,
 			speculativeUnion,
 			stringCoercionError,
-		);
+		});
 		if (nullNormalization.changed) {
 			normalizedArgs = nullNormalization.value;
 			passChanged = true;

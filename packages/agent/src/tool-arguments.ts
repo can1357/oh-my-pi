@@ -28,7 +28,8 @@ export function validateAgentToolArguments(
 	try {
 		const validated = validateToolArguments(tool, toolCall, {
 			keepUnknownRootKeys: tool.lenientArgValidation,
-			stringCoercionError: tool.stringCoercionError,
+			stringCoercionError:
+				tool.stringCoercionError && (path => tool.stringCoercionError?.(path, toolCall.arguments)),
 		});
 		// Kept unknown root keys must not smuggle the internal sentinels past validation.
 		return tool.lenientArgValidation ? withoutSentinels(validated) : validated;

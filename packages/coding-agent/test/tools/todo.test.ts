@@ -547,11 +547,20 @@ describe("TodoTool task label validation", () => {
 	});
 
 	it.each([
-		["append", { op: "append", items: ["Valid label", false] }, "items[1]"],
-		["phased init", { op: "init", list: [{ phase: "Plan", items: [42] }] }, "list[0].items[0]"],
-		["encoded array", { op: "init", items: JSON.stringify([{ phase: "Plan", items: ["One"] }]) }, "items[0]"],
-		["flattened array", { op: "init", list: [], "items[0]": ["One"] }, "items[0]"],
-	] as const)("rejects non-string labels in %s before lenient validation can discard them", (_name, args, field) => {
+		["append", { op: "append", items: ["Valid label", false] }, "items[1] must be a string."],
+		["done", { op: "done", items: [42] }, "items[0] must be a string."],
+		["phased init", { op: "init", list: [{ phase: "Plan", items: [42] }] }, "list[0].items[0] must be a string."],
+		[
+			"encoded array",
+			{ op: "init", items: JSON.stringify([{ phase: "Plan", items: ["One"] }]) },
+			"items[0] must be a string. Use list to initialize phases.",
+		],
+		[
+			"flattened array",
+			{ op: "init\n", list: [], "items[0]": ["One"] },
+			"items[0] must be a string. Use list to initialize phases.",
+		],
+	] as const)("rejects non-string items in %s with guidance specific to the operation", (_name, args, diagnostic) => {
 		const tool = new TodoTool(createSession());
 		expect(() =>
 			validateAgentToolArguments(
@@ -559,7 +568,7 @@ describe("TodoTool task label validation", () => {
 				{ type: "toolCall", id: "malformed", name: "todo", arguments: args },
 				"payload",
 			),
-		).toThrow(`${field} must be a string`);
+		).toThrow(new Error(`Validation failed for tool "todo": ${diagnostic}`));
 	});
 
 	it("preserves literal JSON labels when restoring an encoded array of strings and trimming the op", async () => {
