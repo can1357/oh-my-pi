@@ -2585,8 +2585,7 @@ export class AcpAgent implements Agent {
 	 *
 	 * Mirrors `InteractiveMode.#handlePlanProposal` for the parts the agent sees
 	 * (same `PlanApprovalDetails` shape). Clients without form-mode elicitation
-	 * get an auto-approve so plan mode is never stranded — the agent always has
-	 * a way out.
+	 * cannot approve, so the plan is refused and plan mode stays on (#11686).
 	 */
 	async #handleAcpPlanProposal(record: ManagedSessionRecord, title: string): Promise<AgentToolResult<unknown>> {
 		const session = record.session;
@@ -2618,11 +2617,17 @@ export class AcpAgent implements Agent {
 				session.setPlanModeState({ ...state, planFilePath });
 			}
 			const normalizedTitle = normalizePlanTitle(resolvedTitle).title;
+			// Without elicitation.form the confirmation cannot be shown, so a retry of
+			// propose would hit the same refusal: tell the agent to wait for the user.
+			const text =
+				this.#clientCapabilities?.elicitation?.form == null
+					? "Plan approval needs a client that can show a confirmation form, and this client cannot. Plan mode stays on. Present the plan to the user and wait for them to switch the session to Default mode before implementing. Do not call propose again."
+					: `Plan refinement requested. Update the plan file, then submit ${normalizedTitle} with \`propose\` again when ready.`;
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: `Plan refinement requested. Update the plan file, then submit ${normalizedTitle} with \`propose\` again when ready.`,
+						text,
 					},
 				],
 				details,
@@ -2721,13 +2726,13 @@ export class AcpAgent implements Agent {
 	 * explicit `APPROVE_OPTION` selection. Refine, dismissal (`undefined`), or
 	 * any unrecognized value falls through to refine semantics — the caller
 	 * keeps plan mode active and surfaces guidance text to the agent. Clients
-	 * without `elicitation.form` support auto-approve because there is no
-	 * confirmation surface available; without that, plan mode would strand
-	 * the agent (the bug this method exists to fix).
+	 * without `elicitation.form` support get `false` without a prompt, since no
+	 * confirmation surface exists and silence must never read as approval (#11686);
+	 * the caller tells the agent how to proceed.
 	 */
 	async #requestAcpPlanApprovalChoice(sessionId: string, title: string, planContent: string): Promise<boolean> {
 		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;
-		if (!supportsForm) return true;
+		if (!supportsForm) return false;
 		// Include a short preview of the plan so the user has context in the
 		// dialog. Keep the body bounded — Zed renders elicitation messages
 		// inline and a multi-thousand-line plan blows out the dialog.
