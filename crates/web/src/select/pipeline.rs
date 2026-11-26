@@ -1797,6 +1797,13 @@ fn prompt_block(tree: &Tree, dropped: &[bool], control: usize) -> usize {
 			|| is_landmark(tree, tag)
 			|| has_role(tag, &["main"])
 			|| text_len(nodes, dropped, tag.children.clone()) > PROMPT_MAX_CHARS
+			|| walk(nodes, dropped, tag.children.clone()).any(|(index, node)| {
+				matches!(node, Node::Tag(paragraph)
+					if paragraph.name() == "p"
+						&& !tree.range(index).contains(&control)
+						&& text_len(nodes, dropped, paragraph.children.clone())
+							>= PROSE_PARAGRAPH_MIN_CHARS)
+			})
 			|| nodes[tag.children.clone()]
 				.iter()
 				.any(|node| matches!(node, Node::Tag(tag) if matches!(tag.name(), "h1" | "h2" | "h3")))

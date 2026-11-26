@@ -333,7 +333,7 @@ impl<'a> Writer<'a> {
 		// provided"), not a separator.
 		let item_value =
 			self.fresh && matches!(self.prefix.last(), Some(Prefix::Item { definition: true, .. }));
-		if item_value || !is_separator(text) {
+		if !text.chars().all(char::is_whitespace) && (item_value || !is_separator(text)) {
 			let target = if text.starts_with("![") || !text.chars().any(char::is_alphanumeric) {
 				None
 			} else {
@@ -2885,6 +2885,14 @@ mod tests {
 
 	fn md(html: &str) -> String {
 		render(html, None, true)
+	}
+
+	#[test]
+	fn whitespace_only_paragraphs_do_not_emit_lines() {
+		assert_eq!(
+			md("<h3>Heading</h3><p>&nbsp;</p><p>4&nbsp;GB</p><p>&nbsp;&nbsp;</p><p>End</p>"),
+			"### Heading\n\n4\u{a0}GB\n\nEnd\n",
+		);
 	}
 
 	#[test]

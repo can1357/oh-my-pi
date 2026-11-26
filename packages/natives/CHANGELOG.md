@@ -14,6 +14,7 @@
 ### Fixed
 
 - Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
+- Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
 
 - The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
 

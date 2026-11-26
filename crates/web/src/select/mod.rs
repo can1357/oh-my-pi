@@ -266,6 +266,23 @@ mod tests {
 		"The researchers compared notes, checked the evidence, and revised the report. ";
 
 	#[test]
+	fn reader_keeps_login_instructions_next_to_sign_in_actions() {
+		let html = format!(
+			"<main><h1>First API call</h1><div><div>Log in to the account</div>\
+			 <div><p>{}</p><div><p>{}</p><div><a href='/register'>Register an account</a>\
+			 <a href='/login'>Log in now</a></div></div></div></div><p>{}</p></main>",
+			PROSE.repeat(2),
+			PROSE.repeat(2),
+			PROSE.repeat(4)
+		);
+		let output = selected(&html, reader);
+		assert!(output.contains("Log in to the account"), "{output}");
+		assert!(output.matches(PROSE.trim()).count() >= 8, "{output}");
+		assert!(!output.contains("Register an account"), "{output}");
+		assert!(!output.contains("Log in now"), "{output}");
+	}
+
+	#[test]
 	fn reader_keeps_content_buttons_and_table_rows_with_border_utilities() {
 		let html = format!(
 			"<main><h1>Models</h1><p>Using an agent instead? <button>Set it up with one \
