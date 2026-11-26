@@ -23,6 +23,7 @@ import { imageLabel, paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
 import { terminalPaddingX } from "../terminal-padding";
 import { tint, tintRow } from "./default";
 import { imageLink, resultPictures } from "./file-common";
+import { bodySpans, paintPresenterRows } from "../figures/presented";
 import { lookFor, type ToolProps, toolProps } from "./look";
 
 /** `cx` with some fields replaced (its getters keep reading the paint environment). */
@@ -113,20 +114,11 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
 /** An extension presenter's compact presentation: glyph and label (or the summary), then its rows. */
 function paintCompact(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
-	const theme = cx.theme;
 	const glyph = compactGlyph(node, props, cx);
 	const withLabel = props.term?.compact === "label";
-	const shown = withLabel ? styledText(theme, props.target) : compactText(props, cx);
+	const shown = withLabel ? styledText(cx.theme, props.target) : compactText(props, cx);
 	const rows = [truncate(`${glyph} ${shown}`, cx.width)];
-	const text = withLabel ? node.children()[0] : undefined;
-	if (text) {
-		const spans = (text.props() as { spans?: readonly { t: string }[] }).spans ?? [];
-		for (const line of spans
-			.map(span => span.t)
-			.join("")
-			.split("\n"))
-			rows.push(truncate(`  ${line}`, cx.width));
-	}
+	if (withLabel) rows.push(...paintPresenterRows(bodySpans(node), cx));
 	const limit = cx.height;
 	return {
 		rows: limit === undefined ? rows : rows.slice(0, Math.max(0, limit)),

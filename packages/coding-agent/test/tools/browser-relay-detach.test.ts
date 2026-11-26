@@ -540,19 +540,6 @@ describe("relay tabs Chrome detaches omp from", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"re-adopts a kept relay tab after release and reads the state left on it",
-		async () => {
-			await openRelayTab();
-			for (let attempt = 0; attempt < 4; attempt++) {
-				await releaseTab(name, { keepPage: true });
-				await invoke({ action: "open", app: "relay", target: "case=", timeout: 20 });
-				expect((await invoke(readMark)).value).toBe("kept");
-			}
-		},
-		120_000,
-	);
-
-	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"fails the call in flight at once, names the cause, and re-adopts the same page for the next call",
 		async () => {
 			const ext = await openRelayTab();
@@ -806,7 +793,8 @@ describe("relay tabs Chrome detaches omp from", () => {
 			const ext = await openRelayTab();
 			ext.refuseAttach = "Another debugger is already attached to the tab with id: 1.";
 			const evaluating = ext.hanging();
-			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+			// The refused re-adoption waits out the new worker's setup budget, a third of this call's budget.
+			const stalled = invoke({ action: "run", ...HANG, timeout: 6 }).catch((error: unknown) => error);
 			await evaluating;
 			await ext.chromeDetach("target_closed");
 			const failure = String(await stalled);

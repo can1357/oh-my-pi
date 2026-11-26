@@ -12,7 +12,7 @@ import type {
 	SessionSelectorEntry,
 } from "../modes/view-model/overlays/session-selector";
 import { runStandalone } from "../ui/apps/fullscreen";
-import { SessionSelector } from "../ui/overlays/pickers/session-selector";
+import { SessionSelector, sessionSelectorFocus } from "../ui/overlays/pickers/session-selector";
 
 /** What the picker can do to sessions; foreign import pickers leave most out. */
 export interface SessionPickerHost<T extends SessionSelectorEntry = SessionSelectorEntry> {
@@ -88,6 +88,7 @@ export async function selectSession<T extends SessionSelectorEntry>(
 					loadAllSessions={loadAll}
 				/>
 			),
+			focus: sessionSelectorFocus,
 			done: done.promise,
 		};
 	});
