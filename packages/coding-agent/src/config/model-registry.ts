@@ -3216,13 +3216,22 @@ export class ModelRegistry {
 			// `offline` strategy nothing else would refetch the other mode's rows.
 			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
 		}
+		if (providerConfig.discovery.type === "lm-studio") {
+			// lm-studio dispatches through `discoverOpenAIModelsList` and supports
+			// `advertisedReasoning`, so version its cache namespace alongside
+			// `openai-models-list` to invalidate warm rows cached before pricing
+			// and top-level gateway metadata were extracted.
+			return `${providerConfig.provider}:lm-studio-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
+		}
 		if (providerConfig.discovery.type === "litellm") {
-			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
-			// pagination. rich-v6 moved decisions-mode groups to the Decisions
-			// runner; rich-v5 filtered known non-conversational modes. Bump this
-			// namespace alongside the catalog package's `litellm:rich-vN` when
-			// discovery behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v7`;
+			// rich-v8 invalidates warm LiteLLM `/v1/models` fallback rows cached
+			// before `discoverOpenAIModelsList` extracted `pricing` and top-level
+			// gateway metadata. rich-v7 invalidated incomplete `/v2/model/info`
+			// rosters cached before pagination; rich-v6 moved decisions-mode groups
+			// to the Decisions runner; rich-v5 filtered known non-conversational
+			// modes. Bump this namespace alongside the catalog package's
+			// `litellm:rich-vN` when discovery behavior changes.
+			return `${providerConfig.provider}:litellm-rich-v8`;
 		}
 		return providerConfig.provider;
 	}

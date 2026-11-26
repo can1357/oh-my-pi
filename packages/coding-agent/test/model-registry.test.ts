@@ -3849,7 +3849,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v7",
+						"litellm-proxy:litellm-rich-v8",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,

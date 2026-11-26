@@ -285,61 +285,118 @@ describe("openai-models-list pricing and gateway metadata discovery (#15655)", (
 			expect(getModelPricingStatus(modelB!)).toBe("fixed");
 		});
 
-		test("invalidates warm context-v6 cache rows under online-if-uncached", async () => {
-			const cacheDbPath = path.join(tempDir, "model-cache.db");
-			const staleRow = buildModel({
-				id: "vendor/model-b",
-				name: "vendor/model-b",
-				api: "openai-completions",
-				provider: "custom-gateway",
-				baseUrl: "https://gateway.example.test/v1",
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 128_000,
-				maxTokens: 16_384,
-			});
-			// Seed all pre-change context-v6 namespaces (standard, bare, advertised-off)
-			// with fresh timestamps to confirm none satisfies context-v7 reads.
-			for (const suffix of [
-				"openai-models-list-context-v6",
-				"openai-models-list-advertised-off-context-v6",
-				"openai-models-list-bare-context-v6",
-				"openai-models-list-bare-advertised-off-context-v6",
-			]) {
-				writeModelCache(`custom-gateway:${suffix}`, Date.now(), [staleRow], true, "", cacheDbPath);
-			}
-			fs.writeFileSync(
-				modelsJsonPath,
-				JSON.stringify({
-					providers: {
-						"custom-gateway": {
-							baseUrl: "https://gateway.example.test/v1",
-							apiKey: "test-key",
-							api: "openai-completions",
-							authHeader: true,
-							discovery: { type: "openai-models-list" },
-						},
-					},
-				}),
-			);
-
-			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
-				cacheDbPath,
+		test("falls through to top-level display_name when nested metadata.display_name merely echoes id", async () => {
+			const models = await discoverOpenAIModelsList(providerConfig, {
 				fetch: mockFetch([
 					{
-						id: "vendor/model-b",
-						display_name: "Model B Pro",
-						pricing: { prompt: "0.000002", completion: "0.00001" },
+						id: "vendor/model-echo",
+						display_name: "Vendor Model Echo Pro",
+						metadata: { display_name: "vendor/model-echo" },
+						pricing: { prompt: "0.000001", completion: "0.000002" },
 					},
 				]),
+				getBearerApiKeyResolver: async () => undefined,
 			});
-			await registry.refresh("online-if-uncached");
-
-			const refreshed = registry.find("custom-gateway", "vendor/model-b");
-			expect(refreshed?.name).toBe("Model B Pro");
-			expect(refreshed?.cost).toEqual({ input: 2, output: 10, cacheRead: 0, cacheWrite: 0 });
-			expect(getModelPricingStatus(refreshed!)).toBe("fixed");
+			expect(models).toHaveLength(1);
+			expect(models[0].name).toBe("Vendor Model Echo Pro");
 		});
+
+		test.each([
+			{
+				label: "default (injectV1=true, advertisedReasoning=true)",
+				discovery: { type: "openai-models-list" as const },
+				retiredCacheProviderId: "custom-gateway:openai-models-list-context-v6",
+			},
+			{
+				label: "advertisedReasoning=false",
+				discovery: { type: "openai-models-list" as const, advertisedReasoning: false },
+				retiredCacheProviderId: "custom-gateway:openai-models-list-advertised-off-context-v6",
+			},
+			{
+				label: "injectV1=false",
+				discovery: { type: "openai-models-list" as const, injectV1: false },
+				retiredCacheProviderId: "custom-gateway:openai-models-list-bare-context-v6",
+			},
+			{
+				label: "injectV1=false, advertisedReasoning=false",
+				discovery: { type: "openai-models-list" as const, injectV1: false, advertisedReasoning: false },
+				retiredCacheProviderId: "custom-gateway:openai-models-list-bare-advertised-off-context-v6",
+			},
+			{
+				label: "lm-studio (bare pre-versioned cache)",
+				discovery: { type: "lm-studio" as const },
+				retiredCacheProviderId: "custom-gateway",
+			},
+			{
+				label: "litellm (/v1/models fallback, litellm-rich-v7 cache)",
+				discovery: { type: "litellm" as const },
+				retiredCacheProviderId: "custom-gateway:litellm-rich-v7",
+			},
+		])(
+			"invalidates retired cache namespace for $label under online-if-uncached",
+			async ({ discovery, retiredCacheProviderId }) => {
+				const variantDir = fs.mkdtempSync(path.join(tempDir, "cache-variant-"));
+				const variantModelsJson = path.join(variantDir, "models.json");
+				const cacheDbPath = path.join(variantDir, "model-cache.db");
+				const staleRow = buildModel({
+					id: "vendor/model-b",
+					name: "vendor/model-b",
+					api: "openai-completions",
+					provider: "custom-gateway",
+					baseUrl: "https://gateway.example.test/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+				});
+				writeModelCache(retiredCacheProviderId, Date.now(), [staleRow], true, "", cacheDbPath);
+				fs.writeFileSync(
+					variantModelsJson,
+					JSON.stringify({
+						providers: {
+							"custom-gateway": {
+								baseUrl: "https://gateway.example.test/v1",
+								apiKey: "test-key",
+								api: "openai-completions",
+								authHeader: true,
+								discovery,
+							},
+						},
+					}),
+				);
+
+				const fetchFn = (async (input: string | URL | Request) => {
+					const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+					if (!url.endsWith("/models") || url.includes("/api/v0/models")) {
+						return new Response("not found", { status: 404 });
+					}
+					return new Response(
+						JSON.stringify({
+							object: "list",
+							data: [
+								{
+									id: "vendor/model-b",
+									display_name: "Model B Pro",
+									pricing: { prompt: "0.000002", completion: "0.00001" },
+								},
+							],
+						}),
+						{ status: 200, headers: { "content-type": "application/json" } },
+					);
+				}) as typeof fetch;
+
+				const registry = new ModelRegistry(authStorage, variantModelsJson, {
+					cacheDbPath,
+					fetch: fetchFn,
+				});
+				await registry.refresh("online-if-uncached");
+
+				const refreshed = registry.find("custom-gateway", "vendor/model-b");
+				expect(refreshed?.name).toBe("Model B Pro");
+				expect(refreshed?.cost).toEqual({ input: 2, output: 10, cacheRead: 0, cacheWrite: 0 });
+				expect(getModelPricingStatus(refreshed!)).toBe("fixed");
+			},
+		);
 	});
 });

@@ -1378,12 +1378,15 @@ export async function discoverOpenAIModelsList(
 		// Other gateways (e.g. Magpie, ModelRelay) expose `display_name`,
 		// `context_window`, `modalities`, and `pricing` at the top level.
 		const metadata = isRecord(item.metadata) ? item.metadata : undefined;
-		const rawAdvertisedName =
-			(typeof metadata?.display_name === "string" ? metadata.display_name.trim() : "") ||
-			(typeof item.display_name === "string" ? item.display_name.trim() : "");
-		// Treat a `display_name` that merely echoes `item.id` as absent so a known
-		// bundled reference's human-readable label is not masked by the raw ID.
-		const advertisedName = rawAdvertisedName && rawAdvertisedName !== id ? rawAdvertisedName : "";
+		const metadataDisplayName = typeof metadata?.display_name === "string" ? metadata.display_name.trim() : "";
+		const topLevelDisplayName = typeof item.display_name === "string" ? item.display_name.trim() : "";
+		// Treat a `display_name` that merely echoes `item.id` as absent before
+		// applying metadata-over-top-level precedence, so an echoed nested name
+		// falls through to a distinct top-level name (and then to the bundled
+		// reference's human-readable label).
+		const advertisedName =
+			(metadataDisplayName && metadataDisplayName !== id ? metadataDisplayName : "") ||
+			(topLevelDisplayName && topLevelDisplayName !== id ? topLevelDisplayName : "");
 		const input = nativeMetadataForModel?.input ??
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
