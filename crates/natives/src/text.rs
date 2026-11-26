@@ -995,18 +995,19 @@ fn write_hyperlink_close(state: &WrapState, out: &mut Vec<u16>) {
 
 #[inline]
 fn write_line_end_reset(state: &WrapState, out: &mut Vec<u16>) {
-	let has_underline = state.sgr.attrs & ATTR_UNDERLINE != 0;
-	let has_strike = state.sgr.attrs & ATTR_STRIKE != 0;
-	if has_underline || has_strike {
+	let open = [(ATTR_UNDERLINE, b"24"), (ATTR_STRIKE, b"29"), (ATTR_INVERSE, b"27")];
+	if open.iter().any(|(attr, _)| state.sgr.attrs & attr != 0) {
 		out.extend_from_slice(&[ESC, b'[' as u16]);
-		if has_underline {
-			out.extend_from_slice(&[b'2' as u16, b'4' as u16]);
-			if has_strike {
+		let mut first = true;
+		for (attr, code) in open {
+			if state.sgr.attrs & attr == 0 {
+				continue;
+			}
+			if !first {
 				out.push(b';' as u16);
 			}
-		}
-		if has_strike {
-			out.extend_from_slice(&[b'2' as u16, b'9' as u16]);
+			first = false;
+			out.extend(code.iter().map(|byte| *byte as u16));
 		}
 		out.push(b'm' as u16);
 	}
@@ -2327,6 +2328,26 @@ mod tests {
 			let line_text = String::from_utf16_lossy(line);
 			assert!(line_text.contains("38;5;196"));
 			assert!(line_text.contains("48;5;236"));
+		}
+	}
+
+	#[test]
+	fn test_wrap_text_with_ansi_resets_inverse_without_resetting_colors() {
+		let data = to_u16("\x1b[38;5;196m\x1b[7minverse content wraps\x1b[27m\x1b[0m");
+		let lines = wrap_text_with_ansi_impl(&data, 12, DEFAULT_TAB_WIDTH);
+		assert!(lines.len() > 1);
+
+		for line in &lines[..lines.len() - 1] {
+			let line_text = String::from_utf16_lossy(line);
+			if line_text.contains("\x1b[7m") {
+				assert!(line_text.ends_with("\x1b[27m"));
+				assert!(!line_text.ends_with("\x1b[0m"));
+			}
+		}
+
+		for line in &lines[1..] {
+			let line_text = String::from_utf16_lossy(line);
+			assert!(line_text.contains("38;5;196"));
 		}
 	}
 

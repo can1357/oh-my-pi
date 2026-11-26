@@ -40,7 +40,7 @@ export interface HtmlFormProps {
 /** Rows a picture takes on a tall terminal. */
 const MAX_PICTURE_ROWS = 14;
 
-const STYLE: Record<string, string> = { code: "code", strong: "strong", em: "em" };
+const STYLE: Record<string, string> = { code: "code", strong: "strong", em: "em", mark: "mark" };
 
 /** Form spans as TSP spans. */
 export function tspSpans(spans: readonly FormSpan[]): TspSpan[] {
