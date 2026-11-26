@@ -9,7 +9,6 @@ use std::{
 	cell::OnceCell,
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	iter,
-	path::Path,
 };
 
 use omp_ast::block::standalone_block_at;
@@ -27,6 +26,7 @@ use super::{
 	},
 };
 use crate::{
+	engine::Location,
 	error::{EditError, Rejection},
 	fuzzy::{PatternDistance, levenshtein_within},
 	store::{EditStore, payload_hash},
@@ -38,7 +38,7 @@ pub struct ApplyContext<'a> {
 	pub path:      &'a str,
 	pub notes:     &'a mut Vec<String>,
 	pub store:     &'a EditStore,
-	pub canonical: &'a Path,
+	pub canonical: &'a Location,
 	/// The payload is still streaming: a trailing `*** Find` without its
 	/// `*** Replace` is dropped instead of run through the recovery ladder.
 	pub streaming: bool,
@@ -2543,13 +2543,13 @@ fn resolve_references(rewrite: &str, removed: &[Option<String>]) -> Result<Strin
 /// of itself.
 struct NoopTally<'a> {
 	store:     &'a EditStore,
-	canonical: &'a Path,
+	canonical: &'a Location,
 	payload:   u64,
 	recorded:  OnceCell<(u32, bool)>,
 }
 
 impl<'a> NoopTally<'a> {
-	const fn new(store: &'a EditStore, canonical: &'a Path, payload: u64) -> Self {
+	const fn new(store: &'a EditStore, canonical: &'a Location, payload: u64) -> Self {
 		Self { store, canonical, payload, recorded: OnceCell::new() }
 	}
 

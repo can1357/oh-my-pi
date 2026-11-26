@@ -10,8 +10,10 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { STTController } from "@oh-my-pi/pi-coding-agent/stt";
 import { cfgSttEnabled } from "@oh-my-pi/pi-coding-agent/stt/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { nativeShell } from "./helpers/native-shell";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("InteractiveMode live mode vs. composer dictation", () => {
 	let tempDir: TempDir;
@@ -38,8 +40,8 @@ describe("InteractiveMode live mode vs. composer dictation", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
+		const { frame } = createModeTerminal();
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, frame);
 	});
 
 	afterEach(async () => {
@@ -61,7 +63,8 @@ describe("InteractiveMode live mode vs. composer dictation", () => {
 		await mode.handleLiveCommand();
 		expect(liveCommand).toHaveBeenCalledTimes(1);
 
-		mode.editor.onToggleDictation?.();
+		await using ui = await nativeShell(mode.shell);
+		ui.click("row", "dictation");
 		await mode.handleLiveCommand();
 
 		expect(liveCommand).toHaveBeenCalledTimes(1);

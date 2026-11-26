@@ -26,6 +26,13 @@ import { type DaemonClient, type DaemonTunnel, GLOBAL_SCOPE, type UnitPolicy } f
 export const INFER_KIND = "infer";
 /** Default idle grace after the last lease and request end. */
 export const INFER_IDLE_MS = 15 * 60 * 1_000;
+/**
+ * How long an {@link InferConnection} keeps its lease after its last request
+ * settles (capped at the unit's idle grace). Bounds a burst's reconnect churn
+ * while letting a unit idle-stop as documented instead of when its client exits
+ * (issue #20452).
+ */
+export const INFER_LINGER_MS = 10_000;
 /** Bound on one steady-state `embed`; a longer stall means a hung native runtime (issues #4792, #7352). */
 export const INFER_EMBED_TIMEOUT_MS = 120_000;
 /** Prefix of the error a client sees when its tunnel to an infer unit closes. */
@@ -370,12 +377,14 @@ export interface InferOpenSpec {
 /**
  * One client tunnel to an infer unit. Sends queue until the unit is open and
  * attached; a failed open, a closed tunnel (the unit stopped or its worker
- * exited), or a daemon restart ends the connection once through `onClose`
- * (callers drop it and open a new one on next use).
+ * exited), a daemon restart, or {@link INFER_LINGER_MS} without a request in
+ * flight ends the connection once through `onClose` (callers drop it and open a
+ * new one on next use). Ending on idle releases the lease, so the daemon's idle
+ * grace runs from the last request, not from the client's exit.
  *
  * The process stays alive exactly while a request awaits its terminal reply:
- * the tunnel itself is unref'd, so an idle connection never holds a
- * short-lived (print-mode) process at exit.
+ * the tunnel and the linger timer are unref'd, so an idle connection never
+ * holds a short-lived (print-mode) process at exit.
  */
 export class InferConnection<Req extends { id: string }, Res extends { type: string; id?: string }> {
 	#queue: string[] = [];
@@ -388,6 +397,8 @@ export class InferConnection<Req extends { id: string }, Res extends { type: str
 	/** Ids of requests still awaiting a terminal reply. */
 	#inFlight = new Set<string>();
 	#keepAlive: NodeJS.Timeout | undefined;
+	#linger: NodeJS.Timeout | undefined;
+	#lingerMs = INFER_LINGER_MS;
 	#onMessage: (message: Res) => void;
 	#onClose: (error: Error) => void;
 
@@ -397,12 +408,15 @@ export class InferConnection<Req extends { id: string }, Res extends { type: str
 		void this.#connect(spec).catch((error: unknown) =>
 			this.#end(error instanceof Error ? error : new Error(String(error))),
 		);
+		this.#armLinger();
 	}
 
 	/** Queue or send one request; throws once the connection ended (callers open a new one). */
 	send(message: Req): void {
 		if (this.#closed) throw new Error(INFER_CONNECTION_CLOSED);
 		this.#inFlight.add(message.id);
+		clearTimeout(this.#linger);
+		this.#linger = undefined;
 		this.#keepAlive ??= setInterval(() => {}, 1 << 30);
 		const line = `${JSON.stringify(message)}\n`;
 		if (this.#tunnel) this.#tunnel.send(line);
@@ -444,10 +458,20 @@ export class InferConnection<Req extends { id: string }, Res extends { type: str
 		if (this.#inFlight.size > 0) return;
 		clearInterval(this.#keepAlive);
 		this.#keepAlive = undefined;
+		this.#armLinger();
+	}
+
+	/** Nothing in flight: end the connection (dropping its lease) unless a request arrives first. */
+	#armLinger(): void {
+		clearTimeout(this.#linger);
+		this.#linger = undefined;
+		if (this.#closed) return;
+		this.#linger = setTimeout(() => this.#end(new Error(`${INFER_CONNECTION_CLOSED}: idle`)), this.#lingerMs).unref();
 	}
 
 	async #connect(spec: () => Promise<InferOpenSpec>): Promise<void> {
 		const { key, params, policy } = await spec();
+		this.#lingerMs = Math.min(INFER_LINGER_MS, policy?.idleMs ?? params.idleMs ?? INFER_IDLE_MS);
 		if (this.#closed) return;
 		const client = await daemonClient();
 		if (this.#closed) return;

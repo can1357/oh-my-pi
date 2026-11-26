@@ -18,9 +18,9 @@ const createRuntimeHarness = (manualInput: OAuthManualInputManager): RuntimeHarn
 	let selectorProvider: string | undefined;
 	const ctx = {
 		oauthManualInput: manualInput,
-		editor: {
+		composer: {
 			setText: () => {},
-		} as unknown as InteractiveModeContext["editor"],
+		} as unknown as InteractiveModeContext["composer"],
 		showStatus: (message: string) => {
 			statusMessage = message;
 		},

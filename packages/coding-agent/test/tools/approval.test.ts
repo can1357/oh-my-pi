@@ -510,6 +510,26 @@ describe("tool-owned dynamic approval declarations", () => {
 		});
 	});
 
+	it("matches multi-wildcard bash patterns in linear time on long commands", () => {
+		const settingsOverrides = { "bash.patterns": [{ match: "*git* *push* *:main", approval: "deny" }] };
+		const body = Array.from({ length: 120 }, (_, i) => `git push origin feature-${i}`).join("\n");
+		const command = `cat > pushes.txt <<'EOF'\n${body}\nEOF\necho done`;
+
+		// A `.*` regex took minutes here (#20591).
+		const start = performance.now();
+		expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		expect(performance.now() - start).toBeLessThan(1000);
+		expect(bashApproval(`${command}\ngit push origin HEAD:main`, settingsOverrides)).toMatchObject({
+			policy: "deny",
+		});
+	});
+
+	it("keeps a middle glob literal from overlapping the anchored suffix", () => {
+		const settingsOverrides = { "bash.patterns": [{ match: "git *push*push", approval: "deny" }] };
+		expect(bashApproval("git push", settingsOverrides)).toBe("exec");
+		expect(bashApproval("git push && git push", settingsOverrides)).toMatchObject({ policy: "deny" });
+	});
+
 	it("keeps critical bash patterns prompt-gated unless explicitly denied", () => {
 		const settingsOverrides = {
 			"bash.patterns": [{ match: "*", approval: "allow" }],
@@ -865,6 +885,38 @@ describe("tool-owned dynamic approval declarations", () => {
 			"cargo bench --manifest-path layers/layer3/Cargo.toml --bench standardized_criterion -- --full '^layer3/write/file-wal/batch-(10|1000|10000)$'";
 
 		expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+	});
+
+	it("does not treat spaces inside quoted prose or hyphen-prefixed bullets as -c/-e reinterpret flags", () => {
+		const settingsOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "git add*", approval: "allow" },
+				{ match: "git commit*", approval: "allow" },
+			],
+		};
+
+		for (const command of [
+			'git commit -m "docs: note limit" -m "Caps rendering at 50 per page; replacing inline math keeps it clean."',
+			'git commit -m "fix(stats): address review" -m "Restore indexing (~18:30-18:37 UTC)"',
+			'git add -A && git commit -m "fix(stats): address review" -m "- Route fork upserts so new outcomes merge"',
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+		}
+
+		// Genuine short-option clusters containing -c/-e still block a matching allow rule when paired with shell control chars.
+		const permissiveGitOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [{ match: "git *", approval: "allow" }],
+		};
+		for (const command of [
+			"git -c alias.x='!touch /tmp/pwn; printf ok' x",
+			"git -ec alias.x='!touch /tmp/pwn; printf ok' x",
+			"git add -A && git -c alias.x='!touch /tmp/pwn; printf ok' x",
+			"git -\\\nc alias.x='!touch /tmp/pwn; printf ok' x",
+		]) {
+			expect(bashApproval(command, permissiveGitOverrides)).toBe("exec");
+		}
 	});
 
 	it("opts into per-segment allows for literal && chains, including quoted arguments", () => {

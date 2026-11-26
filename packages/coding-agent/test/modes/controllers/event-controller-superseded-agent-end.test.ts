@@ -1,15 +1,15 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../../../src/ui/theme/service";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { Loader, TERMINAL } from "@oh-my-pi/pi-tui";
+import * as terminalSession from "@oh-my-pi/pi-tui/driver/session";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 /**
- * Models the loader lifecycle InteractiveMode owns: `agent_start` creates the
- * loader via `ensureLoadingAnimation`; `agent_end` stops and drops it. The
+ * The working-row lifecycle: `agent_start` shows the turn's row via
+ * `ensureWorkingRow`; `agent_end` takes it down. The
  * main session's run state and the viewed session's streaming state are
  * mutable flags the tests drive directly.
  */
@@ -35,16 +35,7 @@ function createContext(options: { viewSessionIsMain?: boolean } = {}) {
 		// the normal case where the main session is the one on screen.
 		viewSession: options.viewSessionIsMain ? undefined : viewed,
 	});
-	const loader = new Loader(
-		ctx.ui,
-		text => text,
-		text => text,
-	);
-	vi.spyOn(loader, "stop");
-	ctx.ensureLoadingAnimation = vi.fn(() => {
-		ctx.loadingAnimation ??= loader;
-	});
-	return { ctx, streamState, loader };
+	return { ctx, streamState };
 }
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
@@ -64,13 +55,13 @@ const DONE_END = {
 
 describe("EventController agent_end teardown", () => {
 	beforeAll(async () => {
-		await initTheme(false);
+		initTheme();
 	});
 
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		vi.spyOn(terminalSession, "notifyTerminal").mockImplementation(() => {});
 	});
 
 	afterEach(() => {
@@ -79,21 +70,21 @@ describe("EventController agent_end teardown", () => {
 		resetSettingsForTest();
 	});
 
-	it("tears the loader down on the live turn's own final agent_end", async () => {
-		const { ctx, loader } = createContext();
+	it("takes the working row down on the live turn's own final agent_end", async () => {
+		const { ctx } = createContext();
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent(AGENT_START);
-		expect(ctx.loadingAnimation).toBeDefined();
+		expect(ctx.working).toBe("turn");
 
 		await controller.handleEvent(AGENT_END);
 
-		expect(loader.stop).toHaveBeenCalledTimes(1);
-		expect(ctx.loadingAnimation).toBeUndefined();
+		expect(ctx.clearWorking).toHaveBeenCalledWith("turn");
+		expect(ctx.working).toBeUndefined();
 	});
 
-	it("releases the worker's loader when a focused worker ends while the main session's run goes on", async () => {
-		const { ctx, streamState, loader } = createContext();
+	it("releases the worker's working row when a focused worker ends while the main session's run goes on", async () => {
+		const { ctx, streamState } = createContext();
 		const controller = new EventController(ctx);
 
 		streamState.viewIsStreaming = true;
@@ -107,15 +98,15 @@ describe("EventController agent_end teardown", () => {
 		await controller.handleEvent(AGENT_END);
 
 		// A stale "Working…" row would otherwise stay under the finished worker.
-		expect(loader.stop).toHaveBeenCalledTimes(1);
-		expect(ctx.loadingAnimation).toBeUndefined();
+		expect(ctx.clearWorking).toHaveBeenCalledWith("turn");
+		expect(ctx.working).toBeUndefined();
 		// Main's run is not over: program status stays `working`.
 		expect(report).not.toHaveBeenCalled();
-		expect(TERMINAL.sendNotification).not.toHaveBeenCalled();
+		expect(terminalSession.notifyTerminal).not.toHaveBeenCalled();
 	});
 
 	it("does not report done for a stale agent_end but still tears the ended run down when the next run opened on the viewed main session", async () => {
-		const { ctx, streamState, loader } = createContext({ viewSessionIsMain: true });
+		const { ctx, streamState } = createContext({ viewSessionIsMain: true });
 		// The main session is on screen here, so the focused-worker teardown
 		// branch cannot be what protects the status: the helper's getter makes
 		// `viewSession === session` when no viewSession override is supplied.
@@ -125,7 +116,7 @@ describe("EventController agent_end teardown", () => {
 		streamState.mainRunActive = true;
 		streamState.viewIsStreaming = true;
 		await controller.handleEvent(AGENT_START);
-		expect(ctx.loadingAnimation).toBeDefined();
+		expect(ctx.working).toBe("turn");
 
 		// Real chain order: #checkRun closes run 1 and emits its (stale)
 		// agent_end, then #drainStrandedQueuedMessages opens run 2 before the
@@ -141,13 +132,13 @@ describe("EventController agent_end teardown", () => {
 		expect(report).not.toHaveBeenCalled();
 		// ... but the ended run still got its full teardown, not a blanket skip.
 		expect(ctx.flushPendingModelSwitch).toHaveBeenCalled();
-		expect(loader.stop).toHaveBeenCalled();
-		expect(ctx.loadingAnimation).toBeUndefined();
-		expect(TERMINAL.sendNotification).toHaveBeenCalled();
+		expect(ctx.clearWorking).toHaveBeenCalledWith("turn");
+		expect(ctx.working).toBeUndefined();
+		expect(terminalSession.notifyTerminal).toHaveBeenCalled();
 
 		// Run 2's agent_start follows the stale end and re-arms the live run.
 		await controller.handleEvent(AGENT_START);
-		expect(ctx.loadingAnimation).toBeDefined();
+		expect(ctx.working).toBe("turn");
 
 		// The live run's own terminal end still reports done normally.
 		streamState.mainRunActive = false;

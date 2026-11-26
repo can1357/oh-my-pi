@@ -1,44 +1,49 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../src/ui/theme/service";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { isSettled } from "@oh-my-pi/pi-tui";
+import type { TranscriptBlock } from "../src/ui/shell";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { blockText } from "./helpers/transcript-text";
 
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
+	initTheme();
 });
 
 afterAll(() => {
 	resetSettingsForTest();
 });
 
-function createFixture() {
-	const ctx = createInteractiveModeContext({
-		streamingComponent: new AssistantMessageComponent(),
-	});
-	const blocks: Component[] = [];
-	const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
-	vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(block => {
-		blocks.push(block);
-		addChild(block);
-	});
-	return { ctx, controller: new EventController(ctx), showWarning: vi.spyOn(ctx, "showWarning"), blocks };
+/** Tool blocks the controller mounted. */
+function toolBlocks(ctx: InteractiveModeContext): TranscriptBlock[] {
+	return ctx.shell.transcript.blocks().filter(block => ctx.transcriptEntry(block)?.kind === "tool");
 }
 
-function expectRetirableResult(block: Component): void {
-	const transcript = new TranscriptContainer();
-	transcript.addChild(block);
-	const batch = transcript.peekFinalizedBatch(80, 0);
-	const retired = Bun.stripANSI(batch?.rows.join("\n") ?? "");
-	expect(retired).toContain("done");
-	expect(retired).not.toContain("running");
+function createFixture() {
+	const ctx = createInteractiveModeContext();
+	ctx.streaming = ctx.presentAssistant();
+	return {
+		ctx,
+		controller: new EventController(ctx),
+		showWarning: vi.spyOn(ctx, "showWarning"),
+		get blocks() {
+			return toolBlocks(ctx);
+		},
+	};
+}
+
+/** The block is final (it can move into scrollback) and shows the finished result. */
+function expectRetirableResult(block: TranscriptBlock): void {
+	expect(isSettled(block.node)).toBe(true);
+	const shown = blockText(block, 80);
+	expect(shown).toContain("done");
+	expect(shown).not.toContain("running");
 }
 
 /** A cumulative `message_update` carrying one streamed tool-call block. */
@@ -187,10 +192,7 @@ describe("EventController + Cursor todo bridge", () => {
 
 		expect(f.blocks).toHaveLength(1);
 		expect(f.ctx.pendingTools.size).toBe(0);
-		const block = f.blocks[0]!;
-		expect(block).toHaveProperty("isTranscriptBlockFinalized");
-		expect((block as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
-		expectRetirableResult(block);
+		expectRetirableResult(f.blocks[0]!);
 	});
 
 	it("shows current Todo phases rather than a snapshot captured during Eval", async () => {
@@ -243,10 +245,7 @@ describe("EventController + Cursor todo bridge", () => {
 
 		expect(f.blocks).toHaveLength(1);
 		expect(f.ctx.pendingTools.size).toBe(0);
-		const block = f.blocks[0]!;
-		expect(block).toHaveProperty("isTranscriptBlockFinalized");
-		expect((block as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
-		expectRetirableResult(block);
+		expectRetirableResult(f.blocks[0]!);
 	});
 
 	it("fires the failure warning exactly once when a failed completion is replayed", async () => {
@@ -319,19 +318,13 @@ describe("EventController + Cursor todo bridge", () => {
 			timestamp: 1,
 		};
 		const ctx = createInteractiveModeContext({
-			streamingComponent: new AssistantMessageComponent(),
 			session: {
 				agent: {
 					getPendingToolResults: () => [pending],
 				},
 			},
 		});
-		const blocks: Component[] = [];
-		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
-		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(block => {
-			blocks.push(block);
-			addChild(block);
-		});
+		ctx.streaming = ctx.presentAssistant();
 		const controller = new EventController(ctx);
 		const showWarning = vi.spyOn(ctx, "showWarning");
 
@@ -339,9 +332,9 @@ describe("EventController + Cursor todo bridge", () => {
 		await controller.handleEvent(streamedToolBlock("grep-restore-1", "grep", { pattern: "restore" }));
 		await controller.handleEvent(streamedToolBlock("grep-restore-1", "grep", { pattern: "restore" }));
 
-		expect(blocks).toHaveLength(1);
+		expect(toolBlocks(ctx)).toHaveLength(1);
 		expect(ctx.pendingTools.size).toBe(0);
-		expect(Bun.stripANSI(blocks[0]!.render(120).join("\n"))).toContain("RESTORE_MATCH_LINE");
+		expect(blockText(toolBlocks(ctx)[0]!)).toContain("RESTORE_MATCH_LINE");
 		expect(showWarning).not.toHaveBeenCalled();
 	});
 
@@ -355,27 +348,21 @@ describe("EventController + Cursor todo bridge", () => {
 			timestamp: 1,
 		};
 		const ctx = createInteractiveModeContext({
-			streamingComponent: new AssistantMessageComponent(),
 			session: {
 				agent: {
 					getPendingToolResults: () => [pending],
 				},
 			},
 		});
-		const blocks: Component[] = [];
-		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
-		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(block => {
-			blocks.push(block);
-			addChild(block);
-		});
+		ctx.streaming = ctx.presentAssistant();
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
 		await controller.handleEvent(streamedToolBlock("grep-restore-2", "grep", { pattern: "start" }));
 		await controller.handleEvent(streamedToolBlock("grep-restore-2", "grep", { pattern: "start" }));
 
-		expect(blocks).toHaveLength(1);
+		expect(toolBlocks(ctx)).toHaveLength(1);
 		expect(ctx.pendingTools.size).toBe(0);
-		expect(Bun.stripANSI(blocks[0]!.render(120).join("\n"))).toContain("AGENT_START_MATCH");
+		expect(blockText(toolBlocks(ctx)[0]!)).toContain("AGENT_START_MATCH");
 	});
 });
