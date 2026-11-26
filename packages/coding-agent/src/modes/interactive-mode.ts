@@ -3393,7 +3393,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.clearOptimisticUserMessage();
 		this.#working.setMessage(undefined);
 		if (submission.customType === "goal-continuation") this.#releaseGoalContinuationTurn();
-		this.#working.clear("turn");
+		this.clearWorking("turn");
 		if (!submission.customType && !preserveDraft) {
 			// Enter clears the submitted draft before this cancellation can run.
 			// Keep anything typed or attached since then, after the recovered input.
@@ -3481,9 +3481,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			pendingSubmissionDispose?.();
 			this.#optimisticUserMessageBlocks = [];
 			this.#working.setMessage(undefined);
-			// A run paused on outside work keeps its working row, which names the
-			// wait; the next loop or the run's `agent_end` tears it down.
-			if (!this.#eventController.isAwaitingAsyncWork()) this.clearWorking("turn");
+			this.clearWorking("turn");
 		}
 	}
 
@@ -7298,6 +7296,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	clearWorking(kind?: WorkingKind): boolean {
 		const cleared = this.#working.clear(kind);
+		// Whatever took the row down (the turn's own submission, an error, a maintenance step), a run
+		// that yielded and still waits on outside work gets its row back naming the wait.
+		if (cleared) this.#eventController.restoreAsyncWait();
 		// Synced even when another path took the row down first: the composer's Stop also follows
 		// `session.isStreaming`, which a stopped turn clears only after its submission returned.
 		this.#syncComposerState();
