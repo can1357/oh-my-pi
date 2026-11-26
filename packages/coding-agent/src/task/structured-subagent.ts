@@ -38,7 +38,8 @@ import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" 
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { journalCompletion } from "../session/model-usage-journal";
 import { AUTO_THINKING, type TaskEffort } from "../thinking/levels";
-import { owningSessionId, type ToolSession } from "../tools";
+import type { ToolSession } from "../tools";
+import { owningSessionId } from "../tools/session-id";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";

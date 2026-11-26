@@ -11,7 +11,7 @@
  *
  * Terminal look: `src/ui/styles/figures/figure.ts` (`omp.figures`).
  */
-import { computed, For, type JSXNode, type Reactive, read, Show, untrack } from "@oh-my-pi/pi-tui";
+import { computed, effect, For, type JSXNode, type Reactive, read, Show, untrack } from "@oh-my-pi/pi-tui";
 import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
 import { type EmbedHost, EmbedFigure, parseEmbed } from "./embed";
 import { fenced, type FigureOptions, RasterImage, SvgRaster } from "./svg-figure";
@@ -30,11 +30,31 @@ export interface FigureMarkdownOptions extends FigureOptions {
 	readonly charts: boolean;
 	/** Draw figures and load embeds (the images setting). */
 	readonly showImages: boolean;
+	/** Lift SVG fences and HTML embeds independently; both default on for standalone figure Markdown. */
+	readonly renderSvg?: boolean;
+	readonly renderEmbeds?: boolean;
 	readonly host?: EmbedHost;
 }
 
+const SVG_FENCE = /^ {0,3}(?:`{3,}|~{3,})[ \t]*svg[ \t]*(?=[\r\n]|$)/m;
+const EMBED_LINE = /^ {0,3}<(?:img|iframe)\b/im;
+
+/** Cheap check before lexing a reply; false positives stay Markdown. */
+export function mightHaveFigures(text: string, svg: boolean, embeds: boolean): boolean {
+	return (svg && SVG_FENCE.test(text)) || (embeds && EMBED_LINE.test(text));
+}
+
+function closedFence(raw: string): boolean {
+	const opener = /^ {0,3}(`{3,}|~{3,})/.exec(raw)?.[1];
+	const closer = /\n {0,3}(`{3,}|~{3,})[ \t]*\n?$/.exec(raw)?.[1];
+	return !!opener && !!closer && closer[0] === opener[0] && closer.length >= opener.length;
+}
+
 /** `text` split into its runs. */
-export function figureSegments(text: string, options: Pick<FigureMarkdownOptions, "charts" | "showImages">): Segment[] {
+export function figureSegments(
+	text: string,
+	options: Pick<FigureMarkdownOptions, "charts" | "showImages" | "renderSvg" | "renderEmbeds">,
+): Segment[] {
 	const segments: Segment[] = [];
 	let prose = "";
 	const flush = (): void => {
@@ -42,21 +62,54 @@ export function figureSegments(text: string, options: Pick<FigureMarkdownOptions
 		if (trimmed) segments.push({ kind: "md", text: trimmed });
 		prose = "";
 	};
-	for (const token of lexMarkdown(text)) {
+	const addEmbed = (html: string): boolean => {
+		if (!EMBED_LINE.test(html) || !parseEmbed(html)) return false;
+		flush();
+		segments.push({ kind: "embed", html: html.trim() });
+		return true;
+	};
+	const tokens = lexMarkdown(text);
+	// Reference links can use definitions on either side of a figure.
+	const definitions = tokens
+		.filter(token => token.type === "def")
+		.map(token => token.raw.trimEnd())
+		.join("\n");
+	for (const token of tokens) {
 		if (
 			options.showImages &&
+			options.renderSvg !== false &&
 			token.type === "code" &&
 			token.lang?.trim() === "svg" &&
-			/\n\s*(`{3,}|~{3,})\s*$/.test(token.raw.trimEnd())
+			closedFence(token.raw)
 		) {
 			flush();
 			segments.push({ kind: "svg", source: token.text });
 			continue;
 		}
-		if ((token.type === "html" || token.type === "paragraph") && parseEmbed(token.raw)) {
-			flush();
-			segments.push({ kind: "embed", html: token.raw.trim() });
-			continue;
+		if (options.renderEmbeds !== false) {
+			if (token.type === "html" && addEmbed(token.raw)) continue;
+			if (token.type === "paragraph" && token.tokens && EMBED_LINE.test(token.raw)) {
+				// Lift only a standalone HTML tag, not an example inside an inline code span.
+				let start = 0;
+				let at = 0;
+				for (const inline of token.tokens) {
+					const end = at + inline.raw.length;
+					if (
+						inline.type === "html" &&
+						/^ {0,3}$/.test(token.raw.slice(token.raw.lastIndexOf("\n", at - 1) + 1, at)) &&
+						/^[ \t]*(?:\n|$)/.test(token.raw.slice(end)) &&
+						EMBED_LINE.test(inline.raw) &&
+						parseEmbed(inline.raw)
+					) {
+						prose += token.raw.slice(start, at);
+						addEmbed(inline.raw);
+						start = end;
+					}
+					at = end;
+				}
+				prose += token.raw.slice(start);
+				continue;
+			}
 		}
 		prose += token.raw;
 		if (options.charts && options.showImages && token.type === "table" && tableChartSvg(token.raw) !== undefined) {
@@ -65,6 +118,11 @@ export function figureSegments(text: string, options: Pick<FigureMarkdownOptions
 		}
 	}
 	flush();
+	if (definitions && segments.some(segment => segment.kind !== "md")) {
+		return segments.map(segment =>
+			segment.kind === "md" ? { kind: "md", text: `${definitions}\n\n${segment.text}` } : segment,
+		);
+	}
 	return segments;
 }
 
@@ -83,15 +141,22 @@ function keyOf(segment: Segment): string {
 }
 
 /** An SVG fence of a reply: its raster once drawn, its code until then (and wherever it cannot be drawn). */
-function SvgSegment(props: { readonly source: string } & FigureOptions): JSXNode {
+export function SvgFence(
+	props: { readonly source: Reactive<string>; readonly nodeKey?: string } & FigureOptions,
+): JSXNode {
 	const raster = new SvgRaster(props);
-	const code = fenced("svg", props.source);
-	untrack(() => raster.update(props.source, true));
-	const term: FigureTerm = { code };
+	const code = computed(() => fenced("svg", read(props.source)));
+	effect(() => {
+		const source = read(props.source);
+		untrack(() => raster.update(source, true));
+	});
 	return () => {
 		const state = raster.state();
-		if (state.status !== "ready") return <md role="omp.figure.code" text={code} />;
-		return untrack(() => <RasterImage raster={state.raster} role="omp.figure.svg" term={term} />);
+		if (state.status !== "ready") return <md key={props.nodeKey} role="omp.figure.code" text={code} />;
+		const term: FigureTerm = { code: code() };
+		return untrack(() => (
+			<RasterImage raster={state.raster} role="omp.figure.svg" nodeKey={props.nodeKey} term={term} />
+		));
 	};
 }
 
@@ -109,7 +174,7 @@ export function FigureMarkdown(
 			case "md":
 				return <md text={body} />;
 			case "svg":
-				return <SvgSegment source={body} cell={props.cell} maxRows={props.maxRows} theme={props.theme} />;
+				return <SvgFence source={body} cell={props.cell} maxRows={props.maxRows} theme={props.theme} />;
 			case "chart":
 				return <TableChart markdown={body} inline cell={props.cell} maxRows={props.maxRows} theme={props.theme} />;
 			default:
