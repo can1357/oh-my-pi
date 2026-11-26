@@ -768,10 +768,22 @@
               content.innerHTML = getTreeNodeDisplayHtml(entry, flatNode.node.label);
             }
 
+            div.tabIndex = 0;
+            div.setAttribute('role', 'button');
             div.appendChild(prefixSpan);
             div.appendChild(marker);
             div.appendChild(content);
-            div.addEventListener('click', () => navigateTo(row.navigationId || entry.id, 'target', null, row.anchorId));
+            const activateNode = () => {
+              navigateTo(row.navigationId || entry.id, 'target', null, row.anchorId);
+              if (isMobileLayout()) closeSidebar(false);
+            };
+            div.addEventListener('click', activateNode);
+            div.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                activateNode();
+              }
+            });
 
             container.appendChild(div);
           }
@@ -875,7 +887,7 @@
               previewHighlighted = escapeHtml(previewCode);
             }
 
-            return `<div class="tool-output expandable" onclick="this.classList.toggle('expanded')">
+            return `<div class="tool-output expandable" tabindex="0" role="button" onclick="this.classList.toggle('expanded')">
               <div class="output-preview"><pre><code class="hljs">${previewHighlighted}</code></pre>
               <div class="expand-hint">... (${remaining} more lines)</div></div>
               <div class="output-full"><pre><code class="hljs">${highlighted}</code></pre></div></div>`;
@@ -886,7 +898,7 @@
 
         // Plain text output
         if (remaining > 0) {
-          let out = '<div class="tool-output expandable" onclick="this.classList.toggle(\'expanded\')">';
+          let out = '<div class="tool-output expandable" tabindex="0" role="button" onclick="this.classList.toggle(\'expanded\')">';
           out += '<div class="output-preview">';
           for (const line of displayLines) {
             out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
@@ -1116,8 +1128,8 @@
        * Render the copy-link button HTML for a message.
        */
       function renderCopyLinkButton(entryId) {
-        return `<button class="copy-link-btn" data-entry-id="${entryId}" title="Copy link to this message">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        return `<button type="button" class="copy-link-btn" data-entry-id="${entryId}" title="Copy link to this message" aria-label="Copy link to this message">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
             <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
           </svg>
@@ -1143,7 +1155,7 @@
               if (images.length > 0) {
                 html += '<div class="message-images">';
                 for (const img of images) {
-                  html += `<img src="data:${img.mimeType};base64,${img.data}" class="message-image" />`;
+                  html += `<img src="data:${img.mimeType};base64,${img.data}" class="message-image" alt="User attachment" tabindex="0" role="button" />`;
                 }
                 html += '</div>';
               }
@@ -1192,7 +1204,7 @@
                   <div class="thinking-collapsed">Thinking ...</div>
                 </div>`;
               } else if (block.type === 'image') {
-                html += `<div class="message-images" id="${blockId}"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" /></div>`;
+                html += `<div class="message-images" id="${blockId}"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" alt="Assistant attachment" tabindex="0" role="button" /></div>`;
               } else if (block.type === 'toolCall') {
                 html += renderToolCall(block, sctx, blockId);
               }
@@ -1251,7 +1263,7 @@
 
 
         if (entry.type === 'compaction') {
-          return `<div class="compaction" id="${entryId}" onclick="this.classList.toggle('expanded')">
+          return `<div class="compaction" id="${entryId}" tabindex="0" role="button" onclick="this.classList.toggle('expanded')">
             <div class="compaction-label">[compaction]</div>
             <div class="compaction-collapsed">Compacted from ${entry.tokensBefore.toLocaleString()} tokens</div>
             <div class="compaction-content"><strong>Compacted from ${entry.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(entry.summary)}</div>
@@ -1368,7 +1380,7 @@
         if (!activeSessionKey && tools && tools.length > 0) {
           const namesHtml = tools.map(t => `<span class="tool-name-chip">${escapeHtml(t.name)}</span>`).join('');
           const fullHtml = tools.map(t => `<div class="tool-item"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`).join('');
-          html += `<div class="tools-list collapsed" onclick="this.classList.toggle('collapsed')">
+          html += `<div class="tools-list collapsed" tabindex="0" role="button" onclick="this.classList.toggle('collapsed')">
             <div class="tools-header">Available Tools (${tools.length})</div>
             <div class="tools-collapsed">${namesHtml}</div>
             <div class="tools-content">${fullHtml}</div>
@@ -1453,6 +1465,23 @@
           });
         });
 
+        // Attach copy buttons to markdown code blocks
+        messagesEl.querySelectorAll('.markdown-content pre').forEach(pre => {
+          if (pre.querySelector('.code-copy-btn')) return;
+          const codeEl = pre.querySelector('code');
+          if (!codeEl) return;
+          const copyBtn = document.createElement('button');
+          copyBtn.type = 'button';
+          copyBtn.className = 'code-copy-btn';
+          copyBtn.setAttribute('aria-label', 'Copy code');
+          copyBtn.textContent = 'Copy';
+          copyBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            copyToClipboard(codeEl.textContent || '', copyBtn);
+          });
+          pre.appendChild(copyBtn);
+        });
+
         // Use setTimeout(0) to ensure DOM is fully laid out before scrolling
         setTimeout(() => {
           const content = document.getElementById('content');
@@ -1535,8 +1564,11 @@
       // Filter buttons
       document.querySelectorAll('.filter-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-          document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
+          document.querySelectorAll('.filter-btn').forEach(b => {
+            const isActive = b === btn;
+            b.classList.toggle('active', isActive);
+            b.setAttribute('aria-pressed', String(isActive));
+          });
           filterMode = btn.dataset.filter;
           forceTreeRerender();
         });
@@ -1555,10 +1587,10 @@
       }
 
       function getSidebarBounds() {
-        const rootStyles = getComputedStyle(document.documentElement);
-        const minWidth = parseFloat(rootStyles.getPropertyValue('--sidebar-min-width')) || 240;
-        const maxWidth = parseFloat(rootStyles.getPropertyValue('--sidebar-max-width')) || 720;
-        const viewportMaxWidth = window.innerWidth - MIN_CONTENT_WIDTH;
+        const rootStyles = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+        const minWidth = (rootStyles ? parseFloat(rootStyles.getPropertyValue('--sidebar-min-width')) : NaN) || 240;
+        const maxWidth = (rootStyles ? parseFloat(rootStyles.getPropertyValue('--sidebar-max-width')) : NaN) || 840;
+        const viewportMaxWidth = (window.innerWidth || 1280) - MIN_CONTENT_WIDTH;
         return {
           minWidth,
           maxWidth: Math.max(minWidth, Math.min(maxWidth, viewportMaxWidth))
@@ -1571,7 +1603,14 @@
       }
 
       function applySidebarWidth(width) {
-        document.documentElement.style.setProperty('--sidebar-width', `${Math.round(clampSidebarWidth(width))}px`);
+        const { minWidth, maxWidth } = getSidebarBounds();
+        const clamped = Math.round(Math.max(minWidth, Math.min(maxWidth, width)));
+        document.documentElement.style.setProperty('--sidebar-width', `${clamped}px`);
+        if (sidebarResizer) {
+          sidebarResizer.setAttribute('aria-valuenow', String(clamped));
+          sidebarResizer.setAttribute('aria-valuemin', String(Math.round(minWidth)));
+          sidebarResizer.setAttribute('aria-valuemax', String(Math.round(maxWidth)));
+        }
       }
 
       function loadSidebarWidth() {
@@ -1646,6 +1685,24 @@
           saveSidebarWidth(280);
         });
 
+        sidebarResizer.addEventListener('keydown', (e) => {
+          if (isMobileLayout()) return;
+          const step = e.shiftKey ? 48 : 16;
+          const current = parseFloat(sidebarResizer.getAttribute('aria-valuenow')) || 280;
+          const { minWidth, maxWidth } = getSidebarBounds();
+          let next = null;
+          if (e.key === 'ArrowLeft') next = current - step;
+          else if (e.key === 'ArrowRight') next = current + step;
+          else if (e.key === 'Home') next = minWidth;
+          else if (e.key === 'End') next = maxWidth;
+          else if (e.key === 'Enter' || e.key === '0') next = 280;
+          if (next !== null) {
+            e.preventDefault();
+            applySidebarWidth(next);
+            saveSidebarWidth(next);
+          }
+        });
+
         window.addEventListener('resize', () => {
           if (isMobileLayout()) return;
           applySidebarWidth(sidebar.getBoundingClientRect().width);
@@ -1654,20 +1711,90 @@
 
       setupSidebarResize();
 
-      hamburger.addEventListener('click', () => {
+      const sidebarCloseBtn = document.getElementById('sidebar-close');
+
+      const openSidebar = () => {
         sidebar.classList.add('open');
         overlay.classList.add('open');
-        hamburger.style.display = 'none';
-      });
-
-      const closeSidebar = () => {
-        sidebar.classList.remove('open');
-        overlay.classList.remove('open');
-        hamburger.style.display = '';
+        hamburger.setAttribute('aria-expanded', 'true');
+        sidebarCloseBtn?.focus?.();
       };
 
-      overlay.addEventListener('click', closeSidebar);
-      document.getElementById('sidebar-close').addEventListener('click', closeSidebar);
+      const closeSidebar = (restoreFocus = false) => {
+        const wasOpen = sidebar.classList.contains('open');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('open');
+        hamburger.setAttribute('aria-expanded', 'false');
+        if (restoreFocus && wasOpen && isMobileLayout()) {
+          hamburger.focus?.();
+        }
+      };
+
+      hamburger.addEventListener('click', () => {
+        if (sidebar.classList.contains('open')) closeSidebar(true);
+        else openSidebar();
+      });
+
+      overlay.addEventListener('click', () => closeSidebar(true));
+      sidebarCloseBtn?.addEventListener('click', () => closeSidebar(true));
+
+      // Image modal with focus management
+      const imageModal = document.getElementById('image-modal');
+      const modalImage = document.getElementById('modal-image');
+      const imageModalClose = document.getElementById('image-modal-close');
+      let lastImageTrigger = null;
+
+      const openImageModal = (src, alt, triggerEl) => {
+        if (!imageModal || !modalImage) return;
+        lastImageTrigger = triggerEl || document.activeElement;
+        modalImage.src = src;
+        modalImage.alt = alt || 'Expanded attachment';
+        imageModal.classList.add('open');
+        imageModal.setAttribute('aria-hidden', 'false');
+        imageModalClose?.focus?.();
+      };
+
+      const closeImageModal = () => {
+        if (!imageModal || !imageModal.classList.contains('open')) return;
+        imageModal.classList.remove('open');
+        imageModal.setAttribute('aria-hidden', 'true');
+        if (modalImage) modalImage.src = '';
+        lastImageTrigger?.focus?.();
+        lastImageTrigger = null;
+      };
+
+      imageModalClose?.addEventListener('click', closeImageModal);
+      imageModal?.addEventListener('click', (e) => {
+        if (e.target === imageModal) closeImageModal();
+      });
+
+      const contentEl = document.getElementById('content');
+      contentEl?.addEventListener('click', (e) => {
+        const img = e.target?.closest?.('.message-image');
+        if (img) {
+          openImageModal(img.src, img.alt, img);
+        }
+      });
+      contentEl?.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const target = e.target;
+        if (!target) return;
+        if (target.classList?.contains('message-image')) {
+          e.preventDefault();
+          openImageModal(target.src, target.alt, target);
+        } else if (
+          target.classList?.contains('tool-output') && target.classList?.contains('expandable')
+        ) {
+          e.preventDefault();
+          target.classList.toggle('expanded');
+        } else if (target.classList?.contains('compaction')) {
+          e.preventDefault();
+          target.classList.toggle('expanded');
+        } else if (target.classList?.contains('tools-list')) {
+          e.preventDefault();
+          target.classList.toggle('collapsed');
+        }
+      });
 
       // Toggle states
       let thinkingExpanded = false;
@@ -1697,14 +1824,20 @@
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
           if (e.defaultPrevented || e.composedPath().some(node => node.tagName === 'OMP-SESSION-TRACE')) return;
+          if (imageModal?.classList.contains('open')) {
+            e.preventDefault();
+            closeImageModal();
+            return;
+          }
+          if (sidebar.classList.contains('open')) {
+            e.preventDefault();
+            closeSidebar(true);
+            return;
+          }
           if (e.target?.matches('input, textarea, [contenteditable="true"]')) return;
           if (currentView === 'trace' || timelineOpen) {
             setView('transcript');
             setTimelineOpen(false);
-            return;
-          }
-          if (sidebar.classList.contains('open')) {
-            closeSidebar();
             return;
           }
           searchInput.value = '';

@@ -1,7 +1,7 @@
 <a class="skip-link" href="#content">Skip to transcript</a>
 <header class="topbar">
-  <button id="hamburger" title="Open sidebar" aria-label="Open sidebar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
-  <a class="brand" href="#" id="home-link"><span class="brand-mark">omp</span><span class="brand-divider"></span><span>Session</span></a>
+  <button type="button" id="hamburger" title="Open sidebar" aria-label="Open sidebar" aria-expanded="false" aria-controls="sidebar"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+  <a class="brand" href="#" id="home-link"><span class="brand-mark">omp</span><span class="brand-divider" aria-hidden="true"></span><span>Session</span></a>
   <span class="export-label">Session export</span>
   <div class="topbar-actions">
     <nav class="view-switch" aria-label="Session view">
@@ -15,28 +15,28 @@
     </select>
   </div>
 </header>
-<div id="sidebar-overlay"></div>
+<div id="sidebar-overlay" aria-hidden="true"></div>
 <div id="app">
   <aside id="sidebar" aria-label="Session navigation">
-    <div class="sidebar-section-heading">Sessions <span id="session-count"></span><button class="sidebar-close" id="sidebar-close" title="Close" aria-label="Close sidebar">&times;</button></div>
+    <div class="sidebar-section-heading">Sessions <span id="session-count"></span><button type="button" class="sidebar-close" id="sidebar-close" title="Close sidebar" aria-label="Close sidebar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
     <nav id="session-list" aria-label="Sessions and subagents"></nav>
     <div class="sidebar-header">
       <div class="sidebar-section-heading">Conversation</div>
       <div class="sidebar-controls">
         <input type="search" class="sidebar-search" id="tree-search" aria-label="Search entries" placeholder="Search entries…" autocomplete="off" spellcheck="false">
       </div>
-      <div class="sidebar-filters">
-        <button class="filter-btn active" data-filter="default" title="Hide settings entries">Default</button>
-        <button class="filter-btn" data-filter="no-tools" title="Default minus tool results">No tools</button>
-        <button class="filter-btn" data-filter="user-only" title="Only user messages">User</button>
-        <button class="filter-btn" data-filter="labeled-only" title="Only labeled entries">Labeled</button>
-        <button class="filter-btn" data-filter="all" title="Show everything">All</button>
+      <div class="sidebar-filters" role="group" aria-label="Filter conversation entries">
+        <button type="button" class="filter-btn active" data-filter="default" aria-pressed="true" title="Hide settings entries">Default</button>
+        <button type="button" class="filter-btn" data-filter="no-tools" aria-pressed="false" title="Default minus tool results">No tools</button>
+        <button type="button" class="filter-btn" data-filter="user-only" aria-pressed="false" title="Only user messages">User</button>
+        <button type="button" class="filter-btn" data-filter="labeled-only" aria-pressed="false" title="Only labeled entries">Labeled</button>
+        <button type="button" class="filter-btn" data-filter="all" aria-pressed="false" title="Show everything">All</button>
       </div>
     </div>
     <div class="tree-container" id="tree-container"></div>
-    <div class="tree-status" id="tree-status"></div>
+    <div class="tree-status" id="tree-status" aria-live="polite" aria-atomic="true"></div>
   </aside>
-  <div id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize session tree sidebar"></div>
+  <div id="sidebar-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize session tree sidebar" aria-valuenow="280" aria-valuemin="240" aria-valuemax="840"></div>
   <section id="workspace" aria-label="Session workspace">
     <main id="content" tabindex="-1">
       <div id="header-container"></div>
@@ -50,7 +50,8 @@
       <div id="trace-body" hidden><omp-session-trace view="timeline"></omp-session-trace></div>
     </section>
   </section>
-  <div id="image-modal" class="image-modal">
+  <div id="image-modal" class="image-modal" role="dialog" aria-modal="true" aria-label="Expanded attachment" aria-hidden="true">
+    <button type="button" id="image-modal-close" class="image-modal-close" title="Close" aria-label="Close expanded attachment"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
     <img id="modal-image" src="" alt="Expanded attachment">
   </div>
 </div>
