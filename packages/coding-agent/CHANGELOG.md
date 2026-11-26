@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Fixed ACP and RPC `/todo done` and `/todo drop` with no argument leaving every task unchanged while reporting success, quoted names such as `/todo rm "Ship it"` removing a different phase, and those `/todo` edits not telling the model the user changed the list ([#20680](https://github.com/can1357/oh-my-pi/pull/20680) by [@eggpeat](https://github.com/eggpeat))
 - Rebuilding a long transcript in place (compaction, `/shake`, a display setting change) no longer stalls Tern: the block list is recomputed once for the rebuild instead of once per replayed block ([#20675](https://github.com/can1357/oh-my-pi/pull/20675) by [@H4vC](https://github.com/H4vC))
 - Rebuilding the transcript now removes replaced blocks in one update instead of updating the view for each block ([#20658](https://github.com/can1357/oh-my-pi/pull/20658) by [@H4vC](https://github.com/H4vC))
 - Single-file reads and read preview titles now highlight the path like grouped reads (dim directory, colored file name, muted line range) instead of painting it flat in the accent color ([#20615](https://github.com/can1357/oh-my-pi/pull/20615) by [@JustasMasiulis](https://github.com/JustasMasiulis))
