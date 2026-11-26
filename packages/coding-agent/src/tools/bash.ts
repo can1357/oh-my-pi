@@ -199,13 +199,10 @@ export function wrapShellLineForClientTerminal(
 }
 
 /**
- * Bash patterns flagged as safety critical for approval policy.
- *
- * Kept intentionally tight — the cost of a false negative is data loss or a compromised host,
- * while false positives remain actionable through user policy control.
- * New patterns should target shapes that are virtually never legitimate in automation.
+ * The rm patterns, matched on raw text. They judge only a command that the simple-command reading
+ * cannot show, see isCriticalRemoval.
  */
-export const CRITICAL_BASH_PATTERNS = [
+const CRITICAL_RM_TEXT_PATTERNS = [
 	// Recursive destruction.
 	// Options may sit on either side of the recursive/force flag, so only that flag is pinned and
 	// any other options are skipped: `rm -rf /`, `rm -rf -- /`, `rm --recursive --force /`,
@@ -215,6 +212,157 @@ export const CRITICAL_BASH_PATTERNS = [
 	// wherever it appears — including forms this list would otherwise reach only via the target.
 	/\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
 	/\bsudo\s+rm\b/i, // any `sudo rm`.
+];
+
+/** Bash syntax the simple-command reading does not follow: a substitution, a parameter, a backtick, a redirect, a comment or a continuation. */
+const UNREAD_BASH_SYNTAX = /[`$<>#]|\\\n/;
+
+/** Commands that print, read, move or test text and never run an argument as a command line. `rg` and `git grep` are left out: `--pre` and `-O` run one. `printf` is left out: `printf -v` assigns a string that a later command can run (a zsh function, a bash hash entry). */
+const TEXT_ONLY_COMMANDS = new Set([
+	"cat",
+	"cd",
+	"cmp",
+	"diff",
+	"echo",
+	"egrep",
+	"false",
+	"fgrep",
+	"grep",
+	"head",
+	"ls",
+	"mkdir",
+	"pwd",
+	"sleep",
+	"tail",
+	"test",
+	"touch",
+	"true",
+	"unset",
+	"wc",
+]);
+
+/** `git` subcommands that never run an argument as a command line; `commit` is judged in isJudgedSimpleCommand. */
+const TEXT_ONLY_GIT_SUBCOMMANDS = new Set(["add", "blame", "diff", "log", "show", "status"]);
+
+/**
+ * Whether one simple command is a critical rm: its command word is rm, and it either passes
+ * `--no-preserve-root` among its options, or takes a recursive or force flag before an operand that
+ * is an absolute path. Options are read as rm reads them, and an operand after the first is not judged,
+ * except after `--`, where any operand may be the target.
+ */
+function isCriticalRmCall(words: readonly string[]): boolean {
+	const [name, ...args] = words;
+	if (name === undefined || name.toLowerCase() !== "rm") return false;
+	let recursiveOrForce = false;
+	for (const [index, word] of args.entries()) {
+		// After `--` every word is an operand: `rm -rf -- -- /` deletes `/`, so the first one is not the only target.
+		if (word === "--") return recursiveOrForce && args.slice(index + 1).some(operand => operand.startsWith("/"));
+		if (word.length < 2 || !word.startsWith("-")) return recursiveOrForce && word.startsWith("/");
+		if (word === "--no-preserve-root") return true;
+		if (/^(?:-[a-z]*[rf][a-z]*|--recursive|--force)$/i.test(word)) recursiveOrForce = true;
+	}
+	return false;
+}
+
+/**
+ * Commands that run their arguments, or one of them, as a shell line: their words are read joined, because the
+ * shell joins them (`eval 'rm -rf' /`). Any other command's words are read one by one (see isCriticalRemoval).
+ */
+const SHELL_LINE_COMMANDS = new Set([
+	"bash",
+	"busybox",
+	"command",
+	"dash",
+	"doas",
+	"env",
+	"eval",
+	"exec",
+	"ksh",
+	"nice",
+	"nohup",
+	"sh",
+	"ssh",
+	"su",
+	"sudo",
+	"time",
+	"timeout",
+	"watch",
+	"xargs",
+	"zsh",
+]);
+
+/**
+ * A word a critical rm pattern can start at: an rm or a sudo that is a command word, by its name or by a path
+ * (`rm`, `/bin/rm`) or after `$` (`$'rm'`). An argument that only ends in rm, such as `*.rm`, does not.
+ */
+const RM_RUN_WORD = /(?:^|[/$])(?:rm|sudo)$/i;
+
+/**
+ * Whether a bash command runs a critical rm. When every simple command is judged from its words (see
+ * isJudgedSimpleCommand), the rm calls are read from those words, so text quoted inside a grep pattern
+ * or a commit message is not a delete. Otherwise the line may run its text, so the rm text patterns are
+ * matched on the raw command and on each simple command's quote-removed words. A command in SHELL_LINE_COMMANDS
+ * has all its words joined. Any other command's words are matched one by one, and from each word that is an rm
+ * or sudo command (see RM_RUN_WORD) to the end of its simple command, those words joined, so an argument that
+ * quotes rm text, such as `rg 'rm -rf' /tmp/docs`, is not joined with the words after it.
+ */
+function isCriticalRemoval(command: string): boolean {
+	const simple = tokenizeShellSegments(command);
+	if (!UNREAD_BASH_SYNTAX.test(command) && simple.every(isJudgedSimpleCommand)) return simple.some(isCriticalRmCall);
+	return (
+		CRITICAL_RM_TEXT_PATTERNS.some(pattern => pattern.test(command)) ||
+		simple.some(words => {
+			const name = (words[0] ?? "").toLowerCase().replace(/^.*\//, "");
+			if (SHELL_LINE_COMMANDS.has(name))
+				return CRITICAL_RM_TEXT_PATTERNS.some(pattern => pattern.test(words.join(" ")));
+			return words.some((word, index) =>
+				CRITICAL_RM_TEXT_PATTERNS.some(pattern =>
+					pattern.test(RM_RUN_WORD.test(word) ? words.slice(index).join(" ") : word),
+				),
+			);
+		})
+	);
+}
+
+/**
+ * Whether a git argument is `--trailer`, an unambiguous prefix of it (`--tr` runs the trailer command too), or
+ * `--trailer=value`. git commit runs the command configured as trailer.<key>.command on each trailer value.
+ */
+function isTrailerOption(word: string): boolean {
+	const [option = ""] = word.split("=", 1);
+	return option.length > 2 && "--trailer".startsWith(option);
+}
+
+/**
+ * Whether a simple command is judged from its words: a bare rm, or a bare text-only command. A leading
+ * NAME=value is not judged, because its value can be run as a command line (GIT_EDITOR, GIT_EXTERNAL_DIFF),
+ * and a command named by a path is not judged, because a project script such as ./test may run its arguments.
+ */
+function isJudgedSimpleCommand(words: readonly string[]): boolean {
+	const [name, subcommand = ""] = words;
+	if (name === undefined) return true;
+	if (isShellEnvironmentAssignment(name)) return false;
+	return (
+		name.toLowerCase() === "rm" ||
+		TEXT_ONLY_COMMANDS.has(name) ||
+		(name === "git" &&
+			(TEXT_ONLY_GIT_SUBCOMMANDS.has(subcommand) || (subcommand === "commit" && !words.some(isTrailerOption))))
+	);
+}
+
+/** Whether a bash command matches a critical pattern on its text, or runs a critical rm. */
+function isCriticalCommand(command: string): boolean {
+	return CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command)) || isCriticalRemoval(command);
+}
+
+/**
+ * Bash patterns flagged as safety critical for approval policy.
+ *
+ * Kept intentionally tight — the cost of a false negative is data loss or a compromised host,
+ * while false positives remain actionable through user policy control.
+ * New patterns should target shapes that are virtually never legitimate in automation.
+ */
+export const CRITICAL_BASH_PATTERNS = [
 	/\bchmod\s+-R\s+[0-7]+\s+\//i, // `chmod -R 777 /`.
 	/\bchmod\s+-R\s+[ugoa+\-=rwxXst,]+\s+\//, // `chmod -R u+x /`, `chmod -R u+rwx,o+w /etc` (symbolic mode, root target).
 	/\bchown\s+-R\s+\S+\s+\//i, // `chown -R user /`.
@@ -905,7 +1053,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
 			};
 		}
-		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
+		const criticalCommand = command !== "" && isCriticalCommand(command);
 		if (!compoundSegments && criticalCommand) {
 			return { tier: "exec", override: true, reason: "Critical pattern detected" };
 		}
@@ -973,14 +1121,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		const segmentCritical = segments.map(segment => {
 			const literalCommand = segment.literal?.argv.join(" ");
-			return CRITICAL_BASH_PATTERNS.some(
-				pattern => pattern.test(segment.text) || (literalCommand !== undefined && pattern.test(literalCommand)),
+			return (
+				isCriticalCommand(segment.text) ||
+				(literalCommand !== undefined && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand)))
 			);
 		});
-		const wholeChainOnlyCritical =
-			command !== "" &&
-			CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command)) &&
-			!segmentCritical.some(Boolean);
+		const wholeChainOnlyCritical = command !== "" && isCriticalCommand(command) && !segmentCritical.some(Boolean);
 		if (wholeChainOnlyCritical) return null;
 
 		let chainUntainted = true;

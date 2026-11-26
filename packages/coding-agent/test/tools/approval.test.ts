@@ -449,9 +449,118 @@ describe("tool-owned dynamic approval declarations", () => {
 			"dd if=image.img of=/dev/ttyS0",
 			"dd if=image.img of=/dev/nullb0",
 			"dd if=big.mov of=/dev/null; dd if=image.iso of=/dev/sdb",
+			"rm -fr /tmp/x",
+			"rm -rf /usr",
+			"sudo rm -rf /",
+			"cd /tmp && rm -rf /",
+			"bash -c 'rm -rf /'",
+			'echo "rm -rf /" | sh',
+			"echo $(rm -rf /)",
+			"xargs sh -c 'rm -rf /'",
+			'ssh build.example "rm -rf /"',
+			"python3 -c \"import os; os.system('rm -rf /')\"",
+			'echo "rm -rf /" | python3',
+			"echo x | rm -rf /",
+			"echo ok; rm -rf /",
+			"echo ok\nrm -rf /",
+			'rm -rf "/"',
+			"rm -rf '/'",
+			'pwd && rm -rf "/"',
+			"printf -v 'functions[ls]' %s 'rm -rf /usr'; ls",
+			"echo hi # it's\nrm -rf /",
+			"GIT_EXTERNAL_DIFF='rm -rf /' git diff",
+			"GIT_EDITOR='rm -rf /' git commit -m fix",
+			"export GIT_EXTERNAL_DIFF='rm -rf /'; git diff",
+			"./test 'rm -rf /'",
+			"script/test 'rm -rf /'",
 		]) {
 			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}
+	});
+
+	it.each([
+		"grep -rn 'rm -rf' docs && echo ok",
+		"grep -rn 'rm -rf /' docs",
+		'git commit -m "drop the rm -rf / rule"',
+		'echo "sudo rm -rf /etc"',
+		"grep -rn 'sudo rm' docs",
+		"grep -rn 'rm --no-preserve-root' docs",
+		"echo x | grep 'rm -rf /' docs",
+		"git log --grep 'rm -rf /'",
+	])("does not judge quoted text of a read-only command as a delete: %s", command => {
+		expect(bashApproval(command)).toBe("exec");
+	});
+
+	it.each(['pwd && nice rm -rf "/"', "pwd && nohup rm -rf '/'", "pwd && timeout 5 r\\m -rf /"])(
+		"keeps a quoted critical rm critical in a compound line: %s",
+		command => {
+			expect(bashApproval(command, { "bash.allowCompoundCommands": true })).toEqual({
+				tier: "exec",
+				override: true,
+				reason: "Critical pattern detected",
+			});
+		},
+	);
+
+	it("does not judge a git commit trailer as text: git runs a trailer's command as a shell line", () => {
+		expect(bashApproval("git commit --trailer 'k=rm -rf /' -m m")).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+		expect(bashApproval("git commit -m 'drop the rm -rf / rule'")).toBe("exec");
+	});
+
+	it("does not flatten the arguments of an unrelated command into an rm line", () => {
+		expect(bashApproval("rg 'rm -rf' /tmp/docs")).toBe("exec");
+		expect(bashApproval("tar --exclude='*.rm' -cf /tmp/out.tar .")).toBe("exec");
+		expect(bashApproval("find src -name '*.rm' -newer /ref -print")).toBe("exec");
+		expect(bashApproval("rg 'rm -rf /' docs")).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+	});
+
+	it("reads the word after -- as an operand, not as an option", () => {
+		expect(bashApproval("rm -- '--no-preserve-root'")).toBe("exec");
+		expect(bashApproval("rm -- -rf /")).toBe("exec");
+		expect(bashApproval("rm -rf -- /")).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+	});
+
+	it.each([
+		"rm -rf /",
+		"rm -fr /tmp/x",
+		"bash -c 'rm -rf /'",
+		'sh -c "rm -rf /"',
+		"echo x | rm -rf /",
+		"cd /tmp && rm -rf /",
+		"echo $(rm -rf /)",
+		'eval "rm -rf /"',
+		'"sudo" rm x',
+		"rm -rf -- -- /",
+		'"/bin/rm" -rf /',
+		'"/usr/bin/sudo" rm x',
+		"bash -c 'r''m -rf /'",
+		"sh -c 'rm -rf '/",
+		'eval "r"m" -rf /"',
+		"git commit --trailer 'k=r''m -rf /' -m m",
+		"$'rm' -rf /",
+		"rm -rf -- x /",
+		"eval 'rm -rf' /",
+		"ssh host 'rm -rf' /",
+		'eval "echo; rm" -rf /',
+		'eval "echo; sudo" rm x',
+	])("keeps refusing a real delete: %s", command => {
+		expect(bashApproval(command)).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
 	});
 
 	it("does not flag benign bash commands", () => {
@@ -464,6 +573,7 @@ describe("tool-owned dynamic approval declarations", () => {
 			"tee /var/log/app.log",
 			"rm -rf -- ./build",
 			"rm --recursive --force ./dist",
+			"rm -rf dir",
 			"rm -v /tmp/scratch",
 			"dd if=big.mov of=/dev/null bs=4m count=100",
 			"dd if=/dev/sda of=/dev/null bs=1M count=10",
