@@ -101,6 +101,13 @@ describe("disabled credential tombstones", () => {
 		const [identified] = store!.listAuthCredentials(provider);
 		await store!.deleteAuthCredential(identified.id, "oauth refresh failed: Grant not found");
 
+		// Additive logins never purge an identity-less tombstone: a sibling
+		// identity-less login (e.g. a second Devin browser login) is not its replacement.
+		await store!.saveOAuth(provider, mintMcp("sibling"));
+		expect(await store!.listDisabledCredentials(provider)).toHaveLength(2);
+
+		// A full replacement (`/mcp reauth` → `credentials.set`) declares the provider's
+		// whole credential set, so it supersedes the identity-less tombstone.
 		await storage!.credentials.set(provider, mintMcp("new"));
 
 		const remaining = await store!.listDisabledCredentials(provider);

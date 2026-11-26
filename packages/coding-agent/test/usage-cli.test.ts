@@ -1222,6 +1222,10 @@ describe("formatUsageBreakdown", () => {
 		expect(actionableDisables(disabled, [{ provider, type: "api_key" }])).toEqual(disabled);
 		// An identified active account cannot vouch for an anonymous tombstone.
 		expect(actionableDisables(disabled, [{ provider, type: "oauth", email: "a@example.test" }])).toEqual(disabled);
+		// Outside managed MCP ids, identity-less logins coexist: a sibling Devin
+		// browser login is not a re-login of the failed one.
+		const devinDisabled = disabled.map(summary => ({ ...summary, provider: "devin" }));
+		expect(actionableDisables(devinDisabled, [{ provider: "devin", type: "oauth" }])).toEqual(devinDisabled);
 	});
 
 	it("renders a tombstone-only provider section even when no active credential remains", () => {

@@ -32,6 +32,7 @@ import { peakBuckets, sparkline } from "@oh-my-pi/pi-tui/term/painters/chart";
 import { errorMessage, formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { isManagedMCPOAuthCredentialId } from "../mcp/oauth-flow";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
@@ -632,7 +633,12 @@ function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts:
 	const summaryEmail = summary.email?.toLowerCase();
 	const summaryAccountId = summary.accountId?.toLowerCase();
 	const summaryOrgId = summary.orgId?.toLowerCase();
-	const summaryAnonymous = !summaryEmail && !summaryAccountId && !summaryOrgId;
+	// A managed MCP OAuth provider id names one server login, so an identity-less
+	// tombstone there is restored by any identity-less login of that provider.
+	// Elsewhere identity-less logins can coexist (e.g. two Devin browser logins)
+	// and a sibling is not a re-login.
+	const anonymousRestorable =
+		!summaryEmail && !summaryAccountId && !summaryOrgId && isManagedMCPOAuthCredentialId(summary.provider);
 
 	const matchesActive = activeAccounts.some(account => {
 		if (account.provider !== summary.provider || account.type !== "oauth") return false;
@@ -641,9 +647,7 @@ function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts:
 		const accountAccountId = account.accountId?.toLowerCase();
 		const accountOrgId = account.orgId?.toLowerCase();
 
-		// Neither side carries an identity (e.g. MCP OAuth, where the provider id
-		// is the server): any active OAuth login for the provider restores it.
-		if (summaryAnonymous && !accountEmail && !accountAccountId && !accountOrgId) return true;
+		if (anonymousRestorable && !accountEmail && !accountAccountId && !accountOrgId) return true;
 
 		// If email or accountId match, it's the same identity
 		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
