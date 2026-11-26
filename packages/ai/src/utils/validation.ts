@@ -139,20 +139,12 @@ function tryCoerceBooleanToNumber(value: unknown, expectedTypes: string[]): { va
 	return { value: value ? 1 : 0, changed: true };
 }
 
-function tryCoerceString(
-	value: unknown,
-	expectedTypes: string[],
-	allowLossy: boolean,
-): { value: unknown; changed: boolean } {
+function tryCoerceString(value: unknown, expectedTypes: string[]): { value: unknown; changed: boolean } {
 	if (!expectedTypes.includes("string") || typeof value === "string" || value === null || value === undefined) {
 		return { value, changed: false };
 	}
 
 	if (Array.isArray(value) || typeof value === "object") {
-		// JSON.stringify is irreversible (downstream consumers receive encoded
-		// text where they expected structure), so it requires an authoritative
-		// diagnosis — never a union-branch guess.
-		if (!allowLossy) return { value, changed: false };
 		try {
 			const stringified = JSON.stringify(value);
 			if (stringified === undefined) return { value, changed: false };
@@ -169,15 +161,11 @@ function tryCoerceString(
 	return { value: String(value), changed: true };
 }
 
-/**
- * Schema-directed value repair for a single type issue. `allowLossy` gates the
- * irreversible repairs (container→string stringification); lossless repairs
- * (JSON parsing, boolean spellings, scalar stringification) always apply.
- */
+/** Schema-directed value repair for a single type issue. */
 function tryCoerceForExpectedTypes(
 	value: unknown,
 	expectedTypes: string[],
-	allowLossy: boolean,
+	allowStringCoercion: boolean,
 ): { value: unknown; changed: boolean } {
 	if (typeof value === "string") {
 		const parsed = tryParseJsonForTypes(value, expectedTypes);
@@ -191,7 +179,7 @@ function tryCoerceForExpectedTypes(
 	const numericCoercion = tryCoerceBooleanToNumber(value, expectedTypes);
 	if (numericCoercion.changed) return numericCoercion;
 
-	return tryCoerceString(value, expectedTypes, allowLossy);
+	return allowStringCoercion ? tryCoerceString(value, expectedTypes) : { value, changed: false };
 }
 
 function tryParseLeadingJsonContainer(value: string): unknown | undefined {
@@ -672,6 +660,15 @@ function branchMatchesSchema(branch: unknown, value: unknown, root: unknown = br
 	return isJsonSchemaValueValid(branch, value, root);
 }
 
+type StringCoercionError = (path: readonly string[]) => string | undefined;
+
+function childStringCoercionError(
+	check: StringCoercionError | undefined,
+	key: string,
+): StringCoercionError | undefined {
+	return check && (path => check([key, ...path]));
+}
+
 function normalizeOptionalNullsForSchema(
 	schema: unknown,
 	value: unknown,
@@ -679,6 +676,7 @@ function normalizeOptionalNullsForSchema(
 	root: unknown = schema,
 	insideContent = false,
 	speculativeUnion = false,
+	stringCoercionError?: StringCoercionError,
 ): { value: unknown; changed: boolean } {
 	if (value === null || value === undefined) return { value, changed: false };
 	if (schema === null || typeof schema !== "object") return { value, changed: false };
@@ -702,6 +700,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				stringCoercionError,
 			);
 			if (
 				branchMatchesSchema(branch, normalized.value, root) &&
@@ -722,6 +721,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion || selectedBranch !== branch,
+				stringCoercionError,
 			);
 			if (!normalized.changed) continue;
 
@@ -739,7 +739,14 @@ function normalizeOptionalNullsForSchema(
 			// Diagnose against the enclosing union to retain authoritative vs.
 			// speculative issue provenance, but normalize only this candidate's
 			// branch. Failed candidates never escape to a sibling.
-			const repaired = runCoercionPasses(branchContext, normalized.value, result, isRoot, insideContent);
+			const repaired = runCoercionPasses(
+				branchContext,
+				normalized.value,
+				result,
+				isRoot,
+				insideContent,
+				stringCoercionError,
+			);
 			if (repaired.result.success && branchMatchesSchema(branch, repaired.args, root)) {
 				return { value: repaired.args, changed: true };
 			}
@@ -766,6 +773,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				stringCoercionError,
 			);
 			if (!normalized.changed) continue;
 			nextValue = normalized.value;
@@ -790,6 +798,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				childStringCoercionError(stringCoercionError, String(i)),
 			);
 			if (!normalized.changed) continue;
 			if (!changed) {
@@ -869,6 +878,7 @@ function normalizeOptionalNullsForSchema(
 			root,
 			insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
 			speculativeUnion,
+			childStringCoercionError(stringCoercionError, key),
 		);
 		if (!normalized.changed) continue;
 
@@ -1649,6 +1659,12 @@ interface FlatIssue {
 	unionBranch: boolean;
 }
 
+function getStringCoercionError(issue: FlatIssue, check: StringCoercionError | undefined): string | undefined {
+	if (check && issue.keyword === "type" && issue.expectedTypes.includes("string")) {
+		return check(decodeJsonPointer(issue.instancePath));
+	}
+}
+
 /**
  * Repair issues raised by the validator before we surface them to the caller.
  *
@@ -1673,6 +1689,7 @@ function coerceArgsFromIssues(
 	args: unknown,
 	issues: FlatIssue[],
 	droppedRootKeys?: Map<string, unknown>,
+	stringCoercionError?: StringCoercionError,
 ): { value: unknown; changed: boolean } {
 	if (issues.length === 0) return { value: args, changed: false };
 
@@ -1702,7 +1719,8 @@ function coerceArgsFromIssues(
 		if (issue.expectedTypes.length === 0) continue;
 
 		const currentValue = getValueAtPointer(nextArgs, issue.instancePath);
-		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes, true);
+		const canStringify = !getStringCoercionError(issue, stringCoercionError);
+		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes, canStringify);
 		let coercedValue = result.changed ? result.value : undefined;
 		if (
 			coercedValue === undefined &&
@@ -2041,7 +2059,12 @@ export interface ValidateToolArgumentsOptions {
 	 * fields the model sent rather than run without them.
 	 */
 	keepUnknownRootKeys?: boolean;
+	/** Return an error to require a string argument to have been supplied as text. */
+	stringCoercionError?: StringCoercionError;
 }
+
+/** A tool refused stringification, so lenient validation must not retry the original arguments. */
+export class ToolArgumentStringCoercionError extends AIError.ValidationError {}
 
 /**
  * Validates tool call arguments against an ArkType or plain JSON Schema schema.
@@ -2093,7 +2116,16 @@ export function validateToolArguments(
 		changed = true;
 	}
 
-	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
+	const { stringCoercionError } = options;
+	const initialNormalization = normalizeOptionalNullsForSchema(
+		json,
+		normalizedArgs,
+		true,
+		json,
+		false,
+		false,
+		stringCoercionError,
+	);
 	if (initialNormalization.changed) {
 		normalizedArgs = initialNormalization.value;
 		changed = true;
@@ -2144,7 +2176,15 @@ export function validateToolArguments(
 	if (result.success) return result.value as ToolCall["arguments"];
 
 	const droppedRootKeys = options.keepUnknownRootKeys ? new Map<string, unknown>() : undefined;
-	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
+	const coercionOutcome = runCoercionPasses(
+		ctx,
+		normalizedArgs,
+		result,
+		true,
+		false,
+		stringCoercionError,
+		droppedRootKeys,
+	);
 	normalizedArgs = coercionOutcome.args;
 	changed ||= coercionOutcome.changed;
 	result = coercionOutcome.result;
@@ -2160,11 +2200,27 @@ export function validateToolArguments(
 		changed = true;
 		result = validateContext(ctx, normalizedArgs);
 		if (!result.success) {
-			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
+			const healedOutcome = runCoercionPasses(
+				ctx,
+				normalizedArgs,
+				result,
+				true,
+				false,
+				stringCoercionError,
+				droppedRootKeys,
+			);
 			normalizedArgs = healedOutcome.args;
 			result = healedOutcome.result;
 		}
 		if (result.success) return restoreDroppedRootKeys(result.value, droppedRootKeys) as ToolCall["arguments"];
+	}
+
+	if (stringCoercionError) {
+		for (const issue of result.flatIssues) {
+			const message = getStringCoercionError(issue, stringCoercionError);
+			if (message)
+				throw new ToolArgumentStringCoercionError(`Validation failed for tool "${toolCall.name}": ${message}`);
+		}
 	}
 
 	// Format validation errors nicely. The header phrase is asserted by
@@ -2200,6 +2256,7 @@ function runCoercionPasses(
 	initial: ContextValidationResult,
 	isRoot = true,
 	insideContent = false,
+	stringCoercionError?: StringCoercionError,
 	droppedRootKeys?: Map<string, unknown>,
 ): { args: unknown; result: ContextValidationResult; changed: boolean } {
 	const { json } = ctx;
@@ -2209,7 +2266,7 @@ function runCoercionPasses(
 	let changed = false;
 	for (let pass = 0; pass < MAX_COERCION_PASSES; pass += 1) {
 		if (result.success) break;
-		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues, droppedRootKeys);
+		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues, droppedRootKeys, stringCoercionError);
 		let passChanged = coercion.changed;
 		normalizedArgs = coercion.value;
 
@@ -2234,6 +2291,7 @@ function runCoercionPasses(
 			root,
 			insideContent,
 			speculativeUnion,
+			stringCoercionError,
 		);
 		if (nullNormalization.changed) {
 			normalizedArgs = nullNormalization.value;

@@ -315,6 +315,23 @@ describe("Tool argument coercion", () => {
 					arguments: { values: { op: " a ", note: null, label: null } },
 				}),
 			).toEqual({ values: { op: "a", label: "untitled" } });
+
+			const structuredLabel: ToolCall = {
+				type: "toolCall",
+				id: "strict-label",
+				name: tool.name,
+				arguments: { values: { op: "a", note: null, label: { text: "One" } } },
+			};
+			expect(() =>
+				validateToolArguments(tool, structuredLabel, {
+					stringCoercionError: ([property, field]) =>
+						property === "values" && field === "label" ? "The label must be supplied as text." : undefined,
+				}),
+			).toThrow("The label must be supplied as text.");
+			expect(validateToolArguments(tool, structuredLabel)).toEqual({
+				values: { op: "a", label: '{"text":"One"}' },
+			});
+
 			expect(() =>
 				validateToolArguments(tool, {
 					type: "toolCall",

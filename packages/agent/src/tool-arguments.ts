@@ -1,4 +1,4 @@
-import { type ToolCall, validateToolArguments } from "@oh-my-pi/pi-ai";
+import { type Tool, ToolArgumentStringCoercionError, type ToolCall, validateToolArguments } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "./types";
 
 /**
@@ -16,22 +16,25 @@ export type ToolArgumentSource = "parsed" | "payload";
  * {@link AgentTool.lenientArgValidation}: a lenient tool keeps unknown root
  * keys its closed schema would heal away, and on a schema mismatch receives its
  * raw arguments minus the internal `__parseError`/`__rawJson` sentinels.
- * Malformed JSON from a provider stream is never lenient.
+ * Malformed provider JSON and explicit string coercion refusals are never lenient.
  *
  * @throws the validation error when the tool is strict or the arguments failed to parse.
  */
 export function validateAgentToolArguments(
-	tool: AgentTool,
+	tool: Tool & Pick<AgentTool, "lenientArgValidation" | "stringCoercionError">,
 	toolCall: ToolCall,
 	source: ToolArgumentSource = "parsed",
 ): ToolCall["arguments"] {
 	try {
-		const validated = validateToolArguments(tool, toolCall, { keepUnknownRootKeys: tool.lenientArgValidation });
+		const validated = validateToolArguments(tool, toolCall, {
+			keepUnknownRootKeys: tool.lenientArgValidation,
+			stringCoercionError: tool.stringCoercionError,
+		});
 		// Kept unknown root keys must not smuggle the internal sentinels past validation.
 		return tool.lenientArgValidation ? withoutSentinels(validated) : validated;
 	} catch (error) {
 		const args: unknown = toolCall.arguments;
-		if (!tool.lenientArgValidation) throw error;
+		if (!tool.lenientArgValidation || error instanceof ToolArgumentStringCoercionError) throw error;
 		if (args === null || typeof args !== "object" || Array.isArray(args)) return args as ToolCall["arguments"];
 		if (source === "parsed" && "__parseError" in args) throw error;
 		const fallback = { ...(args as Record<string, unknown>) };

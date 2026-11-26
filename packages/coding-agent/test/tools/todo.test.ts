@@ -1,6 +1,9 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { agentLoop, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import type { Message } from "@oh-my-pi/pi-ai/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
@@ -502,6 +505,76 @@ describe("TodoTool operations", () => {
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Todo list is empty.");
 		expect(result.isError).toBeUndefined();
+	});
+});
+
+describe("TodoTool task label validation", () => {
+	it("rejects phase objects from model calls without replacing the existing list and accepts a corrected retry", async () => {
+		const initial: TodoPhase[] = [{ name: "Existing", tasks: [{ content: "Keep", status: "in_progress" }] }];
+		const session = createSession(initial);
+		const setPhases = spyOn(session, "setTodoPhases");
+		const tool = new TodoTool(session);
+		const phases = [{ phase: "Investigate", items: ["Inspect validator"] }];
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "bad-init", name: "todo", arguments: { op: "init", items: phases } }] },
+				{ content: ["I will retry with the list field."] },
+			],
+		});
+		const results = [];
+		for await (const event of agentLoop(
+			[{ role: "user", content: "Build a plan", timestamp: Date.now() }],
+			{ systemPrompt: ["Test"], messages: [], tools: [tool] },
+			{ model: mock.model, convertToLlm: messages => messages as Message[] },
+			undefined,
+			mock.stream,
+		)) {
+			if (event.type === "tool_execution_end") results.push(event);
+		}
+		expect(results).toHaveLength(1);
+		expect(results[0]?.isError).toBe(true);
+		expect(results[0]?.result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("items[0] must be a string. Use list to initialize phases."),
+		});
+		expect(setPhases).not.toHaveBeenCalled();
+		expect(session.getTodoPhases?.()).toEqual(initial);
+
+		const retry = await tool.execute("fixed-init", { op: "init", list: phases });
+		expect(retry.isError).toBeUndefined();
+		const done = await tool.execute("done", { op: "done", task: "Inspect validator" });
+		expect(done.details?.phases[0]?.tasks).toEqual([{ content: "Inspect validator", status: "completed" }]);
+	});
+
+	it.each([
+		["append", { op: "append", items: ["Valid label", false] }, "items[1]"],
+		["phased init", { op: "init", list: [{ phase: "Plan", items: [42] }] }, "list[0].items[0]"],
+		["encoded array", { op: "init", items: JSON.stringify([{ phase: "Plan", items: ["One"] }]) }, "items[0]"],
+		["flattened array", { op: "init", list: [], "items[0]": ["One"] }, "items[0]"],
+	] as const)("rejects non-string labels in %s before lenient validation can discard them", (_name, args, field) => {
+		const tool = new TodoTool(createSession());
+		expect(() =>
+			validateAgentToolArguments(
+				tool,
+				{ type: "toolCall", id: "malformed", name: "todo", arguments: args },
+				"payload",
+			),
+		).toThrow(`${field} must be a string`);
+	});
+
+	it("preserves literal JSON labels when restoring an encoded array of strings and trimming the op", async () => {
+		const tool = new TodoTool(createSession());
+		const label = JSON.stringify({ phase: "Plan", items: ["One"] });
+		const args = validateAgentToolArguments(tool, {
+			type: "toolCall",
+			id: "encoded",
+			name: "todo",
+			arguments: { op: "init\n", items: JSON.stringify([label]) },
+		});
+		const result = await tool.execute("encoded", args as typeof tool.parameters.infer);
+		expect(result.details?.phases[0]?.tasks[0]?.content).toBe(label);
+		const done = await tool.execute("done", { op: "done", task: label });
+		expect(done.details?.phases[0]?.tasks[0]?.status).toBe("completed");
 	});
 });
 

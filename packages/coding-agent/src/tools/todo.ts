@@ -485,6 +485,15 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
 	return undefined;
 }
 
+function todoItemStringError(path: readonly string[]): string | undefined {
+	if (path[0] === "items" && path.length === 2) {
+		return `items[${path[1]}] must be a string. Use list to initialize phases.`;
+	}
+	if (path[0] === "list" && path[2] === "items" && path.length === 4) {
+		return `list[${path[1]}].items[${path[3]}] must be a string.`;
+	}
+}
+
 /**
  * Validate execute-time arguments, repairing an omitted `op`. The tool sets
  * `lenientArgValidation`, so the agent loop hands `execute()` the raw
@@ -502,6 +511,10 @@ function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntr
 			const repaired = todoSchema({ ...raw, op: inferred });
 			if (!(repaired instanceof type.errors)) return repaired;
 		}
+	}
+	for (const issue of direct) {
+		const message = todoItemStringError(issue.path.map(String));
+		if (message) return `Invalid todo arguments: ${message}`;
 	}
 	return `Invalid todo arguments: ${direct.summary}`;
 }
@@ -691,9 +704,10 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	readonly parameters = todoSchema;
 	readonly concurrency = "exclusive";
 	readonly strict = true;
-	// Raw args reach execute() on schema failure; resolveTodoParams re-validates
+	// Raw args reach execute() on recoverable schema failures; resolveTodoParams re-validates
 	// and repairs the one recoverable shape (missing `op`, unambiguous payload).
 	readonly lenientArgValidation = true;
+	readonly stringCoercionError = todoItemStringError;
 
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
