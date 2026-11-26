@@ -18,7 +18,7 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { ResetCreditAccountStatus, UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ATTEMPT_COOLDOWN_MS,
@@ -26,6 +26,7 @@ import {
 	type CodexResetPlanInput,
 	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
+	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	resetWindowMode,
 	SALVAGE_MIN_USED_FRACTION,
@@ -938,6 +939,65 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			{ reason: "blocked-account", accountKey: ACCOUNT_KEY },
 			{ reason: "expiring-credit", accountKey: "openai-codex|-|2" },
 		]);
+	});
+});
+
+describe("overlayLiveResetCredits", () => {
+	const TEAM = "acct-team";
+	const status = (credentialId: number, email: string, active: boolean): ResetCreditAccountStatus => ({
+		provider: "openai-codex",
+		credentialId,
+		accountId: TEAM,
+		email,
+		active,
+		availableCount: 1,
+		credits: [{ id: `credit-${credentialId}`, status: "available" }],
+	});
+	const teamStatuses = [status(1, "a@team.com", false), status(2, "b@team.com", true)];
+
+	it("pins each Team member's report to its own credential, so a weekly block spends only that member's reset (#20619)", () => {
+		// Same workspace accountId, different members: A is 5h-only blocked, B is weekly blocked.
+		const reports = [
+			report({ accountId: TEAM, email: "a@team.com", primaryUsed: 1, weeklyUsed: 0.3 }),
+			report({ accountId: TEAM, email: "B@team.com", weeklyUsed: 1 }),
+		];
+		const merged = overlayLiveResetCredits(reports, teamStatuses, { synthesizeActive: true, nowMs: NOW })!;
+		expect(merged.map(r => r.metadata?.resetCreditCredentialId)).toEqual([1, 2]);
+		const plan = planCodexResetRedemptions(
+			input(merged, {
+				identity: { accountId: TEAM, email: "b@team.com" },
+				settings: {
+					modes: { "5h": "no", weekly: "yes" },
+					minBlockedMinutes: 60,
+					keepCredits: 0,
+					salvageHorizonMs: 12 * HOUR,
+				},
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", window: "weekly", target: { credentialId: 2 } },
+		]);
+	});
+
+	it("keeps one login's workspaces apart when they share the email", () => {
+		const statuses = [
+			{ ...status(1, EMAIL, false), accountId: "acct-a" },
+			{ ...status(2, EMAIL, true), accountId: "acct-b" },
+		];
+		const merged = overlayLiveResetCredits(
+			[report({ accountId: "acct-b" }), report({ accountId: "acct-a" })],
+			statuses,
+		)!;
+		expect(merged.map(r => r.metadata?.resetCreditCredentialId)).toEqual([2, 1]);
+	});
+
+	it("strips credits from a report several credentials could own", () => {
+		const merged = overlayLiveResetCredits(
+			[report({ accountId: TEAM, email: undefined, credentialId: 9 })],
+			teamStatuses,
+		)!;
+		expect(merged[0]?.resetCredits).toBeUndefined();
+		expect(planCodexResetRedemptions(input(merged)).actions).toEqual([]);
 	});
 });
 

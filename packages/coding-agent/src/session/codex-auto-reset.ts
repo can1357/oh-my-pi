@@ -670,6 +670,34 @@ export function salvageAttemptKey(accountKey: string, creditExpiresAtMs: number)
 	return `salvage|${accountKey}|${Math.round(creditExpiresAtMs / DEBOUNCE_BUCKET_MS)}`;
 }
 
+function normalizedIdentity(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
+}
+
+/**
+ * Whether a live reset-credit row belongs to the account a usage report was
+ * fetched for. The org is a gate; then every identifier both sides carry must
+ * agree. ChatGPT Team members share the workspace `accountId` and differ only
+ * by email; one login across workspaces shares the email and differs by
+ * `accountId` — neither alone identifies the member.
+ */
+function statusMatchesReport(status: ResetCreditAccountStatus, report: UsageReport): boolean {
+	if (status.provider !== "openai-codex") return false;
+	if (normalizedIdentity(status.orgId) !== normalizedIdentity(report.metadata?.orgId)) return false;
+	let matched = false;
+	for (const [mine, theirs] of [
+		[status.accountId, report.metadata?.accountId],
+		[status.email, report.metadata?.email],
+	]) {
+		const left = normalizedIdentity(mine);
+		const right = normalizedIdentity(theirs);
+		if (!left || !right) continue;
+		if (left !== right) return false;
+		matched = true;
+	}
+	return matched;
+}
+
 /**
  * Overlay LIVE per-account credit state (from the dedicated
  * `rate-limit-reset-credits` route) onto usage reports before a blocked pass.
@@ -689,17 +717,10 @@ export function overlayLiveResetCredits(
 ): UsageReport[] | null {
 	const merged = (reports ?? []).map(report => {
 		if (report.provider !== "openai-codex") return report;
-		const status = statuses.find(s => {
-			if (s.provider !== "openai-codex") return false;
-			const statusOrg = s.orgId?.trim().toLowerCase();
-			const reportOrg =
-				typeof report.metadata?.orgId === "string" ? report.metadata.orgId.trim().toLowerCase() : undefined;
-			if (statusOrg !== reportOrg) return false;
-			if (s.accountId && typeof report.metadata?.accountId === "string") {
-				return s.accountId === report.metadata.accountId;
-			}
-			return !!s.email && s.email === report.metadata?.email;
-		});
+		// Several matching rows means the report can't be pinned to one
+		// credential; attributing it to any of them would spend the wrong reset.
+		const matches = statuses.filter(status => statusMatchesReport(status, report));
+		const status = matches.length === 1 ? matches[0] : undefined;
 		if (!status || status.error) return { ...report, resetCredits: undefined };
 		return {
 			...report,
