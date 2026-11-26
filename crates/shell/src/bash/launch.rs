@@ -154,36 +154,25 @@ fn skip_options<W: AsRef<[u8]>>(
 fn launcher<W: AsRef<[u8]>>(words: &[W], windows: bool) -> Option<(usize, bool, usize, bool)> {
 	let skip = match command_name(words.first()?.as_ref(), windows)? {
 		"env" => {
-			// `-S`/`--split-string` is the command line `env` runs. The walk
-			// is `env`'s own, so a value before `-S` (`--chdir /tmp`) is not
-			// taken as that command line.
-			if let Some((at, offset)) = omp_builtins::env_split_string(words) {
-				let packed = words.get(at).is_some_and(|word| {
-					let bytes = word.as_ref();
-					bytes
-						.get(offset..)
-						.unwrap_or(bytes)
-						.iter()
-						.any(u8::is_ascii_whitespace)
-				});
-				return Some((at, false, offset, packed));
-			}
-
-			let mut at = skip_options(
-				words,
-				1,
-				b"uCSaP",
-				&["--unset", "--chdir", "--split-string", "--argv0", "--env0-from"],
-				b"",
-				&[],
-			)?;
-			if words.get(at).is_some_and(|w| w.as_ref() == b"-") {
-				at += 1;
-			}
-			at + words[at..]
-				.iter()
-				.take_while(|w| w.as_ref().contains(&b'='))
-				.count()
+			// `env`'s own option walk finds what it runs: the `-S`/
+			// `--split-string` command line, or the command past the options,
+			// `-` and `NAME=VALUE` operands. An option's separate value
+			// (`--chdir /tmp`, an unambiguous `--un FOO`) is not the command.
+			return match omp_builtins::env_command(words) {
+				omp_builtins::EnvCommand::Split(at, offset) => {
+					let packed = words.get(at).is_some_and(|word| {
+						let bytes = word.as_ref();
+						bytes
+							.get(offset..)
+							.unwrap_or(bytes)
+							.iter()
+							.any(u8::is_ascii_whitespace)
+					});
+					Some((at, false, offset, packed))
+				},
+				omp_builtins::EnvCommand::Command(at) => Some((at, false, 0, false)),
+				omp_builtins::EnvCommand::None => None,
+			};
 		},
 		"sudo" | "doas" => {
 			let at = skip_options(

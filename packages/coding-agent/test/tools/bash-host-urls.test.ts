@@ -212,6 +212,8 @@ describe("hostCommandUrls", () => {
 			"env --chdir /host/dir -S omp read skill://tdd",
 		);
 		expect(await hostAny("env --chdir /tmp -S grep omp skill://tdd")).toBe("env --chdir /tmp -S grep omp /host/tdd");
+		expect(await hostAny("env --un FOO omp read skill://tdd")).toBe("env --un FOO omp read skill://tdd");
+		expect(await hostAny("env --un FOO grep omp skill://tdd")).toBe("env --un FOO grep omp /host/tdd");
 		expect(await hostAny("uv run --no-project --color never omp read skill://tdd")).toBe(
 			"uv run --no-project --color never omp read skill://tdd",
 		);

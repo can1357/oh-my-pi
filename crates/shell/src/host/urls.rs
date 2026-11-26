@@ -439,6 +439,9 @@ mod tests {
 			(&["sudo", "-u", "root", "FOO=bar", "nice", "omp", "read", "local://out.txt"][..], 5),
 			(&["/usr/bin/env", "-C", "local://dir", "omp", "--version"][..], 3),
 			(&["/usr/bin/env", "-", "FOO=local://a", "omp", "read", "local://out.txt"][..], 3),
+			// An unambiguous long option's value is not the command either.
+			(&["env", "--un", "FOO", "omp", "read", "local://out.txt"][..], 3),
+			(&["/usr/bin/env", "--unset", "FOO", "-i", "omp", "read", "local://out.txt"][..], 4),
 			(&["npx", "--loglevel", "warn", "omp", "read", "local://out.txt"][..], 3),
 			(&["bunx", "--minimum-release-age", "86400", "omp", "read", "local://out.txt"][..], 3),
 			(&["timeout", "-k", "5", "30", "omp", "read", "local://out.txt"][..], 4),

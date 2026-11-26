@@ -654,12 +654,13 @@ async fn non_omp_commands_naming_omp_receive_host_paths_for_url_arguments() {
 	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
 }
 
-/// A command line `env -S`/`--split-string` splits is the command that runs:
-/// `omp` behind it receives its URLs as written, another command behind it
-/// receives host paths.
+/// The command `env` runs is what the URL walk sees: `omp` behind a split
+/// `-S`/`--split-string` command line, or behind an option's value spelled as
+/// an unambiguous prefix (`--un` of `--unset`), receives its URLs as written;
+/// other commands receive host paths.
 #[cfg(unix)]
 #[tokio::test]
-async fn env_split_string_runs_the_command_it_splits() {
+async fn env_runs_the_command_past_its_option_values() {
 	use std::os::unix::fs::PermissionsExt;
 
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
@@ -677,6 +678,7 @@ async fn env_split_string_runs_the_command_it_splits() {
 	let script = format!(
 		"PATH='{bin}':$PATH; env -S omp read virtual://docs/a.txt; env --split-string omp read \
 		 virtual://docs/a.txt; env -Somp read virtual://docs/a.txt; env -S probe \
+		 virtual://docs/a.txt; env --un FOO omp read virtual://docs/a.txt; env --un FOO probe \
 		 virtual://docs/a.txt",
 		bin = bin.path().display(),
 	);
@@ -686,6 +688,8 @@ async fn env_split_string_runs_the_command_it_splits() {
 	let expected = [
 		"omp:read virtual://docs/a.txt".to_owned(),
 		"omp:read virtual://docs/a.txt".to_owned(),
+		"omp:read virtual://docs/a.txt".to_owned(),
+		format!("probe:{file}"),
 		"omp:read virtual://docs/a.txt".to_owned(),
 		format!("probe:{file}"),
 	];
