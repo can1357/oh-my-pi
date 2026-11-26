@@ -6,8 +6,9 @@
  * - An extension presenter's compact line (`term.compact`): the status glyph
  *   and the label, then the presenter's rows; a bare one says what runs.
  * - A viewport allocation (the transcript paints the block at a fixed
- *   height): 2 rows open a frame edge with the title, 1 row is the status
- *   line, 0 rows nothing.
+ *   height): 3 or more rows keep the look's head row above its newest rows,
+ *   2 rows open a frame edge with the title, 1 row is the status line, 0
+ *   rows nothing.
  * - Otherwise the tool's look, set off by a blank row above and below when
  *   the look is framed.
  * - Under the look, the result's images where the terminal draws images
@@ -96,9 +97,10 @@ function oneLine(text: string): string {
 /** The block at a fixed number of rows (the transcript's viewport allocation). */
 function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
 	if (rows <= 0) return EMPTY_BLOCK;
-	// The look's own rows when they fit (margins dropped), else the compact rows.
+	// The look's own rows when they fit (margins dropped), else its head over its newest rows, else the compact rows.
 	const own = paintLook(node, withContext(cx, { height: undefined }));
 	if (own.rows.length > 0 && own.rows.length <= rows) return own;
+	if (rows >= 3 && own.rows.length > 0) return headAndTail(own, rows);
 	const props = toolProps(node);
 	const theme = cx.theme;
 	const text = compactText(props, cx);
@@ -108,6 +110,26 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
 		};
 	return {
 		rows: [truncate(`${theme.fg("dim", "╭─")} ${text}`, cx.width), theme.fg("dim", "╰")],
+	};
+}
+
+/**
+ * `block` cut to `rows` rows: its first row (a framed look's titled edge) over
+ * its last `rows - 1` (the newest content and the closing edge). Hits and the
+ * cursor in the dropped rows go with them.
+ */
+function headAndTail(block: Block, rows: number): Block {
+	const cut = block.rows.length - (rows - 1);
+	const at = (row: number): number | undefined => (row === 0 ? 0 : row >= cut ? row - cut + 1 : undefined);
+	const hits = block.hits?.flatMap(hit => {
+		const row = at(hit.row);
+		return row === undefined || (row === 0 && hit.height > 1) ? [] : [{ ...hit, row }];
+	});
+	const cursorRow = block.cursor ? at(block.cursor.row) : undefined;
+	return {
+		rows: [block.rows[0]!, ...block.rows.slice(cut)],
+		...(hits && hits.length > 0 ? { hits } : {}),
+		...(block.cursor && cursorRow !== undefined ? { cursor: { row: cursorRow, col: block.cursor.col } } : {}),
 	};
 }
 
