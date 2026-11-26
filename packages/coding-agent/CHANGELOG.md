@@ -12,6 +12,8 @@
 - Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Extensions can serve their own internal URL schemes with `pi.registerUrlScheme(handler)` in the sessions that load them, through `read`, `write`, composer completion and the system prompt ([#20538](https://github.com/can1357/oh-my-pi/pull/20538) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `pi.replies.expect(peerId)` for extensions that bridge to agents in other processes: `wait` blocks for that peer's reply instead of returning "Nothing to wait for" until the extension releases it; the expectation pauses while a live `disabledExtensions` edit suspends the extension and goes with it at teardown ([#18058](https://github.com/can1357/oh-my-pi/pull/18058) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `pi.onSuspensionChange(listener)` so an extension can pause work it drives itself (a socket, a timer) while a live `disabledExtensions` edit suspends it, and resume it after ([#18058](https://github.com/can1357/oh-my-pi/pull/18058) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Changed
 
