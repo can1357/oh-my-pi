@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed tool definitions sent to providers carrying each tool's host state (such as its session), which made auth-gateway requests megabytes large
 - Fixed OpenTelemetry chat spans reporting the requested model as `gen_ai.response.model` when the provider recorded the model that actually served the turn ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 
 ### Added
