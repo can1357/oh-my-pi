@@ -369,22 +369,85 @@ describe("wait and todo displacement", () => {
 		}
 	});
 
-	it("keeps a live todo card on screen while the tasks it completed strike through", async () => {
+	it("plays a live todo card's strike on screen and keeps it out of scrollback until it is over", async () => {
 		vi.useFakeTimers();
 		const { term } = attachTerminal(fixture);
 		try {
 			const todo = await run(fixture, "todo-1", "todo", { op: "done" }, todoResult(["plan", "read"], ["plan"]));
+			term.render();
+			// The completed task starts unstruck and the strike sweeps across it while the card is live.
+			expect(term.screen().find(line => line.includes("plan"))).not.toContain("~");
+			term.tick(2_000);
+			expect(term.screen().find(line => line.includes("plan"))).toContain("~plan~");
+			expect(isSettled(todo.block.node)).toBe(false);
+
 			await runOutputs(fixture, 8);
 			term.render();
-			// The strike sweeps in on the spinner clock: in scrollback the card could not play it.
+			// In scrollback the card could not have played it.
 			expect(term.backend.retired(todo.block.node)).toBe(false);
-
-			term.tick(2_000);
 			vi.advanceTimersByTime(2_000);
 			term.render();
 			expect(term.history().join("\n")).toContain("~plan~");
 		} finally {
 			vi.useRealTimers();
+			fixture.ctx.shell.transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("lets replies after a todo card hidden with tool activity reach scrollback at once", async () => {
+		vi.useFakeTimers();
+		fixture.ctx.hideToolActivity = true;
+		const { term } = attachTerminal(fixture);
+		try {
+			await run(fixture, "todo-1", "todo", { op: "done" }, todoResult(["plan", "read"], ["plan"]));
+			// The hidden card draws no strike: holding it live would keep every reply off scrollback.
+			for (let i = 0; i < 12; i++) {
+				const message = { ...assistantCalls([]), content: [{ type: "text", text: `reply-${i}` }] } as AgentMessage;
+				await fixture.controller.handleEvent({ type: "message_start", message });
+				await fixture.controller.handleEvent({ type: "message_end", message });
+			}
+			term.render();
+			expect(term.history().join("\n")).toContain("reply-0");
+		} finally {
+			vi.useRealTimers();
+			fixture.ctx.shell.transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("keeps a todo snapshot a later update left in scrollback across a transcript rebuild", async () => {
+		const { term } = attachTerminal(fixture);
+		const helpers = new UiHelpers(fixture.ctx);
+		fixture.ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+		fixture.ctx.eventController = fixture.controller;
+		try {
+			// Displaced while still on screen: gone live, and gone after the rebuild.
+			await run(fixture, "todo-0", "todo", { op: "view" }, todoResult(["draft"]));
+			await run(fixture, "todo-1", "todo", { op: "view" }, todoResult(["plan", "read"]));
+			await runOutputs(fixture, 8);
+			term.render();
+			// In scrollback when the next update lands: it stays there.
+			await run(fixture, "todo-2", "todo", { op: "view" }, todoResult(["fix", "test"]));
+
+			// An in-place rebuild (`/shake`, a display setting) replays the session's messages.
+			fixture.ctx.shell.transcript.retain(new Set());
+			helpers.renderSessionContext({
+				messages: [
+					assistantCalls([{ id: "todo-0", name: "todo", arguments: { op: "view" } }]),
+					toolResult("todo-0", "todo", todoResult(["draft"])),
+					assistantCalls([{ id: "todo-1", name: "todo", arguments: { op: "view" } }]),
+					toolResult("todo-1", "todo", todoResult(["plan", "read"])),
+					assistantCalls([{ id: "todo-2", name: "todo", arguments: { op: "view" } }]),
+					toolResult("todo-2", "todo", todoResult(["fix", "test"])),
+				],
+			} as SessionContext);
+
+			const rows = renderTranscript(fixture.ctx).join("\n");
+			expect(rows).not.toContain("draft");
+			expect(rows).toContain("plan");
+			expect(rows).toContain("fix");
+		} finally {
 			fixture.ctx.shell.transcript.attach(undefined);
 			term.dispose();
 		}

@@ -512,7 +512,10 @@ export class UiHelpers {
 			if (nextToolName === "todo") {
 				todoSnapshot = null;
 				previous.seal();
-				transcript.remove(previous.block);
+				// One a live update found in scrollback stayed there as history: the rebuild keeps it too.
+				const kept =
+					previous.call !== undefined && ctx.eventController?.keptTodoSnapshot(previous.call.id) === true;
+				if (!kept) transcript.remove(previous.block);
 				return;
 			}
 			if (nextToolName !== undefined) return;

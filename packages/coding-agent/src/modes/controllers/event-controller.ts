@@ -355,6 +355,9 @@ export class EventController {
 	// update removes it while none of its rows reached scrollback, else seals it in place; the
 	// turn boundary seals the final snapshot.
 	#displaceableTodoComponent: PendingTool | undefined = undefined;
+	// Call ids of `todo` snapshots a later update found in terminal scrollback and kept there: a
+	// transcript rebuild keeps them too instead of collapsing to the newest snapshot.
+	readonly #todoSnapshotsInHistory = new Set<string>();
 	// Most recent TTSR notification block. A new ttsr_triggered event merges its
 	// rules into this block while it is still the (live-region) transcript tail.
 	#lastTtsrNotification:
@@ -1651,6 +1654,12 @@ export class EventController {
 	inheritDisplaceableTodo(tool: PendingTool | null | undefined): void {
 		this.#displaceableTodoComponent = tool && displaceableBy(tool) === "todo" ? tool : undefined;
 	}
+
+	/** Whether a later update kept the `todo` snapshot of `toolCallId` as history (its rows were in scrollback). */
+	keptTodoSnapshot(toolCallId: string): boolean {
+		return this.#todoSnapshotsInHistory.has(toolCallId);
+	}
+
 	/**
 	 * Adopt the rebuild's replayed user-prompt timestamp so a still-running turn
 	 * keeps its prompt→yield delta. Focus attach and mid-turn rebuilds reset the
@@ -2276,6 +2285,7 @@ export class EventController {
 			previous.seal();
 			const transcript = this.ctx.shell.transcript;
 			if (!transcript.retired(previous.block)) transcript.remove(previous.block);
+			else if (previous.call) this.#todoSnapshotsInHistory.add(previous.call.id);
 		}
 		this.#displaceableTodoComponent = tool;
 	}

@@ -461,13 +461,15 @@ export class TranscriptPresenter {
 		if (editMode) call.setRenderContext({ editMode });
 		const presentedId = signal(spec.id);
 		// A live `todo` result strikes the tasks it completed through on the spinner clock, which the
-		// look plays only while the block is live: the card holds its settle for the strike. A
-		// replayed one does not hold (a rebuild would pin the transcript behind it).
+		// look plays only while the block is live: the card holds its settle for the strike while it
+		// draws its look (not with tool activity hidden or a compact presentation). A replayed one
+		// does not hold (a rebuild would pin the transcript behind it).
 		const striking = spec.name === "todo" ? signal(false) : undefined;
 		let strikeEnd: Timer | undefined;
 		const factory = () => {
 			if (striking) {
-				holdSettle(striking);
+				const facts = call.facts;
+				holdSettle(() => striking() && facts.activityVisible() && facts.presentation() === "full");
 				onCleanup(() => clearTimeout(strikeEnd));
 			}
 			effect(() => {
