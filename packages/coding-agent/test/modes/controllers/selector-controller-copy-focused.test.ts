@@ -62,7 +62,7 @@ describe("SelectorController.showCopySelector", () => {
 		resetSettingsForTest();
 	});
 
-	it("copies a turn picked from the focused subagent's transcript", () => {
+	it("copies a turn picked from the focused subagent's transcript", async () => {
 		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
 		let picker: copySelectorModule.CopySelectorProps | undefined;
 		spyOn(copySelectorModule, "CopySelector").mockImplementation(props => {
@@ -74,6 +74,7 @@ describe("SelectorController.showCopySelector", () => {
 		const ctx = {
 			shell: {
 				focus: vi.fn(),
+				nextFrame: async () => {},
 				overlays: {
 					show: vi.fn((factory: () => unknown) => {
 						createRoot(factory);
@@ -81,13 +82,14 @@ describe("SelectorController.showCopySelector", () => {
 					}),
 				},
 			},
+			composer: { setNotice: vi.fn() },
 			session: main,
 			sessionManager: main.sessionManager,
 			viewSession: sessionWithReply("worker reply"),
 			showStatus: vi.fn(),
 		} as unknown as InteractiveModeContext;
 
-		new SelectorController(ctx).showCopySelector();
+		await new SelectorController(ctx).showCopySelector();
 		if (!picker) throw new Error("Expected the copy picker");
 		const listed = JSON.stringify(picker.entries);
 		expect(listed).toContain("worker reply");

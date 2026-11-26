@@ -1008,9 +1008,9 @@ export interface InteractiveModeContext {
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
-	showUserMessageSelector(startAt?: string): void;
-	showCopySelector(): void;
-	showTreeSelector(): void;
+	showUserMessageSelector(startAt?: string): Promise<void>;
+	showCopySelector(): Promise<void>;
+	showTreeSelector(): Promise<void>;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;
 	showSessionSelector(source?: ForeignSessionSource): void;

@@ -323,6 +323,25 @@ export class SelectorController {
 		const handle = this.ctx.showEditorAreaDialog(() => build(done), { focus });
 	}
 
+	/**
+	 * Say the history is loading before a picker that draws it: the terminal paints such a picker in
+	 * one frame that takes a while on a long session, and until then the keypress showed nothing.
+	 * The notice takes the composer hint's place, so nothing on screen moves. Tern draws the history
+	 * itself: it presents no terminal frame, and the notice comes and goes unseen.
+	 */
+	async #presentHistoryLoader(): Promise<void> {
+		const composer = this.ctx.composer;
+		const symbols = currentTheme().symbols;
+		composer.setNotice([
+			{ t: symbols.symbol("status.pending"), s: "accent" },
+			{ t: " " },
+			{ t: "Loading the session history…", s: "dim em" },
+		]);
+		await this.ctx.shell.nextFrame();
+		// The caller opens its picker before the next frame: the notice stays on screen while that frame paints.
+		composer.setNotice(undefined);
+	}
+
 	showSettingsSelector(): void {
 		if (this.#focusOpenMenu("settings")) return;
 		const menu = this.#claimMenu("settings");
@@ -1358,7 +1377,7 @@ export class SelectorController {
 	}
 
 	/** The rewind selector (Esc Esc), its outline on the latest turn, or on entry `startAt` (a turn's Rewind to here…). */
-	showUserMessageSelector(startAt?: string): void {
+	async showUserMessageSelector(startAt?: string): Promise<void> {
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
 		if (entries.length === 0) {
 			this.ctx.showStatus("No messages to branch from");
@@ -1369,6 +1388,8 @@ export class SelectorController {
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
+
+		await this.#presentHistoryLoader();
 		const done = () => {
 			overlay?.close();
 			this.focusActiveEditorArea();
@@ -1595,7 +1616,7 @@ export class SelectorController {
 			return;
 		}
 		if (turn === "rewind") {
-			this.showUserMessageSelector(entry.id);
+			await this.showUserMessageSelector(entry.id);
 			return;
 		}
 		if (turn === "fork") {
@@ -1633,7 +1654,7 @@ export class SelectorController {
 		);
 	}
 
-	showCopySelector(): void {
+	async showCopySelector(): Promise<void> {
 		// The session on screen: a focused subagent's transcript, else the main one.
 		const session = this.ctx.viewSession;
 		const entries = session.sessionManager.getBranch().filter(isTranscriptEntry);
@@ -1642,6 +1663,7 @@ export class SelectorController {
 			return;
 		}
 
+		await this.#presentHistoryLoader();
 		const done = () => {
 			overlay?.close();
 			this.focusActiveEditorArea();
@@ -1674,7 +1696,7 @@ export class SelectorController {
 		);
 	}
 
-	showTreeSelector(): void {
+	async showTreeSelector(): Promise<void> {
 		const tree = this.ctx.sessionManager.getTree();
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
@@ -1683,6 +1705,7 @@ export class SelectorController {
 			return;
 		}
 
+		await this.#presentHistoryLoader();
 		this.#showInEditorArea(done =>
 			TreeSelector({
 				roots: tree,
@@ -1732,7 +1755,7 @@ export class SelectorController {
 
 						if (summaryChoice === undefined) {
 							// User pressed escape - re-show tree selector
-							this.showTreeSelector();
+							void this.showTreeSelector();
 							return;
 						}
 
@@ -1792,7 +1815,7 @@ export class SelectorController {
 						if (result.aborted) {
 							// Summarization aborted - re-show tree selector
 							this.ctx.showStatus("Branch summarization cancelled");
-							this.showTreeSelector();
+							void this.showTreeSelector();
 							return;
 						}
 						if (result.cancelled) {

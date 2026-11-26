@@ -75,12 +75,12 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 			appendLabelChange: vi.fn(),
 			getSessionName: () => undefined,
 		},
-		shell: { size: () => ({ columns: 120, rows: 40 }) },
+		shell: { size: () => ({ columns: 120, rows: 40 }), nextFrame: async () => {} },
 		showEditorAreaDialog: vi.fn((factory: () => JSXNode) => {
 			view = createRoot(() => factory() as UiNode);
 			return { node: view, closed: false, close: vi.fn() };
 		}),
-		composer: { text: () => "", setText: vi.fn(), addKeyHandler: vi.fn(() => () => {}) },
+		composer: { text: () => "", setText: vi.fn(), setNotice: vi.fn(), addKeyHandler: vi.fn(() => () => {}) },
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		showHookSelector,
@@ -123,7 +123,7 @@ describe("SelectorController tree branch summaries", () => {
 	it("switches without a summary or prompt on plain enter by default", async () => {
 		const harness = createHarness();
 
-		harness.controller.showTreeSelector();
+		await harness.controller.showTreeSelector();
 		harness.press(ENTER);
 		await harness.navigation;
 
@@ -138,7 +138,7 @@ describe("SelectorController tree branch summaries", () => {
 	it("summarizes and switches on shift+enter without showing the prompt", async () => {
 		const harness = createHarness();
 
-		harness.controller.showTreeSelector();
+		await harness.controller.showTreeSelector();
 		harness.press(SHIFT_ENTER);
 		await harness.navigation;
 
@@ -154,7 +154,7 @@ describe("SelectorController tree branch summaries", () => {
 		cfgBranchSummaryEnabled.set(Settings.instance, true);
 		const harness = createHarness();
 
-		harness.controller.showTreeSelector();
+		await harness.controller.showTreeSelector();
 		harness.press(SHIFT_ENTER);
 		await harness.navigation;
 
@@ -170,7 +170,7 @@ describe("SelectorController tree branch summaries", () => {
 		cfgBranchSummaryEnabled.set(Settings.instance, true);
 		const harness = createHarness("Summarize");
 
-		harness.controller.showTreeSelector();
+		await harness.controller.showTreeSelector();
 		harness.press(ENTER);
 		await harness.navigation;
 
