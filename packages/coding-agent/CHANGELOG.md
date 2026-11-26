@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- The exit and fatal-error banners no longer suggest an `omp --resume <id>` that cannot find a session opened by path from outside the sessions folder (such as a pi transcript); they print the shell-quoted file path instead ([#9544](https://github.com/can1357/oh-my-pi/issues/9544), [#19969](https://github.com/can1357/oh-my-pi/pull/19969) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Pasting text that ends in an `@name` no longer opens the file completion list, so the next Enter sends the message instead of replacing the name with a file ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - Rebuilding a long transcript in place (compaction, `/shake`, a display setting change) no longer stalls Tern: the block list is recomputed once for the rebuild instead of once per replayed block ([#20675](https://github.com/can1357/oh-my-pi/pull/20675) by [@H4vC](https://github.com/H4vC))
 - `lsp` tool calls with `new_name: null` or `line: null` no longer crash the TUI while rendering ([#20663](https://github.com/can1357/oh-my-pi/issues/20663)).
