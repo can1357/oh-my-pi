@@ -1346,6 +1346,18 @@ export interface OpenAICompatPricingCardOptions {
 	 * an omitted `completion` leg defaults to `0`. Defaults to `true`.
 	 */
 	requireCompletion?: boolean;
+	/**
+	 * Scale to assume when a card omits `unit`.
+	 *
+	 * - `"per_token"`: provider always emits USD per token (e.g. SambaNova).
+	 * - `"per_million_tokens"`: provider always emits USD per 1M tokens.
+	 * - `undefined` (default for generic `openai-models-list`): accepts explicit
+	 *   `unit` (`"per_token"` or `"per_million_tokens"`), OpenRouter-style
+	 *   decimal-string cards (every present token leg is a string, USD/token),
+	 *   or scale-invariant all-zero free cards. Unitless nonzero numeric cards
+	 *   (such as Chutes' USD/1M `prompt: 0.44`) stay `unknown`.
+	 */
+	defaultUnit?: "per_token" | "per_million_tokens";
 }
 
 function parseScaledPricingLeg(value: unknown, scale: number, absent: number | undefined): number | undefined {
@@ -1361,9 +1373,11 @@ function parseScaledPricingLeg(value: unknown, scale: number, absent: number | u
  * tokens (`cost`) and optional `pricingStatus` (`"free"` for an explicit
  * all-zero card).
  *
- * Supports OpenRouter/SambaNova per-token USD cards (default, no `unit`) and
- * NanoGPT-style `unit: "per_million_tokens"` cards (with optional per-1k cache
- * keys). Returns `undefined` when the card is absent, malformed, carries an
+ * Supports explicit `unit` (`"per_million_tokens"` with optional per-1k cache
+ * keys, or `"per_token"`), OpenRouter-style decimal-string per-token USD cards
+ * (when `unit` is omitted), provider-declared `defaultUnit`, and scale-invariant
+ * all-zero cards. Returns `undefined` when the card is absent, malformed,
+ * ambiguous (unitless nonzero numeric legs with no `defaultUnit`), carries an
  * unsupported unit/currency, uses negative dynamic sentinels (`"-1"`), or has
  * nonzero non-token charges (`request`, `image`, etc.) that `TokenCost` cannot
  * represent.
@@ -1382,11 +1396,36 @@ export function parseOpenAICompatPricingCard(
 
 	let baseScale: number;
 	let perMillionCard = false;
+	let scaleInvariantOnly = false;
 	if (pricing.unit === undefined || pricing.unit === null || pricing.unit === "") {
-		baseScale = 1_000_000;
+		if (options?.defaultUnit === "per_token") {
+			baseScale = 1_000_000;
+		} else if (options?.defaultUnit === "per_million_tokens") {
+			baseScale = 1;
+			perMillionCard = true;
+		} else {
+			const presentTokenLegs = [
+				pricing.prompt,
+				pricing.completion,
+				pricing.input_cache_read ?? pricing.input_cache_reads,
+				pricing.input_cache_write ?? pricing.input_cache_writes,
+			].filter(value => value !== undefined && value !== null);
+			if (presentTokenLegs.length > 0 && presentTokenLegs.every(value => typeof value === "string")) {
+				// OpenRouter `PublicPricing` schema encodes per-token USD rates as decimal strings.
+				baseScale = 1_000_000;
+			} else {
+				// Unitless numeric cards are ambiguous across dialects (e.g. Chutes sends
+				// USD per 1M tokens as JSON numbers with no `unit`), so only an all-zero
+				// free card can be interpreted safely without an explicit unit.
+				baseScale = 1;
+				scaleInvariantOnly = true;
+			}
+		}
 	} else if (pricing.unit === "per_million_tokens") {
 		baseScale = 1;
 		perMillionCard = true;
+	} else if (pricing.unit === "per_token") {
+		baseScale = 1_000_000;
 	} else {
 		return undefined;
 	}
@@ -1416,8 +1455,12 @@ export function parseOpenAICompatPricingCard(
 		return undefined;
 	}
 
+	const total = input + output + cacheRead + cacheWrite;
+	if (scaleInvariantOnly && total !== 0) {
+		return undefined;
+	}
 	const cost = { input, output, cacheRead, cacheWrite };
-	return input + output + cacheRead + cacheWrite === 0 ? { cost, pricingStatus: "free" } : { cost };
+	return total === 0 ? { cost, pricingStatus: "free" } : { cost };
 }
 
 /**
@@ -1430,7 +1473,12 @@ function sambanovaPricing(
 	pricing: unknown,
 	fallback: TokenCost,
 ): Pick<ModelSpec<"openai-completions">, "cost" | "pricingStatus"> {
-	return parseOpenAICompatPricingCard(pricing) ?? { cost: fallback, pricingStatus: "unknown" };
+	return (
+		parseOpenAICompatPricingCard(pricing, { defaultUnit: "per_token" }) ?? {
+			cost: fallback,
+			pricingStatus: "unknown",
+		}
+	);
 }
 
 /**

@@ -109,6 +109,29 @@ describe("openai-models-list pricing and gateway metadata discovery (#15655)", (
 						completion: "0",
 					},
 				},
+				{
+					id: "vendor/explicit-per-token",
+					pricing: {
+						prompt: 0.000002,
+						completion: 0.00001,
+						unit: "per_token",
+					},
+				},
+				{
+					id: "vendor/chutes-unitless-numeric",
+					pricing: {
+						prompt: 0.44,
+						completion: 1.32,
+						input_cache_read: 0.044,
+					},
+				},
+				{
+					id: "vendor/unitless-numeric-free",
+					pricing: {
+						prompt: 0,
+						completion: 0,
+					},
+				},
 			]),
 			getBearerApiKeyResolver: async () => undefined,
 		});
@@ -133,6 +156,18 @@ describe("openai-models-list pricing and gateway metadata discovery (#15655)", (
 		const tiny = byId.get("vendor/tiny-positive-rate")!;
 		expect(tiny.cost.input).toBeCloseTo(1e-7, 15);
 		expect(getModelPricingStatus(tiny)).toBe("fixed");
+
+		const explicitPerToken = byId.get("vendor/explicit-per-token")!;
+		expect(explicitPerToken.cost).toEqual({ input: 2, output: 10, cacheRead: 0, cacheWrite: 0 });
+		expect(getModelPricingStatus(explicitPerToken)).toBe("fixed");
+
+		const chutesAmbiguous = byId.get("vendor/chutes-unitless-numeric")!;
+		expect(chutesAmbiguous.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(getModelPricingStatus(chutesAmbiguous)).toBe("unknown");
+
+		const numericFree = byId.get("vendor/unitless-numeric-free")!;
+		expect(numericFree.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(getModelPricingStatus(numericFree)).toBe("free");
 	});
 
 	test("marks explicit all-zero pricing as free and keeps non-token charges, malformed, or negative cards unknown", async () => {
