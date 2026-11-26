@@ -58,6 +58,7 @@ import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
 import { ToolCall } from "../../src/ui/transcript/tool-block";
 import { toolCallText, toolText } from "../helpers/tool-text";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getLanguageFromPath } from "@oh-my-pi/pi-coding-agent/utils/lang-from-path";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
@@ -1742,7 +1743,12 @@ describe("lsp regressions", () => {
 			const filePath = path.join(tempDir.path(), diagnosticTarget);
 			await Bun.write(filePath, "export default function OpenGraphImage() {}\n");
 
-			const result = await resolveDiagnosticTargets(diagnosticTarget, tempDir.path(), 10);
+			const result = await resolveDiagnosticTargets(
+				diagnosticTarget,
+				tempDir.path(),
+				10,
+				InternalUrlRouter.builtins(),
+			);
 
 			expect(result).toEqual({
 				matches: [diagnosticTarget],
@@ -3852,6 +3858,47 @@ describe("lsp regressions", () => {
 			expect(fs.existsSync(sourceFile)).toBe(false);
 			expect(fs.existsSync(destFile)).toBe(true);
 			expect(result.details).toMatchObject({ action: "rename_file", success: true });
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file refuses a destination URL of a scheme the session registered, before any mutation", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-session-url-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+			const schemes = new UrlSchemeTable("Host URI scheme");
+			schemes.replace([
+				{
+					scheme: "db",
+					spec: { backing: "remote", selectors: "none", immutable: true },
+					resolve: async () => {
+						throw new Error("db:// is never resolved here");
+					},
+				},
+			]);
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "test-lsp": server },
+				idleTimeoutMs: undefined,
+			});
+			const clientSpy = vi.spyOn(lspClient, "getOrCreateClient");
+
+			const tool = new LspTool({ ...makeLspSession(tempDir.path()), urlRouter: new InternalUrlRouter([schemes]) });
+			await expect(
+				tool.execute("rename-file-session-url", {
+					action: "rename_file",
+					file: sourceFile,
+					new_name: "db://rows/new.ts",
+					timeout: 5,
+				}),
+			).rejects.toThrow('internal scheme "db://"');
+
+			expect(fs.existsSync(sourceFile)).toBe(true);
+			expect(fs.existsSync(path.join(tempDir.path(), "db:"))).toBe(false);
+			expect(clientSpy).not.toHaveBeenCalled();
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();

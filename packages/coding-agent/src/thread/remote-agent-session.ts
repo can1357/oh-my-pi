@@ -39,6 +39,7 @@ import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { IrcMessage } from "../irc/irc-types";
 import type { JobWidgetEntry } from "../tools/details/job-widget";
 import type { TodoPhase } from "../tools/details/todo";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManagerApi } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -458,6 +459,11 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	get skills(): readonly Skill[] {
 		return this.#view.skills;
+	}
+
+	/** The session's own schemes live on its home worker; the main-side mirror resolves through the built-ins. */
+	get urlRouter(): InternalUrlRouter {
+		return InternalUrlRouter.builtins();
 	}
 
 	get isAutoThinking(): boolean {

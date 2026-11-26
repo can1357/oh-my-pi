@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, ToolTier } from "@oh-my-pi/pi-agent-core";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -29,8 +30,12 @@ import { approvalTargetKey, approvalTreeSearchKey } from "@oh-my-pi/pi-coding-ag
 import { getAgentDir, isRecord, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 
+// Approval targets here are host paths and built-in URLs, unless a case passes a session router.
+const router = InternalUrlRouter.builtins();
+const offerGrants = { grants: { router } };
+
 /** Tool that keys `args.path` like read/write/edit do. */
-function pathTool(name: string, tier: ToolTier, cwd: string): AgentTool {
+function pathTool(name: string, tier: ToolTier, cwd: string, urlRouter = router): AgentTool {
 	return {
 		name,
 		label: name,
@@ -38,7 +43,7 @@ function pathTool(name: string, tier: ToolTier, cwd: string): AgentTool {
 		parameters: {} as never,
 		approval: tier,
 		approvalCacheTargets: (args: unknown) =>
-			isRecord(args) && typeof args.path === "string" ? [approvalTargetKey(cwd, args.path)!] : undefined,
+			isRecord(args) && typeof args.path === "string" ? [approvalTargetKey(cwd, args.path, urlRouter)!] : undefined,
 		execute: async () => ({ content: [{ type: "text" as const, text: "executed" }] }),
 	};
 }
@@ -63,7 +68,7 @@ describe("always-ask-cached resolution", () => {
 		const read = pathTool("read", "read", cwd);
 		const write = pathTool("write", "write", cwd);
 		const grants = getApprovalGrants(agentDir, "s1");
-		const notes = approvalTargetKey(cwd, "notes.txt")!;
+		const notes = approvalTargetKey(cwd, "notes.txt", router)!;
 
 		expect(resolveApproval(read, { path: "notes.txt" }, "always-ask-cached", {}, grants)).toMatchObject({
 			policy: "prompt",
@@ -73,7 +78,7 @@ describe("always-ask-cached resolution", () => {
 		expect(resolveApproval(read, { path: "notes.txt" }, "always-ask-cached", {}, grants).policy).toBe("allow");
 		// A read grant never lets a write through; a write grant covers reads.
 		expect(resolveApproval(write, { path: "notes.txt" }, "always-ask-cached", {}, grants).policy).toBe("prompt");
-		grants.record(approvalGrantKey("write", approvalTargetKey(cwd, "other.txt")!), "write", "session");
+		grants.record(approvalGrantKey("write", approvalTargetKey(cwd, "other.txt", router)!), "write", "session");
 		expect(resolveApproval(read, { path: "other.txt" }, "always-ask-cached", {}, grants).policy).toBe("allow");
 		// Without a store nothing counts as remembered.
 		expect(resolveApproval(read, { path: "notes.txt" }, "always-ask-cached", {}).policy).toBe("prompt");
@@ -108,7 +113,9 @@ describe("always-ask-cached resolution", () => {
 		}
 		// The target does not exist yet: its key still resolves the link, so a folder grant on the
 		// link's own parent never covers a file that lands elsewhere.
-		expect(approvalTargetKey(agentDir, "link/new.ts")).toBe(approvalTargetKey(agentDir, "real/new.ts"));
+		expect(approvalTargetKey(agentDir, "link/new.ts", router)).toBe(
+			approvalTargetKey(agentDir, "real/new.ts", router),
+		);
 	});
 
 	it("leaves read-tier calls without targets auto-approved and prompts write/exec ones", () => {
@@ -125,7 +132,7 @@ describe("always-ask-cached resolution", () => {
 		const agentDir = freshAgentDir();
 		const write = pathTool("write", "write", agentDir);
 		const grants = getApprovalGrants(agentDir, "s1");
-		grants.record(approvalGrantKey("write", approvalTargetKey(agentDir, "notes.txt")!), "write", "session");
+		grants.record(approvalGrantKey("write", approvalTargetKey(agentDir, "notes.txt", router)!), "write", "session");
 		expect(
 			resolveApproval(write, { path: "notes.txt" }, "always-ask-cached", { write: "prompt" }, grants),
 		).toMatchObject({ policy: "prompt", source: "user" });
@@ -134,6 +141,48 @@ describe("always-ask-cached resolution", () => {
 			policy: "prompt",
 			source: "tool",
 		});
+	});
+
+	it("keeps a remembered grant on a session scheme to the registration that served it", () => {
+		const agentDir = freshAgentDir();
+		// Two sessions each register their own `db://`, as RPC hosts do.
+		const sessionRouter = (): InternalUrlRouter => {
+			const schemes = new UrlSchemeTable("Host URI scheme");
+			schemes.replace([
+				{
+					scheme: "db",
+					spec: {
+						backing: "remote",
+						selectors: "none",
+						immutable: false,
+						write: { via: "handler", payload: "text", scope: "workspace", tier: () => "write" },
+					},
+					resolve: async () => {
+						throw new Error("db:// is never resolved here");
+					},
+					write: async () => {},
+				},
+			]);
+			return new InternalUrlRouter([schemes]);
+		};
+		const routerA = sessionRouter();
+		const writeA = pathTool("write", "write", agentDir, routerA);
+		const writeB = pathTool("write", "write", agentDir, sessionRouter());
+		const args = { path: "db://rows/42" };
+		getApprovalGrants(agentDir, "session-a").record(
+			approvalGrantKey("write", approvalTargetKey(agentDir, args.path, routerA)!),
+			"write",
+			"global",
+		);
+
+		expect(
+			resolveApproval(writeA, args, "always-ask-cached", {}, getApprovalGrants(agentDir, "session-a")).policy,
+		).toBe("allow");
+		expect(
+			resolveApproval(writeB, args, "always-ask-cached", {}, getApprovalGrants(agentDir, "session-b")).policy,
+		).toBe("prompt");
+		// A built-in scheme's grant still holds in every session.
+		expect(approvalTargetKey(agentDir, "local://notes.md", routerA)).toBe("local://notes.md");
 	});
 });
 
@@ -192,19 +241,19 @@ describe("grant choices in the prompt", () => {
 	it.each([
 		[
 			"a directory and a file in another directory",
-			(dir: string) => [approvalDirectoryKey(dir), approvalTargetKey(path.dirname(dir), "a.md")!],
+			(dir: string) => [approvalDirectoryKey(dir), approvalTargetKey(path.dirname(dir), "a.md", router)!],
 		],
 		[
 			"a file and a recursive search of its directory",
-			(dir: string) => [approvalTargetKey(dir, "a.md")!, approvalTreeSearchKey(approvalDirectoryKey(dir))],
+			(dir: string) => [approvalTargetKey(dir, "a.md", router)!, approvalTreeSearchKey(approvalDirectoryKey(dir))],
 		],
-		["a file and an internal URL", (dir: string) => [approvalTargetKey(dir, "a.md")!, "local://a.md"]],
+		["a file and an internal URL", (dir: string) => [approvalTargetKey(dir, "a.md", router)!, "local://a.md"]],
 	])("offers no directory grant for %s, since it would not cover every target", async (_, targets) => {
 		const dir = path.join(freshAgentDir(), "work");
 		fs.mkdirSync(dir);
 		const tool: AgentTool = { ...pathTool("read", "read", dir), approvalCacheTargets: () => targets(dir) };
 		const { ui, prompts } = recordingUi();
-		await requestApproval(ui, tool, {}, { grants: true });
+		await requestApproval(ui, tool, {}, offerGrants);
 		expect(prompts[0]!.grants?.map(grant => grant.scope)).toEqual(["target"]);
 	});
 
@@ -215,7 +264,7 @@ describe("grant choices in the prompt", () => {
 		fs.writeFileSync(path.join(desktop, "notes.txt"), "x");
 		fs.writeFileSync(path.join(desktop, "alpha.txt"), "x");
 		const { ui, prompts } = recordingUi();
-		await requestApproval(ui, pathTool("read", "read", desktop), { path: "notes.txt" }, { grants: true });
+		await requestApproval(ui, pathTool("read", "read", desktop), { path: "notes.txt" }, offerGrants);
 		const label = shortenPath(approvalDirectoryKey(desktop).replace(/[\\/]+$/, ""));
 		expect(prompts[0]!.grants).toEqual([
 			{ scope: "folder", label: `Approve Directory: ${label}`, alwaysLabel: `Always Approve Directory: ${label}` },
@@ -241,7 +290,7 @@ describe("grant choices in the prompt", () => {
 			names.push(name);
 		}
 		const { ui, prompts } = recordingUi();
-		await requestApproval(ui, pathTool("write", "write", huge), { path: "entry-000.txt" }, { grants: true });
+		await requestApproval(ui, pathTool("write", "write", huge), { path: "entry-000.txt" }, offerGrants);
 		const compact = prompts[0]!.compact.split("\n");
 		expect(compact[1]).toContain("200+ entries");
 		expect(compact.at(-1)).toBe("  … 196 more");
@@ -269,7 +318,7 @@ describe("grant choices in the prompt", () => {
 			...pathTool("read", "read", agentDir),
 			approvalCacheTargets: () => [approvalDirectoryKey(dir)],
 		};
-		await requestApproval(ui, listing, {}, { grants: true });
+		await requestApproval(ui, listing, {}, offerGrants);
 		expect(prompts[0]!.grants?.map(grant => grant.scope)).toEqual(["folder"]);
 	});
 
@@ -295,15 +344,15 @@ describe("grant choices in the prompt", () => {
 		const pick = (label: string) => ({
 			select: async (_title: string, choices: string[]) => choices.find(c => c.startsWith(label)),
 		});
-		expect(await requestApproval(pick("Always Approve File"), write, { path: "a.txt" }, { grants: true })).toEqual({
+		expect(await requestApproval(pick("Always Approve File"), write, { path: "a.txt" }, offerGrants)).toEqual({
 			grant: "target",
 			always: true,
 		});
-		expect(await requestApproval(pick("Approve Directory"), write, { path: "a.txt" }, { grants: true })).toEqual({
+		expect(await requestApproval(pick("Approve Directory"), write, { path: "a.txt" }, offerGrants)).toEqual({
 			grant: "folder",
 			always: false,
 		});
-		expect(await requestApproval(pick("Approve Once"), write, { path: "a.txt" }, { grants: true })).toBe("once");
+		expect(await requestApproval(pick("Approve Once"), write, { path: "a.txt" }, offerGrants)).toBe("once");
 	});
 });
 

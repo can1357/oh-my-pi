@@ -24,6 +24,8 @@ import { shellProcessCommand } from "../exec/shell-process";
 import { isUrlPath } from "../internal-urls/url-filesystem";
 import type { ToolSession } from "../tools";
 import { isSharedBrowserUnit } from "../tools/browser/shared-daemon";
+import { sessionUrlRouter } from "../internal-urls/context";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { resolveToCwd } from "../tools/path-utils";
 import { cfgLaunchEnabled, cfgLaunchPersist } from "../tools/settings";
 
@@ -305,9 +307,9 @@ export async function serviceLogs(session: ToolSession, name: string, signal?: A
  * a hoisted shell `cd /` is the filesystem root — so it must not be passed
  * through the tool-input alias again. Relative paths still use that alias.
  */
-function serviceDirectory(cwd: string | undefined, sessionCwd: string): string {
+function serviceDirectory(cwd: string | undefined, sessionCwd: string, router: InternalUrlRouter): string {
 	const requested = cwd ?? sessionCwd;
-	return path.isAbsolute(requested) ? requested : resolveToCwd(requested, sessionCwd);
+	return path.isAbsolute(requested) ? requested : resolveToCwd(requested, sessionCwd, router);
 }
 
 /**
@@ -355,7 +357,7 @@ export async function startService(
 			cwd: urlCwd,
 		}),
 		env: { ...shell.env, ...params.env },
-		cwd: serviceDirectory(urlCwd === undefined ? params.cwd : undefined, session.cwd),
+		cwd: serviceDirectory(urlCwd === undefined ? params.cwd : undefined, session.cwd, sessionUrlRouter(session)),
 		pty: params.pty ?? true,
 		ready: ready
 			? {

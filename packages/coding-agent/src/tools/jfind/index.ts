@@ -10,7 +10,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my
 import type { FindToolDetails } from "../details/find";
 import { ToolError } from "../tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
-import { sessionResolveContext } from "../../internal-urls/context";
+import { sessionResolveContext, sessionUrlRouter } from "../../internal-urls/context";
 import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import {
 	hasNativeJudge,
@@ -80,11 +80,16 @@ export function findHintVisible(session: ToolSession): boolean {
 /** Semantic search tool: describe a behavior, get files and line ranges that implement it. */
 export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	readonly name = "find";
-	readonly approval = searchPathTier;
+	readonly approval = (args: unknown) => searchPathTier(args, sessionUrlRouter(this.session));
 	/** `always-ask-cached` keys: the tree (or file) it searches, as `grep` reports one. */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		const root = (args as { path?: string } | null | undefined)?.path;
-		return searchApprovalCacheTargets(root ? [root] : [], this.session.cwd, entry => entry);
+		return searchApprovalCacheTargets(
+			root ? [root] : [],
+			this.session.cwd,
+			sessionUrlRouter(this.session),
+			entry => entry,
+		);
 	};
 	readonly loadMode = "essential";
 	readonly label = "Find";
@@ -111,11 +116,12 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
 			tier: resolveToolTier(this, params),
 		});
+		const router = filesystem.router;
 		const root = await resolveSearchRoot(filesystem, rawScopeInput, cwd);
 		const scopePath =
 			root.path === path.resolve(cwd)
 				? undefined
-				: formatPathRelativeToCwd(root.path, cwd, { trailingSlash: root.type === "directory" });
+				: formatPathRelativeToCwd(root.path, cwd, { trailingSlash: root.type === "directory", router });
 		const registry = this.session.modelRegistry;
 		if (!registry) throw new ToolError("find has no model registry to resolve a judge from");
 		const sessionModel = this.session.getActiveModel?.();
@@ -190,11 +196,11 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		// with `:start-end` selectors) without knowing the scope.
 		const hits = result.hits.map(hit => ({
 			...hit,
-			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel), cwd),
+			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel, router), cwd, { router }),
 		}));
 		const lexicalFallback = result.lexicalFallback.map(match => ({
 			...match,
-			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, match.rel), cwd),
+			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, match.rel, router), cwd, { router }),
 		}));
 		const details: FindToolDetails = {
 			query,

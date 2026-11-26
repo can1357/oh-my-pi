@@ -46,6 +46,7 @@ import { vi } from "bun:test";
 import type { FigureCell } from "../../src/ui/transcript/figures/svg";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPDroppedServer } from "@oh-my-pi/pi-coding-agent/mcp/transforms";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -139,6 +140,7 @@ export function createSessionStub(
 		model: undefined,
 		sessionFile: undefined,
 		skills: [],
+		urlRouter: InternalUrlRouter.builtins(),
 		ttsrManager: undefined,
 		extensionRunner: undefined,
 		effectiveExtensionRoots: {

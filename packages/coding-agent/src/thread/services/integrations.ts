@@ -124,6 +124,8 @@ export function toWorkerCustomTool<TParams extends TSchema, TDetails>(
  * - `customTools`: {@link toWorkerCustomTool} views.
  * - `parentTelemetry`: `toWorkerTelemetryConfig` (captures the active span as the child's parent, so
  *   call this inside the parent's `execute_tool task` context).
+ * - `parentHostUriSources`: dropped. The RPC host's scheme handlers live on the main thread, so a
+ *   worker-placed child resolves the built-ins only.
  *
  * Everything else in this module's scope crosses automatically through codecs and exported
  * classes (`mcpManager`, `localProtocolOptions`, `preloadedPreparedExtensions`, tool contexts);
@@ -135,6 +137,7 @@ export function bridgeIntegrationOptions(options: ExecutorOptions): ExecutorOpti
 	if (extensionRoots) bridged.extensionRoots = rpcSync(() => extensionRoots());
 	if (options.customTools) bridged.customTools = options.customTools.map(tool => toWorkerCustomTool(tool));
 	if (options.parentTelemetry) bridged.parentTelemetry = toWorkerTelemetryConfig(options.parentTelemetry);
+	delete bridged.parentHostUriSources;
 	return bridged;
 }
 

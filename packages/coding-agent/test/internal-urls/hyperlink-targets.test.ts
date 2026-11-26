@@ -60,7 +60,7 @@ describe("InternalUrlRouter.locateSync", () => {
 	});
 
 	it("returns undefined for non-internal URLs", () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		expect(router.locateSync("/abs/path/file.ts")).toBeUndefined();
 		expect(router.locateSync("relative/path.ts")).toBeUndefined();
 		expect(router.locateSync("https://example.com/foo")).toBeUndefined();
@@ -68,12 +68,12 @@ describe("InternalUrlRouter.locateSync", () => {
 
 	it("returns undefined when local:// resolution has no session options", () => {
 		// No AgentRegistry main session in this unit test, no override installed.
-		expect(InternalUrlRouter.instance().locateSync("local://foo.md")).toBeUndefined();
+		expect(InternalUrlRouter.builtins().locateSync("local://foo.md")).toBeUndefined();
 	});
 
 	it("swallows errors from malformed URLs", () => {
 		// Malformed input should not throw, just return undefined.
-		expect(InternalUrlRouter.instance().locateSync("local://%ZZ")).toBeUndefined();
+		expect(InternalUrlRouter.builtins().locateSync("local://%ZZ")).toBeUndefined();
 	});
 });
 

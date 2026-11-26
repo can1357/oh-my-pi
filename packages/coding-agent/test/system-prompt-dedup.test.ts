@@ -9,6 +9,7 @@ import {
 	type SystemPromptToolMetadata,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 function escapeRegExp(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -60,6 +61,7 @@ describe("SYSTEM.md prompt assembly", () => {
 				totalLines: 0,
 				agentsMdFiles: [],
 			},
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		const promptText = systemPrompt.join("\n\n");
@@ -99,6 +101,7 @@ describe("SYSTEM.md prompt assembly", () => {
 				totalLines: 0,
 				agentsMdFiles: [],
 			},
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		const promptText = renderedPrompt.join("\n\n");
@@ -129,6 +132,7 @@ describe("SYSTEM.md prompt assembly", () => {
 				totalLines: 0,
 				agentsMdFiles: [],
 			},
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		const promptText = systemPrompt.join("\n\n");
@@ -159,6 +163,7 @@ describe("SYSTEM.md prompt assembly", () => {
 				totalLines: 2,
 				agentsMdFiles: ["nested/AGENTS.md"],
 			},
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		const promptText = systemPrompt.join("\n\n");
@@ -192,6 +197,7 @@ describe("SYSTEM.md prompt assembly", () => {
 				totalLines: 0,
 				agentsMdFiles: [],
 			},
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		const promptText = systemPrompt.join("\n\n");
@@ -222,6 +228,7 @@ describe("SYSTEM.md prompt assembly", () => {
 			skills: [],
 			rules: [],
 			toolNames: [],
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		const promptText = systemPrompt.join("\n\n");
@@ -261,6 +268,7 @@ describe("SYSTEM.md prompt assembly", () => {
 			skills: [],
 			rules: [],
 			toolNames: [],
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const promptText = systemPrompt.join("\n\n");
 
@@ -285,6 +293,7 @@ describe("SYSTEM.md prompt assembly", () => {
 			rules: [],
 			alwaysApplyRules: [{ name: "shared", path: instructionPath, content: sharedContent }],
 			toolNames: [],
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		const promptText = systemPrompt.join("\n\n");

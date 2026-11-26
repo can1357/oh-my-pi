@@ -62,7 +62,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { PreparedExtension } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionStateApi } from "../hindsight/state";
-import type { LocalProtocolOptions } from "../internal-urls";
+import type { LocalProtocolOptions, UrlSchemeSource } from "../internal-urls";
 import { IrcBus } from "../irc/bus";
 import type { MCPManagerApi, MCPToolScope } from "../mcp/manager";
 import type { MnemopiSessionStateApi } from "../mnemopi/state";
@@ -627,6 +627,11 @@ export interface ExecutorOptions {
 	oauthAccountPools?: OAuthAccountPools;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
+	/**
+	 * The parent session's RPC host URI schemes (`ToolSession.hostUriSources`), which the child
+	 * resolves live after its own. In-process only: a worker-placed child resolves built-ins.
+	 */
+	parentHostUriSources?: readonly UrlSchemeSource[];
 	/**
 	 * Parent session's ArtifactManager. Subagent adopts it so artifact IDs are
 	 * unique across the whole agent tree and all artifacts land in the parent's
@@ -5322,6 +5327,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					// MCP proxies are minted per build as `mcpTools` in buildSubagentSessionOptions.
 					customTools: options.customTools,
 					localProtocolOptions: options.localProtocolOptions,
+					parentHostUriSources: options.parentHostUriSources,
 					telemetry: subagentTelemetry,
 				},
 				prompt: {

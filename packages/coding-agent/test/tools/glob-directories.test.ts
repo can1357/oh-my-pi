@@ -4,10 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
 import { Settings } from "../../src/config/settings";
+import { InternalUrlRouter } from "../../src/internal-urls/router";
 import { InternalUrlFilesystem } from "../../src/internal-urls/url-filesystem";
 import type { ToolSession } from "../../src/tools";
 import { GlobTool } from "../../src/tools/glob";
 import { parseFindPattern, resolveSearchBase } from "../../src/tools/path-utils";
+
+// The test session has no URL schemes of its own.
+const router = InternalUrlRouter.builtins();
 
 describe("directory-only glob patterns", () => {
 	let dir: string;
@@ -57,16 +61,16 @@ describe("directory-only glob patterns", () => {
 	});
 
 	it("normalizes home and drive patterns without changing slash-only roots", () => {
-		const home = parseFindPattern("~/beta.8*/");
+		const home = parseFindPattern("~/beta.8*/", router);
 		expect(home).toEqual({ basePath: "~", globPattern: "beta.8*", hasGlob: true, directoryOnly: true });
-		expect(resolveSearchBase(home.basePath, dir)).toBe(os.homedir());
-		expect(parseFindPattern("C:\\work\\beta.8*\\")).toEqual({
+		expect(resolveSearchBase(home.basePath, dir, router)).toBe(os.homedir());
+		expect(parseFindPattern("C:\\work\\beta.8*\\", router)).toEqual({
 			basePath: "C:/work",
 			globPattern: "beta.8*",
 			hasGlob: true,
 			directoryOnly: true,
 		});
-		expect(parseFindPattern("/")).toEqual({ basePath: "/", globPattern: "**/*", hasGlob: false });
+		expect(parseFindPattern("/", router)).toEqual({ basePath: "/", globPattern: "**/*", hasGlob: false });
 	});
 
 	it("matches URL directories without interpreting a URL root as a pattern separator", async () => {
@@ -79,7 +83,11 @@ describe("directory-only glob patterns", () => {
 			getSessionId: () => "glob-directories",
 		}).execute("url-directories", { path: "local://beta.8*/", gitignore: false });
 		expect(result.details?.files).toEqual(["local://beta.8a/"]);
-		expect(parseFindPattern("local://")).toEqual({ basePath: "local://", globPattern: "**/*", hasGlob: false });
+		expect(parseFindPattern("local://", router)).toEqual({
+			basePath: "local://",
+			globPattern: "**/*",
+			hasGlob: false,
+		});
 	});
 
 	it("passes directory-only filtering to delegated glob operations", async () => {

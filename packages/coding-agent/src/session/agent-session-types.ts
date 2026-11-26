@@ -23,6 +23,7 @@ import type {
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor/advisor-config-types";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager, AsyncJobManagerApi } from "../async";
+import type { SessionUrlSchemes } from "../internal-urls/scheme-table";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
 import type { AgentRegistryApi } from "../registry/agent-registry";
@@ -278,6 +279,8 @@ export interface AgentSessionConfig {
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Tool bridge context used by user-initiated Python cells to project enabled eval preludes. */
 	evalToolSession?: ToolSession;
+	/** This session's own URL schemes and router; the tool session resolves through the same router. Absent: a fresh, empty set. */
+	urlSchemes?: SessionUrlSchemes;
 	/** Loaded skills already discovered by the SDK. */
 	skills?: Skill[];
 	/** Frozen routing hints shared with the system prompt and later skillful notices. */

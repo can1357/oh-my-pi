@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as os from "node:os";
 import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import { TernTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/tern-tab";
@@ -38,6 +39,7 @@ async function openTab(): Promise<{ tab: TernTab; fake: FakeDaemon }> {
 		deadline: Date.now() + 5_000,
 		signal: new AbortController().signal,
 		session: { cwd: os.tmpdir() },
+		router: InternalUrlRouter.builtins(),
 		output: new RunOutput(),
 		screenshots: [],
 	});

@@ -12,6 +12,7 @@ import { isEnoent, isFsError, logger, prompt, ptree, untilAborted } from "@oh-my
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
 import { replaceTabs } from "../utils/text-width";
 import { shortenPath } from "../utils/render-utils";
@@ -464,7 +465,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			let truncatedGlobTargets = false;
-			const resolvedTargets = await resolveDiagnosticTargets(file, this.session.cwd, MAX_GLOB_DIAGNOSTIC_TARGETS);
+			const resolvedTargets = await resolveDiagnosticTargets(
+				file,
+				this.session.cwd,
+				MAX_GLOB_DIAGNOSTIC_TARGETS,
+				sessionUrlRouter(this.session),
+			);
 			const targets = resolvedTargets.matches;
 			truncatedGlobTargets = resolvedTargets.truncated;
 
@@ -488,7 +494,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const target of targets) {
 				throwIfAborted(signal);
-				const resolved = resolveToCwd(target, this.session.cwd);
+				const resolved = resolveToCwd(target, this.session.cwd, sessionUrlRouter(this.session));
 				const servers = getServersForFile(config, resolved);
 				if (servers.length === 0) {
 					results.push(`${statusSymbol("error")} ${target}: ${describeMissingServers(config, resolved)}`);
@@ -666,10 +672,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 
-			const source = resolveToCwd(file, this.session.cwd);
+			const source = resolveToCwd(file, this.session.cwd, sessionUrlRouter(this.session));
 			// A bare name renames in place: it stays next to the source.
 			const dest = /[\\/]/.test(new_name)
-				? resolveToCwd(new_name, this.session.cwd)
+				? resolveToCwd(new_name, this.session.cwd, sessionUrlRouter(this.session))
 				: path.join(path.dirname(source), new_name);
 
 			if (source === dest) {
@@ -1050,7 +1056,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "capabilities") {
 			let serverList: Array<[string, ServerConfig]>;
 			if (file && file !== "*") {
-				const resolved = resolveToCwd(file, this.session.cwd);
+				const resolved = resolveToCwd(file, this.session.cwd, sessionUrlRouter(this.session));
 				serverList = getLspServersForFile(config, resolved);
 				if (serverList.length === 0) {
 					return {
@@ -1116,7 +1122,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			let chosenServer: [string, ServerConfig] | null = null;
 			let resolvedTarget: string | null = null;
 			if (file && file !== "*") {
-				resolvedTarget = resolveToCwd(file, this.session.cwd);
+				resolvedTarget = resolveToCwd(file, this.session.cwd, sessionUrlRouter(this.session));
 				chosenServer = getLspServerForFile(config, resolvedTarget);
 				if (!chosenServer) {
 					return {
@@ -1210,7 +1216,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		const resolvedFile = file && !isWorkspace ? resolveToCwd(file, this.session.cwd) : null;
+		const resolvedFile =
+			file && !isWorkspace ? resolveToCwd(file, this.session.cwd, sessionUrlRouter(this.session)) : null;
 		if (action === "symbols" && (isWorkspace || !resolvedFile)) {
 			const normalizedQuery = query?.trim();
 			if (!normalizedQuery) {

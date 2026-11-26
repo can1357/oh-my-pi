@@ -6,6 +6,7 @@
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { TreeSelector, type TreeSelectorProps } from "../../src/ui/overlays/pickers/tree-selector";
 import { mountOverlay } from "./overlay-terminal";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 export type TreeSelectorTestProps = Pick<TreeSelectorProps, "roots" | "currentLeafId"> &
 	Partial<Omit<TreeSelectorProps, "roots" | "currentLeafId">>;
@@ -22,6 +23,7 @@ export function mountTreeSelector(
 				terminalHeight: rows,
 				onSelect: () => {},
 				onCancel: () => {},
+				router: InternalUrlRouter.builtins(),
 				...props,
 			}),
 		{ columns: size.columns, rows },

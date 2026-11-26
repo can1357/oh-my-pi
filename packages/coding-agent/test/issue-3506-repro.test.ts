@@ -25,6 +25,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Composer } from "../src/ui/composer/composer";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const ONE_PX_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -44,6 +45,7 @@ function createCtx() {
 			putBlob: async () => ({ hash: "h", path: "/tmp/h.png", displayPath: "/tmp/h.png" }),
 		} as unknown as InteractiveModeContext["sessionManager"],
 		showStatus,
+		session: { urlRouter: InternalUrlRouter.builtins() },
 	} as unknown as InteractiveModeContext;
 	return {
 		ctx,

@@ -13,6 +13,7 @@ import {
 	LocalProtocolHandler,
 	type ProtocolHandler,
 	sessionResolveContext,
+	UrlSchemeTable,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -41,6 +42,13 @@ function virtualDocName(url: InternalUrl): string {
 	const host = url.rawHost || url.hostname;
 	const pathname = url.rawPathname ?? url.pathname;
 	return host ? (pathname && pathname !== "/" ? host + pathname : host) : "";
+}
+
+/** Test-only session schemes; every session {@link createSession} builds resolves through them. */
+const testSchemes = new UrlSchemeTable("Test scheme");
+
+function addTestScheme(handler: ProtocolHandler): void {
+	testSchemes.replace([...testSchemes.handlers(), handler]);
 }
 
 function registerVirtualDocs(docs: ReadonlyMap<string, string>): void {
@@ -72,7 +80,7 @@ function registerVirtualDocs(docs: ReadonlyMap<string, string>): void {
 			};
 		},
 	};
-	InternalUrlRouter.instance().register(handler);
+	addTestScheme(handler);
 }
 
 describe("GrepTool internal URL resolution", () => {
@@ -104,6 +112,7 @@ describe("GrepTool internal URL resolution", () => {
 		AgentRegistry.resetGlobalForTests();
 		LocalProtocolHandler.resetOverrideForTests();
 		InternalUrlRouter.resetForTests();
+		testSchemes.clear();
 		resetActiveSkillsForTests();
 		vi.restoreAllMocks();
 	});
@@ -114,6 +123,7 @@ describe("GrepTool internal URL resolution", () => {
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
+			urlRouter: new InternalUrlRouter([testSchemes]),
 			settings: Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 }),
 			...overrides,
 		};
@@ -719,7 +729,7 @@ describe("GrepTool internal URL resolution", () => {
 		const findResult = await new GlobTool(session).execute("test-find", {
 			path: "local://notes",
 		});
-		const dirResource = await InternalUrlRouter.instance().resolve("local://notes");
+		const dirResource = await InternalUrlRouter.builtins().resolve("local://notes");
 
 		const readText = getResultText(readResult);
 		expect(readText).toContain("PLAN.md");
@@ -980,7 +990,7 @@ describe("GrepTool internal URL resolution", () => {
 	it("refuses to search a directory listing that has no backing local path", async () => {
 		// A directory resource with no sourcePath (e.g. a remote ssh:// listing) must
 		// not be grepped — its listing text is not the directory's contents.
-		InternalUrlRouter.instance().register({
+		addTestScheme({
 			scheme: "dirstub",
 			spec: { backing: "virtual", selectors: "none", immutable: true },
 			async resolve(url: InternalUrl): Promise<InternalResource> {

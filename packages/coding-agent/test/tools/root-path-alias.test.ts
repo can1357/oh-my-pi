@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { resolveToCwd } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -43,8 +44,8 @@ describe("tool path root alias", () => {
 	});
 
 	it("resolves a bare slash to the session cwd", () => {
-		expect(resolveToCwd("/", tempDir)).toBe(tempDir);
-		expect(resolveToCwd("///", tempDir)).toBe(tempDir);
+		expect(resolveToCwd("/", tempDir, InternalUrlRouter.builtins())).toBe(tempDir);
+		expect(resolveToCwd("///", tempDir, InternalUrlRouter.builtins())).toBe(tempDir);
 	});
 
 	it.skipIf(process.platform === "win32")(
@@ -60,26 +61,26 @@ describe("tool path root alias", () => {
 			await fs.symlink(path.join(tempDir, "other", "dir"), path.join(tempDir, "base", "link"));
 
 			const input = `${path.join(tempDir, "base", "link")}${path.sep}..${path.sep}target.txt`;
-			const resolved = resolveToCwd(input, tempDir);
+			const resolved = resolveToCwd(input, tempDir, InternalUrlRouter.builtins());
 			expect(resolved).toBe(input);
 			expect(await Bun.file(resolved).text()).toBe("kernel-correct\n");
 		},
 	);
 
 	it("rejects local:/ (single-slash) as an internal URL", () => {
-		expect(() => resolveToCwd("local:/PLAN.md", tempDir)).toThrow("internal scheme");
+		expect(() => resolveToCwd("local:/PLAN.md", tempDir, InternalUrlRouter.builtins())).toThrow("internal scheme");
 	});
 
 	it("rejects local:// as an internal URL", () => {
-		expect(() => resolveToCwd("local://PLAN.md", tempDir)).toThrow("internal scheme");
+		expect(() => resolveToCwd("local://PLAN.md", tempDir, InternalUrlRouter.builtins())).toThrow("internal scheme");
 	});
 
 	it("rejects @local:/ (at-prefix single-slash) as an internal URL", () => {
-		expect(() => resolveToCwd("@local:/PLAN.md", tempDir)).toThrow("internal scheme");
+		expect(() => resolveToCwd("@local:/PLAN.md", tempDir, InternalUrlRouter.builtins())).toThrow("internal scheme");
 	});
 
 	it("rejects @local:// (at-prefix double-slash) as an internal URL", () => {
-		expect(() => resolveToCwd("@local://PLAN.md", tempDir)).toThrow("internal scheme");
+		expect(() => resolveToCwd("@local://PLAN.md", tempDir, InternalUrlRouter.builtins())).toThrow("internal scheme");
 	});
 
 	it("searches from cwd when path is slash", async () => {

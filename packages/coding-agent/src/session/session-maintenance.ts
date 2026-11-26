@@ -87,6 +87,7 @@ import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import { customMessageEntryMessage } from "./transcript/transcript-entry";
 import { computeNonMessageTokens, type NonMessageTokenSource } from "./context-usage";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import { isCompleteReadResult } from "../tools/read-supersede";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
@@ -492,6 +493,8 @@ export interface SessionMaintenanceHost {
 	baseSystemPrompt(): string[];
 	goalModeState(): GoalModeState | undefined;
 	planReferencePath(): string;
+	/** The session's URL router: canonicalizes plan read paths for compaction protection. */
+	urlRouter: InternalUrlRouter;
 	nonMessageTokenSource(): NonMessageTokenSource;
 	hasExperimentalContextRolloverTools(): boolean;
 	takeExperimentalContextRolloverRequest(context: AgentTurnEndContext | undefined): boolean;
@@ -815,7 +818,7 @@ export class SessionMaintenance {
 	 * reference path at match time, so retitled plans are covered.
 	 */
 	#withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
-		const planMatcher = createPlanReadMatcher(() => this.#host.planReferencePath());
+		const planMatcher = createPlanReadMatcher(() => this.#host.planReferencePath(), this.#host.urlRouter);
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 

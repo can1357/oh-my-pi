@@ -16,6 +16,7 @@ import { buildArgumentCompletions } from "../../../src/slash-commands/builtin-co
 import { Composer, inCompletionContext } from "../../../src/ui/composer";
 import { getTestModel } from "../../helpers/model-fixtures";
 import { key, sendKey, sendPaste, settle } from "./harness";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 function type(composer: Composer, text: string): void {
 	for (const char of text) sendKey(composer.node, composer.field, key(char));
@@ -50,6 +51,7 @@ describe("composer completion sources", () => {
 				],
 				process.cwd(),
 				[],
+				() => InternalUrlRouter.builtins(),
 			),
 		});
 		type(composer, "/u");
@@ -94,6 +96,7 @@ describe("composer completion sources", () => {
 				],
 				process.cwd(),
 				[],
+				() => InternalUrlRouter.builtins(),
 			),
 		});
 		type(composer, "/mode");
@@ -122,7 +125,9 @@ describe("composer completion sources", () => {
 	});
 
 	test("sends an emoji proposal's label with one space after its glyph", async () => {
-		const composer = new Composer({ autocomplete: new PromptActionAutocompleteProvider([], process.cwd(), []) });
+		const composer = new Composer({
+			autocomplete: new PromptActionAutocompleteProvider([], process.cwd(), [], () => InternalUrlRouter.builtins()),
+		});
 		type(composer, ":rock");
 		await offered(composer, "🚀");
 		const popup = composer.node.children().find(child => child.kind === "overlay")!;
@@ -146,6 +151,7 @@ describe("composer completion sources", () => {
 			],
 			process.cwd(),
 			[],
+			() => InternalUrlRouter.builtins(),
 		);
 		const composer = new Composer();
 		// The welcome frame already accepts input before interactive mode binds its provider.
@@ -170,15 +176,20 @@ describe("composer completion sources", () => {
 	test("dispatches emoji, hash actions, GitHub references and internal URLs from the live token", async () => {
 		const composer = new Composer();
 		composer.setAutocomplete(
-			new PromptActionAutocompleteProvider([], process.cwd(), [
-				{
-					id: "clear",
-					label: "Clear draft",
-					keywords: ["clear"],
-					description: "Remove the prompt",
-					execute: () => composer.clearDraft(),
-				},
-			]),
+			new PromptActionAutocompleteProvider(
+				[],
+				process.cwd(),
+				[
+					{
+						id: "clear",
+						label: "Clear draft",
+						keywords: ["clear"],
+						description: "Remove the prompt",
+						execute: () => composer.clearDraft(),
+					},
+				],
+				() => InternalUrlRouter.builtins(),
+			),
 		);
 		type(composer, "ok (:joy");
 		await offered(composer, "😂");
@@ -201,6 +212,7 @@ describe("composer completion sources", () => {
 			[],
 			process.cwd(),
 			[],
+			() => InternalUrlRouter.builtins(),
 			undefined,
 			undefined,
 			undefined,
@@ -224,7 +236,9 @@ describe("composer completion sources", () => {
 		await Promise.all(
 			["alpha.txt", "beta.txt", "two words.txt"].map(name => Bun.write(path.join(dir.path(), name), "")),
 		);
-		const composer = new Composer({ autocomplete: new PromptActionAutocompleteProvider([], dir.path(), []) });
+		const composer = new Composer({
+			autocomplete: new PromptActionAutocompleteProvider([], dir.path(), [], () => InternalUrlRouter.builtins()),
+		});
 		type(composer, "read @");
 		await offered(composer, "@beta.txt");
 		type(composer, "alp");
@@ -259,7 +273,15 @@ describe("composer completion sources", () => {
 			},
 			scopedModels: () => [],
 		});
-		const provider = new PromptActionAutocompleteProvider([], process.cwd(), [], undefined, undefined, candidates);
+		const provider = new PromptActionAutocompleteProvider(
+			[],
+			process.cwd(),
+			[],
+			() => InternalUrlRouter.builtins(),
+			undefined,
+			undefined,
+			candidates,
+		);
 		const composer = new Composer({ autocomplete: provider });
 		type(composer, "compare ^");
 		expect(composer.completing()).toBe(false);
@@ -274,7 +296,7 @@ describe("composer completion sources", () => {
 	});
 
 	test("coalesces consecutive edits, publishes partial proposals and discards retired results", async () => {
-		const provider = new PromptActionAutocompleteProvider([], process.cwd(), []);
+		const provider = new PromptActionAutocompleteProvider([], process.cwd(), [], () => InternalUrlRouter.builtins());
 		const queries: string[] = [];
 		const release = Promise.withResolvers<void>();
 		const composer = new Composer({
@@ -322,6 +344,7 @@ describe("composer completion sources", () => {
 				],
 				process.cwd(),
 				[],
+				() => InternalUrlRouter.builtins(),
 			);
 			const composer = new Composer({ autocomplete: provider });
 			type(composer, "/switch l");

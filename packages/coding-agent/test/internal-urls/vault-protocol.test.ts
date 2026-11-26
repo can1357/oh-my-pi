@@ -427,7 +427,7 @@ describe("VaultProtocolHandler", () => {
 			await Bun.write(path.join(root, "scratch.md"), "body");
 			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
 
-			const resource = await InternalUrlRouter.instance().resolve("vault://Work/scratch.md");
+			const resource = await InternalUrlRouter.builtins().resolve("vault://Work/scratch.md");
 
 			expect(resource.content).toBe("body");
 			expect(resource.immutable).toBe(false);

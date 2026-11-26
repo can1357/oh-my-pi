@@ -13,6 +13,7 @@ import { RewindSelector } from "../src/ui/overlays/pickers/rewind-selector";
 import { SessionSelector } from "../src/ui/overlays/pickers/session-selector";
 import { TreeSelector } from "../src/ui/overlays/pickers/tree-selector";
 import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const CTRL_N = "\x0e";
 const CTRL_P = "\x10";
@@ -39,6 +40,7 @@ function mountTree(roots: SessionTreeNode[], currentLeafId: string, onSelect: (i
 				terminalHeight: 40,
 				onSelect,
 				onCancel: () => {},
+				router: InternalUrlRouter.builtins(),
 			}),
 		{ fullscreen: true },
 	);
@@ -464,6 +466,7 @@ describe("selector navigation keybindings", () => {
 						entries,
 						onSelect: id => selected.push(id),
 						onCancel: () => {},
+						router: InternalUrlRouter.builtins(),
 					}),
 				{ fullscreen: true },
 			);

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as os from "node:os";
 import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import { type DomQuery, domQueryFor } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/dom";
@@ -55,6 +56,7 @@ function actionBudget(tab: TernTab, actionMs: number): void {
 		deadline: Date.now() + actionMs + 1_000,
 		signal: new AbortController().signal,
 		session: { cwd: os.tmpdir() },
+		router: InternalUrlRouter.builtins(),
 		output: new RunOutput(),
 		screenshots: [],
 	});

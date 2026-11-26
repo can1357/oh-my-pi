@@ -114,7 +114,7 @@ describe("glob through linked skill entries", () => {
 		});
 		const entries = await listFiles(
 			{ path: "skill://fixture", type: "directory" },
-			{ filesystem: filesystem.shellFilesystem(), includeHidden: false },
+			{ filesystem: filesystem.shellFilesystem(), router: filesystem.router, includeHidden: false },
 		);
 		expect(entries.map(entry => entry.path)).toEqual([
 			"skill://fixture/SKILL.md",

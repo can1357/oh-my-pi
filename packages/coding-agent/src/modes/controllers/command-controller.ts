@@ -1728,7 +1728,7 @@ export class CommandController {
 		}
 
 		const cwd = this.ctx.sessionManager.getCwd();
-		const resolvedPath = resolveToCwd(unquoted, cwd);
+		const resolvedPath = resolveToCwd(unquoted, cwd, this.ctx.session.urlRouter);
 
 		// If the directory doesn't exist, offer to create it.
 		let isDirectory: boolean;

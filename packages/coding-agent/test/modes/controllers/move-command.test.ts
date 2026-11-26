@@ -2,11 +2,16 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext, WorkingKind } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as sessionWorktree from "@oh-my-pi/pi-coding-agent/session/session-worktree";
 
-function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void>) {
+function createMoveContext(
+	sourceDir: string,
+	settingsFlush?: () => Promise<void>,
+	urlRouter: InternalUrlRouter = InternalUrlRouter.builtins(),
+) {
 	const state = { cwd: sourceDir, movedTo: undefined as string | undefined, completedBtwVisible: true };
 	const present = vi.fn();
 	const applyCwdChange = vi.fn(async (cwd: string) => {
@@ -34,7 +39,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		return moved;
 	});
 	const ctx = {
-		session: { isStreaming: false, moveSession },
+		session: { isStreaming: false, moveSession, urlRouter },
 		sessionManager: {
 			getCwd: () => state.cwd,
 			getSessionId: () => "session-1",
@@ -300,6 +305,40 @@ describe("CommandController /move", () => {
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(withBtwSessionMove).not.toHaveBeenCalled();
 			expect(state.completedBtwVisible).toBe(true);
+			expect(state.movedTo).toBeUndefined();
+			expect(state.cwd).toBe(sourceDir);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a URL of a scheme the session registered instead of moving into a local lookalike", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-session-scheme-"));
+		try {
+			// A directory that only looks like the URL: resolving `db://rows` as a path lands here.
+			await fs.mkdir(path.join(sourceDir, "db:", "rows"), { recursive: true });
+			const schemes = new UrlSchemeTable("Host URI scheme");
+			schemes.replace([
+				{
+					scheme: "db",
+					spec: { backing: "remote", selectors: "none", immutable: true },
+					resolve: async () => {
+						throw new Error("db:// is never resolved here");
+					},
+				},
+			]);
+			const { ctx, state, withBtwSessionMove } = createMoveContext(
+				sourceDir,
+				undefined,
+				new InternalUrlRouter([schemes]),
+			);
+			const controller = new CommandController(ctx);
+
+			await expect(controller.handleMoveCommand("db://rows")).rejects.toThrow('internal scheme "db://"');
+
+			expect(withBtwSessionMove).not.toHaveBeenCalled();
+			expect(ctx.session.moveSession).not.toHaveBeenCalled();
+			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(state.movedTo).toBeUndefined();
 			expect(state.cwd).toBe(sourceDir);
 		} finally {

@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
+- Internal URLs resolve through a per-session router: `InternalUrlRouter.instance()`, `register()` and `unregister()` are removed. `InternalUrlRouter.builtins()` is the process-wide router of OMP's built-in schemes, `session.urlRouter` / `ResolveContext.router` resolve a session's own schemes before the built-ins, and `InternalUrlRouter.isBuiltin()` is static. `RpcHostUriBridge` takes the session's host-URI scheme table instead of a router ([#20520](https://github.com/can1357/oh-my-pi/pull/20520) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Added
 
@@ -17,6 +18,7 @@
 - URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
 - URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
 - Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
+- RPC host URI schemes (`set_host_uri_schemes`) belong to the RPC session that registered them and the task subagents it runs on the main thread: other sessions in the same process no longer resolve them, and standard schemes (`http`, `file`, …) are refused like built-in ones ([#20520](https://github.com/can1357/oh-my-pi/pull/20520) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Fixed
 

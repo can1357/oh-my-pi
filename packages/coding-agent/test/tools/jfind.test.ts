@@ -583,11 +583,13 @@ describe("jfind cascade", () => {
 			includeHidden: false,
 		});
 		expect(result.stats.listed).toBe(1);
-		expect(result.hits.map(hit => resolveSearchResultPath(root.path, hit.rel))).toEqual(["omp://tools/read.md"]);
+		expect(result.hits.map(hit => resolveSearchResultPath(root.path, hit.rel, filesystem.router))).toEqual([
+			"omp://tools/read.md",
+		]);
 	});
 
 	it("walks the omp root in place: every embedded doc is listed and hits resolve to doc URLs", async () => {
-		const completions = (await InternalUrlRouter.instance().complete("omp", "")) ?? [];
+		const completions = (await InternalUrlRouter.builtins().complete("omp", "")) ?? [];
 		const docs = new Set(completions.map(completion => completion.value));
 		const filesystem = urlFs(process.cwd());
 		const root = await resolveSearchRoot(filesystem, "omp://", process.cwd());
@@ -609,7 +611,9 @@ describe("jfind cascade", () => {
 			includeHidden: false,
 		});
 		expect(result.stats.listed).toBe(docs.size);
-		expect(result.hits.map(hit => resolveSearchResultPath(root.path, hit.rel))).toEqual(["omp://tools/read.md"]);
+		expect(result.hits.map(hit => resolveSearchResultPath(root.path, hit.rel, filesystem.router))).toEqual([
+			"omp://tools/read.md",
+		]);
 	});
 
 	it("rejects a missing scope path or a line selector before spending any judgment", async () => {

@@ -6,7 +6,7 @@ import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOption
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
-import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import type { InternalUrlRouter, LocalProtocolOptions } from "../internal-urls";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
@@ -40,6 +40,8 @@ export interface SessionProviderBoundaryHost {
 	settings: Settings;
 	model(): Model | undefined;
 	localProtocolOptions(): LocalProtocolOptions;
+	/** The session's URL router: locates internal-URL image attachments. */
+	urlRouter: InternalUrlRouter;
 	/** Input-image descriptions for models that cannot see images; side requests carrying history as text use them. */
 	imageDescriptions: ImageDescriptions | undefined;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
@@ -82,7 +84,7 @@ export class SessionProviderBoundary {
 				const source = imageAttachmentSource(image)?.path;
 				try {
 					if (source) {
-						const router = InternalUrlRouter.instance();
+						const router = this.#host.urlRouter;
 						if (!router.canHandle(source)) return [{ label, uri, image, sourcePath: source }];
 						const sourcePath = router.locateSync(source, {
 							localProtocolOptions: this.#host.localProtocolOptions(),

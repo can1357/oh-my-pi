@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter, type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
+import { type InternalUrlRouter, type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
 import { resolveToCwd } from "../tools/path-utils";
 
 /**
@@ -10,10 +10,10 @@ import { resolveToCwd } from "../tools/path-utils";
  */
 export function resolvePlanFilePath(
 	planFilePath: string,
-	options: { localProtocolOptions: LocalProtocolOptions; cwd: string },
+	options: { localProtocolOptions: LocalProtocolOptions; cwd: string; router: InternalUrlRouter },
 ): string {
-	const router = InternalUrlRouter.instance();
-	if (!router.canHandle(planFilePath)) return resolveToCwd(planFilePath, options.cwd);
+	const router = options.router;
+	if (!router.canHandle(planFilePath)) return resolveToCwd(planFilePath, options.cwd, router);
 	const located = router.locateSync(planFilePath, {
 		cwd: options.cwd,
 		localProtocolOptions: options.localProtocolOptions,
@@ -25,7 +25,7 @@ export function resolvePlanFilePath(
 /** Reads a plan from an internal URL or cwd-relative filesystem path. */
 export async function readPlanFile(
 	planFilePath: string,
-	options: { localProtocolOptions: LocalProtocolOptions; cwd: string },
+	options: { localProtocolOptions: LocalProtocolOptions; cwd: string; router: InternalUrlRouter },
 ): Promise<string | null> {
 	const resolvedPath = resolvePlanFilePath(planFilePath, options);
 	try {

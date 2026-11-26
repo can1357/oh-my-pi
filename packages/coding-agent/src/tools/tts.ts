@@ -18,6 +18,7 @@ import ttsDescription from "../prompts/tools/tts.md" with { type: "text" };
 import { DEFAULT_TTS_VOICE, TTS_LOCAL_VOICES } from "../tts/models";
 import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 
 import { cfgTtsLocalSpeed, cfgTtsLocalVoice } from "../tts/settings";
@@ -203,7 +204,7 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
 		const cwd = ctx.sessionManager.getCwd();
-		const outputPath = resolveToCwd(params.output_path, cwd);
+		const outputPath = resolveToCwd(params.output_path, cwd, InternalUrlRouter.builtins());
 		const displayPath = formatPathRelativeToCwd(outputPath, cwd);
 		const codec: TtsCodec = outputPath.toLowerCase().endsWith(".wav") ? "wav" : "mp3";
 

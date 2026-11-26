@@ -15,6 +15,7 @@ import { buildSystemPrompt, projectSystemPromptToolMetadata } from "../src/syste
 import { createMCPProxyTools } from "../src/task/executor";
 import { createMockConnection, createMockTransport } from "./mcp-test-utils";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 type CapturedRequest = { method: string; params: Record<string, unknown> | undefined };
 
@@ -103,6 +104,7 @@ describe("Skill URI reader capability", () => {
 				toolNames: [definition.name],
 				tools,
 				workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+				urlRouter: InternalUrlRouter.builtins(),
 			});
 			const text = systemPrompt.join("\n\n");
 			expect(text).toContain("bridge-skill");

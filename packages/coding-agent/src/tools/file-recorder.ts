@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { extractUriScheme } from "../internal-urls/parse";
-import { InternalUrlRouter } from "../internal-urls/router";
+import { contextUrlRouter } from "../internal-urls/context";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import type { ResolveContext } from "../internal-urls/types";
 import { formatPathRelativeToCwd, resolveSearchResultPath } from "./path-utils";
 
@@ -30,13 +31,19 @@ export function createFileRecorder(): {
  * virtual-root prefixes stripped and the result joined onto `basePath` (a host
  * directory or URL), relative to cwd when inside it. Paths outside cwd remain absolute.
  */
-export function formatResultPath(filePath: string, isDirectory: boolean, basePath: string, cwd: string): string {
-	if (InternalUrlRouter.instance().canHandle(filePath)) return filePath;
+export function formatResultPath(
+	filePath: string,
+	isDirectory: boolean,
+	basePath: string,
+	cwd: string,
+	router: InternalUrlRouter,
+): string {
+	if (router.canHandle(filePath)) return filePath;
 	const cleanPath = filePath.startsWith("/") ? filePath.slice(1) : filePath;
 	if (isDirectory) {
-		return formatPathRelativeToCwd(resolveSearchResultPath(basePath, cleanPath), cwd);
+		return formatPathRelativeToCwd(resolveSearchResultPath(basePath, cleanPath, router), cwd, { router });
 	}
-	return formatPathRelativeToCwd(basePath, cwd);
+	return formatPathRelativeToCwd(basePath, cwd, { router });
 }
 
 /**
@@ -50,7 +57,7 @@ export async function resultSnapshotPath(
 	cwd: string,
 	context: ResolveContext,
 ): Promise<string | undefined> {
-	const router = InternalUrlRouter.instance();
+	const router = contextUrlRouter(context);
 	if (!router.canHandle(resultPath)) return path.resolve(cwd, resultPath);
 	const scheme = extractUriScheme(resultPath);
 	if (scheme === undefined || router.spec(scheme)?.immutable) return undefined;

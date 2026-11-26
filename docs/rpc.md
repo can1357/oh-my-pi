@@ -893,7 +893,10 @@ unregistered; an empty list clears all host schemes.
 
 Every built-in scheme (`local://`, `skill://`, `security://`,
 `mcp://`, …) is reserved: RPC hosts cannot register or shadow one, and the
-request fails with `Host URI scheme is reserved by OMP: <scheme>://`.
+request fails with `Host URI scheme is reserved by OMP: <scheme>://`. Standard
+schemes (`http`, `https`, `file`, `ftp`, `mailto`, …) are refused with
+`Host URI scheme is a standard scheme: <scheme>://`. A refused request changes
+nothing.
 
 ## Event Stream Schema
 
@@ -1715,8 +1718,12 @@ a message or fall back to `content` for textual error surfacing:
 - The agent's `edit` tool does not target host URIs. Hosts that want to
   mutate virtual files expose `write` and let the model use the `write` tool
   with replacement content.
-- Schemes are global to the process; `set_host_uri_schemes` replaces the
-  previous set, unregistering anything not in the new list.
+- Schemes belong to the RPC session: its tools resolve them, and so do the
+  task subagents it runs on the main thread, fresh or revived from a parked
+  transcript, including schemes registered after the spawn. Other sessions in
+  the same process, and subagents placed in a worker thread
+  (`task.workerThreads`), do not. `set_host_uri_schemes` replaces the previous
+  set, dropping anything not in the new list.
 - Schemes are normalized to lowercase before registration.
 - Send `content` for successful reads; the current bridge treats an omitted
   value as an empty string. `contentType` defaults to `text/plain` and its

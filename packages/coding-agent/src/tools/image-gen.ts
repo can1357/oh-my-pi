@@ -25,6 +25,7 @@ import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "te
 import { journalCompletion } from "../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../session/role-models";
 import { saveImagesToTemp } from "../utils/image-temp";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveReadPath, specialFileKind } from "./path-utils";
 
 const IMAGE_TIMEOUT = 3 * 60 * 1000;
@@ -93,7 +94,7 @@ function normalizeDataUrl(data: string): { data: string; mimeType?: string } {
 }
 
 async function loadImageFromPath(imagePath: string, cwd: string): Promise<{ data: string; mimeType: string }> {
-	const resolved = resolveReadPath(imagePath, cwd);
+	const resolved = resolveReadPath(imagePath, cwd, InternalUrlRouter.builtins());
 	try {
 		const stat = await fs.stat(resolved);
 		const kind = specialFileKind(stat);

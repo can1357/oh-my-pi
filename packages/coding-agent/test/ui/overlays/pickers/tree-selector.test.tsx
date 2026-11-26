@@ -6,6 +6,7 @@ import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { TreeSelector, type TreeSelectorNode } from "../../../../src/ui/overlays/pickers/tree-selector";
 import { pickerSuite } from "./harness";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 function build(): { roots: TreeSelectorNode[]; leaf: string } {
 	let n = 0;
@@ -48,7 +49,14 @@ test("the ASCII tree paints fork guides and active-path bullets", () => {
 		const { roots, leaf } = build();
 		try {
 			const [node] = resolveChildren(
-				<TreeSelector roots={roots} currentLeafId={leaf} terminalHeight={30} onSelect={noop} onCancel={noop} />,
+				<TreeSelector
+					router={InternalUrlRouter.builtins()}
+					roots={roots}
+					currentLeafId={leaf}
+					terminalHeight={30}
+					onSelect={noop}
+					onCancel={noop}
+				/>,
 			)();
 			const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
 			const rows = paintNode(staticEnvironment(theme), node!, 120).rows.map(stripEscapes);
@@ -65,13 +73,21 @@ pickerSuite({
 		if (caseName === "empty")
 			return {
 				view: () => (
-					<TreeSelector roots={[]} currentLeafId={null} terminalHeight={10} onSelect={noop} onCancel={noop} />
+					<TreeSelector
+						router={InternalUrlRouter.builtins()}
+						roots={[]}
+						currentLeafId={null}
+						terminalHeight={10}
+						onSelect={noop}
+						onCancel={noop}
+					/>
 				),
 			};
 		const { roots, leaf } = build();
 		return {
 			view: () => (
 				<TreeSelector
+					router={InternalUrlRouter.builtins()}
 					roots={roots}
 					currentLeafId={leaf}
 					terminalHeight={30}

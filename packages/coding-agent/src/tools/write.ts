@@ -34,7 +34,7 @@ import {
 } from "@oh-my-pi/pi-utils/ar";
 import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/normalize";
 
-import { InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
+import { type InternalUrlRouter, sessionResolveContext, sessionUrlRouter, sessionWriteContext } from "../internal-urls";
 import { readSnapshot } from "../commit/selective/journal";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
 
@@ -543,7 +543,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (typeof rawPath !== "string") return "write";
 		// Unwrap a hashline `[path#TAG]` wrapper first (parity with execute) so a
 		// wrapped `[scheme://h/x#ABCD]` gets the same tier as the bare URL.
-		return InternalUrlRouter.instance().writeTier(
+		return sessionUrlRouter(this.session).writeTier(
 			unwrapHashlineHeaderPath(rawPath),
 			typeof content === "string" ? content : undefined,
 			this.session,
@@ -563,7 +563,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		const rawPath = (args as Partial<WriteParams> | null | undefined)?.path;
 		if (typeof rawPath !== "string" || rawPath.length === 0) return undefined;
-		const key = approvalTargetKey(this.session.cwd, unwrapHashlineHeaderPath(rawPath));
+		const key = approvalTargetKey(
+			this.session.cwd,
+			unwrapHashlineHeaderPath(rawPath),
+			sessionUrlRouter(this.session),
+		);
 		return key === undefined ? undefined : [key];
 	};
 	readonly label = "Write";
@@ -728,7 +732,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					throw new ToolError(error instanceof Error ? error.message : String(error));
 				}
 
-				const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
+				const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd, { router: sessionUrlRouter(this.session) })}:${
 					resolvedArchivePath.archiveSubPath
 				}`;
 				return {
@@ -895,7 +899,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		// A `<file>:conflict://N` target is normalized to its URL; the note tells the model.
-		const router = InternalUrlRouter.instance();
+		const router = sessionUrlRouter(this.session);
 		const recovered = recoverConflictUriPrefix(router.peelWriteSelector(unwrapHashlineHeaderPath(rawPath), "write"));
 		const path = recovered.path;
 		const target = router.writeTarget(path);
@@ -914,7 +918,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const { text: cleanContent, stripped } = verbatim
 				? { text: content, stripped: false }
 				: stripWriteContent(this.session, content, {
-						targetPath: target ? undefined : resolveToCwd(path, this.session.cwd),
+						targetPath: target ? undefined : resolveToCwd(path, this.session.cwd, sessionUrlRouter(this.session)),
 					});
 			// One UTF-8 scan per call, shared by the progress and result lines.
 			const cleanBytes = Buffer.byteLength(cleanContent, "utf8");
@@ -981,7 +985,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				emitWriteProgress(
 					onUpdate,
 					cleanBytes,
-					`${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
+					`${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd, { router: sessionUrlRouter(this.session) })}:${
 						resolvedArchivePath.archiveSubPath
 					}`,
 					resolvedArchivePath.absolutePath,
@@ -1027,7 +1031,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await enforcePlanModeWrite(this.session, path, { op: "create", signal });
 			const absolutePath = await resolvePlanPath(this.session, path, signal);
 			// A located URL write keeps its URL identity in progress, results, and the hashline header.
-			const displayPath = target ? path : formatPathRelativeToCwd(absolutePath, this.session.cwd);
+			const displayPath = target ? path : formatPathRelativeToCwd(absolutePath, this.session.cwd, { router });
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
 			const existing = await fs.stat(absolutePath).catch(() => undefined);

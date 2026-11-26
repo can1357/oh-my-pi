@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -98,6 +99,7 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: opts.nativeTools,
 			inlineToolDescriptors: opts.inlineToolDescriptors,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		return systemPrompt.join("\n\n");
 	}
@@ -123,6 +125,7 @@ describe("system prompt tool inventory", () => {
 			tools: opts.tools,
 			mountedCommands: [{ name: "fetch", summary: "Fetches URLs." }],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		return systemPrompt.join("\n\n");
 	}
@@ -165,6 +168,7 @@ describe("system prompt tool inventory", () => {
 			inlineToolDescriptors: false,
 			mountedCommands: [{ name: "web_search", summary: "Searches the web.", dynamic: opts.dynamic }],
 			toolCommandDocs: "Mounted web search documentation.",
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 		return { text, inventory: opts.nativeTools ? inventoryFrom(text) : text };
@@ -229,6 +233,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["read"],
 			tools,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -256,6 +261,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["custom-read"],
 			tools,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -334,6 +340,7 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: false,
 			inlineToolDescriptors: false,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const firstText = firstPrompt.systemPrompt.join("\n\n");
 		expect(firstText.indexOf("type edit_wire_r1 = (")).toBeLessThan(firstText.indexOf("type read_wire_r1 = ("));
@@ -360,6 +367,7 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: false,
 			inlineToolDescriptors: false,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const secondText = secondPrompt.systemPrompt.join("\n\n");
 		expect(secondText.indexOf("type edit_wire_r2 = (")).toBeLessThan(secondText.indexOf("type read_wire_r2 = ("));
@@ -440,6 +448,7 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: true,
 			inlineToolDescriptors: false,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		expect(inventoryFrom(systemPrompt.join("\n\n")).trim()).toBe("# Tool Inventory\napply_patch, read");
 	});
@@ -487,6 +496,7 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: true,
 			inlineToolDescriptors: false,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		expect(inventoryFrom(systemPrompt.join("\n\n")).trim()).toBe("# Tool Inventory\napply_patch, read");
 		expect(Array.from(reads.values())).toEqual([
@@ -513,6 +523,7 @@ describe("system prompt tool inventory", () => {
 			tools: TOOLS,
 			mountedCommands: [{ name: "lsp", summary: "Language server." }],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 		expect(text).toContain("MUST use `lsp` for definitions");
@@ -530,6 +541,7 @@ describe("system prompt tool inventory", () => {
 				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 				delegationBias,
 				eagerTasks,
+				urlRouter: InternalUrlRouter.builtins(),
 			});
 			const count = (needle: string) => systemPrompt[0].split(needle).length - 1;
 			return [count("Map unknown code via `task`"), count("Unfamiliar subsystem?"), count("Inline first.")];
@@ -555,6 +567,7 @@ describe("system prompt tool inventory", () => {
 			nativeTools: true,
 			inlineToolDescriptors: false,
 			evalPreludes: [{ name: "browser" }, { name: "computer", guidance: "COMPUTER-GUIDANCE" }],
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		expect(systemPrompt[1]).toBe("COMPUTER-GUIDANCE");
 		expect(systemPrompt.filter(block => block.includes("COMPUTER-GUIDANCE"))).toHaveLength(1);
@@ -624,6 +637,7 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: true,
 			inlineToolDescriptors: true,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 		expect(text).toContain("type eval = (");
@@ -639,6 +653,7 @@ describe("system prompt tool inventory", () => {
 			skills: [],
 			rules: [],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		expect(inventoryNames(systemPrompt.join("\n\n"))).toEqual([...DEFAULT_SYSTEM_PROMPT_TOOL_NAMES]);
 	});
@@ -667,6 +682,7 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 			nativeTools: true,
 			inlineToolDescriptors: true,
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -753,6 +769,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["fetch"],
 			tools,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -794,6 +811,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["read"],
 			tools: TOOLS,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -848,6 +866,7 @@ describe("system prompt tool inventory", () => {
 			],
 			rules: [],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -870,6 +889,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["bash"],
 			tools: TOOLS,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -894,6 +914,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["glob"],
 			tools: TOOLS,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -919,6 +940,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["read"],
 			tools: TOOLS,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -945,6 +967,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["read"],
 			tools: TOOLS,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -963,6 +986,7 @@ describe("system prompt tool inventory", () => {
 			toolNames: ["read"],
 			tools: TOOLS,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		const text = systemPrompt.join("\n\n");
 
@@ -981,6 +1005,7 @@ describe("system prompt tool inventory", () => {
 				rules: [],
 				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 				scoutAvailable: true,
+				urlRouter: InternalUrlRouter.builtins(),
 			})
 		).systemPrompt.join("\n\n");
 		const withoutScout = (
@@ -992,6 +1017,7 @@ describe("system prompt tool inventory", () => {
 				rules: [],
 				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 				scoutAvailable: false,
+				urlRouter: InternalUrlRouter.builtins(),
 			})
 		).systemPrompt.join("\n\n");
 
@@ -1010,12 +1036,18 @@ describe("system prompt tool inventory", () => {
 			nativeTools: true,
 			inlineToolDescriptors: false,
 		};
-		const withoutTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
+		const withoutTodo = (
+			await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"], urlRouter: InternalUrlRouter.builtins() })
+		).systemPrompt.join("\n\n");
 		expect(withoutTodo).not.toContain("Update todos");
 
-		const withTodo = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash", "todo"] })).systemPrompt.join(
-			"\n\n",
-		);
+		const withTodo = (
+			await buildSystemPrompt({
+				...opts,
+				toolNames: ["read", "bash", "todo"],
+				urlRouter: InternalUrlRouter.builtins(),
+			})
+		).systemPrompt.join("\n\n");
 		expect(withTodo).toContain("Update todos");
 	});
 
@@ -1031,11 +1063,15 @@ describe("system prompt tool inventory", () => {
 			nativeTools: true,
 			inlineToolDescriptors: false,
 		};
-		const withRead = (await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"] })).systemPrompt.join("\n\n");
+		const withRead = (
+			await buildSystemPrompt({ ...opts, toolNames: ["read", "bash"], urlRouter: InternalUrlRouter.builtins() })
+		).systemPrompt.join("\n\n");
 		expect(withRead).toContain("help://read/urls");
 		expect(withRead).not.toContain("named service");
 
-		const withoutRead = (await buildSystemPrompt({ ...opts, toolNames: ["bash"] })).systemPrompt.join("\n\n");
+		const withoutRead = (
+			await buildSystemPrompt({ ...opts, toolNames: ["bash"], urlRouter: InternalUrlRouter.builtins() })
+		).systemPrompt.join("\n\n");
 		expect(withoutRead).not.toContain("help://read/urls");
 		expect(withoutRead).toContain("named service");
 	});

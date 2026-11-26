@@ -21,6 +21,7 @@ import { TreeSelector, type TreeSelectorNode } from "../src/ui/overlays/pickers/
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal } from "./helpers/mode-terminal";
 import { nativeShell } from "./helpers/native-shell";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 /** The lookup of the native-shell helper these checks read the document through. */
 interface NativeDocument {
@@ -277,6 +278,7 @@ describe("inline selectors in a Tern terminal", () => {
 		];
 		const tree = mode.showEditorAreaDialog(() => (
 			<TreeSelector
+				router={InternalUrlRouter.builtins()}
 				roots={roots}
 				currentLeafId="result"
 				terminalHeight={40}

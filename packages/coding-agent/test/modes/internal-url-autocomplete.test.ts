@@ -47,15 +47,23 @@ describe("internal-url-autocomplete", () => {
 
 	describe("extractInternalUrlContext", () => {
 		it("detects a bare scheme with the full :// typed", () => {
-			expect(extractInternalUrlContext("local://")).toEqual({ scheme: "local", query: "", token: "local://" });
+			expect(extractInternalUrlContext("local://", InternalUrlRouter.builtins())).toEqual({
+				scheme: "local",
+				query: "",
+				token: "local://",
+			});
 		});
 
 		it("treats a single slash as the same in-progress token (preserving exact text)", () => {
-			expect(extractInternalUrlContext("local:/")).toEqual({ scheme: "local", query: "", token: "local:/" });
+			expect(extractInternalUrlContext("local:/", InternalUrlRouter.builtins())).toEqual({
+				scheme: "local",
+				query: "",
+				token: "local:/",
+			});
 		});
 
 		it("captures the host/path query and the boundary-delimited token", () => {
-			expect(extractInternalUrlContext("look at skill://hum")).toEqual({
+			expect(extractInternalUrlContext("look at skill://hum", InternalUrlRouter.builtins())).toEqual({
 				scheme: "skill",
 				query: "hum",
 				token: "skill://hum",
@@ -63,51 +71,51 @@ describe("internal-url-autocomplete", () => {
 		});
 
 		it("keeps nested paths in the query", () => {
-			expect(extractInternalUrlContext("local://dir/file.json")).toMatchObject({
+			expect(extractInternalUrlContext("local://dir/file.json", InternalUrlRouter.builtins())).toMatchObject({
 				scheme: "local",
 				query: "dir/file.json",
 			});
 		});
 
 		it("ignores schemes with no completion handler (http/https)", () => {
-			expect(extractInternalUrlContext("https://example.com/x")).toBeNull();
+			expect(extractInternalUrlContext("https://example.com/x", InternalUrlRouter.builtins())).toBeNull();
 		});
 
 		it("does not fire on a bare colon in prose", () => {
-			expect(extractInternalUrlContext("note: hello")).toBeNull();
-			expect(extractInternalUrlContext("TODO: ship it")).toBeNull();
+			expect(extractInternalUrlContext("note: hello", InternalUrlRouter.builtins())).toBeNull();
+			expect(extractInternalUrlContext("TODO: ship it", InternalUrlRouter.builtins())).toBeNull();
 		});
 
 		it("requires at least one slash after the colon", () => {
-			expect(extractInternalUrlContext("local:")).toBeNull();
+			expect(extractInternalUrlContext("local:", InternalUrlRouter.builtins())).toBeNull();
 		});
 	});
 
 	describe("getInternalUrlSuggestions", () => {
 		it("lists every skill for a bare skill:// and prefixes the scheme", async () => {
-			const result = await getInternalUrlSuggestions("skill://");
+			const result = await getInternalUrlSuggestions("skill://", InternalUrlRouter.builtins());
 			expect(result).not.toBeNull();
 			expect(result!.prefix).toBe("skill://");
 			expect(result!.items.map(i => i.value).sort()).toEqual(["skill://humanizer", "skill://react", "skill://tla"]);
 		});
 
 		it("fuzzy-filters candidates by the typed query", async () => {
-			const result = await getInternalUrlSuggestions("skill://hum");
+			const result = await getInternalUrlSuggestions("skill://hum", InternalUrlRouter.builtins());
 			expect(result!.items.map(i => i.value)).toEqual(["skill://humanizer"]);
 		});
 
 		it("ranks an exact/prefix match ahead of a scattered subsequence", async () => {
 			// "ra" is a prefix of "react" (score 80) and a subsequence of "humanizer" (lower).
-			const result = await getInternalUrlSuggestions("skill://ra");
+			const result = await getInternalUrlSuggestions("skill://ra", InternalUrlRouter.builtins());
 			expect(result!.items[0]!.value).toBe("skill://react");
 		});
 
 		it("returns null when no candidate matches", async () => {
-			expect(await getInternalUrlSuggestions("skill://zzzzz")).toBeNull();
+			expect(await getInternalUrlSuggestions("skill://zzzzz", InternalUrlRouter.builtins())).toBeNull();
 		});
 
 		it("returns null for schemes without a completion handler", async () => {
-			expect(await getInternalUrlSuggestions("issue://")).toBeNull();
+			expect(await getInternalUrlSuggestions("issue://", InternalUrlRouter.builtins())).toBeNull();
 		});
 
 		it("percent-encodes a configured ssh host with reserved characters while matching a raw query", async () => {
@@ -126,6 +134,7 @@ describe("internal-url-autocomplete", () => {
 			vi.spyOn(capability, "loadCapability").mockResolvedValue(result as CapabilityResult<unknown>);
 			const suggestions = await getInternalUrlSuggestions(
 				"ssh://alice@pr",
+				InternalUrlRouter.builtins(),
 				"/tmp/proj",
 				new AbortController().signal,
 			);
@@ -137,17 +146,17 @@ describe("internal-url-autocomplete", () => {
 
 	describe("router.complete dispatch", () => {
 		it("returns candidates for a completion-capable scheme", async () => {
-			const candidates = await InternalUrlRouter.instance().complete("rule", "");
+			const candidates = await InternalUrlRouter.builtins().complete("rule", "");
 			expect(candidates?.map(c => c.value).sort()).toEqual(["python", "style"]);
 		});
 
 		it("returns null for a known scheme that opted out of completion", async () => {
-			expect(await InternalUrlRouter.instance().complete("issue", "")).toBeNull();
-			expect(await InternalUrlRouter.instance().complete("pr", "")).toBeNull();
+			expect(await InternalUrlRouter.builtins().complete("issue", "")).toBeNull();
+			expect(await InternalUrlRouter.builtins().complete("pr", "")).toBeNull();
 		});
 
 		it("returns null for an unknown scheme", async () => {
-			expect(await InternalUrlRouter.instance().complete("bogus", "")).toBeNull();
+			expect(await InternalUrlRouter.builtins().complete("bogus", "")).toBeNull();
 		});
 	});
 
@@ -181,19 +190,21 @@ describe("internal-url-autocomplete", () => {
 
 	describe("isInternalUrlPrefix", () => {
 		it("recognizes a completion prefix token", () => {
-			expect(isInternalUrlPrefix("skill://hum")).toBe(true);
-			expect(isInternalUrlPrefix("local://")).toBe(true);
+			expect(isInternalUrlPrefix("skill://hum", InternalUrlRouter.builtins())).toBe(true);
+			expect(isInternalUrlPrefix("local://", InternalUrlRouter.builtins())).toBe(true);
 		});
 
 		it("rejects non-url prefixes", () => {
-			expect(isInternalUrlPrefix("@src/foo")).toBe(false);
-			expect(isInternalUrlPrefix("/model")).toBe(false);
+			expect(isInternalUrlPrefix("@src/foo", InternalUrlRouter.builtins())).toBe(false);
+			expect(isInternalUrlPrefix("/model", InternalUrlRouter.builtins())).toBe(false);
 		});
 	});
 
 	describe("PromptActionAutocompleteProvider integration", () => {
 		it("returns url suggestions before falling back to file/emoji completion", async () => {
-			const provider = new PromptActionAutocompleteProvider([], process.cwd(), []);
+			const provider = new PromptActionAutocompleteProvider([], process.cwd(), [], () =>
+				InternalUrlRouter.builtins(),
+			);
 			const line = "look at skill://hum";
 			const result = await provider.getSuggestions([line], 0, line.length);
 			expect(result?.prefix).toBe("skill://hum");
@@ -201,7 +212,9 @@ describe("internal-url-autocomplete", () => {
 		});
 
 		it("applies the selected url candidate in place", async () => {
-			const provider = new PromptActionAutocompleteProvider([], process.cwd(), []);
+			const provider = new PromptActionAutocompleteProvider([], process.cwd(), [], () =>
+				InternalUrlRouter.builtins(),
+			);
 			const line = "look at skill://hum";
 			const result = await provider.getSuggestions([line], 0, line.length);
 			const applied = provider.applyCompletion([line], 0, line.length, result!.items[0]!, result!.prefix);

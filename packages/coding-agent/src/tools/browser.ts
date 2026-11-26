@@ -52,6 +52,7 @@ import {
 	ternBlocksTaken,
 } from "./browser/tab-supervisor";
 import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { resolveToCwd } from "./path-utils";
 import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -204,7 +205,7 @@ export function resolveBrowserKind(
 		return { kind: "connected", cdpUrl: app.replace(/\/+$/, "") };
 	}
 	if (app && !APP_KEYWORDS.includes(app)) {
-		const exe = resolveToCwd(app, session.cwd);
+		const exe = resolveToCwd(app, session.cwd, sessionUrlRouter(session));
 		const args = resolveSpawnArgs(exe, params.argv, session.cwd);
 		if (params.insecure && !args.includes("--ignore-certificate-errors")) {
 			args.push("--ignore-certificate-errors");
@@ -693,7 +694,10 @@ async function openOnKind(
 	notes: readonly string[],
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
-	const downloadsPath = params.downloads === undefined ? undefined : resolveToCwd(params.downloads, session.cwd);
+	const downloadsPath =
+		params.downloads === undefined
+			? undefined
+			: resolveToCwd(params.downloads, session.cwd, sessionUrlRouter(session));
 	details.browser = kind.kind;
 
 	// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
@@ -766,7 +770,7 @@ async function openOnKind(
 			}
 			stage = `opening tab ${JSON.stringify(name)}`;
 			const initScripts = await untilAborted(openSignal, () =>
-				resolveInitScriptSources(params.init_scripts, session.cwd),
+				resolveInitScriptSources(params.init_scripts, session.cwd, sessionUrlRouter(session)),
 			);
 			// Worker-init options cannot be applied to a live tab: recycle it so the
 			// reopened tab starts with them.

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as os from "node:os";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
@@ -89,6 +90,7 @@ function budget(tab: TernTab, remainingMs = 80, signal = new AbortController().s
 		deadline: Date.now() + remainingMs + 1_000,
 		signal,
 		session: { cwd: os.tmpdir() },
+		router: InternalUrlRouter.builtins(),
 		output: new RunOutput(),
 		screenshots: [],
 	});

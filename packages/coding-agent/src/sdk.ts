@@ -158,7 +158,14 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionStateApi } from "./hindsight/state";
-import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
+import {
+	InternalUrlRouter,
+	LocalProtocolHandler,
+	type LocalProtocolOptions,
+	outRepliesActive,
+	SessionUrlSchemes,
+	type UrlSchemeSource,
+} from "./internal-urls";
 import { onJudgeRejection } from "./judgment";
 import { holdSharedLsp } from "./lsp/client";
 import { holdSharedMcp } from "./mcp/host/access";
@@ -1015,6 +1022,11 @@ export interface CreateAgentSessionOptions {
 
 	/** Override local:// protocol options for subagent local:// sharing. Default: uses the session's own artifacts dir and session ID. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/**
+	 * The spawning session's RPC host URI schemes (`ToolSession.hostUriSources`), resolved
+	 * after this session's own. Set only for a subagent on the parent's thread.
+	 */
+	parentHostUriSources?: readonly UrlSchemeSource[];
 
 	/** Settings instance. Default: Settings.init({ cwd, agentDir }) */
 	settings?: Settings;
@@ -1492,6 +1504,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		: undefined;
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
+		// No session: the standalone SDK builder lists the built-in schemes only.
+		urlRouter: InternalUrlRouter.builtins(),
 		customPrompt: options.customPrompt,
 		systemPromptTemplate: options.systemPromptTemplate,
 		skills: options.skills,
@@ -2692,7 +2706,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				activeToolNames.add(name);
 			}
 		};
+		// This session's own URL schemes; its tools and the AgentSession resolve through one router.
+		const urlSchemes = new SessionUrlSchemes(options.parentHostUriSources);
 		const toolSession: ToolSession = {
+			urlRouter: urlSchemes.router,
+			hostUriSources: urlSchemes.hostUriSources,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -3991,6 +4009,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
 			}),
 			createAnnotationsAPI,
+			urlSchemes.router,
 		);
 		// A dialog waits for the user, not the agent: the session lets the display sleep while one is open.
 		const trackUserWait: UserWaitTracker = dialog => (hasSession ? session.waitForUser(dialog) : dialog());
@@ -4362,6 +4381,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// this session did not start on Cursor.
 				getEditReplaceTool: getCursorBridgeEditTool,
 				getToolContext: () => toolContextStore.getContext(),
+				urlRouter: urlSchemes.router,
 				mcpResources: cursorMcpResources,
 				emitEvent: event => cursorEventEmitter?.(event),
 				getTodoPhases: () => session.getTodoPhases(),
@@ -4645,6 +4665,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
+				urlRouter: urlSchemes.router,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				noContextFiles: options.noContextFiles,
 				excludeAgentsMd,
@@ -5560,6 +5581,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionRunner,
 			getEvalPreludes,
 			evalToolSession: toolSession,
+			urlSchemes,
 			customCommands: customCommandsResult.commands,
 			skills,
 			skillDescriptions,

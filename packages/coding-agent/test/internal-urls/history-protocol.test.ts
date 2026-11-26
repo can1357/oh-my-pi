@@ -1,6 +1,6 @@
 /**
  * Contracts: history:// protocol handler (rework-contracts.md §6), resolved
- * through `InternalUrlRouter.instance().resolve(...)` like real callers.
+ * through `InternalUrlRouter.builtins().resolve(...)` like real callers.
  *
  * - Bare `history://` renders an index listing registered agent ids.
  * - `history://<id>` with a live ref renders the in-memory transcript.
@@ -174,7 +174,7 @@ describe("history:// protocol", () => {
 			status: "idle",
 		});
 
-		const resource = await InternalUrlRouter.instance().resolve("history://");
+		const resource = await InternalUrlRouter.builtins().resolve("history://");
 
 		expect(resource.contentType).toBe("text/markdown");
 		expect(resource.content).toContain("# Agents");
@@ -190,7 +190,7 @@ describe("history:// protocol", () => {
 			status: "idle",
 		});
 
-		const resource = await InternalUrlRouter.instance().resolve("history://HubAgent");
+		const resource = await InternalUrlRouter.builtins().resolve("history://HubAgent");
 
 		expect(resource.content).toContain("# HubAgent (idle)");
 		expect(resource.content).toMatch(/^#1 · .* · user: hello from live$/m);
@@ -210,15 +210,15 @@ describe("history:// protocol", () => {
 			status: "idle",
 		});
 
-		const bare = await InternalUrlRouter.instance().resolve("history://HubAgent");
+		const bare = await InternalUrlRouter.builtins().resolve("history://HubAgent");
 		expect(bare.content).not.toContain("pondering");
 
-		const last = await InternalUrlRouter.instance().resolve("history://HubAgent?turns=-1&detail=thinking:full");
+		const last = await InternalUrlRouter.builtins().resolve("history://HubAgent?turns=-1&detail=thinking:full");
 		expect(last.content).toContain("turn 2 of 2");
 		expect(last.content).not.toContain("first ask");
 		expect(last.content).toContain("thinking: pondering");
 
-		await expect(InternalUrlRouter.instance().resolve("history://HubAgent?detail=loud")).rejects.toThrow(
+		await expect(InternalUrlRouter.builtins().resolve("history://HubAgent?detail=loud")).rejects.toThrow(
 			"history:// detail takes",
 		);
 	});
@@ -232,7 +232,7 @@ describe("history:// protocol", () => {
 			status: "idle",
 		});
 
-		const resource = await InternalUrlRouter.instance().resolve("history://current");
+		const resource = await InternalUrlRouter.builtins().resolve("history://current");
 
 		expect(resource.content).toContain("named current transcript");
 	});
@@ -351,7 +351,7 @@ describe("history:// protocol", () => {
 	it("renders the caller-bound branch's full pre-compaction transcript without a disk source", async () => {
 		const branch = currentBranchFixture();
 		const siblingOnly = "sibling branch text must not leak";
-		const resource = await InternalUrlRouter.instance().resolve("history://current/full", {
+		const resource = await InternalUrlRouter.builtins().resolve("history://current/full", {
 			experimentalContextManagement: true,
 			getSessionBranch: () => branch,
 		});
@@ -366,25 +366,25 @@ describe("history:// protocol", () => {
 	});
 
 	it("reads bare history://current as the caller's own branch when no agent is named current", async () => {
-		const resource = await InternalUrlRouter.instance().resolve("history://current", {
+		const resource = await InternalUrlRouter.builtins().resolve("history://current", {
 			experimentalContextManagement: true,
 			getSessionBranch: currentBranchFixture,
 		});
 		expect(resource.content).toContain("latest raw request survives");
-		await expect(InternalUrlRouter.instance().resolve("history://current")).rejects.toThrow(
+		await expect(InternalUrlRouter.builtins().resolve("history://current")).rejects.toThrow(
 			"experimentalContextManagement",
 		);
 	});
 
 	it("rejects current/full when disabled or without a caller-bound branch", async () => {
 		await expect(
-			InternalUrlRouter.instance().resolve("history://current/full", {
+			InternalUrlRouter.builtins().resolve("history://current/full", {
 				experimentalContextManagement: false,
 				getSessionBranch: currentBranchFixture,
 			}),
 		).rejects.toThrow("experimentalContextManagement");
 		await expect(
-			InternalUrlRouter.instance().resolve("history://current/full", {
+			InternalUrlRouter.builtins().resolve("history://current/full", {
 				experimentalContextManagement: true,
 			}),
 		).rejects.toThrow("bound live session branch");
@@ -392,13 +392,13 @@ describe("history:// protocol", () => {
 
 	it("rejects malformed current history routes without consulting agent history", async () => {
 		await expect(
-			InternalUrlRouter.instance().resolve("history://current/full?unexpected=true", {
+			InternalUrlRouter.builtins().resolve("history://current/full?unexpected=true", {
 				experimentalContextManagement: true,
 				getSessionBranch: currentBranchFixture,
 			}),
 		).rejects.toThrow("Invalid history://current route");
 		await expect(
-			InternalUrlRouter.instance().resolve("history://current/extra", {
+			InternalUrlRouter.builtins().resolve("history://current/extra", {
 				experimentalContextManagement: true,
 				getSessionBranch: currentBranchFixture,
 			}),
@@ -459,7 +459,7 @@ describe("history:// protocol", () => {
 			session: fakeLiveSession([{ role: "user", content: "hello from live", timestamp: 1 }]),
 			status: "idle",
 		});
-		const resource = await InternalUrlRouter.instance().resolve("history://HubAgent");
+		const resource = await InternalUrlRouter.builtins().resolve("history://HubAgent");
 		const result = await new ReadTool(makeToolSession(os.tmpdir())).execute("history-raw-range", {
 			path: "history://HubAgent:raw:1-2",
 		});
@@ -480,7 +480,7 @@ describe("history:// protocol", () => {
 			status: "idle",
 		});
 
-		const resource = await InternalUrlRouter.instance().resolve("history://hubagent");
+		const resource = await InternalUrlRouter.builtins().resolve("history://hubagent");
 		expect(resource.content).toContain("# HubAgent (idle)");
 	});
 
@@ -497,7 +497,7 @@ describe("history:// protocol", () => {
 				status: "parked",
 			});
 
-			const resource = await InternalUrlRouter.instance().resolve("history://Sleeper");
+			const resource = await InternalUrlRouter.builtins().resolve("history://Sleeper");
 
 			expect(resource.content).toContain("# Sleeper (parked)");
 			expect(resource.content).toContain("parked hello");
@@ -516,7 +516,7 @@ describe("history:// protocol", () => {
 			status: "idle",
 		});
 
-		const error = await InternalUrlRouter.instance()
+		const error = await InternalUrlRouter.builtins()
 			.resolve("history://Nope")
 			.then(
 				() => null,
@@ -538,7 +538,7 @@ describe("history:// protocol", () => {
 			status: "aborted",
 		});
 
-		const error = await InternalUrlRouter.instance()
+		const error = await InternalUrlRouter.builtins()
 			.resolve("history://Husk")
 			.then(
 				() => null,
@@ -559,7 +559,7 @@ describe("history:// protocol", () => {
 			createdAt: Date.now() - 5_000,
 		});
 
-		const resource = await InternalUrlRouter.instance().resolve("history://FreshWorker");
+		const resource = await InternalUrlRouter.builtins().resolve("history://FreshWorker");
 
 		expect(resource.contentType).toBe("text/markdown");
 		expect(resource.content).toContain("# FreshWorker (running)");
@@ -592,13 +592,13 @@ describe("history:// protocol", () => {
 		});
 
 		// Index lists the subagent but never the advisor.
-		const index = await InternalUrlRouter.instance().resolve("history://");
+		const index = await InternalUrlRouter.builtins().resolve("history://");
 		expect(index.content).toContain("HubAgent");
 		expect(index.content).not.toContain("advisor");
 
 		// Direct lookup of an advisor-kind ref is reported as unknown — the driving
 		// agent must not be able to read it via history://.
-		const error = await InternalUrlRouter.instance()
+		const error = await InternalUrlRouter.builtins()
 			.resolve("history://AdvisorProbe")
 			.then(
 				() => null,
@@ -650,7 +650,7 @@ describe("history:// protocol", () => {
 				status: "idle",
 			});
 
-			const resource = await InternalUrlRouter.instance().resolve("history://Sub1");
+			const resource = await InternalUrlRouter.builtins().resolve("history://Sub1");
 			expect(resource.content).toContain("# Sub1 (on disk)");
 			expect(resource.content).toContain("parked hello");
 			expect(resource.sourcePath).toBe(path.join(artifactsDir, "Sub1.jsonl"));
@@ -676,7 +676,7 @@ describe("history:// protocol", () => {
 				status: "idle",
 			});
 
-			const resource = await InternalUrlRouter.instance().resolve("history://authloader");
+			const resource = await InternalUrlRouter.builtins().resolve("history://authloader");
 			expect(resource.content).toContain("# AuthLoader (on disk)");
 		});
 	});
@@ -700,7 +700,7 @@ describe("history:// protocol", () => {
 				status: "idle",
 			});
 
-			const index = await InternalUrlRouter.instance().resolve("history://");
+			const index = await InternalUrlRouter.builtins().resolve("history://");
 			expect(index.content).toContain("| Sub1 | on disk |");
 			expect(index.content).not.toContain("__advisor");
 
@@ -730,7 +730,7 @@ describe("history:// protocol", () => {
 				status: "idle",
 			});
 
-			const resource = await InternalUrlRouter.instance().resolve("history://Parent.Child");
+			const resource = await InternalUrlRouter.builtins().resolve("history://Parent.Child");
 			expect(resource.content).toContain("# Parent.Child (on disk)");
 		});
 	});

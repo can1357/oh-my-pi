@@ -1382,6 +1382,7 @@ export class SelectorController {
 					"rewind",
 					RewindSelector({
 						entries,
+						router: this.ctx.session.urlRouter,
 						siblingPaths: entryId => this.#siblingBranchPaths(entryId),
 						startAt,
 						terminalRows: () => this.ctx.shell.size().rows,
@@ -1651,6 +1652,7 @@ export class SelectorController {
 					"copy",
 					CopySelector({
 						entries,
+						router: session.urlRouter,
 						onPick: (content, label) => {
 							done();
 							if (!content.trim()) {
@@ -1685,6 +1687,7 @@ export class SelectorController {
 		this.#showInEditorArea(done =>
 			TreeSelector({
 				roots: tree,
+				router: this.ctx.session.urlRouter,
 				currentLeafId: realLeafId,
 				terminalHeight: untrack(this.ctx.shell.size).rows,
 				onSelect: async (entryId, options) => {

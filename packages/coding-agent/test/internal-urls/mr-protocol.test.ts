@@ -75,7 +75,7 @@ describe("mr:// diff family", () => {
 	it("lists changed files of a nested-group project with per-file mr:// links", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 
-		const resource = await InternalUrlRouter.instance().resolve("mr://gitlab.example.com/acme/platform/api/7/diff");
+		const resource = await InternalUrlRouter.builtins().resolve("mr://gitlab.example.com/acme/platform/api/7/diff");
 
 		expect(resource.contentType).toBe("text/markdown");
 		expect(resource.content).toContain("# Merge Request Diff: gitlab.example.com/acme/platform/api!7 (2 files)");
@@ -87,7 +87,7 @@ describe("mr:// diff family", () => {
 
 	it("slices one file, returns the full diff, and rejects an out-of-range index", async () => {
 		vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const slice = await router.resolve("mr://gitlab.com/g/p/7/diff/2");
 		expect(slice.content).toBe(secondSection);
@@ -98,7 +98,7 @@ describe("mr:// diff family", () => {
 
 	it("serves a repeat read from the cache without re-running glab", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const first = await router.resolve("mr://gitlab.com/g/p/7/diff/1");
 		const second = await router.resolve("mr://gitlab.com/g/p/7/diff/1");
@@ -114,7 +114,7 @@ describe("mr:// diff family", () => {
 			.mockResolvedValue({ web_url: "https://gitlab.example.com/acme/platform/api" });
 		vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 
-		const resource = await InternalUrlRouter.instance().resolve("mr://7/diff", { cwd: tempDir });
+		const resource = await InternalUrlRouter.builtins().resolve("mr://7/diff", { cwd: tempDir });
 
 		expect(resource.content).toContain("# Merge Request Diff: gitlab.example.com/acme/platform/api!7 (2 files)");
 		expect(jsonSpy.mock.calls[0]![1]).toEqual(["repo", "view", "-F", "json"]);
@@ -122,7 +122,7 @@ describe("mr:// diff family", () => {
 
 	it("rejects URLs without a diff suffix, a group/project pair, or a plain host", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		await expect(router.resolve("mr://gitlab.com/g/p/7")).rejects.toThrow(/Invalid mr:\/\/ URL/);
 		await expect(router.resolve("mr://gitlab.com/g/7/diff")).rejects.toThrow(/Invalid mr:\/\/ URL/);
@@ -137,7 +137,7 @@ describe("mr:// diff family", () => {
 			.mockRejectedValueOnce(new Error("could not obtain raw diff: 404 Not Found"))
 			.mockResolvedValueOnce(diffText);
 
-		const resource = await InternalUrlRouter.instance().resolve("mr://gitlab.com/g/p/7/diff");
+		const resource = await InternalUrlRouter.builtins().resolve("mr://gitlab.com/g/p/7/diff");
 
 		expect(resource.content).toContain("(2 files)");
 		expect(textSpy).toHaveBeenCalledTimes(2);
@@ -148,7 +148,7 @@ describe("mr:// diff family", () => {
 	it("fails with an upgrade hint instead of parsing an old glab's header-less diff", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockRejectedValue(new Error("unknown flag: --raw"));
 
-		await expect(InternalUrlRouter.instance().resolve("mr://gitlab.com/g/p/7/diff")).rejects.toThrow(
+		await expect(InternalUrlRouter.builtins().resolve("mr://gitlab.com/g/p/7/diff")).rejects.toThrow(
 			/too old for `glab mr diff --raw`/,
 		);
 		expect(textSpy).toHaveBeenCalledTimes(1);
@@ -157,7 +157,7 @@ describe("mr:// diff family", () => {
 	it("keeps env tokens away from hosts the user has not configured", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 		vi.spyOn(gitlab, "json").mockResolvedValue({ web_url: "https://git.own.example/team/app" });
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const context = { cwd: tempDir };
 
 		await expect(router.resolve("mr://attacker.example/a/b/1/diff", context)).rejects.toThrow(

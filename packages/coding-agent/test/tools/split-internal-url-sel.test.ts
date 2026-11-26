@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
-const split = (input: string) => InternalUrlRouter.instance().split(input);
-const peelWriteSelector = (input: string) => InternalUrlRouter.instance().peelWriteSelector(input, "write");
+const split = (input: string) => InternalUrlRouter.builtins().split(input);
+const peelWriteSelector = (input: string) => InternalUrlRouter.builtins().peelWriteSelector(input, "write");
 
 describe("InternalUrlRouter.split", () => {
 	it("returns the input unchanged when there is no selector tail", () => {

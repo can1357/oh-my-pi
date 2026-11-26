@@ -32,6 +32,7 @@ import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { NATIVE_TODO_BACKEND } from "../../tools/settings";
 import { InternalUrlRouter } from "../../internal-urls/router";
+import { isStandardScheme } from "../../internal-urls/url-scheme";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
@@ -72,22 +73,6 @@ type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]+$/;
 /** `todo.backend` ids: safe to print and to type in a config file. */
 const TODO_BACKEND_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/** Standard schemes an extension may not claim: web, file and mail links. omp's internal URLs are refused too. */
-const STANDARD_LINK_SCHEMES: Readonly<Record<string, true>> = {
-	about: true,
-	blob: true,
-	data: true,
-	file: true,
-	ftp: true,
-	http: true,
-	https: true,
-	javascript: true,
-	mailto: true,
-	ssh: true,
-	ws: true,
-	wss: true,
-};
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -348,8 +333,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				`registerLinkScheme: "${scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
 			);
 		}
-		// `=== true`: inherited keys such as `constructor` are not reserved.
-		if (STANDARD_LINK_SCHEMES[normalized] === true || InternalUrlRouter.instance().isBuiltin(normalized)) {
+		if (isStandardScheme(normalized) || InternalUrlRouter.isBuiltin(normalized)) {
 			throw new Error(`registerLinkScheme: "${scheme}" is reserved for standard or omp-internal links`);
 		}
 		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);

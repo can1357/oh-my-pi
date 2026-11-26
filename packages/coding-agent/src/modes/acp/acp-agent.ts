@@ -91,6 +91,7 @@ import {
 } from "../../tools/html-form/data";
 import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText } from "../../tools/html-form/parse";
 import { resolvePlanFilePath } from "../../plan-mode/plan-files";
+import type { InternalUrlRouter } from "../../internal-urls/router";
 import { ToolError } from "../../tools/tool-errors";
 import {
 	DEFAULT_TTS_SPEED,
@@ -2136,6 +2137,7 @@ export class AcpAgent implements Agent {
 			getMessageProgress: message => this.#getLiveMessageProgress(record, message),
 			getToolArgs: toolCallId => record.toolArgsById.get(toolCallId),
 			cwd: record.session.sessionManager.getCwd(),
+			router: record.session.urlRouter,
 			resolveImageData: resolveImageDataForAcp,
 		})) {
 			const delivery = this.#connection.sessionUpdate(notification);
@@ -2603,6 +2605,7 @@ export class AcpAgent implements Agent {
 			statePlanFilePath: state.planFilePath,
 			readPlan: url => this.#readAcpPlanFile(session, url),
 			listPlanFiles: () => this.#listAcpLocalPlanFiles(session),
+			router: session.urlRouter,
 		});
 		const approved = await this.#requestAcpPlanApprovalChoice(record.protocolSessionId, resolvedTitle, planContent);
 		const details: PlanApprovalDetails = {
@@ -2681,6 +2684,7 @@ export class AcpAgent implements Agent {
 				getSessionId: () => session.sessionManager.getSessionId(),
 			},
 			cwd: session.sessionManager.getCwd(),
+			router: session.urlRouter,
 		});
 	}
 
@@ -3029,6 +3033,7 @@ export class AcpAgent implements Agent {
 				record.protocolSessionId,
 				message,
 				cwd,
+				record.session.urlRouter,
 				replayedToolCallIds,
 				replayedToolCallArgs,
 			)) {
@@ -3041,11 +3046,19 @@ export class AcpAgent implements Agent {
 		sessionId: string,
 		message: ReplayableMessage,
 		cwd: string,
+		router: InternalUrlRouter,
 		replayedToolCallIds: Set<string>,
 		replayedToolCallArgs: Map<string, unknown>,
 	): SessionNotification[] {
 		if (message.role === "assistant") {
-			return this.#replayAssistantMessage(sessionId, message, cwd, replayedToolCallIds, replayedToolCallArgs);
+			return this.#replayAssistantMessage(
+				sessionId,
+				message,
+				cwd,
+				router,
+				replayedToolCallIds,
+				replayedToolCallArgs,
+			);
 		}
 		if (
 			message.role === "user" ||
@@ -3068,6 +3081,7 @@ export class AcpAgent implements Agent {
 			return this.#replayToolResult(
 				sessionId,
 				cwd,
+				router,
 				{
 					...message,
 					toolCallId: message.toolCallId,
@@ -3098,6 +3112,7 @@ export class AcpAgent implements Agent {
 		sessionId: string,
 		message: ReplayableMessage,
 		cwd: string,
+		router: InternalUrlRouter,
 		replayedToolCallIds: Set<string>,
 		replayedToolCallArgs: Map<string, unknown>,
 	): SessionNotification[] {
@@ -3165,7 +3180,7 @@ export class AcpAgent implements Agent {
 								args,
 							},
 							sessionId,
-							{ cwd },
+							{ cwd, router },
 						),
 					);
 					replayedToolCallIds.add(toolItem.id);
@@ -3199,6 +3214,7 @@ export class AcpAgent implements Agent {
 	#replayToolResult(
 		sessionId: string,
 		cwd: string,
+		router: InternalUrlRouter,
 		message: Required<Pick<ReplayableMessage, "toolCallId" | "toolName">> & ReplayableMessage,
 		options: { includeStart?: boolean; toolArgs?: unknown } = {},
 	): SessionNotification[] {
@@ -3222,13 +3238,14 @@ export class AcpAgent implements Agent {
 		};
 		const notifications = mapAgentSessionEventToAcpSessionUpdates(endEvent, sessionId, {
 			cwd,
+			router,
 			getToolArgs: toolCallId => (toolCallId === message.toolCallId ? options.toolArgs : undefined),
 			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
 		});
 		if (options.includeStart === false) {
 			return notifications;
 		}
-		return [...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd }), ...notifications];
+		return [...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd, router }), ...notifications];
 	}
 
 	#buildReplayToolArgs(details: unknown): { path?: string } {
