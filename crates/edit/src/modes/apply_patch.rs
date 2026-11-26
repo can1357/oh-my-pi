@@ -4,19 +4,19 @@
 
 use std::{
 	collections::{HashMap, HashSet},
-	path::{Path, PathBuf},
 	sync::Arc,
 };
 
 use super::patch::{Operation, PatchEngine, PatchInput, stage_patch};
 use crate::{
 	engine::{
-		EditMode, FileOp, FileOpIntent, Inspection, ModeEngine, PreviewFile, Resolved, StagedFile,
+		EditMode, FileOp, FileOpIntent, Inspection, Location, ModeEngine, PreviewFile, Resolved,
+		StagedFile,
 	},
 	error::{EditError, Rejection},
 	files::{FileRead, FileSource},
-	notebook::{is_notebook_path, notebook_to_editable_text},
-	path_policy::{PathPolicy, canonical_key},
+	notebook::notebook_to_editable_text,
+	path_policy::PathPolicy,
 	scan::{keyword, space},
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
@@ -305,22 +305,22 @@ enum VirtualFile {
 /// a path that an earlier section deleted or moved.
 struct VirtualFiles<'a> {
 	source: &'a mut dyn FileSource,
-	state:  HashMap<PathBuf, Option<VirtualFile>>,
+	state:  HashMap<Location, Option<VirtualFile>>,
 }
 
 impl VirtualFiles<'_> {
 	fn record(&mut self, file: &StagedFile) {
 		if file.op == FileOp::Delete || file.move_to.is_some() {
-			self.state.insert(canonical_key(&file.absolute), None);
+			self.state.insert(file.location.canonical_key(), None);
 		}
 		if let Some(raw) = &file.persisted {
 			let target = file
 				.move_to
 				.as_ref()
-				.map_or(&file.absolute, |to| &to.absolute);
+				.map_or(&file.location, |to| &to.location);
 			self
 				.state
-				.insert(canonical_key(target), Some(VirtualFile::Raw(raw.clone())));
+				.insert(target.canonical_key(), Some(VirtualFile::Raw(raw.clone())));
 		}
 	}
 }
@@ -332,17 +332,17 @@ impl FileSource for VirtualFiles<'_> {
 
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> Result<Resolved, EditError> {
 		let resolved = self.source.resolve(authored, false)?;
-		if self.state.contains_key(&canonical_key(&resolved.absolute)) || !must_exist {
+		if self.state.contains_key(&resolved.location.canonical_key()) || !must_exist {
 			return Ok(resolved);
 		}
 		self.source.resolve(authored, true)
 	}
 
-	fn exists(&mut self, absolute: &Path) -> bool {
+	fn exists(&mut self, location: &Location) -> bool {
 		self
 			.state
-			.get(&canonical_key(absolute))
-			.map_or_else(|| self.source.exists(absolute), Option::is_some)
+			.get(&location.canonical_key())
+			.map_or_else(|| self.source.exists(location), Option::is_some)
 	}
 
 	fn read(&mut self, authored: &str) -> Result<Arc<FileRead>, EditError> {
@@ -356,7 +356,7 @@ impl FileSource for VirtualFiles<'_> {
 	}
 
 	fn try_read(&mut self, resolved: &Resolved) -> Result<Option<Arc<FileRead>>, EditError> {
-		let key = canonical_key(&resolved.absolute);
+		let key = resolved.location.canonical_key();
 		let Some(state) = self.state.remove(&key) else {
 			return self.source.try_read(resolved);
 		};
@@ -373,7 +373,7 @@ impl FileSource for VirtualFiles<'_> {
 				{
 					return Err(EditError::apply(message));
 				}
-				let is_notebook = is_notebook_path(&resolved.absolute);
+				let is_notebook = resolved.location.is_notebook();
 				let (bom, body) = strip_bom(&raw);
 				let ending = if is_notebook {
 					LineEnding::Lf
@@ -448,7 +448,7 @@ fn stage_entries(
 			let resolved = files
 				.resolve(path, group[0].op != Operation::Create)
 				.map_err(|error| wrap_file_error(path, error, multiple_files))?;
-			let mut exists = files.exists(&resolved.absolute);
+			let mut exists = files.exists(&resolved.location);
 			for entry in group {
 				match entry.op {
 					Operation::Create if exists => {
