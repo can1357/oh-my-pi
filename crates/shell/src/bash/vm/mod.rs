@@ -54,6 +54,11 @@ pub use self::{
 	text::TextKind,
 	zsh::zpattern::Cache as ZshPatternCache,
 };
+
+pub(crate) fn decode_zsh_dollar_quote(s: &[u8]) -> (Vec<u8>, usize) {
+	let k = zsh::text::getkeystring(s, zsh::text::getkey::DOLLARS_QUOTE);
+	(k.text, k.consumed)
+}
 use self::{
 	control::{CANCEL, Ctl, PAUSE, RESUME, SIGNAL, SUSPEND},
 	proc::{Frame, FrameKind, Live, PendingWrite, ScriptKind},

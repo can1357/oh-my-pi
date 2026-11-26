@@ -421,6 +421,7 @@ async function syncAllSessionsLocked(
 			result.userLinks.length +
 			result.toolCalls.length +
 			result.toolResults.length +
+			result.toolApprovals.length +
 			result.snapcompactCompactions.length +
 			spotlightRowCount(result.spotlight);
 		if (pending.length >= SYNC_BATCH_FILES || pendingRows >= SYNC_BATCH_ROWS) flush();
