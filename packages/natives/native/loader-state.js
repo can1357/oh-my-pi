@@ -919,15 +919,13 @@ function buildHelpMessage(ctx) {
 	if (ctx.isCompiledBinary) {
 		const targets = compiledAddonTargets(ctx);
 		const expectedPaths = targets.map(({ targetPath }) => `  ${targetPath}`).join("\n");
-		const downloadHints = targets
-			.map(({ filename, targetPath }) => {
-				const downloadUrl = `https://github.com/can1357/oh-my-pi/releases/latest/download/${filename}`;
-				return `  curl -fsSL "${downloadUrl}" -o "${targetPath}"`;
-			})
-			.join("\n");
+		// Releases publish the addon inside the omp binaries, not as .node files, so the
+		// download that works is the binary of this version.
 		return (
 			`The compiled binary should extract one of:\n${expectedPaths}\n\n` +
-			`If missing, delete ${ctx.versionedDir} and re-run, or download manually:\n${downloadHints}`
+			`If missing, delete ${ctx.versionedDir} and re-run. If it is still missing, reinstall omp v${ctx.packageVersion} ` +
+			`from https://github.com/can1357/oh-my-pi/releases/tag/v${ctx.packageVersion}; its binary for this platform ` +
+			`extracts the addon into ${ctx.versionedDir} when it runs.`
 		);
 	}
 	return (
