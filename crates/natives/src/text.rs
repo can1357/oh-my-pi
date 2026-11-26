@@ -2338,16 +2338,11 @@ mod tests {
 		assert!(lines.len() > 1);
 
 		for line in &lines[..lines.len() - 1] {
-			let line_text = String::from_utf16_lossy(line);
-			if line_text.contains("\x1b[7m") {
-				assert!(line_text.ends_with("\x1b[27m"));
-				assert!(!line_text.ends_with("\x1b[0m"));
-			}
+			assert!(String::from_utf16_lossy(line).ends_with("\x1b[27m"));
 		}
 
 		for line in &lines[1..] {
-			let line_text = String::from_utf16_lossy(line);
-			assert!(line_text.contains("38;5;196"));
+			assert!(String::from_utf16_lossy(line).contains("38;5;196"));
 		}
 	}
 

@@ -8,7 +8,7 @@
 import { computed, effect, type JSXNode, signal, untrack } from "@oh-my-pi/pi-tui";
 import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import type { ChoiceField, FormBlock, FormField, FormSpan } from "../../../tools/html-form/parse";
+import type { ChoiceField, FormBlock, FormField, FormSpan, FormSpanStyle } from "../../../tools/html-form/parse";
 import { spansText } from "../../../tools/html-form/parse";
 import { keyLabel } from "../../setup/scenes/choice";
 import "../../styles/forms";
@@ -40,11 +40,12 @@ export interface HtmlFormProps {
 /** Rows a picture takes on a tall terminal. */
 const MAX_PICTURE_ROWS = 14;
 
-const STYLE: Record<string, string> = { code: "code", strong: "strong", em: "em", mark: "mark" };
+/** TSP token of each form span style; a new style fails to compile until it has one. */
+const STYLE: Record<FormSpanStyle, string> = { code: "code", strong: "strong", em: "em", mark: "mark" };
 
 /** Form spans as TSP spans. */
 export function tspSpans(spans: readonly FormSpan[]): TspSpan[] {
-	return spans.map(span => (span.style ? { s: STYLE[span.style]!, t: span.text } : { t: span.text }));
+	return spans.map(span => (span.style ? { s: STYLE[span.style], t: span.text } : { t: span.text }));
 }
 
 function mask(text: string): string {

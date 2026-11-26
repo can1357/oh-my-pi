@@ -8,10 +8,11 @@ import { nativeShell } from "../../helpers/native-shell";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { createRoot, resolveChildren, signal } from "@oh-my-pi/pi-tui";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { styledSpans } from "@oh-my-pi/pi-tui/text/styled-spans";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import { parseHtmlForm } from "../../../src/tools/html-form/parse";
-import { formMedia, HtmlFormDialog, HtmlFormModel, tspSpans } from "../../../src/ui/forms/html-form";
+import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../../src/ui/forms/html-form";
 import "../../../src/ui/styles/panels/ask-dialog";
 import { figureWorkSettled } from "../../../src/ui/transcript/figures";
 import { corpusSuite, type Driver, type Mounted, settle } from "../setup/harness";
@@ -66,58 +67,56 @@ function rows(html: string, width: number): string[] {
 	});
 }
 
-test("terminal: a <mark> in form text is inverted", () => {
-	expect(rows(`<form><p>Review <mark>stale</mark> token</p></form>`, 60).join("\n")).toMatch(
-		/\x1b\[7m\x1b\[[0-9;]*mstale/,
-	);
+/** Each painted row's highlighted text, rows without any left out: padding or a border a highlight leaks into shows up here. */
+function highlighted(painted: readonly string[]): string[] {
+	return painted
+		.map(row =>
+			styledSpans(row)
+				.filter(span => span.s?.split(" ").includes("mark"))
+				.map(span => span.t)
+				.join(""),
+		)
+		.filter(text => text !== "");
+}
+
+const WORDS = `${"word ".repeat(10)}end`;
+
+test("terminal: a <mark> in form text is highlighted", () => {
+	expect(highlighted(rows(`<form><p>Review <mark>stale</mark> token</p></form>`, 60))).toEqual(["stale"]);
 });
 
-test("terminal: a <mark> in a table cell is inverted, on the measured column width", () => {
+test("terminal: a <mark> in a table cell is highlighted, on the measured column width", () => {
 	const painted = rows(
 		`<form><table><tr><th>Finding</th><th>Owner</th></tr><tr><td>Review <mark>stale</mark> x</td><td>a</td></tr></table></form>`,
 		60,
 	);
-	expect(painted.join("\n")).toMatch(/\x1b\[7m\x1b\[[0-9;]*mstale/);
+	expect(highlighted(painted)).toEqual(["stale"]);
 	expect(painted.map(row => stripEscapes(row).trimEnd()).join("\n")).toContain("Review stale x  a");
 });
 
-test("terminal: a wrapped <mark> closes before the padding and the border", () => {
-	const marked = rows(`<form><p><mark>${"word ".repeat(10)}end</mark></p></form>`, 30);
-	// The mark spans three rows, each closing its inverse video before the box padding.
-	expect(marked.filter(line => /\x1b\[7(;|m)/.test(line))).toHaveLength(3);
-	for (const line of marked) {
-		const closed = [...line.matchAll(/\x1b\[[0-9;]*\b27m/g)].at(-1)?.index ?? -1;
-		expect(closed).toBeGreaterThanOrEqual(line.search(/\x1b\[7(;|m)/));
-	}
+test("terminal: a wrapped <mark> highlights its words only, not the padding or the border", () => {
+	const marked = highlighted(rows(`<form><p><mark>${WORDS}</mark></p></form>`, 30));
+	expect(marked.length).toBeGreaterThan(1);
+	expect(marked.join(" ")).toBe(WORDS);
 });
 
-test("terminal: a <mark> in a legend and a field label is inverted", () => {
+test("terminal: a <mark> in a legend and a field label is highlighted", () => {
 	const painted = rows(
 		`<form><fieldset><legend>Rate the <mark>lease</mark></legend>
 		<label for="d">Fix the <mark>lease</mark></label><input id="d" name="d"></fieldset></form>`,
 		60,
-	).join("\n");
-	expect(painted.match(/\x1b\[7m\x1b\[[0-9;]*mlease/g)).toHaveLength(2);
+	);
+	// The open text box's caret is inverse video too.
+	expect(highlighted(painted)).toEqual(["lease", "lease", " "]);
 });
 
-test("terminal: a <mark> in an option row is inverted, wrapped rows too", () => {
+test("terminal: a <mark> in an option row is highlighted, wrapped rows too", () => {
 	const paint = (label: string) =>
 		rows(`<form><label><input type="radio" name="r" value="fix" checked> ${label}</label></form>`, 30);
-	const one = paint("Keep the <mark>lease</mark>").join("\n");
-	expect(one.match(/\x1b\[7m\x1b\[[0-9;]*mlease/g)).toHaveLength(1);
-	const long = paint(`<mark>${"word ".repeat(10)}end</mark>`).filter(line => /\x1b\[7(;|m)/.test(line));
+	expect(highlighted(paint("Keep the <mark>lease</mark>"))).toEqual(["lease"]);
+	const long = highlighted(paint(`<mark>${WORDS}</mark>`));
 	expect(long.length).toBeGreaterThan(1);
-	for (const line of long) {
-		const closed = [...line.matchAll(/\x1b\[[0-9;]*\b27m/g)].at(-1)?.index ?? -1;
-		expect(closed).toBeGreaterThanOrEqual(line.search(/\x1b\[7(;|m)/));
-	}
-});
-
-test("Tern: tspSpans emits the mark token", () => {
-	expect(tspSpans([{ text: "a " }, { text: "stale", style: "mark" }])).toEqual([
-		{ t: "a " },
-		{ s: "mark", t: "stale" },
-	]);
+	expect(long.join(" ")).toBe(WORDS);
 });
 
 corpusSuite({
