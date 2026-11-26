@@ -5,14 +5,18 @@
 //! (notably `li`, `dt`, `dd`, `tr`, `td`, `th`, `option`, `p`) close
 //! implicitly so malformed markup cannot swallow the rest of a page.
 
-use std::{cell::RefCell, ops::Range};
+use std::{
+	cell::RefCell,
+	collections::{HashMap, HashSet},
+	ops::Range,
+};
 
 use html5ever::{
 	LocalName,
 	tendril::StrTendril,
 	tokenizer::{
-		BufferQueue, CharacterTokens, EndTag, StartTag, Tag, TagToken, Token, TokenSink,
-		TokenSinkResult, Tokenizer, states::RawKind,
+		BufferQueue, CharacterTokens, CommentToken, EndTag, StartTag, Tag, TagToken, Token,
+		TokenSink, TokenSinkResult, Tokenizer, states::RawKind,
 	},
 };
 
@@ -66,6 +70,11 @@ struct Tree {
 	nodes:         Vec<Node>,
 	open:          Vec<usize>,
 	last_was_text: bool,
+	/// Open React Suspense boundaries (`<!--$?-->`, `<!--$-->`, `<!--$!-->`):
+	/// the first node inside and the element they opened in.
+	suspense_open: Vec<(usize, Option<usize>)>,
+	/// Closed boundaries (`<!--/$-->`) whose markers share one parent.
+	suspense:      Vec<Range<usize>>,
 }
 
 impl Tree {
@@ -92,6 +101,20 @@ impl Tree {
 			}
 		}
 		None
+	}
+
+	/// Track React Suspense boundary markers; other comments are dropped.
+	fn comment(&mut self, text: &str) {
+		let parent = self.open.last().copied();
+		if text == "/$" {
+			if let Some((start, opened)) = self.suspense_open.pop()
+				&& opened == parent
+			{
+				self.suspense.push(start..self.nodes.len());
+			}
+		} else if text.starts_with('$') {
+			self.suspense_open.push((self.nodes.len(), parent));
+		}
 	}
 
 	fn push_text(&mut self, raw: &str) {
@@ -124,10 +147,14 @@ impl Tree {
 			"option" => Some((&["option"], &["select"])),
 			"select" | "input" | "button" | "textarea" | "form" | "script" => Some((&["select"], &[])),
 			"body" => Some((&["head"], &["html"])),
-			"p" | "hr" | "div" | "center" | "table" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-			| "dl" | "dlc" | "ol" | "ul" | "menu" | "dir" | "pre" | "blockquote" | "bq" => {
+			// As in HTML5, a heading start closes an open paragraph or heading;
+			// other block starts close only a paragraph, so a heading keeps a
+			// `center` or `div` wrapped around its text.
+			"h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
 				Some((&["p", "h1", "h2", "h3", "h4", "h5", "h6"], &["table", "li", "td", "th"]))
 			},
+			"p" | "hr" | "div" | "center" | "table" | "dl" | "dlc" | "ol" | "ul" | "menu" | "dir"
+			| "pre" | "blockquote" | "bq" => Some((&["p"], &["table", "li", "td", "th"])),
 			_ => None,
 		};
 		if let Some((matches, scope)) = implicit {
@@ -201,6 +228,7 @@ impl TokenSink for Sink {
 		let mut tree = self.0.borrow_mut();
 		match token {
 			CharacterTokens(raw) => tree.push_text(&raw),
+			CommentToken(text) => tree.comment(&text),
 			TagToken(tag) => match tag.kind {
 				StartTag => return tree.start(tag),
 				EndTag => {
@@ -223,7 +251,97 @@ fn tokenize(source: StrTendril) -> Vec<Node> {
 	tokenizer.end();
 	let mut tree = tokenizer.sink.0.into_inner();
 	tree.close(0);
-	tree.nodes
+	splice_streamed(tree.nodes, &tree.suspense)
+}
+
+/// Apply React streaming SSR swaps: a Suspense boundary opening with
+/// `<template id="B:n">` is replaced, fallback included, by the children of
+/// the hidden `<div id="S:n">` that `$RC("B:n","S:n")` moves there, and the
+/// hidden copy goes. The page then holds the streamed content once, where it
+/// belongs.
+fn splice_streamed(nodes: Vec<Node>, boundaries: &[Range<usize>]) -> Vec<Node> {
+	let mut segments: HashMap<&str, usize> = HashMap::new();
+	for (index, node) in nodes.iter().enumerate() {
+		if let Node::Tag(tag) = node
+			&& tag.name() == "div"
+			&& tag.has_attr("hidden")
+			&& let Some(id) = tag.attr("id").and_then(|id| id.strip_prefix("S:"))
+		{
+			segments.insert(id, index);
+		}
+	}
+	if segments.is_empty() {
+		return nodes;
+	}
+	let mut swaps: HashMap<usize, (usize, usize)> = HashMap::new();
+	let mut moved: HashSet<usize> = HashSet::new();
+	for boundary in boundaries {
+		if let Some(Node::Tag(template)) = nodes.get(boundary.start)
+			&& template.name() == "template"
+			&& let Some(id) = template.attr("id").and_then(|id| id.strip_prefix("B:"))
+			&& let Some(&segment) = segments.get(id)
+			&& !(boundary.start..boundary.end).contains(&segment)
+		{
+			swaps.insert(boundary.start, (boundary.end, segment));
+			moved.insert(segment);
+		}
+	}
+	if swaps.is_empty() {
+		return nodes;
+	}
+	let len = nodes.len();
+	let mut old: Vec<Option<Node>> = nodes.into_iter().map(Some).collect();
+	let mut out = Vec::with_capacity(len);
+	copy_spliced(&mut old, 0..len, &swaps, &moved, &mut out);
+	out
+}
+
+/// Copy the sibling nodes of `range` into `out`, applying `swaps` (boundary
+/// start → boundary end and segment) and skipping `moved` segments.
+fn copy_spliced(
+	old: &mut [Option<Node>],
+	range: Range<usize>,
+	swaps: &HashMap<usize, (usize, usize)>,
+	moved: &HashSet<usize>,
+	out: &mut Vec<Node>,
+) {
+	let mut index = range.start;
+	while index < range.end {
+		if let Some(&(stop, segment)) = swaps.get(&index) {
+			if let Some(Node::Tag(tag)) = &old[segment] {
+				let children = tag.children.clone();
+				copy_spliced(old, children, swaps, moved, out);
+			}
+			index = stop.max(index + 1);
+			continue;
+		}
+		match old[index].take() {
+			Some(Node::Text(text)) => {
+				out.push(Node::Text(text));
+				index += 1;
+			},
+			Some(Node::Tag(mut tag)) => {
+				let children = tag.children.clone();
+				if moved.contains(&index) {
+					// Its children went to the boundary; restore the tag so a
+					// later boundary can still read their range.
+					old[index] = Some(Node::Tag(tag));
+					index = children.end;
+					continue;
+				}
+				let at = out.len();
+				tag.children = at + 1..at + 1;
+				out.push(Node::Tag(tag));
+				copy_spliced(old, children.clone(), swaps, moved, out);
+				let end = out.len();
+				if let Node::Tag(tag) = &mut out[at] {
+					tag.children.end = end;
+				}
+				index = children.end;
+			},
+			None => index += 1,
+		}
+	}
 }
 
 /// Parse HTML verbatim into a `Send + Sync` preorder node arena.
@@ -279,5 +397,59 @@ mod tests {
 			unreachable!()
 		};
 		assert_eq!(script.children.len(), 1);
+	}
+
+	#[test]
+	fn streamed_segments_replace_their_boundary_once() {
+		let html = "<main><p>Intro</p><!--$?--><template \
+		            id=\"B:0\"></template><p>Loading</p><!--/$--><p>End</p></main><div hidden \
+		            id=\"S:0\"><p>Streamed</p></div><script>$RC(\"B:0\",\"S:0\")</script>";
+		let nodes = parse(html).unwrap();
+		let texts: Vec<&str> = nodes
+			.iter()
+			.filter_map(|node| match node {
+				Node::Text(text) => Some(text.as_str()),
+				Node::Tag(_) => None,
+			})
+			.collect();
+		assert_eq!(texts, ["Intro", "Streamed", "End", "$RC(\"B:0\",\"S:0\")"]);
+		// Ranges stay consistent: `main` holds the spliced paragraph.
+		let Some(Node::Tag(main)) = nodes
+			.iter()
+			.find(|n| matches!(n, Node::Tag(e) if e.name() == "main"))
+		else {
+			unreachable!()
+		};
+		assert!(
+			nodes[main.children.clone()]
+				.iter()
+				.any(|node| matches!(node, Node::Text(text) if text == "Streamed"))
+		);
+		assert!(
+			!nodes
+				.iter()
+				.any(|node| matches!(node, Node::Tag(tag) if tag.attr("id") == Some("S:0")))
+		);
+	}
+
+	#[test]
+	fn blocks_nest_in_headings() {
+		let nodes = parse("<h1><center>Title</center></h1><p>Body").unwrap();
+		assert!(nodes.iter().any(|node| {
+			matches!(node, Node::Tag(tag) if tag.name() == "h1"
+				&& nodes[tag.children.clone()]
+					.iter()
+					.any(|inner| matches!(inner, Node::Text(text) if text == "Title")))
+		}));
+		// Another heading still closes the open one.
+		let nodes = parse("<h1>One<h2>Two</h2>").unwrap();
+		let h1 = nodes
+			.iter()
+			.find_map(|node| match node {
+				Node::Tag(tag) if tag.name() == "h1" => Some(tag),
+				_ => None,
+			})
+			.unwrap();
+		assert_eq!(h1.children.len(), 1);
 	}
 }

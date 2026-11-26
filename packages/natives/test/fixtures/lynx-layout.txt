@@ -15,7 +15,7 @@
      FOOTNOTE: Source
 
   "A  B"        C
-x[2]
+x₂
 
 
 next
@@ -24,4 +24,4 @@ next
 
    [MATH: x<sup>2</sup> & y :MATH]
    Done.
-   [Size] XL_ units
+   [Size] ___ units
