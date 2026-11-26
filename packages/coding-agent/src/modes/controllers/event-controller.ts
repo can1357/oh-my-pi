@@ -350,9 +350,10 @@ export class EventController {
 	// one persistent poll instead of a stack of "waiting on N jobs" frames —
 	// and sealed in place the moment anything else lands below it.
 	#displaceablePollComponent: PendingTool | undefined = undefined;
-	// Most recent successful `todo` snapshot in the active turn. It stays live
-	// across intervening tool output so a later `todo` update can replace the
-	// old full list; the turn boundary seals the final snapshot as history.
+	// Most recent successful `todo` snapshot in the active turn. Its block settles like any final
+	// card: a live one would hold every later block out of terminal scrollback. A later `todo`
+	// update removes it while none of its rows reached scrollback, else seals it in place; the
+	// turn boundary seals the final snapshot.
 	#displaceableTodoComponent: PendingTool | undefined = undefined;
 	// Most recent TTSR notification block. A new ttsr_triggered event merges its
 	// rules into this block while it is still the (live-region) transcript tail.
@@ -634,8 +635,8 @@ export class EventController {
 			const entry = this.ctx.transcriptEntry(block);
 			if (entry?.kind !== "tool" || !entry.tool.call || isSettled(block.node)) continue;
 			const card = entry.tool;
-			// A card holding its final result is done, not orphaned: a displaceable `wait`/`todo`
-			// snapshot stays live on purpose until the next one replaces it.
+			// A card holding its final result is done, not orphaned: a waiting `wait` poll stays
+			// live on purpose until the next call replaces it.
 			if (card.call?.facts.result() !== undefined && !card.call.facts.partial()) continue;
 			const ids = idsByCard.get(card);
 			if (ids === undefined) {
@@ -1612,23 +1613,10 @@ export class EventController {
 		previous.seal();
 	}
 
-	#resolveDisplaceableTodo(nextToolName?: string): void {
-		const previous = this.#displaceableTodoComponent;
-		if (!previous) return;
-		const displaceable = displaceableBy(previous);
-		if (displaceable === undefined) {
-			this.#displaceableTodoComponent = undefined;
-			return;
-		}
-		if (displaceable === nextToolName) {
-			this.#displaceableTodoComponent = undefined;
-			previous.seal();
-			this.ctx.shell.transcript.remove(previous.block);
-			return;
-		}
-		if (nextToolName !== undefined) return;
+	/** The turn is over: the tracked `todo` snapshot is final. */
+	#resolveDisplaceableTodo(): void {
+		this.#displaceableTodoComponent?.seal();
 		this.#displaceableTodoComponent = undefined;
-		previous.seal();
 	}
 
 	/**
@@ -2278,13 +2266,16 @@ export class EventController {
 		if (event.toolName === "todo" && displaceableBy(component) === "todo") this.#adoptTodoSnapshot(component);
 	}
 
-	/** A successful `todo` snapshot replaces the previous live one. */
+	/**
+	 * A successful `todo` snapshot replaces the previous one. Rows of it already in scrollback
+	 * stay as history: removing them would rewrite all of it.
+	 */
 	#adoptTodoSnapshot(tool: PendingTool): void {
 		const previous = this.#displaceableTodoComponent;
 		if (previous && previous !== tool && displaceableBy(previous) !== undefined) {
-			this.#displaceableTodoComponent = undefined;
 			previous.seal();
-			this.ctx.shell.transcript.remove(previous.block);
+			const transcript = this.ctx.shell.transcript;
+			if (!transcript.retired(previous.block)) transcript.remove(previous.block);
 		}
 		this.#displaceableTodoComponent = tool;
 	}

@@ -782,10 +782,10 @@ export class UiHelpers {
 		sealReadGroup();
 		// A trailing waiting poll is final history on rebuild.
 		resolveWaitingPoll();
-		// A trailing todo snapshot is live state, not history: when the rebuild
-		// runs mid-turn, hand it back to the controller so a follow-up `todo`
-		// update keeps displacing instead of stacking. Idle rebuilds (resume /
-		// compaction) seal it so it retires as history.
+		// A trailing todo snapshot may still be replaced: when the rebuild runs
+		// mid-turn, hand it back to the controller so a follow-up `todo` update
+		// keeps displacing instead of stacking. Idle rebuilds (resume /
+		// compaction) seal it as final.
 		if (todoSnapshot && ctx.viewSession.isStreaming) {
 			ctx.eventController?.inheritDisplaceableTodo(todoSnapshot);
 			todoSnapshot = null;
