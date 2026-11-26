@@ -423,6 +423,7 @@ therefore completes through the paste-code path.
 | `TINYFISH_API_KEY`                                  | TinyFish search provider (required)                                                                                                                            |
 | `KEENABLE_API_KEY`                                  | Keenable search provider (automatic chain requires a key; explicit `web/keenable` selection can use the keyless public endpoint, see below)                    |
 | `SOFYA_API_KEY`                                     | Sofya search provider (required)                                                                                                                               |
+| `SPECSTREAM_API_KEY`                                | SpecStream web search provider (required)                                                                                                                      |
 | `BRAVE_API_KEY`                                     | Brave search provider                                                                                                                                          |
 | `DEEPSEEK_API_KEY`                                  | DeepSeek search provider (same key as DeepSeek models)                                                                                                         |
 | `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                                                                                                        |

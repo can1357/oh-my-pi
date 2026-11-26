@@ -14,6 +14,7 @@
 - `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
 - The glob tool's header shows the globs a call searches, a separate `pattern` included, with wildcards, character classes and `{a,b}` alternations highlighted like grep's regex ([#20616](https://github.com/can1357/oh-my-pi/pull/20616) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Ask forms highlight `<mark>` text, in the terminal and in Tern ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Added SpecStream as a web search engine (`web/specstream`), using `SPECSTREAM_API_KEY` or a stored `specstream` credential ([#20345](https://github.com/can1357/oh-my-pi/pull/20345) by [@Specstreamai](https://github.com/Specstreamai))
 
 ### Changed
 

@@ -43,6 +43,7 @@
    - `packages/coding-agent/src/web/search/providers/tinyfish.ts` — TinyFish search adapter.
    - `packages/coding-agent/src/web/search/providers/keenable.ts` — Keenable search adapter (keyed or keyless public endpoint).
    - `packages/coding-agent/src/web/search/providers/sofya.ts` — Sofya search adapter.
+   - `packages/coding-agent/src/web/search/providers/specstream.ts` — SpecStream live web search adapter.
    - `packages/coding-agent/src/web/search/providers/xai.ts` — xAI Responses web and X search adapter.
    - `packages/coding-agent/src/web/search/providers/zai.ts` — Z.AI remote MCP adapter.
    - `packages/coding-agent/src/web/parallel.ts` — Parallel search/extract HTTP client.
@@ -214,6 +215,11 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Querying: POST `https://sofya.co/v1/search` with bearer auth. Body `{ query, search_depth: "snippets", max_results }`; `site:` / `-site:` hosts map to `include_domains` / `exclude_domains` (at most 10 each; further exclusions fall to the post-filter), `after:`/`before:` map to an inclusive `freshness` range `YYYY-MM-DD:YYYY-MM-DD` ending the day before `before:` (an open side spans to `1970-01-01` or today), and otherwise `recency` passes through as `freshness`. Quoted phrases and `-` exclusions are kept; other directives are left to the post-filter. A directives-only query searches its constraint values as keywords; a date-only query is rejected.
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..20`, default `10`.
       - Output: `sources` (snippet from `description`, else `content`; `published_date` as `publishedDate`), `searchQueries` with Sofya's `relaxed_query` or `altered_query` when it rewrote the query, `authMode: "api_key"`.
+   - **SpecStream** — `packages/coding-agent/src/web/search/providers/specstream.ts`
+      - Availability: `SPECSTREAM_API_KEY` or a configured/stored `specstream` credential.
+      - Querying: POST `https://api.specstream.ai/v1/web-search` with bearer auth. Body `{ q, num, passages: true }`; quoted phrases, `-` exclusions, and `site:` / `-site:` operators are formatted inline via `formatQuery` (preserving site paths), while other directives and `recency`/`after:`/`before:` are left to the central post-filter (SpecStream's `news: true` flag switches to a news-only vertical rather than filtering web results by date, so `recency` is not mapped to `news`). A date-only query is rejected.
+      - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..20`, default `10`.
+      - Output: `sources` (snippet from `excerpt`, else `snippet`; `published` as `publishedDate`), `authMode: "api_key"`.
    - **Jina** — `packages/coding-agent/src/web/search/providers/jina.ts`
       - Availability: `JINA_API_KEY` or a configured/stored `jina` credential.
       - Querying: GET `https://s.jina.ai/<encoded query>?count=<count>` with bearer auth and JSON/no-content headers. A single `site:` host maps to `X-Site`; multiple sites remain inline.
@@ -323,6 +329,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - DeepSeek result count: default `10`, max `50`; query length max `128` characters (`packages/coding-agent/src/web/search/providers/deepseek.ts`).
 - Keenable result count: default `10`, max `50` (`packages/coding-agent/src/web/search/providers/keenable.ts`).
 - Sofya result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/sofya.ts`).
+- SpecStream result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/specstream.ts`).
 - TinyFish count: default `10`, max `20`; sends at most `10` results per page, fetching pages `0..10` until enough unique sources or a short page.
 - Jina count: default `5`, max `20`; OpenRouter plugin breadth: default `5`.
 - DuckDuckGo result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/duckduckgo.ts`).
