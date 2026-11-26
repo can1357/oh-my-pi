@@ -20,7 +20,7 @@
 
 ### Fixed
 
-- After the agent answers while its background jobs or subagents keep running, the working row names what it is waiting for again instead of reverting to `Working…` ([#20603](https://github.com/can1357/oh-my-pi/pull/20603) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- While the agent waits on background jobs or subagents after answering, the working row keeps naming what it waits for instead of reverting to `Working…` or disappearing after an error, a refused prompt, `/fork`, `/wt`, `/compact`, or a `/tree` branch summary ([#20603](https://github.com/can1357/oh-my-pi/pull/20603) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - `/prewalk`, `/prewalk restart`, and `/switch` now accept `^provider/id[:level]` model references inserted by `^` completion ([#20564](https://github.com/can1357/oh-my-pi/issues/20564)).
 - Resuming or rewinding a session with an aborted task result no longer throws while the transcript renders; the card shows the cancellation text ([#20533](https://github.com/can1357/oh-my-pi/pull/20533) by [@g0spel](https://github.com/g0spel))
 - Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).

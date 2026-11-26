@@ -2509,9 +2509,10 @@ export class EventController {
 	 * When the main session's run is paused waiting only on outside sources, the
 	 * working row says so and names the jobs and child agents, instead of
 	 * repeating the last tool call's intent. The label is live, so a job
-	 * cancelled without a wake (`/jobs kill`) leaves the row at once. A user
-	 * prompt's own completion may have torn its loader down, so mount one for
-	 * the wait; the next loop or the run's `agent_end` takes it over.
+	 * cancelled without a wake (`/jobs kill`) leaves the row at once. Shown on
+	 * the pause and again whenever another row (an error, a maintenance step,
+	 * the prompt's own settle) comes down while the run still waits; the next
+	 * loop or the run's `agent_end` takes it over.
 	 */
 	showAsyncWait(): void {
 		const session = this.ctx.session;

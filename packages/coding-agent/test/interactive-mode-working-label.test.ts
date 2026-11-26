@@ -3,9 +3,11 @@
  * on every tick and kept to one terminal row. Without the clamp a long list of
  * job ids wrapped the working row onto a second line at narrow widths.
  *
- * The wait label also survives the paused run's own submission returning: the
- * pause can reach the UI first, and the submission's settle used to put the
- * label back to "Working…".
+ * While the run is paused on outside work, the row keeps naming the wait
+ * whatever else takes it down: the paused prompt's own submission returning
+ * after the pause reached the UI (it used to read "Working…"), an error, or a
+ * maintenance step such as `/wt` or a `/tree` summary (they used to leave no
+ * row at all).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -15,6 +17,7 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -35,6 +38,17 @@ describe("InteractiveMode live working label", () => {
 		return renderRows(() => StatusHud({ model: mode.hud.status }), columns)
 			.map(line => line.trimEnd())
 			.filter(line => line.length > 0);
+	}
+
+	/** Run a prompt that starts a background job and pause on it, as the run's `agent_pause` shows it. */
+	async function pauseOnJob(): Promise<{ jobId: string; input: SubmittedUserInput }> {
+		const jobId = jobs.register("bash", "sleep 150", async () => await jobGate.promise);
+		const input = mode.startPendingSubmission({ text: "start the long job" });
+		await session.prompt(input.text);
+		await session.waitForIdle();
+		expect(mode.eventController.isAwaitingAsyncWork()).toBe(true);
+		mode.eventController.showAsyncWait();
+		return { jobId, input };
 	}
 
 	beforeAll(() => {
@@ -99,18 +113,27 @@ describe("InteractiveMode live working label", () => {
 	});
 
 	it("keeps naming the wait when the paused run's submission returns after its pause", async () => {
-		const jobId = jobs.register("bash", "sleep 150", async () => await jobGate.promise);
-		const input = mode.startPendingSubmission({ text: "start the long job" });
-		await session.prompt(input.text);
-		await session.waitForIdle();
-		expect(mode.eventController.isAwaitingAsyncWork()).toBe(true);
-
-		// The run's `agent_pause` reached the UI before the submission returned.
-		mode.eventController.showAsyncWait();
+		const { jobId, input } = await pauseOnJob();
 		mode.finishPendingSubmission(input);
 
-		const rows = statusRows(120);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]).toContain(`Waiting for background job ${jobId}`);
+		expect(statusRows(120)).toEqual([expect.stringContaining(`Waiting for background job ${jobId}`)]);
+	});
+
+	it("brings the wait back after an error while the run waits", async () => {
+		const { jobId, input } = await pauseOnJob();
+		mode.finishPendingSubmission(input);
+		mode.showError("Unknown /skills subcommand: bogus");
+
+		expect(statusRows(120)).toEqual([expect.stringContaining(`Waiting for background job ${jobId}`)]);
+	});
+
+	it("brings the wait back once a maintenance step that took the row finishes", async () => {
+		const { jobId, input } = await pauseOnJob();
+		mode.finishPendingSubmission(input);
+		mode.showWorking("maintenance", { label: "Creating worktree on wt/test…", startedAt: Date.now() });
+		expect(statusRows(120)).toEqual([expect.stringContaining("Creating worktree on wt/test…")]);
+
+		mode.clearWorking("maintenance");
+		expect(statusRows(120)).toEqual([expect.stringContaining(`Waiting for background job ${jobId}`)]);
 	});
 });
