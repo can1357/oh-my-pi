@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { ovnfsCommand } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { $ } from "bun";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 describe("ovnfsCommand", () => {
 	// Bash strips backslashes: `C:\Users\…\ovnfs.exe` pasted into a command runs as `C:Users…ovnfs.exe`.
@@ -26,6 +27,7 @@ describe("ovnfsCommand", () => {
 				rules: [],
 				toolNames: ["bash"],
 				ovnfs,
+				urlRouter: InternalUrlRouter.builtins(),
 			});
 			const text = prompt.systemPrompt.join("\n");
 			const line = text.split("\n").find(row => row.includes(" new --name <name>"));

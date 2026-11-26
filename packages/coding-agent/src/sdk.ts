@@ -124,8 +124,8 @@ import {
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	EXTENSION_HANDLER_TIMEOUT_MS,
-	type ExtensionAgentIdentity,
 	type Extension,
+	type ExtensionAgentIdentity,
 	type ExtensionContext,
 	type ExtensionFactory,
 	ExtensionRunner,
@@ -143,6 +143,7 @@ import {
 import type { UserWaitTracker } from "./extensibility/extensions/user-wait";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { partitionStartupExtensions, recordStartupVerdicts } from "./extensibility/extensions/startup-deferral";
+import { ExtensionUrlSchemes, urlSchemeConflicts } from "./extensibility/extensions/url-schemes";
 import {
 	createSkillDescriptionCompressor,
 	openSessionSkillDescriptionStore,
@@ -158,7 +159,14 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionStateApi } from "./hindsight/state";
-import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
+import {
+	InternalUrlRouter,
+	LocalProtocolHandler,
+	type LocalProtocolOptions,
+	outRepliesActive,
+	SessionUrlSchemes,
+	type UrlSchemeSource,
+} from "./internal-urls";
 import { onJudgeRejection } from "./judgment";
 import { holdSharedLsp } from "./lsp/client";
 import { holdSharedMcp } from "./mcp/host/access";
@@ -1015,6 +1023,11 @@ export interface CreateAgentSessionOptions {
 
 	/** Override local:// protocol options for subagent local:// sharing. Default: uses the session's own artifacts dir and session ID. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/**
+	 * The spawning session's RPC host URI schemes (`ToolSession.hostUriSources`), resolved
+	 * after this session's own. Set only for a subagent on the parent's thread.
+	 */
+	parentHostUriSources?: readonly UrlSchemeSource[];
 
 	/** Settings instance. Default: Settings.init({ cwd, agentDir }) */
 	settings?: Settings;
@@ -1259,7 +1272,15 @@ export async function loadSessionExtensions(
 			? await partitionStartupExtensions(storage, paths, cwd, cfgTodoBackend.get(settings))
 			: { eager: paths, deferred: [] };
 	const result = await logger.time("loadExtensions", loadExtensions, eager, cwd, eventBus);
-	if (storage) await recordStartupVerdicts(storage, result.extensions);
+	if (storage) {
+		try {
+			await recordStartupVerdicts(storage, result.extensions);
+		} catch (error) {
+			// The caller never receives these loads, so nothing else would release what they registered.
+			for (const extension of result.extensions) extension.registrations?.release();
+			throw error;
+		}
+	}
 	for (const { path, error } of result.errors) {
 		logger.error("Failed to load extension", { path, error });
 	}
@@ -1286,14 +1307,20 @@ export async function loadCliExtensionProviders(
 ): Promise<void> {
 	const eventBus = new EventBus();
 	const extensionsResult = await loadSessionExtensions(options, cwd, settings, eventBus);
-	const activeSources = extensionsResult.extensions.map(extension => extension.path);
-	modelRegistry.syncExtensionSources(activeSources);
-	modelRegistry.clearSourceRegistrations(new Set(activeSources));
-	for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-		modelRegistry.registerProvider(name, config, sourceId);
+	try {
+		const activeSources = extensionsResult.extensions.map(extension => extension.path);
+		modelRegistry.syncExtensionSources(activeSources);
+		modelRegistry.clearSourceRegistrations(new Set(activeSources));
+		for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+			modelRegistry.registerProvider(name, config, sourceId);
+		}
+		extensionsResult.runtime.pendingProviderRegistrations = [];
+		if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
+	} finally {
+		// Only their providers are wanted; no runner adopts these loads, so release what else they
+		// registered outside session state (process-wide; `auth-gateway-stdio` outlives this call).
+		for (const extension of extensionsResult.extensions) extension.registrations?.release();
 	}
-	extensionsResult.runtime.pendingProviderRegistrations = [];
-	if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
 }
 
 /** Resolve prewalk with the same ordering before and after extension registration. */
@@ -1492,6 +1519,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		: undefined;
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
+		// No session: the standalone SDK builder lists the built-in schemes only.
+		urlRouter: InternalUrlRouter.builtins(),
 		customPrompt: options.customPrompt,
 		systemPromptTemplate: options.systemPromptTemplate,
 		skills: options.skills,
@@ -2007,11 +2036,22 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	registerLocalInferenceApi();
-	const extensionRoots = options.extensionRoots?.();
-	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
-	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
-	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	try {
+		registerLocalInferenceApi();
+		const extensionRoots = options.extensionRoots?.();
+		const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
+		const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
+		return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	} catch (error) {
+		// Preloaded loads belong to the caller, which may retry with them (interactive auto-resume
+		// does): a failed startup, wherever it fails, only suspends their registrations, and the runner
+		// that adopts them on a retry resumes them (their listeners hear of it once it is initialized).
+		// A failure once the session existed disposed it, which already shut them down
+		// (`session_shutdown`) and released them; suspending is then a no-op.
+		for (const extension of options.preloadedExtensions?.extensions ?? [])
+			extension.registrations?.setSuspended(true);
+		throw error;
+	}
 }
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
@@ -2043,6 +2083,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	using startupCleanup = new DisposableStack();
 	if (restoreProviderToggles) startupCleanup.defer(restoreProviderToggles);
 	if (unbindSessionEffects) startupCleanup.defer(unbindSessionEffects);
+	// Loads the caller preloaded are its own: a failed startup leaves them to `createAgentSession`,
+	// which suspends them for a retry, instead of releasing them below.
+	const preloadedExtensions: readonly Extension[] = options.preloadedExtensions?.extensions ?? [];
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
 	// reloads and recursively spawned children consume.
@@ -2082,6 +2125,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
+	// The session's extension runner, for its URL schemes; set once it exists.
+	let urlSchemeRunner: ExtensionRunner | undefined;
+	// The loads a startup failure must release itself when no session (and so no shutdown) follows;
+	// preloaded ones are only suspended (see `createAgentSession`).
+	let startupExtensions: readonly Extension[] = [];
 	// Set once the session exists; the built-in warning covers disables from then on.
 	let credentialNoticeSession: AgentSession | undefined;
 	const unsubscribeCredentialDisabled = authStorage.credentials.onDisabled(event => {
@@ -2692,7 +2740,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				activeToolNames.add(name);
 			}
 		};
+		// This session's own URL schemes; its tools and the AgentSession resolve through one router.
+		// Extension schemes come from the runner's active extensions, read per lookup once it exists.
+		const urlSchemes = new SessionUrlSchemes(
+			options.parentHostUriSources,
+			new ExtensionUrlSchemes(() => urlSchemeRunner?.getActiveExtensions() ?? []),
+		);
 		const toolSession: ToolSession = {
+			urlRouter: urlSchemes.router,
+			hostUriSources: urlSchemes.hostUriSources,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -3233,6 +3289,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				logger.error("Failed to load extension", { path, error });
 			}
 		}
+		startupExtensions = extensionsResult.extensions;
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
@@ -3304,6 +3361,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const forwardablePreparedExtensions = new Map(
 			(extensionsResult.preparedExtensions ?? []).map(prepared => [prepared.resolvedPath, prepared]),
 		);
+		// Every load of this session (deferred ones too) shares the runtime, so its store is the session's.
+		toolSession.expectedReplies = extensionsResult.runtime.expectedReplies;
 
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
@@ -3991,7 +4050,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
 			}),
 			createAnnotationsAPI,
+			urlSchemes.router,
 		);
+		urlSchemeRunner = extensionRunner;
+		// Two active extensions registering one URL scheme: the earlier serves it, the rest are errors.
+		// The loader already reported conflicts among the extensions it bound together; this adds the
+		// ones only the whole session sees (inline factories beside loaded paths). A new list, so a
+		// caller's preloaded result is left as it was.
+		const reported = new Set(extensionsResult.errors.map(({ path, error }) => `${path}\0${error}`));
+		const urlSchemeErrors = urlSchemeConflicts(extensionRunner.getActiveExtensions()).filter(
+			({ path, error }) => !reported.has(`${path}\0${error}`),
+		);
+		if (urlSchemeErrors.length > 0) {
+			for (const conflict of urlSchemeErrors) logger.error("Extension URL scheme conflict", conflict);
+			extensionsResult = { ...extensionsResult, errors: [...extensionsResult.errors, ...urlSchemeErrors] };
+		}
 		// A dialog waits for the user, not the agent: the session lets the display sleep while one is open.
 		const trackUserWait: UserWaitTracker = dialog => (hasSession ? session.waitForUser(dialog) : dialog());
 		extensionRunner.setUserWaitTracker(trackUserWait);
@@ -4362,6 +4435,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// this session did not start on Cursor.
 				getEditReplaceTool: getCursorBridgeEditTool,
 				getToolContext: () => toolContextStore.getContext(),
+				urlRouter: urlSchemes.router,
 				mcpResources: cursorMcpResources,
 				emitEvent: event => cursorEventEmitter?.(event),
 				getTodoPhases: () => session.getTodoPhases(),
@@ -4645,6 +4719,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
+				urlRouter: urlSchemes.router,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				noContextFiles: options.noContextFiles,
 				excludeAgentsMd,
@@ -5367,6 +5442,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			state: new ToolConversationState(),
 			// An advisor is a conversation of its own with no hidden-message channel: its preludes stay read-first.
 			noteEvalPreludeCall: undefined,
+			// Replies the primary's extensions expect are owed to the primary's agent: an advisor
+			// granted `wait` must not block on them.
+			expectedReplies: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -5558,8 +5636,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
+			expectedReplies: toolSession.expectedReplies,
 			getEvalPreludes,
 			evalToolSession: toolSession,
+			urlSchemes,
 			customCommands: customCommandsResult.commands,
 			skills,
 			skillDescriptions,
@@ -5935,7 +6015,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const generation = customToolGenerations.get(scopeKey);
 				if (generation) toolSession.customToolPaths = generation.paths;
 			};
-			const reconcileProjectScope = async (): Promise<void> => {
+			// `pending` collects the loads this reconcile makes until the runner adopts them.
+			const reconcileProjectScopeLoads = async (pending: Extension[]): Promise<void> => {
 				// Startup-deferred sources join first so a cwd change suspends them like the rest.
 				await session.loadDeferredExtensions();
 				const cwdNow = sessionManager.getCwd();
@@ -5970,6 +6051,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						for (const extensionPath of unloaded) attemptedExtensionPaths.add(extensionPath);
 						const runtime = extensionsResult.runtime;
 						const loaded = await loadExtensions(unloaded, cwdNow, eventBus, runtime);
+						pending.push(...loaded.extensions);
 						for (const { path: extensionPath, error } of loaded.errors) {
 							logger.error("Failed to load extension", { path: extensionPath, error });
 						}
@@ -6013,6 +6095,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (session.isDisposed) return;
 				// Join before suspending so a tool both scopes define swaps implementations in
 				// place and keeps its selection instead of being dropped and re-added.
+				// `addExtensions` takes them into the runner synchronously, before its first await.
+				pending.length = 0;
 				await extensionRunner.addExtensions(added);
 				const activeGeneration = customToolGenerations.get(scopeKey)?.extension;
 				const generations = new Set<Extension>();
@@ -6061,6 +6145,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							mounted.filter(mountedName => mountedName !== name),
 						);
 					});
+				}
+			};
+			// A load no runner adopted (the bind failed or the session was disposed meanwhile) is
+			// released here, since no session's shutdown would ever reach it.
+			const reconcileProjectScope = async (): Promise<void> => {
+				const pending: Extension[] = [];
+				try {
+					await reconcileProjectScopeLoads(pending);
+				} finally {
+					for (const extension of pending) extension.registrations?.release();
 				}
 			};
 			const queueProjectScopeReconcile = (): Promise<void> => {
@@ -6515,24 +6609,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					eventBus,
 					runtime,
 				);
-				const storage = settings.getStorage();
-				if (storage) await recordStartupVerdicts(storage, loaded.extensions);
-				for (const { path, error } of loaded.errors) logger.error("Failed to load extension", { path, error });
-				for (const message of formatExtensionLoadNotifications(loaded.errors)) {
-					session.emitNotice("warning", message, "extensions");
+				// The loads are this bind's until the runner adopts them. Any way out before that — the
+				// session went away, or a step below threw (a queued provider registration the registry
+				// rejects) — leaves them with no runner, so no shutdown releases what they registered.
+				let adopted = false;
+				try {
+					const storage = settings.getStorage();
+					if (storage) await recordStartupVerdicts(storage, loaded.extensions);
+					for (const { path, error } of loaded.errors) logger.error("Failed to load extension", { path, error });
+					for (const message of formatExtensionLoadNotifications(loaded.errors)) {
+						session.emitNotice("warning", message, "extensions");
+					}
+					if (session.isDisposed) return;
+					// Providers queue until the runner is initialized; drain them as session creation does.
+					for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
+						modelRegistry.registerProvider(name, config, sourceId);
+					}
+					const deferredPrepared = loaded.preparedExtensions ?? [];
+					const deferredPaths = loaded.extensions.map(extension => extension.resolvedPath);
+					forwardedPreparedExtensions.push(...deferredPrepared);
+					extensionPaths.push(...deferredPaths);
+					for (const prepared of deferredPrepared)
+						forwardablePreparedExtensions.set(prepared.resolvedPath, prepared);
+					forwardableExtensionPaths.push(...deferredPaths);
+					// `addExtensions` takes them into the runner synchronously, before its first await.
+					adopted = true;
+					await extensionRunner.addExtensions(loaded.extensions);
+				} finally {
+					if (!adopted) for (const extension of loaded.extensions) extension.registrations?.release();
 				}
-				if (session.isDisposed) return;
-				// Providers queue until the runner is initialized; drain them as session creation does.
-				for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
-					modelRegistry.registerProvider(name, config, sourceId);
-				}
-				const deferredPrepared = loaded.preparedExtensions ?? [];
-				const deferredPaths = loaded.extensions.map(extension => extension.resolvedPath);
-				forwardedPreparedExtensions.push(...deferredPrepared);
-				extensionPaths.push(...deferredPaths);
-				for (const prepared of deferredPrepared) forwardablePreparedExtensions.set(prepared.resolvedPath, prepared);
-				forwardableExtensionPaths.push(...deferredPaths);
-				await extensionRunner.addExtensions(loaded.extensions);
 			});
 		}
 		startDeferredMCPDiscovery?.(session);
@@ -6556,6 +6661,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
 				if (hasRegistered) unregisterUnlessParked();
+				for (const extension of startupExtensions) {
+					if (!preloadedExtensions.includes(extension)) extension.registrations?.release();
+				}
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {
 						AsyncJobManager.setInstance(undefined);

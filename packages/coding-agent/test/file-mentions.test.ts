@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { EditStore } from "@oh-my-pi/pi-natives";
 import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
 import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
@@ -38,12 +39,32 @@ async function createTempDir(): Promise<string> {
 }
 
 describe("generateFileMentionMessages path resolution", () => {
+	test("treats a mention of a session-scheme URL as prose, not a local lookalike file", async () => {
+		const cwd = await createTempDir();
+		await fs.mkdir(path.join(cwd, "db:", "rows"), { recursive: true });
+		await Bun.write(path.join(cwd, "db:", "rows", "notes.md"), "local lookalike");
+		const schemes = new UrlSchemeTable("Host URI scheme");
+		schemes.replace([
+			{
+				scheme: "db",
+				spec: { backing: "remote", selectors: "none", immutable: true },
+				resolve: async () => {
+					throw new Error("db:// is never resolved here");
+				},
+			},
+		]);
+
+		const mentions = extractFileMentions("look at @db://rows/notes.md");
+		expect(mentions).toEqual(["db://rows/notes.md"]);
+		expect(await generateFileMentionMessages(mentions, cwd, new InternalUrlRouter([schemes]))).toEqual([]);
+	});
+
 	test("auto-reads an exact file path", async () => {
 		const cwd = await createTempDir();
 		await fs.mkdir(path.join(cwd, "src"), { recursive: true });
 		await Bun.write(path.join(cwd, "src", "config.ts"), "export const x = 1;");
 
-		const messages = await generateFileMentionMessages(["src/config.ts"], cwd);
+		const messages = await generateFileMentionMessages(["src/config.ts"], cwd, InternalUrlRouter.builtins());
 		expect(messages).toHaveLength(1);
 		const message = messages[0];
 		if (message?.role !== "fileMention") {
@@ -59,7 +80,7 @@ describe("generateFileMentionMessages path resolution", () => {
 		await fs.mkdir(path.join(cwd, "src"), { recursive: true });
 		await Bun.write(path.join(cwd, "src", "index.ts"), "ok");
 
-		const messages = await generateFileMentionMessages(["src"], cwd);
+		const messages = await generateFileMentionMessages(["src"], cwd, InternalUrlRouter.builtins());
 		expect(messages).toHaveLength(1);
 		const message = messages[0];
 		if (message?.role !== "fileMention") {
@@ -79,16 +100,20 @@ describe("generateFileMentionMessages path resolution", () => {
 		// Partial path (old prefix match), scope-style token and bare substring (old fuzzy
 		// match) must all resolve to nothing: the @-selector turns these into real paths
 		// before send, so an unresolved mention is prose, not a file reference.
-		expect(await generateFileMentionMessages(["docs/rea"], cwd)).toHaveLength(0);
-		expect(await generateFileMentionMessages(["widget/"], cwd)).toHaveLength(0);
-		expect(await generateFileMentionMessages(["widget"], cwd)).toHaveLength(0);
+		expect(await generateFileMentionMessages(["docs/rea"], cwd, InternalUrlRouter.builtins())).toHaveLength(0);
+		expect(await generateFileMentionMessages(["widget/"], cwd, InternalUrlRouter.builtins())).toHaveLength(0);
+		expect(await generateFileMentionMessages(["widget"], cwd, InternalUrlRouter.builtins())).toHaveLength(0);
 	});
 
 	test("reads only the mentions that resolve to real paths", async () => {
 		const cwd = await createTempDir();
 		await Bun.write(path.join(cwd, "real.txt"), "present");
 
-		const messages = await generateFileMentionMessages(["real.txt", "does-not-exist.txt"], cwd);
+		const messages = await generateFileMentionMessages(
+			["real.txt", "does-not-exist.txt"],
+			cwd,
+			InternalUrlRouter.builtins(),
+		);
 		expect(messages).toHaveLength(1);
 		const message = messages[0];
 		if (message?.role !== "fileMention") {
@@ -105,7 +130,7 @@ describe("generateFileMentionMessages path resolution", () => {
 
 		const mentions = extractFileMentions("Ignore this text: @local://x and @vault://n, but read @real.txt");
 		expect(mentions).toContain("local://x");
-		const messages = await generateFileMentionMessages(mentions, cwd);
+		const messages = await generateFileMentionMessages(mentions, cwd, InternalUrlRouter.builtins());
 		expect(messages).toHaveLength(1);
 		const message = messages[0];
 		if (message?.role !== "fileMention") {
@@ -122,7 +147,7 @@ describe("generateFileMentionMessages path resolution", () => {
 		const mentions = extractFileMentions("Please see @\"My Folder/my file.png\" and @'My Folder/my file.png'");
 		expect(mentions).toEqual(["My Folder/my file.png"]);
 
-		const messages = await generateFileMentionMessages(mentions, cwd);
+		const messages = await generateFileMentionMessages(mentions, cwd, InternalUrlRouter.builtins());
 		expect(messages).toHaveLength(1);
 		const message = messages[0];
 		if (message?.role !== "fileMention") {
@@ -140,7 +165,7 @@ describe("generateFileMentionMessages path resolution", () => {
 		// A non-NUL invalid-UTF8 blob must be refused too, not just NUL-bearing files.
 		await Bun.write(path.join(cwd, "blob.bin"), Buffer.from([0x4d, 0x5a, 0xff, 0xfe, 0xc0, 0xc0]));
 
-		const messages = await generateFileMentionMessages(["Silver.ttf", "blob.bin"], cwd);
+		const messages = await generateFileMentionMessages(["Silver.ttf", "blob.bin"], cwd, InternalUrlRouter.builtins());
 		expect(messages).toHaveLength(1);
 		const message = messages[0];
 		if (message?.role !== "fileMention") {
@@ -176,7 +201,7 @@ describe("generateFileMentionMessages path resolution", () => {
 		await Bun.write(path.join(cwd, "table.xlsx"), xlsxBytes);
 
 		const snapshotStore = new EditStore();
-		const messages = await generateFileMentionMessages(["table.xlsx"], cwd, {
+		const messages = await generateFileMentionMessages(["table.xlsx"], cwd, InternalUrlRouter.builtins(), {
 			useHashLines: true,
 			snapshotStore,
 		});
@@ -227,11 +252,16 @@ describe("generateFileMentionMessages path resolution", () => {
 			return tag;
 		};
 
-		const messages = await generateFileMentionMessages(["first.txt", "aborted.xlsx"], cwd, {
-			useHashLines: true,
-			snapshotStore,
-			signal: controller.signal,
-		});
+		const messages = await generateFileMentionMessages(
+			["first.txt", "aborted.xlsx"],
+			cwd,
+			InternalUrlRouter.builtins(),
+			{
+				useHashLines: true,
+				snapshotStore,
+				signal: controller.signal,
+			},
+		);
 
 		expect(messages).toHaveLength(0);
 	});

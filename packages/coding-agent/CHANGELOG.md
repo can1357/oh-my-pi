@@ -5,11 +5,16 @@
 ### Breaking Changes
 
 - `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
+- Internal URLs resolve through a per-session router: `InternalUrlRouter.instance()`, `register()` and `unregister()` are removed. `InternalUrlRouter.builtins()` is the process-wide router of OMP's built-in schemes, `session.urlRouter` / `ResolveContext.router` resolve a session's own schemes before the built-ins, and `InternalUrlRouter.isBuiltin()` is static. `RpcHostUriBridge` takes the session's host-URI scheme table instead of a router ([#20520](https://github.com/can1357/oh-my-pi/pull/20520) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Added
 
 - Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Extensions can serve their own internal URL schemes with `pi.registerUrlScheme(handler)` in the sessions that load them, through `read`, `write`, composer completion and the system prompt ([#20538](https://github.com/can1357/oh-my-pi/pull/20538) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `pi.replies.expect(peerId)` for extensions that bridge to agents in other processes: `wait` blocks for that peer's reply instead of returning "Nothing to wait for" until the extension releases it; the expectation pauses while a live `disabledExtensions` edit suspends the extension and goes with it at teardown ([#18058](https://github.com/can1357/oh-my-pi/pull/18058) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `pi.onSuspensionChange(listener)` so an extension can pause work it drives itself (a socket, a timer) while a live `disabledExtensions` edit suspends it, and resume it after ([#18058](https://github.com/can1357/oh-my-pi/pull/18058) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added the `url-scheme-bridge` example extension (`examples/extensions/url-scheme-bridge`): a runnable reference bridge to agents in other processes over a Unix socket, built on `pi.registerUrlScheme`, `pi.replies.expect` and `pi.onSuspensionChange`, with a peer CLI for a two-terminal demo ([#20542](https://github.com/can1357/oh-my-pi/pull/20542) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Changed
 
@@ -17,6 +22,7 @@
 - URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
 - URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
 - Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
+- RPC host URI schemes (`set_host_uri_schemes`) belong to the RPC session that registered them and the task subagents it runs on the main thread: other sessions in the same process no longer resolve them, and standard schemes (`http`, `file`, …) are refused like built-in ones ([#20520](https://github.com/can1357/oh-my-pi/pull/20520) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Fixed
 

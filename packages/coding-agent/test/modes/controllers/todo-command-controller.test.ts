@@ -2,12 +2,17 @@ import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { TodoCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/todo-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext {
+function createContext(
+	cwd: string,
+	phases: TodoPhase[],
+	urlRouter: InternalUrlRouter = InternalUrlRouter.builtins(),
+): InteractiveModeContext {
 	return {
 		agent: {
 			appendMessage: vi.fn(),
@@ -15,6 +20,7 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		session: {
 			getTodoPhases: () => phases,
 			commitTodoPhases: vi.fn(),
+			urlRouter,
 		},
 		sessionManager: {
 			appendMessage: vi.fn(),
@@ -136,6 +142,28 @@ describe("TodoCommandController", () => {
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Failed to write todos:"));
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("internal scheme"));
+	});
+
+	it("refuses an export to a URL of a scheme the session registered, writing no local lookalike", async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-todo-export-session-scheme-"));
+		const schemes = new UrlSchemeTable("Host URI scheme");
+		schemes.replace([
+			{
+				scheme: "db",
+				spec: { backing: "remote", selectors: "none", immutable: true },
+				resolve: async () => {
+					throw new Error("db:// is never resolved here");
+				},
+			},
+		]);
+		const phases: TodoPhase[] = [{ name: "Work", tasks: [{ content: "Ship it", status: "pending" }] }];
+		const ctx = createContext(tempRoot, phases, new InternalUrlRouter([schemes]));
+		const controller = new TodoCommandController(ctx);
+
+		await controller.handleTodoCommand("export db://rows/todo.md");
+
+		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining('internal scheme "db://"'));
+		expect(await fs.readdir(tempRoot)).toEqual([]);
 	});
 
 	function reminderTextFrom(ctx: InteractiveModeContext): string {

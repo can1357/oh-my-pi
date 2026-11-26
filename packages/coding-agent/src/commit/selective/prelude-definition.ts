@@ -6,6 +6,7 @@ import commitGuidance from "../../prompts/tools/commit-guidance.md" with { type:
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns } from "../../tools/output-meta";
+import { sessionUrlRouter } from "../../internal-urls/context";
 import { resolveToCwd } from "../../tools/path-utils";
 import { cfgCommitEnabled } from "../../tools/settings";
 import { commitSelection } from "./apply";
@@ -118,7 +119,8 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 	const describe = (draft: Draft) => ({ id: draft.id, head: draft.head, scope: [...draft.scope] });
 	const invoke = async (params: CommitParams, signal?: AbortSignal) => {
 		if (params.action === "draft") {
-			const cwd = params.repo === undefined ? session.cwd : resolveToCwd(params.repo, session.cwd);
+			const cwd =
+				params.repo === undefined ? session.cwd : resolveToCwd(params.repo, session.cwd, sessionUrlRouter(session));
 			const draft = await draftFor(context(signal, cwd), params.agents);
 			remember(draft, params.agents);
 			return { text: draft.summary(), details: describe(draft) };

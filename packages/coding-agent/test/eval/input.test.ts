@@ -8,6 +8,7 @@ import { Settings } from "../../src/config/settings";
 import { CursorExecHandlers } from "../../src/cursor";
 import { prepareEvalSource } from "../../src/eval/input";
 import { disposeVmContextsByOwner } from "../../src/eval/js/context-manager";
+import { InternalUrlRouter } from "../../src/internal-urls/router";
 import type { ToolSession } from "../../src/tools";
 import { EvalTool, type EvalToolParams } from "../../src/tools/eval";
 
@@ -31,6 +32,7 @@ async function cursorEval(args: Record<string, unknown>): Promise<{ isError: boo
 		getEvalKernelOwnerId: () => ownerId,
 	};
 	const bridge = new CursorExecHandlers({
+		urlRouter: InternalUrlRouter.builtins(),
 		cwd: tmp.path(),
 		tools: new Map([["eval", new EvalTool(context) as AgentTool]]),
 	});

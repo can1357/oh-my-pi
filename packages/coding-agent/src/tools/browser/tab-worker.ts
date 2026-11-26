@@ -26,6 +26,9 @@ import type {
 import { stringifyFunction } from "puppeteer-core/internal/util/Function.js";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { resizeImage } from "../../utils/image-resize";
+// The tab worker gets a session snapshot over its message transport (a worker thread, or inline when
+// a worker cannot spawn), not the session's router: its paths resolve against the built-in schemes.
+import { InternalUrlRouter } from "../../internal-urls/router";
 import { resolveToCwd } from "../path-utils";
 import {
 	bindRunFacade,
@@ -3115,7 +3118,7 @@ export class WorkerCore {
 						prepareElementUpload(
 							page,
 							handle,
-							filePaths.map(filePath => resolveToCwd(filePath, session.cwd)),
+							filePaths.map(filePath => resolveToCwd(filePath, session.cwd, InternalUrlRouter.builtins())),
 							label,
 							route,
 							this.#requireUploads(),
@@ -3449,10 +3452,12 @@ export class WorkerCore {
 				op("tab.setStorage()", actionOpMs, sig => setPageStorage(page, kind, keyOrEntries, value, sig)),
 			clearStorage: kind => op("tab.clearStorage()", actionOpMs, sig => clearPageStorage(page, kind, sig)),
 			saveState: filePath =>
-				op("tab.saveState()", actionOpMs, sig => saveStorageState(page, name, filePath, session.cwd, sig)),
+				op("tab.saveState()", actionOpMs, sig =>
+					saveStorageState(page, name, filePath, session.cwd, InternalUrlRouter.builtins(), sig),
+				),
 			loadState: filePath =>
 				op("tab.loadState()", actionOpMs, sig =>
-					loadStorageState(page, filePath, session.cwd, {
+					loadStorageState(page, filePath, session.cwd, InternalUrlRouter.builtins(), {
 						allowOtherOrigins: this.#mode === "headless",
 						navigationTimeoutMs: actionOpMs,
 						signal: sig,
@@ -3460,7 +3465,14 @@ export class WorkerCore {
 				),
 			recordStart: (destination, opts) =>
 				op(`tab.recordStart(${JSON.stringify(destination)})`, quickOpMs, sig =>
-					this.#recording.start(createCdpRecordingSource(page), destination, session.cwd, opts, sig),
+					this.#recording.start(
+						createCdpRecordingSource(page),
+						destination,
+						session.cwd,
+						InternalUrlRouter.builtins(),
+						opts,
+						sig,
+					),
 				),
 			recordStop: () =>
 				op("tab.recordStop()", budgetBound, sig =>
@@ -3468,11 +3480,18 @@ export class WorkerCore {
 				),
 			recordRestart: (destination, opts) =>
 				op(`tab.recordRestart(${JSON.stringify(destination)})`, budgetBound, sig =>
-					this.#recording.restart(createCdpRecordingSource(page), destination, session.cwd, opts, {
-						signal: sig,
-						output,
-						excludeWebP: session.excludeWebP,
-					}),
+					this.#recording.restart(
+						createCdpRecordingSource(page),
+						destination,
+						session.cwd,
+						InternalUrlRouter.builtins(),
+						opts,
+						{
+							signal: sig,
+							output,
+							excludeWebP: session.excludeWebP,
+						},
+					),
 				),
 			recording: () => op("tab.recording()", quickOpMs, () => Promise.resolve(this.#recording.status())),
 			webmcpList: opts => op("tab.webmcpList()", quickOpMs, sig => untilAborted(sig, () => webmcp.list(opts, sig))),
@@ -3578,7 +3597,7 @@ export class WorkerCore {
 			harStop: opts =>
 				op("tab.harStop()", INF, sig => {
 					const destination = opts?.path
-						? resolveToCwd(opts.path, session.cwd)
+						? resolveToCwd(opts.path, session.cwd, InternalUrlRouter.builtins())
 						: path.join(session.cwd, `browser-${name.replace(/[^a-z0-9_-]+/gi, "-")}-${Snowflake.next()}.har`);
 					return untilAborted(sig, () => this.#requireNetwork().harStop(destination, sig));
 				}),
@@ -4037,7 +4056,10 @@ export class WorkerCore {
 				area: screenshotArea(opts),
 				scale: captureScale,
 				keepCapture: opts.format !== undefined,
-				path: opts.path === undefined ? undefined : resolveToCwd(opts.path, run.session.cwd),
+				path:
+					opts.path === undefined
+						? undefined
+						: resolveToCwd(opts.path, run.session.cwd, InternalUrlRouter.builtins()),
 				silent: opts.silent,
 				notes: opts.annotate ? [formatScreenshotLegend(annotationTargets)] : undefined,
 			},
@@ -4057,7 +4079,7 @@ export class WorkerCore {
 		opts: DiffScreenshotOptions = {},
 	): Promise<DiffScreenshotResult> {
 		const page = this.#requirePage();
-		const absoluteBaseline = resolveToCwd(baselinePath, session.cwd);
+		const absoluteBaseline = resolveToCwd(baselinePath, session.cwd, InternalUrlRouter.builtins());
 		const baseline = await untilAborted(signal, () => fs.promises.readFile(absoluteBaseline));
 		const current = await whileDrawing(page, signal, () =>
 			captureScreenshotBuffer(page, {}, signal, async () => null, "png"),
@@ -4066,7 +4088,7 @@ export class WorkerCore {
 		const threshold = screenshotThreshold(opts.threshold);
 		const changed = diff.pixelChangeRatio > threshold;
 		const diffPath = opts.output
-			? resolveToCwd(opts.output, session.cwd)
+			? resolveToCwd(opts.output, session.cwd, InternalUrlRouter.builtins())
 			: path.join(os.tmpdir(), `omp-screenshot-diff-${Snowflake.next()}.png`);
 		await fs.promises.mkdir(path.dirname(diffPath), { recursive: true });
 		await Bun.write(diffPath, diff.png);
@@ -4091,7 +4113,7 @@ export class WorkerCore {
 
 	async #pdf(session: SessionSnapshot, signal: AbortSignal | undefined, opts: PdfOptions = {}): Promise<string> {
 		const dest = opts.path
-			? resolveToCwd(opts.path, session.cwd)
+			? resolveToCwd(opts.path, session.cwd, InternalUrlRouter.builtins())
 			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.pdf`);
 		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
 		await untilAborted(signal, () =>
@@ -4199,7 +4221,7 @@ export class WorkerCore {
 		session: SessionSnapshot,
 	): Promise<PreparedUpload> {
 		const page = this.#requirePage();
-		const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd));
+		const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd, InternalUrlRouter.builtins()));
 		return withLiveElement(
 			() => this.#resolveActionHandle(selector, timeoutMs, signal),
 			async handle => {

@@ -23,6 +23,7 @@ import type {
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor/advisor-config-types";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager, AsyncJobManagerApi } from "../async";
+import type { SessionUrlSchemes } from "../internal-urls/scheme-table";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
 import type { AgentRegistryApi } from "../registry/agent-registry";
@@ -39,6 +40,7 @@ import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
 import type { MCPLoadResult } from "../mcp";
+import type { ExpectedReplies } from "../extensibility/extensions/expected-replies";
 import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
@@ -269,6 +271,11 @@ export interface AgentSessionConfig {
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
 	/**
+	 * Replies this session's extensions expect (`pi.replies.expect`); the session drops them where it
+	 * replaces or cuts back its conversation.
+	 */
+	expectedReplies?: ExpectedReplies;
+	/**
 	 * Prompt-cache warmer owned by the main agent loop. The session arms it per
 	 * main-loop request, settles it when the agent run finishes, and invalidates
 	 * it when the context changes; side-channel requests never arm it.
@@ -278,6 +285,8 @@ export interface AgentSessionConfig {
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Tool bridge context used by user-initiated Python cells to project enabled eval preludes. */
 	evalToolSession?: ToolSession;
+	/** This session's own URL schemes and router; the tool session resolves through the same router. Absent: a fresh, empty set. */
+	urlSchemes?: SessionUrlSchemes;
 	/** Loaded skills already discovered by the SDK. */
 	skills?: Skill[];
 	/** Frozen routing hints shared with the system prompt and later skillful notices. */

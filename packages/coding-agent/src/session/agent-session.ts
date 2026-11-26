@@ -179,6 +179,7 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
+import type { ExpectedReplies, ExpectedRepliesRange } from "../extensibility/extensions/expected-replies";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
@@ -201,9 +202,10 @@ import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import {
-	InternalUrlRouter,
+	type InternalUrlRouter,
 	type LocalProtocolOptions,
 	resolveLocalRoot,
+	SessionUrlSchemes,
 	sessionLocalProtocolOptions,
 } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
@@ -1292,6 +1294,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	readonly #eval: EvalRunner;
 	readonly #evalToolSession: ToolSession | undefined;
+	/** This session's own URL schemes (RPC host URIs) and the router callers resolve through. */
+	readonly urlSchemes: SessionUrlSchemes;
+	/** The router this session's callers resolve URLs through: its own schemes, then the built-ins. */
+	get urlRouter(): InternalUrlRouter {
+		return this.urlSchemes.router;
+	}
 	/** Manager owned by this top-level session; subagents borrow but never dispose it. */
 	readonly #ownedAsyncJobManager: AsyncJobManager | undefined;
 	/** Manager of this session's root, used for its own job queries and deliveries. */
@@ -1343,6 +1351,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#adoptedResetMarkers = new Map<string, number>();
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
+	#expectedReplies: ExpectedReplies | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
@@ -1537,6 +1546,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Last `skillful` value applied to this session; dedupes {@link setSkillful} and its setting watch. */
 	#skillfulApplied = false;
 	#checkpointState: CheckpointState | undefined = undefined;
+	/** Where expected replies stood when each live checkpoint was taken (see `#applyRewind`). */
+	readonly #checkpointRepliesMarks = new WeakMap<CheckpointState, number>();
+	/** Where expected replies stood when the latest assistant message ended, before its tool calls ran. */
+	#batchRepliesMark: number | undefined;
 	#pendingRewindReport: string | undefined = undefined;
 	#lastCompletedRewind: CompletedRewindState | undefined = undefined;
 	#rewoundToolResultIds = new Set<string>();
@@ -2223,6 +2236,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			statePlanFilePath: state.planFilePath,
 			readPlan: url => this.#readPlanFile(url),
 			listPlanFiles: () => this.#listPlanFiles(),
+			router: this.urlRouter,
 		});
 		return {
 			content: [{ type: "text", text: "Plan ready for review." }],
@@ -2234,6 +2248,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return readPlanFile(planFilePath, {
 			localProtocolOptions: this.#localProtocolOptions(),
 			cwd: this.sessionManager.getCwd(),
+			router: this.urlRouter,
 		});
 	}
 
@@ -2313,6 +2328,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			kernelOwnerId: config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`,
 		});
 		this.#evalToolSession = config.evalToolSession;
+		this.urlSchemes = config.urlSchemes ?? new SessionUrlSchemes();
 		const initialEvalStateContext = this.#buildEvalStateContextMessage(this.agent.state.messages);
 		if (initialEvalStateContext) {
 			// Persist the startup snapshot at the slot this process sends it from, so
@@ -2392,6 +2408,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setPlanProposalHandler: handler => this.setPlanProposalHandler(handler),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			urlRouter: this.urlRouter,
 		};
 		this.#prewalk = new PrewalkCoordinator(prewalkHost, {
 			prewalk: config.prewalk,
@@ -2488,6 +2505,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		this.#expectedReplies = config.expectedReplies;
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
@@ -2898,6 +2916,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: this.settings,
 			model: () => this.model,
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			urlRouter: this.urlRouter,
 			imageDescriptions: config.imageDescriptions,
 			transformContext: (messages, signal) => this.#transformContext(messages, signal),
 			convertToLlm: config.convertToLlm ?? convertToLlm,
@@ -3041,6 +3060,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
+			urlRouter: this.urlRouter,
 			modelRegistry: this.#modelRegistry,
 			yieldQueue: this.yieldQueue,
 			obfuscator: () => this.#obfuscator,
@@ -3126,6 +3146,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
 			goalModeState: () => this.#goalModeState,
 			planReferencePath: () => this.#planReferencePath,
+			urlRouter: this.urlRouter,
 			nonMessageTokenSource: () => this,
 			hasExperimentalContextRolloverTools: () => {
 				const enabled = this.#tools.getEnabledToolNames();
@@ -4227,7 +4248,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#emitRunState(state: "running" | "idle"): void {
 		if (state === "idle") this.#runStartedAt = undefined;
-		else this.#runStartedAt ??= Date.now();
+		else if (this.#runStartedAt === undefined) {
+			this.#runStartedAt = Date.now();
+			// The same boundary scopes expected replies, by run rather than by clock.
+			this.#expectedReplies?.beginRun();
+		}
 		for (const listener of this.#runStateListeners) {
 			try {
 				listener(state);
@@ -4960,6 +4985,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// A run resumed from an unpaired assistant tail (retry of a failed tool
 			// batch) executes that turn's calls without a new message_end.
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
+			// A run resumed from an unpaired tail executes that batch with no `message_end` to mark it.
+			this.#batchRepliesMark = this.#expectedReplies?.mark();
 			this.#prunedTerminalFailure = undefined;
 			this.#advisors.onPrimaryAgentStart();
 			this.#models.settleAutoThinkingLevel();
@@ -5094,6 +5121,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					(checkpointReminder.details && stringProperty(checkpointReminder.details, "startedAt")) ??
 					new Date().toISOString(),
 			};
+			const repliesMark = this.#expectedReplies?.mark();
+			if (repliesMark !== undefined) this.#checkpointRepliesMarks.set(this.#checkpointState, repliesMark);
 			this.#pendingRewindReport = undefined;
 			this.#lastCompletedRewind = undefined;
 			this.agent.steer(checkpointReminder);
@@ -5106,6 +5135,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			event.message.completedAt = Date.now();
 			this.#tools.bindReplyToCapturedPrompt(event.message);
+			// Its tool calls run next; a rewind among them keeps the expectations its siblings record.
+			this.#batchRepliesMark = this.#expectedReplies?.mark();
 		}
 		// Turn-boundary maintenance awaits this commit before draining steering;
 		// extension notifications must not own or delay the persistence work.
@@ -7583,6 +7614,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// newSession()).
 		this.#clearCheckpointRuntimeState();
 		this.#clearSessionScopedToolState();
+		this.#clearExpectedReplies();
 
 		// Rotate provider-side session state so a provider that keeps conversation
 		// history server-side starts a brand-new exchange rather than resuming the
@@ -8785,6 +8817,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * The conversation was replaced or cut back: replies extensions expected for it
+	 * (`pi.replies.expect`) and recorded in `range` (all by default) are no longer owed.
+	 */
+	#clearExpectedReplies(range?: ExpectedRepliesRange): void {
+		this.#expectedReplies?.clear(range);
+	}
+
+	/**
 	 * Rebuild checkpoint/rewind runtime state from the current branch. Handles two
 	 * cases surfaced by session resume, `switchSession()` reloading the same file,
 	 * and tree navigation:
@@ -8797,6 +8837,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *     checkpoint instead of failing with "No active checkpoint".
 	 */
 	#rehydrateCheckpointRewindState(): void {
+		const previous = this.#checkpointState;
 		this.#clearCheckpointRuntimeState();
 		let completed: CompletedRewindState | undefined;
 		let pending: { entryId: string; startedAt: string; messageCount: number } | undefined;
@@ -8824,6 +8865,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				startedAt: pending.startedAt,
 				checkpointMessageCount: pending.messageCount,
 			};
+			// The same checkpoint, rebuilt (an unchanged reload): rewind still drops only what came after it.
+			const repliesMark =
+				previous?.checkpointEntryId === pending.entryId ? this.#checkpointRepliesMarks.get(previous) : undefined;
+			if (repliesMark !== undefined) this.#checkpointRepliesMarks.set(this.#checkpointState, repliesMark);
 			return;
 		}
 		this.#lastCompletedRewind = completed;
@@ -8953,7 +8998,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A draft exists before approval; its file path alone is not execution consent.
 		if (!this.#planReferenceApproved) return null;
 
-		const plan = await loadOverallPlanReference(this.#planReferencePath, this.#localProtocolOptions());
+		const plan = await loadOverallPlanReference(
+			this.#planReferencePath,
+			this.#localProtocolOptions(),
+			this.urlRouter,
+		);
 		if (!plan) return null;
 
 		const content = prompt.render(planModeReferencePrompt, {
@@ -8979,11 +9028,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const state = this.#planModeState;
 		if (!state?.enabled) return null;
 		const sessionPlanUrl = "local://PLAN.md";
-		const planPathOptions = { localProtocolOptions: this.#localProtocolOptions(), cwd: this.sessionManager.getCwd() };
+		const planPathOptions = {
+			localProtocolOptions: this.#localProtocolOptions(),
+			cwd: this.sessionManager.getCwd(),
+			router: this.urlRouter,
+		};
 		const resolvedPlanPath = resolvePlanFilePath(state.planFilePath, planPathOptions);
 		const resolvedSessionPlan = resolvePlanFilePath(sessionPlanUrl, planPathOptions);
 		const displayPlanPath =
-			InternalUrlRouter.instance().canHandle(state.planFilePath) || resolvedPlanPath !== resolvedSessionPlan
+			this.urlRouter.canHandle(state.planFilePath) || resolvedPlanPath !== resolvedSessionPlan
 				? state.planFilePath
 				: sessionPlanUrl;
 
@@ -10148,16 +10201,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Auto-read @filepath mentions
 			const fileMentions = extractFileMentions(expandedText);
 			if (fileMentions.length > 0) {
-				const fileMentionMessages = await generateFileMentionMessages(fileMentions, this.sessionManager.getCwd(), {
-					autoResizeImages: cfgImagesAutoResize.get(this.settings),
-					useHashLines: resolveFileDisplayMode(this).hashLines,
-					// Mentions display tagged rows like `read`: record them where edit
-					// checks provenance, the tool session's store.
-					snapshotStore: this.#evalToolSession
-						? getEditStore(this.#evalToolSession)
-						: (this.editStore ??= new EditStore()),
-					signal: setupAbort.signal,
-				});
+				const fileMentionMessages = await generateFileMentionMessages(
+					fileMentions,
+					this.sessionManager.getCwd(),
+					this.urlRouter,
+					{
+						autoResizeImages: cfgImagesAutoResize.get(this.settings),
+						useHashLines: resolveFileDisplayMode(this).hashLines,
+						// Mentions display tagged rows like `read`: record them where edit
+						// checks provenance, the tool session's store.
+						snapshotStore: this.#evalToolSession
+							? getEditStore(this.#evalToolSession)
+							: (this.editStore ??= new EditStore()),
+						signal: setupAbort.signal,
+					},
+				);
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
 				}
@@ -10459,10 +10517,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		// Get command context from extension runner (includes session control methods)
 		const baseCtx = this.#createCommandContext();
-		const ctx = {
+		const ctx: CustomCommandContext = {
 			...baseCtx,
 			hasQueuedMessages: baseCtx.hasPendingMessages,
-		} as unknown as CustomCommandContext;
+			urlRouter: this.urlRouter,
+		};
 
 		try {
 			const args = parseCommandArgs(argsString);
@@ -12989,6 +13048,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 
 			this.#clearSessionScopedToolState();
+			this.#clearExpectedReplies();
 			this.#clearCheckpointRuntimeState();
 			this.setTodoPhases([]);
 			this.#freshProviderSessionId = undefined;
@@ -13770,6 +13830,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				});
 				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
 			}
+		});
+		// Replies expected since the checkpoint was taken were asked on the branch the rewind just cut
+		// away, except those its own tool batch recorded: those calls are re-parented below and stay
+		// in the conversation. A checkpoint rebuilt from the transcript (after a reload) carries no
+		// mark: drop all of the rest.
+		this.#clearExpectedReplies({
+			recordedFrom: this.#checkpointRepliesMarks.get(checkpointState),
+			recordedBefore: turn?.message.role === "assistant" ? this.#batchRepliesMark : undefined,
 		});
 
 		const rewoundAt = new Date().toISOString();
@@ -14823,6 +14891,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#usagePreflightReadyModel = undefined;
 
 		let cwdChangeTarget: string | undefined;
+		// Where expected replies stood as the switch was announced (see below); unset when it keeps them.
+		let outgoingRepliesBefore: number | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -14906,6 +14976,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// so jobs they start belong to the resumed session. Deliveries are held until now.
 			if (switchingToDifferentSession) this.#cancelOwnAsyncJobs();
 
+			// A resumed or changed conversation owes none of the replies expected in the outgoing one.
+			// They go once nothing can roll the switch back any more; a rollback instead drops any a
+			// handler of the announcement below recorded for the target.
+			outgoingRepliesBefore =
+				switchingToDifferentSession || didReloadConversationChange ? this.#expectedReplies?.mark() : undefined;
 			this.#reseedCostGate();
 			// Emit session_switch event to hooks
 			if (this.#extensionRunner) {
@@ -15046,8 +15121,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			if (outgoingRepliesBefore !== undefined) this.#clearExpectedReplies({ recordedBefore: outgoingRepliesBefore });
 			return true;
 		} catch (error) {
+			if (outgoingRepliesBefore !== undefined) this.#clearExpectedReplies({ recordedFrom: outgoingRepliesBefore });
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
@@ -15286,6 +15363,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#prunedTerminalFailure = undefined;
 			this.#clearSessionScopedToolState();
+			// A hook that keeps the live conversation (`skipConversationRestore`) keeps what it owes too.
+			if (!skipConversationRestore) this.#clearExpectedReplies();
 			this.#rehydrateCheckpointRewindState();
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
@@ -15411,6 +15490,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			this.#prunedTerminalFailure = undefined;
 			this.#clearSessionScopedToolState();
+			this.#clearExpectedReplies();
 
 			this.#rehydrateCheckpointRewindState();
 			this.sessionManager.appendMessage({
@@ -15787,6 +15867,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todo.syncFromBranch();
 		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
+		// The active conversation now follows another path of the tree, and nothing records which
+		// path an expectation was asked on: drop them all, before `session_tree` handlers run.
+		if (newLeafId !== oldLeafId) this.#clearExpectedReplies();
 
 		this.#branchSummaryAbortController = undefined;
 

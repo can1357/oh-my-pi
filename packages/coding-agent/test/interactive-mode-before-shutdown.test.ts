@@ -77,6 +77,7 @@ describe("InteractiveMode pre-quit extension gate", () => {
 			assistantTextRenderers: [],
 			transcriptPresenters: [],
 			linkSchemes: [],
+			urlSchemes: new Map(),
 			fileWriteFallbackHandlers: [],
 			fileDeleteFallbackHandlers: [],
 			messageRenderers: new Map(),

@@ -697,7 +697,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot move while streaming.", runtime);
 			if (!command.args) return usage("Usage: /move <path>", runtime);
-			const resolvedPath = resolveToCwd(command.args, runtime.cwd);
+			const resolvedPath = resolveToCwd(command.args, runtime.cwd, runtime.session.urlRouter);
 			try {
 				const stat = await fs.stat(resolvedPath);
 				if (!stat.isDirectory()) {
@@ -768,7 +768,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot add a directory while streaming.", runtime);
 			if (!command.args) return usage(formatWorkspaceDirectories(runtime, "Usage: /add-dir <path>"), runtime);
-			const resolved = resolveToCwd(command.args, runtime.cwd);
+			const resolved = resolveToCwd(command.args, runtime.cwd, runtime.session.urlRouter);
 			try {
 				const stat = await fs.stat(resolved);
 				if (!stat.isDirectory()) return usage(`Not a directory: ${resolved}`, runtime);
@@ -800,7 +800,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot remove a directory while streaming.", runtime);
 			if (!command.args) return usage("Usage: /remove-dir <path>", runtime);
-			const resolved = resolveToCwd(command.args, runtime.cwd);
+			const resolved = resolveToCwd(command.args, runtime.cwd, runtime.session.urlRouter);
 			if (resolved === path.resolve(runtime.cwd)) {
 				return usage("Cannot remove the working directory; use /move to change it.", runtime);
 			}

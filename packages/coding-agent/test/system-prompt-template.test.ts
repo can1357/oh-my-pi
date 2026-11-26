@@ -18,6 +18,7 @@ import { cfgSystemPromptTemplates } from "@oh-my-pi/pi-coding-agent/session/sett
 import { compileModelPatterns } from "@oh-my-pi/pi-coding-agent/utils/model-patterns";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreEnvValue, restoreSettingsTestState } from "./helpers/settings-test-state";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -69,6 +70,7 @@ function options(cwd: string, overrides: Partial<BuildSystemPromptOptions> = {})
 		rules: [],
 		toolNames: [],
 		workspaceTree: { ...EMPTY_TREE, rootPath: cwd },
+		urlRouter: InternalUrlRouter.builtins(),
 		...overrides,
 	};
 }

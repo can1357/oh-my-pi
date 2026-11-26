@@ -14,6 +14,7 @@ import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { SessionUrlSchemes } from "@oh-my-pi/pi-coding-agent/internal-urls/scheme-table";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -198,6 +199,7 @@ async function spawnAndPark() {
 		/** The reviver a restarted process builds for the parked agent from its session file. */
 		async coldRevive(): Promise<AgentSession> {
 			const owner = {
+				urlSchemes: new SessionUrlSchemes(),
 				sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
 				effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 				preparedExtensions,

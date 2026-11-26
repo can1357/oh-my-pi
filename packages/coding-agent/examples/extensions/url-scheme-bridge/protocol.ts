@@ -1,0 +1,237 @@
+/**
+ * Wire protocol shared by `extension.ts` (inside omp) and `peer-cli.ts` (the stand-in for a mesh
+ * of remote agents): newline-delimited JSON over a Unix domain socket. The peer side listens; the
+ * bridge connects. One connection per omp session.
+ */
+import * as fs from "node:fs/promises";
+
+/**
+ * Written by the peer CLI before it listens; read by the bridge when it loads. The roster and the
+ * socket live in a directory only this user can reach (see {@link assertPrivateDir}).
+ */
+export interface Roster {
+	/**
+	 * Namespace of the mesh. It is also the URL scheme the bridge registers (`<namespace>://`), and
+	 * peers are shown as `@<namespace>/<peer>`.
+	 */
+	namespace: string;
+	/** Unix socket path the peer CLI listens on. */
+	socket: string;
+	/** Bare peer names. */
+	peers: string[];
+}
+
+/** How the far side took a message: the peer's ack for an outbound one, omp's for an inbound one. */
+export interface Receipt {
+	outcome: "delivered" | "failed";
+	error?: string;
+}
+
+/** Bridge → peer. */
+export type BridgeMessage =
+	| { type: "hello"; agentId: string; namespace: string }
+	| { type: "outbound"; id: string; from: string; to: string; body: string; expectsReply: boolean }
+	| { type: "receipt"; id: string; receipt: Receipt };
+
+/** Peer → bridge. */
+export type PeerMessage =
+	| { type: "inbound"; id: string; from: string; body: string; expectsReply: boolean }
+	| { type: "ack"; id: string; receipt: Receipt };
+
+export function encodeLine(message: BridgeMessage | PeerMessage): string {
+	return `${JSON.stringify(message)}\n`;
+}
+
+/**
+ * Accumulates socket chunks and yields complete records. A line that is not JSON, or whose JSON is
+ * not a record of the expected shape (`parse` throws), is skipped and reported through `onError`
+ * rather than tearing the connection down. One decoder per connection: UTF-8 is decoded in
+ * streaming mode so a multi-byte character split across two chunks survives.
+ */
+export class LineDecoder<T> {
+	#buffer = "";
+	readonly #utf8 = new TextDecoder();
+
+	constructor(
+		private readonly parse: (value: unknown) => T,
+		private readonly onError: (line: string, error: unknown) => void,
+	) {}
+
+	push(chunk: Uint8Array | string): T[] {
+		this.#buffer += typeof chunk === "string" ? chunk : this.#utf8.decode(chunk, { stream: true });
+		const messages: T[] = [];
+		let newline = this.#buffer.indexOf("\n");
+		while (newline !== -1) {
+			const line = this.#buffer.slice(0, newline);
+			this.#buffer = this.#buffer.slice(newline + 1);
+			if (line.trim().length > 0) {
+				try {
+					messages.push(this.parse(JSON.parse(line)));
+				} catch (error) {
+					this.onError(line, error);
+				}
+			}
+			newline = this.#buffer.indexOf("\n");
+		}
+		return messages;
+	}
+}
+
+type JsonObject = Record<string, unknown>;
+
+function asObject(value: unknown, what: string): JsonObject {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error(`${what} must be a JSON object`);
+	}
+	return value as JsonObject;
+}
+
+function stringField(record: JsonObject, key: string): string {
+	const value = record[key];
+	if (typeof value !== "string") throw new Error(`${String(record.type)} record: ${key} must be a string`);
+	return value;
+}
+
+function booleanField(record: JsonObject, key: string): boolean {
+	const value = record[key];
+	if (typeof value !== "boolean") throw new Error(`${String(record.type)} record: ${key} must be a boolean`);
+	return value;
+}
+
+function receiptField(record: JsonObject): Receipt {
+	const receipt = asObject(record.receipt, `${String(record.type)} record: receipt`);
+	const { outcome, error } = receipt;
+	if (outcome !== "delivered" && outcome !== "failed") {
+		throw new Error(`${String(record.type)} record: receipt.outcome must be "delivered" or "failed"`);
+	}
+	if (error === undefined) return { outcome };
+	if (typeof error !== "string") throw new Error(`${String(record.type)} record: receipt.error must be a string`);
+	return { outcome, error };
+}
+
+/** One bridge → peer record, checked field by field; throws naming what is wrong. */
+export function parseBridgeMessage(value: unknown): BridgeMessage {
+	const record = asObject(value, "a record");
+	switch (record.type) {
+		case "hello":
+			return { type: "hello", agentId: stringField(record, "agentId"), namespace: stringField(record, "namespace") };
+		case "outbound":
+			return {
+				type: "outbound",
+				id: stringField(record, "id"),
+				from: stringField(record, "from"),
+				to: stringField(record, "to"),
+				body: stringField(record, "body"),
+				expectsReply: booleanField(record, "expectsReply"),
+			};
+		case "receipt":
+			return { type: "receipt", id: stringField(record, "id"), receipt: receiptField(record) };
+		default:
+			throw new Error(`unknown bridge record type ${JSON.stringify(record.type)}`);
+	}
+}
+
+/** One peer → bridge record, checked field by field; throws naming what is wrong. */
+export function parsePeerMessage(value: unknown): PeerMessage {
+	const record = asObject(value, "a record");
+	switch (record.type) {
+		case "inbound":
+			return {
+				type: "inbound",
+				id: stringField(record, "id"),
+				from: stringField(record, "from"),
+				body: stringField(record, "body"),
+				expectsReply: booleanField(record, "expectsReply"),
+			};
+		case "ack":
+			return { type: "ack", id: stringField(record, "id"), receipt: receiptField(record) };
+		default:
+			throw new Error(`unknown peer record type ${JSON.stringify(record.type)}`);
+	}
+}
+
+/**
+ * Writes JSON lines to a Bun socket without assuming a write completes. `Bun.Socket.write()` may
+ * accept fewer bytes than offered once the kernel buffer is full — a message body has no short-line
+ * bound, and a backed-up peer stalls the buffer — so the unwritten suffix is kept at the head of a
+ * backlog and flushed from the socket's `drain` callback. Records are written whole and in order,
+ * so a long line never truncates (its ack would time out) or interleaves with the next record. One
+ * writer per connection: `attach` drops the backlog of a replaced socket, whose records nobody
+ * would ack.
+ */
+export class LineWriter {
+	readonly #backlog: Uint8Array[] = [];
+	#socket: Bun.Socket | undefined;
+
+	attach(socket: Bun.Socket): void {
+		this.#socket = socket;
+		this.#backlog.length = 0;
+	}
+
+	detach(): void {
+		this.#socket = undefined;
+		this.#backlog.length = 0;
+	}
+
+	get connected(): boolean {
+		return this.#socket !== undefined;
+	}
+
+	/** Queue one record and write as much as the socket accepts. False when no socket is attached. */
+	write(message: BridgeMessage | PeerMessage): boolean {
+		if (!this.#socket) return false;
+		this.#backlog.push(new TextEncoder().encode(encodeLine(message)));
+		this.flush();
+		return true;
+	}
+
+	/** Write the backlog head-first until the socket stops accepting; the `drain` callback calls this. */
+	flush(): void {
+		const socket = this.#socket;
+		if (!socket) return;
+		while (this.#backlog.length > 0) {
+			const head = this.#backlog[0];
+			const written = socket.write(head);
+			if (written < head.byteLength) {
+				if (written > 0) this.#backlog[0] = head.subarray(written);
+				return;
+			}
+			this.#backlog.shift();
+		}
+	}
+}
+
+/** Minimal structural validation of a roster file. Throws a message naming the offending field. */
+export function parseRoster(value: unknown): Roster {
+	if (typeof value !== "object" || value === null) throw new Error("roster must be a JSON object");
+	const namespace = "namespace" in value ? value.namespace : undefined;
+	const socket = "socket" in value ? value.socket : undefined;
+	const peers = "peers" in value ? value.peers : undefined;
+	if (typeof namespace !== "string" || !/^[a-z][a-z0-9+.-]*$/.test(namespace)) {
+		throw new Error("roster.namespace must be a lowercase URL scheme (a letter, then letters, digits, +, -, .)");
+	}
+	if (typeof socket !== "string" || socket.length === 0) throw new Error("roster.socket must be a string");
+	if (!Array.isArray(peers) || !peers.every(peer => typeof peer === "string" && /^[A-Za-z0-9._-]+$/.test(peer))) {
+		throw new Error("roster.peers must be an array of names (letters, digits, '.', '_', '-')");
+	}
+	return { namespace, socket, peers };
+}
+
+/**
+ * Throws unless `dir` is a real directory (not a symlink) owned by this user that no other user can
+ * read, write or enter. The roster names the socket whose lines steer the model, and the bridge
+ * does not authenticate the peer, so only this user may place either file. `what` names the
+ * directory in the error.
+ */
+export async function assertPrivateDir(dir: string, what: string): Promise<void> {
+	const stat = await fs.lstat(dir);
+	if (stat.isSymbolicLink() || !stat.isDirectory()) {
+		throw new Error(`the ${what} directory ${dir} must be a directory, not a symlink or a file`);
+	}
+	if (stat.uid !== process.getuid?.()) throw new Error(`the ${what} directory ${dir} is not owned by this user`);
+	if ((stat.mode & 0o077) !== 0) {
+		throw new Error(
+			`the ${what} directory ${dir} is open to other users (mode ${(stat.mode & 0o777).toString(8)}); it must be 0700`,
+		);
+	}
+}

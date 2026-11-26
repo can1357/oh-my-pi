@@ -420,7 +420,7 @@ export class TranscriptPresenter {
 	presentToolCall(spec: ToolCallSpec, options?: { readonly before?: TranscriptBlock }): PendingTool {
 		const builtIn = this.#host.viewSession.hasBuiltInTool(spec.name);
 		const pending =
-			builtIn && isReplyWrite(spec.name, spec.args) === true
+			builtIn && isReplyWrite(spec.name, spec.args, this.#host.viewSession.urlRouter) === true
 				? this.#presentReplyWrite(spec, options?.before)
 				: this.#presentCard(spec, builtIn, options?.before);
 		this.register(pending.block, { kind: "tool", tool: pending });

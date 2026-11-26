@@ -1,8 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter } from "../internal-urls";
-import { sessionResolveContext } from "../internal-urls/context";
+import { sessionResolveContext, sessionUrlRouter } from "../internal-urls/context";
 import type { ToolSession } from ".";
 import { unwrapHashlineHeaderPath } from "./hashline-header-path";
 import { resolveToCwd } from "./path-utils";
@@ -48,7 +47,7 @@ export async function targetsLocalSandbox(
 	targetPath: string,
 	signal?: AbortSignal,
 ): Promise<boolean> {
-	const roots = InternalUrlRouter.instance().sandboxRoots(sessionResolveContext(session, { signal }));
+	const roots = sessionUrlRouter(session).sandboxRoots(sessionResolveContext(session, { signal }));
 	if (roots.length === 0) return false;
 	let resolved: string;
 	try {
@@ -78,12 +77,12 @@ export async function targetsLocalSandbox(
  * read context (same `local://` mapping), and `signal` aborts a vault root lookup.
  */
 export async function resolvePlanPath(session: ToolSession, targetPath: string, signal?: AbortSignal): Promise<string> {
-	const router = InternalUrlRouter.instance();
+	const router = sessionUrlRouter(session);
 	const normalized = router.normalize(unwrapHashlineHeaderPath(targetPath));
 	if (router.canHandle(normalized)) {
 		return router.requireLocal(normalized, "write", sessionResolveContext(session, { signal }), { create: true });
 	}
-	return resolveToCwd(normalized, session.cwd);
+	return resolveToCwd(normalized, session.cwd, router);
 }
 
 /**

@@ -6,6 +6,7 @@ import {
 	formatMatchingDocumentSymbols,
 	resolveDiagnosticTargets,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function symbol(name: string, line: number, children?: DocumentSymbol[]): DocumentSymbol {
@@ -53,7 +54,12 @@ describe("resolveDiagnosticTargets", () => {
 		await Bun.write(path.join(root, "a.ts"), "");
 		await Bun.write(path.join(root, "lib", "b.ts"), "");
 		await Bun.write(path.join(root, "lib", "c.ts"), "");
-		const { matches, truncated } = await resolveDiagnosticTargets("a.ts; lib/*.ts", root, 10);
+		const { matches, truncated } = await resolveDiagnosticTargets(
+			"a.ts; lib/*.ts",
+			root,
+			10,
+			InternalUrlRouter.builtins(),
+		);
 		expect(truncated).toBe(false);
 		expect(matches.sort()).toEqual(["a.ts", path.join("lib", "b.ts"), path.join("lib", "c.ts")]);
 	});

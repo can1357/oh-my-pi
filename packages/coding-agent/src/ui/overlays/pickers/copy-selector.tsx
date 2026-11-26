@@ -19,6 +19,7 @@ import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
 import type { TspPickerAction, TspPickerItem } from "@oh-my-pi/pi-wire";
 import type { CopyBlock, CopyPickSource } from "../../../modes/view-model/overlays/copy-selector";
 import { commandFromToolCall } from "../../../modes/view-model/overlays/copy-targets";
+import type { InternalUrlRouter } from "../../../internal-urls/router";
 import { isReplyWrite, toolResultReplies } from "../../../session/transcript/reply-write";
 import {
 	isUserRequestEntry,
@@ -40,6 +41,8 @@ import {
 
 export interface CopySelectorProps {
 	readonly entries: readonly TranscriptEntryLike[];
+	/** The session's URL router: recognizes reply writes and grouped reads. */
+	readonly router: InternalUrlRouter;
 	/** Replaces the "Copy" heading when the picker serves another purpose. */
 	readonly title?: string;
 	/** The pick verb (default "copy"). */
@@ -65,6 +68,8 @@ export interface Target {
 	readonly turnId: string;
 	readonly isUserTurn: boolean;
 	readonly entries: readonly TranscriptEntryLike[];
+	/** The session's URL router: recognizes reply writes. */
+	readonly router: InternalUrlRouter;
 }
 
 interface MarkdownToken {
@@ -85,7 +90,7 @@ function recentEntries(entries: readonly TranscriptEntryLike[]): readonly Transc
 	return entries;
 }
 
-function targetsOf(entries: readonly TranscriptEntryLike[]): Target[] {
+function targetsOf(entries: readonly TranscriptEntryLike[], router: InternalUrlRouter): Target[] {
 	const targets: Target[] = [];
 	for (const entry of entries) {
 		const message = transcriptEntryMessage(entry);
@@ -95,7 +100,7 @@ function targetsOf(entries: readonly TranscriptEntryLike[]): Target[] {
 			targets[targets.length - 1] = { ...previous, entries: [...previous.entries, entry] };
 			continue;
 		}
-		targets.push({ turnId: entry.id, isUserTurn: isUserRequestEntry(entry), entries: [entry] });
+		targets.push({ turnId: entry.id, isUserTurn: isUserRequestEntry(entry), entries: [entry], router });
 	}
 	return targets;
 }
@@ -111,21 +116,21 @@ interface ProsePiece {
 }
 
 /** Text a `write` call sends to the user as a reply (`out://`), else undefined. */
-function replyWriteText(name: string, args: unknown): string | undefined {
-	if (isReplyWrite(name, args) !== true || typeof args !== "object" || args === null) return undefined;
+function replyWriteText(name: string, args: unknown, router: InternalUrlRouter): string | undefined {
+	if (isReplyWrite(name, args, router) !== true || typeof args !== "object" || args === null) return undefined;
 	const text = (args as { content?: unknown }).content;
 	return typeof text === "string" && text.trim() ? text : undefined;
 }
 
 /** An assistant message's text blocks and reply writes, in document order. */
-function assistantProse(entry: TranscriptEntryLike): ProsePiece[] {
+function assistantProse(entry: TranscriptEntryLike, router: InternalUrlRouter): ProsePiece[] {
 	const message = transcriptEntryMessage(entry);
 	if (message?.role !== "assistant") return [];
 	const pieces: ProsePiece[] = [];
 	for (const part of message.content) {
 		if (part.type === "text") pieces.push({ text: (part as { text: string }).text, reply: false });
 		else if (part.type === "toolCall") {
-			const reply = replyWriteText(part.name, part.arguments);
+			const reply = replyWriteText(part.name, part.arguments, router);
 			if (reply !== undefined) pieces.push({ text: reply, reply: true });
 		}
 	}
@@ -145,8 +150,8 @@ function joinProse(pieces: readonly ProsePiece[]): string {
 	return text.trim();
 }
 
-function assistantText(entry: TranscriptEntryLike): string {
-	return joinProse(assistantProse(entry));
+function assistantText(entry: TranscriptEntryLike, router: InternalUrlRouter): string {
+	return joinProse(assistantProse(entry, router));
 }
 
 /**
@@ -154,7 +159,7 @@ function assistantText(entry: TranscriptEntryLike): string {
  * the replies its tool results carry (`bash > out://`, an eval cell's bridged write).
  */
 function turnProse(target: Target): string {
-	const pieces = assistantProse(target.entries[0]!);
+	const pieces = assistantProse(target.entries[0]!, target.router);
 	for (const entry of target.entries) {
 		const message = transcriptEntryMessage(entry);
 		if (message?.role !== "toolResult") continue;
@@ -221,10 +226,10 @@ export function collectBlocks(target: Target): CopyBlock[] {
 		if (!message) continue;
 		if (message.role === "user") blocks.push(...markdownBlocks(textContent(message.content as never), entry));
 		else if (message.role === "assistant") {
-			blocks.push(...markdownBlocks(assistantText(entry), entry));
+			blocks.push(...markdownBlocks(assistantText(entry, target.router), entry));
 			for (const part of message.content) {
 				if (part.type !== "toolCall") continue;
-				if (isReplyWrite(part.name, part.arguments) === true) {
+				if (isReplyWrite(part.name, part.arguments, target.router) === true) {
 					replyCalls.add(part.id);
 					continue;
 				}
@@ -300,8 +305,8 @@ export function targetCopy(target: Target, blocks: readonly CopyBlock[]): { cont
 }
 
 /** Everything a turn (`entries`: its entry and folded tool results) says, lowercased: its text, commands and tool output. */
-export function turnSearchText(entries: readonly TranscriptEntryLike[]): string {
-	const target: Target = { turnId: entries[0]?.id ?? "", isUserTurn: false, entries };
+export function turnSearchText(entries: readonly TranscriptEntryLike[], router: InternalUrlRouter): string {
+	const target: Target = { turnId: entries[0]?.id ?? "", isUserTurn: false, entries, router };
 	const blocks = collectBlocks(target);
 	return [targetCopy(target, blocks).content, ...blocks.map(block => block.content)].join("\n").toLowerCase();
 }
@@ -340,7 +345,7 @@ function timelineItem(target: Target): TspPickerItem {
 			name: string;
 			arguments: Record<string, unknown>;
 		}[];
-		const prose = assistantText(entry);
+		const prose = assistantText(entry, target.router);
 		if (prose || calls.length === 0)
 			return { id, label: firstLine(prose) || calls.map(c => c.name).join(", ") || "thinking", node: "assistant" };
 		return {
@@ -437,7 +442,7 @@ export function turnPreview(target: Target, content: string): JSXNode {
 export function CopySelector(props: CopySelectorProps): JSXNode {
 	const all = props.entries;
 	const truncated = signal(recentEntries(all).length < all.length);
-	const targets = computed(() => targetsOf(truncated() ? recentEntries(all) : all));
+	const targets = computed(() => targetsOf(truncated() ? recentEntries(all) : all, props.router));
 	const selected = signal(Math.max(0, targets().length - 1));
 	/** The focused block while descended into the turn's blocks. */
 	const blockAt = signal<number | undefined>(undefined);
@@ -448,7 +453,7 @@ export function CopySelector(props: CopySelectorProps): JSXNode {
 		return blocks;
 	};
 	const target = (): Target | undefined => targets()[selected()];
-	const views = new TurnViews();
+	const views = new TurnViews(props.router);
 	const messagesOf = (t: Target): AgentMessage[] => t.entries.flatMap(entry => transcriptEntryMessage(entry) ?? []);
 	const action = props.actionLabel ?? "copy";
 

@@ -18,6 +18,7 @@ import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/autocomplete/autocomplete";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
 
@@ -634,6 +635,7 @@ describe("manual skill visibility", () => {
 				rules: [],
 				toolNames: ["read"],
 				skills,
+				urlRouter: InternalUrlRouter.builtins(),
 			});
 			const text = prompt.systemPrompt.join("\n");
 			expect(text).toContain("First calendar skill.");

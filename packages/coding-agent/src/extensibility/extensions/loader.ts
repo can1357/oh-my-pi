@@ -31,10 +31,14 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { NATIVE_TODO_BACKEND } from "../../tools/settings";
-import { InternalUrlRouter } from "../../internal-urls/router";
+import { assertProtocolHandlerSpec, InternalUrlRouter } from "../../internal-urls/router";
+import type { ProtocolHandler } from "../../internal-urls/types";
+import { isStandardScheme } from "../../internal-urls/url-scheme";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
+import { urlSchemeConflicts } from "./url-schemes";
+import { ExpectedReplies } from "./expected-replies";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loader";
 
@@ -42,6 +46,7 @@ import { resolvePath, withHostGuard } from "../utils";
 import { type ComposerShape, isBuiltinComposerShape } from "../../ui/styles/composer/shapes";
 import { sanitizeDisplayLine } from "../inventory/display-text";
 import { notifyTranscriptPresentersChanged } from "../../session/transcript/transcript-presentation";
+import { ExtensionRegistrations } from "./registrations";
 import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
@@ -49,6 +54,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionReplies,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -72,22 +78,6 @@ type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]+$/;
 /** `todo.backend` ids: safe to print and to type in a config file. */
 const TODO_BACKEND_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/** Standard schemes an extension may not claim: web, file and mail links. omp's internal URLs are refused too. */
-const STANDARD_LINK_SCHEMES: Readonly<Record<string, true>> = {
-	about: true,
-	blob: true,
-	data: true,
-	file: true,
-	ftp: true,
-	http: true,
-	https: true,
-	javascript: true,
-	mailto: true,
-	ssh: true,
-	ws: true,
-	wss: true,
-};
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -128,6 +118,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	readonly expectedReplies = new ExpectedReplies();
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
@@ -219,9 +210,44 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	/** Whether the extension's factory is still running; URL schemes register only then. */
+	#loading = true;
+	/**
+	 * Expectations go to the session's store and follow this load (see `Extension.registrations`):
+	 * they stop counting while it is suspended, and go with it at teardown.
+	 */
+	readonly replies: ExtensionReplies = {
+		expect: (peerId, options) => {
+			const registrations = this.extension.registrations;
+			// A callback the torn-down load left behind records nothing, so no `wait` ever blocks on it.
+			if (registrations?.released) return () => false;
+			const expectation = this.runtime.expectedReplies.expect(peerId, {
+				promised: options?.promised,
+				suspended: registrations?.suspended,
+				// Dropped by the session (its conversation was replaced): nothing is left to follow the load.
+				// Only ever called later, by `clear`, once `untrack` below is set.
+				onDrop: () => untrack?.(),
+			});
+			const untrack = registrations?.add(expectation);
+			return () => {
+				// Released by the extension itself: untracked, so a long-lived load does not accumulate them.
+				untrack?.();
+				return expectation.release();
+			};
+		},
+	};
 
 	get pi() {
 		return getCodingAgentApi();
+	}
+
+	/** The factory returned (or threw): later `registerUrlScheme` calls are refused. */
+	static endLoading(api: ConcreteExtensionAPI): void {
+		api.#loading = false;
+	}
+
+	get expectedReplies(): ExpectedReplies {
+		return this.runtime.expectedReplies;
 	}
 
 	constructor(
@@ -246,6 +272,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		const list = this.extension.handlers.get(event) ?? [];
 		list.push(handler);
 		this.extension.handlers.set(event, list);
+	}
+
+	onSuspensionChange(listener: (suspended: boolean) => void): () => void {
+		return this.extension.registrations?.onSuspensionChange(listener) ?? (() => {});
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
@@ -348,11 +378,37 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				`registerLinkScheme: "${scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
 			);
 		}
-		// `=== true`: inherited keys such as `constructor` are not reserved.
-		if (STANDARD_LINK_SCHEMES[normalized] === true || InternalUrlRouter.instance().isBuiltin(normalized)) {
+		if (isStandardScheme(normalized) || InternalUrlRouter.isBuiltin(normalized)) {
 			throw new Error(`registerLinkScheme: "${scheme}" is reserved for standard or omp-internal links`);
 		}
 		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
+	}
+
+	registerUrlScheme(handler: ProtocolHandler): () => void {
+		const scheme = handler.scheme.toLowerCase();
+		// Conflict checks, startup deferral and the first system prompt all read the schemes a load
+		// registered by the time its factory returned; a later registration would bypass them.
+		if (!this.#loading) {
+			throw new Error(
+				`registerUrlScheme: ${scheme}:// must be registered from the extension factory, not after it returns`,
+			);
+		}
+		if (!LINK_SCHEME_PATTERN.test(scheme)) {
+			throw new Error(
+				`registerUrlScheme: "${handler.scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
+			);
+		}
+		if (InternalUrlRouter.isBuiltin(scheme)) {
+			throw new Error(`registerUrlScheme: ${scheme}:// is an OMP built-in scheme`);
+		}
+		if (isStandardScheme(scheme)) throw new Error(`registerUrlScheme: ${scheme}:// is a standard scheme`);
+		const { urlSchemes } = this.extension;
+		if (urlSchemes.has(scheme)) throw new Error(`registerUrlScheme: ${scheme}:// is already registered`);
+		assertProtocolHandlerSpec(handler);
+		urlSchemes.set(scheme, handler);
+		return () => {
+			if (urlSchemes.get(scheme) === handler) urlSchemes.delete(scheme);
+		};
 	}
 
 	registerComposerShape(shape: ComposerShape & { readonly label: string }): void {
@@ -494,6 +550,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		assistantTextRenderers: [],
 		transcriptPresenters: [],
 		linkSchemes: [],
+		urlSchemes: new Map(),
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
@@ -501,6 +558,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
+		registrations: new ExtensionRegistrations(),
 	};
 }
 
@@ -511,8 +569,9 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
-	api: ExtensionAPI,
+	api: ConcreteExtensionAPI,
 	runtime: IExtensionRuntime,
+	extension: Extension,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 
@@ -524,7 +583,11 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
+		// The failed load never joins a runner, so nothing else would release what it registered.
+		extension.registrations?.release();
 		throw error;
+	} finally {
+		ConcreteExtensionAPI.endLoading(api);
 	}
 }
 
@@ -565,7 +628,7 @@ async function bindExtension(
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime, extension));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -586,7 +649,7 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime);
+	await runExtensionFactory(factory, api, runtime, extension);
 	return extension;
 }
 
@@ -612,6 +675,9 @@ export async function loadExtensions(
  * Bind previously imported extension factories. A fresh session runtime is
  * created unless `runtime` is given: deferred startup extensions bind into the
  * live session's runtime so they share its flag values and wired actions.
+ * Two bound extensions registering one URL scheme are reported in `errors`
+ * (the earlier one serves it), so every caller that surfaces load errors —
+ * the CLI's notifications and its `--trusted-extensions` gate included — shows them.
  */
 export async function bindPreparedExtensions(
 	preparedExtensions: readonly PreparedExtension[],
@@ -638,7 +704,7 @@ export async function bindPreparedExtensions(
 
 	return {
 		extensions,
-		errors,
+		errors: [...errors, ...urlSchemeConflicts(extensions)],
 		runtime,
 		preparedExtensions: [...preparedExtensions],
 	};

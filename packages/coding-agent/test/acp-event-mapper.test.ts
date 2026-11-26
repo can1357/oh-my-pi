@@ -23,9 +23,13 @@ import {
 	mapToolKind,
 	normalizeReplayToolArguments,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { expectAcpStructure } from "./helpers/acp-schema";
+
+/** The mapper tests exercise built-in schemes only. */
+const router = InternalUrlRouter.builtins();
 
 function makeAssistantMessage(text: string) {
 	return {
@@ -126,7 +130,7 @@ describe("ACP event mapper", () => {
 				assistantMessageEvent: { type: "text_delta", delta: "chunk" },
 			} as AgentSessionEvent,
 			"session-1",
-			{ getMessageId },
+			{ getMessageId, router },
 		);
 		const thoughtUpdates = mapAgentSessionEventToAcpSessionUpdates(
 			{
@@ -135,7 +139,7 @@ describe("ACP event mapper", () => {
 				assistantMessageEvent: { type: "thinking_delta", delta: "plan" },
 			} as AgentSessionEvent,
 			"session-1",
-			{ getMessageId },
+			{ getMessageId, router },
 		);
 
 		expect(textUpdates).toHaveLength(1);
@@ -159,7 +163,7 @@ describe("ACP event mapper", () => {
 				message: assistantMessage,
 			} as AgentSessionEvent,
 			"session-1",
-			{ getMessageProgress: message => (message === assistantMessage ? progress : undefined) },
+			{ getMessageProgress: message => (message === assistantMessage ? progress : undefined), router },
 		);
 
 		expect(updates).toEqual([
@@ -181,6 +185,7 @@ describe("ACP event mapper", () => {
 		const progress = { textEmitted: false, thoughtEmitted: false };
 		const options = {
 			getMessageProgress: (message: unknown) => (message === assistantMessage ? progress : undefined),
+			router,
 		};
 
 		const deltaUpdates = mapAgentSessionEventToAcpSessionUpdates(
@@ -226,15 +231,15 @@ describe("ACP event mapper", () => {
 			},
 		] satisfies AgentSessionEvent[];
 		const updates = events.flatMap(event =>
-			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", { getToolArgs: () => args }),
+			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", { getToolArgs: () => args, router }),
 		);
 		expect(updates).toEqual([]);
 	});
 
 	it("maps proc:// controls as execution and reads as resources, never editor file locations", () => {
-		expect(mapToolKind("write", { path: "proc://web/mode", content: "persist" })).toBe("execute");
-		expect(mapToolKind("write", { path: "proc://build-42/kill" })).toBe("execute");
-		expect(mapToolKind("read", { path: "proc://web" })).toBe("read");
+		expect(mapToolKind("write", { path: "proc://web/mode", content: "persist" }, router)).toBe("execute");
+		expect(mapToolKind("write", { path: "proc://build-42/kill" }, router)).toBe("execute");
+		expect(mapToolKind("read", { path: "proc://web" }, router)).toBe("read");
 		for (const [toolName, args] of [
 			["write", { path: "proc://web/mode", content: "persist" }],
 			["read", { path: "proc://web" }],
@@ -242,7 +247,7 @@ describe("ACP event mapper", () => {
 			const updates = mapAgentSessionEventToAcpSessionUpdates(
 				{ type: "tool_execution_start", toolCallId: `tc-${toolName}-proc`, toolName, args } as AgentSessionEvent,
 				"session-1",
-				{ cwd: "/tmp" },
+				{ cwd: "/tmp", router },
 			);
 			expect(updates).toHaveLength(1);
 			expect(updates[0]?.update).toMatchObject({ kind: toolName === "write" ? "execute" : "read" });
@@ -270,6 +275,7 @@ describe("ACP event mapper", () => {
 		const updates = events.flatMap(event =>
 			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
 				getToolArgs: () => ({}),
+				router,
 			}),
 		);
 
@@ -286,6 +292,7 @@ describe("ACP event mapper", () => {
 				intent: "Running command",
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -308,6 +315,7 @@ describe("ACP event mapper", () => {
 				intent: "sum",
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -343,6 +351,7 @@ describe("ACP event mapper", () => {
 				intent: "evaluating",
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -365,6 +374,7 @@ describe("ACP event mapper", () => {
 				args: { language: "js", code: source },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -397,6 +407,7 @@ describe("ACP event mapper", () => {
 				},
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -433,6 +444,7 @@ describe("ACP event mapper", () => {
 				},
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -478,6 +490,7 @@ describe("ACP event mapper", () => {
 		for (const event of events) {
 			const updates = mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
 				resolveImageData: data => (data === blobRef ? resolvedImageData : data),
+				router,
 			});
 			const update = updates[0]!.update as {
 				content?: Array<{
@@ -510,6 +523,7 @@ describe("ACP event mapper", () => {
 					},
 				} as AgentSessionEvent,
 				"session-1",
+				{ router },
 			);
 			return (notification!.update as { status?: string }).status;
 		};
@@ -530,6 +544,7 @@ describe("ACP event mapper", () => {
 				partialResult: { content: [{ type: "text", text: "in progress" }] },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -549,6 +564,7 @@ describe("ACP event mapper", () => {
 				partialResult: { details: { terminalId: "term-1" } },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -576,6 +592,7 @@ describe("ACP event mapper", () => {
 				partialResult: { content: [], details: { terminalId: "term-1" } },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -613,6 +630,7 @@ describe("ACP event mapper", () => {
 				partialResult,
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -643,6 +661,7 @@ describe("ACP event mapper", () => {
 				},
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -669,6 +688,7 @@ describe("ACP event mapper", () => {
 				},
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -698,6 +718,7 @@ describe("ACP event mapper", () => {
 			{
 				getToolArgs: toolCallId =>
 					toolCallId === "tc-terminal-final-command" ? { command: "npm run check" } : undefined,
+				router,
 			},
 		);
 
@@ -723,6 +744,7 @@ describe("ACP event mapper", () => {
 				result: { errorMessage: "command failed", details: { terminalId: "term-1" } },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 		const messageUpdates = mapAgentSessionEventToAcpSessionUpdates(
 			{
@@ -733,6 +755,7 @@ describe("ACP event mapper", () => {
 				result: { message: "command completed", details: { terminalId: "term-1" } },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(errorUpdates).toHaveLength(1);
@@ -767,6 +790,7 @@ describe("ACP event mapper", () => {
 				result: "hello from stdout",
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -788,6 +812,7 @@ describe("ACP event mapper", () => {
 				result: { terminalId: "term-1" },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -811,6 +836,7 @@ describe("ACP event mapper", () => {
 				},
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -829,6 +855,7 @@ describe("ACP event mapper", () => {
 				args: { command: "npm run check", cwd: "/repo" },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -861,6 +888,7 @@ describe("ACP event mapper", () => {
 					args: { command: "echo hi" },
 				} as AgentSessionEvent,
 				"session-1",
+				{ router },
 			);
 
 			expect(updates).toHaveLength(1);
@@ -967,6 +995,7 @@ describe("ACP event mapper", () => {
 			toolName: "bash",
 			args: replayArgs.args,
 			status: "completed",
+			router,
 		});
 
 		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
@@ -992,6 +1021,7 @@ describe("ACP event mapper", () => {
 				args: replayArgs.args,
 				cwd: dir,
 				status: "completed",
+				router,
 			});
 
 			expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
@@ -1012,7 +1042,7 @@ describe("ACP event mapper", () => {
 
 	it("labels a replayed intent without changing its raw input", () => {
 		const args = { i: "Checking timing: Does Retry-After override the timer?" };
-		const update = buildToolCallStartUpdate({ toolCallId: "timing", toolName: "probe", args });
+		const update = buildToolCallStartUpdate({ toolCallId: "timing", toolName: "probe", args, router });
 		expect(update).toMatchObject({ title: "Checking timing", rawInput: { i: args.i } });
 	});
 
@@ -1023,6 +1053,7 @@ describe("ACP event mapper", () => {
 			toolName: "bash",
 			args: replayArgs.args,
 			status: "completed",
+			router,
 		});
 
 		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
@@ -1043,6 +1074,7 @@ describe("ACP event mapper", () => {
 			toolName: "task",
 			args: { tasks: [] },
 			intent: "Waiting for agents",
+			router,
 		});
 
 		expect(update).toMatchObject({
@@ -1061,6 +1093,7 @@ describe("ACP event mapper", () => {
 			toolName: "bash",
 			args: replayArgs.args,
 			status: "completed",
+			router,
 		});
 
 		expect(replayArgs.args).toBe(rawArgs);
@@ -1081,6 +1114,7 @@ describe("ACP event mapper", () => {
 				args: { path: "README.md" },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -1112,7 +1146,7 @@ describe("ACP event mapper", () => {
 					args: { path: "file.ts" },
 				} as AgentSessionEvent,
 				"session-1",
-				{ cwd: dir },
+				{ cwd: dir, router },
 			);
 
 			expect(updates).toHaveLength(1);
@@ -1143,7 +1177,7 @@ describe("ACP event mapper", () => {
 						args: { path: readPath },
 					} as AgentSessionEvent,
 					"session-1",
-					{ cwd: dir },
+					{ cwd: dir, router },
 				);
 				expectAcpNotifications(updates);
 				const update = updates[0]!.update as { locations?: { path: string }[]; rawInput?: unknown };
@@ -1170,7 +1204,7 @@ describe("ACP event mapper", () => {
 						args: { path: readPath },
 					} as AgentSessionEvent,
 					"session-1",
-					{ cwd: dir },
+					{ cwd: dir, router },
 				);
 				expectAcpNotifications(updates);
 				expect("locations" in updates[0]!.update).toBe(false);
@@ -1193,7 +1227,7 @@ describe("ACP event mapper", () => {
 					result: { content: [{ type: "text", text: "data" }], details: { resolvedPath: file } },
 				} as AgentSessionEvent,
 				"session-1",
-				{ cwd: dir },
+				{ cwd: dir, router },
 			);
 			expectAcpNotifications(updates);
 			const update = updates[0]!.update as { locations?: { path: string }[] };
@@ -1215,7 +1249,7 @@ describe("ACP event mapper", () => {
 					args: { path: literalName },
 				} as AgentSessionEvent,
 				"session-1",
-				{ cwd: dir },
+				{ cwd: dir, router },
 			);
 			expectAcpNotifications(updates);
 			const update = updates[0]!.update as { locations?: { path: string }[] };
@@ -1233,7 +1267,7 @@ describe("ACP event mapper", () => {
 				args: { path: "src/report:1-20", content: "x" },
 			} as AgentSessionEvent,
 			"session-1",
-			{ cwd: "/repo" },
+			{ cwd: "/repo", router },
 		);
 		expectAcpNotifications(updates);
 		const update = updates[0]!.update as { locations?: { path: string }[] };
@@ -1248,6 +1282,7 @@ describe("ACP event mapper", () => {
 				args: { path: "src/current.ts", oldPath: "src/old.ts", newPath: "src/new.ts" },
 			} as AgentSessionEvent,
 			"session-1",
+			{ router },
 		);
 
 		expect(updates).toHaveLength(1);
@@ -1263,6 +1298,7 @@ describe("ACP event mapper", () => {
 			toolName: "write",
 			args: { path: "proc://build-42/kill", content: "" },
 			cwd: path.resolve("/repo"),
+			router,
 		});
 
 		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
@@ -1279,6 +1315,7 @@ describe("ACP event mapper", () => {
 			toolCallId: "toolu_help_read",
 			toolName: "read",
 			args: { path: "help://eval/helpers" },
+			router,
 		});
 		expect(discovery).toMatchObject({ title: "help://eval/helpers", kind: "read" });
 		expect("locations" in discovery).toBe(false);
@@ -1288,6 +1325,7 @@ describe("ACP event mapper", () => {
 			toolName: "write",
 			args: { path: "src/foo.ts", content: "x" },
 			cwd: path.resolve("/repo"),
+			router,
 		});
 		expect(fileWrite).toMatchObject({
 			title: "write: src/foo.ts",

@@ -19,6 +19,7 @@ import type { OverlayHandle } from "../src/ui/shell";
 import { createInputHarness, type InputHarness } from "./helpers/input-harness";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import { key, sendKey } from "./ui/composer/harness";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const KEYS: KeybindingsConfig = {
 	"app.display.reset": "alt+l",
@@ -59,6 +60,7 @@ function createContext() {
 	const retry = vi.fn(async () => true);
 	const abort = vi.fn(async () => {});
 	const session = {
+		urlRouter: InternalUrlRouter.builtins(),
 		isStreaming: false,
 		isCompacting: false,
 		isGeneratingHandoff: false,

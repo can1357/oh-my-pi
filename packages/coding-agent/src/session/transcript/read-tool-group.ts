@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { InternalUrlRouter } from "../../internal-urls/router";
+import type { InternalUrlRouter } from "../../internal-urls/router";
 import { splitUrlScheme } from "../../internal-urls/url-scheme";
 import { canonicalizeMessage } from "./thinking-display";
 
@@ -26,11 +26,11 @@ export function readArgsHaveTarget(args: unknown): boolean {
  * external targets always do; registered internal-URL schemes draw full so their resolved content
  * shows, unless their spec declares `compactTranscript` (device listings, docs).
  */
-export function readArgsCollapseIntoGroup(args: unknown): boolean {
+export function readArgsCollapseIntoGroup(args: unknown, router: InternalUrlRouter): boolean {
 	const target = readArgsTarget(args);
 	if (target === undefined) return false;
 	const url = splitUrlScheme(target);
-	const spec = url && InternalUrlRouter.instance().spec(url.scheme);
+	const spec = url && router.spec(url.scheme);
 	return !spec || spec.compactTranscript === true;
 }
 
@@ -38,12 +38,12 @@ export function readArgsCollapseIntoGroup(args: unknown): boolean {
  * The grouped read calls that can own a turn's usage row. Mixed-tool turns and visible content
  * after a read keep the standalone row so request metrics keep their transcript order.
  */
-export function groupedReadUsageCallIds(message: AssistantMessage): string[] | undefined {
+export function groupedReadUsageCallIds(message: AssistantMessage, router: InternalUrlRouter): string[] | undefined {
 	const toolCallIds: string[] = [];
 	let sawToolCall = false;
 	for (const content of message.content) {
 		if (content.type === "toolCall") {
-			if (content.name !== "read" || !readArgsCollapseIntoGroup(content.arguments)) return undefined;
+			if (content.name !== "read" || !readArgsCollapseIntoGroup(content.arguments, router)) return undefined;
 			sawToolCall = true;
 			toolCallIds.push(content.id);
 			continue;

@@ -6,6 +6,7 @@ import type { HostEvalPreludeDefinition } from "../eval/preludes";
 import dsmDocumentation from "../prompts/tools/dsm.md" with { type: "text" };
 import dsmGuidance from "../prompts/tools/dsm-guidance.md" with { type: "text" };
 import type { ToolSession } from "../tools";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { resolveToCwd } from "../tools/path-utils";
 import { parseBinaryView } from "../tools/read-binary";
 import { cfgToolsMaxTimeout } from "../tools/settings";
@@ -203,7 +204,7 @@ export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinitio
 				active(backend);
 				if (!db) {
 					const { path, arch } = splitSliceRef(ref);
-					const absolutePath = resolveToCwd(path, session.cwd);
+					const absolutePath = resolveToCwd(path, session.cwd, sessionUrlRouter(session));
 					const stat = await fs.stat(absolutePath).catch(() => null);
 					active(backend);
 					if (!stat?.isFile()) throw notOpen();
@@ -221,7 +222,7 @@ export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinitio
 					return remember(await findDatabaseHandle(portable), params.path);
 				}
 				const { path, arch } = splitSliceRef(params.path);
-				const absolutePath = resolveToCwd(path, session.cwd);
+				const absolutePath = resolveToCwd(path, session.cwd, sessionUrlRouter(session));
 				const stat = await fs.stat(absolutePath).catch(() => null);
 				const databaseBackend = stat?.isFile() ? databaseOwner(absolutePath) : undefined;
 				if (databaseBackend && databaseBackend.id !== backend) {

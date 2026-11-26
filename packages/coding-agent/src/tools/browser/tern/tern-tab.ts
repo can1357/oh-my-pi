@@ -2592,8 +2592,8 @@ export class TernTab implements InProcessRunTab {
 	async uploadFile(selector: string | TernSelector, ...paths: Array<string | string[]>): Promise<void> {
 		const filePaths = paths.flat();
 		if (filePaths.length === 0) throw new ToolError("tab.uploadFile() requires at least one file path");
-		const cwd = this.#requireRunContext("tab.uploadFile()").session.cwd;
-		const absolute = filePaths.map(filePath => resolveToCwd(filePath, cwd));
+		const context = this.#requireRunContext("tab.uploadFile()");
+		const absolute = filePaths.map(filePath => resolveToCwd(filePath, context.session.cwd, context.router));
 		for (const file of absolute) {
 			try {
 				await fs.promises.access(file);
@@ -3178,7 +3178,7 @@ export class TernTab implements InProcessRunTab {
 				area: screenshotArea(opts),
 				scale,
 				keepCapture: opts.format !== undefined,
-				path: opts.path === undefined ? undefined : resolveToCwd(opts.path, context.session.cwd),
+				path: opts.path === undefined ? undefined : resolveToCwd(opts.path, context.session.cwd, context.router),
 				silent: opts.silent,
 				notes: opts.annotate ? [formatScreenshotLegend(legend)] : undefined,
 			},
@@ -3197,13 +3197,13 @@ export class TernTab implements InProcessRunTab {
 	async diffScreenshot(baselinePath: string, opts: DiffScreenshotOptions = {}): Promise<DiffScreenshotResult> {
 		const context = this.#requireRunContext("tab.diffScreenshot()");
 		const baseline = await untilAborted(context.signal, () =>
-			fs.promises.readFile(resolveToCwd(baselinePath, context.session.cwd)),
+			fs.promises.readFile(resolveToCwd(baselinePath, context.session.cwd, context.router)),
 		);
 		const current = await this.captureBytes({ format: "png" });
 		const diff = createPngDiff(baseline, current);
 		const changed = diff.pixelChangeRatio > screenshotThreshold(opts.threshold);
 		const diffPath = opts.output
-			? resolveToCwd(opts.output, context.session.cwd)
+			? resolveToCwd(opts.output, context.session.cwd, context.router)
 			: path.join(os.tmpdir(), `omp-screenshot-diff-${Snowflake.next()}.png`);
 		await Bun.write(diffPath, diff.png);
 		const resized = await resizeImage(
@@ -3248,7 +3248,7 @@ export class TernTab implements InProcessRunTab {
 			throw new ToolError(`${this.product} pdf answered without data`);
 		}
 		const dest = opts.path
-			? resolveToCwd(opts.path, context.session.cwd)
+			? resolveToCwd(opts.path, context.session.cwd, context.router)
 			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.pdf`);
 		await Bun.write(dest, Buffer.from(answer.data, "base64"));
 		return dest;
@@ -3558,7 +3558,7 @@ export class TernTab implements InProcessRunTab {
 	/** Save every cookie of the PiP's store plus the current origin's storage. */
 	async saveState(requestedPath?: string): Promise<string> {
 		const context = this.#requireRunContext("tab.saveState()");
-		const destination = storageStatePath(this.#name, requestedPath, context.session.cwd);
+		const destination = storageStatePath(this.#name, requestedPath, context.session.cwd, context.router);
 		const [cookies, origin] = await Promise.all([
 			this.#allCookies(),
 			this.#evalUser("tab.saveState()", readOriginStorageInPage, [], null),
@@ -3571,7 +3571,7 @@ export class TernTab implements InProcessRunTab {
 	/** Restore cookies and the current origin's storage; other origins are reported as skipped. */
 	async loadState(requestedPath: string): Promise<LoadStateResult> {
 		const context = this.#requireRunContext("tab.loadState()");
-		const state = await readStorageStateFile(requestedPath, context.session.cwd, context.signal);
+		const state = await readStorageStateFile(requestedPath, context.session.cwd, context.router, context.signal);
 		if (state.cookies.length > 0) await this.setCookies(...state.cookies);
 		let currentOrigin = "null";
 		try {
@@ -3796,7 +3796,7 @@ export class TernTab implements InProcessRunTab {
 		await this.#pull();
 		const har = await this.#network.harStop(this.loadBody);
 		const destination = options.path
-			? resolveToCwd(options.path, context.session.cwd)
+			? resolveToCwd(options.path, context.session.cwd, context.router)
 			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.har`);
 		await Bun.write(destination, `${JSON.stringify(har, null, 2)}\n`);
 		return destination;
@@ -3995,6 +3995,7 @@ export class TernTab implements InProcessRunTab {
 			this.#recordingSource(),
 			rawPath,
 			context.session.cwd,
+			context.router,
 			options,
 			context.signal,
 		);
@@ -4013,11 +4014,18 @@ export class TernTab implements InProcessRunTab {
 	/** Finalize and immediately start another recording. */
 	async recordRestart(rawPath: string, options?: RecordingOptions): Promise<RecordingStartResult> {
 		const context = this.#requireRunContext("tab.recordRestart()");
-		return await this.#recording.restart(this.#recordingSource(), rawPath, context.session.cwd, options, {
-			signal: context.signal,
-			output: context.output,
-			excludeWebP: context.session.excludeWebP,
-		});
+		return await this.#recording.restart(
+			this.#recordingSource(),
+			rawPath,
+			context.session.cwd,
+			context.router,
+			options,
+			{
+				signal: context.signal,
+				output: context.output,
+				excludeWebP: context.session.excludeWebP,
+			},
+		);
 	}
 
 	/** Recording state. */

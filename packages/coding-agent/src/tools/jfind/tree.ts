@@ -9,7 +9,7 @@ import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { ToolError } from "../tool-errors";
 import { buildPathTree, type PathTreeInput, walkPathTree } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter } from "../../internal-urls/router";
+import type { InternalUrlRouter } from "../../internal-urls/router";
 import { type InternalUrlFilesystem, type UrlFileStat, UrlFsError } from "../../internal-urls/url-filesystem";
 import { resolveSearchBase, resolveSearchResultPath } from "../path-utils";
 
@@ -42,10 +42,11 @@ export async function resolveSearchRoot(
 		);
 	}
 	// `find` judges whole files, so a trailing `:N-M` would silently be ignored.
-	if (InternalUrlRouter.instance().split(input).sel !== undefined) {
+	const router = filesystem.router;
+	if (router.split(input).sel !== undefined) {
 		throw new ToolError(`find searches whole files; line-range selectors are not supported: ${input}`);
 	}
-	const root = resolveSearchBase(input, cwd);
+	const root = resolveSearchBase(input, cwd, router);
 	let stat: UrlFileStat;
 	try {
 		stat = await filesystem.stat(root);
@@ -253,6 +254,8 @@ export interface ListFilesOptions {
 	includeHidden: boolean;
 	/** Filesystem URL roots and their entries resolve through. */
 	filesystem: natives.ShellFilesystem;
+	/** Router URL roots resolve through: the one behind {@link filesystem}. */
+	router: InternalUrlRouter;
 	signal?: AbortSignal;
 }
 
@@ -286,7 +289,7 @@ export async function listFiles(root: SearchRoot, options: ListFilesOptions): Pr
 	for (const match of result.matches) {
 		const size = match.size ?? 0;
 		if (!eligibleFile(match.path, size, options.includeHidden)) continue;
-		entries.push({ path: resolveSearchResultPath(root.path, match.path), rel: match.path, size });
+		entries.push({ path: resolveSearchResultPath(root.path, match.path, options.router), rel: match.path, size });
 	}
 	entries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 	return entries;

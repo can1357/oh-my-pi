@@ -3,6 +3,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { estimateToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 function bytes(s: string): number {
 	return Buffer.byteLength(s, "utf-8");
@@ -58,6 +59,7 @@ const built = await buildSystemPrompt({
 	skills: [],
 	contextFiles: [],
 	workspaceTree: { rootPath: process.cwd(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+	urlRouter: InternalUrlRouter.builtins(),
 });
 const parts = built.systemPrompt;
 const part0 = parts[0] ?? "";

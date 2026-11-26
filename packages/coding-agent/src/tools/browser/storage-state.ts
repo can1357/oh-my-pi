@@ -5,6 +5,7 @@ import { type } from "@oh-my-pi/omptype";
 import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "../tool-errors";
 import type { Cookie, CookieParam, Page } from "puppeteer-core";
+import type { InternalUrlRouter } from "../../internal-urls/router";
 import { resolveToCwd } from "../path-utils";
 import { throwIfAborted } from "../tool-errors";
 
@@ -467,12 +468,20 @@ export async function clearPageStorage(page: Page, kind: string, signal?: AbortS
 	await untilAborted(signal, () => page.evaluate(clearStorageInPage, kind));
 }
 
-/** Where `tab.saveState()` writes: the requested path, else `~/.omp/browser-state/<tab>.json`. */
-export function storageStatePath(tabName: string, requestedPath: string | undefined, cwd: string): string {
+/**
+ * Where `tab.saveState()` writes: the requested path, else `~/.omp/browser-state/<tab>.json`.
+ * Refuses a URL of a scheme `router` handles.
+ */
+export function storageStatePath(
+	tabName: string,
+	requestedPath: string | undefined,
+	cwd: string,
+	router: InternalUrlRouter,
+): string {
 	const safeName = tabName.replace(/[^A-Za-z0-9._-]/g, "_");
 	const fileName = safeName === "." || safeName === ".." ? "_" : safeName || "main";
 	return requestedPath
-		? resolveToCwd(requestedPath, cwd)
+		? resolveToCwd(requestedPath, cwd, router)
 		: path.join(os.homedir(), ".omp", "browser-state", `${fileName}.json`);
 }
 
@@ -482,9 +491,10 @@ export async function saveStorageState(
 	name: string,
 	requestedPath: string | undefined,
 	cwd: string,
+	router: InternalUrlRouter,
 	signal?: AbortSignal,
 ): Promise<string> {
-	const destination = storageStatePath(name, requestedPath, cwd);
+	const destination = storageStatePath(name, requestedPath, cwd, router);
 	const [browserCookies, origin] = await Promise.all([
 		untilAborted(signal, () => page.browserContext().cookies()),
 		readOriginStorage(page, signal),
@@ -494,14 +504,15 @@ export async function saveStorageState(
 	return destination;
 }
 
-/** Read and validate a saved browser state file. */
+/** Read and validate a saved browser state file; refuses a URL of a scheme `router` handles. */
 export async function readStorageStateFile(
 	requestedPath: string,
 	cwd: string,
+	router: InternalUrlRouter,
 	signal?: AbortSignal,
 ): Promise<BrowserStorageState> {
 	if (typeof requestedPath !== "string" || requestedPath.length === 0) throw new ToolError(STORAGE_STATE_ERROR);
-	const source = resolveToCwd(requestedPath, cwd);
+	const source = resolveToCwd(requestedPath, cwd, router);
 	try {
 		const text = await untilAborted(signal, () => Bun.file(source).text());
 		return parseStorageState(JSON.parse(text) as unknown);
@@ -517,9 +528,10 @@ export async function loadStorageState(
 	page: Page,
 	requestedPath: string,
 	cwd: string,
+	router: InternalUrlRouter,
 	options: LoadStateOptions,
 ): Promise<LoadStateResult> {
-	const state = await readStorageStateFile(requestedPath, cwd, options.signal);
+	const state = await readStorageStateFile(requestedPath, cwd, router, options.signal);
 	if (state.cookies.length > 0) {
 		try {
 			await untilAborted(options.signal, () => page.browserContext().setCookie(...state.cookies));

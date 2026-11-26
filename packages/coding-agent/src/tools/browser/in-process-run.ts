@@ -11,6 +11,8 @@ import { ToolError } from "../tool-errors";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import type { ToolSession } from "../index";
+import { sessionUrlRouter } from "../../internal-urls/context";
+import type { InternalUrlRouter } from "../../internal-urls/router";
 import {
 	bindRunFacade,
 	isBrowserRunOwnedRejection,
@@ -29,6 +31,8 @@ import type { RunResultOk, ScreenshotResult, SessionSnapshot } from "./tab-proto
 export interface InProcessRunContext {
 	/** The session the run belongs to. */
 	session: SessionSnapshot;
+	/** The calling session's URL router: a URL of a scheme it handles is refused as a file path. */
+	router: InternalUrlRouter;
 	/** Displays the run produces. */
 	output: RunOutput;
 	/** Screenshots the run saved. */
@@ -172,6 +176,7 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 	activeRuns.set(filename, activeRun);
 	const runContext: InProcessRunContext = {
 		session: opts.snapshot,
+		router: sessionUrlRouter(opts.session),
 		output,
 		screenshots,
 		signal,

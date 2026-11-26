@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import {
 	expandDelimitedPathEntries,
@@ -16,6 +17,9 @@ import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
+
+// These cases name host paths only; the built-in schemes are enough to tell them from URLs.
+const router = InternalUrlRouter.builtins();
 
 describe("delimited path expansion", () => {
 	let tempDir: string;
@@ -36,58 +40,60 @@ describe("delimited path expansion", () => {
 	});
 
 	it("splits comma, semicolon, and space delimited entries when parts resolve", async () => {
-		expect(await splitDelimitedPathEntry("apps/a.txt, packages/b.txt", tempDir)).toEqual([
+		expect(await splitDelimitedPathEntry("apps/a.txt, packages/b.txt", tempDir, router)).toEqual([
 			"apps/a.txt",
 			"packages/b.txt",
 		]);
-		expect(await splitDelimitedPathEntry("apps/a.txt;packages/b.txt", tempDir)).toEqual([
+		expect(await splitDelimitedPathEntry("apps/a.txt;packages/b.txt", tempDir, router)).toEqual([
 			"apps/a.txt",
 			"packages/b.txt",
 		]);
-		expect(await splitDelimitedPathEntry("apps/a.txt packages/b.txt", tempDir)).toEqual([
+		expect(await splitDelimitedPathEntry("apps/a.txt packages/b.txt", tempDir, router)).toEqual([
 			"apps/a.txt",
 			"packages/b.txt",
 		]);
 	});
 
 	it("keeps an existing path with spaces intact", async () => {
-		expect(await splitDelimitedPathEntry("folder with spaces/file.txt", tempDir)).toBeNull();
-		expect(await expandDelimitedPathEntries(["folder with spaces/file.txt"], tempDir)).toEqual([
+		expect(await splitDelimitedPathEntry("folder with spaces/file.txt", tempDir, router)).toBeNull();
+		expect(await expandDelimitedPathEntries(["folder with spaces/file.txt"], tempDir, router)).toEqual([
 			"folder with spaces/file.txt",
 		]);
 	});
 
 	it("does not split commas inside brace globs", async () => {
-		expect(await splitDelimitedPathEntry("src/{a,b}.txt", tempDir)).toBeNull();
-		expect(await splitDelimitedPathEntry("src/{a,b}.txt, packages/b.txt", tempDir)).toEqual([
+		expect(await splitDelimitedPathEntry("src/{a,b}.txt", tempDir, router)).toBeNull();
+		expect(await splitDelimitedPathEntry("src/{a,b}.txt, packages/b.txt", tempDir, router)).toEqual([
 			"src/{a,b}.txt",
 			"packages/b.txt",
 		]);
 	});
 
 	it("does not split backslash-escaped delimiters", async () => {
-		expect(await splitDelimitedPathEntry("apps/a.txt\\,packages/b.txt", tempDir)).toBeNull();
-		expect(await splitDelimitedPathEntry("apps/a.txt\\;packages/b.txt", tempDir)).toBeNull();
-		expect(await splitDelimitedPathEntry("folder\\ with\\ spaces/file.txt packages/b.txt", tempDir)).toBeNull();
+		expect(await splitDelimitedPathEntry("apps/a.txt\\,packages/b.txt", tempDir, router)).toBeNull();
+		expect(await splitDelimitedPathEntry("apps/a.txt\\;packages/b.txt", tempDir, router)).toBeNull();
+		expect(
+			await splitDelimitedPathEntry("folder\\ with\\ spaces/file.txt packages/b.txt", tempDir, router),
+		).toBeNull();
 	});
 
 	it("uses strong delimiters leniently and whitespace delimiters conservatively", async () => {
-		expect(await splitDelimitedPathEntry("missing.txt, packages/b.txt", tempDir)).toEqual([
+		expect(await splitDelimitedPathEntry("missing.txt, packages/b.txt", tempDir, router)).toEqual([
 			"missing.txt",
 			"packages/b.txt",
 		]);
-		expect(await splitDelimitedPathEntry("missing.txt;packages/b.txt", tempDir)).toEqual([
+		expect(await splitDelimitedPathEntry("missing.txt;packages/b.txt", tempDir, router)).toEqual([
 			"missing.txt",
 			"packages/b.txt",
 		]);
-		expect(await splitDelimitedPathEntry("missing.txt packages/b.txt", tempDir)).toBeNull();
+		expect(await splitDelimitedPathEntry("missing.txt packages/b.txt", tempDir, router)).toBeNull();
 	});
 
 	it("cleans trailing strong delimiters and expands glob entries", async () => {
-		expect(await expandDelimitedPathEntries(["apps/a.txt,"], tempDir)).toEqual(["apps/a.txt"]);
+		expect(await expandDelimitedPathEntries(["apps/a.txt,"], tempDir, router)).toEqual(["apps/a.txt"]);
 		expect(
-			await expandDelimitedPathEntries(["apps/**/*.txt, packages/**/*.txt"], tempDir, {
-				splitter: parseFindPattern,
+			await expandDelimitedPathEntries(["apps/**/*.txt, packages/**/*.txt"], tempDir, router, {
+				splitter: pattern => parseFindPattern(pattern, router),
 			}),
 		).toEqual(["apps/**/*.txt", "packages/**/*.txt"]);
 	});
@@ -106,19 +112,19 @@ describe("delimited path expansion", () => {
 		}
 		const joined = names.join("; ");
 		expect(joined.length).toBeGreaterThan(255);
-		expect(await splitDelimitedPathEntry(joined, tempDir)).toEqual(names);
-		expect(await expandDelimitedPathEntries([joined], tempDir)).toEqual(names);
+		expect(await splitDelimitedPathEntry(joined, tempDir, router)).toEqual(names);
+		expect(await expandDelimitedPathEntries([joined], tempDir, router)).toEqual(names);
 	});
 
 	it("normalizes Windows path separators before parsing find globs", async () => {
-		expect(parseFindPattern("apps\\**\\*.txt")).toEqual({
+		expect(parseFindPattern("apps\\**\\*.txt", router)).toEqual({
 			basePath: "apps",
 			globPattern: "**/*.txt",
 			hasGlob: true,
 		});
 
-		expect(await splitDelimitedPathEntry("apps/a.txt\\,packages/b.txt", tempDir)).toBeNull();
-		const parsed = parseFindPattern("C:\\work\\repo\\src\\**\\*.ts");
+		expect(await splitDelimitedPathEntry("apps/a.txt\\,packages/b.txt", tempDir, router)).toBeNull();
+		const parsed = parseFindPattern("C:\\work\\repo\\src\\**\\*.ts", router);
 		expect(parsed).toEqual({
 			basePath: "C:/work/repo/src",
 			globPattern: "**/*.ts",

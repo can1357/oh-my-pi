@@ -6,6 +6,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { type EditMode, EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls/scheme-table";
 import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -13,7 +14,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 let tmpDir: string;
 let artifactsDir: string;
 
-function createSession(): ToolSession {
+function createSession(urlRouter?: InternalUrlRouter): ToolSession {
 	const getArtifactsDir = () => artifactsDir;
 	const getSessionId = () => "session-a";
 	return {
@@ -25,6 +26,7 @@ function createSession(): ToolSession {
 		getArtifactsDir,
 		getSessionId,
 		localProtocolOptions: { getArtifactsDir, getSessionId },
+		urlRouter,
 		settings: Settings.isolated({ "edit.enforceSeenLines": false }),
 	} as ToolSession;
 }
@@ -103,25 +105,22 @@ describe("EditTool internal URL targets", () => {
 			resolve: async url => ({ url: url.href, content: await Bun.file(backing).text(), contentType: "text/plain" }),
 			locate: async url => path.join(tmpDir, "demo-root", url.rawHost),
 		};
-		const router = InternalUrlRouter.instance();
-		router.register(handler);
-		try {
-			const tool = new EditTool(createSession(), "apply_patch");
-			for (const target of ["demo:/n.md", "bogus://n.md"]) {
-				const result = await tool.execute(target, {
-					input: `*** Begin Patch\n*** Add File: ${target}\n+pwned\n*** End Patch`,
-				});
-				expect(result.isError).toBe(true);
-			}
-			const replaced = await new EditTool(createSession(), "replace").execute("demo-replace", {
-				path: "demo:/n.md",
-				old_string: "old",
-				new_string: "pwned",
+		const schemes = new UrlSchemeTable("Test scheme");
+		schemes.replace([handler]);
+		const router = new InternalUrlRouter([schemes]);
+		const tool = new EditTool(createSession(router), "apply_patch");
+		for (const target of ["demo:/n.md", "bogus://n.md"]) {
+			const result = await tool.execute(target, {
+				input: `*** Begin Patch\n*** Add File: ${target}\n+pwned\n*** End Patch`,
 			});
-			expect(replaced.isError).toBe(true);
-		} finally {
-			router.unregister("demo");
+			expect(result.isError).toBe(true);
 		}
+		const replaced = await new EditTool(createSession(router), "replace").execute("demo-replace", {
+			path: "demo:/n.md",
+			old_string: "old",
+			new_string: "pwned",
+		});
+		expect(replaced.isError).toBe(true);
 
 		expect(await Bun.file(backing).text()).toBe("old\n");
 		expect(await fs.exists(path.join(tmpDir, "demo:"))).toBe(false);

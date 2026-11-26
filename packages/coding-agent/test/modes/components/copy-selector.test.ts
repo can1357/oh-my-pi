@@ -23,6 +23,7 @@ import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { CopySelector } from "../../../src/ui/overlays/pickers/copy-selector";
 import { mountOverlay } from "../../helpers/overlay-terminal";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
@@ -241,6 +242,7 @@ function makeSelector(
 				},
 				onOpen: opens ? (href, label) => opens.push({ href, label }) : undefined,
 				onCancel,
+				router: InternalUrlRouter.builtins(),
 			}),
 		{ columns: 100, rows: 40 },
 	);
@@ -280,7 +282,12 @@ describe("copy selector", () => {
 		setKeybindings(KeybindingsManager.inMemory({ "app.tools.expand": "up" }));
 		createRoot(dispose => {
 			try {
-				const picker = CopySelector({ entries: makeEntries(), onPick() {}, onCancel() {} });
+				const picker = CopySelector({
+					entries: makeEntries(),
+					onPick() {},
+					onCancel() {},
+					router: InternalUrlRouter.builtins(),
+				});
 				if (!isUiNode(picker)) throw new Error("expected one picker node");
 				const ascii = staticEnvironment(loadThemeSync("dark", { symbolPreset: "ascii" }));
 				const unicode = staticEnvironment(loadThemeSync("dark", { symbolPreset: "unicode" }));

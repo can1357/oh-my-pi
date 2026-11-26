@@ -58,6 +58,12 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `pirate.ts`            | Appends to the system prompt when pirate mode is enabled                   |
 | `custom-compaction.ts` | Custom compaction that summarizes entire conversation                      |
 
+### Cross-Process Messaging
+
+| Extension            | Description                                                                                                 |
+| -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `url-scheme-bridge/` | Bridges the session to agents in other processes via `pi.registerUrlScheme` and `pi.replies.expect`, with a peer CLI and a two-terminal demo |
+
 ### External Dependencies
 
 | Extension         | Description                                                               |

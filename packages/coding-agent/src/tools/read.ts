@@ -37,7 +37,13 @@ import { normalizeToLF } from "../edit/normalize";
 import { isRemoteTextWritable, writeRemoteMirror } from "../edit/remote-mirror";
 import { writeResourceBackingFile } from "../internal-urls/filesystem-resource";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
-import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
+import {
+	extractUriScheme,
+	type InternalUrlRouter,
+	type SchemeSpec,
+	sessionResolveContext,
+	sessionUrlRouter,
+} from "../internal-urls";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text" };
@@ -873,10 +879,13 @@ function formatLocatedFileNotice(url: string, backingPath: string, size: number,
  * Peel `?q=<question>` (ask a vision model about an image) from a plain path or a URL whose
  * scheme declares {@link SchemeSpec.imageQuestion}; every other URL owns its query string.
  */
-export function splitImageQuestionTarget(readPath: string): { path: string; question?: string } {
+export function splitImageQuestionTarget(
+	readPath: string,
+	router: InternalUrlRouter,
+): { path: string; question?: string } {
 	if (readPath.includes("://")) {
 		const scheme = extractUriScheme(readPath);
-		if (!scheme || !InternalUrlRouter.instance().spec(scheme)?.imageQuestion) return { path: readPath };
+		if (!scheme || !router.spec(scheme)?.imageQuestion) return { path: readPath };
 	}
 	if (parseSqlitePathCandidates(readPath).length > 0) return { path: readPath };
 	const jsonTarget = splitJsonQueryTarget(readPath);
@@ -948,12 +957,11 @@ function splitTopLevelSemicolons(text: string): string[] {
  * Split a `;` list whose parts carry `?q=` queries (`a.json?q=.x;b.json?q=.y`) before query routing claims the
  * rest of the list as one filter. Every part must name an existing file or a routed URL.
  */
-async function splitQueryPathList(readPath: string, cwd: string): Promise<string[] | null> {
+async function splitQueryPathList(readPath: string, cwd: string, router: InternalUrlRouter): Promise<string[] | null> {
 	if (!readPath.includes("?") || !readPath.includes(";")) return null;
 	if ((await probeLiteralPathExists(readPath, cwd)) !== "missing") return null;
 	const parts = splitTopLevelSemicolons(readPath);
 	if (parts.length < 2) return null;
-	const router = InternalUrlRouter.instance();
 	for (const part of parts) {
 		if (router.canResolve(part)) continue;
 		const query = part.indexOf("?");
@@ -1109,7 +1117,9 @@ function repeatReadNotice(
 	}
 	entry.count++;
 	if (entry.count < REPEAT_READ_HINT_THRESHOLD) return;
-	const next = acceptsLineSelector(path) ? "use a narrower selector (path:A-B), or proceed" : "proceed";
+	const next = acceptsLineSelector(path, sessionUrlRouter(session))
+		? "use a narrower selector (path:A-B), or proceed"
+		: "proceed";
 	return `[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — ${next} with the edit.]`;
 }
 
@@ -1118,8 +1128,7 @@ function repeatReadNotice(
  * URLs and `lines` schemes do; selector-free schemes (`out://`, `attachment://`),
  * opaque MCP resources and unregistered schemes would read the tail as part of the URL.
  */
-function acceptsLineSelector(path: string): boolean {
-	const router = InternalUrlRouter.instance();
+function acceptsLineSelector(path: string, router: InternalUrlRouter): boolean {
 	if (!router.canResolve(path)) return true;
 	const scheme = extractUriScheme(router.normalize(path));
 	return scheme !== undefined && router.spec(scheme)?.selectors === "lines";
@@ -1255,9 +1264,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly approval = (args: unknown): ToolTier => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
-		const urlTier = InternalUrlRouter.instance().readTier(readPath);
+		const router = sessionUrlRouter(this.session);
+		const urlTier = router.readTier(readPath);
 		if (urlTier !== "read") return urlTier;
-		readPath = splitImageQuestionTarget(readPath).path;
+		readPath = splitImageQuestionTarget(readPath, router).path;
 		const target = splitPathAndSel(readPath);
 		return target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
 	};
@@ -1275,8 +1285,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		const rawPath = args && typeof args === "object" && "path" in args ? String(args.path ?? "") : "";
 		if (rawPath.length === 0) return undefined;
-		const withoutImageQuestion = splitImageQuestionTarget(rawPath).path;
-		const router = InternalUrlRouter.instance();
+		const router = sessionUrlRouter(this.session);
+		const withoutImageQuestion = splitImageQuestionTarget(rawPath, router).path;
 		// Authorization must key what execution reads: an existing literal file like `notes:1` is
 		// read literally, so its grant belongs to `notes:1`, not to `notes`.
 		const { path: selectorless, sel } = router.canHandle(withoutImageQuestion)
@@ -1288,12 +1298,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// only from inside this machine or network, so it is gated like a file.
 			if (isApprovalPublicUrl(selectorless)) return undefined;
 		}
-		const key = approvalTargetKey(this.session.cwd, selectorless);
+		const key = approvalTargetKey(this.session.cwd, selectorless, router);
 		if (key === undefined) return undefined;
 		// A directory read lists that folder itself, so it keys as the folder grant: approving it
 		// covers the folder's own entries, and a parent folder's grant never authorizes reading a
 		// subfolder's contents.
-		if (path.isAbsolute(key) && !approvalTargetNamesFile(key)) return [approvalDirectoryKey(key)];
+		if (path.isAbsolute(key) && !approvalTargetNamesFile(key, router)) return [approvalDirectoryKey(key)];
 		return [key];
 	};
 	readonly label = "Read";
@@ -1316,7 +1326,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			sources: prompt.render(readSourcesDoc, {
 				BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
 			}),
-			urls: InternalUrlRouter.instance()
+			urls: sessionUrlRouter(this.session)
 				.reference()
 				.map(line => `- ${line}`)
 				.join("\n"),
@@ -1474,7 +1484,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		let approvedPlanPath: string | null;
 		try {
-			approvedPlanPath = await InternalUrlRouter.instance().locate(
+			approvedPlanPath = await sessionUrlRouter(this.session).locate(
 				planReferencePath,
 				sessionResolveContext(this.session, { signal }),
 			);
@@ -1492,7 +1502,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		toolContext: AgentToolContext | undefined,
 		routedUrlPredicate?: (entry: string) => boolean,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
-		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
+		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, sessionUrlRouter(this.session), {
+			routedUrlPredicate,
+		});
 		return parts ? this.#readDelimitedParts(parts, signal, toolContext) : null;
 	}
 
@@ -1601,7 +1613,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
-		const resolvedDisplayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+		const resolvedDisplayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd, {
+			router: sessionUrlRouter(this.session),
+		});
 		const mimeType = videoMimeForPath(absolutePath);
 		const selector = parseVideoSelector(sel);
 		if (selector === null && sel !== undefined) {
@@ -1736,7 +1750,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			options;
 		if (!question && !(this.session.getActiveModel?.()?.input.includes("image") ?? true)) {
 			const outputMime = imageMetadata?.mimeType ?? mimeType;
-			const imageQuestionPath = questionPath ?? formatPathRelativeToCwd(absolutePath, this.session.cwd);
+			const imageQuestionPath =
+				questionPath ??
+				formatPathRelativeToCwd(absolutePath, this.session.cwd, { router: sessionUrlRouter(this.session) });
 			const metadataLines = [
 				"Image metadata:",
 				`- MIME: ${outputMime}`,
@@ -1765,6 +1781,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const imageLoadOptions = {
 				path: readPath,
 				cwd: this.session.cwd,
+				router: sessionUrlRouter(this.session),
 				autoResize: cfgImagesAutoResize.get(this.session.settings),
 				maxBytes: MAX_IMAGE_SIZE,
 				resolvedPath: absolutePath,
@@ -2012,7 +2029,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				: getEditStore(this.session).recordSnapshotFile(absolutePath);
 			if (tag) {
 				recordFullySeenRows(getEditStore(this.session), absolutePath, tag, outputText, cutLines);
-				outputText = `${formatReadHashlineHeader(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag)}\n${outputText}`;
+				outputText = `${formatReadHashlineHeader(formatPathRelativeToCwd(absolutePath, this.session.cwd, { router: sessionUrlRouter(this.session) }), tag)}\n${outputText}`;
 			}
 		} else if (rawSelector && visibleSpans.length > 0) {
 			const rawSeenLines = lineNumbersFromSpans(visibleSpans);
@@ -2080,7 +2097,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							: undefined,
 					},
 				);
-		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
+		const displayTarget = sessionUrlRouter(this.session).locateSync(params.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
 		return result;
@@ -2144,10 +2161,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const mixedParts = await splitMixedUrlPathList(
 			readPath,
 			this.session.cwd,
-			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
+			part => parseReadUrlTarget(part) !== null || sessionUrlRouter(this.session).canResolve(part),
+			sessionUrlRouter(this.session),
 		);
 		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
-		const queryParts = await splitQueryPathList(readPath, this.session.cwd);
+		const queryParts = await splitQueryPathList(readPath, this.session.cwd, sessionUrlRouter(this.session));
 		if (queryParts) return this.#readDelimitedParts(queryParts, signal, toolContext);
 		// Filesystem-backed reads choose JSON versus image questions after resolving
 		// the literal file and sniffing its content, not from its final extension.
@@ -2157,7 +2175,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const imageQuestion =
 			!scheme || (scheme === "local" && !isMediaQuestionTarget(readPath))
 				? { path: readPath }
-				: splitImageQuestionTarget(readPath);
+				: splitImageQuestionTarget(readPath, sessionUrlRouter(this.session));
 		readPath = imageQuestion.path;
 		const question = imageQuestion.question;
 
@@ -2198,7 +2216,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
-		const internalRouter = InternalUrlRouter.instance();
+		const internalRouter = sessionUrlRouter(this.session);
 		const delimitedInternalResult = internalRouter.canResolve(readPath)
 			? await this.#tryReadDelimitedPaths(readPath, signal, toolContext, entry => internalRouter.canResolve(entry))
 			: null;
@@ -2456,7 +2474,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				? { kind: "none" as const }
 				: parseSel(localTarget.sel);
 
-		let absolutePath = await resolveReadPathAsync(localReadPath, this.session.cwd);
+		let absolutePath = await resolveReadPathAsync(localReadPath, this.session.cwd, sessionUrlRouter(this.session));
 		let suffixResolution: { from: string; to: string } | undefined;
 
 		let isDirectory = false;
@@ -2650,7 +2668,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// BMP and TIFF reach the model transcoded to PNG.
 		const transcodedMimeType =
 			imageHeader && !mimeType && !heifMimeType ? parseTranscodedImageMimeType(imageHeader) : null;
-		const resolvedDisplayPath = located?.url ?? formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
+		const resolvedDisplayPath =
+			located?.url ??
+			formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd, { router: sessionUrlRouter(this.session) });
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
 		// a whole-file read gets a bottleneck summary (hot paths, top self
@@ -2849,7 +2869,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						renderedSummary.elidedRanges,
 						renderedSummary.elidedLines,
 					);
-					const summaryDisplayPath = formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
+					const summaryDisplayPath = formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd, {
+						router: sessionUrlRouter(this.session),
+					});
 					const summaryHashContext = displayMode.hashLines
 						? buffered
 							? hashlineHeaderContextForText(
@@ -3194,7 +3216,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								: getEditStore(this.session).recordSnapshotFile(absolutePath);
 						if (tag) {
 							hashContext = hashlineHeaderContext(
-								formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd),
+								formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd, {
+									router: sessionUrlRouter(this.session),
+								}),
 								tag,
 							);
 						}
@@ -3389,7 +3413,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						if (blocks.length > 0) {
 							onConflictMarkers?.();
 							const history = getConflictHistory(this.session);
-							const displayPathForWarning = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+							const displayPathForWarning = formatPathRelativeToCwd(absolutePath, this.session.cwd, {
+								router: sessionUrlRouter(this.session),
+							});
 							const entries = blocks.map(block =>
 								history.register({
 									absolutePath,
@@ -3511,7 +3537,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		throwIfAborted(signal);
 		const scan = await scanFileForConflicts(absolutePath);
-		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd, {
+			router: sessionUrlRouter(this.session),
+		});
 		const history = getConflictHistory(this.session);
 		history.reconcilePath(absolutePath, scan);
 		const entries = scan.blocks.map(block =>
@@ -3558,13 +3586,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// A file-backed URL that locate deferred to a remote resolve (an unknown skill:// while
 			// MCP is available) reports its local miss (`Unknown skill`), not the selector refusal.
 			if (spec.backing === "file") {
-				await InternalUrlRouter.instance().locate(url, sessionResolveContext(this.session, { signal }), {
+				await sessionUrlRouter(this.session).locate(url, sessionResolveContext(this.session, { signal }), {
 					localOnly: true,
 				});
 			}
 			throw new ToolError("The ':img' selector requires a file-backed path.");
 		}
-		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
+		const resource = await sessionUrlRouter(this.session).resolve(
+			url,
+			sessionResolveContext(this.session, { signal }),
+		);
 		if (typeof resource.content !== "string") {
 			// Bytes take the file pipeline under the URL's identity: images and documents by their
 			// content and type, anything else as a binary file (`:raw` reads it verbatim).
@@ -3597,7 +3628,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// A remote file `edit` can patch is tagged through its local mirror, under its URL.
 		const mirror =
 			isRemoteTextWritable(spec) && !resource.isDirectory && resource.immutable !== true
-				? await writeRemoteMirror(url, resource.content)
+				? await writeRemoteMirror(url, resource.content, sessionUrlRouter(this.session))
 				: undefined;
 		return buildInMemorySelectorResult(this.session, resource.content, parsedSel, {
 			details,

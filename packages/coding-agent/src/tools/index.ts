@@ -12,6 +12,7 @@ import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
+import type { ExpectedReplies } from "../extensibility/extensions/expected-replies";
 import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
@@ -21,7 +22,7 @@ import type { Skill, SkillRediscoveryHost } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
-import type { LocalProtocolOptions } from "../internal-urls";
+import type { InternalUrlRouter, LocalProtocolOptions, UrlSchemeSource } from "../internal-urls";
 import type { DaemonCompletionEvent } from "../daemon/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManagerApi, MCPToolScope } from "../mcp";
@@ -429,6 +430,8 @@ export interface ToolSession {
 	toolCommands?: ToolCommandState;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistryApi;
+	/** Replies this session's extensions expect for its agent (`pi.replies.expect`); `wait` blocks on them. */
+	expectedReplies?: ExpectedReplies;
 	/** Idle→parked→revive lifecycle owner; lets explicit cancellation stop a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
 	agentLifecycle?: () => AgentLifecycleApi;
 	/** The session directory (`<session>` beside `<session>.jsonl`); `local://` resolves under it. */
@@ -486,6 +489,10 @@ export interface ToolSession {
 	mcpToolScope?: MCPToolScope;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** This session's URL router: its own schemes (RPC host URIs), then the built-ins. Unset: built-ins only. */
+	urlRouter?: InternalUrlRouter;
+	/** The RPC host URI schemes this session resolves; task subagents it spawns on its thread inherit them. */
+	hostUriSources?: readonly UrlSchemeSource[];
 	/** Settings instance for passing to subagents */
 	settings: Settings;
 	/** Plan mode state (if active) */

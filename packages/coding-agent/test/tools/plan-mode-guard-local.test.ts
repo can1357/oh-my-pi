@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { InternalUrlRouter, LocalProtocolHandler, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { enforcePlanModeWrite, resolvePlanPath } from "@oh-my-pi/pi-coding-agent/tools/plan-mode-guard";
@@ -77,6 +77,24 @@ describe("resolvePlanPath resolves literally (no plan-mode redirect)", () => {
 		const selectorHeader = `[${path.join(ARTIFACTS_DIR, "x")}#ABCD:1-2]`;
 		expect(await resolvePlanPath(session, nonHexHeader)).toBe(path.join(REPO_ROOT, nonHexHeader));
 		expect(await resolvePlanPath(session, selectorHeader)).toBe(path.join(REPO_ROOT, selectorHeader));
+	});
+
+	it("refuses an @-prefixed URL of a session scheme instead of resolving it as a local path", async () => {
+		const schemes = new UrlSchemeTable("Host URI scheme");
+		schemes.replace([
+			{
+				scheme: "db",
+				spec: { backing: "remote", selectors: "none", immutable: true },
+				resolve: async () => {
+					throw new Error("db:// is never resolved here");
+				},
+			},
+		]);
+		const session = {
+			...makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT, planMode }),
+			urlRouter: new InternalUrlRouter([schemes]),
+		};
+		await expect(resolvePlanPath(session, "@db://rows/42")).rejects.toThrow('internal scheme "db://"');
 	});
 });
 

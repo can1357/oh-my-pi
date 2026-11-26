@@ -15,6 +15,7 @@ import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plug
 import type { AgentSession, AsyncJobTree } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { getProjectDir, removeWithRetries, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -53,6 +54,7 @@ interface FakeAcpBuiltinSession {
 	getLastAssistantText: () => string | undefined;
 	messages: unknown[];
 	settings: Settings;
+	urlRouter: InternalUrlRouter;
 	model: { provider: string; id: string } | undefined;
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
 	switchSession(sessionPath: string): Promise<boolean>;
@@ -179,6 +181,7 @@ function createRuntime() {
 		messages: [],
 		model: undefined,
 		settings,
+		urlRouter: InternalUrlRouter.builtins(),
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},
 		getContextUsage: () => undefined,
@@ -1121,6 +1124,34 @@ describe("wave 3 commands", () => {
 		expect(output[0]).toContain("Failed to read todos:");
 		expect(output[0]).toContain("internal scheme");
 		expect(session._todoPhases).toEqual([]);
+	});
+
+	it("/todo export: refuses a URL of a scheme the session registered, writing no local lookalike", async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-todo-export-session-scheme-"));
+		try {
+			const { output, session, fakeSessionManager, runtime } = createRuntime();
+			const schemes = new UrlSchemeTable("Host URI scheme");
+			schemes.replace([
+				{
+					scheme: "db",
+					spec: { backing: "remote", selectors: "none", immutable: true },
+					resolve: async () => {
+						throw new Error("db:// is never resolved here");
+					},
+				},
+			]);
+			session.urlRouter = new InternalUrlRouter([schemes]);
+			fakeSessionManager._cwd = tempRoot;
+			session._todoPhases = [{ name: "Work", tasks: [{ content: "Ship it", status: "pending" }] }];
+
+			const result = await executeAcpBuiltinSlashCommand("/todo export db://rows/todo.md", runtime);
+
+			expect(result).toEqual({ consumed: true, failed: true });
+			expect(output[0]).toContain('internal scheme "db://"');
+			expect(await fs.readdir(tempRoot)).toEqual([]);
+		} finally {
+			await removeWithRetries(tempRoot);
+		}
 	});
 
 	it("/todo edit: returns TUI-only usage message", async () => {

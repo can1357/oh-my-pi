@@ -20,6 +20,7 @@ import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
+import type { InternalUrlRouter } from "./router";
 import type { SessionEntry } from "../session/session-entries";
 import type { ToolSession } from "../tools";
 import type { CoordinationDetails } from "../tools/details/wait";
@@ -344,6 +345,11 @@ export interface ResolveContext {
 	 * and throw when it is absent.
 	 */
 	session?: ToolSession;
+	/**
+	 * Calling session's router: its own schemes, then the built-ins. Handlers
+	 * that route a nested URL go through it; absent, they use the built-ins only.
+	 */
+	router?: InternalUrlRouter;
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory
 	 * listing instead return the directory shape (`isDirectory: true`) with empty

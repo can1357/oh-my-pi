@@ -111,6 +111,7 @@ function planReviewExtension(
 		assistantTextRenderers: [],
 		transcriptPresenters: [],
 		linkSchemes: [],
+		urlSchemes: new Map(),
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),

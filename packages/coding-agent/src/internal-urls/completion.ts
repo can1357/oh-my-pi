@@ -5,7 +5,7 @@
  */
 import { type AutocompleteItem, subsequenceMatch, subsequenceScore } from "../autocomplete/autocomplete";
 import { URL_TOKEN_RE } from "../autocomplete/tokens";
-import { InternalUrlRouter } from "./router";
+import type { InternalUrlRouter } from "./router";
 
 /** Upper bound on candidates surfaced in the dropdown. */
 const MAX_URL_SUGGESTIONS = 25;
@@ -41,39 +41,45 @@ function decodeUrlCompletionValue(value: string): string {
 /**
  * Detect a completable internal-url token immediately before the cursor.
  * Returns `null` when the text is not a `scheme://` token whose scheme is
- * registered with a completion-capable handler.
+ * registered with a completion-capable handler in `router` (the receiving session's).
  */
-export function extractInternalUrlContext(textBeforeCursor: string): InternalUrlContext | null {
+export function extractInternalUrlContext(
+	textBeforeCursor: string,
+	router: InternalUrlRouter,
+): InternalUrlContext | null {
 	const tokenMatch = URL_TOKEN_RE.exec(textBeforeCursor);
 	if (!tokenMatch) return null;
 	const token = tokenMatch[1]!;
 	const parts = SCHEME_SPLIT_RE.exec(token);
 	if (!parts) return null;
 	const scheme = parts[1]!.toLowerCase();
-	if (!InternalUrlRouter.instance().completionSchemes().includes(scheme)) return null;
+	if (!router.completionSchemes().includes(scheme)) return null;
 	return { scheme, query: parts[2] ?? "", token };
 }
 
 /**
  * Suggestions for the internal-url token ending at the cursor, or `null` when
  * the text is not such a token or no candidate matches the typed query.
- * The optional lazy caller binding overrides cwd and is read only after
- * recognizing an internal-URL token.
+ * `router` is the receiving session's: its schemes complete, and handlers route
+ * nested URLs through it. The optional lazy caller binding overrides cwd and is
+ * read only after recognizing an internal-URL token.
  */
 export async function getInternalUrlSuggestions(
 	textBeforeCursor: string,
+	router: InternalUrlRouter,
 	cwd?: string,
 	signal?: AbortSignal,
 	getCaller?: () => InternalUrlCallerContext,
 ): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 	if (signal?.aborted) return null;
-	const ctx = extractInternalUrlContext(textBeforeCursor);
+	const ctx = extractInternalUrlContext(textBeforeCursor, router);
 	if (!ctx) return null;
 
-	const candidates = await InternalUrlRouter.instance().complete(ctx.scheme, ctx.query, {
+	const candidates = await router.complete(ctx.scheme, ctx.query, {
 		...(cwd === undefined ? {} : { cwd }),
 		...getCaller?.(),
 		...(signal ? { signal } : {}),
+		router,
 	});
 	if (!candidates || candidates.length === 0) return null;
 
@@ -100,9 +106,9 @@ export async function getInternalUrlSuggestions(
 	};
 }
 
-/** Whether `prefix` (the token a completion was offered for) is an internal-url token. */
-export function isInternalUrlPrefix(prefix: string): boolean {
-	return extractInternalUrlContext(prefix) !== null;
+/** Whether `prefix` (the token a completion was offered for) is an internal-url token in `router`. */
+export function isInternalUrlPrefix(prefix: string, router: InternalUrlRouter): boolean {
+	return extractInternalUrlContext(prefix, router) !== null;
 }
 
 /**

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls/scheme-table";
 import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
@@ -49,9 +50,11 @@ describe("in-memory range reads keep the requested lines", () => {
 	beforeEach(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-in-memory-range-"));
 		InternalUrlRouter.resetForTests();
-		InternalUrlRouter.instance().register(remoteHandler);
+		const schemes = new UrlSchemeTable("Test scheme");
+		schemes.replace([remoteHandler]);
 		const session: ToolSession = {
 			cwd: tmpDir,
+			urlRouter: new InternalUrlRouter([schemes]),
 			hasUI: false,
 			getSessionFile: () => path.join(tmpDir, "session.jsonl"),
 			getSessionSpawns: () => "*",

@@ -2,6 +2,7 @@ export { truncate } from "@oh-my-pi/pi-utils";
 
 import * as fs from "node:fs/promises";
 import { isEnoent, pathExists } from "@oh-my-pi/pi-utils";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
 import {
 	type CodeAction,
@@ -502,39 +503,42 @@ export async function collectGlobMatches(
 /**
  * Files a diagnostics `file` names: a path, a glob, or a `;`-separated list of
  * either (unless the whole string is itself an existing path).
+ * Refuses a URL of a scheme `router` handles.
  */
 export async function resolveDiagnosticTargets(
 	file: string,
 	cwd: string,
 	maxMatches: number,
+	router: InternalUrlRouter,
 ): Promise<{ matches: string[]; truncated: boolean }> {
 	const entries = file
 		.split(";")
 		.map(entry => entry.trim())
 		.filter(entry => entry.length > 0);
-	if (entries.length > 1 && !(await pathExists(resolveToCwd(file, cwd)))) {
+	if (entries.length > 1 && !(await pathExists(resolveToCwd(file, cwd, router)))) {
 		const matches = new Set<string>();
 		for (const entry of entries) {
 			if (matches.size >= maxMatches) return { matches: [...matches], truncated: true };
-			const resolved = await resolveDiagnosticTarget(entry, cwd, maxMatches - matches.size);
+			const resolved = await resolveDiagnosticTarget(entry, cwd, maxMatches - matches.size, router);
 			for (const match of resolved.matches) matches.add(match);
 			if (resolved.truncated) return { matches: [...matches], truncated: true };
 		}
 		return { matches: [...matches], truncated: false };
 	}
-	return resolveDiagnosticTarget(file, cwd, maxMatches);
+	return resolveDiagnosticTarget(file, cwd, maxMatches, router);
 }
 
 async function resolveDiagnosticTarget(
 	file: string,
 	cwd: string,
 	maxMatches: number,
+	router: InternalUrlRouter,
 ): Promise<{ matches: string[]; truncated: boolean }> {
 	if (!hasGlobPattern(file)) {
 		return { matches: [file], truncated: false };
 	}
 
-	const resolved = resolveToCwd(file, cwd);
+	const resolved = resolveToCwd(file, cwd, router);
 	try {
 		const stat = await fs.stat(resolved);
 		if (stat.isFile()) {

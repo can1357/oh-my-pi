@@ -34,6 +34,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { setAgentDir } from "@oh-my-pi/pi-utils";
 import { Composer } from "../src/ui/composer/composer";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
@@ -45,6 +46,7 @@ function createPasteContext(sessionManager: SessionManager) {
 		shell: { focused: () => editor.field },
 		showStatus,
 		sessionManager,
+		session: { urlRouter: InternalUrlRouter.builtins() },
 	} as unknown as InteractiveModeContext;
 	return { ctx, editor, showStatus };
 }

@@ -1,4 +1,5 @@
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
+import { InternalUrlRouter } from "../../../../internal-urls/router";
 import { resolveReadPath } from "../../../../tools/path-utils";
 import type { TextReviewSource } from "./annotation-types";
 
@@ -13,7 +14,7 @@ export async function readFileTextReviewSource(
 ): Promise<TextReviewSource> {
 	const filePath = inputPath.trim();
 	if (!filePath) throw new Error("Enter a file path to annotate.");
-	const resolvedPath = resolveReadPath(filePath, cwd);
+	const resolvedPath = resolveReadPath(filePath, cwd, InternalUrlRouter.builtins());
 	const file = Bun.file(resolvedPath);
 	const readFailure = (error: unknown) => {
 		const detail = error instanceof Error && error.message ? error.message : String(error);

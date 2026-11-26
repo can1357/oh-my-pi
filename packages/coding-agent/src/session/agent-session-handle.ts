@@ -23,6 +23,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import type { TokenRateMeter } from "../utils/token-rate";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { currentThreadId } from "../thread/identity";
@@ -294,6 +295,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly systemPrompt: string[];
 	/** Skills available to the session. */
 	readonly skills: readonly Skill[];
+	/** Router the TUI resolves this session's URLs through (transcript, links): its own schemes, then the built-ins. */
+	readonly urlRouter: InternalUrlRouter;
 	/** Whether the effective thinking level is resolved automatically. */
 	readonly isAutoThinking: boolean;
 	/** Whether a compaction is in progress. */

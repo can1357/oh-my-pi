@@ -15,6 +15,7 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 import { Composer } from "../src/ui/composer/composer";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const ONE_PX_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -46,6 +47,7 @@ describe("attached image chip token", () => {
 				putBlob: async () => ({ hash: "h", path: "/tmp/h.png", displayPath: "/tmp/h.png" }),
 			},
 			showStatus: () => {},
+			session: { urlRouter: InternalUrlRouter.builtins() },
 		} as unknown as InteractiveModeContext;
 		const file = path.join(dir, "shot.png");
 		await Bun.write(file, ONE_PX_PNG);

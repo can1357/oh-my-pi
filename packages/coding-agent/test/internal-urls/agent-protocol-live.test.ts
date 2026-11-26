@@ -109,7 +109,7 @@ describe("agent:// for agents without a published output", () => {
 		registerSub("Builder", "Main", liveSession([]));
 		registerSub("Builder.Child", "Builder", liveSession([assistantText("child is scanning")]));
 
-		const resource = await InternalUrlRouter.instance().resolve("agent://Builder.Child", {
+		const resource = await InternalUrlRouter.builtins().resolve("agent://Builder.Child", {
 			sessionFile: rootSessionFile,
 		});
 
@@ -170,7 +170,7 @@ describe("agent:// for agents without a published output", () => {
 		registerSub("Builder", "Main", liveSession([assistantText("still talking")]), "idle");
 		await Bun.write(path.join(artifactsDir, "Builder.md"), "final report");
 
-		const resource = await InternalUrlRouter.instance().resolve("agent://Builder", { sessionFile: rootSessionFile });
+		const resource = await InternalUrlRouter.builtins().resolve("agent://Builder", { sessionFile: rootSessionFile });
 
 		expect(resource.content).toBe("final report");
 	});
@@ -179,7 +179,7 @@ describe("agent:// for agents without a published output", () => {
 		registerSub("Builder", "Main", liveSession([yieldResult(["code-ready"], { files: [] })]));
 
 		await expect(
-			InternalUrlRouter.instance().resolve("agent://Builder/files", { sessionFile: rootSessionFile }),
+			InternalUrlRouter.builtins().resolve("agent://Builder/files", { sessionFile: rootSessionFile }),
 		).rejects.toThrow(/not published yet/);
 	});
 
@@ -187,7 +187,7 @@ describe("agent:// for agents without a published output", () => {
 		for (let i = 0; i < 200; i++) await Bun.write(path.join(artifactsDir, `Unrelated${i}.md`), "x");
 		registerSub("CodeBuildFolderSources", "Main", liveSession([]));
 
-		const error = await InternalUrlRouter.instance()
+		const error = await InternalUrlRouter.builtins()
 			.resolve("agent://CodeBuildFolderSrcs", { sessionFile: rootSessionFile })
 			.then(
 				() => undefined,

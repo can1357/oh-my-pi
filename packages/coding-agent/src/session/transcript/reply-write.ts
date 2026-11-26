@@ -1,6 +1,6 @@
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter } from "../../internal-urls/router";
+import type { InternalUrlRouter } from "../../internal-urls/router";
 import { splitUrlScheme } from "../../internal-urls/url-scheme";
 
 const NO_USAGE: Usage = {
@@ -15,14 +15,13 @@ const NO_USAGE: Usage = {
 /**
  * Whether a `toolName` call writes to a reply URL. `undefined` while streamed args cannot tell yet:
  * no path so far, or a path that could still grow into a reply URL (`ou`, `out:/`). Callers holding
- * final args treat `undefined` as `false`.
+ * final args treat `undefined` as `false`. `router` is the calling session's.
  */
-export function isReplyWrite(toolName: string, args: unknown): boolean | undefined {
+export function isReplyWrite(toolName: string, args: unknown, router: InternalUrlRouter): boolean | undefined {
 	if (toolName !== "write") return false;
 	if (!isRecord(args)) return undefined;
 	const target = typeof args.path === "string" ? args.path : args.file_path;
 	if (typeof target !== "string") return undefined;
-	const router = InternalUrlRouter.instance();
 	const url = splitUrlScheme(target);
 	if (url) return router.spec(url.scheme)?.write?.scope === "reply";
 	const lower = target.toLowerCase();

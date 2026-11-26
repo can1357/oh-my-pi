@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { ToolError } from "../tool-errors";
 import type { CDPSession, Page } from "puppeteer-core";
+// Only the tab worker traces; it gets a session snapshot, not the session's router: its paths resolve against the built-in schemes.
+import { InternalUrlRouter } from "../../internal-urls/router";
 import { resolveToCwd } from "../path-utils";
 
 /** Options for starting a Chromium performance trace. */
@@ -47,7 +49,7 @@ interface NavigationTiming {
 }
 
 function outputPath(requested: string | undefined, cwd: string, extension: string): string {
-	if (requested) return resolveToCwd(requested, cwd);
+	if (requested) return resolveToCwd(requested, cwd, InternalUrlRouter.builtins());
 	return path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.${extension}`);
 }
 

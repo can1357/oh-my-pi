@@ -5,6 +5,10 @@ import * as path from "node:path";
 import { readImageMetadata, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { loadImageAttachmentInput, loadImageInput } from "../src/utils/image-loading";
 import { InvalidImageDataError } from "@oh-my-pi/pi-coding-agent/utils/image-input";
+import { loadEvalJudgmentImages } from "@oh-my-pi/pi-coding-agent/eval/judgment-bridge";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
+
+const builtins = InternalUrlRouter.builtins();
 
 describe("readImageMetadata", () => {
 	let testDir: string;
@@ -67,7 +71,7 @@ describe("readImageMetadata", () => {
 		const imagePath = path.join(testDir, "middle-elided.png");
 		fs.writeFileSync(imagePath, Buffer.concat([whole.subarray(0, 20), whole.subarray(40)]));
 
-		const loading = loadImageInput({ path: imagePath, cwd: testDir, autoResize: false });
+		const loading = loadImageInput({ path: imagePath, cwd: testDir, router: builtins, autoResize: false });
 		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);
 	});
 
@@ -87,7 +91,7 @@ describe("readImageMetadata", () => {
 		const imagePath = path.join(testDir, "truncated.jpg");
 		fs.writeFileSync(imagePath, intact.subarray(0, intact.length - 8));
 
-		const loading = loadImageInput({ path: imagePath, cwd: testDir, autoResize: false });
+		const loading = loadImageInput({ path: imagePath, cwd: testDir, router: builtins, autoResize: false });
 		await expect(loading).rejects.toBeInstanceOf(InvalidImageDataError);
 	});
 
@@ -101,9 +105,40 @@ describe("readImageMetadata", () => {
 			),
 		);
 
-		const result = await loadImageInput({ path: imagePath, cwd: testDir, autoResize: true, excludeWebP: false });
+		const result = await loadImageInput({
+			path: imagePath,
+			cwd: testDir,
+			router: builtins,
+			autoResize: true,
+			excludeWebP: false,
+		});
 		expect(result?.mimeType).toBe("image/webp");
 		expect(result?.textNote).toContain("Read image file [image/png] (displayed as image/webp)");
+	});
+
+	it("refuses a judgment image path of a scheme the session handles instead of reading a local lookalike", async () => {
+		const lookalike = path.join(testDir, "db:", "rows", "chart.png");
+		await Bun.write(
+			lookalike,
+			Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2Z0AAAAASUVORK5CYII=",
+				"base64",
+			),
+		);
+		const schemes = new UrlSchemeTable("Host URI scheme");
+		schemes.replace([
+			{
+				scheme: "db",
+				spec: { backing: "remote", selectors: "none", immutable: true },
+				resolve: async () => {
+					throw new Error("db:// is never resolved here");
+				},
+			},
+		]);
+
+		await expect(
+			loadEvalJudgmentImages(["db://rows/chart.png"], testDir, new InternalUrlRouter([schemes])),
+		).rejects.toThrow('internal scheme "db://"');
 	});
 });
 

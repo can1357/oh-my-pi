@@ -18,6 +18,7 @@ function registerSession(id: string, kind: "main" | "sub", backend: "local" | "o
 			getArtifactsDir: () => null,
 		},
 		settings: Settings.isolated({ "memory.backend": backend }),
+		urlRouter: InternalUrlRouter.builtins(),
 	} as unknown as AgentSession;
 	AgentRegistry.global().register({
 		id,

@@ -22,6 +22,7 @@ import { formatCost } from "../modes/view-model/overlays/agent-hub-renderer";
 import type { ChainJudge } from "../judgment";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { ToolError } from "../tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { EVAL_HANDLE_CONCURRENCY, evalRequestSlots } from "./completion-bridge";
@@ -408,7 +409,11 @@ export class JudgmentBatch {
 
 			let images: ImageContent[] | undefined;
 			try {
-				images = await loadEvalJudgmentImages(input.imageSources, this.#session.cwd);
+				images = await loadEvalJudgmentImages(
+					input.imageSources,
+					this.#session.cwd,
+					sessionUrlRouter(this.#session),
+				);
 			} catch (error) {
 				return { key: input.key, error: error instanceof Error ? error.message : String(error) };
 			}

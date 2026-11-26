@@ -28,7 +28,7 @@ import { expandAtImports } from "./discovery/at-imports";
 import type { EvalPreludeDefinition } from "./eval/preludes";
 import { SkillDescriptionCatalog } from "./extensibility/skill-descriptions";
 import { loadSkills, type Skill } from "./extensibility/skills";
-import { InternalUrlRouter } from "./internal-urls/router";
+import type { InternalUrlRouter } from "./internal-urls/router";
 import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
@@ -647,6 +647,8 @@ export interface BuildSystemPromptOptions {
 	 * the main agent verifies once after all subagents land, so parallel children don't storm the CPU.
 	 */
 	subagent?: boolean;
+	/** The session's URL router: the prompt lists its schemes (its own, then the built-ins). */
+	urlRouter: InternalUrlRouter;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -719,7 +721,7 @@ export function composeAppendPrompt(appendParts: readonly string[], appendSystem
 }
 
 /** Build the system prompt with tools, guidelines, and context */
-export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
+export async function buildSystemPrompt(options: BuildSystemPromptOptions): Promise<BuildSystemPromptResult> {
 	if ($env.NULL_PROMPT === "true") {
 		return { systemPrompt: [] };
 	}
@@ -775,6 +777,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		ovnfs,
 		subagent = false,
 		activeRepoContext: providedActiveRepoContext,
+		urlRouter,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -1124,8 +1127,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
 		hasSkillUriAccess,
-		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
-		internalUrlReference: InternalUrlRouter.instance().reference(),
+		internalUrls: urlRouter.describe(schemeHost),
+		internalUrlReference: urlRouter.reference(),
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,

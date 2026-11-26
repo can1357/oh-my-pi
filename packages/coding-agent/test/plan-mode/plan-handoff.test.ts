@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { LocalProtocolOptions } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { loadOverallPlanReference } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 describe("loadOverallPlanReference", () => {
 	let tmpDir: string;
@@ -29,13 +30,17 @@ describe("loadOverallPlanReference", () => {
 		const body = "# WP migration\n\n1. Migrate the store\n2. Update callers";
 		await Bun.write(path.join(artifactsDir, "local", "wp-migration.md"), body);
 
-		const ref = await loadOverallPlanReference("local://wp-migration.md", localProtocolOptions);
+		const ref = await loadOverallPlanReference(
+			"local://wp-migration.md",
+			localProtocolOptions,
+			InternalUrlRouter.builtins(),
+		);
 
 		expect(ref).toEqual({ path: "local://wp-migration.md", content: body });
 	});
 
 	it("returns undefined when no plan file exists at the reference path", async () => {
-		const ref = await loadOverallPlanReference("local://PLAN.md", localProtocolOptions);
+		const ref = await loadOverallPlanReference("local://PLAN.md", localProtocolOptions, InternalUrlRouter.builtins());
 
 		expect(ref).toBeUndefined();
 	});
@@ -43,7 +48,7 @@ describe("loadOverallPlanReference", () => {
 	it("returns undefined when the plan file is empty or whitespace-only", async () => {
 		await Bun.write(path.join(artifactsDir, "local", "PLAN.md"), "   \n\t\n");
 
-		const ref = await loadOverallPlanReference("local://PLAN.md", localProtocolOptions);
+		const ref = await loadOverallPlanReference("local://PLAN.md", localProtocolOptions, InternalUrlRouter.builtins());
 
 		expect(ref).toBeUndefined();
 	});

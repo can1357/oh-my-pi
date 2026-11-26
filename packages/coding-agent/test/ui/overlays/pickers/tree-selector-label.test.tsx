@@ -5,6 +5,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import type { TspPickerItem } from "@oh-my-pi/pi-wire";
 import { TreeSelector, type TreeSelectorNode } from "../../../../src/ui/overlays/pickers/tree-selector";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 test("a tree row keeps the entry's blank line as two spaces and expands its tabs", () => {
 	const root: TreeSelectorNode = {
@@ -26,6 +27,7 @@ test("a tree row keeps the entry's blank line as two spaces and expands its tabs
 		() => ({
 			layer: (
 				<TreeSelector
+					router={InternalUrlRouter.builtins()}
 					roots={[root]}
 					currentLeafId="e0"
 					terminalHeight={30}

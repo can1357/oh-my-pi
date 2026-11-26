@@ -6,7 +6,7 @@ import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { jsx } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
-import { InternalUrlRouter } from "../../internal-urls";
+import type { InternalUrlRouter } from "../../internal-urls";
 import type { CustomMessage } from "../../session/messages";
 import { isUserTurnInitiator } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
@@ -149,10 +149,13 @@ type ImageChipSource = { kind: "file"; path: string } | { kind: "internal"; path
  * file holds the original pasted bytes (the payload may be auto-resized), so the chip
  * opens a stable blob copy of that file. Undefined when no file backs the image.
  */
-function imageChipSource(image: ImageContent, sessionManager: ImageChipSessionManager): ImageChipSource | undefined {
+function imageChipSource(
+	image: ImageContent,
+	sessionManager: ImageChipSessionManager,
+	router: InternalUrlRouter,
+): ImageChipSource | undefined {
 	const sourcePath = imageAttachmentSource(image)?.path;
 	if (!sourcePath) return undefined;
-	const router = InternalUrlRouter.instance();
 	if (!router.canHandle(sourcePath)) return { kind: "file", path: sourcePath };
 	try {
 		const located = router.locateSync(sourcePath, {
@@ -171,11 +174,12 @@ function imageChipSource(image: ImageContent, sessionManager: ImageChipSessionMa
 export async function materializeImageChipLinks(
 	images: readonly ImageContent[],
 	sessionManager: ImageChipSessionManager,
+	router: InternalUrlRouter,
 ): Promise<(string | undefined)[]> {
 	const putBlob = sessionManager.putBlob.bind(sessionManager);
 	return Promise.all(
 		images.map(async image => {
-			const source = imageChipSource(image, sessionManager);
+			const source = imageChipSource(image, sessionManager, router);
 			if (source?.kind === "file") return source.path;
 			if (source) {
 				try {
@@ -198,11 +202,12 @@ export async function materializeImageChipLinks(
 export function imageLinksForMessage(
 	images: readonly ImageContent[],
 	sessionManager: ImageChipSessionManager,
+	router: InternalUrlRouter,
 ): (string | undefined)[] | undefined {
 	if (images.length === 0) return undefined;
 	const putBlobSync = sessionManager.putBlobSync.bind(sessionManager);
 	return images.map(image => {
-		const source = imageChipSource(image, sessionManager);
+		const source = imageChipSource(image, sessionManager, router);
 		if (source?.kind === "file") return source.path;
 		if (source) {
 			try {
@@ -578,7 +583,10 @@ export class UiHelpers {
 					const renderToolName = toolRenderName(content.name, tool);
 					resolveWaitingPoll(renderToolName);
 
-					if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
+					if (
+						renderToolName === "read" &&
+						readArgsCollapseIntoGroup(content.arguments, ctx.viewSession.urlRouter)
+					) {
 						if (errorMessage) {
 							const group = ensureReadGroup();
 							group.updateArgs(content.arguments, content.id);
@@ -656,7 +664,9 @@ export class UiHelpers {
 				pendingUsageDuration = message.duration;
 				pendingUsageTtft = message.ttft;
 				pendingUsageTimestamp = message.timestamp;
-				pendingReadUsageCallIds = pendingUsage ? groupedReadUsageCallIds(message) : undefined;
+				pendingReadUsageCallIds = pendingUsage
+					? groupedReadUsageCallIds(message, ctx.viewSession.urlRouter)
+					: undefined;
 				pendingUsageTurnElapsed = cfgDisplayShowTurnTime.get(ctx.settings)
 					? turnElapsedMs(turnStartedAt, message)
 					: undefined;

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -43,6 +44,7 @@ describe("system prompt workstation block", () => {
 			rules: [],
 			toolNames: [],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 
 		const rendered = systemPrompt.join("\n\n");

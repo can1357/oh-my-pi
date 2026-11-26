@@ -24,6 +24,7 @@ import {
 	stripSystemWrapperTags,
 	type TreeToolCall,
 } from "../../../modes/view-model/overlays/tree-entry-labels";
+import type { InternalUrlRouter } from "../../../internal-urls/router";
 import { isUserRequestEntry, type TranscriptEntryLike } from "../../../session/transcript/transcript-entry";
 import { resolveAssistantErrorPresentation } from "../../../session/transcript/transcript-render-helpers";
 import { fuzzyMatch } from "../../../utils/fuzzy";
@@ -74,6 +75,8 @@ export interface TreeSelectorProps {
 	readonly initialFilterMode?: TreeFilterMode;
 	/** The sheet's subtitle. */
 	readonly sessionName?: string;
+	/** The session's URL router: the entry preview recognizes reply writes through it. */
+	readonly router: InternalUrlRouter;
 }
 
 const FILTER_TABS = [
@@ -724,6 +727,7 @@ export function TreeSelector(props: TreeSelectorProps): JSXNode {
 				turnId: entry.id,
 				isUserTurn: isUserRequestEntry(entry),
 				entries: [entry as TranscriptEntryLike],
+				router: props.router,
 			};
 			const copy = targetCopy(target, collectBlocks(target));
 			out.push(

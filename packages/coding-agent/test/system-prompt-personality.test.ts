@@ -6,6 +6,7 @@ import type { Personality } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { __resetDirsFromEnvForTests, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -57,6 +58,7 @@ describe("PERSONALITY.md override", () => {
 			toolNames: [],
 			personality,
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			urlRouter: InternalUrlRouter.builtins(),
 		});
 		return systemPrompt.join("\n\n");
 	}

@@ -9,12 +9,18 @@
  */
 import { isReadableUrlPath } from "./details/read";
 import * as fs from "node:fs";
-import { InternalUrlRouter } from "../internal-urls/router";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import { approvalCacheKeyForPath } from "./approval-cache";
 import { resolveToCwd } from "./path-utils";
 
 /** Key prefix for a recursive search of a tree: opaque, so no folder or file grant matches it. */
 const APPROVAL_TREE_SEARCH_PREFIX = "tree\0";
+
+/**
+ * Key prefix for a URL of a scheme a session registered (an RPC host URI): the key carries the
+ * serving registration's id, so a grant never covers another session's handler of the same scheme.
+ */
+const APPROVAL_REGISTRATION_PREFIX = "registration\0";
 
 /**
  * Cache key for a recursive search rooted at `directoryKey`. Such a search reads below subfolders,
@@ -81,10 +87,9 @@ export function isApprovalPublicUrl(url: string): boolean {
  * only named for a file. A path nothing occupies yet still counts as a file:
  * approving a write is how its file comes to exist.
  */
-export function approvalTargetNamesFile(target: string): boolean {
-	// A recursive search's tree key is opaque: nothing on disk names it, and it is never a file.
-	if (target.startsWith(APPROVAL_TREE_SEARCH_PREFIX)) return false;
-	const router = InternalUrlRouter.instance();
+export function approvalTargetNamesFile(target: string, router: InternalUrlRouter): boolean {
+	// A recursive search's tree key and a session URL's key are opaque: nothing on disk names them.
+	if (target.startsWith(APPROVAL_TREE_SEARCH_PREFIX) || target.startsWith(APPROVAL_REGISTRATION_PREFIX)) return false;
 	const normalized = router.normalize(target);
 	if (router.canHandle(normalized) || isReadableUrlPath(target)) return false;
 	try {
@@ -98,18 +103,22 @@ export function approvalTargetNamesFile(target: string): boolean {
  * Normalize one tool argument into an approval-cache key, or `undefined` when
  * the argument is empty. Unresolvable-but-non-empty targets fall back to their
  * trimmed text so a grant still sticks to the exact target that was approved.
+ * A URL of a scheme `router` handles keys as its normalized form; one of a scheme
+ * the session registered also names the registration that serves it.
  */
-export function approvalTargetKey(cwd: string, target: string): string | undefined {
+export function approvalTargetKey(cwd: string, target: string, router: InternalUrlRouter): string | undefined {
 	// Trimming is only a test for a blank input: leading and trailing spaces are real filename bytes,
 	// so `" secret "` and `"secret"` must not share one grant.
 	const trimmed = target.trim();
 	if (trimmed.length === 0) return undefined;
-	const router = InternalUrlRouter.instance();
 	const normalized = router.normalize(trimmed);
-	if (router.canHandle(normalized)) return normalized;
+	if (router.canHandle(normalized)) {
+		const registration = router.sessionRegistration(normalized);
+		return registration === undefined ? normalized : `${APPROVAL_REGISTRATION_PREFIX}${registration}\0${normalized}`;
+	}
 	if (isReadableUrlPath(trimmed)) return trimmed;
 	try {
-		return approvalCacheKeyForPath(resolveToCwd(target, cwd));
+		return approvalCacheKeyForPath(resolveToCwd(target, cwd, router));
 	} catch {
 		// resolveToCwd rejects registered internal URLs; those returned above.
 		return target;

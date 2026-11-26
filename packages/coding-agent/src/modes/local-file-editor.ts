@@ -2,7 +2,12 @@ import * as fs from "node:fs/promises";
 import { disambiguateDisplayLabels, shortenPath } from "../utils/render-utils";
 import { replaceTabs } from "../utils/text-width";
 import { errorMessage, formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter, type LocalFileEntry, type LocalProtocolOptions, listLocalFiles } from "../internal-urls";
+import {
+	type InternalUrlRouter,
+	type LocalFileEntry,
+	type LocalProtocolOptions,
+	listLocalFiles,
+} from "../internal-urls";
 import { getEditorCommand, openEditorOnPath } from "../utils/external-editor";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import type { InteractiveModeContext } from "./types";
@@ -26,9 +31,10 @@ async function locateAndValidateTarget(
 	url: string,
 	displayUrl: string,
 	options: LocalProtocolOptions,
+	router: InternalUrlRouter,
 ): Promise<{ url: string; path: string }> {
 	// Non-creating locate: realpath + root containment, so traversal and escaping symlinks throw.
-	const located = await InternalUrlRouter.instance().locate(url, { localProtocolOptions: options });
+	const located = await router.locate(url, { localProtocolOptions: options });
 	if (located === null) throw new Error(`Local file not found: ${displayUrl}`);
 	const stat = await fs.stat(located);
 	if (stat.isDirectory()) throw new Error(`${displayUrl} is a directory; name a file inside it.`);
@@ -40,6 +46,7 @@ async function locateAndValidateTarget(
 export async function resolveLocalEditorTarget(
 	target: string,
 	options: LocalProtocolOptions,
+	router: InternalUrlRouter,
 ): Promise<{ url: string; path: string }> {
 	const trimmed = target.trim();
 	if (!trimmed) throw new Error("Enter a local:// file name.");
@@ -51,16 +58,17 @@ export async function resolveLocalEditorTarget(
 	const explicitUrl = /^local:\//i.test(trimmed);
 	const displayUrl = explicitUrl ? trimmed : `local://${trimmed}`;
 	const url = explicitUrl ? trimmed : `local://${encodeLocalPath(trimmed)}`;
-	return locateAndValidateTarget(url, displayUrl, options);
+	return locateAndValidateTarget(url, displayUrl, options, router);
 }
 
 /** Revalidate an already-selected local file entry: realpath + root containment, keeping exact name without trimming. */
 export async function revalidateLocalEditorEntry(
 	entry: LocalFileEntry,
 	options: LocalProtocolOptions,
+	router: InternalUrlRouter,
 ): Promise<{ url: string; path: string }> {
 	const url = `local://${encodeLocalPath(entry.name)}`;
-	return locateAndValidateTarget(url, entry.url, options);
+	return locateAndValidateTarget(url, entry.url, options, router);
 }
 
 async function pickLocalFile(
@@ -108,7 +116,7 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 	let chosen: { url: string; path: string } | undefined;
 	if (target?.trim()) {
 		try {
-			chosen = await resolveLocalEditorTarget(target, options);
+			chosen = await resolveLocalEditorTarget(target, options, ctx.session.urlRouter);
 		} catch (error) {
 			ctx.showError(showErrorMessage(error));
 			return;
@@ -120,7 +128,7 @@ export async function openLocalFileInEditor(ctx: InteractiveModeContext, target?
 			// The listing is stale once the picker returns. Re-resolve the filesystem name
 			// (not the display URL, which would decode `%` twice) so a symlink swapped in
 			// while the picker was open cannot escape the local root.
-			chosen = await revalidateLocalEditorEntry(picked, options);
+			chosen = await revalidateLocalEditorEntry(picked, options, ctx.session.urlRouter);
 		} catch (error) {
 			ctx.showError(showErrorMessage(error));
 			return;
