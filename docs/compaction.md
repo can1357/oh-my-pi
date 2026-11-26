@@ -256,7 +256,7 @@ Pruned tool results are replaced with:
 
 - `[Output truncated - N tokens]`
 
-If pruning changes entries, session storage is rewritten and agent message state is refreshed before compaction decisions.
+If pruning changes entries, the session appends a `tool_result_prune` record naming the blanked results (see [session format](./session.md)) instead of rewriting the session file, and agent message state is refreshed before compaction decisions.
 
 ### Useless-result elision
 

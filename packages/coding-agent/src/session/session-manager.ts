@@ -145,6 +145,7 @@ import {
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
 import { recordSessionRecap, recordSessionTitle } from "./session-index";
+import { applyToolResultPrunes } from "./tool-result-prunes";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -920,8 +921,9 @@ interface AtomicEntryBatch {
 /**
  * The state a full-file body was serialized from, cheap to compare against
  * the live state. Entries change only by append, array replacement, or an
- * in-place update announced through `rewriteEntries()` (which bumps the
- * revision); the title slot and header are small and compared by value.
+ * in-place update announced through `rewriteEntries()` or
+ * `appendInPlaceUpdateRecord()` (which bump the revision); the title slot and
+ * header are small and compared by value.
  */
 interface SessionBodyStamp {
 	entries: readonly SessionEntry[];
@@ -2549,6 +2551,7 @@ export class SessionManager {
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
+		applyToolResultPrunes(fileEntries);
 		await resolveBlobRefsInEntries(fileEntries, this.#blobs);
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
@@ -3484,7 +3487,10 @@ export class SessionManager {
 		return this.#titleSource;
 	}
 
-	/** Bumped when entries are rewritten in place (`rewriteEntries`, replay sanitizing); appends do not bump it. */
+	/**
+	 * Bumped when entries are rewritten in place (`rewriteEntries`, `appendInPlaceUpdateRecord`, replay
+	 * sanitizing); appends do not bump it.
+	 */
 	get bodyRevision(): number {
 		return this.#bodyRevision;
 	}
@@ -3868,8 +3874,20 @@ export class SessionManager {
 	}
 
 	/**
-	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
-	 * outputs). Use sparingly.
+	 * Make in-place entry updates durable by appending a custom record that
+	 * loaders replay (a `tool_result_prune` record), instead of rewriting the
+	 * file. Bumps {@link bodyRevision} as {@link rewriteEntries} does, so
+	 * readers that mirror entries resend the updated ones; the file keeps the
+	 * old lines until a later full rewrite.
+	 */
+	appendInPlaceUpdateRecord(customType: string, data?: unknown): string {
+		this.#bodyRevision++;
+		return this.appendCustomEntry(customType, data);
+	}
+
+	/**
+	 * Rewrite the whole session file after in-place entry updates that have no
+	 * append-only record. Costs the full transcript in bytes; use sparingly.
 	 */
 	async rewriteEntries(): Promise<void> {
 		this.#bodyRevision++;
@@ -4425,6 +4443,7 @@ export class SessionManager {
 			throw err;
 		}
 		migrateToCurrentVersion(sourceEntries);
+		applyToolResultPrunes(sourceEntries);
 		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;

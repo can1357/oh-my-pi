@@ -21,7 +21,7 @@ import type {
 	AgentTranscriptSource,
 } from "../../../modes/view-model/overlays/agent-transcript-viewer";
 import { type TurnUsageSummary, TurnUsageTally } from "../../../modes/view-model/overlays/usage-row";
-import { imageContent, type SessionMessageEntryLike, textContent } from "../../../session/transcript/transcript-entry";
+import { imageContent, textContent } from "../../../session/transcript/transcript-entry";
 import { resolveEditToolMode } from "../../../utils/edit-mode";
 import { ToolCall, type ToolCallOptions, type ToolCallResult } from "../../transcript/tool-block";
 import type { LineValue } from "./common";
@@ -217,6 +217,8 @@ export class AgentTranscriptViewerModel {
 	#loading = false;
 	#idlePolls = 0;
 	#tools = new Map<string, ToolCall>();
+	/** Tool cards keyed by their persisted result entry, for prune-record replay. */
+	#toolResults = new Map<string, ToolCall>();
 	#tally = new TurnUsageTally();
 	#turnStartedAt: number | undefined;
 	#poll: NodeJS.Timeout | undefined;
@@ -388,7 +390,7 @@ export class AgentTranscriptViewerModel {
 			sentinels: sentinelsOf(data),
 		};
 		this.model = undefined;
-		this.#rebuild(this.#messages(this.deps.transcript.parseEntries(complete)));
+		this.#rebuild(this.deps.transcript.parseEntries(complete));
 	}
 
 	#appendLocal(file: string, stat: fs.Stats, state: LocalState, allowAsync: boolean): void {
@@ -407,10 +409,8 @@ export class AgentTranscriptViewerModel {
 		}
 		const { complete, pending } = splitComplete(state.pending + chunk);
 		this.#local = { ...state, size: stat.size, mtimeMs: stat.mtimeMs, pending, sentinels };
-		const previousModel = this.model;
-		const parsed = complete ? this.#messages(this.deps.transcript.parseEntries(complete)) : [];
+		const parsed = complete ? this.deps.transcript.parseEntries(complete) : [];
 		if (parsed.length > 0) this.#append(parsed);
-		else if (this.model !== previousModel) this.touch();
 	}
 
 	#fetchRemote(): void {
@@ -454,7 +454,7 @@ export class AgentTranscriptViewerModel {
 				this.hasRemoteData = true;
 				const { complete } = splitComplete(result.text);
 				this.#remoteBytes = from + Buffer.byteLength(complete, "utf-8");
-				const parsed = complete ? this.#messages(this.deps.transcript.parseEntries(complete)) : [];
+				const parsed = complete ? this.deps.transcript.parseEntries(complete) : [];
 				if (parsed.length > 0) this.#append(parsed);
 				else this.touch();
 			})
@@ -464,29 +464,37 @@ export class AgentTranscriptViewerModel {
 			});
 	}
 
-	/** Message entries, noting the model (the first reply's, a model change's). */
-	#messages(entries: readonly AgentTranscriptEntry[]): SessionMessageEntryLike[] {
-		const messages: SessionMessageEntryLike[] = [];
-		for (const entry of entries) {
-			if (entry.type === "message") {
-				messages.push(entry);
-				if (!this.model && entry.message.role === "assistant") this.model = entry.message.model;
-			} else if (entry.type === "model_change") this.model = entry.model;
-		}
-		return messages;
-	}
-
-	#rebuild(entries: readonly SessionMessageEntryLike[]): void {
+	/** Rebuild after a rewrite, truncation or rotation. */
+	#rebuild(entries: readonly AgentTranscriptEntry[]): void {
 		this.#tools.clear();
+		this.#toolResults.clear();
 		this.#tally.reset();
 		this.#turnStartedAt = undefined;
+		this.model = undefined;
 		this.blocks.set([]);
 		this.#append(entries);
 	}
 
-	#append(entries: readonly SessionMessageEntryLike[]): void {
+	#applyPrunes(results: readonly { entryId: string; notice: string }[]): void {
+		for (const result of results) {
+			const call = this.#toolResults.get(result.entryId);
+			const current = call?.facts.result();
+			if (!call || !current) continue;
+			call.updateResult({ ...current, content: [{ type: "text", text: result.notice }] }, false);
+		}
+	}
+
+	#append(entries: readonly AgentTranscriptEntry[]): void {
 		const added: ViewerBlock[] = [];
 		for (const entry of entries) {
+			if (entry.type === "tool_result_prune") {
+				this.#applyPrunes(entry.results);
+				continue;
+			}
+			if (entry.type === "model_change") {
+				this.model = entry.model;
+				continue;
+			}
 			const message = entry.message;
 			switch (message.role) {
 				case "user":
@@ -526,6 +534,7 @@ export class AgentTranscriptViewerModel {
 					break;
 				}
 				case "assistant": {
+					if (!this.model) this.model = message.model;
 					const usage = this.#tally.add(message, this.#turnStartedAt);
 					added.push({ kind: "assistant", id: entry.id, message, usage });
 					for (const part of message.content) {
@@ -558,6 +567,7 @@ export class AgentTranscriptViewerModel {
 						false,
 					);
 					call.seal();
+					this.#toolResults.set(entry.id, call);
 					break;
 				}
 				case "compactionSummary":

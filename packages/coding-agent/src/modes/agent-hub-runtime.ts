@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import type { AgentRecordLike } from "../registry/agent-hub-types";
 import { type AgentCostSnapshot, aggregateCost } from "./view-model/overlays/agent-hub-projection";
-import type { AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
+import type { AgentTranscriptEntry, AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
 import type { ObservableSession, SessionObserverRegistry } from "../task/session-observer-registry";
 import { AgentActivityIndex } from "../activity";
 import { getRoleInfo } from "../config/model-roles";
@@ -12,15 +12,23 @@ import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent
 import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { isSessionTreeRef, registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
+import { isToolResultPruneData, TOOL_RESULT_PRUNE_CUSTOM_TYPE } from "../session/tool-result-prunes";
 import type { AgentHubProps } from "../ui/overlays/pickers/agent-hub";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
 	fs,
 	parseEntries: text => {
-		const entries = parseSessionEntries(text).filter(
-			entry => entry.type === "message" || entry.type === "model_change",
-		);
+		const entries = parseSessionEntries(text).flatMap((entry): AgentTranscriptEntry[] => {
+			if (entry.type === "message" || entry.type === "model_change") return [entry];
+			if (
+				entry.type === "custom" &&
+				entry.customType === TOOL_RESULT_PRUNE_CUSTOM_TYPE &&
+				isToolResultPruneData(entry.data)
+			)
+				return [{ type: "tool_result_prune" as const, results: entry.data.results }];
+			return [];
+		});
 		for (const entry of entries) {
 			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
 		}

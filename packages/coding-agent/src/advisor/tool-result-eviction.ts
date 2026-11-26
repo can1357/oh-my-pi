@@ -1,5 +1,5 @@
 import type { AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import { invalidateMessageCache, MIN_PRUNE_TOKENS } from "@oh-my-pi/pi-agent-core/compaction";
+import { blankToolResult, MIN_PRUNE_TOKENS } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 
 /**
@@ -53,8 +53,8 @@ function latestReviewStart(messages: readonly AgentMessage[]): number {
  * reviews just to reclaim one small result sitting behind thousands of rewrite
  * tokens.
  *
- * Mutates `messages` in place, following compaction's in-place rewrite
- * contract (blank content, `prunedAt`, cache invalidation).
+ * Mutates `messages` in place through compaction's {@link blankToolResult}
+ * (notice content, `prunedAt`, cache invalidation).
  */
 export function evictStaleToolResults(messages: AgentMessage[], tokenizer: Tokenizer): ToolResultEvictionResult {
 	const protectFrom = latestReviewStart(messages);
@@ -100,9 +100,7 @@ export function evictStaleToolResults(messages: AgentMessage[], tokenizer: Token
 		const message = messages[i];
 		const tokens = tokenizer.countMessage(message);
 		if (!isEvictionCandidate(message, tokens)) continue;
-		message.content = [{ type: "text", text: createEvictionNotice(tokens) }];
-		message.prunedAt = prunedAt;
-		invalidateMessageCache(message);
+		blankToolResult(message, createEvictionNotice(tokens), prunedAt);
 		evicted++;
 	}
 

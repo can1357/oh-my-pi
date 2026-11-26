@@ -234,8 +234,84 @@ describe("AgentTranscriptViewer", () => {
 		});
 	});
 
+	it("replays an appended tool-result prune onto an already shown tool card", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-prune-"));
+		const file = path.join(dir, "__advisor.jsonl");
+		fs.writeFileSync(
+			file,
+			[
+				JSON.stringify({ type: "session", version: CURRENT_SESSION_VERSION, id: "adv", timestamp: TS, cwd: dir }),
+				JSON.stringify({
+					type: "message",
+					id: "assistant",
+					parentId: null,
+					timestamp: TS,
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "call", name: "grep", arguments: { pattern: "needle" } }],
+						api: "anthropic-messages",
+						provider: "test",
+						model: "test",
+						stopReason: "toolUse",
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+						timestamp: 1,
+					},
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "result",
+					parentId: "assistant",
+					timestamp: TS,
+					message: {
+						role: "toolResult",
+						toolCallId: "call",
+						toolName: "grep",
+						content: [{ type: "text", text: "ORIGINALRESULT" }],
+						isError: false,
+						timestamp: 2,
+					},
+				}),
+			].join("\n") + "\n",
+		);
+		const viewer = makeViewer(file);
+		try {
+			viewer.render(80);
+			expect(
+				viewer
+					.render(80)
+					.map(line => Bun.stripANSI(line))
+					.join("\n"),
+			).toContain("ORIGINALRESULT");
+			fs.appendFileSync(
+				file,
+				`${JSON.stringify({
+					type: "custom",
+					id: "prune",
+					parentId: "result",
+					timestamp: TS,
+					customType: "tool_result_prune",
+					data: { results: [{ entryId: "result", notice: "PRUNEDRESULT", prunedAt: 3 }] },
+				})}\n`,
+			);
+			vi.advanceTimersByTime(250);
+			const text = viewer
+				.render(80)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			expect(text).toContain("PRUNEDRESULT");
+			expect(text).not.toContain("ORIGINALRESULT");
+		} finally {
+			viewer.dispose();
+			removeSyncWithRetries(dir);
+		}
+	});
+
 	it("shows a synthetic assistant reply without usage", () => {
 		expect(renderSyntheticAssistant()).toContain("SYNTHETICREPLY");
+	});
+
+	it("uses the first assistant reply's model when no model-change record exists", () => {
+		expect(renderSyntheticAssistant()).toContain("qq");
 	});
 
 	it("shows a synthetic assistant reply with tokens but no cost", () => {

@@ -81,37 +81,38 @@ export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 	pruneUseless: true,
 };
 
+/** One tool result a prune pass blanked in place, with what replaying the blanking needs. */
+export interface ToolResultPrune {
+	/** Session entry id of the blanked `toolResult` message. */
+	readonly entryId: string;
+	/** Placeholder text now standing in for the result. */
+	readonly notice: string;
+	/** {@link ToolResultMessage.prunedAt} stamped by the pass. */
+	readonly prunedAt: number;
+}
+
 export interface PruneResult {
 	prunedCount: number;
 	tokensSaved: number;
 	/**
-	 * Restore every result this pass blanked. Pruning mutates entries in place,
-	 * so a caller whose persistence of the pruned history fails calls this to keep
-	 * memory matching what is durable.
+	 * Every result this pass blanked in place. Callers persist these instead of
+	 * the rewritten history; {@link blankToolResult} replays one onto a freshly
+	 * loaded copy of its entry.
 	 */
-	undo(): void;
+	pruned: readonly ToolResultPrune[];
 }
 
-const NOTHING_PRUNED: PruneResult = { prunedCount: 0, tokensSaved: 0, undo: () => {} };
+const NOTHING_PRUNED: PruneResult = { prunedCount: 0, tokensSaved: 0, pruned: [] };
 
-/** Blank `message` to `notice`, returning the step that restores it. */
-function blankToolResult(message: ToolResultMessage, notice: string, prunedAt: number): () => void {
-	const { content, prunedAt: previousPrunedAt } = message;
+/**
+ * Replace `message`'s content with `notice` in place and stamp `prunedAt`: the
+ * single shape every tool-result prune (both passes, their session replay,
+ * advisor eviction) produces.
+ */
+export function blankToolResult(message: ToolResultMessage, notice: string, prunedAt: number): void {
 	message.content = [{ type: "text", text: notice }];
 	message.prunedAt = prunedAt;
 	invalidateMessageCache(message as AgentMessage);
-	return () => {
-		message.content = content;
-		message.prunedAt = previousPrunedAt;
-		invalidateMessageCache(message as AgentMessage);
-	};
-}
-
-/** Combine per-message restore steps into one {@link PruneResult.undo}. */
-function undoAll(steps: Array<() => void>): () => void {
-	return () => {
-		for (const step of steps) step();
-	};
 }
 
 /** Exact placeholder written over a superseded tool result. */
@@ -527,11 +528,13 @@ export function pruneSupersededToolResults(
 	if (toPrune.length === 0) return NOTHING_PRUNED;
 
 	let tokensSaved = 0;
-	for (const candidate of toPrune) tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
-
 	const prunedAt = Date.now();
-	const steps = toPrune.map(candidate => blankToolResult(candidate.message, candidate.notice, prunedAt));
-	return { prunedCount: toPrune.length, tokensSaved, undo: undoAll(steps) };
+	const pruned = toPrune.map(candidate => {
+		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+		blankToolResult(candidate.message, candidate.notice, prunedAt);
+		return { entryId: candidate.entry.id, notice: candidate.notice, prunedAt };
+	});
+	return { prunedCount: pruned.length, tokensSaved, pruned };
 }
 
 export function pruneToolOutputs(
@@ -653,16 +656,17 @@ export function pruneToolOutputs(
 	}
 
 	const prunedAt = Date.now();
-	const steps = candidates.map(candidate => {
+	const pruned = candidates.map(candidate => {
 		const notice = candidate.superseded
 			? SUPERSEDED_NOTICE
 			: candidate.useless
 				? USELESS_NOTICE
 				: createPrunedNotice(candidate.tokens);
-		return blankToolResult(candidate.entry.message as ToolResultMessage, notice, prunedAt);
+		blankToolResult(candidate.entry.message as ToolResultMessage, notice, prunedAt);
+		return { entryId: candidate.entry.id, notice, prunedAt };
 	});
 
-	return { prunedCount: candidates.length, tokensSaved, undo: undoAll(steps) };
+	return { prunedCount: pruned.length, tokensSaved, pruned };
 }
 
 /**
