@@ -11,8 +11,8 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
-
 import { cfgEvalToolsEnabled } from "../eval/settings";
+import { recordEvalToolDescriptor } from "../eval/tool-descriptors";
 
 interface EvalToolQueryResult {
 	tools: EvalToolDescriptor[];
@@ -147,18 +147,54 @@ function errorResult(
  * A child keeps these tools in its revive capture for as long as it can be revived,
  * so they hold `session`, whose kernel they call, only weakly: holding it strongly
  * kept the whole spawning session in memory after it parked. Its kernel is gone by
- * then anyway; a call after that reports the tool unavailable.
+ * then anyway; a call after that reports the tool unavailable. Each tool's descriptor
+ * is recorded (`evalToolDescriptor`) for the child's spawn spec.
  */
 export function createEvalCustomTools(session: ToolSession, descriptors: EvalToolDescriptor[]): CustomTool[] {
 	if (descriptors.length > 0 && !evalToolsEnabled(session)) {
 		throw new ToolError("Eval-defined tools are disabled; set eval.tools.enabled=true to expose them to subagents.");
 	}
 	const owner = new WeakRef(session);
-	return descriptors.map(descriptor => evalCustomTool(owner, descriptor));
+	return descriptors.map(descriptor => {
+		const tool = evalCustomTool(owner, descriptor);
+		recordEvalToolDescriptor(tool, descriptor);
+		return tool;
+	});
 }
 
-/** One kernel-defined tool. Module-level so its closure holds nothing but `owner` and `descriptor`. */
-function evalCustomTool(owner: WeakRef<ToolSession>, descriptor: EvalToolDescriptor): CustomTool {
+/**
+ * The tools of `descriptors` that a kernel of `session` defines now, by name and language, built over it as
+ * {@link createEvalCustomTools} builds them; a descriptor no kernel defines is left out. Runs on the thread
+ * whose kernels `session` owns.
+ */
+export async function definedEvalCustomTools(
+	session: ToolSession,
+	descriptors: readonly EvalToolDescriptor[],
+): Promise<CustomTool[]> {
+	if (descriptors.length === 0) return [];
+	// `listEvalTools`, not `describeEvalTools`, which throws on a name no kernel defines.
+	const defined = new Map((await listEvalTools(session)).map(tool => [tool.name, tool.language]));
+	return createEvalCustomTools(
+		session,
+		descriptors.filter(descriptor => defined.get(descriptor.name) === descriptor.language),
+	);
+}
+
+/**
+ * A kernel-defined tool a cold-revived child keeps from its spawn spec although no live kernel can serve
+ * it (the defining session is gone, its kernel no longer defines it, or eval tools are off there): the tool
+ * {@link createEvalCustomTools} makes from `descriptor`, so the child's tool list keeps its bytes, and a call
+ * to it answers that the tool is unavailable.
+ */
+export function unavailableEvalCustomTool(descriptor: EvalToolDescriptor): CustomTool {
+	return evalCustomTool(undefined, descriptor);
+}
+
+/**
+ * One kernel-defined tool, served by `owner`'s kernel; with no owner, unavailable. Module-level so its closure
+ * holds nothing but `owner` and `descriptor`.
+ */
+function evalCustomTool(owner: WeakRef<ToolSession> | undefined, descriptor: EvalToolDescriptor): CustomTool {
 	return {
 		name: descriptor.name,
 		label: descriptor.name,
@@ -166,6 +202,13 @@ function evalCustomTool(owner: WeakRef<ToolSession>, descriptor: EvalToolDescrip
 		parameters: descriptor.parameters,
 		loadMode: "essential",
 		async execute(toolCallId, rawParams, _onUpdate, _ctx, signal) {
+			if (!owner) {
+				return errorResult(
+					descriptor.name,
+					descriptor.language,
+					`The ${descriptor.language} tool "${descriptor.name}" is unavailable: no live kernel has defined it since this agent was revived.`,
+				);
+			}
 			const session = owner.deref();
 			if (!session) {
 				return errorResult(

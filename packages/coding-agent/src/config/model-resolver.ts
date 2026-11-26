@@ -224,6 +224,42 @@ export function resolveExactModelIdentity(
 	return formatModelStringWithRouting(routed) === identity ? routed : undefined;
 }
 
+/** Registry surface {@link resolveSpawnModelIdentity} reads: every model, with credentials or without. */
+export type SpawnModelRegistry = Pick<ModelRegistry, "getAll">;
+
+/**
+ * The model a subagent spawn started on, from its stored identity (`formatModelStringWithRouting`):
+ * a catalog model, an `@upstream` pin, an OpenRouter requested-id clone or a Bedrock inference-profile
+ * model, each rebuilt by the function that made it at spawn, from the identity alone. Searches every
+ * model the registry holds, so a model whose provider has no credentials still resolves; undefined
+ * when no model has the identity. It reads no settings: a caller holds the model to the providers
+ * `disabledProviders` turns off.
+ */
+export function resolveSpawnModelIdentity(identity: string, registry: SpawnModelRegistry): Model<Api> | undefined {
+	return resolveSpawnModelIdentityIn(identity, registry.getAll());
+}
+
+function resolveSpawnModelIdentityIn(identity: string, models: Model<Api>[]): Model<Api> | undefined {
+	const literal = models.find(model => formatModelStringWithRouting(model) === identity);
+	if (literal) return literal;
+	const routing = splitUpstreamRouting(identity);
+	if (routing) {
+		const base = resolveSpawnModelIdentityIn(routing.base, models);
+		if (base && supportsUpstreamRouting(base)) {
+			const routed = applyUpstreamRouting(base, routing.upstream);
+			if (formatModelStringWithRouting(routed) === identity) return routed;
+		}
+	}
+	// An OpenRouter route variant is cloned as the exact identity lookup clones it; the other
+	// requested-id clones (a dated id) and inference profiles come from the provider reference lookup.
+	const variant = findOpenRouterRouteVariant(identity, models);
+	if (variant) return variant;
+	const slashIndex = identity.indexOf("/");
+	if (slashIndex <= 0) return undefined;
+	const derived = resolveProviderModelReference(identity.slice(0, slashIndex), identity.slice(slashIndex + 1), models);
+	return derived && formatModelStringWithRouting(derived) === identity ? derived : undefined;
+}
+
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
 	const colonIdx = modelId.lastIndexOf(":");
 	if (colonIdx === -1) {
@@ -1034,6 +1070,18 @@ export function providerModelHint(selector: string, models: readonly Model<Api>[
 		.slice(0, 3)
 		.map(entry => formatModelString(entry.model));
 	return nearMatches.length > 0 ? ` Did you mean ${nearMatches.join(", ")}?` : "";
+}
+
+/**
+ * The message for model patterns that resolve to no model: `Model "<pattern>" not found`, or
+ * `Model one of "<a>", "<b>" not found`; a single provider-qualified pattern also names its
+ * provider's closest ids ({@link providerModelHint} over `models`).
+ */
+export function modelNotFoundMessage(patterns: readonly string[], models: readonly Model<Api>[]): string {
+	const requested =
+		patterns.length === 1 ? `"${patterns[0]}"` : `one of ${patterns.map(pattern => `"${pattern}"`).join(", ")}`;
+	const hint = patterns.length === 1 ? providerModelHint(patterns[0], models) : "";
+	return `Model ${requested} not found${hint ? `.${hint}` : ""}`;
 }
 
 /**
@@ -1965,6 +2013,14 @@ export function resolveModelOverride(
  */
 export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
+}
+
+/**
+ * The models of `models` whose provider `disabled` ({@link disabledProviderIds}) leaves on: `models` itself
+ * where none is off.
+ */
+export function enabledProviderModels(models: Model<Api>[], disabled: ReadonlySet<string>): Model<Api>[] {
+	return disabled.size === 0 ? models : models.filter(model => !disabled.has(model.provider));
 }
 
 function parseSessionModelSelector(modelRegistry: Pick<ModelRegistry, "find">, selector: string) {

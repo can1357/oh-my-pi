@@ -31,7 +31,9 @@ import { importExtensionModule } from "../../extensibility/extensions/loader";
 import type { ExtensionFactory, PreparedExtension } from "../../extensibility/extensions/types";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import { MCPManager, type MCPManagerApi, type MCPManagerGlobal, type MCPToolScope } from "../../mcp/manager";
+import { evalToolDescriptor } from "../../eval/tool-descriptors";
 import type { ExecutorOptions } from "../../task/executor";
+import type { PersistedReviveSpec } from "../../task/persisted-revive";
 import { isMainThread } from "../identity";
 import type { MainThreadLink, WorkerThreadLink } from "../protocol";
 import { type RpcCodec, type RpcServe, rpcSync } from "../rpc";
@@ -121,7 +123,9 @@ export function toWorkerCustomTool<TParams extends TSchema, TDetails>(
  * worker-hosted `runSubprocess`; returns a shallow copy (other fields are untouched).
  *
  * - `extensionRoots`: called synchronously by the child → `rpcSync`.
- * - `customTools`: {@link toWorkerCustomTool} views.
+ * - `customTools`: {@link toWorkerCustomTool} views, and `customToolDescriptors`, the eval descriptor of each
+ *   tool this thread built: a view is a new object the worker's descriptor map does not know, so without them
+ *   the spawn spec would store no eval tool and a revive from the stored session would drop each one.
  * - `parentTelemetry`: `toWorkerTelemetryConfig` (captures the active span as the child's parent, so
  *   call this inside the parent's `execute_tool task` context).
  *
@@ -133,9 +137,31 @@ export function bridgeIntegrationOptions(options: ExecutorOptions): ExecutorOpti
 	const bridged: ExecutorOptions = { ...options };
 	const extensionRoots = options.extensionRoots;
 	if (extensionRoots) bridged.extensionRoots = rpcSync(() => extensionRoots());
-	if (options.customTools) bridged.customTools = options.customTools.map(tool => toWorkerCustomTool(tool));
+	if (options.customTools) {
+		bridged.customTools = options.customTools.map(tool => toWorkerCustomTool(tool));
+		const descriptors = options.customTools.flatMap(tool => evalToolDescriptor(tool) ?? []);
+		if (descriptors.length > 0) bridged.customToolDescriptors = descriptors;
+	}
 	if (options.parentTelemetry) bridged.parentTelemetry = toWorkerTelemetryConfig(options.parentTelemetry);
 	return bridged;
+}
+
+/** Bridges a cold revive's parent-owned live inputs before it crosses to a worker. */
+export function bridgePersistedReviveSpec(spec: PersistedReviveSpec): PersistedReviveSpec {
+	const { live, customTools } = spec.prepared;
+	const extensionRoots = live.extensionRoots;
+	return {
+		...spec,
+		prepared: {
+			...spec.prepared,
+			live: {
+				...live,
+				extensionRoots: extensionRoots ? rpcSync(() => extensionRoots()) : undefined,
+				telemetry: live.telemetry ? toWorkerTelemetryConfig(live.telemetry) : undefined,
+			},
+			customTools: customTools.map(tool => toWorkerCustomTool(tool)),
+		},
+	};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

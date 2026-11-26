@@ -529,6 +529,27 @@ inventory. Files without it revive every name in `tools` top-level. Anonymized e
 as a single block.
 `extractSessionInit()` and read-only `peekSessionInit()` expose this contract.
 
+`spawnSpec` holds what a task subagent's spawn decided, as plain data: its model, thinking level,
+settings overlay, tools, policy, identity, prompt inputs, wake limits, and the names of the live
+inputs its spawner passed. The spawn, the revive in memory and the revive from this file build the
+session from it with the same two steps. Each part is read on its own: a part that is missing or has
+the wrong shape takes the value a file without `spawnSpec` gets, and a `spawnSpec` whose `v` is not
+1 reads as none.
+
+A revive from the file takes credentials, the cost gate and the parent's inputs from the live
+process, and its wake limits are the tighter of the stored and the live ones; a file without
+`spawnSpec` gets the live `task.maxRuntimeMs`. A stored model that the registry no longer serves,
+whose provider has no credential, or that cannot run at or below the live `task.maxEffort` is
+replaced by the live parent's model, with a warning that names the cause and both models. Where
+the parent's model cannot run at or below that ceiling either, the subagent still revives, on the
+parent's model at its lowest effort, and its session records a visible
+`effort-ceiling-not-honoured` message that names both models and the ceiling. A per-call worker's
+fallback is held to the same ceiling and the current grants, and that revive is refused where the
+parent's model fails them. A spec whose model part holds `parentFallbackHeld: true` refuses the
+revive instead of falling back. An effort set on the live subagent since its spawn
+(`agent://<id>/effort`) is restored, but not a level a retry-fallback hop wrote; a per-call worker
+keeps its stored selector.
+
 ### `mode_change`
 
 ```json

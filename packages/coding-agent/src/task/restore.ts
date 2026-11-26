@@ -24,10 +24,11 @@ import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
 import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
-import { persistedAgentDefinition, persistedAgentName } from "./persisted-revive";
+import { persistedAgentDefinition, persistedAgentName, tighterLimit } from "./persisted-revive";
 import { readStepProgress } from "./steps";
 import { formatTaskResultSummary } from "./result-summary";
 import { cfgTaskMaxRuntimeMs } from "./settings";
+import { readSpawnSpec } from "./spawn-spec";
 
 /** Where restored subagents' lifecycle and progress frames go, as a live run's do. */
 export interface RestoreOptions {
@@ -85,15 +86,21 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 		const sessionFileOfRef = ref.sessionFile;
 		const agentName = persistedAgentName(ref.displayName, init);
 		const steps = readStepProgress(sub.entries);
+		// The spawn's own wake inputs where the record stores them, its wake limit never looser than the live
+		// setting; a record an older omp wrote keeps the runtime-neutral agent and the live wake limit.
+		const wake = readSpawnSpec(init).wake;
 		manager.register(
 			"task",
 			id,
 			async ({ signal }) => {
 				const result = await runSubagentFollowUpTurn({
 					id,
-					agent: persistedAgentDefinition(ref.displayName, init),
+					agent: wake?.agent ?? persistedAgentDefinition(ref.displayName, init),
 					message: init.task,
 					restore: true,
+					index: wake?.index,
+					description: wake?.description,
+					parentToolCallId: wake?.parentToolCallId,
 					steps,
 					workPoolYieldItems: init.workPoolYieldItems,
 					outputSchema: init.outputSchema,
@@ -102,7 +109,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					eventBus: options.eventBus,
 					subagentEventBus: options.subagentEventBus,
 					artifactsDir: path.dirname(sessionFileOfRef),
-					maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
+					maxRuntimeMs: tighterLimit(wake?.maxRuntimeMs, cfgTaskMaxRuntimeMs.get(session.settings)),
 					...softRequestBudgetFor(agentName, session.settings),
 				});
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });

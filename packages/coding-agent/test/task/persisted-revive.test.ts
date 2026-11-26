@@ -51,7 +51,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/re
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { localSession } from "../helpers/local-session";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -229,6 +229,8 @@ interface ReviveOwnerOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	sessionAgents?: readonly AgentDefinition[];
+	/** The root session's model, which a revive whose stored model is gone falls back to. */
+	model?: Model;
 }
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
@@ -254,11 +256,21 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 			return owner.preparedExtensions;
 		},
 		getSessionAgents: () => owner.sessionAgents ?? [],
+		model: owner.model,
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
 		authStorage: owner.authStorage ?? ({} as never),
-		modelRegistry: owner.modelRegistry ?? ({ authStorage: {} } as ModelRegistry),
+		// A registry that holds no model and whose discovery finds none: a revive resolves a spawn spec's model there.
+		modelRegistry:
+			owner.modelRegistry ??
+			({
+				authStorage: {},
+				getAll: () => [],
+				refreshInBackground: () => {},
+				awaitBackgroundRefresh: async () => {},
+				hasConfiguredAuth: () => true,
+			} as unknown as ModelRegistry),
 		settings: owner.settings ?? Settings.isolated(),
 		enableLsp: true,
 		eventBus,
@@ -628,11 +640,13 @@ describe("persisted subagent revival", () => {
 			maxTokens: 8192,
 		});
 
-	/** A warm registry stub holding exactly `models`. */
+	/** A warm registry stub holding exactly `models`, each with a credential, whose discovery finds no other. */
 	const stubRegistry = (models: Model[]) =>
 		({
 			authStorage: {},
+			refreshInBackground: () => {},
 			awaitBackgroundRefresh: async () => {},
+			hasConfiguredAuth: () => true,
 			getAvailable: () => models,
 			getAll: () => models,
 		}) as unknown as ModelRegistry;
@@ -742,25 +756,48 @@ describe("persisted subagent revival", () => {
 	it.each([
 		{ identity: "mock/coding-router:low", level: Effort.High, availableId: "coding-router" },
 		{ identity: "mock/coding-router", level: Effort.Low, availableId: "coding-router:low" },
-	])("refuses to revive $identity onto its level-shaped sibling", async ({ identity, level, availableId }) => {
-		const sibling = perCallModelFixture(availableId);
-		const create = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
-			session: Object.assign(createRevivedSession([]).session, { model: sibling }),
-		} as CreateAgentSessionResult);
-		const cwd = makeTempDir("@pi-revive-per-call-sibling-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
-			perCallModel: true,
-			resolvedModel: "mock/coding-router:low",
-			perCallModelIdentity: identity,
-			perCallThinkingLevel: level,
-		});
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, { modelRegistry: stubRegistry([sibling]) })(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
+	])(
+		"revives $identity on its live parent's model when it is gone, never on its level-shaped sibling",
+		async ({ identity, level, availableId }) => {
+			const sibling = perCallModelFixture(availableId);
+			const parentModel = perCallModelFixture("parent-model");
+			const warn = vi.spyOn(logger, "warn");
+			const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+				async options =>
+					({
+						session: Object.assign(createRevivedSession([]).session, { model: options?.model }),
+					}) as CreateAgentSessionResult,
+			);
+			const revive = async (rootModel: Model | undefined) => {
+				const cwd = makeTempDir("@pi-revive-per-call-sibling-");
+				const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+					perCallModel: true,
+					resolvedModel: "mock/coding-router:low",
+					perCallModelIdentity: identity,
+					perCallThinkingLevel: level,
+				});
+				const ref = createRef(sessionFile);
+				const reviver = await createFactory(cwd, undefined, {
+					modelRegistry: stubRegistry([sibling, parentModel]),
+					model: rootModel,
+				})(ref);
+				if (!reviver) throw new Error("Expected a persisted reviver");
+				return reviver(ref);
+			};
 
-		await expect(reviver(ref)).rejects.toBeInstanceOf(PerCallModelError);
-		expect(create).not.toHaveBeenCalled();
-	});
+			// The saved model is gone: the worker resumes on its parent's model, which its grants approve, and says so.
+			expect((await revive(parentModel)).model).toBe(parentModel);
+			expect(create.mock.calls[0]?.[0]?.model).toBe(parentModel);
+			expect(warn).toHaveBeenCalledWith(expect.stringContaining(`Model "${identity}" not found`), {
+				subagent: "persisted-restricted",
+				model: "mock/parent-model",
+			});
+			// With no parent model to take, the worker is refused rather than revived on the sibling.
+			create.mockClear();
+			await expect(revive(undefined)).rejects.toBeInstanceOf(PerCallModelError);
+			expect(create).not.toHaveBeenCalled();
+		},
+	);
 
 	it.each([
 		{ identity: "mock/coding-router", level: Effort.Low },
@@ -880,6 +917,8 @@ describe("persisted subagent revival", () => {
 			modelRegistry: {
 				authStorage: {},
 				awaitBackgroundRefresh,
+				refreshInBackground: () => {},
+				hasConfiguredAuth: () => true,
 				getDiscoverableProviders: () => [],
 				getAvailable: () => (warm ? [model] : []),
 				getAll: () => (warm ? [model] : []),

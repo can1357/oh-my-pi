@@ -25,12 +25,15 @@ import type { AuthStorage } from "../../src/session/auth-storage";
 import { CostGate } from "../../src/session/cost-gate";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import type { EvalToolDescriptor } from "../../src/eval/types";
+import { createEvalCustomTools } from "../../src/task/eval-tools";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../../src/task/executor";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
 import { type AgentDefinition, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../../src/task/types";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
 import { SubagentWorkerPool, setSubagentWorkerPoolForTests } from "../../src/thread/subagent-worker";
 import { EventBus } from "../../src/utils/event-bus";
+import type { ToolSession } from "../../src/tools";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
@@ -47,6 +50,13 @@ const HANG_TASK = `omp-test-scripted-hang-${SCRIPT_ID}`;
 const BG_JOB_TASK = `omp-test-scripted-bg-job-${SCRIPT_ID}`;
 /** In the routed agent's system prompt only, so a request without it is never the run's own turn. */
 const AGENT_MARKER = `omp-test-agent-${SCRIPT_ID}`;
+/** The one eval custom tool of the run that carries one. */
+const LOOKUP_ROWS: EvalToolDescriptor = {
+	name: "lookup_rows",
+	description: "Looks up rows by key.",
+	parameters: { type: "object", properties: { key: { type: "string" } } },
+	language: "python",
+};
 
 interface ChatMessage {
 	role: string;
@@ -446,6 +456,26 @@ describe("subagent runs routed into pooled workers", () => {
 			controller.abort(new Error("stop from main"));
 			await running;
 			await waitFor(() => session?.hasPendingWake === false);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"stores each eval tool's descriptor in the spawn spec of a run placed in a worker",
+		async () => {
+			const toolSession = { settings: Settings.isolated({ "eval.tools.enabled": true }) } as unknown as ToolSession;
+			const customTools = createEvalCustomTools(toolSession, [LOOKUP_ROWS]);
+			const result = await runSubprocess(runOptions("EvalTools", "ping", { customTools }));
+			expect(result.output).toBe("pong");
+			// The tools crossed into the worker as views; the spawn there read the descriptors they carried.
+			const mirror = mirrorOf(AgentRegistry.global().get("EvalTools")?.session);
+			await waitFor(() => !mirror.ircWakesPending);
+			await AgentLifecycleManager.global().park("EvalTools");
+			const peek = await SessionManager.peekSessionInit(path.join(root, "artifacts", "EvalTools.jsonl"));
+			if (!peek?.init) throw new Error("the worker run stored no session_init");
+			// Read as stored JSON, so the file also loads where the spawn spec's reader does not exist.
+			const stored = peek.init as unknown as { spawnSpec?: { tools?: { customTools?: unknown } } };
+			expect(stored.spawnSpec?.tools?.customTools).toEqual([LOOKUP_ROWS]);
 		},
 		TEST_TIMEOUT_MS,
 	);

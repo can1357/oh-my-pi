@@ -414,6 +414,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"outputSchema",
 		"retryFallback",
 		"workPoolYieldItems",
+		"spawnSpec",
 		"providerPromptCacheKey",
 		"taskPromptCacheKey",
 		"providerFile",

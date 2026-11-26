@@ -16,6 +16,7 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { formatApprovalArguments } from "../tools/approval";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
+import { MAX_TOOL_NAME_LENGTH } from "../tools/tool-name-rule";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { insufficientScopeOf } from "./oauth-discovery";
@@ -605,26 +606,20 @@ export function createLegacyMCPToolName(serverName: string, toolName: string): s
 	return legacyName !== currentName ? legacyName : undefined;
 }
 
-/**
- * Longest tool name strict validators accept. OpenAI Responses/Completions and
- * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
- * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
- */
-const MAX_MCP_TOOL_NAME_LENGTH = 64;
 /** Length of the deterministic hash suffix appended when a minted name overflows. */
 const MCP_TOOL_NAME_HASH_LENGTH = 8;
 
 /**
- * Cap a minted MCP tool name at {@link MAX_MCP_TOOL_NAME_LENGTH}. An overlong
+ * Cap a minted MCP tool name at {@link MAX_TOOL_NAME_LENGTH}. An overlong
  * name keeps a readable prefix and gains a deterministic base-36 hash suffix of
  * the full name, so distinct long names stay unique and the same name is stable
  * across turns — the model must call the exact registry key, and the hash is
  * seed-fixed so it never shifts between processes.
  */
 function capMCPToolNameLength(name: string): string {
-	if (name.length <= MAX_MCP_TOOL_NAME_LENGTH) return name;
+	if (name.length <= MAX_TOOL_NAME_LENGTH) return name;
 	const hash = Bun.hash(name).toString(36).slice(0, MCP_TOOL_NAME_HASH_LENGTH);
-	const keep = MAX_MCP_TOOL_NAME_LENGTH - hash.length - 1;
+	const keep = MAX_TOOL_NAME_LENGTH - hash.length - 1;
 	return `${name.slice(0, keep)}_${hash}`;
 }
 

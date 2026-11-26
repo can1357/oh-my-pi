@@ -28,7 +28,8 @@ import type { AsyncJobManagerApi } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
-import type { OverlayLayers, Settings } from "../config/settings";
+import { type OverlayLayers, Settings } from "../config/settings";
+import type { EvalToolDescriptor } from "../eval/types";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
@@ -57,9 +58,10 @@ import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
 import type { ModelUsageRecord, SessionEntry, UsageStatistics } from "../session/session-entries";
+import type { SubagentParentInputs } from "../task/revive-parent-inputs";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
-import type { RemoteObject, RpcMethod } from "./rpc";
+import { isRpcProxy, type RemoteObject, type RpcMethod } from "./rpc";
 
 /** Data a session homed on another thread exposes synchronously. */
 export interface SessionMirrorState {
@@ -115,6 +117,34 @@ export type SessionEntriesDelta =
 export interface SessionSettingsSource {
 	readonly base: Settings | null;
 	readonly layers: OverlayLayers[];
+}
+
+/** Worker side: the main-side rebuild recipe of `settings` (see {@link SessionSettingsSource}). */
+export function sessionSettingsSource(settings: Settings): SessionSettingsSource {
+	const layers: OverlayLayers[] = [];
+	let current: Settings | undefined = settings;
+	while (current && !isRpcProxy(current)) {
+		layers.push(current.overlayLayers());
+		current = current.overlayParent();
+	}
+	layers.reverse();
+	return { base: current ?? null, layers };
+}
+
+/** Main side: the main instance the worker-local layers of `source` apply over; an isolated one where it names none. */
+export function settingsSourceBase(source: SessionSettingsSource): Settings {
+	return source.base ?? Settings.isolated();
+}
+
+/**
+ * Main side: the settings `source` describes, each worker-local layer restored over its main base.
+ *
+ * @throws Error where a layer fails the check `restoreOverlay` makes.
+ */
+export function settingsFromSource(source: SessionSettingsSource): Settings {
+	let settings = settingsSourceBase(source);
+	for (const layers of source.layers) settings = settings.restoreOverlay(layers);
+	return settings;
 }
 
 /** Queue chips of a session (see `AgentSession.getQueuedMessages`). */
@@ -271,6 +301,15 @@ export type SessionHostProtocol = {
 	exportToHtml: RpcMethod<[outputPath?: string, useUserThemes?: boolean], string>;
 	enableIdleMaintenance: RpcMethod<[options: IdleMaintenanceOptions], void>;
 	refreshIdleMaintenance: RpcMethod<[], void>;
+	/**
+	 * A cold revive of subagent `id`, a child of this live session: the inputs it takes from this
+	 * session, with the tools of `descriptors` this session's kernels define now; null when the session
+	 * holds no tool session.
+	 */
+	subagentParentInputs: RpcMethod<
+		[id: string, descriptors: readonly EvalToolDescriptor[]],
+		SubagentParentInputs | null
+	>;
 };
 
 /**
