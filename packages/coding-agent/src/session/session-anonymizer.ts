@@ -416,6 +416,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"workPoolYieldItems",
 		"providerPromptCacheKey",
 		"taskPromptCacheKey",
+		"accountPool",
 		"providerFile",
 		"providerMetadata",
 		"toolCallAbortMessages",

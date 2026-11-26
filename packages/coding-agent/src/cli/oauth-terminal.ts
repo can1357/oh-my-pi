@@ -194,13 +194,13 @@ export async function runTerminalOAuthLogin(
 }
 
 /**
- * Human label for the account a login stored — `email (org)`, `email`, or
- * `org` — so a login landing on an unintended account/subscription is visible.
- * `undefined` for API-key logins and identity-less credentials.
+ * Human label for the account a login stored — `email (org)`, `email`, project,
+ * or `org` — so a login landing on an unintended account/subscription is
+ * visible. `undefined` for API-key logins and identity-less credentials.
  */
 export function formatLoginIdentity(identity: OAuthLoginIdentity | undefined): string | undefined {
 	if (identity?.type !== "oauth") return undefined;
-	const base = identity.email ?? identity.accountId;
+	const base = identity.email ?? identity.accountId ?? identity.projectId;
 	const org = identity.orgName ?? identity.orgId;
 	if (base) return org ? `${base} (${org})` : base;
 	return org;

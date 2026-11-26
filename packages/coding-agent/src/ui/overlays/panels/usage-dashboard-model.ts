@@ -431,6 +431,8 @@ export type UsageView = "overview" | "detail";
 export interface UsageDashboardOptions {
 	readonly reports: UsageReport[];
 	readonly unavailableAccounts?: readonly UnavailableUsageAccount[];
+	/** Whether a report belongs to the OAuth identity serving this session. */
+	readonly isActiveAccount?: (report: UsageReport) => boolean;
 	/** The full `/usage` report of `reports` for Details, per content width. */
 	readonly renderDetail: (width: number, reports: UsageReport[]) => string;
 	/**

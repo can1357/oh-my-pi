@@ -1,6 +1,9 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
+import { expect, it } from "bun:test";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
-import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import type { TspTableColumn, TspText } from "@oh-my-pi/pi-wire";
+import { CORPUS_NOW, corpusEnvironment, describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
 import {
 	type DailyActivityPoint,
 	UsageDashboardModel,
@@ -150,6 +153,94 @@ function mountDashboard(options: Partial<Options>): Mounted {
 		},
 	};
 }
+interface DescribedNode {
+	readonly k?: string;
+	readonly p?: {
+		readonly cols?: readonly TspTableColumn[];
+		readonly role?: string;
+		readonly rows?: readonly { readonly cells?: Record<string, TspText> }[];
+		readonly spans?: TspText;
+		readonly truncate?: string;
+	};
+	readonly c?: readonly DescribedNode[];
+}
+
+function plain(text: TspText | undefined): string {
+	return typeof text === "string" ? text : (text ?? []).map(span => span.t).join("");
+}
+
+function describeDashboard(model: UsageDashboardModel): DescribedNode {
+	return createRoot(dispose => {
+		try {
+			const [root] = resolveChildren(<UsageDashboard model={model} />)();
+			if (!root) throw new Error("the Usage dashboard built nothing");
+			return describeTree(root, corpusEnvironment("dark"), 120) as DescribedNode;
+		} finally {
+			dispose();
+		}
+	});
+}
+
+it("groups quotas by account and marks the account serving this session", () => {
+	const company = "company.account.with-a-long-name@example.test";
+	const personal = "personal.account.with-a-long-name@example.test";
+	const companyReport = report("anthropic", company, [
+		limit("anthropic", "5h", "Claude 5 Hour", 0.1, "ok"),
+		limit("anthropic", "7d", "Claude 7 Day", 0.2, "ok"),
+	]);
+	companyReport.resetCredits = {
+		availableCount: 1,
+		redeemableCount: 1,
+		credits: [{ id: "saved", remainingCount: 1, expiresAt: new Date(NOW + DAY).toISOString() }],
+	};
+	const model = new UsageDashboardModel({
+		reports: [
+			companyReport,
+			report("anthropic", personal, [limit("anthropic", "7d", "Claude 7 Day", 0.3, "ok")]),
+		],
+		isActiveAccount: candidate => candidate.metadata?.email === personal,
+		renderDetail: () => "",
+		loadActivity: async push => push([]),
+		onClose: () => {},
+		terminalRows: () => 30,
+		now: () => NOW,
+	});
+	model.setView("detail");
+	try {
+		const pending: DescribedNode[] = [describeDashboard(model)];
+		const accountGroups: DescribedNode[] = [];
+		for (let candidate = pending.pop(); candidate; candidate = pending.pop()) {
+			pending.push(...(candidate.c ?? []));
+			if (candidate.p?.role === "omp.usage.account") accountGroups.push(candidate);
+		}
+		expect(accountGroups).toHaveLength(2);
+		const accountBlocks = new Map(
+			accountGroups.map(group => {
+				const label = group.c?.find(
+					child => child.p?.role === "omp.usage.account.name" || child.p?.role === "omp.usage.account.active",
+				);
+				const resets = group.c?.find(child => child.p?.role === "omp.usage.account.resets");
+				const table = group.c?.find(child => child.k === "table");
+				return [plain(label?.p?.spans), { label, resets, table }] as const;
+			}),
+		);
+		const companyBlock = accountBlocks.get(`Account · ${company}`);
+		const personalBlock = accountBlocks.get(`● In use · ${personal}`);
+		expect(companyBlock?.label?.p?.truncate).toBe("middle");
+		expect(companyBlock?.resets?.p?.truncate).toBe("end");
+		expect(plain(companyBlock?.resets?.p?.spans)).toStartWith("Resets · 1 saved reset");
+		expect(companyBlock?.table?.p?.cols?.map(column => column.id)).toEqual(["limit", "left", "reset"]);
+		expect(companyBlock?.table?.p?.rows?.map(row => plain(row.cells?.left))).toEqual(["90% left", "80% left"]);
+		expect(personalBlock?.label?.p?.role).toBe("omp.usage.account.active");
+		expect(personalBlock?.label?.p?.truncate).toBe("middle");
+		const activeLeft = personalBlock?.table?.p?.rows?.[0]?.cells?.left;
+		expect(typeof activeLeft === "string" ? [] : activeLeft?.map(part => part.s)).toContain("mono accent strong");
+		expect(personalBlock?.table?.p?.rows?.map(row => plain(row.cells?.left))).toEqual(["70% left"]);
+	} finally {
+		model.close();
+	}
+});
+
 
 panelSuite({
 	dir: "overlays/usage-dashboard",

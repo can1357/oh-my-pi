@@ -30,7 +30,6 @@ import {
 	activityTotals,
 	addDays,
 	amountText,
-	bucketKey,
 	buildCalendar,
 	CARD_MAX_WINDOWS,
 	type Calendar,
@@ -72,8 +71,15 @@ function StatusDot(props: { readonly status: LimitStatus }): JSXNode {
 }
 
 /** `62%` mono (toned by status) and a quiet `left`. */
-function leftSpans(fraction: number, status: LimitStatus): TspSpan[] {
-	const token = status === "exhausted" ? "mono error" : status === "warning" ? "mono warning" : "mono";
+function leftSpans(fraction: number, status: LimitStatus, inUse = false): TspSpan[] {
+	const token =
+		status === "exhausted"
+			? "mono error"
+			: status === "warning"
+				? "mono warning"
+				: inUse
+					? "mono accent strong"
+					: "mono";
 	return [
 		{ s: token, t: `${Math.max(0, Math.round((1 - fraction) * 100))}%` },
 		{ s: "dim", t: " left" },
@@ -569,11 +575,19 @@ function accountLabel(report: UsageReport, projectId: string | undefined, index:
 	return sanitizeDisplayLine(org && org !== identity ? `${identity} (${org})` : identity);
 }
 
+/** Window qualifier worth showing after a limit title (none when the title already names it). */
+function detailWindowLabel(label: string, limit: UsageReport["limits"][number]): string | undefined {
+	const windowLabel = limit.window?.label ?? limit.window?.id ?? limit.scope.windowId;
+	if (!windowLabel) return undefined;
+	const normalized = windowLabel.toLowerCase();
+	if (normalized === "quota window" || label.toLowerCase().includes(normalized)) return undefined;
+	return sanitizeDisplayLine(windowLabel);
+}
+
 const LIMIT_COLUMNS: TspTableColumn[] = [
 	{ id: "limit", head: "Limit", grow: 1, priority: 4 },
-	{ id: "account", head: "Account", truncate: "middle", priority: 1 },
-	{ id: "left", head: "Left", align: "end", priority: 3 },
-	{ id: "reset", head: "Resets", align: "end", priority: 2 },
+	{ id: "left", head: "Left", align: "end", priority: 5 },
+	{ id: "reset", head: "Resets", align: "end", priority: 1 },
 ];
 
 function DetailReport(props: { readonly model: UsageDashboardModel; readonly card: ProviderCard }): JSXNode {
@@ -581,81 +595,7 @@ function DetailReport(props: { readonly model: UsageDashboardModel; readonly car
 	const nowMs = model.nowMs;
 	const reports = collapseSharedUsageReports(model.reports).filter(report => report.provider === card.provider);
 	const unavailable = (model.options.unavailableAccounts ?? []).filter(account => account.provider === card.provider);
-	const facts: { k: TspText; v: TspText }[] = [];
 	const notes = [...new Set(reports.flatMap(report => report.notes ?? []))];
-	if (notes.length > 0) facts.push({ k: [{ s: "muted", t: "Notes" }], v: sanitizeDisplayLine(notes.join(" • ")) });
-	for (const [index, report] of reports.entries()) {
-		const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
-		if (!resets || resets.bankedCount <= 0) continue;
-		const value: TspSpan[] = [
-			{
-				s: resets.redeemableCount > 0 ? "success" : "warning",
-				t: `${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`,
-			},
-		];
-		if (resets.redeemableCount !== resets.bankedCount)
-			value.push({ s: "muted", t: ` · ${resets.redeemableCount} usable now` });
-		if (resets.soonestExpiry) {
-			const remaining = Date.parse(resets.soonestExpiry) - nowMs;
-			const date = resets.soonestExpiry.slice(0, 10);
-			value.push({
-				s: "muted",
-				t: remaining > 0 ? ` · expires in ${formatDuration(remaining)} (${date})` : ` · expired (${date})`,
-			});
-		}
-		if (resets.redeemableCount === 0 && resets.unavailableReason)
-			value.push({ s: "muted", t: ` · unavailable: ${sanitizeDisplayLine(resets.unavailableReason)}` });
-		const first = report.limits[0];
-		facts.push({
-			k: [{ s: "muted", t: `Resets · ${accountLabel(report, first?.scope.projectId, index)}` }],
-			v: value,
-		});
-	}
-	const buckets = new Map<string, { label: string; window?: string; rows: Record<string, TspText>[] }>();
-	const limitNotes = new Set<string>();
-	for (const [index, report] of reports.entries()) {
-		for (const limit of report.limits) {
-			const label = sanitizeDisplayLine(formatLimitTitle(limit));
-			const key = bucketKey(label, limit);
-			let bucket = buckets.get(key);
-			if (!bucket) {
-				const windowLabel = limit.window?.label ?? limit.window?.id ?? limit.scope.windowId;
-				const named =
-					!windowLabel ||
-					windowLabel.toLowerCase() === "quota window" ||
-					label.toLowerCase().includes(windowLabel.toLowerCase());
-				bucket = { label, window: named ? undefined : sanitizeDisplayLine(windowLabel), rows: [] };
-				buckets.set(key, bucket);
-			}
-			const fraction = resolveUsedFraction(limit);
-			const resetsAt = limit.window?.resetsAt;
-			bucket.rows.push({
-				account: [{ s: "muted", t: accountLabel(report, limit.scope.projectId, index) }],
-				left:
-					fraction === undefined
-						? [
-								{
-									s: pressureTone(limit.status) ?? "muted",
-									t: amountText(absoluteAmount([limit]), limit.status, true),
-								},
-							]
-						: leftSpans(fraction, limit.status),
-				reset:
-					resetsAt !== undefined && resetsAt > nowMs
-						? dim(`${limit.window?.resetLabel ?? "resets"} in ${formatDuration(resetsAt - nowMs)}`)
-						: "",
-			});
-			for (const note of limit.notes ?? []) limitNotes.add(sanitizeDisplayLine(note));
-		}
-	}
-	const rows: { id: string; cells: Record<string, TspText> }[] = [];
-	for (const bucket of buckets.values()) {
-		for (const [index, cells] of bucket.rows.entries()) {
-			const limit: TspSpan[] =
-				index === 0 ? [{ t: bucket.label }, ...(bucket.window ? dim(` ${bucket.window}`) : [])] : [];
-			rows.push({ id: `r${rows.length}`, cells: { limit, ...cells } });
-		}
-	}
 	return (
 		<col key={card.provider} role="omp.usage.report" gap="sm">
 			<row key="head" role="omp.usage.report.head" gap="sm" align="baseline">
@@ -666,13 +606,95 @@ function DetailReport(props: { readonly model: UsageDashboardModel; readonly car
 			{unavailable.map(account => (
 				<text spans={[{ s: "muted", t: `${sanitizeDisplayLine(account.label)}: no usage data` }]} wrap="word" />
 			))}
-			{facts.length > 0 && <kv key="facts" items={facts} layout="grid" role="omp.usage.facts" />}
-			{buckets.size > 0
-				? [
-						<table key="limits" cols={LIMIT_COLUMNS} rows={rows} role="omp.usage.limits" />,
-						[...limitNotes].map(note => <text spans={[{ s: "muted", t: note }]} wrap="word" />),
-					]
-				: unavailable.length === 0 && <text spans={[{ s: "muted", t: "No quotas reported" }]} truncate="end" />}
+			{notes.length > 0 && (
+				<text spans={[{ s: "muted", t: `Notes · ${sanitizeDisplayLine(notes.join(" • "))}` }]} wrap="word" />
+			)}
+			{reports.map((report, reportIndex) => {
+				const account = accountLabel(report, report.limits[0]?.scope.projectId, reportIndex);
+				const inUse = model.options.isActiveAccount?.(report) ?? false;
+				const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+				const resetSpans: TspSpan[] = [];
+				if (resets && resets.bankedCount > 0) {
+					resetSpans.push({
+						s: resets.redeemableCount > 0 ? "success" : "warning",
+						t: `${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`,
+					});
+					if (resets.redeemableCount !== resets.bankedCount)
+						resetSpans.push({ s: "muted", t: ` · ${resets.redeemableCount} usable now` });
+					if (resets.soonestExpiry) {
+						const remaining = Date.parse(resets.soonestExpiry) - nowMs;
+						const date = resets.soonestExpiry.slice(0, 10);
+						resetSpans.push({
+							s: "muted",
+							t: remaining > 0 ? ` · expires in ${formatDuration(remaining)} (${date})` : ` · expired (${date})`,
+						});
+					}
+					if (resets.redeemableCount === 0 && resets.unavailableReason)
+						resetSpans.push({
+							s: "muted",
+							t: ` · unavailable: ${sanitizeDisplayLine(resets.unavailableReason)}`,
+						});
+				}
+				const limitNotes = new Set<string>();
+				const rows = report.limits.map((limit, limitIndex) => {
+					const label = sanitizeDisplayLine(formatLimitTitle(limit));
+					const window = detailWindowLabel(label, limit);
+					const fraction = resolveUsedFraction(limit);
+					const resetsAt = limit.window?.resetsAt;
+					for (const note of limit.notes ?? []) limitNotes.add(sanitizeDisplayLine(note));
+					return {
+						id: `r${limitIndex}`,
+						cells: {
+							limit: [{ t: label }, ...(window ? dim(` ${window}`) : [])],
+							left:
+								fraction === undefined
+									? [
+											{
+												s: pressureTone(limit.status) ?? "muted",
+												t: amountText(absoluteAmount([limit]), limit.status, true),
+											},
+										]
+									: leftSpans(fraction, limit.status, inUse),
+							reset:
+								resetsAt !== undefined && resetsAt > nowMs
+									? dim(`${limit.window?.resetLabel ?? "resets"} in ${formatDuration(resetsAt - nowMs)}`)
+									: "",
+						},
+					};
+				});
+				return (
+					<col key={`account-${reportIndex}`} role="omp.usage.account" gap="xs">
+						<text
+							role={inUse ? "omp.usage.account.active" : "omp.usage.account.name"}
+							spans={[
+								{ s: inUse ? "accent strong" : "muted", t: inUse ? "● In use · " : "Account · " },
+								{ s: inUse ? "accent strong" : undefined, t: account },
+							]}
+							title={inUse ? `${account} · in use by this session` : account}
+							truncate="middle"
+						/>
+						{resetSpans.length > 0 && (
+							<text
+								role="omp.usage.account.resets"
+								spans={[{ s: "muted", t: "Resets · " }, ...resetSpans]}
+								title={resetSpans.map(part => part.t).join("")}
+								truncate="end"
+							/>
+						)}
+						{rows.length > 0 ? (
+							[
+								<table key="limits" cols={LIMIT_COLUMNS} rows={rows} role="omp.usage.limits" />,
+								[...limitNotes].map(note => <text spans={[{ s: "muted", t: note }]} wrap="word" />),
+							]
+						) : (
+							<text spans={[{ s: "muted", t: "No quotas reported" }]} truncate="end" />
+						)}
+					</col>
+				);
+			})}
+			{reports.length === 0 && unavailable.length === 0 && (
+				<text spans={[{ s: "muted", t: "No quotas reported" }]} truncate="end" />
+			)}
 		</col>
 	);
 }

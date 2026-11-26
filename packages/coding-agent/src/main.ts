@@ -50,6 +50,7 @@ import { runAutoUpdate } from "./cli/auto-update";
 import { managedInstallName } from "./cli/managed-install";
 import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
 import { findConfigFile } from "./config";
+import { resolveSessionAccountPool } from "./config/account-pools";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "./config/model-selector";
@@ -194,7 +195,13 @@ import {
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder, cfgModelRoles } from "./config/model-settings";
+import {
+	cfgAuthSessionAccountPools,
+	cfgDisabledProviders,
+	cfgEnabledModels,
+	cfgModelProviderOrder,
+	cfgModelRoles,
+} from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
@@ -1683,6 +1690,44 @@ export async function buildSessionOptions(
 		throw new Error("--system-prompt and --system-prompt-template cannot be combined");
 	}
 	const cwd = options.cwd;
+	const protocolOwnsCredentialPolicy = parsed.mode === "rpc" || parsed.mode === "rpc-ui" || parsed.mode === "acp";
+	if (protocolOwnsCredentialPolicy) {
+		if (parsed.accountPool !== undefined) {
+			throw new CliUsageError(`--account-pool does not apply to ${parsed.mode} mode.`);
+		}
+	} else {
+		const namedPools = cfgAuthSessionAccountPools.get(activeSettings);
+		const names = Object.keys(namedPools);
+		const boundName = sessionManager?.getHeader()?.accountPool;
+		if (boundName !== undefined && parsed.accountPool !== undefined && parsed.accountPool !== boundName) {
+			throw new CliUsageError(
+				`This session is bound to account pool ${JSON.stringify(boundName)}; ` +
+					`--account-pool ${JSON.stringify(parsed.accountPool)} cannot replace it.`,
+			);
+		}
+		let selectedName = boundName ?? parsed.accountPool;
+		if (selectedName === undefined) {
+			if (names.length > 1) {
+				throw new CliUsageError(
+					`auth.sessionAccountPools defines multiple named pools; select one with --account-pool <name> (${names.join(", ")}).`,
+				);
+			}
+			selectedName = names[0];
+		}
+		if (selectedName !== undefined) {
+			parsed.accountPool = selectedName;
+			const selected = resolveSessionAccountPool(namedPools, selectedName);
+			if (!selected) {
+				const available = names.length > 0 ? ` Available pools: ${names.join(", ")}.` : "";
+				const prefix =
+					boundName === selectedName ? "Session is bound to unknown account pool" : "Unknown account pool";
+				throw new CliUsageError(`${prefix} ${JSON.stringify(selectedName)}.${available}`);
+			}
+			options.accountPool = selectedName;
+			options.oauthAccountPools = selected;
+			options.oauthAccountPoolsDenyUnlistedProviders = true;
+		}
+	}
 	const discoveredOverride =
 		parsed.systemPrompt === undefined && parsed.systemPromptTemplate === undefined
 			? await discoverSystemPromptOverride(cwd)

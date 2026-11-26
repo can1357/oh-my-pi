@@ -125,6 +125,7 @@ export class OAuthAccounts implements OAuthApi {
 			type: "oauth",
 			email: newCredential.email,
 			accountId: newCredential.accountId,
+			projectId: newCredential.projectId,
 			orgId: newCredential.orgId,
 			orgName: newCredential.orgName,
 		};

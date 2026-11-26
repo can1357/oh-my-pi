@@ -669,6 +669,19 @@ export interface CreateAgentSessionOptions {
 	 * bypasses it.
 	 */
 	oauthAccountPools?: OAuthAccountPools;
+	/**
+	 * Deny providers absent from {@link oauthAccountPools}. Top-level named CLI
+	 * pools enable this so model fallback cannot escape through another provider.
+	 * Exact-agent pools leave it disabled for their existing listed-provider contract.
+	 * @internal
+	 */
+	oauthAccountPoolsDenyUnlistedProviders?: boolean;
+	/**
+	 * Named top-level pool bound to this transcript. The CLI restores it from
+	 * the session header and rejects a different or missing definition.
+	 * @internal
+	 */
+	accountPool?: string;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -2250,6 +2263,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	const taskPromptCacheKey = options.taskPromptCacheKey ?? sessionManager.getHeader()?.taskPromptCacheKey;
 	if (taskPromptCacheKey !== undefined) await sessionManager.setTaskPromptCacheKey(taskPromptCacheKey);
+	if (options.accountPool !== undefined) await sessionManager.setAccountPool(options.accountPool);
 	if (options.credentialSourceSessionId) {
 		// A revived or resumed child already pins, in its own transcript, the accounts that
 		// hold its conversation cache. Inheriting the parent's automatic sticky for those
@@ -2266,7 +2280,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// From here on the session resolves every key through its pools; see
 	// SessionAccountPoolScope. A startup failure leaves no session to lift them.
 	const accountPoolScope = options.oauthAccountPools
-		? new SessionAccountPoolScope(modelRegistry.authStorage, options.oauthAccountPools, providerSessionId)
+		? new SessionAccountPoolScope(modelRegistry.authStorage, options.oauthAccountPools, providerSessionId, {
+				denyUnlistedProviders: options.oauthAccountPoolsDenyUnlistedProviders,
+			})
 		: undefined;
 	if (accountPoolScope) {
 		modelRegistry = accountPoolScope.registry(modelRegistry);

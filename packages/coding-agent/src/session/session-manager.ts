@@ -2188,6 +2188,7 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 			taskPromptCacheKey: options?.taskPromptCacheKey,
+			accountPool: options?.accountPool,
 		};
 		const workspace = normalizeSessionWorkspace({
 			cwd: this.#cwd,
@@ -2606,7 +2607,8 @@ export class SessionManager {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
-		const sessionFile = this.#resetToNewSession(options);
+		const accountPool = options?.accountPool ?? this.#header.accountPool;
+		const sessionFile = this.#resetToNewSession(accountPool === undefined ? options : { ...options, accountPool });
 		if (options?.drop !== true) await this.ensureOnDisk();
 		return sessionFile;
 	}
@@ -2652,6 +2654,7 @@ export class SessionManager {
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			accountPool: this.#header.accountPool,
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
@@ -2903,7 +2906,10 @@ export class SessionManager {
 		const sessionDir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(this.#cwd, undefined, storage);
 		const manager = new SessionManager(this.#cwd, sessionDir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		manager.#resetToNewSession({ taskPromptCacheKey: this.#header.taskPromptCacheKey });
+		manager.#resetToNewSession({
+			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			accountPool: this.#header.accountPool,
+		});
 		manager.#sessionName = this.#sessionName;
 		manager.#titleSource = this.#titleSource;
 		manager.#titleUpdatedAt = this.#titleUpdatedAt;
@@ -3946,12 +3952,13 @@ export class SessionManager {
 	}
 
 	/** Append a credential pin recording which OAuth account served `provider`. */
-	appendCredentialPin(provider: string, hash: string): string {
+	appendCredentialPin(provider: string, hash: string, options: { hard?: boolean } = {}): string {
 		const entry: CredentialPinEntry = {
 			type: "credential_pin",
 			...this.#freshEntryFields(),
 			provider,
 			hash,
+			...(options.hard ? { hard: true } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -3967,11 +3974,15 @@ export class SessionManager {
 	 * account, so its timestamp advances `lastUsedAt` — a resume seconds after
 	 * the last turn seeds a warm sticky instead of a stale one.
 	 */
-	getCredentialPins(): Map<string, { hash: string; lastUsedAt: number }> {
-		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
+	getCredentialPins(): Map<string, { hash: string; lastUsedAt: number; hard: boolean }> {
+		const pins = new Map<string, { hash: string; lastUsedAt: number; hard: boolean }>();
 		for (const entry of this.getBranch()) {
 			if (entry.type === "credential_pin") {
-				pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
+				pins.set(entry.provider, {
+					hash: entry.hash,
+					lastUsedAt: new Date(entry.timestamp).getTime(),
+					hard: entry.hard === true,
+				});
 			} else if (entry.type === "message" && entry.message.role === "assistant") {
 				const pin = pins.get(entry.message.provider);
 				if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, entry.message.timestamp);
@@ -4121,6 +4132,15 @@ export class SessionManager {
 		if (this.#header.taskPromptCacheKey === key && this.#header.providerPromptCacheKey === undefined) return;
 		this.#header.taskPromptCacheKey = key;
 		this.#header.providerPromptCacheKey = undefined;
+		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
+		this.#rewriteRequired = true;
+		await this.#rewriteAtomically();
+	}
+
+	/** Durably bind this transcript to one named `auth.sessionAccountPools` policy. */
+	async setAccountPool(name: string): Promise<void> {
+		if (this.#header.accountPool === name) return;
+		this.#header.accountPool = name;
 		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
 		this.#rewriteRequired = true;
 		await this.#rewriteAtomically();
@@ -4436,6 +4456,7 @@ export class SessionManager {
 				parentSession: sourceHeader?.id,
 				providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(sourceHeader),
 				taskPromptCacheKey: sourceHeader?.taskPromptCacheKey,
+				accountPool: sourceHeader?.accountPool,
 			},
 			options?.sessionFile,
 		);
