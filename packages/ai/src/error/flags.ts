@@ -120,13 +120,16 @@ const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 // Numeric limit pattern — also matches media budgets, so must never veto a payload flag (#9235).
 const GENERIC_LIMIT_OVERFLOW_PATTERN = /exceeds the limit of \d+/i;
 const OVERFLOW_PATTERNS = [...CONTEXT_OVERFLOW_EVIDENCE_PATTERNS, GENERIC_LIMIT_OVERFLOW_PATTERN];
+/** Provider error codes (`error.code` / `error.type`) that name a context-window overflow. An overflow the code names needs no message match. */
+const CONTEXT_OVERFLOW_CODE_PATTERN =
+	/^(?:context_length_exceeded|context_window_exceeded|model_context_window_exceeded)$/;
 
 /** Token-context evidence only — excludes GENERIC_LIMIT_OVERFLOW_PATTERN which media budgets also match (#9235). */
 function hasTokenContextOverflowEvidence(text: string): boolean {
 	return CONTEXT_OVERFLOW_EVIDENCE_PATTERNS.some(p => p.test(text));
 }
 
-/** Checks every cause-chain link; a wrapper whose nested 413 names the token budget stays overflow-only (#9235). */
+/** Checks every cause-chain link's message and code; a wrapper whose nested 413 names the token budget stays overflow-only (#9235). */
 function hasCauseTokenContextOverflowEvidence(error: unknown): boolean {
 	const seen = new Set<object>();
 	let link: unknown = error;
@@ -141,6 +144,7 @@ function hasCauseTokenContextOverflowEvidence(error: unknown): boolean {
 			const message: unknown = link.message;
 			if (typeof message === "string" && hasTokenContextOverflowEvidence(message)) return true;
 		}
+		if ("code" in link && typeof link.code === "string" && CONTEXT_OVERFLOW_CODE_PATTERN.test(link.code)) return true;
 		if ("cause" in link) {
 			link = link.cause;
 			continue;
@@ -797,6 +801,12 @@ export function classify(error: unknown, api?: Api): number {
 					kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 				} else if (ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(link.code)) {
 					kinds |= Flag.AccountPolicy;
+				}
+				if (
+					CONTEXT_OVERFLOW_CODE_PATTERN.test(link.code) &&
+					!isUsageLimitStatus(status(link) ?? governingTerminalStatus)
+				) {
+					kinds |= Flag.ContextOverflow;
 				}
 			}
 		}
