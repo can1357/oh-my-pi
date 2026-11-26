@@ -695,8 +695,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		renderSvg: signal(true),
 		renderEmbeds: signal(true),
 		figureCell: signal<FigureCell | undefined>(undefined),
-		// Tern lays figures out itself: its rasters keep their full size.
-		figureRows: () => (nativeRendering() ? undefined : figureMaxRows(this.shell.size().rows)),
+		// Set with the terminal's rows (see `init`): a signal, so a resize that keeps the share redraws nothing.
+		figureRows: signal<number | undefined>(undefined),
 		tableCharts: () => this.tableChartsVisible,
 		shellVisualization: signal(true),
 		mcpMarkdown: signal(false),
@@ -1614,7 +1614,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#effect(() => {
 			const { rows } = this.shell.size();
 			this.shell.native();
+			// Tern lays figures out itself: its rasters keep their full size.
+			const figureRows = nativeRendering() ? undefined : figureMaxRows(rows);
 			untrack(() => {
+				this.#display.figureRows.set(figureRows);
 				this.#syncEditorMaxHeight();
 				// A short terminal folds the plan into the status row.
 				this.hud.todo.compact.set(rows < TODO_COMPACT_ROWS);

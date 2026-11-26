@@ -94,7 +94,7 @@ export interface DisplayFlags {
 	/** Cell size when the terminal supports inline pictures. */
 	readonly figureCell: Signal<FigureCell | undefined>;
 	/** Rows a reply's figure may take (a share of the terminal's); undefined: as tall as it draws. */
-	readonly figureRows: Accessor<number | undefined>;
+	readonly figureRows: Signal<number | undefined>;
 	/** Tables get charts (the main session's do, a focused subagent's do not). */
 	readonly tableCharts: Accessor<boolean>;
 	/** Show bash commands through the shell engine's presentation (`display.shellVisualization`). */
