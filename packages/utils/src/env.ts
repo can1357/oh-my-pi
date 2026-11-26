@@ -290,7 +290,17 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(getProjectDir(), ".env"));
+const launchProjectDir = getProjectDir();
+const projectEnv = parseEnvFile(path.join(launchProjectDir, ".env"));
+
+/**
+ * Project directory whose dotenv files this process loaded into `Bun.env` at startup. Its values stay
+ * in `Bun.env` after the project directory changes (`--cwd`, `/move`), so filtering trusted settings
+ * against the current directory alone misses them.
+ */
+export function getLaunchProjectDir(): string {
+	return launchProjectDir;
+}
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];

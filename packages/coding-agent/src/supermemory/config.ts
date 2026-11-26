@@ -8,10 +8,12 @@
  * arbitrary namespace of the user's account (`supermemory.scoping` only picks `omp-global` or the
  * per-repository namespace). For the same reason they ignore the project's dotenv files, which
  * Bun and OMP merge into the environment: only the launch environment and the user's own `.env`
- * files (home, agent dir) count. Tuning fields read the `supermemory.*` setting handles.
+ * files (home, agent dir) count. Both the current project and the one OMP was launched in are
+ * filtered: the launch project's values stay in the environment after `--cwd` or `/move`.
+ * Tuning fields read the `supermemory.*` setting handles.
  */
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { clamp, filterChildShellEnv } from "@oh-my-pi/pi-utils";
+import { clamp, filterChildShellEnv, getLaunchProjectDir } from "@oh-my-pi/pi-utils";
 import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 import type { Settings } from "../config/settings";
 import {
@@ -77,8 +79,16 @@ function validateBaseUrl(raw: string | undefined): string | null {
 }
 
 export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
-	// The environment without values from the project's dotenv files (see the module comment).
-	const env = filterChildShellEnv(Bun.env);
+	// The environment without values from the project's dotenv files (see the module comment): a
+	// value counts only if neither the launch project's nor the current project's dotenv files supplied it.
+	const launch = filterChildShellEnv(Bun.env, getLaunchProjectDir());
+	const current = filterChildShellEnv(Bun.env);
+	const trusted = (name: string) => (launch[name] === current[name] ? current[name] : undefined);
+	const env = {
+		SUPERMEMORY_BASE_URL: trusted("SUPERMEMORY_BASE_URL"),
+		SUPERMEMORY_API_KEY: trusted("SUPERMEMORY_API_KEY"),
+		SUPERMEMORY_NAMESPACE: trusted("SUPERMEMORY_NAMESPACE"),
+	};
 	return {
 		baseUrl: validateBaseUrl(env.SUPERMEMORY_BASE_URL?.trim() || DEFAULT_BASE_URL),
 		apiKey: env.SUPERMEMORY_API_KEY?.trim() || null,

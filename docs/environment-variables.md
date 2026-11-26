@@ -579,7 +579,7 @@ replace the account, or choose an arbitrary namespace of your account (`supermem
 between `omp-global` and the per-repository namespace). Values from the current project's dotenv files are
 ignored for the same reason; the launch environment and your own `~/.env` or agent-dir `.env` count, unless the
 project's dotenv file defines the same name (then the variable reads as unset). Values loaded from the dotenv
-files of the directory `omp` was launched in still apply after switching to another project directory.
+files of the directory `omp` was launched in stay ignored after switching to another project directory.
 
 | Variable                | Accepted value / built-in default                                                                                                                                                                  |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

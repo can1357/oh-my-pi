@@ -768,6 +768,28 @@ describe("supermemoryBackend", () => {
 		expect(docs[1]?.content).toContain("continued");
 	});
 
+	it("never uploads turns of a new transcript exchanged before Supermemory was first switched on", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		await start(session);
+		// Switched off before the first prompt: nothing to record yet.
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		session.addTurn("off-period one");
+		session.addTurn("off-period two");
+		await start(session);
+		for (const turn of ["three", "four", "five"]) {
+			session.addTurn(turn);
+			await session.endTurn();
+		}
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents).toHaveLength(1);
+		expect(contents[0]).toContain("reply to three");
+		expect(contents[0]).toContain("reply to five");
+		expect(contents[0]).not.toContain("off-period");
+	});
+
 	it("never uploads turns exchanged while Supermemory was switched off", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")

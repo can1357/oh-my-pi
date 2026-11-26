@@ -93,7 +93,7 @@ describe("loadSupermemoryConfig", () => {
 		using temp = TempDir.createSync("@sm-dotenv-");
 		const agentDir = path.join(temp.path(), "agent");
 		await fs.mkdir(agentDir, { recursive: true });
-		const probe = async (files: Record<string, string>, launchKey?: string) => {
+		const probe = async (files: Record<string, string>, launchKey?: string, moveTo?: string) => {
 			const project = await fs.mkdtemp(path.join(temp.path(), "project-"));
 			for (const [name, content] of Object.entries(files)) {
 				await Bun.write(
@@ -105,8 +105,11 @@ describe("loadSupermemoryConfig", () => {
 			await Bun.write(
 				script,
 				[
+					`import { setProjectDir } from ${JSON.stringify(path.join(import.meta.dir, "../../../utils/src/dirs.ts"))};`,
 					`import { Settings } from ${JSON.stringify(path.join(import.meta.dir, "../../src/config/settings.ts"))};`,
 					`import { loadSupermemoryConfig } from ${JSON.stringify(path.join(import.meta.dir, "../../src/supermemory/config.ts"))};`,
+					// `/move` (or `--cwd`) after startup: the launch project's dotenv values stay in the environment.
+					...(moveTo ? [`setProjectDir(${JSON.stringify(moveTo)});`] : []),
 					"const { apiKey, baseUrl, namespace } = loadSupermemoryConfig(Settings.isolated({}));",
 					"process.stdout.write(JSON.stringify({ apiKey, baseUrl, namespace }));",
 				].join("\n"),
@@ -132,6 +135,12 @@ describe("loadSupermemoryConfig", () => {
 			baseUrl: "https://api.supermemory.ai",
 		});
 		expect(await probe(planted)).toEqual({ apiKey: null, baseUrl: "https://api.supermemory.ai" });
+		// After moving to a directory without those files, the launch project's values are still refused.
+		const clean = await fs.mkdtemp(path.join(temp.path(), "clean-"));
+		expect(await probe(planted, "launch-key", clean)).toEqual({
+			apiKey: "launch-key",
+			baseUrl: "https://api.supermemory.ai",
+		});
 		// The user's own agent-dir `.env` stays trusted.
 		expect(await probe({ "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, "launch-key")).toEqual({
 			apiKey: "launch-key",

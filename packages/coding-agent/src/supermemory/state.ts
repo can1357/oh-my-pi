@@ -298,9 +298,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/**
 	 * Resumes automatic retention at the active branch's latest retention cursor, so a window that
 	 * failed or was cut by the dispose timeout is retried; its document id makes the retry add to the
-	 * same document. A branch without a cursor predates them: its complete windows are assumed
-	 * retained and retention starts at the open window, so resuming an old session never bulk-uploads
-	 * it. An open window keeps its start-based document id, so completing it later re-sends a superset
+	 * same document. A branch without a cursor was never retained here (retention writes one at its
+	 * first run): its turns were exchanged while Supermemory or `autoRetain` was off, or copied from
+	 * another transcript, so retention starts at the current turn and never uploads them. An open window keeps its start-based document id, so completing it later re-sends a superset
 	 * into that document. A latest cursor from another scope (namespace, account or server switch)
 	 * means every turn so far belongs to that scope, and turns added after a stop cursor were
 	 * exchanged while retention was off: either way retention here starts at the current turn (after a
@@ -343,10 +343,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			}
 			return;
 		}
-		const every = this.#config.retainEveryNTurns;
-		this.lastRetainedTurn = Math.floor(turns / every) * every;
+		this.lastRetainedTurn = turns;
 		this.#retainedMessages = 0;
-		this.#windowStart = this.lastRetainedTurn;
+		this.#windowStart = turns;
 	}
 
 	/**
