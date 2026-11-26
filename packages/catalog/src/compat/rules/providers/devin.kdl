@@ -95,7 +95,7 @@ provider "devin" {
 
 	// SWE-2 Flash: enterprise promo is 25% off until 2026-11-18 18:00 UTC.
 	// All three variants then use the same list price. Discovery exposes the
-	// family as `swe-2-flash`, distinct from SWE-2 and Fusion pairings.
+	// family as `swe-2-flash`, distinct from SWE-2.
 	// residue: the logical id plus its raw effort uids, as for SWE-2 above.
 	models "swe-2-flash" "swe-2-flash-medium" "swe-2-flash-high" "swe-2-flash-max" {
 		cost-fallback {

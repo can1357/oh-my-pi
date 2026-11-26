@@ -238,6 +238,7 @@ rust_shared_library(
         "//crates/vcs",
         "//crates/vfs",
         "//crates/voice",
+        "//crates/web",
         "//crates/vendor/napi",
     ],
 )

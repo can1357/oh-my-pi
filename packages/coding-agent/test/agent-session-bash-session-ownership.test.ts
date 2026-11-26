@@ -12,7 +12,7 @@ import { createBashTool } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-p
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
@@ -159,7 +159,11 @@ describe("AgentSession bash session ownership", () => {
 	/** Aborts a TERM-ignoring command and verifies disposal killed its process. */
 	async function expectAbortedCommandKilledByDispose(beforeAbort?: () => Promise<void>): Promise<void> {
 		const pidFile = path.join(tempDir.path(), "child.pid");
-		const command = `trap '' TERM HUP INT; perl -e 'open my $f, ">", $ARGV[0] or die $!; print $f $$; close $f; sleep 60' '${pidFile}'`;
+		// Path-qualified: a bare `perl` runs the embedded shell's in-process builtin, whose `$$`
+		// is the test runner itself (the `finally` below would SIGKILL it).
+		const perl = $which("perl");
+		if (!perl) throw new Error("external perl is required for the TERM-ignoring child");
+		const command = `trap '' TERM HUP INT; '${perl}' -e 'open my $f, ">", $ARGV[0] or die $!; print $f $$; close $f; sleep 60' '${pidFile}'`;
 		const running = session.executeBash(command);
 		let pid = 0;
 		try {

@@ -1,7 +1,7 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
  * Pieces the search tools (grep, glob, find, lsp) share: the file row, the
- * file chip, the inline error view and count wording.
+ * file chip, the inline error view, count wording and highlighted head text.
  */
 import * as nodePath from "node:path";
 import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
@@ -19,6 +19,19 @@ export function countText(count: number, noun: string, plural = `${noun}${noun.e
 /** Tabs as the terminal draws them; newlines flattened to spaces. */
 export function flatText(text: string): string {
 	return replaceTabs(text.replace(/\r?\n/g, " "));
+}
+
+/** Spans as head text: tabs drawn as spaces, neighbors of one style merged; plain text when nothing is styled. */
+export function spansText(spans: Iterable<TspSpan>): TspText {
+	const out: TspSpan[] = [];
+	for (const span of spans) {
+		const last = out[out.length - 1];
+		const t = replaceTabs(span.t);
+		if (last && last.s === span.s) out[out.length - 1] = { ...last, t: last.t + t };
+		else out.push({ ...span, t });
+	}
+	if (out.length === 0) return "";
+	return out.length === 1 && out[0]!.s === undefined ? out[0]!.t : out;
 }
 
 /** The path's directory (with its trailing slash) and its last segment; a directory path keeps its slash on the name. */

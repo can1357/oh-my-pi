@@ -19,7 +19,7 @@ import type {
 	ViewerAgentStatus,
 } from "../../overlays/panels/agent-transcript-viewer-model";
 import { formatContextUsage } from "../../status/format";
-import { type ComposerChromeContext, caretOverflow, composerShape } from "../composer/shapes";
+import { type ComposerChromeContext, caretOverflow, composerRowLines, composerShape } from "../composer/shapes";
 import "../messages";
 import "../tools";
 import { keyLabel } from "../../keys/hints";
@@ -106,7 +106,7 @@ function fieldRows(cx: PaintContext, editor: UiNode, width: number): string[] {
 	lines.forEach((text, index) => {
 		const used = visibleWidth(text);
 		rows.push(
-			...shape.row({
+			...composerRowLines(shape, {
 				...chrome,
 				text,
 				pad: " ".repeat(Math.max(0, content - used)),
