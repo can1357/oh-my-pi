@@ -2,7 +2,7 @@ import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetached
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { errorMessage, logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { continuesConversation } from "../modes/utils/conversation-position";
@@ -21,7 +21,7 @@ import {
 import type { SessionWorktree } from "../worktree/backend";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
 	ParsedSlashCommand,
@@ -88,7 +88,7 @@ async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCo
 	// A switch still applying (or rolling back) decides which conversation is live.
 	if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
 	if (origin && !continuesConversation(ctx.sessionManager, origin)) {
-		restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+		restoreDetachedDraft(ctx.composer, command.text, runtime.input?.images, runtime.input?.imageLinks);
 		ctx.showWarning(`Conversation changed before /${command.name} ran; returned it to the editor`);
 		return;
 	}
@@ -712,7 +712,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
+			runtime.ctx.composer.addToHistory(command.text);
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
 		},
@@ -731,7 +731,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			const sourceCwd = runtime.sessionManager.getCwd();
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(sourceCwd, runtime.settings, branch);
+				worktree = await createSessionWorktree(sourceCwd, runtime.settings, branch, {
+					session: runtime.sessionManager.getSessionId(),
+				});
 			} catch (err) {
 				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
 			}
@@ -751,7 +753,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
+			runtime.ctx.composer.addToHistory(command.text);
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleWorktreeCommand(command.args || undefined);
 		},

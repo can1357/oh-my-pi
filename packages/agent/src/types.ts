@@ -4,6 +4,7 @@ import type {
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
+	CursorExecHandlers,
 	Effort,
 	ImageContent,
 	Message,
@@ -120,6 +121,9 @@ export type AgentBeforeModelCall = (
 	signal?: AbortSignal,
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
 
+/** The tool-call shape a {@link SoftToolRequirement} inspects. */
+export type SoftToolCall = { name: string; arguments?: Record<string, unknown> };
+
 /**
  * A soft tool requirement: the host wants `toolName` called before the loop
  * runs other tools or yields, but WITHOUT paying the forced-`toolChoice` cost
@@ -148,7 +152,13 @@ export interface SoftToolRequirement {
 	 * specific invocation shape (e.g. a `bash` call running a particular tool
 	 * command) instead of any call to `toolName`. Escalation still forces `toolName`.
 	 */
-	satisfies?(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean;
+	satisfies?(toolCall: SoftToolCall): boolean;
+	/**
+	 * Skipped-result text for a call to `toolName` that fails `satisfies`. Without
+	 * it, that call gets the generic notice asking for a `toolName` call, which
+	 * repeats the call the model just made instead of naming the invocation needed.
+	 */
+	unsatisfiedNotice?(toolCall: SoftToolCall): string;
 	/** Host-owned reminder messages, injected once per `id` activation. */
 	reminder: AgentMessage[];
 }
@@ -189,6 +199,8 @@ export interface SteeringQueueState {
  * Configuration for the agent loop.
  */
 export interface AgentLoopConfig extends SimpleStreamOptions {
+	/** Resolve the host bridge only when dispatching to the Cursor transport. */
+	loadCursorExecHandlers?: () => Promise<CursorExecHandlers>;
 	model: Model;
 
 	/** Reports whether this loop has reached a safe process-pause boundary. */
@@ -223,7 +235,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 
 	/**
-	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
+	 * Converts AgentMessage[] to LLM-compatible Message[] for the model receiving this call.
 	 *
 	 * Each AgentMessage must be converted to a UserMessage, AssistantMessage, or ToolResultMessage
 	 * that the LLM can understand. AgentMessages that cannot be converted (e.g., UI-only notifications,
@@ -245,7 +257,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * })
 	 * ```
 	 */
-	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	convertToLlm: (messages: AgentMessage[], model: Model) => Message[] | Promise<Message[]>;
 
 	/**
 	 * Optional transform applied to the context before `convertToLlm`.
@@ -271,7 +283,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * normalization, and append-only context handling, but before telemetry capture
 	 * and provider send.
 	 */
-	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	transformProviderContext?: (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>;
 
 	/** Remembers sent tool definitions to fill {@link Context.inactiveTools}. */
 	sentToolDefinitions?: SentToolDefinitions;
@@ -326,6 +338,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * {@link getSteeringMessages}.
 	 */
 	waitForSteeringMessages?: (signal?: AbortSignal) => Promise<void>;
+
+	/**
+	 * Aborted just before the host aborts the run when running tools should keep
+	 * their work: raises the active tool batch's cooperative
+	 * {@link ToolCallContext.steeringSignal} (source `"user"`) in either
+	 * {@link interruptMode}, so a tool that can (auto-background bash/eval)
+	 * moves its work into a background job instead of being killed.
+	 */
+	detachSignal?: AbortSignal;
 
 	/**
 	 * Called when live steering dequeues messages via {@link getSteeringMessages}
@@ -634,6 +655,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * post-turn steering.
 	 */
 	onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
+	/** Called synchronously when the loop pushes `turn_end` onto the event stream. */
+	onTurnEndEmitted?: () => void;
 
 	/**
 	 * Called once an assistant message is finalized from the model stream, before
@@ -1188,6 +1211,13 @@ export interface AgentTool<
 	 * obtains by delegating to this native tool through `ctx.invokeTool` follow this tool's contract.
 	 */
 	readonly delegationGuidance?: string;
+	/**
+	 * Whether `command` is traffic this tool must run itself rather than shell work: the transport
+	 * host (`bash`) answers true for a line made only of session tool commands, which nothing else
+	 * can dispatch. A same-name extension replacement routes such a call back here instead of
+	 * executing it, so mounted tools keep working behind an override that does not delegate.
+	 */
+	servesToolCommandLine?(command: string): boolean;
 	/**
 	 * On-demand documentation topics (`topic → markdown`), readable as
 	 * `help://<tool>/<topic>`. Lets a tool keep large sub-surfaces out of its

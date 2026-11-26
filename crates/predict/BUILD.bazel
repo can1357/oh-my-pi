@@ -10,6 +10,7 @@ exports_files(["Cargo.toml"])
 # daemon.
 rust_library(
     name = "predict",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     # include_str!/include_bytes! inputs: the SmolLM2 preamble and the ngram

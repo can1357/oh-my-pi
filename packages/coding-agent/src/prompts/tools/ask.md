@@ -9,6 +9,7 @@ Several viable choices: pick conservative/standard, proceed, state choice.
   - NEVER <script>, <style>, style=, or buttons (<button>, type="submit"): the UI supplies Submit and Cancel.
 - Every control needs a name; the submitted form data arrives as JSON `{"name": value}`.
 - One-of: `<input type="radio">`; many-of: type="checkbox"; long lists: <select>.
+  - One question = one `name`: every option repeats it with its own `value` (`name="store" value="sqlite"`, `name="store" value="redis"`). A different `name` per option makes each option a group of its own and submits two answers; ask refuses a <fieldset> that does that.
 - Wrap each control in a <label>; group a question in a <fieldset> with a <legend>, or put it in a <p> right before the group.
 - Radio and checkbox groups automatically get an "Other" free-text answer. NEVER add your own "Other" option or a text field for it.
 - Preselect your recommendation with checked/selected/value: those values are submitted if the user does not answer in time.
@@ -20,7 +21,7 @@ Several viable choices: pick conservative/standard, proceed, state choice.
   - lone checkbox or radio group left unchecked → omitted
   - type="number" → a number; text fields → their text
   - automatic "Other" text → the radio's value, or an extra checkbox array entry
-- Free input: `<input type="text|number|date|email|url">`, <textarea>; placeholder, min/max, pattern, required are enforced.
+- Free input: `<input type="text|number|date|email|url">`, <textarea>; placeholder, min/max, pattern, required are hints: broken answers get flagged, never blocked, so answers MAY break them.
 - Pictures: `<img src="…" alt="…">` and inline <svg> diagrams, as their own blocks.
   - `src`: an http(s) URL, a data: URI, or a file path relative to the working directory.
   - Inside a <label> an image shows only its alt.

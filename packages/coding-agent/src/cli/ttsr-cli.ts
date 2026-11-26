@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { AstMatchStrictness, astMatch, FileType, type GlobMatch, glob } from "@oh-my-pi/pi-natives";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { getProjectDir, pathIsWithinLexical } from "@oh-my-pi/pi-utils/dirs";
 import {
 	BUILTIN_DEFAULTS_PROVIDER_ID,
 	compileRuleCondition,
@@ -562,11 +562,6 @@ function normalizeScanPath(pathValue: string): string {
 	return pathValue.replaceAll("\\", "/");
 }
 
-function isWithinDirectory(child: string, parent: string): boolean {
-	const rel = path.relative(parent, child);
-	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
 function matchesScanGlob(glob: Bun.Glob, filePaths: string[] | undefined): boolean {
 	if (!filePaths || filePaths.length === 0) {
 		return false;
@@ -802,7 +797,7 @@ async function scanAnyAstConditionMatches(
 }
 
 async function discoverScanFiles(scanDir: string, cwd: string, gitignore: boolean): Promise<ScanFileCandidate[]> {
-	const globRoot = isWithinDirectory(scanDir, cwd) ? cwd : scanDir;
+	const globRoot = pathIsWithinLexical(cwd, scanDir) ? cwd : scanDir;
 	const relativeScanDir = normalizeScanPath(path.relative(globRoot, scanDir));
 	const pattern = relativeScanDir === "" ? "**/*" : `${relativeScanDir}/**/*`;
 	try {

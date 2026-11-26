@@ -8,11 +8,10 @@ use std::{
 	collections::HashSet,
 	fmt::{NumBuffer, Write as _},
 	path::Path,
-	sync::LazyLock,
 };
 
-use regex::Regex;
 use serde_json::{Map, Value};
+use xutf::{GeneralCategory, Ucd};
 
 /// Notebook decode/encode failure. `Display` is the exact model-facing text.
 #[derive(Debug, thiserror::Error)]
@@ -73,18 +72,34 @@ pub struct ParsedVirtualCell {
 	pub source:     String,
 }
 
-static CELL_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"^# %% \[(code|markdown|raw)\](?: cell:(\d+))?$")
-		.expect("valid notebook cell marker regex")
-});
-static ESCAPABLE_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"^# %%+ \[(?:code|markdown|raw)\](?: cell:\d+)?$")
-		.expect("valid notebook escape regex")
-});
-static ESCAPED_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"^# %%%+ \[(?:code|markdown|raw)\](?: cell:\d+)?$")
-		.expect("valid notebook unescape regex")
-});
+/// Parses a cell-marker body, including its optional decimal index.
+fn cell_marker_body(body: &str) -> Option<(NotebookCellType, Option<&str>)> {
+	let (kind, rest) = body.strip_prefix(" [")?.split_once(']')?;
+	let cell_type = NotebookCellType::parse(kind)?;
+	if rest.is_empty() {
+		return Some((cell_type, None));
+	}
+	let index = rest.strip_prefix(" cell:")?;
+	(!index.is_empty() && index.chars().all(is_cell_index_digit)).then_some((cell_type, Some(index)))
+}
+
+/// Whether a cell index accepts this decimal digit.
+fn is_cell_index_digit(c: char) -> bool {
+	c.is_ascii_digit() || !c.is_ascii() && c.general_category() == GeneralCategory::DecimalNumber
+}
+
+/// Parses exactly two percent signs, followed by a cell-marker body.
+fn parse_cell_marker(line: &str) -> Option<(NotebookCellType, Option<usize>)> {
+	let (cell_type, index) = cell_marker_body(line.strip_prefix("# %%")?)?;
+	Some((cell_type, index.and_then(|value| value.parse().ok())))
+}
+
+/// Recognizes a marker whose percent prefix may contain extra signs.
+fn is_marker_like(line: &str, prefix: &str) -> bool {
+	line
+		.strip_prefix(prefix)
+		.is_some_and(|body| cell_marker_body(body.trim_start_matches('%')).is_some())
+}
 
 fn escape_marker_like_source_lines(source: &str) -> String {
 	if !source.contains("# %%") {
@@ -93,7 +108,7 @@ fn escape_marker_like_source_lines(source: &str) -> String {
 	source
 		.split('\n')
 		.map(|line| {
-			if ESCAPABLE_MARKER_RE.is_match(line) {
+			if is_marker_like(line, "# %%") {
 				line.replacen("# %", "# %%", 1)
 			} else {
 				line.to_owned()
@@ -104,7 +119,7 @@ fn escape_marker_like_source_lines(source: &str) -> String {
 }
 
 fn unescape_marker_like_line(line: &str) -> String {
-	if ESCAPED_MARKER_RE.is_match(line) {
+	if is_marker_like(line, "# %%%") {
 		line.replacen("# %%", "# %", 1)
 	} else {
 		line.to_owned()
@@ -206,7 +221,7 @@ pub fn parse_notebook_editable_text(
 	};
 
 	for line in lines {
-		if let Some(captures) = CELL_MARKER_RE.captures(line) {
+		if let Some((cell_type, cell_index)) = parse_cell_marker(line) {
 			if let Some((cell_type, cell_index, source_lines)) = current.take() {
 				cells.push(ParsedVirtualCell {
 					cell_type,
@@ -214,12 +229,6 @@ pub fn parse_notebook_editable_text(
 					source: source_lines.join("\n"),
 				});
 			}
-			let cell_type =
-				NotebookCellType::parse(captures.get(1).expect("cell type capture").as_str())
-					.expect("validated marker type");
-			let cell_index = captures
-				.get(2)
-				.and_then(|value| value.as_str().parse().ok());
 			current = Some((cell_type, cell_index, Vec::new()));
 		} else if let Some((_, _, source_lines)) = current.as_mut() {
 			source_lines.push(unescape_marker_like_line(line));

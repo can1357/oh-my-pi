@@ -645,6 +645,17 @@ export declare class Process {
   /** Launch arguments for this process. */
   args(): Array<string>
   /**
+   * Basename of the running process's OS executable image, not `argv[0]`.
+   * Returns null when the image is unreadable or the process has exited.
+   */
+  executableName(): string | null
+  /**
+   * Send `signal` to an owned POSIX process group, even after its leader
+   * exits. Defaults to hard-kill. Returns false if no signal was delivered
+   * or the platform does not support process groups.
+   */
+  static killGroup(pgid: number, signal?: number | undefined | null): boolean
+  /**
    * Send `signal` to this process and its descendants, children first.
    *
    * On Linux and macOS the signal is forwarded as-is. On Windows there is no
@@ -743,6 +754,19 @@ export declare class PtySession {
 }
 
 /**
+ * Reads a URL one step at a time; the host performs all network and browser
+ * I/O.
+ */
+export declare class Reader {
+  /** Create a reader. Resolve each requested step before opening another URL. */
+  constructor(options?: ReaderOptions | undefined | null)
+  /** Start reading a URL and return the first step. */
+  open(url: string): ReaderStep
+  /** Process a fetch or browser response on a worker thread. */
+  resolve(response: ReaderResponse): Promise<ReaderStep>
+}
+
+/**
  * Actual command state, source units and bounded history for one shell run,
  * including observed assignments and producer-attributed output.
  *
@@ -830,6 +854,13 @@ export declare class Shell {
    * dropping it (which would SIGKILL them via kill-on-drop).
    */
   liveBackgroundJobCount(): Promise<number>
+  /**
+   * Every live external this shell session holds, whether a run is in
+   * flight or not: background jobs (`cmd &`, `nohup cmd &`) earlier runs
+   * left running included. Each is unreaped while held, so its pid names
+   * it. Empty once the session is gone.
+   */
+  heldProcesses(): Array<HeldProcess>
   /**
    * Pids of the still-alive processes spawned by this session's in-flight
    * `run`, in spawn order: foreground commands, pipeline stages, and `&`
@@ -1012,6 +1043,8 @@ export declare class VcsGitRepo {
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
   /** Read blob bytes. */
   showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Write bytes as a blob and return its full object id. */
+  writeBlob(data: Uint8Array, signal?: unknown | undefined | null): Promise<string>
   /**
    * Convert worktree content to the blob `git add` would store per path
    * (EOL/`text` attributes, `core.autocrlf`, `ident`, clean filters such as
@@ -1026,6 +1059,11 @@ export declare class VcsGitRepo {
   diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
   /** Render a no-index patch between two filesystem paths. */
   diffNoIndex(left: string, right: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /**
+   * Render a same-path patch between blobs already stored in the object
+   * database.
+   */
+  diffBlobs(change: VcsBlobChange, binary: boolean, signal?: unknown | undefined | null): Promise<string>
   /** Changed paths. */
   changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
   /** Per-file line counts. */
@@ -1042,6 +1080,8 @@ export declare class VcsGitRepo {
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Publish a private-index commit after preparing the shared index. */
+  commitReconciled(message: string, options: VcsCommitOptions, selection: string, signal?: unknown | undefined | null): Promise<VcsReconciledCommit>
   /**
    * Write a commit object for `tree` on `parents` without moving any ref or
    * touching the index/worktree (`git commit-tree`).
@@ -2856,6 +2896,17 @@ export declare enum HeldFileKind {
   Locked = 'locked'
 }
 
+/** A live external a shell session holds ([`Shell::held_processes`]). */
+export interface HeldProcess {
+  /** OS process id. */
+  pid: number
+  /**
+   * It runs in a detached tree: started under the shell's `nohup`, which
+   * does not mask `SIGHUP`, so this is how such a process is told apart.
+   */
+  detached: boolean
+}
+
 /**
  * Highlight code and return ANSI-colored lines.
  *
@@ -2915,28 +2966,6 @@ export interface HoldOptions {
    * menu; see `PointerOptions.refuseMenu`.
    */
   refuseMenu?: boolean
-}
-
-/**
- * Convert HTML source to Markdown with optional preprocessing.
- *
- * # Errors
- * Returns an error if the conversion fails or the worker task aborts.
- */
-export declare function htmlToMarkdown(html: string, options?: HtmlToMarkdownOptions | undefined | null): Promise<string>
-
-/** Options for HTML to Markdown conversion. */
-export interface HtmlToMarkdownOptions {
-  /** Remove navigation elements, forms, headers, footers. */
-  cleanContent?: boolean
-  /** Skip images during conversion. */
-  skipImages?: boolean
-  /**
-   * Hidden content to keep: "drop" (default) omits it, "reachable" keeps
-   * content the page can reveal (collapsed sections, inactive tab panels),
-   * "all" also keeps `<template>` and `<noscript>` content.
-   */
-  hiddenContent?: string
 }
 
 /** One stray sloppy payload region inside prose (UTF-16 offsets). */
@@ -3122,6 +3151,26 @@ export declare enum KeyEventType {
 }
 
 /**
+ * SIGKILL every process of the family of `pids`; returns the number
+ * signalled.
+ *
+ * One process-table snapshot, the ppid walk plus every group/session a
+ * member leads, then SIGCONT the stopped ones. With `spareHangupIgnoring`,
+ * members ignoring SIGHUP and everything descended (ppid chain) from them
+ * are left alone. Windows kills each pid's tree.
+ */
+export declare function killProcessFamily(pids: Array<number>, options?: KillProcessFamilyOptions | undefined | null): number
+
+/** Options for [`kill_process_family`]. */
+export interface KillProcessFamilyOptions {
+  /**
+   * Leave members ignoring SIGHUP (`nohup`) and everything descended from
+   * them alive.
+   */
+  spareHangupIgnoring?: boolean
+}
+
+/**
  * Matches of one [`LineMatcher::match_lines`] call, column-wise.
  *
  * Match `i` is on line `lines[i]` for pattern `rules[i]`, and its named
@@ -3146,6 +3195,18 @@ export interface LineRange {
   /** 1-indexed inclusive last visible line. */
   endLine: number
 }
+
+/**
+ * Live processes (never the caller) whose environment contains exactly
+ * `name=value`.
+ *
+ * Reads the environment each process was exec'd with: only
+ * the caller's user's processes are readable, others are skipped. macOS
+ * also withholds the environment of Apple platform binaries (`/bin/sh`,
+ * `/bin/sleep`, …) even from the same user, so those never match there.
+ * Empty on platforms without a readable process environment (Windows).
+ */
+export declare function listProcessesWithEnv(name: string, value: string): Array<TaggedProcess>
 
 /**
  * Walk the workspace once and return tree entries plus AGENTS.md candidates.
@@ -3689,6 +3750,25 @@ export interface PredictedWord {
   confidence: number
 }
 
+/**
+ * The record of each of `pids` that is alive (zombies and unknown pids
+ * skipped), from one process-table scan. Empty on Windows.
+ */
+export declare function processInfo(pids: Array<number>): Array<TaggedProcess>
+
+/**
+ * Regular files a process's stdout/stderr (fd 1/2) point at; a field is
+ * undefined when that descriptor is not a regular file (pipe, terminal,
+ * socket, deleted file) or unreadable.
+ */
+export declare function processOutputFiles(pid: number): ProcessOutputFiles
+
+/** Regular files a process's stdout/stderr point at. */
+export interface ProcessOutputFiles {
+  stdout?: string
+  stderr?: string
+}
+
 /** Current state of a process reference. */
 export declare enum ProcessStatus {
   /** The referenced process is still running. */
@@ -3821,6 +3901,150 @@ export interface RawExit {
   signal: number | null
 }
 
+/** An HTTP header. Repeated header names are preserved in the header array. */
+export interface ReaderHeader {
+  /** Header name. */
+  name: string
+  /** Header value. */
+  value: string
+}
+
+/** Reader output and fallback options. */
+export interface ReaderOptions {
+  /** Return the decoded source instead of rendering a document. */
+  raw?: boolean
+  /** Output syntax; defaults to Markdown. */
+  format?: "markdown" | "text"
+  /** Use reader selection (the default) or keep all visible content. */
+  mode?: "auto" | "full"
+  /** Which hidden content to include; defaults to dropping it. */
+  hidden?: "drop" | "reachable" | "all"
+  /** Include images in Markdown output; defaults to true. */
+  images?: boolean
+  /** Text rendering width in columns; defaults to 250. */
+  width?: number
+  /** Permit a browser-rendered fallback if HTTP and embedded data fail. */
+  browser?: boolean
+  /** User-agent candidates for HTTP requests. */
+  userAgents?: Array<string>
+  /** Enable site-specific readers; defaults to true. */
+  sites?: boolean
+  /** Credentials for site-specific API requests. */
+  siteCredentials?: Array<ReaderSiteCredential>
+  /** Settings for site-specific readers (for example, `x.model`). */
+  siteSettings?: Array<ReaderSiteSetting>
+  /**
+   * Wall clock in ms since the Unix epoch (`Date.now()`); defaults to the
+   * system clock.
+   */
+  nowMs?: number
+  /**
+   * User-agent for site API requests that do not specify one; defaults to
+   * "omp".
+   */
+  apiUserAgent?: string
+  /** Remote readers in priority order. */
+  remote?: Array<ReaderRemoteBackend>
+  /** Try remote reading before rendering HTML locally. */
+  preferRemote?: boolean
+}
+
+/** Final result of reading a URL. */
+export interface ReaderOutput {
+  /** Whether the reader produced a page, detected a blob, or failed. */
+  kind: "page" | "blob" | "failed"
+  /** Final URL. */
+  url: string
+  /** Rendered or decoded page content. */
+  content?: string
+  /** Page output format. */
+  format?: string
+  /** Source content type for a page result. */
+  contentType?: string
+  /** Page title when available. */
+  title?: string
+  /** Strategy used to produce the page. */
+  strategy?: string
+  /** Reader verdict for a page or failed result. */
+  verdict?: string
+  /** Bot protection that answered instead of the page. */
+  wall?: string
+  /** Diagnostics from the read. */
+  notes: Array<string>
+  /** Whether a page was based on a truncated response. */
+  truncated?: boolean
+  /** Blob MIME type. */
+  mime?: string
+  /** Suggested blob file extension. */
+  extension?: string
+  /** HTTP status of the failed response or the one a page came from. */
+  status?: number
+}
+
+/** Configuration for one remote reader. */
+export interface ReaderRemoteBackend {
+  /** Remote reader service. */
+  kind: "jina" | "firecrawl" | "parallel"
+  /** API key for the service. */
+  apiKey?: string
+  /** Override the service's default base URL. */
+  baseUrl?: string
+}
+
+/** Result of the requested fetch or browser load. */
+export interface ReaderResponse {
+  /** HTTP status, or zero on a transport error. */
+  status: number
+  /** Final URL after redirects. */
+  url: string
+  /** Response headers. */
+  headers: Array<ReaderHeader>
+  /** Response bytes or UTF-8 encoded DOM from a browser load. */
+  body?: Buffer
+  /** Whether the body was cut off at the requested byte limit. */
+  truncated?: boolean
+  /** Transport failure, if any. */
+  error?: string
+}
+
+/** A credential for a site-specific reader. */
+export interface ReaderSiteCredential {
+  /** Site identifier (for example, "github"). */
+  site: string
+  /** API token for the site. */
+  token: string
+}
+
+/** A setting for site-specific readers. */
+export interface ReaderSiteSetting {
+  /** Setting key (for example, "x.model"). */
+  key: string
+  /** Setting value. */
+  value: string
+}
+
+/** The next action for the host, or the reader's final output. */
+export interface ReaderStep {
+  /** Whether to issue an HTTP request, browse, or return a final output. */
+  kind: "fetch" | "browse" | "done"
+  /** URL to fetch or browse. */
+  url?: string
+  /** HTTP method for a fetch step. */
+  method?: string
+  /** HTTP headers for a fetch step. */
+  headers?: Array<ReaderHeader>
+  /** Optional HTTP request body. */
+  body?: Buffer
+  /** Maximum number of response bytes to read. */
+  maxBytes?: number
+  /** Why this fetch is needed. */
+  purpose?: string
+  /** Which responses to retry once before resolving the fetch. */
+  retry?: "none" | "rate-limit" | "transient"
+  /** Result of a completed read. */
+  output?: ReaderOutput
+}
+
 /**
  * Read an image from the system clipboard.
  *
@@ -3844,6 +4068,25 @@ export declare function readTextFromClipboard(): Promise<string | undefined | nu
 
 /** waitpid for a direct child (also one inherited across execReplace). */
 export declare function reapChild(pid: number): Promise<RawExit>
+
+/** Render HTML as Markdown or plain text on a worker thread. */
+export declare function renderHtml(html: string, options?: RenderHtmlOptions | undefined | null): Promise<string>
+
+/** Options for rendering HTML already held by the caller. */
+export interface RenderHtmlOptions {
+  /** Output syntax; defaults to Markdown. */
+  format?: "markdown" | "text"
+  /** Use reader selection (the default) or keep all visible content. */
+  mode?: "auto" | "full"
+  /** Which hidden content to include; defaults to dropping it. */
+  hidden?: "drop" | "reachable" | "all"
+  /** Include images in Markdown output; defaults to true. */
+  images?: boolean
+  /** Text rendering width in columns; defaults to 250. */
+  width?: number
+  /** Absolute URL used to resolve relative links. */
+  baseUrl?: string
+}
 
 /**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
@@ -3877,6 +4120,16 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
  * JS-side re-encode.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
+
+/**
+ * Repairs `\` continuations after here-document operators in `script`.
+ *
+ * Drops the `\` after each `<<EOF &&` (or `||`, `|`, `|&`) so the
+ * here-document body starts on the next line; `null` when nothing needs
+ * repair or the result would not parse. omp's bash tool runs commands
+ * through it.
+ */
+export declare function repairHeredocContinuations(script: string): string | null
 
 /**
  * Put back a stdin console mode `enableConsoleVtInput` returned. False when
@@ -3972,6 +4225,12 @@ export interface ShellCommandRequest {
    * otherwise.
    */
   stdin: string
+  /**
+   * Arguments that are job specs (`%1`, `%%`, `%name`) naming a job of the
+   * invoking shell that runs a program, mapped to that program's OS pid;
+   * absent when no argument is one.
+   */
+  jobs?: Record<string, number>
 }
 
 /** Shell-composable response of a session command. */
@@ -4428,6 +4687,16 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+  /**
+   * The command ended in another directory than it started in (a `cd` in
+   * it); a later run that passes `cwd` starts there instead.
+   */
+  movedCwd: boolean
+  /**
+   * The command ended with `errexit` (`set -e`) on; the next run starts
+   * with it off.
+   */
+  errexit: boolean
 }
 
 /** The application's speech synthesizer, injected into a shell run. */
@@ -4707,6 +4976,19 @@ export interface SvgCell {
   heightPx: number
 }
 
+/** A live process whose environment carries a given `NAME=value` entry. */
+export interface TaggedProcess {
+  pid: number
+  ppid: number
+  /** ms since the epoch */
+  startedAt: number
+  /** full command line, args joined by spaces */
+  command: string
+  /** SIGHUP is ignored (nohup) */
+  ignoresHangup: boolean
+  stopped: boolean
+}
+
 /** Options for [`TextPredictor::new`]. */
 export interface TextPredictorOptions {
   /** Engine: `ngram`, `smollm`, or `apple`. */
@@ -4719,6 +5001,252 @@ export interface TextPredictorOptions {
   showThreshold?: number
 }
 
+/** A tool call with its result and the reasoning before it. */
+export interface TranscriptCall {
+  /** Index of the transcript in `files`. */
+  file: number
+  /** Session entry id of the assistant message holding the call. */
+  entry?: string
+  /** Unix milliseconds; 0 when the line carries no time. */
+  at: number
+  callId: string
+  tool: string
+  /**
+   * Arguments as a JSON object; strings longer than 4,003 characters keep
+   * their first and last 2,000.
+   */
+  args: string
+  /** Result text; longer than 1,003 characters keeps its first and last 500. */
+  result?: string
+  /** UTF-16 length of the whole result text. */
+  resultChars?: number
+  isError?: boolean
+  /** The last 4,000 characters of the thinking and reply before the call. */
+  reasoning?: string
+  model?: string
+  /** omp version that recorded the call. */
+  version?: string
+}
+
+/** Which tool calls count; omitted fields match every call. */
+export interface TranscriptCallFilter {
+  /** Tool names. */
+  tools?: Array<string>
+  /** Regex matching some string inside the arguments. */
+  args?: string
+  /** Regex matching the whole result text. */
+  result?: string
+  /**
+   * `true` keeps failed calls, `false` succeeded ones; a call without a
+   * result matches neither.
+   */
+  error?: boolean
+}
+
+/**
+ * The newest `limit` tool calls of `files` matching the filter, with their
+ * results and reasoning.
+ *
+ * # Errors
+ * Rejects when cancelled; a regex that compiles in neither engine falls back
+ * to literal text, as in the grep tool.
+ */
+export declare function transcriptCalls(options: TranscriptCallsOptions): Promise<TranscriptCallsResult>
+
+/** Options for [`transcript_calls`]. */
+export interface TranscriptCallsOptions {
+  files: Array<TranscriptFile>
+  /** Unix milliseconds; calls made earlier are skipped. */
+  since?: number
+  /** Unix milliseconds; calls made at or after it are skipped. */
+  until?: number
+  filter: TranscriptCallFilter
+  flags?: TranscriptRegexFlags
+  /** Newest calls returned at most. */
+  limit: number
+  signal?: unknown
+}
+
+/** What [`transcript_calls`] found. */
+export interface TranscriptCallsResult {
+  /** Newest first. */
+  calls: Array<TranscriptCall>
+  /** Headers of the transcripts read. */
+  headers: Array<TranscriptHeader>
+}
+
+/** A transcript to scan. */
+export interface TranscriptFile {
+  /** JSONL file. */
+  path: string
+  /**
+   * Unix milliseconds of its newest activity (its mtime): capped scans read
+   * files newest first and skip those older than every hit they keep.
+   */
+  newest: number
+}
+
+/**
+ * The newest `limit` matches of `pattern` in `sources` of `files`.
+ *
+ * # Errors
+ * Rejects when cancelled.
+ */
+export declare function transcriptGrep(options: TranscriptGrepOptions): Promise<TranscriptGrepResult>
+
+/** One place a grep pattern matched. */
+export interface TranscriptGrepHit {
+  file: number
+  entry?: string
+  at: number
+  source: TranscriptSource
+  /** Tool whose arguments or result matched. */
+  tool?: string
+  callId?: string
+  /** Snippet around the match, whitespace collapsed. */
+  text: string
+  /** The matched text. */
+  matched: string
+}
+
+/** Options for [`transcript_grep`]. */
+export interface TranscriptGrepOptions {
+  files: Array<TranscriptFile>
+  since?: number
+  until?: number
+  pattern: string
+  flags?: TranscriptRegexFlags
+  sources: Array<TranscriptSource>
+  /** Tools whose arguments and results are searched; all when omitted. */
+  tools?: Array<string>
+  limit: number
+  signal?: unknown
+}
+
+/** What [`transcript_grep`] found. */
+export interface TranscriptGrepResult {
+  /** Newest first. */
+  hits: Array<TranscriptGrepHit>
+  headers: Array<TranscriptHeader>
+}
+
+/** Session header of a scanned transcript. */
+export interface TranscriptHeader {
+  /** Index of the transcript in `files`. */
+  file: number
+  id: string
+  cwd: string
+}
+
+/**
+ * The newest `limit` records of `kinds` in one transcript, whole, oldest
+ * first.
+ *
+ * # Errors
+ * Rejects when the file cannot be read or the scan is cancelled.
+ */
+export declare function transcriptMessages(options: TranscriptMessagesOptions): Promise<Array<TranscriptRecord>>
+
+/** Options for [`transcript_messages`]. */
+export interface TranscriptMessagesOptions {
+  path: string
+  /** Kinds kept; all when omitted. */
+  kinds?: Array<TranscriptRecordKind>
+  since?: number
+  until?: number
+  /** Newest records returned at most. */
+  limit: number
+  signal?: unknown
+}
+
+/** One transcript record, whole. */
+export interface TranscriptRecord {
+  entry?: string
+  at: number
+  kind: TranscriptRecordKind
+  /** Message or result text; `null` for calls. */
+  text?: string
+  tool?: string
+  callId?: string
+  /** Arguments of a call as a JSON object. */
+  args?: string
+  isError?: boolean
+}
+
+/** Kind of a transcript record. */
+export declare enum TranscriptRecordKind {
+  User = 'user',
+  Assistant = 'assistant',
+  Thinking = 'thinking',
+  Call = 'call',
+  Result = 'result'
+}
+
+/**
+ * Regex dialect of a scan: the grep tool's (Rust `regex`, PCRE2 for
+ * look-around and back-references).
+ */
+export interface TranscriptRegexFlags {
+  /** Case-insensitive matching. */
+  ignoreCase?: boolean
+  /** `.` matches newlines and matches may span lines. */
+  dotAll?: boolean
+}
+
+/** Text a grep searches. */
+export declare enum TranscriptSource {
+  User = 'user',
+  Assistant = 'assistant',
+  Thinking = 'thinking',
+  Args = 'args',
+  Result = 'result'
+}
+
+/** Calls of one transcript counted under one key. */
+export interface TranscriptStat {
+  file: number
+  /** `null` when the fact is unknown, and for `by: "none"`. */
+  key?: string
+  calls: number
+  errors: number
+}
+
+/**
+ * Calls of `files` matching the filter, counted per transcript by `by`.
+ *
+ * # Errors
+ * Rejects when cancelled.
+ */
+export declare function transcriptStats(options: TranscriptStatsOptions): Promise<TranscriptStatsResult>
+
+/** Call fact [`transcript_stats`] counts by within each transcript. */
+export declare enum TranscriptStatsKey {
+  Tool = 'tool',
+  Model = 'model',
+  Version = 'version',
+  /** Local calendar day, `YYYY-MM-DD`. */
+  Day = 'day',
+  /** One count per transcript. */
+  PerTranscript = 'none'
+}
+
+/** Options for [`transcript_stats`]. */
+export interface TranscriptStatsOptions {
+  files: Array<TranscriptFile>
+  since?: number
+  until?: number
+  filter: TranscriptCallFilter
+  flags?: TranscriptRegexFlags
+  by: TranscriptStatsKey
+  signal?: unknown
+}
+
+/** What [`transcript_stats`] counted. */
+export interface TranscriptStatsResult {
+  stats: Array<TranscriptStat>
+  headers: Array<TranscriptHeader>
+}
+
 /**
  * Translate a kitty CSI-u Alt/Ctrl+Alt chord into the text `AltGr` produced
  * on the active keyboard layout; `null` when the sequence is not an `AltGr`
@@ -4728,6 +5256,19 @@ export interface TextPredictorOptions {
  * active: other hosts report the produced text themselves.
  */
 export declare function translateWindowsAltGrSequence(data: string): string | null
+
+/**
+ * UTF-16 code-unit length of the longest prefix of `input` within
+ * `max_tokens` `Jev` tokens (as `countTokens(_, Encoding.Jev)` counts),
+ * never ending on half a surrogate pair. `Jev` only.
+ *
+ * Merging stops at the piece that crosses the budget; the rest of the input
+ * is still read for the NFC quick-check.
+ *
+ * Slice the original JS string with `input.slice(0, len)` (or keep `input`
+ * unchanged when `len === input.length`).
+ */
+export declare function truncateToTokens(input: string, maxTokens: number): number
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.
@@ -4742,6 +5283,15 @@ export interface VcsApplyOptions {
   indexPath?: string
   reverse?: boolean
   threeWay?: boolean
+}
+
+/** One same-path change between blobs already stored in the object database. */
+export interface VcsBlobChange {
+  path: string
+  oldId?: string
+  newId?: string
+  oldMode?: string
+  newMode?: string
 }
 
 /** Clean options. */
@@ -4885,6 +5435,14 @@ export interface VcsPushOptions {
   remote?: string
   refspec?: string
   forceWithLease?: boolean
+}
+
+/** Published private-index commit and any shared-index entries left staged. */
+export interface VcsReconciledCommit {
+  /** Published commit's object ID. */
+  sha: string
+  /** Staged changes left in the shared index or publication warnings. */
+  indexNotes: Array<string>
 }
 
 /** Restore options. */

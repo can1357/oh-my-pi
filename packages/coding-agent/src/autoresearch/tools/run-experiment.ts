@@ -1,4 +1,3 @@
-import { runExperimentToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -6,7 +5,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
 import { formatBytes, procmgr } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
-import { executeBash } from "../../exec/bash-executor";
+import { executeBash, sessionShellEnv } from "../../exec/bash-executor";
 import type { ToolDefinition } from "../../extensibility/extensions";
 
 import {
@@ -15,7 +14,7 @@ import {
 	TailBuffer,
 	type TruncationResult,
 	truncateTail,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+} from "../../tools/streaming-output";
 
 import { parseWorkDirDirtyPaths } from "../git";
 import {
@@ -25,14 +24,14 @@ import {
 	tryGitPrefix,
 	tryGitStatus,
 } from "../helpers";
-import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
-import { formatElapsed } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
+import { formatNum } from "../tool-details";
+import { formatElapsed } from "../results-data";
 import { buildExperimentState } from "../state";
 import { quotePosixArgument } from "../../utils/shell-quote";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
-import type { ASIData, RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
-import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type { ASIData, RunDetails, RunExperimentProgressDetails } from "../tool-details";
+import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "../tool-details";
 
 const runExperimentSchema = type({
 	"timeout_seconds?": type("number").describe("timeout in seconds (default 600)"),
@@ -62,7 +61,6 @@ export function createRunExperimentTool(
 	options: AutoresearchToolFactoryOptions,
 ): ToolDefinition<typeof runExperimentSchema, RunDetails | RunExperimentProgressDetails> {
 	return {
-		...runExperimentToolRenderer,
 		name: "run_experiment",
 		label: "Run Experiment",
 		description:
@@ -133,6 +131,10 @@ export function createRunExperimentTool(
 				execution = await executeProcess({
 					command: await resolveHarnessExecLine(),
 					cwd: ctx.cwd,
+					env: sessionShellEnv({
+						id: ctx.sessionManager.getSessionId(),
+						file: ctx.sessionManager.getSessionFile(),
+					}),
 					logPath: benchmarkLogPath,
 					timeoutMs,
 					signal,
@@ -262,6 +264,8 @@ async function resolveHarnessExecLine(): Promise<string> {
 async function executeProcess(opts: {
 	command: string;
 	cwd: string;
+	/** Session identity for the command ({@link sessionShellEnv}). */
+	env: Record<string, string>;
 	logPath: string;
 	timeoutMs: number;
 	signal?: AbortSignal;
@@ -304,6 +308,7 @@ async function executeProcess(opts: {
 	try {
 		const result = await executeBash(opts.command, {
 			cwd: opts.cwd,
+			env: opts.env,
 			sessionKey: `autoresearch:${opts.cwd}`,
 			timeout: opts.timeoutMs > 0 ? opts.timeoutMs : 2_147_000_000,
 			signal: opts.signal,

@@ -15,13 +15,14 @@ import {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
-} from "@oh-my-pi/pi-tui/chat/messages";
+} from "./transcript/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	PREWALK_PLAN_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
 	DEFAULT_CUSTOM_MESSAGE_TYPE,
 	LIVE_DELEGATION_MESSAGE_TYPE,
 	type CustomMessageContent,
@@ -48,17 +49,18 @@ export {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
-} from "@oh-my-pi/pi-tui/chat/messages";
+} from "./transcript/messages";
 import { calculateContextTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
+import { readerIncludesThinking } from "@oh-my-pi/snapcompact";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
@@ -70,8 +72,8 @@ export {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
+import { formatOutputNotice } from "../tools/output-meta-format";
+import { titleTextFromSkillPrompt } from "./transcript/skill-title-input";
 
 /**
  * Logs provider-error turns so their actual cause is available outside the
@@ -85,6 +87,7 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 		errorMessage: msg.errorMessage,
 		errorStatus: msg.errorStatus,
 		errorId: msg.errorId,
+		requestId: msg.requestId,
 	});
 }
 
@@ -187,13 +190,19 @@ export function buildReplanTitleContext(messages: AgentMessage[]): string {
 }
 
 /**
- * Title text of a message the operator wrote: a typed prompt, or a `/skill:`
- * invocation as its chip (never the expanded skill body). `undefined` for
- * agent-attributed and non-user messages, which automatic titles never name.
+ * Title text of a message the operator wrote: a typed prompt, a writable-collab
+ * peer's prompt (a web client's first instruction included), or a `/skill:`
+ * invocation as its chip (never the expanded skill body). Images never count.
+ * `undefined` for agent-attributed, text-less, and non-user messages, which
+ * automatic titles never name.
  */
 export function operatorTitleText(message: AgentMessage): string | undefined {
-	if (message.role === "custom") return titleTextFromSkillPrompt(message);
-	if (message.role !== "user" || message.attribution !== "user") return undefined;
+	if (message.role === "custom") {
+		if (message.customType !== COLLAB_PROMPT_MESSAGE_TYPE) return titleTextFromSkillPrompt(message);
+	} else if (message.role !== "user") {
+		return undefined;
+	}
+	if (message.attribution !== "user") return undefined;
 	return textFromContent(message.content) || undefined;
 }
 
@@ -302,7 +311,7 @@ function thinkingFromContent(content: unknown): string {
 
 function titleConversationTurnFromMessage(message: AgentMessage): TitleConversationTurn | undefined {
 	if (message.role === "custom") {
-		const text = titleTextFromSkillPrompt(message);
+		const text = operatorTitleText(message);
 		if (!text) return undefined;
 		return { role: "user", text };
 	}
@@ -526,17 +535,6 @@ export function demoteInterruptedThinking(
 		strippedContent: content.slice(0, runStart),
 		blockCount,
 	};
-}
-
-/**
- * True when the assistant turn at `messages[index]` is immediately followed by
- * its hidden `interrupted-thinking` continuity message — the marker that a
- * trailing thinking run was demoted on user interrupt. The run stays on the
- * persisted/displayed assistant message; this flag tells the LLM path to drop it.
- */
-function followedByInterruptedThinking(messages: AgentMessage[], index: number): boolean {
-	const next = messages[index + 1];
-	return next !== undefined && next.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE;
 }
 
 /** Drop an incomplete trailing thinking run from an interrupted assistant in the LLM view. */
@@ -1105,8 +1103,8 @@ const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
 // the streaming tail (`context.messages[len-1] = partial → trailing`). Between
 // owner invalidations (prune/shake/strip bump `convertGeneration`) and for a
 // given array identity, only the last index is ever swapped and the array only
-// grows — interior prefix messages are immutable. That invariant lets two
-// shortcuts skip the O(N) re-walk:
+// grows — interior prefix messages are immutable. While the reader's policy is
+// unchanged, that invariant lets two shortcuts skip the O(N) re-walk:
 //   - exact-repeat: same array, same length, same generation, same tail identity
 //     → hand back the same outer array.
 //   - slice-on-growth: same array, same generation, length grew → copy the
@@ -1117,6 +1115,7 @@ const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
 // from a stale mid-stream fragment.
 interface ConvertArrayMemo {
 	generation: number;
+	includeInterruptedThinking: boolean;
 	length: number;
 	output: Message[];
 	tail: AgentMessage | undefined;
@@ -1266,6 +1265,8 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 	}
 }
 
+const NO_LLM_MESSAGES: readonly Message[] = [];
+
 /**
  * Converts `messages[index]` with its neighbor-sensitive state.
  * {@link convertToLlm} and {@link convertMessagesForContextView} both go
@@ -1276,10 +1277,20 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 function convertMessageAt(
 	messages: AgentMessage[],
 	index: number,
+	includeInterruptedThinking: boolean,
 	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
-): Message[] {
+): readonly Message[] {
 	const m = messages[index];
-	return convert(m, m.role === "assistant" && followedByInterruptedThinking(messages, index));
+	// Check the assistant's original neighbor even when the reader cannot see
+	// the quote: that marker still requires stripping the incomplete run.
+	if (m.role === "assistant") {
+		const next = messages[index + 1];
+		return convert(m, next?.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE);
+	}
+	if (!includeInterruptedThinking && m.role === "custom" && m.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) {
+		return NO_LLM_MESSAGES;
+	}
+	return convert(m, false);
 }
 
 /** A converted viewer message and its position in the source and converted histories. */
@@ -1303,11 +1314,12 @@ export interface ContextViewMessage {
  * disable its cache shortcuts, a cost every request would pay even when
  * `/context` is never opened.
  */
-export function convertMessagesForContextView(messages: AgentMessage[]): ContextViewMessage[] {
+export function convertMessagesForContextView(messages: AgentMessage[], model?: Model): ContextViewMessage[] {
 	const modelMessages = wrapSteeringForModel(messages);
+	const includeInterruptedThinking = model !== undefined && readerIncludesThinking(model);
 	const result: ContextViewMessage[] = [];
 	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
-		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
+		for (const message of convertMessageAt(modelMessages, sourceIndex, includeInterruptedThinking, convertOne)) {
 			const replay = toProviderReplayMessage(message);
 			if (replay) result.push({ message: replay, sourceIndex, convertedIndex: result.length });
 		}
@@ -1333,6 +1345,7 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
 
 /**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
+ * A saved interrupted-thinking quote replays only for a known, eligible reader.
  *
  * This is used by:
  * - Agent's transormToLlm option (for prompt calls and queued messages)
@@ -1349,17 +1362,21 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * {@link convertMessageAt}; it stays separate so the index mapping `/context`
  * needs adds no cost here.
  */
-export function convertToLlm(messages: AgentMessage[]): Message[] {
+export function convertToLlm(messages: AgentMessage[], model?: Model): Message[] {
 	const len = messages.length;
+	const includeInterruptedThinking = model !== undefined && readerIncludesThinking(model);
 	const memo = convertArrayCache.get(messages);
-	const sameGeneration = memo !== undefined && memo.generation === convertGeneration;
+	const reusable =
+		memo !== undefined &&
+		memo.generation === convertGeneration &&
+		memo.includeInterruptedThinking === includeInterruptedThinking;
 	const tail = len > 0 ? messages[len - 1] : undefined;
 
 	// Exact-repeat: same array, same length, same trailing identity → reuse the
 	// outer array. The tail-identity check rejects the streaming snapshot swap
 	// (partial → settled trailing keeps array identity/length but mints a fresh
 	// tail), so a settled tail never reads a stale mid-stream fragment.
-	if (sameGeneration && memo.length === len && tail === memo.tail) {
+	if (reusable && memo.length === len && tail === memo.tail) {
 		return memo.output;
 	}
 
@@ -1373,7 +1390,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let out: Message[];
 	let start: number;
 	if (
-		sameGeneration &&
+		reusable &&
 		len > memo.length &&
 		memo.length > 0 &&
 		messages[memo.length - 1] === memo.tail &&
@@ -1391,7 +1408,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let prefixOutputLen = 0;
 	for (let i = start; i < len; i++) {
 		if (i === len - 1) prefixOutputLen = out.length;
-		const fragment = convertMessageAt(messages, i, convertOneCached);
+		const fragment = convertMessageAt(messages, i, includeInterruptedThinking, convertOneCached);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;
@@ -1400,6 +1417,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	// so a prior caller holding the previous memo output never sees it grow.
 	convertArrayCache.set(messages, {
 		generation: convertGeneration,
+		includeInterruptedThinking,
 		length: len,
 		output: out,
 		tail,

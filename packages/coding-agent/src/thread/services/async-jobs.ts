@@ -202,10 +202,10 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 				threadId,
 				manager.onJobSettled(() => ignoreSettle(listener())),
 			),
-		onJobsChanged: (manager, listener) =>
+		onJobsChanged: (manager, listener, ids) =>
 			cleanups.track(
 				threadId,
-				manager.onJobsChanged(() => ignoreSettle(listener())),
+				manager.onJobsChanged(() => ignoreSettle(listener()), ids),
 			),
 		register: (manager, type, label, run, options) => {
 			const feed = options?.feed ? new JobFeedMirror(options.feed) : undefined;
@@ -227,6 +227,8 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		},
 		publishCompleted: (manager, type, label, result, options) =>
 			manager.publishCompleted(type, label, result, options),
+		publishFailed: (manager, type, label, errorText, options) =>
+			manager.publishFailed(type, label, errorText, options),
 		cancel: (manager, id, filter) => manager.cancel(id, filter),
 		getJob: (manager, id) => {
 			const job = manager.getJob(id);

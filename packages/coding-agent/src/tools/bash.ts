@@ -4,7 +4,7 @@ import {
 	formatWallTimeNotice,
 	formatExitCodeNotice,
 	WALL_TIME_NOTICE_MIN_MS,
-} from "@oh-my-pi/pi-tui/tools/bash";
+} from "./details/bash";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,12 +18,13 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { PipeStreams, type ShellCommands, shellBuiltins } from "@oh-my-pi/pi-natives";
+import { PipeStreams, repairHeredocContinuations, type ShellCommands, shellBuiltins } from "@oh-my-pi/pi-natives";
 import { $which, isEnoent, logger, prompt, spillUrl } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
 	compileNotifyPattern,
+	formatAsyncJobLabel,
 	type NotifyPattern,
 	OutputNotifier,
 	raceJobSettlement,
@@ -31,7 +32,8 @@ import {
 } from "../async";
 import { shellChangeSnapshots } from "../commit/selective/journal";
 import { type BoardEntry, registerOnBoard } from "../daemon/client";
-import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { applyDirenvPreflight, type BashResult, executeBash, sessionShellEnv } from "../exec/bash-executor";
+import { BASH_SESSION_ENV } from "../exec/session-processes";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { InternalUrlRouter } from "../internal-urls";
@@ -49,11 +51,12 @@ import type {
 	ClientBridgeTerminalHandle,
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
-import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "./streaming-output";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
 import type { ToolSession } from ".";
+import { owningSessionId } from "./session-id";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
@@ -65,9 +68,10 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
-import { isFindEnabled } from "./jfind";
-import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { O2CTL_COMMAND, runO2ctlCommand } from "../launch/o2ctl-command";
+import { findHintVisible } from "./jfind";
+import { formatArtifactErrorNotice } from "./output-meta-format";
+import { formatOutputNotice } from "./output-meta-format";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
@@ -82,7 +86,7 @@ import {
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 import type { ToolCommandDispatch } from "./tool-commands";
@@ -116,9 +120,9 @@ import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { sessionShellSpeech } from "../tts/shell-speech";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
-import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
+import type { SpotlightDetails } from "./details/spotlight";
 
-const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
+const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^- \t]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
 function hasBashApprovalShellControl(command: string): boolean {
 	let quote: "'" | '"' | undefined;
@@ -254,12 +258,29 @@ function normalizeBashApprovalPattern(value: string): string {
 	return value.trim().replace(/\s+/gu, " ");
 }
 
-function bashApprovalPatternToRegExp(pattern: string): RegExp {
-	const escaped = normalizeBashApprovalPattern(pattern)
-		.split("*")
-		.map(part => part.replace(/[\\^$+?.()|[\]{}]/gu, "\\$&"))
-		.join(".*");
-	return new RegExp(`^${escaped}$`, "u");
+/**
+ * Matches `text` against an anchored, case-sensitive `bash.patterns` glob whose only wildcard is `*`
+ * (any run of characters). Linear in `text` per literal: the first and last literals are checked as
+ * prefix and suffix, and each middle literal takes its leftmost occurrence after the previous one,
+ * which is enough to decide a `*`-only glob. A `.*` regex backtracks polynomially on non-matching
+ * input and blocks the event loop for minutes on multi-KB commands (#20591).
+ */
+function bashApprovalPatternMatches(pattern: string, text: string): boolean {
+	const parts = pattern.split("*");
+	const head = parts[0];
+	if (parts.length === 1) return text === head;
+	const tail = parts[parts.length - 1];
+	const end = text.length - tail.length;
+	if (end < head.length || !text.startsWith(head) || !text.endsWith(tail)) return false;
+	let pos = head.length;
+	for (let i = 1; i < parts.length - 1; i++) {
+		const part = parts[i];
+		if (part.length === 0) continue;
+		const index = text.indexOf(part, pos);
+		if (index === -1 || index + part.length > end) return false;
+		pos = index + part.length;
+	}
+	return true;
 }
 
 function normalizeBashPatternApproval(value: unknown): BashPatternApproval | undefined {
@@ -295,7 +316,7 @@ function getBashApprovalPatternRules(value: unknown): BashApprovalPatternRule[] 
 function commandMatchesBashApprovalPattern(command: string, pattern: string): boolean {
 	const normalizedCommand = normalizeBashApprovalPattern(command);
 	if (normalizedCommand.length === 0) return false;
-	return bashApprovalPatternToRegExp(pattern).test(normalizedCommand);
+	return bashApprovalPatternMatches(pattern, normalizedCommand);
 }
 
 // Names match exactly: a wildcard such as `CARGO_*` would also admit
@@ -329,11 +350,10 @@ function bashCommandSegments(command: string): string[] {
 // `deny`/`prompt` matching: the rule fires when its glob matches the whole
 // command or any single segment of a compound command.
 function commandSegmentMatchesBashApprovalPattern(command: string, pattern: string): boolean {
-	const regex = bashApprovalPatternToRegExp(pattern);
 	const normalizedCommand = normalizeBashApprovalPattern(command);
 	if (normalizedCommand.length === 0) return false;
-	if (regex.test(normalizedCommand)) return true;
-	return bashCommandSegments(command).some(segment => regex.test(segment));
+	if (bashApprovalPatternMatches(pattern, normalizedCommand)) return true;
+	return bashCommandSegments(command).some(segment => bashApprovalPatternMatches(pattern, segment));
 }
 
 // A rule "applies" to a command under approval-specific semantics: `allow` must
@@ -620,6 +640,17 @@ const FORK_STATE_LOST_NOTICE = "Ran in a copy of the busy session shell; changes
 const FORK_JOBS_NOTICE =
 	"Background jobs started here run in a copy of the busy session shell; later calls' jobs, wait and %N won't see them.";
 
+/**
+ * Names what a command changed in the session shell that the next call starts without: a `cd`
+ * (calls start in `sessionCwd`) and `set -e`.
+ */
+function formatShellResetNotice(result: BashResult | BashInteractiveResult, sessionCwd: string): string | undefined {
+	const reset: string[] = [];
+	if ("movedCwd" in result && result.movedCwd) reset.push(`cwd → ${sessionCwd}`);
+	if ("errexit" in result && result.errexit) reset.push("set -e off");
+	return reset.length > 0 ? `Reset before the next call: ${reset.join(", ")}.` : undefined;
+}
+
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
 }
@@ -818,6 +849,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return undefined;
 	}
 
+	/**
+	 * Whether this line is pure tool-command traffic: every simple command is a mounted tool
+	 * command (or a special command), joined only by `;`, `&&`, `||`, `|` and newlines, with no
+	 * redirection, expansion, substitution or assignment — see {@link isToolCommandLine}. Such a
+	 * line runs no program: it dispatches the same session tools a top-level call would, which is
+	 * why a same-name extension replacement hands it back to this tool (#18339). Every other line
+	 * stays the override's.
+	 */
+	servesToolCommandLine(command: string): boolean {
+		return isToolCommandLine(command, new Set(toolCommandNames(this.session)));
+	}
+
 	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision => {
 		const input = (args ?? {}) as Partial<BashToolInput>;
 		const rawCommand = input.command;
@@ -1002,7 +1045,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			hasAstEdit: isToolActive("ast_edit", cfgAstEditEnabled.get(this.session.settings)),
 			hasGrep: isToolActive("grep", cfgGrepEnabled.get(this.session.settings)),
 			hasGlob: isToolActive("glob", cfgGlobEnabled.get(this.session.settings)),
-			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
+			hasFind: findHintVisible(this.session),
 			hasRead: isToolActive("read", true),
 			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
 			// building a bare ToolSession lack the rebuild lifecycle, so fall back
@@ -1059,9 +1102,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	/**
-	 * Session tool commands for one embedded shell run, or undefined when the session mounts none.
-	 * The handler lives as long as the run: `signal` is the run's own, and every dispatch lands in
-	 * `recorder`, after which `onChange` re-emits the run's frame.
+	 * Session tool commands for one embedded shell run, plus `o2ctl` while services can launch;
+	 * undefined when there are none. The handler lives as long as the run: `signal` is the run's
+	 * own, and every tool dispatch lands in `recorder`, after which `onChange` re-emits the run's
+	 * frame.
 	 */
 	#shellCommands(
 		names: readonly string[],
@@ -1073,40 +1117,47 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			onChange?: () => void;
 		},
 	): ShellCommands | undefined {
-		if (names.length === 0) return undefined;
+		// A mounted tool of that name keeps it.
+		const o2ctl = this.#launchEnabled && !names.includes(O2CTL_COMMAND);
+		if (names.length === 0 && !o2ctl) return undefined;
 		const { recorder, onChange } = options;
+		const tools = createToolCommandHandler({
+			session: this.session,
+			toolCallId: options.toolCallId,
+			signal: options.signal,
+			context: options.context,
+			onDispatch: (dispatch, index) => {
+				recorder.finish(dispatch, index);
+				onChange?.();
+			},
+			onProgress: (dispatch, index) => {
+				recorder.progress(dispatch, index);
+				onChange?.();
+			},
+		});
 		return {
-			names: [...names],
-			handler: createToolCommandHandler({
-				session: this.session,
-				toolCallId: options.toolCallId,
-				signal: options.signal,
-				context: options.context,
-				onDispatch: (dispatch, index) => {
-					recorder.finish(dispatch, index);
-					onChange?.();
-				},
-				onProgress: (dispatch, index) => {
-					recorder.progress(dispatch, index);
-					onChange?.();
-				},
-			}),
+			names: o2ctl ? [...names, O2CTL_COMMAND] : [...names],
+			handler: request =>
+				o2ctl && request.name === O2CTL_COMMAND
+					? runO2ctlCommand(this.session, request, options.signal)
+					: tools(request),
 		};
 	}
 
 	/**
-	 * Session identity for a command, read when its tool call starts, so
-	 * `/fork`, `/new`, and `/resume` take effect on the next call while a call
-	 * already under way keeps the session it began in. `PI_TOOL_CALL_ID` is the
-	 * id this call runs under: the agent's call in the transcript, or the eval
-	 * tool bridge's own id for a call made from an eval cell. Always
-	 * set every key: an empty value replaces a stale one inherited from a parent
-	 * omp process, since an env overlay cannot unset.
+	 * Session identity for a command ({@link sessionShellEnv}), read when its
+	 * tool call starts, so `/fork`, `/new`, and `/resume` take effect on the next
+	 * call while a call already under way keeps the session it began in.
+	 * `PI_TOOL_CALL_ID` is the id this call runs under: the agent's call in the
+	 * transcript, or the eval tool bridge's own id for a call made from an eval
+	 * cell.
 	 */
 	#sessionEnv(toolCallId: string): Record<string, string> {
+		const sessionId = owningSessionId(this.session) ?? "";
 		return {
-			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
-			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
+			...sessionShellEnv({ id: sessionId, file: this.session.getSessionFile() }),
+			// Membership tag for processes the call leaves running (session-processes.ts).
+			[BASH_SESSION_ENV]: sessionId,
 			PI_TOOL_CALL_ID: toolCallId,
 		};
 	}
@@ -1298,6 +1349,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (notice) notices.push(notice);
 			}
 		}
+		const resetNotice = formatShellResetNotice(result, this.session.cwd);
+		if (resetNotice) notices.push(resetNotice);
 		const fork = "fork" in result ? result.fork : undefined;
 		if (fork && !fork.carried) notices.push(FORK_STATE_LOST_NOTICE);
 		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);
@@ -1513,7 +1566,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError("Background job manager unavailable for this session.");
 		}
 
-		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
+		const label = formatAsyncJobLabel(options.command);
 		// Holds the run's Shell only while it runs: a retained reference would
 		// keep a finished `:async:` Shell (and its background children) alive.
 		let pids: () => readonly number[] = NO_PIDS;
@@ -1902,6 +1955,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				const patched = await applyPatch.execute(toolCallId, { input: shellPatch }, signal, undefined, ctx);
 				return { content: patched.content, isError: patched.isError, details: {} };
 			}
+		}
+
+		const repaired = repairHeredocContinuations(command);
+		if (repaired !== null) {
+			pendingNotices.push(
+				"Ran without the `\\` after `<<EOF &&`: a line continuation there makes the next line a command and starts the heredoc body after it. End such lines with the operator alone.",
+			);
+			command = repaired;
 		}
 
 		if (cfgWorktreeClone.get(this.session.settings)) {

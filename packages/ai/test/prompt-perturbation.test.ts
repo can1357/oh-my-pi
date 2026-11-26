@@ -1,14 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import * as catalogPolicy from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import poolText from "../src/prompts/perturbation-pool.json.txt" with { type: "text" };
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import type { BunPlugin } from "bun";
 import { perturbContext, perturbPromptText, resetPromptPerturbation } from "../src/prompts/perturbation";
 import type { Context } from "../src/types";
 
-const pool: { entries: { source: string; variants: string[]; manual?: boolean }[] } = JSON.parse(poolText);
+const pool: { entries: { source: string; variants: string[]; manual?: boolean }[] } = JSON.parse(
+	readFileSync(new URL("../src/prompts/perturbation-pool.json.txt", import.meta.url), "utf8"),
+);
 
-const sample = pool.entries.find(entry => !entry.manual && entry.source.startsWith("`todo`"));
-if (!sample) throw new Error("pool lost the todo guidance line");
+const sample = pool.entries.find(entry => !entry.manual && /^[A-Z`]/.test(entry.source));
+if (!sample) throw new Error("pool has no generated sentence");
 
 const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 if (!model) throw new Error("bundled fixture model missing");
@@ -42,24 +47,31 @@ describe("per-install prompt perturbation", () => {
 		expect(second).toBe(first);
 	});
 
-	it("covers every static prose line of the coding-agent prompts", async () => {
-		const promptDir = new URL("../../coding-agent/src/prompts/", import.meta.url);
-		const pooled = new Set(pool.entries.map(entry => entry.source.trim()));
-		const missing: string[] = [];
-		for await (const relative of new Bun.Glob("**/*.md").scan({ cwd: promptDir.pathname })) {
-			const text = await Bun.file(new URL(relative, promptDir)).text();
-			let fenced = false;
-			for (const raw of text.split("\n")) {
-				if (raw.trimStart().startsWith("```")) {
-					fenced = !fenced;
-					continue;
-				}
-				const source = raw.trim();
-				if (fenced || source.length < 40 || source.includes("{{")) continue;
-				if (!pooled.has(source)) missing.push(`${relative}: ${source.slice(0, 60)}`);
-			}
+	it("rewrites a pooled sentence wherever it renders, keeping its punctuation and surroundings", () => {
+		const before = "  - Rendered value 42 here. ";
+		const after = "! Trailing sentence that no pool entry could have authored.";
+		const rendered = perturbPromptText(`${before}${sample.source}${after}`);
+		expect(rendered.startsWith(before)).toBe(true);
+		expect(rendered.endsWith(after)).toBe(true);
+		expect(sample.variants).toContain(rendered.slice(before.length, -after.length));
+	});
+
+	it("leaves a pooled sentence untouched where it is only part of a longer one", () => {
+		for (const text of [
+			`${sample.source}, which no pool entry could have authored.`,
+			`Long before that ${sample.source}.`,
+		]) {
+			expect(perturbPromptText(text)).toBe(text);
 		}
-		expect(missing).toEqual([]);
+	});
+
+	it("leaves a pooled sentence inside fenced code untouched", () => {
+		const fenced = `\`\`\`\n${sample.source}\n\`\`\``;
+		expect(perturbPromptText(fenced)).toBe(fenced);
+	});
+
+	it("swaps manual literals inside fenced code too", () => {
+		expect(perturbPromptText("```\n⁂ Runtime\n```")).not.toContain("⁂");
 	});
 
 	it("drops the system-prompt opener instead of paraphrasing it", async () => {
@@ -67,6 +79,50 @@ describe("per-install prompt perturbation", () => {
 		const prompt = await Bun.file(promptUrl).text();
 		expect(prompt.startsWith("You are omp's trusted coding assistant.\n\n")).toBe(true);
 		expect(perturbPromptText(prompt).startsWith("# Engineering\n")).toBe(true);
+	});
+
+	it("reads the pool beside an npm-style bundle run from another directory", async () => {
+		using dir = TempDir.createSync("@omp-perturbation-bundle-");
+		const probe = dir.join("probe.ts");
+		const perturbationModule = path.resolve(import.meta.dir, "../src/prompts/perturbation.ts");
+		await Bun.write(
+			probe,
+			`import { perturbPromptText } from ${JSON.stringify(perturbationModule)};\nconsole.log(JSON.stringify(perturbPromptText(${JSON.stringify(sample.source)})));\n`,
+		);
+		const stubs: Record<string, string> = {
+			"@oh-my-pi/pi-catalog/compat/catalog-policy": "export const resolveCatalogPolicy = () => ({});",
+			"@oh-my-pi/pi-utils": 'export const getInstallId = () => "bundle-probe";',
+		};
+		const stubPlugin: BunPlugin = {
+			name: "perturbation-probe-stubs",
+			setup(build) {
+				build.onResolve({ filter: /.*/ }, args =>
+					stubs[args.path] === undefined ? undefined : { path: args.path, namespace: "perturbation-probe-stub" },
+				);
+				build.onLoad({ filter: /.*/, namespace: "perturbation-probe-stub" }, args => ({
+					contents: stubs[args.path]!,
+					loader: "js",
+				}));
+			},
+		};
+		const bundle = await Bun.build({
+			entrypoints: [probe],
+			outdir: dir.join("dist"),
+			target: "bun",
+			plugins: [stubPlugin],
+		});
+		expect(bundle.success, bundle.logs.map(log => log.message).join("\n")).toBe(true);
+		const entry = bundle.outputs.find(output => output.kind === "entry-point");
+		if (!entry) throw new Error("perturbation probe emitted no entry point");
+		// The bundle's asset import is relative to the bundle; from another cwd only bundle-relative resolution finds it.
+		const child = Bun.spawn([process.execPath, entry.path], { cwd: dir.path(), stdout: "pipe", stderr: "pipe" });
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(sample.variants).toContain(JSON.parse(stdout));
 	});
 
 	it("leaves text that matches no pooled source untouched", () => {

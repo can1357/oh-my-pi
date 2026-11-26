@@ -253,7 +253,14 @@ async function spawnUrlTunnel(
 	const fd = fs.openSync(logPath, "w");
 	let proc: Bun.Subprocess;
 	try {
-		proc = Bun.spawn(argv, { env: { ...spawn.env }, stdin: "ignore", stdout: fd, stderr: fd, cwd: spawn.cwd });
+		proc = Bun.spawn(argv, {
+			env: { ...spawn.env },
+			stdin: "ignore",
+			stdout: fd,
+			stderr: fd,
+			cwd: spawn.cwd,
+			windowsHide: true,
+		});
 	} finally {
 		fs.closeSync(fd);
 	}
@@ -535,6 +542,7 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 					stdout: "ignore",
 					stderr: "ignore",
 					cwd: spawn.env.HOME ?? os.homedir(),
+					windowsHide: true,
 				},
 			);
 			const early = await Promise.race([

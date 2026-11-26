@@ -965,7 +965,37 @@ export class TtsrCoordinator {
 				this.#abortPending = false;
 				this.#perToolInjections.clear();
 				if (this.#manager?.getSettings().contextMode === "discard") {
-					this.#host.agent.replaceMessages(this.#host.agent.state.messages.slice(0, targetAssistantIndex));
+					// Drop only the interrupted turn: the assistant, its tool results (an orphaned result is a
+					// provider 400), the hook context the loop appends right after them, and the empty aborted
+					// assistant the unwinding run may append. Messages admitted meanwhile (queued follow-ups,
+					// notices) belong to no discarded turn (#20052). Any empty aborted assistant qualifies: it
+					// carries nothing to lose.
+					const messages = this.#host.agent.state.messages;
+					const target = messages[targetAssistantIndex];
+					const toolCallIds = new Set<string>();
+					if (target.role === "assistant") {
+						for (const block of target.content) if (block.type === "toolCall") toolCallIds.add(block.id);
+					}
+					let followsDroppedResult = false;
+					this.#host.agent.replaceMessages(
+						messages.filter((message, index) => {
+							if (index === targetAssistantIndex) return false;
+							if (message.role === "toolResult") {
+								followsDroppedResult = toolCallIds.has(message.toolCallId);
+								return !followsDroppedResult;
+							}
+							const hookContext =
+								followsDroppedResult && message.role === "developer" && message.attribution === "agent";
+							followsDroppedResult = false;
+							if (hookContext) return false;
+							return !(
+								index > targetAssistantIndex &&
+								message.role === "assistant" &&
+								message.stopReason === "aborted" &&
+								message.content.length === 0
+							);
+						}),
+					);
 				}
 				const injection = this.#getInjectionContent(ttsrInterruptTemplate);
 				if (injection) {

@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { FileType, type GlobMatch, listWorkspace } from "@oh-my-pi/pi-natives";
-import { sanitizeDisplayWarning, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { sanitizeDisplayWarning, TRUNCATE_LENGTHS } from "./utils/render-utils";
+import { truncateToWidth } from "./utils/text-width";
 import { formatAge, formatBytes } from "@oh-my-pi/pi-utils";
 
 /** Defaults for the workspace tree shown in the system prompt. */

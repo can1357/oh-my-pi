@@ -10,7 +10,7 @@
 
 import * as path from "node:path";
 import type { Context, ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
+import { errorMessage, getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
 import { daemonClient } from "../daemon/client";
@@ -131,10 +131,6 @@ async function uploadBlob(
 		);
 	}
 	return client.call<EnsureBlobResponse>(BLOB_BROKER_KIND, "blob", { key, mimeType, upload }, { unit });
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 /** Open (find-or-start) the project's `blob` unit for `config`, with a lease on this client's connection. */

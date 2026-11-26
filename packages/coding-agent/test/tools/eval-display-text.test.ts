@@ -5,8 +5,8 @@ import type { EvalDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/types";
 import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { splitEvalOutput } from "@oh-my-pi/pi-tui/tools/eval";
-import { OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { splitEvalOutput } from "@oh-my-pi/pi-coding-agent/tools/details/eval";
+import { OutputSink } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 
 function makeSession(): ToolSession {
 	return {

@@ -3,7 +3,7 @@ import * as path from "node:path";
 
 import { type } from "@oh-my-pi/omptype";
 import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import type { Cookie, CookieParam, Page } from "puppeteer-core";
 import { resolveToCwd } from "../path-utils";
 import { throwIfAborted } from "../tool-errors";
