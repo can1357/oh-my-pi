@@ -14,8 +14,6 @@
 ### Fixed
 
 - Fixed the native addon load error printing a `curl` command for a `.node` file that no release publishes, which returned 404; it now names the release page ([#10126](https://github.com/can1357/oh-my-pi/issues/10126), [#19951](https://github.com/can1357/oh-my-pi/pull/19951) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed a timed-out or cancelled shell command, or a terminated PTY run, leaving behind descendants in a process group or session of their own (a debugger's stopped inferior, a `setsid` daemon): the termination now snapshots the command's whole process family before the first signal (parent links plus every group and session a member leads), sends TERM to the members outside the command's own group, and KILLs the family after the grace, continuing stopped members.
-- Fixed timed-out or aborted `glob`, `grep`, `fuzzyFind` and `astGrep` calls continuing to walk the tree in the background when several ran at once, pinning CPUs and stalling every later filesystem call in the process.
 - Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
 - Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
 - Preserved source-code indentation and linked content cards in URL reads.
