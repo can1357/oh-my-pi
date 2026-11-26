@@ -59,6 +59,8 @@ const kAccessor = Symbol("jsx.accessor");
 
 interface Source {
 	observers: Computation<unknown>[] | null;
+	/** Scratch mark: the run that last tracked it, or the resubscribe pass that last visited it. */
+	stamp: number;
 	/** Bring the value up to date (computeds); no-op for signals. */
 	refresh(): void;
 }
@@ -103,12 +105,18 @@ let currentOwner: Owner | null = null;
 let currentObserver: Computation<unknown> | null = null;
 /** Sources the running computation read this run, in first-read order. */
 let currentSources: Source[] | null = null;
+/** Source of every stamp: run ids and resubscribe marks never repeat. */
+let stampClock = 0;
+/** Id of the running computation's run; a source stamped with it is already in `currentSources`. */
+let currentRun = 0;
 let batchDepth = 0;
 let pendingEffects: Computation<unknown>[] = [];
 
 function track(source: Source): void {
-	if (currentSources === null) return;
-	if (!currentSources.includes(source)) currentSources.push(source);
+	if (currentSources === null || source.stamp === currentRun) return;
+	// A nested run may restamp a source this run already read; the duplicate push is swept in `#resubscribe`.
+	source.stamp = currentRun;
+	currentSources.push(source);
 }
 
 function markStale(node: Computation<unknown>, state: State): void {
@@ -148,6 +156,7 @@ function flush(): void {
 
 class SignalNode<T> implements Source {
 	observers: Computation<unknown>[] | null = null;
+	stamp = 0;
 	value: T;
 	readonly equals: Equals<T> | false;
 
@@ -173,6 +182,7 @@ class SignalNode<T> implements Source {
 class Computation<T> extends Owner implements Source {
 	observers: Computation<unknown>[] | null = null;
 	sources: Source[] | null = null;
+	stamp = 0;
 	state: State = DIRTY;
 	value: T | undefined = undefined;
 	readonly isEffect: boolean;
@@ -220,10 +230,12 @@ class Computation<T> extends Owner implements Source {
 		const prevOwner = currentOwner;
 		const prevObserver = currentObserver;
 		const prevSources = currentSources;
+		const prevRun = currentRun;
 		const sources: Source[] = [];
 		currentOwner = this;
 		currentObserver = this as Computation<unknown>;
 		currentSources = sources;
+		currentRun = ++stampClock;
 		let next: T;
 		try {
 			if (this.#tracksEpoch) this.epoch?.();
@@ -232,6 +244,7 @@ class Computation<T> extends Owner implements Source {
 			currentOwner = prevOwner;
 			currentObserver = prevObserver;
 			currentSources = prevSources;
+			currentRun = prevRun;
 			this.#resubscribe(sources);
 		}
 		const changed = !this.#settled || this.#equals === false || !this.#equals(this.value as T, next);
@@ -243,20 +256,34 @@ class Computation<T> extends Owner implements Source {
 		}
 	}
 
+	/**
+	 * Subscribe to the sources of the run that just ended and drop the ones it no longer read, in
+	 * one pass over each list: previous sources are marked, then `next` is walked (deduplicated in
+	 * place, first read kept, so the CHECK walk keeps read order), then unmarked previous ones leave.
+	 */
 	#resubscribe(next: Source[]): void {
+		const self = this as Computation<unknown>;
 		const previous = this.sources;
+		const kept = ++stampClock;
+		if (previous) for (const source of previous) source.stamp = kept;
+		const seen = ++stampClock;
+		let length = 0;
+		for (const source of next) {
+			const stamp = source.stamp;
+			if (stamp === seen) continue;
+			if (stamp !== kept) (source.observers ??= []).push(self);
+			source.stamp = seen;
+			next[length++] = source;
+		}
+		next.length = length;
 		if (previous) {
 			for (const source of previous) {
-				if (next.includes(source)) continue;
+				if (source.stamp === seen) continue;
 				const list = source.observers;
 				if (!list) continue;
-				const index = list.indexOf(this as Computation<unknown>);
+				const index = list.indexOf(self);
 				if (index !== -1) list.splice(index, 1);
 			}
-		}
-		for (const source of next) {
-			if (previous?.includes(source)) continue;
-			(source.observers ??= []).push(this as Computation<unknown>);
 		}
 		this.sources = next;
 	}
