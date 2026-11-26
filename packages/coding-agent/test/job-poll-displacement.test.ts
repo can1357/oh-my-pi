@@ -20,6 +20,7 @@ import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settin
 import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { displaceableBy } from "@oh-my-pi/pi-coding-agent/modes/utils/displaceable";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { isSettled } from "@oh-my-pi/pi-tui";
 import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
@@ -424,6 +425,25 @@ describe("wait and todo displacement", () => {
 		try {
 			// Displaced while still on screen: gone live, and gone after the rebuild.
 			await run(fixture, "todo-0", "todo", { op: "view" }, todoResult(["draft"]));
+			// Streamed before its id (the provider fills it in later): the card keeps the placeholder
+			// id it was created with, while the call completes, and persists, as `todo-1`.
+			const todoCall = (id: string) => assistantCalls([{ id, name: "todo", arguments: { op: "view" } }]);
+			await fixture.controller.handleEvent({ type: "message_start", message: assistantCalls([]) });
+			await fixture.controller.handleEvent({
+				type: "message_update",
+				message: todoCall(""),
+				assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, partial: todoCall("") },
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
+			await fixture.controller.handleEvent({
+				type: "message_update",
+				message: todoCall("todo-1"),
+				assistantMessageEvent: {
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: "{}",
+					partial: todoCall("todo-1"),
+				},
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
 			await run(fixture, "todo-1", "todo", { op: "view" }, todoResult(["plan", "read"]));
 			await runOutputs(fixture, 8);
 			term.render();

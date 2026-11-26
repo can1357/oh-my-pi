@@ -350,11 +350,12 @@ export class EventController {
 	// one persistent poll instead of a stack of "waiting on N jobs" frames —
 	// and sealed in place the moment anything else lands below it.
 	#displaceablePollComponent: PendingTool | undefined = undefined;
-	// Most recent successful `todo` snapshot in the active turn. Its block settles like any final
-	// card: a live one would hold every later block out of terminal scrollback. A later `todo`
-	// update removes it while none of its rows reached scrollback, else seals it in place; the
-	// turn boundary seals the final snapshot.
-	#displaceableTodoComponent: PendingTool | undefined = undefined;
+	// Most recent successful `todo` snapshot in the active turn, with the call id it completed
+	// under (a card streamed before its id keeps the placeholder it was created with). Its block
+	// settles like any final card: a live one would hold every later block out of terminal
+	// scrollback. A later `todo` update removes it while none of its rows reached scrollback, else
+	// seals it in place; the turn boundary seals the final snapshot.
+	#displaceableTodo: { readonly tool: PendingTool; readonly id: string } | undefined = undefined;
 	// Call ids of `todo` snapshots a later update found in terminal scrollback and kept there: a
 	// transcript rebuild keeps them too instead of collapsing to the newest snapshot.
 	readonly #todoSnapshotsInHistory = new Set<string>();
@@ -1243,7 +1244,7 @@ export class EventController {
 		this.#ircExpiryTimers.clear();
 		this.#liveIrcCards.clear();
 		this.#displaceablePollComponent = undefined;
-		this.#displaceableTodoComponent = undefined;
+		this.#displaceableTodo = undefined;
 		this.#lastTtsrNotification = undefined;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
@@ -1618,8 +1619,8 @@ export class EventController {
 
 	/** The turn is over: the tracked `todo` snapshot is final. */
 	#resolveDisplaceableTodo(): void {
-		this.#displaceableTodoComponent?.seal();
-		this.#displaceableTodoComponent = undefined;
+		this.#displaceableTodo?.tool.seal();
+		this.#displaceableTodo = undefined;
 	}
 
 	/**
@@ -1635,11 +1636,10 @@ export class EventController {
 	takeDisplaceableComponents(): PendingTool[] {
 		const components: PendingTool[] = [];
 		if (this.#displaceablePollComponent) components.push(this.#displaceablePollComponent);
-		if (this.#displaceableTodoComponent && this.#displaceableTodoComponent !== this.#displaceablePollComponent) {
-			components.push(this.#displaceableTodoComponent);
-		}
+		const todo = this.#displaceableTodo?.tool;
+		if (todo && todo !== this.#displaceablePollComponent) components.push(todo);
 		this.#displaceablePollComponent = undefined;
-		this.#displaceableTodoComponent = undefined;
+		this.#displaceableTodo = undefined;
 		return components;
 	}
 
@@ -1652,7 +1652,8 @@ export class EventController {
 	 * Drops the candidate when it is no longer a displaceable todo.
 	 */
 	inheritDisplaceableTodo(tool: PendingTool | null | undefined): void {
-		this.#displaceableTodoComponent = tool && displaceableBy(tool) === "todo" ? tool : undefined;
+		// A rebuilt card is created under its persisted call id.
+		this.#displaceableTodo = tool?.call && displaceableBy(tool) === "todo" ? { tool, id: tool.call.id } : undefined;
 	}
 
 	/** Whether a later update kept the `todo` snapshot of `toolCallId` as history (its rows were in scrollback). */
@@ -2272,22 +2273,24 @@ export class EventController {
 		if (event.toolName === "read") this.#clearReadToolCall(event.toolCallId);
 		// Mirrors the displacement bookkeeping in `#handleToolExecutionEnd`:
 		// a successful snapshot supersedes the previous live panel.
-		if (event.toolName === "todo" && displaceableBy(component) === "todo") this.#adoptTodoSnapshot(component);
+		if (event.toolName === "todo" && displaceableBy(component) === "todo") {
+			this.#adoptTodoSnapshot(component, event.toolCallId);
+		}
 	}
 
 	/**
-	 * A successful `todo` snapshot replaces the previous one. Rows of it already in scrollback
-	 * stay as history: removing them would rewrite all of it.
+	 * A successful `todo` snapshot (completed as `toolCallId`) replaces the previous one. Rows of
+	 * it already in scrollback stay as history: removing them would rewrite all of it.
 	 */
-	#adoptTodoSnapshot(tool: PendingTool): void {
-		const previous = this.#displaceableTodoComponent;
-		if (previous && previous !== tool && displaceableBy(previous) !== undefined) {
-			previous.seal();
+	#adoptTodoSnapshot(tool: PendingTool, toolCallId: string): void {
+		const previous = this.#displaceableTodo;
+		if (previous && previous.tool !== tool && displaceableBy(previous.tool) !== undefined) {
+			previous.tool.seal();
 			const transcript = this.ctx.shell.transcript;
-			if (!transcript.retired(previous.block)) transcript.remove(previous.block);
-			else if (previous.call) this.#todoSnapshotsInHistory.add(previous.call.id);
+			if (!transcript.retired(previous.tool.block)) transcript.remove(previous.tool.block);
+			else this.#todoSnapshotsInHistory.add(previous.id);
 		}
-		this.#displaceableTodoComponent = tool;
+		this.#displaceableTodo = { tool, id: toolCallId };
 	}
 
 	#applyToolCompletion(
@@ -2385,7 +2388,7 @@ export class EventController {
 					// Successful todo update supersedes the prior live snapshot. A failed
 					// follow-up never reaches this branch (errored results are not
 					// displaceable), so the last-good panel stays on screen.
-					this.#adoptTodoSnapshot(component);
+					this.#adoptTodoSnapshot(component, event.toolCallId);
 				}
 			} else if (!this.#toolTimelineComponents.has(event.toolCallId)) {
 				// No component yet: the async streamed-block handler lost the race
