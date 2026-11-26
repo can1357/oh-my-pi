@@ -1574,11 +1574,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	/**
 	 * Hard-deletes disabled rows for a provider when an active replacement exists.
 	 * OAuth credentials match by identity key; API keys match by provider and type.
+	 * An OAuth row with no identity key (e.g. `mcp_oauth:*`, where the provider id
+	 * is the identity) is superseded by any identity-less active OAuth row, since
+	 * re-logging into it can only ever produce another identity-less row.
 	 * Disabled rows without an active same-type replacement remain recoverable.
 	 */
 	#purgeSupersededDisabledRows(provider: string, activeRows: StoredAuthCredential[]): void {
+		if (activeRows.length === 0) return;
 		try {
 			let hasActiveApiKey = false;
+			let hasActiveAnonymousOAuth = false;
 			const activeIdentityKeys = new Set<string>();
 			const activeOAuthCredentials: AuthCredential[] = [];
 			for (const row of activeRows) {
@@ -1589,9 +1594,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				activeOAuthCredentials.push(row.credential);
 				const identityKey = resolveCredentialIdentityKey(provider, row.credential);
 				if (identityKey) activeIdentityKeys.add(identityKey);
+				else hasActiveAnonymousOAuth = true;
 			}
-			if (!hasActiveApiKey && activeIdentityKeys.size === 0) return;
-
 			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
 			for (const row of disabledRows) {
 				if (hasActiveApiKey && row.credential_type === "api_key") {
@@ -1600,6 +1604,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				}
 				const identityKey = resolveRowCredentialIdentityKey(provider, row);
 				if (identityKey && activeIdentityKeys.has(identityKey)) {
+					this.#hardDeleteStmt.run(row.id);
+					continue;
+				}
+				if (identityKey === null && hasActiveAnonymousOAuth && row.credential_type !== "api_key") {
 					this.#hardDeleteStmt.run(row.id);
 					continue;
 				}

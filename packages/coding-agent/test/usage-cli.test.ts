@@ -14,6 +14,7 @@ import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
 import {
+	actionableDisables,
 	buildRedactionMap,
 	annotateUsagePolicy,
 	collectHistoryIdentityStrings,
@@ -1163,7 +1164,9 @@ describe("formatUsageBreakdown", () => {
 				cause: "oauth refresh failed: whatever",
 			},
 		];
-		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, now, undefined, disabled));
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, accounts, now, undefined, actionableDisables(disabled, accounts)),
+		);
 		// Auto-disabled OAuth row: identity, age, shortened upstream cause, and the fix.
 		expect(text).toContain("✗ dead@example.test — disabled 4h ago: Refresh token expired (re-login to restore)");
 		// User-driven replacement and api_key tombstones are lifecycle noise, not lost capacity.
@@ -1195,9 +1198,30 @@ describe("formatUsageBreakdown", () => {
 				cause: "oauth refresh failed: Refresh token expired",
 			},
 		];
-		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, now, undefined, disabled));
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([], activeAccounts, now, undefined, actionableDisables(disabled, activeAccounts)),
+		);
 		expect(text).not.toContain("active@example.test — disabled");
 		expect(text).toContain("✗ truly-dead@example.test — disabled");
+	});
+
+	it("suppresses an identity-less MCP OAuth tombstone once the server has an active login", () => {
+		const provider = "mcp_oauth:profile:default:https://mcp.cloudflare.com/mcp";
+		const disabled = [
+			{
+				id: 10,
+				provider,
+				type: "oauth" as const,
+				cause: 'oauth refresh failed: MCP OAuth refresh failed: 400 {"error":"invalid_grant","error_description":"Grant not found"}',
+			},
+		];
+		// The MCP provider has no usage endpoint, so its active row is not a
+		// reportable account; only the full stored set can restore the tombstone.
+		expect(actionableDisables(disabled, [{ provider, type: "oauth" }])).toEqual([]);
+		// An API key for the provider is not an OAuth re-login.
+		expect(actionableDisables(disabled, [{ provider, type: "api_key" }])).toEqual(disabled);
+		// An identified active account cannot vouch for an anonymous tombstone.
+		expect(actionableDisables(disabled, [{ provider, type: "oauth", email: "a@example.test" }])).toEqual(disabled);
 	});
 
 	it("renders a tombstone-only provider section even when no active credential remains", () => {
