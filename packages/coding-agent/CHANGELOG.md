@@ -4,14 +4,6 @@
 
 ### Breaking Changes
 
-- Removed `errorMessage` from `@oh-my-pi/pi-coding-agent/disasm/protocol`, `slash-commands/helpers/parse` and `subprocess/worker-runtime`; import it from `@oh-my-pi/pi-utils/type-guards` ([#20479](https://github.com/can1357/oh-my-pi/pull/20479) by [@H4vC](https://github.com/H4vC))
-- Removed `flattenLine` from `@oh-my-pi/pi-coding-agent/utils/render-utils`; import it from `@oh-my-pi/pi-tui/text/sanitize` ([#20484](https://github.com/can1357/oh-my-pi/pull/20484) by [@H4vC](https://github.com/H4vC))
-- Moved `fuzzyHits` to `@oh-my-pi/pi-coding-agent/utils/fuzzy` (was exported from `modes/view-model/overlays/model-browser` and `ui/overlays/panels/extension-list-model`), and removed `stripInlineMarkdown` from `ui/overlays/panels/plan-sections`; import it from `plan-mode/plan-toc` ([#20485](https://github.com/can1357/oh-my-pi/pull/20485) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed skill previews ending in a broken character when the 100-unit cut fell inside an astral CJK or emoji character ([#17070](https://github.com/can1357/oh-my-pi/issues/17070), [#20379](https://github.com/can1357/oh-my-pi/pull/20379) by [@JamieJ5926](https://github.com/JamieJ5926))
-- Fixed files and directories whose name starts with `..` being treated as outside their parent: a working directory under such a folder now counts as part of its checkout, and scoped settings, plugin roots and folder restrictions apply to it ([#20482](https://github.com/can1357/oh-my-pi/pull/20482) by [@H4vC](https://github.com/H4vC))
 - `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
 
 ### Added
@@ -30,6 +22,7 @@
 
 ### Fixed
 
+- Fixed skill previews ending in a broken character when the 100-unit cut fell inside an astral CJK or emoji character ([#17070](https://github.com/can1357/oh-my-pi/issues/17070), [#20379](https://github.com/can1357/oh-my-pi/pull/20379) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Rebuilding the transcript now removes replaced blocks in one update instead of updating the view for each block ([#20658](https://github.com/can1357/oh-my-pi/pull/20658) by [@H4vC](https://github.com/H4vC))
 - Single-file reads and read preview titles now highlight the path like grouped reads (dim directory, colored file name, muted line range) instead of painting it flat in the accent color ([#20615](https://github.com/can1357/oh-my-pi/pull/20615) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Large pictures in assistant replies (`<img>` embeds, page stills, SVG fences) now fit within 80% of the terminal's height instead of drawing at full size past the screen ([#20620](https://github.com/can1357/oh-my-pi/pull/20620) by [@JustasMasiulis](https://github.com/JustasMasiulis))
