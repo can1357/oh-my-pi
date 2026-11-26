@@ -1,6 +1,6 @@
 /** Dependency tracking: what a computation reruns for, and what it stops rerunning for. */
 import { describe, expect, it } from "bun:test";
-import { batch, computed, createRoot, effect, type Signal, signal } from "@oh-my-pi/pi-tui";
+import { batch, computed, createRoot, effect, onCleanup, type Signal, signal } from "@oh-my-pi/pi-tui";
 
 describe("reactive tracking", () => {
 	it("runs a diamond's effect once per write, with both sides updated", () => {
@@ -167,6 +167,112 @@ describe("reactive tracking", () => {
 			expect(guarded()).toBe(11);
 			b.set(20);
 			expect(guarded()).toBe(21);
+			dispose();
+		});
+	});
+
+	it("never reruns a computed that disposed its own owner while running", () => {
+		const s = signal(0);
+		let runs = 0;
+		const read = createRoot(disposeOwner =>
+			computed(() => {
+				runs++;
+				if (s() === 1) disposeOwner();
+				// Constant: the effect reading it stays subscribed across the run that disposed it.
+				return "same";
+			}),
+		);
+		createRoot(dispose => {
+			effect(() => {
+				read();
+			});
+			s.set(1);
+			expect(runs).toBe(2);
+			s.set(2);
+			s.set(3);
+			// Disposed: a later write to what it read must not run it again.
+			expect(runs).toBe(2);
+			dispose();
+		});
+	});
+
+	it("never runs a computed disposed before a pending recompute is pulled", () => {
+		createRoot(dispose => {
+			const s = signal(0);
+			let runs = 0;
+			let disposeOwner = () => {};
+			effect(() => {
+				if (s() === 1) disposeOwner();
+			});
+			const read = createRoot(disposeRoot => {
+				disposeOwner = disposeRoot;
+				return computed(() => {
+					runs++;
+					return s() * 2;
+				});
+			});
+			const seen: number[] = [];
+			effect(() => {
+				seen.push(read());
+			});
+			s.set(1);
+			// Disposed while dirty: the effect still holding it must not pull a recompute.
+			expect(runs).toBe(1);
+			expect(seen).toEqual([0]);
+			dispose();
+		});
+	});
+
+	it("tears down what a run created after disposing its own owner", () => {
+		const s = signal(0);
+		let cleanups = 0;
+		let innerRuns = 0;
+		const read = createRoot(disposeOwner =>
+			computed(() => {
+				if (s() === 1) {
+					disposeOwner();
+					onCleanup(() => cleanups++);
+					effect(() => {
+						s();
+						innerRuns++;
+					});
+				}
+				return "same";
+			}),
+		);
+		createRoot(dispose => {
+			effect(() => {
+				read();
+			});
+			s.set(1);
+			expect(cleanups).toBe(1);
+			const settled = innerRuns;
+			s.set(2);
+			s.set(3);
+			expect(innerRuns).toBe(settled);
+			dispose();
+		});
+	});
+
+	it("reruns effects in the order they subscribed, one that left and came back last", () => {
+		createRoot(dispose => {
+			const s = signal(0);
+			const bReads = signal(true);
+			const order: string[] = [];
+			for (const name of ["a", "b", "c"]) {
+				effect(() => {
+					if (name !== "b" || bReads()) s();
+					order.push(name);
+				});
+			}
+			order.length = 0;
+			s.set(1);
+			expect(order).toEqual(["a", "b", "c"]);
+			bReads.set(false);
+			bReads.set(true);
+			order.length = 0;
+			s.set(2);
+			expect(order).toEqual(["a", "c", "b"]);
 			dispose();
 		});
 	});
