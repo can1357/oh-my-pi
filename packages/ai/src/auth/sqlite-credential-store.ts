@@ -1513,6 +1513,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		const result = replace(provider, credentials);
 		this.#purgeSupersededDisabledRows(provider, result);
+		this.#purgeAnonymousOAuthTombstones(provider, result);
 		return result;
 	}
 
@@ -1617,6 +1618,29 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					matchesReplacementCredential(provider, disabledCredential, identityKey, active),
 				);
 				if (superseded) this.#hardDeleteStmt.run(row.id);
+			}
+		} catch {
+			// Best-effort cleanup; don't let it break the main operation
+		}
+	}
+
+	/**
+	 * Hard-deletes identity-less disabled OAuth rows once a full replacement stored an
+	 * identity-less OAuth credential (e.g. an `mcp_oauth:*` re-login, where the provider
+	 * id is the only identity). {@link replaceAuthCredentials} declares the provider's
+	 * complete credential set, so such a row is superseded just as an unmatched active
+	 * row is. Additive writes (upsert, refresh) never call this: a sibling identity-less
+	 * login there, such as a second Devin browser login, is not a replacement.
+	 */
+	#purgeAnonymousOAuthTombstones(provider: string, stored: StoredAuthCredential[]): void {
+		const storedAnonymous = stored.some(
+			row => row.credential.type === "oauth" && resolveCredentialIdentityKey(provider, row.credential) === null,
+		);
+		if (!storedAnonymous) return;
+		try {
+			for (const row of this.#listDisabledByProviderStmt.all(provider) as AuthRow[]) {
+				if (row.credential_type === "api_key") continue;
+				if (resolveRowCredentialIdentityKey(provider, row) === null) this.#hardDeleteStmt.run(row.id);
 			}
 		} catch {
 			// Best-effort cleanup; don't let it break the main operation
