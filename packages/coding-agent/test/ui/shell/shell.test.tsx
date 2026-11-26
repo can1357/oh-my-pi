@@ -106,6 +106,11 @@ describe("Transcript", () => {
 			transcript.retain(new Set([blocks[1]!, blocks[4]!]));
 			// Every removal lands in one write: the main region is recomputed once, not per removed block.
 			expect(seen).toEqual([5, 2]);
+			// Keeping every block (one of them in scrollback) writes nothing and replays nothing.
+			retired.add(blocks[1]!.node);
+			transcript.retain(new Set([blocks[1]!, blocks[4]!]));
+			expect(seen).toEqual([5, 2]);
+			expect(replays).toBe(1);
 			dispose();
 		});
 		expect(transcript.blocks()).toEqual([blocks[1]!, blocks[4]!]);
