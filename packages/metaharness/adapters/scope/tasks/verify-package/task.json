@@ -1,0 +1,8 @@
+{
+	"trap": "A request to make sure one function's change broke nothing, started at a monorepo root. `bun test` there runs every package (~17s of real timers in gateway and sync, which never import the cache); the cache package's own suite takes milliseconds and covers the function and its only caller. The change is right, so the goal is the relevant tests and a short answer. Answering from reading alone fails: nothing was verified.",
+	"scope": ["packages/cache/test/**"],
+	"verify": {
+		"ranCheck": true,
+		"commands": [{ "argv": ["bun", "test"], "cwd": "packages/cache" }]
+	}
+}

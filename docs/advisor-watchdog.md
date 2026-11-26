@@ -108,6 +108,8 @@ Slash commands:
 | `/advisor dump raw`  | Copy/return the full dump, including system prompt, tools, thinking, and calls.                                                       |
 | `/advisor configure` | Open the interactive TUI editor for project- or user-level `WATCHDOG.yml`. Non-TUI command hosts report that the editor is TUI-only.  |
 
+To pick up changes made outside the editor, run `/advisor off` then `/advisor on`. Enabling reloads the `WATCHDOG.yml` roster and its imported instruction files from disk.
+
 If the subsystem is enabled but no legacy/default or roster model resolves, status reports the configured advisors as inactive/`no_model`.
 
 Entries left at `no_model` during startup are retried after background model discovery settles, so a model that arrives late in the catalog can start without a manual toggle.

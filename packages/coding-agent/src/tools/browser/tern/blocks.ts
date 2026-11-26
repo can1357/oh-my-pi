@@ -3,7 +3,7 @@
  * `target` picks the one an open adopts.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import type { TernSocketClient } from "./wire";
 
 /**

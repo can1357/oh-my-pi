@@ -5,19 +5,25 @@ import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as modelHubModule from "@oh-my-pi/pi-tui/overlays/model-hub";
-import * as modelPickerModule from "@oh-my-pi/pi-tui/overlays/model-picker";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
+import * as modelHubModule from "../../../src/ui/overlays/pickers/model-hub";
+import type { ModelHubState } from "../../../src/ui/overlays/pickers/model-hub-state";
+import * as modelPickerModule from "../../../src/ui/overlays/pickers/model-picker";
+import { Overlays } from "../../../src/ui/shell/overlays";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../../helpers/settings-test-state";
 
 const model = (id: string) => getBundledModel("anthropic", id) as Model;
@@ -49,53 +55,66 @@ describe("SelectorController model selector writes", () => {
 		tempDir.removeSync();
 	});
 
-	function start(settings: Settings, initial: Model): { controller: SelectorController; showError: () => unknown } {
+	function start(
+		settings: Settings,
+		initial: Model,
+		scope?: Pick<AgentSessionConfig, "scopedModels" | "scopedModelsFromSettings">,
+	): { controller: SelectorController; showError: () => unknown } {
 		const live = new AgentSession({
 			agent: new Agent({ initialState: { model: initial, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
 			obfuscator: new SecretObfuscator([]),
+			...scope,
 		});
 		session = live;
 		const showError = vi.fn();
-		const controller = new SelectorController(
-			createInteractiveModeContext({
-				session: live,
-				settings,
-				ui: { showOverlay: () => ({ hide: () => {}, setHidden: () => {}, isHidden: () => false }) },
-				keybindings: { getKeys: () => [], getDisplayString: () => "" },
-				showError,
-			}),
-		);
+		const focused = signal<UiNode | null>(null);
+		const ctx = {
+			session: live,
+			viewSession: live,
+			focusedAgentId: undefined,
+			settings,
+			shell: {
+				native: () => false,
+				focus: (node: UiNode | null) => focused.set(node),
+				size: () => ({ columns: 120, rows: 40 }),
+				overlays: new Overlays({ focused, focus: node => focused.set(node), fallback: () => null }),
+			},
+			keybindings: { keysFor: () => [] },
+			statusLine: { refresh: () => {} },
+			updateEditorBorderColor: () => {},
+			showModelCycleTrack: () => {},
+			showStatus: () => {},
+			showWarning: () => {},
+			showError,
+		} as unknown as InteractiveModeContext;
+		const controller = new SelectorController(ctx);
 		return { controller, showError };
 	}
 
-	function openModelHub(controller: SelectorController): modelHubModule.ModelHubCallbacks {
-		let callbacks: modelHubModule.ModelHubCallbacks | undefined;
-		vi.spyOn(modelHubModule, "ModelHubComponent").mockImplementation(function (...args: unknown[]) {
-			callbacks = args[4] as modelHubModule.ModelHubCallbacks;
-			return { refreshAfterExternalMutation: () => {}, dispose: () => {} };
-		} as never);
+	function openModelHub(controller: SelectorController): modelHubModule.ModelHubProps["callbacks"] {
+		let callbacks: modelHubModule.ModelHubProps["callbacks"] | undefined;
+		vi.spyOn(modelHubModule, "ModelHub").mockImplementation(props => {
+			callbacks = props.callbacks;
+			return jsx("picker", {});
+		});
 		controller.showModelSelector();
 		if (!callbacks) throw new Error("model hub was not opened");
 		return callbacks;
 	}
 
+	type PickerProps = modelPickerModule.ModelPickerProps;
 	function openModelPicker(controller: SelectorController): {
-		callbacks: modelPickerModule.ModelPickerCallbacks;
-		options: modelPickerModule.ModelPickerOptions;
+		callbacks: PickerProps["callbacks"];
+		options: NonNullable<PickerProps["options"]>;
 	} {
-		let opened:
-			| { callbacks: modelPickerModule.ModelPickerCallbacks; options: modelPickerModule.ModelPickerOptions }
-			| undefined;
-		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function (...args: unknown[]) {
-			opened = {
-				callbacks: args[4] as modelPickerModule.ModelPickerCallbacks,
-				options: args[5] as modelPickerModule.ModelPickerOptions,
-			};
-			return {};
-		} as never);
+		let opened: { callbacks: PickerProps["callbacks"]; options: NonNullable<PickerProps["options"]> } | undefined;
+		vi.spyOn(modelPickerModule, "ModelPicker").mockImplementation(props => {
+			opened = { callbacks: props.callbacks, options: props.options ?? {} };
+			return jsx("picker", {});
+		});
 		controller.showModelSelector({ temporaryOnly: true });
 		if (!opened) throw new Error("model picker was not opened");
 		return opened;
@@ -157,6 +176,67 @@ describe("SelectorController model selector writes", () => {
 		expect(showError).not.toHaveBeenCalled();
 	});
 
+	it("applies a session-only pick once when Enter repeats before the first apply settles", async () => {
+		const opus = model("claude-opus-4-5");
+		const { controller, showError } = start(Settings.isolated(), model("claude-sonnet-4-5"));
+		const { callbacks } = openModelPicker(controller);
+
+		// Two Enters land while the first apply is still awaiting the model switch; the picker stays on screen.
+		const first = callbacks.onPick(opus, "anthropic/claude-opus-4-5", { overContext: false });
+		const second = callbacks.onPick(opus, "anthropic/claude-opus-4-5", { overContext: false });
+		await Promise.all([first, second]);
+
+		// One pick is one session model change in the transcript, not one per Enter.
+		const switches = session!.sessionManager.getBranch().filter(entry => entry.type === "model_change");
+		expect(switches).toHaveLength(1);
+		expect(session!.model?.id).toBe("claude-opus-4-5");
+		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("applies a pick of a different model made while the first apply is in flight", async () => {
+		const opus = model("claude-opus-4-5");
+		const sonnet = model("claude-sonnet-4-5");
+		const { controller, showError } = start(Settings.isolated(), model("claude-sonnet-4-5"));
+		const { callbacks } = openModelPicker(controller);
+
+		// A deliberate pick of another model lands while the first apply is still awaiting
+		// the model switch; only a repeat of the same pick is dropped. The first apply is
+		// the slower one: it must not land after and overwrite the newer pick.
+		const realSetModelTemporary = session!.setModelTemporary.bind(session!);
+		vi.spyOn(session!, "setModelTemporary").mockImplementation(async (picked, level) => {
+			if (picked.id === "claude-opus-4-5") await new Promise(resolve => setTimeout(resolve, 50));
+			return realSetModelTemporary(picked, level);
+		});
+		const first = callbacks.onPick(opus, "anthropic/claude-opus-4-5", { overContext: false });
+		const second = callbacks.onPick(sonnet, "anthropic/claude-sonnet-4-5", { overContext: false });
+		await Promise.all([first, second]);
+
+		// The second pick applied despite the first being in flight and slower: the session
+		// ends on it, with one model_change recorded for the final choice.
+		const switches = session!.sessionManager.getBranch().filter(entry => entry.type === "model_change");
+		expect(switches).toHaveLength(1);
+		expect(session!.model?.id).toBe("claude-sonnet-4-5");
+		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("applies a quick-role pick once when Enter repeats before the first apply settles", async () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "anthropic/claude-opus-4-5" }, cycleOrder: ["smol"] });
+		const { controller, showError } = start(settings, model("claude-sonnet-4-5"));
+		const { callbacks, options } = openModelPicker(controller);
+		const smol = options.quickRoles?.find(entry => entry.role === "smol");
+		if (!smol) throw new Error("the smol quick role was not offered");
+
+		// Two Enters land on the quick role while its first apply is still awaiting the model switch.
+		const first = callbacks.onPickRole?.(smol);
+		const second = callbacks.onPickRole?.(smol);
+		await Promise.all([first, second]);
+
+		const switches = session!.sessionManager.getBranch().filter(entry => entry.type === "model_change");
+		expect(switches).toHaveLength(1);
+		expect(session!.model?.id).toBe("claude-opus-4-5");
+		expect(showError).not.toHaveBeenCalled();
+	});
+
 	it("saves only the edited fallback chain, never the chains a --config overlay supplies", async () => {
 		const agentDir = tempDir.join("agent");
 		const overlayPath = tempDir.join("overlay.yml");
@@ -190,6 +270,68 @@ describe("SelectorController model selector writes", () => {
 		expect(session?.model?.id).toBe("claude-opus-4-5");
 	});
 
+	it("ignores a stale settings-derived scope when falling back to the persisted default", async () => {
+		await Bun.write(
+			tempDir.join(".omp", "config.yml"),
+			YAML.stringify({ modelRoles: { default: "anthropic/claude-opus-4-5" } }),
+		);
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const sonnet = model("claude-sonnet-4-5");
+		const { controller, showError } = start(settings, sonnet, {
+			scopedModels: [{ model: sonnet }],
+			scopedModelsFromSettings: true,
+		});
+
+		await openModelHub(controller).onUnassign("default");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(session?.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it.each(["explicit", "settings"] as const)("keeps the live model on a disallowed %s-scope default", async scope => {
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		const base = "openrouter/z-ai/glm-4.7";
+		const allowed = `${base}@cerebras`;
+		await Bun.write(
+			tempDir.join(".omp", "config.yml"),
+			YAML.stringify({
+				modelRoles: { default: `${base}@sambanova` },
+				enabledModels: scope === "settings" ? [allowed] : [],
+			}),
+		);
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const initial = model("claude-sonnet-4-5");
+		const { controller, showError } = start(settings, initial);
+		if (scope === "explicit") {
+			const routed = parseModelPattern(allowed, [getBundledModel("openrouter", "z-ai/glm-4.7") as Model]).model;
+			if (!routed) throw new Error(`Missing fixture model ${allowed}`);
+			session?.setScopedModels([{ model: routed }]);
+		}
+
+		await openModelHub(controller).onUnassign("default");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(session?.model?.id).toBe(initial.id);
+	});
+
+	it("switches to the persisted default when only its route differs from the live model", async () => {
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		const base = "openrouter/z-ai/glm-4.7";
+		const fallback = `${base}@sambanova`;
+		await Bun.write(tempDir.join(".omp", "config.yml"), YAML.stringify({ modelRoles: { default: fallback } }));
+		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
+		const { model: initial } = parseModelPattern(`${base}@cerebras`, [
+			getBundledModel("openrouter", "z-ai/glm-4.7") as Model,
+		]);
+		if (!initial) throw new Error("Missing live route fixture");
+		const { controller, showError } = start(settings, initial);
+
+		await openModelHub(controller).onUnassign("default");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(session?.model && formatModelStringWithRouting(session.model)).toBe(fallback);
+	});
+
 	it("refreshes the open hub once a confirmed compaction point has moved the model to its extended window", async () => {
 		const settings = await Settings.init({ agentDir: tempDir.join("agent"), cwd: tempDir.path() });
 		const { controller, showError } = start(settings, model("claude-sonnet-4-5"));
@@ -197,18 +339,17 @@ describe("SelectorController model selector writes", () => {
 		const terra = registry.find("openai", "gpt-5.6-terra");
 		if (!terra) throw new Error("Expected bundled gpt-5.6-terra");
 		const refreshed = Promise.withResolvers<number | null | undefined>();
-		vi.spyOn(modelHubModule, "ModelHubComponent").mockImplementation(function (...args: unknown[]) {
-			const callbacks = args[4] as modelHubModule.ModelHubCallbacks;
-			queueMicrotask(() => {
-				expect(callbacks.onCompactionPointChange?.(terra, "400k", true)).toBeUndefined();
-			});
-			return {
+		vi.spyOn(modelHubModule, "ModelHub").mockImplementation(props => {
+			props.onState?.({
 				// The window the hub would re-read when it refreshes.
 				refreshAfterExternalMutation: () =>
 					refreshed.resolve(registry.find("openai", "gpt-5.6-terra")?.contextWindow),
-				dispose: () => {},
-			};
-		} as never);
+			} as unknown as ModelHubState);
+			queueMicrotask(() => {
+				expect(props.callbacks.onCompactionPointChange?.(terra, "400k", true)).toBeUndefined();
+			});
+			return jsx("picker", {});
+		});
 		controller.showModelSelector();
 
 		expect(await refreshed.promise).toBe(1_050_000);

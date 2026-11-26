@@ -3,6 +3,8 @@
 provider "github-copilot" {
 	default-model "gpt-5.5"
 	env "COPILOT_GITHUB_TOKEN"
+	// The authenticated `/models` roster is the account's own list: a bundled model it omits is not offered.
+	dynamic-models-authoritative #true
 
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
@@ -44,6 +46,11 @@ provider "github-copilot" {
 		}
 	}
 	class "gemini" {
+		// Copilot hands Gemini tool schemas to Google's dialect and answers a
+		// JSON Schema `type` array (common in MCP tools) with a blank
+		// `400 invalid_request_body`; GitHub's own client rewrites them too
+		// (vscode-copilot-chat `toolSchemaNormalizer.ts`).
+		tool-schema-flavor "google"
 		family "flash" {
 			supports-developer-role #false
 		}

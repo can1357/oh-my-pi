@@ -328,6 +328,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"chmod",
 		"cksum",
 		"cmp",
+		"column",
 		"combine",
 		"comm",
 		"cp",
@@ -370,6 +371,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 		"open",
 		"paste",
+		"perl",
 		"printenv",
 		"readlink",
 		"realpath",
@@ -1912,6 +1914,22 @@ async fn windows_switch_syntax_runs_the_shadowed_system_program() {
 		.filter(|l| !l.is_empty())
 		.collect();
 	assert_eq!(lines, ["3", "banana split", "GET /api/users", "."]);
+}
+
+/// The POSIX form of `timeout` must still run its operand when backgrounded,
+/// even with Windows' incompatible `timeout.exe` on PATH.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn background_timeout_does_not_select_system32_timeout() {
+	let root = std::env::var_os("SystemRoot").expect("Windows SystemRoot");
+	let system32 = std::path::PathBuf::from(root).join("System32");
+	assert!(system32.join("timeout.exe").is_file());
+	let (result, output) = execute_captured(format!(
+		"PATH='{}' timeout 5 printf 'wrapped\\n' & p=$!; wait \"$p\" && [ \"$p\" -ge 1073741824 ]",
+		system32.display(),
+	))
+	.await;
+	assert_eq!((result.exit_code, output.as_str()), (Some(0), "wrapped\n"));
 }
 
 /// A host synthesizer that records what `say` asks it to speak.

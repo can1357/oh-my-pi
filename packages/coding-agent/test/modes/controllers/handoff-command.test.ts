@@ -8,10 +8,9 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
+import { initTheme } from "../../../src/ui/theme/service";
+import { createModeTerminal, type ModeTerminal } from "../../helpers/mode-terminal";
 
 beforeAll(() => initTheme());
 afterEach(() => resetSettingsForTest());
@@ -28,7 +27,7 @@ const HUD_ROW = "Compacting context in the background (";
 interface Harness extends AsyncDisposable {
 	readonly session: AgentSession;
 	readonly manager: SessionManager;
-	readonly terminal: VirtualTerminal;
+	readonly terminal: ModeTerminal;
 	readonly side: MockModel;
 	readonly liveStarted: PromiseWithResolvers<void>;
 	readonly liveResponse: PromiseWithResolvers<MockResponse>;
@@ -78,9 +77,8 @@ async function startHarness(): Promise<Harness> {
 		modelRegistry,
 		sideStreamFn: side.stream,
 	});
-	const terminal = new VirtualTerminal(120, 36);
-	const composer = new Composer({ terminal });
-	const mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, undefined, composer);
+	const terminal = createModeTerminal({ columns: 120, rows: 36 });
+	const mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, undefined, terminal.frame);
 	await session.prompt("Earlier request");
 	await mode.init({ suppressWelcomeIntro: true });
 	void mode.getUserInput();
@@ -93,15 +91,13 @@ async function startHarness(): Promise<Harness> {
 		liveResponse,
 		handoffStarted,
 		handoffResponse,
-		screen: () =>
-			terminal
-				.getViewport()
-				.map(row => Bun.stripANSI(row))
-				.join("\n"),
+		screen: () => terminal.screen().join("\n"),
 		async [Symbol.asyncDispose]() {
 			liveResponse.resolve({ content: ["Stopped test"] });
 			handoffResponse.resolve({ content: ["## Goal\nStopped test"] });
 			mode.stop();
+			await mode.shell.stop();
+			terminal.dispose();
 			await session.dispose();
 			auth.close();
 			dir.removeSync();
@@ -113,12 +109,12 @@ it("runs /handoff from the live composer and keeps the reply on the compacted tr
 	await using h = await startHarness();
 	const livePrompt = h.session.prompt("Keep working on the report");
 	await h.liveStarted.promise;
-	await h.terminal.waitForRender(() => h.screen().includes("Working"));
+	await h.terminal.waitFor(() => h.screen().includes("Working"));
 
-	h.terminal.sendInput("/handoff keep report constraints");
-	h.terminal.sendInput("\r");
+	h.terminal.type("/handoff keep report constraints");
+	h.terminal.press("enter");
 	await h.handoffStarted.promise;
-	await h.terminal.waitForRender(() => h.screen().includes(HUD_ROW));
+	await h.terminal.waitFor(() => h.screen().includes(HUD_ROW));
 	expect(h.screen()).toContain(HUD_ROW);
 	expect(h.screen()).toContain("Working");
 	expect(JSON.stringify(h.side.calls[0]?.context.messages)).toContain("keep report constraints");
@@ -126,34 +122,34 @@ it("runs /handoff from the live composer and keeps the reply on the compacted tr
 	h.handoffResponse.resolve({ content: ["## Goal\nPreserve the report constraints"] });
 	h.liveResponse.resolve({ content: ["The report finished without interruption"] });
 	await livePrompt;
-	await h.terminal.waitForRender(() => h.screen().includes("Compaction complete"));
+	await h.terminal.waitFor(() => h.screen().includes("Compaction complete"));
 	expect(h.screen()).toContain("The report finished without interruption");
 	expect(h.manager.getBranch().findLast(entry => entry.type === "compaction")).toMatchObject({ method: "handoff" });
 });
 
 it("shows an idle /handoff in the status row and steps beside a turn that starts", async () => {
 	await using h = await startHarness();
-	h.terminal.sendInput("/handoff");
-	h.terminal.sendInput("\r");
+	h.terminal.type("/handoff");
+	h.terminal.press("enter");
 	await h.handoffStarted.promise;
-	await h.terminal.waitForRender(() => h.screen().includes(IDLE_ROW));
+	await h.terminal.waitFor(() => h.screen().includes(IDLE_ROW));
 	expect(h.screen()).toContain(IDLE_ROW);
 
 	const livePrompt = h.session.prompt("Keep working on the report");
 	await h.liveStarted.promise;
-	await h.terminal.waitForRender(() => h.screen().includes("Working") && h.screen().includes(HUD_ROW));
+	await h.terminal.waitFor(() => h.screen().includes("Working") && h.screen().includes(HUD_ROW));
 	expect(h.screen()).toContain("Working");
 	expect(h.screen()).toContain(HUD_ROW);
 	expect(h.screen()).not.toContain(IDLE_ROW);
 
 	h.liveResponse.resolve({ content: ["The report finished"] });
 	await livePrompt;
-	await h.terminal.waitForRender(() => h.screen().includes(IDLE_ROW));
+	await h.terminal.waitFor(() => h.screen().includes(IDLE_ROW));
 	expect(h.screen()).toContain(IDLE_ROW);
 	expect(h.screen()).not.toContain(HUD_ROW);
 
 	h.handoffResponse.resolve({ content: ["## Goal\nFinish the report"] });
-	await h.terminal.waitForRender(() => h.screen().includes("Compaction complete"));
+	await h.terminal.waitFor(() => h.screen().includes("Compaction complete"));
 	expect(h.screen()).toContain("Compaction complete");
 	expect(h.screen()).not.toContain("Compacting context in the background");
 });

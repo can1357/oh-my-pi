@@ -11,7 +11,7 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
-import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
+import { AstMatchStrictness, astMatch, truncateToTokens } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { countCapturingGroups, type LinearRegExp, type RegexStream } from "@oh-my-pi/pi-utils/regex";
 import { compileRuleCondition, type Rule } from "../capability/rule";
@@ -74,17 +74,8 @@ export const JUDGED_CONTENT_MAX_TOKENS = 32_000;
 
 /** Longest prefix of `text` within `maxTokens` Jev tokens, never ending on half a surrogate pair. */
 function jevPrefix(text: string, maxTokens: number): string {
-	if (countTokens(text, Encoding.Jev) <= maxTokens) return text;
-	// Counts grow with length up to whole-word jitter, so bisect; `lo` always fits, `hi` never does.
-	let lo = 0;
-	let hi = text.length;
-	while (hi - lo > 1) {
-		const mid = (lo + hi) >>> 1;
-		if (countTokens(text.slice(0, mid), Encoding.Jev) <= maxTokens) lo = mid;
-		else hi = mid;
-	}
-	const last = text.charCodeAt(lo - 1);
-	return text.slice(0, last >= 0xd800 && last <= 0xdbff ? lo - 1 : lo);
+	const end = truncateToTokens(text, maxTokens);
+	return end === text.length ? text : text.slice(0, end);
 }
 
 /**

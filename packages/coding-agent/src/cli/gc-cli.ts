@@ -7,6 +7,7 @@ import { createGunzip, createGzip } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { isCompressScratchPath } from "@oh-my-pi/omp-stats/parser";
 import {
+	errorMessage,
 	formatBytes,
 	getAgentDir,
 	getBlobsDir,
@@ -21,6 +22,7 @@ import {
 	hashPath,
 	isPidAlive,
 	normalizePathForComparison,
+	pathExists,
 	readLines,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
@@ -86,6 +88,8 @@ const HEADER_SNIFF_BYTES = 4096;
 const STALE_POINTER_GRACE_MS = DAY_MS;
 /** Sessions (and archived transcripts) stripped at once, so one's reads overlap another's writes. */
 const STRIP_CONCURRENCY = 8;
+/** How long a WAL checkpoint waits on active readers/writers before reporting the database busy. */
+const WAL_CHECKPOINT_BUSY_TIMEOUT_MS = 5000;
 
 export interface GcCommandFlags {
 	apply?: boolean;
@@ -110,6 +114,8 @@ export interface GcCommandArgs {
 	flags: GcCommandFlags;
 	/** Where to draw transient per-step progress bars; drawn only on a TTY, none when omitted. */
 	progress?: ProgressOutput;
+	/** SQLite busy timeout for WAL checkpoints; defaults to {@link WAL_CHECKPOINT_BUSY_TIMEOUT_MS}. Tests shorten it. */
+	walBusyTimeoutMs?: number;
 }
 
 export interface BlobGcResult {
@@ -266,6 +272,7 @@ interface ResolvedGcOptions {
 	staleRetainDays: number;
 	compressAfterDays: number;
 	stripAfterDays: number;
+	walBusyTimeoutMs: number;
 	/** Wraps each slow per-item loop in a progress bar. */
 	track: ProgressTracker;
 }
@@ -299,7 +306,11 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 	return normalizeNumberSetting(fallback, defaultValue);
 }
 
-async function resolveOptions({ flags, progress }: GcCommandArgs): Promise<ResolvedGcOptions> {
+async function resolveOptions({
+	flags,
+	progress,
+	walBusyTimeoutMs = WAL_CHECKPOINT_BUSY_TIMEOUT_MS,
+}: GcCommandArgs): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
 	const selected =
 		flags.blobs === true ||
@@ -365,6 +376,7 @@ async function resolveOptions({ flags, progress }: GcCommandArgs): Promise<Resol
 			cfgGcCompressAfterDays.default,
 		),
 		stripAfterDays: numberSetting(flags.stripAfterDays, read(cfgGcStripAfterDays), cfgGcStripAfterDays.default),
+		walBusyTimeoutMs,
 		track: createProgressTracker(progress),
 	};
 }
@@ -383,24 +395,10 @@ function getArchivedSessionsDir(agentDir: string): string {
 	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
 }
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 function codeOf(error: unknown): string | undefined {
 	return typeof error === "object" && error !== null && "code" in error
 		? String((error as { code?: unknown }).code)
 		: undefined;
-}
-
-async function pathExists(target: string): Promise<boolean> {
-	try {
-		await fs.stat(target);
-		return true;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return false;
-		throw error;
-	}
 }
 
 async function statIfPresent(target: string) {
@@ -2204,7 +2202,7 @@ async function runStripGc(options: ResolvedGcOptions, archiveRoot: string): Prom
 	return result;
 }
 
-async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpointResult> {
+async function checkpointWal(dbPath: string, apply: boolean, busyTimeoutMs: number): Promise<WalCheckpointResult> {
 	const walPath = `${dbPath}-wal`;
 	let walBytes = 0;
 	try {
@@ -2226,7 +2224,7 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 	const db = new Database(dbPath);
 	let checkpointAttempted = false;
 	try {
-		db.run("PRAGMA busy_timeout = 5000");
+		db.run(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
 		using checkpointStmt = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)");
 		const row = checkpointStmt.get() as WalCheckpointRow | null;
 		checkpointAttempted = true;
@@ -2252,7 +2250,7 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 async function runWalGc(options: ResolvedGcOptions): Promise<WalGcResult> {
 	const databases = await Promise.all(
 		[getHistoryDbPath(options.agentDir), getModelDbPath(options.agentDir)].map(dbPath =>
-			checkpointWal(dbPath, options.apply),
+			checkpointWal(dbPath, options.apply, options.walBusyTimeoutMs),
 		),
 	);
 	return {

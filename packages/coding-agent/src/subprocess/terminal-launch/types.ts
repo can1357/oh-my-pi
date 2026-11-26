@@ -1,4 +1,4 @@
-import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import type { MultiplexerId } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import type { terminalLaunchCapabilities } from "./providers";
 
 export interface PlacementCapabilities {
@@ -34,8 +34,8 @@ export interface UnsupportedMultiplexerCapabilities {
 }
 
 export type TerminalLaunchMultiplexer = {
-	[M in TerminalMultiplexer]: (typeof terminalLaunchCapabilities)[M] extends { supported: true } ? M : never;
-}[TerminalMultiplexer];
+	[M in MultiplexerId]: (typeof terminalLaunchCapabilities)[M] extends { supported: true } ? M : never;
+}[MultiplexerId];
 
 export type TerminalLaunchPlacement = "pane" | "window";
 
@@ -84,7 +84,7 @@ type RequestOptions<C> = TargetOption<C> &
 	FocusOption<C> &
 	ShellGrammarOption<C>;
 
-type RequestForPlacement<Multiplexer extends TerminalMultiplexer, Placement extends TerminalLaunchPlacement, C> = {
+type RequestForPlacement<Multiplexer extends MultiplexerId, Placement extends TerminalLaunchPlacement, C> = {
 	multiplexer: Multiplexer;
 	placement: Placement;
 	command: readonly string[];
@@ -92,7 +92,7 @@ type RequestForPlacement<Multiplexer extends TerminalMultiplexer, Placement exte
 } & RequestOptions<C>;
 
 /** Requests a provider accepts, derived from that provider's own capability entry. */
-export type TerminalLaunchRequestFor<Multiplexer extends TerminalMultiplexer, Entry> = {
+export type TerminalLaunchRequestFor<Multiplexer extends MultiplexerId, Entry> = {
 	[Placement in Extract<keyof Entry, TerminalLaunchPlacement>]: RequestForPlacement<
 		Multiplexer,
 		Placement,
@@ -140,14 +140,14 @@ export interface TerminalLaunchBackendContext {
 }
 
 /** Backend that executes the requests its provider's capability entry allows. */
-export type TerminalLaunchBackend<Multiplexer extends TerminalMultiplexer, Capabilities> = (
+export type TerminalLaunchBackend<Multiplexer extends MultiplexerId, Capabilities> = (
 	request: TerminalLaunchRequestFor<Multiplexer, Capabilities>,
 	context: TerminalLaunchBackendContext,
 ) => Promise<TerminalLaunchResult>;
 
 /** A supported provider's launch capabilities and the backend that executes them. */
 export interface TerminalLaunchProvider<
-	Multiplexer extends TerminalMultiplexer,
+	Multiplexer extends MultiplexerId,
 	Capabilities extends SupportedMultiplexerCapabilities,
 > {
 	capabilities: Capabilities;
@@ -158,7 +158,7 @@ export interface TerminalLaunchProvider<
 export class TerminalLaunchError extends Error {
 	constructor(
 		message: string,
-		public readonly multiplexer: TerminalMultiplexer,
+		public readonly multiplexer: MultiplexerId,
 		public readonly placement: TerminalLaunchPlacement,
 		public readonly operation: string,
 		public readonly exitCode?: number | null,

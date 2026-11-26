@@ -11,6 +11,7 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { OTARI_US_BASE_URL } from "../wire/otari";
 
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
@@ -18,6 +19,7 @@ export interface ModelCacheProviderIdOptions extends AccountScope {
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	arkanecloud: true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
@@ -50,7 +52,27 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// A Modal proxy token is workspace-scoped and the roster is the endpoints it
 	// may call, so a shared namespace would serve one workspace's ids to another.
 	modal: true,
+	// A Refuseless key lists its account's private models and bills its
+	// account rates, and discovery is authoritative.
+	refuseless: true,
 };
+
+/**
+ * Cache namespace for a provider's auth-gateway roster (`transport: "pi-native"`).
+ * Scoped by gateway and configured bearer: a client-scoped gateway token lists
+ * only its granted models and the roster replaces the provider's catalog, so
+ * another gateway's or token's rows must never serve this one. `apiKey` is the
+ * configured value (a literal, env name, or `!command`), never resolved, so
+ * startup can name the namespace without running a command. Distinct from the
+ * provider's own namespace, which holds its direct roster.
+ */
+export function resolvePiNativeModelCacheProviderId(
+	providerId: string,
+	scope: { baseUrl: string; apiKey?: string },
+): string {
+	const baseUrl = scope.baseUrl.trim().replace(/\/+$/, "");
+	return `${providerId}:pi-native-v1:${Bun.hash(`${scope.apiKey ?? ""}\u0000${baseUrl}`).toString(36)}`;
+}
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
 export function isCredentialScopedModelCacheProvider(providerId: string): boolean {
@@ -72,8 +94,12 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
 		case "modal":
 			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
+		case "arkanecloud":
+			return "https://console.arkanecloud.com/api/v2";
 		case "otari":
-			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
+			return Bun.env.OTARI_BASE_URL?.trim() || OTARI_US_BASE_URL;
+		case "refuseless":
+			return "https://api.refuseless.com/v1";
 		case "bifrost":
 			return Bun.env.BIFROST_BASE_URL?.trim() || "http://localhost:8080/v1";
 		case "opencode-go":
@@ -188,11 +214,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return `kimi-code:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		// Per-key rosters (Otari: one workspace's enabled models; Bifrost: one
-		// virtual key's allowed models) behind a configurable endpoint: scope by
-		// both so switching either re-runs discovery.
+		// virtual key's allowed models; Refuseless: one account's private models
+		// and rates) behind a configurable endpoint: scope by both so switching
+		// either re-runs discovery.
 		case "muse-code":
 		case "otari":
-		case "bifrost": {
+		case "arkanecloud":
+		case "bifrost":
+		case "refuseless": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
@@ -291,7 +320,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// `permission_denied: no API providers are available`.
 			// v3: rows cached before discovery read `ModelInfo.maxTokens` hold a
 			// 200K window on every model.
-			return "devin:models-v3";
+			// v4: rows cached before discovery dropped Fusion pairings and folded
+			// `-fast` lanes into `priorityLane` list 1000+ duplicate rows.
+			return "devin:models-v4";
 		default:
 			return providerId;
 	}
