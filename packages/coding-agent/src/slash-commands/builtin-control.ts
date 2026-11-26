@@ -3,6 +3,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { clearApprovalGrants } from "../tools/approval-cache";
+import { cfgTuiShowLinkUrl } from "../modes/settings";
 import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, usage } from "./helpers/parse";
@@ -178,5 +179,32 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "power",
 		description: "Quit the application",
 		handleTui: shutdownHandlerTui,
+	},
+	{
+		name: "link-url",
+		icon: "globe",
+		description: "Toggle the URL shown in parentheses after markdown links",
+		subcommands: [
+			{ name: "on", description: "Show target URLs after named links" },
+			{ name: "off", description: "Show only the link label" },
+			{ name: "status", description: "Show link URL status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			`Link URLs: ${cfgTuiShowLinkUrl.get(runtime.ctx.settings) ? "on" : "off"}`,
+		handleTui: (command, runtime) => {
+			const { ctx } = runtime;
+			const arg = command.args.trim().toLowerCase();
+			if (arg && arg !== "on" && arg !== "off" && arg !== "status" && arg !== "toggle") {
+				ctx.showError("Usage: /link-url [on|off|status]");
+			} else if (arg === "status") {
+				ctx.showStatus(`Link URLs are ${cfgTuiShowLinkUrl.get(ctx.settings) ? "on" : "off"}.`);
+			} else {
+				const next = arg === "on" || (arg !== "off" && !cfgTuiShowLinkUrl.get(ctx.settings));
+				cfgTuiShowLinkUrl.set(ctx.settings, next);
+				ctx.showStatus(`Link URLs ${next ? "enabled" : "disabled"}.`);
+			}
+			clearSubmittedText(runtime);
+		},
 	},
 ];

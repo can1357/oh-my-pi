@@ -24,8 +24,13 @@ export interface InlineEnvironment {
 	readonly styles: MarkdownStyles;
 	/** Wrap links in OSC 8 hyperlinks. */
 	readonly hyperlinks: boolean;
-	/** Draw ` (href)` after a link label that is not the href itself (default true). */
-	readonly linkUrls?: boolean;
+	/**
+	 * Draw ` (href)` after a link label that is not the href itself (default
+	 * true). `false` is the host's setting: on a terminal without OSC 8 the
+	 * suffix still draws so the target stays visible. `"never"` is a layout
+	 * choice (sized headings, pickers): no suffix whatever the terminal.
+	 */
+	readonly linkUrls?: boolean | "never";
 	/** The hyperlink target of an href (a resolved relative path); the href itself when undefined. */
 	readonly linkTarget?: (href: string) => string | undefined;
 	/** Whether an href is an extension link (its scheme registered by the host). */
@@ -166,7 +171,9 @@ function renderLink(env: InlineEnvironment, ctx: InlineContext, token: Tokens.Li
 	const target = env.linkTarget?.(href) ?? href;
 	const bare = token.text === href || href === `mailto:${token.text}`;
 	let out = env.hyperlinks ? osc8(target, label) : label;
-	if (!bare && env.linkUrls !== false) {
+	// Without OSC 8 the label alone loses the destination, so the suffix draws
+	// even when the host hides link URLs.
+	if (!bare && env.linkUrls !== "never" && (env.linkUrls !== false || !env.hyperlinks)) {
 		const url = styles.linkUrl(`(${href})`);
 		out += ` ${env.hyperlinks ? osc8(target, url) : url}`;
 	}

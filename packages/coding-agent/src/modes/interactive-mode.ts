@@ -332,6 +332,7 @@ import {
 	cfgTuiAutoGraph,
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
+	cfgTuiShowLinkUrl,
 	cfgTuiRenderMermaid,
 	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
@@ -491,6 +492,7 @@ const cfgLiveUiSettings = combine({
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
+	"tui.showLinkUrl": cfgTuiShowLinkUrl,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
 	"tui.renderEmbeds": cfgTuiRenderEmbeds,
@@ -3534,6 +3536,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setMarkdownLook({
 			colorful: cfgTuiColorfulMarkdown.get(this.settings),
 			mermaid: cfgTuiRenderMermaid.get(this.settings),
+			linkUrls: cfgTuiShowLinkUrl.get(this.settings),
 		});
 	}
 
@@ -3618,7 +3621,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			rebuildChat = true;
 		}
-		if (any("tui.colorfulMarkdown", "tui.renderMermaid", "tui.renderSvg", "tui.renderEmbeds")) {
+		if (any("tui.colorfulMarkdown", "tui.showLinkUrl", "tui.renderMermaid", "tui.renderSvg", "tui.renderEmbeds")) {
 			this.#syncTranscriptDisplaySettings();
 			resetDisplay = true;
 		}

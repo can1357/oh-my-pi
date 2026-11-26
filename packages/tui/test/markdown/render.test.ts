@@ -1,6 +1,13 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, afterEach } from "bun:test";
 import { cellGrid, firstCellDiff, plainRows } from "../../src/testing/cells";
-import { EXTENSION_LINK_ID, type MarkdownOptions, renderMarkdown, takeExtensionLinks } from "../../src/text/markdown";
+import {
+	EXTENSION_LINK_ID,
+	type MarkdownOptions,
+	renderMarkdown,
+	renderMarkdownFrame,
+	takeExtensionLinks,
+} from "../../src/text/markdown";
+import { markdownLook, setMarkdownLook } from "../../src/text/markdown/look";
 import { visibleWidth } from "../../src/text/width";
 import { loadThemeSync } from "../../src/theme";
 
@@ -272,6 +279,20 @@ describe("inline", () => {
 		expect(cells[text.indexOf(" (")]!.link).toBe("");
 	});
 
+	it("hides a named link's suffix when linkUrls is off, keeping it where OSC 8 is off", () => {
+		expect(plain("[docs](https://e.com/d)", 80, { linkUrls: false, hyperlinks: true })).toEqual(["docs"]);
+		expect(plain("[docs](https://e.com/d)", 80, { linkUrls: false })).toEqual(["docs (https://e.com/d)"]);
+	});
+
+	it("never repeats the href when the label already carries it", () => {
+		expect(
+			plain("[https://e.com/d](https://e.com/d) and https://e.com/bare", 80, { linkUrls: false, hyperlinks: true }),
+		).toEqual(["https://e.com/d and https://e.com/bare"]);
+		expect(plain("[a@b.co](mailto:a@b.co) and https://e.com/bare", 80, { linkUrls: false })).toEqual([
+			"a@b.co and https://e.com/bare",
+		]);
+	});
+
 	it("links through a resolved target while showing the written href", () => {
 		const rows = renderMarkdown("see [x](./a.ts)", 40, {
 			theme,
@@ -330,6 +351,31 @@ describe("inline", () => {
 		expect(cells[0]!.italic && cells[4]!.italic).toBe(true);
 		expect(cells[0]!.fg).toBe(cells[4]!.fg);
 		expect(cells[2]!.italic).toBe(false);
+	});
+});
+
+describe("host look", () => {
+	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true }));
+
+	it("renders with the host's linkUrls when the caller leaves it unset", () => {
+		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
+		expect(markdownLook().linkUrls).toBe(false);
+		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true })).toEqual(["docs"]);
+	});
+
+	it("lets an explicit linkUrls win over the host look", () => {
+		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
+		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true, linkUrls: true })).toEqual([
+			"docs (https://e.com/d)",
+		]);
+	});
+
+	it("does not reuse cached block rows across a linkUrls toggle", () => {
+		const source = "See [the docs](https://e.com/d) online.\n\nTrailing paragraph.";
+		const shown = renderMarkdownFrame(source, 60, { theme, stream: true, hyperlinks: true, linkUrls: true });
+		const hidden = renderMarkdownFrame(source, 60, { theme, stream: true, hyperlinks: true, linkUrls: false });
+		expect(plainRows(shown.rows).some(row => row.includes("(https://e.com/d)"))).toBe(true);
+		expect(plainRows(hidden.rows).some(row => row.includes("(https://e.com/d)"))).toBe(false);
 	});
 });
 

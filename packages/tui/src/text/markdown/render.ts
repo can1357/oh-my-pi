@@ -48,6 +48,12 @@ export interface MarkdownOptions {
 	/** Wrap links in OSC 8 hyperlinks (default false). */
 	readonly hyperlinks?: boolean;
 	/**
+	 * Draw ` (href)` after a link label that is not the href itself (default:
+	 * the host's {@link markdownLook}). On a terminal without OSC 8 the suffix
+	 * still draws so the target stays visible.
+	 */
+	readonly linkUrls?: boolean;
+	/**
 	 * Draw top-level H1 headings at double size with OSC 66 text sizing, over
 	 * their row and one reserved blank row (default false: the terminal must
 	 * draw OSC 66).
@@ -258,7 +264,7 @@ const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
  */
 function sizedHeading(r: Renderer, token: Tokens.Heading, width: number): string | undefined {
 	if (token.depth !== 1 || !r.options.textSizing) return undefined;
-	const drawn = renderInline({ ...r.inline, linkUrls: false }, token.tokens, PLAIN_CONTEXT);
+	const drawn = renderInline({ ...r.inline, linkUrls: "never" }, token.tokens, PLAIN_CONTEXT);
 	if (drawn.includes(EXTENSION_LINK_ID)) return undefined;
 	const drawnWidth = visibleWidth(drawn);
 	if (drawnWidth === 0 || drawnWidth * HEADING_SCALE > width) return undefined;
@@ -527,6 +533,7 @@ function createRenderer(tokens: readonly Token[], fullWidth: number, options: Ma
 		inline: {
 			styles,
 			hyperlinks: options.hyperlinks ?? false,
+			linkUrls: options.linkUrls,
 			linkTarget: options.linkTarget,
 			extensionLink: extensionLinkTest(options.linkSchemes ?? []),
 			marks: options.marks,
@@ -745,6 +752,7 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		options.paddingX ?? 0,
 		options.colorful ?? true,
 		options.hyperlinks ?? false,
+		options.linkUrls ?? true,
 		options.textSizing ?? false,
 		options.mermaid ?? true,
 		options.textStyle ?? "",
@@ -869,11 +877,17 @@ export function renderMarkdown(source: string, width: number, options: MarkdownO
 	return [...renderMarkdownFrame(source, width, options).rows];
 }
 
-/** `options` with the host's look where they leave `colorful` or `mermaid` unset. */
+/** `options` with the host's look where they leave `colorful`, `mermaid` or `linkUrls` unset. */
 function withHostLook(options: MarkdownOptions): MarkdownOptions {
-	if (options.colorful !== undefined && options.mermaid !== undefined) return options;
+	if (options.colorful !== undefined && options.mermaid !== undefined && options.linkUrls !== undefined)
+		return options;
 	const look = markdownLook();
-	return { ...options, colorful: options.colorful ?? look.colorful, mermaid: options.mermaid ?? look.mermaid };
+	return {
+		...options,
+		colorful: options.colorful ?? look.colorful,
+		mermaid: options.mermaid ?? look.mermaid,
+		linkUrls: options.linkUrls ?? look.linkUrls,
+	};
 }
 
 /**
