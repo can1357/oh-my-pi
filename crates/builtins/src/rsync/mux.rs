@@ -1819,6 +1819,17 @@ impl MuxReader {
 		Ok(more)
 	}
 
+	/// How long ago the connection's last output was written (`None`: never),
+	/// counting the linked writer's, as the idle check does.
+	fn since_output(&self) -> Option<Duration> {
+		let last_out = self
+			.writer
+			.as_ref()
+			.map_or(0, |w| w.shared.counters.last_out.load(Ordering::Relaxed))
+			.max(self.shared.counters.last_out.load(Ordering::Relaxed));
+		(last_out != 0).then(|| Duration::from_millis(clock_ms().saturating_sub(last_out)))
+	}
+
 	fn read_data(&mut self, buf: &mut [u8], mut idle: Option<IdleWork<'_>>) -> io::Result<usize> {
 		let sh = Arc::clone(&self.shared);
 		if sh.cancel.load(Ordering::Relaxed) {
@@ -1935,7 +1946,21 @@ impl MuxReader {
 			if let Some(timing) = timing {
 				let now = Instant::now();
 				let select = Duration::from_secs(timing.select);
-				let due = *next_check.get_or_insert(now + select);
+				let mut due = *next_check.get_or_insert(now + select);
+				// Upstream's poll counts its select timeout again after each write,
+				// so a check comes a whole select after the last output, the
+				// keepalive the previous check queued included. Here the output
+				// thread writes that keepalive only after the check returned:
+				// counted from the check, the next one came less than a lull after
+				// a late write and sent no keepalive, so the peer heard nothing for
+				// two lulls, and the check after it could time the sender out.
+				if now >= due
+					&& let Some(left) = self.since_output().and_then(|since| select.checked_sub(since))
+					&& !left.is_zero()
+				{
+					due = now + left;
+					next_check = Some(due);
+				}
 				if now >= due {
 					let role = st.role;
 					drop(st);
@@ -2890,6 +2915,67 @@ mod tests {
 		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL);
 		let out = sink.take();
 		assert!(out.len() >= 8 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
+	}
+
+	/// A connection that takes its first write `late` after it is made, and
+	/// records when each write ends.
+	struct LateFirstWrite {
+		sink: Sink,
+		late: Option<Duration>,
+		ended: Arc<Mutex<Vec<Instant>>>,
+	}
+
+	impl Write for LateFirstWrite {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			if let Some(late) = self.late.take() {
+				thread::sleep(late);
+			}
+			lock(&self.ended).push(Instant::now());
+			self.sink.write(buf)
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			self.sink.flush()
+		}
+	}
+
+	/// `--timeout=10` (lull 5): the connection takes the first keepalive a second
+	/// after it is queued. The next check must still come a whole lull after that
+	/// write and send the second keepalive, so the two writes end less than one and a
+	/// half lulls (7.5 s) apart. Counted from the check that queued the first, the
+	/// next check found 4 s of silence and sent none, and the second keepalive came
+	/// 9 s after the first.
+	#[test]
+	fn blocked_sender_keepalive_follows_a_late_write() {
+		let timeout = Duration::from_secs(10);
+		let (mut r, _tx, cancel) = blocking_reader(Some(timeout));
+		let sink = Sink::default();
+		let write_ends = Arc::new(Mutex::new(Vec::new()));
+		let late = LateFirstWrite { sink: sink.clone(), late: Some(Duration::from_secs(1)), ended: Arc::clone(&write_ends) };
+		let cfg = WriteConfig { timeout: Some(timeout), ..WriteConfig::default() };
+		let w = MuxWriter::new(Box::new(late), IoCounters::default(), cfg);
+		w.start_multiplex().unwrap();
+		r.set_role(Role::Sender);
+		r.link_writer(w);
+		let ended = Arc::new(AtomicBool::new(false));
+		let (flag, read_ended, sent) = (Arc::clone(&cancel), Arc::clone(&ended), Arc::clone(&sink.bytes));
+		let t = thread::spawn(move || {
+			let deadline = Instant::now() + 4 * timeout;
+			while lock(&sent).len() < 8 && !read_ended.load(Ordering::Relaxed) && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(10));
+			}
+			flag.store(true, Ordering::Relaxed);
+		});
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		ended.store(true, Ordering::Relaxed);
+		t.join().unwrap();
+		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL, "{err}");
+		let out = sink.take();
+		assert!(out.len() >= 8 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
+		let write_ends = lock(&write_ends).clone();
+		let lull = timeout / 2;
+		let gap = write_ends[1] - write_ends[0];
+		assert!(gap < lull + lull / 2, "the second keepalive ended {gap:?} after the first");
 	}
 
 	#[test]
