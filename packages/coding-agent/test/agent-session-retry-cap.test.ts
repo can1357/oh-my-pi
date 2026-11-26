@@ -941,6 +941,71 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
+	it("waits for a 429 'rests until <ISO> (quota)' reset past retry.maxDelayMs when retry.waitForUsageReset is set", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+		const resetIso = new Date(Date.now() + 360_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+		const expectedDelayMs = Date.parse(resetIso) - Date.now();
+		// Prefix with `HTTP 429` so `createMockModel` (which omits `errorStatus`) classifies it as HTTP 429.
+		const mock = createMockModel({
+			responses: [
+				{ throw: `HTTP 429 rests until ${resetIso} (quota)` },
+				{ content: ["recovered after rests until reset"], stopReason: "stop" },
+			],
+		});
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 300_000,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger 429 rests until quota reset");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(Math.abs(retryStartEvents[0].delayMs - expectedDelayMs)).toBeLessThan(1_000);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(lastAssistant(session).stopReason).toBe("stop");
+		expect(session.isRetrying).toBe(false);
+	});
+
 	/**
 	 * Isolated AuthStorage whose opencode-go usage endpoint reports the given
 	 * rolling/weekly windows. Lets recovery tests drive report-derived
@@ -2576,6 +2641,58 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after sibling account" });
 	});
 
+	it("moves a Devin session off a login whose weekly quota is spent", async () => {
+		const model = getBundledModel("devin", "swe-1-6");
+		if (!model) throw new Error("Expected bundled Devin test model to exist");
+		// No usage provider: the rotation must come from the refusal alone, with no GetUserStatus call.
+		const localStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+		});
+		try {
+			await localStorage.credentials.reload();
+			await localStorage.credentials.set("devin", [
+				{ type: "api_key", key: "devin-key-1" },
+				{ type: "api_key", key: "devin-key-2" },
+			]);
+			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
+			// Devin's end-of-stream Connect trailer: no HTTP status, no reset time.
+			const weeklyQuotaError =
+				"Devin stream error failed_precondition: Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage to purchase on-demand usage or turn on auto-reload.";
+			const mock = createMockModel();
+			const requestedKeys: string[] = [];
+			const agent = new Agent({
+				getApiKey: requested => localRegistry.resolver(requested, agent.sessionId),
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (requestedModel, context, options) => {
+					const apiKey = resolveInitialApiKey(options?.apiKey);
+					requestedKeys.push(apiKey);
+					// Whichever login the session starts on is the spent one: Devin refuses it every time.
+					mock.push(
+						apiKey === requestedKeys[0]
+							? { throw: weeklyQuotaError }
+							: { content: ["answered on the other login"] },
+					);
+					return mock.stream(requestedModel, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: localRegistry,
+			});
+			mockSchedulerWaitWithClock();
+			await session.prompt("Trigger Devin weekly quota");
+			await session.waitForIdle();
+			const last = lastAssistant(session);
+			expect(last.stopReason).toBe("stop");
+			expect(last.content).toContainEqual({ type: "text", text: "answered on the other login" });
+			expect([...requestedKeys].sort()).toEqual(["devin-key-1", "devin-key-2"]);
+		} finally {
+			localStorage.close();
+		}
+	});
+
 	it("tries every Codex account before the configured model fallback on cyber-policy denials", async () => {
 		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
@@ -2775,6 +2892,69 @@ describe("AgentSession retry delay cap", () => {
 			}
 		},
 	);
+
+	it.each([0, 1])("explains a restricted OAuth pool denial with retry.maxRetries=%d", async maxRetries => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const providerSessionId = `restricted-org-policy-${maxRetries}`;
+		const identity = "email:denied@example.test|org:denied-org";
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "denied-access",
+				refresh: "denied-refresh",
+				expires: Date.now() + 3_600_000,
+				email: "denied@example.test",
+				orgId: "denied-org",
+			},
+		]);
+		const lease = authStorage.sessions.restrict("anthropic", providerSessionId, [identity]);
+		try {
+			registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
+			const providerError =
+				'403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}},"request_id":"req_org_policy_test"}';
+			const requestedKeys: string[] = [];
+			const mock = createMockModel({
+				id: model.id,
+				provider: model.provider,
+				handler: (_context, options) => {
+					requestedKeys.push(resolveInitialApiKey(options?.apiKey));
+					return { stopReason: "error", errorMessage: providerError };
+				},
+			});
+			const agent = new Agent({
+				getApiKey: model => modelRegistry.getApiKey(model, providerSessionId),
+				sessionId: providerSessionId,
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (_model, context, options) => aiStream.streamSimple(mock.model, context, options),
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"retry.maxRetries": maxRetries,
+					"retry.modelFallback": false,
+				}),
+				modelRegistry,
+				providerSessionId,
+			});
+
+			await session.prompt("Test restricted organization policy denial");
+			await session.waitForIdle();
+
+			expect(requestedKeys).toEqual(["denied-access"]);
+			expect(session.isRetrying).toBe(false);
+			const terminal = lastAssistant(session);
+			expect(terminal.stopReason).toBe("error");
+			expect(terminal.errorMessage).toContain(providerError);
+			expect(terminal.errorMessage).toContain("session OAuth account pool");
+			expect(terminal.errorMessage).toContain(`${identity} rejected by org policy`);
+			expect(terminal.errorMessage?.startsWith("Retry budget exhausted")).toBe(maxRetries === 0);
+		} finally {
+			authStorage.sessions.unrestrict("anthropic", providerSessionId, lease);
+		}
+	});
 
 	it("skips a short sibling wait after account-policy exhaustion", async () => {
 		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");

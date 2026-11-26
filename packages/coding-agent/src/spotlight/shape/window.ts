@@ -3,7 +3,7 @@
  * a character budget. A window says why it showed or hid each line ({@link SpotlightReason}) and what it spent, for the result's
  * trace.
  */
-import { reasonShows, type SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
+import { reasonShows, type SpotlightReason } from "../../tools/details/spotlight";
 import { MARKER, norm, pairKey } from "./lines";
 import type { SourcePeak } from "./view";
 import type { Seen } from "./state";

@@ -25,8 +25,8 @@ const ACCOUNT_RATE_LIMIT_PATTERN =
 	/\baccount(?:'s)?\b[^\n]{0,80}\brate.?limit\b|\brate.?limit\b[^\n]{0,80}\baccount\b/i;
 const INSUFFICIENT_BALANCE_PATTERN = /insufficient.?balance/i;
 // Prepaid-credit exhaustion phrased around the credit balance rather than a
-// quota: Anthropic "This request would exceed your available credits given
-// your current in-flight requests" (402), OpenRouter "Insufficient credits",
+// quota: OpenRouter "This request would exceed your available credits given
+// your current in-flight requests" (402) and "Insufficient credits",
 // "credits exhausted". Account-local, so rotate to a sibling credential.
 const CREDITS_EXHAUSTED_PATTERN =
 	/\b(?:exceed\w*|insufficient|not enough)\b[^\n]{0,40}\bcredits?\b|\bcredits?\b[^\n]{0,40}\b(?:exhausted|depleted)\b/i;
@@ -425,9 +425,17 @@ export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 	}
 }
 
-/** Detect usage/quota limit errors in error messages (persistent, requires credential switch). */
+/**
+ * Detect usage/quota limit errors in error messages (persistent, requires credential switch).
+ * `(daily|weekly) usage quota has been exhausted` matches any provider, Devin's account allowance
+ * refusal included. Devin's weekly form names no reset time ("Your weekly usage quota has been
+ * exhausted. Visit … to purchase on-demand usage"), so this phrase is all that marks it; the window
+ * word keeps a per-minute throttle phrased the same way out. With no usage report, the session
+ * retry path blocks a spent weekly login only for the default `QUOTA_EXHAUSTED` backoff (30 min),
+ * so it costs one refused request per backoff window until the weekly reset.
+ */
 const USAGE_LIMIT_PATTERN =
-	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|out of (?:extra )?usage|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
+	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|(?:daily|weekly) usage quota has been exhausted|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|out of (?:extra )?usage|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
 
 /**
  * HTTP status codes that, absent richer body classification, represent an
@@ -475,6 +483,12 @@ export function is402BillingCapBody(message: string | undefined): boolean {
 // ceilings, ChatGPT-style "out of credits").
 const OUT_OF_CREDIT_PATTERN = /\bout of credit|\badd (?:more )?credit|\btop ?up\b/i;
 
+// OpenRouter 402 "This request would exceed your available credits given your
+// current in-flight requests. Retry after in-flight requests settle, or add
+// credits." The balance is reserved by the account's own running requests and
+// frees as they finish, so the stated `retry-after-ms` window can clear it.
+const IN_FLIGHT_CREDIT_RESERVATION_PATTERN = /\bin-flight requests\b/i;
+
 /**
  * Whether a usage-limit failure is a *billing* cap rather than a window that
  * reopens on a clock: an out-of-credit balance (402), a spent prepaid
@@ -486,14 +500,15 @@ const OUT_OF_CREDIT_PATTERN = /\bout of credit|\badd (?:more )?credit|\btop ?up\
  * hold the session through the whole sleep while the user has no way to retry
  * by hand.
  *
- * A DashScope/Bailian per-minute token throttle and a concurrency cap wear
- * quota wording but are transient slots, so both stay out.
+ * A DashScope/Bailian per-minute token throttle, a concurrency cap, and an
+ * in-flight credit reservation wear quota wording but are transient slots, so
+ * they stay out.
  */
 export function isBillingCapUsageLimit(status: number | undefined, message: string | undefined): boolean {
 	if (message === undefined) return false;
 	const reason = parseRateLimitReason(message);
 	if (reason === "CONCURRENT_LIMIT" && status !== 402) return false;
-	if (isDashScopeTokenLimitText(message)) return false;
+	if (isDashScopeTokenLimitText(message) || IN_FLIGHT_CREDIT_RESERVATION_PATTERN.test(message)) return false;
 	if (status === 402) return is402BillingCapBody(message);
 	return (
 		reason === "INSUFFICIENT_G1_CREDITS_BALANCE" ||

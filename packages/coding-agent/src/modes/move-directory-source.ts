@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { MoveDirectorySource, MoveDirectoryEntry } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import type { MoveDirectorySource, MoveDirectoryEntry } from "./view-model/overlays/move-overlay";
 
 /** TTL for the directory listing cache (ms). */
 const DIR_CACHE_TTL = 500;

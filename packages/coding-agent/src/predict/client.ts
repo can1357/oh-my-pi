@@ -1,14 +1,14 @@
 /**
  * Client half of text prediction, served by the daemon's `predict` module.
  *
- * The composer's word-completion provider (`@oh-my-pi/pi-tui/prompt/word-completion`)
+ * The composer's word-completion provider (`modes/view-model/prompt/word-completion`)
  * reaches the module through {@link textPredictionBackend}. The first request
  * opens (find-or-start) the global `predict` unit of this agent directory and
  * holds a lease on it; every request is then a `call`. Failures never surface
  * to the editor: a query that cannot be answered shows no ghost text.
  */
 import type { PredictedWord } from "@oh-my-pi/pi-natives";
-import type { WordCompletionEngine, WordPredictionBackend } from "@oh-my-pi/pi-tui/prompt/word-completion";
+import type { WordCompletionEngine, WordPredictionBackend } from "../modes/view-model/prompt/word-completion";
 import { getAgentDir, getHistoryDbPath, getPredictStateDir, logger } from "@oh-my-pi/pi-utils";
 import { daemonClient } from "../daemon/client";
 import { type DaemonClient, GLOBAL_SCOPE } from "../daemon/protocol";
@@ -101,9 +101,11 @@ class TextPredictionClient {
 				this.#offReconnect = undefined;
 			}
 			if (!dropped.lease) return;
-			dropped.daemon
-				.release(dropped.lease)
-				.catch(error => logger.debug("text-predict: lease release failed", { error: String(error) }));
+			dropped.daemon.release(dropped.lease).catch(error =>
+				logger.debug("text-predict: lease release failed", {
+					error: String(error),
+				}),
+			);
 		};
 		if (session) release(session);
 		// An open still in flight would otherwise leave its lease behind.

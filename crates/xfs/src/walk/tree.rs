@@ -265,10 +265,13 @@ enum Open<'a> {
 	Path(&'a Path),
 }
 
-/// An owned [`Open`], for a listing read ahead.
-enum Target {
-	Child(Arc<Dir>, Box<[u8]>),
-	Path(PathBuf),
+/// An owned [`Open`], for a listing read ahead: the directory's native path,
+/// opened relative to its open parent when there is one (its name is the
+/// last `name_len` bytes of `path`).
+struct Target {
+	parent:   Option<Arc<Dir>>,
+	path:     PathBuf,
+	name_len: usize,
 }
 
 /// The native path of the child `name` of the directory at `parent`
@@ -297,12 +300,13 @@ struct ListSpec {
 	identify: bool,
 }
 
-/// Opens and lists one directory into `listing` (recycled), on the
-/// traversal or ahead of it: `None` when it lies on another device than
-/// `spec.device`.
+/// Opens and lists one directory (at absolute `abs`) into `listing`
+/// (recycled), on the traversal or ahead of it: `None` when it lies on
+/// another device than `spec.device`.
 async fn list(
 	session: &mut Session,
 	open: Open<'_>,
+	abs: &Path,
 	spec: &ListSpec,
 	mut listing: Listing,
 ) -> io::Result<Option<Listed>> {
@@ -329,7 +333,7 @@ async fn list(
 			names.record(listing.name(record), record.file_type, sources.custom);
 		}
 		if !names.is_empty() {
-			ignores = DirIgnores::load(session, &dir, names, sources, false).await;
+			ignores = DirIgnores::load(session, &dir, abs, names, sources, false).await;
 		}
 	}
 	let id = if spec.identify {
@@ -835,7 +839,7 @@ impl Cx {
 		let dir = self.session.open_dir(&self.root).await?;
 		let spec = self.spec(0, 0, None);
 		let listing = self.pool.pop().unwrap_or_default();
-		let listed = list(&mut self.session, Open::Opened(dir), &spec, listing)
+		let listed = list(&mut self.session, Open::Opened(dir), &self.root, &spec, listing)
 			.await?
 			.expect("a listing without a device check is never skipped");
 		Ok(self.frame(listed, 0, inherited.as_ref(), None, saved))
@@ -952,22 +956,24 @@ impl Cx {
 	) -> JoinHandle<io::Result<Option<Listed>>> {
 		let spec = self.spec(depth, children, self.root_dev);
 		let listing = self.pool.pop().unwrap_or_default();
-		let target = match parent {
-			Some(parent) => Target::Child(parent, name.into()),
-			None => Target::Path(child_path(&self.abs[..own_abs], name)),
-		};
+		let target =
+			Target { parent, path: child_path(&self.abs[..own_abs], name), name_len: name.len() };
 		let runtime = self.runtime.clone().expect("read-ahead runs on a runtime");
 		let active = Active::start(&self.active);
 		let pool = runtime.clone();
 		pool.spawn_blocking(move || {
 			let _active = active;
-			let open = match &target {
-				Target::Child(parent, name) => Open::Child(parent, name),
-				Target::Path(path) => Open::Path(path),
+			let Target { parent, path, name_len } = &target;
+			let open = match parent {
+				Some(parent) => {
+					let path = path.as_os_str().as_encoded_bytes();
+					Open::Child(parent, &path[path.len() - name_len..])
+				},
+				None => Open::Path(path),
 			};
 			let fs = Fs::native();
 			let mut session = take_session(&fs);
-			let listed = now(&runtime, list(&mut session, open, &spec, listing));
+			let listed = now(&runtime, list(&mut session, open, path, &spec, listing));
 			give_session(&fs, session);
 			listed
 		})
@@ -1157,7 +1163,7 @@ impl Cx {
 				(Some(dir), false) => Open::Child(dir, name),
 				_ => Open::Path(as_path(&self.abs)),
 			};
-			list(&mut self.session, open, &spec, listing).await?
+			list(&mut self.session, open, as_path(&self.abs), &spec, listing).await?
 		};
 		Ok(listed.map(|listed| self.frame(listed, depth, parent.ignore.as_ref(), post, saved)))
 	}
