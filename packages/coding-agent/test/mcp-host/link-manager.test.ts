@@ -160,46 +160,62 @@ describe("MCPManager on a scripted host", () => {
 		expect(manager.getTools()).toHaveLength(1);
 	});
 
-	it("settles waitForPendingConnects once connects are done, without waiting on a reconnect", async () => {
-		await connect();
-		// The reconnect's catalog load never answers, so the reconnect stays in flight.
-		answers["tools/list"] = () => undefined;
-		let reconnected = false;
-		void manager.reconnectServer(SERVER).then(() => {
-			reconnected = true;
-		}, noop);
+	/** A manager whose config discovery finds `config` as the only server. */
+	function discovering(config: MCPHttpServerConfig): MCPManager {
+		return new MCPManager(
+			workDir,
+			async () => ({ configs: { [SERVER]: config }, sources: {}, exaApiKeys: [] }),
+			undefined,
+			host,
+		);
+	}
 
-		// Waiting on the reconnect, as `waitForStartup(0)` does, would hang here until the test times out.
-		await manager.waitForPendingConnects();
-		expect(reconnected).toBe(false);
+	it("names a startup server's tools while its first mount runs, never a later reconnect's", async () => {
+		manager = discovering({ type: "http", url: URL });
+		const seen: boolean[] = [];
+		manager.setOnToolsChanged(async tools => {
+			for (const tool of tools) seen.push(manager.isStartupMount(tool.name));
+		});
+		await manager.discoverAndConnect({ startup: true });
+		await manager.waitForStartup(0);
+
+		// The first mount ran inside the startup; once it is done, the server is past it.
+		expect(seen.length).toBeGreaterThan(0);
+		expect(seen.every(Boolean)).toBe(true);
+		const [tool] = manager.getTools();
+		expect(manager.isStartupMount(tool!.name)).toBe(false);
+
+		seen.length = 0;
+		expect(await manager.reconnectServer(SERVER)).not.toBeNull();
+		await settled();
+		expect(seen.length).toBeGreaterThan(0);
+		expect(seen.some(Boolean)).toBe(false);
 	});
 
-	it("waits on a timed-out startup connect's retry and the tool refresh it starts", async () => {
+	it("keeps a timed-out startup connect's retry in the startup until the refresh it starts is done", async () => {
 		// The first discovery never answers, so the startup connect times out and retries; the retry is answered.
 		const answered = answers["server/discover"];
 		let discovers = 0;
 		answers["server/discover"] = (message, tunnel) => (++discovers === 1 ? undefined : answered?.(message, tunnel));
-		const refreshing = Promise.withResolvers<void>();
+		// A real 50 ms connect timeout: the timeout is what starts the retry under test.
+		manager = discovering({ type: "http", url: URL, timeout: 50 });
+		const refreshing = Promise.withResolvers<string>();
 		const release = Promise.withResolvers<void>();
 		manager.setOnToolsChanged(async tools => {
-			if (tools.length === 0) return;
-			refreshing.resolve();
+			const [tool] = tools;
+			if (!tool) return;
+			refreshing.resolve(tool.name);
 			await release.promise;
 		});
-		// A real 50 ms connect timeout: the timeout is what starts the retry under test.
-		await manager.connectServers({ [SERVER]: { type: "http", url: URL, timeout: 50 } }, {});
-		let waited = false;
-		const waiting = manager.waitForPendingConnects().then(() => {
-			waited = true;
-		});
+		await manager.discoverAndConnect({ startup: true });
 
-		// The retry mounted the tools and the owner's refresh is still running: the startup is not over.
-		await refreshing.promise;
+		// The retry mounted the tools and settled; the owner's refresh it fired is still running: still the startup.
+		const name = await refreshing.promise;
 		await settled();
-		expect(waited).toBe(false);
+		expect(manager.isStartupMount(name)).toBe(true);
 		release.resolve();
-		await waiting;
-		expect(manager.getTools()).toHaveLength(1);
+		await settled();
+		expect(manager.isStartupMount(name)).toBe(false);
 	});
 
 	it("reports a reauth reconnect by its outcome, not by the link being attached", async () => {

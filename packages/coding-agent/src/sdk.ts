@@ -3062,12 +3062,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					deferredMCPManager.setNotificationsEnabled(true);
 				}
 				startDeferredMCPDiscovery = liveSession => {
+					// Each configured server's first mount, whether discovery or a later `onToolsChanged`
+					// (a slow or retried connect) brings it, is part of this startup, not a change.
+					liveSession.setMCPStartupMounts(toolName => deferredMCPManager.isStartupMount(toolName));
 					const discovery = (async () => {
 						try {
 							const mcpResult = await logger.time("discoverAndLoadMCPTools", () =>
 								deferredMCPManager.discoverAndConnect({
 									...mcpDiscoverOptions,
 									enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
+									startup: true,
 								}),
 							);
 							// The session can be torn down while servers are still connecting.
@@ -3098,10 +3102,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					})();
 					initialMcpDiscovery = discovery;
 					liveSession.setPendingMCPDiscovery(discovery);
-					// Servers still connecting when discovery returns mount later through `onToolsChanged`; the
-					// startup connect lasts until each of them has connected or failed, a timed-out one's
-					// automatic retry included (other reconnects and reloads excluded).
-					liveSession.setMCPStartupConnecting(discovery.then(() => deferredMCPManager.waitForPendingConnects()));
 				};
 			} else {
 				const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {

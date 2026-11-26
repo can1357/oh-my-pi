@@ -1713,7 +1713,7 @@ Unavailable; invocations fail:
 		expect(delivered[0]).toContain("mcp__nucleus_search");
 	});
 
-	it("keeps the startup MCP connect's mounts model-visible without rendering them", async () => {
+	it("keeps a startup MCP server's first mounts model-visible without rendering them", async () => {
 		const { session, contexts, toolRegistry } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
 			toolCommands: createTestToolCommandState(),
 			responses: [{ content: ["ok"] }],
@@ -1725,30 +1725,30 @@ Unavailable; invocations fail:
 			if (event.type === "notice" && event.source === "toolCommands") notices.push(event.message);
 		});
 
-		// The startup connect (a fresh start or a resume) mounts every server's tools, some only after
-		// discovery returns; its own "MCP finished" line reports the servers, so a "Tool commands: added …"
-		// list is noise.
-		const discovery = Promise.withResolvers<void>();
-		session.setMCPStartupConnecting(discovery.promise);
+		// The startup connect (a fresh start or a resume) mounts each server's tools, some only after discovery
+		// returns; its own "MCP finished" line reports the servers, so a "Tool commands: added …" list is noise.
+		let nucleusStarting = true;
+		session.setMCPStartupMounts(name => nucleusStarting && name.startsWith("mcp__nucleus_"));
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		await session.refreshMCPTools([search]);
 		expect(notices).toEqual([]);
-		// A non-MCP tool command mounted meanwhile is still a change the user sees.
+		// Meanwhile a non-MCP tool command and a tool of a server that is not starting are changes the user sees.
 		const catalog = { ...createBasicTool("catalog_lookup", "Catalog Lookup"), loadMode: "discoverable" as const };
 		toolRegistry.set(catalog.name, catalog);
 		await session.setActiveToolPresentation(["read", "bash", search.name, catalog.name], [search.name, catalog.name]);
-		expect(notices).toEqual(["Tool commands: added catalog_lookup"]);
+		const lookup = createMcpCustomTool("mcp__atlas_lookup", "atlas", "lookup", "Look up atlas");
+		await session.refreshMCPTools([search, lookup]);
+		expect(notices).toEqual(["Tool commands: added catalog_lookup", "Tool commands: added mcp__atlas_lookup"]);
 		await session.prompt("hello");
 		const delivered = mountNoticesIn(contexts[0]);
 		expect(delivered).toHaveLength(1);
 		expect(delivered[0]).toContain("mcp__nucleus_search");
 
-		// Once every startup server has connected or failed, a server that mounts later is a change the user sees.
-		discovery.resolve();
-		await discovery.promise;
+		// Once nucleus is past its startup, its later mounts are changes too.
+		nucleusStarting = false;
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
-		await session.refreshMCPTools([search, fetch]);
-		expect(notices).toEqual(["Tool commands: added catalog_lookup", "Tool commands: added mcp__nucleus_fetch"]);
+		await session.refreshMCPTools([search, lookup, fetch]);
+		expect(notices.at(-1)).toBe("Tool commands: added mcp__nucleus_fetch");
 	});
 	it("restores the active-tool predicate when a rebuild fails mid-flight", async () => {
 		let blockRebuild = false;

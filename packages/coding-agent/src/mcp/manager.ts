@@ -220,6 +220,11 @@ export interface MCPDiscoverOptions {
 	onStatus?: (event: McpConnectionStatusEvent) => void;
 	/** Non-blocking discovery window in milliseconds; environment override wins. */
 	startupTimeoutMs?: number;
+	/**
+	 * The session's startup connect: until a configured server's first tools are mounted (a timed-out
+	 * connect's automatic retry included), {@link MCPManager.isStartupMount} names its tools.
+	 */
+	startup?: boolean;
 }
 
 /** Handles an MCP `WWW-Authenticate` challenge and returns refreshed config. */
@@ -377,8 +382,8 @@ export class MCPManager implements MCPManagerApi {
 	#pendingConnections = new Map<string, Promise<HostedMCPConnection>>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#startupUpdates = new Map<string, Promise<void>>();
-	/** The latest automatic retry of each startup connect that timed out (other reconnects are not here). */
-	#startupRetries = new Map<string, Promise<unknown>>();
+	/** Servers still in the session's startup connect, each with the token of the discovery that claimed it. */
+	#startupOwned = new Map<string, object>();
 	#startupServers = new Set<string>();
 	#startupFailures = new Map<string, string>();
 	/** Newest connect/reconnect failure per server, cleared when it connects; explains "not connected". */
@@ -778,6 +783,10 @@ export class MCPManager implements MCPManagerApi {
 			throw error;
 		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
+		if (options?.startup) {
+			const token = {};
+			for (const name of Object.keys(configs)) this.#startupOwned.set(name, token);
+		}
 		const result = await this.connectServers(configs, sources, options?.onStatus, options?.startupTimeoutMs);
 		result.exaApiKeys = exaApiKeys;
 		return result;
@@ -1027,6 +1036,11 @@ export class MCPManager implements MCPManagerApi {
 			const tracked = trackPromise(toolsPromise);
 			connectionTasks.push({ name, config, tracked, toolsPromise, connectSignal });
 
+			const owned = this.#startupOwned.get(name);
+			const release = (): void => {
+				if (owned && this.#startupOwned.get(name) === owned) this.#startupOwned.delete(name);
+			};
+			let retrying = false;
 			const startupUpdate = toolsPromise
 				.then(async ({ connection, serverTools }) => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
@@ -1057,13 +1071,21 @@ export class MCPManager implements MCPManagerApi {
 								})
 							: undefined;
 						const retry = this.reconnectServer(name);
-						this.#startupRetries.set(name, retry);
+						// The retry fires the owner's refresh without awaiting it: the startup ends once that drains.
+						retrying = true;
+						void retry
+							.then(
+								() => this.#ownerToolsRun?.catch(() => {}),
+								() => {},
+							)
+							.finally(release);
 						if (stopForwarding) void retry.then(stopForwarding, stopForwarding);
 						else void retry;
 					}
 				})
 				.finally(() => {
 					if (this.#startupUpdates.get(name) === startupUpdate) this.#startupUpdates.delete(name);
+					if (!retrying) release();
 				});
 			this.#startupUpdates.set(name, startupUpdate);
 		}
@@ -1300,17 +1322,13 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
-	 * Settles once the servers connecting now have published their tools (the owner's tool-change
-	 * callback awaited) or failed. A connect that timed out counts until its automatic retry has
-	 * settled and the owner refresh that retry started has drained. Each step is bounded by the
-	 * connect timeout. Unlike {@link waitForStartup}, it waits neither on other reconnects and reloads
-	 * (`/mcp reload`, `tools/list_changed`) nor on connects started later.
+	 * Whether `toolName` belongs to a server still in the session's startup connect (see
+	 * {@link MCPDiscoverOptions.startup}): its first mount is no change to announce. Matched by the
+	 * tool's `mcpServerName`, never a name prefix.
 	 */
-	async waitForPendingConnects(): Promise<void> {
-		await Promise.allSettled([...this.#startupUpdates.values()]);
-		await Promise.allSettled([...this.#startupRetries.values()]);
-		// A retry fires the owner callback without awaiting it (`#connectAndWireServer`).
-		await this.#ownerToolsRun?.catch(() => {});
+	isStartupMount(toolName: string): boolean {
+		const server = this.#tools.find(tool => tool.name === toolName)?.mcpServerName;
+		return server !== undefined && this.#startupOwned.has(server);
 	}
 
 	/**
@@ -1551,7 +1569,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#startupServers.delete(name);
 		this.#startupFailures.delete(name);
 		this.#startupUpdates.delete(name);
-		this.#startupRetries.delete(name);
+		this.#startupOwned.delete(name);
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#pendingReconnections.delete(name);
@@ -1608,7 +1626,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
 		this.#startupUpdates.clear();
-		this.#startupRetries.clear();
+		this.#startupOwned.clear();
 		this.#startupServers.clear();
 		this.#startupFailures.clear();
 		this.#pendingReconnections.clear();

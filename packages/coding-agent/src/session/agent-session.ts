@@ -1438,8 +1438,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * otherwise the prompt changes on the next turn and the provider prompt cache misses.
 	 */
 	#pendingMCPDiscovery: Promise<void> | undefined;
-	/** Until it settles, the MCP servers configured at startup are still connecting (their mounts are no change). */
-	#mcpStartupConnecting: Promise<void> | undefined;
+	/** Whether a tool name belongs to an MCP server still in its startup connect (its mount is no change). */
+	#mcpStartupMount: ((toolName: string) => boolean) | undefined;
 	/**
 	 * Startup-deferred extensions (see `startup-deferral.ts`): the loader binding
 	 * them into this session, then its in-flight run once started. Submissions and
@@ -2827,7 +2827,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			clientBridge: () => this.#clientBridge,
 			agentKind: () => this.#agentKind,
 			isDisposed: () => this.#isDisposed,
-			mcpStartupConnecting: () => this.#mcpStartupConnecting !== undefined,
+			mcpStartupMount: toolName => this.#mcpStartupMount?.(toolName) === true,
 			isStreaming: () => this.isStreaming,
 			steeringArrivalSignal: () => this.#steeringArrivalSignal(),
 			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
@@ -8254,13 +8254,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#pendingMCPDiscovery = pending;
 	}
 
-	/** Marks the startup MCP connect as running until `startup` settles: tools it mounts are not announced as changes. */
-	setMCPStartupConnecting(startup: Promise<unknown>): void {
-		const settled = () => {
-			if (this.#mcpStartupConnecting === pending) this.#mcpStartupConnecting = undefined;
-		};
-		const pending = startup.then(settled, settled);
-		this.#mcpStartupConnecting = pending;
+	/** Names the tools of MCP servers still in their startup connect: their mounts are not announced as changes. */
+	setMCPStartupMounts(isStartupMount: (toolName: string) => boolean): void {
+		this.#mcpStartupMount = isStartupMount;
 	}
 
 	/** Bind startup-deferred extensions on the first {@link loadDeferredExtensions} call. */
