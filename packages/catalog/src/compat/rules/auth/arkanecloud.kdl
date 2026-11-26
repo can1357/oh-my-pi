@@ -1,0 +1,9 @@
+auth "arkanecloud" {
+	name "ArkaneCloud"
+	login "api-key" {
+		auth-url "https://console.arkanecloud.com/management"
+		instructions "Create or copy your API key from the ArkaneCloud dashboard (keys look like ak_...)"
+		prompt "Paste your ArkaneCloud API key" placeholder="ak_..."
+		validate "models-endpoint" label="ArkaneCloud" url="https://console.arkanecloud.com/api/v2/models"
+	}
+}

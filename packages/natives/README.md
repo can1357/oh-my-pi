@@ -57,6 +57,41 @@ without applying alpha twice. Fully transparent pixels remain transparent;
 unscaled images retain their existing blending path. Re-encode when the terminal
 background RGB changes.
 
+### Web reader
+
+Use `renderHtml` to convert HTML you already have to Markdown or plain text without making network requests.
+
+```typescript
+import { renderHtml } from "@oh-my-pi/pi-natives";
+
+const markdown = await renderHtml(html, {
+	baseUrl: "https://example.org/docs/",
+	mode: "auto",
+});
+```
+
+Markdown, reader content selection (`mode: "auto"`), and dropping hidden content are the defaults.
+Use `mode: "full"` to keep all visible content.
+Set `hidden: "reachable"` to include collapsed sections or `"all"` to include content
+that the page cannot reveal. Set `images: false` to skip images in Markdown.
+Set `format: "text"` for plain text; `width` defaults to 250 columns.
+
+Use `new Reader(options?)` to read a URL with your own HTTP or browser client:
+
+- `reader.open(url)` returns the first step synchronously.
+- For a `"fetch"` step, send the requested URL, method, headers, and optional body,
+  and cap the response at `maxBytes`. For a `"browse"` step, load the URL in a
+  browser and send back the rendered DOM as a UTF-8 buffer.
+- `await reader.resolve(response)` returns the next step. Pass the HTTP status
+  (or `0` for a transport error), final URL, header array, and optional body,
+  truncation flag, or error. Resolve one step at a time.
+- A `"done"` step contains a rendered page, a blob descriptor, or failure
+  diagnostics. Keep the response bytes yourself if you need to process a blob.
+
+`Reader` accepts the same rendering options except `baseUrl`, plus `raw` for
+decoded source, `browser` to enable browser fallback, and `userAgents` to supply
+HTTP user-agent candidates. The host owns redirects, cookies, and network I/O.
+
 ### PTY dimensions
 
 `normalizePtyDimensions(cols, rows)` returns `{ cols, rows }` with fractional

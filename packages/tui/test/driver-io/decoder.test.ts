@@ -287,6 +287,22 @@ describe("InputDecoder: every family, byte by byte", () => {
 		]);
 	});
 
+	it("drops a malformed TSP reply whose stalled tail starts with a space, preserving the next key", () => {
+		const { clock, decoder, keys } = setup();
+		decoder.process('\x1b_tsp;;{"ev":"error","msg":"unknown surface');
+		clock.advance(200);
+		decoder.process(' s:1"}\x1b\\x');
+		expect(keys()).toEqual(["x"]);
+	});
+
+	it("does not type the spaced tail of a TSP reply after the string watchdog expires", () => {
+		const { clock, decoder, keys } = setup();
+		decoder.process('\x1b_tsp;e;{"ev":"error","msg":"unknow');
+		clock.advance(5000);
+		decoder.process('surface s:1"}\x1b\\x');
+		expect(keys()).toEqual(["x"]);
+	});
+
 	it("routes every probe reply to its owner and never to input", () => {
 		const { bytes, events, replies } = setup();
 		bytes("\x1b[?62;4;22c");

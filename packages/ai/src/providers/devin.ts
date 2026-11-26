@@ -28,7 +28,7 @@ import {
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { isRecord, logger, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -42,6 +42,8 @@ import type {
 	DeveloperMessage,
 	Message,
 	Model,
+	ModelCost,
+	ServiceTier,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -79,6 +81,8 @@ export interface DevinOptions extends StreamOptions {
 	sessionId?: string;
 	/** Wire model uid selected after thinking-effort routing. */
 	chatModelUid?: string;
+	/** `priority` (`/fast`) sends the model's fast-lane twin of `chatModelUid`; other tiers are ignored. */
+	serviceTier?: ServiceTier;
 }
 
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
@@ -192,6 +196,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let cost: ModelCost = model.cost;
 
 		let currentTextBlock: TextContent | null = null;
 		let currentThinkingBlock: ThinkingContent | null = null;
@@ -268,7 +273,20 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
 				output.upstreamModel = assignment.modelUid;
 			}
-			let request = buildDevinChatRequest(model, context, options, turn, assignment);
+			// `/fast`: the effort's wire uid swaps for its fast-lane twin, billed at the lane's card.
+			const lane = assignment === undefined && options?.serviceTier === "priority" ? model.priorityLane : undefined;
+			const fastUid = lane?.routes[options?.chatModelUid ?? model.requestModelId ?? model.id];
+			if (lane && fastUid !== undefined) {
+				output.serviceTier = "priority";
+				cost = lane.cost;
+			}
+			let request = buildDevinChatRequest(
+				model,
+				context,
+				fastUid === undefined ? options : { ...options, chatModelUid: fastUid },
+				turn,
+				assignment,
+			);
 			const replacementRequest = await options?.onPayload?.(request, model);
 			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
@@ -531,7 +549,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				toolBlocks.size > 0 ? "toolUse" : latestStopReason === StopReason.MAX_TOKENS ? "length" : "stop";
 			output.stopReason = doneReason;
 
-			calculateCost(model, output.usage, output.timestamp);
+			calculateUsageCost(cost, output.usage, output.timestamp);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 

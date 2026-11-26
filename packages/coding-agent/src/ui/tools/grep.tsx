@@ -7,9 +7,8 @@
  * Terminal look: `grep` (`src/ui/styles/tools/grep.ts`): a status-glyph head
  * line and a branch tree of files and their match rows.
  */
-import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { TspText } from "@oh-my-pi/pi-wire";
 import { highlightSpans } from "@oh-my-pi/pi-tui/text/highlight";
-import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { ToolHead, ToolPresenter, ToolView } from "./contract";
 import { resultText } from "./default";
 import {
@@ -22,7 +21,7 @@ import {
 import type { OutputMeta } from "../../tools/output-meta-format";
 import { toPathList } from "../../utils/render-utils";
 import { registerToolPresenter } from "./registry";
-import { countText, inlineErrorView, StatsFoot } from "./search-common";
+import { countText, inlineErrorView, spansText, StatsFoot } from "./search-common";
 
 /** The args grep shows. */
 export interface GrepArgs {
@@ -67,18 +66,8 @@ const PREVIEW_LINES = 12;
 
 /** A pattern highlighted by the regex grammar, tabs drawn as spaces; plain text when nothing is styled. */
 export function patternText(pattern: string): TspText {
-	const spans: TspSpan[] = [];
-	const push = (span: TspSpan): void => {
-		const last = spans[spans.length - 1];
-		if (last && last.s === span.s) spans[spans.length - 1] = { ...last, t: last.t + span.t };
-		else spans.push(span);
-	};
-	highlightSpans(pattern, "Regular Expression").forEach((line, i) => {
-		if (i > 0) push({ t: "\n" });
-		for (const span of line) push({ ...span, t: replaceTabs(span.t) });
-	});
-	if (spans.length === 0) return "";
-	return spans.length === 1 && spans[0]!.s === undefined ? spans[0]!.t : spans;
+	const lines = highlightSpans(pattern, "Regular Expression");
+	return spansText(lines.flatMap((line, i) => (i === 0 ? line : [{ t: "\n" }, ...line])));
 }
 
 /** The searched paths. */
