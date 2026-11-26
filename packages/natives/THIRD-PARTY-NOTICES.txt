@@ -10,6 +10,20 @@ VENDORED SOURCE AND DATA
 ========================
 
 -------------------------------------------------------------------------------
+Main-content extraction — crates/web/src/select
+
+================================================================================
+Trafilatura 2.0.0 (https://github.com/adbar/trafilatura), Apache-2.0
+--------------------------------------------------------------------------------
+Covers: content and discard rules, link-density pruning, text recovery and
+fallback comparison, adapted from XPath/lxml to DOM traversal.
+
+  Copyright (c) 2024 Adrien Barbaresi
+
+Licensed under the Apache License, Version 2.0; the full license text appears
+below under "Apache License 2.0".
+
+-------------------------------------------------------------------------------
 Command-line utilities — crates/builtins
 
 ================================================================================
@@ -11895,7 +11909,6 @@ Used by:
 - fluent-langneg 0.13.1 (https://github.com/projectfluent/fluent-langneg-rs)
 - gbm-sys 0.4.0 (https://github.com/Drakulix/gbm.rs/tree/master/gbm-sys)
 - hifijson 0.5.0 (https://github.com/01mf02/hifijson)
-- html-to-markdown-rs 3.18.3 (https://github.com/xberg-io/html-to-markdown)
 - include_dir 0.7.4 (https://github.com/Michael-F-Bryan/include_dir)
 - include_dir_macros 0.7.4 (https://github.com/Michael-F-Bryan/include_dir)
 - intl_pluralrules 7.0.2 (https://github.com/zbraniecki/pluralrules)
