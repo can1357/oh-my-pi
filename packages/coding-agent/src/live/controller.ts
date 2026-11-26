@@ -121,6 +121,8 @@ export class LiveSessionController {
 	#activeDelegationId: string | undefined;
 	/** Transcript that received a spoken request; only it must hear that the call ended. */
 	#delegatedSessionId: string | undefined;
+	/** Settles once every spoken request has been admitted, so the end notice never lands before one. */
+	#delegations: Promise<unknown> = Promise.resolve();
 	#userTranscript = "";
 	#assistantTranscript = "";
 	#userTranscriptFinal = false;
@@ -306,17 +308,21 @@ export class LiveSessionController {
 			}
 		}
 
-		if (this.#delegatedSessionId && this.#delegatedSessionId === this.#session.sessionManager.getSessionId()) {
-			void this.#session
-				.sendCustomMessage(
-					{
-						customType: LIVE_ENDED_MESSAGE_TYPE,
-						content: prompt.render(liveEndedTemplate),
-						display: false,
-						attribution: "agent",
-					},
-					{ deliverAs: "nextTurn" },
-				)
+		const delegatedSessionId = this.#delegatedSessionId;
+		if (delegatedSessionId) {
+			void this.#delegations
+				.then(() => {
+					if (delegatedSessionId !== this.#session.sessionManager.getSessionId()) return;
+					return this.#session.sendCustomMessage(
+						{
+							customType: LIVE_ENDED_MESSAGE_TYPE,
+							content: prompt.render(liveEndedTemplate),
+							display: false,
+							attribution: "agent",
+						},
+						{ deliverAs: "nextTurn" },
+					);
+				})
 				.catch(cause => {
 					logger.warn("Live session end notice was not delivered", { error: toError(cause).message });
 				});
@@ -374,7 +380,7 @@ export class LiveSessionController {
 		this.#activeDelegationId = event.item.id;
 		this.#refreshAudioPhase();
 		this.#delegatedSessionId = this.#session.sessionManager.getSessionId();
-		void this.#session
+		const delegation = this.#session
 			.sendCustomMessage(
 				{
 					customType: LIVE_DELEGATION_MESSAGE_TYPE,
@@ -385,6 +391,7 @@ export class LiveSessionController {
 				{ triggerTurn: true },
 			)
 			.catch(cause => this.#reportFailure(toError(cause)));
+		this.#delegations = Promise.all([this.#delegations, delegation]);
 	}
 
 	/** Offline mode reaches only the session's provider, unless `live.endpoint` names the voice server. */

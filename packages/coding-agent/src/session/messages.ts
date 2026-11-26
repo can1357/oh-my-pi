@@ -65,7 +65,7 @@ import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { readerIncludesThinking } from "@oh-my-pi/snapcompact";
-import voiceRequestTemplate from "../prompts/live/voice-request.md" with { type: "text" };
+import voiceRequestTemplate from "../live/prompts/voice-request.md" with { type: "text" };
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
