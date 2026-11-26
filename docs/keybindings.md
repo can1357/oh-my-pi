@@ -4,7 +4,7 @@ Run `/hotkeys` inside an `omp` session for the built-in shortcut reference. Appl
 
 Base editor, input, and selector actions use `tui.editor.*`, `tui.input.*`, and `tui.select.*`; application actions use `app.*`. Definitions live in `packages/coding-agent/src/config/keybindings/tui-keybindings.ts` and `packages/coding-agent/src/config/keybindings/app-keybindings.ts`; the keymap that loads `keybindings.yml` and matches keys is `packages/coding-agent/src/config/keybindings/keybindings.ts`.
 
-The `tui.select.*` actions (`up`, `down`, `pageUp`, `pageDown`, `confirm`, `cancel`) drive every list: pickers, menus, settings pages, dialogs and the setup wizard. The `tui.editor.*` actions and `tui.input.newLine` drive every text field, the prompt included; `tui.input.submit` submits single-purpose inputs (renames, labels, form fields). Home/End, Space, Tab and ←/→ in lists, and Alt+Enter as a new line in fields, stay fixed. Key hints and button tooltips show the keys you bound.
+The `tui.select.*` actions (`up`, `down`, `pageUp`, `pageDown`, `confirm`, `cancel`) drive every list: pickers, menus, settings pages, dialogs and the setup wizard. Editor and newline bindings work in text fields, including the prompt. `tui.editor.redo` applies only to the prompt with Vim mode off. `tui.input.submit` submits single-purpose inputs (renames, labels, form fields). Home/End, Space, Tab and ←/→ in lists, and Alt+Enter as a new line in fields, stay fixed. Key hints and button tooltips show the keys you bound.
 
 ## Customize keybindings
 
@@ -19,6 +19,8 @@ app.plan.toggle: Alt+Shift+P
 ```
 
 Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`. Modifier order does not matter (`Shift+Ctrl+P` is `Ctrl+Shift+P`), `Esc`/`Return` mean `Escape`/`Enter`, and a symbol typed with Shift is written as the symbol itself: `?` and `Shift+?` are the same key.
+
+If your terminal reports `Ctrl+Shift+Z` as a distinct chord, you can set `tui.editor.redo: ctrl+shift+z`.
 
 Set an action to an empty array to disable it:
 
@@ -36,6 +38,7 @@ app.history.search: []
 | `app.model.select`           | `Alt+M`                                                               | Open the model selector and set roles                                                                                                                  |
 | `app.plan.toggle`            | `Alt+Shift+P`                                                         | Toggle plan mode                                                                                                                                       |
 | `app.history.search`         | `Ctrl+R`                                                              | Search prompt history                                                                                                                                  |
+| `tui.editor.redo`            | `Ctrl+^`, `Ctrl+Shift+6`                                               | Redo an edit to the prompt with Vim mode off                                                                                                           |
 | `app.tools.expand`           | `Ctrl+O`                                                              | Toggle tool-output expansion                                                                                                                           |
 | `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Show or hide tool activity                                                                                                                             |
 | `app.links.hint`             | `Alt+O`                                                               | Tag each [extension link](./extensions.md#extension-link-schemes) on screen; type a tag to pick it, `Esc` cancels; again or `Page Up` browses all      |

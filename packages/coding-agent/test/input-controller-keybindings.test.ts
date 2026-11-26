@@ -1406,6 +1406,24 @@ describe("InputController paste into an ask form", () => {
 });
 
 describe("InputController global editor actions", () => {
+	it("keeps Ctrl+R for Vim Normal redo and Insert history search", () => {
+		const { ctx, editor, press } = createContext();
+		new InputController(ctx).setupKeyHandlers();
+		editor.setText("abc");
+		editor.setVim(true);
+		press("escape");
+		press("x");
+		press("u");
+		press("ctrl+^");
+		expect(editor.text()).toBe("abc");
+		press("ctrl+r");
+		expect(editor.text()).toBe("ab");
+		expect(ctx.showHistorySearch).not.toHaveBeenCalled();
+		press("i");
+		expect(press("ctrl+r")).toBe("global");
+		expect(ctx.showHistorySearch).toHaveBeenCalledTimes(1);
+	});
+
 	it("routes shortcuts while a dialog that does not bind them holds focus", () => {
 		const context = createContext();
 		const controller = new InputController(context.ctx);

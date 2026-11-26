@@ -514,14 +514,21 @@ export class Composer {
 
 	/** Undo the last change. */
 	undo(): void {
-		const last = this.#history.undo({ text: this.#text(), cursor: this.#cursor() });
-		if (!last) return;
+		this.#stepHistory("undo");
+	}
+
+	#stepHistory(direction: "undo" | "redo"): void {
+		// A speech preview must never become an undo or redo snapshot.
+		if (this.#volatile.peek()) return;
+		const snapshot = this.#history[direction]({ text: this.#text(), cursor: this.#cursor() });
+		if (!snapshot) return;
+		if (direction === "redo") this.field.fieldSelection!.anchor = null;
 		this.#typingAt = -1;
 		this.#closeCompletion();
 		this.#revision++;
 		batch(() => {
-			this.#text.set(last.text);
-			this.#cursor.set(last.cursor);
+			this.#text.set(snapshot.text);
+			this.#cursor.set(Math.min(snapshot.cursor, snapshot.text.length));
 		});
 	}
 
@@ -1576,6 +1583,10 @@ export class Composer {
 		}
 		if (this.#backslashSubmit(key)) return true;
 		const bindings = getKeybindings();
+		if (!vim && bindings.matches(key, "tui.editor.redo")) {
+			this.#stepHistory("redo");
+			return true;
+		}
 		const submit = bindings.matches(key, "tui.input.submit");
 		const tab = bindings.matches(key, "tui.input.tab");
 		const right = bindings.matches(key, "tui.editor.cursorRight");
