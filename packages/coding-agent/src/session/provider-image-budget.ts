@@ -236,20 +236,28 @@ function clampImages(context: Context, state: ImageBudgetState): Context {
 }
 
 /**
+ * Over the count budget, the oldest images go a whole step at a time, a quarter of the budget. Dropping exactly the
+ * excess moves the first kept image on every new image, so each request rewrites the warm provider prefix (#15230).
+ */
+const EVICTION_STEP_DIVISOR = 4;
+
+/**
  * Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap.
  *
  * {@link countImages} counts exactly the roles {@link clampImages} can drop, so the
  * budget is always fully spendable and the clamp never evicts an input image
- * on behalf of a model output.
+ * on behalf of a model output. Once over budget, it drops in whole eviction steps
+ * ({@link EVICTION_STEP_DIVISOR}), so the cached prefix changes once per step.
  */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
 	const metadataWire = sendsComputerScreenshotMetadata(model);
-	const totalImages = countImages(context, metadataWire);
-	const remainingDrops = totalImages - providerImageBudget(model);
-	if (remainingDrops <= 0) return context;
+	const budget = providerImageBudget(model);
+	const excess = countImages(context, metadataWire) - budget;
+	if (excess <= 0) return context;
+	const step = Math.max(1, Math.ceil(budget / EVICTION_STEP_DIVISOR));
 	return clampImages(context, {
-		remainingDrops,
+		remainingDrops: Math.ceil(excess / step) * step,
 		inlineBytes: 0,
 		byteBudget: Number.POSITIVE_INFINITY,
 		model,
