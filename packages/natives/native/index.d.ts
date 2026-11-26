@@ -1233,6 +1233,9 @@ export declare function __ompSetGrammarDir(dir: string): void
  */
 export declare function __piNativesBuildVersion(): string | null
 
+/** Parses and classifies a bash or zsh command for `bash` tool approval. */
+export declare function analyzeBashApproval(command: string, dialect?: 'bash' | 'zsh'): BashApprovalAnalysis
+
 /**
  * Reports whether the on-device model can generate, as an `availability`
  * event JSON: `{available, reason?, contextSize?, variant?, vision?,
@@ -1293,6 +1296,24 @@ export interface ApplicationQuery {
  * failure, a damaged or unsupported patch, or a patch made for other old data.
  */
 export declare function applyBinaryPatch(oldPath: string, patchPath: string, outPath: string): Promise<number>
+
+export interface ApprovalAndClause {
+  text: string
+  simple?: ApprovalSimpleCommand
+  syntacticallyStateful: boolean
+  stageCommands: Array<Array<string>>
+  restrictionSegments: Array<string>
+}
+
+export interface ApprovalSimpleCommand {
+  text: string
+  withoutAssignsText: string
+  assignNames: Array<string>
+  argv: Array<string>
+  globWordIndices: Array<number>
+  expansionFree: boolean
+  strictlyLiteral: boolean
+}
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1622,6 +1643,16 @@ export interface AxTextSelection {
    * act on the focused element.
    */
   focused: boolean
+}
+
+export interface BashApprovalAnalysis {
+  valid: boolean
+  hasControlChars: boolean
+  hasComment: boolean
+  single?: ApprovalSimpleCommand
+  andChain?: Array<ApprovalAndClause>
+  restrictionSegments: Array<string>
+  restrictionIncomplete: boolean
 }
 
 export interface BlockParseOptions {

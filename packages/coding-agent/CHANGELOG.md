@@ -14,6 +14,8 @@
 - `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
 - The glob tool's header shows the globs a call searches, a separate `pattern` included, with wildcards, character classes and `{a,b}` alternations highlighted like grep's regex ([#20616](https://github.com/can1357/oh-my-pi/pull/20616) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Ask forms highlight `<mark>` text, in the terminal and in Tern ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Added the `gitlab` tool (`gitlab.enabled`, default off) covering project/file/issue reads, MR creation/updating/worktree checkout/push, discussions/notes/resolution, project/group/global search, and CI pipeline/job watching and logs, and expanded `mr://` URLs to support MR listings (`mr://`, `mr://<host>/<group>/<project>`) and cached MR overviews (`mr://<iid>`) alongside existing `/diff` slices ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
+- Included `tool_approvals` in `omp gc` stats database session purges ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield))
 - Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - On Linux the tool guard also refuses heavy work started while the host is strained ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses it; `onJudgeError` covers judge failures, and judged-rule requests count toward the cost cap ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
@@ -27,8 +29,14 @@
 - Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
 - Ask form table cells, field labels and option rows keep their `<strong>`, `<em>`, `<code>` and `<mark>` styling in the terminal instead of showing plain text ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 
+### Changed
+
+- `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, and fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
+- When `bash.patterns` allow rules can skip an approval prompt, the bash tool's description tells the agent which shell syntax (unquoted operators, `$`/backtick expansions) disqualifies them ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
+
 ### Fixed
 
+- A todo update no longer hides the rest of a long turn: tool output after it stays in terminal scrollback instead of vanishing behind a one-row todo line and a clipped empty card frame ([#20705](https://github.com/can1357/oh-my-pi/pull/20705) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Pasting text that ends in an `@name` no longer opens the file completion list, so the next Enter sends the message instead of replacing the name with a file ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - Rebuilding a long transcript in place (compaction, `/shake`, a display setting change) no longer stalls Tern: the block list is recomputed once for the rebuild instead of once per replayed block ([#20675](https://github.com/can1357/oh-my-pi/pull/20675) by [@H4vC](https://github.com/H4vC))
 - `lsp` tool calls with `new_name: null` or `line: null` no longer crash the TUI while rendering ([#20663](https://github.com/can1357/oh-my-pi/issues/20663)).
@@ -70,6 +78,7 @@
 - Renaming a session from `/resume` accepts keyboard input again and returns focus to the picker after saving or cancelling ([#20548](https://github.com/can1357/oh-my-pi/issues/20548)).
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
+- Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
 
 ### Removed
 

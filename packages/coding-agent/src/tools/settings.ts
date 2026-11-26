@@ -946,6 +946,19 @@ export const cfgGithubEnabled = register({
 	},
 });
 
+export const cfgGitlabEnabled = register({
+	id: "gitlab.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "GitLab CLI",
+		description:
+			"Enable the gitlab tool (op-based dispatch for project, file, issue, merge request, discussion, search, checkout, push, and CI pipeline workflows)",
+	},
+});
+
 export const cfgGithubCacheEnabled = register({
 	id: "github.cache.enabled",
 	type: "boolean",
@@ -1294,6 +1307,7 @@ export const cfgBuiltinToolGates = combine({
 	evalPy: cfgEvalPy,
 	find: cfgFindEnabled,
 	github: cfgGithubEnabled,
+	gitlab: cfgGitlabEnabled,
 	glob: cfgGlobEnabled,
 	grep: cfgGrepEnabled,
 	launch: cfgLaunchEnabled,

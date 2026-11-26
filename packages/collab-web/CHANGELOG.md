@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `gitlab` tool renderer for shared sessions and HTML exports ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
