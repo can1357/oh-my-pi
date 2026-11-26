@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { createRoot, type KeyEvent, signal, type UiEvent, type UiNode } from "../../src";
 import { bubbleEvent, keypathOf } from "../../src/dispatch";
-import { type EditorProps, layoutText } from "../../src/term/painters/editor";
+import { type EditorProps, lastLayout, layoutText, rowOf } from "../../src/term/painters/editor";
 import { paintNode, staticEnvironment } from "../../src/term/paint";
 import { setWidgetKeymap } from "../../src/term/keymap";
 import { widgetFor, widgetState } from "../../src/term/widgets";
@@ -103,6 +103,34 @@ describe("layout", () => {
 		expect(rows).toHaveLength(1);
 		expect(rows[0]!.textEnd).toBe(4);
 		expect(rows[0]!.end).toBe(6);
+	});
+	test("finds the row holding an offset at breaks, blank lines and past the end", () => {
+		// "alpha beta" (the blank at 10 is swallowed by the soft break), "gamma", the blank line, "xy".
+		const rows = layoutText("alpha beta gamma\n\nxy", 10);
+		expect(rows.map(r => [r.start, r.end])).toEqual([
+			[0, 11],
+			[11, 16],
+			[17, 17],
+			[18, 20],
+		]);
+		// A swallowed blank stays on its row, a soft break starts the next, a line's end stays on its last row.
+		expect([0, 10, 11, 16, 17, 18, 20, 99].map(offset => rowOf(rows, offset))).toEqual([0, 0, 1, 1, 2, 3, 3, 3]);
+	});
+	test("lays a field out again after an edit as a fresh layout would", () => {
+		const f = field("editor", "one two three\nfour five six\nseven", 8);
+		f.rows(9);
+		for (const [id, typed] of [
+			["x", "x"],
+			["enter", undefined],
+			["backspace", undefined],
+			["space", " "],
+		] as const)
+			f.press(id, typed);
+		f.paste("a much longer pasted line\nand another");
+		f.rows(9);
+		expect(lastLayout(f.node)).toEqual(layoutText(f.text(), 9));
+		f.rows(6);
+		expect(lastLayout(f.node)).toEqual(layoutText(f.text(), 6));
 	});
 });
 

@@ -20,7 +20,7 @@ import type { UiNode } from "../../node";
 import { fgSgr } from "../../theme/color";
 import type { Theme } from "../../theme/contract";
 import { hyperlink } from "../../text/osc";
-import { TAB_WIDTH, truncate, visibleWidth } from "../../text/width";
+import { TAB_WIDTH, truncate, visibleWidth, widthEpoch } from "../../text/width";
 import { widgetState } from "../widgets";
 import { type Block, type Cell, definePainter, type PaintContext } from "../paint";
 
@@ -154,11 +154,16 @@ function wrapLine(line: string, width: number): Chunk[] {
 
 /** Lay `text` out in rows of `width` cells (see {@link EditorRow}). */
 export function layoutText(text: string, width: number): EditorRow[] {
+	return layoutLines(text, line => wrapLine(line, Math.max(1, width)));
+}
+
+/** Rows of `text`, each logical line wrapped by `wrap` (chunk offsets relative to the line). */
+function layoutLines(text: string, wrap: (line: string) => readonly Chunk[]): EditorRow[] {
 	const rows: EditorRow[] = [];
 	let offset = 0;
 	let line = 0;
 	for (const lineText of text.split("\n")) {
-		const chunks = wrapLine(lineText, Math.max(1, width));
+		const chunks = wrap(lineText);
 		for (let k = 0; k < chunks.length; k++) {
 			const c = chunks[k]!;
 			rows.push({
@@ -176,12 +181,56 @@ export function layoutText(text: string, width: number): EditorRow[] {
 	return rows;
 }
 
+const kLayout = Symbol("pi-tui.editor.layout");
+
+/** A field's last layout, and the wrapped chunks of each of its lines (reused by the next layout at that width). */
+interface FieldLayout {
+	readonly text: string;
+	readonly width: number;
+	/** The {@link widthEpoch} the lines were measured under. */
+	readonly epoch: number;
+	readonly rows: readonly EditorRow[];
+	readonly lines: ReadonlyMap<string, readonly Chunk[]>;
+}
+
+interface LayoutHolder {
+	[kLayout]?: FieldLayout;
+}
+
+/**
+ * {@link layoutText} for a field, through its last layout: the same text at the same width is laid
+ * out once (painting and key handling ask for it several times per keystroke), and an edit
+ * re-wraps only the lines it changed.
+ */
+function layoutField(node: UiNode, text: string, width: number): readonly EditorRow[] {
+	const holder = node as LayoutHolder;
+	const epoch = widthEpoch();
+	const last = holder[kLayout]?.epoch === epoch ? holder[kLayout] : undefined;
+	if (last && last.width === width && last.text === text) return last.rows;
+	const reuse = last?.width === width ? last.lines : undefined;
+	const lines = new Map<string, readonly Chunk[]>();
+	const rows = layoutLines(text, line => {
+		let chunks = lines.get(line) ?? reuse?.get(line);
+		if (!chunks) chunks = wrapLine(line, Math.max(1, width));
+		lines.set(line, chunks);
+		return chunks;
+	});
+	holder[kLayout] = { text, width, epoch, rows, lines };
+	return rows;
+}
+
 /** The row holding `offset` (a soft-break boundary belongs to the next row). */
 export function rowOf(rows: readonly EditorRow[], offset: number): number {
-	for (let r = 0; r < rows.length; r++) {
-		const row = rows[r]!;
-		if (offset >= row.start && (offset < row.end || (offset === row.end && row.last))) return r;
+	// Rows start in ascending order: the only row that can hold `offset` is the last one starting at or before it.
+	let lo = 0;
+	let hi = rows.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (rows[mid]!.start <= offset) lo = mid + 1;
+		else hi = mid;
 	}
+	const row = rows[lo - 1];
+	if (row && (offset < row.end || (offset === row.end && row.last))) return lo - 1;
 	return Math.max(0, rows.length - 1);
 }
 
@@ -233,9 +282,9 @@ export function lastWrapWidth(node: UiNode): number | undefined {
 }
 
 /** The rows of `node`'s text as it was last painted (one row per logical line before any paint). */
-export function lastLayout(node: UiNode): EditorRow[] {
+export function lastLayout(node: UiNode): readonly EditorRow[] {
 	const text = (node.props() as EditorProps).text ?? "";
-	return layoutText(text, lastWrapWidth(node) ?? Number.MAX_SAFE_INTEGER);
+	return layoutField(node, text, lastWrapWidth(node) ?? Number.MAX_SAFE_INTEGER);
 }
 
 // ─── Props ──────────────────────────────────────────────────────────────────
@@ -503,7 +552,7 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 	const wrapWidth = options?.wrap === false ? Number.MAX_SAFE_INTEGER : Math.max(1, room - overflow);
 	(node as WrapWidthHolder)[kWrapWidth] = wrapWidth;
 
-	const rows = layoutText(text, wrapWidth);
+	const rows = layoutField(node, text, wrapWidth);
 	const caretRow = rowOf(rows, caret);
 	const base = sgrPair(theme.fgResolved("text", MARK)) as [string, string];
 	const styles = rangeStyles(
