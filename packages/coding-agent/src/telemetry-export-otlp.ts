@@ -164,10 +164,12 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 		// `envDetector` parses OTEL_RESOURCE_ATTRIBUTES (percent-decoded, per spec) and
 		// OTEL_SERVICE_NAME; merged last so both take precedence over the fallback
 		// service.name — with OTEL_SERVICE_NAME still winning service.name inside the
-		// detector itself.
-		const resource = resourceFromAttributes({ "service.name": SERVICE_NAME }).merge(
-			detectResources({ detectors: [envDetector] }),
-		);
+		// detector itself. The fallback service.instance.id is a fresh UUID per process, so
+		// concurrent omp processes export distinct series unless the environment pins one.
+		const resource = resourceFromAttributes({
+			"service.name": SERVICE_NAME,
+			"service.instance.id": crypto.randomUUID(),
+		}).merge(detectResources({ detectors: [envDetector] }));
 
 		if (signalConfig.trace) {
 			const exporter = new OTLPTraceExporter();
@@ -282,12 +284,12 @@ class AgentMetricRecorder {
 	}
 
 	recordChatUsage(event: ChatUsageEvent): void {
+		// The spawn-unique agent id stays on spans: as a metric label it grows with every spawn.
 		const baseAttrs = metricAttributes({
 			"gen_ai.operation.name": event.operation,
 			"gen_ai.provider.name": event.provider,
 			"gen_ai.request.model": event.model,
 			"gen_ai.response.service_tier": event.serviceTier,
-			"omp.gen_ai.agent.id": event.agent?.id,
 			"omp.gen_ai.agent.name": event.agent?.name,
 		});
 
