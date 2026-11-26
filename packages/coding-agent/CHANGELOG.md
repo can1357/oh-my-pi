@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- Fixed ACP and RPC `/todo done` and `/todo drop` with no argument leaving every task unchanged while reporting success, quoted names such as `/todo rm "Ship it"` removing a different phase, and those `/todo` edits not telling the model the user changed the list ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- Fixed ACP and RPC `/todo done` and `/todo drop` with no argument leaving every task unchanged while reporting success, quoted names such as `/todo rm "Ship it"` removing a different phase, and those `/todo` edits not telling the model the user changed the list ([#20680](https://github.com/can1357/oh-my-pi/pull/20680) by [@eggpeat](https://github.com/eggpeat))
 - Fixed files and directories whose name starts with `..` being treated as outside their parent: a working directory under such a folder now counts as part of its checkout, and scoped settings, plugin roots and folder restrictions apply to it ([#20482](https://github.com/can1357/oh-my-pi/pull/20482) by [@H4vC](https://github.com/H4vC))
 
 ### Added
