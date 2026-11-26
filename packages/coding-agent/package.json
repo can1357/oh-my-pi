@@ -65,6 +65,10 @@
 			"types": "./src/async/*.ts",
 			"import": "./src/async/*.ts"
 		},
+		"./autolearn/settings": {
+			"types": "./src/autolearn/settings.ts",
+			"import": "./src/autolearn/settings.ts"
+		},
 		"./autoresearch": {
 			"types": "./src/autoresearch/index.ts",
 			"import": "./src/autoresearch/index.ts"

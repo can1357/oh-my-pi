@@ -326,4 +326,21 @@ export const observed = {
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});
+
+	it("loads autolearn settings through the bundled registry in compiled mode (issue #16454)", async () => {
+		// coding-agent's root `./*` catch-all stays out of the registry, so a subpath
+		// only that catch-all serves has no loader and an extension importing it fails.
+		const key = "@oh-my-pi/pi-coding-agent/autolearn/settings";
+		const entry = bundledEntries.find(candidate => candidate.key === key);
+		if (!entry) throw new Error("Autolearn settings import is missing from the bundled registry");
+
+		const observed = await runRegistryProbe(
+			[entry],
+			`const { cfgAutolearnEnabled } = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
+export const observed = cfgAutolearnEnabled.id;`,
+		);
+		expect(observed).toBe("autolearn.enabled");
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
 });

@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Fixed compiled `omp` binaries failing to load extensions that import `@oh-my-pi/pi-coding-agent/autolearn/settings` ([#16454](https://github.com/can1357/oh-my-pi/issues/16454), [#19942](https://github.com/can1357/oh-my-pi/pull/19942) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Pasting text that ends in an `@name` no longer opens the file completion list, so the next Enter sends the message instead of replacing the name with a file ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - Rebuilding a long transcript in place (compaction, `/shake`, a display setting change) no longer stalls Tern: the block list is recomputed once for the rebuild instead of once per replayed block ([#20675](https://github.com/can1357/oh-my-pi/pull/20675) by [@H4vC](https://github.com/H4vC))
 - `lsp` tool calls with `new_name: null` or `line: null` no longer crash the TUI while rendering ([#20663](https://github.com/can1357/oh-my-pi/issues/20663)).
