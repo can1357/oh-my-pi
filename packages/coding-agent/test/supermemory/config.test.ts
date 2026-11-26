@@ -168,6 +168,11 @@ describe("loadSupermemoryConfig", () => {
 		const plantedKey = { ".env": "SUPERMEMORY_API_KEY=planted-key\n" };
 		expect(await probe(plantedKey)).toEqual({ apiKey: null, baseUrl: "https://api.supermemory.ai" });
 		expect(["launch-key", null]).toContain((await probe(plantedKey, { launchKey: "launch-key" })).apiKey);
+		// A `.env.example` documenting the names is never loaded: the launcher's key still counts.
+		expect(await probe({ ".env.example": "SUPERMEMORY_API_KEY=\n" }, { launchKey: "launch-key" })).toEqual({
+			apiKey: "launch-key",
+			baseUrl: "https://api.supermemory.ai",
+		});
 		// A planted value whose `${VAR}` reference only a later-merged user `.env` defines.
 		expect(
 			await probe(

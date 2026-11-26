@@ -406,7 +406,18 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		if (!this.automatic) return;
-		this.#unsubscribe = this.session.subscribe(event => {
+		// Attached while a run is in progress (a `supermemory.*` edit mid-run replaced the state): that run
+		// fires no further `agent_start`, so open it here; its rest is retained, while anything written
+		// between the predecessor's stop and now stays out.
+		if (this.#config.autoRetain && !this.#disposed && this.session.isStreaming && !this.#latestMarker()?.started) {
+			this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart, { started: true });
+		}
+		// A run abandoned without `agent_end` (`/new`, a session switch, fork or branch cancel it first)
+		// still ends: close it in the file it ran in, before the session manager leaves that file.
+		const unsubscribeRunState = this.session.subscribeRunState(state => {
+			if (state === "idle") this.#recordStop();
+		});
+		const unsubscribeEvents = this.session.subscribe(event => {
 			if (event.type !== "agent_start" && event.type !== "agent_pause" && event.type !== "agent_end") return;
 			this.#followBranch();
 			if (this.#config.autoRetain && (event.type === "agent_start" || !this.#hasCursor)) {
@@ -435,6 +446,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			}
 			void this.drainOutbox();
 		});
+		this.#unsubscribe = () => {
+			unsubscribeRunState();
+			unsubscribeEvents();
+		};
 	}
 
 	/** Persisted transcript id; survives resume, unlike the provider session id. */

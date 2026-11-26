@@ -415,10 +415,11 @@ const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string
 	const dotenvNames = (dir: string) => {
 		const names = new Set<string>();
 		if (launchEnvValues) return names;
-		let files: string[] = [];
-		try {
-			files = fs.readdirSync(dir).filter(file => /^\.env(\..+)?$/.test(file));
-		} catch {}
+		// The files Bun's autoload and OMP's merge can read: `.env`, `.env.local` and each mode's pair
+		// (a `.env.example` documenting names is not loaded, so its names stay usable).
+		const modes = new Set(["development", "production", "test", Bun.env.NODE_ENV]);
+		const files = [".env", ".env.local"];
+		for (const mode of modes) if (mode) files.push(`.env.${mode}`, `.env.${mode}.local`);
 		for (const file of files) for (const key in parseEnvFile(path.join(dir, file))) names.add(foldEnvName(key));
 		return names;
 	};

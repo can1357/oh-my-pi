@@ -31,6 +31,7 @@ let temp: TempDir;
 
 function makeSession(options: { settings?: Record<string, unknown>; cwd?: string } = {}) {
 	const listeners = new Set<AgentSessionEventListener>();
+	const runStateListeners = new Set<(state: "running" | "idle") => void>();
 	const entries: SessionEntry[] = [];
 	/** Active path after {@link session.navigate}; until then every entry is on it. */
 	let branch: SessionEntry[] | undefined;
@@ -85,6 +86,15 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 		subscribe(listener: AgentSessionEventListener) {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
+		},
+		subscribeRunState(listener: (state: "running" | "idle") => void) {
+			runStateListeners.add(listener);
+			return () => runStateListeners.delete(listener);
+		},
+		/** The run closes without `agent_end`: `/new` or a session switch cancelled it. */
+		emitIdle() {
+			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
+			for (const listener of [...runStateListeners]) listener("idle");
 		},
 		emitNotice: (_level: string, message: string) => notices.push(message),
 		notices,
@@ -924,6 +934,32 @@ describe("supermemoryBackend", () => {
 		expect(contents[0]).toContain("reply to four");
 	});
 
+	it("a run abandoned without agent_end is closed in its transcript, so later off turns stay out", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const settings = { "supermemory.retainEveryNTurns": 1 };
+		const first = makeSession({ settings });
+		await start(first);
+		first.addTurn("one");
+		await first.endTurn();
+		// A second run starts, then `/new` cancels it before its `agent_end`.
+		first.addTurn("abandoned");
+		first.emitIdle();
+		// Another process opens the transcript with memory off, then one with memory on.
+		const second = makeSession({ settings });
+		second.sessionManager.getEntries().push(...first.sessionManager.getEntries());
+		second.addTurn("off-period");
+		const third = makeSession({ settings });
+		third.sessionManager.getEntries().push(...second.sessionManager.getEntries());
+		await start(third);
+		third.addTurn("three");
+		await third.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to three");
+		expect(contents).not.toContain("off-period");
+	});
+
 	it("turns another process adds with memory off after this one left without a stop are never uploaded", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")
@@ -1044,6 +1080,36 @@ describe("supermemoryBackend", () => {
 		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
 		expect(contents.at(-1)).toContain("three");
 		expect(contents.join("\n")).not.toContain("off-period");
+	});
+
+	it("a supermemory.* edit mid-run still retains the rest of that run's answer", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		// The settings edit lands while the run streams: the state is replaced, but no new run starts.
+		session.isStreaming = true;
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		await start(session);
+		session.sessionManager.getEntries().push({
+			type: "message",
+			id: "a-rest",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "rest of the answer" }],
+				stopReason: "stop",
+				timestamp: 0,
+			},
+		} as never);
+		session.isStreaming = false;
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to one");
+		expect(contents).toContain("rest of the answer");
 	});
 
 	it("a replacement state's window upload waits for the previous state's upload still in flight", async () => {
