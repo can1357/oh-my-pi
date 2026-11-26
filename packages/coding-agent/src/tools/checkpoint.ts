@@ -54,7 +54,7 @@ export class CheckpointTool implements AgentTool<typeof checkpointSchema, Checkp
 	readonly name = "checkpoint";
 	readonly approval = "read" as const;
 	readonly label = "Checkpoint";
-	readonly summary = "Create a git-based checkpoint to save and restore session state";
+	readonly summary = "Mark a conversation checkpoint before exploratory work; rewind keeps only its report";
 	readonly description: string;
 	readonly parameters = checkpointSchema;
 	readonly strict = true;
