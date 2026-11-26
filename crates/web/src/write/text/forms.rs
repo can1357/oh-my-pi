@@ -303,24 +303,10 @@ impl Reader<'_> {
 						max
 					},
 				);
-				if kind == Kind::Keygen
-					|| self
-						.forms
-						.submits
-						.binary_search(&tag.children.start)
-						.is_ok()
-				{
-					field(&mut self.layout, "", size, '_');
-				} else {
-					let ty = attr(tag, "type");
-					let value = if ty.is_empty() || ty.eq_ignore_ascii_case("text") || kind == Kind::File
-					{
-						reduce_blanks(raw)
-					} else {
-						Cow::Borrowed(raw)
-					};
-					field(&mut self.layout, &value, size, if kind == Kind::File { ' ' } else { '_' });
-				}
+				// A field shows its size, not its value: a pre-filled value (an
+				// embed code, a default query) is form state, not page text,
+				// and Markdown omits it too.
+				field(&mut self.layout, "", size, if kind == Kind::File { ' ' } else { '_' });
 			},
 		}
 	}
@@ -519,7 +505,8 @@ impl Reader<'_> {
 mod tests {
 	use super::super::dump;
 
-	// Stock Lynx 2.9.3, -dump -nolist -width=250 with UTF-8 input/display.
+	// Lynx 2.9.3 `-dump -nolist -width=250` layout, except that text fields
+	// show their size, never their pre-filled value.
 	#[test]
 	fn finalizes_forms_before_printing_their_fields() {
 		assert_eq!(
@@ -528,7 +515,7 @@ mod tests {
 				 type=password value=pass size=5><input type=checkbox></form>"
 			)
 			.unwrap(),
-			"   A ____\n   B pass_ [ ]\n"
+			"   A ____\n   B _____ [ ]\n"
 		);
 		assert_eq!(
 			dump(
@@ -554,9 +541,9 @@ mod tests {
 		assert_eq!(
 			dump("A<input type=text size=7 value='  a   b  '>Z<input type=file size=4 value=a>")
 				.unwrap(),
-			"   A a b____Z a   \n"
+			"   A _______Z     \n"
 		);
-		assert_eq!(dump("A<input type=password size=4 value=éééé>X").unwrap(), "   A éé__X\n");
+		assert_eq!(dump("A<input type=password size=4 value=éééé>X").unwrap(), "   A ____X\n");
 	}
 
 	#[test]

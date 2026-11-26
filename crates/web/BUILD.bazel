@@ -10,6 +10,7 @@ rust_library(
     lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
+    compile_data = glob(["src/**/*.md"]),
     crate_name = "omp_web",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
