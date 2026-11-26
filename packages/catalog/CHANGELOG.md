@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Gemini models on Venice get their tool schemas sent in Google's dialect, so a JSON Schema `type` array no longer makes Venice reject the request ([#12269](https://github.com/can1357/oh-my-pi/issues/12269), [#20413](https://github.com/can1357/oh-my-pi/pull/20413) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed Antigravity CLI models showing as free in the model browser: they now show as included in the Google AI plan, can be selected as the cheapest vision fallback when configured roles do not resolve, and report $0 instead of unavailable cost in OTLP telemetry. ([#20577](https://github.com/can1357/oh-my-pi/pull/20577) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Added

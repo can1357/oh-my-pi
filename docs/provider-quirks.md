@@ -2090,6 +2090,7 @@ Venice is a privacy-focused AI platform delivering uncensored and open-source mo
 Provider-specific overrides in `packages/catalog/src/compat/rules/providers/venice.kdl` (more-specific selectors override provider defaults):
 
 - For class qwen: `thinkingFormat="openai"`.
+- For class gemini: `toolSchemaFlavor="google"` (tool schemas go out in Google's dialect, so a JSON Schema `type` array is not sent; issue #12269).
 - For class gemini; revision >=3.0.0 <3.1.0: `thinking.requiresEffort=true`.
 - For class gemini; revision >=3.1.0 <3.8.0: `thinking.requiresEffort=false`, `thinking.efforts=["minimal","low","medium","high","xhigh"]`.
 - For class unknown: `thinking.efforts=["minimal","low","medium","high","xhigh"]`.
