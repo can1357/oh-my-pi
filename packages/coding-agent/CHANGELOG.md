@@ -47,6 +47,9 @@
 ### Changed
 
 - `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, and fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
+- The bash tool's description tells the agent to run a system program by path (`/usr/bin/x`) only after the builtin's output proved wrong.
+- The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
+- Clarified the `bash` tool prompt to name `local://<N>.log` on the output-truncation hint and, when bash pattern approval is active, to explain that shell control operators and `$`/backticks disqualify allow rules and force a prompt ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
 
 ### Fixed
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))

@@ -6,7 +6,10 @@ In-process builtins, ahead of PATH: {{join builtins ", "}}.
 `async` defers finite results but keeps the deadline (default {{defaultTimeoutSec}}s); `timeout: 0` for watchers and long jobs.
 `notify` (regex; implies `async`) sends each matching output line as a follow-up while the job runs, ahead of its result. Match only lines you'd act on: too many matches switch it off.
 {{/if}}
-Don't trunc output by habit, result will be summarized and saved as an artifact.
+Don't trunc output by habit (e.g. `| head`/`| tail`); large output is summarized and saved to `local://<N>.log`.
+{{#if approvalPatternsActive}}
+Commands matching allow rules run without prompting, but shell control operators (`|`, `>`, `<`, `;`, `&`, `(`, `)`, literal newlines) and `$` or backticks (even inside double quotes) disqualify allow rules and force a prompt. Prefer single-line commands{{#if allowCompoundCommands}} (or `&&` chains where every command matches an allow rule){{/if}}, repeated `git commit -m`/`-F` flags, or parallel tool calls over shell loops, pipes, or multiline arguments.
+{{/if}}
 {{#if hasLaunch}}
 Long-lived services:
 - unique name; ready requires name; no async/timeout; pty defaults true.
