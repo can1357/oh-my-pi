@@ -17,7 +17,7 @@ Read the whole page
 
    Preferences
 
-   Name Jane____ [X] ( ) (*) [Custom_]
+   Name ________ [X] ( ) (*) [Custom_]
    line 1_
    line 2_
 
