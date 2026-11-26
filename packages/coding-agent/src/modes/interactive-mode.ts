@@ -1295,6 +1295,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		activity.isComposing = untrack(this.composer.text).trim() !== "";
 		activity.isReviewingPlan = this.#planReviewPick !== undefined;
 		target.enableIdleMaintenance({
+			// Idle maintenance must not run while a submitted plan is awaiting review:
+			// compaction would destroy the exploration context needed to refine the plan.
 			isBlocked: () =>
 				!activity.ready || activity.target !== target || activity.isComposing || activity.isReviewingPlan,
 			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
@@ -5212,6 +5214,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReviewOverlayHandle = showSheet(this.shell, planReviewSheet(model), () => jsx(PlanReview, { model }), {
 			mouse: "any",
 		});
+		// Re-evaluate idle maintenance so in-flight idle timers pause while the review is open.
 		this.syncIdleMaintenanceView();
 		return promise;
 	}
@@ -5228,6 +5231,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReview = undefined;
 		this.#planReviewOwner = undefined;
 		onHide?.();
+		// Re-evaluate idle maintenance now that the review is closed.
+		this.syncIdleMaintenanceView();
 	}
 
 	/** The open plan review awaiting an answer, as `plan_review_requested` reported it: backs `ctx.getPendingPlanReview`. */
