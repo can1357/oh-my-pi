@@ -4,6 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings, withActiveSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
+import { buildReviewPrompt } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/prompt";
+import {
+	createResolvedReviewTarget,
+	resolveBaseBranchTarget,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/target";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -78,6 +83,14 @@ function makeUserEntry(id: string, content: string): SessionEntry {
 			timestamp: Date.now(),
 		},
 	};
+}
+
+async function initGitFixture(dir: string): Promise<VcsGitRepo> {
+	await $`git init -q -b main`.cwd(dir).quiet();
+	const repository = vcs.requireGit(dir);
+	await repository.configSet("user.email", "test@example.com");
+	await repository.configSet("user.name", "Test");
+	return repository;
 }
 
 interface EditorCall {
@@ -1000,6 +1013,90 @@ describe("ReviewCommand", () => {
 			expect(featureResult).toContain("Reviewing changes between `main` and `feature`");
 			expect(featureResult).toContain("a.txt");
 			expect(featureResult).not.toContain("base-only.txt");
+			// The interactive PR Style keeps its existing prompt contract: the
+			// CLI-only range pinning must not leak into the TUI path.
+			expect(featureResult).toContain("MAY read full file context as needed via `read`");
+			expect(featureResult).not.toContain("git show ");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("pins explicit CLI ranges to exact SHAs and the repository root", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-range-"));
+		try {
+			const repository = await initGitFixture(dir);
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await repository.stageFiles(["a.txt"]);
+			await repository.commitCreate("init", {});
+
+			await repository.checkoutNewBranch("feature");
+			await fs.writeFile(path.join(dir, "a.txt"), "two\n");
+			await repository.stageFiles(["a.txt"]);
+			await repository.commitCreate("feature-change", {});
+
+			// main advances independently; the CLI range must exclude this
+			// base-only commit and review only feature...merge-base.
+			await repository.checkout("main");
+			await fs.writeFile(path.join(dir, "base-only.txt"), "base\n");
+			await repository.stageFiles(["base-only.txt"]);
+			await repository.commitCreate("base-advance", {});
+			await repository.checkout("feature");
+
+			const subdir = path.join(dir, "sub");
+			await fs.mkdir(subdir);
+			const target = await resolveBaseBranchTarget(subdir, "main", "feature", { pinRange: true });
+			const prompt = buildReviewPrompt(target);
+			const featureSha = await repository.resolveRef("feature");
+			const mergeBase = await repository.mergeBase("main", "feature");
+			if (!mergeBase || !featureSha) throw new Error("fixture must resolve main, feature, and their merge base");
+
+			expect(target.rangeBase).toBe(mergeBase);
+			expect(target.rangeHead).toBe(featureSha);
+			expect(prompt).toContain(`### Repository\n\n\`${vcs.repo(dir)!.root()}\``);
+			expect(prompt).toContain(`git show ${featureSha}:<path>`);
+			expect(prompt).toContain(`git show ${target.rangeBase}:<path>`);
+			expect(prompt).toContain("a.txt");
+			expect(prompt).toContain("+two");
+			expect(prompt).not.toContain("base-only.txt");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps exact range SHAs in delegated large-diff instructions", () => {
+		const rawDiff = `diff --git a/big.ts b/big.ts
+--- a/big.ts
++++ b/big.ts
+@@ -1 +1 @@
+-${"a".repeat(30_000)}
++${"b".repeat(30_000)}
+`;
+		const target = createResolvedReviewTarget(
+			"base-branch",
+			"Reviewing a large range (PR-style)",
+			rawDiff,
+			"No changes",
+			{ rangeBase: "111111111111", rangeHead: "222222222222" },
+		);
+
+		const prompt = buildReviewPrompt(target);
+
+		expect(prompt).toContain("git diff 111111111111..222222222222 -- <assigned paths>");
+		expect(prompt).toContain("git show 222222222222:<path>");
+		expect(prompt).toContain("for deleted paths use `git show 111111111111:<path>`");
+		expect(prompt).not.toContain(rawDiff);
+	});
+
+	it("fails an explicit CLI range on an invalid ref", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-bad-ref-"));
+		try {
+			const repository = await initGitFixture(dir);
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await repository.stageFiles(["a.txt"]);
+			await repository.commitCreate("init", {});
+
+			await expect(resolveBaseBranchTarget(dir, "missing")).rejects.toThrow("Cannot resolve base ref `missing`");
 		} finally {
 			await removeWithRetries(dir);
 		}

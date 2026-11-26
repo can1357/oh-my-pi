@@ -121,6 +121,11 @@ export const psHelp = {
 export const readHelp = {
 	description: "Show what the read tool will return for a path, URL, or internal URI",
 } satisfies CommandMetadata;
+
+export const reviewHelp = {
+	description: "Run a headless PR-style review of a local Git range and print the findings",
+} satisfies CommandMetadata;
+
 export const renderHelp = {
 	description: "Draw a session's entire thread through the production transcript pipeline (with repaint timing)",
 } satisfies CommandMetadata;

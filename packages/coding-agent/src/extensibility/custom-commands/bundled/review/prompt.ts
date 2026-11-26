@@ -138,6 +138,8 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 		rawDiff: target.rawDiff.trim(),
 		diffInstruction: target.diffInstruction,
 		contextInstruction: target.contextInstruction,
+		rangeBase: target.rangeBase,
+		rangeHead: target.rangeHead,
 		suppliedPatch: target.kind === "patch",
 		prDiffUrl: target.prDiffUrl,
 		prDiffQuery,

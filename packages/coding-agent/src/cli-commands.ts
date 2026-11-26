@@ -249,6 +249,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.readHelp,
 	},
 	{
+		name: "review",
+		load: () => import("./commands/review").then(m => m.default),
+		help: commandHelp.reviewHelp,
+	},
+	{
 		name: "render",
 		load: () => import("./commands/render").then(m => m.default),
 		help: commandHelp.renderHelp,

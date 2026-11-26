@@ -193,6 +193,15 @@ describe("mode-dependent guards defer to flag-value errors", () => {
 		expect(run.exitCode, run.stderr).toBe(1);
 		expect(run.stderr).toContain("Error: --no-ui requires --mode rpc");
 	}, 30_000);
+
+	it("runs the review subcommand without waiting for stdin", async () => {
+		using tempDir = TempDir.createSync("@omp-review-command-");
+		const run = await launchWithoutTerminal(tempDir, ["review", "--base", "definitely-not-a-ref"]);
+
+		expect(run.exitCode, run.stderr).toBe(2);
+		expect(run.stderr).toContain("not a repository");
+		expect(run.stderr).not.toContain(TTY_ERROR);
+	}, 30_000);
 });
 
 describe("ACP launch flag validation", () => {

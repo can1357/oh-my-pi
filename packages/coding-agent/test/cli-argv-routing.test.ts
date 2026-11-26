@@ -57,6 +57,12 @@ describe("resolveCliArgv routes subcommands hidden behind leading global flags",
 		});
 	});
 
+	test("routes the review subcommand without launch-flag rewriting", () => {
+		expect(resolveCliArgv(["review", "--base", "main", "commit", "handling"])).toEqual({
+			argv: ["review", "--base", "main", "commit", "handling"],
+		});
+	});
+
 	test("`gc` dispatches as a top-level maintenance subcommand", () => {
 		expect(resolveCliArgv(["gc", "--apply"])).toEqual({
 			argv: ["gc", "--apply"],

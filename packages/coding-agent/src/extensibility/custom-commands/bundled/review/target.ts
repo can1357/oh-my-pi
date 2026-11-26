@@ -16,6 +16,10 @@ export interface ResolvedReviewTarget {
 	filteredMessage?: string;
 	diffInstruction?: string;
 	contextInstruction?: string;
+	/** Exact merge-base SHA for a local PR-style range. */
+	rangeBase?: string;
+	/** Exact head SHA for a local PR-style range. */
+	rangeHead?: string;
 	/** Base URL for per-file slices of the original, unfiltered PR/MR diff. */
 	prDiffUrl?: string;
 	/** Leading `?at=<generation>` when `prDiffUrl` is pinned, otherwise empty. */
@@ -46,7 +50,14 @@ export function createResolvedReviewTarget(
 	emptyMessage: string,
 	options: Pick<
 		ResolvedReviewTarget,
-		"filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl" | "prDiffQuery"
+		| "filteredMessage"
+		| "diffInstruction"
+		| "contextInstruction"
+		| "rangeBase"
+		| "rangeHead"
+		| "prDiffUrl"
+		| "prDiffQuery"
+		| "repository"
 	> = {},
 ): ResolvedReviewTarget {
 	return {
@@ -111,6 +122,39 @@ async function recentCommits(cwd: string, count: number): Promise<string[]> {
 	}
 }
 
+/** Resolve a PR-style `base...head` review target without any UI. */
+export async function resolveBaseBranchTarget(
+	cwd: string,
+	baseRef: string,
+	headRef = "HEAD",
+	/** Headless review pins SHAs; interactive PR Style keeps its working-tree context. */
+	options: { pinRange?: boolean } = {},
+): Promise<ResolvedReviewTarget> {
+	const base = baseRef.trim();
+	const head = headRef.trim();
+	if (!base) throw new Error("A base ref is required for PR-style review");
+	if (!head) throw new Error("A head ref is required for PR-style review");
+	const repository = vcs.requireGit(cwd);
+	const [baseSha, headSha] = await Promise.all([repository.resolveRef(base), repository.resolveRef(head)]);
+	if (!baseSha) throw new Error(`Cannot resolve base ref \`${base}\``);
+	if (!headSha) throw new Error(`Cannot resolve head ref \`${head}\``);
+	// Resolve both ends once, then diff the merge base to the frozen head SHA.
+	// A branch moving during the review cannot change the reviewed patch.
+	const mergeBase = await repository.mergeBase(baseSha, headSha);
+	if (!mergeBase) throw new Error(`No common history between ${base} and ${head}`);
+	const diffText = await repository.diffText({ base: mergeBase, head: headSha });
+	const repositoryRoot = options.pinRange ? repository.info().repoRoot : undefined;
+	const repositoryDir =
+		repositoryRoot && path.resolve(repositoryRoot) !== path.resolve(cwd) ? repositoryRoot : undefined;
+	return createResolvedReviewTarget(
+		"base-branch",
+		`Reviewing changes between \`${base}\` and \`${head}\` (PR-style)`,
+		diffText,
+		`No changes between ${base} and ${head}`,
+		options.pinRange ? { rangeBase: mergeBase, rangeHead: headSha, repository: repositoryDir } : {},
+	);
+}
+
 export async function resolveLocalReviewTarget(
 	kind: LocalReviewKind,
 	cwd: string,
@@ -126,29 +170,16 @@ export async function resolveLocalReviewTarget(
 			const baseBranch = await ui.select("Select base branch to compare against", branches);
 			if (!baseBranch) return undefined;
 			const currentBranch = await currentGitBranch(cwd);
-			let diffText: string;
 			try {
-				const repository = vcs.requireGit(cwd);
-				// PR-style review compares the merge base against the current
-				// branch (`base...head`), so base-only commits are excluded.
-				const mergeBase = await repository.mergeBase(baseBranch, currentBranch);
-				if (!mergeBase) {
-					// No common ancestor: `git diff base...head` aborts here
-					// rather than comparing unrelated trees tip-to-tip.
-					ui.notify(`No common history between ${baseBranch} and ${currentBranch}`, "error");
-					return undefined;
-				}
-				diffText = await repository.diffText({ base: mergeBase, head: currentBranch });
+				return await resolveBaseBranchTarget(cwd, baseBranch, currentBranch);
 			} catch (error) {
-				ui.notify(`Failed to get diff: ${errorMessage(error)}`, "error");
+				const message = errorMessage(error);
+				ui.notify(
+					message.startsWith("No common history between ") ? message : `Failed to get diff: ${message}`,
+					"error",
+				);
 				return undefined;
 			}
-			return createResolvedReviewTarget(
-				"base-branch",
-				`Reviewing changes between \`${baseBranch}\` and \`${currentBranch}\` (PR-style)`,
-				diffText,
-				`No changes between ${baseBranch} and ${currentBranch}`,
-			);
 		}
 		case "uncommitted":
 			try {
