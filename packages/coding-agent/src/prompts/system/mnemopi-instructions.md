@@ -5,4 +5,8 @@ This agent has local Mnemopi long-term memory.
 - Use `recall` proactively before answering questions about past conversations, project history, or user preferences.
 - Use `retain` to store durable facts (decisions, preferences, project context) the agent should remember in future sessions.
 - Use `reflect` for questions that need a synthesised answer over many memories.
-- Durable project facts, preferences, and decisions are retained automatically from completed turns.
+{{#if autoRetain}}
+- Completed turns are also retained automatically.
+{{else}}
+- Turns are not retained automatically: a memory is kept only when it is stored on purpose, as with `retain`.
+{{/if}}
