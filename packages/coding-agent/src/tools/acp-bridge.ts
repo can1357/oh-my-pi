@@ -8,7 +8,7 @@
  * never be pushed into the editor.
  */
 
-import { InternalUrlRouter } from "../internal-urls";
+import { sessionUrlRouter } from "../internal-urls";
 import { notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { FileChangeType } from "../lsp/types";
 import type { ToolSession } from ".";
@@ -27,7 +27,7 @@ export async function shouldRouteWriteThroughBridge(
 	requestedPath: string,
 	absolutePath: string,
 ): Promise<boolean> {
-	const router = InternalUrlRouter.instance();
+	const router = sessionUrlRouter(session);
 	if (router.canHandle(requestedPath)) return false;
 	// OMP-owned session artifacts (plan files, scratch notes) must stay off the
 	// editor buffer even when addressed by their absolute sandbox path — e.g.

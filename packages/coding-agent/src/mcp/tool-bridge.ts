@@ -170,7 +170,8 @@ async function resolveOutboundUrlArgs(
 		// cwd-prefixed `…/local://x` path must not rewrite free text that merely
 		// mentions one.
 		if (!extractUriScheme(value)) return value;
-		const router = InternalUrlRouter.instance();
+		// Only file-backed schemes are rewritten for an out-of-process MCP server; the session's own schemes (RPC host URIs) are remote-backed, so the built-ins decide.
+		const router = InternalUrlRouter.builtins();
 		const url = router.normalize(value);
 		if (!router.canHandle(url)) return value;
 		const scheme = extractUriScheme(url);

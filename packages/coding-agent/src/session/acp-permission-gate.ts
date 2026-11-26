@@ -1,5 +1,6 @@
 import { editInspect } from "@oh-my-pi/pi-natives";
 import { isRecord, stringProperty } from "@oh-my-pi/pi-utils";
+import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveToCwd } from "../tools/path-utils";
 import type { ClientBridgePermissionOption } from "./client-bridge";
 
@@ -113,7 +114,7 @@ export function extractPermissionLocations(
 		// tool args (often cwd-relative) against the session cwd before sending.
 		let resolved: string;
 		try {
-			resolved = resolveToCwd(value, cwd);
+			resolved = resolveToCwd(value, cwd, InternalUrlRouter.builtins());
 		} catch {
 			return;
 		}

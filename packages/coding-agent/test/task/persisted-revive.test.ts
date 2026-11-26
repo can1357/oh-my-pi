@@ -15,6 +15,7 @@ import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolv
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { SessionUrlSchemes } from "@oh-my-pi/pi-coding-agent/internal-urls/scheme-table";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
@@ -233,6 +234,7 @@ interface ReviveOwnerOptions {
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
 	const parentSession = {
+		urlSchemes: new SessionUrlSchemes(),
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
@@ -1197,6 +1199,7 @@ describe("persisted subagent revival", () => {
 			const ref = { ...createRef(sessionFile), parentId: parent };
 			const factory = createPersistedSubagentReviverFactory({
 				session: {
+					urlSchemes: new SessionUrlSchemes(),
 					sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
 					effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 					getSessionAgents: () => [],

@@ -5,7 +5,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import * as natives from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, hasFsCode, isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
+import { sessionResolveContext, sessionUrlRouter } from "../internal-urls";
 import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { truncateHead } from "./streaming-output";
@@ -158,7 +158,8 @@ interface NativePreparedTarget {
 
 export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly name = "glob";
-	readonly approval = (args: unknown) => searchPathTier({ path: globSearchPath(args) });
+	readonly approval = (args: unknown) =>
+		searchPathTier({ path: globSearchPath(args) }, sessionUrlRouter(this.session));
 	/**
 	 * `always-ask-cached` keys: the folders and files this glob searches, so a
 	 * folder grant recorded by a `read` (or by a grep) covers a search inside it
@@ -167,12 +168,14 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	 * costs a single stat; see {@link searchApprovalCacheTargets}.
 	 */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const router = sessionUrlRouter(this.session);
 		return searchApprovalCacheTargets(
 			toPathList(globSearchPath(args)),
 			this.session.cwd,
-			entry => parseFindPattern(entry).basePath,
+			router,
+			entry => parseFindPattern(entry, router).basePath,
 			entry => {
-				const { globPattern } = parseFindPattern(entry);
+				const { globPattern } = parseFindPattern(entry, router);
 				// A bare pattern recurses (`*.ts` matches at any depth); only a one-segment pattern
 				// under an explicit base (`dir/*.ts`) stays inside the folder's own entries.
 				return globPattern === "" || globPattern.includes("**");
@@ -260,10 +263,11 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		}
 		const immediateAbortSignal = this.#customOps?.glob ? signal : preparationController?.signal;
 		const execution = untilAborted(immediateAbortSignal, async () => {
-			const formatScopePath = (targetPath: string): string => formatPathRelativeToCwd(targetPath, this.session.cwd);
+			const internalRouter = sessionUrlRouter(this.session);
+			const formatScopePath = (targetPath: string): string =>
+				formatPathRelativeToCwd(targetPath, this.session.cwd, { router: internalRouter });
 			const scopedPaths = toPathList(pathInput);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
-			const internalRouter = InternalUrlRouter.instance();
 			// Internal URLs resolve inside the native walk, bounded by the tier this call was approved at.
 			const urlFilesystem = new InternalUrlFilesystem({
 				context: sessionResolveContext(this.session, { signal, containSkillPaths: true }),
@@ -271,8 +275,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			});
 			const rawPatternInputs = this.#customOps
 				? effectivePaths
-				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
-						splitter: parseFindPattern,
+				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, internalRouter, {
+						splitter: pattern => parseFindPattern(pattern, internalRouter),
 						mixedLocalPaths: urlFilesystem,
 					});
 			const rawPatterns = rawPatternInputs.map(input => normalizePathLikeInput(input).replace(/\\/g, "/"));
@@ -297,7 +301,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const partition = await partitionExistingPaths(
 					normalizedPatterns,
 					this.session.cwd,
-					parseFindPattern,
+					pattern => parseFindPattern(pattern, internalRouter),
 					urlFilesystem,
 				);
 				if (partition.valid.length === 0) {
@@ -309,7 +313,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				missingPaths = partition.missing;
 			}
 
-			const multiPattern = await resolveExplicitFindPatterns(effectivePatterns, this.session.cwd);
+			const multiPattern = await resolveExplicitFindPatterns(effectivePatterns, this.session.cwd, internalRouter);
 			const isSingle = !multiPattern;
 			const targets: GlobTarget[] = multiPattern
 				? multiPattern.targets.map(target => ({
@@ -320,9 +324,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					}))
 				: [
 						(() => {
-							const parsed = parseFindPattern(effectivePatterns[0] ?? ".");
+							const parsed = parseFindPattern(effectivePatterns[0] ?? ".", internalRouter);
 							return {
-								searchPath: resolveSearchBase(parsed.basePath, this.session.cwd),
+								searchPath: resolveSearchBase(parsed.basePath, this.session.cwd, internalRouter),
 								globPattern: parsed.globPattern,
 								hasGlob: parsed.hasGlob,
 								directoryOnly: parsed.directoryOnly,
@@ -345,8 +349,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			const formatMatchPath = (matchPath: string, base: string, fileType?: natives.FileType): string => {
 				const hadTrailingSlash = matchPath.endsWith("/") || matchPath.endsWith("\\");
-				return formatPathRelativeToCwd(resolveSearchResultPath(base, matchPath), this.session.cwd, {
+				return formatPathRelativeToCwd(resolveSearchResultPath(base, matchPath, internalRouter), this.session.cwd, {
 					trailingSlash: fileType === natives.FileType.Dir || hadTrailingSlash,
+					router: internalRouter,
 				});
 			};
 

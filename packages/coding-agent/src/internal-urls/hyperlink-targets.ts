@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
-import { extractUriScheme, InternalUrlRouter, parseInternalUrl, type ResolveContext } from "./index";
+import { extractUriScheme, parseInternalUrl, type ResolveContext } from "./index";
+import { contextUrlRouter } from "./context";
 import { expandPath } from "../tools/path-utils";
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import { fileUriForTerminal } from "../utils/file-links";
@@ -17,7 +18,7 @@ export async function resolveMarkdownLinkHrefs(
 ): Promise<ReadonlyMap<string, string>> {
 	const targets = new Map<string, string>();
 	const urls = new Set<string>();
-	const router = InternalUrlRouter.instance();
+	const router = contextUrlRouter(context);
 	for (const href of hrefs) {
 		if (!href || /[\x00-\x1f\x7f]/.test(href) || /^(?:#|\?|\/\/)/.test(href)) continue;
 		const scheme = extractUriScheme(href);

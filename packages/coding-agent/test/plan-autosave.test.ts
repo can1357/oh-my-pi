@@ -14,6 +14,7 @@ import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-m
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgPlanAutosave, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 let tempDir: TempDir | undefined;
 
@@ -187,6 +188,7 @@ describe("plan-yolo approval autosave", () => {
 			},
 			waitForSessionMessagePersistence: async () => {},
 			localProtocolOptions: () => localOptions,
+			urlRouter: InternalUrlRouter.builtins(),
 		};
 		return { host, notices, modelTemporaryCalls, localOptions, getHandler: () => capturedHandler };
 	}

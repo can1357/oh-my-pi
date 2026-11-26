@@ -6,6 +6,7 @@ import { nativeShell } from "../../../helpers/native-shell";
 import type { TranscriptEntryLike } from "../../../../src/session/transcript/transcript-entry";
 import { CopySelector } from "../../../../src/ui/overlays/pickers/copy-selector";
 import { type Driver, pickerSuite } from "./harness";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const usage = {
 	input: 10,
@@ -96,6 +97,7 @@ test("the primary Copy action picks the outlined turn; its preview action picks 
 		fullscreenMenuView(
 			"copy",
 			<CopySelector
+				router={InternalUrlRouter.builtins()}
 				entries={[entry("u", null, { role: "user", content: text, timestamp: 1 })]}
 				onPick={content => picked.push(content)}
 				onCancel={noop}
@@ -115,6 +117,7 @@ pickerSuite({
 		return {
 			view: () => (
 				<CopySelector
+					router={InternalUrlRouter.builtins()}
 					entries={entries}
 					onPick={noop}
 					onOpen={caseName === "titled" ? undefined : noop}

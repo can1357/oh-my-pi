@@ -13,7 +13,7 @@ import { type AstReplaceChange, type AstReplaceFileChange, astEdit, type ShellFi
 import { $envpos, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
-import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
+import { type InternalUrlRouter, sessionResolveContext, sessionUrlRouter } from "../internal-urls";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { formatHashlineHeader } from "./hashline-format";
 
@@ -56,6 +56,7 @@ interface AstEditCallOptions {
 	failOnParseError: boolean;
 	signal?: AbortSignal;
 	filesystem: ShellFilesystem;
+	router: InternalUrlRouter;
 }
 
 interface AstEditAggregatedResult {
@@ -117,12 +118,15 @@ async function runAstEditTargets(
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
 		for (const change of targetResult.changes) {
-			const absolute = resolveTargetResultPath(target, change.path);
-			aggregatedChanges.push({ ...change, path: relativeSearchResultPath(commonBasePath, absolute) });
+			const absolute = resolveTargetResultPath(target, change.path, options.router);
+			aggregatedChanges.push({
+				...change,
+				path: relativeSearchResultPath(commonBasePath, absolute, options.router),
+			});
 		}
 		for (const fileChange of targetResult.fileChanges) {
-			const absolute = resolveTargetResultPath(target, fileChange.path);
-			const rebased = relativeSearchResultPath(commonBasePath, absolute);
+			const absolute = resolveTargetResultPath(target, fileChange.path, options.router);
+			const rebased = relativeSearchResultPath(commonBasePath, absolute, options.router);
 			fileCounts.set(rebased, (fileCounts.get(rebased) ?? 0) + fileChange.count);
 		}
 	}
@@ -172,7 +176,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const paths = isRecord(args) ? args.paths : undefined;
 		if (!Array.isArray(paths) || paths.length === 0) return "write";
-		const router = InternalUrlRouter.instance();
+		const router = sessionUrlRouter(this.session);
 		const decisions: ToolApprovalDecision[] = [];
 		for (const target of paths) {
 			// A malformed entry fails closed rather than reaching a tier decision.
@@ -309,13 +313,20 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					failOnParseError: false,
 					signal,
 					filesystem: urlFilesystem.shellFilesystem(),
+					router: sessionUrlRouter(this.session),
 				}),
 			);
 			const grammarNote = result.missingGrammars?.length ? missingGrammarsNote(result.missingGrammars) : undefined;
 
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
 			const formatPath = (filePath: string): string =>
-				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
+				formatResultPath(
+					filePath,
+					isDirectory,
+					resolvedSearchPath,
+					this.session.cwd,
+					sessionUrlRouter(this.session),
+				);
 
 			const { record: recordFile, list: fileList } = createFileRecorder();
 			const fileReplacementCounts = new Map<string, number>();
@@ -471,6 +482,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 							maxFiles,
 							failOnParseError: false,
 							filesystem: new InternalUrlFilesystem({ context: applyContext, tier }).shellFilesystem(),
+							router: sessionUrlRouter(this.session),
 						});
 						for (const { path: file, before } of journaled) {
 							const after = await readSnapshot(file);

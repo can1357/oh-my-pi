@@ -13,6 +13,7 @@ import type { BranchVariantPath } from "@oh-my-pi/pi-coding-agent/modes/view-mod
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { RewindSelector } from "../src/ui/overlays/pickers/rewind-selector";
 import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -109,7 +110,7 @@ function makeSelector(
 	siblingPaths?: (entryId: string) => BranchVariantPath[],
 	entries: SessionMessageEntry[] = makeEntries(),
 ): LayerTerminal {
-	return mountRewind({ entries, siblingPaths, onSelect, onCancel: () => {} });
+	return mountRewind({ entries, siblingPaths, onSelect, onCancel: () => {}, router: InternalUrlRouter.builtins() });
 }
 
 function mountRewind(props: Parameters<typeof RewindSelector>[0]): LayerTerminal {
@@ -367,6 +368,7 @@ describe("RewindSelector", () => {
 			],
 			onSelect: id => selected.push(id),
 			onCancel: () => {},
+			router: InternalUrlRouter.builtins(),
 		});
 		selector.render(80);
 
@@ -388,6 +390,7 @@ describe("RewindSelector", () => {
 			onCancel: () => {
 				cancelled = true;
 			},
+			router: InternalUrlRouter.builtins(),
 		});
 		selector.render(80);
 

@@ -14,6 +14,7 @@ import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SessionUrlSchemes } from "@oh-my-pi/pi-coding-agent/internal-urls/scheme-table";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -173,6 +174,7 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 		defaultThinkingLevel: Effort.Medium,
 	});
 	const session = {
+		urlSchemes: new SessionUrlSchemes(),
 		sessionManager: {
 			getSessionFile: () => mainFile,
 			getCwd: () => cwd,

@@ -405,7 +405,7 @@ describe("ReviewCommand", () => {
 					url: `pr://owner/repo/123/diff/${lastIndex}${snapshotQuery}`,
 				});
 				try {
-					const router = InternalUrlRouter.instance();
+					const router = InternalUrlRouter.builtins();
 					for (const row of rows) {
 						const resource = await router.resolve(row.url);
 						expect(resourceText(resource).split("\n")[0]).toBe(`diff --git a/${row.path} b/${row.path}`);

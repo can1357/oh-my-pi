@@ -33,7 +33,7 @@ function session(
 
 describe("out://", () => {
 	it("is advertised only where replies reach the user", () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const advertised = (outReplies: boolean) =>
 			router.describe({ ...host, outReplies }).some(line => line.startsWith("out://"));
 		expect(advertised(true)).toBe(true);
@@ -41,7 +41,7 @@ describe("out://", () => {
 	});
 
 	it("follows the TUI transcript unless `out.enabled` is set, and never lets subagents reply", () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const tier = (caller: ToolSession) => router.writeTier("out://", "hi", caller);
 		const off = { policy: "deny", reason: expect.stringContaining("out.enabled") };
 
@@ -59,7 +59,7 @@ describe("out://", () => {
 	});
 
 	it("accepts Markdown as an elidable result and rejects disabled, blank, and oversize replies", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const accepted = await router.write("out://", "## Status\n\nhalfway", { session: session(true) });
 		expect(accepted).toMatchObject({ content: [{ type: "text", text: "Shown to the user." }], useless: true });
 
@@ -72,16 +72,16 @@ describe("out://", () => {
 	});
 
 	it("routes only writes to reply URLs as replies, holding a path that could still become one", () => {
-		expect(isReplyWrite("write", { path: "out://", content: "x" })).toBe(true);
-		expect(isReplyWrite("write", { path: "OUT://notes" })).toBe(true);
+		expect(isReplyWrite("write", { path: "out://", content: "x" }, InternalUrlRouter.builtins())).toBe(true);
+		expect(isReplyWrite("write", { path: "OUT://notes" }, InternalUrlRouter.builtins())).toBe(true);
 		// Streamed prefixes of `out://` cannot be decided yet.
-		expect(isReplyWrite("write", { path: "ou" })).toBeUndefined();
-		expect(isReplyWrite("write", { path: "out:/" })).toBeUndefined();
-		expect(isReplyWrite("write", {})).toBeUndefined();
+		expect(isReplyWrite("write", { path: "ou" }, InternalUrlRouter.builtins())).toBeUndefined();
+		expect(isReplyWrite("write", { path: "out:/" }, InternalUrlRouter.builtins())).toBeUndefined();
+		expect(isReplyWrite("write", {}, InternalUrlRouter.builtins())).toBeUndefined();
 		// Paths that can no longer become a reply URL are cards right away.
-		expect(isReplyWrite("write", { path: "output.md", content: "x" })).toBe(false);
-		expect(isReplyWrite("write", { path: "src/out.ts" })).toBe(false);
-		expect(isReplyWrite("write", { path: "local://out.md" })).toBe(false);
-		expect(isReplyWrite("edit", { path: "out://" })).toBe(false);
+		expect(isReplyWrite("write", { path: "output.md", content: "x" }, InternalUrlRouter.builtins())).toBe(false);
+		expect(isReplyWrite("write", { path: "src/out.ts" }, InternalUrlRouter.builtins())).toBe(false);
+		expect(isReplyWrite("write", { path: "local://out.md" }, InternalUrlRouter.builtins())).toBe(false);
+		expect(isReplyWrite("edit", { path: "out://" }, InternalUrlRouter.builtins())).toBe(false);
 	});
 });

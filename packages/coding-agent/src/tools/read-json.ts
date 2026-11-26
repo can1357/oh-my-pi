@@ -17,6 +17,7 @@ import {
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import type { ToolSession } from "../sdk";
 import { quotePosixArgument } from "../utils/shell-quote";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { resolveReadPath } from "./path-utils";
 import { buildInMemorySelectorResult, prependSuffixResolutionNotice, toReadTruncationStats } from "./read-format";
 import {
@@ -409,7 +410,7 @@ export async function resolveJsonReadPath(
 	const selector = parseJsonSelector(target.queryString);
 	if (!selector) return null;
 
-	const absolutePath = resolveReadPath(target.jsonPath, session.cwd);
+	const absolutePath = resolveReadPath(target.jsonPath, session.cwd, sessionUrlRouter(session));
 	// A `.json`/`.jsonl`/`.ndjson` name always admits; any other name (a backup, an
 	// extensionless file) admits only when it opens like JSON, so `?q=` on a video,
 	// SVG, PDF or raster image keeps its vision-question route.

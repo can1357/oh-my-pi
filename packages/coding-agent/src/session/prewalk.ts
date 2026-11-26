@@ -13,7 +13,7 @@ import { AUTO_PREWALK_ESCALATE_TIMEOUT_MS, type AutoPrewalkDecision } from "../a
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import type { LocalProtocolOptions } from "../internal-urls";
+import type { InternalUrlRouter, LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../plan-mode/plan-autosave";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
@@ -125,6 +125,8 @@ export interface PrewalkCoordinatorHost {
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void;
 	waitForSessionMessagePersistence(message: AgentMessage): Promise<void>;
 	localProtocolOptions(): LocalProtocolOptions;
+	/** The session's URL router: resolves and canonicalizes plan URLs. */
+	urlRouter: InternalUrlRouter;
 }
 
 /** Initial state for prewalk and plan-yolo startup flows. */
@@ -814,8 +816,10 @@ export class PrewalkCoordinator {
 				readPlanFile(url, {
 					localProtocolOptions: this.#host.localProtocolOptions(),
 					cwd: this.#host.sessionManager.getCwd(),
+					router: this.#host.urlRouter,
 				}),
 			listPlanFiles: () => listPlanFiles({ localProtocolOptions: this.#host.localProtocolOptions() }),
+			router: this.#host.urlRouter,
 		});
 		let autosavedPlan: string | null = null;
 		try {

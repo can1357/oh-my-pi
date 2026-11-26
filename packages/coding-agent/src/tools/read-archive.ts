@@ -14,6 +14,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { ToolSession } from "../sdk";
 import { convertBufferWithMarkit } from "../utils/markit";
 import { truncateHead } from "./streaming-output";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { resolveReadPath } from "./path-utils";
 import type { ReadToolDetails } from "./details/read";
 import {
@@ -93,7 +94,7 @@ async function resolveZipDocumentMember(
 		const end = (match.index ?? 0) + match[0].length;
 		const subPath = normalized.slice(end + 1);
 		if (subPath.length === 0 || parseSel(subPath).kind !== "none") continue;
-		const absolutePath = resolveReadPath(readPath.slice(0, end), session.cwd);
+		const absolutePath = resolveReadPath(readPath.slice(0, end), session.cwd, sessionUrlRouter(session));
 		const stat = await Bun.file(absolutePath)
 			.stat()
 			.catch(() => null);
@@ -176,7 +177,7 @@ export async function resolveArchiveReadPath(
 ): Promise<ResolvedArchiveReadPath | null> {
 	const candidates = parseArchivePathCandidates(readPath);
 	for (const candidate of candidates) {
-		let absolutePath = resolveReadPath(candidate.archivePath, session.cwd);
+		let absolutePath = resolveReadPath(candidate.archivePath, session.cwd, sessionUrlRouter(session));
 		let suffixResolution: { from: string; to: string } | undefined;
 
 		try {

@@ -7,6 +7,7 @@ import type { ToolSession } from "../tools";
 import { owningSessionId } from "../tools/session-id";
 import { getExperimentalContextSession } from "../tools/context-notes";
 import type { LocalProtocolOptions } from "./local-protocol";
+import { InternalUrlRouter } from "./router";
 import type { ResolveContext, WriteContext } from "./types";
 
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
@@ -38,6 +39,16 @@ export function contextLocalProtocolOptions(session: ToolSession): LocalProtocol
 	return sessionLocalProtocolOptions(session);
 }
 
+/** The router `session` resolves through: its own schemes, then the built-ins. No session: the built-ins only. */
+export function sessionUrlRouter(session: Pick<ToolSession, "urlRouter"> | undefined): InternalUrlRouter {
+	return session?.urlRouter ?? InternalUrlRouter.builtins();
+}
+
+/** The router a handler routes nested URLs through: the caller's ({@link ResolveContext.router}), else the built-ins. */
+export function contextUrlRouter(context: Pick<ResolveContext, "router"> | undefined): InternalUrlRouter {
+	return context?.router ?? InternalUrlRouter.builtins();
+}
+
 /** The single ResolveContext builder for a tool session; replaces per-tool literal assembly. */
 export function sessionResolveContext(
 	session: ToolSession,
@@ -57,6 +68,7 @@ export function sessionResolveContext(
 		containSkillPaths: options.containSkillPaths,
 		rules: session.activeRules,
 		session,
+		router: sessionUrlRouter(session),
 		skipDirectoryListing: options.skipDirectoryListing,
 	};
 }

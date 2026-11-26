@@ -143,7 +143,7 @@ export class TodoCommandController {
 	}
 
 	#resolveTodoPath(rest: string): string {
-		return resolveTodoMarkdownPath(rest, this.ctx.sessionManager.getCwd());
+		return resolveTodoMarkdownPath(rest, this.ctx.sessionManager.getCwd(), this.ctx.session.urlRouter);
 	}
 
 	async #exportToFile(rest: string): Promise<void> {

@@ -58,14 +58,14 @@ describe("McpProtocolHandler", () => {
 	});
 
 	it("returns error when no MCP manager is available", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("mcp://test://resource")).rejects.toThrow("No MCP manager");
 	});
 
 	it("requires resource URI in mcp URL", async () => {
 		const manager = createMockManager({ servers: ["server-a"] });
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("mcp://")).rejects.toThrow("mcp:// URL requires a resource URI");
 	});
 
@@ -77,7 +77,7 @@ describe("McpProtocolHandler", () => {
 		});
 		const manager = createMockManager({ servers: ["server-a"], resources });
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		await expect(router.resolve("mcp://test://missing")).rejects.toThrow("No MCP server has resource");
 		await expect(router.resolve("mcp://test://missing")).rejects.toThrow("file://known");
@@ -92,7 +92,7 @@ describe("McpProtocolHandler", () => {
 		});
 		const manager = createMockManager({ servers: ["server-a"], resources });
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		await expect(router.resolve("mcp://example://missing")).rejects.toThrow("example://items/open");
 		await expect(router.resolve("mcp://example://missing")).rejects.toThrow("example://items/{id}");
@@ -110,7 +110,7 @@ describe("McpProtocolHandler", () => {
 			readResult: { contents: [{ uri: "test://doc", text: "hello world" }] },
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://doc");
 		expect(resource.content).toBe("hello world");
@@ -132,7 +132,7 @@ describe("McpProtocolHandler", () => {
 		MCPManager.setInstance(manager);
 		const controller = new AbortController();
 
-		const reading = InternalUrlRouter.instance().resolve("mcp://test://slow", { signal: controller.signal });
+		const reading = InternalUrlRouter.builtins().resolve("mcp://test://slow", { signal: controller.signal });
 		await readStarted.promise;
 		controller.abort();
 		// A lost signal leaves the read pending forever; fail instead of hanging the suite.
@@ -233,7 +233,7 @@ describe("McpProtocolHandler", () => {
 			readResult: { contents: [{ uri: "catalog://root/", text: "catalog root" }] },
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("catalog://root/");
 		expect(resource.content).toBe("catalog root");
@@ -264,7 +264,7 @@ describe("McpProtocolHandler", () => {
 	});
 
 	it("recognizes opaque URIs in canResolve without swallowing path-like inputs", () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		expect(router.canResolve("urn:example:document")).toBe(true);
 		expect(router.canResolve("custom:item")).toBe(true);
 		// Windows drive paths and selector-shaped filesystem inputs stay on the
@@ -288,7 +288,7 @@ describe("McpProtocolHandler", () => {
 			readResult: { contents: [{ uri: "test://doc?q=1", text: "query resource" }] },
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://doc?q=1");
 		expect(resource.content).toBe("query resource");
@@ -306,7 +306,7 @@ describe("McpProtocolHandler", () => {
 			readResult: { contents: [{ uri: "test://docs/foo/raw", text: "from template" }] },
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://docs/foo/raw");
 		expect(resource.content).toBe("from template");
@@ -324,7 +324,7 @@ describe("McpProtocolHandler", () => {
 			readResult: { contents: [{ uri: "test://docs", text: "empty expansion" }] },
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://docs");
 		expect(resource.content).toBe("empty expansion");
@@ -346,7 +346,7 @@ describe("McpProtocolHandler", () => {
 			readResult: { contents: [{ uri: "test://foo/123", text: "from specific" }] },
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://foo/123");
 		expect(resource.notes).toEqual(["MCP server: specific-server"]);
@@ -368,7 +368,7 @@ describe("McpProtocolHandler", () => {
 			readResult: { contents: [{ uri: "test://foo", text: "from first" }] },
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://foo");
 		expect(resource.notes).toEqual(["MCP server: first"]);
@@ -382,7 +382,7 @@ describe("McpProtocolHandler", () => {
 		});
 		const manager = createMockManager({ servers: ["tmpl-server"], resources });
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		await expect(router.resolve("mcp://test://foo")).rejects.toThrow("No MCP server has resource");
 	});
@@ -399,7 +399,7 @@ describe("McpProtocolHandler", () => {
 			readResult: undefined,
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		await expect(router.resolve("mcp://test://empty")).rejects.toThrow("returned no content");
 		await expect(router.resolve("mcp://test://empty")).rejects.toThrow("null-server");
@@ -422,7 +422,7 @@ describe("McpProtocolHandler", () => {
 
 		it("resolves a lone blob to its bytes and reported type", async () => {
 			serveBlob("test://image", PNG, "image/png");
-			const resource = await InternalUrlRouter.instance().resolve("mcp://test://image");
+			const resource = await InternalUrlRouter.builtins().resolve("mcp://test://image");
 			expect(resource.content).toEqual(Buffer.from(PNG, "base64"));
 			expect(resource.contentType).toBe("image/png");
 		});
@@ -474,7 +474,7 @@ describe("McpProtocolHandler", () => {
 			},
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://mixed");
 		expect(resource.content).toContain("part one");
@@ -496,7 +496,7 @@ describe("McpProtocolHandler", () => {
 			},
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://blank");
 		expect(resource.content).toBe("(empty resource)");
@@ -514,7 +514,7 @@ describe("McpProtocolHandler", () => {
 			readError: new Error("connection refused"),
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		await expect(router.resolve("mcp://test://fail")).rejects.toThrow("MCP resource read error:");
 		await expect(router.resolve("mcp://test://fail")).rejects.toThrow("connection refused");
@@ -536,7 +536,7 @@ describe("McpProtocolHandler", () => {
 			readResult: { contents: [{ uri: "test://shared", text: "from first" }] },
 		});
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve("mcp://test://shared");
 		expect(resource.notes).toEqual(["MCP server: first"]);
@@ -545,7 +545,7 @@ describe("McpProtocolHandler", () => {
 	it("shows (none) when no servers have any resources", async () => {
 		const manager = createMockManager({ servers: ["lonely-server"] });
 		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		await expect(router.resolve("mcp://test://anything")).rejects.toThrow("(none)");
 	});
@@ -636,7 +636,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 			}),
 		);
 
-		const reading = InternalUrlRouter.instance().resolve(skillUri, { skills: [] });
+		const reading = InternalUrlRouter.builtins().resolve(skillUri, { skills: [] });
 		expect((await withTimeout(reading, 2_000, "connected catalog was blocked by another server")).content).toBe(
 			mcpText,
 		);
@@ -665,7 +665,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		resources.set("figma", { resources: [], templates: [] });
 		MCPManager.setInstance(createMockManager({ servers: ["figma"], resources }));
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		await expect(router.resolve("skill://nope", { skills: [] })).rejects.toThrow(/Unknown skill: nope/);
 		await expect(router.resolve("skill://nope", { skills: [] })).rejects.toThrow(/Available: none/);
@@ -675,7 +675,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 
 		MCPManager.resetForTests();
 		InternalUrlRouter.resetForTests();
-		const bare = InternalUrlRouter.instance();
+		const bare = InternalUrlRouter.builtins();
 		await expect(bare.target("skill://nope", { skills: [] })).rejects.toThrow(/Unknown skill: nope/);
 	});
 
@@ -691,7 +691,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 		expect(skills.some(s => s.name === "figma")).toBe(true);
 
 		MCPManager.setInstance(figmaManager("mcp copy"));
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		const resource = await router.resolve(skillUri, { skills });
 		expect(resource.content).toBe("local copy");
@@ -712,7 +712,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 				},
 			}),
 		);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		// `%load` and plan-mode writes need a local file; an advertised resource cannot back them.
 		await expect(router.requireLocal(skillUri, "load", { skills: [] })).rejects.toThrow("Unknown skill: figma");
@@ -740,7 +740,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 		MCPManager.setDeferredInstance(async () => {
 			throw new Error("auth storage locked");
 		});
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("skill://nope", { skills: [] })).rejects.toThrow("Unknown skill: nope");
 		// The startup error itself is what an explicit MCP read reports.
 		await expect(router.resolve(`mcp://${skillUri}`)).rejects.toThrow("auth storage locked");
@@ -758,7 +758,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 				},
 			}),
 		);
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		for (const uri of ["skill://nope", `mcp://${skillUri}`]) {
 			waiting = Promise.withResolvers<void>();
 			const controller = new AbortController();
@@ -791,7 +791,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 				return Promise.withResolvers<MCPManager>().promise;
 			});
 			// Settle into a value: Bun's `expect(...).rejects` blocks until settlement, before timers advance.
-			const outcome = InternalUrlRouter.instance()
+			const outcome = InternalUrlRouter.builtins()
 				.resolve("skill://nope", { skills: [] })
 				.then(
 					() => "resolved",
@@ -811,7 +811,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 			loads++;
 			return figmaManager();
 		});
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 
 		expect((await router.resolve(skillUri, { skills: [] })).content).toBe(mcpText);
 		expect((await router.resolve(`mcp://${skillUri}`)).content).toBe(mcpText);
@@ -825,7 +825,7 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 			staleStarted.resolve();
 			return stale.promise;
 		});
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const staleRead = router.resolve(skillUri, { skills: [] });
 		await staleStarted.promise;
 

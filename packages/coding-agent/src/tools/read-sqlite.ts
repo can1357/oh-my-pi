@@ -3,6 +3,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "../sdk";
 import { DEFAULT_MAX_LINES, truncateHead } from "./streaming-output";
 import { applyListLimit } from "./list-limit";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { resolveReadPath } from "./path-utils";
 import type { ReadToolDetails } from "./details/read";
 import { prependSuffixResolutionNotice, toReadTruncationStats } from "./read-format";
@@ -49,7 +50,7 @@ export async function resolveSqliteReadPath(
 ): Promise<ResolvedSqliteReadPath | null> {
 	const candidates = parseSqlitePathCandidates(readPath);
 	for (const candidate of candidates) {
-		let absolutePath = resolveReadPath(candidate.sqlitePath, session.cwd);
+		let absolutePath = resolveReadPath(candidate.sqlitePath, session.cwd, sessionUrlRouter(session));
 		let suffixResolution: { from: string; to: string } | undefined;
 
 		try {
@@ -93,7 +94,7 @@ export async function resolveSqliteReadPath(
 
 	// A SQLite file without a database extension is recognized by its header alone.
 	for (const candidate of parseSqliteSelectorBoundaryCandidates(readPath)) {
-		const absolutePath = resolveReadPath(candidate.sqlitePath, session.cwd);
+		const absolutePath = resolveReadPath(candidate.sqlitePath, session.cwd, sessionUrlRouter(session));
 		const stat = await Bun.file(absolutePath)
 			.stat()
 			.catch(() => null);

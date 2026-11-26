@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { InternalUrlRouter, UrlSchemeTable } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { runInProcessTab } from "@oh-my-pi/pi-coding-agent/tools/browser/in-process-run";
 import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import type { ScreenshotResult } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { TernElementHandle, TernTab, userSourceFunction } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/tern-tab";
@@ -8,6 +11,7 @@ import { parseTernSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/
 import { TernError, TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
 interface FakePage {
@@ -333,6 +337,7 @@ describe("TernTab", () => {
 			deadline: Date.now() + 2_000,
 			signal: new AbortController().signal,
 			session: { cwd: os.tmpdir() },
+			router: InternalUrlRouter.builtins(),
 			output: new RunOutput(),
 			screenshots: [],
 		});
@@ -641,6 +646,7 @@ describe("TernTab on an unresponsive page", () => {
 			deadline: Date.now() + timeoutMs,
 			signal: new AbortController().signal,
 			session: { cwd: os.tmpdir() },
+			router: InternalUrlRouter.builtins(),
 			output: new RunOutput(),
 			screenshots: [],
 		});
@@ -717,6 +723,7 @@ describe("TernTab screenshots", () => {
 			deadline: Date.now() + 5_000,
 			signal: new AbortController().signal,
 			session: { cwd: os.tmpdir() },
+			router: InternalUrlRouter.builtins(),
 			output,
 			screenshots,
 		});
@@ -752,6 +759,7 @@ describe("TernTab screenshots", () => {
 			deadline: Date.now() + 5_000,
 			signal: new AbortController().signal,
 			session: { cwd: os.tmpdir() },
+			router: InternalUrlRouter.builtins(),
 			output: new RunOutput(),
 			screenshots,
 		});
@@ -773,5 +781,33 @@ describe("TernTab screenshots", () => {
 		await tab.setViewport({ width: 1000, height: 600 });
 		await expect(tab.clickAt(1000, 100)).rejects.toThrow(/new screenshot/);
 		for (const saved of screenshots) await fs.rm(saved.dest);
+	});
+});
+
+describe("TernTab file paths in a session with its own schemes", () => {
+	it("refuses a session-scheme URL as a saveState path in an in-process run, writing nothing", async () => {
+		using dir = TempDir.createSync("@omp-tern-session-scheme-");
+		const schemes = new UrlSchemeTable("Host URI scheme");
+		schemes.replace([
+			{
+				scheme: "db",
+				spec: { backing: "remote", selectors: "none", immutable: true },
+				resolve: async () => {
+					throw new Error("db:// is never resolved here");
+				},
+			},
+		]);
+		const session = { cwd: dir.path(), urlRouter: new InternalUrlRouter([schemes]) } as unknown as ToolSession;
+		const tab = await openTab(await startPage({ eventBatches: [], kit: {} }));
+
+		await expect(
+			runInProcessTab(tab, {
+				code: 'await tab.saveState("db://rows/state.json");',
+				timeoutMs: 5_000,
+				session,
+				snapshot: { cwd: dir.path() },
+			}),
+		).rejects.toThrow('internal scheme "db://"');
+		expect(await fs.readdir(dir.path())).toEqual([]);
 	});
 });

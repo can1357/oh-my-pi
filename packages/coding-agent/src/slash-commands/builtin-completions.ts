@@ -7,7 +7,6 @@ import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
 import { cfgCycleOrder } from "../config/model-settings";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
-import { InternalUrlRouter } from "../internal-urls";
 import { replaceTabs } from "../utils/text-width";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { encodeLocalPath } from "../modes/local-file-editor";
@@ -390,7 +389,7 @@ export function buildLocalFileArgumentCompletions(
 			.replace(/^local:\/{0,2}/i, "")
 			.toLowerCase();
 		try {
-			const files = await InternalUrlRouter.instance().complete("local", query, {
+			const files = await runtime.ctx.session.urlRouter.complete("local", query, {
 				localProtocolOptions: sessionLocalProtocolOptions(runtime.ctx.sessionManager),
 			});
 			const matches = (files ?? [])

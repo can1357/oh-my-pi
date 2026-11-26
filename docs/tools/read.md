@@ -340,7 +340,7 @@ Notes: ...
    - Video invokes `ffmpeg`/`ffprobe`; PDF page screenshots use headless Chromium; executable analysis views may create/open a database in the active disassembler backend (IDA, Ghidra, or Binary Ninja) and request rendered views.
 - Session state
    - Records local text snapshots and seen lines in the session's native `EditStore` for later stale-anchor recovery.
-   - Passes session `cwd`, `settings`, and `localProtocolOptions` into the process-global `InternalUrlRouter.instance().resolve()` for internal URLs.
+   - Passes session `cwd`, `settings`, and `localProtocolOptions` into `resolve()` on the session's router (`session.urlRouter`: its own schemes, then the built-ins) for internal URLs.
    - Uses `session.allocateOutputArtifact()` for cached/truncated URL output.
 - Background work / cancellation
    - Only the deterministic disk reads are non-abortable: plain-file line/range reads (`streamLinesFromFile`, multi-range) and directory listings (`#readDirectory`) are called with `undefined` instead of the `AbortSignal`, so an interrupt mid-read can't surface a misleading "Operation aborted" on a read that would have finished instantly. Every other branch keeps the signal and its helpers call `throwIfAborted(signal)` to stop promptly: URL/internal-URL reads (network), archive, sqlite, document conversion, image decode, structural summary, conflict scan, and the suffix-glob path resolution.

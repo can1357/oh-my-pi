@@ -93,6 +93,7 @@ import {
 import { MODEL_ROLES } from "../config/model-roles";
 import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
+import type { InternalUrlRouter } from "../internal-urls/router";
 import type { CursorMcpResourceAdapter } from "../cursor";
 import { estimateContextToolSchemaTokens } from "./context-usage";
 import type { PlanModeState } from "../plan-mode/state";
@@ -524,6 +525,8 @@ export interface SessionAdvisorsHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** The host session's URL router; advisors resolve URLs through it. */
+	urlRouter: InternalUrlRouter;
 	modelRegistry: ModelRegistry;
 	yieldQueue: YieldQueue;
 	obfuscator(): SecretObfuscator | undefined;
@@ -1482,6 +1485,8 @@ export class SessionAdvisors {
 					// this context; without it every bridge tool fails closed to
 					// `always-ask`.
 					getToolContext: this.#advisorGetToolContext,
+					// Advisors have no URL schemes of their own: their tool sessions share the host session's router.
+					urlRouter: this.#host.urlRouter,
 					allowDirectFileMutation: advisorCanMutateFiles,
 					// Gated on the advisor's own grant: the factory builds a fresh
 					// tool, so handing it over unconditionally would give a roster

@@ -9,6 +9,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
+import { sessionUrlRouter } from "../../internal-urls/context";
 import { isReplyWrite, toolResultReplies } from "../../session/transcript/reply-write";
 import { parseMCPProgress } from "../../tools/mcp-progress";
 import { ToolError } from "../../tools/tool-errors";
@@ -366,7 +367,9 @@ async function runSessionTool(
 	}
 	// The transcript draws a direct `write out://` from its args; a bridged one only reaches the user through `onReply`.
 	const reply =
-		isReplyWrite(name, validatedArgs) === true && isRecord(validatedArgs) && typeof validatedArgs.content === "string"
+		isReplyWrite(name, validatedArgs, sessionUrlRouter(options.session)) === true &&
+		isRecord(validatedArgs) &&
+		typeof validatedArgs.content === "string"
 			? validatedArgs.content
 			: undefined;
 	if (reply !== undefined && !options.onReply) {

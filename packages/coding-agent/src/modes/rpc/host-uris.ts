@@ -1,5 +1,5 @@
 import { Snowflake } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter } from "../../internal-urls";
+import type { UrlSchemeTable } from "../../internal-urls/scheme-table";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -65,21 +65,22 @@ class RpcHostUriProtocolHandler implements ProtocolHandler {
 /**
  * Bidirectional bridge that lets the RPC host own a set of URI schemes.
  *
- * The host registers schemes via `set_host_uri_schemes`; the bridge installs
- * a `RpcHostUriProtocolHandler` per scheme into the process-global
- * {@link InternalUrlRouter}. Reads land on the read tool through the existing
- * router; writes are intercepted by the write tool and dispatched through
+ * The host registers schemes via `set_host_uri_schemes`; the bridge fills the
+ * RPC session's host-URI {@link UrlSchemeTable} with a
+ * `RpcHostUriProtocolHandler` per scheme, so only that session's router
+ * resolves them. Reads land on the read tool through the session router;
+ * writes are intercepted by the write tool and dispatched through
  * `requestWrite`.
  */
 export class RpcHostUriBridge {
 	#output: RpcHostUriOutput;
-	#router: InternalUrlRouter;
+	#schemes: UrlSchemeTable;
 	#definitions = new Map<string, RpcHostUriSchemeDefinition>();
 	#pending = new Map<string, PendingUriRequest>();
 
-	constructor(output: RpcHostUriOutput, router: InternalUrlRouter = InternalUrlRouter.instance()) {
+	constructor(output: RpcHostUriOutput, schemes: UrlSchemeTable) {
 		this.#output = output;
-		this.#router = router;
+		this.#schemes = schemes;
 	}
 
 	getSchemes(): string[] {
@@ -87,9 +88,9 @@ export class RpcHostUriBridge {
 	}
 
 	/**
-	 * Replace the registered set of host URI schemes. Previously registered
-	 * schemes that no longer appear in the new set are unregistered from the
-	 * router; surviving and new schemes get fresh handler instances.
+	 * Replace the registered set of host URI schemes with fresh handler
+	 * instances. Throws, changing nothing, for an invalid, built-in or
+	 * standard scheme.
 	 */
 	setSchemes(schemes: RpcHostUriSchemeDefinition[]): string[] {
 		const normalized = new Map<string, RpcHostUriSchemeDefinition>();
@@ -101,11 +102,6 @@ export class RpcHostUriBridge {
 			if (!/^[a-z][a-z0-9+.-]*$/.test(scheme)) {
 				throw new Error(`Host URI scheme contains invalid characters: ${raw.scheme}`);
 			}
-			// Built-in schemes are OMP-owned: a host shadowing one would change its semantics for
-			// the whole process, and `clear()` would then delete it for later sessions.
-			if (this.#router.isBuiltin(scheme)) {
-				throw new Error(`Host URI scheme is reserved by OMP: ${scheme}://`);
-			}
 			normalized.set(scheme, {
 				scheme,
 				description: typeof raw.description === "string" ? raw.description : undefined,
@@ -113,28 +109,16 @@ export class RpcHostUriBridge {
 				immutable: raw.immutable === true,
 			});
 		}
-
-		for (const previous of this.#definitions.keys()) {
-			if (!normalized.has(previous)) {
-				this.#router.unregister(previous);
-			}
-		}
-		for (const definition of normalized.values()) {
-			this.#router.register(new RpcHostUriProtocolHandler(definition, this));
-		}
+		this.#schemes.replace(
+			Array.from(normalized.values(), definition => new RpcHostUriProtocolHandler(definition, this)),
+		);
 		this.#definitions = normalized;
 		return Array.from(normalized.keys());
 	}
 
-	/**
-	 * Unregister every host scheme from the router and reject any in-flight
-	 * requests. Called on RPC shutdown to keep the global router clean for
-	 * subsequent sessions in the same process (used by tests).
-	 */
+	/** Drop every host scheme from the session and reject any in-flight requests. Called on RPC shutdown. */
 	clear(message: string = "Host URI bridge shut down"): void {
-		for (const scheme of this.#definitions.keys()) {
-			this.#router.unregister(scheme);
-		}
+		this.#schemes.clear();
 		this.#definitions.clear();
 		this.rejectAllPending(message);
 	}

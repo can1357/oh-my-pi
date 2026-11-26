@@ -31,10 +31,13 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { NATIVE_TODO_BACKEND } from "../../tools/settings";
-import { InternalUrlRouter } from "../../internal-urls/router";
+import { assertProtocolHandlerSpec, InternalUrlRouter } from "../../internal-urls/router";
+import type { ProtocolHandler } from "../../internal-urls/types";
+import { isStandardScheme } from "../../internal-urls/url-scheme";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
+import { urlSchemeConflicts } from "./url-schemes";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loader";
 
@@ -72,22 +75,6 @@ type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]+$/;
 /** `todo.backend` ids: safe to print and to type in a config file. */
 const TODO_BACKEND_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/** Standard schemes an extension may not claim: web, file and mail links. omp's internal URLs are refused too. */
-const STANDARD_LINK_SCHEMES: Readonly<Record<string, true>> = {
-	about: true,
-	blob: true,
-	data: true,
-	file: true,
-	ftp: true,
-	http: true,
-	https: true,
-	javascript: true,
-	mailto: true,
-	ssh: true,
-	ws: true,
-	wss: true,
-};
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -219,9 +206,16 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	/** Whether the extension's factory is still running; URL schemes register only then. */
+	#loading = true;
 
 	get pi() {
 		return getCodingAgentApi();
+	}
+
+	/** The factory returned (or threw): later `registerUrlScheme` calls are refused. */
+	static endLoading(api: ConcreteExtensionAPI): void {
+		api.#loading = false;
 	}
 
 	constructor(
@@ -348,11 +342,37 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				`registerLinkScheme: "${scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
 			);
 		}
-		// `=== true`: inherited keys such as `constructor` are not reserved.
-		if (STANDARD_LINK_SCHEMES[normalized] === true || InternalUrlRouter.instance().isBuiltin(normalized)) {
+		if (isStandardScheme(normalized) || InternalUrlRouter.isBuiltin(normalized)) {
 			throw new Error(`registerLinkScheme: "${scheme}" is reserved for standard or omp-internal links`);
 		}
 		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
+	}
+
+	registerUrlScheme(handler: ProtocolHandler): () => void {
+		const scheme = handler.scheme.toLowerCase();
+		// Conflict checks, startup deferral and the first system prompt all read the schemes a load
+		// registered by the time its factory returned; a later registration would bypass them.
+		if (!this.#loading) {
+			throw new Error(
+				`registerUrlScheme: ${scheme}:// must be registered from the extension factory, not after it returns`,
+			);
+		}
+		if (!LINK_SCHEME_PATTERN.test(scheme)) {
+			throw new Error(
+				`registerUrlScheme: "${handler.scheme}" is not a URL scheme of two or more characters (letters, digits, "+", "-", ".")`,
+			);
+		}
+		if (InternalUrlRouter.isBuiltin(scheme)) {
+			throw new Error(`registerUrlScheme: ${scheme}:// is an OMP built-in scheme`);
+		}
+		if (isStandardScheme(scheme)) throw new Error(`registerUrlScheme: ${scheme}:// is a standard scheme`);
+		const { urlSchemes } = this.extension;
+		if (urlSchemes.has(scheme)) throw new Error(`registerUrlScheme: ${scheme}:// is already registered`);
+		assertProtocolHandlerSpec(handler);
+		urlSchemes.set(scheme, handler);
+		return () => {
+			if (urlSchemes.get(scheme) === handler) urlSchemes.delete(scheme);
+		};
 	}
 
 	registerComposerShape(shape: ComposerShape & { readonly label: string }): void {
@@ -494,6 +514,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		assistantTextRenderers: [],
 		transcriptPresenters: [],
 		linkSchemes: [],
+		urlSchemes: new Map(),
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
@@ -511,7 +532,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
-	api: ExtensionAPI,
+	api: ConcreteExtensionAPI,
 	runtime: IExtensionRuntime,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
@@ -525,6 +546,8 @@ async function runExtensionFactory(
 			...providerRegistrationCheckpoint,
 		);
 		throw error;
+	} finally {
+		ConcreteExtensionAPI.endLoading(api);
 	}
 }
 
@@ -612,6 +635,9 @@ export async function loadExtensions(
  * Bind previously imported extension factories. A fresh session runtime is
  * created unless `runtime` is given: deferred startup extensions bind into the
  * live session's runtime so they share its flag values and wired actions.
+ * Two bound extensions registering one URL scheme are reported in `errors`
+ * (the earlier one serves it), so every caller that surfaces load errors —
+ * the CLI's notifications and its `--trusted-extensions` gate included — shows them.
  */
 export async function bindPreparedExtensions(
 	preparedExtensions: readonly PreparedExtension[],
@@ -638,7 +664,7 @@ export async function bindPreparedExtensions(
 
 	return {
 		extensions,
-		errors,
+		errors: [...errors, ...urlSchemeConflicts(extensions)],
 		runtime,
 		preparedExtensions: [...preparedExtensions],
 	};

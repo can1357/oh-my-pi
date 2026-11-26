@@ -41,7 +41,7 @@ describe("LocalProtocolHandler", () => {
 				getArtifactsDir: () => artifactsDir,
 				getSessionId: () => "session-a",
 			});
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const resource = await router.resolve("local://");
 
 			expect(resource.contentType).toBe("text/markdown");
@@ -60,7 +60,7 @@ describe("LocalProtocolHandler", () => {
 				getArtifactsDir: () => artifactsDir,
 				getSessionId: () => "session-b",
 			});
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const resource = await router.resolve("local://subtasks/trace.txt");
 
 			expect(resource.content).toBe("trace");
@@ -73,7 +73,7 @@ describe("LocalProtocolHandler", () => {
 			const localFile = path.join(tempDir, "local", "report.json");
 			await Bun.write(localFile, '{"report":true}');
 			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			expect(await router.locate("local://report.json", context)).toBe(await fs.realpath(localFile));
 			expect(await router.locate("local://", context)).toBe(await fs.realpath(path.dirname(localFile)));
 			expect(await router.locate("local://missing.json", context)).toBeNull();
@@ -86,7 +86,7 @@ describe("LocalProtocolHandler", () => {
 				getArtifactsDir: () => path.join(tempDir, "artifacts"),
 				getSessionId: () => "session-c",
 			});
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("local://../secret.txt")).rejects.toThrow(
 				"Path traversal (..) is not allowed in local:// URLs",
 			);
@@ -152,7 +152,7 @@ describe("LocalProtocolHandler", () => {
 				getArtifactsDir: () => artifactsDir,
 				getSessionId: () => "session-d",
 			});
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("local://linked/secret.txt")).rejects.toThrow("local:// URL escapes local root");
 		});
 	});
@@ -168,7 +168,7 @@ describe("LocalProtocolHandler", () => {
 			await fs.symlink(outsideDir, path.join(localRoot, "link"));
 			await fs.symlink(path.join(outsideDir, "victim.txt"), path.join(localRoot, "dangling"));
 			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 
 			await expect(router.locate("local://link/newdir/f", context, { create: true })).rejects.toThrow(
 				"local:// URL escapes local root",
@@ -192,7 +192,7 @@ describe("LocalProtocolHandler", () => {
 			await fs.symlink(path.join(localRoot, "loopA"), path.join(localRoot, "loopB"));
 			await Bun.write(path.join(localRoot, "file.txt"), "x");
 			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const failure = async (url: string) => {
 				const error = await router.locate(url, context, { create: true }).then(
 					() => undefined,
@@ -215,7 +215,7 @@ describe("LocalProtocolHandler", () => {
 		await withTempDir(async tempDir => {
 			await fs.symlink(path.join(tempDir, "gone"), path.join(tempDir, "local"));
 			const context = { localProtocolOptions: { getArtifactsDir: () => tempDir } };
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 
 			await expect(router.locate("local://x.md", context, { create: true })).rejects.toThrow(
 				"local:// URL goes through a dangling symlink: local://x.md",
@@ -247,7 +247,7 @@ describe("LocalProtocolHandler", () => {
 				getSessionId: () => "stale-session",
 			});
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const resource = await router.resolve("local://PLAN.md", {
 				localProtocolOptions: {
 					getArtifactsDir: () => callerArtifactsDir,
@@ -278,7 +278,7 @@ describe("LocalProtocolHandler", () => {
 				getSessionId: () => "stale-session",
 			});
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(
 				router.resolve("local://PLAN.md", {
 					localProtocolOptions: {

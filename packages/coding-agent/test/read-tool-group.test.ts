@@ -19,6 +19,7 @@ import {
 	type ReadResult,
 	type ReadUsage,
 } from "../src/ui/transcript/read-group";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 function extractLinkUris(text: string): string[] {
 	return [...text.matchAll(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/g)].map(match => match[1]!);
@@ -524,8 +525,8 @@ describe("readArgsCollapseIntoGroup", () => {
 		["mcp://server/resource"],
 		["local://PLAN.md"],
 	])("keeps %s as a full tool execution (not grouped)", target => {
-		expect(readArgsCollapseIntoGroup({ path: target })).toBe(false);
-		expect(readArgsCollapseIntoGroup({ file_path: target })).toBe(false);
+		expect(readArgsCollapseIntoGroup({ path: target }, InternalUrlRouter.builtins())).toBe(false);
+		expect(readArgsCollapseIntoGroup({ file_path: target }, InternalUrlRouter.builtins())).toBe(false);
 	});
 
 	it.each([
@@ -535,16 +536,16 @@ describe("readArgsCollapseIntoGroup", () => {
 		["help://"],
 		["help://eval/helpers"],
 	])("collapses %s into the read group", target => {
-		expect(readArgsCollapseIntoGroup({ path: target })).toBe(true);
-		expect(readArgsCollapseIntoGroup({ file_path: target })).toBe(true);
+		expect(readArgsCollapseIntoGroup({ path: target }, InternalUrlRouter.builtins())).toBe(true);
+		expect(readArgsCollapseIntoGroup({ file_path: target }, InternalUrlRouter.builtins())).toBe(true);
 	});
 
 	it("returns false for non-record / missing arguments", () => {
-		expect(readArgsCollapseIntoGroup(undefined)).toBe(false);
-		expect(readArgsCollapseIntoGroup(null)).toBe(false);
-		expect(readArgsCollapseIntoGroup("help://x")).toBe(false);
-		expect(readArgsCollapseIntoGroup(["help://x"])).toBe(false);
-		expect(readArgsCollapseIntoGroup({})).toBe(false);
-		expect(readArgsCollapseIntoGroup({ path: 42 })).toBe(false);
+		expect(readArgsCollapseIntoGroup(undefined, InternalUrlRouter.builtins())).toBe(false);
+		expect(readArgsCollapseIntoGroup(null, InternalUrlRouter.builtins())).toBe(false);
+		expect(readArgsCollapseIntoGroup("help://x", InternalUrlRouter.builtins())).toBe(false);
+		expect(readArgsCollapseIntoGroup(["help://x"], InternalUrlRouter.builtins())).toBe(false);
+		expect(readArgsCollapseIntoGroup({}, InternalUrlRouter.builtins())).toBe(false);
+		expect(readArgsCollapseIntoGroup({ path: 42 }, InternalUrlRouter.builtins())).toBe(false);
 	});
 });

@@ -1,6 +1,6 @@
 import { transcriptEntryMessage } from "../../../../session/transcript/transcript-entry";
 import { jsx } from "@oh-my-pi/pi-tui";
-import { CopySelector } from "../../../../ui/overlays/pickers/copy-selector";
+import { CopySelector, type CopySelectorProps } from "../../../../ui/overlays/pickers/copy-selector";
 import { type CopyPickSource } from "../../../../modes/view-model/overlays/copy-selector";
 import { assistantText } from "../../../../modes/view-model/overlays/copy-targets";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
@@ -142,12 +142,15 @@ export async function selectSessionTextReviewSource(
 		(ui, _theme, _keybindings, done) =>
 			jsx(CopySelector, {
 				entries,
+				// The session's router, so its extensions' schemes classify reply writes and URL reads
+				// as its transcript does.
+				router: ctx.urlRouter,
 				terminalRows: () => ui.size().rows,
 				title: "Select message to annotate",
 				actionLabel: "select",
 				onPick: (content: string, label: string, source: CopyPickSource) => done({ content, label, ...source }),
 				onCancel: () => done(undefined),
-			}),
+			} satisfies CopySelectorProps),
 		{ overlay: true },
 	);
 	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;

@@ -11,6 +11,7 @@ import { replaceTabs } from "../utils/text-width";
 import { shortenPath } from "../utils/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
 import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import { InternalUrlRouter } from "../internal-urls/router";
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
 import type {
@@ -529,7 +530,7 @@ function restrictionSubjects(
 	const requested = isRecord(args) ? args.cwd : undefined;
 	if (typeof requested === "string" && requested.trim().length > 0) {
 		try {
-			workingDirectory = resolveToCwd(requested, cwd);
+			workingDirectory = resolveToCwd(requested, cwd, InternalUrlRouter.builtins());
 		} catch {
 			// An internal-URL working directory is no local folder; the session's still applies.
 		}
@@ -810,12 +811,14 @@ function approvalFolderPromptBlock(
 /**
  * The grants an `always-ask-cached` prompt offers for this call, in display order: the directory
  * around it, when it names a filesystem path, then its exact targets — unless the only target is
- * that directory itself, which the directory answer already covers.
+ * that directory itself, which the directory answer already covers. `router` is the calling
+ * session's, so a target naming one of its URL schemes is not labelled a file.
  */
 function approvalGrantChoices(
 	tool: ApprovalSubject,
 	args: unknown,
 	folder: { key: string; label: string } | undefined,
+	router: InternalUrlRouter,
 ): ExtensionApprovalGrant[] {
 	const grants: ExtensionApprovalGrant[] = [];
 	if (folder) {
@@ -827,7 +830,7 @@ function approvalGrantChoices(
 	}
 	const targets = approvalCacheTargets(tool, args);
 	if (targets.some(target => target !== folder?.key)) {
-		const files = targets.every(approvalTargetNamesFile);
+		const files = targets.every(target => approvalTargetNamesFile(target, router));
 		grants.push({
 			scope: "target",
 			label: files ? "Approve File" : "Approve",
@@ -843,7 +846,8 @@ function approvalGrantChoices(
  * keeps its room), else a select with the full prompt (RPC, ACP, extension hosts). `appendix`
  * lines follow the prompt on both. With a `sessionSubject`, both also offer to approve that
  * subject for the rest of the session; with `grants`, both offer the `always-ask-cached` grants
- * the call can record, and the prompt lists the folder a directory grant would cover. `signal`
+ * the call can record (their targets classified through `grants.router`, the calling session's),
+ * and the prompt lists the folder a directory grant would cover. `signal`
  * (the call's abort signal) closes the prompt, so aborting the turn never waits on a prompt
  * nobody can see or answer. Anything but an explicit approval is `deny`.
  */
@@ -855,7 +859,7 @@ export async function requestApproval(
 		reason?: string;
 		appendix?: readonly string[];
 		sessionSubject?: string;
-		grants?: boolean;
+		grants?: { router: InternalUrlRouter };
 		signal?: AbortSignal;
 	} = {},
 ): Promise<ExtensionApprovalAnswer> {
@@ -864,7 +868,7 @@ export async function requestApproval(
 	const details = approvalDetails(tool, args);
 	const session = sessionSubject === undefined ? undefined : `Approve ${sessionSubject} for this session`;
 	const folder = options.grants ? approvalFolderCandidate(tool, args) : undefined;
-	const grants = options.grants ? approvalGrantChoices(tool, args, folder) : [];
+	const grants = options.grants ? approvalGrantChoices(tool, args, folder, options.grants.router) : [];
 	// A directory answer names what it covers: the folder's own entries, listed in the prompt.
 	const listing = folder ? await approvalFolderListing(folder.key, APPROVAL_FOLDER_FULL_LISTING) : undefined;
 	const folderBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_FULL_LISTING);

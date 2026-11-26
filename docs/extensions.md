@@ -137,6 +137,7 @@ Core methods:
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `registerTodoBackend`
+- `registerUrlScheme`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -358,6 +359,77 @@ export default function (pi: ExtensionAPI) {
 - **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). When several extensions register the selected id, the first one loaded keeps it and the others are reported as extension errors. A selected id no enabled extension registers is reported once as an extension error (again if it is selected again after another id), and todos work as with `native`. A backend selected mid-session gets the list with the next change, or at once when picked in `/settings`.
 - **Scope.** Main session only: subagents and `/tan` clones are not mirrored.
 - **Settings.** `/settings` → Tools → Todos → "Todo Backend" lists `Native` and every backend an enabled extension registers, with its `label` (the `id` when omitted) and `description`. Both are optional; a blank one throws at registration.
+
+### Internal URL schemes (`registerUrlScheme`)
+
+`pi.registerUrlScheme(handler)` serves `<scheme>://…` URLs with your handler, the same
+`ProtocolHandler` interface the built-in schemes (`local://`, `agent://`, …) implement, in the
+sessions that load your extension. It returns a function that removes the registration.
+
+```ts
+import type { ExtensionAPI, ProtocolHandler } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+	const notes = new Map<string, string>();
+	const handler: ProtocolHandler = {
+		scheme: "notes",
+		spec: {
+			backing: "remote",
+			selectors: "none",
+			immutable: false,
+			write: { via: "handler", payload: "text", scope: "workspace", tier: () => "write" },
+		},
+		async resolve(url, context) {
+			// context?.cwd / sessionId / session identify the calling session.
+			return { url: url.href, content: notes.get(url.host) ?? "", contentType: "text/plain" };
+		},
+		async write(url, content) {
+			notes.set(url.host, content);
+		},
+		async complete() {
+			return [...notes.keys()].map(value => ({ value }));
+		},
+		promptDoc: () => "notes://<name> — scratch notes kept by the notes extension",
+	};
+	pi.registerUrlScheme(handler);
+}
+```
+
+- **Routing.** `read notes://x` calls `resolve`; `write notes://x` calls `write` when
+  `spec.write.via` is `"handler"` (the handler must have `write()` exactly then); composer tab
+  completion after `notes://` calls `complete(query)`. Optional `locate`, `enumerate`,
+  `readDirectory`, `promptDoc` and `promptReference` hooks work as for built-in schemes; the
+  session's system prompt lists `promptDoc`.
+- **Context.** Each call receives the caller in `context`: `read` passes the tool session's
+  `ResolveContext` (`cwd`, `sessionId`, `sessionFile`, the tool `session`, `signal`, …), `write`
+  a `WriteContext`, composer completion the focused session's `cwd` and session. Other callers
+  may pass less, so treat every field as optional.
+- **Write approval.** The write tool gates an extension scheme like a built-in non-file scheme:
+  approval asks `spec.write.tier(url, content, session)`, and a scheme without `spec.write` is
+  denied as read-only. Choose `scope` and `tier` as honestly as a built-in scheme would.
+- **Per session.** Registering only records the handler on your extension; nothing
+  process-wide changes. Each session resolves the schemes of its own active extensions, after
+  its RPC host URI schemes and before the built-ins: a session that does not load your
+  extension, or a subagent whose session does not, never sees the scheme. Subagents load
+  extensions in their own sessions, so each registers its own handler.
+- **From the factory.** Call `registerUrlScheme` while your factory runs (an async factory may
+  await first). A call after the factory returns — from `session_start` or a later event —
+  throws: conflict checks, startup deferral and the first system prompt read the schemes a load
+  registered by then. The returned function may be called at any time.
+- **Refusals.** `registerUrlScheme` throws for invalid syntax (`^[a-z][a-z0-9+.-]+$` after
+  lowercasing: at least two characters, so no scheme captures a Windows drive path such as
+  `C:/notes.txt`), a built-in scheme, a standard one (`http`, `https`, `file`, …), a scheme your
+  extension already registered, or a spec the handler contradicts (`write()` without
+  `spec.write.via: "handler"`, and so on). An RPC host's `set_host_uri_schemes` cannot take a
+  scheme an extension of the session registered.
+- **Conflicts.** Two active extensions of one session registering the same scheme is reported as
+  an extension load error (an `omp` startup warning; fatal under `--trusted-extension`); the
+  extension loaded first serves it.
+- **Suspension.** While a live `disabledExtensions` edit suspends your extension, its schemes
+  stop serving in that session; they serve again on resume.
+- **Startup.** An extension that registers a URL scheme always binds before the session starts,
+  never after the first prompt, so its `promptDoc` and composer completion are there from the
+  start.
 
 ### Runtime setting overrides
 
@@ -582,7 +654,7 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_shutdown` / `session_shutdown`
 
 In the interactive TUI, an extension whose factory registers no providers,
-shortcuts, composer shapes, or file fallbacks is loaded after the composer
+shortcuts, composer shapes, file fallbacks, or URL schemes is loaded after the composer
 accepts input, once a previous launch has recorded that about its current
 source. Its `session_start` still runs (it is delivered when the extension
 binds), and the first submitted message and every model turn wait until it is

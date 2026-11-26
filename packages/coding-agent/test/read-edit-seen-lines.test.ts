@@ -10,6 +10,7 @@ import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import { generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -310,7 +311,7 @@ describe("@file mention → edit seen-line guard", () => {
 	});
 
 	async function mention(session: ToolSession, name: string): Promise<string> {
-		const [message] = await generateFileMentionMessages([name], cwd, {
+		const [message] = await generateFileMentionMessages([name], cwd, InternalUrlRouter.builtins(), {
 			useHashLines: true,
 			snapshotStore: getEditStore(session),
 		});

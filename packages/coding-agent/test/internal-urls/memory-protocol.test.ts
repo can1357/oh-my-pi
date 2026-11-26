@@ -89,7 +89,7 @@ describe("MemoryProtocolHandler", () => {
 	});
 
 	it("rejects memory URLs when the calling session disables memory", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const settings = Settings.isolated({ "memory.backend": "off" });
 
 		await expect(router.resolve("memory://", { settings })).rejects.toThrow("Unknown protocol: memory://");
@@ -178,7 +178,7 @@ describe("MemoryProtocolHandler", () => {
 		await withMemoryFixture(async ({ memoryRoot }) => {
 			await Bun.write(path.join(memoryRoot, "memory_summary.md"), "summary");
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const resource = await router.resolve("memory://root");
 
 			expect(resource.content).toBe("summary");
@@ -218,7 +218,7 @@ describe("MemoryProtocolHandler", () => {
 				});
 			}
 
-			const resource = await InternalUrlRouter.instance().resolve("memory://root", { sessionId: "sdk-second" });
+			const resource = await InternalUrlRouter.builtins().resolve("memory://root", { sessionId: "sdk-second" });
 
 			expect(resource.content).toBe("second sdk session summary");
 		} finally {
@@ -233,7 +233,7 @@ describe("MemoryProtocolHandler", () => {
 			await fs.mkdir(path.dirname(skillPath), { recursive: true });
 			await Bun.write(skillPath, "demo skill");
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const resource = await router.resolve("memory://root/skills/demo/SKILL.md");
 
 			expect(resource.content).toBe("demo skill");
@@ -292,7 +292,7 @@ describe("MemoryProtocolHandler", () => {
 				sessionFile: null,
 			});
 
-			const resource = await InternalUrlRouter.instance().resolve("memory://root/memory_summary.md", {
+			const resource = await InternalUrlRouter.builtins().resolve("memory://root/memory_summary.md", {
 				cwd: secondCwd,
 			});
 
@@ -306,7 +306,7 @@ describe("MemoryProtocolHandler", () => {
 
 	it("throws for unknown memory namespace when no mnemopi backend is active", async () => {
 		await withMemoryFixture(async () => {
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("memory://other/memory_summary.md")).rejects.toThrow(
 				/Unknown memory namespace: other\. Supported: root/,
 			);
@@ -315,7 +315,7 @@ describe("MemoryProtocolHandler", () => {
 
 	it("blocks path traversal attempts", async () => {
 		await withMemoryFixture(async () => {
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("memory://root/../secret.md")).rejects.toThrow(
 				"Path traversal (..) is not allowed in memory:// URLs",
 			);
@@ -392,7 +392,7 @@ describe("MemoryProtocolHandler", () => {
 
 	it("throws clear error for missing files", async () => {
 		await withMemoryFixture(async () => {
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("memory://root/missing.md")).rejects.toThrow(
 				"Memory file not found: memory://root/missing.md",
 			);
@@ -408,7 +408,7 @@ describe("MemoryProtocolHandler", () => {
 			await Bun.write(path.join(outsideDir, "secret.md"), "secret");
 			await fs.symlink(outsideDir, path.join(memoryRoot, "linked"));
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("memory://root/linked/secret.md")).rejects.toThrow(
 				"memory:// URL escapes memory root",
 			);
@@ -424,7 +424,7 @@ describe("MemoryProtocolHandler", () => {
 			await fs.symlink(outsideDir, path.join(memoryRoot, "linked"));
 			await fs.symlink(path.join(outsideDir, "victim.md"), path.join(memoryRoot, "dangling.md"));
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.locate("memory://root/linked/new/f.md", { cwd }, { create: true })).rejects.toThrow(
 				"memory:// URL escapes memory root",
 			);
@@ -521,7 +521,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 			const id = state.rememberInScope(full, { importance: 0.9 });
 			expect(id).toBeTruthy();
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const resource = await router.resolve(`memory://${id}`);
 
 			expect(resource.contentType).toBe("text/markdown");
@@ -534,7 +534,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 
 	it("throws a clear error when the mnemopi id is not stored in any scoped bank", async () => {
 		await withMnemopiSession(async () => {
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("memory://deadbeefdeadbeef")).rejects.toThrow(
 				/Mnemopi memory deadbeefdeadbeef not found/,
 			);
@@ -558,7 +558,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 					0.9,
 				);
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			const resource = await router.resolve("memory://0473bbdb8da6df92");
 
 			expect(resource.content).toContain("id: 0473bbdb8da6df92");
@@ -596,7 +596,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 
 	it("routes memory://root to the file-backed summary even when mnemopi is active", async () => {
 		await withMnemopiSession(async () => {
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("memory://root")).rejects.toThrow(
 				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
 			);
@@ -637,7 +637,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 				const peerId = peerState.rememberInScope("peer bank row");
 				if (!ownId || !peerId) throw new Error("Expected both mnemopi fixtures to store a memory id");
 
-				const router = InternalUrlRouter.instance();
+				const router = InternalUrlRouter.builtins();
 				await expect(router.resolve(`memory://${ownId}`, { cwd: dbDir.path() })).resolves.toMatchObject({
 					content: expect.stringContaining("caller bank row"),
 				});
@@ -695,7 +695,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 
 				// Two live sessions share this cwd, so it names no single caller.
 				const context = { cwd: sharedCwd, settings: Settings.isolated({ "memory.backend": "mnemopi" }) };
-				const router = InternalUrlRouter.instance();
+				const router = InternalUrlRouter.builtins();
 				await expect(router.resolve(`memory://${twinId}`, context)).rejects.toThrow(
 					/not found in the calling session's scoped bank/,
 				);
@@ -733,28 +733,40 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 			});
 			// The child shares this cwd, so a cwd-only context names no caller and
 			// identifies no bank — what the prompt used to send.
-			const ambiguous = await getInternalUrlSuggestions("memory://", sharedCwd);
+			const ambiguous = await getInternalUrlSuggestions("memory://", InternalUrlRouter.builtins(), sharedCwd);
 			expect(ambiguous?.items.map(item => item.value) ?? []).not.toContain("memory://<memory-id>");
 
 			// Naming the session that will resolve the URL offers its own bank again.
-			const bound = await getInternalUrlSuggestions("memory://", undefined, undefined, () => ({
-				cwd: sharedCwd,
-				sessionId: "test-mnemopi",
-			}));
+			const bound = await getInternalUrlSuggestions(
+				"memory://",
+				InternalUrlRouter.builtins(),
+				undefined,
+				undefined,
+				() => ({
+					cwd: sharedCwd,
+					sessionId: "test-mnemopi",
+				}),
+			);
 			expect(bound?.items.map(item => item.value)).toContain("memory://<memory-id>");
 
 			// Typing into the child instead binds to its hindsight backend, which has
 			// no addressable ids and no file-backed root, so it is offered nothing.
-			const childBound = await getInternalUrlSuggestions("memory://", undefined, undefined, () => ({
-				cwd: sharedCwd,
-				sessionFile: childSessionFile,
-			}));
+			const childBound = await getInternalUrlSuggestions(
+				"memory://",
+				InternalUrlRouter.builtins(),
+				undefined,
+				undefined,
+				() => ({
+					cwd: sharedCwd,
+					sessionFile: childSessionFile,
+				}),
+			);
 			expect(childBound?.items.map(item => item.value) ?? []).not.toContain("memory://<memory-id>");
 			expect(childBound?.items.map(item => item.value) ?? []).not.toContain("memory://root");
 
 			// A caller that is no longer registered is offered nothing at all.
 			expect(
-				await getInternalUrlSuggestions("memory://", undefined, undefined, () => ({
+				await getInternalUrlSuggestions("memory://", InternalUrlRouter.builtins(), undefined, undefined, () => ({
 					cwd: sharedCwd,
 					sessionId: "gone",
 				})),
@@ -787,7 +799,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 			if (!id) throw new Error("Expected the mnemopi fixture to store a memory id");
 
 			await expect(
-				InternalUrlRouter.instance().resolve(`memory://${id}`, {
+				InternalUrlRouter.builtins().resolve(`memory://${id}`, {
 					cwd: dbDir.path(),
 					sessionFile: childSessionFile,
 				}),
@@ -806,7 +818,7 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 				settings: Settings.isolated({ "memory.backend": "mnemopi" }),
 			};
 
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve(`memory://${id}`, context)).rejects.toThrow("Unknown protocol: memory://");
 			expect(await router.complete("memory", "", context)).toEqual([]);
 		});
@@ -846,7 +858,7 @@ describe("MemoryProtocolHandler — hindsight (issue #7587)", () => {
 
 	it("returns a corrective error for memory://<id> when hindsight is active", async () => {
 		await withHindsightSession(async () => {
-			const router = InternalUrlRouter.instance();
+			const router = InternalUrlRouter.builtins();
 			await expect(router.resolve("memory://a1b2c3d4e5f6")).rejects.toThrow(
 				/Hindsight memories are not addressable via memory:\/\/.*use `recall`.*`reflect`/s,
 			);
@@ -856,7 +868,7 @@ describe("MemoryProtocolHandler — hindsight (issue #7587)", () => {
 	it("uses the calling session backend when hindsight and mnemopi sessions coexist", async () => {
 		await withMnemopiSession(async () => {
 			await withHindsightSession(async () => {
-				const router = InternalUrlRouter.instance();
+				const router = InternalUrlRouter.builtins();
 				const settings = Settings.isolated({ "memory.backend": "hindsight" });
 				await expect(router.resolve("memory://a1b2c3d4e5f6", { settings })).rejects.toThrow(
 					/Hindsight memories are not addressable via memory:\/\//,
@@ -866,7 +878,7 @@ describe("MemoryProtocolHandler — hindsight (issue #7587)", () => {
 	});
 
 	it("keeps the generic namespace error when no memory backend is active", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		await expect(router.resolve("memory://a1b2c3d4e5f6")).rejects.toThrow(
 			/Unknown memory namespace: a1b2c3d4e5f6\. Supported: root/,
 		);
@@ -895,7 +907,7 @@ describe("MemoryProtocolHandler — file-backed root vs non-local backends (issu
 			await fs.mkdir(memoryRoot, { recursive: true });
 			await Bun.write(path.join(memoryRoot, "memory_summary.md"), "stale local summary");
 			const settings = Settings.isolated({ "memory.backend": "hindsight" });
-			await expect(InternalUrlRouter.instance().resolve("memory://root", { cwd, settings })).rejects.toThrow(
+			await expect(InternalUrlRouter.builtins().resolve("memory://root", { cwd, settings })).rejects.toThrow(
 				"File-backed memory artifacts only exist with memory.backend=local (active backend: hindsight). Use `recall`/`reflect` to search Hindsight memories.",
 			);
 		} finally {
@@ -912,7 +924,7 @@ describe("MemoryProtocolHandler — file-backed root vs non-local backends (issu
 			const cwd = path.join(cleanupRoot, "project");
 			await fs.mkdir(cwd, { recursive: true });
 			const settings = Settings.isolated({ "memory.backend": "local" });
-			await expect(InternalUrlRouter.instance().resolve("memory://root", { cwd, settings })).rejects.toThrow(
+			await expect(InternalUrlRouter.builtins().resolve("memory://root", { cwd, settings })).rejects.toThrow(
 				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
 			);
 		} finally {
@@ -922,7 +934,7 @@ describe("MemoryProtocolHandler — file-backed root vs non-local backends (issu
 	});
 
 	it("advertises memory://root only on the local backend that can populate it", async () => {
-		const router = InternalUrlRouter.instance();
+		const router = InternalUrlRouter.builtins();
 		const hindsight = await router.complete("memory", "", {
 			settings: Settings.isolated({ "memory.backend": "hindsight" }),
 		});

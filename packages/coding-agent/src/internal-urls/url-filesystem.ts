@@ -40,7 +40,8 @@ import { TIER_RANK } from "../tools/approval";
 import { type ParsedSelector, parseSel, resolveTailSelector } from "../tools/read-selector";
 import { UrlContainmentError } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
-import { InternalUrlRouter } from "./router";
+import { contextUrlRouter } from "./context";
+import type { InternalUrlRouter } from "./router";
 import type {
 	InternalResource,
 	InternalWriteResult,
@@ -360,7 +361,7 @@ export class InternalUrlFilesystem {
 	#cleanupFs: InternalUrlFilesystem | undefined;
 
 	constructor(options: InternalUrlFilesystemOptions) {
-		this.#router = InternalUrlRouter.instance();
+		this.#router = contextUrlRouter(options.context);
 		// Directory nodes never serve their rendered listing, so handlers skip building it.
 		this.#context = { ...options.context, skipDirectoryListing: true };
 		this.#tier = options.tier;
@@ -368,6 +369,11 @@ export class InternalUrlFilesystem {
 		this.#onWrite = options.onWrite;
 		this.#onFileChange = options.onFileChange;
 		this.#toolCallId = options.toolCallId;
+	}
+
+	/** The router URL paths resolve through: the calling session's ({@link ResolveContext.router}), else the built-ins. */
+	get router(): InternalUrlRouter {
+		return this.#router;
 	}
 
 	/** Native shell binding: URL paths reach {@link handle}; host paths stay on the native filesystem. */

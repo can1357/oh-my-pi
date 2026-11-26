@@ -41,6 +41,7 @@ import debugDescription from "../prompts/tools/debug.md" with { type: "text" };
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import type { OutputMeta } from "./output-meta-format";
+import { sessionUrlRouter } from "../internal-urls/context";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 import { replaceTabs, truncateToWidth } from "../utils/text-width";
 import { shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
@@ -605,8 +606,10 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				if (!params.program) {
 					throw new ToolError("program is required for launch");
 				}
-				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
-				const program = resolveToCwd(params.program, commandCwd);
+				const commandCwd = params.cwd
+					? resolveToCwd(params.cwd, this.session.cwd, sessionUrlRouter(this.session))
+					: this.session.cwd;
+				const program = resolveToCwd(params.program, commandCwd, sessionUrlRouter(this.session));
 				const programKind = await classifyLaunchProgram(program);
 				const selection = selectLaunchAdapter(program, commandCwd, params.adapter, programKind);
 				if (selection.kind === "unavailable") {
@@ -633,7 +636,9 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				if (params.pid === undefined && params.port === undefined && !params.adapter) {
 					throw new ToolError("attach requires pid or port");
 				}
-				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
+				const commandCwd = params.cwd
+					? resolveToCwd(params.cwd, this.session.cwd, sessionUrlRouter(this.session))
+					: this.session.cwd;
 				const adapter = await selectAttachAdapter(commandCwd, params.adapter, {
 					pid: params.pid,
 					port: params.port,
@@ -672,7 +677,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				if (!params.file || params.line === undefined) {
 					throw new ToolError("set_breakpoint requires file+line or function");
 				}
-				const file = resolveToCwd(params.file, this.session.cwd);
+				const file = resolveToCwd(params.file, this.session.cwd, sessionUrlRouter(this.session));
 				const response = await dapSessionManager.setBreakpoint(
 					file,
 					params.line,
@@ -698,7 +703,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				if (!params.file || params.line === undefined) {
 					throw new ToolError("remove_breakpoint requires file+line or function");
 				}
-				const file = resolveToCwd(params.file, this.session.cwd);
+				const file = resolveToCwd(params.file, this.session.cwd, sessionUrlRouter(this.session));
 				const response = await dapSessionManager.removeBreakpoint(
 					file,
 					params.line,

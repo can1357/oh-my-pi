@@ -24,7 +24,7 @@ describe("ssh:// is rejected before any connection in read/write-tier tools", ()
 		// Reject if resolve is ever reached, so a guard regression fails loudly
 		// instead of attempting a real connection.
 		const spy = vi
-			.spyOn(InternalUrlRouter.instance(), "resolve")
+			.spyOn(InternalUrlRouter.builtins(), "resolve")
 			.mockRejectedValue(new Error("resolve must not run for ssh://"));
 		await expect(
 			resolveToolSearchScope({

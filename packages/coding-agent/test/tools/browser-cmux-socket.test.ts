@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -145,6 +146,7 @@ describe("CmuxSocketClient", () => {
 					const controller = new AbortController();
 					tab.setRunContext({
 						session: { cwd: process.cwd() },
+						router: InternalUrlRouter.builtins(),
 						output: new RunOutput(),
 						screenshots: [],
 						signal: controller.signal,
@@ -181,6 +183,7 @@ describe("CmuxSocketClient", () => {
 					spyOn(Date, "now").mockReturnValue(0);
 					tab.setRunContext({
 						session: { cwd: process.cwd() },
+						router: InternalUrlRouter.builtins(),
 						output: new RunOutput(),
 						screenshots: [],
 						signal: new AbortController().signal,
@@ -220,6 +223,7 @@ describe("CmuxSocketClient", () => {
 					const now = spyOn(Date, "now").mockReturnValue(0);
 					tab.setRunContext({
 						session: { cwd: process.cwd() },
+						router: InternalUrlRouter.builtins(),
 						output: new RunOutput(),
 						screenshots: [],
 						signal: new AbortController().signal,

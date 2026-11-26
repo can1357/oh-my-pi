@@ -13,7 +13,7 @@ import type { ToolTier } from "@oh-my-pi/pi-agent-core";
 import { SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
 import { getActiveSkills } from "../extensibility/skills";
 import { LocalProtocolHandler, resolveLocalRoot } from "../internal-urls/local-protocol";
-import { InternalUrlRouter } from "../internal-urls/router";
+import { contextUrlRouter } from "../internal-urls/context";
 import type { ResolveContext } from "../internal-urls/types";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TIER_RANK } from "../tools/approval";
@@ -46,7 +46,7 @@ export async function shellMounts(context: ResolveContext, tier: ToolTier): Prom
 		const root = resolveLocalRoot(localOptions);
 		// The session scratch root always exists, like a mount point.
 		await fs.mkdir(root, { recursive: true });
-		const decision = InternalUrlRouter.instance().writeTier("local://", undefined, context.session);
+		const decision = contextUrlRouter(context).writeTier("local://", undefined, context.session);
 		const refused = typeof decision !== "string" && decision.policy === "deny";
 		const readOnly = refused || TIER_RANK[typeof decision === "string" ? decision : decision.tier] > TIER_RANK[tier];
 		script += mount(readOnly ? "-r " : "", "local://", root);
