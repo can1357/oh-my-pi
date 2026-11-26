@@ -1,0 +1,16 @@
+// The personal or team key determines which models and prices are visible.
+provider "arkanecloud" {
+	default-model "deepseek-ai/DeepSeek-V4-Flash"
+	env "ARKANECLOUD_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="ArkaneCloud"
+
+	// Qwen takes the same `reasoning_effort` field as every other family here,
+	// not its native `enable_thinking`.
+	thinking-format "openai"
+	// Thinking-off is `reasoning: { enabled: false }`; intensity stays on the
+	// top-level `reasoning_effort`. Rows that cannot disable clamp to their
+	// lowest effort instead (`lowest-effort`, set per row by discovery).
+	reasoning-disable-mode "cline-enabled-false"
+}

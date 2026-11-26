@@ -122,12 +122,12 @@ it("drops an image-bearing skill when aborted while its image is normalized", as
 
 it("describes a queued user-invoked skill image when it is delivered", async () => {
 	const { session, mock, visionCalls } = setup();
-	await session.promptCustomMessage(skill, { streamingBehavior: "followUp", queueOnly: true });
-	await session.prompt("kickoff");
+	await session.withQueueDrainPaused(async () => {
+		await session.promptCustomMessage(skill, { streamingBehavior: "followUp", queueOnly: true });
+		expect(session.getQueuedMessages().followUp).toHaveLength(1);
+		expect(visionCalls).toHaveLength(0);
+	});
 	await session.waitForIdle();
 	expect(visionCalls).toHaveLength(1);
-	const skillRequest = mock.calls.find(call =>
-		call.context.messages.some(message => JSON.stringify(message.content).includes("Expanded skill.")),
-	);
-	expectDescribedSkill(skillRequest?.context.messages);
+	expectDescribedSkill(mock.calls[0]?.context.messages);
 });
