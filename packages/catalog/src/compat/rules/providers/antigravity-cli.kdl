@@ -10,6 +10,10 @@ provider "antigravity-cli" {
 	preserves-max-output-tokens #false
 	// agy executes its control tools internally alongside the IDE MCP tools.
 	requires-native-tools #true
+	// Every row carries a zero rate card because plan quota covers the request,
+	// so an undeclared zero would render as `free` pricing. These models are
+	// included in the signed-in plan instead.
+	pricing-status "included"
 
 	// The roster `agy acp` 1.5.12 advertises in `session/new` config options
 	// (orchestrators omitted: they drive agy's own subagents, which this
