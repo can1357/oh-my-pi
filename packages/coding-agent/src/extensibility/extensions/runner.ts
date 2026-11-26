@@ -540,6 +540,7 @@ export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner 
 	} finally {
 		extensionRunner.disposeFileFallbacks();
 		extensionRunner.clearManagedTimers();
+		extensionRunner.releaseExtensionRegistrations();
 	}
 }
 
@@ -656,6 +657,10 @@ export class ExtensionRunner {
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
 	#suspendedExtensions = new Set<Extension>();
+	/** The latest {@link setSuspendedExtensions} predicate, applied to extensions added afterwards. */
+	#shouldSuspend: ((extension: Extension) => boolean) | undefined;
+	/** Extensions `session_start` reached; one resumed without it gets the replay. */
+	#sessionStarted = new WeakSet<Extension>();
 	/** Per-extension listener factories from {@link onToolRegistered}, applied to late-added extensions too. */
 	#toolRegistrationSubscribers = new Set<(extension: Extension) => ToolRegistrationListener>();
 	/**
@@ -919,6 +924,11 @@ export class ExtensionRunner {
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
+		// A load suspended by a failed startup (see `createAgentSession`) acts again once a session
+		// adopts it (what the session builds next, its system prompt, may read them), but its own
+		// `onSuspensionChange` listeners hear of it only from `initialize`, which wires the actions
+		// they may call.
+		for (const extension of extensions) extension.registrations?.setSuspended(false, { notify: false });
 	}
 
 	/**
@@ -1045,6 +1055,8 @@ export class ExtensionRunner {
 		this.disposeFileFallbacks();
 		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
 		for (const ext of this.getLoadedExtensions()) this.#installFileFallbacks(ext);
+		// Listeners of an adopted load hear its resume now that the actions they may call are wired.
+		for (const extension of this.getLoadedExtensions()) extension.registrations?.notifySuspensionChange();
 
 		// Drain events buffered by emitCredentialDisabled() before initialize ran. The
 		// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
@@ -1281,8 +1293,20 @@ export class ExtensionRunner {
 	 */
 	async addExtensions(added: readonly Extension[]): Promise<void> {
 		if (added.length === 0) return;
-		this.extensions.push(...added);
+		// A live disable can land before these loads arrive (a startup-deferred bind): the latest
+		// suspension applies to them as it does to every other load, before any of them acts.
+		const shouldSuspend = this.#shouldSuspend;
+		const held = shouldSuspend ? added.filter(extension => shouldSuspend(extension)) : [];
+		const joined = added.filter(extension => !held.includes(extension));
+		this.extensions.push(...joined);
 		this.#loadOrder?.push(...added);
+		for (const extension of held) {
+			this.#suspendedExtensions.add(extension);
+			extension.registrations?.setSuspended(true, { notify: this.#initialized });
+			// Attached like any loaded extension (its existing tools join on resume, as a resumed
+			// load's do), so a tool it registers later reaches every subscriber.
+			for (const attach of this.#toolRegistrationSubscribers) attach(extension);
+		}
 		// Presenters their factories registered before they joined.
 		if (added.some(extension => extension.transcriptPresenters.length > 0)) {
 			notifyTranscriptPresentersChanged();
@@ -1290,7 +1314,7 @@ export class ExtensionRunner {
 		if (this.#initialized) {
 			for (const extension of added) this.#installFileFallbacks(extension);
 		}
-		for (const extension of added) {
+		for (const extension of joined) {
 			const scope: ToolRegistrationScope = {
 				pending: new Set(),
 				closed: false,
@@ -1314,7 +1338,10 @@ export class ExtensionRunner {
 				});
 			}
 		}
-		if (this.#sessionStartEvent) await this.#emitTo(added, this.#sessionStartEvent);
+		if (this.#sessionStartEvent) {
+			for (const extension of joined) this.#sessionStarted.add(extension);
+			await this.#emitTo(joined, this.#sessionStartEvent);
+		}
 	}
 
 	getExtensionPaths(): string[] {
@@ -1343,6 +1370,7 @@ export class ExtensionRunner {
 		resumed: Extension[];
 	} {
 		this.#loadOrder ??= [...this.extensions];
+		this.#shouldSuspend = shouldSuspend;
 		const suspended: Extension[] = [];
 		const resumed: Extension[] = [];
 		for (const extension of this.#loadOrder) {
@@ -1356,10 +1384,28 @@ export class ExtensionRunner {
 				resumed.push(extension);
 			}
 		}
-		if (suspended.length > 0 || resumed.length > 0) {
+		const changed = suspended.length > 0 || resumed.length > 0;
+		// The active list first: a load told of its own suspension or resume sees the runner's state
+		// (its commands, tools and handlers) already matching it.
+		if (changed) {
 			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
 			this.extensions.splice(0, this.extensions.length, ...active);
-			for (const listener of this.#suspensionListeners) listener();
+		}
+		// Out-of-session registrations follow the load: they stop acting while it is suspended and
+		// act again on resume, like its handlers, tools and commands. The load's own listeners hear
+		// of it once `initialize` has wired the actions they may call (it delivers what they missed).
+		for (const extension of suspended) extension.registrations?.setSuspended(true, { notify: this.#initialized });
+		for (const extension of resumed) extension.registrations?.setSuspended(false, { notify: this.#initialized });
+		if (changed) for (const listener of this.#suspensionListeners) listener();
+		// A load resumed before `session_start` ever reached it (suspended before it ran, or a
+		// startup-deferred load that joined suspended) gets it now, as a later-added load does.
+		const sessionStart = this.#sessionStartEvent;
+		const unstarted = sessionStart ? resumed.filter(extension => !this.#sessionStarted.has(extension)) : [];
+		if (sessionStart && unstarted.length > 0) {
+			for (const extension of unstarted) this.#sessionStarted.add(extension);
+			this.#emitTo(unstarted, sessionStart).catch((error: unknown) => {
+				logger.warn("Replaying session_start to resumed extensions failed", { error: String(error) });
+			});
 		}
 		return { suspended, resumed };
 	}
@@ -2063,6 +2109,14 @@ export class ExtensionRunner {
 	}
 
 	/**
+	 * Release the out-of-session registrations of every loaded extension, suspended ones included
+	 * (see {@link Extension.registrations}). Called on session shutdown.
+	 */
+	releaseExtensionRegistrations(): void {
+		for (const extension of this.getLoadedExtensions()) extension.registrations?.release();
+	}
+
+	/**
 	 * Remove every file write and delete fallback this runner installed into the
 	 * process-wide registries. Called on session shutdown (and before reinstalling
 	 * on a re-{@link initialize}) so a handler bound to a torn-down session's
@@ -2227,6 +2281,8 @@ export class ExtensionRunner {
 		const turns = this.#reserveDeliveryTurns(extensions, event.type, timeoutMs);
 		try {
 			for (const ext of extensions) {
+				// Marked as its dispatch begins: a load suspended later in the broadcast has still seen it.
+				if (event.type === "session_start") this.#sessionStarted.add(ext);
 				const handlers = ext.handlers.get(event.type);
 				if (!handlers || handlers.length === 0) continue;
 				const turn = turns?.get(ext);
