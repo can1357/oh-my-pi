@@ -46,6 +46,11 @@ export function modelMentionToken(selector: string): string {
 	return `^${selector}`;
 }
 
+/** Selector named by a `^` mention token; any other text is returned unchanged. */
+export function modelMentionSelector(token: string): string {
+	return token.startsWith("^") ? token.slice(1) : token;
+}
+
 /** Encode a registered mention for the user message sent to the model. */
 export function modelMentionTag(mention: ModelMention): string {
 	return `<model agent="${mention.agent}" name="${mention.name}"/>`;
