@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- A computed value whose owner was disposed no longer runs again when the values it read change, and what it created after the dispose is torn down ([#20670](https://github.com/can1357/oh-my-pi/pull/20670) by [@H4vC](https://github.com/H4vC))
 - Typing in an editor holding thousands of lines is about 3x faster per keystroke ([#20659](https://github.com/can1357/oh-my-pi/pull/20659) by [@H4vC](https://github.com/H4vC))
 - Updates no longer slow down sharply when a single reactive computation reads thousands of values ([#20657](https://github.com/can1357/oh-my-pi/pull/20657) by [@H4vC](https://github.com/H4vC))
 - SIXEL and iTerm2 images no longer draw over other rows or scroll the terminal under the frame: images taller than the screen are fitted within it, and a live image whose first rows the viewport cuts off is left out until they fit ([#20620](https://github.com/can1357/oh-my-pi/pull/20620) by [@JustasMasiulis](https://github.com/JustasMasiulis))
