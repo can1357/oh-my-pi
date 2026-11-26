@@ -15,10 +15,12 @@ import {
 	GetUserJwtRequestSchema,
 	GetUserJwtResponseSchema,
 	ModelAssignmentSchema,
+	type ModelUsageStats,
+	ModelUsageStatsSchema,
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import type { DevinCompat } from "@oh-my-pi/pi-catalog/types";
+import type { DevinCompat, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const AUTH_PAYLOAD = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "user-jwt" }));
 
@@ -31,7 +33,11 @@ function frameConnectMessage(payload: Uint8Array): Uint8Array {
 	return out;
 }
 
-function devinModel(compat: DevinCompat, requestModelId = "adaptive"): Model<"devin-agent"> {
+function devinModel(
+	compat: DevinCompat,
+	requestModelId = "adaptive",
+	spec: Partial<ModelSpec<"devin-agent">> = {},
+): Model<"devin-agent"> {
 	return buildModel({
 		id: "devin-router-test",
 		name: "Devin Router Test",
@@ -45,11 +51,13 @@ function devinModel(compat: DevinCompat, requestModelId = "adaptive"): Model<"de
 		contextWindow: 200_000,
 		maxTokens: 64_000,
 		compat,
+		...spec,
 	});
 }
 
 interface ChatResponseFields {
 	actualModelUid?: string;
+	usage?: ModelUsageStats;
 	creditCost?: number;
 	committedCreditCost?: number;
 	committedAcuCost?: number;
@@ -238,6 +246,34 @@ describe("streamDevin router assignment", () => {
 		expect(recorded.chat?.modelAssignmentJwt).toBeUndefined();
 		expect(recorded.chat?.cascadeId).toBe("session-7");
 		expect(result.upstreamModel).toBeUndefined();
+	});
+
+	it("sends the fast-lane uid under /fast and bills the lane's card", async () => {
+		const model = devinModel({}, "claude-sonnet-4-5", {
+			cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
+			priorityLane: {
+				id: "devin-router-test-fast",
+				routes: { "claude-sonnet-4-5": "claude-sonnet-4-5-fast" },
+				cost: { input: 6, output: 30, cacheRead: 0, cacheWrite: 0 },
+			},
+		});
+		const usage = create(ModelUsageStatsSchema, { inputTokens: 1_000_000n });
+
+		const fast = fakeDevin({ chat: { usage } });
+		const fastResult = await streamDevin(model, context, {
+			apiKey: "token",
+			fetch: fast.fetch,
+			serviceTier: "priority",
+		}).result();
+		expect(fast.recorded.chat?.chatModelUid).toBe("claude-sonnet-4-5-fast");
+		expect(fastResult.serviceTier).toBe("priority");
+		expect(fastResult.usage.cost.input).toBe(6);
+
+		const standard = fakeDevin({ chat: { usage } });
+		const standardResult = await streamDevin(model, context, { apiKey: "token", fetch: standard.fetch }).result();
+		expect(standard.recorded.chat?.chatModelUid).toBe("claude-sonnet-4-5");
+		expect(standardResult.serviceTier).toBeUndefined();
+		expect(standardResult.usage.cost.input).toBe(3);
 	});
 
 	it("surfaces credit metering onto usage", async () => {
