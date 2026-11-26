@@ -146,6 +146,14 @@ const GENERIC_ABORT_MESSAGES: Record<string, true> = {
 	"The operation was aborted.": true,
 };
 
+/** Terminal provider rejections stay terminal even if a bare cancellation wins the error race. */
+function hasTerminalProviderStatus(message: Pick<AssistantMessage, "errorId" | "errorStatus">): boolean {
+	const rawStatusId =
+		message.errorId !== undefined && message.errorId >= 400 && message.errorId <= 599 ? message.errorId : undefined;
+	const status = message.errorStatus ?? rawStatusId;
+	return status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }
@@ -1614,7 +1622,8 @@ export class TurnRecovery {
 			message.content.some(block => block.type !== "fallback") ||
 			this.#host.abortInProgress() ||
 			this.#host.isDisposed() ||
-			this.#host.streamingEditAbortTriggered()
+			this.#host.streamingEditAbortTriggered() ||
+			hasTerminalProviderStatus(message)
 		) {
 			return false;
 		}
@@ -1778,6 +1787,7 @@ export class TurnRecovery {
 			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
 		const reasonlessAbort =
 			(message.stopReason === "aborted" || message.stopReason === "error") &&
+			!hasTerminalProviderStatus(message) &&
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&
 			!this.#host.streamingEditAbortTriggered() &&

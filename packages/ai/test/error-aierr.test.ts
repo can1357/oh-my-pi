@@ -146,11 +146,25 @@ describe("AIError.finalize", () => {
 		expect(result.message.length).toBeGreaterThan(0);
 	});
 
-	it("reports aborted when the caller signal is aborted", async () => {
+	it("reports a bare caller abort consistently instead of surfacing the transport error", async () => {
 		const controller = new AbortController();
 		controller.abort();
-		const result = await AIError.finalize(new Error("cancelled"), { signal: controller.signal });
+		const result = await AIError.finalize(new Error("fetch failed"), { signal: controller.signal });
 		expect(result.stopReason).toBe("aborted");
+		expect(result.message).toBe("Request was aborted");
+		expect(result.id).toBe(AIError.create(AIError.Flag.Abort));
+	});
+
+	it("keeps a provider status when a bare caller abort has no status of its own", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const result = await AIError.finalize(new AIError.ProviderHttpError("missing model", 404), {
+			signal: controller.signal,
+		});
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.status).toBe(404);
+		expect(result.message).toBe("Request was aborted");
 	});
 
 	it("surfaces the HTTP status from a ProviderHttpError", async () => {

@@ -1619,5 +1619,20 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			]);
 			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(withOutput)).toBe(false);
 		});
+
+		it("retries only plain cancellations without a terminal provider status", () => {
+			const plain = abortedTurn([]);
+			plain.errorId = AIError.create(AIError.Flag.Abort);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(plain)).toBe(true);
+
+			const labelled = abortedTurn([]);
+			labelled.errorMessage = "Streaming edit preview failed";
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(labelled)).toBe(false);
+
+			const terminal = abortedTurn([]);
+			terminal.errorId = AIError.create(AIError.Flag.Abort);
+			terminal.errorStatus = 404;
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(terminal)).toBe(false);
+		});
 	});
 });

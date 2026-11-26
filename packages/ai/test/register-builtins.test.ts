@@ -61,6 +61,43 @@ function createAssistantMessage(
 
 const baseContext: Context = { messages: [] };
 
+async function resultAfterCallerAbort(reason: unknown): Promise<AssistantMessage> {
+	const abortController = new AbortController();
+	const partialMessage = createAssistantMessage("stop");
+	let providerSignal: AbortSignal | undefined;
+	const source = {
+		async *[Symbol.asyncIterator]() {
+			yield { type: "start", partial: partialMessage } as const;
+			const { promise, reject } = Promise.withResolvers<never>();
+			if (providerSignal?.aborted) {
+				reject(new Error("transport stopped"));
+			}
+			providerSignal?.addEventListener("abort", () => reject(new Error("transport stopped")), {
+				once: true,
+			});
+			await promise;
+		},
+	} as unknown as AssistantMessageEventStream;
+
+	setBedrockProviderModule({
+		streamBedrock: (_model, _context, options) => {
+			providerSignal = options.signal;
+			return source;
+		},
+	});
+
+	const stream = streamBedrock(createModel(), baseContext, {
+		signal: abortController.signal,
+		streamIdleTimeoutMs: 500,
+	});
+	const iterator = stream[Symbol.asyncIterator]();
+	const firstEvent = await iterator.next();
+	expect(firstEvent.value?.type).toBe("start");
+
+	abortController.abort(reason);
+	return stream.result();
+}
+
 describe("register-builtins lazy streams", () => {
 	it("resolves the outer stream result from source.result() when no terminal event is iterated", async () => {
 		const finalMessage = createAssistantMessage("stop");
@@ -273,6 +310,62 @@ describe("register-builtins lazy streams", () => {
 		}
 	});
 
+	it("forwards a caller's abort label instead of replacing it with generic text", async () => {
+		const result = await resultAfterCallerAbort("Interrupted by user");
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("Interrupted by user");
+		expect(AIError.is(result.errorId, AIError.Flag.Abort)).toBe(false);
+	});
+
+	it("keeps structural flags from the original caller abort reason", async () => {
+		const reason = new AIError.StreamTimeoutError("budget spent");
+		const result = await resultAfterCallerAbort(reason);
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("budget spent");
+		expect(AIError.is(result.errorId, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(result.errorId, AIError.Flag.Abort)).toBe(false);
+	});
+
+	it("keeps a provider HTTP status when a bare cancellation wins the race", async () => {
+		const abortController = new AbortController();
+		const partialMessage = createAssistantMessage("stop");
+		const providerError = new AIError.ProviderHttpError("missing model", 404);
+		const source = {
+			async *[Symbol.asyncIterator]() {
+				yield { type: "start", partial: partialMessage } as const;
+			},
+			result: async () => {
+				abortController.abort();
+				throw providerError;
+			},
+		} as unknown as AssistantMessageEventStream;
+		setBedrockProviderModule({ streamBedrock: () => source });
+
+		const result = await streamBedrock(createModel(), baseContext, {
+			signal: abortController.signal,
+			streamIdleTimeoutMs: 500,
+		}).result();
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("Request was aborted");
+		expect(result.errorStatus).toBe(404);
+		expect(AIError.is(result.errorId, AIError.Flag.Abort)).toBe(true);
+	});
+
+	it("reads a tool-scoped caller reason", async () => {
+		const toolScopedResult = await resultAfterCallerAbort({
+			kind: "tool-scoped-abort",
+			message: "Streaming edit preview failed",
+			toolCallMessages: {},
+			defaultToolCallMessage: "Streaming edit preview failed",
+		});
+		expect(toolScopedResult.errorMessage).toBe("Streaming edit preview failed");
+		expect(AIError.is(toolScopedResult.errorId, AIError.Flag.Abort)).toBe(false);
+	});
+
 	it("preserves caller aborts while forwarding lazy provider streams", async () => {
 		const abortController = new AbortController();
 		const partialMessage = createAssistantMessage("stop");
@@ -315,5 +408,6 @@ describe("register-builtins lazy streams", () => {
 		}
 		expect(result.stopReason).toBe("aborted");
 		expect(result.errorMessage).toBe("Request was aborted");
+		expect(result.errorId).toBe(AIError.create(AIError.Flag.Abort));
 	});
 });

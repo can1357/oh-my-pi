@@ -18,13 +18,18 @@ export class AbortError extends Error {
 }
 
 /**
- * The text a caller gave `AbortController.abort(reason)`, a string or an `Error` other than an abort, such as the coding
- * agent's user-interrupt label; `undefined` for a bare `abort()`, whose reason is the default `AbortError`.
+ * The text a caller gave `AbortController.abort(reason)`, a string, an `Error` other than an abort (such as the coding
+ * agent's user-interrupt label), or a tool-scoped abort object; `undefined` for a bare `abort()`, whose reason is the
+ * default `AbortError`.
  */
 export function callerAbortReason(signal: AbortSignal | undefined): string | undefined {
 	const reason = signal?.reason;
 	if (typeof reason === "string" && reason.trim().length > 0) return reason;
 	if (reason instanceof Error && reason.name !== "AbortError" && reason.message.trim().length > 0)
 		return reason.message;
+	if (reason !== null && typeof reason === "object" && Reflect.get(reason, "kind") === "tool-scoped-abort") {
+		const message = Reflect.get(reason, "message");
+		if (typeof message === "string" && message.trim().length > 0) return message;
+	}
 	return undefined;
 }

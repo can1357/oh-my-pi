@@ -1,6 +1,8 @@
 import * as AIError from "../error";
 
 export interface AbortSourceTracker {
+	/** Original caller signal, when one was supplied; kept separate from the merged request signal. */
+	readonly callerSignal?: AbortSignal;
 	requestAbortController: AbortController;
 	requestSignal: AbortSignal;
 	abortLocally(reason: Error): Error;
@@ -29,6 +31,7 @@ export function createAbortSourceTracker(callerSignal?: AbortSignal): AbortSourc
 	let localAbortReason: Error | undefined;
 
 	return {
+		callerSignal,
 		requestAbortController,
 		requestSignal,
 		abortLocally(reason) {

@@ -141,7 +141,7 @@ function forwardStream<TApi extends Api>(
 				onIdle: () => abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_IDLE_TIMEOUT_ERROR)),
 				onFirstItemTimeout: () =>
 					abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
-				abortSignal: options.signal,
+				abortSignal: abortTracker.callerSignal,
 				// The synthetic `start` event is yielded immediately by every provider before
 				// the upstream model has emitted any tokens. Treating it as the first "real"
 				// item would flip the watchdog from `firstItemTimeoutMs` to the much shorter
@@ -160,19 +160,24 @@ function forwardStream<TApi extends Api>(
 				target.end();
 			}
 		} catch (error) {
-			const stopReason = abortTracker.wasCallerAbort() ? "aborted" : "error";
-			const message = createProviderStreamError(model, error, stopReason);
-			target.push({ type: "error", reason: stopReason, error: message });
+			const message = await createProviderStreamError(model, error, abortTracker);
+			target.push({ type: "error", reason: message.stopReason, error: message });
 			target.end(message);
 		}
 	})();
 }
 
-function createProviderStreamError<TApi extends Api>(
+async function createProviderStreamError<TApi extends Api>(
 	model: Model<TApi>,
 	error: unknown,
-	stopReason: Extract<AssistantMessage["stopReason"], "aborted" | "error"> = "error",
-): AssistantMessage {
+	abortTracker: AbortSourceTracker,
+): Promise<AssistantMessage & { stopReason: "aborted" | "error" }> {
+	const finalized = await AIError.finalize(error, {
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		abortTracker,
+	});
 	return {
 		role: "assistant",
 		content: [],
@@ -187,10 +192,10 @@ function createProviderStreamError<TApi extends Api>(
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason,
-		errorId: stopReason === "error" ? AIError.classify(error, model.api) || undefined : undefined,
-		errorMessage:
-			stopReason === "aborted" ? "Request was aborted" : error instanceof Error ? error.message : String(error),
+		stopReason: finalized.stopReason,
+		errorStatus: finalized.status,
+		errorId: finalized.id || undefined,
+		errorMessage: finalized.message,
 		timestamp: Date.now(),
 	};
 }
@@ -213,18 +218,18 @@ function createLazyProviderStream<TModule, TApi extends Api>(
 ): (model: Model<TApi>, context: Context, options: OptionsForApi<TApi>) => EventStreamImpl {
 	return (model, context, options) => {
 		const outer = new EventStreamImpl();
-		const streamOptions: OptionsForApi<TApi> = options ?? {};
+		const { signal: callerSignal, ...streamOptions } = options ?? {};
+		const abortTracker = createAbortSourceTracker(callerSignal);
+		const providerOptions: OptionsForApi<TApi> = { ...streamOptions, signal: abortTracker.requestSignal };
 
 		load()
 			.then(mod => {
-				const abortTracker = createAbortSourceTracker(streamOptions.signal);
-				const providerOptions: OptionsForApi<TApi> = { ...streamOptions, signal: abortTracker.requestSignal };
 				const inner = pick(mod)(model, context, providerOptions);
 				forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
 			})
-			.catch(error => {
-				const message = createProviderStreamError(model, error);
-				outer.push({ type: "error", reason: "error", error: message });
+			.catch(async error => {
+				const message = await createProviderStreamError(model, error, abortTracker);
+				outer.push({ type: "error", reason: message.stopReason, error: message });
 				outer.end(message);
 			});
 
