@@ -1142,7 +1142,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			autoBackgroundSeconds: cfgBashAutoBackgroundThresholdMs.get(this.session.settings) / 1000,
 			approvalPatternsActive,
 			allowCompoundCommands:
-				cfgBashAllowCompoundCommands.get(this.session.settings) && isPosixShell(shellConfig.shell),
+				cfgBashAllowCompoundCommands.get(this.session.settings) && bashApprovalDialect(shellConfig.shell) !== null,
 			hasAstGrep: isToolActive("ast_grep", cfgAstGrepEnabled.get(this.session.settings)),
 			hasAstEdit: isToolActive("ast_edit", cfgAstEditEnabled.get(this.session.settings)),
 			hasGrep: isToolActive("grep", cfgGrepEnabled.get(this.session.settings)),

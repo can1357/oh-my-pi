@@ -8,7 +8,7 @@ In-process builtins, ahead of PATH: {{join builtins ", "}}.
 {{/if}}
 Don't trunc output by habit, result will be summarized and saved as an artifact.
 {{#if approvalPatternsActive}}
-`bash.patterns` allow rules auto-approve only a single plain command: unquoted `|`, `;`, `&`, `<`, `>`, `(`, `)` or line breaks, and `$`/backticks outside single quotes, force a prompt{{#if allowCompoundCommands}} unless the line is an `&&` chain of plain commands that each match an allow rule (no `cd`, `export` or other shell-state builtins){{/if}}. Prefer separate or parallel calls over pipes, loops and redirects; pass multi-line text single-quoted, not via heredoc or `$(…)`.
+`bash.patterns` allow rules auto-approve only one plain, parseable command. These force a prompt: unquoted `|`, `;`, `&`, `<`, `>`, `(`, `)`, `{a,b}`, `#` comments or line breaks; `$` expansions (`$VAR`, `${…}`, `$(…)`, `$((…))`) or backticks outside single quotes; a `!`/`time` prefix; a glob in the command name{{#if allowCompoundCommands}}. Exception: a one-line `&&` chain of literal commands that each match an allow rule (no globs, leading `~`, `cd`/`export`/other shell-state builtins, or `sh`/`env`/`sudo`-style wrappers){{/if}}. `$'…'` counts as literal. Prefer separate or parallel calls over pipes, loops and redirects; pass multi-line text single-quoted, not via heredoc or `$(…)`.
 {{/if}}
 {{#if hasLaunch}}
 Long-lived services:
