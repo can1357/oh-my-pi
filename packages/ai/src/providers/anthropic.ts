@@ -153,7 +153,7 @@ import {
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
-import { applyInferenceHeaders } from "./inference-headers";
+import { applyInferenceHeaders, setHeaderIfAbsent } from "./inference-headers";
 import { hasAnthropicMessageControls, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
@@ -4223,6 +4223,8 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			sessionId,
 			parentSessionId,
 		});
+		// Copilot needs this session key to return text replies and their usage.
+		if (sessionId) setHeaderIfAbsent(defaultHeaders, "X-Client-Session-Id", sessionId);
 
 		return {
 			isOAuthToken: false,
