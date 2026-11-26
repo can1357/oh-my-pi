@@ -2009,9 +2009,10 @@ export function resolveRoutedModelSelector(
 
 /**
  * Resolve a saved session model selector (`provider/id`, optionally with an
- * upstream route and thinking suffix) to a registered model whose provider is
- * enabled and has credentials configured. Startup resume and runtime session
- * switches share this lookup, so both restore the same models.
+ * upstream route and thinking suffix) to a registered chat-transport model
+ * (`chat` or `tiny`) whose provider is enabled and has credentials configured.
+ * Startup resume and runtime session switches share this lookup, so both restore
+ * the same models.
  *
  * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
  * tokens and runs no `!command` keys, which would stall a restore on the network.
@@ -2021,7 +2022,12 @@ export function resolveSessionModelSelector(
 	selector: string,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const resolved = resolveRoutedModelSelector(modelRegistry, selector);
-	return resolved && modelRegistry.hasConfiguredAuth(resolved.model) ? resolved : undefined;
+	if (!resolved) return undefined;
+	// A runner kind such as web/exa (`search`, api `web-search`) has no chat transport:
+	// mapOptionsForApi throws on its api at the session's next turn.
+	const kind = modelKind(resolved.model);
+	if (kind !== "chat" && kind !== "tiny") return undefined;
+	return modelRegistry.hasConfiguredAuth(resolved.model) ? resolved : undefined;
 }
 
 /**
