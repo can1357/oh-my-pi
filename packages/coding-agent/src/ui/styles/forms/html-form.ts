@@ -401,6 +401,11 @@ function dropdownRows(
 	return out;
 }
 
+/** Cells a textarea's rows wrap at in a column `width` wide: past its bar, a cell short for the caret after a full row. */
+function textareaWrap(width: number): number {
+	return Math.max(1, width - 5);
+}
+
 function openFieldLines(
 	theme: Theme,
 	model: HtmlFormModel,
@@ -444,8 +449,7 @@ function openFieldLines(
 			const text = answer.text.text;
 			const cursor = answer.text.cursor;
 			const room = Math.max(1, width - 4);
-			// Rows wrap like the editor's, a cell short of the box for the caret bar after a full row.
-			const rows = layoutText(text, room - 1);
+			const rows = layoutText(text, textareaWrap(width));
 			const caretRow = rowOf(rows, cursor);
 			const shown = Math.max(4, rows.length);
 			for (let r = 0; r < shown; r++) {
@@ -632,6 +636,8 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 		column = buildColumn(cx, look, view, inner - 1);
 		body = Math.min(tallest(cx, look, inner - 1, view), limit);
 	}
+	// Up/Down in a textarea step through the rows drawn here.
+	model.wrapWidth = textareaWrap(overflow ? inner - 1 : inner);
 	const rows = body - skip.length;
 	const lines = column.lines;
 	if (column.overlay) {

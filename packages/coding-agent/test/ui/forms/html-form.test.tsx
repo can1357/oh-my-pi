@@ -68,14 +68,21 @@ test("wraps a long textarea line and keeps the caret row visible in a short term
 		expect(term.screen().some(row => row.includes("the road.▏"))).toBe(true);
 		expect(term.screen().join("\n")).not.toContain("…");
 
+		// Up steps to the wrapped row above, keeping the caret's column, instead of leaving the field.
+		term.press("up");
+		term.type("X");
+		const edited = start.replace("Use the m", "Use the mX");
+		expect(term.screen().some(row => row.includes("Use the mXarked"))).toBe(true);
+		term.press("end");
+
 		const suffix = " Follow the signs by the river and continue past the bridge.".repeat(4) + " Meet at sunrise.";
 		term.paste(suffix);
 		expect(term.screen().join("\n")).toContain("at sunrise.▏");
 		term.press("home");
-		expect(term.screen().join("\n")).toContain("Use the marked trail");
+		expect(term.screen().join("\n")).toContain("Use the mXarked trail");
 		expect(term.screen().join("\n")).not.toContain("at sunrise.");
 		term.press("enter");
-		expect(onSubmit).toHaveBeenCalledWith({ notes: start + suffix }, []);
+		expect(onSubmit).toHaveBeenCalledWith({ notes: edited + suffix }, []);
 	} finally {
 		term.dispose();
 	}
