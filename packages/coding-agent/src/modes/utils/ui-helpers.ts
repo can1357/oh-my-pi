@@ -661,6 +661,8 @@ export class UiHelpers {
 				}
 				const turnSummary = turnUsage.add(message, turnStartedAt);
 				if (turnSummary && !runStartUnseen) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				// The tally starts over after a run's last reply, so the next run counts whole even when nothing
+				// marks its start (an agent-attributed custom message resets nothing below).
 				if (message.stopReason !== "toolUse") runStartUnseen = false;
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(ctx.settings) && assistantUsageIsBilled(message.usage)
