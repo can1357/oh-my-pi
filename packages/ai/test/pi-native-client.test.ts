@@ -168,6 +168,23 @@ afterEach(() => {
 });
 
 describe("streamPiNative request shape", () => {
+	it.each([
+		["Bearer from-headers", "Bearer from-headers"],
+		["", "Bearer gw-bearer"],
+	])("sends one credential for lowercase authorization %j and an API key", async (authorization, expected) => {
+		const captured: { headers?: Headers } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.headers = new Headers(init?.headers);
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamPiNative(fakeModel({ headers: { authorization } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(captured.headers?.get("authorization")).toBe(expected);
+	});
 	it("POSTs `{modelId, context, options, stream:true}` to `<baseUrl>/v1/pi/stream`", async () => {
 		const final = baseAssistant();
 		const captured: { url?: string; init?: RequestInit } = {};

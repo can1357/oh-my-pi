@@ -91,7 +91,7 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * runtime discovery is authoritative per credential (mirrors the GitLab Duo
  * fallback-only policy below).
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "sambanova", "otari", "modal"]);
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["arkanecloud", "devin", "sambanova", "otari", "modal", "refuseless"]);
 /**
  * Providers whose authored seed is the complete documented fallback
  * catalog: their previous-snapshot rows are never resurrected, so an id

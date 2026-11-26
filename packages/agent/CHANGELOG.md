@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenTelemetry chat spans reporting the requested model as `gen_ai.response.model` when the provider recorded the model that actually served the turn ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

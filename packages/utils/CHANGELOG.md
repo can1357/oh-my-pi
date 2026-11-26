@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+### Breaking Changes
+
+- Removed the unused `getToolsDir()` export. Custom tool discovery is unchanged.
+### Fixed
+
+- Fixed `parseImageMetadata` omitting the dimensions of lossless WebP (VP8L) headers shorter than 30 bytes ([#20521](https://github.com/can1357/oh-my-pi/pull/20521) by [@shgew](https://github.com/shgew))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

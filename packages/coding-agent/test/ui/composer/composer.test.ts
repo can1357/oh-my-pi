@@ -8,6 +8,7 @@ import { bubbleEvent, pathTo } from "@oh-my-pi/pi-tui/dispatch";
 import { corpusEnvironment } from "@oh-my-pi/pi-tui/testing/corpus";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { plainRows } from "@oh-my-pi/pi-tui/testing/cells";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { getKeybindings, KeybindingsManager, setKeybindings } from "../../../src/config/keybindings/keybindings";
 import {
@@ -17,6 +18,7 @@ import {
 	composerShape,
 	registerComposerShape,
 } from "../../../src/ui/composer";
+import { composerShapePreviewRows } from "../../../src/ui/styles/overlays/composer-shape-preview";
 import { key, sendKey, sendPaste } from "./harness";
 
 function make(options: ComposerOptions = {}): { composer: Composer; type(...keys: string[]): void } {
@@ -175,6 +177,42 @@ describe("extension hooks", () => {
 		const { composer, type } = make({ shape: "test-bracket" });
 		type("hi");
 		expect(plainRows([...paintNode(corpusEnvironment("dark"), composer.node, 10).rows])).toEqual(["[hi▏     ]"]);
+	});
+	test("a custom shape keeps the hardware caret on its text row after leading padding", () => {
+		const remove = registerComposerShape({
+			id: "test-padded",
+			sideBorders: true,
+			paddingX: 1,
+			sideWidth: paddingX => paddingX + 1,
+			top: ({ width }) => `╭${"─".repeat(width - 2)}╮`,
+			row: ({ first, last, width, text, pad }) => {
+				const blank = `│${" ".repeat(width - 2)}│`;
+				return {
+					rows: [...(first ? [blank] : []), `│ ${text}${pad} │`, ...(last ? [blank] : [])],
+					textRow: first ? 1 : 0,
+				};
+			},
+			bottom: ({ width }) => `╰${"─".repeat(width - 2)}╯`,
+		});
+		const { composer } = make({ shape: "test-padded", caret: "terminal" });
+		const theme = loadThemeSync("dark");
+		const term = createTestTerminal(() => ({ dock: composer.node }), { columns: 24, rows: 8, theme });
+		try {
+			term.focus(composer.field);
+			term.type("hello");
+			const blank = `│${" ".repeat(22)}│`;
+			const top = `╭${"─".repeat(22)}╮`;
+			const bottom = `╰${"─".repeat(22)}╯`;
+			const screen = term.screen();
+			expect(screen.slice(-5)).toEqual([top, blank, `│ hello${" ".repeat(16)}│`, blank, bottom]);
+			expect(term.cursor()).toEqual({ row: screen.length - 3, col: 7 });
+
+			const preview = plainRows(composerShapePreviewRows(theme, "test-padded", 24));
+			expect(preview).toEqual([top, blank, expect.stringContaining("Ask anything"), blank, bottom]);
+		} finally {
+			term.dispose();
+			remove();
+		}
 	});
 });
 
@@ -525,5 +563,42 @@ describe("a `?` draft", () => {
 		expect(chip?.children()[0]?.props()).toMatchObject({ spans: [{ s: "btwMode", t: "btw" }] });
 		expect(field?.props()).toMatchObject({ decor: [{ from: 0, to: 2, s: "hide" }] });
 		expect(field?.props()).not.toHaveProperty("lang", expect.anything());
+	});
+});
+
+describe("IME-safe cursor layout", () => {
+	test("moves the box bottom border to its own row when the hardware cursor is active", () => {
+		const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true });
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.slice(-2)).toEqual(["│  hi", `╰${"─".repeat(18)}╯`]);
+	});
+
+	test("keeps the separate bottom border when the caret is not at the end", () => {
+		const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true });
+		composer.setCursor(1);
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.slice(-2)).toEqual(["│  hi", `╰${"─".repeat(18)}╯`]);
+	});
+
+	test("drops the right chrome of the last row in the filled shapes", () => {
+		for (const [shape, cap] of [
+			["field", "▐"],
+			["rail", "▎"],
+		] as const) {
+			const { composer } = make({ text: "hi", caret: "terminal", imeSafeCursor: true, shape });
+			const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+			expect(plainRows([...painted.rows]).at(-1)).toBe(`${cap} hi`);
+		}
+	});
+
+	test("keeps the merged bottom border when the caret is drawn", () => {
+		const { composer } = make({ text: "hi", caret: "drawn", imeSafeCursor: true });
+		const painted = paintNode(corpusEnvironment("dark"), composer.node, 20);
+		const rows = plainRows([...painted.rows]);
+		expect(rows.at(-1)?.startsWith("╰─")).toBe(true);
+		expect(rows.at(-1)).toContain("hi");
+		expect(rows.at(-1)).not.toBe(`╰${"─".repeat(18)}╯`);
 	});
 });

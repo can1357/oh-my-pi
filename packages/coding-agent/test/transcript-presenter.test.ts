@@ -25,6 +25,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import type { PendingTool } from "../src/modes/types";
@@ -154,6 +155,28 @@ describe("extension transcript presenters", () => {
 			timestamp: timestamp + 1,
 		});
 		return call;
+	}
+
+	/** One model `read` call (`id`) of `file` in the session, with its result. */
+	function appendReadCall(id: string, file: string, timestamp: number): void {
+		session.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id, name: "read", arguments: { path: file } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: USAGE,
+			timestamp,
+		});
+		session.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "read",
+			content: [{ type: "text", text: `CONTENT-${id}` }],
+			isError: false,
+			timestamp: timestamp + 1,
+		});
 	}
 
 	function appendReply(text: string, timestamp: number): void {
@@ -367,6 +390,64 @@ describe("extension transcript presenters", () => {
 		expect(chat()).toContain("OUTPUT-call1");
 		mode.setToolsExpanded(false);
 		expect(chat()).not.toContain("OUTPUT-call1");
+	});
+
+	it("draws compact tool rows in the presenter's span styles, packed with compact messages without blank rows", async () => {
+		// Regression guard (#20512): a compact tool call's or read's label and rows losing their theme
+		// tokens, or consecutive compact tool and message blocks each set off by a blank row.
+		await installExtensions(
+			presenter(block =>
+				block.type === "toolCall"
+					? {
+							compact: {
+								label: [{ t: `LABEL-${block.id}`, s: "success" }],
+								rows: [[{ t: `ROW-${block.id}`, s: "error" }]],
+							},
+						}
+					: block.type === "message"
+						? { compact: { label: [{ t: `LABEL-${block.id}`, s: "success" }] } }
+						: undefined,
+			),
+		);
+		appendReadCall("read1", "/tmp/a.ts", 10);
+		appendToolCall("call1", 20);
+		appendToolCall("call2", 30);
+		session.sessionManager.appendMessage({
+			role: "custom",
+			customType: "advisor",
+			content: "body",
+			display: true,
+			details: { notes: [] },
+			timestamp: 40,
+		});
+		await start();
+		await mode.renderInitialMessages();
+		const raw = createTestTerminal(() => ({ main: mode.shell.transcript.nodes }), {
+			columns: 120,
+			rows: 200,
+			theme: currentTheme(),
+			separator: mode.shell.transcript.separator,
+		});
+		const rows = raw.rows();
+		raw.dispose();
+		const styled = rows.join("\n");
+		const theme = currentTheme();
+		for (const id of ["read1", "call1", "call2"]) {
+			expect(styled).toContain(theme.style("success", `LABEL-${id}`));
+			expect(styled).toContain(theme.style("error", `ROW-${id}`));
+		}
+		const plain = rows.map(row => Bun.stripANSI(row).trim());
+		const first = plain.findIndex(row => row.includes("LABEL-read1"));
+		const last = plain.findIndex(row => row.includes("LABEL-40"));
+		expect(plain.slice(first, last + 1)).toEqual([
+			"• LABEL-read1",
+			"ROW-read1",
+			"• LABEL-call1",
+			"ROW-call1",
+			"• LABEL-call2",
+			"ROW-call2",
+			"• LABEL-40",
+		]);
 	});
 
 	it("asks again only the blocks refreshTranscript names", async () => {
