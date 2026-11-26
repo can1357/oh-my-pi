@@ -384,10 +384,22 @@ export interface WriteContext {
 	};
 }
 
-/** Remote text fetched for an edit. */
-export interface RemoteEditSource {
-	/** Canonical URL ({@link RemoteEditHooks.canonicalUrl}). */
+/**
+ * Where a remote file an edit targets lives: its canonical URL (the key `read`
+ * tags and `edit` addresses) and the destination that URL resolved to.
+ */
+export interface RemoteEditLocation {
+	/** `scheme://authority/<absolute path>`, one spelling per remote file. */
 	url: string;
+	/**
+	 * Identity of the resolved destination (host, account, port, key), so one
+	 * URL that resolves to different hosts (per-project aliases) never shares a mirror.
+	 */
+	target: string;
+}
+
+/** Remote text fetched for an edit. */
+export interface RemoteEditSource extends RemoteEditLocation {
 	content: string;
 	/** Checksum of exactly the fetched bytes; {@link RemoteEditHooks.update} writes only while the file still matches it. */
 	checksum: string;
@@ -395,29 +407,29 @@ export interface RemoteEditSource {
 
 /**
  * Hooks for remote text that `edit` patches through a local mirror
- * ({@link SchemeWritePolicy.edits}). The mirror is keyed by the canonical URL,
+ * (`spec.write.edits`). The mirror is keyed by the {@link RemoteEditLocation},
  * so every spelling of one remote file shares its mirror and snapshot tag.
  */
 export interface RemoteEditHooks {
 	/**
-	 * `scheme://authority/<absolute path>`, the key `read` and `edit` share. With
-	 * `localOnly`, never touches the remote host and returns `undefined` when the
-	 * answer would need it (a home-relative path whose HOME is not cached yet).
+	 * The file's {@link RemoteEditLocation}. With `localOnly`, never touches the
+	 * remote host and returns `undefined` when the answer would need it (a
+	 * home-relative path whose HOME is not cached yet).
 	 */
-	canonicalUrl(
+	locate(
 		url: InternalUrl,
 		context?: ResolveContext,
 		options?: { localOnly?: boolean },
-	): Promise<string | undefined>;
+	): Promise<RemoteEditLocation | undefined>;
 	/**
 	 * Fetch an existing regular file's text for an edit. Refuses a symbolic link
 	 * (naming it), a directory, a special file, binary content, and a missing
-	 * path ({@link RemoteEditMissingError}).
+	 * path (`RemoteEditMissingError`).
 	 */
 	fetch(url: InternalUrl, context?: ResolveContext): Promise<RemoteEditSource>;
 	/**
 	 * Replace the file's text in one remote operation, only while its bytes still
-	 * match `checksum` ({@link RemoteEditConflictError} otherwise; nothing is written).
+	 * match `checksum` (`RemoteEditConflictError` otherwise; nothing is written).
 	 */
 	update(url: InternalUrl, content: string, checksum: string, context?: WriteContext): Promise<void>;
 }

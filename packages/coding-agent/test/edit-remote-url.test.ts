@@ -64,19 +64,25 @@ function registerRemote(remote: Remote): void {
 			remote.files.set(absolute(url), content);
 		},
 		edit: {
-			async canonicalUrl(url, _context, options) {
+			// The "destination" an alias resolves to differs per project, like an `ssh.json` alias.
+			async locate(url, context, options) {
 				if (homeRelative(url) && !homeKnown) {
 					if (options?.localOnly) return undefined;
 					remote.io.push("home");
 					homeKnown = true;
 				}
-				return canonical(url);
+				return { url: canonical(url), target: context?.cwd ?? "" };
 			},
-			async fetch(url) {
+			async fetch(url, context) {
 				remote.io.push(`fetch ${canonical(url)}`);
 				const content = remote.files.get(absolute(url));
 				if (content === undefined) throw new RemoteEditMissingError(canonical(url));
-				return { url: canonical(url), content, checksum: posixCksum(Buffer.from(content)) };
+				return {
+					url: canonical(url),
+					target: context?.cwd ?? "",
+					content,
+					checksum: posixCksum(Buffer.from(content)),
+				};
 			},
 			async update(url, content, checksum) {
 				remote.io.push(`update ${canonical(url)}`);
@@ -119,10 +125,10 @@ describe("edit on a remote handler-written URL", () => {
 		InternalUrlRouter.instance().unregister("remotetest");
 	});
 
-	function setup() {
+	function setup(shared?: Remote) {
 		const dir = TempDir.createSync("@omp-edit-remote-");
-		const remote: Remote = { files: new Map(), io: [] };
-		registerRemote(remote);
+		const remote: Remote = shared ?? { files: new Map(), io: [] };
+		if (!shared) registerRemote(remote);
 		const session = {
 			cwd: dir.path(),
 			hasUI: false,
@@ -187,15 +193,109 @@ describe("edit on a remote handler-written URL", () => {
 		};
 		const previews = await streamPreview(tool, "mixed", args);
 		expect(remote.io).toEqual([]);
-		expect(previews).toHaveLength(2);
-		expect(previews[0]?.diff).toBeUndefined();
-		expect(previews[0]?.error).toContain(`Preview deferred: remotetest://host/~/${unique}.py`);
-		expect(previews[1]?.diff).toContain("two");
+		// The deferred file has no preview and no error (an error fails the preview under
+		// `edit.streamingAbort`); the local file's preview renders.
+		expect(previews).toHaveLength(1);
+		expect(previews[0]?.error).toBeUndefined();
+		expect(previews[0]?.diff).toContain("two");
 
 		const result = await tool.execute("mixed", args);
 		expect(result.isError).not.toBe(true);
 		expect(remote.files.get(`${HOME}/${unique}.py`)).toBe("def f():\n    return 2\n");
 		expect(await Bun.file(local).text()).toBe("two\n");
+	});
+
+	it("renders the local sections of an atomic apply_patch batch whose remote file has no mirror", async () => {
+		const { dir, remote, edit, unique } = setup();
+		using _dir = dir;
+		const local = path.join(dir.path(), "local.txt");
+		await Bun.write(local, "one\n");
+		remote.files.set(`/tmp/${unique}.txt`, "alpha\n");
+		const args = {
+			input: [
+				"*** Begin Patch",
+				`*** Update File: remotetest://host/tmp/${unique}.txt`,
+				"@@",
+				"-alpha",
+				"+beta",
+				`*** Update File: ${local}`,
+				"@@",
+				"-one",
+				"+two",
+				"*** End Patch",
+			].join("\n"),
+		};
+		const tool = edit("apply_patch");
+		const previews = await streamPreview(tool, "atomic", args);
+		expect(remote.io).toEqual([]);
+		expect(previews).toHaveLength(1);
+		expect(previews[0]?.error).toBeUndefined();
+		expect(previews[0]?.diff).toContain("two");
+
+		const result = await tool.execute("atomic", args);
+		expect(result.isError).not.toBe(true);
+		expect(remote.files.get(`/tmp/${unique}.txt`)).toBe("beta\n");
+		expect(await Bun.file(local).text()).toBe("two\n");
+	});
+
+	it("refuses an explicit remote create in the preview without contacting the host", async () => {
+		const { dir, remote, edit, unique } = setup();
+		using _dir = dir;
+		const local = path.join(dir.path(), "local.txt");
+		await Bun.write(local, "one\n");
+		const args = {
+			input: [
+				"*** Begin Patch",
+				`*** Update File: ${local}`,
+				"@@",
+				"-one",
+				"+two",
+				`*** Add File: remotetest://host/tmp/${unique}.txt`,
+				"+new",
+				"*** End Patch",
+			].join("\n"),
+		};
+		const refusal = `remotetest://host/tmp/${unique}.txt does not exist, and remotetest:// files can only be updated in place, so edit cannot create it`;
+		const tool = edit("apply_patch");
+		const previews = await streamPreview(tool, "create", args);
+		expect(previews.some(file => file.error?.includes(refusal))).toBe(true);
+
+		const result = await tool.execute("create", args);
+		expect(result.isError).toBe(true);
+		expect(text(result)).toContain(refusal);
+		expect(remote.io).toEqual([]);
+		expect(remote.files.has(`/tmp/${unique}.txt`)).toBe(false);
+		expect(await Bun.file(local).text()).toBe("one\n");
+	});
+
+	it("never previews against a mirror read for a URL that resolved to another destination", async () => {
+		const first = setup();
+		using _first = first.dir;
+		const second = setup(first.remote);
+		using _second = second.dir;
+		const file = `/tmp/${first.unique}.py`;
+		first.remote.files.set(file, "def f():\n    return 1\n");
+		const header = (await first.read(`remotetest://host${file}`)).split("\n")[0];
+		first.remote.io.length = 0;
+
+		// The second project resolves the same URL elsewhere: its preview waits for the
+		// fetch instead of diffing the first project's copy.
+		const args = { input: `${header}\nPUT 2.=2:\n+    return 2\n` };
+		const previews = await streamPreview(second.edit("hashline"), "other-target", args);
+		expect(previews).toEqual([]);
+		expect(first.remote.io).toEqual([]);
+	});
+
+	it("mirrors a remote file whose name is not a valid local filename", async () => {
+		const { dir, remote, read, edit, unique } = setup();
+		using _dir = dir;
+		remote.files.set(`/tmp/${unique}-star*.txt`, "one\n");
+		const header = (await read(`remotetest://host/tmp/${unique}-star%2A.txt`)).split("\n")[0];
+		expect(header).toContain(`${unique}-star*.txt#`);
+
+		const result = await edit("hashline").execute("star", { input: `${header}\nPUT 1.=1:\n+two\n` });
+		expect(result.isError).not.toBe(true);
+		expect(remote.files.get(`/tmp/${unique}-star*.txt`)).toBe("two\n");
 	});
 
 	it("writes nothing when the remote file changed after the edit fetched it", async () => {

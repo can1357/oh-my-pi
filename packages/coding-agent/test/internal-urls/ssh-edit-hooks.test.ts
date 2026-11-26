@@ -9,6 +9,9 @@ import { RemoteEditConflictError, RemoteEditMissingError } from "../../src/inter
 import { SshProtocolHandler } from "../../src/internal-urls/ssh-protocol";
 import { fakeSshTransport } from "../helpers/fake-ssh-transport";
 
+/** `text` behind a UTF-8 BOM, as bytes: `Bun.file().text()` would drop the BOM. */
+const bom = (text: string) => Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text)]);
+
 // The fake remote is the local filesystem behind a POSIX shell.
 describe.skipIf(process.platform === "win32")("ssh:// edit hooks", () => {
 	const handler = new SshProtocolHandler();
@@ -35,13 +38,14 @@ describe.skipIf(process.platform === "win32")("ssh:// edit hooks", () => {
 	it("keys HOME-relative and absolute spellings by one URL, contacting the host for HOME at most once", async () => {
 		const transport = fakeSshTransport(() => home);
 		const tilde = parseInternalUrl(`ssh://${host}/~/dir/a%20b.py`);
-		expect(await hooks.canonicalUrl(tilde, undefined, { localOnly: true })).toBeUndefined();
+		expect(await hooks.locate(tilde, undefined, { localOnly: true })).toBeUndefined();
 		expect(transport.commands).toHaveLength(0);
 
 		const canonical = `ssh://${host}${home.split("/").map(encodeURIComponent).join("/")}/dir/a%20b.py`;
-		expect(await hooks.canonicalUrl(tilde)).toBe(canonical);
-		expect(await hooks.canonicalUrl(tilde, undefined, { localOnly: true })).toBe(canonical);
-		expect(await hooks.canonicalUrl(parseInternalUrl(canonical), undefined, { localOnly: true })).toBe(canonical);
+		const located = await hooks.locate(tilde);
+		expect(located?.url).toBe(canonical);
+		expect(await hooks.locate(tilde, undefined, { localOnly: true })).toEqual(located);
+		expect(await hooks.locate(parseInternalUrl(canonical), undefined, { localOnly: true })).toEqual(located);
 		expect(transport.commands).toHaveLength(1);
 	});
 
@@ -63,20 +67,22 @@ describe.skipIf(process.platform === "win32")("ssh:// edit hooks", () => {
 	it("writes in place only while the file still matches the fetched checksum", async () => {
 		fakeSshTransport(() => home);
 		const file = path.join(home, "a.txt");
-		await Bun.write(file, "﻿one\n");
+		await fs.writeFile(file, bom("one\n"));
 		await fs.chmod(file, 0o640);
 		const url = parseInternalUrl(`ssh://${host}/~/a.txt`);
 
 		const source = await hooks.fetch(url);
-		expect(source.content).toBe("﻿one\n");
-		await Bun.write(file, "﻿two\n");
-		const conflict = await hooks.update(url, "﻿three\n", source.checksum).catch((caught: unknown) => caught);
+		expect(Buffer.from(source.content)).toEqual(bom("one\n"));
+		await fs.writeFile(file, bom("two\n"));
+		const conflict = await hooks
+			.update(url, bom("three\n").toString(), source.checksum)
+			.catch((caught: unknown) => caught);
 		expect(conflict).toBeInstanceOf(RemoteEditConflictError);
-		expect(await Bun.file(file).text()).toBe("﻿two\n");
+		expect(await fs.readFile(file)).toEqual(bom("two\n"));
 
 		const fresh = await hooks.fetch(url);
-		await hooks.update(url, "﻿three\n", fresh.checksum);
-		expect(await Bun.file(file).text()).toBe("﻿three\n");
+		await hooks.update(url, bom("three\n").toString(), fresh.checksum);
+		expect(await fs.readFile(file)).toEqual(bom("three\n"));
 		expect((await fs.stat(file)).mode & 0o777).toBe(0o640);
 		expect((await fs.readdir(home)).filter(name => name.includes(".omp-tmp."))).toEqual([]);
 	});

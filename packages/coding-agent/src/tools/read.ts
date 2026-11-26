@@ -3600,10 +3600,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			isRemoteTextWritable(spec) && !resource.isDirectory && resource.immutable !== true
 				? InternalUrlRouter.instance().remoteEdit(url)
 				: undefined;
-		const canonical = remote
-			? await remote.hooks.canonicalUrl(remote.url, sessionResolveContext(this.session, { signal }))
+		const location = remote
+			? await remote.hooks.locate(remote.url, sessionResolveContext(this.session, { signal }))
 			: undefined;
-		const mirror = canonical === undefined ? undefined : await writeRemoteMirror(canonical, resource.content);
+		const canonical = location?.url;
+		const mirror = location === undefined ? undefined : await writeRemoteMirror(location, resource.content);
 		// A remote notebook reads as the cell projection `edit` patches, like a local one; `:raw` keeps the JSON.
 		const notebook =
 			canonical !== undefined &&

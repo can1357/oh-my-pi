@@ -129,6 +129,11 @@ function canonicalSshUrl(url: InternalUrl, absolute: string): string {
 	return `ssh://${authority}${path}`;
 }
 
+/** Identity of the destination an `ssh://` authority resolved to (it can differ per project). */
+function sshTargetKey(target: SSHConnectionTarget): string {
+	return JSON.stringify([target.name, target.host, target.username, target.port, target.keyPath]);
+}
+
 /** UTF-8 text of `bytes` with any BOM kept, so a mirror edit writes it back; `null` for binary/non-UTF-8 bytes. */
 function decodeEditableText(bytes: Uint8Array): string | null {
 	if (bytes.indexOf(0) !== -1) return null;
@@ -332,19 +337,20 @@ export class SshProtocolHandler implements ProtocolHandler {
 	};
 
 	/**
-	 * `edit` patches a local mirror keyed by the canonical URL: it fetches the
-	 * file and its checksum only once the edit runs, and writes back in place only
-	 * while the remote bytes still match what it fetched.
+	 * `edit` patches a local mirror keyed by the canonical URL and the resolved
+	 * destination: it fetches the file and its checksum only once the edit runs,
+	 * and writes back in place only while the remote bytes still match what it fetched.
 	 */
 	readonly edit: RemoteEditHooks = {
-		canonicalUrl: async (url, context, options) => {
+		locate: async (url, context, options) => {
 			const target = await resolveTarget(url, context?.cwd);
 			const { homeRelative, decoded } = parseRemotePath(url);
-			if (!homeRelative) return canonicalSshUrl(url, decoded);
+			if (!homeRelative) return { url: canonicalSshUrl(url, decoded), target: sshTargetKey(target) };
 			const home = options?.localOnly
 				? peekRemoteHomeDirectory(target)
 				: await remoteHomeDirectory(target, { signal: context?.signal });
-			return home === undefined ? undefined : canonicalSshUrl(url, joinRemoteHome(home, decoded));
+			if (home === undefined) return undefined;
+			return { url: canonicalSshUrl(url, joinRemoteHome(home, decoded)), target: sshTargetKey(target) };
 		},
 		fetch: async (url, context) => {
 			const target = await resolveTarget(url, context?.cwd);
@@ -367,7 +373,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 			const content = decodeEditableText(file.bytes);
 			if (content === null)
 				throw new Error(`${canonical} is a binary or non-UTF-8 file; ssh:// edits UTF-8 text only`);
-			return { url: canonical, content, checksum: posixCksum(file.bytes) };
+			return { url: canonical, target: sshTargetKey(target), content, checksum: posixCksum(file.bytes) };
 		},
 		update: async (url, content, checksum, context) => {
 			const target = await resolveTarget(url, context?.cwd);
