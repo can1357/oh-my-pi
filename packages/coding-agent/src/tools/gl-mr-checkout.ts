@@ -7,6 +7,7 @@ import { getWorktreeDir, hashPath, logger } from "@oh-my-pi/pi-utils";
 import { parseGitUrl } from "../extensibility/plugins/git-url";
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+import { redactUrlForLog } from "../utils/redact-url";
 import { withRepoLock } from "../utils/repo-lock";
 import { resolveAvailableWorktreePath } from "../worktree/paths";
 import type { GlMrCheckoutSummary, GlToolDetails } from "./details/gitlab";
@@ -146,19 +147,6 @@ async function ensureMrRemoteWithRepo(
 	return { name: remoteName, url: remoteUrl };
 }
 
-function redactRemoteUrlCredentials(rawUrl: string): string {
-	if (!rawUrl.includes("://")) return rawUrl;
-	try {
-		const parsed = new URL(rawUrl);
-		if (!parsed.username && !parsed.password) return rawUrl;
-		parsed.username = "";
-		parsed.password = "";
-		return parsed.toString();
-	} catch {
-		return rawUrl.replace(/(\w+:\/\/)[^/\s@]+@/, "$1");
-	}
-}
-
 function formatMrCheckoutResult(outcome: MrCheckoutOutcome): string {
 	const { mr, localBranch, worktreePath, remoteName, remoteUrl, sourceBranch, isCrossRepository, reused, clonedWith } =
 		outcome;
@@ -177,7 +165,7 @@ function formatMrCheckoutResult(outcome: MrCheckoutOutcome): string {
 		clonedWith != null ? `${worktreePath} (cloned via ${formatIsolationBackend(clonedWith)})` : worktreePath,
 	);
 	pushLine(lines, "Remote", remoteName);
-	pushLine(lines, "Remote URL", redactRemoteUrlCredentials(remoteUrl));
+	pushLine(lines, "Remote URL", redactUrlForLog(remoteUrl));
 	pushLine(lines, "Cross repository", isCrossRepository);
 	if (mr.allow_collaboration !== undefined) {
 		pushLine(lines, "Allow collaboration", mr.allow_collaboration);
@@ -554,7 +542,7 @@ export async function executeMrPush(
 		if (!parsedPush) {
 			if (!isLocalFilesystemPath) {
 				throw new ToolError(
-					`Cannot verify push destination for remote '${remoteName}' (${redactRemoteUrlCredentials(effectivePushUrl)}) against MR source project '${expectedPushProject}'; refusing to push.`,
+					`Cannot verify push destination for remote '${remoteName}' (${redactUrlForLog(effectivePushUrl)}) against MR source project '${expectedPushProject}'; refusing to push.`,
 				);
 			}
 		} else if (`${parsedPush.host}/${parsedPush.path}`.toLowerCase() !== expectedPushProject) {
@@ -585,7 +573,7 @@ export async function executeMrPush(
 	pushLine(lines, "Local branch", localBranch);
 	pushLine(lines, "Remote", remoteName);
 	pushLine(lines, "Remote branch", headRef);
-	pushLine(lines, "Remote URL", effectivePushUrl ? redactRemoteUrlCredentials(effectivePushUrl) : undefined);
+	pushLine(lines, "Remote URL", effectivePushUrl ? redactUrlForLog(effectivePushUrl) : undefined);
 	pushLine(lines, "MR", mrUrl ?? undefined);
 	pushLine(lines, "Force with lease", params.forceWithLease ?? false);
 	lines.push(`Pushed ${localBranch} to ${remoteName}:${headRef}.`);

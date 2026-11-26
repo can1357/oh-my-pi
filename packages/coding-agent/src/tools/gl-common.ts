@@ -6,7 +6,12 @@ import type { GlToolDetails } from "./details/gitlab";
 import { ToolError } from "./tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
 import { gitlab } from "../utils/gitlab";
-import { appendArtifactReference, parsePositiveDecimalInt, requireCurrentGitBranch } from "./gh-common";
+import {
+	appendArtifactReference,
+	normalizeOptionalString,
+	parsePositiveDecimalInt,
+	requireCurrentGitBranch,
+} from "./gh-common";
 import {
 	assertGitlabHostTrustedForEnvToken,
 	GITLAB_HOST_PATTERN,
@@ -243,6 +248,14 @@ function parseGitlabResourceUrl(
 		}
 	}
 	return {};
+}
+
+/** Reject an `mr` array for ops that act on exactly one merge request. */
+export function requireSingleMrIdentifier(mr: string | string[] | undefined, op: string): string | undefined {
+	if (Array.isArray(mr)) {
+		throw new ToolError(`mr must be a single merge request identifier for ${op}.`);
+	}
+	return normalizeOptionalString(mr);
 }
 
 export function parseGitlabMrUrl(value: string | undefined): { project?: string; iid?: number } {

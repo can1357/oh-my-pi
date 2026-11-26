@@ -42,6 +42,7 @@ import {
 	requireConsistentUrlProject,
 	resolveGitlabMrIid,
 	resolveGitlabProject,
+	requireSingleMrIdentifier,
 	type GitlabProjectRef,
 } from "./gl-common";
 import { toGitlabIsoDateBound } from "./gl-search";
@@ -88,13 +89,6 @@ function getJobDurationSeconds(
 	return Math.max(0, Math.round((endMs - startedMs) / 1000));
 }
 
-function requireSingleMrString(mr: string | string[] | undefined): string | undefined {
-	if (Array.isArray(mr)) {
-		throw new ToolError("mr must be a single merge request identifier for pipeline/job operations.");
-	}
-	return normalizeOptionalString(mr);
-}
-
 interface ResolvedPipelineTarget {
 	pipelineId: number;
 	/** Numeric project ID owning the pipeline (may differ from target project on fork MRs). */
@@ -127,7 +121,7 @@ async function resolvePipelineTarget(
 		return { pipelineId };
 	}
 
-	const explicitMr = requireSingleMrString(params.mr);
+	const explicitMr = requireSingleMrIdentifier(params.mr, "pipeline/job operations");
 	if (explicitMr) {
 		const iid = await resolveGitlabMrIid(cwd, projectRef, explicitMr, signal);
 		const mr = await glabApiJson<GlMrApi>(
@@ -289,7 +283,7 @@ export async function executePipelineList(
 	params: GitlabInput,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GlToolDetails>> {
-	const mrStr = requireSingleMrString(params.mr);
+	const mrStr = requireSingleMrIdentifier(params.mr, "pipeline/job operations");
 	const mrUrl = parseGitlabMrUrl(mrStr);
 	const ref = await resolveGitlabProject(session.cwd, normalizeOptionalString(params.repo), mrUrl.project, signal);
 	const encodedPath = encodeProjectPath(ref.path);
@@ -384,7 +378,7 @@ export async function executePipelineView(
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GlToolDetails>> {
 	const pipelineUrl = parseGitlabPipelineUrl(normalizeOptionalString(params.pipeline));
-	const mrUrl = parseGitlabMrUrl(requireSingleMrString(params.mr));
+	const mrUrl = parseGitlabMrUrl(requireSingleMrIdentifier(params.mr, "pipeline/job operations"));
 	const urlProject = requireConsistentUrlProject([pipelineUrl.project, mrUrl.project]);
 	const ref = await resolveGitlabProject(session.cwd, normalizeOptionalString(params.repo), urlProject, signal);
 	const target = await resolvePipelineTarget(session.cwd, ref, params, signal);
@@ -729,7 +723,7 @@ export async function executePipelineWatch(
 	onUpdate: AgentToolUpdateCallback<GlToolDetails> | undefined,
 ): Promise<AgentToolResult<GlToolDetails>> {
 	const pipelineUrl = parseGitlabPipelineUrl(normalizeOptionalString(params.pipeline));
-	const mrUrl = parseGitlabMrUrl(requireSingleMrString(params.mr));
+	const mrUrl = parseGitlabMrUrl(requireSingleMrIdentifier(params.mr, "pipeline/job operations"));
 	const urlProject = requireConsistentUrlProject([pipelineUrl.project, mrUrl.project]);
 	const projectRef = await resolveGitlabProject(session.cwd, normalizeOptionalString(params.repo), urlProject, signal);
 	const tail = resolveTailLimit(params.tail);
@@ -983,7 +977,7 @@ export async function executeJobLog(
 	const tail = Math.min(Math.max(1, Math.floor(params.tail ?? JOB_LOG_TAIL_DEFAULT)), JOB_LOG_TAIL_MAX);
 	const jobUrl = parseGitlabJobUrl(normalizeOptionalString(params.job));
 	const pipelineUrl = parseGitlabPipelineUrl(normalizeOptionalString(params.pipeline));
-	const mrUrl = parseGitlabMrUrl(requireSingleMrString(params.mr));
+	const mrUrl = parseGitlabMrUrl(requireSingleMrIdentifier(params.mr, "pipeline/job operations"));
 	const urlProject = requireConsistentUrlProject([jobUrl.project, pipelineUrl.project, mrUrl.project]);
 	const ref = await resolveGitlabProject(session.cwd, normalizeOptionalString(params.repo), urlProject, signal);
 	const resolved = await resolveJobInProject(session.cwd, ref, params, signal);
@@ -1065,7 +1059,7 @@ export async function executeJobRetry(
 ): Promise<AgentToolResult<GlToolDetails>> {
 	const jobUrl = parseGitlabJobUrl(normalizeOptionalString(params.job));
 	const pipelineUrl = parseGitlabPipelineUrl(normalizeOptionalString(params.pipeline));
-	const mrUrl = parseGitlabMrUrl(requireSingleMrString(params.mr));
+	const mrUrl = parseGitlabMrUrl(requireSingleMrIdentifier(params.mr, "pipeline/job operations"));
 	const urlProject = requireConsistentUrlProject([jobUrl.project, pipelineUrl.project, mrUrl.project]);
 	const ref = await resolveGitlabProject(session.cwd, normalizeOptionalString(params.repo), urlProject, signal);
 	const resolved = await resolveJobInProject(session.cwd, ref, params, signal);

@@ -22,6 +22,7 @@ import {
 	parseGitlabMrUrl,
 	resolveGitlabMrIid,
 	resolveGitlabProject,
+	requireSingleMrIdentifier,
 	type GitlabProjectRef,
 } from "./gl-common";
 import type { GitlabInput, GlDiscussionApi, GlMrApi, GlNoteApi } from "./gl-types";
@@ -31,13 +32,6 @@ import { ToolAbortError } from "./tool-errors";
 
 const ALLOWED_DISCUSSION_STATES = new Set(["unresolved", "resolved", "all"]);
 const ALLOWED_NOTE_TYPES = new Set(["diff", "general", "system", "all"]);
-
-function requireSingleMrIdentifier(mr: string | string[] | undefined, op: string): string | undefined {
-	if (Array.isArray(mr)) {
-		throw new ToolError(`mr must be a single merge request identifier for ${op}.`);
-	}
-	return normalizeOptionalString(mr);
-}
 
 function appendRepeatedFlag(args: string[], flag: string, values: readonly string[] | undefined): void {
 	for (const raw of values ?? []) {

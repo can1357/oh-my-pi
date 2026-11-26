@@ -1,8 +1,9 @@
 /** `gitlab` — glab CLI dispatch: projects, files, MRs, discussions, search, checkout/push, CI pipelines. */
 import type { ReactNode } from "react";
-import { Badge, InvalidArg, Kv, KvGrid, Note, Output, ResultText, Row } from "../parts";
+import { Badge, Kv, KvGrid, Note, Output, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
 import { detailsRecord, isRecord, normalizeWs, num, shortenPath, str, truncate } from "../util";
+import { ArgsGrid, shortSha } from "./github";
 
 const SUCCESS_STATUSES: Record<string, true> = { success: true, skipped: true, manual: true };
 const FAILURE_STATUSES: Record<string, true> = { failed: true, canceled: true };
@@ -30,10 +31,6 @@ function formatMr(mr: unknown): string | null {
 	if (parts.length === 0) return null;
 	if (parts.length > 3) return `${parts.slice(0, 3).join(", ")}, +${parts.length - 3} more`;
 	return parts.join(", ");
-}
-
-function shortSha(sha: string): string {
-	return /^[0-9a-f]{12,}$/i.test(sha) ? sha.slice(0, 7) : sha;
 }
 
 function Salient({ args }: { args: Record<string, unknown> }): ReactNode {
@@ -104,34 +101,6 @@ function Summary(props: ToolRenderProps): ReactNode {
 			{op ? <Badge tone="accent">{op}</Badge> : <Badge tone="warn">no op</Badge>} <Salient args={props.args} />
 		</>
 	);
-}
-
-function argValue(value: unknown): ReactNode {
-	if (typeof value === "string") return value;
-	if (typeof value === "number" || typeof value === "boolean") return String(value);
-	if (Array.isArray(value)) {
-		const parts: string[] = [];
-		for (const item of value) {
-			if (typeof item === "string" || typeof item === "number") parts.push(String(item));
-		}
-		return parts.join(", ");
-	}
-	return <InvalidArg />;
-}
-
-function ArgsGrid({ args }: { args: Record<string, unknown> }): ReactNode {
-	const rows: ReactNode[] = [];
-	for (const key in args) {
-		if (key === "op" || key === "body") continue;
-		const value = args[key];
-		if (value === undefined || value === null) continue;
-		rows.push(
-			<Kv k={key} key={key}>
-				{argValue(value)}
-			</Kv>,
-		);
-	}
-	return rows.length > 0 ? <KvGrid>{rows}</KvGrid> : null;
 }
 
 function jobVisual(job: Record<string, unknown>): { icon: string; cls: string } {
