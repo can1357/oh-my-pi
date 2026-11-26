@@ -14,13 +14,13 @@ import { registerToolPresenter } from "./registry";
 import { fileHref } from "./file-common";
 import { countText, FileRow, inlineErrorView } from "./search-common";
 
-/** The args lsp shows. */
+/** The args lsp shows; models may send `null` for an unused optional arg. */
 export interface LspArgs {
 	readonly action?: string;
 	readonly file?: string;
-	readonly line?: number;
+	readonly line?: number | null;
 	readonly symbol?: string;
-	readonly new_name?: string;
+	readonly new_name?: string | null;
 }
 
 /** One parsed diagnostic. */
@@ -134,8 +134,13 @@ function title(action: string | undefined): string {
 		.join(" ");
 }
 
+/** `a.ts:3`, or `a.ts` without a line. */
+function fileLine(file: string, line: number | null | undefined): string {
+	return line != null ? `${file}:${line}` : file;
+}
+
 function lspHead(args: LspArgs | undefined, meta: readonly TspText[]): ToolHead {
-	const target = args?.file ? `${args.file}${args.line !== undefined ? `:${args.line}` : ""}` : undefined;
+	const target = args?.file ? fileLine(args.file, args.line) : undefined;
 	const href = fileHref(args?.file);
 	return {
 		title: title(args?.action),
@@ -147,17 +152,18 @@ function lspHead(args: LspArgs | undefined, meta: readonly TspText[]): ToolHead 
 
 function callMeta(args: LspArgs | undefined): TspText[] {
 	if (!args?.symbol) return [];
-	return [args.new_name !== undefined ? `${args.symbol} · → ${args.new_name}` : args.symbol];
+	return [args.new_name != null ? `${args.symbol} · → ${args.new_name}` : args.symbol];
 }
 
 function lspTerm(args: LspArgs | undefined, extra?: Partial<LspTerm>): LspTerm {
 	const action = args?.action || "lsp";
-	const location = args?.file ? ` ${args.file}${args.line !== undefined ? `:${args.line}` : ""}` : "";
-	const symbol = args?.symbol && args.new_name === undefined ? ` (${args.symbol})` : "";
+	const newName = args?.new_name ?? undefined;
+	const at = args?.file ? ` ${fileLine(args.file, args.line)}` : "";
+	const symbol = args?.symbol && newName === undefined ? ` (${args.symbol})` : "";
 	return {
 		look: "lsp",
-		description: `${action}${location}${symbol}`,
-		newName: args?.new_name,
+		description: `${action}${at}${symbol}`,
+		newName,
 		...extra,
 	};
 }

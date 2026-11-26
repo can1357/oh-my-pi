@@ -332,6 +332,7 @@ import {
 	cfgTuiAutoGraph,
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
+	cfgTuiShowLinkUrl,
 	cfgTuiRenderMermaid,
 	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
@@ -491,6 +492,7 @@ const cfgLiveUiSettings = combine({
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
+	"tui.showLinkUrl": cfgTuiShowLinkUrl,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
 	"tui.renderEmbeds": cfgTuiRenderEmbeds,
@@ -3534,6 +3536,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setMarkdownLook({
 			colorful: cfgTuiColorfulMarkdown.get(this.settings),
 			mermaid: cfgTuiRenderMermaid.get(this.settings),
+			linkUrls: cfgTuiShowLinkUrl.get(this.settings),
 		});
 	}
 
@@ -3618,7 +3621,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			rebuildChat = true;
 		}
-		if (any("tui.colorfulMarkdown", "tui.renderMermaid", "tui.renderSvg", "tui.renderEmbeds")) {
+		if (any("tui.colorfulMarkdown", "tui.showLinkUrl", "tui.renderMermaid", "tui.renderSvg", "tui.renderEmbeds")) {
 			this.#syncTranscriptDisplaySettings();
 			resetDisplay = true;
 		}
@@ -4048,17 +4051,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.transcriptBlocks = new WeakMap();
 		this.#frame.welcomeBlock = undefined;
-		transcript.retain(live);
-		this.#headerBlocks = [];
-		const anchor = transcript.blocks()[0];
-		transcript.setInsertionPoint(anchor);
-		try {
-			if (!cfgStartupQuiet.get(settings)) this.#frame.showWelcome();
-			this.#syncHeaderExtras();
-			this.renderSessionContext(context, { preservedLiveToolCallIds });
-		} finally {
-			transcript.setInsertionPoint(undefined);
-		}
+		// One update of the drawn regions for the removal and the whole replay, not one per block: in
+		// Tern each update walks the whole transcript.
+		batch(() => {
+			transcript.retain(live);
+			this.#headerBlocks = [];
+			const anchor = transcript.blocks()[0];
+			transcript.setInsertionPoint(anchor);
+			try {
+				if (!cfgStartupQuiet.get(settings)) this.#frame.showWelcome();
+				this.#syncHeaderExtras();
+				this.renderSessionContext(context, { preservedLiveToolCallIds });
+			} finally {
+				transcript.setInsertionPoint(undefined);
+			}
+		});
 		// `renderSessionContext` clears `pendingTools` at start and end so historical tool blocks
 		// don't leak into live tracking: restore the in-flight entries so the next streamed delta
 		// routes into the preserved block instead of stacking a duplicate below it.
