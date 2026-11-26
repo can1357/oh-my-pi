@@ -1,5 +1,5 @@
 import { parseFlag } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import type { Observation, ObservationEntry } from "../tab-protocol";
 
 /** cmux could not host a browser here: its socket refused the connection, or it opened no browser split. */

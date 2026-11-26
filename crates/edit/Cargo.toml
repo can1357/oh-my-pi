@@ -16,13 +16,14 @@ parking_lot.workspace = true
 omp-ast.workspace = true
 omp-diff.workspace = true
 omp-xfs.workspace = true
-regex.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 xutf.workspace = true
 xxhash-rust.workspace = true
 
 [dev-dependencies]
+# Fixture expectations starting with `^` are patterns.
+regex.workspace = true
 tempfile = "3"
 tokio.workspace = true
 # Stands in for the on-demand Lua wasm grammar in the hashline parity fixtures.

@@ -13,7 +13,7 @@ function createRuntime() {
 		addToHistory,
 		runtime: {
 			ctx: {
-				editor: { clearDraft, addToHistory } as unknown as InteractiveModeContext["editor"],
+				composer: { clearDraft, addToHistory } as unknown as InteractiveModeContext["composer"],
 				handleTanCommand,
 			} as unknown as InteractiveModeContext,
 		},

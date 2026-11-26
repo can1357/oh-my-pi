@@ -188,18 +188,26 @@ export function mergeByModelKey<T extends { provider: string; id: string }>(
 	combine: (existing: Model<Api> | undefined, entry: T) => Model<Api>,
 ): Model<Api>[] {
 	const merged = [...base];
-	const indexByKey = new Map<string, number>();
-	for (let i = 0; i < merged.length; i += 1) {
-		indexByKey.set(`${merged[i].provider}\u0000${merged[i].id}`, i);
-	}
+	if (incoming.length === 0) return merged;
+	// provider → id → index: no joined key string per row.
+	const indexByKey = new Map<string, Map<string, number>>();
+	const idsOf = (provider: string): Map<string, number> => {
+		let ids = indexByKey.get(provider);
+		if (!ids) {
+			ids = new Map();
+			indexByKey.set(provider, ids);
+		}
+		return ids;
+	};
+	for (let i = 0; i < merged.length; i += 1) idsOf(merged[i].provider).set(merged[i].id, i);
 	for (const entry of incoming) {
-		const key = `${entry.provider}\u0000${entry.id}`;
-		const existingIndex = indexByKey.get(key);
+		const ids = idsOf(entry.provider);
+		const existingIndex = ids.get(entry.id);
 		if (existingIndex !== undefined) {
 			merged[existingIndex] = combine(merged[existingIndex], entry);
 		} else {
 			merged.push(combine(undefined, entry));
-			indexByKey.set(key, merged.length - 1);
+			ids.set(entry.id, merged.length - 1);
 		}
 	}
 	return merged;

@@ -5,7 +5,7 @@
  * caller to deliver with the prompt (`on`). See `auto-parallel/planner.ts` for how prompts split.
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ParallelPlan } from "../auto-parallel/planner";
 import type { Settings } from "../config/settings";

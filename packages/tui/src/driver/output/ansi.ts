@@ -1,0 +1,109 @@
+/**
+ * The escape sequences the frame writer emits, and row normalization.
+ *
+ * Rows reach the screen width-fitted (never wider than the screen, so with
+ * autowrap off nothing wraps or scrolls by accident) and closed (SGR reset,
+ * open OSC 8 hyperlink closed), so every row can be rewritten on its own.
+ */
+import { textSizedRows } from "../../text/osc";
+import { replaceTabs, truncate, visibleWidth } from "../../text/width";
+
+export const CSI = "\x1b[";
+/** Begin / end synchronized update (DEC 2026). */
+export const SYNC_BEGIN = "\x1b[?2026h";
+export const SYNC_END = "\x1b[?2026l";
+export const AUTOWRAP_OFF = "\x1b[?7l";
+export const AUTOWRAP_ON = "\x1b[?7h";
+export const CURSOR_SHOW = "\x1b[?25h";
+export const CURSOR_HIDE = "\x1b[?25l";
+export const ALT_ENTER = "\x1b[?1049h";
+export const ALT_LEAVE = "\x1b[?1049l";
+/** Erase from the cursor to the end of the line. */
+export const ERASE_LINE_RIGHT = "\x1b[K";
+/** Erase from the start of the line through the cursor. */
+export const ERASE_LINE_LEFT = "\x1b[1K";
+/** Erase the whole line. */
+export const ERASE_LINE = "\x1b[2K";
+/** Erase from the cursor to the end of the screen. */
+export const ERASE_DOWN = "\x1b[J";
+/** Home, clear the screen, then clear scrollback (ED2 first: preserved-clear terminals push the screen into scrollback). */
+export const CLEAR_ALL = "\x1b[H\x1b[2J\x1b[3J";
+export const SGR_RESET = "\x1b[0m";
+const HYPERLINK_CLOSE = "\x1b]8;;\x1b\\";
+
+export const up = (n: number): string => (n > 0 ? `${CSI}${n === 1 ? "" : n}A` : "");
+export const down = (n: number): string => (n > 0 ? `${CSI}${n === 1 ? "" : n}B` : "");
+export const right = (n: number): string => (n > 0 ? `${CSI}${n === 1 ? "" : n}C` : "");
+/** Cursor to 0-based column `col` of the current row. */
+export const column = (col: number): string => `${CSI}${col + 1}G`;
+/** Cursor to 0-based (`row`, `col`). */
+export const position = (row: number, col: number): string => `${CSI}${row + 1};${col + 1}H`;
+/** Delete `n` lines at the cursor row (rows below move up, blanks enter at the bottom). */
+export const deleteLines = (n: number): string => (n > 0 ? `${CSI}${n === 1 ? "" : n}M` : "");
+/** Insert `n` blank lines at the cursor row (rows below move down, the bottom ones fall off). */
+export const insertLines = (n: number): string => (n > 0 ? `${CSI}${n === 1 ? "" : n}L` : "");
+
+/** Sequences that draw graphics or sized text: rows carrying them are rewritten in place, never shifted. */
+const GRAPHICS = /\x1b_G|\x1bP|\x1b\]1337;|\x1b\]66;/;
+
+/** Whether `row` carries an image placement, SIXEL/iTerm2 data or OSC 66 sized text. */
+export function hasGraphics(row: string): boolean {
+	return row.includes("\x1b") && GRAPHICS.test(row);
+}
+
+const LINE_BREAKS = /[\r\n]/g;
+
+/**
+ * `row` as the writer puts it on screen: tabs expanded, line breaks dropped,
+ * cut to `width` cells, styles and hyperlinks closed at its end.
+ */
+export function normalizeRow(row: string, width: number): string {
+	let text = replaceTabs(row);
+	if (text.includes("\n") || text.includes("\r")) text = text.replace(LINE_BREAKS, "");
+	if (visibleWidth(text) > width) text = truncate(text, width, "");
+	if (!text.includes("\x1b")) return text;
+	if (text.includes("\x1b[") && !text.endsWith(SGR_RESET)) text += SGR_RESET;
+	if (text.lastIndexOf("\x1b]8;") > text.lastIndexOf(HYPERLINK_CLOSE)) text += HYPERLINK_CLOSE;
+	return text;
+}
+
+/**
+ * Bytes that draw normalized `row` from column 0 of the cursor row and
+ * erase what an older, wider row left after it. A row filling the width
+ * needs no erase (with autowrap off the cursor rests on the last cell,
+ * which an erase would clear).
+ */
+export function drawRow(row: string, width: number, covered = 0): string {
+	// Under a scaled glyph a whitespace-only row (a container's indent) is a spacer: drawing spaces would erase it.
+	if (row === "" || (covered > 0 && Bun.stripANSI(row).trim() === "")) {
+		// A multicell (OSC 66) glyph from a row above spans these cells: erasing any of them erases the glyph.
+		if (covered >= width) return "\r";
+		if (covered > 0) return `\r${SGR_RESET}${right(covered)}${ERASE_LINE_RIGHT}`;
+		return `\r${ERASE_LINE}`;
+	}
+	return visibleWidth(row) >= width ? `\r${row}` : `\r${row}${ERASE_LINE_RIGHT}`;
+}
+
+/**
+ * Cells of row `k` of `rows` covered by an OSC 66 scaled span on a row above
+ * (the covering row's width), 0 when none reaches it.
+ */
+export function coveredCells(rows: readonly string[], k: number): number {
+	for (let j = k - 1; j >= 0 && k - j < 8; j--) {
+		const row = rows[j]!;
+		if (!row.includes("\x1b]66;") || textSizedRows(row) <= k - j) continue;
+		// Up to the end of the last scaled span: trailing padding after it covers nothing.
+		const start = row.lastIndexOf("\x1b]66;");
+		const st = row.indexOf("\x1b\\", start);
+		const bel = row.indexOf("\x07", start);
+		const end = st < 0 ? (bel < 0 ? row.length : bel + 1) : bel >= 0 && bel < st ? bel + 1 : st + 2;
+		return visibleWidth(row.slice(0, end));
+	}
+	return 0;
+}
+
+/** Screen rows `row` takes once a terminal rewraps it at `columns`. */
+export function reflowHeight(row: string, columns: number): number {
+	const width = visibleWidth(Bun.stripANSI(row).trimEnd());
+	return Math.max(1, Math.ceil(width / Math.max(1, columns)));
+}

@@ -24,8 +24,8 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { AgentProgress, AgentStreaming } from "@oh-my-pi/pi-tui/tools/task";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
+import type { AgentProgress, AgentStreaming } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -578,6 +578,24 @@ describe("recentOutput event-sequence equivalence (deferred reconstruction)", ()
 				argsKey: "path",
 			});
 		}
+	});
+
+	it("counts the lines a finished edit changed, by its result's diff, and nothing for failures or other tools", async () => {
+		const diff = "+1|added\n+2|added too\n-3|gone\n 4|kept";
+		const call = (id: string, toolName: string, isError: boolean): AgentSessionEvent[] => [
+			{ type: "tool_execution_start", toolCallId: id, toolName, args: { path: "src/one.ts" } },
+			{ type: "tool_execution_end", toolCallId: id, toolName, result: { content: [], details: { diff } }, isError },
+		];
+		const result = await runScenario([], {
+			events: [...call("ok", "edit", false), ...call("bad", "edit", true), ...call("other", "read", false)],
+		});
+		const finished =
+			result.toolSnapshots.find(snapshot => snapshot.recentTools[0]?.tool === "read")?.recentTools ?? [];
+		expect(finished.map(({ tool, isError, added, removed }) => ({ tool, isError, added, removed }))).toEqual([
+			{ tool: "read", isError: false, added: undefined, removed: undefined },
+			{ tool: "edit", isError: true, added: undefined, removed: undefined },
+			{ tool: "edit", isError: false, added: 2, removed: 1 },
+		]);
 	});
 
 	it("matches the reference across arbitrary chunk boundaries and blank lines", async () => {

@@ -13,8 +13,9 @@ import {
 	type SlashCommandRuntime,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
-import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/autocomplete/autocomplete";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
+import { type ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 
 const command = lookupBuiltinSlashCommand("effort");
 

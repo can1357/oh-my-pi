@@ -352,15 +352,20 @@ impl PtySession {
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		#[cfg(unix)]
 		{
-			let (fd, pid) = {
-				let mut handles = self.handles.lock();
-				let Some(fd) = handles.pending.take() else {
+			let pid = {
+				let handles = self.handles.lock();
+				if handles.pending.is_none() {
 					return Err(Error::from_reason("PtySession.resume: no adopted PTY to resume"));
-				};
-				(fd, handles.pid.unwrap_or(0))
+				}
+				handles.pid.unwrap_or(0)
 			};
 			let handles = Arc::clone(&self.handles);
 			self.launch(env, "pty.resume", None, None, move |tx, rx, ct| {
+				// Taken on the control thread: if that thread cannot start, the
+				// adopted master stays pending and `master_fd`/`pid` stay accurate.
+				let Some(fd) = handles.lock().pending.take() else {
+					return Err(Error::from_reason("PtySession.resume: no adopted PTY to resume"));
+				};
 				run_adopted_sync(fd, pid, Some(on_chunk), tx, rx, ct, &handles)
 			})
 		}
@@ -435,7 +440,7 @@ impl PtySession {
 }
 
 impl PtySession {
-	/// Register the control channel and run `run` on a blocking thread.
+	/// Register the control channel and run `run` on a dedicated thread.
 	fn launch<'env>(
 		&self,
 		env: &'env Env,
@@ -464,16 +469,52 @@ impl PtySession {
 			*guard = Some(PtySessionCore { control_tx: control_tx.clone() });
 		}
 		task::future(env, tag, async move {
-			let run_result =
-				tokio::task::spawn_blocking(move || run(control_tx, control_rx, ct)).await;
+			// Run the PTY control loop on a dedicated OS thread rather than
+			// Tokio's bounded blocking pool so long-lived PTYs never starve
+			// short `spawn_blocking` tasks or subsequent PTY starts.
+			// Enter the active Tokio runtime handle on that thread because
+			// `drive_pty` spawns async cancel and output-pump tasks via
+			// `napi::tokio::spawn`.
+			let rt_handle = napi::tokio::runtime::Handle::current();
+			let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+			let spawn_res = std::thread::Builder::new()
+				.name("pi-pty-ctrl".into())
+				.stack_size(512 * 1024)
+				.spawn(move || {
+					let _guard = rt_handle.enter();
+					let result = crate::crash_handler::blocking_task_panic_scope(|| {
+						std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+							run(control_tx, control_rx, ct)
+						}))
+					});
+					let mapped = match result {
+						Ok(res) => res,
+						Err(payload) => {
+							let msg = payload
+								.downcast_ref::<&str>()
+								.copied()
+								.or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+								.unwrap_or("unknown panic");
+							Err(Error::from_reason(format!("PTY control thread panicked: {msg}")))
+						},
+					};
+					let _ = done_tx.send(mapped);
+				});
+			let run_result = match spawn_res {
+				Ok(_) => done_rx
+					.await
+					.map_err(|err| Error::from_reason(format!("PTY execution task failed: {err}")))
+					.flatten(),
+				Err(err) => {
+					Err(Error::from_reason(format!("Failed to spawn PTY control thread: {err}")))
+				},
+			};
 
 			let mut guard = core.lock();
 			*guard = None;
 			drop(guard);
 
 			run_result
-				.map_err(|err| Error::from_reason(format!("PTY execution task failed: {err}")))
-				.flatten()
 		})
 	}
 

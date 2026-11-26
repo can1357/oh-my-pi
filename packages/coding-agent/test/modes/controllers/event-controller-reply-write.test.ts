@@ -4,16 +4,23 @@ import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ReplyWriteComponent } from "@oh-my-pi/pi-tui/chat/reply-write";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { InteractiveModeContext, TranscriptEntry } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { TranscriptBlock } from "../../../src/ui/shell";
+import { initTheme } from "../../../src/ui/theme/service";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { blockText } from "../../helpers/transcript-text";
 
-beforeAll(async () => {
-	await initTheme();
+beforeAll(() => {
+	initTheme();
 });
+
+/** Transcript blocks with what they show. */
+function entries(ctx: InteractiveModeContext): { block: TranscriptBlock; entry: TranscriptEntry | undefined }[] {
+	return ctx.shell.transcript.blocks().map(block => ({ block, entry: ctx.transcriptEntry(block) }));
+}
+
+const isCard = (entry: TranscriptEntry | undefined) => entry?.kind === "tool" && entry.tool.call !== undefined;
+const isReplyWrite = (entry: TranscriptEntry | undefined) => entry?.kind === "tool" && entry.tool.reply !== undefined;
 
 afterEach(() => {
 	resetSettingsForTest();
@@ -49,10 +56,8 @@ function streamingWrite(args: Record<string, unknown>, partialJson: string): Ass
 
 async function fixture() {
 	await Settings.init({ inMemory: true, cwd: process.cwd() });
-	const ctx = createInteractiveModeContext({
-		streamingComponent: new AssistantMessageComponent(),
-		streamingMessage: message([]),
-	});
+	const ctx = createInteractiveModeContext({ streamingMessage: message([]) });
+	ctx.streaming = ctx.presentAssistant();
 	const controller = new EventController(ctx);
 	const update = (streaming: AssistantMessage) => {
 		ctx.streamingMessage = streaming;
@@ -62,7 +67,7 @@ async function fixture() {
 			assistantMessageEvent: undefined as never,
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 	};
-	const rendered = (component: Component) => Bun.stripANSI(component.render(100).join("\n"));
+	const rendered = (block: TranscriptBlock) => blockText(block, 100);
 	return { ctx, controller, update, rendered };
 }
 
@@ -72,11 +77,7 @@ describe("EventController reply writes", () => {
 		// `toolcall_start` (no argument text yet) still streams; neither it nor `ou` tells a reply from a card.
 		await update(streamingWrite({}, ""));
 		await update(streamingWrite({ path: "ou" }, '{"path":"ou'));
-		expect(
-			ctx.chatContainer.children.filter(
-				child => child instanceof ToolExecutionComponent || child instanceof ReplyWriteComponent,
-			),
-		).toEqual([]);
+		expect(entries(ctx).filter(({ entry }) => entry?.kind === "tool")).toEqual([]);
 
 		await update(
 			streamingWrite(
@@ -84,10 +85,10 @@ describe("EventController reply writes", () => {
 				'{"path":"out://status.md","content":"Short answer: **yes**',
 			),
 		);
-		const reply = ctx.chatContainer.children.find(child => child instanceof ReplyWriteComponent);
-		expect(reply).toBeInstanceOf(ReplyWriteComponent);
-		expect(rendered(reply!)).toContain("Short answer: yes");
-		expect(ctx.chatContainer.children.some(child => child instanceof ToolExecutionComponent)).toBe(false);
+		const reply = entries(ctx).find(({ entry }) => isReplyWrite(entry));
+		expect(reply).toBeDefined();
+		expect(rendered(reply!.block)).toContain("Short answer: yes");
+		expect(entries(ctx).some(({ entry }) => isCard(entry))).toBe(false);
 		controller.dispose();
 	});
 
@@ -103,9 +104,9 @@ describe("EventController reply writes", () => {
 				partialResult: { content: [{ type: "text", text: "" }], details: { replies } },
 			} as Extract<AgentSessionEvent, { type: "tool_execution_update" }>);
 		const replyTexts = () =>
-			ctx.chatContainer.children
-				.filter(child => child instanceof AssistantMessageComponent && !(child instanceof ReplyWriteComponent))
-				.map(rendered)
+			entries(ctx)
+				.filter(({ entry }) => entry?.kind === "assistant")
+				.map(({ block }) => rendered(block))
 				.filter(text => text.trim().length > 0);
 
 		await frame(["step **one** done"]);
@@ -120,10 +121,10 @@ describe("EventController reply writes", () => {
 			isError: false,
 		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
 		expect(replyTexts()).toEqual([expect.stringContaining("step one done"), expect.stringContaining("all done")]);
-		const children = ctx.chatContainer.children;
-		const card = children.findIndex(child => child instanceof ToolExecutionComponent);
+		const shown = entries(ctx);
+		const card = shown.findIndex(({ entry }) => isCard(entry));
 		expect(card).toBeGreaterThanOrEqual(0);
-		expect(card).toBeLessThan(children.findIndex(child => rendered(child).includes("all done")));
+		expect(card).toBeLessThan(shown.findIndex(({ block }) => rendered(block).includes("all done")));
 		controller.dispose();
 	});
 });

@@ -3,25 +3,36 @@ import * as fs from "node:fs";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runInteractiveBashPty } from "@oh-my-pi/pi-coding-agent/tools/bash-interactive";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { initTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
-import { TUI } from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
+import type { ExtensionUiHost } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/render-types";
+import type { ExtensionCustomFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { ensureTheme } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
+import { createRoot, type UiNode } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
+import { extensionTheme } from "../../src/ui/extensions/render-output";
+import { keyEvent } from "../helpers/input-harness";
 
 type InteractiveUi = Pick<NonNullable<AgentToolContext["ui"]>, "custom">;
 
 /**
- * A UI whose `custom()` mounts the overlay factory against a headless TUI over
- * a virtual terminal and resolves with the value the overlay reports through
- * `done`. Nothing is rendered to a real terminal.
+ * A UI whose `custom()` builds the console view against a 100×30 host, hands
+ * the view to `onView`, and resolves with the value the console reports
+ * through `done`. Nothing is rendered to a real terminal.
  */
-function headlessUi(): InteractiveUi {
-	const custom: InteractiveUi["custom"] = async <T>(
-		factory: (tui: TUI, uiTheme: Theme, keybindings: KeybindingsManager, done: (result: T) => void) => unknown,
-	): Promise<T> => {
+function headlessUi(onView?: (view: UiNode) => void): InteractiveUi {
+	const custom: InteractiveUi["custom"] = async <T>(factory: ExtensionCustomFactory<T>): Promise<T> => {
 		const { promise, resolve } = Promise.withResolvers<T>();
-		await factory(new TUI(new VirtualTerminal(100, 30)), theme, KeybindingsManager.inMemory(), resolve);
+		const host: ExtensionUiHost = {
+			requestRender() {},
+			size: () => ({ columns: 100, rows: 30 }),
+			suspend: run => run(),
+		};
+		ensureTheme();
+		const view = await createRoot(() =>
+			factory(host, extensionTheme(currentTheme()), KeybindingsManager.inMemory(), resolve),
+		);
+		if (view && typeof view === "object" && "kind" in view) onView?.(view);
 		return promise;
 	};
 	return { custom };
@@ -33,7 +44,6 @@ describe("runInteractiveBashPty", () => {
 	let tempDir: TempDir;
 
 	beforeEach(async () => {
-		initTheme();
 		tempDir = TempDir.createSync("@omp-bash-pty-env-");
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -95,5 +105,31 @@ describe("runInteractiveBashPty", () => {
 		expect(output).toContain(
 			"term=session-term ci=session-ci no_color=session-no-color git_editor=session-git-editor gpg_tty=session-gpg-tty",
 		);
+	});
+	it.skipIf(ptyUnavailable)("forwards keys typed into the console to the program", async () => {
+		const started = Promise.withResolvers<void>();
+		let view: UiNode | undefined;
+		const command = `read -r line; printf 'got=%s\\n' "$line"`;
+		const running = runInteractiveBashPty(
+			headlessUi(node => {
+				view = node;
+			}),
+			{
+				command,
+				application: "/bin/bash",
+				args: ["-c", command],
+				cwd: tempDir.path(),
+				timeoutMs: 15_000,
+				env: { PATH: Bun.env.PATH ?? "", HOME: tempDir.path() },
+				onStart: () => started.resolve(),
+			},
+		);
+		await started.promise;
+		if (!view) throw new Error("expected the console view");
+		for (const key of ["h", "i", "enter"]) expect(view.handlers.onKey?.(keyEvent(key))).toBe(true);
+
+		const result = await running;
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("got=hi");
 	});
 });

@@ -21,7 +21,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import questionFile from "../prompts/judge/auto-thinking.json" with { type: "json" };
-import { clampAutoThinkingEffort } from "@oh-my-pi/pi-tui/thinking";
+import { clampAutoThinkingEffort } from "../thinking/levels";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 
 import { cfgProvidersAutoThinkingMaxEffort } from "../session/settings";
