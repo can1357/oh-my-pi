@@ -652,7 +652,7 @@ export class EditTool implements AgentTool<TInput> {
 				.then(async () => {
 					let settledBatch: SettledPreviewBatch = batch;
 					try {
-						settledBatch = await this.#settlePreview(batch, open, rawInput);
+						settledBatch = await this.#settlePreview(batch, open);
 					} catch (settleError) {
 						logger.debug("Edit preview settling failed", { error: String(settleError) });
 						settledBatch = { ...batch, files: this.#markDeferred(batch.files, open) };
@@ -1020,7 +1020,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * whole preview: the final one is computed again without the deferred files'
 	 * sections, and those files get placeholders.
 	 */
-	async #settlePreview(batch: EditPreviewBatch, call: EditCall, rawInput: boolean): Promise<SettledPreviewBatch> {
+	async #settlePreview(batch: EditPreviewBatch, call: EditCall): Promise<SettledPreviewBatch> {
 		if (call.deferred.size === 0) return batch;
 		const atomic = batch.files.length === 1 && !batch.files[0]?.diff && this.#isDeferral(batch.files[0]?.error, call);
 		const input = this.#callArgs(call).args?.input;
@@ -1040,7 +1040,7 @@ export class EditTool implements AgentTool<TInput> {
 			].map(deferredPlaceholder);
 			const stripped = stripPatchSections(input, drop);
 			if (patchFileHeaders(stripped).length === 0) return { ...batch, files: placeholders };
-			const files = await this.#previewOnce(stripped, call, rawInput);
+			const files = await this.#previewOnce(stripped, call);
 			// The pass failed or never reported: keep the engine's batch, deferrals as placeholders.
 			if (files === undefined) return { ...batch, files: this.#markDeferred(batch.files, call) };
 			const failed = files.length === 1 && !files[0]?.diff && this.#isDeferral(files[0]?.error, call);
@@ -1056,11 +1056,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * {@link PREVIEW_PASS_TIMEOUT_MS}, so a stuck pass never stalls the previews
 	 * chained after it.
 	 */
-	async #previewOnce(
-		input: string,
-		call: EditCall,
-		rawInput: boolean,
-	): Promise<EditPreviewBatch["files"] | undefined> {
+	async #previewOnce(input: string, call: EditCall): Promise<EditPreviewBatch["files"] | undefined> {
 		const final = Promise.withResolvers<EditPreviewBatch["files"] | undefined>();
 		const argsJson = JSON.stringify({ input });
 		// Its own arguments: the copied version cache would answer for the outer call's.
@@ -1073,7 +1069,8 @@ export class EditTool implements AgentTool<TInput> {
 		};
 		const native = new EditSession(
 			getEditStore(this.session),
-			this.#policy(rawInput, call.resolveContext),
+			// The pass is fed JSON (`setArgsJson`), never the raw custom-wire payload.
+			this.#policy(false, call.resolveContext),
 			(error, batch) => {
 				if (error) final.resolve(undefined);
 				else if (!batch.streaming) final.resolve(batch.files);

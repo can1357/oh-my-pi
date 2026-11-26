@@ -138,18 +138,27 @@ function streamingAborts(files: Preview[]): number {
 	return aborts;
 }
 
-/** Stream `args` into `tool` in small chunks and resolve with the final (untrimmed) preview's files. */
-async function streamPreview(tool: EditTool, toolCallId: string, args: Record<string, unknown>): Promise<Preview[]> {
+/**
+ * Stream `args` into `tool` in small chunks and resolve with the final (untrimmed) preview's files.
+ * `wire: "custom"` streams `args.input` verbatim, as the custom `apply_patch` wire does; JSON otherwise.
+ */
+async function streamPreview(
+	tool: EditTool,
+	toolCallId: string,
+	args: Record<string, unknown>,
+	wire: "json" | "custom" = "json",
+): Promise<Preview[]> {
 	const final = Promise.withResolvers<Preview[]>();
 	const stream = tool.openArgStream({
 		toolCallId,
 		toolName: "edit",
+		customWireName: wire === "custom" ? "apply_patch" : undefined,
 		emit: update => {
 			const batch = update as { streaming?: boolean; files?: Preview[] };
 			if (batch.streaming === false) final.resolve(batch.files ?? []);
 		},
 	});
-	const encoded = JSON.stringify(args);
+	const encoded = wire === "custom" ? String(args.input) : JSON.stringify(args);
 	for (let offset = 0; offset < encoded.length; offset += 7) stream.push(encoded.slice(offset, offset + 7));
 	stream.end(args);
 	return final.promise;
@@ -157,6 +166,8 @@ async function streamPreview(tool: EditTool, toolCallId: string, args: Record<st
 
 describe("edit on a remote handler-written URL", () => {
 	afterEach(() => {
+		// A timed-out fake-timer test never reaches its own `finally`.
+		vi.useRealTimers();
 		InternalUrlRouter.instance().unregister("remotetest");
 	});
 
@@ -243,41 +254,44 @@ describe("edit on a remote handler-written URL", () => {
 		expect(await Bun.file(local).text()).toBe("two\n");
 	});
 
-	it("renders the local sections of an atomic apply_patch batch whose remote file has no mirror", async () => {
-		const { dir, remote, edit, unique } = setup();
-		using _dir = dir;
-		const local = path.join(dir.path(), "local.txt");
-		await Bun.write(local, "one\n");
-		remote.files.set(`/tmp/${unique}.txt`, "alpha\n");
-		const args = {
-			input: [
-				"*** Begin Patch",
-				`*** Update File: remotetest://host/tmp/${unique}.txt`,
-				"@@",
-				"-alpha",
-				"+beta",
-				`*** Update File: ${local}`,
-				"@@",
-				"-one",
-				"+two",
-				"*** End Patch",
-			].join("\n"),
-		};
-		const tool = edit("apply_patch");
-		const previews = await streamPreview(tool, "atomic", args);
-		expect(remote.io).toEqual([]);
-		expect(previews).toHaveLength(2);
-		expect(previews.find(file => file.diff !== undefined)?.diff).toContain("two");
-		const deferred = previews.find(file => file.path === `remotetest://host/tmp/${unique}.txt`);
-		expect(deferred?.notice).toBe(DEFERRED);
-		expect(deferred?.error).toBeUndefined();
-		expect(streamingAborts(previews)).toBe(0);
+	it.each(["json", "custom"] as const)(
+		"renders the local sections of an atomic apply_patch batch whose remote file has no mirror (%s wire)",
+		async wire => {
+			const { dir, remote, edit, unique } = setup();
+			using _dir = dir;
+			const local = path.join(dir.path(), "local.txt");
+			await Bun.write(local, "one\n");
+			remote.files.set(`/tmp/${unique}.txt`, "alpha\n");
+			const args = {
+				input: [
+					"*** Begin Patch",
+					`*** Update File: remotetest://host/tmp/${unique}.txt`,
+					"@@",
+					"-alpha",
+					"+beta",
+					`*** Update File: ${local}`,
+					"@@",
+					"-one",
+					"+two",
+					"*** End Patch",
+				].join("\n"),
+			};
+			const tool = edit("apply_patch");
+			const previews = await streamPreview(tool, "atomic", args, wire);
+			expect(remote.io).toEqual([]);
+			expect(previews).toHaveLength(2);
+			expect(previews.find(file => file.diff !== undefined)?.diff).toContain("two");
+			const deferred = previews.find(file => file.path === `remotetest://host/tmp/${unique}.txt`);
+			expect(deferred?.notice).toBe(DEFERRED);
+			expect(deferred?.error).toBeUndefined();
+			expect(streamingAborts(previews)).toBe(0);
 
-		const result = await tool.execute("atomic", args);
-		expect(result.isError).not.toBe(true);
-		expect(remote.files.get(`/tmp/${unique}.txt`)).toBe("beta\n");
-		expect(await Bun.file(local).text()).toBe("two\n");
-	});
+			const result = await tool.execute("atomic", args);
+			expect(result.isError).not.toBe(true);
+			expect(remote.files.get(`/tmp/${unique}.txt`)).toBe("beta\n");
+			expect(await Bun.file(local).text()).toBe("two\n");
+		},
+	);
 
 	it("still emits the approval preview when recomputing an atomic patch never reports", async () => {
 		const { dir, remote, read, edit, unique } = setup();

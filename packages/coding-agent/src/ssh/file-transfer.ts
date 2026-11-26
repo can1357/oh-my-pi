@@ -225,8 +225,9 @@ export async function updateRemoteFileIfUnchanged(
 		`p=${quotePosixArgument(remotePath)}; t=${tmp}; trap 'rm -f -- "$t"' 0; ` +
 		`umask 077; cat > "$t" || exit 1; ` +
 		EDIT_REGULAR_FILE_GUARD +
-		`c=$(cksum < "$p") || exit 1; set -- $c; ` +
-		`[ "$1 $2" = ${quotePosixArgument(checksum)} ] || exit ${REMOTE_CHANGED_EXIT}; ` +
+		// `read` splits the fields in every shell; `set -- $c` would not under zsh.
+		`c=$(cksum < "$p" | { read -r crc size && printf '%s %s' "$crc" "$size"; }) || exit 1; ` +
+		`[ "$c" = ${quotePosixArgument(checksum)} ] || exit ${REMOTE_CHANGED_EXIT}; ` +
 		`cat "$t" > "$p"`;
 	const args = await buildRemoteCommand(target, wrapInPosixShell(shell, command), { allowStdin: true });
 	using child = ptree.spawn(["ssh", ...args], {
