@@ -7,7 +7,7 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
-import { formatBackgroundNotice, formatExitCodeNotice } from "./details/bash";
+import { formatBackgroundNotice, formatExitCodeNotice, formatTimeoutClampNotice } from "./details/bash";
 import { replaceTabs, truncateToWidth } from "../utils/text-width";
 import { shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { parseConfiguredThinkingLevel } from "../thinking/levels";
@@ -476,7 +476,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const cellTimeoutMs = cellTimeoutSec * 1000;
 		const timeoutNotice =
 			params.timeout !== undefined && params.timeout !== cellTimeoutSec
-				? `Eval timeout clamped from ${params.timeout}s to ${cellTimeoutSec}s.`
+				? formatTimeoutClampNotice(params.timeout, cellTimeoutSec)
 				: undefined;
 		if (timeoutNotice) {
 			onUpdate?.({

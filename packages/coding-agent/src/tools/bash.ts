@@ -3,6 +3,7 @@ import {
 	formatBackgroundNotice,
 	formatWallTimeNotice,
 	formatExitCodeNotice,
+	formatTimeoutClampNotice,
 	WALL_TIME_NOTICE_MIN_MS,
 } from "./details/bash";
 import * as fs from "node:fs";
@@ -2177,7 +2178,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec, maxTimeout);
 		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
 		if (timeoutSec !== undefined && timeoutSec !== requestedTimeoutSec) {
-			pendingNotices.push(`[timeout clamped: ${requestedTimeoutSec}s → ${timeoutSec}s]`);
+			pendingNotices.push(formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec));
 		}
 
 		if (asyncRequested) {

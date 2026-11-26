@@ -78,6 +78,11 @@ export function formatWallTimeNotice(wallTimeMs: number): string {
 	return `[took ${formatWallTimeSeconds(wallTimeMs)}s]`;
 }
 
+/** Formats the notice bash and eval add when the requested `timeout` was clamped. */
+export function formatTimeoutClampNotice(requestedSec: number, effectiveSec: number): string {
+	return `[timeout clamped: ${requestedSec}s → ${effectiveSec}s]`;
+}
+
 /** Formats the model-facing command exit status notice. */
 export function formatExitCodeNotice(exitCode: number): string {
 	return `[exit code ${exitCode}]`;

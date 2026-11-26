@@ -659,7 +659,7 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		const request = { signal: executionOptions.signal, deadlineMs };
 		if (isCancellationError(err, PythonExecutionCancelledError, request)) {
 			const timedOut = isTimedOutCancellation(err, PythonExecutionCancelledError, request.signal, deadlineMs);
-			return createCancelledKernelResult(timedOut ? formatTimeoutAnnotation(executionOptions.timeoutMs) : "");
+			return createCancelledKernelResult(timedOut ? `[${formatTimeoutAnnotation(executionOptions.timeoutMs)}]` : "");
 		}
 		throw err;
 	}
