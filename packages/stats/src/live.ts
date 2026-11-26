@@ -12,7 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, hasFsCode, isEacces, logger } from "@oh-my-pi/pi-utils";
 import { syncAllSessions } from "./aggregator";
 import { getDataVersion, initDb } from "./db";
 import { isCompressScratchPath } from "./parser";
@@ -276,8 +276,7 @@ export class StatsLive {
 			});
 			this.#watcher.on("error", error => {
 				// An unreadable subtree (e.g. a root-only directory) fails only its own watch; the rest keeps reporting.
-				const code = (error as NodeJS.ErrnoException).code;
-				if (code === "EACCES" || code === "EPERM") {
+				if (isEacces(error) || hasFsCode(error, "EPERM")) {
 					logger.debug("Stats session watcher skipped an unreadable directory", { error: String(error) });
 					return;
 				}
