@@ -209,9 +209,9 @@ function layoutField(node: UiNode, text: string, width: number): readonly Editor
 	if (last && last.width === width && last.text === text) return last.rows;
 	const reuse = last?.width === width ? last.lines : undefined;
 	const lines = new Map<string, readonly Chunk[]>();
+	const wrapWidth = Math.max(1, width);
 	const rows = layoutLines(text, line => {
-		let chunks = lines.get(line) ?? reuse?.get(line);
-		if (!chunks) chunks = wrapLine(line, Math.max(1, width));
+		const chunks = lines.get(line) ?? reuse?.get(line) ?? wrapLine(line, wrapWidth);
 		lines.set(line, chunks);
 		return chunks;
 	});

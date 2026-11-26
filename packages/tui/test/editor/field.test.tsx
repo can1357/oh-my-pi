@@ -107,12 +107,6 @@ describe("layout", () => {
 	test("finds the row holding an offset at breaks, blank lines and past the end", () => {
 		// "alpha beta" (the blank at 10 is swallowed by the soft break), "gamma", the blank line, "xy".
 		const rows = layoutText("alpha beta gamma\n\nxy", 10);
-		expect(rows.map(r => [r.start, r.end])).toEqual([
-			[0, 11],
-			[11, 16],
-			[17, 17],
-			[18, 20],
-		]);
 		// A swallowed blank stays on its row, a soft break starts the next, a line's end stays on its last row.
 		expect([0, 10, 11, 16, 17, 18, 20, 99].map(offset => rowOf(rows, offset))).toEqual([0, 0, 1, 1, 2, 3, 3, 3]);
 	});

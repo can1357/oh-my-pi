@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Typing in an editor holding thousands of lines is about 3x faster per keystroke
+- Typing in an editor holding thousands of lines is about 3x faster per keystroke ([#20659](https://github.com/can1357/oh-my-pi/pull/20659) by [@H4vC](https://github.com/H4vC))
 - SIXEL and iTerm2 images no longer draw over other rows or scroll the terminal under the frame: images taller than the screen are fitted within it, and a live image whose first rows the viewport cuts off is left out until they fit ([#20620](https://github.com/can1357/oh-my-pi/pull/20620) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Code blocks in a streaming reply now reach scrollback line by line as they scroll off screen, instead of staying out of reach until the block ends ([#13676](https://github.com/can1357/oh-my-pi/issues/13676), [#20561](https://github.com/can1357/oh-my-pi/pull/20561) by [@Frexxis](https://github.com/Frexxis))
 - Reduced idle CPU use on Windows after `/restart` ([#20518](https://github.com/can1357/oh-my-pi/pull/20518) by [@ethancawse](https://github.com/ethancawse)).
