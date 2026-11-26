@@ -14,6 +14,7 @@
 ### Fixed
 
 - Fixed the native addon load error printing a `curl` command for a `.node` file that no release publishes, which returned 404; it now names the release page ([#10126](https://github.com/can1357/oh-my-pi/issues/10126), [#19951](https://github.com/can1357/oh-my-pi/pull/19951) by [@JamieJ5926](https://github.com/JamieJ5926))
+- `Process.terminate` now reaches descendants that started their own session: it captures them before the first signal, so a group SIGTERM that ends the root first no longer hides them, and keeps them for the hard-kill wave ([#20597](https://github.com/can1357/oh-my-pi/pull/20597) by [@daandden](https://github.com/daandden))
 - Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
 - Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
 - Preserved source-code indentation and linked content cards in URL reads.
