@@ -12,6 +12,7 @@ import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
+import { resolveConfigValue } from "../config/resolve-config-value";
 import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import type {
 	MemoryBackend,
@@ -531,6 +532,7 @@ async function resolveMnemopiProviderOptions(
 	usageLedger: Partial<ModelUsageLedger>,
 	session: AgentSession,
 ): Promise<MnemopiProviderOptions> {
+	const embeddingKey = config.providerOptions.embeddingApiKey;
 	const base: MnemopiProviderOptions = {
 		noEmbeddings: config.providerOptions.noEmbeddings,
 		embeddings: {
@@ -558,9 +560,15 @@ async function resolveMnemopiProviderOptions(
 		},
 		embeddingModel: config.providerOptions.embeddingModel,
 		embeddingApiUrl: config.providerOptions.embeddingApiUrl,
+		// A configured key is an environment-variable name or a !command, read on each
+		// request as a provider apiKey is; an empty setting stays a static empty key.
 		embeddingApiKey:
-			config.providerOptions.embeddingApiKey ??
-			(await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)),
+			typeof embeddingKey === "string"
+				? embeddingKey === ""
+					? ""
+					: () => resolveConfigValue(embeddingKey)
+				: (embeddingKey ??
+					(await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl))),
 		llm: false,
 	};
 

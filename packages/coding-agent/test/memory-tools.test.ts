@@ -275,6 +275,62 @@ describe("Mnemopi tool factories", () => {
 		expect(MemoryReflectTool.createIf(session)).toBeInstanceOf(MemoryReflectTool);
 		expect(MemoryEditTool.createIf(session)).toBeInstanceOf(MemoryEditTool);
 	});
+	it("sends the environment variable named by mnemopi.embeddingApiKey as the bearer token", async () => {
+		const keyVariable = "OMP_MNEMOPI_TEST_EMBED_KEY";
+		const previousKey = Bun.env[keyVariable];
+		Bun.env[keyVariable] = "sk-embedding-test";
+		const authorizations: (string | null)[] = [];
+		const server = Bun.serve({
+			port: 0,
+			fetch(request) {
+				const authorization = request.headers.get("authorization");
+				authorizations.push(authorization);
+				if (authorization !== "Bearer sk-embedding-test") return new Response("unauthorized", { status: 401 });
+				return Response.json({ data: [{ embedding: [0.25, 0.75], index: 0 }] });
+			},
+		});
+
+		try {
+			const settings = Settings.isolated({
+				"memory.backend": "mnemopi",
+				"mnemopi.noEmbeddings": false,
+				"mnemopi.llmMode": "none",
+				"mnemopi.scoping": "global",
+				"mnemopi.bank": "default",
+				"mnemopi.dbPath": makeMnemopiConfig().dbPath,
+				"mnemopi.embeddingModel": "bge-m3",
+				"mnemopi.embeddingApiUrl": `http://127.0.0.1:${server.port}/v1`,
+				"mnemopi.embeddingApiKey": keyVariable,
+			});
+			const modelRegistry = { getApiKeyForProvider: async () => undefined, resolver: () => async () => undefined };
+			const session = {
+				sessionId: TEST_SESSION_ID,
+				settings,
+				modelRegistry,
+				sessionManager: { getEntries: () => [], getCwd: () => "/tmp" },
+				emitNotice: () => {},
+				getHindsightSessionState: () => undefined,
+				subscribe: () => () => {},
+			} as never;
+			await mnemopiBackend.start({
+				session,
+				settings,
+				modelRegistry: modelRegistry as never,
+				agentDir: path.dirname(tempDbPath!),
+				taskDepth: 0,
+			});
+
+			const started = getMnemopiSessionState(session);
+			if (!started) throw new Error("Mnemopi backend did not start");
+			registeredMnemopiState = started;
+			await started.getScopedRetainTarget().memory.recall("embedding authentication");
+			expect(authorizations).toEqual(["Bearer sk-embedding-test"]);
+		} finally {
+			server.stop(true);
+			if (previousKey === undefined) delete Bun.env[keyVariable];
+			else Bun.env[keyVariable] = previousKey;
+		}
+	});
 });
 
 describe("retain.execute", () => {
