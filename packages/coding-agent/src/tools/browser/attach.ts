@@ -754,21 +754,29 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}
 		targets = browser.targets();
 	}
-	let hasUnreadablePage = false;
+	// A matcher names a tab by an id, URL or title that Chromium reports without attaching. Attach only the tabs it names,
+	// so an unrelated tab whose page never resolves can neither delay nor veto them. With no named tab, attach every page.
+	const matcher = options.matcher;
+	const named = matcher
+		? targets.filter(target => String(target.type()) === "page" && targetNamedBy(target, matcher))
+		: [];
+	const unreadableUrls: string[] = [];
 	const discoveredPages = await Promise.all(
-		targets.map(async target => {
+		(named.length > 0 ? named : targets).map(async target => {
 			if (String(target.type()) !== "page") return null;
 			const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
 			if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal))) {
-				hasUnreadablePage = true;
+				unreadableUrls.push(target.url());
 				return null;
 			}
 			return page;
 		}),
 	);
 	const usablePages = discoveredPages.filter((page): page is Page => page !== null);
-	if (hasUnreadablePage && options.matcher) {
-		throw new ToolError("A browser tab is not ready; retry after it loads to avoid selecting a different tab");
+	if (unreadableUrls.length > 0 && matcher) {
+		throw new ToolError(
+			`A browser tab is not ready; retry after it loads to avoid selecting a different tab: ${unreadableUrls.join(", ")}`,
+		);
 	}
 	if (usablePages.length > 0) return pickPageFromList(usablePages, options);
 
@@ -777,6 +785,13 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		throw new ToolError("No page targets available on the attached browser");
 	}
 	return pickPageFromList(fallbackPages, options);
+}
+
+/** Whether `matcher` names a page by the id, URL or title Chromium reports for its target, without attaching to the page. */
+function targetNamedBy(target: Target, matcher: string): boolean {
+	const id = (target as Target & { _targetId?: string })._targetId;
+	const { title } = (target as Target & { _getTargetInfo(): { title: string } })._getTargetInfo();
+	return relayEntryMatches({ id: id ?? "", type: "page", title, url: target.url() }, matcher);
 }
 
 async function enrichPages(
