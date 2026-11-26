@@ -124,4 +124,15 @@ describe("parseArgs — --cwd flag", () => {
 		expect(setProjectDir).toHaveBeenCalledTimes(1);
 		expect(setProjectDir).toHaveBeenCalledWith(fallback);
 	});
+
+	it("keeps an explicitly allowed home-rooted checkout in place", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "omp-home-repo-"));
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+		vi.spyOn(utils, "getProjectDir").mockReturnValue(home);
+		const setProjectDir = vi.spyOn(utils, "setProjectDir").mockImplementation(() => {});
+
+		await applyStartupCwd(parseArgs(["--print", "--allow-home"]));
+
+		expect(setProjectDir).not.toHaveBeenCalled();
+	});
 });

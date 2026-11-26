@@ -73,7 +73,7 @@ export default class Review extends Command {
 		}
 
 		const { runRootCommand } = await import("../main");
-		await runRootCommand(parseArgs(["--print"]), [], {
+		await runRootCommand(parseArgs(["--print", "--allow-home"]), [], {
 			initialPrompt: prompt,
 			freshSession: true,
 		});
