@@ -32,7 +32,9 @@ import {
 	type RemotePathKind,
 	readRemoteFile,
 	readRemoteFileForEdit,
+	RemoteFileChangedError,
 	remoteHomeDirectory,
+	sshTargetKey,
 	statRemotePath,
 	updateRemoteFileIfUnchanged,
 	writeRemoteFile,
@@ -47,6 +49,7 @@ import type {
 	InternalUrl,
 	ProtocolHandler,
 	RemoteEditHooks,
+	RemoteEditLocation,
 	ResolveContext,
 	SchemeSpec,
 	UrlCompletion,
@@ -118,9 +121,11 @@ async function remotePathFromUrl(url: InternalUrl, target: SSHConnectionTarget, 
 
 /**
  * `ssh://<authority as written>/<absolute path>`, each path segment
- * percent-encoded, so every spelling of one remote file (`/~/x`, `/home/u/x`,
- * `/home/u/%78`) shares one mirror and snapshot tag. A literal leading `~`
- * segment stays encoded (`/%7E`): `/~` spells HOME.
+ * percent-encoded, so every path spelling of one remote file (`/~/x`,
+ * `/home/u/x`, `/home/u/%78`) reads back under one URL. A literal leading `~`
+ * segment stays encoded (`/%7E`): `/~` spells HOME. The authority keeps its
+ * case, so writes go back through the alias as written; mirrors are keyed by
+ * {@link sshEditLocation} instead.
  */
 function canonicalSshUrl(url: InternalUrl, absolute: string): string {
 	const authority = /^ssh:\/\/([^/?#]*)/i.exec(url.rawHref ?? url.href)?.[1] ?? url.host;
@@ -129,9 +134,13 @@ function canonicalSshUrl(url: InternalUrl, absolute: string): string {
 	return `ssh://${authority}${path}`;
 }
 
-/** Identity of the destination an `ssh://` authority resolved to (it can differ per project). */
-function sshTargetKey(target: SSHConnectionTarget): string {
-	return JSON.stringify([target.name, target.host, target.username, target.port, target.keyPath]);
+/**
+ * The edit location of `absolute` on the destination `url` resolved to: keyed by
+ * that destination and the absolute path, so authorities that differ only in case
+ * (`ssh://Prod/x`, `ssh://prod/x`) share one mirror and one tag.
+ */
+function sshEditLocation(url: InternalUrl, target: SSHConnectionTarget, absolute: string): RemoteEditLocation {
+	return { url: canonicalSshUrl(url, absolute), target: sshTargetKey(target), path: absolute };
 }
 
 /** UTF-8 text of `bytes` with any BOM kept, so a mirror edit writes it back; `null` for binary/non-UTF-8 bytes. */
@@ -146,12 +155,11 @@ function decodeEditableText(bytes: Uint8Array): string | null {
 
 /** Model-facing refusal for an edit transfer on `url`. */
 function editTransferError(error: unknown, url: string): unknown {
+	if (error instanceof RemoteFileChangedError) return new RemoteEditConflictError(url);
 	if (!(error instanceof RemoteEditPathError)) return error;
 	switch (error.kind) {
 		case "missing":
 			return new RemoteEditMissingError(url);
-		case "changed":
-			return new RemoteEditConflictError(url);
 		case "symlink":
 			return new Error(
 				`${url} is a symbolic link${error.linkTarget ? ` to ${error.linkTarget}` : ""}; edit does not write through symbolic links. Edit the link's target instead.`,
@@ -337,25 +345,26 @@ export class SshProtocolHandler implements ProtocolHandler {
 	};
 
 	/**
-	 * `edit` patches a local mirror keyed by the canonical URL and the resolved
-	 * destination: it fetches the file and its checksum only once the edit runs,
+	 * `edit` patches a local mirror keyed by the resolved destination and the
+	 * absolute path: it fetches the file and its checksum only once the edit runs,
 	 * and writes back in place only while the remote bytes still match what it fetched.
 	 */
 	readonly edit: RemoteEditHooks = {
 		locate: async (url, context, options) => {
 			const target = await resolveTarget(url, context?.cwd);
 			const { homeRelative, decoded } = parseRemotePath(url);
-			if (!homeRelative) return { url: canonicalSshUrl(url, decoded), target: sshTargetKey(target) };
+			if (!homeRelative) return sshEditLocation(url, target, decoded);
 			const home = options?.localOnly
 				? peekRemoteHomeDirectory(target)
 				: await remoteHomeDirectory(target, { signal: context?.signal });
 			if (home === undefined) return undefined;
-			return { url: canonicalSshUrl(url, joinRemoteHome(home, decoded)), target: sshTargetKey(target) };
+			return sshEditLocation(url, target, joinRemoteHome(home, decoded));
 		},
 		fetch: async (url, context) => {
 			const target = await resolveTarget(url, context?.cwd);
 			const remotePath = await remotePathFromUrl(url, target, context?.signal);
-			const canonical = canonicalSshUrl(url, remotePath);
+			const location = sshEditLocation(url, target, remotePath);
+			const canonical = location.url;
 			let file: RemoteFileReadResult;
 			try {
 				file = await readRemoteFileForEdit(target, remotePath, {
@@ -373,7 +382,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 			const content = decodeEditableText(file.bytes);
 			if (content === null)
 				throw new Error(`${canonical} is a binary or non-UTF-8 file; ssh:// edits UTF-8 text only`);
-			return { url: canonical, target: sshTargetKey(target), content, checksum: posixCksum(file.bytes) };
+			return { ...location, content, checksum: posixCksum(file.bytes) };
 		},
 		update: async (url, content, checksum, context) => {
 			const target = await resolveTarget(url, context?.cwd);

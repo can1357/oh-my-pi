@@ -20,6 +20,7 @@ import {
 	toolCallLoopRedirectDetails,
 } from "./tool-call-loop-redirect";
 
+import { DEFERRED_PREVIEW_NOTICE } from "../edit/remote-mirror";
 import { cfgEditStreamingAbort } from "../edit/settings";
 import { toolCommandCallName } from "../tools/tool-commands";
 import {
@@ -119,7 +120,9 @@ export class StreamingEditGuard {
 				"error" in file &&
 				typeof file.error === "string" &&
 				file.error.length > 0 &&
-				!file.error.startsWith(NO_CHANGES_PREVIEW_PREFIX),
+				!file.error.startsWith(NO_CHANGES_PREVIEW_PREFIX) &&
+				// A remote file whose preview waits for the edit's fetch has not failed.
+				!file.error.startsWith(DEFERRED_PREVIEW_NOTICE),
 		);
 		if (failed) this.#abortPatch({ toolCallId: event.toolCallId, filePath: failed.path, error: failed.error });
 	}

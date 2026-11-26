@@ -385,17 +385,21 @@ export interface WriteContext {
 }
 
 /**
- * Where a remote file an edit targets lives: its canonical URL (the key `read`
- * tags and `edit` addresses) and the destination that URL resolved to.
+ * Where a remote file an edit targets lives: the destination its URL resolved
+ * to and the absolute path there (together the mirror's key), plus the canonical
+ * URL `read` shows in its tag and `edit` writes back through.
  */
 export interface RemoteEditLocation {
-	/** `scheme://authority/<absolute path>`, one spelling per remote file. */
+	/** `scheme://authority/<absolute path>`, the authority as written. */
 	url: string;
 	/**
 	 * Identity of the resolved destination (host, account, port, key), so one
-	 * URL that resolves to different hosts (per-project aliases) never shares a mirror.
+	 * URL that resolves to different hosts (per-project aliases) never shares a mirror,
+	 * and spellings that resolve to one destination (`Prod`, `prod`) always do.
 	 */
 	target: string;
+	/** Absolute path of the file on {@link target}. */
+	path: string;
 }
 
 /** Remote text fetched for an edit. */

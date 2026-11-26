@@ -60,12 +60,20 @@ class RpcHostUriProtocolHandler implements ProtocolHandler {
 			this.write = (url, content, context) => this.#bridge.requestWrite(this.scheme, url, content, context);
 			this.edit = {
 				// The host owns its URIs' identity: one spelling, one resource.
-				locate: async url => ({ url: url.href, target: "" }),
+				locate: async url => ({ url: url.href, target: "", path: url.href }),
 				fetch: async (url, context) => {
 					const { content } = await this.resolve(url, context);
-					return { url: url.href, target: "", content, checksum: posixCksum(new TextEncoder().encode(content)) };
+					return {
+						url: url.href,
+						target: "",
+						path: url.href,
+						content,
+						checksum: posixCksum(new TextEncoder().encode(content)),
+					};
 				},
-				// The host protocol has no conditional write, so the check is a read just before the write.
+				// Not a conditional write: the host protocol has none, so this reads, compares, then
+				// writes in separate requests. A change the host takes between the read and the write
+				// is overwritten; only changes made before the read are refused.
 				update: async (url, content, checksum, context) => {
 					const current = await this.resolve(url, context);
 					if (posixCksum(new TextEncoder().encode(current.content)) !== checksum) {

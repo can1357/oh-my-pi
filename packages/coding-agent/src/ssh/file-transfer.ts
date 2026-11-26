@@ -69,13 +69,24 @@ export interface RemoteFileWriteOptions {
 	timeoutMs?: number;
 }
 
+/**
+ * Identity of the host account `target` connects to: the one key the HOME cache
+ * and `ssh://` edit mirrors share. The alias name is a label, not part of the
+ * identity, and the host is compared without case (DNS names are, and OpenSSH
+ * lowercases the destination before matching `Host` patterns), so `ssh://Prod`
+ * and `ssh://prod` share one key. The account name stays case-sensitive.
+ */
+export function sshTargetKey(target: SSHConnectionTarget): string {
+	return JSON.stringify([target.host.toLowerCase(), target.username, target.port, target.keyPath]);
+}
+
 /** Resolve the remote account's HOME without shell-expanding any caller-supplied path. */
 export async function remoteHomeDirectory(
 	target: SSHConnectionTarget,
 	opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<string> {
 	opts.signal?.throwIfAborted();
-	const key = JSON.stringify([target.name, target.host, target.username, target.port, target.keyPath]);
+	const key = sshTargetKey(target);
 	const cached = remoteHomes.get(key);
 	if (cached !== undefined) return cached;
 	const shell = await ensurePosixRemote(target);
@@ -94,7 +105,7 @@ export async function remoteHomeDirectory(
 
 /** The cached HOME of `target`'s account, without contacting the host; `undefined` before the first lookup. */
 export function peekRemoteHomeDirectory(target: SSHConnectionTarget): string | undefined {
-	return remoteHomes.get(JSON.stringify([target.name, target.host, target.username, target.port, target.keyPath]));
+	return remoteHomes.get(sshTargetKey(target));
 }
 
 /** Remote exit status `readRemoteFile` reserves for "nothing at the path" (sysexits `EX_NOINPUT`). */
@@ -111,11 +122,19 @@ const REMOTE_SPECIAL_EXIT = 83;
 /** Why an edit transfer refused its path. `linkTarget` is set for `symlink` when the host reported it. */
 export class RemoteEditPathError extends Error {
 	constructor(
-		readonly kind: "missing" | "symlink" | "directory" | "special" | "changed",
+		readonly kind: "missing" | "symlink" | "directory" | "special",
 		readonly linkTarget?: string,
 	) {
 		super(`remote edit refused: ${kind}`);
 		this.name = "RemoteEditPathError";
+	}
+}
+
+/** A guarded update found the file's checksum no longer matches the expected one; nothing was written. */
+export class RemoteFileChangedError extends Error {
+	constructor(readonly remotePath: string) {
+		super(`${remotePath} changed on the remote host; nothing was written`);
+		this.name = "RemoteFileChangedError";
 	}
 }
 
@@ -130,8 +149,15 @@ const EDIT_REGULAR_FILE_GUARD =
 	`if [ -d "$p" ]; then exit ${REMOTE_DIRECTORY_EXIT}; fi; ` +
 	`[ -f "$p" ] || exit ${REMOTE_SPECIAL_EXIT}; `;
 
-/** Map an edit transfer's reserved exit status to a {@link RemoteEditPathError}; other failures pass through. */
-async function awaitEditTransfer(child: { exitedCleanly: Promise<unknown> }, stdout: Uint8Array): Promise<void> {
+/**
+ * Map an edit transfer's reserved exit status to a {@link RemoteEditPathError} or,
+ * for a checksum mismatch, a {@link RemoteFileChangedError}; other failures pass through.
+ */
+async function awaitEditTransfer(
+	child: { exitedCleanly: Promise<unknown> },
+	stdout: Uint8Array,
+	remotePath: string,
+): Promise<void> {
 	try {
 		await child.exitedCleanly;
 	} catch (error) {
@@ -148,7 +174,7 @@ async function awaitEditTransfer(child: { exitedCleanly: Promise<unknown> }, std
 			case REMOTE_SPECIAL_EXIT:
 				throw new RemoteEditPathError("special");
 			case REMOTE_CHANGED_EXIT:
-				throw new RemoteEditPathError("changed");
+				throw new RemoteFileChangedError(remotePath);
 		}
 		throw error;
 	}
@@ -171,7 +197,7 @@ export async function readRemoteFileForEdit(
 		signal: ptree.combineSignals(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
 	});
 	const raw = await child.bytes();
-	await awaitEditTransfer(child, raw);
+	await awaitEditTransfer(child, raw, remotePath);
 	const truncated = raw.length > opts.maxBytes;
 	return { bytes: truncated ? raw.subarray(0, opts.maxBytes) : raw, truncated };
 }
@@ -180,8 +206,11 @@ export async function readRemoteFileForEdit(
  * Rewrite an existing regular file in place with `content`, only while its POSIX
  * `cksum` still equals `checksum`, in one remote command: stdin is staged into a
  * temp beside the file first, then the guard, the checksum comparison, and the
- * in-place copy run together. A mismatch, a symbolic link, or a non-regular path
- * throws {@link RemoteEditPathError} and leaves the file untouched.
+ * in-place copy run together. A mismatch ({@link RemoteFileChangedError}), a
+ * symbolic link, or a non-regular path ({@link RemoteEditPathError}) leaves the
+ * file untouched. The temp is created under `umask 077`, so the new contents of a
+ * private file are never readable by other users while staged; the in-place copy
+ * keeps the file's own mode.
  */
 export async function updateRemoteFileIfUnchanged(
 	target: SSHConnectionTarget,
@@ -194,7 +223,7 @@ export async function updateRemoteFileIfUnchanged(
 	const tmp = quotePosixArgument(`${remotePath}.omp-tmp.${crypto.randomUUID()}`);
 	const command =
 		`p=${quotePosixArgument(remotePath)}; t=${tmp}; trap 'rm -f -- "$t"' 0; ` +
-		`cat > "$t" || exit 1; ` +
+		`umask 077; cat > "$t" || exit 1; ` +
 		EDIT_REGULAR_FILE_GUARD +
 		`c=$(cksum < "$p") || exit 1; set -- $c; ` +
 		`[ "$1 $2" = ${quotePosixArgument(checksum)} ] || exit ${REMOTE_CHANGED_EXIT}; ` +
@@ -205,7 +234,7 @@ export async function updateRemoteFileIfUnchanged(
 		signal: ptree.combineSignals(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
 	});
 	const out = await child.bytes();
-	await awaitEditTransfer(child, out);
+	await awaitEditTransfer(child, out, remotePath);
 }
 
 /**

@@ -17,6 +17,7 @@ import {
 	editGrammar,
 	editInspect,
 	type EditFileOutcome,
+	type EditFilePreview,
 	type EditInspection,
 	type EditPolicy,
 	type EditPreviewBatch,
@@ -39,7 +40,13 @@ import {
 	sessionWriteContext,
 } from "../internal-urls";
 import { unwrapHashlineHeaderPath } from "../tools/hashline-header-path";
-import { isRemoteTextWritable, remoteMirrorPath, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
+import {
+	DEFERRED_PREVIEW_NOTICE,
+	isRemoteTextWritable,
+	remoteMirrorPath,
+	remoteMirrorUrl,
+	writeRemoteMirror,
+} from "./remote-mirror";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "../tools/details/lsp";
 import { notifyWorkspaceWatchedFiles } from "../lsp/client";
@@ -381,6 +388,10 @@ interface OpenEditSession {
 	resolveContext: ResolveContext;
 	/** The arguments as far as they are known (partial while streaming), as JSON for {@link editInspect}. */
 	argsJson: () => string;
+	/** Bumped whenever {@link argsJson} would return something new; keys {@link argsView}. */
+	argsVersion: number;
+	/** {@link argsJson} inspected and parsed once per {@link argsVersion} (`#callArgs`). */
+	argsView?: CallArgsView;
 	/** Set once the call runs (after approval): URL targets resolve from then on, never before. */
 	applying: boolean;
 	/** Remote mirrors this call fetched, by mirror path: the canonical URL and the checksum its write must match. */
@@ -389,12 +400,30 @@ interface OpenEditSession {
 	deferred: Set<string>;
 }
 
+/** One version of an edit call's arguments, inspected and parsed. */
+interface CallArgsView {
+	version: number;
+	inspection: EditInspection;
+	args: Record<string, unknown> | undefined;
+}
+
 /** An edit call's state that URL resolution and writes consult. */
 type EditCall = Omit<OpenEditSession, "native">;
 
-/** The refusal that stands in for a remote file's deferred preview; `#settlePreview` drops it. */
+/**
+ * Longest wait for a throwaway preview pass (`#previewOnce`). It only reads local
+ * files, so this bounds a pass that never reports rather than a slow one.
+ */
+const PREVIEW_PASS_TIMEOUT_MS = 5_000;
+
+/** The refusal that stands in for a remote file's deferred preview; `#settlePreview` turns it into a placeholder. */
 function deferredPreview(url: string): string {
 	return `Preview deferred: ${url} is fetched from the remote host when the edit runs`;
+}
+
+/** The preview entry shown for a deferred remote file: a notice, not a failed preview. */
+function deferredPlaceholder(path: string): EditFilePreview {
+	return { path, error: DEFERRED_PREVIEW_NOTICE };
 }
 
 /** Whether the authored edit target `authored` names the internal URL `url` as the native engine keys it. */
@@ -419,6 +448,10 @@ function parsePartialArgs(argsJson: string): Record<string, unknown> | undefined
 	}
 }
 
+// TODO(native): `PATCH_FILE_HEADER`, `patchFileHeaders` and `stripPatchSections` duplicate
+// the native `*** Begin Patch` parser. `editInspect` already reports deletes and moves as
+// `EditFileOpIntent` (crates/natives/src/edit.rs); once a Rust change reports `create` there
+// too, read creates from `inspection.fileOps` and drop this TS copy.
 const PATCH_FILE_HEADER = /^\*\*\* (Add|Update|Delete) File: (.*)$/;
 
 /** The file headers of a `*** Begin Patch` payload (apply_patch, sloppy's patch form). */
@@ -598,15 +631,27 @@ export class EditTool implements AgentTool<TInput> {
 				logger.debug("Native edit preview failed", { error: error.message, toolCallId: init.toolCallId });
 				return;
 			}
-			// Batches arrive in generation order; settling keeps that order.
+			// Batches arrive in generation order; settling keeps that order. A batch is
+			// always emitted: one whose settling fails goes out as the engine produced it
+			// (deferred entries still shown as placeholders), so the approval it gates
+			// never waits on a lost preview.
 			settled = settled
-				.then(() => this.#settlePreview(batch, open, rawInput))
-				.then(settledBatch => init.emit(settledBatch))
-				.catch(settleError => logger.debug("Edit preview settling failed", { error: String(settleError) }));
+				.then(async () => {
+					let settledBatch = batch;
+					try {
+						settledBatch = await this.#settlePreview(batch, open, rawInput);
+					} catch (settleError) {
+						logger.debug("Edit preview settling failed", { error: String(settleError) });
+						settledBatch = { ...batch, files: this.#markDeferred(batch.files, open) };
+					}
+					init.emit(settledBatch);
+				})
+				.catch(emitError => logger.debug("Edit preview emit failed", { error: String(emitError) }));
 		});
 		const editSession = open.native;
 		let streamed = "";
 		open.argsJson = () => (rawInput ? JSON.stringify({ input: streamed }) : streamed);
+		open.argsVersion++;
 		this.#sessions.delete(init.toolCallId);
 		this.#sessions.set(init.toolCallId, open);
 		while (this.#sessions.size > 32) {
@@ -619,6 +664,7 @@ export class EditTool implements AgentTool<TInput> {
 		return {
 			push: delta => {
 				streamed += delta;
+				open.argsVersion++;
 				editSession.push(delta);
 			},
 			end: args => {
@@ -680,6 +726,7 @@ export class EditTool implements AgentTool<TInput> {
 			open.native.finish();
 		}
 		open.argsJson = () => argsJson;
+		open.argsVersion++;
 		open.applying = true;
 		const current = open;
 		const editSession = open.native;
@@ -800,6 +847,7 @@ export class EditTool implements AgentTool<TInput> {
 		const call: EditCall = {
 			resolveContext,
 			argsJson: () => "{}",
+			argsVersion: 0,
 			applying: false,
 			fetched: new Map(),
 			deferred: new Set(),
@@ -899,12 +947,9 @@ export class EditTool implements AgentTool<TInput> {
 		return { path: mirror, planWritable: false };
 	}
 
-	/**
-	 * The operation other than an in-place update that the call's arguments
-	 * (partial while streaming) name for `url`: a delete or move, or an explicit
-	 * create (`*** Add File:`, a patch entry with `op: "create"`).
-	 */
-	#remoteOperation(url: string, call: EditCall): "create" | "delete" | "move" | undefined {
+	/** The call's current arguments, inspected and parsed once per version (not once per URL resolution). */
+	#callArgs(call: EditCall): CallArgsView {
+		if (call.argsView?.version === call.argsVersion) return call.argsView;
 		const argsJson = call.argsJson();
 		let inspection: EditInspection;
 		try {
@@ -912,12 +957,22 @@ export class EditTool implements AgentTool<TInput> {
 		} catch {
 			inspection = { paths: [], entries: [], fileOps: [] };
 		}
+		call.argsView = { version: call.argsVersion, inspection, args: parsePartialArgs(argsJson) };
+		return call.argsView;
+	}
+
+	/**
+	 * The operation other than an in-place update that the call's arguments
+	 * (partial while streaming) name for `url`: a delete or move, or an explicit
+	 * create (`*** Add File:`, a patch entry with `op: "create"`).
+	 */
+	#remoteOperation(url: string, call: EditCall): "create" | "delete" | "move" | undefined {
+		const { inspection, args } = this.#callArgs(call);
 		const names = (authored: string) => namesUrl(authored, url);
 		for (const op of inspection.fileOps) {
 			if (op.kind === "delete" && names(op.path)) return "delete";
 			if (op.kind === "move" && (names(op.path) || (op.to !== undefined && names(op.to)))) return "move";
 		}
-		const args = parsePartialArgs(argsJson);
 		if (typeof args?.input === "string") {
 			for (const header of patchFileHeaders(args.input)) {
 				if (header.kind === "Add" && names(header.path)) return "create";
@@ -934,51 +989,94 @@ export class EditTool implements AgentTool<TInput> {
 		return undefined;
 	}
 
+	/** Whether `error` is the refusal that stands in for one of the call's deferred previews. */
+	#isDeferral(error: string | undefined, call: EditCall): boolean {
+		return error !== undefined && [...call.deferred].some(url => error.includes(deferredPreview(url)));
+	}
+
+	/** `files` with every deferral refusal replaced by its placeholder entry. */
+	#markDeferred(files: readonly EditFilePreview[], call: EditCall): EditFilePreview[] {
+		return files.map(file => (this.#isDeferral(file.error, call) ? deferredPlaceholder(file.path) : file));
+	}
+
 	/**
-	 * Drop the refusals that stand in for deferred previews (`#resolveRemote`), so only
-	 * those files' previews are missing and no deferral reads as a failed preview.
+	 * Show the refusals that stand in for deferred previews (`#resolveRemote`) as
+	 * placeholder entries, so each deferred file stays visible in the approval
+	 * preview without reading as a failed preview under `edit.streamingAbort`.
 	 * `*** Begin Patch` payloads stage atomically, so one deferred section fails the
-	 * whole preview: the final one is computed again without the deferred files' sections.
+	 * whole preview: the final one is computed again without the deferred files'
+	 * sections, and those files get placeholders.
 	 */
 	async #settlePreview(batch: EditPreviewBatch, call: EditCall, rawInput: boolean): Promise<EditPreviewBatch> {
 		if (call.deferred.size === 0) return batch;
-		const deferredOnly = (error: string | undefined) =>
-			error !== undefined && [...call.deferred].some(url => error.includes(deferredPreview(url)));
-		const atomic = batch.files.length === 1 && !batch.files[0]?.diff && deferredOnly(batch.files[0]?.error);
-		const input = parsePartialArgs(call.argsJson())?.input;
-		if (!atomic || batch.streaming || typeof input !== "string") {
-			return { ...batch, files: batch.files.filter(file => !deferredOnly(file.error)) };
+		const atomic = batch.files.length === 1 && !batch.files[0]?.diff && this.#isDeferral(batch.files[0]?.error, call);
+		const input = this.#callArgs(call).args?.input;
+		if (!atomic || batch.streaming || typeof input !== "string" || patchFileHeaders(input).length === 0) {
+			return { ...batch, files: this.#markDeferred(batch.files, call) };
 		}
 		// Every pass that fails again has deferred one more URL; one that defers nothing new ends.
 		for (;;) {
 			const deferred = new Set(call.deferred);
-			const stripped = stripPatchSections(input, path => [...deferred].some(url => namesUrl(path, url)));
+			const drop = (path: string) => [...deferred].some(url => namesUrl(path, url));
+			const placeholders = [
+				...new Set(
+					patchFileHeaders(input)
+						.filter(header => drop(header.path))
+						.map(header => header.path),
+				),
+			].map(deferredPlaceholder);
+			const stripped = stripPatchSections(input, drop);
+			if (patchFileHeaders(stripped).length === 0) return { ...batch, files: placeholders };
 			const files = await this.#previewOnce(stripped, call, rawInput);
-			const failed = files.length === 1 && !files[0]?.diff && deferredOnly(files[0]?.error);
+			// The pass failed or never reported: keep the engine's batch, deferrals as placeholders.
+			if (files === undefined) return { ...batch, files: this.#markDeferred(batch.files, call) };
+			const failed = files.length === 1 && !files[0]?.diff && this.#isDeferral(files[0]?.error, call);
 			if (!failed || call.deferred.size === deferred.size) {
-				return { ...batch, files: files.filter(file => !deferredOnly(file.error)) };
+				return { ...batch, files: [...this.#markDeferred(files, call), ...placeholders] };
 			}
 		}
 	}
 
-	/** The final preview of `input` alone, in a throwaway session that never contacts a remote host. */
-	async #previewOnce(input: string, call: EditCall, rawInput: boolean): Promise<EditPreviewBatch["files"]> {
-		const final = Promise.withResolvers<EditPreviewBatch["files"]>();
-		const previewCall: EditCall = { ...call, applying: false, argsJson: () => JSON.stringify({ input }) };
+	/**
+	 * The final preview of `input` alone, in a throwaway session that never contacts a
+	 * remote host; `undefined` when the pass fails or reports nothing within
+	 * {@link PREVIEW_PASS_TIMEOUT_MS}, so a stuck pass never stalls the previews
+	 * chained after it.
+	 */
+	async #previewOnce(
+		input: string,
+		call: EditCall,
+		rawInput: boolean,
+	): Promise<EditPreviewBatch["files"] | undefined> {
+		const final = Promise.withResolvers<EditPreviewBatch["files"] | undefined>();
+		const argsJson = JSON.stringify({ input });
+		// Its own arguments: the copied version cache would answer for the outer call's.
+		const previewCall: EditCall = {
+			...call,
+			applying: false,
+			argsJson: () => argsJson,
+			argsVersion: 0,
+			argsView: undefined,
+		};
 		const native = new EditSession(
 			getEditStore(this.session),
 			this.#policy(rawInput, call.resolveContext),
 			(error, batch) => {
-				if (error) final.resolve([]);
+				if (error) final.resolve(undefined);
 				else if (!batch.streaming) final.resolve(batch.files);
 			},
 			(_error, url) => this.#resolveUrl(url, previewCall),
 		);
+		const timeout = setTimeout(() => {
+			logger.debug("Edit preview pass timed out", { timeoutMs: PREVIEW_PASS_TIMEOUT_MS });
+			final.resolve(undefined);
+		}, PREVIEW_PASS_TIMEOUT_MS);
 		try {
-			native.setArgsJson(JSON.stringify({ input }));
+			native.setArgsJson(argsJson);
 			native.finish();
 			return await final.promise;
 		} finally {
+			clearTimeout(timeout);
 			native.close();
 		}
 	}

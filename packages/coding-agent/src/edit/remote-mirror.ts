@@ -2,8 +2,9 @@
  * Hashline editing for remote text resources (`ssh://`): the native edit engine
  * patches local files, so a remote file is mirrored into a local file that
  * `read` tags and `edit` patches, and the patched text is written back through
- * the scheme's {@link RemoteEditHooks}. A mirror is keyed by the canonical URL
- * and the destination it resolved to, so every spelling of one remote file
+ * the scheme's {@link RemoteEditHooks}. A mirror is keyed by the destination a
+ * URL resolved to and the absolute path there, never by the URL as written, so
+ * every spelling of one remote file (`/~/x` and `/home/u/x`, `Prod` and `prod`)
  * shares one mirror and one snapshot tag, while one URL that resolves to
  * different hosts (a per-project `ssh.json` alias) never does.
  */
@@ -17,7 +18,15 @@ const mirrors = new Map<string, string>();
 /** Location key → its mirror path. */
 const mirrorsByLocation = new Map<string, string>();
 
-const locationKey = (location: RemoteEditLocation) => `${location.target}\n${location.url}`;
+const locationKey = (location: RemoteEditLocation) => `${location.target}\n${location.path}`;
+
+/**
+ * The preview entry that stands in for a remote file whose preview waits for the
+ * edit's fetch (no mirror existed before the call ran). It rides the entry's
+ * `error` field, the only text a preview entry carries, but it is not a failure:
+ * `edit.streamingAbort` skips it.
+ */
+export const DEFERRED_PREVIEW_NOTICE = "Preview deferred: fetched when the edit runs";
 
 /** Characters no Windows filename may contain (`/` and NUL are invalid everywhere). */
 const INVALID_FILENAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;

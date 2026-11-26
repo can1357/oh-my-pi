@@ -10,6 +10,7 @@ import {
 	RemoteEditMissingError,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { InternalResource, InternalUrl, ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
+import { StreamingEditGuard, type StreamGuardsHost } from "@oh-my-pi/pi-coding-agent/session/stream-guards";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import type { EditMode } from "@oh-my-pi/pi-coding-agent/edit";
@@ -31,7 +32,9 @@ interface Remote {
 /**
  * A remote, handler-written text scheme like `ssh://`, backed by `remote.files`.
  * `/~/` paths sit below {@link HOME}, which the "host" reports only after a
- * home-relative request contacted it, as ssh:// caches it.
+ * home-relative request contacted it, as ssh:// caches it. Like ssh://, the
+ * canonical URL keeps the authority as written, while the destination it
+ * resolves to ignores the host's case.
  */
 function registerRemote(remote: Remote): void {
 	let homeKnown = false;
@@ -43,7 +46,8 @@ function registerRemote(remote: Remote): void {
 		const decoded = decodeURIComponent(url.rawPathname ?? url.pathname);
 		return homeRelative(url) ? `${HOME}${decoded.slice(2)}` : decoded;
 	};
-	const canonical = (url: InternalUrl) => `remotetest://host${absolute(url)}`;
+	const canonical = (url: InternalUrl) => `remotetest://${url.rawHost || url.host}${absolute(url)}`;
+	const destination = (url: InternalUrl, cwd: string | undefined) => `${cwd ?? ""}|${url.hostname.toLowerCase()}`;
 	const handler: ProtocolHandler = {
 		scheme: "remotetest",
 		spec: {
@@ -71,7 +75,7 @@ function registerRemote(remote: Remote): void {
 					remote.io.push("home");
 					homeKnown = true;
 				}
-				return { url: canonical(url), target: context?.cwd ?? "" };
+				return { url: canonical(url), target: destination(url, context?.cwd), path: absolute(url) };
 			},
 			async fetch(url, context) {
 				remote.io.push(`fetch ${canonical(url)}`);
@@ -79,7 +83,8 @@ function registerRemote(remote: Remote): void {
 				if (content === undefined) throw new RemoteEditMissingError(canonical(url));
 				return {
 					url: canonical(url),
-					target: context?.cwd ?? "",
+					target: destination(url, context?.cwd),
+					path: absolute(url),
 					content,
 					checksum: posixCksum(Buffer.from(content)),
 				};
@@ -101,6 +106,32 @@ interface Preview {
 	displayPath?: string;
 	diff?: string;
 	error?: string;
+}
+
+const DEFERRED = "Preview deferred: fetched when the edit runs";
+
+/** How many aborts `edit.streamingAbort` raises for the final preview `files`. */
+function streamingAborts(files: Preview[]): number {
+	let aborts = 0;
+	const guard = new StreamingEditGuard({
+		agent: { abort: () => aborts++ },
+		settings: Settings.isolated({ "edit.streamingAbort": true }),
+		sessionManager: { getCwd: () => process.cwd() },
+		model: () => undefined,
+		isDisposed: () => false,
+		promptGeneration: () => 0,
+		promptSequence: () => 0,
+		emitNotice() {},
+		schedulePostPromptTask() {},
+		discardAssistantTurn() {},
+	} as unknown as StreamGuardsHost);
+	guard.maybeAbort({
+		type: "tool_stream_update",
+		toolCallId: "guard",
+		toolName: "edit",
+		update: { generation: 1, streaming: false, files },
+	});
+	return aborts;
 }
 
 /** Stream `args` into `tool` in small chunks and resolve with the final (untrimmed) preview's files. */
@@ -193,11 +224,12 @@ describe("edit on a remote handler-written URL", () => {
 		};
 		const previews = await streamPreview(tool, "mixed", args);
 		expect(remote.io).toEqual([]);
-		// The deferred file has no preview and no error (an error fails the preview under
-		// `edit.streamingAbort`); the local file's preview renders.
-		expect(previews).toHaveLength(1);
-		expect(previews[0]?.error).toBeUndefined();
-		expect(previews[0]?.diff).toContain("two");
+		// The deferred file shows a placeholder, which `edit.streamingAbort` does not count
+		// as a failed preview; the local file's preview renders.
+		expect(previews).toHaveLength(2);
+		expect(previews.find(file => file.path?.includes(`/~/${unique}.py`))?.error).toBe(DEFERRED);
+		expect(previews.find(file => file.diff !== undefined)?.diff).toContain("two");
+		expect(streamingAborts(previews)).toBe(0);
 
 		const result = await tool.execute("mixed", args);
 		expect(result.isError).not.toBe(true);
@@ -228,9 +260,10 @@ describe("edit on a remote handler-written URL", () => {
 		const tool = edit("apply_patch");
 		const previews = await streamPreview(tool, "atomic", args);
 		expect(remote.io).toEqual([]);
-		expect(previews).toHaveLength(1);
-		expect(previews[0]?.error).toBeUndefined();
-		expect(previews[0]?.diff).toContain("two");
+		expect(previews).toHaveLength(2);
+		expect(previews.find(file => file.diff !== undefined)?.diff).toContain("two");
+		expect(previews.find(file => file.path === `remotetest://host/tmp/${unique}.txt`)?.error).toBe(DEFERRED);
+		expect(streamingAborts(previews)).toBe(0);
 
 		const result = await tool.execute("atomic", args);
 		expect(result.isError).not.toBe(true);
@@ -282,7 +315,7 @@ describe("edit on a remote handler-written URL", () => {
 		// fetch instead of diffing the first project's copy.
 		const args = { input: `${header}\nPUT 2.=2:\n+    return 2\n` };
 		const previews = await streamPreview(second.edit("hashline"), "other-target", args);
-		expect(previews).toEqual([]);
+		expect(previews.map(file => file.error)).toEqual([DEFERRED]);
 		expect(first.remote.io).toEqual([]);
 	});
 
@@ -362,6 +395,26 @@ describe("edit on a remote handler-written URL", () => {
 		const result = await tool.execute("canonical", args);
 		expect(result.isError).not.toBe(true);
 		expect(remote.files.get(`${HOME}/${unique}.py`)).toBe("def f():\n    return 2\n");
+	});
+
+	it("shares one mirror and tag between authorities that differ only in case", async () => {
+		const { dir, remote, read, edit, unique } = setup();
+		using _dir = dir;
+		remote.files.set(`/tmp/${unique}.py`, "def f():\n    return 1\n");
+		const header = (await read(`remotetest://HOST/tmp/${unique}.py`)).split("\n")[0];
+		const tag = /#([0-9A-F]{4})\]$/.exec(header)?.[1];
+		expect(header).toBe(`[remotetest://HOST/tmp/${unique}.py#${tag}]`);
+		remote.io.length = 0;
+
+		// Edited under the lowercase spelling, the read's mirror still serves the preview.
+		const tool = edit("hashline");
+		const args = { input: `[remotetest://host/tmp/${unique}.py#${tag}]\nPUT 2.=2:\n+    return 2\n` };
+		const [preview] = await streamPreview(tool, "authority-case", args);
+		expect(preview?.diff).toContain("return 2");
+		expect(remote.io).toEqual([]);
+		const result = await tool.execute("authority-case", args);
+		expect(result.isError).not.toBe(true);
+		expect(remote.files.get(`/tmp/${unique}.py`)).toBe("def f():\n    return 2\n");
 	});
 
 	it("reads a remote notebook as its cells and edits it by the read's line numbers", async () => {
