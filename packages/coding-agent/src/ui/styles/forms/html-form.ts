@@ -15,6 +15,7 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { paintPicture } from "@oh-my-pi/pi-tui/term/painters/image";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { padTo, sliceCells, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { ChoiceField, FormBlock, FormField, FormSpan } from "../../../tools/html-form/parse";
@@ -126,10 +127,6 @@ function clip(row: string, width: number): string {
 	// The ellipsis takes the cell it replaces: that cell's styles around it.
 	const cell = sliceCells(row, Math.max(0, width - 1), 1).text;
 	return `${head}${cell.replace(/(^|m)[^\x1b]+/, "$1…")}`;
-}
-
-function oneLine(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
 }
 
 function styled(theme: Theme, spans: readonly FormSpan[], base: string): string {
@@ -249,7 +246,7 @@ function foldLines(theme: Theme, model: HtmlFormModel, index: number, width: num
 	);
 	const answer = model.answer(index);
 	if (field.kind === "text") {
-		const text = field.type === "password" ? "•".repeat([...answer.text.text].length) : oneLine(answer.text.text);
+		const text = field.type === "password" ? "•".repeat([...answer.text.text].length) : flattenLine(answer.text.text);
 		const shown = text ? theme.fg("muted", text) : theme.fg("dim", field.placeholder || "type your answer");
 		lines.push(`  ${truncate(shown, inner, "…")}`);
 	} else {
@@ -339,7 +336,7 @@ function optionRows(
 					: theme.fg("dim", "  ✎ draft");
 			// Long labels wrap under themselves.
 			const color = selected ? "accent" : checked ? "muted" : "text";
-			const wrapped = wrap(oneLine(spansText(option.label)), Math.max(1, width - 4 - visibleWidth(marker)));
+			const wrapped = wrap(flattenLine(spansText(option.label)), Math.max(1, width - 4 - visibleWidth(marker)));
 			wrapped.forEach((part, i) => {
 				const head = i === 0 ? `${cursor}${theme.fg(checked ? "success" : "dim", glyph)} ` : "    ";
 				lines.push(
@@ -349,7 +346,7 @@ function optionRows(
 		}
 		if (selected) column.focusEnd = lines.length;
 		if (view.note && view.note.field === index && view.note.option === row) {
-			const label = oneLine(spansText(field.options[row]!.label));
+			const label = flattenLine(spansText(field.options[row]!.label));
 			lines.push(clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width));
 			lines.push(
 				`    ${theme.fgResolved("text", `${view.note.text.slice(0, view.note.cursor)}▏${view.note.text.slice(view.note.cursor)}`)}`,
@@ -370,7 +367,7 @@ function dropdownRows(
 ): string[] {
 	const chosen = [...model.answer(index).checked][0];
 	const answer = model.answer(index);
-	const labelOf = (i: number): string => oneLine(spansText(field.options[i]!.label));
+	const labelOf = (i: number): string => flattenLine(spansText(field.options[i]!.label));
 	const markerOf = (i: number): string =>
 		answer.notes.has(i) ? (answer.checked.has(i) ? "  ✎ note" : "  ✎ draft") : "";
 	const natural = Math.max(...field.options.map((_, i) => visibleWidth(labelOf(i)) + visibleWidth(markerOf(i))));
@@ -424,12 +421,12 @@ function openFieldLines(
 		const bar = view.focused ? theme.fg("accent", "│") : theme.fg("dim", "│");
 		const counter = `  ${chosen + 1}/${field.options.length}`;
 		const room = Math.max(1, width - 4 - 4 - counter.length);
-		const shown = truncate(oneLine(spansText(field.options[chosen]!.label)), room, "…");
+		const shown = truncate(flattenLine(spansText(field.options[chosen]!.label)), room, "…");
 		const value = `${theme.fg("accent", "‹ ")}${theme.fg("accent", shown)}${theme.fg("accent", " ›")}${theme.fg("dim", counter)}`;
 		lines.push(truncate(`  ${bar} ${value}`, width, "…"));
 		column.focusEnd = lines.length;
 		if (view.note && view.note.field === index) {
-			const label = oneLine(spansText(field.options[view.note.option]!.label));
+			const label = flattenLine(spansText(field.options[view.note.option]!.label));
 			column.overlay = {
 				at: lines.length,
 				rows: [
@@ -612,7 +609,7 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 		return {
 			rows: [
 				truncate(
-					`${head} ${theme.fg("muted", truncate(`${oneLine(question)}${more}`, room, "…"))}${hint}`,
+					`${head} ${theme.fg("muted", truncate(`${flattenLine(question)}${more}`, room, "…"))}${hint}`,
 					cx.width,
 					"…",
 				),
@@ -621,7 +618,7 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	}
 	const inner = cx.width - 4;
 	const view = currentView(model);
-	const skip = look.skipNotice ? wrap(theme.fg("warning", `⚠ ${oneLine(look.skipNotice)}`), inner) : [];
+	const skip = look.skipNotice ? wrap(theme.fg("warning", `⚠ ${flattenLine(look.skipNotice)}`), inner) : [];
 	const limit = Math.max(1, Math.floor(look.terminalRows * HEIGHT_RATIO) - CHROME_ROWS);
 	let column = buildColumn(cx, look, view, inner);
 	let body = Math.min(tallest(cx, look, inner, view), limit);

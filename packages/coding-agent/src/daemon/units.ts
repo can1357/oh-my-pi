@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { killProcessFamily, Process, type PtyRunResult, PtySession, processOutputFiles } from "@oh-my-pi/pi-natives";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../tools/streaming-output";
 import type { DaemonReadySpec } from "./daemon-types";
-import { isEnoent, logger, sanitizeText, withTimeout } from "@oh-my-pi/pi-utils";
+import { errorMessage, isEnoent, logger, sanitizeText, withTimeout } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
@@ -165,10 +165,6 @@ function isTerminal(state: UnitSnapshot["state"]): boolean {
 
 function isSettled(state: UnitSnapshot["state"]): boolean {
 	return isTerminal(state) || state === "restarting";
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function identity(kind: string, scope: UnitScope, key: string): string {

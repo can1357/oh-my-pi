@@ -1,14 +1,19 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type Signal, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { isSettled, type Signal, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { TerminalImages } from "@oh-my-pi/pi-tui/driver/images/store";
+import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import type { TurnUsageSummary } from "../../../../src/modes/view-model/overlays/usage-row";
 import type { CacheInvalidation } from "../../../../src/session/transcript/cache-invalidation-marker";
 import type { ServedModelMismatch } from "../../../../src/session/transcript/served-model-marker";
+import { Transcript } from "../../../../src/ui/shell/transcript";
+import { figureWorkSettled } from "../../../../src/ui/transcript/figures/svg";
 import { AssistantMessageBlock, type ToolResultMedia } from "../../../../src/ui/transcript/messages/assistant-message";
+import { KITTY } from "../figures/harness";
 import { screenSuite, single } from "./harness";
 
 /** The 1×1 PNG the capture used (`"1x1 png"` in the inputs). */
@@ -236,4 +241,143 @@ describe("assistant message tone", () => {
 		expect(row(toned)).toContain(accentOpen);
 		expect(row(plain)).not.toContain(accentOpen);
 	});
+});
+
+function sixelEnvironment() {
+	const caps = signal({ ...KITTY, images: "sixel" } satisfies typeof KITTY);
+	const images = new TerminalImages({ capabilities: caps });
+	return {
+		env: staticEnvironment(loadThemeSync("dark"), { images: driverImages(images, caps), hyperlinks: true }),
+		images,
+	};
+}
+
+test("a finished assistant SVG fence draws inline on SIXEL, not as XML", async () => {
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const finalized = signal(false);
+	const renderSvg = signal(true);
+	const text = "Before\n\n```svg\n<svg viewBox='0 0 80 32'><rect width='80' height='32'/></svg>\n```\n\nAfter";
+	const message = assistant([{ type: "text", text }], 2);
+	const block = transcript.append(() => (
+		<AssistantMessageBlock model={{ message, transient: true, finalized, renderSvg }} />
+	));
+	const paint = () => paintNode(env, block.node, 80);
+	try {
+		const streaming = paint();
+		// The visible code is replaced at completion, so it cannot already be in scrollback.
+		expect(streaming.rows.join("\n")).toContain("viewBox");
+		expect(streaming.rows.slice(0, streaming.stable ?? 0).join("\n")).not.toContain("viewBox");
+		finalized.set(true);
+		transcript.settle(block);
+		expect(isSettled(block.node)).toBe(false);
+		await figureWorkSettled();
+		expect(isSettled(block.node)).toBe(true);
+		paint();
+		await images.whenEncoded();
+		const rows = paint().rows.join("\n");
+		expect(rows).not.toContain("viewBox");
+		expect(rows).toMatch(/Before[\s\S]*\x1bP[\d;]*q[\s\S]*After/);
+
+		renderSvg.set(false);
+		expect(paint().rows.join("\n")).toContain("viewBox");
+	} finally {
+		transcript.clear();
+	}
+});
+
+test("assistant embeds draw their image and page still, but do not load when images are turned off", async () => {
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const showImages = signal(false);
+	const capture = Promise.withResolvers<Uint8Array>();
+	const calls: string[] = [];
+	const png = Buffer.from(PNG_1X1, "base64");
+	const text = [
+		"Before",
+		`<img src="data:image/png;base64,${PNG_1X1}" alt="Image fixture">`,
+		"",
+		'<iframe src="page.html" title="Page fixture"></iframe>',
+		"",
+		"After",
+	].join("\n");
+	const message = assistant([{ type: "text", text }], 2);
+	const block = transcript.append(() => (
+		<AssistantMessageBlock
+			model={{
+				message,
+				finalized: true,
+				showImages,
+				renderEmbeds: true,
+				embedHost: {
+					cwd: () => import.meta.dir,
+					capturePage: url => {
+						calls.push(url);
+						return capture.promise;
+					},
+				},
+			}}
+		/>
+	));
+	const paint = () => paintNode(env, block.node, 80).rows.join("\n");
+	try {
+		expect(paint()).toMatch(/Image fixture[\s\S]*Page fixture/);
+		expect(calls).toEqual([]);
+		showImages.set(true);
+		paint();
+		transcript.settle(block);
+		expect(isSettled(block.node)).toBe(false);
+		expect(calls).toEqual([new URL("page.html", import.meta.url).href]);
+		capture.resolve(png);
+		await figureWorkSettled();
+		expect(isSettled(block.node)).toBe(true);
+		paint();
+		await images.whenEncoded();
+		const rows = paint();
+		expect(rows.match(/\x1bP[\d;]*q/g)).toHaveLength(2);
+		expect(rows).toMatch(/Before[\s\S]*Page fixture[\s\S]*\[Visit\][\s\S]*After/);
+	} finally {
+		capture.resolve(png);
+		transcript.clear();
+	}
+});
+
+test("embeds at a reply's edges keep their image rows in the transcript block", async () => {
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const img = (alt: string) => `<img src="data:image/png;base64,${PNG_1X1}" alt="${alt}">`;
+	const text = [img("Lead"), "", "Between", "", img("Tail")].join("\n");
+	const block = transcript.append(() => (
+		<AssistantMessageBlock
+			model={{ message: assistant([{ type: "text", text }], 2), finalized: true, renderEmbeds: true }}
+		/>
+	));
+	const paint = () => paintNode(env, block.node, 80).rows.join("\n");
+	try {
+		paint();
+		transcript.settle(block);
+		await figureWorkSettled();
+		paint();
+		await images.whenEncoded();
+		expect(paint()).toMatch(/^\x1bP[\d;]*q[^\n]*\n\n[^\n]*Between[^\n]*\n\n\x1bP[\d;]*q[^\n]*$/);
+	} finally {
+		transcript.clear();
+	}
+});
+
+test("a leading assistant image keeps all its rows while encoding and after drawing", async () => {
+	const data = await new Bun.Image(Buffer.from(PNG_1X1, "base64")).resize(48, 48).png().toBase64();
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const message = assistant([{ type: "image", mimeType: "image/png", data }], 2);
+	const block = transcript.append(() => <AssistantMessageBlock model={{ message, finalized: true }} />);
+	try {
+		expect(paintNode(env, block.node, 80).rows).toHaveLength(3);
+		await images.whenEncoded();
+		const { rows } = paintNode(env, block.node, 80);
+		expect(rows).toHaveLength(3);
+		expect(rows[2]).toMatch(/\x1b7\x1b\[2A\x1bP[\d;]*q/);
+	} finally {
+		transcript.clear();
+	}
 });

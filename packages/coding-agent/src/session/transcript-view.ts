@@ -20,7 +20,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type TranscriptRecord, TranscriptRecordKind } from "@oh-my-pi/pi-natives";
 import { formatCount, formatNumber, isRecord } from "@oh-my-pi/pi-utils";
 import { cleanTinyMessage, stripAnsi, truncateTinyMessage } from "../tiny/message-preproc";
-import { flattenLine, previewLine } from "../utils/render-utils";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
+import { previewLine } from "../utils/render-utils";
 import { contentToText, formatHistoryEventLine, formatToolCallPrimaryArg } from "./session-history-format";
 import { localMinute, overlapsWindow, type TimeWindow } from "./time-window";
 

@@ -228,6 +228,7 @@ pub(in crate::perl) fn replace(interp: &mut Interp<'_>, io: &Io, mut handle: Han
 	for (fd, name) in ["STDIN", "STDOUT", "STDERR"].into_iter().enumerate() {
 		if interp.handle(name, false).is_some_and(|std| Rc::ptr_eq(io, &std)) {
 			handle.set_standard_number(fd as i32);
+			if fd == 0 && let Some(output) = interp.handle("STDOUT", false) { handle.set_prompt_output(&output); }
 			break;
 		}
 	}

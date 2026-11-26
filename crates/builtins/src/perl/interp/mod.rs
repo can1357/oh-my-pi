@@ -23,6 +23,7 @@ use super::{ast::*, code::{CodeBody, CodeImpl, Cv}, func, io::{Handle, InPlace, 
 
 pub(in crate::perl) use self::{calls::{FormatArgs, PerlBody}, hints::{Hints, Warnings}};
 use self::vars::{Pad, Restore};
+pub(in crate::perl) use self::vars::SpecialGlob;
 
 /// Dynamic evaluation context supplied by the enclosing operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,16 +39,32 @@ pub(in crate::perl) enum Ret {
 }
 impl Ret {
 	/// Use the last element of a list as its comma-operator value.
+	#[inline]
 	pub fn scalar(self) -> Value { match self { Self::One(v) => v, Self::Many(mut v) => v.pop().unwrap_or(Value::Undef) } }
 	/// Flatten the result into a list, keeping even an undefined scalar.
 	pub fn list(self) -> Vec<Value> { match self { Self::One(v) => vec![v], Self::Many(v) => v } }
+	/// Flatten directly into an enclosing list without allocating a singleton vector.
+	pub(super) fn append_to(self, out: &mut Vec<Value>) {
+		match self {
+			Self::One(v) => out.push(v),
+			Self::Many(values) if out.is_empty() => *out = values,
+			Self::Many(values) => out.extend(values),
+		}
+	}
 	/// The empty list.
 	pub fn empty() -> Self { Self::Many(Vec::new()) }
 	pub(super) fn values(values: Vec<Value>, cx: Cx) -> Self {
 		if cx == Cx::List { Self::Many(values) } else { Self::One(Value::Int(values.len() as i64)) }
 	}
 	fn no_value(cx: Cx) -> Self { if cx == Cx::List { Self::empty() } else { Self::One(Value::Undef) } }
-	fn in_context(self, cx: Cx) -> Self { if cx == Cx::List { self } else { Self::One(self.scalar()) } }
+	#[inline]
+	fn apply_context(&mut self, cx: Cx) {
+		if cx != Cx::List && let Self::Many(values) = self {
+			*self = Self::One(values.pop().unwrap_or(Value::Undef));
+		}
+	}
+	#[inline]
+	fn in_context(mut self, cx: Cx) -> Self { self.apply_context(cx); self }
 }
 
 /// Non-local control transfers. Die strings have already received their location.
@@ -172,12 +189,13 @@ pub(in crate::perl) struct ArgvState {
 struct CallFrame {
 	info: Frame,
 	hints: Rc<Hints>,
-	hint_bits: i64,
+	outer: bool,
 	args: Option<Av>,
 }
 
 #[derive(Default)]
 struct Scope {
+	lexical_mark: usize,
 	pad: Pad,
 	declarations: Pad,
 	undo: Vec<Restore>,
@@ -202,6 +220,8 @@ pub(in crate::perl) struct Interp<'h> {
 	pub(in crate::perl) sys: func::sys::State,
 	pub(in crate::perl) data: func::data::State,
 	pub(in crate::perl) modules: modules::State,
+	/// Host-backed defaults not yet handed out through a glob or its stash.
+	startup_host: runtime::HostSpecials,
 	/// Most recent successful match in this dynamic block.
 	pub(in crate::perl) last_match: Option<Rc<rx::MatchState>>,
 	symbols: FxHashMap<Rc<str>, Gv>,
@@ -212,10 +232,9 @@ pub(in crate::perl) struct Interp<'h> {
 	/// Memoized `qualify`/`glob` results keyed by the name's address and length (validated by content).
 	names: RefCell<FxHashMap<(usize, usize), vars::NameMemo>>,
 	/// Memoized globs of frequently used punctuation variables, valid for their `symbol_generation`.
-	special_globs: RefCell<[Option<(u64, Gv)>; vars::SPECIAL_GLOBS]>,
+	special_globs: RefCell<[vars::SpecialMemo; vars::SPECIAL_GLOBS]>,
 	magic_cells: FxHashMap<usize, (&'static str, std::rc::Weak<value::ScalarBody>)>,
-	readonly_literals: FxHashMap<usize, std::rc::Weak<value::ScalarBody>>,
-	readonly_sweep: usize,
+	global_sites: Vec<vars::GlobalSite>,
 	/// Tied scalars whose FETCH/STORE is running: their magic is off meanwhile (perl's save_magic).
 	tie_suspended: FxHashSet<usize>,
 	stashes: FxHashMap<Rc<str>, Hv>,
@@ -241,13 +260,13 @@ pub(in crate::perl) struct Interp<'h> {
 	parse_scopes: Vec<Hints>,
 	compile_pads: Vec<Pad>,
 	compile_pad_base: usize,
-	declared_slots: FxHashMap<usize, (Rc<str>, vars::Slot)>,
 	use_hints: FxHashMap<usize, Rc<Hints>>,
-	captures: FxHashMap<usize, FxHashSet<(u8, Rc<str>)>>,
+	captures: FxHashMap<usize, Vec<usize>>,
 	imported_symbols: FxHashSet<Rc<str>>,
 	package: Rc<str>,
 	loc: Location,
 	scopes: Vec<Scope>,
+	lexicals: vars::Lexicals,
 	/// Emptied scopes kept for reuse by `push_scope`.
 	scope_pool: Vec<Scope>,
 	/// Emptied scope stacks kept for reuse by `enter_pad`.
@@ -257,6 +276,8 @@ pub(in crate::perl) struct Interp<'h> {
 	frames: Vec<CallFrame>,
 	active_subs: Vec<(Cv, Av, Cx)>,
 	eval_contexts: Vec<(Cx, bool)>,
+	perl_calls: Vec<usize>,
+	arg_arrays: Vec<Av>,
 	sub_depth: FxHashMap<usize, u32>,
 	tail_args: Option<Av>,
 	eval_serial: u64,

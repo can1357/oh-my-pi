@@ -39,6 +39,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { journalCompletion } from "../session/model-usage-journal";
 import { AUTO_THINKING, type TaskEffort } from "../thinking/levels";
 import type { ToolSession } from "../tools";
+import { owningSessionId } from "../tools/session-id";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -845,11 +846,14 @@ async function loadPlanReference(
 	);
 }
 
-/** Isolated runs work in ovnfs checkouts when `isolation.backend` is auto and ovnfs is found, else in native clones. */
-function openIsolatedWorkspace(settings: Settings): OpenWorkspace {
-	const backend = cfgIsolationBackend.get(settings);
-	const ovnfs = backend === "auto" ? ovnfsCommand(settings) : undefined;
-	return ovnfs ? ovnfsWorkspace(ovnfs) : nativeWorkspace(parseIsolationBackend(backend));
+/**
+ * Isolated runs `session` spawns work in ovnfs checkouts, which record it, when
+ * `isolation.backend` is auto and ovnfs is found, else in native clones.
+ */
+function openIsolatedWorkspace(session: ToolSession): OpenWorkspace {
+	const backend = cfgIsolationBackend.get(session.settings);
+	const ovnfs = backend === "auto" ? ovnfsCommand(session.settings) : undefined;
+	return ovnfs ? ovnfsWorkspace(ovnfs, owningSessionId(session)) : nativeWorkspace(parseIsolationBackend(backend));
 }
 
 function buildFailureResult(
@@ -1041,7 +1045,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				result = await runIsolatedSubprocess({
 					baseOptions,
 					context: isolationContext,
-					openWorkspace: openIsolatedWorkspace(request.session.settings),
+					openWorkspace: openIsolatedWorkspace(request.session),
 					agentId: id,
 					mergeMode: policy.mergeMode,
 					artifactsDir: lease.artifactsDir,

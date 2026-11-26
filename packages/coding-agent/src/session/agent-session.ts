@@ -106,6 +106,7 @@ import {
 	isBunTestRuntime,
 	isInteractiveHost,
 	isRecord,
+	Laps,
 	logger,
 	postmortem,
 	prompt,
@@ -150,7 +151,7 @@ import {
 	withUpstreamPinOf,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
+import { isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
@@ -595,8 +596,10 @@ import {
 	cfgSkillful,
 	cfgTierAdvisor,
 	cfgTierAnthropic,
+	cfgTierDevin,
 	cfgTierGoogle,
 	cfgTierOpenai,
+	cfgTiers,
 	cfgProvidersAnthropicSlowMode,
 	resetWindowModes,
 	resetWindowSettings,
@@ -3100,6 +3103,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			memoryPrompt: config.advisorMemoryPrompt,
 			configs: config.advisorConfigs,
 			configWarnings: config.advisorConfigWarnings,
+			configDir: config.advisorConfigDir,
 			streamFn: config.advisorStreamFn,
 			createTransformProviderContext:
 				config.createAdvisorTransformProviderContext ??
@@ -3481,6 +3485,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		cfgTierOpenai.listen(this, tier => this.setServiceTierFamily("openai", serviceTierSettingToTier(tier)));
 		cfgTierAnthropic.listen(this, tier => this.setServiceTierFamily("anthropic", serviceTierSettingToTier(tier)));
 		cfgTierGoogle.listen(this, tier => this.setServiceTierFamily("google", serviceTierSettingToTier(tier)));
+		cfgTierDevin.listen(this, tier => this.setServiceTierFamily("devin", serviceTierSettingToTier(tier)));
 		cfgAdvisorRuntimeInputs.listen(this, (next, previous) => {
 			// A budget/tier edit rebuilds a running advisor (both are part of its
 			// runtime signature) without overriding a session-only `/advisor` toggle.
@@ -9852,7 +9857,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		signal: AbortSignal,
 	): Promise<QueuedMessagePreparation> {
 		const generation = this.#promptGeneration;
+		const laps = new Laps();
 		await this.#prewalk.beginAutoTask(message);
+		laps.lap("beginTaskMs");
 		// Past the cap, the before-model-call gate refuses this task's first request and reports it; judging it, or
 		// moving it to an `escalate` planner, would only spend and switch for a request that is never sent.
 		const capped = this.#costGate.check() !== undefined;
@@ -9865,9 +9872,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					message,
 					() => !signal.aborted && this.#promptGeneration === generation,
 				);
+		laps.lap("prewalkRouteMs");
 		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
+		laps.lap("agentStartMs");
 		const decision = await autoPrewalk?.decision;
+		laps.lap("prewalkJudgeMs");
 		const plan = await autoParallel;
+		laps.lap("autoParallelMs");
+		logger.debug("Queued task prepared", laps.record());
 		return {
 			commit: () => {
 				const additional = preparation.commit();
@@ -9910,7 +9922,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			(!this.#isDisposed || alreadyDisposing) &&
 			!signal?.aborted;
 		const cancelled = { baseToolCommandCatalogDelivered: false, commit: () => undefined };
+		const laps = new Laps();
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+		laps.lap("extensionsMs");
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
 		if (pendingMCPDiscovery) {
 			const timedOut = new Error("MCP discovery still pending");
@@ -9923,13 +9937,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				logger.debug("Turn started before MCP discovery finished", { error: String(error) });
 			});
 		}
+		laps.lap("mcpMs");
 		for (let attempt = 0; attempt < AGENT_START_POLICY_MAX_ATTEMPTS; attempt++) {
 			await this.#memory.transition;
+			laps.lap("memoryMs");
 			if (!isCurrent()) return cancelled;
 			const sourceBase = this.#tools.baseSystemPrompt;
 			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal);
+			laps.lap("systemPromptMs");
 			if (!isCurrent()) return cancelled;
 			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
+			laps.lap("hooksMs");
 			if (!isCurrent()) return cancelled;
 			// Overrides are opaque replacements, not string patches. Re-run only policy preparation
 			// against the winning base; discard this attempt's returned context and staged memory.
@@ -9979,7 +9997,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 				if (!isCurrent()) return cancelled;
 			}
+			laps.lap("messagesMs");
 			if (!overrideIsCurrent()) continue;
+			logger.debug("Agent start prepared", { origin, attempts: attempt + 1, ...laps.record() });
 			return {
 				baseToolCommandCatalogDelivered: result?.systemPrompt === undefined,
 				commit: () => {
@@ -11806,16 +11826,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.queuedMessageCount > 0 || this.agent.peekUndeliveredQueuedMessages().some(isDisplayableQueuedMessage);
 	}
 
-	/** Chip texts for the queue display. Steering live steering took for the streaming response
-	 *  stays listed until the transcript records it, when the model actually switches to it. */
+	/** Chip texts for the queue display. Input the agent already took stays listed, first in its
+	 *  queue, until the transcript records it: steering live steering took for the streaming
+	 *  response (the model switches to it then), and messages on their way into the next request
+	 *  (recorded once it opens). `liveSteered` counts the steering among them. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
-		const liveSteered = this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage).length;
+		const sent = [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekDeliveringMessages("steering")].filter(
+			isUserAuthoredQueuedMessage,
+		);
 		return {
-			steering: [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
+			steering: [...sent, ...this.agent.peekSteeringQueue().filter(isUserAuthoredQueuedMessage)].map(queueChipText),
+			followUp: [...this.agent.peekDeliveringMessages("followUp"), ...this.agent.peekFollowUpQueue()]
 				.filter(isUserAuthoredQueuedMessage)
 				.map(queueChipText),
-			followUp: this.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage).map(queueChipText),
-			liveSteered,
+			liveSteered: sent.length,
 		};
 	}
 
@@ -14963,11 +14987,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				.getBranch()
 				.some(entry => entry.type === "service_tier_change");
 			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
-			const configuredServiceTierByFamily = buildServiceTierByFamily(
-				cfgTierOpenai.get(this.settings),
-				cfgTierAnthropic.get(this.settings),
-				cfgTierGoogle.get(this.settings),
-			);
+			const configuredServiceTierByFamily = cfgTiers.get(this.settings);
 			// Restore the thinking selector. Each change persists the configured
 			// selector (`auto` or a concrete level), so prefer it: an `auto` session
 			// resumes in auto mode (reclassifying the next turn) instead of freezing at
@@ -16961,6 +16981,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		sharedMaxNotesPerUpdate?: number,
 	): number {
 		return this.#advisors.applyAdvisorConfigs(advisors, sharedInstructions, sharedMaxNotesPerUpdate);
+	}
+
+	/** Reload the advisor roster and its imported instructions from disk. */
+	reloadAdvisorConfigs(): Promise<{ count: number; warnings: string[] }> {
+		return this.#advisors.reloadConfigs();
 	}
 
 	/**

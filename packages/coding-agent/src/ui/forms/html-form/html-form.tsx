@@ -6,6 +6,7 @@
  * terminal draws the card from the model (`../../styles/forms/html-form.ts`).
  */
 import { computed, effect, type JSXNode, signal, untrack } from "@oh-my-pi/pi-tui";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { ChoiceField, FormBlock, FormField, FormSpan } from "../../../tools/html-form/parse";
 import { spansText } from "../../../tools/html-form/parse";
@@ -48,10 +49,6 @@ export function tspSpans(spans: readonly FormSpan[]): TspSpan[] {
 
 function mask(text: string): string {
 	return "•".repeat([...text].length);
-}
-
-function oneLine(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
 }
 
 /** A text box's Vim state as Tern shows it: the mode badge and, in Visual modes, the selection's anchor. */
@@ -269,7 +266,7 @@ function choiceControls(model: HtmlFormModel, index: number, field: ChoiceField)
 			<text
 				role="omp.ask.note"
 				wrap="word"
-				text={`Note for ${oneLine(spansText(field.options[note.option]!.label))}`}
+				text={`Note for ${flattenLine(spansText(field.options[note.option]!.label))}`}
 			/>,
 			<col role="omp.field">
 				<editor
@@ -331,7 +328,7 @@ function foldSummary(model: HtmlFormModel, index: number, field: FormField, key:
 					spans={[{ s: "dim", t: field.placeholder || "type your answer" }]}
 				/>
 			);
-		const text = field.type === "password" ? mask(value) : oneLine(value);
+		const text = field.type === "password" ? mask(value) : flattenLine(value);
 		return FoldSummaryNode({ summary: { kind: "answer", text }, nodeKey: key, more: `open:${index}` });
 	}
 	const { pills, note } = model.foldChoice(index);

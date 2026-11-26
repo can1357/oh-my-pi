@@ -29,7 +29,7 @@ use std::{
 	fmt,
 	io::{self, Read, Seek, SeekFrom, Write},
 	path::Path,
-	rc::Rc,
+	rc::{Rc, Weak},
 	sync::{Arc, atomic::AtomicBool},
 	time::Instant,
 };
@@ -38,7 +38,7 @@ use omp_vfs::{Metadata, OpenOptions};
 
 use crate::{host::{Host, StreamWriter}, openfile::{Fd, OpenFile}};
 
-use self::{device::{Device, ScalarFile}, input::Input};
+use self::{device::{Device, OutputSink, ScalarFile}, input::Input};
 use super::value::{PStr, Sv, Value};
 
 pub(in crate::perl) use self::{
@@ -88,14 +88,22 @@ pub(in crate::perl) fn alarm_due(err: &io::Error) -> bool {
 pub(super) struct Source<'a> {
 	device: &'a mut Device,
 	deadline: Option<&'a ReadDeadline>,
+	prompt_output: Option<&'a Weak<RefCell<Handle>>>,
 }
 
 impl Read for Source<'_> {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		flush_prompt(self.prompt_output);
 		if let Some(deadline) = self.deadline {
 			self.device.wait_input(deadline)?;
 		}
 		self.device.read(buf)
+	}
+}
+
+fn flush_prompt(output: Option<&Weak<RefCell<Handle>>>) {
+	if let Some(io) = output.and_then(Weak::upgrade) && let Ok(mut handle) = io.try_borrow_mut() {
+		let _ = handle.flush_output();
 	}
 }
 
@@ -192,6 +200,30 @@ impl Resource {
 	}
 }
 
+/// `open FH, ">-"` attaches to STDOUT's PerlIO stream, including pending bytes.
+enum Output {
+	Owned(Vec<u8>),
+	Shared(Rc<RefCell<Vec<u8>>>),
+}
+
+impl Output {
+	fn alias(&mut self) -> Self {
+		if let Self::Owned(buf) = self {
+			*self = Self::Shared(Rc::new(RefCell::new(std::mem::take(buf))));
+		}
+		match self { Self::Shared(shared) => Self::Shared(shared.clone()), Self::Owned(_) => unreachable!() }
+	}
+
+	fn len(&self) -> usize {
+		match self { Self::Owned(buf) => buf.len(), Self::Shared(buf) => buf.borrow().len() }
+	}
+
+	#[inline]
+	fn with_mut<T>(&mut self, f: impl FnOnce(&mut Vec<u8>) -> T) -> T {
+		match self { Self::Owned(buf) => f(buf), Self::Shared(buf) => f(&mut buf.borrow_mut()) }
+	}
+}
+
 /// One Perl filehandle with independent PerlIO buffering and line counter.
 pub(in crate::perl) struct Handle {
 	resource: Resource,
@@ -201,8 +233,10 @@ pub(in crate::perl) struct Handle {
 	input: Input,
 	shared_input: Option<Rc<RefCell<Input>>>,
 	position_known: bool,
-	output: Vec<u8>,
+	output: Output,
 	buffered: bool,
+	line_buffered: bool,
+	prompt_output: Option<Weak<RefCell<Handle>>>,
 	autoflush: bool,
 	line: u64,
 	read_record_once: bool,
@@ -240,8 +274,9 @@ impl Handle {
 
 	fn new(resource: Resource, mode: OpenMode, layers: Layers, descriptor: Option<i32>, buffered: bool) -> Self {
 		Self {
-			resource, mode, layers, descriptor, input: Input::default(), shared_input: None, position_known: false, output: Vec::new(),
-			buffered, autoflush: false, line: 0, read_record_once: false, read_deadline: None,
+			resource, mode, layers, descriptor, input: Input::default(), shared_input: None, position_known: false,
+			output: Output::Owned(Vec::new()), buffered, line_buffered: false, prompt_output: None,
+			autoflush: false, line: 0, read_record_once: false, read_deadline: None,
 			blessed: RefCell::new(None),
 		}
 	}
@@ -291,11 +326,25 @@ impl Handle {
 		self.resource.get(|device| device.with_fd(f)).ok_or_else(bad_fd)?
 	}
 
+	/// Writing to a nonscalar device cannot modify a borrowed Perl scalar.
+	pub(in crate::perl) fn writes_external_bytes(&self) -> bool {
+		self.mode.write && matches!(&self.resource, Resource::Owned(device) if !matches!(device, Device::Scalar(_)))
+	}
+
 	/// Whether the current stream is writable.
 	pub fn is_writable(&self) -> bool { self.mode.write && self.is_open() }
 
 	/// Keep standard descriptor numbers attached to their Perl glob on reopen.
-	pub fn set_standard_number(&mut self, fd: i32) { self.descriptor = Some(fd); }
+	pub fn set_standard_number(&mut self, fd: i32) {
+		self.descriptor = Some(fd);
+		if fd == 1 && self.buffered { self.line_buffered = self.is_terminal(); }
+	}
+
+	/// Deliver pending prompts immediately before a physical terminal read, not
+	/// when merely consuming buffered input. A weak link cannot keep STDOUT alive.
+	pub fn set_prompt_output(&mut self, output: &Io) {
+		self.prompt_output = self.is_terminal().then(|| Rc::downgrade(output));
+	}
 
 	/// Override the original Host stream only if this standard handle was reopened or closed.
 	pub fn child_stream(&self, index: usize) -> Option<Fd> {
@@ -350,6 +399,7 @@ impl Handle {
 				source.flush()?;
 				let device = source.resource.get(|device| device.duplicate(host.cancel_flag())).ok_or_else(bad_fd)??;
 				let mut handle = Self::new(Resource::Owned(device), mode, layers.inherit(source.layers), None, mode.write);
+				handle.prompt_output = source.prompt_output.clone();
 				handle.set_position(source.tell().max(0) as u64);
 				handle
 			},
@@ -359,6 +409,7 @@ impl Handle {
 				let fd = source.fileno().filter(|&fd| fd >= 0).ok_or_else(bad_fd)?;
 				let offset = source.tell().max(0) as u64;
 				let mut handle = Self::new(source.resource.alias()?, mode, layers.inherit(source.layers), Some(fd), mode.write);
+				handle.prompt_output = source.prompt_output.clone();
 				handle.set_position(offset);
 				handle
 			},
@@ -392,7 +443,13 @@ impl Handle {
 	/// losing unread bytes; line counts and the ability to close are independent.
 	pub fn alias_standard(&mut self, mode: OpenMode, layers: Layers) -> io::Result<Self> {
 		let resource = self.resource.alias()?;
-		let mut alias = Self::new(resource, mode, layers.inherit(self.layers), self.descriptor, false);
+		let mut alias = Self::new(resource, mode, layers.inherit(self.layers), self.descriptor, mode.write && self.buffered);
+		if mode.write {
+			alias.output = self.output.alias();
+			alias.line_buffered = self.line_buffered;
+			alias.autoflush = self.autoflush;
+		}
+		alias.prompt_output = self.prompt_output.clone();
 		if mode.read {
 			let input = self.shared_input.get_or_insert_with(|| Rc::new(RefCell::new(std::mem::take(&mut self.input))));
 			alias.shared_input = Some(input.clone());
@@ -409,16 +466,22 @@ impl Handle {
 	/// The host's destination-aware stdout writer.
 	pub fn stdout(host: &Host) -> Self {
 		let file = host.paths().file(1).cloned().unwrap_or_else(|| host.stdout_clone());
-		let device = Device::Stdout { writer: host.stdout_writer(), file };
-		Self::new(Resource::Owned(device), OpenMode::WRITE, Layers::default(), Some(1), false)
+		let line_buffered = file.is_terminal();
+		let writer = match &host.stderr {
+			StreamWriter::Shared(_) | StreamWriter::Async(_) => OutputSink::Managed(host.stdout_writer()),
+			_ => OutputSink::Guarded(host.stdout_clone()),
+		};
+		let mut handle = Self::new(Resource::Owned(Device::Stdout { writer, file }), OpenMode::WRITE, Layers::default(), Some(1), true);
+		handle.line_buffered = line_buffered;
+		handle
 	}
 
-	/// The host's stderr, autoflushed and sharing the stdout buffer when merged.
+	/// Perl STDERR is unbuffered, even when the host merges the destinations.
 	pub fn stderr(host: &Host) -> Self {
 		let writer = match &host.stderr {
-			StreamWriter::Shared(shared) => StreamWriter::Shared(shared.clone()),
-			StreamWriter::Async(out) => StreamWriter::Async(out.clone()),
-			_ => StreamWriter::line(host.stderr_clone()),
+			StreamWriter::Shared(shared) => OutputSink::Managed(StreamWriter::Shared(shared.clone())),
+			StreamWriter::Async(out) => OutputSink::Managed(StreamWriter::Async(out.clone())),
+			_ => OutputSink::Guarded(host.stderr_clone()),
 		};
 		let file = host.paths().file(2).cloned().unwrap_or_else(|| host.stderr_clone());
 		let mut handle = Self::new(Resource::Owned(Device::Stdout { writer, file }), OpenMode::WRITE, Layers::default(), Some(2), false);
@@ -434,7 +497,7 @@ impl Handle {
 		if !self.mode.read {
 			return Err(bad_fd());
 		}
-		if !self.output.is_empty() {
+		if self.output.len() != 0 {
 			self.flush()?;
 		}
 		Ok(())
@@ -461,9 +524,10 @@ impl Handle {
 		let mut shared = self.shared_input.as_ref().map(|input| input.try_borrow_mut().map_err(|_| bad_fd())).transpose()?;
 		let input = shared.as_deref_mut().unwrap_or(&mut self.input);
 		let deadline = self.read_deadline.as_ref();
+		let prompt_output = self.prompt_output.as_ref();
 		self.resource.with_mut(|device| {
 			let scalar = matches!(device, Device::Scalar(_));
-			let result = op(input, &mut Source { device: &mut *device, deadline });
+			let result = op(input, &mut Source { device: &mut *device, deadline, prompt_output });
 			if scalar {
 				// A program may reassign the backing SV between reads. Don't
 				// retain stale lookahead or EOF across those calls.
@@ -482,17 +546,38 @@ impl Handle {
 	/// Read a record for the list form of `readline`, which does not synthesize
 	/// an empty first record when slurping an empty file.
 	pub fn read_record_with_context(&mut self, sep: &RecordSep, list: bool) -> io::Result<Option<PStr>> {
+		self.read_record_reusing(sep, list, &mut Vec::new())
+	}
+
+	pub(in crate::perl) fn read_record_reusing(&mut self, sep: &RecordSep, list: bool, spare: &mut Vec<u8>) -> io::Result<Option<PStr>> {
 		let layers = self.layers;
+		if layers.raw_bytes() && self.mode.read && self.output.len() == 0
+			&& !matches!(self.resource, Resource::Closed)
+			&& let RecordSep::Text(text) = sep && !text.utf8 && let [byte] = text.bytes[..]
+		{
+			let record = match &self.shared_input {
+				Some(input) => input.try_borrow_mut().map_err(|_| bad_fd())?.buffered_record(byte, spare),
+				None => self.input.buffered_record(byte, spare),
+			};
+			if let Some(bytes) = record {
+				self.read_record_once = true;
+				self.line = self.line.saturating_add(1);
+				return Ok(Some(PStr::new(bytes, false)));
+			}
+		}
 		let crlf = layers.crlf();
-		let bytes = self.with_input(|input, device| match sep {
-			RecordSep::Slurp | RecordSep::Fixed(0) => input.to_end(device, crlf),
-			RecordSep::Paragraph => input.paragraph(device, crlf),
-			RecordSep::Fixed(count) => input.read_count(device, *count, crlf, layers.unicode_widths()),
-			RecordSep::Text(text) if text.is_empty() => input.paragraph(device, crlf),
-			RecordSep::Text(text) => match layers.delimiter(text)? {
-				Some(sep) => input.until(device, &sep, crlf),
-				None => input.to_end(device, crlf),
-			},
+		let bytes = self.with_input(|input, device| {
+			input.reuse(spare);
+			match sep {
+				RecordSep::Slurp | RecordSep::Fixed(0) => input.to_end(device, crlf),
+				RecordSep::Paragraph => input.paragraph(device, crlf),
+				RecordSep::Fixed(count) => input.read_count(device, *count, crlf, layers.unicode_widths()),
+				RecordSep::Text(text) if text.is_empty() => input.paragraph(device, crlf),
+				RecordSep::Text(text) => match layers.delimiter(text)? {
+					Some(sep) => input.until(device, &sep, crlf),
+					None => input.to_end(device, crlf),
+				},
+			}
 		})?;
 		let allow_empty = !list && !self.read_record_once && matches!(sep, RecordSep::Slurp | RecordSep::Fixed(0));
 		if bytes.is_empty() && !allow_empty {
@@ -527,6 +612,7 @@ impl Handle {
 		// larger than any pipe or terminal delivers at once, so only a full read (a regular file) asks for more.
 		let mut out = Vec::new();
 		let mut slice = len.min(SYSREAD_SLICE);
+		if len != 0 { flush_prompt(self.prompt_output.as_ref()); }
 		let deadline = self.read_deadline.as_ref();
 		loop {
 			let filled = out.len();
@@ -581,6 +667,10 @@ impl Handle {
 
 	/// Whether the stream has ended (or cannot be read). Does not consume a byte.
 	pub fn eof(&mut self) -> bool {
+		if self.mode.read && self.output.len() == 0 && self.shared_input.is_none()
+			&& matches!(&self.resource, Resource::Owned(device) if !matches!(device, Device::Scalar(_)))
+			&& self.input.unread() != 0
+		{ return false; }
 		self.with_input(|input, source| match &*source.device {
 			Device::Scalar(scalar) if input.unread() == 0 => scalar.eof(),
 			_ => Ok(input.peek(source)?.is_empty()),
@@ -601,9 +691,11 @@ impl Handle {
 		if !self.mode.write || !self.is_open() {
 			return Err(bad_fd());
 		}
-		let (bytes, wide) = self.layers.encode(s);
+		let (bytes, wide) = if !s.utf8 && self.layers.sysread_allowed() {
+			(Cow::Borrowed(s.bytes.as_slice()), false)
+		} else { self.layers.encode(s) };
 		if !bytes.is_empty() {
-			self.before_write()?;
+			if self.mode.read || self.shared_input.is_some() || self.input.unread() != 0 { self.before_write()?; }
 			if self.layers.crlf() {
 				let mut rest = bytes.as_ref();
 				while let Some(nl) = memchr::memchr(b'\n', rest) {
@@ -640,34 +732,49 @@ impl Handle {
 	}
 
 	fn emit(&mut self, bytes: &[u8]) -> io::Result<()> {
+		if bytes.is_empty() { return Ok(()); }
+		let resource = &mut self.resource;
 		if self.buffered && !self.autoflush && !self.layers.unbuffered() {
-			if self.output.len() + bytes.len().min(OUTPUT_CHUNK) > OUTPUT_CHUNK {
-				self.drain_output()?;
-			}
-			if bytes.len() < OUTPUT_CHUNK {
-				if self.output.is_empty() && !bytes.is_empty() && self.output.capacity() == 0 {
-					self.output.reserve(OUTPUT_CHUNK);
+			let newline = self.line_buffered.then(|| memchr::memrchr(b'\n', bytes)).flatten();
+			self.output.with_mut(|buf| {
+				let mut rest = bytes;
+				if let Some(at) = newline {
+					let (lines, tail) = rest.split_at(at + 1);
+					Self::buffer_output(resource, buf, lines)?;
+					Self::drain(resource, buf)?;
+					rest = tail;
 				}
-				self.output.extend_from_slice(bytes);
-			} else {
-				self.resource.with_mut(|device| device.write_all(bytes))?;
-			}
+				Self::buffer_output(resource, buf, rest)
+			})?;
 		} else {
-			self.resource.with_mut(|device| device.write_all(bytes))?;
+			// An alias may have accumulated bytes even if this handle is unbuffered.
+			self.output.with_mut(|buf| Self::drain(resource, buf))?;
+			resource.with_mut(|device| device.write_all(bytes))?;
 		}
 		self.with_buffer_mut(|input| input.offset = input.offset.saturating_add(bytes.len() as u64));
 		self.position_known &= !self.mode.append;
 		Ok(())
 	}
 
-	fn drain_output(&mut self) -> io::Result<()> {
-		if self.output.is_empty() {
-			return Ok(());
-		}
-		let bytes = &self.output;
-		let result = self.resource.with_mut(|device| device.write_all(bytes));
-		self.output.clear();
+	fn buffer_output(resource: &mut Resource, buf: &mut Vec<u8>, bytes: &[u8]) -> io::Result<()> {
+		if bytes.is_empty() { return Ok(()); }
+		if bytes.len() > OUTPUT_CHUNK - buf.len() { Self::drain(resource, buf)?; }
+		if bytes.len() >= OUTPUT_CHUNK { return resource.with_mut(|device| device.write_all(bytes)); }
+		if buf.capacity() == 0 { buf.reserve(OUTPUT_CHUNK); }
+		buf.extend_from_slice(bytes);
+		Ok(())
+	}
+
+	fn drain(resource: &mut Resource, bytes: &mut Vec<u8>) -> io::Result<()> {
+		if bytes.is_empty() { return Ok(()); }
+		let result = resource.with_mut(|device| device.write_all(bytes));
+		bytes.clear();
 		result
+	}
+
+	fn drain_output(&mut self) -> io::Result<()> {
+		let resource = &mut self.resource;
+		self.output.with_mut(|buf| Self::drain(resource, buf))
 	}
 
 	fn flush_output(&mut self) -> io::Result<()> {

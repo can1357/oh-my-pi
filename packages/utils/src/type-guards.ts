@@ -17,6 +17,14 @@ export function nonEmptyString(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Message text of a thrown value: `Error.message` for errors, `String(value)` otherwise.
+ * `String()` can itself throw (a null-prototype object, a throwing `toString`); that error propagates.
+ */
+export function errorMessage(value: unknown): string {
+	return value instanceof Error ? value.message : String(value);
+}
+
 export function toError(value: unknown): Error {
 	return value instanceof Error ? value : new Error(String(value));
 }

@@ -8,9 +8,18 @@
  * row, draws, and restores the cursor. The other rows are reserved: empty
  * but not blank (a reset), so nothing treats them as trimmable padding.
  */
+import { hasGraphics } from "../output/ansi";
 
 /** A reserved image row. */
 export const RESERVED_ROW = "\x1b[0m";
+
+/**
+ * Whether `row` reserves space for an image (possibly indented) or carries a graphics
+ * sequence. Row trimmers keep these rows so the image stays anchored to its first row.
+ */
+export function holdsImage(row: string): boolean {
+	return row.trim() === RESERVED_ROW || hasGraphics(row);
+}
 
 /** `rows` rows drawing `sequence` from the first one. A single row is the bare sequence. */
 export function anchoredRows(sequence: string, rows: number): string[] {

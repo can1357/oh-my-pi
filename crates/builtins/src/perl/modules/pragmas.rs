@@ -671,6 +671,7 @@ fn english_sigil(name: &str) -> u8 {
 	if matches!(name, "LAST_MATCH_START" | "LAST_MATCH_END") { b'@' } else { b'*' }
 }
 fn english_symbols(i: &mut Interp<'_>) {
+	i.symbols_changed();
 	let mut exports = Vec::with_capacity(ENGLISH.len());
 	for &(name, target) in ENGLISH {
 		let sigil = english_sigil(name);
@@ -682,6 +683,7 @@ fn english_symbols(i: &mut Interp<'_>) {
 	*i.av("English::EXPORT").elems_mut() = exports;
 }
 fn english(i: &mut Interp<'_>, a: Vec<Sv>, _: Cx) -> PResult<Ret> {
+	i.symbols_changed();
 	let pkg = i.package();
 	let opts: Vec<_> = names(&a).collect();
 	let no_matches = opts.iter().any(|s| s == "-no_match_vars");
@@ -783,7 +785,7 @@ fn readonly(i: &mut Interp<'_>, a: Vec<Sv>, _: Cx) -> PResult<Ret> {
 	let flag = a.get(1).map(|slot| slot.get().truthy());
 	let on = match arg(&a, 0) {
 		Value::Ref(Ref::Scalar(sv)) => {
-			if let Some(on) = flag { super::set_readonly(&mut i.modules.readonly, &sv, on); }
+			if let Some(on) = flag { sv.set_module_readonly(on); }
 			super::readonly_sv(i, &sv)
 		}
 		Value::Ref(Ref::Array(av)) => {

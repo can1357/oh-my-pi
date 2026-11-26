@@ -27,7 +27,7 @@ const P_POWER: u8 = 22;
 const P_INC: u8 = 23;
 const P_ARROW: u8 = 24;
 
-fn node(location: Location, kind: ExprKind) -> Expr { Expr { location, kind } }
+fn node(location: Location, kind: ExprKind) -> Expr { Expr { location, cache: NodeCache::default(), kind } }
 fn unary(location: Location, op: Unary, inner: Expr) -> Expr { node(location, ExprKind::Unary(op, Box::new(inner))) }
 fn empty(location: Location) -> Expr { node(location, ExprKind::List(Vec::new())) }
 
@@ -579,7 +579,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		{
 			let topic = node(location.clone(), ExprKind::Variable(Sigil::Scalar, "_".into()));
 			args = Some(match args {
-				Some(Expr { kind: ExprKind::List(mut items), location }) => { items.push(topic); node(location, ExprKind::List(items)) }
+				Some(Expr { kind: ExprKind::List(mut items), location, .. }) => { items.push(topic); node(location, ExprKind::List(items)) }
 				Some(single) => node(single.location.clone(), ExprKind::List(vec![single, topic])),
 				None => topic,
 			});
@@ -776,10 +776,10 @@ impl<'s, 'h> Parser<'s, 'h> {
 		// `goto &NAME` must retain the ampersand target, not execute the call.
 		Ok(Some(if builtin == Builtin::Goto {
 			match arg {
-				Expr { location, kind: ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }) } => {
+				Expr { location, kind: ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }), .. } => {
 					node(location, ExprKind::Variable(Sigil::Code, name))
 				}
-				Expr { location, kind: ExprKind::Call(Call { target: CallTarget::Code(code, true), args: None, .. }) } => {
+				Expr { location, kind: ExprKind::Call(Call { target: CallTarget::Code(code, true), args: None, .. }), .. } => {
 					node(location, ExprKind::Deref(Sigil::Code, code))
 				}
 				other => other,
@@ -1305,7 +1305,7 @@ fn scalar_operand_description(arg: &Expr) -> Option<&'static str> {
 
 /// Inside a parenthesized `\( ... )`, an argument-less `&name` names the sub (no call).
 fn uncalled_code_refs(expr: Expr) -> Expr {
-	let Expr { location, kind } = expr;
+	let Expr { location, kind, .. } = expr;
 	let kind = match kind {
 		ExprKind::Group(inner) => ExprKind::Group(Box::new(uncalled_code_refs(*inner))),
 		ExprKind::List(items) => ExprKind::List(items.into_iter().map(uncalled_code_refs).collect()),
@@ -1313,7 +1313,7 @@ fn uncalled_code_refs(expr: Expr) -> Expr {
 		ExprKind::Call(Call { target: CallTarget::Code(code, true), args: None, slot: None, .. }) => ExprKind::Deref(Sigil::Code, code),
 		kind => kind,
 	};
-	Expr { location, kind }
+	node(location, kind)
 }
 
 /// Location of the first `\` item in a declaration's parenthesized list.

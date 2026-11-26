@@ -402,9 +402,11 @@ describe("retain.execute", () => {
 		await registeredState?.flushRetainQueue();
 
 		expect(retainBatchSpy).toHaveBeenCalledTimes(1);
-		expect(retainBatchSpy.mock.calls[0][1].map(item => ({ content: item.content, tags: item.tags }))).toEqual([
-			{ content: "shared fact", tags: undefined },
+		// Items of one call can share a publication mtime, so their order within the request is unspecified.
+		const sent = retainBatchSpy.mock.calls[0][1].map(item => ({ content: item.content, tags: item.tags }));
+		expect(sent.toSorted((a, b) => a.content.localeCompare(b.content))).toEqual([
 			{ content: "explicitly global fact", tags: undefined },
+			{ content: "shared fact", tags: undefined },
 		]);
 	});
 

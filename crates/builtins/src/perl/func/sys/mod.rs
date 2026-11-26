@@ -37,7 +37,8 @@ pub(in crate::perl) use self::net::{pack_sockaddr, sockaddr_family};
 pub(in crate::perl) struct State {
 	stat: Option<file::CachedStat>,
 	dirs: HashMap<usize, (Weak<RefCell<Handle>>, Rc<RefCell<DirHandle>>)>,
-	handles: HashMap<usize, handles::KnownHandle>,
+	handles: rustc_hash::FxHashMap<usize, handles::KnownHandle>,
+	record_buffer: Vec<u8>,
 	formats: HashMap<Rc<str>, Rc<format::Definition>>,
 	pages: HashMap<usize, (Weak<RefCell<Handle>>, format::Page)>,
 	glob_sites: HashMap<glob::Site, VecDeque<Value>>,
@@ -49,6 +50,16 @@ pub(in crate::perl) struct State {
 	argv_outer: Vec<argv::Suspended>,
 	umask: Option<u32>,
 	users: users::State,
+}
+
+impl State {
+	/// Keep one ordinary-sized allocation from the previous implicit readline assignment.
+	pub(in crate::perl) fn recycle_record(&mut self, mut bytes: Vec<u8>) {
+		if bytes.capacity() <= 64 * 1024 {
+			bytes.clear();
+			self.record_buffer = bytes;
+		}
+	}
 }
 
 /// Dispatch the perlfunc intrinsics owned by the system layer.

@@ -26,13 +26,13 @@ impl Interp<'_> {
 		if let ExprKind::Declare(kind, _, variable, _) = &e.kind {
 			self.declare_targets(*kind, variable, e as *const Expr as usize)?;
 			if let ExprKind::Variable(sigil, name) = &ungroup(variable).kind {
-				return self.ref_variable(*sigil, name, *kind != DeclKind::Local);
+				return self.ref_variable(ungroup(variable), *sigil, name, *kind != DeclKind::Local);
 			}
 			return self.ref_target(variable);
 		}
-		if let ExprKind::Variable(sigil, name) = &e.kind { return self.ref_variable(*sigil, name, false); }
+		if let ExprKind::Variable(sigil, name) = &e.kind { return self.ref_variable(e, *sigil, name, false); }
 		if let ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }) = &e.kind {
-			return self.ref_variable(Sigil::Code, name, false);
+			return self.ref_variable(e, Sigil::Code, name, false);
 		}
 		if let ExprKind::Conditional(cond, yes, no) = &e.kind {
 			let value = self.eval_scalar(cond)?;
@@ -42,18 +42,27 @@ impl Interp<'_> {
 		self.ref_element_target(e)
 	}
 
-	fn ref_variable(&mut self, sigil: Sigil, name: &str, pending: bool) -> PResult<RefTarget> {
+	fn ref_variable(&mut self, e: &Expr, sigil: Sigil, name: &str, pending: bool) -> PResult<RefTarget> {
 		if !matches!(sigil, Sigil::Scalar | Sigil::Array | Sigil::Hash | Sigil::Code) {
 			return Err(self.die_msg("Can't modify reference constructor in assignment"));
 		}
-		let binding = self.scopes.iter().enumerate().rev().find_map(|(scope_ix, scope)| {
+		let binding = if !pending {
+			self.pad_position_at(e, sigil, name).map(|(scope, offset)| {
+				let our = match &self.scopes[scope].pad[offset].1 { Slot::Our(name) => Some(name.clone()), _ => None };
+				(scope, offset, false, our)
+			})
+		} else { self.scopes.iter().enumerate().rev().find_map(|(scope_ix, scope)| {
 			[(true, &scope.declarations), (false, &scope.pad)].into_iter().find_map(|(is_pending, pad)| {
-				if is_pending && !pending { return None; }
-				let (index, (_, _, slot)) = pad.iter().enumerate().rfind(|(_, (s, n, _))| *s == sigil && n.as_ref() == name)?;
+				let cached = e.cache.lexical.get();
+				let (index, (_, slot)) = pad.iter().enumerate().rfind(|(_, (id, _))| {
+					if cached != 0 { return *id == (cached - 1) as usize; }
+					let (s, n) = self.lexicals.spelling(*id);
+					*s == sigil && n.as_ref() == name
+				})?;
 				let our = if let Slot::Our(name) = slot { Some(name.clone()) } else { None };
 				Some((scope_ix, index, is_pending, our))
 			})
-		});
+		}) };
 		if let Some((scope, index, pending, our)) = binding {
 			let place = if let Some(name) = our { RefPlace::Glob(self.glob(&name), sigil) }
 			else { RefPlace::Pad { scope, index, pending } };
@@ -67,7 +76,7 @@ impl Interp<'_> {
 	}
 
 	pub(super) fn pending_ref_target(&mut self, e: &Expr) -> PResult<RefTarget> {
-		if let ExprKind::Variable(sigil, name) = &ungroup(e).kind { self.ref_variable(*sigil, name, true) }
+		if let ExprKind::Variable(sigil, name) = &ungroup(e).kind { self.ref_variable(ungroup(e), *sigil, name, true) }
 		else { self.ref_target(e) }
 	}
 
@@ -95,7 +104,7 @@ impl Interp<'_> {
 			(RefPlace::Pad { scope, index, pending }, slot) => {
 				if let Some(scope) = self.scopes.get_mut(scope) {
 					let pad = if pending { &mut scope.declarations } else { &mut scope.pad };
-					if let Some((_, _, alias)) = pad.get_mut(index) { *alias = slot; }
+					if let Some((_, alias)) = pad.get_mut(index) { *alias = slot; }
 				}
 			}
 			(RefPlace::Glob(glob, Sigil::Scalar), Slot::Scalar(sv)) => { glob.scalar.replace(sv); }

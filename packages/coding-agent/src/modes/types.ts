@@ -718,7 +718,7 @@ export interface InteractiveModeContext {
 	playWelcomeIntro(): void;
 	/** Close and quit. Operator quits are cancellable by extensions; pass `cancellable: false` for forced closes. */
 	shutdown(options?: { cancellable?: boolean }): Promise<void>;
-	/** Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session. */
+	/** Restart with the original launch flags, resuming this session. Refuse if the working directory was removed. */
 	restart(): Promise<void>;
 	/** Request graceful shutdown at the next fully settled boundary, including background turns. */
 	requestShutdown(): void;
@@ -726,7 +726,6 @@ export interface InteractiveModeContext {
 
 	// Extension UI integration
 	setToolUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void;
-	initializeHookRunner(uiContext: ExtensionUIContext, hasUI: boolean): void;
 	/** Stack extension autocomplete behavior on top of the built-in editor provider. */
 	addAutocompleteProvider(factory: AutocompleteProviderFactory): void;
 

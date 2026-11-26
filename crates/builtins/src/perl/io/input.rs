@@ -199,6 +199,32 @@ impl Input {
 		Ok(())
 	}
 
+	/// The usual short raw record fits in lookahead. Move whole buffers when possible;
+	/// otherwise copy just the returned record into its recycled, independently owned SV.
+	#[inline]
+	pub(super) fn buffered_record(&mut self, delim: u8, spare: &mut Vec<u8>) -> Option<Vec<u8>> {
+		if self.direct || !self.partial.is_empty() { return None; }
+		let len = memchr(delim, &self.buf[self.start..self.end])? + 1;
+		if self.start == 0 && len == self.end && spare.capacity() >= self.buf.len() {
+			std::mem::swap(&mut self.buf, spare);
+			spare.truncate(len);
+			self.start = 0;
+			self.end = 0;
+			self.offset = self.offset.saturating_add(len as u64);
+		} else {
+			spare.extend_from_slice(&self.buf[self.start..self.start + len]);
+			self.consume(len, false);
+		}
+		Some(std::mem::take(spare))
+	}
+
+	/// Seed the next record allocation without discarding an interrupted record.
+	pub(super) fn reuse(&mut self, spare: &mut Vec<u8>) {
+		if self.partial.capacity() == 0 {
+			std::mem::swap(&mut self.partial, spare);
+		}
+	}
+
 	/// Reads through the exact delimiter, retaining it in the result.
 	pub(super) fn until(&mut self, src: &mut impl Read, sep: &[u8], crlf: bool) -> io::Result<Vec<u8>> {
 		let mut out = std::mem::take(&mut self.partial);
@@ -211,16 +237,34 @@ impl Input {
 	fn until_into(&mut self, src: &mut impl Read, sep: &[u8], crlf: bool, out: &mut Vec<u8>) -> io::Result<()> {
 		if let [byte] = *sep {
 			loop {
-				let (bytes, cooked) = self.window(src, crlf, usize::MAX)?;
-				if bytes.is_empty() {
-					return Ok(());
-				}
-				let found = memchr(byte, bytes);
-				let len = found.map_or(bytes.len(), |i| i + 1);
-				out.extend_from_slice(&bytes[..len]);
-				self.consume(len, cooked);
-				if found.is_some() {
-					return Ok(());
+				let bytes = self.peek(src)?;
+				if bytes.is_empty() { return Ok(()); }
+				let found = if crlf { memchr::memchr2(byte, b'\r', bytes) } else { memchr(byte, bytes) };
+				if let Some(at) = found && crlf && bytes[at] == b'\r' {
+					out.extend_from_slice(&bytes[..at]);
+					self.consume(at, false);
+					// Only the CR itself needs lookahead (possibly across a refill).
+					let (unit, cooked) = self.window(src, true, usize::MAX)?;
+					let logical = unit[0];
+					out.push(logical);
+					self.consume(1, cooked);
+					if logical == byte { return Ok(()); }
+				} else {
+					let len = found.map_or(bytes.len(), |at| at + 1);
+					if len >= CHUNK / 2 && len == bytes.len() && self.start == 0 && out.is_empty() {
+						// A whole refill belongs to this record. Transfer it rather
+						// than copying it into another allocation (including when
+						// this is the first fragment of a multi-buffer line).
+						std::mem::swap(out, &mut self.buf);
+						out.truncate(len);
+						self.start = 0;
+						self.end = 0;
+						self.offset = self.offset.saturating_add(len as u64);
+					} else {
+						out.extend_from_slice(&self.buf[self.start..self.start + len]);
+						self.consume(len, false);
+					}
+					if found.is_some() { return Ok(()); }
 				}
 			}
 		}

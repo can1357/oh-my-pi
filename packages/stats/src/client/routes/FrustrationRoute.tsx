@@ -1,3 +1,4 @@
+import { errorMessage } from "@oh-my-pi/pi-utils/type-guards";
 import { Sparkles } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -116,10 +117,6 @@ export function FrustrationRoute({ active, range }: FrustrationRouteProps) {
 /** `part / whole` as a percentage string; `–` when there is nothing to divide. */
 function rate(part: number, whole: number): string {
 	return whole > 0 ? formatPercent(part / whole) : "–";
-}
-
-function errorMessage(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
 }
 
 function formatElapsed(ms: number): string {

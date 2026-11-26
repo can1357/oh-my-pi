@@ -214,6 +214,9 @@ describe("InteractiveMode tray", () => {
 		tempDir?.removeSync();
 	});
 
+	/** Agent `id`'s transcript, in this session's artifacts tree. */
+	const transcript = (id: string): string => path.join(session.sessionManager.getArtifactsDir()!, `${id}.jsonl`);
+
 	/** A job body that runs until the test ends. */
 	const hold = (): Promise<string> => {
 		const { promise, resolve } = Promise.withResolvers<string>();
@@ -237,7 +240,7 @@ describe("InteractiveMode tray", () => {
 			parentId: "Main",
 			session: null,
 			// Its transcript, so focusing can open it.
-			sessionFile: "/tmp/TrayScan.jsonl",
+			sessionFile: transcript("TrayScan"),
 			status: "running",
 		});
 		registry.register({
@@ -338,12 +341,12 @@ describe("InteractiveMode tray", () => {
 		const cards = children(described[trayAt]);
 		expect(cards.map(card => [card.p?.item, card.p?.ref])).toEqual([
 			["agent", "TrayScan"],
-			["agent", "TrayReview"],
 			["job", "bg_1"],
 			["job", "bg_2"],
+			["agent", "TrayReview"],
 			["done", "done"],
 		]);
-		const [scan, review, widgetJob, bareJob, done] = cards;
+		const [scan, widgetJob, bareJob, review, done] = cards;
 
 		expect(scan!.p).toMatchObject({
 			role: "omp.tray.card",
@@ -733,7 +736,7 @@ describe("InteractiveMode tray", () => {
 			kind: "sub",
 			parentId: "Main",
 			session: null,
-			sessionFile: "/tmp/TrayOld.jsonl",
+			sessionFile: transcript("TrayOld"),
 			status: "parked",
 			createdAt: 1_000,
 		});
@@ -743,7 +746,7 @@ describe("InteractiveMode tray", () => {
 			kind: "sub",
 			parentId: "Main",
 			session: null,
-			sessionFile: "/tmp/TrayScan.jsonl",
+			sessionFile: transcript("TrayScan"),
 			status: "aborted",
 			createdAt: 2_000,
 		});
@@ -793,6 +796,31 @@ describe("InteractiveMode tray", () => {
 				["done", "done"],
 			],
 		});
+	});
+
+	it("leaves out the agents of a session resumed earlier, which the process-global registry keeps", async () => {
+		const registry = AgentRegistry.global();
+		// Restored from the transcripts of the session `/resume` left.
+		registry.register({
+			id: "TrayOld",
+			displayName: "m2",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: path.join(tempDir.path(), "earlier-session", "TrayOld.jsonl"),
+			status: "parked",
+		});
+		registry.register({
+			id: "TrayScan",
+			displayName: "m2",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: transcript("TrayScan"),
+			status: "parked",
+		});
+		await traySynced();
+		expect(children(trayOf()).map(card => card.p?.ref)).toEqual(["TrayScan"]);
 	});
 
 	it("keeps the status row as the tray's seat while it has cards, one row from working to idle and back", async () => {

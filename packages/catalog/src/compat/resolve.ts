@@ -122,9 +122,9 @@ class IdentityFacts {
 
 /**
  * The id a spec resolves identity and rules under: its own, unless that names
- * no model and the row sends a model that does on the wire. A Devin Fusion
- * pairing runs only its lead, so the lead's reviewed rules (cache-write rate,
- * long-context tier) apply to it at build time.
+ * no model and the row sends a model that does on the wire. A custom alias
+ * (`review-alias` → `gpt-6-luna`) thereby gets the wire model's reviewed rules
+ * at build time.
  */
 function policyModelId(spec: CatalogPolicyInputs): string {
 	const wireId = spec.requestModelId;
@@ -1280,7 +1280,28 @@ function mergeEffortMap(
 			: undefined;
 	const configured = readCompatEffortMap(compat);
 	if (detected === undefined && ruleMap === undefined && configured === undefined) return undefined;
-	return filterEffortMap({ ...detected, ...ruleMap, ...configured }, efforts);
+	const served = filterEffortMap({ ...detected, ...ruleMap, ...configured }, efforts);
+	const aliases = ruleMap === undefined ? undefined : effortAliases(ruleMap, efforts);
+	return aliases === undefined ? served : { ...served, ...aliases };
+}
+
+/**
+ * `thinking-effort-map` entries that send an unserved effort to a served tier
+ * (`medium "high"` on a low/high/max ladder); `clampThinkingLevelForModel`
+ * follows them instead of stepping down. Wire-value maps never alias.
+ */
+function effortAliases(
+	map: Partial<Record<Effort, string>>,
+	efforts: readonly Effort[],
+): Partial<Record<Effort, string>> | undefined {
+	let aliases: Partial<Record<Effort, string>> | undefined;
+	for (const effort of THINKING_EFFORTS) {
+		const target = effortValue(map[effort]);
+		if (efforts.includes(effort) || target === undefined || !efforts.includes(target)) continue;
+		aliases ??= {};
+		aliases[effort] = target;
+	}
+	return aliases;
 }
 
 /**

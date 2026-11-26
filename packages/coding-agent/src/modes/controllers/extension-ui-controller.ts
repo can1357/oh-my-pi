@@ -118,11 +118,6 @@ function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): Ex
 	return Object.create(Object.getPrototypeOf(uiContext), descriptors) as ExtensionUIContext;
 }
 
-async function editDialogExternally(text: string): Promise<string | null> {
-	const command = getEditorCommand();
-	return command ? openInEditor(command, text) : null;
-}
-
 interface CollabWinner<T> {
 	source: "local" | "remote";
 	value: T | undefined;
@@ -206,6 +201,12 @@ export class ExtensionUiController {
 	 */
 	#toolUIContext: ExtensionUIContext | undefined;
 	constructor(private ctx: InteractiveModeContext) {}
+
+	/** Ctrl+G in a dialog editor: the editor gets the terminal, the TUI stops rendering and reading keys until it exits. */
+	#editDialogExternally = async (text: string): Promise<string | null> => {
+		const command = getEditorCommand();
+		return command ? this.ctx.suspend(() => openInEditor(command, text)) : null;
+	};
 
 	#syncExtensionComposerShapes(): void {
 		this.disposeComposerShapes();
@@ -526,146 +527,6 @@ export class ExtensionUiController {
 		const theme = currentTheme();
 		const text = theme.fg("accent", `${theme.symbols.symbol("status.success")} New session started`);
 		this.ctx.present(() => AnsiText({ text, padX: 1, padY: 1 }));
-	}
-
-	initializeHookRunner(uiContext: ExtensionUIContext, _hasUI: boolean): void {
-		const extensionRunner = this.ctx.session.extensionRunner;
-		if (!extensionRunner) {
-			return;
-		}
-
-		const actions: ExtensionActions = {
-			sendMessage: this.#sendExtensionMessage,
-			sendUserMessage: this.#sendExtensionUserMessage,
-			appendEntry: (customType, data) => {
-				this.ctx.sessionManager.appendCustomEntry(customType, data);
-			},
-			setLabel: (targetId, label) => {
-				this.ctx.sessionManager.appendLabelChange(targetId, label);
-			},
-			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
-			getAllTools: () => this.ctx.session.getAllToolInfos(),
-			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
-			setModel: async model => {
-				const key = await this.ctx.session.modelRegistry.getApiKey(model);
-				if (!key) return false;
-				await this.ctx.session.setModel(model);
-				return true;
-			},
-			getThinkingLevel: () => this.ctx.session.thinkingLevel,
-			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
-			getServiceTiers: () => this.ctx.session.serviceTierByFamily,
-			setServiceTier: (family, tier) => this.ctx.session.setServiceTierFamily(family, tier),
-			getCommands: () => getSessionSlashCommands(this.ctx.session),
-			getSessionName: () => this.ctx.sessionManager.getSessionName(),
-			setSessionName: name => this.#updateSessionName(name),
-		};
-		const contextActions: ExtensionContextActions = {
-			getModel: () => this.ctx.session.model,
-			isIdle: () => !this.ctx.session.isStreaming,
-			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
-			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
-			shutdown: () => this.ctx.requestShutdown(),
-			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
-			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
-			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
-			sessionModes: this.ctx.sessionModes,
-			keybindings: this.ctx.keybindings,
-			getContextUsage: () => this.ctx.session.getContextUsage(),
-			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
-			getSystemPrompt: () => this.ctx.session.systemPrompt,
-			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
-			startLive: options => this.ctx.startRemoteLive(options),
-		};
-		const commandActions: ExtensionCommandContextActions = {
-			getContextUsage: () => this.ctx.session.getContextUsage(),
-			waitForIdle: () => this.ctx.session.agent.waitForIdle(),
-			reload: async () => {
-				await this.ctx.session.reload();
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-				await this.ctx.reloadTodos();
-				this.ctx.showStatus("Reloaded session");
-			},
-			newSession: async options => {
-				await this.ctx.prepareSessionSwitch();
-				this.ctx.clearTransientSessionUi();
-
-				// Create new session
-				this.clearExtensionTerminalInputListeners();
-				this.clearHookWidgets();
-				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
-				if (!success) {
-					return { cancelled: true };
-				}
-
-				// Call setup callback if provided
-				if (options?.setup) {
-					await options.setup(this.ctx.sessionManager);
-				}
-
-				// Clear UI state
-				this.ctx.clearTransientSessionUi();
-				this.ctx.resetTranscript();
-
-				this.#presentNewSessionNotice();
-				await this.ctx.reloadTodos();
-
-				return { cancelled: false };
-			},
-			branch: async entryId => {
-				await this.ctx.prepareSessionSwitch();
-				const result = await this.ctx.session.branch(entryId);
-				if (result.cancelled) {
-					return { cancelled: true };
-				}
-
-				// Update UI
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-				await this.ctx.reloadTodos();
-				this.ctx.composer.setDraft(result.selectedText, result.selectedImages);
-				this.ctx.showStatus("Branched to new session");
-
-				return { cancelled: false };
-			},
-			navigateTree: async (targetId, options) => {
-				const result = await this.ctx.session.navigateTree(targetId, { summarize: options?.summarize });
-				if (result.cancelled) {
-					return { cancelled: true };
-				}
-
-				// Update UI
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-				await this.ctx.reloadTodos();
-				if (result.editorText && !this.ctx.composer.text().trim()) {
-					this.ctx.composer.setDraft(result.editorText, result.editorImages);
-				}
-				this.ctx.showStatus("Navigated to selected point");
-
-				return { cancelled: false };
-			},
-			compact: async instructionsOrOptions => this.#handleInteractiveCompact(instructionsOrOptions),
-			switchSession: async sessionPath => {
-				await this.ctx.prepareSessionSwitch();
-				this.clearHookWidgets();
-				let modelFallbackWarning: string | undefined;
-				const result = await this.ctx.session.switchSession(sessionPath, {
-					onModelFallback: warning => {
-						modelFallbackWarning = warning;
-					},
-				});
-				if (!result) {
-					return { cancelled: true };
-				}
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-				await this.ctx.reloadTodos();
-				if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
-				return { cancelled: false };
-			},
-		};
-
-		const runnerUiContext = withTerminalLauncher(uiContext, _hasUI);
-		extensionRunner.initialize(actions, contextActions, commandActions, runnerUiContext, "tui");
-		this.#syncExtensionComposerShapes();
 	}
 
 	/**
@@ -1306,7 +1167,7 @@ export class ExtensionUiController {
 							prefill,
 							options: {
 								promptStyle: true,
-								externalEditor: editDialogExternally,
+								externalEditor: this.#editDialogExternally,
 								question: prompt.question,
 								maxHeight: this.#dialogEditorRows(),
 								...options,
@@ -1704,7 +1565,7 @@ export class ExtensionUiController {
 						prefill,
 						options: {
 							...editorOptions,
-							externalEditor: editDialogExternally,
+							externalEditor: this.#editDialogExternally,
 							maxHeight: this.#dialogEditorRows(),
 						},
 						vim: this.ctx.dialogVim(),
