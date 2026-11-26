@@ -391,9 +391,10 @@ function finished(text: string): Buffer {
  * Cursor handing the client one `read` call the way it does on the wire: the
  * call's start, its MCP exec frame, then the step's listing. Once the call is
  * answered the model finishes (or, with `finish: false`, keeps talking). A turn
- * rebuilt from history (`resumeAction`) finishes at once.
+ * rebuilt from history (`resumeAction`) finishes at once. With `leadingText`, the
+ * step opens with that text before the call starts.
  */
-function relayingCursor(runs: ServedRun[], finish = true): FixtureStream {
+function relayingCursor(runs: ServedRun[], finish = true, leadingText?: string): FixtureStream {
 	const served = new WeakMap<http2.ServerHttp2Stream, { run: ServedRun; step: number; end(data: Buffer): void }>();
 	return (stream, _headers, received) => {
 		const entry = served.get(stream);
@@ -444,6 +445,14 @@ function relayingCursor(runs: ServedRun[], finish = true): FixtureStream {
 			});
 			stream.write(
 				Buffer.concat([
+					...(leadingText === undefined
+						? []
+						: [
+								interactionFrame({
+									case: "textDelta",
+									value: create(TextDeltaUpdateSchema, { text: leadingText }),
+								}),
+							]),
 					interactionFrame({ case: "tokenDelta", value: create(TokenDeltaUpdateSchema, { tokens: 5 }) }),
 					interactionFrame({
 						case: "toolCallStarted",
@@ -819,6 +828,21 @@ describe("Cursor runs relayed across an external executor's requests", () => {
 			expect(handedOff.usage.output + resumed.usage.output).toBe(12);
 			expect(states.size).toBe(0);
 		});
+	});
+
+	it("refuses tool-call markup in a step that hands off a call, and does not carry it past the park (issue 8495)", async () => {
+		const runs: ServedRun[] = [];
+		const states = new Map<string, ProviderSessionState>();
+		await withCursorServer(
+			relayingCursor(runs, true, '<|open|>toolscall tool="Shell" index="1"<|sep|>'),
+			async baseUrl => {
+				const handedOff = await respond(baseUrl, [user], relayOptions(states));
+
+				expect(handedOff.stopReason).toBe("error");
+				expect(handedOff.errorMessage).toContain("tool-call markup");
+				expect(states.size).toBe(0);
+			},
+		);
 	});
 
 	it("hands off a call Cursor waits on before listing its step, and counts it toward the listing", async () => {
