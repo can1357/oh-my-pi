@@ -55,7 +55,7 @@ import {
 	thinkingDotToken,
 } from "../../../modes/view-model/overlays/model-browser";
 import { fuzzyHits, fuzzyRank } from "../../../utils/fuzzy";
-import { thinkingLevelGlyph, type ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { editLine, type LineState } from "../settings/line-edit";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
 
@@ -1165,9 +1165,4 @@ export class ModelBrowserState {
 /** A theme-resolved glyph for native text (`status.enabled` → `●`). */
 export function glyph(key: string): string {
 	return currentTheme().symbols.symbol(key);
-}
-
-/** The thinking glyph of a role chip: ⦸ for off, the level's own otherwise; none for inherit. */
-export function thinkingGlyph(level: ConfiguredThinkingLevel, symbol: (key: string) => string = glyph): string {
-	return thinkingLevelGlyph(symbol, level);
 }

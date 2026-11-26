@@ -10,7 +10,6 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { computed, effect, type JSXNode, onCleanup } from "@oh-my-pi/pi-tui";
-import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type {
 	TspPickerAction,
 	TspPickerColumn,
@@ -34,7 +33,6 @@ import type {
 	ScopedModelItem,
 } from "../../../modes/view-model/overlays/model-hub";
 import { getConfiguredThinkingLevelMetadata } from "../../../thinking/levels";
-import { thinkingLevelGlyph } from "../../../utils/render-utils";
 import "../../styles/pickers/model-hub";
 import { compactionNotice, type ModelHubTerm } from "../../styles/pickers/model-hub";
 import { modelPreview } from "./model-browser";
@@ -311,7 +309,6 @@ function pickerStrip(hub: ModelHubState, strip: StripState): NonNullable<TspPick
 			...(strip.kind === "scope" ? [{ s: "muted", t: " to" }] : []),
 		];
 	}
-	const glyph = currentTheme().symbols.symbol;
 	return {
 		label,
 		items: strip.chips.map((chip, index) => {
@@ -323,7 +320,6 @@ function pickerStrip(hub: ModelHubState, strip: StripState): NonNullable<TspPick
 						? assigned.thinkingLevel
 						: undefined;
 			const thinking = strip.kind === "thinking";
-			const thinkingGlyph = thinking ? thinkingLevelGlyph(glyph, chip.thinkingLevel) : "";
 			const dot = !thinking && level !== undefined ? thinkingDotToken(level) : undefined;
 			const on =
 				chip.action === "unassign" ||
@@ -332,7 +328,7 @@ function pickerStrip(hub: ModelHubState, strip: StripState): NonNullable<TspPick
 					chip.thinkingLevel === strip.initialThinkingLevel);
 			return {
 				id: String(index),
-				label: thinkingGlyph ? `${thinkingGlyph} ${chip.label}` : chip.label,
+				label: thinking ? hub.chipSpans(chip) : chip.label,
 				...(on ? { on: true } : {}),
 				...(dot ? { dot } : {}),
 			};

@@ -96,14 +96,24 @@ pickerSuite({
 	},
 });
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function nativeText(node: unknown): string {
-	if (!node || typeof node !== "object") return "";
-	const value = node as {
-		p?: { spans?: readonly { t?: unknown }[] };
-		c?: readonly unknown[];
-	};
-	const spans = value.p?.spans?.map(span => (typeof span.t === "string" ? span.t : "")).join("") ?? "";
-	return spans + (value.c?.map(nativeText).join("") ?? "");
+	if (typeof node === "string") return node;
+	if (Array.isArray(node)) return node.map(nativeText).join("");
+	if (!isRecord(node)) return "";
+	let text = typeof node.t === "string" ? node.t : "";
+	const props = node.p;
+	if (isRecord(props)) {
+		const spans = props.spans;
+		if (Array.isArray(spans)) text += nativeText(spans);
+		text += nativeText(props.value);
+		text += nativeText(props.label);
+	}
+	const children = node.c;
+	return text + nativeText(children);
 }
 
 test("native model browser resolves glyphs from the active theme", () => {

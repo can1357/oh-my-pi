@@ -177,12 +177,16 @@ describe("model hub flows the corpus does not record", () => {
 
 			const roleStrip = picker().strip;
 			expect(roleStrip).toBeDefined();
-			const slow = roleStrip?.items.find(item => item.label === "slow");
+			const slow = roleStrip?.items.find(
+				item => (typeof item.label === "string" ? item.label : item.label.map(span => span.t).join("")) === "slow",
+			);
 			expect(slow).toBeDefined();
 			ui.send({ ev: "action", sf: ui.sf, id: pickerNode.id, act: "strip", value: slow!.id });
 
 			const thinkingItems = picker().strip?.items ?? [];
-			const labels = thinkingItems.map(item => item.label);
+			const labels = thinkingItems.map(item =>
+				typeof item.label === "string" ? item.label : item.label.map(span => span.t).join(""),
+			);
 			expect(labels).toEqual(expect.arrayContaining(["@D off", "@L low", "@A auto"]));
 			expect(thinkingItems.every(item => item.dot === undefined)).toBe(true);
 		} finally {
