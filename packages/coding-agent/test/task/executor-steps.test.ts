@@ -9,6 +9,8 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -53,6 +55,7 @@ function stepSession(answer: (prompt: string, child: Child) => void, tools: stri
 	const messages: AssistantMessage[] = [];
 	const prompts: string[] = [];
 	const entries: FileEntry[] = [];
+	const delivered: IrcMessage[] = [];
 	let calls = 0;
 	const emit = (event: AgentSessionEvent) => {
 		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
@@ -99,6 +102,10 @@ function stepSession(answer: (prompt: string, child: Child) => void, tools: stri
 		},
 		getLastAssistantMessage: () => messages.at(-1),
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
+		deliverIrcMessage: async (message: IrcMessage) => {
+			delivered.push(message);
+			return "injected" as const;
+		},
 	};
 	vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
 		session: session as unknown as AgentSession,
@@ -106,7 +113,7 @@ function stepSession(answer: (prompt: string, child: Child) => void, tools: stri
 		setToolUIContext: () => {},
 		eventBus: new EventBus(),
 	} as CreateAgentSessionResult);
-	return { prompts, entries };
+	return { prompts, entries, delivered };
 }
 
 /** Records the step reports the spawner `Main` receives. */
@@ -199,5 +206,58 @@ describe("runSubprocess stepped spawns", () => {
 			expect.stringContaining("report STEP-ONE"),
 			expect.stringContaining("report STEP-TWO"),
 		]);
+	});
+
+	it("in an isolated registry, reports each step through that registry's bus", async () => {
+		stepSession((prompt, child) => child.say(`report ${prompt}`), ["read"]);
+		const isolated = new AgentRegistry();
+		isolated.register({ id: "Main", displayName: "Main", kind: "main", session: null });
+		const isolatedSend = vi
+			.spyOn(IrcBus.forRegistry(isolated), "send")
+			.mockResolvedValue({ to: "Main", outcome: "injected" });
+		const globalInbox = spawnerInbox();
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: PROMPTS[0],
+			steps: PROMPTS,
+			index: 0,
+			id: "steps-isolated",
+			parentAgentId: "Main",
+			agentRegistry: isolated,
+		});
+
+		expect(isolatedSend.mock.calls.map(([message]) => message.body)).toEqual([
+			expect.stringContaining("report STEP-ONE"),
+			expect.stringContaining("report STEP-TWO"),
+		]);
+		expect(globalInbox()).toEqual([]);
+	});
+});
+
+describe("runSubprocess in an isolated registry", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		AsyncJobManager.resetForTests();
+		IrcBus.resetGlobalForTests();
+	});
+
+	it("hands the child the messages held for it on that registry's bus when it starts", async () => {
+		const harness = stepSession((_prompt, child) => child.say("done"), ["read"]);
+		const isolated = new AgentRegistry();
+		IrcBus.forRegistry(isolated).park({ from: "Main", to: "held-isolated", body: "use v2" });
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "Do the work.",
+			index: 0,
+			id: "held-isolated",
+			agentRegistry: isolated,
+		});
+
+		expect(harness.delivered.map(message => [message.from, message.body])).toEqual([["Main", "use v2"]]);
+		expect(IrcBus.forRegistry(isolated).take("held-isolated")).toBeUndefined();
 	});
 });

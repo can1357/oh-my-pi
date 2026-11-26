@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
+import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -157,6 +159,32 @@ describe("write agent:// messaging", () => {
 		}
 	});
 
+	it("holds a message for a spawned agent of an isolated registry on that registry's bus", async () => {
+		registry = new AgentRegistry();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null });
+		const manager = new AsyncJobManager({});
+		const start = Promise.withResolvers<string>();
+		manager.register("task", "Queued", async () => start.promise, {
+			id: "Queued",
+			agentId: "Queued",
+			ownerId: "Main",
+			queued: true,
+		});
+		const session = { ...makeSession(), asyncJobManager: manager } as ToolSession;
+		try {
+			const result = await new WriteTool(session).execute("early", { path: "agent://Queued", content: "use v2" });
+			expect(result.isError).toBeFalsy();
+			const bus = IrcBus.forRegistry(registry);
+			// The caller's `wait` reads this bus: the held message is owed a reply there.
+			expect(bus.unansweredSends("Main", 0)).toMatchObject([{ to: "Queued" }]);
+			expect(bus.take("Queued")).toMatchObject({ from: "Main", to: "Queued", body: "use v2" });
+			expect(IrcBus.existing()?.take("Queued")).toBeUndefined();
+		} finally {
+			start.resolve("done");
+			await manager.dispose();
+		}
+	});
+
 	it("reports unknown and stopped recipients without delivering", async () => {
 		const tool = new WriteTool(makeSession());
 		const unknown = await tool.execute("unknown", { path: "agent://Missing", content: "hello" });
@@ -197,5 +225,65 @@ describe("write agent:// messaging", () => {
 			new WriteTool(makeSession()).execute("empty", { path: "agent://Scout", content: "  " }),
 		).rejects.toThrow("non-empty content");
 		expect(received.get("Scout")?.map(message => message.body)).toEqual(["from plan"]);
+	});
+
+	it("routes agent://@ns/name to the namespace transport: the /name segment is the id, not a JSON path", async () => {
+		// A leaf root (cannot spawn) has only the bridge's remote peers; the write gate must still open.
+		const settings = Settings.isolated({ "task.maxRecursionDepth": 0 });
+		const seen: Array<{ to: string; toName: string | undefined }> = [];
+		IrcBus.localForRegistry().setRemoteTransport(
+			"cluster-a",
+			{
+				async send(message, opts) {
+					seen.push({ to: message.to, toName: opts?.toName });
+					return { to: message.to, outcome: "injected" };
+				},
+			},
+			"ext:test",
+		);
+		const session = makeSession();
+		session.settings = settings;
+		const tool = new WriteTool(session);
+
+		const result = await tool.execute("remote", { path: "agent://@cluster-a/leia", content: "hello leia" });
+		expect(result.isError).toBeFalsy();
+		expect(result.content[0]).toMatchObject({ text: "Delivered to @cluster-a/leia." });
+		expect(seen).toEqual([{ to: "@cluster-a/leia", toName: "leia" }]);
+
+		// Anything after the id is still a JSON-path suffix and still rejected.
+		await expect(tool.execute("suffix", { path: "agent://@cluster-a/leia/result", content: "oops" })).rejects.toThrow(
+			"JSON-path suffix",
+		);
+		// A bare namespace is in the reserved `@` space but names no peer: explain, never a local miss.
+		await expect(tool.execute("bare-ns", { path: "agent://@cluster-a", content: "oops" })).rejects.toThrow(
+			/@cluster-a is not a valid bridged peer id/,
+		);
+		expect(seen).toHaveLength(1);
+		// Reading a remote peer explains what it is instead of a not-found scan.
+		await expect(
+			InternalUrlRouter.instance().resolve("agent://@cluster-a/leia", { sessionFile: undefined }),
+		).rejects.toThrow(/@cluster-a\/leia is a bridged peer[\s\S]*write agent:\/\/@cluster-a\/leia/);
+
+		// Remote peers are write targets, so they tab-complete under agent:// (not history://, where a
+		// completed remote id could only ever resolve to the no-transcript error).
+		registry.register({
+			id: "@cluster-a/leia",
+			displayName: "leia",
+			kind: "remote",
+			session: null,
+			status: "running",
+		});
+		const agentCompletions = await new AgentProtocolHandler().complete();
+		expect(agentCompletions.map(completion => completion.value)).toContain("@cluster-a/leia");
+		const historyCompletions = await new HistoryProtocolHandler().complete();
+		expect(historyCompletions.map(completion => completion.value)).not.toContain("@cluster-a/leia");
+		// A caller with its own registry (SDK/ACP) completes ITS peers, not the global session's.
+		const isolated = new AgentRegistry();
+		isolated.register({ id: "@mesh/han", displayName: "han", kind: "remote", session: null, status: "running" });
+		const isolatedCompletions = (await new AgentProtocolHandler().complete("", { agentRegistry: isolated })).map(
+			completion => completion.value,
+		);
+		expect(isolatedCompletions).toContain("@mesh/han");
+		expect(isolatedCompletions).not.toContain("@cluster-a/leia");
 	});
 });

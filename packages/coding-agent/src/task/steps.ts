@@ -18,6 +18,7 @@ import { IrcBus } from "../irc/bus";
 import stepTemplate from "../prompts/system/subagent-step.md" with { type: "text" };
 import stepReportTemplate from "../prompts/system/subagent-step-report.md" with { type: "text" };
 import stepsBriefTemplate from "../prompts/system/subagent-steps-brief.md" with { type: "text" };
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { FileEntry } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 
@@ -95,10 +96,14 @@ export function renderStepsBrief(steps: readonly string[]): string {
 	return fillTextSlots(rendered, steps, 0);
 }
 
-/** The stepped child its step reports come from, and the agent that spawned it, who reads them. */
+/**
+ * The stepped child its step reports come from, the agent that spawned it, who reads them, and the
+ * registry both live in, whose bus carries the reports.
+ */
 export interface StepReportRoute {
 	from: string;
 	to: string;
+	registry: AgentRegistryApi;
 }
 
 /**
@@ -107,9 +112,10 @@ export interface StepReportRoute {
  * `wait` keeps waiting for the final result. Delivery failures are logged; the steps go on.
  */
 export async function sendStepReport(route: StepReportRoute, report: string): Promise<void> {
+	const { from, to, registry } = route;
 	const body = prompt.render(stepReportTemplate, { report });
-	const receipt = await IrcBus.global().send({ ...route, body, progress: true });
-	if (receipt.outcome === "failed") logger.warn("Step report not delivered", { ...route, error: receipt.error });
+	const receipt = await IrcBus.forRegistry(registry).send({ from, to, body, progress: true });
+	if (receipt.outcome === "failed") logger.warn("Step report not delivered", { from, to, error: receipt.error });
 }
 
 /** Persists that the first `sent` prompts went out; pass `prompts` on a run's first record only. */

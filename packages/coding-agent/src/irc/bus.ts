@@ -12,10 +12,24 @@
 import { type IrcDeliveryReceipt, type IrcMessage } from "./irc-types";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
+import { isValidRemoteId, malformedRemoteIdError, remoteNameOf, remoteNamespaceOf } from "../registry/remote-id";
 import type { CustomMessage } from "../session/messages";
 import { agentMesh } from "./mesh";
 import { parsePeerAddress } from "./mesh-protocol";
+
+/**
+ * Transport that carries a bridged IRC send out of this process to the mesh behind it (e.g. the
+ * murmur bridge). Installed per globally-unique `namespace` via {@link IrcBus.setRemoteTransport};
+ * `send` routes any `@<namespace>/<name>` recipient to that namespace's transport (prefix-authoritative
+ * — a registered proxy ref is optional). `opts.toName` is the recipient's bare mesh name (the `@ns/`
+ * prefix stripped) so the transport never parses ids; `opts.expectsReply` is forwarded so an awaited
+ * send gets the same side-channel auto-reply behaviour across the bridge as a local send. Returns a
+ * synthesized {@link IrcDeliveryReceipt} for a uniform outcome.
+ */
+export interface RemoteTransport {
+	send(message: IrcMessage, opts?: { expectsReply?: boolean; toName?: string }): Promise<IrcDeliveryReceipt>;
+}
 
 interface IrcWaiter {
 	filter: IrcWaitFilter;
@@ -53,6 +67,22 @@ interface SendMark {
 	seq: number;
 	/** The message's opening text (see {@link excerptOf}), for notices that quote an ask or a promise. */
 	excerpt: string;
+}
+
+/** One extension load's stake in a namespace claim (see {@link IrcBus.setRemoteTransport}). */
+interface NamespaceOwner {
+	/** `main`-kind root id of the owning load's session; undefined for a bus-level caller with no root. */
+	rootId: string | undefined;
+	/** Installed outbound transport; undefined while cleared for a reconnect (claim retained). */
+	transport: RemoteTransport | undefined;
+}
+
+/** A claimed namespace: one extension source, one owner per independent root session. */
+interface NamespaceClaim {
+	/** Extension source path that owns the namespace; a different source is rejected. */
+	source: string;
+	/** Owners by `ownerToken`. Several only when independent roots share one registry. */
+	owners: Map<string, NamespaceOwner>;
 }
 
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
@@ -112,7 +142,12 @@ export interface IrcBusApi {
 }
 
 export class IrcBus implements IrcBusApi {
+	/** The process-global bus: lazily a local {@link IrcBus} over the global registry, or the proxy of
+	 *  main's bus a worker installed. */
 	static #global: IrcBusApi | undefined;
+	/** One local IrcBus per isolated (non-global) AgentRegistry, with its own waiters, mailboxes, and
+	 *  transports. Weak so a bus is collected with its registry. */
+	static #buses = new WeakMap<AgentRegistryApi, IrcBus>();
 
 	/** The installed bus; lazily a local {@link IrcBus} unless a worker installed a proxy. */
 	static global(): IrcBusApi {
@@ -122,9 +157,36 @@ export class IrcBus implements IrcBusApi {
 		return IrcBus.#global;
 	}
 
-	/** The process-global bus if one exists; never creates it (no bus means no message was ever held). */
-	static existing(): IrcBusApi | undefined {
-		return IrcBus.#global;
+	/** The bus serving `registry` if one exists; never creates it (no bus means no message was ever held). */
+	static existing(registry: AgentRegistryApi = AgentRegistry.global()): IrcBusApi | undefined {
+		return registry === AgentRegistry.global() ? IrcBus.#global : IrcBus.#buses.get(registry);
+	}
+
+	/** The bus serving `registry`: the global bus for the global registry (the root session and its
+	 *  subagents, wherever they run), otherwise that registry's own local bus, created on first use.
+	 *  Delivery resolves recipients in that one registry, so an isolated session registry is isolated
+	 *  by construction (no cross-registry leak). */
+	static forRegistry(registry: AgentRegistryApi): IrcBusApi {
+		if (registry === AgentRegistry.global()) return IrcBus.global();
+		let bus = IrcBus.#buses.get(registry);
+		if (!bus) {
+			bus = new IrcBus(registry);
+			IrcBus.#buses.set(registry, bus);
+		}
+		return bus;
+	}
+
+	/**
+	 * The main-thread bus serving `registry`, where the bridge seams live (inbound delivery,
+	 * outbound transports, namespace claims). Throws on a worker thread, whose global bus is a proxy
+	 * of main's: extension bridges claim and deliver from the main thread only.
+	 */
+	static localForRegistry(registry: AgentRegistryApi = AgentRegistry.global()): IrcBus {
+		const bus = IrcBus.forRegistry(registry);
+		if (!(bus instanceof IrcBus)) {
+			throw new Error("Bridged IRC is served by the main thread's bus; this thread only has a proxy of it.");
+		}
+		return bus;
 	}
 
 	/** Install the process-global bus. Worker bootstrap only. */
@@ -139,12 +201,12 @@ export class IrcBus implements IrcBusApi {
 
 	/**
 	 * Count a settled job of agent `from` owned by `to` as `from`'s reply to
-	 * `to`: the job delivers that agent's outcome, so it answers what `to`
-	 * asked it before now (see {@link unansweredSends}). With no bus yet no
-	 * message was ever sent, so there is nothing to answer.
+	 * `to` on `registry`'s bus: the job delivers that agent's outcome, so it
+	 * answers what `to` asked it before now (see {@link unansweredSends}). With
+	 * no bus yet no message was ever sent, so there is nothing to answer.
 	 */
-	static recordReply(from: string, to: string): void {
-		IrcBus.#global?.recordReply(from, to);
+	static recordReply(from: string, to: string, registry: AgentRegistryApi = AgentRegistry.global()): void {
+		IrcBus.existing(registry)?.recordReply(from, to);
 	}
 
 	readonly #registry: AgentRegistryApi;
@@ -163,12 +225,150 @@ export class IrcBus implements IrcBusApi {
 	readonly #lastJobReply = new Map<string, Map<string, SendMark>>();
 	/** Last {@link SendMark.seq} handed out, taken when a send starts. */
 	#sendSeq = 0;
+	/** Namespace claims keyed by globally-unique NAMESPACE (the `@<namespace>/` routing prefix). */
+	readonly #claims = new Map<string, NamespaceClaim>();
 
 	constructor(registry: AgentRegistryApi = AgentRegistry.global(), lifecycle?: AgentLifecycleApi) {
 		this.#registry = registry;
-		// Lazy: the lifecycle global self-constructs against the global registry,
-		// so only touch it when a parked recipient actually needs reviving.
-		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+		// Lazy + registry-paired: default to THIS registry's lifecycle manager (mirrors the
+		// bus<->registry pairing) so a custom-registry bus revives its own parked peers instead
+		// of consulting the global manager. Only touched when a parked recipient needs reviving.
+		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.forRegistry(this.#registry);
+	}
+
+	/**
+	 * Install, update, or clear the outbound transport for a globally-unique `namespace`, claimed by
+	 * the installing extension load's `ownerToken` (its `source` extension path and, for a root
+	 * session's load, the root's `rootId`):
+	 * - unclaimed namespace: claim it for `ownerToken` and install `transport`;
+	 * - claimed by the SAME `ownerToken`: update `transport`, or (with `undefined`) clear ROUTING while
+	 *   KEEPING the claim + any registered peers, so the owner can reinstall after a reconnect;
+	 * - claimed by a DIFFERENT load of the SAME `source` extension:
+	 *   - from a subagent (no `rootId`) or from a root that already owns the claim: a no-op keeping the
+	 *     existing owners + transports, so the child inherits routing and — being a non-owner — never
+	 *     releases the shared transport on its own teardown (#7401 review);
+	 *   - from an INDEPENDENT root sharing this registry (a `rootId` no owner has): a co-owner with its
+	 *     own transport. Its sends route through its own transport, and the claim survives until the
+	 *     LAST owner releases, so disposing one root never strands the other (#14071 review);
+	 * - claimed by a DIFFERENT `source` extension: throw — a namespace is single-owner across the
+	 *   process, so two distinct bridges to the same external cluster must pick distinct namespaces.
+	 *
+	 * `source` defaults to `ownerToken` (each caller its own extension) so a plain 3-arg call keeps the
+	 * strict single-owner behaviour; the ExtensionAPI passes the extension path to enable sharing.
+	 */
+	setRemoteTransport(
+		namespace: string,
+		transport: RemoteTransport | undefined,
+		ownerToken: string,
+		source: string = ownerToken,
+		rootId?: string,
+	): void {
+		const claim = this.#claims.get(namespace);
+		if (claim === undefined) {
+			// A clear is only meaningful for a namespace this load already claimed (install → clear →
+			// reinstall, the reconnect flow). Reject a clear of an UNCLAIMED namespace so a
+			// clear-before-install can't mark it claimed on the ExtensionAPI side with no owner here.
+			if (!transport) {
+				throw new Error(`IRC namespace "${namespace}" is not claimed; install a transport before clearing.`);
+			}
+			this.#claims.set(namespace, { source, owners: new Map([[ownerToken, { rootId, transport }]]) });
+			return;
+		}
+		if (claim.source !== source) {
+			throw new Error(
+				`IRC namespace "${namespace}" is already claimed by another extension; choose a distinct namespace.`,
+			);
+		}
+		const owner = claim.owners.get(ownerToken);
+		if (owner) {
+			// Update routing, or clear it while the claim survives (reconnect-friendly);
+			// releaseTransportsForOwner drops the claim.
+			owner.transport = transport;
+			return;
+		}
+		// A different load of the same extension: a passenger (subagent, or a re-load under a root that
+		// already owns the claim) shares silently; an independent root becomes a co-owner.
+		if (rootId === undefined) return;
+		for (const existing of claim.owners.values()) {
+			if (existing.rootId === rootId) return;
+		}
+		if (!transport) {
+			throw new Error(`IRC namespace "${namespace}" is not claimed; install a transport before clearing.`);
+		}
+		claim.owners.set(ownerToken, { rootId, transport });
+	}
+
+	/**
+	 * The transport that carries `from`'s send into `namespace`: the one installed by `from`'s own
+	 * root when independent roots co-own the claim, else any installed transport (a root whose bridge
+	 * is mid-reconnect still reaches the mesh through a sibling root's connection).
+	 */
+	#transportFor(namespace: string, from: string): RemoteTransport | undefined {
+		const claim = this.#claims.get(namespace);
+		if (!claim) return undefined;
+		if (claim.owners.size > 1) {
+			// The sender's own `main` root, which need not be `MAIN_AGENT_ID` (ACP/custom roots).
+			const rootId = this.#rootMainFor(from)?.id;
+			if (rootId !== undefined) {
+				for (const owner of claim.owners.values()) {
+					if (owner.rootId === rootId && owner.transport) return owner.transport;
+				}
+			}
+		}
+		for (const owner of claim.owners.values()) {
+			if (owner.transport) return owner.transport;
+		}
+		return undefined;
+	}
+
+	/** Whether any outbound transport is installed (murmur-q00p): a leaf agent then still has peers. */
+	hasRemoteTransport(): boolean {
+		for (const claim of this.#claims.values()) {
+			for (const owner of claim.owners.values()) {
+				if (owner.transport) return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Whether any namespace is currently CLAIMED (murmur-q00p): true while an extension owns a
+	 * namespace, even across a reconnect `setRemoteTransport(ns, undefined)` clear that drops routing
+	 * but keeps the claim and its registered remote peers. The durable "this session is bridged"
+	 * signal — unlike `hasRemoteTransport`, which reports only a transport installed right now.
+	 */
+	hasClaimedNamespace(): boolean {
+		return this.#claims.size > 0;
+	}
+
+	/** Whether `namespace` is currently claimed by any load. */
+	isNamespaceClaimed(namespace: string): boolean {
+		return this.#claims.has(namespace);
+	}
+
+	/** Whether `ownerToken` is one of the loads owning `namespace` (owner-scoped clear + roster writes). */
+	isNamespaceOwner(namespace: string, ownerToken: string): boolean {
+		return this.#claims.get(namespace)?.owners.has(ownerToken) === true;
+	}
+
+	/**
+	 * Release `ownerToken`'s stake in every namespace it owns: drop its transport, and drop the claim
+	 * itself once no owner remains (freeing the namespace for re-claim). Owner-scoped, so sibling and
+	 * co-owner loads are untouched; called on extension load-failure rollback and runtime teardown.
+	 * Distinct from a plain `setRemoteTransport(ns, undefined, owner)` clear, which keeps the claim
+	 * for reconnect. Returns the namespaces that became unclaimed, so the caller can retire their
+	 * `remote` proxies — which belong to the claim, not to any one owner.
+	 */
+	releaseTransportsForOwner(ownerToken: string): string[] {
+		const freed: string[] = [];
+		for (const [namespace, claim] of this.#claims) {
+			if (!claim.owners.delete(ownerToken)) continue;
+			if (claim.owners.size === 0) {
+				this.#claims.delete(namespace);
+				freed.push(namespace);
+			}
+		}
+		return freed;
 	}
 
 	/**
@@ -183,23 +383,13 @@ export class IrcBus implements IrcBusApi {
 	 * `wait`/`inbox` and inflate unread counts. Only a failed live hand-off
 	 * is buffered for the recipient to drain later.
 	 */
-	async send({ localOnly, ...msg }: IrcSend): Promise<IrcDeliveryReceipt> {
+	async send({ localOnly, ...msg }: IrcSend, opts?: { expectsReply?: boolean }): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		// Taken before delivery: a reply sent while this message is still being
 		// delivered must still order after it.
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq, excerpt: excerptOf(message.body) };
-		const receipt = await this.#deliver(message, { localOnly });
-		if (receipt.outcome !== "failed") {
-			if (message.progress) {
-				this.#record(this.#lastProgress, message.from, message.to, mark);
-			} else {
-				this.#record(this.#lastSent, message.from, message.to, mark);
-				if (!message.broadcast) {
-					this.#record(this.#lastReply, message.from, message.to, mark);
-					if (!message.wakeRelay) this.#record(this.#lastDirect, message.from, message.to, mark);
-				}
-			}
-		}
+		const receipt = await this.#deliver(message, { localOnly, expectsReply: opts?.expectsReply });
+		if (receipt.outcome !== "failed") this.#recordDelivered(message, mark, !message.broadcast && !message.wakeRelay);
 		return receipt;
 	}
 
@@ -216,6 +406,23 @@ export class IrcBus implements IrcBusApi {
 			this.#record(this.#lastDirect, message.from, message.to, mark);
 		}
 		return message;
+	}
+
+	/**
+	 * Record a delivered message for reply tracking: progress promises a later reply, a
+	 * non-broadcast message answers what the recipient asked the sender before it (a broadcast
+	 * answers nothing), and a `request` also leaves the recipient owing the sender a reply (see
+	 * {@link unansweredSends}).
+	 */
+	#recordDelivered(message: IrcMessage, mark: SendMark, request: boolean): void {
+		if (message.progress) {
+			this.#record(this.#lastProgress, message.from, message.to, mark);
+			return;
+		}
+		this.#record(this.#lastSent, message.from, message.to, mark);
+		if (message.broadcast) return;
+		this.#record(this.#lastReply, message.from, message.to, mark);
+		if (request) this.#record(this.#lastDirect, message.from, message.to, mark);
 	}
 
 	#record(table: Map<string, Map<string, SendMark>>, from: string, to: string, mark: SendMark): void {
@@ -280,22 +487,136 @@ export class IrcBus implements IrcBusApi {
 		return this.#lastReply.get(from)?.get(to)?.ts;
 	}
 
-	async #deliver(message: IrcMessage, options: { localOnly?: boolean }): Promise<IrcDeliveryReceipt> {
+	async #deliver(
+		message: IrcMessage,
+		options: { localOnly?: boolean; expectsReply?: boolean },
+	): Promise<IrcDeliveryReceipt> {
+		// Delivery order: (1) an agent in this bus's registry, (2) a bridged peer `@<namespace>/<name>`
+		// through its namespace's RemoteTransport, (3) a numeric `<pid>[/<id>]` agent of another omp
+		// instance in this project over the pid mesh, skipped for a `localOnly` send. The id spaces are
+		// disjoint: no local agent id starts with `@` (refused at creation), and the mesh parses only
+		// numeric ids. A registered proxy ref (`kind: "remote"`) is a roster entry, not a local agent.
 		const ref = this.#registry.get(message.to);
-		const mesh = ref || options.localOnly ? undefined : agentMesh();
+		if (ref && ref.kind !== "remote") return this.#deliverToLocalRef(ref, message);
+		// Reach-by-name still must honor the @ns/name contract: an id in the reserved `@` space that is
+		// not `@<namespace>/<name>` (`@ns`, `@ns/`, `@/x`, bad alphabet) fails locally, so a mistyped id
+		// never reaches a transport as a bogus opts.toName and never masquerades as a local miss.
+		const malformed = malformedRemoteIdError(message.to);
+		if (malformed) return { to: message.to, outcome: "failed", error: malformed.message };
+		const namespace = remoteNamespaceOf(message.to);
+		if (namespace !== undefined) {
+			const toName = remoteNameOf(message.to);
+			// Prefix-authoritative: an `@<namespace>/<name>` recipient is unambiguously a bridged peer and
+			// routes to its namespace's transport — a registered proxy ref is optional (reach-by-name). A
+			// ref is consulted ONLY to honor an `aborted` tombstone, matching a local hard-aborted agent.
+			if (ref?.status === "aborted") {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Agent "${message.to}" was aborted and cannot be messaged.`,
+				};
+			}
+			const transport = this.#transportFor(namespace, message.from);
+			if (!transport) {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Bridged agent "${message.to}" is unreachable — no transport for namespace "@${namespace}".`,
+				};
+			}
+			try {
+				const receipt = await transport.send(message, {
+					expectsReply: options.expectsReply,
+					toName,
+				});
+				// Relay a successful outbound send to the root UI — symmetric with local agent↔agent
+				// delivery (§#deliverToLocalRef) and inbound remote→local (deliverInbound). Display-only
+				// and skips Main-as-endpoint, so no echo loop (murmur-ffh4).
+				if (receipt.outcome !== "failed") this.#relayToMainUi(message);
+				return receipt;
+			} catch (error) {
+				// A transport that rejects (transient network/proxy failure) must not escape IrcBus.send
+				// and turn a whole (possibly broadcast) `hub send` into a tool exception — surface it as a
+				// failed receipt, symmetric with local delivery.
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		}
+		// Any other miss is a numeric `<pid>[/<id>]` agent of another instance or a genuine unknown
+		// recipient, which gets the actionable local error even with bridge transports installed — a
+		// mistyped local id never leaves the process.
+		const mesh = options.localOnly ? undefined : agentMesh();
 		const peer = mesh && parsePeerAddress(message.to);
 		if (mesh && peer && peer.pid !== process.pid) {
 			// Another omp instance in this project: the mesh forwards it, and the
 			// recipient's own bus decides how it lands.
 			return mesh.send(peer, message.from, message.body, message.progress);
 		}
-		if (!ref) {
+		return {
+			to: message.to,
+			outcome: "failed",
+			error: `Unknown agent "${message.to}" — check the subagent roster or read history:// for known peers.`,
+		};
+	}
+
+	/**
+	 * Local-only inbound delivery for the murmur bridge (murmur-4e7n). Shares `send`'s
+	 * in-process delivery core (revive / waiter / aside / wake, full
+	 * `injected|woken|revived|failed` outcome), but a local-registry MISS returns `failed` and
+	 * NEVER consults the remote transport — a message that arrived FROM murmur must not bounce
+	 * back onto the bus (contract omp-bridge.md §8). Returns omp's freshly-minted native id so
+	 * the bridge can correlate it with the murmur msgId without conflating id namespaces.
+	 */
+	async deliverInbound(
+		msg: Omit<IrcMessage, "id" | "ts">,
+		opts?: { expectsReply?: boolean },
+	): Promise<{ receipt: IrcDeliveryReceipt; id: string }> {
+		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		// Inbound arrives FROM the mesh, so the sender MUST be a well-formed remote id
+		// (@namespace/name). Reject a bare local id (e.g. "Main") or a malformed remote id before the
+		// local delivery path: msg.from feeds wait filters, IrcBridge.deliver, and #runAutoReply's
+		// side-channel reply, so an unvalidated sender could impersonate a local agent and route a
+		// reply back to that id on the local bus.
+		if (!isValidRemoteId(message.from)) {
 			return {
-				to: message.to,
-				outcome: "failed",
-				error: `Unknown agent "${message.to}" — check the subagent roster or read history:// for known peers.`,
+				receipt: {
+					to: message.to,
+					outcome: "failed",
+					error: `Inbound sender "${message.from}" is not a remote id (@namespace/name).`,
+				},
+				id: message.id,
 			};
 		}
+		const ref = this.#registry.get(message.to);
+		if (!ref || ref.kind === "remote") {
+			return {
+				receipt: { to: message.to, outcome: "failed", error: `Unknown agent "${message.to}" — not on this node.` },
+				id: message.id,
+			};
+		}
+		// Taken before delivery, as in `send`: a reply sent while this message is still being
+		// delivered must order after it.
+		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq, excerpt: excerptOf(message.body) };
+		const receipt = await this.#deliverToLocalRef(ref, message);
+		// Reply tracking as for a local peer's message: a non-broadcast one answers what the local
+		// agent asked the remote peer, and one that expects a reply leaves the local agent owing the
+		// remote peer one until a later non-progress `write agent://@ns/name` (routed through the
+		// transport) answers.
+		if (receipt.outcome !== "failed") {
+			this.#recordDelivered(message, mark, opts?.expectsReply === true && !message.broadcast && !message.wakeRelay);
+		}
+		return { receipt, id: message.id };
+	}
+
+	/**
+	 * In-process delivery core shared by `send` and `deliverInbound`: the recipient `ref` is
+	 * present in this process's registry; resolve the advisor / parked-or-aborted revive / waiter
+	 * / live-session paths and return the outcome. Never touches the remote transport.
+	 */
+	async #deliverToLocalRef(ref: AgentRef, message: IrcMessage): Promise<IrcDeliveryReceipt> {
 		// Advisor refs are observability-only transcripts, never messageable peers.
 		if (ref.kind === "advisor") {
 			return {
@@ -510,16 +831,21 @@ export class IrcBus implements IrcBusApi {
 	}
 
 	/**
-	 * Surface agent↔agent traffic as a display-only card on the main session
-	 * UI. Skipped when the main agent is either endpoint: as recipient its
-	 * own `deliverIrcMessage` already shows the message, and as sender the
-	 * irc send tool call already rendered the outbound body — relaying it
-	 * again would duplicate it in the transcript.
+	 * Surface agent↔agent (or agent↔remote) traffic as a display-only card on the ROOT session's
+	 * UI — the `main`-kind root of the LOCAL participant's tree ({@link #rootMainFor}): "Main" for
+	 * the in-repo default, a custom id (e.g. ACP's `acp:<sessionId>`) for an embedder-supplied
+	 * registry, and — when several top-level sessions share one registry — the sender's OWN root.
+	 * Skipped when that root is itself an endpoint: as recipient its own `deliverIrcMessage` already
+	 * shows the message, and as sender the irc send tool call already rendered it.
 	 */
 	#relayToMainUi(message: IrcMessage): void {
-		if (message.to === MAIN_AGENT_ID || message.from === MAIN_AGENT_ID) return;
-		const mainSession = this.#registry.get(MAIN_AGENT_ID)?.session;
-		if (!mainSession) return;
+		// The local participant is the non-remote endpoint (a remote `@ns/name` peer has no local
+		// transcript to relay into).
+		const localId = remoteNamespaceOf(message.from) === undefined ? message.from : message.to;
+		const root = this.#rootMainFor(localId);
+		if (!root || message.to === root.id || message.from === root.id) return;
+		const rootSession = root.session;
+		if (!rootSession) return;
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:relay",
@@ -535,10 +861,26 @@ export class IrcBus implements IrcBusApi {
 			timestamp: message.ts,
 		};
 		try {
-			mainSession.emitIrcRelayObservation(record);
+			rootSession.emitIrcRelayObservation(record);
 		} catch (error) {
 			// Display-only forwarding must never affect delivery semantics.
-			logger.debug("IrcBus: main UI relay failed", { to: message.to, error: String(error) });
+			logger.debug("IrcBus: root UI relay failed", { to: message.to, error: String(error) });
 		}
+	}
+
+	/**
+	 * The `main`-kind root of `id`'s tree — walk its parentId chain to the first `main` ref, so in a
+	 * shared registry a subagent's traffic lands on ITS root, not whichever main registered first.
+	 * Falls back to the registry's main when the chain isn't registered (a synthetic/unregistered
+	 * sender) so the relay still surfaces instead of being dropped.
+	 */
+	#rootMainFor(id: string): AgentRef | undefined {
+		let ref = this.#registry.get(id);
+		const seen = new Set<string>();
+		while (ref && ref.kind !== "main" && ref.parentId && !seen.has(ref.id)) {
+			seen.add(ref.id);
+			ref = this.#registry.get(ref.parentId);
+		}
+		return ref?.kind === "main" ? ref : this.#registry.list().find(candidate => candidate.kind === "main");
 	}
 }

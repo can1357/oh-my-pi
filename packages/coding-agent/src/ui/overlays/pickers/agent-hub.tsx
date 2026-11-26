@@ -149,6 +149,8 @@ export interface AgentHubProps<T extends AgentRecordLike = AgentRecordLike> {
 	readonly sessionFile?: string | null;
 	/** Whether a registry entry belongs to the open session's tree (default: all do). */
 	readonly inSession?: (ref: AgentRecordLike) => boolean;
+	/** Host policy for records with a local session or transcript; a bridged peer has neither, so the hub never lists it. */
+	readonly hasLocalPresence: (kind: AgentRecordLike["kind"]) => boolean;
 	/** Key ids that close the hub from inside (its own toggle keys). */
 	readonly hubKeys: readonly string[];
 	readonly initialSection?: AgentHubSection;
@@ -340,7 +342,11 @@ export function AgentHub<T extends AgentRecordLike>(
 	const metricsFor = (ref: T, session: ObservableSession | undefined): AgentMetrics | undefined =>
 		hubRowMetrics(ref, session, sessionMetrics);
 	const sessionRefs = (): T[] =>
-		registry.list().filter(ref => ref.id !== MAIN_AGENT_ID && (props.inSession?.(ref) ?? true));
+		registry
+			.list()
+			.filter(
+				ref => ref.id !== MAIN_AGENT_ID && props.hasLocalPresence(ref.kind) && (props.inSession?.(ref) ?? true),
+			);
 
 	/** A parked or killed agent without a session and an unseen id, met while the saved-agent scan runs, is one it found. */
 	const foundOnDisk = (ref: T): boolean =>

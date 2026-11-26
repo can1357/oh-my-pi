@@ -52,6 +52,38 @@ describe("parseInternalUrl — namespaced host (colon in host)", () => {
 	});
 });
 
+// ── Remote agent ids (@namespace/name spans authority + first segment) ──
+
+describe("parseInternalUrl — agent-id authority", () => {
+	const agentId = { agentIdAuthority: true as const };
+
+	it("folds @ns/name into one host for an agent-id scheme", () => {
+		const u = parseInternalUrl("agent://@double-down/leia", agentId);
+		expect(u.rawHost).toBe("@double-down/leia");
+		expect(u.pathname).toBe("");
+		expect(u.rawPathname).toBe("");
+	});
+
+	it("keeps everything after the remote id as the path", () => {
+		const u = parseInternalUrl("agent://@double-down/leia/reports/0", agentId);
+		expect(u.rawHost).toBe("@double-down/leia");
+		expect(u.pathname).toBe("/reports/0");
+		expect(u.rawPathname).toBe("/reports/0");
+	});
+
+	it("leaves local ids and a bare @namespace alone", () => {
+		expect(parseInternalUrl("agent://Main/reports", agentId).rawHost).toBe("Main");
+		expect(parseInternalUrl("agent://Main/reports", agentId).pathname).toBe("/reports");
+		expect(parseInternalUrl("agent://@double-down", agentId).rawHost).toBe("@double-down");
+	});
+
+	it("does not fold for schemes without agent-id authority (ssh://@host is an empty userinfo)", () => {
+		const u = parseInternalUrl("ssh://@prod/etc/hosts");
+		expect(u.rawHost).toBe("@prod");
+		expect(u.rawPathname).toBe("/etc/hosts");
+	});
+});
+
 // ── Percent-encoded colons ───────────────────────────────────────────
 
 describe("parseInternalUrl — percent-encoded host", () => {

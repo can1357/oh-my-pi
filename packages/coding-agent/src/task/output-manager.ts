@@ -13,6 +13,7 @@
 import * as fs from "node:fs/promises";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-names";
 import type { Settings } from "../config/settings";
+import { REMOTE_ID_PREFIX } from "../registry/remote-id";
 import { cfgTaskCrossInstance } from "./settings";
 /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
 export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
@@ -40,9 +41,6 @@ export class AgentOutputManager {
 		// write `<id>.jsonl`, clobbering the advisor's `__advisor.jsonl` in the same
 		// artifacts dir. Reserving bumps such a request to `__advisor-2`.
 		this.#taken.add(ADVISOR_TRANSCRIPT_STEM);
-		// Reserve the pinned-HUD toggle sentinel the same way: a colliding agent
-		// id would be indistinguishable from the expander row in click routing.
-		this.#taken.add(PINNED_HUD_TOGGLE_ID);
 	}
 
 	/**
@@ -117,6 +115,11 @@ export class AgentOutputManager {
 	 * @returns Unique ID ("Anna" first, then "Anna-2", "Anna-3", …)
 	 */
 	async allocate(id: string): Promise<string> {
+		if (id.startsWith(REMOTE_ID_PREFIX)) {
+			throw new Error(
+				`Subagent name ${JSON.stringify(id)} may not start with "${REMOTE_ID_PREFIX}" — that prefix is reserved for bridged peers.`,
+			);
+		}
 		await this.#ensureInitialized();
 		const usePrefix = /^\d+$/.test(id) && this.#settings && cfgTaskCrossInstance.get(this.#settings);
 		return this.#allocateUnique(usePrefix ? `Agent${id}` : id);

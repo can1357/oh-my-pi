@@ -25,6 +25,8 @@ await fs.mkdir(cwd);
 const marker = "REPRO_B_WAKE_ONLY";
 const childId = "ReproChildB";
 const sessions: AgentSession[] = [];
+// Each root runs its own IRC world (per-AgentRegistry bus and lifecycle); B's child lives in B's.
+const registries = new Map<AgentSession, AgentRegistry>();
 const auth = await AuthStorage.create(":memory:");
 auth.keys.setRuntime("mock", "repro-key");
 registerMockApi("repro-sdk-async-routing");
@@ -98,6 +100,7 @@ const create = async (
 	agentId?: string,
 	sessionManager?: AgentSession["sessionManager"],
 ) => {
+	const agentRegistry = new AgentRegistry();
 	const { session } = await createAgentSession({
 		cwd,
 		agentDir: profileDir,
@@ -105,7 +108,7 @@ const create = async (
 		modelRegistry: registry,
 		model,
 		settings,
-		agentRegistry: new AgentRegistry(),
+		agentRegistry,
 		agentId,
 		sessionManager,
 		disableExtensionDiscovery: true,
@@ -124,6 +127,7 @@ const create = async (
 		restrictToolNames: true,
 	});
 	sessions.push(session);
+	registries.set(session, agentRegistry);
 	console.log(name, { sessionId: session.sessionId, hasManager: !!session.asyncJobManager });
 	return session;
 };
@@ -149,7 +153,8 @@ try {
 		await b.asyncJobManager.drainDeliveries({ filter: { ownerId: mode === "unique" ? "RootB" : MAIN_AGENT_ID } });
 		await b.waitForIdle();
 	}
-	const child = AgentRegistry.global().get(childId);
+	const bRegistry = registries.get(b)!;
+	const child = bRegistry.get(childId);
 	assert.ok(child?.session, "B's task did not leave a live child");
 	const childSession = localSession(child.session);
 	console.log("child", {
@@ -159,7 +164,7 @@ try {
 		status: child.status,
 	});
 	assert.equal(child.status, "idle");
-	const receipt = await IrcBus.global().send({ from: "ReproPeerB", to: childId, body: marker });
+	const receipt = await IrcBus.forRegistry(bRegistry).send({ from: "ReproPeerB", to: childId, body: marker });
 	console.log("IRC", receipt);
 	assert.equal(receipt.outcome, "woken");
 	await childSession.waitForIdle();
@@ -195,7 +200,7 @@ try {
 	assert.equal(result.markerOnDiskB, true, "BUG: B's correction was not persisted in B");
 } finally {
 	clearTimeout(deadline);
-	await AgentLifecycleManager.global().dispose();
+	for (const agentRegistry of registries.values()) await AgentLifecycleManager.forRegistry(agentRegistry).dispose();
 	for (const session of sessions.toReversed()) await session.dispose();
 	unregisterCustomApis("repro-sdk-async-routing");
 	auth.close();

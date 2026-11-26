@@ -47,3 +47,39 @@ test("IRC writes paint the preset's direction arrow, receipt badge and error sep
 	expect(rows).toContain(" IRC  Reviewer failed");
 	expect(rows).toContain("└─ Reviewer ⟨failed⟩ – not running");
 });
+
+// Receipts of a bridged peer's transport are bridge-controlled input: its id and error must not
+// inject terminal escapes, extra rows (newlines, U+2028/U+2029) or lone surrogates into the call.
+test("a bridged peer's receipt id and error render sanitized, one row each", () => {
+	const env = staticEnvironment(loadThemeSync("dark", { symbolPreset: "nerd" }));
+	const call = new ToolCall({
+		id: "irc-2",
+		name: "write",
+		presenter: writePresenter,
+		args: { path: "agent://all", content: "heads up" },
+	});
+	call.setExecutionStarted();
+	call.updateResult(
+		{
+			content: [],
+			details: {
+				message: {
+					to: "all",
+					receipts: [
+						{ to: "AuthLoader", outcome: "woken" },
+						{
+							to: "@cluster/e\tvil\u2028name",
+							outcome: "failed",
+							error: "\x1b[2Jboom\nINJECTED\u2029tail\ud800",
+						},
+					],
+				},
+			},
+		},
+		false,
+	);
+	const rows = plainToolRows(call, env);
+	expect(rows.join("\n")).not.toMatch(/[\u2028\u2029\ud800]|\[2J/u);
+	expect(rows.some(row => row.includes("@cluster/e vil name") && row.includes("boom INJECTED tail"))).toBe(true);
+	expect(rows.some(row => row.trimStart().startsWith("INJECTED"))).toBe(false);
+});

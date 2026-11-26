@@ -763,6 +763,27 @@ describe("wait", () => {
 			childRun.resolve("done");
 		});
 
+		test("in an isolated registry, a subagent block the caller's latest message is ending does not end a wait on its job", async () => {
+			const registry = new AgentRegistry();
+			registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "running" });
+			registry.register({ id: "Child", displayName: "Child", kind: "sub", session: null, status: "running" });
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const childRun = registerChildJob(manager);
+			const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+			// The subagent blocks on the caller, then the caller's answer lands on this registry's bus.
+			const release = registry.awaits.hold("Child", ["Main"], { interruptible: true, message: true });
+			now.mockReturnValue(1_000_001);
+			IrcBus.forRegistry(registry).park({ from: "Main", to: "Child", body: "heliotrope" });
+			const waiting = new WaitTool(session(manager, "Main", false, { agentRegistry: registry })).execute(
+				"parent-wait",
+				{},
+			);
+			expect(await stillPending(waiting)).toBe(true);
+			release();
+			childRun.resolve("done");
+			expect(await idleText(waiting)).not.toContain("is waiting on you");
+		});
+
 		test("keeps waiting while the agent asked waits on the caller or other work, whichever ends first", async () => {
 			const { child } = registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });

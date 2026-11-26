@@ -14,6 +14,7 @@ import { canonicalProjectDir, daemonClient } from "../daemon/client";
 import { type DaemonClient, type DaemonTunnel, projectScope } from "../daemon/protocol";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { sessionFileBelongsToRoot } from "../registry/persisted-agents";
+import { REMOTE_ID_PREFIX } from "../registry/remote-id";
 import { IrcBus } from "./bus";
 import {
 	AGENT_MESH_KIND,
@@ -268,7 +269,11 @@ export class AgentMesh {
 
 	async #deliver(message: Extract<MeshDown, { t: "deliver" }>): Promise<void> {
 		let receipt: IrcDeliveryReceipt;
-		if (!message.progress && !this.#spendWake(message.fromPid)) {
+		// Mesh peers address this instance's local agents only: a bridged `@ns/name` id would relay their
+		// message out through an extension's transport.
+		if (message.to.startsWith(REMOTE_ID_PREFIX)) {
+			receipt = { to: message.to, outcome: "failed", error: "Instance mesh messages must target a local agent." };
+		} else if (!message.progress && !this.#spendWake(message.fromPid)) {
 			receipt = {
 				to: message.to,
 				outcome: "failed",

@@ -97,12 +97,16 @@ import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { LiveTranscript } from "../../live/controller";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
+
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
+import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/irc-types";
+import type { RemoteTransport } from "../../irc/bus";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
+import type { AgentStatus } from "../../registry/agent-registry";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
@@ -1924,6 +1928,70 @@ export type ShortcutConflict =
 	| { kind: "extension"; extensionPath: string };
 
 /**
+ * Scoped inbound-IRC surface exposed to extensions (the murmur bridge, murmur-4e7n).
+ * A narrow door onto the process-global IrcBus so extensions never touch the bus class
+ * directly. Always injected into the ExtensionAPI (like the sibling module surfaces); an
+ * extension that also targets older omp builds may runtime-detect `pi.irc` before use.
+ */
+export interface IrcApi {
+	/**
+	 * Deliver a message that arrived from a remote transport (e.g. the murmur bridge)
+	 * into a local agent's session on the process-global bus. `msg.from` must be `@ns/<name>` in a
+	 * namespace this extension claimed via {@link IrcApi.setRemoteTransport}, else the receipt is
+	 * `failed`. Local-only: a registry miss returns `failed` and never bounces back onto the bus
+	 * (contract §8). Returns omp's freshly-minted native id so the caller can correlate it with its
+	 * own msgId.
+	 */
+	deliverInbound(
+		msg: Omit<IrcMessage, "id" | "ts">,
+		opts?: { expectsReply?: boolean },
+	): Promise<{ receipt: IrcDeliveryReceipt; id: string }>;
+
+	/**
+	 * Claim a globally-unique `namespace` and install (or, with `undefined`, clear) its outbound
+	 * transport. A send addressed to `@<namespace>/<name>` routes to this transport with the bare
+	 * `<name>` in `opts.toName`. One extension load may claim SEVERAL distinct namespaces, each with
+	 * its own transport (a bridge claims its home cluster plus every far cluster whose agents appear
+	 * as `@X/<name>`); the first claim is the default namespace a bare peer name composes against in
+	 * {@link IrcApi.registerRemotePeer}. Only a top-level session may originate a claim; a subagent
+	 * that reloads the same extension shares its root's claim. Claiming a namespace owned by a
+	 * DIFFERENT extension throws; another top-level session in the same registry loading this same
+	 * extension co-owns the claim with its own transport, and the claim (with its registered peers)
+	 * lasts until the last owner's session ends. Each root's sends leave through its own transport;
+	 * while one co-owner has cleared its transport for a reconnect, its sends fall back to a sibling
+	 * root's transport (the message's `from` is still the sender, so a bridge that attributes by
+	 * connection should read `from`). Clearing a namespace this load never claimed throws. Every
+	 * claim is released — and this surface closed, so later calls throw — at session shutdown, when
+	 * the extension is disabled live, or when its factory throws.
+	 * OPTIONAL: present only on omp builds carrying the outbound/[3] transport seam (murmur-l5vv);
+	 * capability-detected by callers, absent on inbound-only builds.
+	 */
+	setRemoteTransport?(namespace: string, transport: RemoteTransport | undefined): void;
+
+	/**
+	 * Register a bridged `remote` proxy peer at `@<namespace>/<name>` in a namespace this
+	 * extension claimed via {@link IrcApi.setRemoteTransport} (call that first, else this returns
+	 * `undefined`). `name` is either a bare name, composed against the FIRST claimed namespace, or a
+	 * full `@ns/name` id whose `ns` is any namespace this load claimed. `kind` is forced to `remote`
+	 * and `session` to `null`. Returns the composed `@ns/name` id (the caller can address it) or
+	 * `undefined` on an invalid name / a namespace this load did not claim. The proxy belongs to the
+	 * namespace claim: it is retired when the claim's last owner releases, so a failed load or the
+	 * extension's own teardown rolls it back and co-owning sessions share one roster. Remote ids are
+	 * disjoint from local ids and from other extensions' namespaces, so registration is
+	 * collision-free — no reserved-id or clobber guards. OPTIONAL: outbound-seam builds only.
+	 */
+	registerRemotePeer?(peer: { name: string; displayName?: string; status?: AgentStatus }): string | undefined;
+
+	/**
+	 * Retract a `remote` proxy peer in a namespace THIS extension claimed (ownership-checked, so one
+	 * extension cannot evict another's peers). Accepts either the composed `@ns/name` id (any claimed
+	 * namespace) or the bare `name` (composed against the first claimed namespace). OPTIONAL:
+	 * outbound-seam builds only.
+	 */
+	unregisterRemotePeer?(idOrName: string): boolean;
+}
+
+/**
  * ExtensionAPI passed to extension factory functions.
  *
  * Methods retain their extension binding when destructured or passed as callbacks.
@@ -1947,6 +2015,9 @@ export interface ExtensionAPI {
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
+
+	/** Scoped inbound-IRC surface for the murmur bridge (murmur-4e7n) — always injected (see IrcApi). */
+	irc: IrcApi;
 
 	// =========================================================================
 	// Event Subscription
@@ -2628,6 +2699,13 @@ export interface Extension {
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
 	registersProviders?: boolean;
+	/**
+	 * Release this load's IRC state (its namespace claim + transport, and the claim's `remote` proxies
+	 * once no owner remains) and close its `pi.irc` surface. Set by the loader; run by the
+	 * ExtensionRunner on session shutdown for every load — suspended or not — and when a live
+	 * `disabledExtensions` edit suspends the load. Idempotent.
+	 */
+	releaseIrc?: () => void;
 }
 
 /**

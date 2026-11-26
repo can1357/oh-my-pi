@@ -2722,10 +2722,14 @@ export class SelectorController {
 
 	/** Whether the hub would list any agent of this session (live or saved). */
 	#hubHasAgents(
-		runtime: Pick<AgentHubProps<AgentRef>, "registry" | "inSession">,
+		runtime: Pick<AgentHubProps<AgentRef>, "registry" | "inSession" | "hasLocalPresence">,
 		observers: SessionObserverRegistry,
 	): boolean {
 		if (observers.getSessions().length > 0) return true;
-		return runtime.registry.list().some(ref => ref.id !== MAIN_AGENT_ID && (runtime.inSession?.(ref) ?? true));
+		return runtime.registry
+			.list()
+			.some(
+				ref => ref.id !== MAIN_AGENT_ID && runtime.hasLocalPresence(ref.kind) && (runtime.inSession?.(ref) ?? true),
+			);
 	}
 }

@@ -859,7 +859,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			structured: this.#isStructured(),
 			steps: cfgTaskSteps.get(this.session.settings),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
-			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 			asyncGuidance: this.delegationGuidance,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
@@ -1006,7 +1006,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: this.session.enableLsp ?? true,
-			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 			maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 		});
 	}
@@ -1133,7 +1133,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgTaskMaxRecursionDepth.get(this.session.settings),
 			this.session.taskDepth ?? 0,
 		);
-		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
+		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry);
 
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
@@ -1491,6 +1491,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// A queued job launches (or adopts) its run when it starts; until then
 		// its widget has no tool tap to read.
 		let spawnRun: SpawnRun | undefined = run;
+		const registry = this.session.agentRegistry ?? AgentRegistry.global();
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
@@ -1500,8 +1501,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const isolated = spawnParams.isolated === true;
 			// A failed or killed run may never have written the transcript a revival
 			// reads, so a resumable-looking ref alone does not make it messageable.
-			const transcriptAvailable = await hasResolvableTranscript(agentId);
-			const ref = AgentRegistry.global().get(agentId);
+			const transcriptAvailable = await hasResolvableTranscript(agentId, registry);
+			const ref = registry.get(agentId);
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
@@ -1662,7 +1663,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+					const hint = registry.get(agentId) ? await buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				}
 			},
@@ -1687,8 +1688,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// queued, or failed before its session opened) never takes the messages
 		// held for it; drop them so none reach a later agent of the same id.
 		const dropHeld = () => {
-			if (AgentRegistry.global().get(agentId)) return;
-			const bus = IrcBus.existing();
+			if (registry.get(agentId)) return;
+			const bus = IrcBus.existing(registry);
 			let held = bus?.take(agentId);
 			while (held) held = bus?.take(agentId);
 		};
@@ -1895,7 +1896,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: this.session.enableLsp ?? true,
-				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 				maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 				signal,
 				...(tools ? { onToolResult: (result: SubagentToolResult) => appendToolResult(tools, result) } : {}),
@@ -1953,7 +1954,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		totalDurationMs: number,
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
-		const summary = formatTaskResultSummary(result, { totalDurationMs, mergeSummary });
+		const summary = formatTaskResultSummary(result, {
+			totalDurationMs,
+			mergeSummary,
+			registry: this.session.agentRegistry ?? AgentRegistry.global(),
+		});
 		return {
 			content: [{ type: "text", text: summary }],
 			details: {

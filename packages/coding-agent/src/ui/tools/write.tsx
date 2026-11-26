@@ -14,6 +14,7 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 import { shortenHome } from "@oh-my-pi/pi-tui/text/sanitize";
 import { formatDuration } from "@oh-my-pi/pi-utils";
+import { sanitizeInline } from "../../extensibility/inventory/display-text";
 import type {
 	ToolActivity,
 	ToolFigure,
@@ -212,9 +213,9 @@ function messageView(target: string, body: string, result: ToolResult<WriteDetai
 					{receipts.map(receipt => (
 						<item
 							key={receipt.to}
-							label={[{ s: "toolOutput", t: cleanText(receipt.to) }]}
+							label={[{ s: "toolOutput", t: sanitizeInline(receipt.to) }]}
 							value={[{ s: tone(receipt.outcome), t: receipt.outcome }]}
-							detail={receipt.error ? [{ s: "error", t: cleanText(receipt.error) }] : undefined}
+							detail={receipt.error ? [{ s: "error", t: sanitizeInline(receipt.error) }] : undefined}
 							tone={tone(receipt.outcome)}
 						/>
 					))}

@@ -1,4 +1,4 @@
-import { replaceTabs } from "../../utils/text-width";
+import { replaceTabs, truncateToWidth } from "../../utils/text-width";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 /** Strip ANSI/C0/C1/malformed unicode, then expand tabs. Call before theming. */
@@ -14,6 +14,14 @@ export function sanitizeDisplaySingleLine(text: string): string {
 /** Collapse newlines so a hostile title cannot inject extra TUI rows. */
 export function sanitizeDisplayLine(text: string): string {
 	return sanitizeDisplaySingleLine(text).trim();
+}
+
+/**
+ * One bounded display line from an externally sourced string (a bridged peer's id, a transport
+ * error): {@link sanitizeDisplayLine} with whitespace runs collapsed, truncated to `max` cells.
+ */
+export function sanitizeInline(text: string, max = 200): string {
+	return truncateToWidth(sanitizeDisplayLine(text).replace(/\s+/g, " "), max);
 }
 
 /** Like {@link sanitizeDisplayText}, dropping empty results. */

@@ -11,7 +11,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus, type IrcBusApi } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
@@ -28,7 +28,7 @@ describe("AgentSession run held open by a child agent", () => {
 	let runStates: string[];
 	let modelCalls: number;
 	let jobs: AsyncJobManager;
-	let bus: IrcBus;
+	let bus: IrcBusApi;
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-run-wake-sources-");
@@ -44,8 +44,8 @@ describe("AgentSession run held open by a child agent", () => {
 			},
 		});
 		registry = new AgentRegistry();
-		bus = new IrcBus(registry);
-		IrcBus.installGlobal(bus);
+		// The session reads its isolated registry's own bus, so the test parks there too.
+		bus = IrcBus.forRegistry(registry);
 		jobs = new AsyncJobManager({});
 		session = new AgentSession({
 			agent: new Agent({

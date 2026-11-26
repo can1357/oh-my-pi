@@ -20,7 +20,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createAgentsHubDeps } from "@oh-my-pi/pi-coding-agent/modes/agents-hub-deps";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -40,7 +41,11 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
-function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
+function createSession(options: {
+	manager?: AsyncJobManager;
+	settings?: Record<string, unknown>;
+	agentRegistry?: AgentRegistryApi;
+}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -48,6 +53,7 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
+		agentRegistry: options.agentRegistry,
 	} as unknown as ToolSession;
 }
 
@@ -287,6 +293,43 @@ describe("task spawn routing", () => {
 		expect(signals[0]).toBeInstanceOf(AbortSignal);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini-1"]);
 		expect(runSpy.mock.calls[0]?.[0].modelRoute).toBe("pool 1");
+	});
+
+	it("uses the session registry for stopped-agent resume and transcript hints", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+		const registry = new AgentRegistry();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			registry.register({
+				id,
+				displayName: "task",
+				kind: "sub",
+				session: { messages: [] } as unknown as AgentSession,
+				status: "idle",
+			});
+			AgentRegistry.global().register({
+				id,
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				status: "aborted",
+			});
+			return makeResult(id, { aborted: true, exitCode: 1 });
+		});
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, agentRegistry: registry }));
+		const result = await tool.execute("tc-stopped", {
+			agent: "task",
+			name: "Stopped",
+			task: "Do the thing.",
+		} as TaskParams);
+		const job = manager.getJob(result.details!.async!.jobId)!;
+		await job.promise;
+
+		expect(job.status).toBe("failed");
+		expect(job.errorText).toContain("Stopped was stopped but is still resumable");
+		expect(job.errorText).toContain("history://Stopped");
+		expect(job.errorText).not.toContain("transcript unavailable");
 	});
 
 	for (const { label, runnerOverrides, expectRetained } of [
@@ -861,6 +904,40 @@ describe("task spawn routing", () => {
 		expect(queuedResult).toBe("settled");
 		expect(started).toEqual(["First"]);
 		expect(secondJob.status).toBe("cancelled");
+	});
+
+	it("drops the messages held for a spawn of an isolated registry that is cancelled while queued", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const gate = deferred();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			await gate.promise;
+			return makeResult(options.id ?? "?");
+		});
+		const isolated = new AgentRegistry();
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({ manager, settings: { "task.maxConcurrency": 1 }, agentRegistry: isolated }),
+		);
+
+		const first = await tool.execute("tc-1", { agent: "task", name: "First", task: "Work A." } as TaskParams);
+		const second = await tool.execute("tc-2", { agent: "task", name: "Second", task: "Work B." } as TaskParams);
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+		const secondId = secondJob.agentId!;
+		expect(secondJob.queued).toBe(true);
+		const bus = IrcBus.forRegistry(isolated);
+		bus.park({ from: "Main", to: secondId, body: "use v2" });
+
+		expect(manager.cancel(secondJob.id)).toBe(true);
+		// The spawn's own settle handler, registered first, has run by the time this await resumes.
+		await secondJob.promise.catch(() => {});
+
+		// A later spawn of the same id in this registry must not take the cancelled spawn's mail.
+		expect(bus.take(secondId)).toBeUndefined();
+		gate.resolve();
+		await manager.getJob(first.details!.async!.jobId)!.promise;
 	});
 
 	it("keeps the concurrency cap intact when a queued spawn is cancelled (no permit leak)", async () => {

@@ -25,8 +25,9 @@ import { resolveAgentModelPatterns } from "../config/model-resolver";
 import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "../config/model-selector";
 import { fuzzyFilter } from "../utils/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi, isMessageablePeer, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/persisted-agents";
+import { malformedRemoteIdError, REMOTE_ID_PREFIX, remoteNamespaceOf } from "../registry/remote-id";
 import { IrcBus } from "../irc/bus";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import { agentMesh } from "../irc/mesh";
@@ -290,6 +291,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	readonly spec: SchemeSpec = {
 		backing: "file",
 		selectors: "lines",
+		agentIdAuthority: true,
 		immutable: true,
 		linkable: true,
 		write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "read" },
@@ -314,7 +316,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
-		if (outputId === "all" || hasPathExtraction(url)) return null;
+		if (outputId === "all" || outputId.startsWith(REMOTE_ID_PREFIX) || hasPathExtraction(url)) return null;
 		if (crossInstanceEnabled(context) && (outputId === "peers" || /^\d+$/.test(outputId))) return null;
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
@@ -338,6 +340,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				: formatPeerAddress(pid.address)
 			: url.rawHost || url.hostname;
 		if (!named) throw new Error("agent:// URL requires a recipient: agent://<id>");
+		const malformedTo = malformedRemoteIdError(named);
+		if (malformedTo) throw malformedTo;
 		const segments = pid?.segments ?? url.pathname.split("/").filter(Boolean).map(decodeSegment);
 		const [field] = segments;
 		const remote = pid !== undefined && !pid.local;
@@ -367,7 +371,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			const { model, effort } = await target.applyAgentModelChange(change);
 			return { content: [{ type: "text", text: `${to}: ${model} (effort: ${effort ?? "default"}).` }] };
 		}
-		if (!isIrcEnabled(session.settings, session.taskDepth ?? 0)) {
+		if (!isIrcEnabled(session.settings, session.taskDepth ?? 0, registry)) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
 		if (pid ? segments.length > 0 : hasPathExtraction(url)) {
@@ -385,7 +389,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				? undefined
 				: session.asyncJobManager?.getJob(to);
 		if (startingJob?.agentId === to && startingJob.status === "running") {
-			IrcBus.global().park({ from: senderId, to, body: content, ...(progress ? { progress: true } : {}) });
+			IrcBus.forRegistry(registry).park({
+				from: senderId,
+				to,
+				body: content,
+				...(progress ? { progress: true } : {}),
+			});
 			return {
 				content: [{ type: "text", text: `Queued for ${to} (not started yet; delivered when it starts).` }],
 				details: { message: { op: "send", from: senderId, to } },
@@ -414,6 +423,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (outputId === "all") throw new Error("agent://all is write-only; use it to broadcast a message.");
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
+		}
+		// A bridged peer (`@ns/name`) runs behind an extension's bridge: it is a message target, never an output.
+		const malformedId = malformedRemoteIdError(outputId);
+		if (malformedId) throw malformedId;
+		if (remoteNamespaceOf(outputId) !== undefined) {
+			throw new Error(
+				`${outputId} is a bridged peer and has no local output to read. Message it with \`write agent://${outputId}\`; list peers with \`read history://\`.`,
+			);
 		}
 		const crossInstance = crossInstanceEnabled(context);
 		if (crossInstance && outputId === "peers") return this.#resolvePeers(url);
@@ -689,7 +706,13 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		return { foundPath, jsonPath, anyDirExists, availableIds };
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
+	/**
+	 * Output ids (readable) plus messageable peers (write targets) from the caller's registry — an
+	 * SDK/ACP session with its own `AgentRegistry` sees its `@namespace/name` peers, not the global
+	 * session's. Remote peers appear here, not under history://, because `write agent://@ns/name` is
+	 * the only thing one can do with them.
+	 */
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const ids = new Set<string>();
 		for (const dir of artifactsDirsFromRegistry()) {
 			let files: string[];
@@ -703,6 +726,11 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				if (f.endsWith(".md")) ids.add(f.slice(0, -3));
 			}
 		}
-		return [...ids].sort().map(value => ({ value }));
+		const completions: UrlCompletion[] = [...ids].sort().map(value => ({ value }));
+		for (const ref of (context?.agentRegistry ?? AgentRegistry.global()).list()) {
+			if (!isMessageablePeer(ref.kind) || ids.has(ref.id)) continue;
+			completions.push({ value: ref.id, description: `${ref.status} · ${ref.kind} · message with write` });
+		}
+		return completions;
 	}
 }
