@@ -452,6 +452,8 @@ export interface AgentSessionConfig {
 	advisorConfigs?: AdvisorConfig[];
 	/** Config problems collected during WATCHDOG.yml discovery. */
 	advisorConfigWarnings?: string[];
+	/** User configuration directory used to rediscover the advisor roster. */
+	advisorConfigDir?: string;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/**
