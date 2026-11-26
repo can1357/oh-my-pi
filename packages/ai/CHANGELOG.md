@@ -9,6 +9,11 @@
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
 - Added `refresh: "valid-only"` to `oauth.accessAll()`: it refreshes no account and reports one needing a refresh as `{ ok: false, skipped: "expired" }` ([#19912](https://github.com/can1357/oh-my-pi/pull/19912) by [@Xytronix](https://github.com/Xytronix))
 
+### Fixed
+
+- Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
+- Fixed the auth broker's background sweep refreshing every Google Antigravity account at once; accounts now refresh only when a request is about to use one ([#19912](https://github.com/can1357/oh-my-pi/pull/19912) by [@Xytronix](https://github.com/Xytronix))
+
 ### Changed
 
 - `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
@@ -20,7 +25,6 @@
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
 - Fixed a cancelled inference request still being sent through a custom fetch that ignores the abort signal, when the cancel came while the request body was being prepared ([#20673](https://github.com/can1357/oh-my-pi/pull/20673) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the auth broker's background sweep refreshing every Google Antigravity account at once; accounts now refresh only when a request is about to use one ([#19912](https://github.com/can1357/oh-my-pi/pull/19912) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.2.1] - 2026-11-25
 
