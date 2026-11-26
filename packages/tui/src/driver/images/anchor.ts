@@ -14,12 +14,11 @@ import { hasGraphics } from "../output/ansi";
 export const RESERVED_ROW = "\x1b[0m";
 
 /**
- * Whether `row` is part of an image (reserved, or carrying a graphics sequence per
- * {@link hasGraphics}): escape-only, yet not blank. Row trimmers keep these rows, or the image
- * loses its place on screen.
+ * Whether `row` reserves space for an image (possibly indented) or carries a graphics
+ * sequence. Row trimmers keep these rows so the image stays anchored to its first row.
  */
 export function holdsImage(row: string): boolean {
-	return row === RESERVED_ROW || hasGraphics(row);
+	return row.trim() === RESERVED_ROW || hasGraphics(row);
 }
 
 /** `rows` rows drawing `sequence` from the first one. A single row is the bare sequence. */

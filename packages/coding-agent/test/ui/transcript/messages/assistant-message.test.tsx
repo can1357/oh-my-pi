@@ -364,3 +364,20 @@ test("embeds at a reply's edges keep their image rows in the transcript block", 
 		transcript.clear();
 	}
 });
+
+test("a leading assistant image keeps all its rows while encoding and after drawing", async () => {
+	const data = await new Bun.Image(Buffer.from(PNG_1X1, "base64")).resize(48, 48).png().toBase64();
+	const { env, images } = sixelEnvironment();
+	const transcript = new Transcript();
+	const message = assistant([{ type: "image", mimeType: "image/png", data }], 2);
+	const block = transcript.append(() => <AssistantMessageBlock model={{ message, finalized: true }} />);
+	try {
+		expect(paintNode(env, block.node, 80).rows).toHaveLength(3);
+		await images.whenEncoded();
+		const { rows } = paintNode(env, block.node, 80);
+		expect(rows).toHaveLength(3);
+		expect(rows[2]).toMatch(/\x1b7\x1b\[2A\x1bP[\d;]*q/);
+	} finally {
+		transcript.clear();
+	}
+});
