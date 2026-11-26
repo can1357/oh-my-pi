@@ -1,7 +1,7 @@
 import { expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { getBundledModel, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 
 function neon() {
 	return buildModel({
@@ -27,8 +27,9 @@ it("antigravity-cli Gemini 4 Neon offers only agy's thought levels, defaulting t
 	expect(model.thinking?.defaultLevel).toBe(Effort.High);
 });
 
-it("antigravity-cli rows resolve to included pricing rather than free", () => {
-	// Every bundled row carries a zero rate card because plan quota covers the
-	// request. Without a declared state the browser labels that zero as `free`.
-	expect(getModelPricingStatus(neon())).toBe("included");
+it("bundled antigravity-cli rows resolve to included pricing rather than free", () => {
+	// The runtime reads this materialized row directly from models.json, so this
+	// assertion fails when the KDL changed but the bundled catalog was not regenerated.
+	const model = getBundledModel("antigravity-cli", "gemini-4-neon");
+	expect(getModelPricingStatus(model)).toBe("included");
 });
