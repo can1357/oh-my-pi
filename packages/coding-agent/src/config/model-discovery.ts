@@ -942,14 +942,17 @@ function collectModalities(values: readonly unknown[]): Set<string> {
 function extractOpenAIModelsListInputCapabilities(item: {
 	input?: unknown;
 	input_modalities?: unknown;
+	modalities?: unknown;
 	architecture?: unknown;
 	metadata?: unknown;
 }): ("text" | "image")[] | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
 	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+	const modalitiesObj = isRecord(item.modalities) ? item.modalities : undefined;
 	const modalities = collectModalities([
 		item.input,
 		item.input_modalities,
+		modalitiesObj?.input,
 		architecture?.input_modalities,
 		metadata?.input_modalities,
 	]);
@@ -980,13 +983,16 @@ function extractOpenAIModelsListInputCapabilities(item: {
 function extractOpenAIModelsListOutputTask(item: {
 	output?: unknown;
 	output_modalities?: unknown;
+	modalities?: unknown;
 	architecture?: unknown;
 }): { kind: KindApiKind; api: Api } | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
+	const modalitiesObj = isRecord(item.modalities) ? item.modalities : undefined;
 	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
 	const output = collectModalities([
 		item.output,
 		item.output_modalities,
+		modalitiesObj?.output,
 		architecture?.output_modalities,
 		summary.length === 2 ? summary[1].split("+") : undefined,
 	]);
@@ -1086,6 +1092,7 @@ type AdvertisedReasoning =
 function extractAdvertisedReasoning(item: {
 	metadata?: unknown;
 	supported_reasoning_levels?: unknown;
+	reasoning_levels?: unknown;
 	default_reasoning_level?: unknown;
 	reasoning?: unknown;
 	reasoning_effort_map?: unknown;
@@ -1096,7 +1103,11 @@ function extractAdvertisedReasoning(item: {
 	// the same place the ladder below comes from, or a nested `reasoning: false`
 	// would keep the reference dial alive.
 	if ((metadata?.reasoning ?? item.reasoning) === false) return { kind: "none" };
-	const raw = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
+	const raw =
+		metadata?.supported_reasoning_levels ??
+		item.supported_reasoning_levels ??
+		metadata?.reasoning_levels ??
+		item.reasoning_levels;
 	const efforts = extractReasoningLevels(raw);
 	if (efforts === undefined) {
 		return (metadata?.reasoning ?? item.reasoning) === true ? { kind: "native" } : undefined;
@@ -1236,6 +1247,47 @@ function withoutReasoning(spec: ModelSpec<Api>, isAnthropic: boolean): ModelSpec
 	} as ModelSpec<Api>;
 }
 
+const UNKNOWN_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+/**
+ * Convert an OpenRouter-style per-token USD rate (numeric string or number)
+ * to USD per 1M tokens. Missing values return `absent`; malformed or negative
+ * values (e.g. OpenRouter's `"-1"` dynamic sentinel) return `undefined`.
+ */
+function parsePerTokenRateToPerMillion(value: unknown, absent: number | undefined): number | undefined {
+	if (value === undefined || value === null) return absent;
+	if (typeof value === "string" && value.trim() === "") return undefined;
+	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+	return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed * 1e12) / 1e6 : undefined;
+}
+
+/**
+ * Extract OpenRouter-style per-token `pricing` (`prompt`, `completion`,
+ * `input_cache_read` / `input_cache_reads`, `input_cache_write`) from an
+ * OpenAI-compatible `/v1/models` row (issue #15655).
+ *
+ * Missing or unreadable cards stay unpriced (`cost: 0`, `pricingStatus` unset →
+ * `"unknown"`). An explicit all-zero card is marked `pricingStatus: "free"`.
+ * On dedicated non-chat tasks (embeddings, TTS, STT, images), `completion` may
+ * be omitted and defaults to `0`.
+ */
+function extractOpenAIModelsListPricing(
+	pricing: unknown,
+	options?: { requireCompletion?: boolean },
+): Pick<ModelSpec<Api>, "cost" | "pricingStatus"> {
+	if (!isRecord(pricing)) return { cost: { ...UNKNOWN_COST } };
+	const requireCompletion = options?.requireCompletion ?? true;
+	const input = parsePerTokenRateToPerMillion(pricing.prompt, undefined);
+	const output = parsePerTokenRateToPerMillion(pricing.completion, requireCompletion ? undefined : 0);
+	const cacheRead = parsePerTokenRateToPerMillion(pricing.input_cache_read ?? pricing.input_cache_reads, 0);
+	const cacheWrite = parsePerTokenRateToPerMillion(pricing.input_cache_write, 0);
+	if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) {
+		return { cost: { ...UNKNOWN_COST } };
+	}
+	const cost = { input, output, cacheRead, cacheWrite };
+	return input + output + cacheRead + cacheWrite === 0 ? { cost, pricingStatus: "free" } : { cost };
+}
+
 export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -1283,8 +1335,10 @@ export async function discoverOpenAIModelsList(
 				return (await res.json()) as {
 					data?: Array<{
 						id?: string;
+						display_name?: unknown;
 						max_model_len?: unknown;
 						context_length?: unknown;
+						context_window?: unknown;
 						max_output_tokens?: unknown;
 						max_completion_tokens?: unknown;
 						max_tokens?: unknown;
@@ -1294,10 +1348,13 @@ export async function discoverOpenAIModelsList(
 						input_modalities?: unknown;
 						output?: unknown;
 						output_modalities?: unknown;
+						modalities?: unknown;
 						architecture?: unknown;
+						pricing?: unknown;
 						mode?: unknown;
 						metadata?: unknown;
 						supported_reasoning_levels?: unknown;
+						reasoning_levels?: unknown;
 						default_reasoning_level?: unknown;
 						reasoning?: unknown;
 						reasoning_effort_map?: unknown;
@@ -1335,8 +1392,12 @@ export async function discoverOpenAIModelsList(
 		const referenceCompat = reference?.compat as OpenAICompat | undefined;
 		// codex-lb and similar registries nest the route's identity beside its
 		// reasoning ladder: `display_name`, `context_window`, `input_modalities`.
+		// Other gateways (e.g. Magpie, ModelRelay) expose `display_name`,
+		// `context_window`, `modalities`, and `pricing` at the top level.
 		const metadata = isRecord(item.metadata) ? item.metadata : undefined;
-		const advertisedName = typeof metadata?.display_name === "string" ? metadata.display_name.trim() : "";
+		const advertisedName =
+			(typeof metadata?.display_name === "string" ? metadata.display_name.trim() : "") ||
+			(typeof item.display_name === "string" ? item.display_name.trim() : "");
 		const input = nativeMetadataForModel?.input ??
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
@@ -1346,6 +1407,7 @@ export async function discoverOpenAIModelsList(
 		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
+			toPositiveNumberOrUndefined(item.context_window) ??
 			toPositiveNumberOrUndefined(metadata?.context_window) ??
 			reportedLimitsContextWindow ??
 			nativeMetadataForModel?.contextWindow ??
@@ -1360,7 +1422,9 @@ export async function discoverOpenAIModelsList(
 		const task: { kind: ModelKind; api: Api } | undefined = nativeMetadataForModel?.decision
 			? { kind: "judge", api: "openai-decisions" }
 			: extractOpenAIModelsListOutputTask(item);
+		const rawPricing = item.pricing ?? metadata?.pricing;
 		if (task) {
+			const taskPricing = extractOpenAIModelsListPricing(rawPricing, { requireCompletion: false });
 			specs.push({
 				id,
 				name: advertisedName || reference?.name || id,
@@ -1371,7 +1435,7 @@ export async function discoverOpenAIModelsList(
 				reasoning: false,
 				input,
 				supportsTools: false,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				...taskPricing,
 				// Embeddings, judges, speech and transcription cap their input by
 				// context; image jobs carry no token window. None produces output tokens.
 				contextWindow: task.kind === "image" ? null : reportedContextWindow,
@@ -1396,6 +1460,10 @@ export async function discoverOpenAIModelsList(
 		// (bare ids or codex-rs `{ id }` objects; codex-lb nests it under
 		// `metadata`). It is what lets Ultrafast reach an advertising relay row.
 		const serviceTiers = parseServiceTierIds(metadata?.service_tiers ?? item.service_tiers);
+		// Use provider-reported OpenRouter-style `pricing` when present; otherwise
+		// keep costs local-unknown rather than borrowing another provider's bundled
+		// rate card.
+		const discoveredPricing = extractOpenAIModelsListPricing(rawPricing);
 		const spec = {
 			id,
 			name: advertisedName || reference?.name || id,
@@ -1407,10 +1475,7 @@ export async function discoverOpenAIModelsList(
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input,
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
-			// Proxy/gateway pricing is provider-specific and rarely matches
-			// upstream bundled catalogs, so keep costs local-unknown even
-			// when we successfully recover the upstream model identity.
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			...discoveredPricing,
 			contextWindow,
 			// Cap a provider-advertised output limit or the reference's output limit at
 			// the discovered context window so a larger limit can never request more
