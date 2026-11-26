@@ -585,25 +585,72 @@ describe("archive activity", () => {
 	});
 });
 
-describe("archive prelude under session.storage: sql", () => {
-	it("opens a session it lists by that session's id prefix", async () => {
-		// What main.ts installs for `session.storage: sql`: the transcript lives only in the table.
-		const client = new SQL("sqlite::memory:");
-		const storage = await SqlSessionStorage.create({ client });
-		setDefaultSessionStorage(storage);
-		try {
-			const at = "2024-06-01T00:00:00.000Z";
-			const id = `sql-${crypto.randomUUID()}`;
-			const file = path.join(sessionDirForCwd(app), `${new Date(at).getTime()}_${id}.jsonl`);
-			await storage.writeText(file, sessionContent(id, at, app, { prompt: "sql work", answered: true }));
+// The views of `archive.ts` read sessions through the configured storage, so a
+// SQL-stored session answers each one as a session file does. The views the
+// native scanner backs refuse under SQL instead (`sql-storage-refusals.test.ts`).
+describe("archive views over the configured session storage", () => {
+	for (const kind of ["file", "sql"] as const) {
+		it(`lists, opens, and searches sessions held by ${kind} storage`, async () => {
+			// Under `sql` this is what main.ts installs: the transcript lives only in the table.
+			const client = kind === "sql" ? new SQL("sqlite::memory:") : undefined;
+			const storage = client ? await SqlSessionStorage.create({ client }) : new FileSessionStorage();
+			setDefaultSessionStorage(storage);
+			try {
+				const at = "2024-06-01T00:00:00.000Z";
+				const store = async (cwd: string, label: string, options: Parameters<typeof sessionContent>[3]) => {
+					const id = `${label}-${crypto.randomUUID()}`;
+					const file = path.join(sessionDirForCwd(cwd), `${new Date(at).getTime()}_${id}.jsonl`);
+					await storage.writeText(file, sessionContent(id, at, cwd, options));
+					return { id, file };
+				};
+				const appSession = await store(app, "app", { prompt: "fix the deploy", reply: "The deploy now retries." });
+				const libSession = await store(lib, "lib", { prompt: "lib refactor", answered: true });
+				await storage.drain();
+				recordSessionRecap(appSession.id, app, "deploy recap");
+				recordSessionTitle(libSession.id, "lib internals");
+				HistoryStorage.open().add("fix the deploy", app, appSession.id);
+				expect((await syncTranscripts()).outcome).toBe("synced");
 
-			const listed = await call<ArchiveSession[]>({ action: "sessions" });
-			expect(listed.map(session => session.id)).toEqual([id]);
-			const detail = await call<ArchiveSessionDetail>({ action: "session", id: id.slice(0, 12) });
-			expect([detail.id, detail.file]).toEqual([id, file]);
-		} finally {
-			setDefaultSessionStorage(new FileSessionStorage());
-			await client.end();
-		}
-	});
+				const projects = await call<ArchiveProject[]>({ action: "projects" });
+				expect(
+					projects
+						.map(project => [project.path, project.sessions, project.latest.id, project.latest.messages])
+						.sort(),
+				).toEqual([
+					[app, 1, appSession.id, 2],
+					[lib, 1, libSession.id, 2],
+				]);
+				const sessions = await call<ArchiveSession[]>({ action: "sessions" });
+				expect(sessions.map(session => [session.id, session.file, session.messages, session.recap])).toEqual([
+					[appSession.id, appSession.file, 2, "deploy recap"],
+				]);
+				const detail = await call<ArchiveSessionDetail>({ action: "session", id: appSession.id.slice(0, 12) });
+				expect([
+					detail.id,
+					detail.file,
+					detail.messages,
+					detail.recaps.map(recap => recap.text),
+					detail.prompts.map(prompt => prompt.text),
+				]).toEqual([appSession.id, appSession.file, 2, ["deploy recap"], ["fix the deploy"]]);
+				const found = (hits: ArchiveSearchHit[]) =>
+					hits.map(hit => [hit.id, hit.matches.map(match => [match.source, match.text])]);
+				expect(found(await call({ action: "search", query: "retries" }))).toEqual([
+					[appSession.id, [["assistant", "The deploy now retries."]]],
+				]);
+				expect(found(await call({ action: "search", query: "internals", project: "*" }))).toEqual([
+					[libSession.id, [["title", "lib internals"]]],
+				]);
+				// Prompt history and recaps live in history.db under either storage.
+				expect((await call<ArchivePrompt[]>({ action: "prompts" })).map(prompt => prompt.text)).toEqual([
+					"fix the deploy",
+				]);
+				expect((await call<ArchiveRecap[]>({ action: "recaps" })).map(recap => recap.text)).toEqual([
+					"deploy recap",
+				]);
+			} finally {
+				setDefaultSessionStorage(new FileSessionStorage());
+				await client?.end();
+			}
+		});
+	}
 });

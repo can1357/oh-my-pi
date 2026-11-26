@@ -34,12 +34,17 @@ const ALL_RECORDS = 0xffff_ffff;
  * within `options.budget` characters.
  *
  * @throws {ToolError} when no session or several match, or the file is not readable.
+ * @throws {SessionStorageUnsupportedError} under `session.storage: sql`.
  */
 export async function archiveTranscript(
 	idOrFile: string,
 	options: ArchiveTranscriptOptions,
 ): Promise<ArchiveView<ArchiveTranscript>> {
-	const { file, records } = await readTranscript(idOrFile, { limit: ALL_RECORDS, signal: options.signal });
+	const { file, records } = await readTranscript(
+		idOrFile,
+		{ limit: ALL_RECORDS, signal: options.signal },
+		"transcript",
+	);
 	const view = renderTranscriptRecords(records, { ...options, title: "Transcript" });
 	return { text: view.text, records: { file, ...view } };
 }

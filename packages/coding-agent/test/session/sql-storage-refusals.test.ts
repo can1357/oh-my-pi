@@ -11,6 +11,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as stats from "@oh-my-pi/omp-stats";
+import type {
+	ArchiveCall,
+	ArchiveGrepHit,
+	ArchiveMessage,
+	ArchiveStat,
+} from "@oh-my-pi/pi-coding-agent/archive/activity";
+import { createArchivePrelude } from "@oh-my-pi/pi-coding-agent/archive/prelude-definition";
+import type { ArchiveTranscript } from "@oh-my-pi/pi-coding-agent/archive/transcript";
 import * as cleanse from "@oh-my-pi/pi-coding-agent/cleanse/index";
 import type { CleanseCommandResult } from "@oh-my-pi/pi-coding-agent/cleanse/types";
 import { GC_AUTO_COMPRESS_LOG, scheduleGcAutoCompress } from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
@@ -21,6 +29,7 @@ import Compress from "@oh-my-pi/pi-coding-agent/commands/compress";
 import Session from "@oh-my-pi/pi-coding-agent/commands/session";
 import Stats from "@oh-my-pi/pi-coding-agent/commands/stats";
 import * as compress from "@oh-my-pi/pi-coding-agent/compress/index";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CompressResult } from "@oh-my-pi/pi-coding-agent/compress/types";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
@@ -37,6 +46,7 @@ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-comm
 import { stopStatsDashboard } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/stats-dashboard";
 import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
 import * as ternPage from "@oh-my-pi/pi-coding-agent/tools/browser/tern/user-page";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import * as openUtils from "@oh-my-pi/pi-coding-agent/utils/open";
 import { getAgentDir, postmortem, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
@@ -64,6 +74,8 @@ const CLI_ENTRY = path.join(import.meta.dir, "..", "..", "src", "cli.ts");
 const TEST_CONFIG = { bin: "omp", version: "0.0.0-test", commands: new Map() };
 const SQL_REFUSAL = "is unavailable with session.storage: sql";
 const STATS_REASON = "usage statistics are ingested from session files on disk";
+const ARCHIVE_SCANNER_REASON =
+	"the native transcript scanner reads session files on disk, and this store keeps sessions as database rows";
 const originalCwd = process.cwd();
 const originalAgentDir = getAgentDir();
 const originalEnv = {
@@ -100,8 +112,9 @@ afterEach(async () => {
  * A store holding one session for a project, selected the way a user selects
  * it (`OMP_SESSION_STORAGE`, and the connection-string file for SQL), with
  * the process in the project directory and the store installed as default.
+ * The session holds a user prompt, then `extraEntries`.
  */
-async function openFixture(kind: Kind): Promise<Fixture> {
+async function openFixture(kind: Kind, extraEntries: object[] = []): Promise<Fixture> {
 	const dir = TempDir.createSync(`@omp-sql-refusals-${kind}-`);
 	const agentDir = dir.join("agent");
 	const cwd = dir.join("project");
@@ -139,6 +152,7 @@ async function openFixture(kind: Kind): Promise<Fixture> {
 				timestamp: "2026-11-02T00:00:01.000Z",
 				message: { role: "user", content: `stored in ${kind}`, timestamp: 1 },
 			},
+			...extraEntries,
 		]
 			.map(entry => JSON.stringify(entry))
 			.join("\n")}\n`,
@@ -159,6 +173,96 @@ function captureStdout(): () => string {
 	const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 	return () => stdout.mock.calls.map(([chunk]) => String(chunk)).join("");
 }
+
+/** A bash call and its result after the fixture's prompt, for the archive's activity views to find. */
+const TOOL_CALL_ENTRIES = [
+	{
+		type: "message",
+		id: "m2",
+		parentId: "m1",
+		timestamp: "2026-11-02T00:00:02.000Z",
+		message: {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }],
+			model: "model-a",
+			provider: "test",
+			api: "test",
+			timestamp: 2,
+		},
+	},
+	{
+		type: "message",
+		id: "m3",
+		parentId: "m2",
+		timestamp: "2026-11-02T00:00:03.000Z",
+		message: {
+			role: "toolResult",
+			toolCallId: "c1",
+			toolName: "bash",
+			content: [{ type: "text", text: "listed" }],
+			isError: false,
+			timestamp: 3,
+		},
+	},
+];
+
+/** Runs an `archive` prelude call as the eval kernel does, in the fixture's project. */
+async function archive(fx: Fixture, params: Record<string, unknown>): Promise<unknown> {
+	const session = { cwd: fx.cwd, settings: Settings.isolated() } as unknown as ToolSession;
+	const result = await createArchivePrelude(session).invoke(params, { session, toolCallId: "sql-refusals" });
+	return result.details;
+}
+
+/** The archive views the native scanner backs: each call, and what it returns on file storage. */
+const ARCHIVE_SCANNER_VIEWS: {
+	action: "calls" | "grep" | "stats" | "messages" | "transcript";
+	params: (fx: Fixture) => Record<string, unknown>;
+	onFile: (details: unknown, fx: Fixture) => void;
+}[] = [
+	{
+		action: "calls",
+		params: () => ({}),
+		onFile: details => {
+			expect((details as ArchiveCall[]).map(call => [call.callId, call.tool, call.result])).toEqual([
+				["c1", "bash", "listed"],
+			]);
+		},
+	},
+	{
+		action: "grep",
+		params: () => ({ pattern: "stored in \\w+" }),
+		onFile: details => {
+			expect((details as ArchiveGrepHit[]).map(hit => hit.match)).toEqual(["stored in file"]);
+		},
+	},
+	{
+		action: "stats",
+		params: () => ({}),
+		onFile: details => {
+			expect((details as ArchiveStat[]).map(stat => [stat.key, stat.calls])).toEqual([["bash", 1]]);
+		},
+	},
+	{
+		action: "messages",
+		params: fx => ({ id: fx.sessionId }),
+		onFile: details => {
+			expect((details as ArchiveMessage[]).map(message => message.text ?? message.tool)).toEqual([
+				"stored in file",
+				"bash",
+				"listed",
+			]);
+		},
+	},
+	{
+		action: "transcript",
+		params: fx => ({ id: fx.sessionId }),
+		onFile: (details, fx) => {
+			const view = details as ArchiveTranscript;
+			expect(view.file).toBe(fx.sessionFile);
+			expect(view.text).toContain("stored in file");
+		},
+	},
+];
 
 for (const kind of ["file", "sql"] as const) {
 	const refuses = kind === "sql";
@@ -414,6 +518,23 @@ for (const kind of ["file", "sql"] as const) {
 				await client.stop();
 			}
 		}, 120_000);
+
+		for (const view of ARCHIVE_SCANNER_VIEWS) {
+			test(`archive.${view.action} ${refuses ? "refuses before scanning" : "scans the session file"}`, async () => {
+				const fx = await openFixture(kind, TOOL_CALL_ENTRIES);
+
+				const outcome = archive(fx, { action: view.action, ...view.params(fx) });
+
+				if (refuses) {
+					expect(await rejectionOf(outcome)).toMatchObject({
+						name: "SessionStorageUnsupportedError",
+						message: `archive.${view.action} ${SQL_REFUSAL}: ${ARCHIVE_SCANNER_REASON}`,
+					});
+				} else {
+					view.onFile(await outcome, fx);
+				}
+			});
+		}
 	});
 }
 
