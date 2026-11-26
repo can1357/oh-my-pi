@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -5,7 +6,7 @@ import { createRoot, effect, type KeyEvent, type PasteEvent, type UiNode, untrac
 import type { InputEvent } from "@oh-my-pi/pi-tui/driver/index";
 import { emergencyTerminalRestore } from "@oh-my-pi/pi-tui/driver/session";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AutocompleteProvider, SlashCommand } from "../../autocomplete/autocomplete";
 import { expandEmoticons } from "../../autocomplete/emoji";
 import { createModelMentionSource } from "../../autocomplete/model-mention";
@@ -30,6 +31,8 @@ import { parseConfiguredThinkingLevel } from "../../thinking/levels";
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import { resolveReadPath } from "../../tools/path-utils";
+import { buildTextOutput, MAX_AUTO_READ_TEXT_BYTES } from "../../utils/file-mentions";
+import { convertFileWithMarkit, isConvertibleDocumentPath } from "../../utils/markit";
 import { vocalizer } from "../../tts/vocalizer";
 import { collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
@@ -79,7 +82,7 @@ import {
 import { type ConversationPosition, continuesConversation, conversationPosition } from "../utils/conversation-position";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
 import { compactImageMarkers, formatVisionMarker, shiftImageMarkers } from "../view-model/prompt/composer-attachments";
-import { extractImagePastePathsFromText, extractImagePathFromText } from "../view-model/prompt/custom-editor";
+import { extractComposerPastePathsFromText, extractImagePathFromText } from "../view-model/prompt/custom-editor";
 import { formatQueueShorthand, parseQueueShorthand, splitQueuedMessages } from "../view-model/prompt/queue-input";
 
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
@@ -130,6 +133,8 @@ interface ImagePasteSink {
 	pasteText(text: string): void;
 	/** Main editor only; without it a video path lands as text. */
 	attachVideo?(path: string): Promise<void>;
+	/** Main editor only; without it a document path lands as text. */
+	attachDocument?(path: string): Promise<void>;
 }
 
 /** One paste into an image-accepting prompt; `finish` delivers what it collected, in order. */
@@ -335,6 +340,7 @@ export class InputController {
 			this.#normalizeAndInsertPastedImage(image, unsupportedMessage, sourcePath),
 		pasteText: text => this.#pasteIntoComposer(text),
 		attachVideo: path => this.#insertPendingVideoPreview(path),
+		attachDocument: path => this.#insertPendingDocument(path),
 	};
 
 	#abortStreamingTurn(): void {
@@ -708,7 +714,7 @@ export class InputController {
 			void this.handleImagePaste();
 			return true;
 		}
-		const paths = extractImagePastePathsFromText(content);
+		const paths = extractComposerPastePathsFromText(content);
 		if (paths) {
 			void this.#trackImagePaste(
 				(async () => {
@@ -2661,6 +2667,47 @@ export class InputController {
 	}
 
 	/**
+	 * Attach a pasted document path (pdf, docx, pptx, xlsx, epub) by converting it to markdown
+	 * through markit - the same converter behind the read tool - and staging the result as a
+	 * text-attachment chip wrapped in `<attachment>` tags (#9931). Bounded like `@`-mentions of
+	 * the same formats: files over {@link MAX_AUTO_READ_TEXT_BYTES} are not converted, and the
+	 * markdown is truncated through {@link buildTextOutput}. Every failure pastes the literal
+	 * path instead, with the reason in the status, so the paste is never lost.
+	 */
+	async #insertPendingDocument(pastedPath: string): Promise<void> {
+		const absolutePath = resolveReadPath(pastedPath, this.ctx.sessionManager.getCwd());
+		const name = path.basename(absolutePath);
+		const fail = (reason: string) => {
+			this.#pasteIntoComposer(pastedPath);
+			this.ctx.showStatus(
+				`Document paste failed: ${truncateToWidth(sanitizeText(reason), TRUNCATE_LENGTHS.CONTENT)}`,
+			);
+		};
+		let size: number;
+		try {
+			size = (await fs.stat(absolutePath)).size;
+		} catch (error) {
+			fail(isEnoent(error) ? `${name} not found` : error instanceof Error ? error.message : String(error));
+			return;
+		}
+		if (size > MAX_AUTO_READ_TEXT_BYTES) {
+			fail(`${name} is ${formatBytes(size)}, over the ${formatBytes(MAX_AUTO_READ_TEXT_BYTES)} paste limit`);
+			return;
+		}
+		// Keys typed behind the paste wait for it; say why the prompt pauses.
+		this.ctx.showStatus(`Converting ${name}...`);
+		const result = await convertFileWithMarkit(absolutePath);
+		if (!result.ok || result.content.trim().length === 0) {
+			fail(result.error ?? "conversion produced no text");
+			return;
+		}
+		const { body, notice } = buildTextOutput(result.content);
+		const content = body + notice;
+		this.ctx.composer.insertTextAttachment(content, wrapPasteInAttachmentBlock(content));
+		this.ctx.showStatus(`Attached ${name} as markdown text`);
+	}
+
+	/**
 	 * Route enhanced-paste text to whatever has focus, as the bracketed paste a terminal without
 	 * enhanced paste sends: modal prompts (OAuth API-key entry, Perplexity OTP, GitHub Enterprise
 	 * URL, manual redirect URL) and dialogs that keep their field inside take it there, never the
@@ -2778,6 +2825,16 @@ export class InputController {
 
 	async #pasteImagePath(path: string, sink: ImagePasteSink): Promise<void> {
 		try {
+			if (isConvertibleDocumentPath(path)) {
+				if (sink.attachDocument) {
+					await sink.attachDocument(path);
+					return;
+				}
+				// Image-only prompts keep the path as text, like an unsupported video paste.
+				sink.pasteText(path);
+				this.ctx.showStatus("Document paste is not supported in this prompt");
+				return;
+			}
 			if (isVideoPath(path)) {
 				if (sink.attachVideo) {
 					await sink.attachVideo(path);
