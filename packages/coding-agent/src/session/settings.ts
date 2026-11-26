@@ -2,8 +2,11 @@ import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type ScopeLike, type Setting, type SettingValueOf } from "../config/registry";
 import {
+	buildServiceTierByFamily,
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
+	SERVICE_TIER_DEVIN_OPTIONS,
+	SERVICE_TIER_DEVIN_VALUES,
 	SERVICE_TIER_GOOGLE_OPTIONS,
 	SERVICE_TIER_GOOGLE_VALUES,
 	SERVICE_TIER_INHERIT_OPTIONS,
@@ -766,6 +769,27 @@ export const cfgTierGoogle = register({
 		options: SERVICE_TIER_GOOGLE_OPTIONS,
 	},
 });
+
+export const cfgTierDevin = register({
+	id: "tier.devin",
+	type: "enum",
+	values: SERVICE_TIER_DEVIN_VALUES,
+	default: "none",
+	ui: {
+		tab: "model",
+		group: "Sampling",
+		label: "Service Tier — Devin",
+		description:
+			"Processing tier for Devin requests. `priority` sends a model's fast lane (`-fast`, `-priority`, `-lightning` wire ids) where it has one; the same switch as `/fast` on a Devin model.",
+		options: SERVICE_TIER_DEVIN_OPTIONS,
+	},
+});
+
+/** Per-family service tiers configured by the `tier.<family>` settings; the starting `/fast` state of a fresh session. */
+export const cfgTiers = combine(
+	{ openai: cfgTierOpenai, anthropic: cfgTierAnthropic, google: cfgTierGoogle, devin: cfgTierDevin },
+	buildServiceTierByFamily,
+);
 
 export const cfgTierSubagent = register({
 	id: "tier.subagent",

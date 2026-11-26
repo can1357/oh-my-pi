@@ -98,10 +98,15 @@ function spread<T>(items: T[], max: number): T[] {
 	return Array.from({ length: max }, (_, index) => items[Math.floor((index * (items.length - 1)) / (max - 1))]);
 }
 
-/** Draft snippets from the alternate, or from both references when a Lynx dump is supplied. */
-export function draftGold(lynx: string | undefined, markdown: string): Gold {
+/** Represent Reader plaintext without interpreting it as Markdown. */
+export function plainTextView(text: string): MarkdownView {
+	return { text, structure: { headings: 0, code_fences: 0, links: 0 }, metaDump: false };
+}
+
+/** Draft snippets from the Reader response, or from both references when a Lynx dump is supplied. */
+export function draftGold(lynx: string | undefined, content: string, markdown = true): Gold {
 	const examples: string[] = [];
-	const { text, structure } = markdownView(markdown, examples);
+	const { text, structure } = markdown ? markdownView(content, examples) : plainTextView(content);
 	const plainLynx = lynx === undefined ? undefined : normalize(lynx);
 	const plainMarkdown = normalize(text);
 	const matches = (snippet: string) => snippet.length >= 4 && (plainLynx === undefined || plainLynx.includes(snippet));
@@ -186,11 +191,17 @@ export function parseGold(toml: string): GoldFile {
 	return parsed;
 }
 
-function snippetText(text: string): string {
+function snippetText(text: string, ignoreWhitespace: boolean): string {
 	// A gold excerpt may contain a single table row, which is not a complete
 	// GFM table. Handle rows with edge pipes and isolated cell separators.
 	const withoutRows = text.replace(/^[ \t]*\|[^|\n]+(?:\|[^|\n]+)*\|[ \t]*$/gm, row => row.replaceAll("|", " "));
-	return normalize(withoutRows.replace(/(?<=^|\s)\|(?=\s|$)/g, " ").replace(/\\?`+/g, ""));
+	const plain = withoutRows
+		.replace(/(?<=^|\s)\|(?=\s|$)/g, " ")
+		.replace(/\\?`+/g, "")
+		.replace(/[‘’]/gu, "'")
+		.replace(/[“”]/gu, '"')
+		.replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+	return ignoreWhitespace ? plain.replace(/\s+/gu, "").normalize("NFC") : normalize(plain);
 }
 
 /** Match gold snippets and structure against a parsed Markdown output. */
@@ -202,18 +213,19 @@ export function checkGold(
 	noise: string[];
 	shortStructure: string[];
 } {
-	const candidate = snippetText(view.text);
-	const contains = (snippet: string) => {
-		const literal = snippetText(snippet);
+	const content = snippetText(view.text, true);
+	const chrome = snippetText(view.text, false);
+	const contains = (candidate: string, snippet: string, ignoreWhitespace: boolean) => {
+		const literal = snippetText(snippet, ignoreWhitespace);
 		if (literal && candidate.includes(literal)) return true;
 		// Strip backticks before parsing Markdown syntax in the excerpt: an
 		// accidental matching pair must not hide punctuation or link markup.
-		const visible = snippetText(markdownView(snippet.replace(/\\?`+/g, "")).text);
+		const visible = snippetText(markdownView(snippet.replace(/\\?`+/g, "")).text, ignoreWhitespace);
 		return visible.length > 0 && candidate.includes(visible);
 	};
 	return {
-		missing: gold.must.filter(snippet => !contains(snippet)),
-		noise: gold.must_not.filter(contains),
+		missing: gold.must.filter(snippet => !contains(content, snippet, true)),
+		noise: gold.must_not.filter(snippet => contains(chrome, snippet, false)),
 		shortStructure: (["headings", "code_fences", "links"] as const)
 			.filter(key => view.structure[key] < gold.structure[key])
 			.map(key => `${key}=${view.structure[key]} < ${gold.structure[key]}`),
