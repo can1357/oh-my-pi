@@ -5,7 +5,6 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
-import { fuzzyRank } from "@oh-my-pi/pi-tui";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
@@ -13,6 +12,7 @@ import { committedTodoPhases } from "../../tools/todo";
 import { isReplyWrite, toolResultReplies } from "../../session/transcript/reply-write";
 import { parseMCPProgress } from "../../tools/mcp-progress";
 import { ToolError } from "../../tools/tool-errors";
+import { fuzzyRank } from "../../utils/fuzzy";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
