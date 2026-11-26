@@ -2509,10 +2509,10 @@ export class EventController {
 	 * When the main session's run is paused waiting only on outside sources, the
 	 * working row says so and names the jobs and child agents, instead of
 	 * repeating the last tool call's intent. The label is live, so a job
-	 * cancelled without a wake (`/jobs kill`) leaves the row at once. Shown on
-	 * the pause and again whenever another row (an error, a maintenance step,
-	 * the prompt's own settle) comes down while the run still waits; the next
-	 * loop or the run's `agent_end` takes it over.
+	 * cancelled without a wake (`/jobs kill`) leaves the row at once. Shown
+	 * when the run yields into the wait (its `agent_pause`, a focus return), and
+	 * again by {@link restoreAsyncWait}; the next loop or the run's `agent_end`
+	 * takes it over.
 	 */
 	showAsyncWait(): void {
 		const session = this.ctx.session;
@@ -2520,6 +2520,15 @@ export class EventController {
 		this.#showingAsyncWait = true;
 		this.ctx.ensureWorkingRow();
 		this.ctx.setWorkingMessage(() => formatAsyncWaitLabel(session.wakeSources));
+	}
+
+	/**
+	 * Put the wait row back after another row (an error, a maintenance step, the
+	 * prompt's own settle) came down while a yielded run still waits. A gap the
+	 * run did not yield in (a continuation between its loops) gets no wait label.
+	 */
+	restoreAsyncWait(): void {
+		if (this.#showingAsyncWait) this.showAsyncWait();
 	}
 
 	/** The main run is paused waiting only on outside sources, and the interrupt key would end that wait. */

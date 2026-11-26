@@ -7284,8 +7284,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	clearWorking(kind?: WorkingKind): boolean {
 		const cleared = this.#working.clear(kind);
 		// Whatever took the row down (the turn's own submission, an error, a maintenance step), a run
-		// still paused on outside work gets its row back naming the wait.
-		if (cleared) this.#eventController.showAsyncWait();
+		// that yielded and still waits on outside work gets its row back naming the wait.
+		if (cleared) this.#eventController.restoreAsyncWait();
 		// Synced even when another path took the row down first: the composer's Stop also follows
 		// `session.isStreaming`, which a stopped turn clears only after its submission returned.
 		this.#syncComposerState();

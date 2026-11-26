@@ -7,7 +7,7 @@
  * whatever else takes it down: the paused prompt's own submission returning
  * after the pause reached the UI (it used to read "Working…"), an error, or a
  * maintenance step such as `/wt` or a `/tree` summary (they used to leave no
- * row at all).
+ * row at all). A gap the run did not yield in gets no wait label.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -40,15 +40,21 @@ describe("InteractiveMode live working label", () => {
 			.filter(line => line.length > 0);
 	}
 
-	/** Run a prompt that starts a background job and pause on it, as the run's `agent_pause` shows it. */
-	async function pauseOnJob(): Promise<{ jobId: string; input: SubmittedUserInput }> {
+	/** Run a prompt that starts a background job; the run then waits on it, its pause not shown yet. */
+	async function runOnJob(): Promise<{ jobId: string; input: SubmittedUserInput }> {
 		const jobId = jobs.register("bash", "sleep 150", async () => await jobGate.promise);
 		const input = mode.startPendingSubmission({ text: "start the long job" });
 		await session.prompt(input.text);
 		await session.waitForIdle();
 		expect(mode.eventController.isAwaitingAsyncWork()).toBe(true);
-		mode.eventController.showAsyncWait();
 		return { jobId, input };
+	}
+
+	/** {@link runOnJob}, with the run's yielded `agent_pause` shown. */
+	async function pauseOnJob(): Promise<{ jobId: string; input: SubmittedUserInput }> {
+		const run = await runOnJob();
+		mode.eventController.showAsyncWait();
+		return run;
 	}
 
 	beforeAll(() => {
@@ -135,5 +141,14 @@ describe("InteractiveMode live working label", () => {
 
 		mode.clearWorking("maintenance");
 		expect(statusRows(120)).toEqual([expect.stringContaining(`Waiting for background job ${jobId}`)]);
+	});
+
+	it("names no wait when a row comes down in a gap the run did not yield in", async () => {
+		const { input } = await runOnJob();
+		mode.finishPendingSubmission(input);
+		mode.showWorking("compaction", { label: "Auto context-full maintenance…", startedAt: Date.now() });
+
+		mode.clearWorking("compaction");
+		expect(statusRows(120)).toEqual([]);
 	});
 });
