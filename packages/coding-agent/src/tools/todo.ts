@@ -68,10 +68,8 @@ const todoSchema = type({
 	"items?": type("string").array().describe("tasks for flat init or append"),
 });
 
-type TodoParams = TodoSchema;
-type TodoSchema = typeof todoSchema.infer;
 /** A single todo op entry (the params object itself). */
-type TodoOpEntryValue = TodoParams;
+type TodoOpEntryValue = typeof todoSchema.infer;
 
 // =============================================================================
 // State helpers
@@ -503,6 +501,13 @@ function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntr
 			if (!(repaired instanceof type.errors)) return repaired;
 		}
 	}
+	if (isRecord(raw) && raw.op === "init") {
+		for (const issue of direct) {
+			if (issue.path[0] === "items") {
+				return `Invalid todo arguments: ${direct.summary}\nUse "list" for phases; "items" takes task strings.`;
+			}
+		}
+	}
 	return `Invalid todo arguments: ${direct.summary}`;
 }
 
@@ -691,6 +696,8 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	readonly parameters = todoSchema;
 	readonly concurrency = "exclusive";
 	readonly strict = true;
+	/** Task labels and targets are verbatim text, never serialized by the argument validator. */
+	readonly verbatimStringArgs = true;
 	// Raw args reach execute() on schema failure; resolveTodoParams re-validates
 	// and repairs the one recoverable shape (missing `op`, unambiguous payload).
 	readonly lenientArgValidation = true;
@@ -702,7 +709,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 
 	async execute(
 		_toolCallId: string,
-		params: TodoParams,
+		params: unknown,
 		_signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
 		_context?: AgentToolContext,

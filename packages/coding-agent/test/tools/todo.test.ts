@@ -1,6 +1,8 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
+import type { ToolCall as ModelToolCall } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
@@ -539,6 +541,48 @@ describe("TodoTool lenient init shapes", () => {
 		expect(session.getTodoPhases?.()).toEqual(initial);
 	});
 
+	it("rejects phase objects in flat items without replacing the existing list", async () => {
+		const initial: TodoPhase[] = [{ name: "Existing", tasks: [{ content: "Keep", status: "in_progress" }] }];
+		const session = createSession(initial);
+		const tool = new TodoTool(session);
+		const list = [{ phase: "Investigate", items: ["Check upstream issues"] }];
+		const call: ModelToolCall = {
+			type: "toolCall",
+			id: "init",
+			name: "todo",
+			arguments: { op: "init", items: list },
+		};
+		const result = await tool.execute(call.id, validateAgentToolArguments(tool, call));
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining('Use "list" for phases') }),
+		]);
+		expect(session.getTodoPhases?.()).toEqual(initial);
+
+		const retry = { ...call, arguments: { op: "init", list } };
+		await tool.execute(retry.id, validateAgentToolArguments(tool, retry));
+		expect(session.getTodoPhases?.()).toEqual([
+			{ name: "Investigate", tasks: [{ content: "Check upstream issues", status: "in_progress" }] },
+		]);
+	});
+
+	it("preserves a literal JSON-looking task label in an encoded flat array", async () => {
+		const session = createSession();
+		const tool = new TodoTool(session);
+		const label = '{"phase":"Investigate","items":["Check upstream issues"]}';
+		const call: ModelToolCall = {
+			type: "toolCall",
+			id: "init",
+			name: "todo",
+			arguments: { op: "init", items: JSON.stringify([label]) },
+		};
+		await tool.execute(call.id, validateAgentToolArguments(tool, call));
+		expect(session.getTodoPhases?.()).toEqual([
+			{ name: "Tasks", tasks: [{ content: label, status: "in_progress" }] },
+		]);
+	});
+
 	it("accepts a flattened init with bare items and no phase", async () => {
 		const tool = new TodoTool(createSession());
 		const result = await tool.execute("call-1", { op: "init", items: ["First", "Second"] });
@@ -607,7 +651,7 @@ describe("TodoTool lenient op recovery", () => {
 		const tool = new TodoTool(createSession());
 		const result = await tool.execute("call-1", {
 			list: [{ phase: "Fixes", items: ["Bytecompiler ordering", "Posix path fd handling"] }],
-		} as never);
+		});
 
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.op).toBe("init");
@@ -622,7 +666,7 @@ describe("TodoTool lenient op recovery", () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["First"] }] });
 
-		const result = await tool.execute("call-2", { phase: "Work", items: ["Second"] } as never);
+		const result = await tool.execute("call-2", { phase: "Work", items: ["Second"] });
 
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.op).toBe("append");
@@ -631,7 +675,7 @@ describe("TodoTool lenient op recovery", () => {
 
 	it("infers init from bare items only when no todos exist", async () => {
 		const fresh = new TodoTool(createSession());
-		const initialized = await fresh.execute("call-1", { items: ["Only task"] } as never);
+		const initialized = await fresh.execute("call-1", { items: ["Only task"] });
 		expect(initialized.isError).toBeUndefined();
 		expect(initialized.details?.op).toBe("init");
 
@@ -640,13 +684,13 @@ describe("TodoTool lenient op recovery", () => {
 		const populated = new TodoTool(
 			createSession([{ name: "Work", tasks: [{ content: "First", status: "pending" }] }]),
 		);
-		const ambiguous = await populated.execute("call-2", { items: ["Second"] } as never);
+		const ambiguous = await populated.execute("call-2", { items: ["Second"] });
 		expect(ambiguous.isError).toBe(true);
 	});
 
 	it("surfaces the schema error when op is missing and not inferable", async () => {
 		const tool = new TodoTool(createSession());
-		const result = await tool.execute("call-1", { task: "Something" } as never);
+		const result = await tool.execute("call-1", { task: "Something" });
 
 		expect(result.isError).toBe(true);
 		const summary = result.content.find(part => part.type === "text");

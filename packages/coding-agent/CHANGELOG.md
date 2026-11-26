@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- `todo init` rejects non-string task entries instead of saving them as text, and tells callers to put phases in `list` ([#20669](https://github.com/can1357/oh-my-pi/issues/20669)).
 - Rebuilding the transcript now removes replaced blocks in one update instead of updating the view for each block ([#20658](https://github.com/can1357/oh-my-pi/pull/20658) by [@H4vC](https://github.com/H4vC))
 - Single-file reads and read preview titles now highlight the path like grouped reads (dim directory, colored file name, muted line range) instead of painting it flat in the accent color ([#20615](https://github.com/can1357/oh-my-pi/pull/20615) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Large pictures in assistant replies (`<img>` embeds, page stills, SVG fences) now fit within 80% of the terminal's height instead of drawing at full size past the screen ([#20620](https://github.com/can1357/oh-my-pi/pull/20620) by [@JustasMasiulis](https://github.com/JustasMasiulis))

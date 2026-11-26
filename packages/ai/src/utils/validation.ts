@@ -139,20 +139,14 @@ function tryCoerceBooleanToNumber(value: unknown, expectedTypes: string[]): { va
 	return { value: value ? 1 : 0, changed: true };
 }
 
-function tryCoerceString(
-	value: unknown,
-	expectedTypes: string[],
-	allowLossy: boolean,
-): { value: unknown; changed: boolean } {
+type StringCoercionPolicy = Pick<ValidateToolArgumentsOptions, "verbatimStringArgs">;
+
+function tryCoerceString(value: unknown, expectedTypes: string[]): { value: unknown; changed: boolean } {
 	if (!expectedTypes.includes("string") || typeof value === "string" || value === null || value === undefined) {
 		return { value, changed: false };
 	}
 
 	if (Array.isArray(value) || typeof value === "object") {
-		// JSON.stringify is irreversible (downstream consumers receive encoded
-		// text where they expected structure), so it requires an authoritative
-		// diagnosis — never a union-branch guess.
-		if (!allowLossy) return { value, changed: false };
 		try {
 			const stringified = JSON.stringify(value);
 			if (stringified === undefined) return { value, changed: false };
@@ -169,15 +163,11 @@ function tryCoerceString(
 	return { value: String(value), changed: true };
 }
 
-/**
- * Schema-directed value repair for a single type issue. `allowLossy` gates the
- * irreversible repairs (container→string stringification); lossless repairs
- * (JSON parsing, boolean spellings, scalar stringification) always apply.
- */
+/** Repair a value in the direction requested by the schema. */
 function tryCoerceForExpectedTypes(
 	value: unknown,
 	expectedTypes: string[],
-	allowLossy: boolean,
+	policy: StringCoercionPolicy,
 ): { value: unknown; changed: boolean } {
 	if (typeof value === "string") {
 		const parsed = tryParseJsonForTypes(value, expectedTypes);
@@ -191,7 +181,7 @@ function tryCoerceForExpectedTypes(
 	const numericCoercion = tryCoerceBooleanToNumber(value, expectedTypes);
 	if (numericCoercion.changed) return numericCoercion;
 
-	return tryCoerceString(value, expectedTypes, allowLossy);
+	return policy.verbatimStringArgs ? { value, changed: false } : tryCoerceString(value, expectedTypes);
 }
 
 function tryParseLeadingJsonContainer(value: string): unknown | undefined {
@@ -675,6 +665,7 @@ function branchMatchesSchema(branch: unknown, value: unknown, root: unknown = br
 function normalizeOptionalNullsForSchema(
 	schema: unknown,
 	value: unknown,
+	policy: StringCoercionPolicy,
 	isRoot = true,
 	root: unknown = schema,
 	insideContent = false,
@@ -698,6 +689,7 @@ function normalizeOptionalNullsForSchema(
 			const normalized = normalizeOptionalNullsForSchema(
 				branch,
 				value,
+				policy,
 				isRoot,
 				root,
 				insideContent,
@@ -718,6 +710,7 @@ function normalizeOptionalNullsForSchema(
 			const normalized = normalizeOptionalNullsForSchema(
 				branch,
 				value,
+				policy,
 				isRoot,
 				root,
 				insideContent,
@@ -739,7 +732,7 @@ function normalizeOptionalNullsForSchema(
 			// Diagnose against the enclosing union to retain authoritative vs.
 			// speculative issue provenance, but normalize only this candidate's
 			// branch. Failed candidates never escape to a sibling.
-			const repaired = runCoercionPasses(branchContext, normalized.value, result, isRoot, insideContent);
+			const repaired = runCoercionPasses(branchContext, normalized.value, result, policy, isRoot, insideContent);
 			if (repaired.result.success && branchMatchesSchema(branch, repaired.args, root)) {
 				return { value: repaired.args, changed: true };
 			}
@@ -762,6 +755,7 @@ function normalizeOptionalNullsForSchema(
 			const normalized = normalizeOptionalNullsForSchema(
 				branch,
 				nextValue,
+				policy,
 				isRoot,
 				root,
 				insideContent,
@@ -786,6 +780,7 @@ function normalizeOptionalNullsForSchema(
 			const normalized = normalizeOptionalNullsForSchema(
 				itemSchema,
 				value[i],
+				policy,
 				false,
 				root,
 				insideContent,
@@ -865,6 +860,7 @@ function normalizeOptionalNullsForSchema(
 		const normalized = normalizeOptionalNullsForSchema(
 			propertySchema,
 			currentValue,
+			policy,
 			false,
 			root,
 			insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
@@ -1672,6 +1668,7 @@ interface FlatIssue {
 function coerceArgsFromIssues(
 	args: unknown,
 	issues: FlatIssue[],
+	policy: StringCoercionPolicy,
 	droppedRootKeys?: Map<string, unknown>,
 ): { value: unknown; changed: boolean } {
 	if (issues.length === 0) return { value: args, changed: false };
@@ -1684,8 +1681,6 @@ function coerceArgsFromIssues(
 	let owned = false;
 	let nextArgs: unknown = args;
 	for (const issue of issues) {
-		// Failed union branches still contribute schema-directed type repairs.
-		// Container-to-string conversion remains enabled for string branches.
 		if (issue.keyword === "unrecognized") {
 			if (issue.unionBranch) continue;
 			if (droppedRootKeys) {
@@ -1702,7 +1697,7 @@ function coerceArgsFromIssues(
 		if (issue.expectedTypes.length === 0) continue;
 
 		const currentValue = getValueAtPointer(nextArgs, issue.instancePath);
-		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes, true);
+		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes, policy);
 		let coercedValue = result.changed ? result.value : undefined;
 		if (
 			coercedValue === undefined &&
@@ -2041,6 +2036,8 @@ export interface ValidateToolArgumentsOptions {
 	 * fields the model sent rather than run without them.
 	 */
 	keepUnknownRootKeys?: boolean;
+	/** Keep non-string arguments from being stringified during validation repair. */
+	verbatimStringArgs?: boolean;
 }
 
 /**
@@ -2093,7 +2090,7 @@ export function validateToolArguments(
 		changed = true;
 	}
 
-	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
+	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs, options);
 	if (initialNormalization.changed) {
 		normalizedArgs = initialNormalization.value;
 		changed = true;
@@ -2144,7 +2141,7 @@ export function validateToolArguments(
 	if (result.success) return result.value as ToolCall["arguments"];
 
 	const droppedRootKeys = options.keepUnknownRootKeys ? new Map<string, unknown>() : undefined;
-	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
+	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result, options, true, false, droppedRootKeys);
 	normalizedArgs = coercionOutcome.args;
 	changed ||= coercionOutcome.changed;
 	result = coercionOutcome.result;
@@ -2160,7 +2157,7 @@ export function validateToolArguments(
 		changed = true;
 		result = validateContext(ctx, normalizedArgs);
 		if (!result.success) {
-			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
+			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result, options, true, false, droppedRootKeys);
 			normalizedArgs = healedOutcome.args;
 			result = healedOutcome.result;
 		}
@@ -2198,6 +2195,7 @@ function runCoercionPasses(
 	ctx: ValidationContext,
 	args: unknown,
 	initial: ContextValidationResult,
+	policy: StringCoercionPolicy,
 	isRoot = true,
 	insideContent = false,
 	droppedRootKeys?: Map<string, unknown>,
@@ -2209,7 +2207,7 @@ function runCoercionPasses(
 	let changed = false;
 	for (let pass = 0; pass < MAX_COERCION_PASSES; pass += 1) {
 		if (result.success) break;
-		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues, droppedRootKeys);
+		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues, policy, droppedRootKeys);
 		let passChanged = coercion.changed;
 		normalizedArgs = coercion.value;
 
@@ -2230,6 +2228,7 @@ function runCoercionPasses(
 		const nullNormalization = normalizeOptionalNullsForSchema(
 			json,
 			normalizedArgs,
+			policy,
 			isRoot,
 			root,
 			insideContent,

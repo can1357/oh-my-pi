@@ -1758,7 +1758,7 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 	return commands;
 }
 
-/** `AgentTool` keys that shape the request's tool list; a capture turn copies them so it keeps the primary's cache prefix. */
+/** `AgentTool` keys a refused capture tool preserves for wire and validation parity. */
 const CAPTURE_ADVERTISED_KEYS = [
 	"name",
 	"description",
@@ -1778,6 +1778,7 @@ const CAPTURE_ADVERTISED_KEYS = [
 	"deferrable",
 	"delegationGuidance",
 	"lenientArgValidation",
+	"verbatimStringArgs",
 ] as const satisfies readonly (keyof AgentTool)[];
 
 /** `AgentTool` keys that run code or let a call reach an effect; a refused copy has none of them. */
