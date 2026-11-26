@@ -1323,14 +1323,101 @@ export interface SambaNovaModelManagerConfig {
 }
 
 /**
- * One SambaNova per-token USD rate (a decimal string) as a per-million rate.
- * `absent` is the value for a missing field; a present field that is not a
- * nonnegative number yields `undefined`.
+ * Non-token pricing legs from OpenRouter's `PublicPricing` schema. A nonzero or
+ * unreadable charge on any of these cannot be represented by `TokenCost`, so a
+ * card carrying one must stay `unknown` rather than dropping the charge or
+ * labeling a request-priced row `free`.
  */
-function sambanovaRate(value: unknown, absent: number | undefined): number | undefined {
+const NON_TOKEN_PRICING_KEYS = [
+	"request",
+	"image",
+	"image_token",
+	"image_output",
+	"audio",
+	"audio_output",
+	"input_audio_cache",
+	"web_search",
+	"internal_reasoning",
+] as const;
+
+export interface OpenAICompatPricingCardOptions {
+	/**
+	 * When `false` (dedicated non-chat tasks like embeddings, TTS, STT, images),
+	 * an omitted `completion` leg defaults to `0`. Defaults to `true`.
+	 */
+	requireCompletion?: boolean;
+}
+
+function parseScaledPricingLeg(value: unknown, scale: number, absent: number | undefined): number | undefined {
 	if (value === undefined || value === null) return absent;
 	const parsed = toNumber(value);
-	return parsed !== undefined && parsed >= 0 ? Math.round(parsed * 1e12) / 1e6 : undefined;
+	if (parsed === undefined || parsed < 0) return undefined;
+	const scaled = parsed * scale;
+	return Number.isFinite(scaled) ? scaled : undefined;
+}
+
+/**
+ * Parse a live OpenAI-compatible `/v1/models` `pricing` card into USD per 1M
+ * tokens (`cost`) and optional `pricingStatus` (`"free"` for an explicit
+ * all-zero card).
+ *
+ * Supports OpenRouter/SambaNova per-token USD cards (default, no `unit`) and
+ * NanoGPT-style `unit: "per_million_tokens"` cards (with optional per-1k cache
+ * keys). Returns `undefined` when the card is absent, malformed, carries an
+ * unsupported unit/currency, uses negative dynamic sentinels (`"-1"`), or has
+ * nonzero non-token charges (`request`, `image`, etc.) that `TokenCost` cannot
+ * represent.
+ */
+export function parseOpenAICompatPricingCard(
+	pricing: unknown,
+	options?: OpenAICompatPricingCardOptions,
+): Pick<ModelSpec<Api>, "cost" | "pricingStatus"> | undefined {
+	if (!isRecord(pricing)) return undefined;
+
+	if (pricing.currency !== undefined && pricing.currency !== null) {
+		if (typeof pricing.currency !== "string" || pricing.currency.trim().toUpperCase() !== "USD") {
+			return undefined;
+		}
+	}
+
+	let baseScale: number;
+	let perMillionCard = false;
+	if (pricing.unit === undefined || pricing.unit === null || pricing.unit === "") {
+		baseScale = 1_000_000;
+	} else if (pricing.unit === "per_million_tokens") {
+		baseScale = 1;
+		perMillionCard = true;
+	} else {
+		return undefined;
+	}
+
+	for (const key of NON_TOKEN_PRICING_KEYS) {
+		const raw = pricing[key];
+		if (raw === undefined || raw === null) continue;
+		const parsed = toNumber(raw);
+		if (parsed === undefined || parsed !== 0) {
+			return undefined;
+		}
+	}
+
+	const requireCompletion = options?.requireCompletion ?? true;
+	const input = parseScaledPricingLeg(pricing.prompt, baseScale, undefined);
+	const output = parseScaledPricingLeg(pricing.completion, baseScale, requireCompletion ? undefined : 0);
+	const cacheRead =
+		perMillionCard && pricing.cacheReadInputPer1kTokens !== undefined && pricing.cacheReadInputPer1kTokens !== null
+			? parseScaledPricingLeg(pricing.cacheReadInputPer1kTokens, 1_000, 0)
+			: parseScaledPricingLeg(pricing.input_cache_read ?? pricing.input_cache_reads, baseScale, 0);
+	const cacheWrite =
+		perMillionCard && pricing.cacheWriteInputPer1kTokens !== undefined && pricing.cacheWriteInputPer1kTokens !== null
+			? parseScaledPricingLeg(pricing.cacheWriteInputPer1kTokens, 1_000, 0)
+			: parseScaledPricingLeg(pricing.input_cache_write ?? pricing.input_cache_writes, baseScale, 0);
+
+	if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) {
+		return undefined;
+	}
+
+	const cost = { input, output, cacheRead, cacheWrite };
+	return input + output + cacheRead + cacheWrite === 0 ? { cost, pricingStatus: "free" } : { cost };
 }
 
 /**
@@ -1343,16 +1430,7 @@ function sambanovaPricing(
 	pricing: unknown,
 	fallback: TokenCost,
 ): Pick<ModelSpec<"openai-completions">, "cost" | "pricingStatus"> {
-	const rates = isRecord(pricing) ? pricing : {};
-	const input = sambanovaRate(rates.prompt, undefined);
-	const output = sambanovaRate(rates.completion, undefined);
-	const cacheRead = sambanovaRate(rates.input_cache_read, 0);
-	const cacheWrite = sambanovaRate(rates.input_cache_write, 0);
-	if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) {
-		return { cost: fallback, pricingStatus: "unknown" };
-	}
-	const cost = { input, output, cacheRead, cacheWrite };
-	return input + output + cacheRead + cacheWrite === 0 ? { cost, pricingStatus: "free" } : { cost };
+	return parseOpenAICompatPricingCard(pricing) ?? { cost: fallback, pricingStatus: "unknown" };
 }
 
 /**

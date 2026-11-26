@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- `openai-models-list` discovery now parses gateway `pricing` cards (OpenRouter per-token and `per_million_tokens` units) along with top-level `display_name`, `context_window`, `modalities`, and `reasoning_levels` metadata instead of leaving discovered gateway models unpriced ([#20654](https://github.com/can1357/oh-my-pi/pull/20654) by [@comicchang](https://github.com/comicchang))
 - Single-file reads and read preview titles now highlight the path like grouped reads (dim directory, colored file name, muted line range) instead of painting it flat in the accent color ([#20615](https://github.com/can1357/oh-my-pi/pull/20615) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Large pictures in assistant replies (`<img>` embeds, page stills, SVG fences) now fit within 80% of the terminal's height instead of drawing at full size past the screen ([#20620](https://github.com/can1357/oh-my-pi/pull/20620) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Blob-broker tunnels no longer flash console windows on Windows, including when a tunnel fails to start and is retried ([#20599](https://github.com/can1357/oh-my-pi/issues/20599)).

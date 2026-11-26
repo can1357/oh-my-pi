@@ -3173,7 +3173,7 @@ export class ModelRegistry {
 	 * `offline` strategy nothing else refetches them.
 	 */
 	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig): string {
-		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v6" : "context-v6";
+		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v7" : "context-v7";
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -3197,6 +3197,10 @@ export class ModelRegistry {
 			// model; warm v5 rows stayed without the aliases, so an unsupported
 			// requested effort kept clamping to the tier below and a thinking-off
 			// request could reach a route that rejects it.
+			// context-v7 invalidates rows cached before `openai-models-list`
+			// extracted `pricing` and top-level gateway metadata (`display_name`,
+			// `context_window`, `modalities`, `reasoning_levels`); warm v6 rows
+			// kept zero costs and stale metadata until expiry or forced refresh.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.

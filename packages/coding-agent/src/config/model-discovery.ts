@@ -25,6 +25,7 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	OPENROUTER_BASE_URL,
+	parseOpenAICompatPricingCard,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
@@ -989,18 +990,24 @@ function extractOpenAIModelsListOutputTask(item: {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
 	const modalitiesObj = isRecord(item.modalities) ? item.modalities : undefined;
 	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
-	const output = collectModalities([
+	const rawOutput = collectModalities([
 		item.output,
 		item.output_modalities,
 		modalitiesObj?.output,
 		architecture?.output_modalities,
 		summary.length === 2 ? summary[1].split("+") : undefined,
 	]);
+	// Canonicalize singular/plural task aliases before checking cardinality so a
+	// row carrying both `output_modalities: ["embedding"]` and
+	// `modalities.output: ["embeddings"]` stays on the embeddings runner.
+	const output = new Set<string>();
+	for (const modality of rawOutput) {
+		output.add(modality === "embeddings" ? "embedding" : modality);
+	}
 	if (output.size !== 1) return undefined;
 	const [modality] = output;
 	switch (modality) {
 		case "embedding":
-		case "embeddings":
 			return { kind: "embedding", api: "openai-embeddings" };
 		case "image":
 			return { kind: "image", api: "openai-images" };
@@ -1250,42 +1257,18 @@ function withoutReasoning(spec: ModelSpec<Api>, isAnthropic: boolean): ModelSpec
 const UNKNOWN_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
 /**
- * Convert an OpenRouter-style per-token USD rate (numeric string or number)
- * to USD per 1M tokens. Missing values return `absent`; malformed or negative
- * values (e.g. OpenRouter's `"-1"` dynamic sentinel) return `undefined`.
- */
-function parsePerTokenRateToPerMillion(value: unknown, absent: number | undefined): number | undefined {
-	if (value === undefined || value === null) return absent;
-	if (typeof value === "string" && value.trim() === "") return undefined;
-	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-	return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed * 1e12) / 1e6 : undefined;
-}
-
-/**
- * Extract OpenRouter-style per-token `pricing` (`prompt`, `completion`,
- * `input_cache_read` / `input_cache_reads`, `input_cache_write`) from an
- * OpenAI-compatible `/v1/models` row (issue #15655).
+ * Extract provider-reported `pricing` from an OpenAI-compatible `/v1/models`
+ * row (issue #15655) via the shared catalog rate-card parser.
  *
- * Missing or unreadable cards stay unpriced (`cost: 0`, `pricingStatus` unset →
- * `"unknown"`). An explicit all-zero card is marked `pricingStatus: "free"`.
- * On dedicated non-chat tasks (embeddings, TTS, STT, images), `completion` may
- * be omitted and defaults to `0`.
+ * Missing, unreadable, or unsupported cards stay unpriced (`cost: 0`,
+ * `pricingStatus` unset → `"unknown"`). An explicit all-zero card with no
+ * non-token charges is marked `pricingStatus: "free"`.
  */
 function extractOpenAIModelsListPricing(
 	pricing: unknown,
 	options?: { requireCompletion?: boolean },
 ): Pick<ModelSpec<Api>, "cost" | "pricingStatus"> {
-	if (!isRecord(pricing)) return { cost: { ...UNKNOWN_COST } };
-	const requireCompletion = options?.requireCompletion ?? true;
-	const input = parsePerTokenRateToPerMillion(pricing.prompt, undefined);
-	const output = parsePerTokenRateToPerMillion(pricing.completion, requireCompletion ? undefined : 0);
-	const cacheRead = parsePerTokenRateToPerMillion(pricing.input_cache_read ?? pricing.input_cache_reads, 0);
-	const cacheWrite = parsePerTokenRateToPerMillion(pricing.input_cache_write, 0);
-	if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) {
-		return { cost: { ...UNKNOWN_COST } };
-	}
-	const cost = { input, output, cacheRead, cacheWrite };
-	return input + output + cacheRead + cacheWrite === 0 ? { cost, pricingStatus: "free" } : { cost };
+	return parseOpenAICompatPricingCard(pricing, options) ?? { cost: { ...UNKNOWN_COST } };
 }
 
 export async function discoverOpenAIModelsList(
@@ -1395,9 +1378,12 @@ export async function discoverOpenAIModelsList(
 		// Other gateways (e.g. Magpie, ModelRelay) expose `display_name`,
 		// `context_window`, `modalities`, and `pricing` at the top level.
 		const metadata = isRecord(item.metadata) ? item.metadata : undefined;
-		const advertisedName =
+		const rawAdvertisedName =
 			(typeof metadata?.display_name === "string" ? metadata.display_name.trim() : "") ||
 			(typeof item.display_name === "string" ? item.display_name.trim() : "");
+		// Treat a `display_name` that merely echoes `item.id` as absent so a known
+		// bundled reference's human-readable label is not masked by the raw ID.
+		const advertisedName = rawAdvertisedName && rawAdvertisedName !== id ? rawAdvertisedName : "";
 		const input = nativeMetadataForModel?.input ??
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
