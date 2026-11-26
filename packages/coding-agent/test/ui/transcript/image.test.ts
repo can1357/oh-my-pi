@@ -143,16 +143,34 @@ test("a read picture draws once beneath the details card and only while images a
 	});
 });
 
-test.each(["jpeg", "webp"] as const)("a %s tool result draws inline instead of its placeholder", async format => {
+/** `jpeg` with two max-size APP2 (ICC) segments after SOI, pushing its SOF marker past 128 KiB. */
+function withLargeMetadata(jpeg: Buffer): Buffer {
+	const segment = Buffer.alloc(2 + 0xffff);
+	segment.writeUInt16BE(0xffe2, 0);
+	segment.writeUInt16BE(0xffff, 2);
+	return Buffer.concat([jpeg.subarray(0, 2), segment, segment, jpeg.subarray(2)]);
+}
+
+test.each([
+	["jpeg", "jpeg"],
+	["webp", "webp"],
+	["jpeg with its SOF behind large metadata", "jpeg-metadata"],
+] as const)("a %s tool result draws inline instead of its placeholder", async (_label, format) => {
 	const source = new Bun.Image(Buffer.from(RED_PNG, "base64")).resize(1200, 600);
-	const data = await (format === "jpeg" ? source.jpeg() : source.webp()).toBase64();
+	const data =
+		format === "webp"
+			? await source.webp().toBase64()
+			: format === "jpeg"
+				? await source.jpeg().toBase64()
+				: withLargeMetadata(Buffer.from(await source.jpeg().bytes())).toString("base64");
+	const mimeType = format === "webp" ? "image/webp" : "image/jpeg";
 	const settings = sizingSettings(() => 50);
 	cfgTuiMaxInlineImageColumns.override(settings, 40);
 	cfgTuiMaxInlineImageRows.override(settings, 10);
 	createRoot(dispose => {
 		try {
 			const call = new ToolCall({ id: "shot", name: "eval", args: {} });
-			call.updateResult({ content: [{ type: "image", data, mimeType: `image/${format}` }] }, false);
+			call.updateResult({ content: [{ type: "image", data, mimeType }] }, false);
 			const node = ToolBlock({ call });
 			if (!isUiNode(node)) throw new Error("expected a tool node");
 			const drawn = paintRows(node)().join("\n");

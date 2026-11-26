@@ -13,7 +13,6 @@
  * Merged presenters (`merge`) show the result view in place of the call's;
  * others stack the result body under the call body.
  */
-import { base64ImageSize } from "@oh-my-pi/pi-agent-core/image-tokens";
 import {
 	type Accessor,
 	computed,
@@ -41,6 +40,7 @@ import {
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { readMediaPath } from "../../session/transcript/tool-execution";
+import { readImageHeaderDimensions } from "../../utils/image-resize";
 import { type ShellInspectorSource, shellVizEventAction } from "../apps/shell-visualizer/model";
 import type { ToolTerm } from "../styles/tools/look";
 import type { ToolActivity, ToolPresenter, ToolResult, ToolView, ToolViewState } from "../tools/contract";
@@ -501,13 +501,14 @@ function withImagesAsText(result: ToolCallResult): ToolCallResult {
 /** `[Image: [image/png] 1x1]`. */
 export function imagePlaceholder(block: { readonly data?: string; readonly mimeType?: string }): string {
 	const mime = block.mimeType ?? "image";
-	const size = block.data ? imageSize(block.data) : undefined;
+	// Same size source as the drawn `image` node, so the label a look prints matches the linked text.
+	const size = block.data ? imageSize(Buffer.from(block.data, "base64")) : undefined;
 	return `[Image: [${mime}]${size ? ` ${size.w}x${size.h}` : ""}]`;
 }
 
-/** Pixel size of a base64 PNG/JPEG/GIF/WebP, when its header says. */
-export function imageSize(base64: string): { w: number; h: number } | undefined {
-	const size = base64ImageSize(base64);
+/** Pixel size of decoded PNG/JPEG/GIF/WebP bytes, when the header says (the whole image is scanned for a JPEG SOF). */
+export function imageSize(bytes: Uint8Array): { w: number; h: number } | undefined {
+	const size = readImageHeaderDimensions(bytes);
 	return size ? { w: size.width, h: size.height } : undefined;
 }
 
@@ -718,12 +719,13 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 /** A result's images as `image` nodes (shown under the body while images are on). */
 function imageNodes(result: ToolCallResult | undefined): JSXNode {
 	return resultImages(result).map((image, index) => {
-		const size = imageSize(image.data);
+		const bytes = Buffer.from(image.data, "base64");
+		const size = imageSize(bytes);
 		return (
 			<image
 				key={`img${index}`}
 				term={inlineImageTerm({ role: RESULT_IMAGE_ROLE })}
-				blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType ?? "image/png")}
+				blob={registerBlob(bytes, image.mimeType ?? "image/png")}
 				alt={image.mimeType}
 				w={size?.w}
 				h={size?.h}
