@@ -2,12 +2,14 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 ### Breaking Changes
 
 - Removed the unused `getToolsDir()` export. Custom tool discovery is unchanged.
+
+### Added
+
+- Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+
 ### Fixed
 
 - Fixed 429 retry hints ignoring `rests until <ISO-8601>` quota reset timestamps ([#20647](https://github.com/can1357/oh-my-pi/issues/20647)).

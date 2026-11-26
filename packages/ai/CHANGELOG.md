@@ -2,15 +2,16 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Factory Droid requests no longer fail with 403 `content_policy_rejected` for carrying OMP's identity sentence ([#19895](https://github.com/can1357/oh-my-pi/pull/19895) by [@Xytronix](https://github.com/Xytronix))
-
 ### Added
 
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
+
+### Fixed
+
+- Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
+- Factory Droid requests no longer fail with 403 `content_policy_rejected` for carrying OMP's identity sentence ([#19895](https://github.com/can1357/oh-my-pi/pull/19895) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

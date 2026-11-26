@@ -16,6 +16,7 @@ import {
 	seedApiKeyResolver,
 	streamSimple,
 	stripSchemaDescriptions,
+	type Tool,
 	type ToolCallProviderMetadata,
 	type ToolChoice,
 	type ToolResultMessage,
@@ -1112,7 +1113,7 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 			const parameters = (
 				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, undefined) : stripped
 			) as TSchema;
-			return { ...t, parameters, description: "" };
+			return toolSpec(t, parameters, "");
 		}
 		const wire = toolWireSchema(t);
 		const parameters = (
@@ -1121,8 +1122,25 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
-		return { ...t, parameters, description: finalDescription };
+		return toolSpec(t, parameters, finalDescription);
 	});
+}
+
+/**
+ * The provider-bound spec of `t`: its {@link Tool} fields and nothing else.
+ * Tool instances carry host state (a tool's `session`, renderers, caches) that a
+ * spread would copy into the context, where transports serializing it whole
+ * (`pi-native`, proxy) ship it with every request.
+ */
+function toolSpec(t: AgentTool, parameters: TSchema, description: string): Tool {
+	const spec: Tool = { name: t.name, description, parameters };
+	if (t.strict !== undefined) spec.strict = t.strict;
+	if (t.deferLoading !== undefined) spec.deferLoading = t.deferLoading;
+	if (t.customFormat !== undefined) spec.customFormat = t.customFormat;
+	if (t.customWireName !== undefined) spec.customWireName = t.customWireName;
+	if (t.native !== undefined) spec.native = t.native;
+	if (t.examples !== undefined) spec.examples = t.examples;
+	return spec;
 }
 
 function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" | "omit" {
