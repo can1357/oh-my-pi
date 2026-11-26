@@ -388,6 +388,7 @@ import {
 	type JSXNode,
 	jsx,
 	type KeyEvent,
+	nativeRendering,
 	type PresentedFrame,
 	type Signal,
 	signal,
@@ -694,7 +695,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		renderSvg: signal(true),
 		renderEmbeds: signal(true),
 		figureCell: signal<FigureCell | undefined>(undefined),
-		figureRows: () => figureMaxRows(this.shell.size().rows),
+		// Tern lays figures out itself: its rasters keep their full size.
+		figureRows: () => (nativeRendering() ? undefined : figureMaxRows(this.shell.size().rows)),
 		tableCharts: () => this.tableChartsVisible,
 		shellVisualization: signal(true),
 		mcpMarkdown: signal(false),
