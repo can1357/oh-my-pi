@@ -4,31 +4,26 @@
 
 ### Breaking Changes
 
-- `providers.fetch` values `native`, `trafilatura`, and `lynx` are replaced by a single `local` value for the in-process reader engine.
+- The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
+- Removed unused `parse*Args` and `print*Help` exports from the CLI configuration, grep, plugin, setup, shell, web-search, and update modules.
 
 ### Added
 
-- Added the `tui.showLinkUrl` setting to hide the URL drawn after named Markdown links where the label is a clickable terminal hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
-- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
-- `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
-- The glob tool's header shows the globs a call searches, a separate `pattern` included, with wildcards, character classes and `{a,b}` alternations highlighted like grep's regex ([#20616](https://github.com/can1357/oh-my-pi/pull/20616) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- Ask forms highlight `<mark>` text, in the terminal and in Tern ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Added the `gitlab` tool (`gitlab.enabled`, default off) covering project/file/issue reads, MR creation/updating/worktree checkout/push, discussions/notes/resolution, project/group/global search, and CI pipeline/job watching and logs, and expanded `mr://` URLs to support MR listings (`mr://`, `mr://<host>/<group>/<project>`) and cached MR overviews (`mr://<iid>`) alongside existing `/diff` slices ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
-- Included `tool_approvals` in `omp gc` stats database session purges ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield))
+- Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
+- Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
+- Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.
+- Updated `/fast` to switch Devin models to their fast lanes; use `tier.devin: priority` to start sessions in fast mode.
+- Improved glob tool output with clearer search patterns and highlighted wildcards, character classes, and brace alternations.
+- Added `<mark>` highlighting and preserved rich text styling in terminal and Tern ask forms.
+- Added an opt-in GitLab integration (`gitlab.enabled`) for project, file, issue, merge request, discussion, search, worktree, and CI workflows, along with expanded `mr://` resources for merge request listings, cached overviews, and diff slices.
+- Included `tool_approvals` in `omp gc` session statistics and purge handling.
 
 ### Changed
 
-- Bash loads approved `.envrc` and opt-in `.env` files without a `direnv` executable on `PATH`, using the exact file contents checked for approval.
-- URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
-- URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
-- Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
-- Ask form table cells, field labels and option rows keep their `<strong>`, `<em>`, `<code>` and `<mark>` styling in the terminal instead of showing plain text ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-
-### Changed
-
-- `bash.gitGuard` now also blocks `rebase`, `merge`, `pull`, `cherry-pick`, `revert` (except continuing/aborting an active one), `commit --amend`, and non-dry-run `clean` in shared checkouts, and fixes `core.bare`/magic-pathspec/`--recurse-submodules=false`/short-SHA edge cases ([#20545](https://github.com/can1357/oh-my-pi/pull/20545) by [@asuffield](https://github.com/asuffield))
-- When `bash.patterns` allow rules can skip an approval prompt, the bash tool's description tells the agent which shell syntax (unquoted operators, `$`/backtick expansions) disqualifies them ([#20305](https://github.com/can1357/oh-my-pi/pull/20305) by [@asuffield](https://github.com/asuffield)).
+- Bash can now load approved `.envrc` files and opt-in `.env` files without requiring `direnv`, using the exact approved file contents.
+- URL reading now preserves cookies across redirects, follows meta refreshes, falls back to the headless browser when plain fetching is blocked, and uses the native reader for X, YouTube, docs.rs, Discourse, and Mastodon while raw reads bypass site-specific rendering.
+- Expanded `bash.gitGuard` protection in shared checkouts to cover more history-changing Git operations, including rebase, merge, pull, cherry-pick, revert, amend, and non-dry-run clean operations.
+- Improved bash approval guidance by explaining which shell syntax prevents a `bash.patterns` rule from bypassing approval prompts.
 
 ### Fixed
 
@@ -86,6 +81,17 @@
 ### Removed
 
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
+- Fixed terminal completion, focus, scrolling, and keyboard handling across prompts, ask forms, plugin and agent views, debugger and plan review screens, session management, and external editors.
+- Fixed transcript rebuilding so compaction, shaking, display changes, forks, and worktree operations remain responsive while preserving terminal scrollback and background-task status.
+- Fixed rendering of images and rich content in the terminal, including image sizing, edge placement, WebP and GIF embeds, annotated pasted images, Markdown styling, and syntax-highlighted paths.
+- Fixed crashes and rendering errors for LSP calls with null fields and for resumed or rewound sessions containing cancelled task results.
+- Fixed session and service lifecycle issues, including restarting after a deleted working directory, cleaning up descendant processes, reloading advisor rules, and restoring the correct session state after resume.
+- Fixed MCP connectivity for HTTP servers that reject discovery with HTTP 415, and restored OpenCode Go quota windows in `/usage`.
+- Fixed bash behavior for tab completion, read-only Perl commands, complex approval patterns, and benign command flags; long wildcard rules no longer freeze sessions.
+- Fixed model reference handling in `/prewalk`, `/switch`, and related commands when using provider/model/level completion.
+- Fixed Gemini planning behavior so long tool-free reasoning is not repeatedly interrupted.
+- Fixed ACP and RPC `/mcp` commands to honor project-server precedence, enable/disable overrides, and the session working directory.
+- Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
 
 ## [19.2.1] - 2026-11-25
 

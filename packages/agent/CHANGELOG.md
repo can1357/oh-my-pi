@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Fixed tool definitions sent to providers carrying each tool's host state (such as its session), which made auth-gateway requests megabytes large
-- Fixed OpenTelemetry chat spans reporting the requested model as `gen_ai.response.model` when the provider recorded the model that actually served the turn ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+- Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
+- Corrected OpenTelemetry chat spans to report the model that actually served the response.
 
 ## [19.2.1] - 2026-11-25
 
