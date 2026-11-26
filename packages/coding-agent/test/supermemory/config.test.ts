@@ -182,6 +182,10 @@ describe("loadSupermemoryConfig", () => {
 		);
 		await fs.rm(path.join(temp.path(), ".env"), { force: true });
 		expect(home).toEqual({ apiKey: "home-key", baseUrl: "https://api.supermemory.ai" });
+		// A project `.env` shadowing the user's own agent-dir value: the user's value counts, not the default.
+		expect(
+			await probe({ ...planted, "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, "launch-key", clean),
+		).toEqual({ apiKey: "launch-key", baseUrl: "http://127.0.0.1:9" });
 		// The user's own agent-dir `.env` stays trusted.
 		expect(await probe({ "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, "launch-key")).toEqual({
 			apiKey: "launch-key",

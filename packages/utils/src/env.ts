@@ -393,9 +393,11 @@ for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 }
 
 // Startup values that came from a dotenv file of the launch project (OMP's merge above) or of the
-// process cwd (Bun's autoload), with what the launch environment held instead (absent, or a launcher
-// value such as `""` that dotenv overwrote). Captured now: those values stay in `Bun.env` after the
-// project directory changes or the files are edited, and a filter that re-reads the files misses them.
+// process cwd (Bun's autoload), with the value to trust instead: what the launch environment held
+// (absent, or a launcher value such as `""` that dotenv overwrote), else the user's own `.env` value
+// the project's shadowed. Captured now: those values stay in `Bun.env` after the project directory
+// changes or the files are edited, and a filter that re-reads the files misses them.
+const foldEnvName = (name: string) => (process.platform === "win32" ? name.toUpperCase() : name);
 const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string | undefined }> = (() => {
 	const values = new Map<string, { planted: string; trusted: string | undefined }>();
 	// Launched from the home, config root or agent dir: its `.env` is the user's own, not a project's.
@@ -407,15 +409,18 @@ const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string
 		}
 	};
 	const userDirs = new Set([os.homedir(), getConfigRootDir(), getAgentDir()].map(real));
+	const userValue = (key: string) => agentEnv[key] || piEnv[key] || homeEnv[key] || undefined;
 	for (const dir of new Set([launchProjectDir, process.cwd()].map(real))) {
 		if (userDirs.has(dir)) continue;
 		const kept = filterChildShellEnvInternal(Bun.env, dir);
 		for (const key in Bun.env) {
 			const planted = Bun.env[key];
 			if (planted === undefined || kept[key] === planted) continue;
-			// Two directories disagreeing on what to keep: trust neither.
-			const trusted = values.has(key) && values.get(key)?.trusted !== kept[key] ? undefined : kept[key];
-			values.set(key, { planted, trusted });
+			const candidate = kept[key] ?? userValue(key);
+			// Two directories disagreeing on what to trust: trust neither.
+			const previous = values.get(foldEnvName(key));
+			const trusted = previous && previous.trusted !== candidate ? undefined : candidate;
+			values.set(foldEnvName(key), { planted, trusted });
 		}
 	}
 	return values;
@@ -423,14 +428,15 @@ const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string
 
 /**
  * `Bun.env[name]`, except a value the startup environment took from a project dotenv file (the launch
- * project's or the process cwd's): that reads as what the launch environment held instead. Unlike
- * `filterChildShellEnv`, this still holds after the project directory changes (`--cwd`, `/move`) or
- * the files are edited. For settings a cloned repository must not control. A value set after startup
- * is returned as is: no dotenv file is loaded into the environment later.
+ * project's or the process cwd's): that reads as the launch environment's value, else the user's own
+ * `.env` value, else unset. Unlike `filterChildShellEnv`, this still holds after the project directory
+ * changes (`--cwd`, `/move`) or the files are edited. For settings a cloned repository must not
+ * control. A value set after startup is returned as is: no dotenv file is loaded into the
+ * environment later.
  */
 export function launchTrustedEnv(name: string): string | undefined {
 	const value = Bun.env[name];
-	const launch = launchDotenvValues.get(name);
+	const launch = launchDotenvValues.get(foldEnvName(name));
 	return launch !== undefined && value === launch.planted ? launch.trusted : value;
 }
 

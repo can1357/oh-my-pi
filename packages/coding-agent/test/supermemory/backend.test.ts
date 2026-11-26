@@ -1438,6 +1438,87 @@ describe("supermemoryBackend", () => {
 		expect(docs[0]?.content).toContain("reply to three");
 	});
 
+	it("a copy taken before its first turn and switched off never uploads the turns made while off", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const settings = { "supermemory.retainEveryNTurns": 3 };
+		const source = makeSession({ settings });
+		await start(source);
+		// The source's first run records its cursor before any turn lands.
+		source.emitPause(false);
+		// `/branch` at the first prompt: the copy holds only that cursor; the source lives on elsewhere.
+		const copy = makeSession({ settings });
+		copy.transcriptId = "t2";
+		copy.sessionManager.getEntries().push(...source.sessionManager.getEntries());
+		await start(copy);
+		await copy.setSupermemorySessionState(undefined)?.dispose();
+		copy.addTurn("off-period one");
+		copy.addTurn("off-period two");
+		await start(copy);
+		for (const turn of ["three", "four", "five"]) {
+			copy.addTurn(turn);
+			await copy.endTurn();
+		}
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "");
+		expect(contents).toHaveLength(1);
+		expect(contents[0]).not.toContain("off-period");
+	});
+
+	it("a copy of a /tan clone never uploads the clone's inherited turns", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const settings = { "supermemory.retainEveryNTurns": 3 };
+		const clone = makeSession({ settings });
+		clone.header = { type: "session", id: "fork", parentSession: "parent.jsonl" } as SessionHeader;
+		clone.addTurn("inherited-one");
+		clone.addTurn("inherited-two");
+		clone.sessionManager.appendCustomEntry(TAN_FORK_BOUNDARY_CUSTOM_TYPE, "fork");
+		await start(clone);
+		clone.addTurn("fork-one");
+		await clone.endTurn();
+		// `/branch` of the clone: a new id and header, so the clone's boundary no longer applies.
+		const copy = makeSession({ settings });
+		copy.header = { type: "session", id: "copy", parentSession: "fork.jsonl" } as SessionHeader;
+		copy.transcriptId = "t2";
+		copy.sessionManager.getEntries().push(...clone.sessionManager.getEntries());
+		create.mockClear();
+		await start(copy);
+		for (const turn of ["copy-one", "copy-two", "copy-three"]) {
+			copy.addTurn(turn);
+			await copy.endTurn();
+		}
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("copy-three");
+		expect(contents).not.toContain("inherited");
+	});
+
+	it("an enqueue without automatic retention leaves no cursor for later retention to resume from", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({
+			settings: { "supermemory.retainEveryNTurns": 3, "supermemory.autoRetain": false },
+		});
+		await start(session);
+		session.addTurn("enqueued-one");
+		await supermemoryBackend.enqueue!(temp.path(), "/tmp", session as never);
+		session.addTurn("never-enqueued");
+		// `supermemory.autoRetain` switched on: the state is rebuilt.
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		session.settings = Settings.isolated({ ...CONFIGURED, "supermemory.retainEveryNTurns": 3 });
+		await start(session);
+		for (const turn of ["three", "four", "five"]) {
+			session.addTurn(turn);
+			await session.endTurn();
+		}
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("enqueued-one");
+		expect(contents).toContain("reply to five");
+		expect(contents).not.toContain("never-enqueued");
+	});
+
 	it("a window that completes after the session moves to a new transcript records no cursor there", async () => {
 		const reply = Promise.withResolvers<{ id: string; status: string }>();
 		const sent = Promise.withResolvers<void>();

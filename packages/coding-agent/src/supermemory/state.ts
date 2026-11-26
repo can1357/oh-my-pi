@@ -16,7 +16,7 @@ import { findPersistedRecall, persistRecall } from "../memory-backend/recall-ent
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import recallTemplate from "../prompts/system/supermemory-recall.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
-import type { SessionEntry } from "../session/session-entries";
+import { type SessionEntry, TAN_FORK_BOUNDARY_CUSTOM_TYPE } from "../session/session-entries";
 import {
 	type SupermemoryClient,
 	type SupermemoryDocument,
@@ -346,7 +346,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		// A copy (`/fork`, `/branch`, `/btw`) holds its source's cursors under the source's id: continue
 		// after the source's last retained turn, so the source's unsent open window is not lost. Windows
 		// already sent belong to the source's documents, so nothing before that turn is re-sent here.
-		const copied = this.#pathCursor(path, start, true);
+		// A copy of a `/tan` clone counts turns from the clone's boundary, which this copy no longer
+		// honours (its header names another session): its cursor turns would land on inherited turns.
+		const tanDerived = path.some(
+			entry => entry.type === "custom" && entry.customType === TAN_FORK_BOUNDARY_CUSTOM_TYPE,
+		);
+		const copied = tanDerived ? undefined : this.#pathCursor(path, start, true);
 		const copiedStop = copied?.stoppedAt;
 		const copiedOff =
 			copiedStop !== undefined &&
@@ -357,6 +362,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			this.lastRetainedTurn = from;
 			this.#windowStart = from;
 			this.#retainedMessages = 0;
+			// The copy's own cursor, so a stop is recorded even before its first turn and a later resume
+			// does not fall back to the source's cursor across turns exchanged while off.
+			if (!this.#disposed) this.#appendCursor(from, 0, from);
 			return;
 		}
 		// Otherwise a branch without a cursor was never retained by automatic retention: start at its
@@ -873,6 +881,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		windowStart: number,
 		stop?: { stoppedAt: number; stoppedMessages?: number },
 	): void {
+		// A state that does not retain automatically (`/memory enqueue` with `autoRetain` off) records
+		// nothing: a later retaining state would adopt its cursor and upload the turns after it, which
+		// nothing retained.
+		if (!this.automatic || !this.#config.autoRetain) return;
 		this.session.sessionManager.appendCustomEntry(RETENTION_CURSOR_ENTRY_TYPE, {
 			version: 1,
 			scope: this.#scope(),
