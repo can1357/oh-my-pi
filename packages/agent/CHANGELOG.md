@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Fixed OpenTelemetry chat spans reporting the requested model as `gen_ai.response.model` when the provider recorded the model that actually served the turn ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 
 ## [19.2.1] - 2026-11-25
@@ -16,10 +17,6 @@
 ### Changed
 
 - Debug logs now time the wait between dequeuing input and the model request that carries it, by phase.
-
-### Fixed
-
-- Fixed `AgentLoop` soft tool-choice requirements refusing a batch without naming the other tool calls that caused the refusal ([#18859](https://github.com/can1357/oh-my-pi/issues/18859), [#19947](https://github.com/can1357/oh-my-pi/pull/19947) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ## [19.2.0] - 2026-11-25
 
