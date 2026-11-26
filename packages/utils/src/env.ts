@@ -409,27 +409,59 @@ const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string
 	};
 	const home = real(os.homedir());
 	const launchDirs = [...new Set([launchProjectDir, process.cwd()].map(real))].filter(dir => dir !== home);
-	const kept = new Map(launchDirs.map(dir => [dir, filterChildShellEnvInternal(Bun.env, dir)]));
+	// Names each launch dir's dotenv files define. Without a launch snapshot, the filter decides by value,
+	// which `${VAR}` expansion against a later-merged `.env` or a mode file it does not read can defeat:
+	// every such name is refused, at the cost of a shell export the project's files also name.
+	const dotenvNames = (dir: string) => {
+		const names = new Set<string>();
+		if (launchEnvValues) return names;
+		let files: string[] = [];
+		try {
+			files = fs.readdirSync(dir).filter(file => /^\.env(\..+)?$/.test(file));
+		} catch {}
+		for (const file of files) for (const key in parseEnvFile(path.join(dir, file))) names.add(foldEnvName(key));
+		return names;
+	};
+	const launch = launchDirs.map(dir => ({
+		dir,
+		filtered: filterChildShellEnvInternal(Bun.env, dir),
+		named: dotenvNames(dir),
+	}));
+	const plantedIn = (entry: (typeof launch)[number], key: string) =>
+		entry.named.has(foldEnvName(key)) || entry.filtered[key] !== Bun.env[key];
 	// The agent and config dirs (and their `.env`) are the user's own only if nothing a project dotenv
 	// file supplied relocated them: a checkout must not designate its own trusted root.
-	const dirAffecting = /^(PI_CODING_AGENT_DIR|PI_CONFIG_DIR|PI_PROFILE|OMP_PROFILE|OMP_APP_NAME|XDG_[A-Z_]+)$/i;
-	const dirsPlanted = [...kept.values()].some(filtered =>
-		Object.keys(Bun.env).some(key => dirAffecting.test(key) && filtered[key] !== Bun.env[key]),
+	const dirAffecting = /^(PI_CODING_AGENT_DIR|PI_CONFIG_DIR|PI_PROFILE|OMP_PROFILE)$/i;
+	const dirsPlanted = launch.some(entry =>
+		Object.keys(Bun.env).some(key => dirAffecting.test(key) && plantedIn(entry, key)),
 	);
 	const userDirs = new Set([home, ...(dirsPlanted ? [] : [getConfigRootDir(), getAgentDir()].map(real))]);
 	const userValue = (key: string) =>
 		(dirsPlanted ? homeEnv[key] : agentEnv[key] || piEnv[key] || homeEnv[key]) || undefined;
-	for (const [dir, filtered] of kept) {
+	for (const entry of launch) {
 		// Launched from the home (or a trusted agent/config) dir: its `.env` is the user's own.
-		if (userDirs.has(dir)) continue;
+		if (userDirs.has(entry.dir)) continue;
 		for (const key in Bun.env) {
 			const planted = Bun.env[key];
-			if (planted === undefined || filtered[key] === planted) continue;
-			const candidate = filtered[key] ?? userValue(key);
+			if (planted === undefined || !plantedIn(entry, key)) continue;
+			const kept = entry.named.has(foldEnvName(key)) ? undefined : entry.filtered[key];
+			const candidate = kept ?? userValue(key);
 			// Two directories disagreeing on what to trust: trust neither.
 			const previous = values.get(foldEnvName(key));
 			const trusted = previous && previous.trusted !== candidate ? undefined : candidate;
 			values.set(foldEnvName(key), { planted, trusted });
+		}
+	}
+	// A relocated agent/config dir: OMP's merge above already loaded its `.env`, whose names the
+	// project's files never mention. Those values are the checkout's too, unless the launcher set them.
+	if (dirsPlanted) {
+		for (const file of [agentEnv, piEnv]) {
+			for (const key in file) {
+				const planted = Bun.env[key];
+				if (planted === undefined || planted !== file[key] || launchEnvValues?.get(key) === planted) continue;
+				if (!values.has(foldEnvName(key)))
+					values.set(foldEnvName(key), { planted, trusted: homeEnv[key] || undefined });
+			}
 		}
 	}
 	return values;

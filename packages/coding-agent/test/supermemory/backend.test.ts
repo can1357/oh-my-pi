@@ -74,6 +74,7 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 		},
 		/** A `.`/`c` continuation: an assistant answer without a user turn. */
 		addAnswer(text: string) {
+			session.emitStart();
 			append({
 				type: "message",
 				id: `a${entries.length}`,
@@ -94,7 +95,13 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 			state = next;
 			return previous;
 		},
+		/** A run begins: `agent_start` fires before the run persists its messages. */
+		emitStart() {
+			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
+			for (const listener of [...listeners]) listener({ type: "agent_start" } as never);
+		},
 		addTurn(text: string) {
+			session.emitStart();
 			const at = new Date(0).toISOString();
 			append({
 				type: "message",
@@ -445,6 +452,7 @@ describe("supermemoryBackend", () => {
 		await session.endTurn();
 		const entries = session.sessionManager.getEntries();
 		const at = new Date(0).toISOString();
+		session.emitStart();
 		entries.push({
 			type: "message",
 			id: "u-aborted",
@@ -455,6 +463,7 @@ describe("supermemoryBackend", () => {
 		await session.endTurn();
 		expect(create).toHaveBeenCalledTimes(1);
 		// A bare resume answers the same prompt without a new user entry.
+		session.emitStart();
 		entries.push({
 			type: "message",
 			id: "a-resumed",
@@ -477,6 +486,7 @@ describe("supermemoryBackend", () => {
 		const at = new Date(0).toISOString();
 		const message = (id: string, value: unknown) =>
 			entries.push({ type: "message", id, parentId: null, timestamp: at, message: value } as never);
+		session.emitStart();
 		message("u1", { role: "user", content: "one", timestamp: 0 });
 		message("a1", {
 			role: "assistant",
@@ -487,6 +497,7 @@ describe("supermemoryBackend", () => {
 		await session.endTurn();
 		expect(create).not.toHaveBeenCalled();
 		// `/retry` continues the same prompt without a new user entry.
+		session.emitStart();
 		message("a2", {
 			role: "assistant",
 			content: [{ type: "text", text: "retried answer" }],
@@ -683,6 +694,7 @@ describe("supermemoryBackend", () => {
 		session.addTurn("one");
 		await session.endTurn();
 		// `.`/`c`: a synthetic developer prompt; the transcript gains only an assistant answer.
+		session.emitStart();
 		session.sessionManager.getEntries().push({
 			type: "message",
 			id: "a-cont",
@@ -718,6 +730,7 @@ describe("supermemoryBackend", () => {
 		await session.getSupermemorySessionState()?.dispose();
 		session.settings = Settings.isolated({ ...CONFIGURED, "supermemory.retainEveryNTurns": 1 });
 		await start(session);
+		session.emitStart();
 		session.sessionManager.getEntries().push({
 			type: "message",
 			id: "a-cont",
@@ -748,6 +761,7 @@ describe("supermemoryBackend", () => {
 		await session.getSupermemorySessionState()?.dispose();
 		session.settings = Settings.isolated({ ...CONFIGURED, "supermemory.retainEveryNTurns": 3 });
 		await start(session);
+		session.emitStart();
 		session.sessionManager.getEntries().push({
 			type: "message",
 			id: "a-cont",
@@ -908,6 +922,31 @@ describe("supermemoryBackend", () => {
 		expect(contents).toHaveLength(1);
 		expect(contents[0]).toContain("reply to two");
 		expect(contents[0]).toContain("reply to four");
+	});
+
+	it("turns another process adds with memory off after this one left without a stop are never uploaded", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const settings = { "supermemory.retainEveryNTurns": 1 };
+		// Process one retains a turn, then leaves the transcript without disposing (`/new`, a crash).
+		const first = makeSession({ settings });
+		await start(first);
+		first.addTurn("one");
+		await first.endTurn();
+		// Process two opens the same transcript with memory off.
+		const second = makeSession({ settings });
+		second.sessionManager.getEntries().push(...first.sessionManager.getEntries());
+		second.addTurn("off-period");
+		// Process three switches memory back on.
+		const third = makeSession({ settings });
+		third.sessionManager.getEntries().push(...second.sessionManager.getEntries());
+		await start(third);
+		third.addTurn("three");
+		await third.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to three");
+		expect(contents).not.toContain("off-period");
 	});
 
 	it("a turn exchanged while off on another branch is never uploaded after switching back on", async () => {
@@ -1125,6 +1164,7 @@ describe("supermemoryBackend", () => {
 			if (started) await start(session);
 			const at = new Date(0).toISOString();
 			const content = `${"a".repeat(1_000)} ${secret} ${"b".repeat(filler)}`;
+			session.emitStart();
 			session.sessionManager.getEntries().push(
 				{
 					type: "message",
@@ -1230,9 +1270,10 @@ describe("supermemoryBackend", () => {
 			await session.getSupermemorySessionState()?.dispose();
 		}
 		const docs = create.mock.calls.map(call => call[1]);
+		// Turns one to three predate Supermemory's first run: they are never retained or counted.
 		expect(docs.map(doc => doc?.metadata)).toMatchObject([
-			{ turnStart: 3, turnEnd: 4 },
-			{ turnStart: 4, turnEnd: 5 },
+			{ turnStart: 0, turnEnd: 1 },
+			{ turnStart: 1, turnEnd: 2 },
 		]);
 		expect(new Set(docs.map(doc => doc?.id)).size).toBe(2);
 		expect(docs[0]?.content).toContain("four");
@@ -1589,6 +1630,34 @@ describe("supermemoryBackend", () => {
 		reply.resolve({ id: "d", status: "queued" });
 		await ended;
 		expect(cursors(session).filter(([transcriptId]) => transcriptId === "t2")).toEqual([]);
+	});
+
+	it("a second dispose waits for the first one to record its stop", async () => {
+		const reply = Promise.withResolvers<{ id: string; status: string }>();
+		const sent = Promise.withResolvers<void>();
+		vi.spyOn(SupermemoryClient.prototype, "addDocument").mockImplementation(() => {
+			sent.resolve();
+			return reply.promise;
+		});
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		session.emitEnd();
+		await sent.promise;
+		const state = session.getSupermemorySessionState();
+		const first = state?.dispose();
+		let secondDone = false;
+		const second = state?.dispose().then(() => {
+			secondDone = true;
+		});
+		await Bun.sleep(0);
+		expect(secondDone).toBe(false);
+		reply.resolve({ id: "d", status: "queued" });
+		await Promise.all([first, second]);
+		const stops = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom" && JSON.stringify(entry.data).includes("stoppedAt"));
+		expect(stops).toHaveLength(1);
 	});
 
 	it("retention queued behind a slow upload does not run after dispose times out", async () => {

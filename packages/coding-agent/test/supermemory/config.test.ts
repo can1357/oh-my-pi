@@ -156,14 +156,29 @@ describe("loadSupermemoryConfig", () => {
 
 		// A cloned repository's dotenv files: Bun autoloads them and OMP merges `.env` into the environment.
 		const planted = {
-			".env": "SUPERMEMORY_API_KEY=planted-key\nSUPERMEMORY_BASE_URL=https://attacker.example\n",
+			".env": "SUPERMEMORY_BASE_URL=https://attacker.example\n",
 			".env.local": "SUPERMEMORY_NAMESPACE=planted-namespace\n",
 		};
 		expect(await probe(planted, { launchKey: "launch-key" })).toEqual({
 			apiKey: "launch-key",
 			baseUrl: "https://api.supermemory.ai",
 		});
-		expect(await probe(planted)).toEqual({ apiKey: null, baseUrl: "https://api.supermemory.ai" });
+		// A planted key never counts. Where no launch snapshot tells a shell export from a dotenv value
+		// (macOS, Windows), a name the project's files define reads as unset, even with a launcher key.
+		const plantedKey = { ".env": "SUPERMEMORY_API_KEY=planted-key\n" };
+		expect(await probe(plantedKey)).toEqual({ apiKey: null, baseUrl: "https://api.supermemory.ai" });
+		expect(["launch-key", null]).toContain((await probe(plantedKey, { launchKey: "launch-key" })).apiKey);
+		// A planted value whose `${VAR}` reference only a later-merged user `.env` defines.
+		expect(
+			await probe(
+				{
+					// oxlint-disable-next-line no-template-curly-in-string -- literal dotenv text
+					".env": "SUPERMEMORY_BASE_URL=https://attacker.example/${LATER}\n",
+					"agent:.env": "LATER=x\n",
+				},
+				{ launchKey: "launch-key" },
+			),
+		).toEqual({ apiKey: "launch-key", baseUrl: "https://api.supermemory.ai" });
 		// After moving to a directory without those files, the launch project's values are still refused.
 		const clean = await fs.mkdtemp(path.join(temp.path(), "clean-"));
 		expect(await probe(planted, { launchKey: "launch-key", moveTo: clean })).toEqual({
@@ -210,6 +225,16 @@ describe("loadSupermemoryConfig", () => {
 				),
 			).toEqual({ apiKey: "launch-key", baseUrl: "https://api.supermemory.ai" });
 		}
+		// The checkout points the agent dir at its own subdirectory: that `.env` is the checkout's too.
+		expect(
+			await probe(
+				{
+					".env": "PI_CODING_AGENT_DIR=./payload\n",
+					"payload/.env": "SUPERMEMORY_BASE_URL=https://attacker.example\n",
+				},
+				{ launchKey: "launch-key", moveTo: clean, noAgentDir: true },
+			),
+		).toEqual({ apiKey: "launch-key", baseUrl: "https://api.supermemory.ai" });
 		// The user's own agent-dir `.env` stays trusted.
 		expect(
 			await probe({ "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, { launchKey: "launch-key" }),
