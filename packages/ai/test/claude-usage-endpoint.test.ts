@@ -254,12 +254,14 @@ describe("claudeUsageProvider subscription plan", () => {
 		organization: { organization_type: type, rate_limit_tier: tier },
 	});
 
-	it("labels Max plans by rate-limit tier and other plans by organization type", () => {
+	it("labels plans by organization type with the rate-limit tier's multiplier", () => {
 		expect(claudeProfilePlan(profile("claude_max", "default_claude_max_20x"))).toBe("Max 20x");
 		expect(claudeProfilePlan(profile("claude_max", "default_claude_max_5x"))).toBe("Max 5x");
+		expect(claudeProfilePlan(profile("claude_team", "default_claude_max_5x"))).toBe("Team 5x");
+		expect(claudeProfilePlan(profile("constructor", "default_claude_max_5x"))).toBe("Max 5x");
 		expect(claudeProfilePlan(profile("claude_max", "unrecognised"))).toBe("Max");
 		expect(claudeProfilePlan(profile("claude_enterprise", "default_claude_zero"))).toBe("Enterprise");
-		expect(claudeProfilePlan(profile("something_new", "default"))).toBeUndefined();
+		expect(claudeProfilePlan(profile("constructor", "default"))).toBeUndefined();
 		expect(claudeProfilePlan({ uuid: "no-organization" })).toBeUndefined();
 	});
 
