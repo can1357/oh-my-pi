@@ -191,8 +191,8 @@ const DIFF_GUTTER = /^(\s*[+-]?\s*\d*)([|│])(.*)$/s;
 /**
  * One rendered diff row wrapped to `width`: content wraps beside the gutter,
  * continuation rows show a blank gutter with its rule, every row re-opens the
- * row's color and closes inverse and color at its end. Rows without a gutter
- * wrap plainly.
+ * row's color and closes it at its end (`wrap` closes inverse at each break).
+ * Rows without a gutter wrap plainly.
  */
 export function wrapDiffRow(row: string, width: number): string[] {
 	if (width <= 0) return [row];
@@ -208,7 +208,7 @@ export function wrapDiffRow(row: string, width: number): string[] {
 	const prefixWidth = visibleWidth(prefix);
 	const continuation = `${spaces(prefixWidth - 1)}${match[2]}`;
 	return wrap(match[3]!, Math.max(1, width - prefixWidth)).map(
-		(segment, index) => `${open}${index === 0 ? prefix : continuation}${segment}\x1b[27m\x1b[39m`,
+		(segment, index) => `${open}${index === 0 ? prefix : continuation}${segment}\x1b[39m`,
 	);
 }
 
