@@ -209,7 +209,8 @@ class Computation<T> extends Owner implements Source {
 	}
 
 	refresh(): void {
-		if (this.state === CLEAN) return;
+		// Disposed while stale: an observer still holding it pulls the last value, never a new run.
+		if (this.state === CLEAN || this.disposed) return;
 		if (this.state === CHECK) {
 			for (const source of this.sources ?? []) {
 				source.refresh();
@@ -245,7 +246,10 @@ class Computation<T> extends Owner implements Source {
 			currentObserver = prevObserver;
 			currentSources = prevSources;
 			currentRun = prevRun;
-			this.#resubscribe(sources);
+			// Disposed during its own run: `dispose` already left every source, so what the run read must not
+			// rejoin them, and what it created after the dispose is torn down now.
+			if (this.disposed) this.reset();
+			else this.#resubscribe(sources);
 		}
 		const changed = !this.#settled || this.#equals === false || !this.#equals(this.value as T, next);
 		this.#settled = true;
