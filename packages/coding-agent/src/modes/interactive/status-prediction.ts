@@ -77,13 +77,15 @@ export interface StartupDefaultStatus {
 
 /**
  * `prediction` with the resolved default model in place of the cached one. Fast mode and the
- * compaction boundaries belong to the cached model, so they drop when the model changes.
+ * compaction boundaries belong to the cached model, so they drop when the model changes, and the
+ * fresh session's occupancy is measured against the new model's window.
  */
 export function withStartupDefault(prediction: StatusPrediction, update: StartupDefaultStatus): StatusPrediction {
 	const { model } = update;
 	const previous = prediction.facts.model;
 	const changed = previous?.id !== model.id || previous?.provider !== model.provider;
-	const { thinkingLevel: _level, compaction, fastMode, ...facts } = prediction.facts;
+	const { thinkingLevel: _level, compaction, fastMode, context, ...facts } = prediction.facts;
+	const window = model.contextWindow ?? 0;
 	return {
 		settings: prediction.settings,
 		facts: {
@@ -100,6 +102,9 @@ export function withStartupDefault(prediction: StatusPrediction, update: Startup
 			usingSubscription: update.usingSubscription,
 			...(!changed && fastMode !== undefined ? { fastMode } : {}),
 			...(!changed && compaction ? { compaction } : {}),
+			context: changed
+				? { tokens: context.tokens, window, percent: window ? (context.tokens / window) * 100 : null }
+				: context,
 		},
 	};
 }

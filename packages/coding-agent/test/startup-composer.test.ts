@@ -748,16 +748,21 @@ describe("startup prepaint frame", () => {
 				autoCompact: true,
 				fastMode: true,
 				compaction: { thresholdPercent: 80, speculationPercent: null },
-				context: { tokens: 0, window: 200_000, percent: 0 },
+				context: { tokens: 12_000, window: 1_000_000, percent: 1.2 },
 			},
 		};
 		const update = { model, thinkingLevel: "low", autoThinking: false, usingSubscription: true };
 		const same = withStartupDefault(base, update);
 		expect(same.facts).toMatchObject({ thinkingLevel: "low", fastMode: true, usingSubscription: true });
 		expect(same.facts.compaction).toEqual(base.facts.compaction);
-		const other = withStartupDefault(base, { ...update, model: getBundledModel("anthropic", "claude-sonnet-4-5") });
+		expect(same.facts.context).toEqual(base.facts.context);
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const other = withStartupDefault(base, { ...update, model: sonnet });
 		expect(other.facts.model?.id).toBe("claude-sonnet-4-5");
 		expect(other.facts.fastMode).toBeUndefined();
 		expect(other.facts.compaction).toBeUndefined();
+		const window = sonnet.contextWindow ?? 0;
+		expect(window).not.toBe(base.facts.context.window);
+		expect(other.facts.context).toEqual({ tokens: 12_000, window, percent: (12_000 / window) * 100 });
 	});
 });
