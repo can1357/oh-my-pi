@@ -151,6 +151,7 @@ import {
 	outcomeLinesView,
 	REWIND_PAGE,
 	successText,
+	transcriptFocus,
 	usageDashboardView,
 } from "./selector-views";
 
@@ -2584,7 +2585,8 @@ export class SelectorController {
 		const { DebugSelector } = await import("../../debug");
 		this.#showInEditorArea(
 			done => DebugSelector({ host: this.ctx, onDone: done }),
-			root => firstOfKind(root, "list"),
+			// A card's `list` in Tern, the sheet's `picker` on terminal rows.
+			root => firstOfKind(root, "list", "picker"),
 		);
 	}
 
@@ -2665,7 +2667,7 @@ export class SelectorController {
 				viewer = this.ctx.shell.overlays.show(
 					() => fullscreenMenuView("agent-transcript", AgentTranscriptViewer({ model })),
 					{
-						focus: root => firstOfKind(root, "editor"),
+						focus: transcriptFocus,
 						onClose: () => {
 							viewer = undefined;
 							model.dispose();
