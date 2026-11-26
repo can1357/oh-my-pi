@@ -1,14 +1,23 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Text } from "@oh-my-pi/pi-tui";
+import { type JSXNode, jsx } from "@oh-my-pi/pi-tui";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { DeferredCommand } from "../src/ui/dock/deferred";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 type Harness = {
 	mode: InteractiveMode;
+	session: AgentSession;
+	authStorage: AuthStorage;
 	tempDir: TempDir;
 	setStreaming: (value: boolean) => void;
 };
@@ -19,35 +28,40 @@ async function createHarness(): Promise<Harness> {
 	if (harness) {
 		harness.setStreaming(false);
 		harness.mode.clearTransientSessionUi();
-		harness.mode.chatContainer.disposeChildren();
+		for (const block of harness.mode.shell.transcript.blocks()) harness.mode.shell.transcript.remove(block);
 		return harness;
 	}
 
 	const tempDir = TempDir.createSync("@pi-deferred-notice-");
 	await Settings.init({ inMemory: true, cwd: tempDir.path() });
-	await initTheme(false);
+	initTheme();
 	const sessionManager = SessionManager.inMemory(tempDir.path());
 	await sessionManager.setSessionName("Deferred notice", "user");
 	let streaming = false;
-	const session = {
+	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	const modelRegistry = new ModelRegistry(authStorage);
+	const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected claude-sonnet-4-5 in the registry");
+	const session = new AgentSession({
+		agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
 		sessionManager,
-		settings,
-		agent: { state: { tools: [] }, metadataForProvider: () => undefined },
-		customCommands: [],
-		skills: [],
-		autoCompactionEnabled: true,
-		messages: [],
-		systemPrompt: [],
-		state: { model: undefined },
-		model: undefined,
-		thinkingLevel: undefined,
-		get isStreaming() {
-			return streaming;
-		},
-	} as unknown as AgentSession;
-	const mode = new InteractiveMode(session, "test");
+		settings: Settings.isolated(),
+		modelRegistry,
+	});
+	Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
+	const mode = new InteractiveMode(
+		session,
+		"test",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		createModeTerminal().frame,
+	);
 	harness = {
 		mode,
+		session,
+		authStorage,
 		tempDir,
 		setStreaming: (value: boolean) => {
 			streaming = value;
@@ -56,24 +70,48 @@ async function createHarness(): Promise<Harness> {
 	return harness;
 }
 
+/** `nodes` as plain terminal rows at 120 columns. */
+function rows(nodes: () => JSXNode): string[] {
+	const term = createTestTerminal(() => ({ main: nodes() }), { columns: 120, rows: 1000 });
+	try {
+		const screen = term.screen();
+		while (screen.length > 0 && screen.at(-1) === "") screen.pop();
+		return screen;
+	} finally {
+		term.dispose();
+	}
+}
+
+/** The deferred-output preview above the prompt. */
+function noticeRows(mode: InteractiveMode): string[] {
+	return rows(() => DeferredCommand({ model: mode.hud.deferred }));
+}
+
 function noticeText(mode: InteractiveMode): string {
-	return mode.deferredCommandContainer.render(120).join("\n");
+	return noticeRows(mode).join("\n");
 }
 
 function transcriptRowCount(mode: InteractiveMode): number {
-	return mode.chatContainer.render(120).length;
+	return rows(() => mode.shell.transcript.nodes).length;
 }
 
 function transcriptText(mode: InteractiveMode): string {
-	return mode.chatContainer.render(120).join("\n");
+	return rows(() => mode.shell.transcript.nodes).join("\n");
+}
+
+/** A command's output panel. */
+function panel(text: string): () => JSXNode {
+	return () => jsx("text", { text });
 }
 
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-afterAll(() => {
+afterAll(async () => {
 	harness?.mode.stop();
+	await harness?.session.dispose();
+	harness?.authStorage.close();
 	harness?.tempDir.removeSync();
 	harness = undefined;
 	resetSettingsForTest();
@@ -85,7 +123,7 @@ describe("InteractiveMode deferred command preview", () => {
 		setStreaming(true);
 		const transcriptBefore = transcriptRowCount(mode);
 
-		mode.presentCommandOutput(new Text("Claude 5 Hour: 62% used", 1, 0));
+		mode.presentCommandOutput(panel("Claude 5 Hour: 62% used"));
 
 		// The answer is visible right away, which is the whole point: before this,
 		// a command run mid-turn was indistinguishable from a dead one.
@@ -103,12 +141,8 @@ describe("InteractiveMode deferred command preview", () => {
 		// A native surface reconciles a document instead of appending scrollback,
 		// so there is nothing to duplicate and no reason to hold a clipped preview
 		// above the prompt for the rest of the turn.
-		Object.defineProperty(mode.ui, "nativeRendering", { configurable: true, get: () => true });
-		try {
-			mode.presentCommandOutput(new Text("Context 112K / 1m", 1, 0));
-		} finally {
-			Reflect.deleteProperty(mode.ui, "nativeRendering");
-		}
+		vi.spyOn(mode.shell, "native").mockReturnValue(true);
+		mode.presentCommandOutput(panel("Context 112K / 1m"));
 
 		expect(noticeText(mode)).toBe("");
 		expect(transcriptText(mode)).toContain("Context 112K / 1m");
@@ -120,10 +154,10 @@ describe("InteractiveMode deferred command preview", () => {
 
 		// One command commonly queues a spacer plus its panel; that is still one
 		// command from the user's point of view.
-		mode.presentCommandOutput([new Text("spacer", 1, 0), new Text("usage panel", 1, 0)]);
+		mode.presentCommandOutput(() => [jsx("text", { text: "spacer" }), jsx("text", { text: "usage panel" })]);
 		expect(noticeText(mode)).toContain("1 command output");
 
-		mode.presentCommandOutput(new Text("advisor panel", 1, 0));
+		mode.presentCommandOutput(panel("advisor panel"));
 		expect(noticeText(mode)).toContain("2 command outputs");
 	});
 
@@ -132,20 +166,20 @@ describe("InteractiveMode deferred command preview", () => {
 		setStreaming(true);
 		const tall = Array.from({ length: 200 }, (_, i) => `row ${i}`).join("\n");
 
-		mode.presentCommandOutput(new Text(tall, 1, 0));
+		mode.presentCommandOutput(panel(tall));
 
-		const rows = mode.deferredCommandContainer.render(120);
-		expect(rows.length).toBeLessThan(60);
-		expect(rows.join("\n")).toContain("row 0");
-		expect(rows.join("\n")).toContain("more rows");
+		const notice = noticeRows(mode);
+		expect(notice.length).toBeLessThan(60);
+		expect(notice.join("\n")).toContain("row 0");
+		expect(notice.join("\n")).toContain("more rows");
 		// The tail is not silently dropped: it arrives in full at the settle.
-		expect(rows.join("\n")).not.toContain("row 199");
+		expect(notice.join("\n")).not.toContain("row 199");
 	});
 
 	it("clears the preview and mounts the panels once the turn settles", async () => {
 		const { mode, setStreaming } = await createHarness();
 		setStreaming(true);
-		mode.presentCommandOutput(new Text("usage panel", 1, 0));
+		mode.presentCommandOutput(panel("usage panel"));
 		expect(noticeText(mode)).not.toBe("");
 
 		setStreaming(false);
@@ -158,7 +192,7 @@ describe("InteractiveMode deferred command preview", () => {
 	it("shows no preview when the agent is idle, since output mounts immediately", async () => {
 		const { mode } = await createHarness();
 
-		mode.presentCommandOutput(new Text("usage panel", 1, 0));
+		mode.presentCommandOutput(panel("usage panel"));
 
 		expect(noticeText(mode)).toBe("");
 		expect(transcriptText(mode)).toContain("usage panel");
@@ -167,7 +201,7 @@ describe("InteractiveMode deferred command preview", () => {
 	it("drops a stale preview when the session is reset while output is queued", async () => {
 		const { mode, setStreaming } = await createHarness();
 		setStreaming(true);
-		mode.presentCommandOutput(new Text("usage panel", 1, 0));
+		mode.presentCommandOutput(panel("usage panel"));
 		expect(noticeText(mode)).not.toBe("");
 
 		mode.clearTransientSessionUi();
@@ -178,12 +212,12 @@ describe("InteractiveMode deferred command preview", () => {
 	it("starts the queue over after a reset, so a later command previews alone", async () => {
 		const { mode, setStreaming } = await createHarness();
 		setStreaming(true);
-		mode.presentCommandOutput(new Text("stale panel", 1, 0));
+		mode.presentCommandOutput(panel("stale panel"));
 
 		// The reset keeps the same session id here, so nothing downstream can
 		// recognise the leftover queue as stale; it has to be dropped at the reset.
 		mode.clearTransientSessionUi();
-		mode.presentCommandOutput(new Text("fresh panel", 1, 0));
+		mode.presentCommandOutput(panel("fresh panel"));
 
 		const notice = noticeText(mode);
 		expect(notice).toContain("fresh panel");

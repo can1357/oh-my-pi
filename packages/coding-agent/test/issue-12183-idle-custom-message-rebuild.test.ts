@@ -13,11 +13,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 
 /**
  * Issue #12183: an idle `pi.sendMessage({ display: true }, { deliverAs: "nextTurn",
@@ -39,7 +37,6 @@ let session: AgentSession | undefined;
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
 	authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("openai", "openai-test-key");
 });
@@ -63,7 +60,14 @@ async function createHarness() {
 	const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 	const assistantWithToolCall = {
 		...createAssistantMessage(""),
-		content: [{ type: "toolCall" as const, id: "call-1", name: "bash", arguments: { command: "echo hi" } }],
+		content: [
+			{
+				type: "toolCall" as const,
+				id: "call-1",
+				name: "bash",
+				arguments: { command: "echo hi" },
+			},
+		],
 		stopReason: "toolUse" as const,
 	};
 	const history: AgentMessage[] = [
@@ -83,11 +87,19 @@ async function createHarness() {
 	for (const message of history) sessionManager.appendMessage(message as never);
 	const agent = new Agent({
 		getApiKey: () => "test-key",
-		initialState: { model, systemPrompt: ["Test"], tools: [], messages: history },
+		initialState: {
+			model,
+			systemPrompt: ["Test"],
+			tools: [],
+			messages: history,
+		},
 		convertToLlm,
 		streamFn: () => new AssistantMessageEventStream(),
 	});
-	const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"todo.enabled": false,
+	});
 	settings.setModelRole("default", `${model.provider}/${model.id}`);
 	const created = new AgentSession({
 		agent,
@@ -109,9 +121,13 @@ async function createHarness() {
 		setToolApprovalPreviewWaiter: () => () => {},
 		getMessageRenderer: () => undefined,
 		getAssistantThinkingRenderers: () => undefined,
+		getAssistantTextRenderers: () => [],
 		getComposerShapes: () => [],
 	};
-	Object.defineProperty(created, "extensionRunner", { value: fakeRunner, configurable: true });
+	Object.defineProperty(created, "extensionRunner", {
+		value: fakeRunner,
+		configurable: true,
+	});
 
 	const ctx = createInteractiveModeContext({
 		session: created,
@@ -147,28 +163,33 @@ async function createHarness() {
 				return sent;
 			}) as typeof created.sendCustomMessage;
 			actions!.sendMessage(
-				{ customType: "example.notice", content: MARKER, display, attribution: "agent" },
+				{
+					customType: "example.notice",
+					content: MARKER,
+					display,
+					attribution: "agent",
+				},
 				{ deliverAs: "nextTurn", triggerTurn: false },
 			);
 			// The controller's `.then(applyCustomMessageDisplay)` was registered on this
 			// promise before this continuation, so it has run once the await resumes.
 			await sent;
 		},
-		rendered: () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n")),
+		rendered: () => renderTranscript(ctx).join("\n"),
 	};
 }
 
 describe("issue #12183 idle display:true custom message", () => {
 	test("appends after the existing transcript without touching its components", async () => {
 		const h = await createHarness();
-		const before = [...h.ctx.chatContainer.children];
-		expect(before.some(child => child instanceof ToolExecutionComponent)).toBe(true);
+		const before = [...h.ctx.shell.transcript.blocks()];
+		expect(before.some(block => h.ctx.transcriptEntry(block)?.kind === "tool")).toBe(true);
 
 		await h.send(true);
 
-		const after = h.ctx.chatContainer.children;
+		const after = h.ctx.shell.transcript.blocks();
 		expect(h.rebuild).not.toHaveBeenCalled();
-		// Every pre-existing component (tool execution included) is the same instance, in order.
+		// Every pre-existing block (the tool call included) is the same instance, in order.
 		expect(after.length).toBe(before.length + 1);
 		for (let i = 0; i < before.length; i++) expect(after[i]).toBe(before[i]!);
 		// Shown exactly once, below the last reply.
@@ -179,12 +200,12 @@ describe("issue #12183 idle display:true custom message", () => {
 
 	test("display:false changes nothing", async () => {
 		const h = await createHarness();
-		const before = [...h.ctx.chatContainer.children];
+		const before = [...h.ctx.shell.transcript.blocks()];
 
 		await h.send(false);
 
 		expect(h.rebuild).not.toHaveBeenCalled();
-		expect(h.ctx.chatContainer.children).toEqual(before);
+		expect(h.ctx.shell.transcript.blocks()).toEqual(before);
 		expect(h.rendered()).not.toContain(MARKER);
 	});
 });

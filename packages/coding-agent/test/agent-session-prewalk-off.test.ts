@@ -116,7 +116,7 @@ describe("AgentSession /prewalk off", () => {
 			settings,
 			collabGuest: false,
 			showStatus: vi.fn(),
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		const runtime = { ctx } satisfies TuiSlashCommandRuntime;

@@ -2,7 +2,7 @@
  * Number and trend formatting for job widgets: `186 tok/s`, `5.37 ms`,
  * `12.3k req`, `▲ 15%`.
  */
-import type { JobWidgetTrend } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobWidgetTrend } from "../tools/details/job-widget";
 import type { JobWidgetBetter } from "./spec";
 
 const COMPACT_STEPS: readonly [number, string][] = [

@@ -1,68 +1,51 @@
-import { beforeEach, describe, expect, it } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
-import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
-import { ToolActivityContainer } from "@oh-my-pi/pi-tui/chrome/tool-activity";
-import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
-import { Text } from "@oh-my-pi/pi-tui";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createInteractiveModeContext, renderTranscript } from "../../helpers/interactive-mode-context";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-const darkTheme = await getThemeByName("dark");
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
+
+beforeAll(async () => {
+	await Settings.init({ inMemory: true });
+});
+
+const rule: Rule = {
+	name: "ts-no-tiny-functions",
+	path: "/rules/ts-no-tiny-functions.md",
+	content: "Inline tiny wrappers.",
+	_source: {
+		provider: "test",
+		providerName: "Test",
+		path: "/rules/ts-no-tiny-functions.md",
+		level: "project",
+	},
+};
 
 describe("tool activity visibility", () => {
-	beforeEach(() => {
-		if (!darkTheme) throw new Error("Failed to load dark theme");
-		setThemeInstance(darkTheme);
-	});
-
-	it("applies visibility to mounted and subsequently added activity blocks", () => {
-		const rule: Rule = {
-			name: "ts-no-tiny-functions",
-			path: "/rules/ts-no-tiny-functions.md",
-			content: "Inline tiny wrappers.",
-			_source: {
-				provider: "test",
-				providerName: "Test",
-				path: "/rules/ts-no-tiny-functions.md",
-				level: "project",
-			},
-		};
-		const transcript = new TranscriptContainer();
-		transcript.addChild(new TtsrNotificationComponent([rule]));
-		transcript.addChild(new TodoReminderComponent([{ content: "finish the task", status: "in_progress" }], 1, 3));
-		transcript.addChild(new ToolActivityContainer(new Text("tool warning", 1, 0)));
-
-		const visible = stripVTControlCharacters(transcript.render(120).join("\n"));
+	it("hides TTSR notices and todo reminders with tool activity, including ones added while hidden", async () => {
+		const ctx = createInteractiveModeContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "ttsr_triggered", rules: [rule] } as AgentSessionEvent);
+		const visible = renderTranscript(ctx).join("\n");
 		expect(visible).toContain("ts-no-tiny-functions");
-		expect(visible).toContain("finish the task");
-		expect(visible).toContain("tool warning");
 
-		transcript.setToolActivityVisible(false);
-		expect(stripVTControlCharacters(transcript.render(120).join("\n"))).toBe("");
-		transcript.addChild(new ToolActivityContainer(new Text("late activity", 1, 0)));
-		expect(stripVTControlCharacters(transcript.render(120).join("\n"))).toBe("");
+		ctx.hideToolActivity = true;
+		expect(renderTranscript(ctx).join("\n")).not.toContain("ts-no-tiny-functions");
+		await controller.handleEvent({
+			type: "todo_reminder",
+			todos: [{ content: "finish the task", status: "in_progress" }],
+			attempt: 1,
+			maxAttempts: 3,
+		} as AgentSessionEvent);
+		expect(renderTranscript(ctx).join("\n")).not.toContain("finish the task");
 
-		transcript.setToolActivityVisible(true);
-		const restored = stripVTControlCharacters(transcript.render(120).join("\n"));
+		ctx.hideToolActivity = false;
+		const restored = renderTranscript(ctx).join("\n");
 		expect(restored).toContain("ts-no-tiny-functions");
 		expect(restored).toContain("finish the task");
-		expect(restored).toContain("tool warning");
-		expect(restored).toContain("late activity");
-	});
-
-	it("forwards Ctrl+O expansion to wrapped expandable components", () => {
-		// The transcript expansion traversal only visits top-level children;
-		// without forwarding, a wrapped renderer freezes at insertion-time state.
-		const states: boolean[] = [];
-		class ExpandableText extends Text {
-			setExpanded(expanded: boolean): void {
-				states.push(expanded);
-			}
-		}
-		const wrapper = new ToolActivityContainer(new ExpandableText("activity", 1, 0));
-		wrapper.setExpanded(true);
-		wrapper.setExpanded(false);
-		expect(states).toEqual([true, false]);
 	});
 });

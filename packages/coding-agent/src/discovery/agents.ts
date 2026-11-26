@@ -21,6 +21,7 @@ import {
 	calculateDepth,
 	createSourceMeta,
 	loadFilesFromDir,
+	mergeLoadResults,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -165,10 +166,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 
 	const results = await Promise.all([...projectScans, ...userScans]);
 
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 registerProvider<Skill>(skillCapability.id, {
@@ -193,10 +191,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 		...getUserPathCandidates(ctx, "rules").map(dir => load(dir, "user")),
 	]);
 
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 registerProvider<Rule>(ruleCapability.id, {
@@ -225,10 +220,7 @@ async function loadPrompts(ctx: LoadContext): Promise<LoadResult<Prompt>> {
 		...getUserPathCandidates(ctx, "prompts").map(dir => load(dir, "user")),
 	]);
 
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 registerProvider<Prompt>(promptCapability.id, {
@@ -258,10 +250,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 		...getUserPathCandidates(ctx, "commands").map(dir => load(dir, "user")),
 	]);
 
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 registerProvider<SlashCommand>(slashCommandCapability.id, {

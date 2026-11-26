@@ -1,6 +1,6 @@
 // Gallery fixtures for agentic orchestration (task, wait, goal, yield).
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { TaskToolDetails, YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+import type { TaskToolDetails, YieldItem } from "../../task/task-details";
 import type { GalleryFixture } from "./types";
 
 /** Plausible cumulative usage for a fixture subagent run. */
@@ -26,7 +26,6 @@ const YIELD_DATA = {
 export const agenticFixtures: Record<string, GalleryFixture> = {
 	task: {
 		label: "Task",
-		customRendered: true,
 		// Streaming: agent chosen, assignment still landing. The args follow the
 		// tool schema `renderCall` reads (`agent`, `name`, `task`).
 		streamingArgs: {
