@@ -218,6 +218,41 @@ describe("MCPManager on a scripted host", () => {
 		expect(manager.isStartupMount(name)).toBe(false);
 	});
 
+	it("does not claim a server an earlier connect already brought up for the startup", async () => {
+		// `/extensions` enabled the server before the deferred startup discovery found it.
+		manager = discovering({ type: "http", url: URL });
+		await manager.connectServers({ [SERVER]: { type: "http", url: URL } }, {});
+		await manager.waitForStartup(0);
+		await manager.discoverAndConnect({ startup: true });
+		await manager.waitForStartup(0);
+
+		const [tool] = manager.getTools();
+		expect(manager.isStartupMount(tool!.name)).toBe(false);
+	});
+
+	it("still names a startup tool the server removed while its first mount runs", async () => {
+		manager = discovering({ type: "http", url: URL });
+		const mounted = Promise.withResolvers<string>();
+		const release = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(async tools => {
+			const [tool] = tools;
+			if (!tool) return;
+			mounted.resolve(tool.name);
+			await release.promise;
+		});
+		await manager.discoverAndConnect({ startup: true });
+		const name = await mounted.promise;
+
+		// The server drops the tool before the first mount's refresh is done.
+		answers["tools/list"] = () => ({ result: { tools: [] } });
+		const refresh = manager.refreshServerTools(SERVER);
+		await settled();
+		expect(manager.getTools()).toHaveLength(0);
+		expect(manager.isStartupMount(name)).toBe(true);
+		release.resolve();
+		await refresh;
+	});
+
 	it("reports a reauth reconnect by its outcome, not by the link being attached", async () => {
 		const config: MCPHttpServerConfig = { type: "http", url: URL };
 		await connect(config);

@@ -382,8 +382,10 @@ export class MCPManager implements MCPManagerApi {
 	#pendingConnections = new Map<string, Promise<HostedMCPConnection>>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#startupUpdates = new Map<string, Promise<void>>();
-	/** Servers still in the session's startup connect, each with the token of the discovery that claimed it. */
+	/** Servers still in the session's startup connect, each with the token of the connect that claimed it. */
 	#startupOwned = new Map<string, object>();
+	/** Each mounted tool's server by tool name, kept after the tool goes: a notice may name a tool already removed. */
+	#toolServers = new Map<string, string>();
 	#startupServers = new Set<string>();
 	#startupFailures = new Map<string, string>();
 	/** Newest connect/reconnect failure per server, cleared when it connects; explains "not connected". */
@@ -783,11 +785,13 @@ export class MCPManager implements MCPManagerApi {
 			throw error;
 		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
-		if (options?.startup) {
-			const token = {};
-			for (const name of Object.keys(configs)) this.#startupOwned.set(name, token);
-		}
-		const result = await this.connectServers(configs, sources, options?.onStatus, options?.startupTimeoutMs);
+		const result = await this.connectServers(
+			configs,
+			sources,
+			options?.onStatus,
+			options?.startupTimeoutMs,
+			options?.startup,
+		);
 		result.exaApiKeys = exaApiKeys;
 		return result;
 	}
@@ -907,12 +911,14 @@ export class MCPManager implements MCPManagerApi {
 	 * Each newly resolved server is merged via {@link MCPManager.#replaceServerTools}.
 	 * Interactive enable (`/mcp enable`, `/extensions`) can pass a single
 	 * `{ [name]: config }` without wiping the rest of the registry.
+	 * `startup` claims each connect it starts for the session's startup (see {@link MCPDiscoverOptions.startup}).
 	 */
 	async connectServers(
 		configs: Record<string, MCPServerConfig>,
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
+		startup?: boolean,
 	): Promise<MCPLoadResult> {
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
@@ -1036,7 +1042,9 @@ export class MCPManager implements MCPManagerApi {
 			const tracked = trackPromise(toolsPromise);
 			connectionTasks.push({ name, config, tracked, toolsPromise, connectSignal });
 
-			const owned = this.#startupOwned.get(name);
+			// Only a connect started here is the startup's: a server already connected or connecting is not.
+			const owned = startup ? {} : undefined;
+			if (owned) this.#startupOwned.set(name, owned);
 			const release = (): void => {
 				if (owned && this.#startupOwned.get(name) === owned) this.#startupOwned.delete(name);
 			};
@@ -1149,6 +1157,7 @@ export class MCPManager implements MCPManagerApi {
 	#replaceServerTools(name: string, tools: CustomTool<TSchema, MCPToolDetails>[]): void {
 		this.#tools = this.#tools.filter(t => t.mcpServerName !== name);
 		this.#tools.push(...tools);
+		for (const tool of tools) this.#toolServers.set(tool.name, name);
 		// Stable sort by name so reconnect order does not perturb the array.
 		// See `sortMCPToolsByName` for the cache-stability rationale.
 		sortMCPToolsByName(this.#tools);
@@ -1324,10 +1333,10 @@ export class MCPManager implements MCPManagerApi {
 	/**
 	 * Whether `toolName` belongs to a server still in the session's startup connect (see
 	 * {@link MCPDiscoverOptions.startup}): its first mount is no change to announce. Matched by the
-	 * tool's `mcpServerName`, never a name prefix.
+	 * server that mounted the tool, never a name prefix; a tool removed since still names its server.
 	 */
 	isStartupMount(toolName: string): boolean {
-		const server = this.#tools.find(tool => tool.name === toolName)?.mcpServerName;
+		const server = this.#toolServers.get(toolName);
 		return server !== undefined && this.#startupOwned.has(server);
 	}
 
