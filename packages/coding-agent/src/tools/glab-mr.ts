@@ -44,10 +44,14 @@ export function parseGitlabProjectWebUrl(webUrl: string): string | undefined {
  * the configured default host, a host in glab's config, or the host of the
  * checkout's own GitLab remote.
  */
-async function assertGitlabHostTrustedForEnvToken(host: string, cwd: string, signal?: AbortSignal): Promise<void> {
+export async function assertGitlabHostTrustedForEnvToken(
+	host: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<void> {
 	if (!GITLAB_TOKEN_ENV_VARS.some(name => process.env[name])) return;
 	const trusted = new Set(["gitlab.com"]);
-	for (const name of ["GITLAB_HOST", "GITLAB_URI", "GL_HOST"]) {
+	for (const name of ["GITLAB_HOST", "GITLAB_URI", "GITLAB_URL", "GL_HOST"]) {
 		const value = process.env[name]?.trim();
 		if (!value) continue;
 		try {
