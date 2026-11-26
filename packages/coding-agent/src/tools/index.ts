@@ -307,13 +307,14 @@ export interface ToolSession {
 	/** Imported extension factories safe to rebind in child sessions. */
 	preparedExtensions?: PreparedExtension[];
 	/**
-	 * Session-local extension roots for post-startup sub-discovery: explicit SDK
-	 * roots, discovery mode, and configured `extensions:`. A provider (not a
-	 * stored value) so it is materialized live per discovery call — a runtime
-	 * override or settings reload is reflected, never a construction-time
-	 * snapshot. Keeps the task surface byte-identical to the scoped load.
-	 * A standalone function, never a `this`-bound method: subagents forward it
-	 * as is, and a parked subagent keeps it for revival after its parent is gone.
+	 * Session-local extension roots for task-tool construction and post-startup
+	 * sub-discovery: explicit SDK roots, discovery mode, and configured
+	 * `extensions:`. A provider (not a stored value) so it is materialized live
+	 * per discovery call — a runtime override or settings reload is reflected,
+	 * never a construction-time snapshot. Keeps the task surface byte-identical
+	 * to the scoped load. A standalone function, never a `this`-bound method:
+	 * subagents forward it as is, and a parked subagent keeps it for revival
+	 * after its parent is gone.
 	 */
 	effectiveExtensionRoots?: () => EffectiveExtensionRoots;
 	/**
