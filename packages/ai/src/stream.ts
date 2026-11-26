@@ -2014,6 +2014,7 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"devin-agent">({
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
+				serviceTier: options?.serviceTier,
 			});
 		}
 		case "antigravity-acp": {

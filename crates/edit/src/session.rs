@@ -13,13 +13,14 @@ use crate::{
 		BlockContextSource, CompactDiffOptions, build_compact_diff_preview, generate_diff_string,
 	},
 	engine::{
-		EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, Resolved, StagedFile,
+		EditMode, FileOp, FileOpIntent, HeaderKind, Location, ModeEngine, PreviewFile, Resolved,
+		StagedFile,
 	},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
 	modes::hashline::syntax::has_syntax_oracle,
 	notebook,
-	path_policy::{PathPolicy, UrlResolution, canonical_key},
+	path_policy::{PathPolicy, UrlAnswer},
 	store::{EditStore, file_hash, seen_lines_from_body},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
@@ -221,7 +222,7 @@ impl Session {
 	/// Record the host answer for `url`; clears cached reads/resolutions for
 	/// it and makes [`Self::preview_pending`] true. Answers provided before
 	/// the apply phase serve previews only.
-	pub fn provide(&mut self, url: String, resolution: UrlResolution) {
+	pub fn provide(&mut self, url: String, resolution: UrlAnswer) {
 		self.files.provide(url, resolution);
 		self.generation += 1;
 	}
@@ -360,16 +361,16 @@ impl Session {
 		let last_write = staged.iter().rposition(|file| file.op != FileOp::Noop);
 		let mut files = Vec::with_capacity(staged.len());
 		for (index, mut file) in staged.into_iter().enumerate() {
-			let canonical = canonical_key(&file.absolute);
+			let canonical = file.location.canonical_key();
 			let response = if file.op == FileOp::Noop {
 				WriteResponse::default()
 			} else {
 				writer
 					.write(WriteRequest {
-						absolute:     file.absolute.clone(),
+						absolute:     file.location.writer_path(),
 						display:      file.display.clone(),
 						op:           file.op,
-						move_to:      file.move_to.as_ref().map(|m| m.absolute.clone()),
+						move_to:      file.move_to.as_ref().map(|m| m.location.writer_path()),
 						content:      file.persisted.clone(),
 						flush_lsp:    request.lsp_flush && last_write == Some(index),
 						lsp_batch_id: request.lsp_batch_id.clone(),
@@ -380,7 +381,7 @@ impl Session {
 			let mut tag: Option<String> = None;
 			// Updated files register their response rows against the minted tag
 			// (the store carries still-valid prior provenance): the store key.
-			let mut provenance: Option<PathBuf> = None;
+			let mut provenance: Option<Location> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
 				FileOp::Noop => {
@@ -389,7 +390,7 @@ impl Session {
 					}
 				},
 				FileOp::Create | FileOp::Update => {
-					let dest_canonical = file.move_to.as_ref().map(|m| canonical_key(&m.absolute));
+					let dest_canonical = file.move_to.as_ref().map(|m| m.location.canonical_key());
 					let track_provenance = file.record_snapshot
 						&& file.op == FileOp::Update
 						&& file.header == HeaderKind::HashlineTag;
@@ -470,10 +471,10 @@ impl Session {
 			let (old_text, new_text, snapshots_pruned) = prune_snapshots(old_text, new_text);
 
 			files.push(FileOutcome {
-				absolute: file.absolute.clone(),
+				absolute: file.location.writer_path(),
 				display: file.display.clone(),
 				op: file.op,
-				move_to: file.move_to.as_ref().map(|m| m.absolute.clone()),
+				move_to: file.move_to.as_ref().map(|m| m.location.writer_path()),
 				diff: file.diff.clone(),
 				first_changed_line: file.first_changed_line,
 				old_text,
@@ -504,7 +505,7 @@ fn recorded_view(file: &StagedFile, written: &str) -> String {
 	if file.persisted.as_deref() == Some(written) {
 		return file.after.clone();
 	}
-	if notebook::is_notebook_path(&file.absolute) {
+	if file.location.is_notebook() {
 		return notebook::notebook_to_editable_text(written, &file.display)
 			.map_or_else(|_| file.after.clone(), |text| normalize_to_lf(&text).into_owned());
 	}
@@ -530,10 +531,12 @@ fn format_file_text(file: &StagedFile, header: &str) -> String {
 		let moved = file.move_to.as_ref().map(|m| {
 			// DEST resolves from cwd, not from the source's directory: name a
 			// move out of that directory absolutely so it cannot be misread.
-			if m.absolute.parent() == file.absolute.parent() {
+			let Location::Disk(source) = &file.location;
+			let Location::Disk(destination) = &m.location;
+			if source.parent() == destination.parent() {
 				format!("Moved to {}", m.display)
 			} else {
-				format!("Moved to {}", m.absolute.display())
+				format!("Moved to {}", m.location.display())
 			}
 		});
 		if let Some(moved) = &moved {
@@ -670,7 +673,7 @@ mod tests {
 		session.provide_recovery(
 			"src/a.ts".to_owned(),
 			Some(Resolved {
-				absolute: tmp.path().join("deep/src/a.ts"),
+				location: tmp.path().join("deep/src/a.ts").into(),
 				display:  "deep/src/a.ts".to_owned(),
 			}),
 		);
@@ -691,7 +694,7 @@ mod tests {
 			"*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n",
 		);
 		let answer = Resolved {
-			absolute: tmp.path().join("deep/src/a.ts"),
+			location: tmp.path().join("deep/src/a.ts").into(),
 			display:  "deep/src/a.ts".to_owned(),
 		};
 		session.provide_recovery("src/a.ts".to_owned(), Some(answer.clone()));

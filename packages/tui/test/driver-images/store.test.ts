@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { type Accessor, computed, createRoot, type Signal, signal } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
-import { RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { anchoredRows, RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { itermImage } from "@oh-my-pi/pi-tui/driver/images/iterm";
 import { kittyDelete, kittyDeleteAll, kittyTransmit, kittyVirtualPlace } from "@oh-my-pi/pi-tui/driver/images/kitty";
 import {
 	type ImageRequest,
@@ -344,6 +345,40 @@ describe("TerminalImages: fallback and SIXEL", () => {
 		expect(drawn.rows.at(-1)).toBe("\x1b7\x1b[10A\x1bPq#0~\x1b\\\x1b8");
 		expect(requests).toEqual([[900, 220, 0]]);
 		expect(images.takeSequences()).toBe("");
+	});
+
+	it("fits a SIXEL image taller than the screen within the screen's rows, at its natural size once it fits", async () => {
+		const requests: [number, number][] = [];
+		const screenRows = signal(12);
+		const { images } = rig(
+			{ images: "sixel", cell: { w: 10, h: 20 } },
+			{
+				screenRows,
+				encodeSixel: async (_bytes, w, h) => {
+					requests.push([w, h]);
+					return "\x1bPq#0~\x1b\\";
+				},
+			},
+		);
+		const block = paint(images, { ...image("s"), widthPx: 500, heightPx: 1000 }, { fallback: "[s]" });
+		block.block();
+		await images.whenEncoded();
+		expect(block.block().rows.at(-1)).toBe("\x1b7\x1b[11A\x1bPq#0~\x1b\\\x1b8");
+		screenRows.set(60);
+		expect(block.block().rows).toHaveLength(50);
+		expect(requests).toEqual([
+			[120, 240],
+			[500, 1000],
+		]);
+	});
+
+	it("sends an iTerm2 image taller than the screen at the screen's height, at its natural size once it fits", () => {
+		const screenRows = signal(12);
+		const { images } = rig({ images: "iterm", cell: { w: 10, h: 20 } }, { screenRows });
+		const block = paint(images, { ...image("i"), widthPx: 500, heightPx: 1000 }, { fallback: "[i]" });
+		expect(block.block().rows).toEqual(anchoredRows(itermImage(PNG_1PX, 12, 12), 12));
+		screenRows.set(60);
+		expect(block.block().rows).toEqual(anchoredRows(itermImage(PNG_1PX, 50, 50), 50));
 	});
 
 	it("falls back in the image's rows when the encode fails", async () => {
