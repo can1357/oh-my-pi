@@ -7054,8 +7054,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	async restart(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		try {
-			// Bun can return a cached process.cwd() after the directory is unlinked.
-			await fs.realpath(".");
+			// Bun can return a cached process.cwd() after the directory is unlinked. Linux fails
+			// `realpath(".")`; macOS still resolves the removed path, so stat what it names.
+			await fs.stat(await fs.realpath("."));
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 			if (!this.#isShuttingDown) {
