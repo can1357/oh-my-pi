@@ -66,7 +66,7 @@
 - Fixed Gemini models on OpenRouter losing reasoning during long tool-call loops.
 - Fixed prompt-cache misses for /btw and other side turns on OpenCode Go and Zen.
 - Fixed antigravity-cli losing conversation context during OAuth refreshes and when restoring saved turns after generation metadata compaction.
-- Built-in provider streams now report the cancellation reason a caller supplied (such as "Interrupted by user") instead of a generic abort message; a bare cancellation still reports `Request was aborted` ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- Built-in provider streams now report the cancellation reason a caller supplied (such as "Interrupted by user") instead of a generic abort message; a bare cancellation still reports `Request was aborted` ([#20644](https://github.com/can1357/oh-my-pi/pull/20644) by [@eggpeat](https://github.com/eggpeat))
 - DeepSeek tool calls written as DSML text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route, instead of failing and triggering a retry nudge
 - Kimi K2 and Qwen tool calls written as text on OpenRouter's Responses route (and other Responses hosts) are now turned into real tool calls while streaming, as on the chat-completions route
 - GitHub Copilot Gemini models no longer fail every request with `400 invalid request body` when an MCP tool schema declares a `type` array (e.g. `["string", "null"]`); tool schemas are rewritten into Gemini's schema dialect ([#20198](https://github.com/can1357/oh-my-pi/issues/20198))
