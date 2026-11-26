@@ -15,6 +15,20 @@ It explicitly excludes context-overflow recovery via auto-compaction. Overflow i
 - [`../packages/coding-agent/src/modes/rpc/rpc-client.ts`](../packages/coding-agent/src/modes/rpc/rpc-client.ts)
 - [`../packages/coding-agent/src/modes/rpc/rpc-types.ts`](../packages/coding-agent/src/modes/rpc/rpc-types.ts)
 
+## Side requests (`/btw`)
+
+Fresh and resumed sessions use the same configured fallback chains for ephemeral turns.
+The walk uses `retry.enabled`, `retry.modelFallback`, `retry.fallbackOn`, normal chain
+specificity and ordering, cooldown/offline/effort/context eligibility, and model-aware
+credential resolution (including registered Gateway providers). Each routed model is
+attempted at most once per side request, including cyclic chains. No fallback occurs
+after visible text has streamed. Exhaustion reports one error with retry/configuration
+guidance. The parent model, thinking level, conversation, and fallback state do not
+change; attempt usage is still journaled. Provider conversation state remains isolated
+under the side-request lineage.
+
+Mocked handler regression: `bun test packages/coding-agent/test/btw-fallback.test.ts`.
+
 ## Scope boundary vs compaction
 
 Retry and compaction are checked from the same `agent_end` path, but they are intentionally separated:

@@ -137,6 +137,7 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	formatModelStringWithRouting,
 	disabledProviderIds,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
@@ -14250,9 +14251,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				throw new Error(`${field} must be a positive safe integer.`);
 			}
 		}
-		const cappedBudgetThinking =
-			args.maxTokens !== undefined &&
-			(model.thinking?.mode === "budget" || model.thinking?.mode === "anthropic-budget-effort");
 		const maxTokensRejection = args.maxTokens !== undefined ? ephemeralMaxTokensRejection(model) : undefined;
 		if (maxTokensRejection) {
 			throw new Error(
@@ -14318,36 +14316,42 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const sideSessionId = args.conversationKey
 			? `${cacheSessionId}:side:conversation:${args.conversationKey}`
 			: `${cacheSessionId}:side:${Snowflake.next()}`;
-		const options = this.prepareSimpleStreamOptions(
-			{
-				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
-				// Side-channel turns must not share OpenAI/Codex append-only
-				// conversation state with the main agent turn: IRC and /btw can run
-				// while the main turn is mid-tool-call. Keep the prompt-cache key
-				// stable, but isolate provider routing from the main conversation.
-				// Serialized BTW follow-ups reuse a topic-specific lineage; standalone
-				// side requests retain their unique request lineage.
-				sessionId: sideSessionId,
-				// Request controls (OpenAI effort updates) still replay the main
-				// conversation's, so the side request keeps its cached prefix.
-				parentSessionId: cacheSessionId,
-				promptCacheKey: this.getPromptCacheKeyForModel(model) ?? this.agent.sessionId,
-				preferWebsockets: resolveWebsocketPreference(this.settings, model),
-				providerSessionState: this.#providerSessionState,
-				reasoning: toReasoningEffort(this.thinkingLevel),
-				minimizeEffort: args.minimizeEffort,
-				// Budget-thinking transports can raise explicit caps to make room for their
-				// default thinking budget. A side turn's cap is a hard resource boundary.
-				disableReasoning: shouldDisableReasoning(this.thinkingLevel) || cappedBudgetThinking,
-				hideThinkingSummary: this.agent.hideThinkingSummary,
-				serviceTier: this.#models.effectiveServiceTier(model),
-				maxTokens: args.maxTokens,
-				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
-			},
-			model.provider,
-		);
-
-		if (args.tools === false) options.toolChoice = "none";
+		let route: { model: Model; thinkingLevel: ThinkingLevel | undefined; pinnedRole?: string } = {
+			model,
+			thinkingLevel: this.thinkingLevel,
+		};
+		const tried = new Set<string>();
+		const makeOptions = (requestModel: Model) =>
+			this.prepareSimpleStreamOptions(
+				{
+					apiKey: this.#modelRegistry.resolver(requestModel, cacheSessionId),
+					// Side-channel turns must not share OpenAI/Codex append-only
+					// conversation state with the main agent turn: IRC and /btw can run
+					// while the main turn is mid-tool-call. Keep the prompt-cache key
+					// stable, but isolate provider routing from the main conversation.
+					// Serialized BTW follow-ups reuse a topic-specific lineage; standalone
+					// side requests retain their unique request lineage.
+					sessionId: sideSessionId,
+					// Request controls (OpenAI effort updates) still replay the main
+					// conversation's, so the side request keeps its cached prefix.
+					parentSessionId: cacheSessionId,
+					promptCacheKey: this.getPromptCacheKeyForModel(requestModel) ?? this.agent.sessionId,
+					preferWebsockets: resolveWebsocketPreference(this.settings, requestModel),
+					providerSessionState: this.#providerSessionState,
+					reasoning: toReasoningEffort(route.thinkingLevel),
+					minimizeEffort: args.minimizeEffort,
+					disableReasoning:
+						shouldDisableReasoning(route.thinkingLevel) ||
+						(args.maxTokens !== undefined &&
+							(requestModel.thinking?.mode === "budget" ||
+								requestModel.thinking?.mode === "anthropic-budget-effort")),
+					hideThinkingSummary: this.agent.hideThinkingSummary,
+					serviceTier: this.#models.effectiveServiceTier(requestModel),
+					maxTokens: args.maxTokens,
+					signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
+				},
+				requestModel.provider,
+			);
 
 		let providerReplyText = "";
 		let emittedReplyText = "";
@@ -14364,39 +14368,67 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 		assertEphemeralTurnReady();
 		try {
-			const stream = await this.#sideStreamFn(model, context, options);
-			for await (const event of stream) {
-				if (event.type === "text_delta") {
-					providerReplyText += event.delta;
-					if (args.onTextDelta) {
-						const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
-						if (readyText.length > emittedReplyText.length) {
-							const delta = readyText.slice(emittedReplyText.length);
-							emittedReplyText = readyText;
-							await args.onTextDelta(delta);
+			while (!assistantMessage) {
+				assertEphemeralTurnReady();
+				if (
+					(args.maxTokens !== undefined && ephemeralMaxTokensRejection(route.model)) ||
+					(args.tools === false &&
+						(requiresNativeTools(route.model) ||
+							(toolHistory && requiresToolFreeHistoryForToolOptOut(route.model))))
+				) {
+					throw new Error(
+						`Fallback model ${route.model.provider}/${route.model.id} cannot preserve this side request's token/tool limits.`,
+					);
+				}
+				tried.add(formatModelStringWithRouting(route.model));
+				const options = makeOptions(route.model);
+				if (args.tools === false) options.toolChoice = "none";
+				let failure: AssistantMessage | undefined;
+				const stream = await this.#sideStreamFn(route.model, context, options);
+				for await (const event of stream) {
+					if (event.type === "text_delta") {
+						providerReplyText += event.delta;
+						if (args.onTextDelta) {
+							const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+							if (readyText.length > emittedReplyText.length) {
+								const delta = readyText.slice(emittedReplyText.length);
+								emittedReplyText = readyText;
+								await args.onTextDelta(delta);
+							}
 						}
+						continue;
 					}
-					continue;
+					if (event.type === "done") {
+						// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
+						// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
+						// see #4323) can hand back a message whose `content` was dropped or replaced with
+						// `undefined`. Downstream `.content.filter` at the sanitize step below would then
+						// crash the recap turn with `TypeError: undefined is not an object (evaluating
+						// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
+						// instead of turning a malformed side-channel response into a session-mute crash.
+						const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
+						assistantMessage = this.#obfuscator?.hasSecrets()
+							? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
+							: { ...event.message, content: rawContent };
+						reportUsage(assistantMessage);
+						break;
+					}
+					if (event.type === "error") {
+						reportUsage(event.error);
+						failure = event.error;
+						break;
+					}
 				}
-				if (event.type === "done") {
-					// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
-					// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
-					// see #4323) can hand back a message whose `content` was dropped or replaced with
-					// `undefined`. Downstream `.content.filter` at the sanitize step below would then
-					// crash the recap turn with `TypeError: undefined is not an object (evaluating
-					// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
-					// instead of turning a malformed side-channel response into a session-mute crash.
-					const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
-					assistantMessage = this.#obfuscator?.hasSecrets()
-						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
-						: { ...event.message, content: rawContent };
-					reportUsage(assistantMessage);
-					break;
-				}
-				if (event.type === "error") {
-					reportUsage(event.error);
-					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
-				}
+				if (!failure) break;
+				// Never append a second answer after text has already reached the panel.
+				const next =
+					!providerReplyText && (await this.#recovery.nextSideRequestFallback(failure, route, tried, args.signal));
+				assertEphemeralTurnReady();
+				if (!next)
+					throw new Error(
+						`${failure.errorMessage || "Ephemeral turn failed"}. No eligible fallback remains; retry /btw or check retry.fallbackChains and provider credentials.`,
+					);
+				route = next;
 			}
 		} catch (error) {
 			streamAbort.abort();

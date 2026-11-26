@@ -2070,6 +2070,57 @@ export class TurnRecovery {
 		return candidates.filter(candidate => provider !== undefined && candidate.provider === provider);
 	}
 
+	/** Select a side-request route without applying it to the parent session. */
+	async nextSideRequestFallback(
+		message: AssistantMessage,
+		current: { model: Model; thinkingLevel: ThinkingLevel | undefined; pinnedRole?: string },
+		tried: ReadonlySet<string>,
+		signal?: AbortSignal,
+	): Promise<{ model: Model; thinkingLevel: ThinkingLevel | undefined; pinnedRole: string } | undefined> {
+		const settings = cfgRetry.get(this.#host.settings);
+		if (!settings.enabled || !settings.modelFallback || this.#host.modelFallbackDisabled?.()) return undefined;
+		const id = AIError.classifyMessage(message);
+		if (
+			message.stopReason !== "error" ||
+			AIError.is(id, AIError.Flag.Abort) ||
+			AIError.is(id, AIError.Flag.UserInterrupt) ||
+			AIError.isContextOverflow(message, current.model.contextWindow ?? 0) ||
+			!retryFallbackAdmits(settings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit))
+		)
+			return undefined;
+		if (Object.keys(getRetryFallbackChains(this.#host.settings)).length === 0) return undefined;
+		const selector = formatRetryFallbackSelector(current.model, current.thinkingLevel);
+		const ceiling = this.#host.thinkingLevelCeiling();
+		for (const role of this.retryFallbackChainKeys(selector, current.model, { pinnedRole: current.pinnedRole })) {
+			for (const next of this.findRetryFallbackCandidates(role, selector, current.model)) {
+				if (this.isRetryFallbackSelectorSuppressed(next)) continue;
+				const resolved = resolveModelOverride([next.raw], this.#host.modelRegistry, this.#host.settings);
+				const model = resolved.model ?? this.#host.modelRegistry.find(next.provider, next.id);
+				if (!model || tried.has(formatModelStringWithRouting(model))) continue;
+				if (ceiling !== undefined && !modelSupportsEffortCeiling(model, ceiling)) continue;
+				if (!this.#host.contextFitsModel(model)) continue;
+				let apiKey: string | undefined;
+				try {
+					apiKey = await this.#host.modelRegistry.getApiKey(model, this.#host.sessionId(), { signal });
+				} catch (error) {
+					if (!(error instanceof AIError.MissingApiKeyError)) throw error;
+				}
+				signal?.throwIfAborted();
+				if (!apiKey) continue;
+				const requested =
+					next.thinkingLevel === AUTO_THINKING
+						? current.thinkingLevel
+						: (next.thinkingLevel ?? current.thinkingLevel);
+				const thinkingLevel = resolveThinkingLevelForModel(
+					model,
+					clampThinkingLevelToCeiling(model, requested, ceiling),
+				);
+				return { model, thinkingLevel, pinnedRole: current.pinnedRole ?? role };
+			}
+		}
+		return undefined;
+	}
+
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
 		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
 		const currentModel = this.#host.model();
