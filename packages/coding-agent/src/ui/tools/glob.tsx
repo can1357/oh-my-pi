@@ -1,17 +1,18 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
- * Glob: `Glob  25 files · in src`, then the files: a few as path rows, more
+ * Glob: `Glob src/*.{ts,tsx}  25 files · in src` (the globs' wildcards, classes
+ * and alternations highlighted), then the files: a few as path rows, more
  * as wrapped chips; limits and skipped paths in one quiet footnote.
  *
  * Terminal look: `glob` (`src/ui/styles/tools/glob.ts`): a head line and a
  * branch tree of paths with file-type icons.
  */
-import type { TspText } from "@oh-my-pi/pi-wire";
+import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { ToolHead, ToolPresenter, ToolView } from "./contract";
 import { toPathList } from "../../utils/render-utils";
 import { resultText } from "./default";
 import { registerToolPresenter } from "./registry";
-import { countText, FileChip, FileRow, inlineErrorView, StatsFoot } from "./search-common";
+import { countText, FileChip, FileRow, inlineErrorView, spansText, StatsFoot } from "./search-common";
 
 /** The args glob shows. */
 export interface GlobArgs {
@@ -72,15 +73,79 @@ function limitMeta(args: GlobArgs | undefined): TspText[] {
 	return args?.limit !== undefined ? [`limit:${args.limit}`] : [];
 }
 
-/** The searched paths as one label (`src, test`); empty when the call names none. */
-function scopeLabel(args: GlobArgs | undefined): string {
-	return toPathList(args?.path ?? args?.paths).join(", ");
+// Theme keys the regex grammar gives the equivalent regex tokens, so glob and grep heads read alike.
+// No escapes: glob reads every `\` as a path separator.
+/** Wildcards, class brackets, alternation braces and commas. */
+const OPERATOR = "syntaxKeyword";
+/** A class range (`a-z`). */
+const RANGE = "syntaxNumber";
+
+/** The index of the `]` closing the class opened at `start`; -1 when it never closes (the `[` is literal). */
+function classEnd(glob: string, start: number): number {
+	let i = start + 1;
+	if (glob[i] === "!" || glob[i] === "^") i++;
+	if (glob[i] === "]") i++; // A leading `]` is a member.
+	return glob.indexOf("]", i);
+}
+
+/** The class `[start, end]` (`[!a-z_]`) as spans: brackets and negation operators, ranges numbers, members plain. */
+function classSpans(glob: string, start: number, end: number): TspSpan[] {
+	const open = glob[start + 1] === "!" || glob[start + 1] === "^" ? 2 : 1;
+	const spans: TspSpan[] = [{ t: glob.slice(start, start + open), s: OPERATOR }];
+	for (let i = start + open; i < end;) {
+		const range = glob[i + 1] === "-" && i + 2 < end;
+		const length = range ? 3 : 1;
+		const t = glob.slice(i, i + length);
+		spans.push(range ? { t, s: RANGE } : { t });
+		i += length;
+	}
+	spans.push({ t: "]", s: OPERATOR });
+	return spans;
+}
+
+/**
+ * A glob (or a `;` list of them) as spans: wildcards (`*`, `**`, `?`), classes
+ * and `{a,b}` alternations styled as the regex grammar styles the equivalent
+ * tokens; path text unstyled.
+ */
+function globSpans(glob: string): TspSpan[] {
+	const spans: TspSpan[] = [];
+	let i = 0;
+	const take = (length: number, s?: string): void => {
+		const t = glob.slice(i, i + length);
+		spans.push(s === undefined ? { t } : { t, s });
+		i += length;
+	};
+	let depth = 0; // Open `{` alternations.
+	while (i < glob.length) {
+		const ch = glob[i]!;
+		const classClose = ch === "[" ? classEnd(glob, i) : -1;
+		if (ch === "*" || ch === "?") take(1, OPERATOR);
+		else if (classClose >= 0) {
+			spans.push(...classSpans(glob, i, classClose));
+			i = classClose + 1;
+		} else if (ch === "{") {
+			depth++;
+			take(1, OPERATOR);
+		} else if ((ch === "}" || ch === ",") && depth > 0) {
+			if (ch === "}") depth--;
+			take(1, OPERATOR);
+		} else take(1);
+	}
+	return spans;
+}
+
+/** The searched paths as one label (`src/*.ts, test`), each highlighted as a glob; empty when the call names none. */
+function scopeText(args: GlobArgs | undefined): TspText {
+	// Lenient arg validation lets malformed entries through; skip them as grep does.
+	const entries = toPathList(args?.path ?? args?.paths).filter(entry => typeof entry === "string" && entry !== "");
+	return spansText(entries.flatMap((entry, i) => (i === 0 ? globSpans(entry) : [{ t: ", " }, ...globSpans(entry)])));
 }
 
 function globHead(args: GlobArgs | undefined, meta: readonly TspText[]): ToolHead {
 	return {
 		title: "Glob",
-		target: scopeLabel(args) || "*",
+		target: scopeText(args) || "*",
 		targetKind: "pattern",
 		meta,
 	};
@@ -135,6 +200,7 @@ export const globPresenter: ToolPresenter<GlobArgs, GlobDetails> = {
 			...globHead(args, meta),
 			...extra,
 		});
+		const scoped = scopeText(args) !== "";
 		if (details?.fileCount === undefined) {
 			const text = resultText(result);
 			const files = text.split("\n").filter(line => line.trim() !== "");
@@ -145,7 +211,7 @@ export const globPresenter: ToolPresenter<GlobArgs, GlobDetails> = {
 					term: {
 						look: "glob",
 						result: true,
-						target: scopeLabel(args) !== "",
+						target: scoped,
 						empty: "No files found",
 						headless: true,
 					} satisfies GlobTerm,
@@ -158,7 +224,7 @@ export const globPresenter: ToolPresenter<GlobArgs, GlobDetails> = {
 				term: {
 					look: "glob",
 					result: true,
-					target: scopeLabel(args) !== "",
+					target: scoped,
 					files,
 					plain: true,
 				} satisfies GlobTerm,
@@ -186,7 +252,7 @@ export const globPresenter: ToolPresenter<GlobArgs, GlobDetails> = {
 				term: {
 					look: "glob",
 					result: true,
-					target: scopeLabel(args) !== "",
+					target: scoped,
 					empty: details.timedOut ? "No matches before timeout (scan incomplete)" : "No files found",
 					notes: rowNotes,
 				} satisfies GlobTerm,
@@ -199,7 +265,7 @@ export const globPresenter: ToolPresenter<GlobArgs, GlobDetails> = {
 			term: {
 				look: "glob",
 				result: true,
-				target: scopeLabel(args) !== "",
+				target: scoped,
 				files,
 				notes: rowNotes,
 				...(details.cwd ? { cwd: details.cwd } : {}),
