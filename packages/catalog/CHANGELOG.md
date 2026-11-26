@@ -2,16 +2,11 @@
 
 ## [Unreleased]
 
-### Removed
-
-- Removed unused exports `hasQuotaTierPolicy` (`/compat/behavior`), `hasRoutingVariants` (`/compat/taxonomy`), `toFirepassPublicModelId` (`/fireworks-model-id`), `isAzureDeploymentsUrl` (`/hosts`) and `toPositiveNumberOrNull` (`/utils`) ([#20528](https://github.com/can1357/oh-my-pi/pull/20528))
-- Removed Devin Fusion pairings (`fusion-<lead>-sidekick-*`) from the model list: omp runs only the lead, so the 1000+ rows duplicated the lead models pinned to one thinking level
-
 ### Added
 
 - Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
-
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
 - Added `Model.voice` (default voice for speech models) and `Model.speechFormats` (the only audio containers a speech model returns), and moved `SPEECH_FORMATS`/`SpeechFormat` here from `@oh-my-pi/pi-ai` ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
@@ -25,7 +20,11 @@
 
 ### Added
 
-- Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
+
+### Removed
+
+- Removed unused exports `hasQuotaTierPolicy` (`/compat/behavior`), `hasRoutingVariants` (`/compat/taxonomy`), `toFirepassPublicModelId` (`/fireworks-model-id`), `isAzureDeploymentsUrl` (`/hosts`) and `toPositiveNumberOrNull` (`/utils`) ([#20528](https://github.com/can1357/oh-my-pi/pull/20528))
+- Removed Devin Fusion pairings (`fusion-<lead>-sidekick-*`) from the model list: omp runs only the lead, so the 1000+ rows duplicated the lead models pinned to one thinking level
 
 ## [19.2.1] - 2026-11-25
 

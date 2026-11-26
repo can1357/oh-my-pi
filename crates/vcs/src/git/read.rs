@@ -254,6 +254,20 @@ impl GitRepo {
 				return Ok(Some(kind));
 			}
 		}
+		if let Ok(todo) = std::fs::read_to_string(git_dir.join("sequencer/todo")) {
+			for line in todo.lines().map(str::trim) {
+				if line.is_empty() || line.starts_with('#') {
+					continue;
+				}
+				if line.starts_with("revert ") {
+					return Ok(Some("revert"));
+				}
+				if line.starts_with("pick ") {
+					return Ok(Some("cherry-pick"));
+				}
+				break;
+			}
+		}
 		if self.is_reftable() {
 			return Ok((!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty())
 				.then_some("unmerged-index"));
@@ -468,6 +482,36 @@ impl GitRepo {
 		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
 			.map_err(|e| Error::backend("git config", e))?;
 		Ok(config.string(key).is_some())
+	}
+
+	/// Whether the repository's common git directory is configured as bare
+	/// (`core.bare = true`), resolving repository-local includes and
+	/// `config.worktree` without global/system configuration or environment
+	/// overrides. Never invokes git.
+	pub fn is_common_repo_bare(&self) -> Result<bool> {
+		let common_dir = &self.info().common_dir;
+		let Some(config) = load_local_config(common_dir.join("config"), common_dir)? else {
+			return Ok(common_dir.file_name().is_none_or(|n| n != ".git"));
+		};
+		let wt_has_worktree = if matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true)))
+			&& let Some(wt) = load_local_config(common_dir.join("config.worktree"), common_dir)?
+		{
+			match wt.boolean("core.bare") {
+				Some(Ok(bare)) => return Ok(bare),
+				Some(Err(err)) => return Err(Error::backend("git config", err)),
+				None => {},
+			}
+			wt.string("core.worktree").is_some()
+		} else {
+			false
+		};
+		match config.boolean("core.bare") {
+			Some(Ok(bare)) => Ok(bare),
+			Some(Err(err)) => Err(Error::backend("git config", err)),
+			None => Ok(!wt_has_worktree
+				&& config.string("core.worktree").is_none()
+				&& common_dir.file_name().is_none_or(|n| n != ".git")),
+		}
 	}
 
 	/// Read a scalar git config value.
@@ -1381,6 +1425,52 @@ fn cap_bytes(mut bytes: Vec<u8>, max: Option<usize>) -> ShowResult {
 	ShowResult { bytes, truncated }
 }
 
+/// Load a repository-local git config file (`config` or `config.worktree`)
+/// and resolve its `[include]` / `[includeIf]` directives without loading
+/// global/system config or environment overrides.
+fn load_local_config(
+	path: std::path::PathBuf,
+	common_dir: &Path,
+) -> Result<Option<gix::config::File<'static>>> {
+	match std::fs::metadata(&path) {
+		Ok(_) => {},
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+		Err(err) => return Err(Error::backend("git config", err)),
+	}
+	let mut config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+		.map_err(|e| Error::backend("git config", e))?;
+	let home_dir = std::env::var_os("HOME")
+		.or_else(|| std::env::var_os("USERPROFILE"))
+		.map(std::path::PathBuf::from);
+	let head_ref = std::fs::read_to_string(common_dir.join("HEAD"))
+		.ok()
+		.and_then(|head| {
+			head
+				.trim()
+				.strip_prefix("ref:")
+				.map(str::trim)
+				.map(str::to_owned)
+		})
+		.and_then(|target| gix::refs::FullName::try_from(target).ok());
+	let interpolate = gix::config::path::interpolate::Context {
+		git_install_dir: None,
+		home_dir:        home_dir.as_deref(),
+		home_for_user:   Some(gix::config::path::interpolate::home_for_user),
+	};
+	let conditional = gix::config::file::includes::conditional::Context {
+		git_dir:     Some(common_dir),
+		branch_name: head_ref.as_ref().map(gix::refs::FullName::as_ref),
+	};
+	let options = gix::config::file::init::Options {
+		includes: gix::config::file::includes::Options::follow(interpolate, conditional).strict(),
+		..Default::default()
+	};
+	config
+		.resolve_includes(options)
+		.map_err(|e| Error::backend("git config", e))?;
+	Ok(Some(config))
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{fs, process::Command};
@@ -1447,6 +1537,17 @@ mod tests {
 		fs::write(git_dir.join("REBASE_HEAD"), "")?;
 		assert_eq!(repo.operation_kind()?, None);
 		assert!(!repo.operation_in_progress()?);
+		// Multi-commit cherry-pick/revert sequencer without
+		// CHERRY_PICK_HEAD/REVERT_HEAD.
+		fs::create_dir_all(git_dir.join("sequencer"))?;
+		fs::write(git_dir.join("sequencer/todo"), "pick deadbeef\n")?;
+		assert_eq!(repo.operation_kind()?, Some("cherry-pick"));
+		fs::write(git_dir.join("CHERRY_PICK_HEAD"), "deadbeef\n")?;
+		assert_eq!(repo.operation_kind()?, Some("cherry-pick"));
+		fs::remove_file(git_dir.join("CHERRY_PICK_HEAD"))?;
+		fs::write(git_dir.join("sequencer/todo"), "revert deadbeef\n")?;
+		assert_eq!(repo.operation_kind()?, Some("revert"));
+		fs::remove_dir_all(git_dir.join("sequencer"))?;
 		Ok(())
 	}
 
@@ -1885,6 +1986,96 @@ mod tests {
 		// resolved locations rather than spellings.
 		assert_eq!(worktrees[1].path.canonicalize()?, linked.canonicalize()?);
 		assert_eq!(worktrees[1].branch.as_deref(), Some("refs/heads/linked-branch"));
+		Ok(())
+	}
+
+	#[test]
+	fn is_common_repo_bare_distinguishes_separate_git_dir_from_bare_dot_git() -> TestResult {
+		let (dir, normal) = repo()?;
+		commit(dir.path(), "tracked", "tracked\n", "initial")?;
+		assert!(!normal.is_common_repo_bare()?);
+
+		let parent = tempfile::tempdir()?;
+		let separate_worktree = parent.path().join("sep-main");
+		let separate_git_dir = parent.path().join("sep-git");
+		git(parent.path(), &[
+			"init",
+			"-b",
+			"main",
+			"--separate-git-dir",
+			&separate_git_dir.to_string_lossy(),
+			&separate_worktree.to_string_lossy(),
+		])?;
+		git(&separate_worktree, &["config", "user.name", "Test User"])?;
+		git(&separate_worktree, &["config", "user.email", "test@example.com"])?;
+		commit(&separate_worktree, "tracked", "tracked\n", "initial")?;
+		let sep_linked = parent.path().join("sep-linked");
+		git(&separate_worktree, &["worktree", "add", "-b", "topic", &sep_linked.to_string_lossy()])?;
+		assert!(!GitRepo::require(&sep_linked)?.is_common_repo_bare()?);
+
+		let bare = parent.path().join("bare.git");
+		git(parent.path(), &[
+			"clone",
+			"--bare",
+			&dir.path().to_string_lossy(),
+			&bare.to_string_lossy(),
+		])?;
+		let bare_linked = parent.path().join("bare-linked");
+		git(&bare, &["worktree", "add", &bare_linked.to_string_lossy(), "main"])?;
+		assert!(GitRepo::require(&bare_linked)?.is_common_repo_bare()?);
+
+		let bare_dot_git = parent.path().join("bare-holder/.git");
+		fs::create_dir_all(&bare_dot_git)?;
+		git(parent.path(), &[
+			"clone",
+			"--bare",
+			&dir.path().to_string_lossy(),
+			&bare_dot_git.to_string_lossy(),
+		])?;
+		let bare_dot_git_linked = parent.path().join("bare-dot-git-linked");
+		git(&bare_dot_git, &[
+			"worktree",
+			"add",
+			"-b",
+			"other",
+			&bare_dot_git_linked.to_string_lossy(),
+			"main",
+		])?;
+		assert!(GitRepo::require(&bare_dot_git_linked)?.is_common_repo_bare()?);
+
+		// `extensions.worktreeConfig = true`: `config.worktree` overrides common
+		// `core.bare`.
+		git(&separate_worktree, &["config", "extensions.worktreeConfig", "true"])?;
+		fs::write(separate_git_dir.join("config.worktree"), "[core]\n\tbare = true\n")?;
+		assert!(GitRepo::require(&sep_linked)?.is_common_repo_bare()?);
+
+		// Repository-local `[include]` overriding `core.bare` and
+		// `extensions.worktreeConfig`.
+		let inc_wt = parent.path().join("inc-main");
+		let inc_git = parent.path().join("inc-git");
+		git(parent.path(), &[
+			"init",
+			"-b",
+			"main",
+			"--separate-git-dir",
+			&inc_git.to_string_lossy(),
+			&inc_wt.to_string_lossy(),
+		])?;
+		git(&inc_wt, &["config", "user.name", "Test User"])?;
+		git(&inc_wt, &["config", "user.email", "test@example.com"])?;
+		commit(&inc_wt, "tracked", "tracked\n", "initial")?;
+		let inc_linked = parent.path().join("inc-linked");
+		git(&inc_wt, &["worktree", "add", "-b", "topic", &inc_linked.to_string_lossy()])?;
+		assert!(!GitRepo::require(&inc_linked)?.is_common_repo_bare()?);
+		fs::write(inc_git.join("bare-override.cfg"), "[core]\n\tbare = true\n")?;
+		git(&inc_wt, &["config", "include.path", "bare-override.cfg"])?;
+		assert!(GitRepo::require(&inc_linked)?.is_common_repo_bare()?);
+
+		// `[include]` enabling `extensions.worktreeConfig` with `config.worktree`
+		// setting `core.bare = true`.
+		fs::write(inc_git.join("bare-override.cfg"), "[extensions]\n\tworktreeConfig = true\n")?;
+		fs::write(inc_git.join("config.worktree"), "[core]\n\tbare = true\n")?;
+		assert!(GitRepo::require(&inc_linked)?.is_common_repo_bare()?);
 		Ok(())
 	}
 }

@@ -9,13 +9,18 @@
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
 - `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`) ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
-### Changed
-
-- `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
-
 ### Removed
 
 - Removed the `SPEECH_FORMATS` value export; import it from `@oh-my-pi/pi-catalog/types`. The `SpeechFormat` type is still exported ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
+- Speech synthesis rejects a JSON error body sent with a 2xx status as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
@@ -24,7 +29,6 @@
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
 - Fixed a cancelled inference request still being sent through a custom fetch that ignores the abort signal, when the cancel came while the request body was being prepared ([#20673](https://github.com/can1357/oh-my-pi/pull/20673) by [@sjawhar](https://github.com/sjawhar))
-- Speech synthesis rejects a JSON error body sent with a 2xx status as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.2.1] - 2026-11-25
 
