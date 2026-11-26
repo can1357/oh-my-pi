@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the `omp stats` dashboard missing live updates and running full syncs back to back while idle: a sessions directory it could not read no longer shuts down the transcript watcher, watcher syncs run at most 5 seconds after the first pending write, and each full sync now starts 5 minutes after the previous one ends instead of right after a slow one.
+- Fixed the `omp stats` dashboard missing live updates when a sessions directory is unreadable or agents write continuously, and running full syncs back to back while idle.
 
 ## [19.1.1] - 2026-11-23
 
