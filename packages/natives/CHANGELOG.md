@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Commits made by the commit helper take their identity and run their hooks from the file `GIT_CONFIG_GLOBAL` names, as `git commit` does ([#19819](https://github.com/can1357/oh-my-pi/issues/19819), [#20214](https://github.com/can1357/oh-my-pi/pull/20214) by [@JamieJ5926](https://github.com/JamieJ5926))
 - `Process.terminate` now reaches descendants that started their own session: it captures them before the first signal, so a group SIGTERM that ends the root first no longer hides them, and keeps them for the hard-kill wave ([#20597](https://github.com/can1357/oh-my-pi/pull/20597) by [@daandden](https://github.com/daandden))
 - Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
 - Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
