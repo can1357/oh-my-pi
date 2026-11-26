@@ -1,6 +1,11 @@
+use std::collections::HashSet;
+
 use serde_json::Value;
 
-use crate::{dom::Node, facts::Facts};
+use crate::{
+	dom::{self, Node},
+	facts::Facts,
+};
 
 const MIN_BODY_CHARS: usize = 200;
 /// Words an Open Graph description needs to summarize a page.
@@ -162,13 +167,136 @@ pub fn extract(nodes: &[Node], facts: &Facts) -> Option<String> {
 				state_content(page_props, None)
 			})
 		})
-		.or_else(|| open_graph(nodes, substantial))?;
-	Some(content.markdown(facts.title.as_deref()))
+		.or_else(|| open_graph(nodes, substantial));
+	if let Some(content) = content {
+		return Some(content.markdown(facts.title.as_deref()));
+	}
+	// A shell whose only server-side content is its FAQ markup.
+	let entries = faq(facts);
+	let chars: usize = entries.iter().map(|(q, a)| q.len() + a.len()).sum();
+	(chars >= MIN_BODY_CHARS).then(|| {
+		let title = facts
+			.title
+			.as_deref()
+			.map(str::trim)
+			.filter(|t| !t.is_empty());
+		let mut out = title.map_or_else(String::new, |t| format!("# {t}\n\n"));
+		out.push_str(&faq_markdown(&entries, 2));
+		out
+	})
 }
 
-/// A script shell's Open Graph summary when [`extract`] finds no content: too
-/// short to stand in for the page while a browser can render it, but better
-/// than nothing.
+/// Question and answer pairs of the page's JSON-LD `FAQPage` blocks, in order,
+/// each question once; answers are plain text.
+pub fn faq(facts: &Facts) -> Vec<(String, String)> {
+	fn is_type(value: &Value, name: &str) -> bool {
+		let matches = |kind: &Value| {
+			kind
+				.as_str()
+				.is_some_and(|kind| kind.rsplit(['/', '#']).next() == Some(name))
+		};
+		value.get("@type").is_some_and(|kind| {
+			kind
+				.as_array()
+				.map_or_else(|| matches(kind), |kinds| kinds.iter().any(matches))
+		})
+	}
+	fn walk(
+		value: &Value,
+		depth: usize,
+		seen: &mut HashSet<String>,
+		out: &mut Vec<(String, String)>,
+	) {
+		if depth == 0 {
+			return;
+		}
+		if let Some(values) = value.as_array() {
+			for value in values {
+				walk(value, depth - 1, seen, out);
+			}
+			return;
+		}
+		if is_type(value, "FAQPage") {
+			let questions = value.get("mainEntity");
+			let questions = questions
+				.and_then(Value::as_array)
+				.map_or_else(|| questions.into_iter().collect::<Vec<_>>(), |all| all.iter().collect());
+			for question in questions {
+				let Some(name) = text(question, "name").map(plain_text) else {
+					continue;
+				};
+				let answer = question.get("acceptedAnswer").map(|answer| {
+					answer
+						.as_array()
+						.and_then(|all| all.first())
+						.unwrap_or(answer)
+				});
+				let Some(answer) = answer
+					.and_then(|answer| text(answer, "text"))
+					.map(plain_text)
+				else {
+					continue;
+				};
+				if !name.is_empty() && !answer.is_empty() && seen.insert(name.clone()) {
+					out.push((name, answer));
+				}
+			}
+			return;
+		}
+		if let Some(graph) = value.get("@graph") {
+			walk(graph, depth - 1, seen, out);
+		}
+	}
+	let mut seen = HashSet::new();
+	let mut out = Vec::new();
+	for value in &facts.json_ld {
+		walk(value, 4, &mut seen, &mut out);
+	}
+	out
+}
+
+/// Markdown for FAQ entries, questions as headings at `level`.
+pub fn faq_markdown(entries: &[(String, String)], level: usize) -> String {
+	let mut out = String::new();
+	for (question, answer) in entries {
+		if !out.is_empty() {
+			out.push_str("\n\n");
+		}
+		out.push_str(&"#".repeat(level));
+		out.push(' ');
+		out.push_str(question);
+		out.push_str("\n\n");
+		out.push_str(answer);
+	}
+	out
+}
+
+/// Text of a JSON-LD string that may hold HTML markup, whitespace-collapsed.
+fn plain_text(value: &str) -> String {
+	let mut out = String::new();
+	let mut push = |text: &str| {
+		for word in text.split_whitespace() {
+			if !out.is_empty() {
+				out.push(' ');
+			}
+			out.push_str(word);
+		}
+	};
+	if !value.contains('<') {
+		push(value);
+		return out;
+	}
+	for node in dom::parse(value).unwrap_or_default() {
+		if let Node::Text(text) = node {
+			push(&text);
+		}
+	}
+	out
+}
+
+/// A script shell's Open Graph or meta description summary when [`extract`]
+/// finds no content: too short to stand in for the page while a browser can
+/// render it, but better than nothing.
 pub fn summary(nodes: &[Node], facts: &Facts) -> Option<String> {
 	let sentence = |text: &str| {
 		text
@@ -178,7 +306,12 @@ pub fn summary(nodes: &[Node], facts: &Facts) -> Option<String> {
 			.is_some()
 			&& !crate::wall::is_block_page(text)
 	};
-	open_graph(nodes, sentence).map(|content| content.markdown(facts.title.as_deref()))
+	open_graph(nodes, sentence)
+		.or_else(|| {
+			let body = facts.description.as_deref().filter(|text| sentence(text))?;
+			Some(Content { title: None, body })
+		})
+		.map(|content| content.markdown(facts.title.as_deref()))
 }
 
 #[cfg(test)]
@@ -236,6 +369,37 @@ mod tests {
 		let facts = collect(&nodes, &Url::parse("https://example.test/shell").unwrap());
 		assert_eq!(extract(&nodes, &facts), None);
 		assert_eq!(summary(&nodes, &facts), None);
+	}
+
+	#[test]
+	fn a_meta_description_summarizes_a_shell_without_open_graph() {
+		let html = r#"<title>Rules</title><meta name="description" content="Make the model run faster, then speed up how it is served.">"#;
+		let nodes = parse(html).unwrap();
+		let facts = collect(&nodes, &Url::parse("https://example.test/rules").unwrap());
+		assert_eq!(
+			summary(&nodes, &facts).as_deref(),
+			Some("# Rules\n\nMake the model run faster, then speed up how it is served.")
+		);
+	}
+
+	#[test]
+	fn faq_page_json_ld_yields_each_question_once() {
+		let answer = "Yes, the menu is served every day of the week, including weekend brunch, from \
+		              noon until late in the evening, and every dish can also be ordered for \
+		              takeaway at the counter or through the booking page.";
+		let data = serde_json::json!({ "@type": "FAQPage", "mainEntity": [
+			{ "@type": "Question", "name": "Is it served daily?", "acceptedAnswer": { "@type": "Answer", "text": format!("<p>{answer}</p>") } }
+		] });
+		let html = format!(
+			r#"<title>Menu</title><div id="root"></div><script type="application/ld+json">{data}</script><script type="application/ld+json">{data}</script>"#
+		);
+		let nodes = parse(&html).unwrap();
+		let facts = collect(&nodes, &Url::parse("https://example.test/menu").unwrap());
+		assert_eq!(faq(&facts), [("Is it served daily?".to_owned(), answer.to_owned())]);
+		assert_eq!(
+			extract(&nodes, &facts),
+			Some(format!("# Menu\n\n## Is it served daily?\n\n{answer}"))
+		);
 	}
 
 	#[test]

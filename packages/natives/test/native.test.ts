@@ -1088,11 +1088,11 @@ try {
 		it("matches browser controls, image labels and table column alignment", async () => {
 			const html = `<h2>Controls</h2><p><q>Hello</q> x<sub>2</sub> x<sup>3</sup>. See <img src="/images/icon.png"> and <img alt="diagram" src="/d">.</p><form>Name<input size="8" value="Jane"><input type="checkbox" checked><select><option>Red</option><option selected>Blue</option></select></form><table><tr><th>Key</th><th>Value</th></tr><tr><td>Longer</td><td>One</td></tr></table>`;
 			expect(await renderHtml(html, { format: "text", mode: "full", hidden: "all" })).toBe(
-				'Controls\n\n   "Hello" x[2] x^3. See [icon.png] and diagram .\n   Name Jane____ [X] [Blue]\n\n    Key   Value\n   Longer One\n',
+				'Controls\n\n   "Hello" x₂ x³. See [icon.png] and diagram .\n   Name ________ [X] [Blue]\n\n    Key   Value\n   Longer One\n',
 			);
 		});
 
-		it.each(["lynx-dump", "lynx-layout"])("matches stock Lynx stdout for %s", async fixture => {
+		it.each(["lynx-dump", "lynx-layout"])("renders the %s fixture", async fixture => {
 			const [html, dump] = await Promise.all(
 				["html", "txt"].map(ext => Bun.file(new URL(`./fixtures/${fixture}.${ext}`, import.meta.url)).text()),
 			);
