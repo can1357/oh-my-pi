@@ -367,6 +367,8 @@ enum Pending {
 pub struct Reader {
 	options:    Options,
 	agents:     Vec<String>,
+	/// URL passed to [`Reader::open`].
+	requested:  String,
 	/// Page URL being fetched: the requested one or a refresh target.
 	target:     String,
 	/// Index of the page attempt; after success, of the agent that succeeded.
@@ -403,6 +405,7 @@ impl Reader {
 		Self {
 			options,
 			agents,
+			requested: String::new(),
 			target: String::new(),
 			attempt: 0,
 			saved: None,
@@ -420,6 +423,7 @@ impl Reader {
 
 	/// Start reading `url`, abandoning any read in progress.
 	pub fn open(&mut self, url: &str) -> Step {
+		url.clone_into(&mut self.requested);
 		url.clone_into(&mut self.target);
 		self.attempt = 0;
 		self.saved = None;
@@ -689,6 +693,16 @@ impl Reader {
 		if let Some(Rendered { verdict: Verdict::Wall(name), .. }) = &rendered {
 			blocked = Some(name.clone());
 		}
+		// A page that redirects to a sign-in form is a login wall, not the page.
+		if blocked.is_none()
+			&& is_html
+			&& Url::parse(&self.requested).is_ok_and(|requested| {
+				moved(&requested, &page_url)
+					&& wall::is_login_url(&page_url)
+					&& !wall::is_login_url(&requested)
+			}) {
+			blocked = Some("login wall".to_owned());
+		}
 
 		if blocked.is_some() && !last_agent {
 			// A 2xx challenge outranks a refusal's wall: a browser can still pass
@@ -772,6 +786,16 @@ impl Reader {
 			self.target = refresh.url.into();
 			return self.fetch_page(Purpose::Refresh);
 		}
+		// A refresh may land on a different page, such as a guide's index
+		// standing in for a removed topic. HTTP redirects need no note: the
+		// caller reports the final URL.
+		if self.hops > 0
+			&& Url::parse(&self.requested).is_ok_and(|requested| moved(&requested, &page_url))
+		{
+			self
+				.notes
+				.push(format!("Redirected from {} to {url}", self.requested));
+		}
 
 		if kind == Kind::Blob {
 			return blob(&page_url, &mime, &response.headers);
@@ -826,7 +850,12 @@ impl Reader {
 				Some(markdown) => passthrough(strategy::finalize(&markdown), "markdown", "feed", notes),
 				None => passthrough(strategy::finalize(&text), "text", "text", notes),
 			},
-			Kind::Markdown => passthrough(strategy::finalize(&text), "markdown", "text", notes),
+			Kind::Markdown => passthrough(
+				strategy::finalize(&strategy::markdown_body(&text)),
+				"markdown",
+				"text",
+				notes,
+			),
 			Kind::Text | Kind::Xml | Kind::Blob | Kind::Html => {
 				passthrough(strategy::finalize(&text), "text", "text", notes)
 			},
@@ -950,12 +979,16 @@ impl Reader {
 			return self.next_probe(html, queue);
 		}
 		let text = decode::decode(&response.body, content_type_opt, false);
-		if wall::http(response.status, &response.headers, &text).is_some() {
+		// A Markdown or llms.txt URL answered with HTML got the site's app shell
+		// or error page.
+		if wall::http(response.status, &response.headers, &text).is_some()
+			|| (strategy::is_html_mime(&mime) && !matches!(probe, Probe::Feed(_)))
+		{
 			return self.next_probe(html, queue);
 		}
 		let found = match &probe {
 			Probe::Alternate(href) if strategy::usable_markdown(&text) => Some((
-				strategy::finalize(without_leading_comments(&text)),
+				strategy::finalize(&strategy::markdown_body(&text)),
 				"text/markdown".to_owned(),
 				"alternate-markdown",
 				format!("Used markdown alternate: {href}"),
@@ -967,7 +1000,7 @@ impl Reader {
 					&& !strategy::is_soft_404(&text) =>
 			{
 				Some((
-					strategy::finalize(without_leading_comments(&text)),
+					strategy::finalize(&strategy::markdown_body(&text)),
 					mime,
 					"content-negotiation",
 					format!("Content negotiation returned {content_type}"),
@@ -984,7 +1017,7 @@ impl Reader {
 				})
 			},
 			Probe::Llms(href) if strategy::usable_markdown(&text) => Some((
-				strategy::finalize(&text),
+				strategy::finalize(&strategy::markdown_body(&text)),
 				"text/plain".to_owned(),
 				"llms.txt",
 				format!("Used llms.txt fallback: {href}"),
@@ -1379,6 +1412,19 @@ const fn done(page: Page) -> Step {
 	Step::Done(Output::Page(page))
 }
 
+/// True when `to` is another page than `from`, not the same one under another
+/// scheme, `www.` host, trailing slash, query or fragment.
+fn moved(from: &Url, to: &Url) -> bool {
+	let host = |url: &Url| {
+		let host = url.host_str().unwrap_or_default();
+		host
+			.strip_prefix("www.")
+			.unwrap_or(host)
+			.to_ascii_lowercase()
+	};
+	host(from) != host(to) || from.path().trim_end_matches('/') != to.path().trim_end_matches('/')
+}
+
 /// True when a rendering holds nothing a reader can use.
 fn renders_to_nothing(rendered: &Rendered) -> bool {
 	if rendered.strategy == "embedded" {
@@ -1386,19 +1432,6 @@ fn renders_to_nothing(rendered: &Rendered) -> bool {
 	}
 	!matches!(rendered.verdict, Verdict::Ok)
 		|| !strategy::longer_than(&rendered.content, MIN_RENDERED_CHARS)
-}
-
-/// Markdown without the HTML comments it opens with: metadata a renderer hides
-/// (Apple's documentation alternates open with a JSON comment).
-fn without_leading_comments(markdown: &str) -> &str {
-	let mut rest = markdown.trim_start();
-	while let Some(comment) = rest.strip_prefix("<!--") {
-		let Some(end) = comment.find("-->") else {
-			break;
-		};
-		rest = comment[end + 3..].trim_start();
-	}
-	rest
 }
 
 /// Cheap check before parsing a raw body for a meta refresh.
@@ -1661,6 +1694,101 @@ mod tests {
 		);
 		assert_eq!(run.purposes(), [Purpose::Page, Purpose::Refetch]);
 		assert!(run.page().content.contains("Caf"));
+	}
+
+	#[test]
+	fn a_markdown_response_passes_through_without_markdoc_tags() {
+		let body = "# Lyria\n\n{% table %}\n* {% icon name=\"id\" /%}Model code\n{% /table %}\n\nAn \
+		            experimental engine for musical synthesis.\n";
+		let run = pump(
+			Options::default(),
+			"https://x.test/docs/lyria",
+			|_| response(200, "text/markdown; charset=utf-8", body),
+			no_browser,
+		);
+		let page = run.page();
+		assert_eq!(
+			(page.format, page.content.as_str()),
+			("markdown", "# Lyria\n\n* Model code\n\nAn experimental engine for musical synthesis.")
+		);
+	}
+
+	#[test]
+	fn probes_answered_with_html_are_not_found() {
+		let markdown =
+			format!("# Not the file\n\n{}", "The site answers every path with its app. ".repeat(4));
+		let run = pump(
+			Options::default(),
+			"https://x.test/app/",
+			|request| match request.purpose {
+				Purpose::Page => html(SHELL),
+				Purpose::Llms => response(200, "text/html", &markdown),
+				_ => not_found(),
+			},
+			no_browser,
+		);
+		assert_ne!(run.page().strategy, "llms.txt");
+		assert!(run.purposes().contains(&Purpose::Llms));
+	}
+
+	#[test]
+	fn a_redirect_to_another_page_is_named() {
+		let run = pump(
+			Options::default(),
+			"https://x.test/guide/removed-topic.html",
+			|request| match request.purpose {
+				Purpose::Page => Response {
+					url: "https://x.test/guide/".to_owned(),
+					..html(r#"<meta http-equiv="refresh" content="0;URL=index.html">"#)
+				},
+				Purpose::Refresh => html(ARTICLE),
+				_ => not_found(),
+			},
+			no_browser,
+		);
+		assert!(run.page().notes.contains(
+			&"Redirected from https://x.test/guide/removed-topic.html to https://x.test/guide/index.html"
+				.to_owned()
+		));
+		// An HTTP redirect, even to another page, is the transport's to report.
+		let http = pump(
+			Options::default(),
+			"http://x.test/filing",
+			|request| match request.purpose {
+				Purpose::Page => {
+					Response { url: "https://x.test/archive/filing".to_owned(), ..html(ARTICLE) }
+				},
+				_ => not_found(),
+			},
+			no_browser,
+		);
+		assert!(
+			http
+				.page()
+				.notes
+				.iter()
+				.all(|note| !note.starts_with("Redirected"))
+		);
+	}
+
+	#[test]
+	fn a_redirect_to_a_sign_in_form_is_a_login_wall() {
+		let run = pump(
+			Options::default(),
+			"https://x.test/r/thread/1",
+			|request| Response {
+				url: "https://x.test/login/?reason=agent".to_owned(),
+				..match request.purpose {
+					Purpose::Page | Purpose::UaRetry => html("<h1>Log in to continue</h1>"),
+					_ => not_found(),
+				}
+			},
+			no_browser,
+		);
+		let Output::Failed { verdict, wall, .. } = &run.output else {
+			panic!("expected failure, got {:?}", run.output);
+		};
+		assert_eq!((verdict.as_str(), wall.as_deref()), ("wall", Some("login wall")));
 	}
 
 	#[test]

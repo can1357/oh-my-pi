@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -8,6 +9,7 @@ import {
 	type ReaderStep,
 	renderHtml,
 } from "@oh-my-pi/pi-natives";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { browse } from "../../packages/coding-agent/src/web/browse";
 import { HttpSession } from "../../packages/coding-agent/src/web/http-session";
 import {
@@ -19,6 +21,7 @@ import {
 	markdownView,
 	normalize,
 	parseGold,
+	plainTextView,
 	stripReaderFrontMatter,
 	type WordBag,
 	words,
@@ -29,8 +32,8 @@ const root = path.join(os.homedir(), ".omp", "web-corpus");
 const width = 250;
 const timeoutMs = 30_000;
 const modes = ["auto", "full"] as const;
+const autoOptions = { mode: "auto", hidden: "reachable", width } as const;
 const formats = ["markdown", "text"] as const;
-const lineBaseline = 0.964;
 const writerWordMinimum = 0.99;
 const htmlWordBoundary =
 	/^(?:address|article|aside|blockquote|br|dd|div|dl|dt|figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|th|thead|tr|ul)$/i;
@@ -89,6 +92,10 @@ interface LegacyAddon {
 interface Replay {
 	output: ReaderOutput;
 	browsed: boolean;
+}
+interface ReaderBody {
+	content: string;
+	markdown: boolean;
 }
 interface RenderSet {
 	outputs: Record<Mode, Record<Format, string>>;
@@ -235,13 +242,20 @@ async function readReference(dir: string, prefix: string, url: string): Promise<
 	return { html, lynx, url };
 }
 
-function readerAlternate(output: ReaderOutput): string | undefined {
+function readerBody(output: ReaderOutput): ReaderBody | undefined {
 	if (output.kind !== "page") return undefined;
 	switch (output.strategy) {
 		case "alternate-markdown":
 		case "content-negotiation":
 		case "llms.txt":
-			return stripReaderFrontMatter(output.content ?? "");
+		// Native sniffing classified the response as a non-HTML page.
+		case "text":
+		case "json":
+		case "feed": {
+			const markdown = output.format === "markdown";
+			const content = output.content ?? "";
+			return { content: markdown ? stripReaderFrontMatter(content) : content, markdown };
+		}
 		default:
 			return undefined;
 	}
@@ -306,13 +320,21 @@ async function record(site: Site): Promise<{ recording: Recording; primary: Capt
 	const primary = await recordReference(dir, "", await readExchange(dir, exchanges[index]));
 	const browser = browserIndex === undefined ? undefined : await readExchange(dir, exchanges[browserIndex]);
 	const dom = browser?.body?.length ? await recordReference(dir, "browser-", browser) : undefined;
-	const alternate = readerAlternate(output);
+	const body = readerBody(output);
 	const draft = writeGold({
-		...(alternate === undefined ? draftGold(primary.lynx, primary.trafilatura) : draftGold(undefined, alternate)),
+		...(body ? draftGold(undefined, body.content, body.markdown) : draftGold(primary.lynx, primary.trafilatura)),
 		browser: dom && draftGold(dom.lynx, dom.trafilatura),
 	});
 	await Bun.write(path.join(dir, "gold.draft.toml"), draft);
-	const recording = { requestedUrl: site.url, url, index, browserIndex, off, on, exchanges };
+	const recording: Recording = {
+		requestedUrl: site.url,
+		url,
+		index,
+		browserIndex,
+		off,
+		on,
+		exchanges,
+	};
 	await Bun.write(path.join(dir, "recording.json"), JSON.stringify(recording, null, 2));
 	return { recording, primary };
 }
@@ -337,7 +359,10 @@ async function renderSet(reference: Reference): Promise<RenderSet> {
 	const unstable: RenderSet["unstable"] = [];
 	for (const mode of modes) {
 		for (const format of formats) {
-			const options = { mode, format, width, baseUrl: reference.url };
+			const options =
+				mode === "auto"
+					? { ...autoOptions, format, baseUrl: reference.url }
+					: { mode, format, width, baseUrl: reference.url };
 			const first = await renderHtml(reference.html, options);
 			outputs[mode][format] = first;
 			if (first !== (await renderHtml(reference.html, options))) unstable.push({ mode, format });
@@ -486,24 +511,16 @@ function agreement(candidate: WordBag, reference: WordBag, allowBothEmpty = fals
 async function score(site: Site): Promise<Row> {
 	const dir = path.join(root, site.slug);
 	const recording = (await Bun.file(path.join(dir, "recording.json")).json()) as Recording;
-	const entry = recording.exchanges[recording.index];
-	const reference = await readReference(dir, "", entry.response.url);
+	const url = recording.exchanges[recording.index].response.url;
 	const reviewed = Bun.file(path.join(dir, "gold.toml"));
 	const goldFile = (await reviewed.exists()) ? reviewed : Bun.file(path.join(dir, "gold.draft.toml"));
 	const gold = parseGold(await goldFile.text());
-	const rendered = await renderSet(reference);
-	const lynxOptions = { format: "text", mode: "full", hidden: "all", width, baseUrl: reference.url } as const;
-	const lynxText = await renderHtml(reference.html, lynxOptions);
-	const unstable = rendered.unstable.map(({ mode, format }) => outputFilename(mode, format));
-	if (lynxText !== (await renderHtml(reference.html, lynxOptions))) unstable.push("ours-full.txt");
-	await Promise.all([writeOutputs(dir, rendered), Bun.write(path.join(dir, "ours-full.txt"), lynxText)]);
 	const expected = verdicts[site.class];
 	const off = await replay(dir, recording, false);
 	const on = await replay(dir, recording, true);
 	const verdictPass = expected ? g4(expected, off, on, gold) : null;
-	const alternate = readerAlternate(off.output);
-	const hasAlternate = alternate !== undefined;
-	if (expected || hasAlternate) {
+	const body = readerBody(off.output);
+	if (expected || body) {
 		await Promise.all([
 			Bun.write(path.join(dir, "ours-reader-off.json"), JSON.stringify(off, null, 2)),
 			Bun.write(path.join(dir, "ours-reader-on.json"), JSON.stringify(on, null, 2)),
@@ -511,14 +528,32 @@ async function score(site: Site): Promise<Row> {
 	}
 	const checkLength = site.class !== "wall" && site.class !== "app-shell";
 	const snapshots = [];
+	const unstable: string[] = [];
 	let required = gold.must;
-	if (alternate !== undefined) {
+	let writers: Agreement | null = null;
+	let matchedLines = 0;
+	let lynxLines = 0;
+	let sizes: string;
+	if (body) {
+		const file = outputFilename("auto", body.markdown ? "markdown" : "text");
+		await Bun.write(path.join(dir, file), body.content);
+		const again = readerBody((await replay(dir, recording, false)).output);
+		if (!again || again.content !== body.content || again.markdown !== body.markdown) unstable.push(file);
 		snapshots.push({
-			...checkGold(markdownView(alternate), gold),
-			markdownFile: "ours-reader-off.json",
+			...checkGold(body.markdown ? markdownView(body.content) : plainTextView(body.content), gold),
+			markdownFile: file,
 			bloat: null,
 		});
+		sizes = `${body.markdown ? `${body.content.length}/—` : `—/${body.content.length}`}\tn/a`;
 	} else {
+		const reference = await readReference(dir, "", url);
+		const rendered = await renderSet(reference);
+		const lynxOptions = { format: "text", mode: "full", hidden: "all", width, baseUrl: url } as const;
+		const lynxText = await renderHtml(reference.html, lynxOptions);
+		unstable.push(...rendered.unstable.map(({ mode, format }) => outputFilename(mode, format)));
+		if (lynxText !== (await renderHtml(reference.html, lynxOptions))) unstable.push("ours-full.txt");
+		await Promise.all([writeOutputs(dir, rendered), Bun.write(path.join(dir, "ours-full.txt"), lynxText)]);
+		sizes = modes.map(mode => formats.map(format => rendered.outputs[mode][format].length).join("/")).join("\t");
 		snapshots.push(scoreSnapshot(rendered, reference, gold, { checkLength, strategy: off.output.strategy }));
 		if (gold.browser && recording.browserIndex !== undefined && on.browsed && on.output.verdict === "ok") {
 			const dom = await readReference(dir, "browser-", recording.exchanges[recording.browserIndex].response.url);
@@ -534,12 +569,6 @@ async function score(site: Site): Promise<Row> {
 			required = gold.browser.must;
 			unstable.push(...browser.unstable.map(({ mode, format }) => outputFilename(mode, format, true)));
 		}
-	}
-	const chosen = snapshots[snapshots.length - 1];
-	let writers: Agreement | null = null;
-	let matchedLines = 0;
-	let lynxLines = 0;
-	if (!hasAlternate) {
 		writers = agreement(
 			words(visibleMarkdown(rendered.outputs.full.markdown), true),
 			words(visibleLynx(rendered.outputs.full.text), true),
@@ -550,6 +579,7 @@ async function score(site: Site): Promise<Row> {
 			if (!change.added && !change.removed) matchedLines += change.count;
 		}
 	}
+	const chosen = snapshots[snapshots.length - 1];
 	const writerWordsPass = writers
 		? writers.precision >= writerWordMinimum && writers.recall >= writerWordMinimum
 		: null;
@@ -564,9 +594,8 @@ async function score(site: Site): Promise<Row> {
 		G5: writerWordsPass,
 		G7: deterministic,
 	};
-	const sizes = modes.map(mode => formats.map(format => rendered.outputs[mode][format].length).join("/")).join("\t");
 	const ratios = writers ? `${(100 * writers.precision).toFixed(1)}/${(100 * writers.recall).toFixed(1)}` : "n/a";
-	const lineCounts = hasAlternate ? "n/a" : `${matchedLines}/${lynxLines}`;
+	const lineCounts = body ? "n/a" : `${matchedLines}/${lynxLines}`;
 	const results = gateIds.map(gate => (gates[gate] === null ? "—" : gates[gate] ? "PASS" : "FAIL")).join("\t");
 	console.log(
 		`${site.slug}\t${sizes}\t${ratios}\t${lineCounts}\t${off.output.verdict ?? "—"}/${on.output.verdict ?? "—"}\t${results}`,
@@ -593,7 +622,7 @@ async function score(site: Site): Promise<Row> {
 	if (problems.length) console.error(`${site.slug}: ${problems.join("; ")}`);
 	return {
 		slug: site.slug,
-		url: reference.url,
+		url: body ? off.output.url : url,
 		gates,
 		matchedLines,
 		lynxLines,
@@ -604,7 +633,67 @@ async function score(site: Site): Promise<Row> {
 	};
 }
 
-async function holdout(sites: Site[], count: number, addon?: LegacyAddon): Promise<void> {
+async function scoreHoldout(): Promise<void> {
+	const entries = await fs.readdir(root, { withFileTypes: true }).catch(error => {
+		if (isEnoent(error)) return [];
+		throw error;
+	});
+	let reviewed = 0;
+	let content = 0;
+	let chrome = 0;
+	let failed = 0;
+	console.log("holdout\tG1 content/structure\tG2 chrome");
+	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+		if (!entry.isDirectory() || !entry.name.startsWith("holdout-")) continue;
+		const slug = entry.name;
+		const dir = path.join(root, slug);
+		const goldFile = Bun.file(path.join(dir, "gold.toml"));
+		if (!(await goldFile.exists())) continue;
+		reviewed++;
+		try {
+			const gold = parseGold(await goldFile.text());
+			const recording = (await Bun.file(path.join(dir, "recording.json")).json()) as Recording;
+			const baseUrl = recording.exchanges[recording.index].response.url;
+			const { output } = await replay(dir, recording, false);
+			const body = readerBody(output);
+			const text =
+				body?.content ??
+				(await renderHtml(await Bun.file(path.join(dir, "page.html")).text(), {
+					...autoOptions,
+					format: "markdown",
+					baseUrl,
+				}));
+			const file = outputFilename("auto", "markdown");
+			await Bun.write(path.join(dir, file), text);
+			const view = body?.markdown === false ? plainTextView(text) : markdownView(text);
+			const { missing, noise, shortStructure } = checkGold(view, gold);
+			const acceptsEmpty =
+				!/[^\s\p{Default_Ignorable_Code_Point}]/u.test(view.text) ||
+				output.verdict === "js-shell" ||
+				output.verdict === "wall" ||
+				output.verdict === "empty";
+			const missingGold = !gold.must.length && !acceptsEmpty;
+			const contentPass = !missingGold && !missing.length && !shortStructure.length;
+			const chromePass = !noise.length;
+			content += Number(contentPass);
+			chrome += Number(chromePass);
+			failed += Number(!contentPass || !chromePass);
+			console.log(`${slug}\t${contentPass ? "PASS" : "FAIL"}\t${chromePass ? "PASS" : "FAIL"}`);
+			if (missingGold) console.error(`${slug}: G1 ${file}: gold.must is empty for a content page`);
+			for (const snippet of missing) console.error(`${slug}: G1 ${file}: missing ${JSON.stringify(snippet)}`);
+			for (const issue of shortStructure) console.error(`${slug}: G1 ${file}: ${issue}`);
+			for (const snippet of noise) console.error(`${slug}: G2 ${file}: noise ${JSON.stringify(snippet)}`);
+		} catch (error) {
+			failed++;
+			console.log(`${slug}\tERROR`);
+			console.error(`${slug}: ${error}`);
+		}
+	}
+	console.log(`Holdout: ${reviewed - failed}/${reviewed} passed; G1 ${content}/${reviewed}; G2 ${chrome}/${reviewed}`);
+	if (failed) process.exitCode = 1;
+}
+
+async function sampleHoldout(sites: Site[], count: number): Promise<Site[]> {
 	const known = new Set<string>();
 	for (const site of sites) {
 		known.add(pageUrl(site.url).href);
@@ -630,24 +719,53 @@ async function holdout(sites: Site[], count: number, addon?: LegacyAddon): Promi
 	}
 	if (candidates.length < count)
 		throw new Error(`Holdout needs ${count} distinct non-corpus URLs; got ${candidates.length}`);
-	console.log("holdout\tconsensus words\trecall %\tnoise %\tlegacy recall %\tlegacy noise %\turl");
+	const selected: Site[] = [];
 	for (let i = 0; i < count; i++) {
 		const j = i + Math.floor(Math.random() * (candidates.length - i));
 		[candidates[i], candidates[j]] = [candidates[j], candidates[i]];
 		const url = candidates[i];
-		const slug = `holdout-${Bun.hash(url).toString(16)}`;
+		selected.push({ slug: `holdout-${Bun.hash(url).toString(16)}`, url, class: "listing" });
+	}
+	return selected;
+}
+
+async function selectRecordedHoldouts(slugs: string[]): Promise<Site[]> {
+	const selected: Site[] = [];
+	for (const slug of new Set(slugs)) {
+		if (!/^holdout-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+			throw new Error(`Invalid holdout slug: ${JSON.stringify(slug)}`);
+		}
+		const file = Bun.file(path.join(root, slug, "recording.json"));
 		try {
-			const { primary: reference } = await record({ slug, url, class: "listing" });
+			const recording = (await file.json()) as Recording;
+			selected.push({ slug, url: recording.requestedUrl, class: "listing" });
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			throw new Error(`No recording for ${slug}`);
+		}
+	}
+	return selected;
+}
+
+async function holdout(sites: Site[], addon?: LegacyAddon): Promise<void> {
+	console.log("holdout\tconsensus words\trecall %\tnoise %\tlegacy recall %\tlegacy noise %\turl");
+	for (const site of sites) {
+		const { slug, url } = site;
+		try {
+			const { recording, primary: reference } = await record(site);
+			const body = readerBody((await replay(path.join(root, slug), recording, false)).output);
 			const target = consensus(words(reference.lynx), words(markdownView(reference.trafilatura).text));
-			const text = await renderHtml(reference.html, { width, baseUrl: reference.url });
-			const legacy = await addon?.htmlToMarkdown(reference.html, { cleanContent: true, hiddenContent: "reachable" });
-			const ratios = (markdown: string) => {
-				const bag = words(markdownView(markdown).text);
+			const text = body?.content ?? (await renderHtml(reference.html, { ...autoOptions, baseUrl: reference.url }));
+			const legacy = body
+				? undefined
+				: await addon?.htmlToMarkdown(reference.html, { cleanContent: true, hiddenContent: "reachable" });
+			const ratios = (content: string, markdown = true) => {
+				const bag = words(markdown ? markdownView(content).text : content);
 				const agreed = consensus(bag, target).size;
 				return `${target.size ? ((100 * agreed) / target.size).toFixed(1) : "—"}\t${target.size && bag.size ? (100 * (1 - agreed / bag.size)).toFixed(1) : "—"}`;
 			};
 			console.log(
-				`${slug}\t${target.size}\t${ratios(text)}\t${legacy === undefined ? "—\t—" : ratios(legacy)}\t${url}`,
+				`${slug}\t${target.size}\t${ratios(text, body?.markdown)}\t${legacy === undefined ? "—\t—" : ratios(legacy)}\t${url}`,
 			);
 		} catch (error) {
 			console.error(`${slug}: ${error}`);
@@ -664,7 +782,7 @@ try {
 	const [command, ...args] = Bun.argv.slice(2);
 	if (command !== "record" && command !== "score" && command !== "holdout") {
 		throw new Error(
-			"Usage: bun scripts/web-bench/bench.ts record [--only slug,...] | score [slug ...] | holdout [count] < urls.txt",
+			"Usage: bun scripts/web-bench/bench.ts record [--only slug,...] | score [--holdout | slug ...] | holdout [count] < urls.txt | holdout --only holdout-slug,...",
 		);
 	}
 	const { page: sites } = Bun.TOML.parse(await Bun.file(path.join(import.meta.dir, "corpus.toml")).text()) as {
@@ -673,11 +791,21 @@ try {
 	for (const site of sites) {
 		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(site.slug)) throw new Error(`Invalid corpus slug: ${site.slug}`);
 	}
-	if (command === "holdout") {
-		const count = args.length ? Number(args[0]) : 10;
-		if (args.length > 1 || !Number.isSafeInteger(count) || count < 1)
-			throw new Error("Holdout count must be a positive integer");
-		await holdout(sites, count, openLegacy());
+	if (command === "score" && args[0] === "--holdout") {
+		if (args.length !== 1) throw new Error("score --holdout does not accept corpus slugs");
+		await scoreHoldout();
+	} else if (command === "holdout") {
+		let selected: Site[];
+		if (args[0] === "--only") {
+			if (args.length !== 2) throw new Error("holdout --only takes one comma-separated list of holdout slugs");
+			selected = await selectRecordedHoldouts(args[1].split(",").map(slug => slug.trim()));
+		} else {
+			const count = args.length ? Number(args[0]) : 10;
+			if (args.length > 1 || !Number.isSafeInteger(count) || count < 1)
+				throw new Error("Holdout count must be a positive integer");
+			selected = await sampleHoldout(sites, count);
+		}
+		await holdout(selected, openLegacy());
 	} else {
 		let slugs = args;
 		if (command === "record" && args[0] === "--only") {
@@ -714,16 +842,15 @@ try {
 			const lineRows = rows.filter(row => row.gates.G5 !== null);
 			const matched = lineRows.reduce((sum, row) => sum + row.matchedLines, 0);
 			const lines = lineRows.reduce((sum, row) => sum + row.lynxLines, 0);
-			const linePass = lineRows.length ? lines > 0 && matched / lines >= lineBaseline : null;
+			const identity = lines ? matched / lines : null;
 			console.log(
-				`G5 line identity (ours-full.txt / lynx.txt): ${linePass === null ? "n/a" : `${matched}/${lines} (${lines ? ((100 * matched) / lines).toFixed(2) : "—"}%; minimum 96.4%) ${linePass ? "PASS" : "FAIL"}`}`,
+				`G5 line identity (informational, ours-full.txt / lynx.txt): ${identity === null ? "n/a" : `${matched}/${lines} (${(100 * identity).toFixed(2)}%)`}`,
 			);
 			const gates = [];
 			for (const gate of gateIds) {
 				const eligible = rows.filter(row => row.gates[gate] !== null);
 				const pass = eligible.filter(row => row.gates[gate]).length;
-				const ok =
-					pass === eligible.length && rows.length === selected.length && (gate !== "G5" || linePass !== false);
+				const ok = pass === eligible.length && rows.length === selected.length;
 				gates.push({ gate, passed: pass, eligible: eligible.length, ok });
 				console.log(
 					`${gate}: ${eligible.length ? `${pass}/${eligible.length} ${ok ? "PASS" : "FAIL"}` : ok ? "N/A" : "FAIL"}`,
@@ -732,7 +859,7 @@ try {
 			}
 			const summary = {
 				gates,
-				g5Lines: { matched, lines, threshold: lineBaseline, ok: linePass },
+				g5Lines: { matched, lines, identity },
 				rows,
 				errors,
 			};

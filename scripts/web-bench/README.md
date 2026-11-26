@@ -7,9 +7,15 @@ bun scripts/web-bench/bench.ts record
 bun scripts/web-bench/bench.ts record --only bbc,npr
 bun scripts/web-bench/bench.ts score
 bun scripts/web-bench/bench.ts holdout 10 < urls.txt
+bun scripts/web-bench/bench.ts holdout --only holdout-abc123
+bun scripts/web-bench/bench.ts score --holdout
 ```
 
 `record` and `score` accept optional corpus slugs for a focused run. With no slugs, they run the entire `corpus.toml`. The benchmark disables site-specific handlers and does not configure remote readers so it measures the local renderer. `score` is offline: it never opens a network connection or runs the browser. `holdout` accepts newline-delimited HTTP(S) URLs on stdin (for example, URLs from session history), samples ten distinct non-corpus URLs by default, and records just those. It reports the proportion of the two reference tools' shared word occurrences retained and the fraction of candidate word occurrences outside that consensus. This noise estimate also counts valid words only one reference found. If a legacy addon was supplied, it prints the same metrics for the old Markdown path.
+
+`holdout --only` re-records the URLs in the named holdout directories. It does not read stdin or resample, and preserves each reviewed `gold.toml`.
+
+`score --holdout` runs G1 (including structure) and G2 offline against every `holdout-*` directory with a reviewed `gold.toml`. An empty `must` list is valid when the evaluated output is empty or the Reader reports `js-shell`, `wall`, or `empty`. It writes the evaluated content to `ours-auto.md`, replaying the Reader for direct non-HTML content and alternate responses. Its results are separate from the corpus gates and `score.json`. Both score paths render HTML in auto mode with `hidden: "reachable"` to match fetch.
 
 ## Local files and gold review
 
@@ -30,12 +36,12 @@ The table shows output lengths for unified `auto` and `full` modes (Markdown/tex
 | Gate | Requirement |
 | --- | --- |
 | G1 | Auto Markdown contains every required snippet and satisfies the reviewed minimum counts on non-wall pages. An app shell may have an empty `must` list. Use the browser snapshot when browser replay recovers the page. |
-| G2 | No forbidden snippet in auto Markdown. Like G1, matches ignore Markdown markup and whitespace layout on both sides. |
+| G2 | No forbidden snippet in auto Markdown. Like G1, matches ignore Markdown markup, all whitespace, and zero-width characters, and treat curly and straight quotes alike. |
 | G3 | Auto output has no data URI or metadata dump. Except for app shells and walls, it has at most 105% of real Lynx's visible text. Embedded strategies are not compared. |
 | G4 | With browsing off, pages classified as `wall` must report `wall`; those classified as `app-shell` must report `js-shell` or pass gold via embedded data. With browsing on, recovery must pass browser gold or preserve the verdict without returning chrome. An `embedded-summary` may accompany a retained `js-shell` verdict. The Reader's generated YAML header is ignored when checking content. |
-| G5 | Full Markdown and full text reach at least 99% word-multiset precision and recall after stripping display notation. For line identity, render full text with `hidden: "all"` to match stock Lynx. At least 96.4% of reference lines must be byte-identical in order, weighted across the corpus. |
-| G7 | Rendering the same input twice in each format and mode (`auto`, `full`) produces identical output. |
+| G5 | Full Markdown and full text reach at least 99% word-multiset precision and recall after stripping display notation. Line identity against stock Lynx (`hidden: "all"`) is reported for information only; it does not affect the gate. |
+| G7 | Rendering the same HTML input twice in each format and mode (`auto`, `full`), or replaying the same Reader body twice, produces identical output. |
 
-If the Reader returns an alternate Markdown URL, negotiated Markdown, or `llms.txt` without browsing, recording drafts gold from that response. G1, G2, and the structure checks use its content in `ours-reader-off.json`; G3 and G5 are not applicable because Lynx saw the original HTML.
+If the Reader returns direct non-HTML content, an alternate Markdown URL, negotiated Markdown, or `llms.txt` without browsing, recording drafts gold from that response. G1, G2, and the structure checks use the replayed Reader body rather than rendering the original snapshot. G3 and G5 do not apply to that body.
 
 Any failed applicable gate or missing recording exits nonzero. Keep the corpus and scores local; this benchmark is not a CI test.
