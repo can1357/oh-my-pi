@@ -197,6 +197,16 @@ function splitComplete(text: string): { complete: string; pending: string } {
 	return at < 0 ? { complete: "", pending: text } : { complete: text.slice(0, at + 1), pending: text.slice(at + 1) };
 }
 
+/**
+ * `stat` with its size cut to the end of `text`, read from byte `from`: the
+ * stat that read answers for. A read that stops short of the size `stat` saw (a
+ * window of a long transcript) then leaves the next poll a larger size to read
+ * on to, instead of an unchanged stat that idles it with the tail unread.
+ */
+function answeredStat(stat: AgentTranscriptStat, from: number, text: string): AgentTranscriptStat {
+	return { ...stat, size: Math.min(stat.size, from + Buffer.byteLength(text, "utf-8")) };
+}
+
 export class AgentTranscriptViewerModel {
 	/** Bumped on every change either face shows. */
 	readonly rev = signal(0);
@@ -362,35 +372,77 @@ export class AgentTranscriptViewerModel {
 	/**
 	 * Read the transcript from the anchor of `state` and append what follows the
 	 * rendered end. Without a state, or when the anchor text changed (a rewrite,
-	 * not an append), read all of it and rebuild.
+	 * not an append), read it from the start and rebuild. A read may answer only
+	 * a window of a long transcript; the state then records the end of that
+	 * window as the size seen, so the next poll reads on from it.
 	 */
 	#readLocal(file: string, stat: AgentTranscriptStat, state: LocalState | undefined, verifyWhole = false): void {
 		this.#loading = true;
-		// A whole-transcript verify reads from the start so the rendered prefix
-		// can be compared, not just the anchor at its end.
-		const from = verifyWhole ? 0 : (state?.anchorOffset ?? 0);
+		if (verifyWhole && state) {
+			void this.#verifyLocal(file, stat, state);
+			return;
+		}
+		const from = state?.anchorOffset ?? 0;
 		this.deps.transcript
 			.readFrom(file, from)
 			.then(text => {
 				this.#loading = false;
 				if (this.#disposed) return;
-				if (verifyWhole && state) {
-					const prefix = text.slice(0, state.rendered.length);
-					const unchanged =
-						prefix.length === state.rendered.length && hashRendered(prefix).value === state.rendered.value;
-					if (unchanged) this.#appendLocal(state, stat, text.slice(state.rendered.length));
-					else this.#applyFull(file, stat, text);
-					return;
-				}
-				if (state && text.startsWith(state.anchor)) this.#appendLocal(state, stat, text.slice(state.anchor.length));
+				const answered = answeredStat(stat, from, text);
+				if (state && text.startsWith(state.anchor))
+					this.#appendLocal(state, answered, text.slice(state.anchor.length));
 				else if (from > 0) this.#readLocal(file, stat, undefined);
-				else this.#applyFull(file, stat, text);
+				else this.#applyFull(file, answered, text);
 			})
 			.catch((error: unknown) => {
 				// The state stays: the next poll retries.
 				this.#loading = false;
 				logger.debug("transcript viewer: read failed", { error: String(error) });
 			});
+	}
+
+	/**
+	 * The whole-transcript verify: whether the transcript still starts with the
+	 * rendered text of `state`, by its hash. A read may answer one window of a
+	 * long transcript, so the rendered text is hashed window by window from byte
+	 * 0 until a window reaches its end; no window is compared as if it held the
+	 * whole of it. Unchanged, what follows the rendered end in that window is
+	 * appended; changed, the view is rebuilt from the first window.
+	 */
+	async #verifyLocal(file: string, stat: AgentTranscriptStat, state: LocalState): Promise<void> {
+		try {
+			const first = await this.deps.transcript.readFrom(file, 0);
+			let text = first;
+			let at = 0;
+			let hashed: RenderedHash = { value: 0n, length: 0 };
+			for (;;) {
+				if (this.#disposed) return;
+				const remaining = state.rendered.length - hashed.length;
+				if (text.length >= remaining) {
+					const whole = concatRendered(hashed, hashRendered(text.slice(0, remaining)));
+					this.#loading = false;
+					if (whole.value === state.rendered.value) {
+						this.#appendLocal(state, answeredStat(stat, at, text), text.slice(remaining));
+					} else this.#applyFull(file, answeredStat(stat, 0, first), first);
+					return;
+				}
+				// A window short of the rendered end: hash its complete lines and read on after them.
+				const { complete } = splitComplete(text);
+				if (!complete) {
+					// The transcript ends before the rendered text does.
+					this.#loading = false;
+					this.#applyFull(file, answeredStat(stat, 0, first), first);
+					return;
+				}
+				hashed = concatRendered(hashed, hashRendered(complete));
+				at += Buffer.byteLength(complete, "utf-8");
+				text = await this.deps.transcript.readFrom(file, at);
+			}
+		} catch (error) {
+			// The state stays: the next poll retries.
+			this.#loading = false;
+			logger.debug("transcript viewer: read failed", { error: String(error) });
+		}
 	}
 
 	#applyFull(file: string, stat: AgentTranscriptStat, text: string): void {

@@ -79,7 +79,7 @@ For a normal local subagent, `Enter` or click focuses the main TUI on that agent
 
 Steering uses the normal prompt path, so the message and response are written to the subagent's persisted session history. While a subagent is focused, `Esc` returns to the main session; it does not interrupt the subagent.
 
-Contexts without a local focusable session use the Hub's full-screen transcript viewer instead. This includes collab guests and advisor rows; advisor transcripts are read-only. The viewer incrementally tails the file-backed transcript and provides an input line only when the selected agent can be messaged. Sending there has the same semantics: revive if parked or killed, steer if running, and prompt if idle.
+Contexts without a local focusable session use the Hub's full-screen transcript viewer instead. This includes collab guests and advisor rows; advisor transcripts are read-only. The viewer incrementally tails the transcript and provides an input line only when the selected agent can be messaged. A local transcript is read in windows of at most 8 MiB (more only for a single longer line), and the viewer reads on from each window at the next poll; its periodic check of the whole transcript reads it window by window too. Sending there has the same semantics: revive if parked or killed, steer if running, and prompt if idle.
 
 ## Pinned jump list and click to focus
 

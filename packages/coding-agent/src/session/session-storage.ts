@@ -1804,6 +1804,29 @@ export async function readSessionTextFrom(
 	return { text: bytes.subarray(offset, end).toString("utf8"), size: bytes.length };
 }
 
+/** Bytes {@link readSessionLinesFrom} reads at once, unless one line needs more. */
+const TRANSCRIPT_WINDOW_BYTES = 8 * 1024 * 1024;
+
+/**
+ * {@link readSessionTextFrom} of a window of at most 8 MiB from `offset`, for a
+ * caller that tails a transcript: it keeps the complete lines and reads on from
+ * where they end, so a long transcript is never held whole. A window that stops
+ * short of the end with no newline in its second half is doubled until it has
+ * one, so the caller moves forward even when it starts up to half a window
+ * before the lines it has not seen (the Agent Hub viewer re-reads the end of
+ * what it rendered); only a line longer than half a window makes a window larger.
+ */
+export async function readSessionLinesFrom(
+	storage: SessionStorage,
+	filePath: string,
+	offset: number,
+): Promise<{ text: string; size: number }> {
+	for (let window = TRANSCRIPT_WINDOW_BYTES; ; window *= 2) {
+		const read = await readSessionTextFrom(storage, filePath, offset, window);
+		if (offset + window >= read.size || read.text.lastIndexOf("\n") >= read.text.length / 2) return read;
+	}
+}
+
 /**
  * The bytes of `filePath` in `storage`, in windows of
  * {@link SESSION_READ_WINDOW_BYTES} read one after another, each kept through
