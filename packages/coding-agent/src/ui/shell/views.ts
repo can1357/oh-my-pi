@@ -113,6 +113,16 @@ export class ViewList<T extends ViewEntry = ViewEntry> {
 		return true;
 	}
 
+	/** Remove and dispose every entry `keep` rejects, in one write. */
+	retain(keep: (entry: T) => boolean): void {
+		const kept: T[] = [];
+		const removed: T[] = [];
+		for (const entry of this.#entries.peek()) (keep(entry) ? kept : removed).push(entry);
+		if (removed.length === 0) return;
+		this.#entries.set(kept);
+		for (const entry of removed) entry.dispose();
+	}
+
 	/** Remove and dispose every entry from `index` on; returns what was removed. */
 	truncate(index: number): readonly T[] {
 		const list = this.#entries.peek();
