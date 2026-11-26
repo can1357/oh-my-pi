@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed gist participants leaving out names used mid-sentence when sentence openers like `The` or `It` filled the five slots first ([#16725](https://github.com/can1357/oh-my-pi/issues/16725), [#19979](https://github.com/can1357/oh-my-pi/pull/19979) by [@JamieJ5926](https://github.com/JamieJ5926))
 ### Removed
 
 - Removed unused `@oh-my-pi/pi-mnemopi/config` exports: `FASTEMBED_CACHE_DIR`, `MODEL_CACHE_DIR`, `DEFAULT_LLM_MODEL_REPO`, `DEFAULT_LLM_MODEL_FILE`, `HOST_LLM_TIMEOUT_SECONDS`, `beamOptimizationsEnabled`, `embeddingsViaApi`, `isApiEmbeddingModel`, `apiEmbeddingsAvailable`, `workingMemoryMaxItems`, `episodicRecallLimit`, `sleepBatchSize`, `scratchpadMaxItems`, `tier2Days`, `tier3Days`, `degradeBatchSize`, `smartCompressEnabled`, `tier3MaxChars`, `veracityWeightOverrides`, `autoMigrateEnabled`, `llmThreads`, `llmRepo`, `llmFile`, `llmModelFiles`, `hostLlmProvider`, `hostLlmModel`, `hostLlmContext` ([#20530](https://github.com/can1357/oh-my-pi/pull/20530))
+
+### Fixed
+
+- Fixed gist participants leaving out names used mid-sentence when sentence openers like `The` or `It` filled the five slots first ([#16725](https://github.com/can1357/oh-my-pi/issues/16725), [#19979](https://github.com/can1357/oh-my-pi/pull/19979) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 ## [19.1.0] - 2026-11-21
 
