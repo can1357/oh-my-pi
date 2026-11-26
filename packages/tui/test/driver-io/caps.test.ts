@@ -221,6 +221,7 @@ describe("cell size from the environment", () => {
 		["12x24", { w: 12, h: 24 }],
 		["12", null],
 		["0x24", null],
+		[`${"9".repeat(400)}x24`, null],
 	] as const)("PI_CELL_SIZE=%j → %j", (value, expected) => {
 		expect(capabilitiesFromEnv({ PI_CELL_SIZE: value }, { id: "base", ...direct }).cell).toEqual(expected);
 	});

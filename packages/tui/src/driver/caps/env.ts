@@ -92,7 +92,8 @@ export function forcedCellSize(env: Env): TerminalCapabilities["cell"] {
 	if (!match) return null;
 	const w = Number(match[1]);
 	const h = Number(match[2]);
-	return w > 0 && h > 0 ? { w, h } : null;
+	// A digit run too long for a safe integer (or one that overflows to Infinity) is malformed too.
+	return Number.isSafeInteger(w) && Number.isSafeInteger(h) && w > 0 && h > 0 ? { w, h } : null;
 }
 
 export interface ImageContext {
