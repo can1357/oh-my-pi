@@ -934,6 +934,67 @@ describe("supermemoryBackend", () => {
 		expect(contents[0]).toContain("reply to four");
 	});
 
+	it("a crash mid-run never makes a later memory-off process's turns retainable", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const settings = { "supermemory.retainEveryNTurns": 1 };
+		const first = makeSession({ settings });
+		await start(first);
+		first.addTurn("one");
+		await first.endTurn();
+		// Killed mid-run: its start marker is written, no stop ever follows.
+		first.addTurn("crashed-run");
+		const second = makeSession({ settings });
+		second.sessionManager.getEntries().push(...first.sessionManager.getEntries());
+		second.addTurn("off-period");
+		const third = makeSession({ settings });
+		third.sessionManager.getEntries().push(...second.sessionManager.getEntries());
+		await start(third);
+		third.addTurn("three");
+		await third.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).toContain("reply to three");
+		expect(contents).not.toContain("off-period");
+	});
+
+	it("switching memory on while a turn begun with it off streams keeps that turn out of older windows", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		await session.setSupermemorySessionState(undefined)?.dispose();
+		// Turn two's prompt is written with memory off; memory comes back while its answer streams.
+		session.sessionManager.getEntries().push({
+			type: "message",
+			id: "u-two",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: "off-period prompt", timestamp: 0 },
+		} as never);
+		session.isStreaming = true;
+		await start(session);
+		session.sessionManager.getEntries().push({
+			type: "message",
+			id: "a-two",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "off-period answer" }],
+				stopReason: "stop",
+				timestamp: 0,
+			},
+		} as never);
+		session.isStreaming = false;
+		await session.endTurn();
+		const contents = create.mock.calls.map(call => call[1]?.content ?? "").join("\n");
+		expect(contents).not.toContain("off-period");
+	});
+
 	it("a run abandoned without agent_end is closed in its transcript, so later off turns stay out", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")
