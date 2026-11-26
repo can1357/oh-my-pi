@@ -6,9 +6,9 @@
  * - An extension presenter's compact line (`term.compact`): the status glyph
  *   and the label, then the presenter's rows; a bare one says what runs.
  * - A viewport allocation (the transcript paints the block at a fixed
- *   height): 3 or more rows keep the look's head row above its newest rows,
- *   2 rows open a frame edge with the title, 1 row is the status line, 0
- *   rows nothing.
+ *   height): 3 or more rows keep the look's head (through its title row)
+ *   above its newest rows, 2 rows open a frame edge with the title, 1 row is
+ *   the status line, 0 rows nothing.
  * - Otherwise the tool's look, set off by a blank row above and below when
  *   the look is framed.
  * - Under the look, the result's images where the terminal draws images
@@ -16,7 +16,8 @@
  *   placeholders out.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
-import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { type Block, defineRolePainter, EMPTY_BLOCK, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
@@ -100,7 +101,8 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
 	// The look's own rows when they fit (margins dropped), else its head over its newest rows, else the compact rows.
 	const own = paintLook(node, withContext(cx, { height: undefined }));
 	if (own.rows.length > 0 && own.rows.length <= rows) return own;
-	if (rows >= 3 && own.rows.length > 0) return headAndTail(own, rows);
+	const cut = rows >= 3 ? headAndTail(own, rows) : undefined;
+	if (cut) return cut;
 	const props = toolProps(node);
 	const theme = cx.theme;
 	const text = compactText(props, cx);
@@ -114,22 +116,41 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
 }
 
 /**
- * `block` cut to `rows` rows: its first row (a framed look's titled edge) over
- * its last `rows - 1` (the newest content and the closing edge). Hits and the
- * cursor in the dropped rows go with them.
+ * `block` cut to `rows` rows: its head (through its first non-blank row: a
+ * framed look's titled edge, a boxed look's pad and title) over its newest
+ * rows. The tail never starts inside an image: its draw rides on the image's
+ * last row and moves up over the reserved rows above it (`anchoredRows`), so a
+ * cut image would paint over the head. Hits are clipped to the rows kept; a
+ * cursor in a dropped row goes. Undefined when the head leaves no row for the
+ * tail.
  */
-function headAndTail(block: Block, rows: number): Block {
-	const cut = block.rows.length - (rows - 1);
-	const at = (row: number): number | undefined => (row === 0 ? 0 : row >= cut ? row - cut + 1 : undefined);
+function headAndTail(block: Block, rows: number): Block | undefined {
+	const head = block.rows.findIndex(row => Bun.stripANSI(row).trim().length > 0) + 1;
+	if (head === 0 || head >= rows) return undefined;
+	let cut = block.rows.length - (rows - head);
+	while (cut < block.rows.length && holdsImage(block.rows[cut]!) && holdsImage(block.rows[cut - 1]!)) cut++;
 	const hits = block.hits?.flatMap(hit => {
-		const row = at(hit.row);
-		return row === undefined || (row === 0 && hit.height > 1) ? [] : [{ ...hit, row }];
+		const end = hit.row + hit.height;
+		const kept: Hit[] = [];
+		if (hit.row < head) kept.push({ ...hit, height: Math.min(end, head) - hit.row });
+		if (end > cut) {
+			const from = Math.max(hit.row, cut);
+			kept.push({ ...hit, row: from - cut + head, height: end - from });
+		}
+		return kept;
 	});
-	const cursorRow = block.cursor ? at(block.cursor.row) : undefined;
+	const cursor = block.cursor;
+	const cursorRow = !cursor
+		? undefined
+		: cursor.row < head
+			? cursor.row
+			: cursor.row >= cut
+				? cursor.row - cut + head
+				: undefined;
 	return {
-		rows: [block.rows[0]!, ...block.rows.slice(cut)],
+		rows: [...block.rows.slice(0, head), ...block.rows.slice(cut)],
 		...(hits && hits.length > 0 ? { hits } : {}),
-		...(block.cursor && cursorRow !== undefined ? { cursor: { row: cursorRow, col: block.cursor.col } } : {}),
+		...(cursor && cursorRow !== undefined ? { cursor: { row: cursorRow, col: cursor.col } } : {}),
 	};
 }
 
