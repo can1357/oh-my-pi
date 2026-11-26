@@ -339,6 +339,7 @@ describe("openai-models-list pricing and gateway metadata discovery (#15655)", (
 			);
 			expect(models).toHaveLength(1);
 			expect(models[0]?.api).toBe("openai-responses");
+			expect(models[0]?.kind).toBe("image");
 			expect(models[0]?.cost).toEqual({ input: 5, output: 10, cacheRead: 0, cacheWrite: 0 });
 		});
 
@@ -421,11 +422,13 @@ describe("openai-models-list pricing and gateway metadata discovery (#15655)", (
 						},
 					}),
 				);
-				// Seed the retired cache AFTER writing models.json with a timestamp
-				// strictly newer than its mtime so `#isDiscoveryCacheOlderThanModelsConfig`
-				// cannot mask a failure to retire the namespace.
-				const freshCacheTimestamp = Math.max(Date.now(), Math.ceil(fs.statSync(variantModelsJson).mtimeMs) + 1_000);
-				writeModelCache(retiredCacheProviderId, freshCacheTimestamp, [staleRow], true, "", cacheDbPath);
+				// Backdate models.json mtime by 2s and seed the retired cache at `now`
+				// so `updatedAt` is strictly newer than models.json mtime while staying
+				// <= Date.now() (required by `readModelCache`'s freshness check).
+				const now = Date.now();
+				const past = new Date(now - 2_000);
+				fs.utimesSync(variantModelsJson, past, past);
+				writeModelCache(retiredCacheProviderId, now, [staleRow], true, "", cacheDbPath);
 
 				const fetchFn = (async (input: string | URL | Request) => {
 					const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;

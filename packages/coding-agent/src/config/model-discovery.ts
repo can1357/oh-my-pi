@@ -981,12 +981,15 @@ function extractOpenAIModelsListInputCapabilities(item: {
  * Decisions API another). A row that declares nothing keeps the provider's
  * chat API.
  */
-function extractOpenAIModelsListOutputTask(item: {
-	output?: unknown;
-	output_modalities?: unknown;
-	modalities?: unknown;
-	architecture?: unknown;
-}): { kind: KindApiKind; api: Api } | undefined {
+function extractOpenAIModelsListOutputTask(
+	item: {
+		output?: unknown;
+		output_modalities?: unknown;
+		modalities?: unknown;
+		architecture?: unknown;
+	},
+	configuredApi?: Api,
+): { kind: KindApiKind; api: Api } | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
 	const modalitiesObj = isRecord(item.modalities) ? item.modalities : undefined;
 	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
@@ -1016,11 +1019,14 @@ function extractOpenAIModelsListOutputTask(item: {
 		case "embedding":
 			return { kind: "embedding", api: "openai-embeddings" };
 		case "image":
-			// Nested `modalities.output: ["image"]` advertises capability rather than
-			// a dedicated `/images/generations` endpoint (e.g. Responses-hosted image
-			// models); only switch transports when an explicit output/architecture
-			// field declares the dedicated image task.
-			return explicitOutput.size > 0 ? { kind: "image", api: "openai-images" } : undefined;
+			// Explicit output/architecture declarations select `/images/generations`.
+			// Nested `modalities.output: ["image"]` on an `openai-responses` provider
+			// marks a Responses-hosted image model: keep the configured Responses
+			// transport while recording `kind: "image"` so the image role can select it.
+			if (explicitOutput.size > 0) {
+				return { kind: "image", api: "openai-images" };
+			}
+			return configuredApi === "openai-responses" ? { kind: "image", api: configuredApi } : undefined;
 		case "speech":
 			return { kind: "tts", api: "openai-speech" };
 		case "transcription":
@@ -1420,7 +1426,7 @@ export async function discoverOpenAIModelsList(
 		// `/v1/decisions`, OpenAI's Decisions API.
 		const task: { kind: ModelKind; api: Api } | undefined = nativeMetadataForModel?.decision
 			? { kind: "judge", api: "openai-decisions" }
-			: extractOpenAIModelsListOutputTask(item);
+			: extractOpenAIModelsListOutputTask(item, providerConfig.api);
 		const rawPricing = item.pricing ?? metadata?.pricing;
 		if (task) {
 			const taskPricing = extractOpenAIModelsListPricing(rawPricing, { requireCompletion: false });
