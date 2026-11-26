@@ -19,7 +19,7 @@ import type {
 	ProviderSessionState,
 	TextContent,
 } from "@oh-my-pi/pi-ai/types";
-import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { markPerCallContextMessage, markRepeatedPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
@@ -392,6 +392,22 @@ describe("anthropic message threads", () => {
 		expect(sent[1].betas).not.toContain(THREADS_BETA);
 		expect(sent[2].body.thread).toEqual({ type: "continue", previous_message_id: "msg_1" });
 		expect(userTexts(sent[2].body)).toEqual(["second", "reply 2", "third"]);
+	});
+
+	it("sends a request with a repeated per-call message without a thread, as a per-call one", async () => {
+		const { fetch, sent } = endpoint();
+		const chat = session(fetch);
+
+		await chat.turn("first");
+		// The agent sends a per-call note the previous request sent with the same bytes as history; its next copy may
+		// still differ, so a thread could not continue past it.
+		const note: Message = { role: "developer", content: "repeated reminder", timestamp: 99 };
+		markPerCallContextMessage(note);
+		markRepeatedPerCallContextMessage(note);
+		await chat.turn("second", [note]);
+
+		expect(sent.map(request => request.body.thread?.type)).toEqual(["create", undefined]);
+		expect(sent[1].betas).not.toContain(THREADS_BETA);
 	});
 
 	it("honors statefulResponses: false", async () => {

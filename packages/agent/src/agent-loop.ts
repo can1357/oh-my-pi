@@ -2040,6 +2040,11 @@ interface PreparedProviderCall {
 	ownedDialect: Dialect | undefined;
 	/** Steering source offered to the provider for this call. */
 	liveSteering?: LiveSteeringChannel;
+	/**
+	 * Records this call's per-call messages as the previous main request's; called as the provider reports its
+	 * response to the request (its `onResponse`), so a request stopped before it reached the provider is no record.
+	 */
+	perCallMessagesSent?: () => void;
 }
 
 /**
@@ -2152,6 +2157,14 @@ async function prepareProviderCall(
 	if (config.transformProviderContext) {
 		llmContext = await config.transformProviderContext(llmContext, model, signal);
 	}
+	// After the provider-context transform, so the comparison reads the bytes the request sends: a host rewrites
+	// message content there (image descriptions, a secret obfuscator, a blob store's references).
+	let perCallMessagesSent: (() => void) | undefined;
+	if (config.repeatedPerCallMessages) {
+		const settled = config.repeatedPerCallMessages.settle(llmContext.messages);
+		if (settled.messages !== llmContext.messages) llmContext = { ...llmContext, messages: settled.messages };
+		perCallMessagesSent = settled.sent;
+	}
 
 	let promptToolWireTools: Context["tools"];
 	if (ownedDialect && llmContext.tools && llmContext.tools.length > 0) {
@@ -2170,7 +2183,7 @@ async function prepareProviderCall(
 		// The transformed standby definitions, when no request has declared tools yet.
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, llmContext.inactiveTools);
 	}
-	return { model, context: llmContext, promptToolWireTools, ownedDialect };
+	return { model, context: llmContext, promptToolWireTools, ownedDialect, perCallMessagesSent };
 }
 
 /**
@@ -2275,11 +2288,18 @@ async function streamAssistantResponse(
 
 	// Wrap the user-supplied onResponse so we always observe response headers
 	// for telemetry (`ChatUsageEvent.headers`, gateway auto-detection) without
-	// stealing them from the configured hook.
+	// stealing them from the configured hook. A response also makes this request
+	// the one the next request compares its per-call messages with: only a request
+	// the provider answered can have left them in its cache. One stopped before it
+	// reached the provider sends nothing: a stream function's own gate (a spend cap
+	// as the request goes out), or an abort while the provider still builds the
+	// request (its payload hook, image preparation), after the dispatch hook ran.
 	let capturedHeaders: Readonly<Record<string, string>> | undefined;
 	const userOnResponse = config.onResponse;
+	const perCallMessagesSent = providerCall.perCallMessagesSent;
 	const captureOnResponse: AgentLoopConfig["onResponse"] = (response, modelInfo) => {
 		capturedHeaders = response.headers;
+		perCallMessagesSent?.();
 		return userOnResponse?.(response, modelInfo);
 	};
 
