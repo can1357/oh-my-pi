@@ -55,6 +55,7 @@ The tool returns a single text block plus structured `details`.
 5. `parseFindPattern()` determines `(basePath, globPattern, hasGlob)`:
    - no glob chars (`*`, `?`, `[`, `{`) => search that path with implicit `**/*`.
    - glob in the first segment => search from `.` and, unless the pattern already starts with `**/`, prefix it with `**/`.
+   - a leading `./` in front of a glob-bearing segment is dropped first, so `./*.json` parses as `*.json` and matches at any depth. A `./` in front of a literal name, such as `./~/x`, is kept as written.
    - glob later in the path => split at the first glob-bearing segment.
    - a glob ending in `/` (or a Windows `\` separator) => remove the terminal separator from the matcher and restrict matches to directories, including directory symlinks; files with matching names are excluded.
    - internal URL => split below its `scheme://` root like a later-segment glob (`local://*.md` → base `local://`, non-recursive `*.md`); the glob tail is percent-decoded with encoded metacharacters kept literal, and `router.isGlob()` keeps queries, fragments, and host authorities out of the glob.
