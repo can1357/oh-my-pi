@@ -216,6 +216,12 @@ describe("images from the environment", () => {
 	});
 });
 
+describe("cell size from the environment", () => {
+	it.each(["12", "0x24", `${"9".repeat(400)}x24`])("ignores PI_CELL_SIZE=%j", value => {
+		expect(capabilitiesFromEnv({ PI_CELL_SIZE: value }, { id: "base", ...direct }).cell).toBeNull();
+	});
+});
+
 describe("colors and appearance", () => {
 	it("derives color depth", () => {
 		expect(capabilitiesFromEnv({ COLORTERM: "truecolor" }, { id: "trueColor", ...direct })).toMatchObject({
