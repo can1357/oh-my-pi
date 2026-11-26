@@ -990,27 +990,37 @@ function extractOpenAIModelsListOutputTask(item: {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
 	const modalitiesObj = isRecord(item.modalities) ? item.modalities : undefined;
 	const summary = typeof architecture?.modality === "string" ? architecture.modality.split("->") : [];
-	const rawOutput = collectModalities([
-		item.output,
-		item.output_modalities,
-		modalitiesObj?.output,
-		architecture?.output_modalities,
-		summary.length === 2 ? summary[1].split("+") : undefined,
-	]);
+	const canonicalize = (values: Iterable<string>): Set<string> => {
+		const out = new Set<string>();
+		for (const modality of values) {
+			out.add(modality === "embeddings" ? "embedding" : modality);
+		}
+		return out;
+	};
+	const explicitOutput = canonicalize(
+		collectModalities([
+			item.output,
+			item.output_modalities,
+			architecture?.output_modalities,
+			summary.length === 2 ? summary[1].split("+") : undefined,
+		]),
+	);
+	const nestedOutput = canonicalize(collectModalities([modalitiesObj?.output]));
 	// Canonicalize singular/plural task aliases before checking cardinality so a
 	// row carrying both `output_modalities: ["embedding"]` and
 	// `modalities.output: ["embeddings"]` stays on the embeddings runner.
-	const output = new Set<string>();
-	for (const modality of rawOutput) {
-		output.add(modality === "embeddings" ? "embedding" : modality);
-	}
+	const output = new Set<string>([...explicitOutput, ...nestedOutput]);
 	if (output.size !== 1) return undefined;
 	const [modality] = output;
 	switch (modality) {
 		case "embedding":
 			return { kind: "embedding", api: "openai-embeddings" };
 		case "image":
-			return { kind: "image", api: "openai-images" };
+			// Nested `modalities.output: ["image"]` advertises capability rather than
+			// a dedicated `/images/generations` endpoint (e.g. Responses-hosted image
+			// models); only switch transports when an explicit output/architecture
+			// field declares the dedicated image task.
+			return explicitOutput.size > 0 ? { kind: "image", api: "openai-images" } : undefined;
 		case "speech":
 			return { kind: "tts", api: "openai-speech" };
 		case "transcription":

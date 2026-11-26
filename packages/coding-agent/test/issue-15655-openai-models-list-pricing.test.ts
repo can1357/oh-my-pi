@@ -285,6 +285,28 @@ describe("openai-models-list pricing and gateway metadata discovery (#15655)", (
 			expect(getModelPricingStatus(modelB!)).toBe("fixed");
 		});
 
+		test("keeps nested modalities.output image models on the configured Responses transport", async () => {
+			const models = await discoverOpenAIModelsList(
+				{
+					...providerConfig,
+					api: "openai-responses",
+				},
+				{
+					fetch: mockFetch([
+						{
+							id: "gpt-image-1.5",
+							modalities: { input: ["text", "image"], output: ["image"] },
+							pricing: { prompt: "0.000005", completion: "0.00001" },
+						},
+					]),
+					getBearerApiKeyResolver: async () => undefined,
+				},
+			);
+			expect(models).toHaveLength(1);
+			expect(models[0]?.api).toBe("openai-responses");
+			expect(models[0]?.cost).toEqual({ input: 5, output: 10, cacheRead: 0, cacheWrite: 0 });
+		});
+
 		test("falls through to top-level display_name when nested metadata.display_name merely echoes id", async () => {
 			const models = await discoverOpenAIModelsList(providerConfig, {
 				fetch: mockFetch([
@@ -350,7 +372,6 @@ describe("openai-models-list pricing and gateway metadata discovery (#15655)", (
 					contextWindow: 128_000,
 					maxTokens: 16_384,
 				});
-				writeModelCache(retiredCacheProviderId, Date.now(), [staleRow], true, "", cacheDbPath);
 				fs.writeFileSync(
 					variantModelsJson,
 					JSON.stringify({
@@ -365,6 +386,11 @@ describe("openai-models-list pricing and gateway metadata discovery (#15655)", (
 						},
 					}),
 				);
+				// Seed the retired cache AFTER writing models.json with a timestamp
+				// strictly newer than its mtime so `#isDiscoveryCacheOlderThanModelsConfig`
+				// cannot mask a failure to retire the namespace.
+				const freshCacheTimestamp = Math.max(Date.now(), Math.ceil(fs.statSync(variantModelsJson).mtimeMs) + 1_000);
+				writeModelCache(retiredCacheProviderId, freshCacheTimestamp, [staleRow], true, "", cacheDbPath);
 
 				const fetchFn = (async (input: string | URL | Request) => {
 					const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
