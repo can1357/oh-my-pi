@@ -179,6 +179,8 @@ An interceptor rule only applies when its `tool` is available in the current ses
 
 The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list. Project and `--config` overlay `bashInterceptor.patterns` entries are prepended ahead of the global list (or `DEFAULT_BASH_INTERCEPTOR_RULES` when the global config leaves `bashInterceptor.patterns` unset). A global list of only path-scoped entries keeps the built-in rules after its own, so prepending onto it keeps them too.
 
+The Perl rule looks for `-i` in the interpreter's leading switches, including clusters such as `-lpi`. Perl program text, script arguments, and operands after `--` do not count as switches.
+
 For compatibility with existing custom regexes, the interceptor always checks the complete original command first. It then checks raw, flat command fragments separated by unquoted and unescaped `&&`, `||`, `;`, `|`, `&`, or newlines. It also checks fragments after leading environment assignments are removed:
 
 ```bash
