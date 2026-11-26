@@ -11,7 +11,7 @@ import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { ToolHead, ToolPresenter, ToolView } from "./contract";
 import { splitUrlScheme } from "../../internal-urls/url-scheme";
 import { globSearchPath } from "../../tools/details/glob";
-import { splitTopLevelDelimitedPath, toPathList } from "../../utils/render-utils";
+import { shortenPath, splitTopLevelDelimitedPath, toPathList } from "../../utils/render-utils";
 import { resultText } from "./default";
 import { registerToolPresenter } from "./registry";
 import { countText, FileChip, FileRow, inlineErrorView, spansText, StatsFoot } from "./search-common";
@@ -137,8 +137,19 @@ function globSpans(glob: string): TspSpan[] {
 }
 
 /**
+ * A `path` entry's `;` list as the tool splits it: at top-level `;`, except a
+ * list led by a URL. The tool splits that only when every part is a URL, or once
+ * it finds the URL missing (unknowable here), since a URL's own path may hold `;`.
+ */
+function listEntries(entry: string): string[] {
+	const parts = splitTopLevelDelimitedPath(entry, "semicolon");
+	if (!splitUrlScheme(entry.trim()) || parts.every(part => splitUrlScheme(part.trim()))) return parts;
+	return [entry];
+}
+
+/**
  * The globs a call searches, highlighted: its path with a separate `pattern`
- * scoped under it, then listed and split at top-level `;`, as the tool does.
+ * scoped under it, then listed and split as the tool does, home shortened to `~`.
  * Empty when the call names none.
  */
 function scopeText(args: GlobArgs | undefined): TspText {
@@ -149,11 +160,11 @@ function scopeText(args: GlobArgs | undefined): TspText {
 	const searched = globSearchPath({ path, pattern: args?.pattern });
 	if (!searched) return "";
 
-	const entries = toPathList(searched).flatMap(entry => splitTopLevelDelimitedPath(entry, "semicolon"));
+	const entries = toPathList(searched).flatMap(listEntries);
 	const spans: TspSpan[] = [];
 	for (let i = 0; i < entries.length; i++) {
 		if (i > 0) spans.push({ t: ";" });
-		spans.push(...globSpans(entries[i]!));
+		spans.push(...globSpans(shortenPath(entries[i]!)));
 	}
 	return spansText(spans);
 }

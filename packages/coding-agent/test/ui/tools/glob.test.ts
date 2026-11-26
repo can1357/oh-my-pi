@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import "../../../src/ui/styles/tools/glob";
 import type { ToolViewState } from "../../../src/ui/tools/contract";
 import { type GlobArgs, globPresenter } from "../../../src/ui/tools/glob";
@@ -31,7 +33,7 @@ describe("glob head target", () => {
 		]);
 	});
 
-	it("tokenizes each `;` entry alone, keeps internal URLs plain and never splits a character", () => {
+	it("tokenizes each `;` entry alone, keeps URLs plain and never splits a character", () => {
 		expect(target({ path: "src/[a*;ssh://[::1]/src/*.ts;docs/[😀-😎]" })).toEqual([
 			{ t: "src/[a" },
 			operator("*"),
@@ -39,6 +41,18 @@ describe("glob head target", () => {
 			operator("["),
 			{ t: "😀-😎" },
 			operator("]"),
+		]);
+		// A URL's own path may hold `;`: the tool keeps a URL-led mixed list whole.
+		expect(target({ path: "local://reports;old/*.md" })).toBe("local://reports;old/*.md");
+	});
+
+	it("shortens a searched path under home to `~`", () => {
+		expect(target({ pattern: path.join(os.homedir(), "project", "**", "*.ts") })).toEqual([
+			{ t: "~/project/" },
+			operator("**"),
+			{ t: "/" },
+			operator("*"),
+			{ t: ".ts" },
 		]);
 	});
 
