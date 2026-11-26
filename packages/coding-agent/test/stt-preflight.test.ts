@@ -16,7 +16,8 @@ const DICTATION_MODELS = [
 	getBundledModel("local", "whisper-base"),
 	getBundledModel("local", "whisper-small"),
 	getBundledModel("local", "whisper-large-v3-turbo"),
-	getBundledModel("local", "parakeet-tdt-0.6b-v3"),
+	getBundledModel("local", "fluid-speech-pro"),
+	getBundledModel("local", "parakeet-tdt-0.6b-v2"),
 	getBundledModel("local", "nemotron-streaming-en-0.6b"),
 ];
 const registry: STTControllerDependencies["registry"] = {
@@ -264,7 +265,7 @@ describe("STTController preflight", () => {
 		expect(isCached).toHaveBeenCalledTimes(2);
 	});
 
-	it("falls back to the full parakeet id when the dictation chain is empty", async () => {
+	it("falls back to the built-in default id when the dictation chain is empty", async () => {
 		settings.setModelRole("dictation", "missing/model");
 		const emptyRegistry: STTControllerDependencies["registry"] = {
 			getError: () => undefined,
@@ -279,8 +280,8 @@ describe("STTController preflight", () => {
 		const options = makeOptions();
 		await controller.toggle(makeEditor(), options);
 
-		expect(isCached).toHaveBeenCalledWith("parakeet-tdt-0.6b-v3");
-		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("parakeet-tdt-0.6b-v3", expect.anything());
+		expect(isCached).toHaveBeenCalledWith("fluid-speech-pro");
+		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("fluid-speech-pro", expect.anything());
 		expect(options.showWarning).toHaveBeenCalledWith(
 			"Dictation model missing/model not found; using the built-in local model",
 		);

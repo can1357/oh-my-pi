@@ -61,6 +61,7 @@ provider "openrouter" {
 			limits context=128000 max-tokens=115200
 			supports-tools #false
 		}
+		// OpenRouter lists MAI-Transcribe 1.5 with `expiration_date` 2026-12-22.
 		model "microsoft/mai-transcribe-1.5" name="Microsoft AI: MAI-Transcribe 1.5" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
 			reasoning #false
 			input "text"
@@ -69,6 +70,62 @@ provider "openrouter" {
 			supports-tools #false
 		}
 		model "microsoft/mai-transcribe-2" name="Microsoft AI: MAI-Transcribe 2" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "openai/gpt-transcribe" name="OpenAI: GPT Transcribe" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "openai/whisper-large-v3-turbo" name="OpenAI: Whisper Large V3 Turbo" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "nvidia/nemotron-3.5-transcribe" name="NVIDIA: Nemotron 3.5 Transcribe" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "elevenlabs/scribe-v2" name="ElevenLabs: Scribe v2" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "assemblyai/universal-3-6-pro" name="AssemblyAI: Universal-3.6 Pro" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "deepgram/nova-3" name="Deepgram: Nova-3" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "qwen/qwen3-asr-1.7b" name="Qwen: Qwen3 ASR 1.7B" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "x-ai/grok-stt-2.0" name="xAI: Grok STT 2.0" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
 			reasoning #false
 			input "text"
 			cost input=0 output=0 cache-read=0 cache-write=0
@@ -151,7 +208,9 @@ provider "openrouter" {
 		kind "video"
 	}
 	models "openai/whisper-1" "openai/whisper-large-v3" "openai/gpt-4o-transcribe" \
-		"microsoft/mai-transcribe-1.5" "microsoft/mai-transcribe-2" {
+		"microsoft/mai-transcribe-1.5" "microsoft/mai-transcribe-2" "openai/gpt-transcribe" \
+		"openai/whisper-large-v3-turbo" "nvidia/nemotron-3.5-transcribe" "elevenlabs/scribe-v2" \
+		"assemblyai/universal-3-6-pro" "deepgram/nova-3" "qwen/qwen3-asr-1.7b" "x-ai/grok-stt-2.0" {
 		kind "stt"
 	}
 

@@ -7,10 +7,14 @@
 - Added the ArkaneCloud provider, including `/login arkanecloud`, `ARKANECLOUD_API_KEY` authentication, and live model and pricing discovery per API key.
 - Added xAI SuperGrok speech-to-text support through `xai-oauth/grok-voice-transcribe-2.0`.
 - Added the Refuseless provider with `/login refuseless`, `REFUSELESS_API_KEY` authentication, live model discovery, and support for abliterated and standard open-weight models.
+- Added OpenAI's `gpt-transcribe` speech-to-text model, the replacement for `whisper-1`, `gpt-4o-transcribe`, and `gpt-4o-mini-transcribe`, which OpenAI shuts down on 2027-02-26.
+- Added OpenRouter speech-to-text models `openai/gpt-transcribe`, `openai/whisper-large-v3-turbo`, `nvidia/nemotron-3.5-transcribe`, `elevenlabs/scribe-v2`, `assemblyai/universal-3-6-pro`, `deepgram/nova-3`, `qwen/qwen3-asr-1.7b`, and `x-ai/grok-stt-2.0`.
+- Added DeepInfra text-to-speech models `Qwen/Qwen3-TTS` and `sesame/csm-1b`.
 
 ### Changed
 
 - Seeded models now remain available even when their provider applies model exclusions.
+- Replaced the local `parakeet-tdt-0.6b-v3` dictation seed with `fluid-speech-pro`, now the default dictation model, and added `parakeet-tdt-0.6b-v2` (English).
 - Devin models now expose their fast lane through `/fast` instead of listing separate `-fast` model entries.
 
 ### Fixed

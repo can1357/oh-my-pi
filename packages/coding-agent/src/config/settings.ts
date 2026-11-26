@@ -454,26 +454,38 @@ const PHONON_VOICE_FOR_KOKORO_PREFIX: Record<string, string> = {
 	bm_: "edwin",
 };
 
+/** Retired local speech models and the catalog model that replaced each. */
+const RETIRED_LOCAL_SPEECH_MODELS: Record<string, string> = {
+	"local/kokoro": "local/phonon-31m",
+	"local/parakeet-tdt-0.6b-v3": "local/fluid-speech-pro",
+};
+
 /**
- * Local TTS moved from Kokoro-82M to Phonon 31M: rewrite configured Kokoro
- * voice ids (`tts.localVoice`, `speech.voice`) to the Phonon voice of the same
- * accent and gender, and a `local/kokoro` speech role to `local/phonon-31m`.
- * Handles nested and quoted-dotted sources.
+ * Local speech models were replaced in place: Kokoro-82M by Phonon 31M (TTS)
+ * and Parakeet TDT 0.6B v3 by Fluid Speech Pro (dictation). Rewrite the
+ * `speech`/`dictation` roles and their fallback chains to the successors, and
+ * configured Kokoro voice ids (`tts.localVoice`, `speech.voice`) to the Phonon
+ * voice of the same accent and gender. Handles nested and quoted-dotted sources.
  */
-function migrateKokoroSpeechSettings(raw: RawSettings): void {
+function migrateRetiredSpeechSettings(raw: RawSettings): void {
 	const phononVoice = (value: unknown): string | undefined =>
 		typeof value === "string" ? PHONON_VOICE_FOR_KOKORO_PREFIX[value.slice(0, 3)] : undefined;
-	const phononRole = (value: unknown): unknown =>
-		value === "local/kokoro"
-			? "local/phonon-31m"
-			: Array.isArray(value)
-				? value.map(entry => (entry === "local/kokoro" ? "local/phonon-31m" : entry))
-				: value;
+	const successor = (value: unknown): unknown =>
+		typeof value === "string" ? (RETIRED_LOCAL_SPEECH_MODELS[value] ?? value) : value;
+	const migrateRole = (value: unknown): unknown => (Array.isArray(value) ? value.map(successor) : successor(value));
 	const leaves: Array<[root: string, leaf: string, migrate: (value: unknown) => unknown]> = [
 		["tts", "localVoice", value => phononVoice(value) ?? value],
 		["speech", "voice", value => phononVoice(value) ?? value],
-		["modelRoles", "speech", phononRole],
+		["modelRoles", "speech", migrateRole],
+		["modelRoles", "dictation", migrateRole],
 	];
+	for (const role of ["speech", "dictation"]) {
+		const retry = raw.retry;
+		const chains = isRecord(retry) ? retry.fallbackChains : raw["retry.fallbackChains"];
+		if (isRecord(chains) && role in chains) chains[role] = migrateRole(chains[role]);
+		const dotted = `retry.fallbackChains.${role}`;
+		if (dotted in raw) raw[dotted] = migrateRole(raw[dotted]);
+	}
 	for (const [root, leaf, migrate] of leaves) {
 		const rootObj = raw[root];
 		if (isRecord(rootObj) && leaf in rootObj) rootObj[leaf] = migrate(rootObj[leaf]);
@@ -3681,7 +3693,7 @@ export class Settings {
 			value => typeof value === "number" && Number.isFinite(value),
 		);
 
-		migrateKokoroSpeechSettings(raw);
+		migrateRetiredSpeechSettings(raw);
 
 		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
 		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no

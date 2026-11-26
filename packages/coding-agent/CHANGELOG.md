@@ -17,6 +17,8 @@
 - Added `<mark>` highlighting and preserved rich text styling in terminal and Tern ask forms.
 - Added an opt-in GitLab integration (`gitlab.enabled`) for project, file, issue, merge request, discussion, search, worktree, and CI workflows, along with expanded `mr://` resources for merge request listings, cached overviews, and diff slices.
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
+- Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
+- Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
 
 ### Changed
 
@@ -25,6 +27,9 @@
 - Expanded `bash.gitGuard` protection in shared checkouts to cover more history-changing Git operations, including rebase, merge, pull, cherry-pick, revert, amend, and non-dry-run clean operations.
 - Improved bash approval guidance by explaining which shell syntax prevents a `bash.patterns` rule from bypassing approval prompts.
 - Exiting or restarting no longer flashes a "Closing session…" toast; a status appears only when closing takes longer than 3 seconds.
+- Local dictation now defaults to Fluid Speech Pro (`local/fluid-speech-pro`), a further-trained Parakeet TDT 0.6B v3 that stays accurate with noise or music in the room. `local/parakeet-tdt-0.6b-v3` roles and fallback chains migrate to it automatically.
+- Live voice mode now uses Codex's `gpt-live-1.1-codex` realtime model.
+- Updated the local speech runtimes to sherpa-onnx 2.0.3 and Transformers.js 4.3.2; they reinstall on first use.
 - Shortened and bracketed bash's notices, e.g. `[next call: cwd → …, set -e off]`, `[timeout clamped: 7200s → 3600s]`, `[backgrounded as bg_3, killed at 300s total; …]`; eval's background notice follows suit.
 - `cfg://` writes to map settings such as `modelRoles` now change only the entries they name (`null` removes one), so approval prompts and transcripts show just those entries instead of the whole map, and saving one entry keeps the others in your config.
 
@@ -85,6 +90,7 @@
 
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
 - Fixed `bash` running its command approval analysis in yolo mode without `bash.patterns` rules, which failed every command when the native addon was out of date.
+- Fixed garbled live dictation (stray words like "Yeah. Oh. Hey.") with quiet microphones or background music: recordings are now split at pauses by the Silero voice activity detector instead of a loudness threshold that chopped speech into sub-second pieces. A recording with no detected speech, such as a song, is transcribed in one pass when recording stops.
 - Fixed terminal completion, focus, scrolling, and keyboard handling across prompts, ask forms, plugin and agent views, debugger and plan review screens, session management, and external editors.
 - Fixed transcript rebuilding so compaction, shaking, display changes, forks, and worktree operations remain responsive while preserving terminal scrollback and background-task status.
 - Fixed rendering of images and rich content in the terminal, including image sizing, edge placement, WebP and GIF embeds, annotated pasted images, Markdown styling, and syntax-highlighted paths.
