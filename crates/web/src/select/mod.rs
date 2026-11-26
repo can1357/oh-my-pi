@@ -267,19 +267,19 @@ mod tests {
 
 	#[test]
 	fn reader_preserves_repeated_code_and_aria_table_cells() {
-		let line = "<span>const repeatedValue</span><span> = veryLongObjectName.</span>\
-		            <span>getImportantValue</span><span>(anotherArgument);</span>";
-		let rail = "<span>First navigation label</span><span>Second navigation label</span>\
-		            <span>Third navigation label</span><span>Fourth navigation label</span>";
+		let line = "<span>const repeatedValue</span><span> = \
+		            veryLongObjectName.</span><span>getImportantValue</span><span>(anotherArgument);\
+		            </span>";
+		let rail = "<span>First navigation label</span><span>Second navigation \
+		            label</span><span>Third navigation label</span><span>Fourth navigation \
+		            label</span>";
 		let html = format!(
-			"<main><h1>Source listing</h1><p>{}</p>\
-			 <div role='table' data-markdown-slug='js'>\
-			 <div role='row'><code role='cell'>{line}</code></div>\
-			 <div role='row'><code role='cell'>{line}</code></div>\
-			 <div role='row'><div role='cell'>{line}</div></div>\
-			 <div role='row'><div role='cell'>{line}</div></div></div>\
-			 <code>{line}</code><code>{line}</code>\
-			 <div>{rail}</div><div>{rail}</div></main>",
+			"<main><h1>Source listing</h1><p>{}</p><div role='table' data-markdown-slug='js'><div \
+			 role='row'><code role='cell'>{line}</code></div><div role='row'><code \
+			 role='cell'>{line}</code></div><div role='row'><div role='cell'>{line}</div></div><div \
+			 role='row'><div \
+			 role='cell'>{line}</div></div></div><code>{line}</code><code>{line}</code><div>{rail}</\
+			 div><div>{rail}</div></main>",
 			PROSE.repeat(4)
 		);
 		let output = selected(&html, reader);
@@ -290,12 +290,11 @@ mod tests {
 	#[test]
 	fn reader_keeps_linked_cards_with_arrow_but_drops_pagers() {
 		let html = format!(
-			"<main><h1>GPU prices</h1><p>{}</p><h2>Shop by memory</h2>\
-			 <div><a href='/4gb'><p>Cheapest 4GB GPU</p>\
-			 <p>Example GPU · €659</p><span>See all GPUs</span><span>→</span></a>\
-			 <a href='/8gb'><p>Cheapest 8GB GPU</p>\
-			 <p>Another GPU · €437</p><span>See all GPUs</span><span>→</span></a></div>\
-			 <a href='/next'>Next →</a></main>",
+			"<main><h1>GPU prices</h1><p>{}</p><h2>Shop by memory</h2><div><a \
+			 href='/4gb'><p>Cheapest 4GB GPU</p><p>Example GPU · €659</p><span>See all \
+			 GPUs</span><span>→</span></a><a href='/8gb'><p>Cheapest 8GB GPU</p><p>Another GPU · \
+			 €437</p><span>See all GPUs</span><span>→</span></a></div><a href='/next'>Next \
+			 →</a></main>",
 			PROSE.repeat(3)
 		);
 		let output = selected(&html, reader);
@@ -308,11 +307,10 @@ mod tests {
 	#[test]
 	fn reader_keeps_text_nav_color_utility_but_drops_navigation() {
 		let html = format!(
-			"<main><h1>Installation</h1><p>{}</p>\
-			 <div class='text-nav text-muted'>Invites are going out to our mailing list</div>\
-			 <h2>Linux <span class='text-nav'>Server only</span></h2>\
-			 <p class='text-nav'>Install the server using these instructions.</p>\
-			 <div class='nav'>Unrelated navigation</div></main>",
+			"<main><h1>Installation</h1><p>{}</p><div class='text-nav text-muted'>Invites are going \
+			 out to our mailing list</div><h2>Linux <span class='text-nav'>Server only</span></h2><p \
+			 class='text-nav'>Install the server using these instructions.</p><div \
+			 class='nav'>Unrelated navigation</div></main>",
 			PROSE.repeat(3)
 		);
 		let output = selected(&html, reader);
@@ -329,9 +327,9 @@ mod tests {
 	#[test]
 	fn reader_keeps_login_instructions_next_to_sign_in_actions() {
 		let html = format!(
-			"<main><h1>First API call</h1><div><div>Log in to the account</div>\
-			 <div><p>{}</p><div><p>{}</p><div><a href='/register'>Register an account</a>\
-			 <a href='/login'>Log in now</a></div></div></div></div><p>{}</p></main>",
+			"<main><h1>First API call</h1><div><div>Log in to the \
+			 account</div><div><p>{}</p><div><p>{}</p><div><a href='/register'>Register an \
+			 account</a><a href='/login'>Log in now</a></div></div></div></div><p>{}</p></main>",
 			PROSE.repeat(2),
 			PROSE.repeat(2),
 			PROSE.repeat(4)
@@ -347,11 +345,11 @@ mod tests {
 	fn reader_keeps_content_buttons_and_table_rows_with_border_utilities() {
 		let html = format!(
 			"<main><h1>Models</h1><p>Using an agent instead? <button>Set it up with one \
-			 command</button>.</p><ul><li><button popovertarget='details'>Project \
-			 Alpha</button><div id='details' popover role='dialog'>Hidden details</div></li></ul>\
-			 <table><tr class='border-b border-nav'><th>Model</th><th>Speed</th></tr><tr \
-			 class='border-b border-nav'><td>Example model</td><td>500</td></tr></table>\
-			 <p>{}</p><button>Copy page</button></main>",
+			 command</button>.</p><ul><li><button popovertarget='details'>Project Alpha</button><div \
+			 id='details' popover role='dialog'>Hidden details</div></li></ul><table><tr \
+			 class='border-b border-nav'><th>Model</th><th>Speed</th></tr><tr class='border-b \
+			 border-nav'><td>Example model</td><td>500</td></tr></table><p>{}</p><button>Copy \
+			 page</button></main>",
 			PROSE.repeat(4)
 		);
 		let output = selected(&html, reader);
@@ -366,8 +364,8 @@ mod tests {
 	#[test]
 	fn reader_drops_digit_prefixed_footer_chrome() {
 		let html = format!(
-			"<main><h1>Article</h1><p>{}</p></main><div class='_2016footer2TopWrapper'>\
-			 <p>Footer copyright and company information</p></div>",
+			"<main><h1>Article</h1><p>{}</p></main><div class='_2016footer2TopWrapper'><p>Footer \
+			 copyright and company information</p></div>",
 			PROSE.repeat(4)
 		);
 		let output = selected(&html, reader);
@@ -378,10 +376,10 @@ mod tests {
 	#[test]
 	fn reader_drops_news_aside_even_with_non_link_widget_text() {
 		let html = format!(
-			"<main><article><h1>Article</h1><p>{}</p></article><aside><h2>Latest news</h2>\
-			 <div><a href='/one'><h2>Unrelated story one</h2></a><a href='/two'><h2>\
-			 Unrelated story two</h2></a><a href='/three'><h2>Unrelated story three</h2></a>\
-			 </div><div>{}</div></aside></main>",
+			"<main><article><h1>Article</h1><p>{}</p></article><aside><h2>Latest news</h2><div><a \
+			 href='/one'><h2>Unrelated story one</h2></a><a href='/two'><h2>Unrelated story \
+			 two</h2></a><a href='/three'><h2>Unrelated story \
+			 three</h2></a></div><div>{}</div></aside></main>",
 			PROSE.repeat(8),
 			"Subscription widget markup and promotional text. ".repeat(20)
 		);
