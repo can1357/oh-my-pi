@@ -11,6 +11,7 @@ import type { HindsightConfig } from "./config";
 import {
 	composeRecallQuery,
 	formatMemories,
+	HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
 	type HindsightMessage,
 	prepareRetentionTranscript,
 	sliceLastTurnsByUserBoundary,
@@ -566,7 +567,12 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		const history = extractMessages(this.session.sessionManager.getEntries());
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
-		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
+		const truncated = truncateRecallQuery(
+			query,
+			latestPrompt,
+			this.config.recallMaxQueryChars,
+			HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
+		);
 		const { context, ok } = await this.recallForContext(truncated, signal);
 		if (!ok) return undefined;
 
@@ -605,7 +611,12 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		if (!lastUser) return undefined;
 
 		const query = composeRecallQuery(lastUser.content, messages, this.config.recallContextTurns);
-		const truncated = truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
+		const truncated = truncateRecallQuery(
+			query,
+			lastUser.content,
+			this.config.recallMaxQueryChars,
+			HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
+		);
 		const { context } = await this.recallForContext(truncated, signal);
 		return context ?? undefined;
 	}
