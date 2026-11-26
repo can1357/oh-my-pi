@@ -280,12 +280,15 @@ describe("TodoTool operations", () => {
 		const session = createSession();
 		const tool = new TodoTool(session);
 		const phaseJson = JSON.stringify({ phase: "Investigate", items: ["a", "b"] });
+		const phaseJson2 = JSON.stringify({ items: ["c"] });
 
-		// Simulates the upstream argument-repair path: an object inside `items`
+		// Simulates the upstream argument-repair path: an object inside flat `items`
 		// is stringified to satisfy the string[] schema before reaching the tool.
+		// This is the flat shape reported in #20669, which reaches the guard through
+		// the synthesized one-phase list at initPhases.
 		const result = await tool.execute("call-1", {
 			op: "init",
-			list: [{ phase: "Tasks", items: [phaseJson] }],
+			items: [phaseJson, phaseJson2],
 		});
 
 		expect(result.isError).toBe(true);

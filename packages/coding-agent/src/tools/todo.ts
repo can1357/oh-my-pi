@@ -341,8 +341,8 @@ function isStringifiedJsonContainer(content: string): boolean {
 	const isArray = trimmed.startsWith("[") && trimmed.endsWith("]");
 	if (!isObject && !isArray) return false;
 	try {
-		const parsed: unknown = JSON.parse(trimmed);
-		return typeof parsed === "object" && parsed !== null;
+		JSON.parse(trimmed);
+		return true;
 	} catch {
 		return false;
 	}
@@ -354,7 +354,7 @@ function describeJsonContainer(content: string): string {
 	return trimmed.length > 60 ? `${trimmed.slice(0, 57)}...` : trimmed;
 }
 
-function guardJsonContainerItems(contents: readonly string[], errors: string[], where: "init" | "append"): boolean {
+function guardJsonContainerItems(contents: readonly string[], errors: string[], where: "init" | "append"): void {
 	let rejected = false;
 	for (const content of contents) {
 		if (isStringifiedJsonContainer(content)) {
@@ -364,7 +364,6 @@ function guardJsonContainerItems(contents: readonly string[], errors: string[], 
 			);
 		}
 	}
-	return rejected;
 }
 
 function forbiddenHint(where: "init" | "append"): string {
@@ -397,7 +396,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 			errors.push(`Duplicate phase "${name}" in init list`);
 		}
 		seenPhases.add(name);
-		if (guardJsonContainerItems(listEntry.items, errors, "init")) return [];
+		guardJsonContainerItems(listEntry.items, errors, "init");
 		const tasks: TodoItem[] = [];
 		for (const content of listEntry.items) {
 			if (seenTasks.has(content)) {
@@ -421,7 +420,7 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 		return phases;
 	}
 
-	if (guardJsonContainerItems(entry.items, errors, "append")) return phases;
+	guardJsonContainerItems(entry.items, errors, "append");
 
 	// Validate the whole batch before mutating so a failing op reports every
 	// duplicate and leaves nothing half-applied.
