@@ -1247,9 +1247,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		target: AgentViewSession | undefined;
 		ready: boolean;
 		isComposing: boolean;
+		isReviewingPlan: boolean;
 		scheduledTurn: ((target: AgentViewSession) => boolean) | undefined;
 		presentRecap: ((recap: string) => void) | undefined;
-	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
+	} = {
+		target: undefined,
+		ready: false,
+		isComposing: false,
+		isReviewingPlan: false,
+		scheduledTurn: undefined,
+		presentRecap: undefined,
+	};
 
 	syncIdleMaintenanceView(target: AgentViewSession | null = this.viewSession): void {
 		const activity = this.#idleMaintenanceActivity;
@@ -1267,7 +1275,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		activity.target = target;
 		activity.isComposing = untrack(this.composer.text).trim() !== "";
 		target.enableIdleMaintenance({
-			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			isBlocked: () =>
+				!activity.ready || activity.target !== target || activity.isComposing || activity.isReviewingPlan,
 			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
 			// Delivered only while unblocked, so `target` is the session on screen.
 			onRecap: recap => activity.presentRecap?.(recap),
@@ -5146,11 +5155,21 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			{ theme: currentTheme, size: () => this.shell.size() },
 		);
-		this.#planReview = model;
+		this.#setPlanReview(model);
 		this.#planReviewOverlayHandle = showSheet(this.shell, planReviewSheet(model), () => jsx(PlanReview, { model }), {
 			mouse: "any",
 		});
 		return promise;
+	}
+
+	// A choice can settle before the review is hidden.
+	#setPlanReview(model: PlanReviewModel | undefined): void {
+		this.#planReview = model;
+		const activity = this.#idleMaintenanceActivity;
+		const isReviewingPlan = model !== undefined;
+		if (activity.isReviewingPlan === isReviewingPlan) return;
+		activity.isReviewingPlan = isReviewingPlan;
+		activity.target?.refreshIdleMaintenance();
 	}
 
 	#hidePlanReview(owner?: object): void {
@@ -5162,8 +5181,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReviewOnHide = undefined;
 		this.#planReviewOverlayHandle?.close();
 		this.#planReviewOverlayHandle = undefined;
-		this.#planReview = undefined;
 		this.#planReviewOwner = undefined;
+		this.#setPlanReview(undefined);
 		onHide?.();
 	}
 

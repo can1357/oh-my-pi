@@ -2,8 +2,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { KeybindingsManager, setKeybindings } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -25,12 +27,21 @@ import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autos
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	cfgCompactionEnabled,
+	cfgCompactionIdleEnabled,
+	cfgCompactionIdleThresholdTokens,
+	cfgCompactionIdleTimeoutSeconds,
+	cfgCompactionKeepRecentTokens,
+	cfgCompactionMethodOrder,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
 import { initTheme } from "../src/ui/theme/service";
+import { driveTurn, elapse, flush } from "./helpers/fake-clock";
 import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
 import { createModeTerminal, type ModeTerminal, pressKey, renderRows } from "./helpers/mode-terminal";
 
@@ -1171,6 +1182,61 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.handlePlanApproval({ planFilePath: newPlanPath, planExists: true, title: "NEW" });
 
 		expect(session.getPlanModeState()?.planFilePath).toBe(newPlanPath);
+	});
+
+	it("defers idle compaction until a submitted plan review is dismissed", async () => {
+		cfgCompactionEnabled.override(session.settings, false);
+		cfgCompactionIdleEnabled.override(session.settings, true);
+		cfgCompactionIdleThresholdTokens.override(session.settings, 1);
+		cfgCompactionIdleTimeoutSeconds.override(session.settings, 60);
+		cfgCompactionKeepRecentTokens.override(session.settings, 1);
+		cfgCompactionMethodOrder.override(session.settings, ["soft"]);
+		const model = createMockModel({
+			responses: [
+				{ content: ["Investigation findings. ".repeat(200)] },
+				{ content: ["The plan is ready to review."] },
+			],
+		});
+		session.agent.streamFn = model.stream;
+		session.agent.getApiKey = () => "test-key";
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "Investigation summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		await mode.init({ suppressWelcomeIntro: true });
+		await session.prompt("Investigate the change");
+		const planFilePath = path.join(tempDir.path(), "PLAN.md");
+		await Bun.write(planFilePath, "# Plan\n\nKeep the investigation context for refinement.\n");
+		const hasCompaction = () => session.sessionManager.getBranch().some(entry => entry.type === "compaction");
+
+		vi.useFakeTimers();
+		try {
+			await driveTurn(session, session.prompt("Prepare the plan"));
+			await elapse(59_000);
+			mode.planModeEnabled = true;
+			const opened = Promise.withResolvers<void>();
+			const review = mode.handlePlanApproval(
+				{ planFilePath, planExists: true, title: "PLAN" },
+				{ abortTurn: false, onOpened: opened.resolve },
+			);
+			await opened.promise;
+			await elapse(2_000);
+			await session.waitForIdle();
+			expect(hasCompaction()).toBe(false);
+
+			pressKey(mode.shell, "escape");
+			await review;
+			await flush();
+			await elapse(59_000);
+			expect(hasCompaction()).toBe(false);
+			await elapse(1_000);
+			await session.waitForIdle();
+			expect(hasCompaction()).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("opens the annotation external editor from the real plan review overlay", async () => {
