@@ -111,15 +111,43 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 	return sanitized ?? items;
 }
 
-/** Remove Codex-rejected backend metadata; preserve clean-item identity by default, or copy while keeping/dropping id. */
+function holdsCreatedBy(value: unknown): boolean {
+	return typeof value === "object" && value !== null && Object.hasOwn(value, "created_by");
+}
+
+/**
+ * Remove what Responses input refuses from a replayed item: Codex's
+ * `internal_chat_message_metadata_passthrough`, and `created_by` at any value
+ * (`null` too), which the API sets on output items and on each entry of a
+ * `shell_call_output` item's `output`. Preserve clean-item identity by default,
+ * or copy while keeping/dropping id.
+ */
 export function stripOpenAIResponsesInternalMetadataForReplay<
 	TItem extends { id?: unknown; internal_chat_message_metadata_passthrough?: unknown },
 >(item: TItem, mode: "preserve" | "copy" | "drop-id" = "preserve"): TItem {
-	if (mode === "preserve" && !Object.hasOwn(item, "internal_chat_message_metadata_passthrough")) return item;
-	const sanitized = { ...item };
+	const record = item as Record<string, unknown>;
+	const shellOutput = record.type === "shell_call_output" && Array.isArray(record.output) ? record.output : undefined;
+	const entriesHoldCreatedBy = shellOutput?.some(holdsCreatedBy) === true;
+	if (
+		mode === "preserve" &&
+		!Object.hasOwn(item, "internal_chat_message_metadata_passthrough") &&
+		!Object.hasOwn(item, "created_by") &&
+		!entriesHoldCreatedBy
+	) {
+		return item;
+	}
+	const sanitized = { ...record };
 	delete sanitized.internal_chat_message_metadata_passthrough;
+	delete sanitized.created_by;
+	if (shellOutput && entriesHoldCreatedBy) {
+		sanitized.output = shellOutput.map(entry => {
+			if (!holdsCreatedBy(entry)) return entry;
+			const { created_by: _createdBy, ...withoutCreatedBy } = entry as Record<string, unknown>;
+			return withoutCreatedBy;
+		});
+	}
 	if (mode === "drop-id") delete sanitized.id;
-	return sanitized;
+	return sanitized as TItem;
 }
 
 /**
