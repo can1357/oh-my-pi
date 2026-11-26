@@ -622,6 +622,19 @@ export const cfgTuiMaxFps = register({
 	},
 });
 
+export const cfgTuiShowLinkUrl = register({
+	id: "tui.showLinkUrl",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Link URLs",
+		description:
+			"Show the target URL in parentheses after named markdown links; off only hides it where terminal hyperlinks make the label clickable",
+	},
+});
+
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
 	type: "enum",
@@ -887,7 +900,8 @@ export const cfgTuiImeSafeCursor = register({
 		tab: "appearance",
 		group: "Display",
 		label: "IME-Safe Prompt Layout",
-		description: "Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it",
+		description:
+			"Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it. Requires Show Hardware Cursor.",
 	},
 });
 

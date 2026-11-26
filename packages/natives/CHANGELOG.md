@@ -2,16 +2,36 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline rendering or `Reader` for URL reads; interactive terminal browsing is no longer provided.
+
 ### Added
 
-- Added `Shell.heldProcesses()`: every live external a shell session holds, in or between runs (`&`/`nohup &` jobs left running included), with whether its `nohup` started it.
-- Added `listProcessesWithEnv(name, value)`, `processInfo(pids)`, `processOutputFiles(pid)` and `killProcessFamily(pids, { spareHangupIgnoring })` for finding processes by an inherited environment tag, describing live processes, locating the file a process writes its output to, and killing a process family while sparing `nohup`'d members.
-- Added an in-process `perl` shell builtin: a Perl 5.34 interpreter covering the core language, regexes (via PCRE2), formats, `tie`, weak references, the common command-line switches (`-e -n -p -i -0 -l -a -F -M`), and commonly used core modules (List::Util, Scalar::Util, POSIX, Data::Dumper, JSON::PP, File::*, Getopt::Long, Time::*, Digest::*, Encode, Storable, …). File and command I/O runs through the shell, so `scheme://` paths and other builtins work from Perl code.
+- Added `renderHtml` for Markdown and plain-text rendering. Both `renderHtml` and `Reader` default to reader content selection (`mode: "auto"`), support `mode: "full"` to keep all visible content, and share hidden-content options.
+- Added `Reader` for step-by-step URL reading with host-provided HTTP and browser I/O.
 
 ### Fixed
 
-- Fixed a timed-out or cancelled shell command, or a terminated PTY run, leaving behind descendants in a process group or session of their own (a debugger's stopped inferior, a `setsid` daemon): the termination now snapshots the command's whole process family before the first signal (parent links plus every group and session a member leads), sends TERM to the members outside the command's own group, and KILLs the family after the grace, continuing stopped members.
-- Fixed timed-out or aborted `glob`, `grep`, `fuzzyFind` and `astGrep` calls continuing to walk the tree in the background when several ran at once, pinning CPUs and stalling every later filesystem call in the process.
+- `Process.terminate` now reaches descendants that started their own session: it captures them before the first signal, so a group SIGTERM that ends the root first no longer hides them, and keeps them for the hard-kill wave ([#20597](https://github.com/can1357/oh-my-pi/pull/20597) by [@daandden](https://github.com/daandden))
+- Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
+- Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
+- Preserved source-code indentation and linked content cards in URL reads.
+
+- The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added `Shell.heldProcesses()` to inspect all live external processes held by a shell session, including background and `nohup` jobs, with their `nohup` status.
+- Added process utilities for finding processes by inherited environment variables, inspecting process details and output files, and terminating process families while preserving `nohup` processes when requested.
+- Added an in-process Perl 5.34 shell builtin with core language and regex support, common command-line options and modules, and shell-integrated file and command I/O, including support for `scheme://` paths and other shell builtins.
+
+### Fixed
+
+- Fixed timed-out, cancelled, or terminated shell and PTY commands leaving descendant processes running, including descendants in separate process groups or sessions.
+- Fixed cancelled filesystem searches continuing in the background and consuming CPU or blocking subsequent filesystem operations when multiple searches ran concurrently.
 
 ## [19.2.0] - 2026-11-25
 
