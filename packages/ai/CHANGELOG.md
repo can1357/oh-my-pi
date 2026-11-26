@@ -13,8 +13,8 @@
 - `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
-- API-key sessions on a usage-ranked provider now stay on their key until it hits a usage limit or an auth failure, instead of switching when usage reports change; a new subagent starts on its parent's key (Anthropic also re-ranks after an hour idle) ([#12034](https://github.com/can1357/oh-my-pi/issues/12034), [#19974](https://github.com/can1357/oh-my-pi/pull/19974) by [@JamieJ5926](https://github.com/JamieJ5926))
 
+- API-key sessions on a usage-ranked provider now stay on their key until it hits a usage limit or an auth failure, instead of switching when usage reports change; a new subagent starts on its parent's key (Anthropic also re-ranks after an hour idle) ([#12034](https://github.com/can1357/oh-my-pi/issues/12034), [#19974](https://github.com/can1357/oh-my-pi/pull/19974) by [@JamieJ5926](https://github.com/JamieJ5926))
 - Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
