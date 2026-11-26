@@ -1185,6 +1185,16 @@ export class Settings {
 	}
 
 	/**
+	 * Raw value of `setting` beneath this instance's own runtime overrides: the `--config` overlay,
+	 * project and global layers over an overlay parent's view. An override deep-merges over a record
+	 * here, so `cfg://` session writes check it before removing record entries. `null` counts as unset.
+	 */
+	underlyingValue(setting: AnySetting): unknown {
+		const layers = this.#mergeOwnLayers({ ...this.#ownLayers(), overrides: {} });
+		return configuredValue(this.#mergeOverParent(layers), setting, this.#cwd);
+	}
+
+	/**
 	 * Whether `setting` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
 	 * A configured `null` counts as unset, like in {@link rawValue}.
