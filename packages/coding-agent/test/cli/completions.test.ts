@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildSpec, type CompletionSpec, generateCompletion } from "@oh-my-pi/pi-coding-agent/cli/completion-gen";
 import { generateLiveCompletion } from "@oh-my-pi/pi-coding-agent/commands/completions";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import type { CliConfig, CommandCtor } from "@oh-my-pi/pi-utils/cli";
 
 // A compact synthetic spec exercising every value-source kind and an aliased
@@ -77,6 +78,48 @@ describe("generateCompletion — bash", () => {
 		expect(out).toContain('compgen -W "list clear"');
 		expect(out).toContain("_omp_cmd_commit()");
 		expect(out).toContain('compgen -W "--push"');
+	});
+});
+
+const hasBash = process.platform !== "win32" && $which("bash") !== null;
+
+describe.skipIf(!hasBash)("Bash path completion", () => {
+	const completion = generateCompletion("bash", {
+		...spec,
+		commands: [
+			{
+				name: "read",
+				aliases: [],
+				description: "Read a file",
+				flags: [],
+				args: [{ name: "path", description: "Path", value: { kind: "file" } }],
+			},
+		],
+	});
+
+	it.each([
+		["--session-dir", "Work", "Work Space"],
+		["--extension", "Note", "Note Draft.ts"],
+		["read", "Note", "Note Draft.ts"],
+	])("preserves spaces in a path candidate for %s", async (arg, prefix, expected) => {
+		await using dir = await TempDir.create("@omp-bash-completion-");
+		await fs.promises.mkdir(dir.join("Work Space"));
+		await Bun.write(dir.join("Note Draft.ts"), "");
+		// Drive the generated dispatcher with Bash's completion variables.
+		// compopt only works when Bash itself invokes the callback on Tab.
+		const script = `${completion}
+compopt() { :; }
+COMP_WORDS=(omp "$@")
+COMP_CWORD=2
+_omp
+printf '%s\\n' "\${COMPREPLY[@]}"
+`;
+		const result = Bun.spawnSync(["bash", "--noprofile", "--norc", "-c", script, "bash", arg, prefix], {
+			cwd: dir.path(),
+			env: { ...process.env, BASH_ENV: "" },
+		});
+		expect(result.exitCode, result.stderr.toString()).toBe(0);
+		expect(result.stdout.toString()).toBe(`${expected}\n`);
 	});
 });
 
