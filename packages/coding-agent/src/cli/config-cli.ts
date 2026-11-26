@@ -10,6 +10,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
 import { type AnySetting, lookup } from "../config/registry";
 import { Settings, settings } from "../config/settings";
+import { cfgBashPatterns, effectiveBashPatterns } from "../exec/settings";
 import { initXdg } from "./commands/init-xdg";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
@@ -262,7 +263,8 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 		process.exit(1);
 	}
 
-	const value = def.setting.get(settings);
+	// bash.patterns reports the rules the bash tool enforces, not only the session list (oh-my-pi#19196).
+	const value = def.setting === cfgBashPatterns ? effectiveBashPatterns(settings) : def.setting.get(settings);
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value, type: def.type, description: def.description }, null, 2));

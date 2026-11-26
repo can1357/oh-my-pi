@@ -236,6 +236,8 @@ Valid rule approvals are `allow`, `prompt`, and `deny`. Regardless of the opt-in
 
 Project settings can tighten `bash.patterns` but never loosen them: `deny` and `prompt` rules from the operator's layers (global config, `--config` overlays, and runtime overrides) still apply when a project's `bash.patterns` would allow the command, because repository settings files are writable by the agent.
 
+`omp config get bash.patterns` prints the session list, then each operator `deny` or `prompt` rule that list lacks, so a project `bash.patterns: []` still shows the operator's `deny` rule. It does not reorder rules: a project `allow` can still print before the operator `deny` that the bash tool enforces. A project `bash.patterns: []` also drops the operator's `allow` rules from the bash tool's auto-approval, and the printed list does not show them, so a command an operator `allow` lists before an operator `deny` prints that `deny` while the bash tool returns the generic `exec` tier rather than a refusal.
+
 `bash.patterns` is an approval policy, not containment. An allowed program still has the bash process's filesystem, network, and subprocess access, and a seemingly narrow program can perform broader actions through its own options or configuration. The rules govern the `bash` tool only; they do not cover shells started through `eval`. To close that path, add a `tools.approval.eval` policy (`prompt` or `deny`) as well; see [Tool approval mode](./approval-mode.md).
 
 ### Bash interceptor patterns

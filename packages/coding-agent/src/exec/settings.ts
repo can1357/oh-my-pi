@@ -3,6 +3,7 @@
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
 import { combine, register, type SettingValueOf } from "../config/registry";
+import type { Settings } from "../config/settings";
 
 /** One bash-interceptor rule: commands matching `pattern` are redirected to `tool`. */
 export interface BashInterceptorRule {
@@ -200,6 +201,25 @@ export const cfgBashPatterns = register({
 			"Ordered bash command approval rules. Each item has match and approval fields; only '*' wildcards are supported.",
 	},
 });
+
+/**
+ * The `bash.patterns` list `omp config get` reports: the session list, then each operator `deny` or
+ * `prompt` rule it lacks. The bash tool enforces those operator rules whatever a project list says, and
+ * a project `[]` drops them from the session list. Order is not changed, so a project `allow` can still
+ * print before the operator rule that wins.
+ */
+export function effectiveBashPatterns(settings: Settings): BashApprovalPatternRule[] {
+	const effective = [...cfgBashPatterns.get(settings)];
+	const listed = new Set(effective.map(rule => JSON.stringify(rule)));
+	for (const rule of cfgBashPatterns.get(settings.grantAuthority())) {
+		if (rule.approval === "allow") continue;
+		const key = JSON.stringify(rule);
+		if (listed.has(key)) continue;
+		listed.add(key);
+		effective.push(rule);
+	}
+	return effective;
+}
 
 export const cfgBashAllowedEnvVars = register({
 	id: "bash.allowedEnvVars",
