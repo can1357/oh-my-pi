@@ -284,6 +284,79 @@ it("sends Tern the toolbar and sidebar as buttons whose clicks stage and close",
 	expect(ui.shell.overlays.open()).toBe(false);
 });
 
+it("scrolls the focused Git commit diff with arrow and page keys without switching files", async () => {
+	ensureTheme();
+	await using ui = await nativeShell();
+	ui.send({ ev: "features", features: ["aside", "settle", "scroll"] });
+	const model = fakeModel({
+		model: {
+			cwd: "/fixture",
+			branch: "test",
+			clean: true,
+			unstaged: [],
+			staged: [],
+			headCommit: {
+				sha: "0123456789",
+				shortSha: "0123456",
+				subject: "Change two files",
+				body: "",
+				authorName: "Test",
+				authorEmail: "test@example.com",
+				authorDate: "2026-01-01T00:00:00Z",
+				parents: ["1234567890"],
+				files: [
+					{ path: "a.txt", kind: "added", area: "commit" },
+					{ path: "b.txt", kind: "added", area: "commit" },
+				],
+				filesLoaded: true,
+			},
+		},
+		contents: {
+			kind: "text",
+			oldText: "",
+			newText: Array.from({ length: 100 }, (_, line) => `Added line ${line + 1}\n`).join(""),
+		},
+	});
+	const closed = presentGitApp(ui.shell, {
+		model,
+		createAvatarSource: () => ({ get: () => null }),
+		aiStage: async () => {
+			throw new Error("unexpected AI stage");
+		},
+		generateCommitMessage: async () => {
+			throw new Error("unexpected commit generation");
+		},
+	});
+	await settle();
+	const diff = ui.node("diff");
+	expect(diff.p.path).toBe("a.txt");
+	ui.type("\x1b[A");
+	expect(ui.scrolls()).toEqual([]);
+
+	ui.type("\r");
+	await settle();
+	for (const key of ["\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[6~", "\x1b[5~", "G", "g"]) {
+		ui.type(key);
+		await settle();
+	}
+	expect(ui.scrolls()).toEqual([
+		[diff.id, "line-down"],
+		[diff.id, "line-up"],
+		[diff.id, "page-down"],
+		[diff.id, "page-down"],
+		[diff.id, "page-up"],
+		[diff.id, "end"],
+		[diff.id, "start"],
+	]);
+	expect(ui.node("diff").p.path).toBe("a.txt");
+
+	ui.type("]");
+	await settle();
+	expect(ui.node("diff").p.path).toBe("b.txt");
+	ui.type("q");
+	await closed;
+});
+
 /** SGR mouse bytes as a pointer event (0-based cells). */
 function decodeMouse(data: string): MouseEvent | undefined {
 	const match = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);

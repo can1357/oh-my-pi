@@ -227,6 +227,50 @@ async fn envrc_is_evaluated_only_once_allowed() {
 	]);
 }
 
+/// The user's startup hooks run after authorization, but cannot substitute
+/// different bytes for the root file. The shell still supplies its real
+/// source name and directory, and detects a replacement even at the same mtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn envrc_uses_the_approved_snapshot_and_rechecks_replaced_bytes() {
+	let project = Project::new();
+	project.write("tree/proj/.envrc", "export FOO=approved PARENT=${BASH_SOURCE[0]} LOCAL=$PWD\n");
+	project.write("tree/proj/replacement", "touch replacement-ran\nexport FOO=replacement\n");
+	let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+	for path in ["tree/proj/.envrc", "tree/proj/replacement"] {
+		std::fs::File::options()
+			.write(true)
+			.open(project.root.join(path))
+			.expect("open fixture")
+			.set_modified(stamp)
+			.expect("set matching mtime");
+	}
+	project.write("home/.direnvrc", "if [[ -f replacement ]]; then mv -f replacement .envrc; fi\n");
+
+	let (status, output) = project
+		.run(
+			"direnv allow || exit 90\neval \"$(direnv export bash 2>/dev/null)\"\nprintf \
+			 '%s|%s|%s\\n' \"$FOO\" \"$PARENT\" \"$LOCAL\"\ndirenv export bash >\"$root/blocked.sh\" \
+			 2>\"$root/blocked.log\"\necho \"blocked=$?\"; . \"$root/blocked.sh\"; echo \
+			 \"after=${FOO-unset}\"\n[[ ! -e replacement-ran ]] || exit 91\ndirenv allow || exit \
+			 92\ndirenv exec . printenv FOO 2>/dev/null\n",
+		)
+		.await;
+	assert_eq!(status, Some(0), "{output}");
+	assert_eq!(
+		output,
+		format!(
+			"approved|./.envrc|{}\nblocked=1\nafter=unset\nreplacement\n",
+			project.text("tree/proj")
+		)
+	);
+	assert!(
+		std::fs::read_to_string(project.text("blocked.log"))
+			.expect("blocked log")
+			.contains("is blocked")
+	);
+	assert!(project.root.join("tree/proj/replacement-ran").exists());
+}
+
 /// Contract: an `.envrc` that fails under `strict_env` fails the load:
 /// `exec` does not run its command, and `export` fails without exporting
 /// what the file set before it stopped.

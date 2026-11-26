@@ -1107,11 +1107,17 @@ describe("ModelRegistry runtime provider registration", () => {
 			},
 		};
 		registry.registerProvider("gated-provider", config, "ext://oauth");
-		const anthropicNames = () => registry.getProviderModels("anthropic").map(model => model.name);
+		const mirror = new ModelRegistry(authStorage, modelsJsonPath, { owner: registry });
+		const { snapshot, unsubscribe } = registry.subscribeMirror(batch => mirror.applyMirrorBatch(batch));
+		mirror.applyMirrorBatch(snapshot);
+		const anthropicNames = (catalog: ModelRegistry) =>
+			catalog.getProviderModels("anthropic").map(model => model.name);
 
 		// Without credentials the hook cannot run, so the lookup stays provider-scoped and untouched.
-		expect(anthropicNames().length).toBeGreaterThan(0);
-		expect(anthropicNames().some(name => name.endsWith(" (gated)"))).toBe(false);
+		const before = anthropicNames(registry);
+		expect(before.length).toBeGreaterThan(0);
+		expect(before.some(name => name.endsWith(" (gated)"))).toBe(false);
+		expect(anthropicNames(mirror)).toEqual(before);
 
 		await authStorage.credentials.set("gated-provider", {
 			type: "oauth",
@@ -1121,7 +1127,10 @@ describe("ModelRegistry runtime provider registration", () => {
 		});
 		// The login flow refreshes only the authenticated provider; anthropic's lookup must still see the hook.
 		await registry.refreshProvider("gated-provider", "offline");
-		expect(anthropicNames().every(name => name.endsWith(" (gated)"))).toBe(true);
+		const expected = before.map(name => `${name} (gated)`);
+		expect(anthropicNames(registry)).toEqual(expected);
+		expect(anthropicNames(mirror)).toEqual(expected);
+		unsubscribe();
 	});
 
 	test("oauth.modifyModels output is materialized through buildModel", async () => {
@@ -1432,7 +1441,7 @@ describe("ModelRegistry runtime provider registration", () => {
 			refresh: "refresh-token",
 			expires: Date.now() + 60_000,
 		});
-		let projectionCount = 0;
+		let projectedName = "registration";
 		registry.registerProvider(
 			"changing-provider",
 			{
@@ -1446,10 +1455,10 @@ describe("ModelRegistry runtime provider registration", () => {
 					refreshToken: async credentials => credentials,
 					getApiKey: credentials => credentials.access,
 					modifyModels: models => {
-						projectionCount += 1;
 						return models.map(model =>
-							model.provider === "changing-provider"
-								? { ...model, name: `projection-${projectionCount}` }
+							model.provider === "changing-provider" ||
+							(model.provider === "anthropic" && model.id === anthropicId)
+								? { ...model, name: projectedName }
 								: model,
 						);
 					},
@@ -1459,8 +1468,11 @@ describe("ModelRegistry runtime provider registration", () => {
 		);
 
 		const refreshPromise = registry.refresh("offline");
-		expect(registry.find("anthropic", anthropicId!)).toBeDefined();
-		expect(registry.find("changing-provider", "runtime-model")?.name).toBe("projection-3");
+		projectedName = "anthropic lookup";
+		expect(registry.find("anthropic", anthropicId!)?.name).toBe("anthropic lookup");
+		// The first lookup ran the hook on both providers, but only its anthropic row was requested.
+		projectedName = "changing-provider lookup";
+		expect(registry.find("changing-provider", "runtime-model")?.name).toBe("changing-provider lookup");
 		await refreshPromise;
 	});
 
