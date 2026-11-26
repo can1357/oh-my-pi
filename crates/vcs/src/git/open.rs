@@ -157,7 +157,7 @@ pub(crate) fn status_with_fresh_index<'repo>(
 /// - Trust: full. This is a local dev tool operating on the user's own
 ///   checkout; ownership quarantine would only reject repos the user already
 ///   chose to work in.
-fn open_options() -> Options {
+pub(crate) fn open_options() -> Options {
 	Options::default()
 		.permissions(Permissions {
 			env:        permissions::Environment {

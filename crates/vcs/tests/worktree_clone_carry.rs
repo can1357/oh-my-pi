@@ -360,3 +360,61 @@ fn clone_target_cleanup_keeps_nested_repositories_and_unlinks_only_symlinks() {
 	assert_eq!(snapshot(&outside), outside_before, "cleanup followed a symlink outside the clone");
 	assert_eq!(snapshot(&source), source_before);
 }
+
+/// The plain-checkout fallback must run `filter.<driver>.smudge` registered in
+/// `<common-dir>/info/attributes`, exactly like `git worktree add` does.
+///
+/// The driver maps the worktree form `TOKEN` to the stored form `token` on
+/// clean and back on smudge — strict inverses. The fixture asserts the clean
+/// side actually ran (the committed blob differs from the bytes written to
+/// disk), so an unfiltered checkout can only leave `token` on disk, which
+/// `git status` then reports dirty; passing therefore proves smudge ran.
+#[test]
+fn plain_checkout_fallback_applies_smudge_filters() {
+	if cfg!(windows) {
+		eprintln!("SKIP: filter driver scripts are shell-based");
+		return;
+	}
+	let (temp, source, repo) = fixture();
+	let script = source.join("filter.sh");
+	fs::write(&script, "#!/bin/sh\ncase \"$1\" in\n\tsmudge) tr a-z A-Z ;;\n\tclean)  tr A-Z a-z ;;\nesac\n").unwrap();
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+	}
+	let script = script.display().to_string();
+	for (key, value) in [
+		("filter.t.smudge", format!("'{}' smudge", script)),
+		("filter.t.clean", format!("'{}' clean", script)),
+		("filter.t.required", "true".to_owned()),
+	] {
+		git(&source, &["config", &key, &value]);
+	}
+	write(&source, ".git/info/attributes", "*.txt filter=t\n");
+	write(&source, "b.txt", "TOKEN\n");
+	git(&source, &["add", "b.txt"]);
+	git(&source, &["commit", "-qm", "filter fixture"]);
+	assert_eq!(
+		git(&source, &["cat-file", "blob", "HEAD:b.txt"]),
+		"token",
+		"clean filter did not run: the committed blob must be the lowercased form"
+	);
+
+	let target = temp.path().join("target");
+	let result = repo
+		.worktree_add(&target, "HEAD", WorktreeAddOptions {
+			detach:       true,
+			clone:        WorktreeClone::Off,
+			keep_changes: false,
+		})
+		.unwrap();
+	assert!(result.cloned_with.is_none());
+	assert!(result.clone_error.is_none());
+	assert_eq!(
+		fs::read_to_string(target.join("b.txt")).unwrap(),
+		"TOKEN",
+		"smudge filter did not run: the worktree file must be the uppercased form"
+	);
+	assert_eq!(git(&target, &["status", "--porcelain"]), "");
+}
