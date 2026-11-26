@@ -4,7 +4,9 @@
  *
  * Updates are synchronous and glitch-free. A write marks direct observers
  * dirty and their dependents "check"; queued effects then pull their sources
- * in creation order, so a computed reruns only when a source actually changed
+ * in the order they were marked (each source marks its observers in the order
+ * they subscribed; one that stopped reading it and came back is last), so a
+ * computed reruns only when a source actually changed
  * and every effect sees a consistent graph. Writes inside {@link batch} (or
  * inside a running effect) flush once, when the outermost batch ends.
  *
@@ -58,7 +60,8 @@ const MAX_FLUSH_RUNS = 100_000;
 const kAccessor = Symbol("jsx.accessor");
 
 interface Source {
-	observers: Computation<unknown>[] | null;
+	/** Insertion-ordered, so a write marks (and flushes) observers in the order they subscribed; O(1) to leave. */
+	observers: Set<Computation<unknown>> | null;
 	/** Scratch mark: the run that last tracked it, or the resubscribe pass that last visited it. */
 	stamp: number;
 	/** Bring the value up to date (computeds); no-op for signals. */
@@ -155,7 +158,7 @@ function flush(): void {
 }
 
 class SignalNode<T> implements Source {
-	observers: Computation<unknown>[] | null = null;
+	observers: Set<Computation<unknown>> | null = null;
 	stamp = 0;
 	value: T;
 	readonly equals: Equals<T> | false;
@@ -180,7 +183,7 @@ class SignalNode<T> implements Source {
 }
 
 class Computation<T> extends Owner implements Source {
-	observers: Computation<unknown>[] | null = null;
+	observers: Set<Computation<unknown>> | null = null;
 	sources: Source[] | null = null;
 	stamp = 0;
 	state: State = DIRTY;
@@ -209,7 +212,8 @@ class Computation<T> extends Owner implements Source {
 	}
 
 	refresh(): void {
-		if (this.state === CLEAN) return;
+		// Disposed while stale: an observer still holding it pulls the last value, never a new run.
+		if (this.state === CLEAN || this.disposed) return;
 		if (this.state === CHECK) {
 			for (const source of this.sources ?? []) {
 				source.refresh();
@@ -245,7 +249,10 @@ class Computation<T> extends Owner implements Source {
 			currentObserver = prevObserver;
 			currentSources = prevSources;
 			currentRun = prevRun;
-			this.#resubscribe(sources);
+			// Disposed during its own run: `dispose` already left every source, so what the run read must not
+			// rejoin them, and what it created after the dispose is torn down now.
+			if (this.disposed) this.reset();
+			else this.#resubscribe(sources);
 		}
 		const changed = !this.#settled || this.#equals === false || !this.#equals(this.value as T, next);
 		this.#settled = true;
@@ -271,18 +278,14 @@ class Computation<T> extends Owner implements Source {
 		for (const source of next) {
 			const stamp = source.stamp;
 			if (stamp === seen) continue;
-			if (stamp !== kept) (source.observers ??= []).push(self);
+			if (stamp !== kept) (source.observers ??= new Set()).add(self);
 			source.stamp = seen;
 			next[length++] = source;
 		}
 		next.length = length;
 		if (previous) {
 			for (const source of previous) {
-				if (source.stamp === seen) continue;
-				const list = source.observers;
-				if (!list) continue;
-				const index = list.indexOf(self);
-				if (index !== -1) list.splice(index, 1);
+				if (source.stamp !== seen) source.observers?.delete(self);
 			}
 		}
 		this.sources = next;
@@ -291,12 +294,7 @@ class Computation<T> extends Owner implements Source {
 	override dispose(): void {
 		if (this.disposed) return;
 		super.dispose();
-		for (const source of this.sources ?? []) {
-			const list = source.observers;
-			if (!list) continue;
-			const index = list.indexOf(this as Computation<unknown>);
-			if (index !== -1) list.splice(index, 1);
-		}
+		for (const source of this.sources ?? []) source.observers?.delete(this as Computation<unknown>);
 		this.sources = null;
 	}
 }
