@@ -118,6 +118,24 @@ pub fn http(status: u16, headers: &[(String, String)], body: &str) -> Option<Str
 	Some(name.to_owned())
 }
 
+/// Last path segments of a sign-in form.
+const LOGIN_SEGMENTS: [&str; 6] =
+	["login", "log-in", "signin", "sign-in", "sign_in", "authenticate"];
+
+/// True when `url` is a sign-in form: a site sends a reader it refuses there.
+pub fn is_login_url(url: &url::Url) -> bool {
+	url.path_segments().is_some_and(|mut segments| {
+		segments
+			.rfind(|segment| !segment.is_empty())
+			.is_some_and(|segment| {
+				let segment = segment.split('.').next().unwrap_or(segment);
+				LOGIN_SEGMENTS
+					.iter()
+					.any(|login| segment.eq_ignore_ascii_case(login))
+			})
+	})
+}
+
 /// True when a short rendering is a wall's block page or a JavaScript gate
 /// rather than content: what a remote reader is served by a wall.
 pub fn is_block_page(text: &str) -> bool {
@@ -260,6 +278,15 @@ mod tests {
 			<input-example name="js_challenge"></input-example><input data-name="js_challenge">
 			<div data-example='<input name="js_challenge">'></div></article>"#;
 		assert_eq!(http(200, &html(&[]), quoted), None);
+	}
+
+	#[test]
+	fn login_urls() {
+		let login = |url: &str| is_login_url(&Url::parse(url).unwrap());
+		assert!(login("https://x.test/login/?reason=agent"));
+		assert!(login("https://x.test/accounts/Sign-In.aspx"));
+		assert!(!login("https://x.test/blog/how-login-works"));
+		assert!(!login("https://x.test/"));
 	}
 
 	#[test]
