@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- `Process.terminate` now reaches descendants that started their own session: it captures them before the first signal, so a group SIGTERM that ends the root first no longer hides them, and keeps them for the hard-kill wave.
 - Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
 - Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
 - Preserved source-code indentation and linked content cards in URL reads.
