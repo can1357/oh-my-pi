@@ -34,3 +34,79 @@ it("refuses a later HTTP attempt after the cost gate closes without recording a 
 	expect(sent).toBe(1);
 	expect(lastDispatchOrigin(model)).toBe("https://first.invalid");
 });
+
+it("does not send a request whose signal aborted before it reached the transport", async () => {
+	const model = buildModel({
+		id: "aborted-before-transport",
+		name: "Aborted Before Transport",
+		api: "openai-completions",
+		provider: "test-aborted-before-transport",
+		baseUrl: "https://aborted.invalid/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 4096,
+		maxTokens: 1024,
+	});
+	let admitted = 0;
+	let sent = 0;
+	const fetch = transportFetch(
+		model,
+		async () => {
+			sent++;
+			return new Response("ok");
+		},
+		() => {
+			admitted++;
+		},
+	);
+	const url = "https://aborted.invalid/v1/chat/completions";
+	const cancelled = new AbortController();
+	const reason = new Error("caller cancelled");
+	cancelled.abort(reason);
+	await expect(fetch(url, { method: "POST", signal: cancelled.signal })).rejects.toBe(reason);
+	expect(sent).toBe(0);
+	expect(admitted).toBe(0);
+	expect(lastDispatchOrigin(model)).toBeUndefined();
+
+	await fetch(url, { method: "POST", signal: new AbortController().signal });
+	expect(sent).toBe(1);
+});
+
+it("does not send a Request whose own signal aborted before it reached the transport", async () => {
+	const model = buildModel({
+		id: "aborted-request-before-transport",
+		name: "Aborted Request Before Transport",
+		api: "openai-completions",
+		provider: "test-aborted-request-before-transport",
+		baseUrl: "https://aborted-request.invalid/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 4096,
+		maxTokens: 1024,
+	});
+	let admitted = 0;
+	let sent = 0;
+	const fetch = transportFetch(
+		model,
+		async () => {
+			sent++;
+			return new Response("ok");
+		},
+		() => {
+			admitted++;
+		},
+	);
+	const url = "https://aborted-request.invalid/v1/chat/completions";
+	const cancelled = new AbortController();
+	const reason = new Error("caller cancelled the request");
+	cancelled.abort(reason);
+	await expect(fetch(new Request(url, { method: "POST", signal: cancelled.signal }))).rejects.toBe(reason);
+	expect(sent).toBe(0);
+	expect(admitted).toBe(0);
+	expect(lastDispatchOrigin(model)).toBeUndefined();
+
+	await fetch(new Request(url, { method: "POST", signal: new AbortController().signal }));
+	expect(sent).toBe(1);
+});
