@@ -7096,6 +7096,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * {@link restartArgv}), restoring this session (`--restore`) when it exists on
 	 * disk: subagents the teardown cut off mid-turn go on in the new process.
 	 *
+	 * Refuses to close the session if its working directory has been removed.
+	 *
 	 * On POSIX the relaunch is a true `execvp(3)` image replacement: same PID,
 	 * same terminal, no lingering parent. Postmortem cleanups and stdout are
 	 * flushed first because nothing in this process runs after a successful
@@ -7103,6 +7105,17 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * spawning the replacement and lingering only to forward its exit code.
 	 */
 	async restart(): Promise<void> {
+		if (this.#isShuttingDown) return;
+		try {
+			// Bun can return a cached process.cwd() after the directory is unlinked.
+			await fs.realpath(".");
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			if (!this.#isShuttingDown) {
+				this.showError("Could not restart: the working directory no longer exists. Run /move <dir> first.");
+			}
+			return;
+		}
 		if (this.#isShuttingDown) return;
 		this.#beginClose();
 		try {

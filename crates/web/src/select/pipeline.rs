@@ -637,8 +637,10 @@ fn drop_repeated_rails(tree: &Tree, dropped: &mut [bool]) {
 	let mut rails: HashMap<String, Vec<usize>> = HashMap::new();
 	for (index, node) in walk(nodes, dropped, 0..nodes.len()) {
 		let Node::Tag(tag) = node else { continue };
-		if matches!(tag.name(), "html" | "body" | "pre" | "code" | "table" | "thead" | "tbody" | "tr" | "td" | "th")
-			|| has_role(tag, &["table", "grid", "treegrid"])
+		if matches!(
+			tag.name(),
+			"html" | "body" | "pre" | "code" | "table" | "thead" | "tbody" | "tr" | "td" | "th"
+		) || has_role(tag, &["table", "grid", "treegrid"])
 			|| nodes[tag.children.clone()].iter().any(
 				|node| matches!(node, Node::Tag(inner) if matches!(inner.name(), "a" | "pre" | "code")),
 			)
@@ -647,8 +649,7 @@ fn drop_repeated_rails(tree: &Tree, dropped: &mut [bool]) {
 				.any(|parent| {
 					matches!(parent.name(), "pre" | "code" | "table")
 						|| has_role(parent, &["table", "grid", "treegrid"])
-				})
-		{
+				}) {
 			continue;
 		}
 		let Some(text) = label(nodes, dropped, tag.children.clone(), RAIL_MAX_CHARS) else {

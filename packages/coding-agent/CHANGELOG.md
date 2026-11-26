@@ -11,6 +11,7 @@
 - Combined goal mode with vibe mode: `/goal` and `/vibe` compose in either order, keeping the `goal` tool in the director's set while workers drive the objective. Worker-result delivery owns director wake-ups (goal continuation fires only when every worker is idle), goal state rides in the vibe `mode_change` journal entry so one record rehydrates both on resume, exiting vibe pauses an active goal, and a goal's `token_budget` now covers director plus worker spend through record-level usage accounting that survives worker park/revive and process restarts.
 - Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
 
 ### Changed
 
@@ -23,6 +24,11 @@
 ### Fixed
 
 - Entering vibe while a goal is paused keeps that objective, and worker spend from an earlier vibe session is not charged again when the goal resumes.
+- Blob-broker tunnels no longer flash console windows on Windows, including when a tunnel fails to start and is retried ([#20599](https://github.com/can1357/oh-my-pi/issues/20599)).
+- `/restart` keeps the session open if its working directory was deleted and suggests using `/move` before retrying ([#20594](https://github.com/can1357/oh-my-pi/issues/20594)).
+- `http` MCP servers that answer `server/discover` with a plain HTTP 415 (rmcp 0.2, e.g. `elastic/mcp-server-elasticsearch`) now connect through the `initialize` handshake instead of failing ([#20588](https://github.com/can1357/oh-my-pi/issues/20588)).
+- `/usage` shows OpenCode Go quota windows again instead of `API key — usage unavailable` after the model catalog refreshes ([#20581](https://github.com/can1357/oh-my-pi/issues/20581)).
+- Terminal images at the edges of assistant replies no longer disappear or draw above their allotted rows ([#20569](https://github.com/can1357/oh-my-pi/issues/20569)).
 - `/prewalk`, `/prewalk restart`, and `/switch` now accept `^provider/id[:level]` model references inserted by `^` completion ([#20564](https://github.com/can1357/oh-my-pi/issues/20564)).
 - Resuming or rewinding a session with an aborted task result no longer throws while the transcript renders; the card shows the cancellation text ([#20533](https://github.com/can1357/oh-my-pi/pull/20533) by [@g0spel](https://github.com/g0spel))
 - Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).
