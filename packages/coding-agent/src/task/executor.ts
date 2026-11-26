@@ -11,6 +11,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, extractIntent, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessageEvent, Model, ServiceTierByFamily, ToolCall, Usage } from "@oh-my-pi/pi-ai";
+import { SERVICE_TIER_FAMILIES } from "@oh-my-pi/pi-ai/types";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -47,7 +48,6 @@ import {
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
 import {
-	buildServiceTierByFamily,
 	isServiceTierForFamily,
 	resolveAgentServiceTierOverride,
 	resolveSubagentServiceTier,
@@ -172,9 +172,7 @@ import {
 } from "./settings";
 import {
 	cfgTierSubagent,
-	cfgTierGoogle,
-	cfgTierAnthropic,
-	cfgTierOpenai,
+	cfgTiers,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
 	cfgPrewalkAutoTarget,
@@ -1205,14 +1203,10 @@ function inheritedSubagentServiceTiers(
 	inheritedServiceTier?: ServiceTierByFamily | null,
 ): ServiceTierByFamily {
 	if (inheritedServiceTier === undefined) {
-		return buildServiceTierByFamily(
-			cfgTierOpenai.get(baseSettings),
-			cfgTierAnthropic.get(baseSettings),
-			cfgTierGoogle.get(baseSettings),
-		);
+		return cfgTiers.get(baseSettings);
 	}
 	const tiers: ServiceTierByFamily = {};
-	for (const family of ["openai", "anthropic", "google"] as const) {
+	for (const family of SERVICE_TIER_FAMILIES) {
 		const tier = inheritedServiceTier?.[family];
 		if (isServiceTierForFamily(family, tier)) tiers[family] = tier;
 	}
@@ -1299,6 +1293,7 @@ export function createSubagentSettings(
 			"tier.openai": subagentTiers.openai ?? "none",
 			"tier.anthropic": subagentTiers.anthropic ?? "none",
 			"tier.google": subagentTiers.google ?? "none",
+			"tier.devin": subagentTiers.devin ?? "none",
 			// Async jobs and bash/eval auto-backgrounding are inherited from the parent:
 			// background jobs are owner-routed to the subagent's own session, and
 			// the run driver's quiescence barrier + teardown reap guarantee no
