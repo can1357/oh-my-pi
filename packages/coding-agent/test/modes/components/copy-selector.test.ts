@@ -266,6 +266,69 @@ function promptChain(count: number): SessionMessageEntry[] {
 	return entries;
 }
 
+/**
+ * One prompt, then 700 bash calls with their results: a final turn far longer than the replay cap.
+ * `answer` closes the run with a reply, which moves the replay cap's cut onto a tool result.
+ */
+function longFinalTurn(answer?: string): SessionMessageEntry[] {
+	const entries: SessionMessageEntry[] = [
+		entry("u1", null, { role: "user", content: "run the sweep", timestamp: 1 } as AgentMessage),
+	];
+	for (let index = 0; index < 700; index++) {
+		const call = `call-${index}`;
+		entries.push(
+			entry(`a${index}`, entries.at(-1)!.id, {
+				role: "assistant",
+				content: [{ type: "toolCall", id: call, name: "bash", arguments: { command: `step ${index}` } }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "toolUse",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: 2 + index * 2,
+			} as unknown as AgentMessage),
+		);
+		entries.push(
+			entry(`t${index}`, entries.at(-1)!.id, {
+				role: "toolResult",
+				toolCallId: call,
+				toolName: "bash",
+				content: [{ type: "text", text: `output ${index}` }],
+				isError: false,
+				timestamp: 3 + index * 2,
+			} as unknown as AgentMessage),
+		);
+	}
+	if (answer)
+		entries.push(
+			entry("answer", entries.at(-1)!.id, {
+				role: "assistant",
+				content: [{ type: "text", text: answer }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "stop",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: 1500,
+			} as unknown as AgentMessage),
+		);
+	return entries;
+}
+
 describe("copy selector", () => {
 	const previousKeybindings = getKeybindings();
 	beforeEach(async () => {
@@ -486,45 +549,10 @@ describe("copy selector", () => {
 	});
 
 	it("keeps a copyable target when the final turn is longer than the replay cap", () => {
-		// Cutting blindly at `length - limit` would start the tail inside the
-		// tool results, whose calls are gone: the picker would mount with nothing to copy.
-		const entries: SessionMessageEntry[] = [
-			entry("u1", null, { role: "user", content: "run the sweep", timestamp: 1 } as AgentMessage),
-		];
-		for (let index = 0; index < 700; index++) {
-			const call = `call-${index}`;
-			entries.push(
-				entry(`a${index}`, entries.at(-1)!.id, {
-					role: "assistant",
-					content: [{ type: "toolCall", id: call, name: "bash", arguments: { command: `step ${index}` } }],
-					api: "anthropic-messages",
-					provider: "anthropic",
-					model: "claude-sonnet-4-5",
-					stopReason: "toolUse",
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					timestamp: 2 + index * 2,
-				} as unknown as AgentMessage),
-			);
-			entries.push(
-				entry(`t${index}`, entries.at(-1)!.id, {
-					role: "toolResult",
-					toolCallId: call,
-					toolName: "bash",
-					content: [{ type: "text", text: `output ${index}` }],
-					isError: false,
-					timestamp: 3 + index * 2,
-				} as unknown as AgentMessage),
-			);
-		}
+		// The run alone outgrows the replay cap: the tail opens on a call inside it, so the newest
+		// call still copies with its output.
 		const picks: Pick[] = [];
-		const term = makeSelector(picks, () => {}, undefined, entries);
+		const term = makeSelector(picks, () => {}, undefined, longFinalTurn());
 		try {
 			press(term, "enter");
 			expect(picks).toHaveLength(1);
@@ -532,5 +560,22 @@ describe("copy selector", () => {
 		} finally {
 			term.dispose();
 		}
+	});
+
+	it("opens a final turn longer than the replay cap on its recent calls, not the whole branch", () => {
+		// The tail once reached back to the turn's prompt, replaying all 701 turns of a branch with one prompt.
+		// The cut lands on a tool result whose call is cut off: the tail starts at the next call
+		// (a blind cut would list the orphan result as a 301st turn).
+		createRoot(dispose => {
+			try {
+				const picker = CopySelector({ entries: longFinalTurn("swept"), onPick() {}, onCancel() {} });
+				if (!isUiNode(picker)) throw new Error("expected one picker node");
+				const screen = paintNode(staticEnvironment(loadThemeSync("dark")), picker, 100).rows.join("\n");
+				expect(screen).toContain("300/300");
+				expect(screen).toContain("a earlier turns");
+			} finally {
+				dispose();
+			}
+		});
 	});
 });

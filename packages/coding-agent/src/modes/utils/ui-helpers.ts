@@ -455,6 +455,9 @@ export class UiHelpers {
 		// a run gets the turn's totals, and with them the native footer under its
 		// answer (`⧉ · 12.4s · 19K tok this turn`) whose Copy copies the answer.
 		const turnUsage = new TurnUsageTally();
+		// A replica can open partway through a run (a selector replaying a long branch's tail): until a
+		// run starts in view, the tally would cover only the replayed part, so that run gets no totals.
+		let runStartUnseen = replica;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usage = pendingUsage;
@@ -648,7 +651,8 @@ export class UiHelpers {
 					);
 				}
 				const turnSummary = turnUsage.add(message, turnStartedAt);
-				if (turnSummary) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				if (turnSummary && !runStartUnseen) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				if (message.stopReason !== "toolUse") runStartUnseen = false;
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(ctx.settings) && assistantUsageIsBilled(message.usage)
 						? message.usage
@@ -756,6 +760,7 @@ export class UiHelpers {
 				if (message.role === "user" && message.attribution !== "agent") {
 					turnStartedAt = message.timestamp;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				// A synthetic developer message initiates a fresh run (auto-continue,
 				// /goal, approved plan): replay must not inherit the preceding user
@@ -767,10 +772,12 @@ export class UiHelpers {
 					// turn's own prompt: anchor the delta to it instead of clearing.
 					turnStartedAt = message.userInitiated ? message.timestamp : undefined;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
 					turnStartedAt = message.timestamp;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				this.addMessageToChat(message, undefined, ctx);
 			}

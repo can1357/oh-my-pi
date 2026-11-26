@@ -90,7 +90,7 @@ function makeEntries(): SessionMessageEntry[] {
 	];
 }
 
-/** The cutoff falls on a tool result; keep its call and user turn. */
+/** The replay cap's cut falls on a tool result: the tail starts after it, and its exchange loads whole with the rest. */
 function longEntriesWithBoundaryTool(): SessionMessageEntry[] {
 	const entries: SessionMessageEntry[] = [];
 	for (let index = 0; index < 40; index++) {
@@ -137,11 +137,12 @@ describe("RewindSelector", () => {
 		try {
 			selector.render(120);
 
-			// The tail starts at u39 (601 targets): 600 steps reach its oldest turn.
+			// The tail skips the cut-off tool result and starts at u40 (599 targets): the 599th step
+			// loads the earlier history and the 600th reaches u39.
 			for (let index = 0; index < 600; index++) selector.handleInput(UP);
 			selector.handleInput(ENTER);
 
-			// Left past the oldest replayed turn loads the earlier history.
+			// Left steps to the previous user turn.
 			selector.handleInput(LEFT);
 			selector.render(120);
 			selector.handleInput(ENTER);
