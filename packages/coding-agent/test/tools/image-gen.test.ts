@@ -336,8 +336,11 @@ describe("imageGenTool catalog routing", () => {
 			"https://deepinfra.example/v1/images/edits",
 			"https://deepinfra.example/v1/images/generations",
 		]);
-		expect(bodies[0]).toMatchObject({ model: "flux-selected", input_references: [{ type: "image_url" }] });
-		expect(bodies[1]).toMatchObject({ model: "flux-selected", input_references: [{ type: "image_url" }] });
+		const [edit, fallback] = bodies;
+		expect(edit?.model).toBe("flux-selected");
+		expect(edit?.images).toEqual([{ image_url: `data:image/png;base64,${PNG_DATA}` }]);
+		expect(edit).not.toHaveProperty("input_references");
+		expect(fallback).toEqual(edit);
 	});
 
 	it("uses OpenRouter native images with edit references and response media types", async () => {

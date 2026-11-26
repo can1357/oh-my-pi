@@ -240,7 +240,7 @@ fn pseudo_preserves_control_fallback_and_function_parameters() {
 	);
 	let output = text(&f.present(&[], &Options::default()).rows);
 	for expected in
-		["def f(arg1):", "for x in", "is_file(", "else:", "match ", "\n  and false\n  or print"]
+		["def f(arg1):", "for x in", "is_file(", "else:", "match ", "\n  && false\n  || print"]
 	{
 		assert!(output.contains(expected), "missing {expected}: {output}");
 	}
@@ -299,13 +299,13 @@ fn setup_and_pipeline_idioms_restore_real_operands() {
 	);
 	let mut options = Options::default();
 	let folded = text(&f.present(&[], &options).rows);
-	for expected in ["cwd /tmp", "exports all", "⏱ 3s", "may fail", "⇣ last 2"] {
+	for expected in ["exports all", "⏱ 3s", "may fail", "⇣ last 2"] {
 		assert!(folded.contains(expected), "{folded}");
 	}
 	options.layers.idioms = false;
 	let plain = text(&f.present(&[], &options).rows);
 	for expected in
-		["cd /tmp", "set -a", "set +a", "timeout 3 curl", "2>&1", "tail -n 2", " or true"]
+		["cd /tmp", "set -a", "set +a", "timeout 3 curl", "2>&1", "tail -n 2", " || true"]
 	{
 		assert!(plain.contains(expected), "{plain}");
 	}
@@ -338,6 +338,23 @@ fn embedded_documents_are_physical_rows_and_unwrap_restores_delimiters() {
 	assert!(plain.contains("<<'TOML'"));
 	assert!(plain.contains("[section]"));
 	assert!(plain.contains("  TOML"));
+}
+
+#[test]
+fn only_multi_line_embedded_programs_move_below_their_command() {
+	let long =
+		r"/^pub struct Session \{/{f=1;next} f&&/^\}/{f=0} f&&/^\s+[a-z_]+:/{n++} END{print n}";
+	let one_line = text(
+		&Fixture::new(&format!("awk '{long}' session.rs"))
+			.present(&[], &Options::default())
+			.rows,
+	);
+	assert_eq!(one_line, format!("awk ‹{long}› session.rs"));
+
+	let p = Fixture::new("awk '\nBEGIN { n = 0 }\n{ n++ }\nEND { print n }' f")
+		.present(&[], &Options::default());
+	let multi = text(&p.rows);
+	assert_eq!(multi, "awk ⟦awk ↓⟧ f\n  BEGIN { n = 0 }\n  { n++ }\n  END { print n }");
 }
 
 #[test]

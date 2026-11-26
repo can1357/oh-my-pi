@@ -35,7 +35,7 @@ import {
 } from "../internal-urls";
 import { isRemoteTextWritable, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
-import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type FileDiagnosticsResult } from "../tools/details/lsp";
 import { notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { FileChangeType } from "../lsp/types";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
@@ -51,17 +51,17 @@ import {
 	writeFileWithFallback,
 } from "../tools/file-write-fallback";
 import { outputMeta, resolveOutputMaxColumns } from "../tools/output-meta";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { DEFAULT_MAX_COLUMN } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
-import { resolveEditMode } from "../utils/edit-mode";
+import { ToolError } from "../tools/tool-errors";
+import { DEFAULT_MAX_COLUMN } from "../tools/streaming-output";
+import { type EditMode } from "../tools/details/edit";
+import { resolveEditMode, resolveEditToolMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
 import { MAGIC_EDIT_GRAMMAR, magicEditPaths, runMagicEdit } from "./magic";
 import magicEditDescription from "../prompts/tools/magic-edit.md" with { type: "text" };
 import { getLspBatchRequest } from "../lsp/batch";
-import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "@oh-my-pi/pi-tui/tools/edit";
+import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "../tools/details/edit";
 import {
 	type ApplyPatchParams,
 	applyPatchSchema,
@@ -99,10 +99,10 @@ export type {
 	EditToolPerFileResult,
 	Operation,
 	PerFileDiffPreview,
-} from "@oh-my-pi/pi-tui/tools/edit";
+} from "../tools/details/edit";
 export * from "./schemas";
 export * from "./store";
-export { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+export { type EditMode } from "../tools/details/edit";
 
 type TInput =
 	| typeof replaceEditSchema
@@ -401,11 +401,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get mode(): EditMode {
-		if (this.#editMode) return this.#editMode;
-		const mode = resolveEditMode(this.session);
-		// `magic` applies its model-written batch through `replace` (see `#magic`). `edit.mode: none`
-		// unregisters this tool on the next built-in reconcile; until then keep a valid schema.
-		return mode === "none" || mode === "magic" ? "replace" : mode;
+		return this.#editMode ?? resolveEditToolMode(this.session);
 	}
 
 	/**

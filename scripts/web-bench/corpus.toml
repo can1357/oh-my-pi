@@ -1,0 +1,166 @@
+[[page]]
+slug = "wikipedia"
+url = "https://en.wikipedia.org/wiki/Lynx_(web_browser)"
+class = "article"
+
+[[page]]
+slug = "bbc"
+url = "https://www.bbc.com/news"
+article_href = 'href="(/news/articles/[a-z0-9]+)"'
+class = "article"
+
+[[page]]
+slug = "guardian"
+url = "https://www.theguardian.com/international"
+article_href = 'href="(/[a-z-]+/20\d\d/[a-z]{3}/\d\d/[a-z0-9-]+)"'
+class = "article"
+
+[[page]]
+slug = "npr"
+url = "https://www.npr.org/sections/news/"
+class = "listing"
+
+[[page]]
+slug = "paulgraham"
+url = "https://paulgraham.com/greatwork.html"
+class = "article"
+
+[[page]]
+slug = "danluu"
+url = "https://danluu.com/web-bloat/"
+class = "article"
+
+[[page]]
+slug = "simonw"
+url = "https://simonwillison.net/2024/Dec/31/llms-in-2024/"
+class = "article"
+
+[[page]]
+slug = "pydocs"
+url = "https://docs.python.org/3/library/asyncio-task.html"
+class = "docs"
+
+[[page]]
+slug = "mdn"
+url = "https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies"
+class = "docs"
+
+[[page]]
+slug = "rustbook"
+url = "https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html"
+class = "docs"
+
+[[page]]
+slug = "reactdev"
+url = "https://react.dev/learn/thinking-in-react"
+class = "docs"
+
+[[page]]
+slug = "stackoverflow"
+url = "https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster-than-processing-an-unsorted-array"
+class = "wall"
+
+[[page]]
+slug = "hn"
+url = "https://news.ycombinator.com/item?id=8863"
+class = "thread"
+
+[[page]]
+slug = "gh-repo"
+url = "https://github.com/rust-lang/rust"
+class = "listing"
+
+[[page]]
+slug = "gh-issue"
+url = "https://github.com/oven-sh/bun/issues/12823"
+class = "thread"
+
+[[page]]
+slug = "arxiv"
+url = "https://arxiv.org/abs/1706.03762"
+class = "article"
+
+[[page]]
+slug = "npm"
+url = "https://www.npmjs.com/package/react"
+class = "docs"
+
+[[page]]
+slug = "crates"
+url = "https://crates.io/crates/serde"
+class = "app-shell"
+
+[[page]]
+slug = "aozora-sjis"
+url = "https://www.aozora.gr.jp/cards/000148/files/773_14560.html"
+class = "article"
+
+[[page]]
+slug = "rfc"
+url = "https://www.rfc-editor.org/rfc/rfc6265.html"
+class = "docs"
+
+[[page]]
+slug = "lobsters"
+url = "https://lobste.rs/"
+class = "listing"
+
+[[page]]
+slug = "youtube"
+url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+class = "app-shell"
+
+[[page]]
+slug = "reuters"
+url = "https://www.reuters.com/world/"
+class = "wall"
+
+[[page]]
+slug = "httpbin-cookie"
+url = "https://httpbin.org/cookies/set?session=abc123"
+class = "listing"
+
+[[page]]
+slug = "nvidia"
+url = "https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
+class = "docs"
+
+[[page]]
+slug = "mslearn"
+url = "https://learn.microsoft.com/en-us/dotnet/csharp/asynchronous-programming/"
+class = "docs"
+
+[[page]]
+slug = "huggingface"
+url = "https://huggingface.co/learn/llm-course/chapter1/1"
+class = "docs"
+
+[[page]]
+slug = "appledev"
+url = "https://developer.apple.com/documentation/swift/array"
+class = "docs"
+
+[[page]]
+slug = "mcp"
+url = "https://modelcontextprotocol.io/specification/2025-06-18/basic/transports"
+class = "docs"
+
+[[page]]
+slug = "cloudflare"
+url = "https://developers.cloudflare.com/workers/runtime-apis/fetch/"
+class = "docs"
+
+[[page]]
+slug = "discourse"
+url = "https://meta.discourse.org/t/understanding-discourse-trust-levels/90752"
+class = "wall"
+
+[[page]]
+slug = "reddit"
+url = "https://www.reddit.com/r/IAmA/comments/z1c9z/i_am_barack_obama_president_of_the_united_states/"
+class = "wall"
+
+[[page]]
+slug = "fandom"
+url = "https://minecraft.fandom.com/wiki/Crafting"
+class = "docs"

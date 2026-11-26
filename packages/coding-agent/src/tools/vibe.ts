@@ -1,4 +1,4 @@
-import { type VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
+import { type VibeToolDetails } from "./details/vibe";
 /**
  * Vibe mode tools — the director's entire non-read surface.
  *
@@ -23,7 +23,7 @@ import vibeSendDescription from "../prompts/tools/vibe-send.md" with { type: "te
 import vibeSpawnDescription from "../prompts/tools/vibe-spawn.md" with { type: "text" };
 import vibeWaitDescription from "../prompts/tools/vibe-wait.md" with { type: "text" };
 
-import { type VibeScreenSnapshot, type VibeWaitOutcome } from "@oh-my-pi/pi-tui/tools/vibe";
+import { type VibeScreenSnapshot, type VibeWaitOutcome } from "./details/vibe";
 import { VibeSessionRegistry } from "../vibe/runtime";
 import type { Tool, ToolSession } from "./index";
 

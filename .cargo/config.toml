@@ -16,3 +16,11 @@ PCRE2_SYS_STATIC = "1"
 # boolean, while older nightlies took `"DoNotEmbed"`.
 [unstable]
 embed-metadata = false
+# Enables `build.fingerprint = "content"` below.
+checksum-freshness = true
+
+[build]
+# Freshness by content checksum instead of mtime: concurrent agent sessions,
+# git checkouts and no-op formatter rewrites stop invalidating artifacts whose
+# sources did not change (as in stencil).
+fingerprint = "content"

@@ -15,7 +15,7 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/task-details";
 
 beforeEach(() => {
 	AgentRegistry.resetGlobalForTests();

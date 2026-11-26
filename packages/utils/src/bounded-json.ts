@@ -11,14 +11,14 @@ export class BoundedJsonReadError extends Error {
 }
 
 /**
- * Read a response body up to `maxBytes`, stopping once the cap is crossed so an
+ * Read a response or request body up to `maxBytes`, stopping once the cap is crossed so an
  * oversized body cannot balloon memory. `bytes` never exceeds the cap;
  * `truncated` reports that the body continued past it. Returns `null` when the
- * response has no readable body. An abort of `signal` cancels the read and
+ * message has no readable body. An abort of `signal` cancels the read and
  * rejects with its reason, so a peer that never closes cannot stall the caller.
  */
 export async function readBoundedBody(
-	response: Response,
+	response: Response | Request,
 	maxBytes: number,
 	options: { signal?: AbortSignal } = {},
 ): Promise<{ bytes: Uint8Array; truncated: boolean } | null> {

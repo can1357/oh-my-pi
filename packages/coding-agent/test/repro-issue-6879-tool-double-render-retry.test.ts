@@ -4,7 +4,6 @@ import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -12,6 +11,9 @@ import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-c
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import type { TranscriptBlock } from "../src/ui/shell";
+import { createModeTerminal, renderRows, transcriptText } from "./helpers/mode-terminal";
 
 /**
  * Regression for issue #6879 — a tool call renders twice (follow-up to #6516).
@@ -56,7 +58,16 @@ function assistantMessage(content: AssistantMessage["content"], stopReason: stri
  * draws the command through the shell visualization, a finished one as `$ cmd`.
  */
 function countCommand(mode: InteractiveMode): number {
-	return mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)).length;
+	return blocksShowing(mode, CMD).length;
+}
+
+/** Transcript blocks whose painted rows contain `text`. */
+function blocksShowing(mode: InteractiveMode, text: string): TranscriptBlock[] {
+	return mode.shell.transcript.blocks().filter(block =>
+		renderRows(() => block.node)
+			.join("\n")
+			.includes(text),
+	);
 }
 
 describe("issue #6879 — tool output appears twice after a superseded turn", () => {
@@ -77,14 +88,6 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 	});
 
 	beforeEach(() => {
-		vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
-		vi.spyOn(process.stdin, "setEncoding").mockReturnValue(process.stdin);
-		if (typeof process.stdin.setRawMode === "function") {
-			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
-		}
-
 		tempDir = TempDir.createSync("@pi-issue-6879-");
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
@@ -98,8 +101,15 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		// The session is constructed with no tools; bash is a built-in in real
 		// sessions, so provenance-gated rendering must treat it as one here.
 		vi.spyOn(session, "hasBuiltInTool").mockReturnValue(true);
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
 	});
 
@@ -258,7 +268,6 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		try {
 			enableTtsrRewind(true);
 			const ec = mode.eventController;
-			const requestComponentRender = vi.spyOn(mode.ui, "requestComponentRender");
 			const writeCall: ToolCall = {
 				type: "toolCall",
 				id: "write-rewound",
@@ -283,9 +292,9 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 			const writeComponent = mode.pendingTools.get(writeCall.id);
 			if (!writeComponent) throw new Error("Expected animated write component");
 
+			const writeBlock = writeComponent.block;
 			vi.advanceTimersByTime(500);
-			expect(requestComponentRender.mock.calls.some(call => call[0] === writeComponent)).toBeTrue();
-			requestComponentRender.mockClear();
+			expect(mode.shell.transcript.blocks()).toContain(writeBlock);
 
 			// TTSR rewind is known at message_end (isTtsrAbortPending): retract now.
 			await ec.handleEvent({
@@ -294,8 +303,9 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 			} as Extract<AgentSessionEvent, { type: "message_end" }>);
 			expect(mode.pendingTools.has(writeCall.id)).toBeFalse();
 
-			vi.advanceTimersByTime(1_000);
-			expect(requestComponentRender.mock.calls.some(call => call[0] === writeComponent)).toBeFalse();
+			// Retracted: the card left the transcript and its animation went with its node.
+			expect(mode.shell.transcript.blocks()).not.toContain(writeBlock);
+			expect(writeBlock.node.disposed).toBeTrue();
 		} finally {
 			vi.useRealTimers();
 		}
@@ -313,7 +323,7 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		await streamReadToolCall("read-rerun", "toolUse");
 		const retryGroup = mode.pendingTools.get("read-rerun");
 		if (!retryGroup) throw new Error("Expected retry read group");
-		expect(mode.chatContainer.children).toContain(retryGroup);
+		expect(mode.shell.transcript.blocks()).toContain(retryGroup.block);
 
 		await ec.handleEvent({
 			type: "tool_execution_start",
@@ -329,7 +339,7 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 			isError: false,
 		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
 
-		const rendered = Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
+		const rendered = transcriptText(mode.shell);
 		expect(rendered).toContain(READ_PATH);
 	});
 
@@ -357,7 +367,7 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		enableTtsrRewind(true);
 		await streamReadToolCall("read-superseded", "aborted", supersededPath);
 
-		const rendered = Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
+		const rendered = transcriptText(mode.shell);
 		expect(mode.pendingTools.has("read-superseded")).toBeFalse();
 		expect(rendered).toContain(keptPath);
 		expect(rendered).not.toContain(supersededPath);
@@ -433,11 +443,9 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		);
 		mode.rebuildChatFromMessages();
 
-		const replayCards = mode.chatContainer.children.filter(child =>
-			Bun.stripANSI(child.render(120).join("\n")).includes(memoryPath),
-		);
+		const replayCards = blocksShowing(mode, memoryPath);
 		expect(replayCards).toHaveLength(1);
-		const replayChildCount = mode.chatContainer.children.length;
+		const replayChildCount = mode.shell.transcript.blocks().length;
 
 		// Persistence/replay won the race; the delayed live completion must not
 		// create a fallback read group beside the completed replay card.
@@ -449,11 +457,9 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 			isError: false,
 		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
 
-		const matchingCards = mode.chatContainer.children.filter(child =>
-			Bun.stripANSI(child.render(120).join("\n")).includes(memoryPath),
-		);
+		const matchingCards = blocksShowing(mode, memoryPath);
 		expect(matchingCards).toHaveLength(1);
-		expect(mode.chatContainer.children).toHaveLength(replayChildCount);
+		expect(mode.shell.transcript.blocks()).toHaveLength(replayChildCount);
 	});
 
 	it("retracts a TTSR-rewound turn's tool card so the re-run renders it once", async () => {
@@ -511,7 +517,7 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		await runToolCallToCompletion("call-real");
 		expect(countCommand(mode)).toBe(1);
 		// The result routes into the surviving card (no orphaned pending preview).
-		expect(Bun.stripANSI(mode.chatContainer.render(120).join("\n"))).toContain("(no output)");
+		expect(transcriptText(mode.shell)).toContain("(no output)");
 	});
 
 	it("re-keys a grouped read when its id is populated after the block appears", async () => {
@@ -549,9 +555,7 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 
 		expect(mode.pendingTools.has("")).toBeFalse();
 		expect(mode.pendingTools.has("read-real")).toBeTrue();
-		const matchingCards = mode.chatContainer.children.filter(child =>
-			Bun.stripANSI(child.render(120).join("\n")).includes(READ_PATH),
-		);
+		const matchingCards = blocksShowing(mode, READ_PATH);
 		expect(matchingCards).toHaveLength(1);
 	});
 

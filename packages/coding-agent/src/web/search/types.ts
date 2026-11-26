@@ -1,7 +1,7 @@
 import type { WebSearchGrounding } from "@oh-my-pi/pi-catalog/types";
-import type { SearchProviderId, SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search-types";
+import type { SearchProviderId, SearchResponse } from "./provider-types";
 
-export * from "@oh-my-pi/pi-tui/tools/web-search-types";
+export * from "./provider-types";
 
 /** One provider that failed before another answered, or before the search gave up. */
 export interface SearchFailureDetail {

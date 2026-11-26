@@ -1,11 +1,12 @@
 //! `ast-grep` / `sg` builtin: ast-grep 0.50's `run` (structural search and
-//! rewrite), `scan` (YAML rules, `sgconfig.yml` projects) and `outline`
-//! (symbol outlines) commands as an in-process shell utility on top of the
-//! `omp_ast` search engine, with ast-grep's piped (non-terminal) output: no
-//! colors and no file headings unless `--heading always`.
+//! rewrite), `scan` (YAML rules, `sgconfig.yml` projects), `test` (rule test
+//! cases and snapshots), `new` (project scaffolding) and `outline` (symbol
+//! outlines) commands as an in-process shell utility on top of the `omp_ast`
+//! search engine, with ast-grep's piped (non-terminal) output: no colors and
+//! no file headings unless `--heading always`.
 
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	ffi::OsString,
 	fmt::Write as _,
 	io::{self, Write},
@@ -38,6 +39,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::host::{AsyncUtility, Host};
 
+mod scaffold;
+mod verify;
+
 const DOC_SITE_HOST: &str = "https://ast-grep.github.io";
 const PATTERN_GUIDE: &str = "/guide/pattern-syntax.html";
 const ESQUERY_GUIDE: &str = "/reference/rule/esquery.html";
@@ -56,21 +60,22 @@ const STDIN_PATH: &str = "STDIN";
 const PROJECT_CONFIG: &str = "sgconfig.yml";
 
 /// The builtin's subcommands; any other first argument runs `run`.
-const COMMANDS: &[&str] = &["run", "scan", "outline", "help"];
+const COMMANDS: &[&str] = &["run", "scan", "test", "new", "outline", "help"];
 
 /// ast-grep subcommands the builtin does not implement.
-const UNSUPPORTED_COMMANDS: &[&str] = &["test", "new", "lsp", "completions"];
+const UNSUPPORTED_COMMANDS: &[&str] = &["lsp", "completions"];
 
 /// Options that take a separate value, so their value is never read as a flag.
 const VALUE_OPTIONS: &[&str] = &[
 	"-p", "--pattern", "-r", "--rewrite", "--rule", "-l", "--lang", "--selector", "--strictness", "--globs",
 	"-j", "--threads", "-A", "--after", "-B", "--before", "-C", "--context", "--color", "--heading",
 	"--no-ignore", "-c", "--config", "-k", "--kind", "--inline-rules", "--filter", "--report-style",
-	"--max-results", "--items", "--type", "--match", "--view",
+	"--max-results", "--items", "--type", "--match", "--view", "-t", "--test-dir", "--snapshot-dir", "-f",
+	"--inspect", "--custom-languages",
 ];
 
 /// Unsupported ast-grep options, by the spellings that select them.
-const UNSUPPORTED_OPTIONS: &[(&str, &[&str])] = &[("--interactive", &["-i", "--interactive"]), ("--inspect", &["--inspect"])];
+const UNSUPPORTED_OPTIONS: &[(&str, &[&str])] = &[("--interactive", &["-i", "--interactive"])];
 
 /// The first ast-grep feature `args` (the arguments after the program name)
 /// use that the builtin does not implement.
@@ -108,9 +113,12 @@ fn unsupported_feature<'a>(args: impl IntoIterator<Item = Option<&'a str>>) -> O
 fn command_index(argv: &[OsString]) -> Option<usize> {
 	let mut index = 1;
 	while let Some(arg) = argv.get(index).and_then(|arg| arg.to_str()) {
-		if arg == "-c" || arg == "--config" {
+		if arg == "-c" || arg == "--config" || arg == "--custom-languages" {
 			index += 2;
-		} else if arg.starts_with("--config=") || (arg.starts_with("-c") && arg.len() > 2 && !arg.starts_with("--")) {
+		} else if arg.starts_with("--config=")
+			|| arg.starts_with("--custom-languages=")
+			|| (arg.starts_with("-c") && arg.len() > 2 && !arg.starts_with("--"))
+		{
 			index += 1;
 		} else {
 			return COMMANDS.contains(&arg).then_some(index);
@@ -132,6 +140,24 @@ pub(crate) struct AstGrep {
 	/// Path to ast-grep root config, default is sgconfig.yml.
 	#[arg(short, long, global = true, value_name = "CONFIG_FILE")]
 	config: Option<String>,
+
+	/// Control how sgconfig.yml handles native custom language libraries (default: ignore).
+	#[arg(long = "custom-languages", global = true, value_enum, value_name = "CUSTOM_LANGUAGES")]
+	_custom_languages: Option<CustomLanguagePolicy>,
+}
+
+/// ast-grep's `--custom-languages` values; accepted and ignored (the builtin
+/// only loads its built-in grammars).
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CustomLanguagePolicy {
+	/// Load native custom language libraries for this invocation.
+	Allow,
+	/// Skip native custom language libraries without reporting an error.
+	Ignore,
+	/// Load native custom language libraries and remember this project.
+	Trust,
+	/// Forget this project and ignore its native custom language libraries.
+	Revoke,
 }
 
 #[derive(Subcommand, Debug)]
@@ -140,8 +166,24 @@ enum Command {
 	Run(Run),
 	/// Scan and rewrite code by configuration.
 	Scan(Scan),
+	/// Test ast-grep rules.
+	Test(verify::Test),
+	/// Create new ast-grep project or items like rules/tests.
+	New(scaffold::New),
 	/// Explore code structure for symbols, imports, exports, and members.
 	Outline(Outline),
+}
+
+/// ast-grep's `--inspect` granularity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum Granularity {
+	/// Do not show any tracing information.
+	#[default]
+	Nothing,
+	/// Show summary about how many files are scanned and skipped.
+	Summary,
+	/// Show per-file/per-rule tracing information.
+	Entity,
 }
 
 #[derive(Args, Debug)]
@@ -221,6 +263,10 @@ struct Run {
 	/// Controls whether to print the file name as heading (`auto`: never, output is piped).
 	#[arg(long, default_value = "auto", value_name = "WHEN")]
 	heading: Heading,
+
+	/// Show what ast-grep discovered: the project config, scanned files and languages.
+	#[arg(long, value_name = "GRANULARITY", value_enum)]
+	inspect: Option<Granularity>,
 }
 
 /// Where a command reads code from (ast-grep's `InputArgs`).
@@ -824,8 +870,11 @@ fn glob_selectors(globs: &[String]) -> Result<(Option<Selector>, Option<Selector
 
 impl Input {
 	/// Files below every operand, in operand order, displayed as ast-grep does;
-	/// walk failures are reported and skipped.
-	async fn candidates(&self, host: &mut Host, lang: Option<SupportLang>) -> Result<Vec<Candidate>, i32> {
+	/// walk failures are reported and skipped. `lang` is the explicit walk
+	/// language: `None` keeps every file whose name maps to a language,
+	/// `Some(lang)` also keeps names that map to none, skipping other
+	/// languages' files (ast-grep's `walk_lang`).
+	async fn walk(&self, host: &mut Host, lang: Option<SupportLang>, hidden: bool) -> Result<Vec<Candidate>, i32> {
 		let (include, exclude) = match glob_selectors(&self.globs) {
 			Ok(selectors) => selectors,
 			Err(error) => {
@@ -844,12 +893,12 @@ impl Input {
 		let options = Discover {
 			include,
 			exclude,
-			hidden: ignores(IgnoreFile::Hidden),
+			hidden,
 			gitignore: !ignores(IgnoreFile::Dot) && !ignores(IgnoreFile::Vcs),
 			node_modules: true,
 			follow_links: self.follow,
 			workers: (self.threads > 0).then_some(self.threads),
-			lang: None,
+			lang,
 		};
 		let vfs = host.vfs();
 		let mut candidates = Vec::new();
@@ -860,11 +909,6 @@ impl Input {
 				Ok(found) => candidates.extend(
 					found
 						.into_iter()
-						.filter(|candidate| {
-							lang.is_none_or(|lang| {
-								SupportLang::from_path(&candidate.path).is_some_and(|found| found.parses_as(lang))
-							})
-						})
 						.map(|candidate| Candidate { display: display_path(operand, root_is_dir, &candidate), ..candidate }),
 				),
 				Err(SearchError::Stopped) => return Err(1),
@@ -877,6 +921,48 @@ impl Input {
 			}
 		}
 		Ok(candidates)
+	}
+
+	/// Files below every operand, in operand order, displayed as ast-grep does;
+	/// walk failures are reported and skipped.
+	async fn candidates(&self, host: &mut Host, lang: Option<SupportLang>) -> Result<Vec<Candidate>, i32> {
+		let hidden = self.no_ignore.contains(&IgnoreFile::Hidden);
+		Ok(self
+			.walk(host, None, hidden)
+			.await?
+			.into_iter()
+			.filter(|candidate| {
+				lang.is_none_or(|lang| {
+					SupportLang::from_path(&candidate.path).is_some_and(|found| found.parses_as(lang))
+				})
+			})
+			.collect())
+	}
+
+	/// The files `--inspect` counts as scanned, with ast-grep's walk semantics:
+	/// a plain walk for `run` without `--lang` (unknown-language files count
+	/// too), or a type-filtered walk for `run --lang`/`scan` (`langs`), which
+	/// ast-grep runs with hidden files included.
+	async fn inspect_files(&self, host: &mut Host, langs: Option<&[SupportLang]>) -> Result<Vec<Candidate>, i32> {
+		let Some(langs) = langs else {
+			let hidden = self.no_ignore.contains(&IgnoreFile::Hidden);
+			let mut files = self.walk(host, None, hidden).await?;
+			// The explicit-language walk keeps unknown-language names too.
+			for candidate in self.walk(host, Some(SupportLang::Rust), hidden).await? {
+				if SupportLang::from_path(&candidate.path).is_none() {
+					files.push(candidate);
+				}
+			}
+			return Ok(files);
+		};
+		Ok(self
+			.walk(host, None, true)
+			.await?
+			.into_iter()
+			.filter(|candidate| {
+				SupportLang::from_path(&candidate.path).is_some_and(|found| langs.iter().any(|lang| found.parses_as(*lang)))
+			})
+			.collect())
 	}
 }
 
@@ -1169,7 +1255,12 @@ impl Run {
 		let _ = writeln!(host.stderr, "{text}");
 	}
 
-	async fn execute(&self, host: &mut Host) -> Result<bool, i32> {
+	async fn execute(&self, host: &mut Host, config: Option<&str>) -> Result<bool, i32> {
+		let inspect = self.inspect.unwrap_or_default();
+		// ast-grep resolves the project before a run, so a bad `-c` fails
+		// here; the trace only reports what was found.
+		let setup = load_project_setup(host, config).await?;
+		inspect_project(host, inspect, setup.as_ref());
 		let lang = match (self.input.stdin, self.lang) {
 			(true, None) => {
 				Report {
@@ -1219,6 +1310,21 @@ impl Run {
 		let _ = out.write_all(&tail);
 		let _ = out.flush();
 		let _ = host.flush_output().await;
+		if inspect >= Granularity::Summary {
+			let scanned = if self.input.stdin {
+				0
+			} else {
+				let langs = self.lang.map(|lang| vec![lang]);
+				let files = self.input.inspect_files(host, langs.as_deref()).await?;
+				for file in &files {
+					if let Some(language) = SupportLang::from_path(&file.path) {
+						inspect_file_entity(host, inspect, &file.display, language);
+					}
+				}
+				files.len()
+			};
+			inspect_file_summary(host, inspect, scanned, 0);
+		}
 		if !matched && has_error {
 			Report {
 				warning: true,
@@ -1381,18 +1487,159 @@ struct Scan {
 	#[arg(short = 'C', long, default_value = "0", value_name = "NUM")]
 	context: u16,
 
+	/// Show what ast-grep discovered: the project config, scanned files and rules.
+	#[arg(long, value_name = "GRANULARITY", value_enum)]
+	inspect: Option<Granularity>,
+
 	#[command(flatten)]
 	input: Input,
 }
 
-/// An `sgconfig.yml`: the rule and utility directories, relative to it.
-#[derive(serde::Deserialize, Default)]
+/// An `sgconfig.yml`: the rule, utility and test directories, relative to it.
+/// Field order matches ast-grep's own serialization, so `new` writes the same
+/// bytes it does.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ProjectConfig {
-	#[serde(default)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	rule_dirs: Vec<PathBuf>,
-	#[serde(default)]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	test_configs: Option<Vec<TestConfig>>,
+	#[serde(skip_serializing_if = "Option::is_none")]
 	util_dirs: Option<Vec<PathBuf>>,
+}
+
+/// One `testConfigs` entry of an `sgconfig.yml`.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestConfig {
+	/// Directory of test case YAML files, relative to the project.
+	test_dir:     PathBuf,
+	/// Snapshot directory, relative to `test_dir`; `__snapshots__` by default.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	snapshot_dir: Option<PathBuf>,
+}
+
+
+/// A loaded `sgconfig.yml` project.
+struct Project {
+	/// The directory holding `sgconfig.yml`.
+	root:   PathBuf,
+	config: ProjectConfig,
+	/// Every rule of the project's `ruleDirs`.
+	rules:  Vec<RuleConfig<SupportLang>>,
+}
+
+/// An `sgconfig.yml` discovered and parsed, without its rules or utilities.
+struct ProjectSetup {
+	/// The directory holding the config file (ast-grep's project dir).
+	root:   PathBuf,
+	config: ProjectConfig,
+}
+
+/// Finds and reads the project configuration of `config` (by default the
+/// nearest `sgconfig.yml` at or above the working directory) without loading
+/// its rules: `Ok(None)` when none is configured and none is found; a config
+/// that cannot be read or parsed is reported.
+async fn load_project_setup(host: &mut Host, config: Option<&str>) -> Result<Option<ProjectSetup>, i32> {
+	let cwd = host.resolve(".");
+	let vfs = host.vfs();
+	let config_path = match config {
+		Some(config) => host.resolve(config),
+		None => {
+			let mut found = None;
+			for dir in cwd.ancestors() {
+				let candidate = dir.join(PROJECT_CONFIG);
+				if vfs.metadata(&candidate).await.is_ok_and(|meta| meta.is_file()) {
+					found = Some(candidate);
+					break;
+				}
+			}
+			let Some(found) = found else {
+				return Ok(None);
+			};
+			found
+		},
+	};
+	let text = read_text(
+		host,
+		&config_path,
+		"Cannot read configuration.",
+		"Please add an sgconfig.yml configuration file in the project root to run the scan command.",
+	)
+	.await?;
+	let config: ProjectConfig = ast_grep_config::from_str(&text).map_err(|error| {
+		fail(
+			host,
+			"Cannot parse configuration",
+			"The sgconfig.yml is not a valid configuration file. Please refer to doc and fix the error.",
+			Some(CONFIG_REFERENCE),
+			Some(error.to_string()),
+			8,
+		)
+	})?;
+	// ast-grep works from the canonical project directory.
+	let config_path = vfs.canonicalize(&config_path).await.unwrap_or(config_path);
+	let root = config_path.parent().map_or(cwd, Path::to_path_buf);
+	Ok(Some(ProjectSetup { root, config }))
+}
+
+/// Loads the project of `config` (by default the nearest `sgconfig.yml` at
+/// or above the working directory): its configuration, utility rules and the
+/// rules of its `ruleDirs`.
+async fn load_project(host: &mut Host, config: Option<&str>) -> Result<Project, i32> {
+	let Some(setup) = load_project_setup(host, config).await? else {
+		return Err(fail(
+			host,
+			"No ast-grep project configuration is found.",
+			"You need to create an ast-grep project for this command. Try `sg new` to create one.",
+			Some(PROJECT_GUIDE),
+			None,
+			3,
+		));
+	};
+	let ProjectSetup { root, config: project } = setup;
+	let mut utils = Vec::new();
+	for dir in project.util_dirs.iter().flatten() {
+		for file in yaml_files(host, &root.join(dir), false).await? {
+			let name = file.path.display().to_string();
+			let text = read_text(host, &file.path, &format!("Cannot read rule {name}"), "The rule file either does not exist or cannot be opened.").await?;
+			utils.push(ast_grep_config::from_str(&text).map_err(|error| {
+				fail(host, &format!("Cannot parse rule {name}"), "The file is not a valid ast-grep rule. Please refer to doc and fix the error.", Some(CONFIG_GUIDE), Some(error.to_string()), 8)
+			})?);
+		}
+	}
+	let globals = DeserializeEnv::<SupportLang>::parse_global_utils(utils).map_err(|error| {
+		fail(
+			host,
+			"Error occurs when parsing global utility rules",
+			"Please check the YAML rules inside the rule directory",
+			Some(UTILITY_RULE),
+			Some(error.to_string()),
+			8,
+		)
+	})?;
+	let mut rules: Vec<RuleConfig<SupportLang>> = Vec::new();
+	for dir in &project.rule_dirs {
+		for file in yaml_files(host, &root.join(dir), false).await? {
+			let name = file.path.display().to_string();
+			let text = read_text(host, &file.path, &format!("Cannot read rule {name}"), "The rule file either does not exist or cannot be opened.").await?;
+			rules.extend(parse_rules(host, &text, &name, &globals)?);
+		}
+	}
+	let mut seen = HashSet::new();
+	if let Some(duplicate) = rules.iter().filter(|rule| !rule.id.is_empty()).find(|rule| !seen.insert(rule.id.as_str())) {
+		let title = format!("Duplicate rule id `{}` is found", duplicate.id);
+		return Err(fail(
+			host,
+			&title,
+			"Multiple rule files have the same id. Please add a unique `id` field to each rule.",
+			Some(CONFIG_GUIDE),
+			None,
+			8,
+		));
+	}
+	Ok(Project { root, config: project, rules })
 }
 
 /// Prints an ast-grep error report and returns its exit status.
@@ -1401,15 +1648,57 @@ fn fail(host: &mut Host, title: &str, help: &str, link: Option<&str>, cause: Opt
 	code
 }
 
-/// The YAML files below `dir`, in path order.
-async fn yaml_files(host: &mut Host, dir: &Path) -> Result<Vec<PathBuf>, i32> {
+/// `--inspect`: ast-grep's semi-structured `sg: <level>|<entity>...` trace on
+/// stderr. The helpers below print nothing below their level.
+fn inspect_project(host: &mut Host, level: Granularity, setup: Option<&ProjectSetup>) {
+	if level < Granularity::Summary {
+		return;
+	}
+	let _ = match setup {
+		Some(setup) => writeln!(host.stderr, "sg: summary|project: isProject=true,projectDir={}", setup.root.display()),
+		None => writeln!(host.stderr, "sg: summary|project: isProject=false"),
+	};
+}
+
+/// One scanned file and its language (`scan` also reports its applied rules).
+fn inspect_file_entity(host: &mut Host, level: Granularity, path: &str, lang: SupportLang) {
+	if level >= Granularity::Entity {
+		let _ = writeln!(host.stderr, "sg: entity|file|{path}: language={lang}");
+	}
+}
+
+fn inspect_scan_file_entity(host: &mut Host, level: Granularity, path: &str, lang: SupportLang, applied: usize) {
+	if level >= Granularity::Entity {
+		let _ = writeln!(host.stderr, "sg: entity|file|{path}: language={lang},appliedRuleCount={applied}");
+	}
+}
+
+fn inspect_file_summary(host: &mut Host, level: Granularity, scanned: usize, skipped: usize) {
+	if level >= Granularity::Summary {
+		let _ = writeln!(host.stderr, "sg: summary|file: scannedFileCount={scanned},skippedFileCount={skipped}");
+	}
+}
+
+fn inspect_rule_entity(host: &mut Host, level: Granularity, id: &str, severity: &Severity) {
+	if level >= Granularity::Entity {
+		let _ = writeln!(host.stderr, "sg: entity|rule|{id}: finalSeverity={severity:?}");
+	}
+}
+
+fn inspect_rule_summary(host: &mut Host, level: Granularity, effective: usize, skipped: usize) {
+	if level >= Granularity::Summary {
+		let _ = writeln!(host.stderr, "sg: summary|rule: effectiveRuleCount={effective},skippedRuleCount={skipped}");
+	}
+}
+
+/// The YAML files below `dir`, in path order, optionally following symlinks.
+async fn yaml_files(host: &mut Host, dir: &Path, follow_links: bool) -> Result<Vec<Candidate>, i32> {
 	let vfs = host.vfs();
-	let options = Discover { hidden: true, gitignore: true, ..Discover::default() };
+	let options = Discover { hidden: true, gitignore: true, follow_links, ..Discover::default() };
 	match search::discover(&vfs, dir, &options).await {
 		Ok(found) => Ok(found
 			.into_iter()
 			.filter(|candidate| SupportLang::from_path(&candidate.path) == Some(SupportLang::Yaml))
-			.map(|candidate| candidate.path)
 			.collect()),
 		Err(error) => Err(fail(
 			host,
@@ -1494,78 +1783,8 @@ impl Scan {
 		if let Some(text) = &self.inline_rules {
 			return Ok((parse_rules(host, text, "INLINE_RULES", &GlobalRules::default())?, cwd));
 		}
-		let vfs = host.vfs();
-		let config_path = match config {
-			Some(config) => host.resolve(config),
-			None => {
-				let mut found = None;
-				for dir in cwd.ancestors() {
-					let candidate = dir.join(PROJECT_CONFIG);
-					if vfs.metadata(&candidate).await.is_ok_and(|meta| meta.is_file()) {
-						found = Some(candidate);
-						break;
-					}
-				}
-				let Some(found) = found else {
-					return Err(fail(
-						host,
-						"No ast-grep project configuration is found.",
-						"You need to create an ast-grep project for this command. Try `sg new` to create one.",
-						Some(PROJECT_GUIDE),
-						None,
-						3,
-					));
-				};
-				found
-			},
-		};
-		let text = read_text(
-			host,
-			&config_path,
-			"Cannot read configuration.",
-			"Please add an sgconfig.yml configuration file in the project root to run the scan command.",
-		)
-		.await?;
-		let project: ProjectConfig = ast_grep_config::from_str(&text).map_err(|error| {
-			fail(
-				host,
-				"Cannot parse configuration",
-				"The sgconfig.yml is not a valid configuration file. Please refer to doc and fix the error.",
-				Some(CONFIG_REFERENCE),
-				Some(error.to_string()),
-				8,
-			)
-		})?;
-		let root = config_path.parent().map_or(cwd, Path::to_path_buf);
-		let mut utils = Vec::new();
-		for dir in project.util_dirs.iter().flatten() {
-			for file in yaml_files(host, &root.join(dir)).await? {
-				let name = file.display().to_string();
-				let text = read_text(host, &file, &format!("Cannot read rule {name}"), "The rule file either does not exist or cannot be opened.").await?;
-				utils.push(ast_grep_config::from_str(&text).map_err(|error| {
-					fail(host, &format!("Cannot parse rule {name}"), "The file is not a valid ast-grep rule. Please refer to doc and fix the error.", Some(CONFIG_GUIDE), Some(error.to_string()), 8)
-				})?);
-			}
-		}
-		let globals = DeserializeEnv::<SupportLang>::parse_global_utils(utils).map_err(|error| {
-			fail(
-				host,
-				"Error occurs when parsing global utility rules",
-				"Please check the YAML rules inside the rule directory",
-				Some(UTILITY_RULE),
-				Some(error.to_string()),
-				8,
-			)
-		})?;
-		let mut rules = Vec::new();
-		for dir in &project.rule_dirs {
-			for file in yaml_files(host, &root.join(dir)).await? {
-				let name = file.display().to_string();
-				let text = read_text(host, &file, &format!("Cannot read rule {name}"), "The rule file either does not exist or cannot be opened.").await?;
-				rules.extend(parse_rules(host, &text, &name, &globals)?);
-			}
-		}
-		Ok((rules, root))
+		let project = load_project(host, config).await?;
+		Ok((project.rules, project.root))
 	}
 
 	/// The findings of `rules` in one source.
@@ -1739,7 +1958,11 @@ impl Scan {
 	}
 
 	async fn execute(&self, host: &mut Host, config: Option<&str>) -> Result<bool, i32> {
+		let inspect = self.inspect.unwrap_or_default();
+		let setup = load_project_setup(host, config).await?;
+		inspect_project(host, inspect, setup.as_ref());
 		let (mut rules, root) = self.load_rules(host, config).await?;
+		let total_rules = rules.len();
 		rules.retain(|rule| !matches!(rule.severity, Severity::Off));
 		if let Some(filter) = &self.filter {
 			let filter = regex::Regex::new(filter).map_err(|error| {
@@ -1774,6 +1997,16 @@ impl Scan {
 				9,
 			)
 		})?;
+		let effective_rules = collection.total_rule_count();
+		let mut rule_languages: Vec<SupportLang> = Vec::new();
+		collection.for_each_rule(|rule| {
+			if inspect >= Granularity::Entity {
+				inspect_rule_entity(host, inspect, &rule.id, &rule.severity);
+			}
+			if !rule_languages.contains(&rule.language) {
+				rule_languages.push(rule.language);
+			}
+		});
 		let candidates = self.input.candidates(host, None).await?;
 		let vfs = host.vfs();
 		let mut files = Vec::new();
@@ -1800,6 +2033,18 @@ impl Scan {
 			findings.truncate(budget);
 			budget -= findings.len();
 			files.push((candidate.display, candidate.path, source, lang, findings));
+		}
+		if inspect >= Granularity::Summary {
+			let scanned = self.input.inspect_files(host, Some(rule_languages.as_slice())).await?;
+			for file in &scanned {
+				if let Some(language) = SupportLang::from_path(&file.path) {
+					let relative = file.path.strip_prefix(&root).unwrap_or(Path::new(&file.display));
+					let applied = collection.for_path(relative).len();
+					inspect_scan_file_entity(host, inspect, &file.display, language, applied);
+				}
+			}
+			inspect_file_summary(host, inspect, scanned.len(), 0);
+			inspect_rule_summary(host, inspect, effective_rules, total_rules.saturating_sub(effective_rules));
 		}
 		self.report(host, files).await
 	}
@@ -2204,10 +2449,15 @@ impl AsyncUtility for AstGrep {
 
 	async fn run(self, host: &mut Host) -> i32 {
 		let config = self.config.as_deref();
+		if let Command::New(new) = &self.command {
+			return scaffold::execute(host, new, config).await;
+		}
 		let result = match &self.command {
-			Command::Run(run) => run.execute(host).await,
+			Command::Run(run) => run.execute(host, config).await,
 			Command::Scan(scan) => scan.execute(host, config).await,
+			Command::Test(test) => test.execute(host, config).await,
 			Command::Outline(outline) => outline.execute(host).await,
+			Command::New(_) => unreachable!("handled above"),
 		};
 		match result {
 			Ok(true) => 0,
@@ -2459,10 +2709,110 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn unsupported_features_exit_two() {
 		let tree = tree();
-		assert_eq!(run(&tree, &["test"]).await, (2, String::new(), "ast-grep: test is not supported by the built-in ast-grep\n".to_owned()));
+		assert_eq!(run(&tree, &["lsp"]).await, (2, String::new(), "ast-grep: lsp is not supported by the built-in ast-grep\n".to_owned()));
+		assert_eq!(
+			run(&tree, &["test", "-i"]).await,
+			(2, String::new(), "ast-grep: --interactive is not supported by the built-in ast-grep\n".to_owned())
+		);
 		assert_eq!(
 			run(&tree, &["run", "-p", "foo", "--interactive", "a.rs"]).await,
 			(2, String::new(), "ast-grep: --interactive is not supported by the built-in ast-grep\n".to_owned())
+		);
+	}
+
+	/// `new -y` in a clean directory scaffolds the project exactly as
+	/// ast-grep does: the same stdout, the same files, and a `sgconfig.yml`
+	/// of absolute canonical paths.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn new_yes_scaffolds_a_project() {
+		let tree = tempfile::tempdir().unwrap();
+		let (code, out, err) = run(&tree, &["new", "-y"]).await;
+		assert_eq!(
+			(code, out.as_str(), err.as_str()),
+			(0, "No sgconfig.yml found. Creating a new ast-grep project...\nYour new ast-grep project has been created!\n", "")
+		);
+		let root = std::fs::canonicalize(tree.path()).unwrap();
+		assert_eq!(
+			std::fs::read_to_string(tree.path().join("sgconfig.yml")).unwrap(),
+			format!(
+				"ruleDirs:\n- {0}/rules\ntestConfigs:\n- testDir: {0}/rule-tests\nutilDirs:\n- {0}/utils\n",
+				root.display()
+			)
+		);
+		for dir in ["rules", "rule-tests", "utils"] {
+			assert_eq!(std::fs::read(tree.path().join(dir).join(".gitkeep")).unwrap(), b"");
+		}
+	}
+
+	/// `new -y` with an existing project does not re-scaffold it: ast-grep
+	/// demands the entity on the command line (exit status 22).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn new_yes_refuses_without_entity_in_a_project() {
+		let tree = tempfile::tempdir().unwrap();
+		run(&tree, &["new", "-y"]).await;
+		let (code, out, err) = run(&tree, &["new", "-y"]).await;
+		assert_eq!((code, out.as_str()), (22, ""));
+		assert_eq!(
+			err,
+			"Error: Insufficient command line argument provided to use `--yes` option.\nHelp: You need to provide `entity` in command line to use non-interactive `new`.\n\n"
+		);
+	}
+
+	/// `new rule -y -l rust NAME` writes ast-grep's rule and test templates and
+	/// prints their absolute paths.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn new_yes_writes_a_rule_and_test() {
+		let tree = tempfile::tempdir().unwrap();
+		run(&tree, &["new", "-y"]).await;
+		let root = std::fs::canonicalize(tree.path()).unwrap();
+		let (code, out, err) = run(&tree, &["new", "rule", "-y", "-l", "rust", "my-rule"]).await;
+		assert_eq!((code, err.as_str()), (0, ""), "{out}");
+		assert_eq!(
+			out,
+			format!("Created rules at {0}/rules/my-rule.yml\nCreated test at {0}/rule-tests/my-rule-test.yml\n", root.display())
+		);
+		assert_eq!(
+			std::fs::read_to_string(tree.path().join("rules").join("my-rule.yml")).unwrap(),
+			"# yaml-language-server: $schema=https://raw.githubusercontent.com/ast-grep/ast-grep/main/schemas/rule.json\n\n\
+			 id: my-rule\nmessage: Add your rule message here....\nseverity: error # error, warning, info, hint\nlanguage: Rust\n\
+			 rule:\n  pattern: Your Rule Pattern here...\n# utils: Extract repeated rule as local utility here.\n\
+			 # note: Add detailed explanation for the rule."
+		);
+		assert_eq!(
+			std::fs::read_to_string(tree.path().join("rule-tests").join("my-rule-test.yml")).unwrap(),
+			"id: my-rule\nvalid:\n- \"valid code\"\ninvalid:\n- \"invalid code\"\n"
+		);
+	}
+
+	/// `run --inspect=summary` without a project reports `isProject=false` and
+	/// the scanned-file count on stderr, leaving stdout untouched.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn run_inspect_without_a_project_reports_file_count() {
+		let tree = tree();
+		let (code, out, err) = run(&tree, &["run", "--inspect=summary", "-p", "foo($A)", "-l", "rust", "a.rs"]).await;
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "a.rs:2:    let a = foo(1);\n");
+		assert_eq!(err, "sg: summary|project: isProject=false\nsg: summary|file: scannedFileCount=1,skippedFileCount=0\n");
+	}
+
+	/// `run --inspect=entity` inside a project reports its canonical directory
+	/// and each scanned file's language.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn run_inspect_with_a_project_reports_files() {
+		let tree = tree();
+		std::fs::write(tree.path().join("sgconfig.yml"), "ruleDirs:\n  - rules\n").unwrap();
+		std::fs::create_dir(tree.path().join("rules")).unwrap();
+		let root = std::fs::canonicalize(tree.path()).unwrap();
+		let (code, out, err) = run(&tree, &["run", "--inspect=entity", "-p", "foo($A)", "a.rs"]).await;
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "a.rs:2:    let a = foo(1);\n");
+		assert_eq!(
+			err,
+			format!(
+				"sg: summary|project: isProject=true,projectDir={}\nsg: entity|file|a.rs: language=Rust\n\
+				 sg: summary|file: scannedFileCount=1,skippedFileCount=0\n",
+				root.display()
+			)
 		);
 	}
 
@@ -2519,5 +2869,120 @@ mod tests {
 		let tree = tree();
 		assert_eq!(run(&tree, &["outline", "a.rs"]).await, (0, "a.rs\n1: fn main()\n".to_owned(), String::new()));
 		assert_eq!(run(&tree, &["outline", "--view", "names", "a.rs", "b.rs"]).await.1, "a.rs\nfunction: main\n\nb.rs\nfunction: g\n");
+	}
+
+	const NO_BAR: &str = "id: no-bar\nlanguage: Rust\nmessage: Avoid bar\nrule:\n  pattern: bar($A)\nfix: baz($A)\n";
+	const NO_FOO_SNAPSHOT: &str =
+		"id: no-foo\nsnapshots:\n  foo(1);:\n    labels:\n    - source: foo(1)\n      style: primary\n      start: 0\n      end: 6\n";
+	const NO_BAR_SNAPSHOT: &str = "id: no-bar\nsnapshots:\n  \"fn x() {\\n  bar(1);\\n}\":\n    fixed: |-\n      fn x() {\n        \
+	                               baz(1);\n      }\n    labels:\n    - source: bar(1)\n      style: primary\n      start: 11\n      \
+	                               end: 17\n";
+	const MISMATCH_HELP: &str = "Help: Test failed due to mismatching snapshots. Run with `--update-all` to update all snapshots, or \
+	                             `--interactive` to update selectively.\nSee also: https://ast-grep.github.io/guide/test-rule.html\n\n";
+
+	/// An ast-grep project with the `no-foo` and `no-bar` rules and a test
+	/// case for each, without snapshots.
+	fn test_project() -> tempfile::TempDir {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path();
+		std::fs::write(path.join("sgconfig.yml"), "ruleDirs:\n  - rules\ntestConfigs:\n  - testDir: tests\n").unwrap();
+		std::fs::create_dir(path.join("rules")).unwrap();
+		std::fs::write(path.join("rules").join("no-foo.yml"), NO_FOO).unwrap();
+		std::fs::write(path.join("rules").join("no-bar.yml"), NO_BAR).unwrap();
+		std::fs::create_dir(path.join("tests")).unwrap();
+		std::fs::write(path.join("tests").join("no-foo-test.yml"), "id: no-foo\nvalid:\n  - let a = 1;\ninvalid:\n  - foo(1);\n").unwrap();
+		std::fs::write(path.join("tests").join("no-bar-test.yml"), "id: no-bar\ninvalid:\n  - \"fn x() {\\n  bar(1);\\n}\"\n").unwrap();
+		tree
+	}
+
+	/// Writes `snapshot` as the `id` rule's snapshot file.
+	fn write_snapshot(tree: &tempfile::TempDir, id: &str, snapshot: &str) {
+		let dir = tree.path().join("tests").join("__snapshots__");
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(dir.join(format!("{id}-snapshot.yml")), snapshot).unwrap();
+	}
+
+	/// A rule test suite whose snapshots match must pass instead of being
+	/// rejected or reporting spurious failures.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_passes_with_matching_snapshots() {
+		let tree = test_project();
+		write_snapshot(&tree, "no-foo", NO_FOO_SNAPSHOT);
+		write_snapshot(&tree, "no-bar", NO_BAR_SNAPSHOT);
+		assert_eq!(
+			run(&tree, &["test"]).await,
+			(
+				0,
+				"Running 2 tests\n\n----------- Case Details -----------\nPASS no-bar  .\nPASS no-foo  ..\n\ntest result: ok. 2 \
+				 passed; 0 failed;\n"
+					.to_owned(),
+				String::new()
+			)
+		);
+	}
+
+	/// `--update-all` must write missing snapshots in ast-grep's YAML so they
+	/// stay byte-identical to the ones the real tool commits.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_update_all_writes_missing_snapshots() {
+		let tree = test_project();
+		assert_eq!(
+			run(&tree, &["test", "-U"]).await,
+			(
+				0,
+				"Running 2 tests\n\n----------- Case Details -----------\n[Updated] Rule no-bar's snapshot baseline has been \
+				 updated.\n\n  fn x() {\n    bar(1);\n  }\n\n[Updated] Rule no-foo's snapshot baseline has been updated.\n\n  \
+				 foo(1);\n\nPASS no-bar  U\nPASS no-foo  .U\n\ntest result: ok. 2 passed; 0 failed;\n"
+					.to_owned(),
+				String::new()
+			)
+		);
+		let snapshots = tree.path().join("tests").join("__snapshots__");
+		assert_eq!(std::fs::read_to_string(snapshots.join("no-foo-snapshot.yml")).unwrap(), NO_FOO_SNAPSHOT);
+		assert_eq!(std::fs::read_to_string(snapshots.join("no-bar-snapshot.yml")).unwrap(), NO_BAR_SNAPSHOT);
+	}
+
+	/// A snapshot that differs from what the rule reports must fail with the
+	/// YAML diff and the snapshot-mismatch error (exit status 4).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_reports_snapshot_mismatch_diff() {
+		let tree = test_project();
+		write_snapshot(&tree, "no-foo", &NO_FOO_SNAPSHOT.replace("end: 6", "end: 7"));
+		assert_eq!(
+			run(&tree, &["test", "-f", "foo"]).await,
+			(
+				4,
+				"Running 1 tests\n\n----------- Case Details -----------\n[Wrong] no-foo snapshot is different from \
+				 baseline.\nDiff:\n@@ -1,4 +1,4 @@\n2 2│ - source: foo(1)\n3 3│   style: primary\n4 4│   start: 0\n5  │-  end: \
+				 7\n  5│+  end: 6\nFor Code:\n  foo(1);\n\nFAIL no-foo  .W\n\n"
+					.to_owned(),
+				format!("Error: test failed. 0 passed; 1 failed;\n{MISMATCH_HELP}")
+			)
+		);
+	}
+
+	/// Noisy valid code, missing reports and test cases without a rule must
+	/// each fail the run with ast-grep's details and errors.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_fails_on_noisy_missing_and_unmatched_cases() {
+		let tree = test_project();
+		std::fs::write(
+			tree.path().join("tests").join("no-foo-test.yml"),
+			"id: no-foo\nvalid:\n  - foo(2);\ninvalid:\n  - let b = 2;\n---\nid: ghost\nvalid: [a]\n",
+		)
+		.unwrap();
+		assert_eq!(
+			run(&tree, &["test", "--skip-snapshot-tests"]).await,
+			(
+				4,
+				"Running 3 tests\nConfiguration not found! ghost\n\n----------- Case Details -----------\n[Noisy] Expect no-foo to \
+				 report no issue, but some issues found in:\n\n  foo(2);\n\n[Missing] Expect rule no-foo to report issues, but \
+				 none found in:\n\n  let b = 2;\n\nPASS no-bar  .\nFAIL no-foo  NM\n\ntest failed. 1 passed; 1 failed;\n"
+					.to_owned(),
+				"Error: 1 test case(s) matched no rule.\nHelp: You can use ast-grep playground to debug your rules and test \
+				 cases.\nSee also: https://ast-grep.github.io/playground.html\n\n"
+					.to_owned()
+			)
+		);
 	}
 }

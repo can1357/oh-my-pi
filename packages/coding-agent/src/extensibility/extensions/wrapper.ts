@@ -11,7 +11,8 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { extensionTheme } from "../../ui/extensions/render-output";
 import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
 	approvalRestrictions,
@@ -38,7 +39,7 @@ import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from
  * renderer contracts.
  *
  * omp invokes renderers as `renderCall(args, options, theme)` (see
- * `packages/tui/src/tools/renderer.ts`), while pi-era renderers — including
+ * `src/ui/tools/legacy.ts`), while pi-era renderers — including
  * every third-party plugin written against pi's published example — are
  * declared `renderCall(args, theme, context)`. Both shapes take three
  * parameters, so arity cannot discriminate them. The returned value carries
@@ -95,19 +96,17 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		// enters the custom-renderer path, gets undefined back, and silently
 		// discards tool result text (extensions without renderers show blank).
 		if (registeredTool.definition.renderCall) {
-			this.renderCall = (args: any, options: any, theme: any) =>
-				registeredTool.definition.renderCall!(
-					args,
-					renderOptionsWithTheme(options, theme as Theme),
-					theme as Theme,
-				);
+			this.renderCall = (args: any, options: any, theme: Theme) => {
+				const facade = extensionTheme(theme);
+				return registeredTool.definition.renderCall!(args, renderOptionsWithTheme(options, facade), facade);
+			};
 		}
 		if (registeredTool.definition.renderResult) {
-			this.renderResult = (result: any, options: any, theme: any, args?: any) =>
+			this.renderResult = (result: any, options: any, theme: Theme, args?: any) =>
 				registeredTool.definition.renderResult!(
 					result,
 					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
-					theme as Theme,
+					extensionTheme(theme),
 					args,
 				);
 		}

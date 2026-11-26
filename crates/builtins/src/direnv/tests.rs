@@ -317,6 +317,33 @@ async fn stdlib_callbacks_print_bash() {
 	assert!(err.contains("newly created"), "{err}");
 }
 
+/// An approved required file contributes its content pin and the exact
+/// authorization marker to the same list consumed by `current` and shell caches.
+#[tokio::test]
+async fn required_approval_watches_the_input_and_its_marker() {
+	let tree = Sandbox::new();
+	let absolute = |relative: &str| super::lossy(&omp_vfs::normalize_lexically(&tree.path(relative)));
+	let rc = absolute("proj/.envrc");
+	let input = absolute("proj/manifest");
+	tree.write("proj/manifest", "allowed");
+	let hash = sha256(&[&input, "\nallowed"]);
+	let marker = format!("data/direnv/allowed-required/{}/{hash}", sha256(&[&rc, "\n"]));
+	tree.write(&marker, "manifest\n");
+	let (code, out, err) = tree.direnv("proj", &["check-required", "bash", &rc, "manifest"]).await;
+	assert_eq!(code, 0, "{err}");
+	let encoded = out
+		.strip_prefix("export DIRENV_WATCHES=$'")
+		.and_then(|s| s.strip_suffix("';"))
+		.expect("watch-list export");
+	let times = super::FileTimes::unmarshal(encoded).expect("decode watches");
+	assert!(times.0.iter().any(|t| t.path == input && t.hash.as_ref() == Some(&hash)));
+	let marker = absolute(&marker);
+	assert!(times.0.iter().any(|t| t.path == marker && t.exists));
+	std::fs::remove_file(&marker).expect("remove approval");
+	let (code, _, _) = tree.run("proj", tree.env(&[("DIRENV_WATCHES", encoded)]), &["current", &marker]).await;
+	assert_eq!(code, 1);
+}
+
 /// Contract: dumps are interchangeable with the real direnv's: `show_dump`
 /// reads its `gzenv`, and `apply_dump` turns a dumped environment (`gzenv`
 /// or, from a host without direnv, `env -0`) into the exports that reach it.
@@ -371,8 +398,7 @@ async fn version_checks_compare_numerically() {
 }
 
 /// Contract: an external program asked for its environment (`use nix`) gets
-/// the host's direnv by path when there is one, and a plain `env -0` when
-/// there is none, so the hand-back works on a host without direnv.
+/// a plain `env -0` even if a direnv executable happens to be on PATH.
 #[cfg(unix)]
 #[tokio::test]
 async fn stdlib_names_a_dump_command_external_programs_can_run() {
@@ -389,6 +415,5 @@ async fn stdlib_names_a_dump_command_external_programs_can_run() {
 		.expect("make executable");
 	let (code, out, _) = tree.run(".", tree.env(&[("PATH", &tree.text("bin"))]), &["stdlib"]).await;
 	assert_eq!(code, 0);
-	let dump = format!("\n__direnv_dump=({} dump)\n", bash_escape(&tree.text("bin/direnv")));
-	assert!(out.contains(&dump), "host direnv by path");
+	assert!(out.contains("\n__direnv_dump=(sh -c 'env -0 >\"$DIRENV_DUMP_FILE_PATH\"')\n"), "independent of PATH");
 }
