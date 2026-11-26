@@ -125,32 +125,41 @@ export interface OpenAnnotationDraft {
 
 /**
  * Tie an overlay to the draft for `source`: {@link restore} replays the saved state
- * (`resumed`, or the draft saved for the same source), and {@link close} saves the
+ * (`resumed`, or the draft saved for the same source; `null` skips lookup), and {@link close} saves the
  * overlay's state, or removes the draft once its notes were sent for review or emptied.
- * The state is also saved if the process exits while the overlay is open.
+ * A `"refresh"` close explicitly discards it. The state is also saved if the process
+ * exits while the overlay is open.
  */
 export async function openAnnotationDraft(
 	session: DraftSession,
 	source: AnnotationDraftSource,
-	resumed?: AnnotationDraft,
+	resumed?: AnnotationDraft | null,
 ): Promise<OpenAnnotationDraft> {
 	const key = annotationDraftKey(source);
-	const saved = resumed ?? (await loadAnnotationDrafts(session)).find(draft => draft.key === key);
+	const saved =
+		resumed === undefined ? (await loadAnnotationDrafts(session)).find(draft => draft.key === key) : resumed;
 	// An open overlay holds the session: a close-time cleanup (or shutdown) racing the save must not delete it.
 	const artifactsDir = session.getArtifactsDir();
 	const openDirectory = artifactsDir ? draftDirectory(artifactsDir, session.getSessionId()) : undefined;
 	if (openDirectory) OPEN_DRAFTS.add(openDirectory);
 	let overlay: AnnotationReviewModel | undefined;
 	const persist = async (sent: boolean) => {
-		const state = overlay?.getDraft();
-		if (!state) return;
+		const current = overlay?.getDraft();
+		if (!current) return;
+		const state =
+			current.kind === "text" && source.kind === "text" && current.editedText === source.source.text
+				? { kind: "text" as const, annotations: current.annotations, editor: current.editor }
+				: current;
 		const empty = !state.annotations.length && !state.editor?.text && !("editedText" in state && state.editedText);
-		if (sent || empty) await removeAnnotationDraft(session, key);
-		else await saveDraft(session, { key, updatedAt: Date.now(), source, state });
+		if (sent || empty) {
+			await removeAnnotationDraft(session, key);
+		} else {
+			await saveDraft(session, { key, updatedAt: Date.now(), source, state });
+		}
 	};
 	const unregister = postmortem.register(`annotation-draft:${key}`, () => persist(false));
 	return {
-		restored: saved !== undefined,
+		restored: saved != null,
 		restore(mounted) {
 			overlay = mounted;
 			if (saved) mounted.restoreDraft(saved.state);
@@ -158,7 +167,8 @@ export async function openAnnotationDraft(
 		async close(result) {
 			unregister();
 			try {
-				await persist(result?.action === "review");
+				if (result?.action === "refresh") await removeAnnotationDraft(session, key);
+				else await persist(result?.action === "review");
 			} finally {
 				if (openDirectory) OPEN_DRAFTS.delete(openDirectory);
 			}

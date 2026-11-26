@@ -6,6 +6,7 @@ import type { AnnotationOverlayDraft } from "@oh-my-pi/pi-coding-agent/extensibi
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	annotationDraftKey,
+	hasAnnotationDraftsSync,
 	loadAnnotationDrafts,
 	openAnnotationDraft,
 } from "../../../src/extensibility/custom-commands/bundled/annotate/draft-store";
@@ -57,5 +58,32 @@ describe("annotation drafts", () => {
 		const file = path.join(tempDir.path(), "annotation-drafts", "s1", `draft-${key}.json`);
 		await Bun.write(file, JSON.stringify({ key, updatedAt: 1, source, state: null }));
 		expect(await loadAnnotationDrafts(session)).toEqual([]);
+	});
+	it("retains an open draft's session and discards its notes without saving them", async () => {
+		using tempDir = TempDir.createSync("@pi-annotation-drafts-");
+		const session = { getArtifactsDir: () => tempDir.path(), getSessionId: () => "s1", ensureOnDisk: vi.fn() };
+		const target = createResolvedReviewTarget("uncommitted", "Uncommitted changes", DIFF, "No changes");
+		const source = { kind: "diff", target } as const;
+		const state: AnnotationOverlayDraft = {
+			kind: "diff",
+			annotations: [
+				{
+					fileIndex: 0,
+					sourceIndex: -1,
+					annotation: { scope: "file", path: "src/value.ts", occurrence: 1, note: "discard me" },
+				},
+			],
+		};
+		const draft = await openAnnotationDraft(session, source);
+		draft.restore({
+			getDraft: () => state,
+			restoreDraft: vi.fn(),
+		} as unknown as AnnotationReviewModel);
+
+		expect(hasAnnotationDraftsSync(tempDir.path(), "s1")).toBe(true);
+		await draft.close({ action: "refresh" });
+		expect(await loadAnnotationDrafts(session)).toEqual([]);
+		expect(hasAnnotationDraftsSync(tempDir.path(), "s1")).toBe(false);
+		expect(session.ensureOnDisk).not.toHaveBeenCalled();
 	});
 });

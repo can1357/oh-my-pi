@@ -111,6 +111,117 @@ it("requires a second Enter press, not a key release, to discard notes", () => {
 	}
 });
 
+it("keeps empty reviews refreshable and disables Continue", () => {
+	const env = corpusEnvironment("dark");
+	let refreshCalls = 0;
+	const model = new AnnotationReviewModel(
+		{ kind: "diff", files: [], mode: "Review" },
+		{
+			onComplete() {},
+			onRefresh: async () => {
+				refreshCalls++;
+			},
+		},
+		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
+	);
+
+	expect(model.actionDisabled(0)).toBe(true);
+	model.key("r", "r", "r");
+	expect(refreshCalls).toBe(1);
+});
+
+it("blocks concurrent refresh inputs and warns after a failed refresh", async () => {
+	const pending = Promise.withResolvers<void>();
+	const warnings: string[] = [];
+	const env = corpusEnvironment("dark");
+	let refreshCalls = 0;
+	const model = new AnnotationReviewModel(
+		{ kind: "diff", files: FILES.slice(0, 2), mode: "Review" },
+		{
+			onComplete() {},
+			onWarning: message => warnings.push(message),
+			onRefresh: () => {
+				refreshCalls++;
+				return pending.promise;
+			},
+		},
+		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
+	);
+	model.key("r", "r", "r");
+	expect(model.refreshing).toBe(true);
+	model.key("r", "r", "r");
+	model.action("refresh");
+	model.pick("files", "f1", true);
+	expect(refreshCalls).toBe(1);
+	expect(model.fileIndex).toBe(0);
+
+	pending.reject(new Error("offline"));
+	await pending.promise.catch(() => {});
+	expect(model.refreshing).toBe(false);
+	expect(warnings).toEqual(["Failed to refresh review: offline"]);
+});
+
+it("keeps cancel available during refresh and ignores late failures", async () => {
+	const env = corpusEnvironment("dark");
+	for (const closeBy of ["key", "native"] as const) {
+		const pending = Promise.withResolvers<void>();
+		const warnings: string[] = [];
+		const model = new AnnotationReviewModel(
+			{ kind: "diff", files: FILES.slice(0, 1), mode: "Review" },
+			{
+				onComplete() {},
+				onWarning: message => warnings.push(message),
+				onRefresh: () => pending.promise,
+			},
+			{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
+		);
+		model.key("r", "r", "r");
+		if (closeBy === "key") model.key("escape", undefined, "\x1b");
+		else model.action("close");
+		expect(model.finished).toBe(true);
+		const revision = model.rev();
+
+		pending.reject(new Error("offline"));
+		await pending.promise.catch(() => {});
+		expect(model.refreshing).toBe(false);
+		expect(model.rev()).toBe(revision);
+		expect(warnings).toEqual([]);
+	}
+});
+
+it("requires approval to reload over edited text even without any notes", async () => {
+	const env = corpusEnvironment("dark");
+	const model = new AnnotationReviewModel(
+		{ kind: "text", source: TEXT },
+		{ onComplete() {} },
+		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
+	);
+	model.replaceTextSource("edited source");
+	const decision = model.confirmDiscardForRefresh();
+	expect(model.refreshConfirmationPending).toBe(true);
+	model.action("refresh-confirm");
+	expect(await decision).toBe(true);
+});
+
+it("cancels unresolved refresh approval when disposed without dropping the draft", async () => {
+	const env = corpusEnvironment("dark");
+	const model = new AnnotationReviewModel(
+		{ kind: "text", source: TEXT },
+		{ onComplete() {} },
+		{ theme: env.theme, size: () => ({ columns: 100, rows: 24 }) },
+	);
+	model.replaceTextSource("edited source");
+	const draft = model.getDraft();
+	const decision = model.confirmDiscardForRefresh();
+
+	expect(model.refreshConfirmationPending).toBe(true);
+	model.dispose();
+
+	expect(await decision).toBe(false);
+	expect(model.refreshConfirmationPending).toBe(false);
+	expect(model.getDraft()).toEqual(draft);
+});
+
 panelSuite({
 	dir: "overlays/plan-annotation",
 	mount(caseName, corpusCase) {

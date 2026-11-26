@@ -10,7 +10,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { resetDefaultGitlabProjectMemoForTests } from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
+import {
+	fetchMrDiffFreshGuarded,
+	resetDefaultGitlabProjectMemoForTests,
+} from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { gitlab } from "@oh-my-pi/pi-coding-agent/utils/gitlab";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -157,6 +160,9 @@ describe("mr:// diff family", () => {
 	it("keeps env tokens away from hosts the user has not configured", async () => {
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 		vi.spyOn(gitlab, "json").mockResolvedValue({ web_url: "https://git.own.example/team/app" });
+		await expect(fetchMrDiffFreshGuarded(tempDir, "attacker.example/a/b", 1, undefined)).rejects.toThrow(
+			/Refusing to send GitLab token environment variables to attacker\.example/,
+		);
 		const router = InternalUrlRouter.instance();
 		const context = { cwd: tempDir };
 

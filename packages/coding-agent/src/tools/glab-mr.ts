@@ -130,6 +130,16 @@ export async function fetchMrDiffFresh(
 	// row stores it once. `getOrFetchMrDiff` rehydrates `unified` from `rendered`.
 	return { rendered: text, sourceUrl: undefined, payload: { unified: "", files: payload.files } };
 }
+/** Fresh MR diff fetch with the same env-token host trust check as cached lookups. */
+export async function fetchMrDiffFreshGuarded(
+	cwd: string,
+	project: string,
+	iid: number,
+	signal: AbortSignal | undefined,
+): Promise<{ rendered: string; sourceUrl: string | undefined; payload: PrDiffPayload }> {
+	await assertGitlabHostTrustedForEnvToken(project.split("/")[0]!, cwd, signal);
+	return fetchMrDiffFresh(cwd, project, iid, signal);
+}
 
 export interface MrDiffLookupOptions {
 	cwd: string;

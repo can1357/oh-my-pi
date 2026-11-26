@@ -228,6 +228,7 @@ function railRows(model: AnnotationReviewModel, rows: number, width: number, the
 }
 
 function actionRows(model: AnnotationReviewModel, theme: Theme): string[] {
+	if (model.refreshConfirmationPending) return [];
 	const nav = theme.symbols.symbol("nav.cursor");
 	return model.actions.map((action, index) => {
 		const label = action === DISCARD_ANNOTATIONS_ACTION && model.discardArmed ? "Confirm: discard all notes" : action;
@@ -348,11 +349,20 @@ function helpText(model: AnnotationReviewModel): string {
 			: model.focus === "diff"
 				? `${upDown} line · ${key("shift")} faster · ${key("pageUp")}/${key("pageDown")} · g/${key("shift+g")} ends · a line note · ${key("shift+a")} ${model.textSource ? "text" : "file"} note · e edit note`
 				: `${upDown} select · ${key("confirm")} confirm`;
-	const editor = model.callbacks.onExternalEditor ? ` · ${key(model.externalEditorKey)} editor` : "";
-	return `${focus} · u undo · ${key("tab")} regions${editor} · ${key(model.cancelKey)} cancel`;
+	const refresh = model.callbacks.onRefresh ? (model.refreshing ? "Refreshing…" : `${key("r")} refresh`) : undefined;
+	const editor = model.callbacks.onExternalEditor ? `${key(model.externalEditorKey)} editor` : undefined;
+	return [refresh, focus, "u undo", `${key("tab")} regions`, editor, `${key(model.cancelKey)} cancel`]
+		.filter((part): part is string => part !== undefined)
+		.join(" · ");
 }
 
 function footerRows(model: AnnotationReviewModel, width: number, chooserRowsMax: number, height: number, theme: Theme) {
+	if (model.refreshConfirmationPending) {
+		return [
+			theme.style("strong", "Discard this annotation draft and reload?"),
+			theme.fg("dim", `${key("y")} reload · ${key(model.cancelKey)}/n keep draft`),
+		];
+	}
 	if (model.chooser) return chooserRows(model, width, chooserRowsMax, theme);
 	if (model.annotating) {
 		const { action, location } = noteCaption(model);
@@ -422,7 +432,8 @@ export function annotationFrame(
 	const sidebar = rail ? railWidth(width) : 0;
 	const inner = Math.max(1, width - 4);
 	const bodyWidth = rail ? Math.max(0, width - sidebar - 7) : inner;
-	const chooserBase = height - (model.actions.length + 7);
+	const actionCount = model.refreshConfirmationPending ? 0 : model.actions.length;
+	const chooserBase = height - (actionCount + 7);
 	const footer = footerRows(
 		model,
 		inner,
@@ -432,7 +443,7 @@ export function annotationFrame(
 		height,
 		theme,
 	);
-	const available = height - (model.actions.length + footer.length + 7);
+	const available = height - (actionCount + footer.length + 7);
 	const bodyRows = model.chooser ? Math.max(0, available) : Math.max(MIN_BODY_ROWS, available);
 	const contentWidth = Math.max(1, bodyWidth - 1);
 
@@ -444,7 +455,7 @@ export function annotationFrame(
 	const maxOffset = Math.max(0, total - bodyRows);
 	let offset = Math.max(0, Math.min(model.offset, maxOffset));
 	if (model.viewportDriven) {
-		if (!model.annotating && !model.chooser && body.rowBySource.length > 0) {
+		if (!model.refreshConfirmationPending && !model.annotating && !model.chooser && body.rowBySource.length > 0) {
 			const cursor = viewportSource(body.rowBySource, offset, bodyRows, model.viewportTowardEnd, maxOffset);
 			if (cursor !== model.sourceIndex) body = build(cursor);
 		}

@@ -73,6 +73,7 @@ function FooterButton(props: {
 	readonly tone?: TspTone;
 	readonly keys?: readonly string[];
 	readonly mark?: () => "pick" | "drop" | undefined;
+	readonly busy?: boolean;
 }): JSXNode {
 	return (
 		<ActionButton
@@ -82,6 +83,7 @@ function FooterButton(props: {
 			tone={props.tone}
 			mark={props.mark}
 			keys={props.keys}
+			busy={props.busy}
 		/>
 	);
 }
@@ -105,7 +107,7 @@ export function annotationReviewSheet(model: AnnotationReviewModel): SheetAttrib
 export function AnnotationReview(props: { readonly model: AnnotationReviewModel }): JSXNode {
 	const model = props.model;
 	const rev = model.rev;
-	const editing = () => model.annotating || model.chooser !== undefined;
+	const editing = () => model.annotating || model.chooser !== undefined || model.refreshConfirmationPending;
 
 	const lines = () => (
 		<list
@@ -341,11 +343,38 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 
 	const composerMode = computed(() => {
 		rev();
-		return model.chooser ? "chooser" : model.annotating ? "note" : "";
+		return model.refreshConfirmationPending
+			? "refresh-confirmation"
+			: model.chooser
+				? "chooser"
+				: model.annotating
+					? "note"
+					: "";
 	});
 
 	const composer = () => {
 		switch (composerMode()) {
+			case "refresh-confirmation":
+				return (
+					<col key="refresh-confirmation" role="omp.review.composer">
+						<text key="caption" spans={[{ s: "strong", t: "Discard this annotation draft and reload?" }]} />
+						<row gap="sm">
+							<FooterButton
+								act="refresh-confirm"
+								label={() => "Discard and reload"}
+								title={() => "Discard this annotation draft and reload"}
+								tone="warning"
+								keys={["y"]}
+							/>
+							<FooterButton
+								act="refresh-cancel"
+								label={() => "Keep draft"}
+								title={() => "Keep this annotation draft"}
+								keys={["escape"]}
+							/>
+						</row>
+					</col>
+				);
 			case "chooser":
 				return (
 					<col key="chooser" role="omp.review.composer">
@@ -444,6 +473,8 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 			if (model.callbacks.onAnnotationExternalEditor)
 				out.push({ keys: [keysOf(model.externalEditorKey)], label: "editor" });
 		} else {
+			if (model.callbacks.onRefresh)
+				out.push({ keys: [["r"]], label: model.refreshing ? "refreshing…" : "refresh" });
 			const undo = model.undoStack.length > 0 ? [{ keys: [["u"]], label: "undo" }] : [];
 			if (model.focus === "files") {
 				out.push(
@@ -475,6 +506,19 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 		return out;
 	};
 
+	const refreshButton = () => {
+		rev();
+		if (!model.callbacks.onRefresh || editing()) return undefined;
+		return (
+			<FooterButton
+				act="refresh"
+				label={() => (model.refreshing ? "Refreshing…" : "Refresh")}
+				title={() => (model.refreshing ? "Refreshing review" : "Refresh review  r")}
+				keys={["r"]}
+				busy={model.refreshing}
+			/>
+		);
+	};
 	const mark = (index: number) => () => {
 		rev();
 		if (editing() || model.actionDisabled(index)) return "drop" as const;
@@ -485,38 +529,43 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 		model.hasNotes() ? PASTE_CODE_REVIEW_ACTION : "Add a note to paste it into the prompt"
 	);
 
-	const footer = () => (
-		<row key="actions" role="omp.actions" gap="sm" align="center">
-			<KeycapHints nodeKey="hints" hints={hints} />
-			<FooterButton act="close" label={() => "Cancel"} title={() => "Cancel  esc"} keys={["escape"]} />
-			<FooterButton
-				act="discard"
-				label={() => (rev(), model.discardArmed ? "Confirm discard" : "Discard")}
-				title={() => DISCARD_ANNOTATIONS_ACTION}
-				mark={mark(model.actions.indexOf(DISCARD_ANNOTATIONS_ACTION))}
-			/>
-			{model.textSource ? (
+	const footer = () => {
+		rev();
+		if (model.refreshConfirmationPending) return undefined;
+		return (
+			<row key="actions" role="omp.actions" gap="sm" align="center">
+				<KeycapHints nodeKey="hints" hints={hints} />
+				{refreshButton}
+				<FooterButton act="close" label={() => "Cancel"} title={() => "Cancel  esc"} keys={["escape"]} />
 				<FooterButton
-					act="paste"
-					label={() => "Paste into prompt"}
-					title={pasteTitle}
-					tone="accent"
-					mark={mark(0)}
+					act="discard"
+					label={() => (rev(), model.discardArmed ? "Confirm discard" : "Discard")}
+					title={() => DISCARD_ANNOTATIONS_ACTION}
+					mark={mark(model.actions.indexOf(DISCARD_ANNOTATIONS_ACTION))}
 				/>
-			) : (
-				[
-					<FooterButton act="paste" label={() => "Paste into prompt"} title={pasteTitle} mark={mark(1)} />,
+				{model.textSource ? (
 					<FooterButton
-						act="review"
-						label={() => "Review with LLM"}
-						title={() => CONTINUE_CODE_REVIEW_ACTION}
+						act="paste"
+						label={() => "Paste into prompt"}
+						title={pasteTitle}
 						tone="accent"
 						mark={mark(0)}
-					/>,
-				]
-			)}
-		</row>
-	);
+					/>
+				) : (
+					[
+						<FooterButton act="paste" label={() => "Paste into prompt"} title={pasteTitle} mark={mark(1)} />,
+						<FooterButton
+							act="review"
+							label={() => "Review with LLM"}
+							title={() => CONTINUE_CODE_REVIEW_ACTION}
+							tone="accent"
+							mark={mark(0)}
+						/>,
+					]
+				)}
+			</row>
+		);
+	};
 
 	const pane = () => (
 		<col key="pane" role="omp.review.pane" grow={1} min={{ w: 0 }}>

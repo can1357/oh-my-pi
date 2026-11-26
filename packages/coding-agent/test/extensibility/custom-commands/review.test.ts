@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings, withActiveSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
+import {
+	ReviewCommand,
+	fetchPrReviewTarget,
+	refreshReviewTarget,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -11,8 +15,18 @@ import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-ent
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
+import { buildCodeReviewFeedback } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/prompt";
 import * as glab from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
-import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
+import {
+	readUncommittedReviewTarget,
+	resolveLocalReviewTarget,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review/target";
+import {
+	getCached,
+	getCachedGeneration,
+	resetForTests as resetCacheForTests,
+	resolveGithubCacheAuthKey,
+} from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { gitlab } from "@oh-my-pi/pi-coding-agent/utils/gitlab";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
@@ -314,6 +328,133 @@ describe("ReviewCommand", () => {
 		}
 	});
 
+	it("refreshes a GitHub review target live and pins it only on review handoff", async () => {
+		const dir = createTempDir();
+		const previousToken = process.env.GH_TOKEN;
+		const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+		const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-refresh-cache-"));
+		process.env.GH_TOKEN = "review-refresh-token";
+		process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
+		resetCacheForTests();
+		retainGeneration.mockRestore();
+		const retainPrDiffGeneration = gh.retainPrDiffGeneration;
+		const retainSpy = spyOn(gh, "retainPrDiffGeneration").mockImplementation(options =>
+			retainPrDiffGeneration(options),
+		);
+		const generatedDiff = `diff --git a/dist/generated.js b/dist/generated.js
+--- a/dist/generated.js
++++ b/dist/generated.js
+@@ -1 +1 @@
+-old generated
++new generated
+`;
+		const updatedDiff = `${generatedDiff}${SAMPLE_PR_DIFF}`;
+		const diffSpy = spyOn(github, "text").mockResolvedValueOnce(SAMPLE_PR_DIFF).mockResolvedValueOnce(updatedDiff);
+		const ref = {
+			forge: "github" as const,
+			repo: "owner/repo",
+			number: 123,
+			raw: "https://github.com/owner/repo/pull/123",
+			kind: "github-url" as const,
+		};
+
+		try {
+			const settings = Settings.isolated({ "github.cache.enabled": true });
+			const initial = await withActiveSettings(settings, () => fetchPrReviewTarget(dir, ref));
+			const cacheAuthKey = resolveGithubCacheAuthKey();
+			if (!cacheAuthKey) throw new Error("Could not resolve GitHub cache identity for the test");
+			expect(initial.prDiffQuery).toBeUndefined();
+			expect(retainSpy).not.toHaveBeenCalled();
+			expect(getCached<PrDiffPayload>("owner/repo", "pr-diff", 123, false, cacheAuthKey)?.rendered).toBe(
+				SAMPLE_PR_DIFF,
+			);
+			const refreshed = await withActiveSettings(settings, () =>
+				refreshReviewTarget({ ...initial, repository: "/repo-root" }),
+			);
+			expect(refreshed.rawDiff).toBe(updatedDiff);
+			expect(refreshed.prDiffQuery).toBeUndefined();
+			expect(refreshed.repository).toBe("/repo-root");
+			expect(refreshed.snapshot.files.map(file => file.path)).toEqual(["src/pr.ts"]);
+			expect(diffSpy).toHaveBeenCalledTimes(2);
+			const pending = refreshed.pendingPrDiffGeneration;
+			if (!pending) throw new Error("Refreshed target is missing its pending generation metadata");
+			expect(
+				getCachedGeneration<PrDiffPayload>("owner/repo", "pr-diff", 123, false, pending.fetchedAt, cacheAuthKey)
+					?.rendered,
+			).not.toBe(updatedDiff);
+
+			const paste = buildCodeReviewFeedback(refreshed, [], false, "Keep these notes");
+			expect(paste).toContain("Keep these notes");
+			expect(retainSpy).not.toHaveBeenCalled();
+			process.env.GH_TOKEN = "different-review-token";
+			const mismatchedFeedback = buildCodeReviewFeedback(refreshed, [], true, undefined);
+			const differentAuthKey = resolveGithubCacheAuthKey();
+			expect(differentAuthKey).not.toBe(cacheAuthKey);
+			expect(mismatchedFeedback).toBeDefined();
+			expect(mismatchedFeedback).not.toContain("?at=");
+			expect(retainSpy).not.toHaveBeenCalled();
+			process.env.GH_TOKEN = "review-refresh-token";
+
+			const resumedTarget = JSON.parse(JSON.stringify(refreshed)) as typeof refreshed;
+			const feedback = buildCodeReviewFeedback(resumedTarget, [], true, undefined);
+			const generationMatch = feedback?.match(/\?at=(\d+)/);
+			expect(generationMatch).not.toBeNull();
+			const refreshedGenerationId = Number(generationMatch![1]);
+			expect(feedback).toContain(`pr://owner/repo/123/diff/2?at=${refreshedGenerationId}`);
+			const pinned = gh.getPinnedPrDiff({
+				repo: "owner/repo",
+				number: 123,
+				fetchedAt: refreshedGenerationId,
+				cacheAuthKey,
+			});
+			expect(pinned?.rendered).toBe(updatedDiff);
+			expect(pinned?.payload.files).toEqual(parsePrUnifiedDiff(updatedDiff).files);
+			expect(pinned?.payload.files).toHaveLength(2);
+			expect(getCached<PrDiffPayload>("owner/repo", "pr-diff", 123, false, cacheAuthKey)?.rendered).toBe(
+				SAMPLE_PR_DIFF,
+			);
+			expect(retainSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			resetCacheForTests();
+			if (previousToken === undefined) delete process.env.GH_TOKEN;
+			else process.env.GH_TOKEN = previousToken;
+			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+			resetCacheForTests();
+			await removeWithRetries(cacheDir);
+		}
+	});
+
+	it("refreshes GitLab review targets through the guarded fresh fetch with their serialized project ref", async () => {
+		const dir = createTempDir();
+		const diffSpy = spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const freshSpy = spyOn(glab, "fetchMrDiffFreshGuarded").mockResolvedValue({
+			rendered: "",
+			sourceUrl: undefined,
+			payload: { unified: "", files: [] },
+		});
+		const ref = {
+			forge: "gitlab" as const,
+			repo: "gitlab.example/group/project",
+			number: 7,
+			raw: "https://gitlab.example/group/project/-/merge_requests/7",
+			kind: "gitlab-url" as const,
+		};
+
+		const initial = await fetchPrReviewTarget(dir, ref);
+		const refreshed = await refreshReviewTarget(initial);
+
+		expect(initial.refreshSource).toEqual({
+			kind: "remote",
+			cwd: dir,
+			ref: { forge: "gitlab", repo: "gitlab.example/group/project", number: 7 },
+		});
+		expect(refreshed.rawDiff).toBe("");
+		expect(refreshed.prDiffUrl).toBe("mr://gitlab.example/group/project/7/diff");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, project: "gitlab.example/group/project", iid: 7 });
+		expect(freshSpy).toHaveBeenCalledWith(dir, "gitlab.example/group/project", 7, undefined);
+	});
+
 	it("does not retain a review snapshot when the GitHub cache is disabled", async () => {
 		const dir = createTempDir();
 		const previousToken = process.env.GH_TOKEN;
@@ -335,6 +476,19 @@ describe("ReviewCommand", () => {
 			expect(result).toBeDefined();
 			expect(result!).toContain("pr://owner/repo/123/diff/");
 			expect(result!).not.toContain("?at=");
+			const ref = {
+				forge: "github" as const,
+				repo: "owner/repo",
+				number: 123,
+				raw: "https://github.com/owner/repo/pull/123",
+				kind: "github-url" as const,
+			};
+			const initial = await withActiveSettings(settings, () => fetchPrReviewTarget(dir, ref));
+			const refreshed = await withActiveSettings(settings, () => refreshReviewTarget(initial));
+			const feedback = withActiveSettings(settings, () => buildCodeReviewFeedback(refreshed, [], true, undefined));
+			expect(feedback).toBeDefined();
+			expect(feedback).not.toContain("?at=");
+			expect(retainGeneration).not.toHaveBeenCalled();
 		} finally {
 			resetCacheForTests();
 			if (previousToken === undefined) delete process.env.GH_TOKEN;
@@ -951,6 +1105,48 @@ describe("ReviewCommand", () => {
 			expect(result!).toContain("`mr://gitlab.com/acme/app/5/diff/21`");
 			expect(result!).toContain("mr://gitlab.com/acme/app/5/diff/all");
 		});
+	});
+
+	it("refreshes uncommitted changes and accepts an empty live diff", async () => {
+		const diff = vi.fn().mockResolvedValueOnce(SAMPLE_PR_DIFF).mockResolvedValueOnce("");
+		const repository = { kind: () => "git", uncommittedDiff: diff } as unknown as VcsRepo;
+		spyOn(vcs, "require").mockReturnValue(repository);
+
+		const initial = await readUncommittedReviewTarget("/checkout");
+		const refreshed = await refreshReviewTarget({ ...initial, repository: "/repo-root" });
+
+		expect(initial.refreshSource).toEqual({ kind: "uncommitted", cwd: "/checkout" });
+		expect(refreshed.rawDiff).toBe("");
+		expect(refreshed.repository).toBe("/repo-root");
+		expect(diff).toHaveBeenCalledTimes(2);
+	});
+
+	it("refreshes a base comparison against its original refs", async () => {
+		const mergeBase = vi.fn(async (_base: string, _head: string) => "merge-base");
+		const diffText = vi.fn().mockResolvedValueOnce(SAMPLE_PR_DIFF).mockResolvedValueOnce("");
+		const repository = {
+			listBranches: async () => ["main"],
+			mergeBase,
+			diffText,
+		} as unknown as VcsGitRepo;
+		spyOn(vcs, "requireGit").mockReturnValue(repository);
+		spyOn(vcs, "git").mockReturnValue({ currentBranch: async () => "feature" } as unknown as VcsGitRepo);
+
+		const initial = await resolveLocalReviewTarget("base-branch", "/checkout", {
+			select: async () => "main",
+			notify: () => {},
+		});
+		if (!initial) throw new Error("Base-branch review did not resolve");
+		const refreshed = await refreshReviewTarget({ ...initial, repository: "/repo-root" });
+
+		expect(initial.refreshSource).toEqual({ kind: "base-branch", cwd: "/checkout", base: "main", head: "feature" });
+		expect(mergeBase.mock.calls).toEqual([
+			["main", "feature"],
+			["main", "feature"],
+		]);
+		expect(diffText).toHaveBeenNthCalledWith(2, { base: "merge-base", head: "feature" });
+		expect(refreshed.rawDiff).toBe("");
+		expect(refreshed.repository).toBe("/repo-root");
 	});
 
 	it("resolves base-branch review against a real repo without a range revspec", async () => {

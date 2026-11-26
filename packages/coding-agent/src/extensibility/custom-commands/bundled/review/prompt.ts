@@ -4,6 +4,10 @@ import reviewRequestTemplate from "../../../../prompts/review-request.md" with {
 import type { CodeReviewAnnotation } from "../annotate/annotation-types";
 import { getRecommendedReviewAgentCount, getReviewDiffPreview, type ReviewDiffSnapshot } from "./diff";
 import type { ResolvedReviewTarget } from "./target";
+import * as gh from "../../../../tools/gh";
+import { resolveCacheTtl, resolveGithubCacheAuthKey } from "../../../../tools/github-cache";
+import { parsePrUnifiedDiff } from "../../../../tools/gh-pr-diff";
+import { findScopedSettings } from "../../../../config/settings";
 
 const LARGE_DIFF_CHARACTER_LIMIT = 50_000;
 const LARGE_DIFF_FILE_LIMIT = 20;
@@ -101,6 +105,27 @@ export function buildCodeReviewFeedback(
 	return review ? buildReviewPrompt(target, formatted) : formatted;
 }
 
+function reviewDiffQuery(target: ResolvedReviewTarget): string {
+	const pending = target.pendingPrDiffGeneration;
+	const source = target.refreshSource;
+	if (!pending || source?.kind !== "remote" || source.ref.forge !== "github") return target.prDiffQuery ?? "";
+	if (
+		!resolveCacheTtl(findScopedSettings(source.cwd)).enabled ||
+		resolveGithubCacheAuthKey() !== pending.cacheAuthKey
+	) {
+		return "";
+	}
+	const generationAt = gh.retainPrDiffGeneration({
+		repo: source.ref.repo,
+		number: source.ref.number,
+		rendered: target.rawDiff,
+		files: parsePrUnifiedDiff(target.rawDiff).files,
+		fetchedAt: pending.fetchedAt,
+		cacheAuthKey: pending.cacheAuthKey,
+	});
+	return generationAt === null ? "" : `?at=${generationAt}`;
+}
+
 function exceedsInlineDiffLimit(target: ResolvedReviewTarget): boolean {
 	return target.rawDiff.length > LARGE_DIFF_CHARACTER_LIMIT || target.snapshot.files.length > LARGE_DIFF_FILE_LIMIT;
 }
@@ -119,7 +144,7 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 	assertReviewablePatchSize(target);
 	const skipDiff = exceedsInlineDiffLimit(target);
 	const linesPerFile = skipDiff ? Math.max(5, Math.floor(100 / target.snapshot.files.length)) : 0;
-	const prDiffQuery = target.prDiffQuery ?? "";
+	const prDiffQuery = reviewDiffQuery(target);
 	const files = target.snapshot.files.map(file =>
 		renderReviewPromptFile(file, linesPerFile, target.prDiffUrl, prDiffQuery),
 	);

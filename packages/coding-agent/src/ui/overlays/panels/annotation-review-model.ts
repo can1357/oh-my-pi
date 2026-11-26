@@ -45,6 +45,8 @@ export interface AnnotationReviewCallbacks {
 	onAnnotationExternalEditor?(draft: string, commit: (text: string | null) => void): void | Promise<void>;
 	/** Open the source in the host's editor; the review stays open. */
 	onExternalEditor?(): void | Promise<void>;
+	/** Refresh the source under review. */
+	onRefresh?(): Promise<void>;
 }
 
 export interface AnnotationReviewOptions {
@@ -113,6 +115,7 @@ export class AnnotationReviewModel {
 	discardArmed = false;
 	finished = false;
 	notes: DiffNote[] = [];
+	refreshing = false;
 	textNotes: TextNote[] = [];
 	undoStack: { notes: DiffNote[]; textNotes: TextNote[] }[] = [];
 	/** The lines' scroll offset (in the terminal's geometry). */
@@ -121,6 +124,12 @@ export class AnnotationReviewModel {
 	viewportDriven = false;
 	viewportTowardEnd = false;
 	#textEdited = false;
+	#refreshDecision:
+		| {
+				readonly promise: Promise<boolean>;
+				readonly resolve: (confirmed: boolean) => void;
+		  }
+		| undefined;
 	#external = false;
 	#rev = 0;
 	/** Moves since the last draw: the view follows the cursor (or the cursor the view) once drawn. */
@@ -176,7 +185,7 @@ export class AnnotationReviewModel {
 
 	/** After moves, as a draw does: the view scrolls to the cursor, or (after paging) the cursor follows the view. */
 	#settle(): void {
-		if (!this.#unsettled) return;
+		if (!this.#unsettled || this.#refreshDecision) return;
 		this.#unsettled = false;
 		const frame = this.reference();
 		this.offset = frame.offset;
@@ -334,6 +343,7 @@ export class AnnotationReviewModel {
 
 	dispose(): void {
 		this.finished = true;
+		this.#resolveRefreshConfirmation(false, false);
 	}
 
 	// ─── Queries ────────────────────────────────────────────────────────────
@@ -360,6 +370,7 @@ export class AnnotationReviewModel {
 
 	actionDisabled(index: number): boolean {
 		if (this.actions[index] === DISCARD_ANNOTATIONS_ACTION) return false;
+		if (this.actions[index] === CONTINUE_CODE_REVIEW_ACTION) return this.files.length === 0;
 		return this.textSource ? !this.hasNotes() : index === 1 && !this.hasNotes();
 	}
 
@@ -391,6 +402,13 @@ export class AnnotationReviewModel {
 	/** A key; false when it belongs to the note editor's field. */
 	key(id: string, text: string | undefined, raw: string): boolean {
 		if (this.finished || this.#external) return true;
+		if (this.#refreshDecision) {
+			if (id === "y" || text === "y") this.#resolveRefreshConfirmation(true);
+			else if (id === "escape" || id === this.cancelKey || id === "n" || text === "n")
+				this.#resolveRefreshConfirmation(false);
+			return true;
+		}
+		if (this.refreshing && id !== this.cancelKey) return true;
 		this.drawnAt(this.terminal.size().columns);
 		const armed = this.discardArmed;
 		this.discardArmed = false;
@@ -425,6 +443,10 @@ export class AnnotationReviewModel {
 			return true;
 		}
 		// List keys follow the selector bindings (`tui.select.*`).
+		if (text === "r" && this.callbacks.onRefresh) {
+			void this.#refreshSource();
+			return true;
+		}
 		id = selectKeyId(id);
 		if (this.callbacks.onExternalEditor && id === this.externalEditorKey) {
 			void this.#editSourceExternally();
@@ -555,6 +577,7 @@ export class AnnotationReviewModel {
 
 	#finish(result: CodeReviewOverlayResult | TextReviewOverlayResult | undefined): void {
 		if (this.finished) return;
+		this.#resolveRefreshConfirmation(false, false);
 		this.finished = true;
 		this.callbacks.onComplete(result);
 	}
@@ -604,7 +627,7 @@ export class AnnotationReviewModel {
 
 	/** An edit of the note draft. */
 	editDraft(edit: TextEdit): void {
-		if (!this.annotating || edit.len !== this.draft.text.length) return;
+		if (!this.annotating || this.#refreshDecision || edit.len !== this.draft.text.length) return;
 		this.draft = {
 			text: `${this.draft.text.slice(0, edit.from)}${edit.text}${this.draft.text.slice(edit.to)}`,
 			cursor: edit.cursor,
@@ -748,17 +771,64 @@ export class AnnotationReviewModel {
 			this.touch();
 		}
 	}
+	get refreshConfirmationPending(): boolean {
+		return this.#refreshDecision !== undefined;
+	}
+
+	confirmDiscardForRefresh(): Promise<boolean> {
+		if (this.#refreshDecision) return this.#refreshDecision.promise;
+		if (this.finished) return Promise.resolve(false);
+		if (!this.hasNotes() && !this.annotating && !this.#textEdited) return Promise.resolve(true);
+		const { promise, resolve } = Promise.withResolvers<boolean>();
+		this.#refreshDecision = { promise, resolve };
+		this.touch();
+		return promise;
+	}
+
+	#resolveRefreshConfirmation(confirmed: boolean, redraw = true): void {
+		const decision = this.#refreshDecision;
+		if (!decision) return;
+		this.#refreshDecision = undefined;
+		if (redraw && !this.finished) this.touch();
+		decision.resolve(confirmed);
+	}
+
+	async #refreshSource(): Promise<void> {
+		const refresh = this.callbacks.onRefresh;
+		if (!refresh || this.refreshing || this.finished) return;
+		this.refreshing = true;
+		this.touch();
+		try {
+			await refresh();
+		} catch (error) {
+			if (!this.finished)
+				this.callbacks.onWarning?.(
+					`Failed to refresh review: ${error instanceof Error ? error.message : String(error)}`,
+				);
+		} finally {
+			this.refreshing = false;
+			if (!this.finished) this.touch();
+		}
+	}
 
 	// ─── Native events ──────────────────────────────────────────────────────
 
 	/** A footer button. */
 	action(act: string): void {
 		if (this.finished || this.#external) return;
+		if (this.#refreshDecision) {
+			if (act === "refresh-confirm") this.#resolveRefreshConfirmation(true);
+			else if (act === "refresh-cancel" || act === "close") this.#resolveRefreshConfirmation(false);
+			return;
+		}
+		if (this.refreshing && act !== "close") return;
 		const armed = this.discardArmed;
 		this.discardArmed = false;
 		if (act === "close") {
 			if (this.chooser) this.chooser = undefined;
 			else this.#finish(undefined);
+		} else if (act === "refresh") {
+			if (!this.annotating && !this.chooser) void this.#refreshSource();
 		} else if (!this.annotating && !this.chooser) {
 			const index =
 				act === "discard"
@@ -777,10 +847,9 @@ export class AnnotationReviewModel {
 		}
 		this.touch();
 	}
-
 	/** A pick in the files, lines or chooser list. */
 	pick(leaf: string, item: string, activate: boolean): void {
-		if (this.finished || this.#external) return;
+		if (this.finished || this.#external || this.refreshing || this.#refreshDecision) return;
 		this.discardArmed = false;
 		const index = (prefix: string): number =>
 			item.startsWith(prefix) && /^\d+$/.test(item.slice(prefix.length)) ? Number(item.slice(prefix.length)) : -1;
