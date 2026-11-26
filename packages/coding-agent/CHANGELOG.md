@@ -20,6 +20,29 @@
 - Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
 
 ### Fixed
+- Fixed shell commands like `grep omp local://out.txt` skipping URL rewriting when `omp` appears as an argument or option value instead of the invoked program ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- Images reach each request as the receiving model needs them: after switching to a text-only model, queued and earlier images are described by the vision model (once per image, reused across turns and resumes); after switching to a vision model, they are sent as images again with no stale description. Compaction and branch summaries and advisor reviews carry the descriptions whenever their model or the session's cannot see images, and a failed description is retried instead of sticking ([#20369](https://github.com/can1357/oh-my-pi/pull/20369) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Edit cards in hashline, sloppy and magic modes name their target file again instead of `…`: while a call streams, and in the Agent Hub transcript of a subagent
+- In Tern, viewing a subagent shows the composer's `Viewing` header again, so the tray marks that agent's card (amber, with an eye) and its MAIN bar leads back to the main session
+- Attachment chips show the symbol preset's icon again instead of an emoji (a Nerd Font glyph in Tern): in the draft, on the chip's card and in sent prompts; skill and model chips of sent prompts follow the preset too
+- Image and video attachment cards show the picture and its pixel size again: in Tern, and as a thumbnail in terminals that draw Kitty Unicode placeholders
+- In Tern, a draft that would skip a pending question shows the composer's `skips ask` chip and its `Skip & send` button again
+- In Tern, hovering the prompt-cache indicator shows its card again: whether the next message reads the cache and until when, or why not and what it re-sends
+- Web search results without a synthesized answer show each source's excerpt again (one line collapsed, up to three expanded; under the source in Tern) instead of a warning with the raw source listing
+- The background jobs panel shows a subagent's name as a heading above its jobs again
+- Expand hints on tool cards, notices, summaries, error banners, approvals and the rewind and copy pickers name the key bound to `app.tools.expand` in the active symbol preset (`Ctrl+O` off macOS) instead of a fixed `⌃O`
+- Key hints in terminal dialogs, pickers and full-screen views (model and agent hubs, session tree, history search, plan save, pause, plugin settings, log viewer, raw SSE, git help, autoresearch, live, ps) follow the symbol preset and your key bindings again instead of fixed Unicode keycaps
+- Glyphs follow the symbol preset again where they had become fixed Unicode ones: bullets and tree guides in argument trees, memory lists and the session tree, IRC arrows, accept and reject marks, badge brackets, the service PID icon, selection cursors, radio and checkbox marks, and the status marks of `/btw`, `/cleanse`, `/omfg`, the agent hubs and plugin settings (in Tern too)
+- The status line's cost segment follows the ASCII preset and the classic footer follows every preset; the session-tree segment shows its icon again, `pi.showProfile: false` hides the profile tag again, and the autocomplete popup marks its selection with the preset's cursor
+- Failed `find`, `glob` and memory calls no longer read `Error: Error: …`
+- `tui.maxInlineImageColumns` and `tui.maxInlineImageRows` limit transcript pictures again, and a change applies to the pictures already on screen
+- Terminals that draw images show the picture of an image `read` and of a user-run command's output again instead of only its placeholder
+- In Tern, reading a media file (image, PDF, video, audio, 3D model) opens it in the media viewer again, capped at the inline image height, for single and grouped reads
+- Tight Layout (`tui.tight`) works again and applies at once: assistant prose, notices, command output, Read and search rows and the dock's rows give up their one-cell side padding, so they share one left edge; user bubbles and framed tool cards keep theirs
+- `omp gallery` draws aliased tool samples with their real tool's look, and its path and status segment samples match the status line
+- Extensions importing `@oh-my-pi/omptype` resolve to the host's copy, so they load offline and after Bun prunes the package's cached registry manifest; the bare import used to fall back to the install cache and fail the extension load
+- `--no-extensions` no longer imports custom tool modules from `.omp/tools`, `.claude/tools`, `.codex/tools`, or installed plugins; tools from explicitly passed `-e`/`--hook` packages still load
+- Fixed `/fast off` and bare `/fast` claiming "Fast mode disabled." on a model with no service-tier control; they now report that fast mode is unavailable for the current model ([#20284](https://github.com/can1357/oh-my-pi/pull/20284) by [@adammekki](https://github.com/adammekki))
 
 - Blob-broker tunnels no longer flash console windows on Windows, including when a tunnel fails to start and is retried ([#20599](https://github.com/can1357/oh-my-pi/issues/20599)).
 - `/restart` keeps the session open if its working directory was deleted and suggests using `/move` before retrying ([#20594](https://github.com/can1357/oh-my-pi/issues/20594)).

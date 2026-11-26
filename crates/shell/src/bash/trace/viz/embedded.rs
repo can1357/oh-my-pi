@@ -10,6 +10,17 @@ fn basename(s: &str) -> &str {
 	s.rsplit('/').next().unwrap_or(s)
 }
 
+fn command_name(word: &[u8]) -> Option<&str> {
+	let mut name = word
+		.rsplit(|&b| b == b'/' || (cfg!(windows) && b == b'\\'))
+		.next()
+		.unwrap_or(word);
+	if cfg!(windows) && name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".exe") {
+		name = &name[..name.len() - 4];
+	}
+	std::str::from_utf8(name).ok()
+}
+
 /// A short-option cluster that sets `flag` (`-euc` sets `c`).
 fn sets(word: &str, flag: char) -> bool {
 	word
@@ -17,109 +28,212 @@ fn sets(word: &str, flag: char) -> bool {
 		.is_some_and(|flags| !flags.starts_with('-') && flags.contains(flag))
 }
 
-/// `NAME=VALUE`, as `env` and `sudo` take before the command they run.
-fn assignment(word: &str) -> bool {
-	word.split_once('=').is_some_and(|(name, _)| {
-		name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-			&& name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-	})
+/// `NAME=VALUE` (or `NAME+=VALUE`), as `sudo`, `doas`, and `time` take before
+/// the command they run.
+fn assignment(word: &[u8]) -> bool {
+	let Some(eq) = word.iter().position(|&b| b == b'=') else {
+		return false;
+	};
+	let name = word[..eq].strip_suffix(b"+").unwrap_or(&word[..eq]);
+	!name.is_empty()
+		&& (name[0].is_ascii_alphabetic() || name[0] == b'_')
+		&& name[1..]
+			.iter()
+			.all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
-/// Index of the first operand from `from` on, past the options; `takes_value`
-/// names the options whose value is the next word.
-fn operand(words: &[String], from: usize, takes_value: impl Fn(&str) -> bool) -> usize {
+/// Index of the first operand from `from` on, past the options.
+/// `short_vals`/`long_vals` name options whose value is the next word (or
+/// attached to the short cluster); `stop_shorts`/`stop_longs` name options
+/// that prevent executing a positional command (`command -v`, `npx -c`,
+/// `uv run -m`).
+fn skip_options<W: AsRef<[u8]>>(
+	words: &[W],
+	from: usize,
+	short_vals: &[u8],
+	long_vals: &[&str],
+	stop_shorts: &[u8],
+	stop_longs: &[&str],
+) -> Option<usize> {
 	let mut i = from;
 	while let Some(word) = words.get(i) {
-		if word == "--" {
-			return i + 1;
+		let w = word.as_ref();
+		if w == b"--" {
+			return Some((i + 1).min(words.len()));
 		}
-		if !word.starts_with('-') || word == "-" {
+		if !w.starts_with(b"-") || w == b"-" {
 			break;
 		}
-		i += if takes_value(word) { 2 } else { 1 };
+		if w.starts_with(b"--") {
+			let opt_name = w.iter().position(|&b| b == b'=').map_or(w, |eq| &w[..eq]);
+			if stop_longs.iter().any(|&opt| opt_name == opt.as_bytes()) {
+				return None;
+			}
+			if w.contains(&b'=') {
+				i += 1;
+			} else if long_vals.iter().any(|&opt| w == opt.as_bytes()) {
+				i += 2;
+			} else {
+				i += 1;
+			}
+			continue;
+		}
+		let mut consumed = false;
+		for k in 1..w.len() {
+			if stop_shorts.contains(&w[k]) {
+				return None;
+			}
+			if short_vals.contains(&w[k]) {
+				i += if k + 1 < w.len() { 1 } else { 2 };
+				consumed = true;
+				break;
+			}
+		}
+		if !consumed {
+			i += 1;
+		}
 	}
-	i
+	Some(i.min(words.len()))
 }
 
 /// Words a launcher at the start of `words` takes before the command it runs
 /// (`timeout 5 cmd` → 2), and whether that command runs on an `ssh` host.
-fn launcher(words: &[String]) -> Option<(usize, bool)> {
-	let skip = match basename(words.first()?) {
+fn launcher<W: AsRef<[u8]>>(words: &[W]) -> Option<(usize, bool)> {
+	let skip = match command_name(words.first()?.as_ref())? {
 		"env" => {
-			let at = operand(words, 1, |w| {
-				matches!(w, "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string" | "-P")
-			});
-			at + words.iter().skip(at).take_while(|w| assignment(w)).count()
+			let mut at = skip_options(
+				words,
+				1,
+				b"uCSaP",
+				&["--unset", "--chdir", "--split-string", "--argv0", "--env0-from"],
+				b"",
+				&[],
+			)?;
+			if words.get(at).is_some_and(|w| w.as_ref() == b"-") {
+				at += 1;
+			}
+			at + words[at..]
+				.iter()
+				.take_while(|w| w.as_ref().contains(&b'='))
+				.count()
 		},
 		"sudo" | "doas" => {
-			let at = operand(words, 1, |w| {
-				matches!(
-					w,
-					"-u"
-						| "-g"
-						| "-C"
-						| "-D"
-						| "-h"
-						| "-p"
-						| "-R"
-						| "-r"
-						| "-T"
-						| "-t"
-						| "-U"
-						| "--user"
-						| "--group"
-						| "--close-from"
-						| "--chdir"
-						| "--host"
-						| "--prompt"
-						| "--chroot"
-						| "--role"
-						| "--command-timeout"
-						| "--type"
-						| "--other-user"
-				)
-			});
-			at + words.iter().skip(at).take_while(|w| assignment(w)).count()
+			let at = skip_options(
+				words,
+				1,
+				b"ugCDhpRrTtUac",
+				&[
+					"--user",
+					"--group",
+					"--close-from",
+					"--chdir",
+					"--host",
+					"--prompt",
+					"--chroot",
+					"--role",
+					"--command-timeout",
+					"--type",
+					"--other-user",
+				],
+				b"",
+				&[],
+			)?;
+			at + words[at..]
+				.iter()
+				.take_while(|w| assignment(w.as_ref()))
+				.count()
 		},
 		// The first operand is the duration.
 		"timeout" | "gtimeout" => {
-			operand(words, 1, |w| matches!(w, "-s" | "--signal" | "-k" | "--kill-after")) + 1
+			skip_options(words, 1, b"sk", &["--signal", "--kill-after"], b"", &[])? + 1
 		},
-		"nice" => operand(words, 1, |w| matches!(w, "-n" | "--adjustment")),
-		"nohup" | "time" => operand(words, 1, |w| matches!(w, "-o" | "--output" | "-f" | "--format")),
-		"stdbuf" => {
-			operand(words, 1, |w| matches!(w, "-i" | "-o" | "-e" | "--input" | "--output" | "--error"))
+		"nice" => skip_options(words, 1, b"n", &["--adjustment"], b"", &[])?,
+		"nohup" | "setsid" | "ifne" => skip_options(words, 1, b"", &[], b"", &[])?,
+		"time" => {
+			let at = skip_options(words, 1, b"of", &["--output", "--format"], b"", &[])?;
+			at + words[at..]
+				.iter()
+				.take_while(|w| assignment(w.as_ref()))
+				.count()
 		},
-		"exec" => operand(words, 1, |w| w == "-a"),
-		"uv" if words.get(1).is_some_and(|w| w == "run") => operand(words, 2, |w| {
-			matches!(
-				w,
-				"--with"
-					| "--with-editable"
-					| "--with-requirements"
-					| "-p"
-					| "--python"
-					| "--package"
-					| "--project"
-					| "--directory"
-					| "--env-file"
-					| "--extra"
-					| "--group"
-					| "--only-group"
-					| "--no-group"
-					| "--index"
-					| "--default-index"
-					| "-i"
-					| "--index-url"
-					| "--extra-index-url"
-					| "-f"
-					| "--find-links"
-					| "--config-file"
-					| "--cache-dir"
-			)
-		}),
+		"stdbuf" => skip_options(words, 1, b"ioe", &["--input", "--output", "--error"], b"", &[])?,
+		"command" => skip_options(words, 1, b"", &[], b"vV", &[])?,
+		"exec" => skip_options(words, 1, b"a", &[], b"", &[])?,
+		"xargs" => skip_options(
+			words,
+			1,
+			b"adEILnPs",
+			&[
+				"--arg-file",
+				"--delimiter",
+				"--max-args",
+				"--max-procs",
+				"--max-chars",
+				"--process-slot-var",
+			],
+			b"",
+			&[],
+		)?,
+		"npx" => skip_options(
+			words,
+			1,
+			b"pcw",
+			&[
+				"--package",
+				"--call",
+				"--cache",
+				"--userconfig",
+				"--prefix",
+				"--loglevel",
+				"--workspace",
+				"--shell",
+				"--registry",
+				"--node-options",
+			],
+			b"c",
+			&["--call"],
+		)?,
+		"bunx" => skip_options(
+			words,
+			1,
+			b"pc",
+			&["--package", "--shell", "--registry", "--minimum-release-age", "--cwd", "--config"],
+			b"c",
+			&[],
+		)?,
+		"uv" if words.get(1).is_some_and(|w| w.as_ref() == b"run") => skip_options(
+			words,
+			2,
+			b"wpifm",
+			&[
+				"--with",
+				"--with-editable",
+				"--with-requirements",
+				"--python",
+				"--package",
+				"--project",
+				"--directory",
+				"--env-file",
+				"--extra",
+				"--group",
+				"--only-group",
+				"--no-group",
+				"--index",
+				"--default-index",
+				"--index-url",
+				"--extra-index-url",
+				"--find-links",
+				"--config-file",
+				"--cache-dir",
+				"--module",
+				"--script",
+				"--gui-script",
+			],
+			b"m",
+			&["--module", "--script", "--gui-script"],
+		)?,
 		"ssh" => {
-			let host = operand(words, 1, |w| w.len() == 2 && "pilojFSLRDWbcEemOQw".contains(&w[1..]));
+			let host = skip_options(words, 1, b"BbcDEeFIiJLlmOopQRSWw", &[], b"", &[])?;
 			return (host < words.len()).then_some((host + 1, true));
 		},
 		_ => return None,
@@ -129,15 +243,15 @@ fn launcher(words: &[String]) -> Option<(usize, bool)> {
 
 /// A command line past its launchers (`env`, `timeout`, `sudo`, `uv run`,
 /// `ssh host`, …).
-struct Launch {
+pub(crate) struct Launch {
 	/// Index of the word naming the program; for `ssh`, of its first remote
 	/// word, if any (none: the remote login shell runs stdin).
-	at:     usize,
+	pub at:     usize,
 	/// The program runs on an `ssh` host.
-	remote: bool,
+	pub remote: bool,
 }
 
-fn launch(words: &[String]) -> Launch {
+pub(crate) fn launch<W: AsRef<[u8]>>(words: &[W]) -> Launch {
 	let mut launch = Launch { at: 0, remote: false };
 	while let Some((skip, remote)) = launcher(&words[launch.at..]) {
 		launch.at = (launch.at + skip).min(words.len());
@@ -300,7 +414,7 @@ fn shebang(body: &str) -> Option<&'static str> {
 	let mut words = line.split_ascii_whitespace();
 	let program = words.next()?;
 	if basename(program) == "env" {
-		return interpreter(words.find(|w| !w.starts_with('-') && !assignment(w))?);
+		return interpreter(words.find(|w| !w.starts_with('-') && !assignment(w.as_bytes()))?);
 	}
 	interpreter(program)
 }

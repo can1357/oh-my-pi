@@ -607,6 +607,53 @@ async fn omp_receives_its_url_arguments_as_written() {
 	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
 }
 
+/// Only a command actually invoking `omp` (directly or behind a wrapper's
+/// options) skips URL rewriting; non-`omp` commands that merely take `omp` as
+/// an argument or option value still receive host paths for their URLs.
+#[cfg(unix)]
+#[tokio::test]
+async fn non_omp_commands_naming_omp_receive_host_paths_for_url_arguments() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let docs = directory.path().join("docs");
+	fs::create_dir(&docs).expect("provider directory");
+	fs::write(docs.join("a.txt"), b"alpha\n").expect("document");
+	let bin = tempfile::tempdir().expect("program directory");
+	let omp = bin.path().join("omp");
+	fs::write(&omp, b"#!/bin/sh\nprintf 'omp:%s\\n' \"$*\"\n").expect("stand-in omp");
+	fs::set_permissions(&omp, fs::Permissions::from_mode(0o755)).expect("executable stand-in");
+	let probe_bin = bin.path().join("probe");
+	fs::write(&probe_bin, b"#!/bin/sh\nfor arg; do printf 'probe:%s\\n' \"$arg\"; done\n")
+		.expect("stand-in probe");
+	fs::set_permissions(&probe_bin, fs::Permissions::from_mode(0o755)).expect("executable probe");
+	let script = format!(
+		"PATH='{bin}':$PATH; probe omp virtual://docs/a.txt; probe ./omp virtual://docs/a.txt; nice \
+		 -n 5 probe omp virtual://docs/a.txt; env -u omp probe virtual://docs/a.txt; env -- \
+		 -flag=/opt/omp probe omp virtual://docs/a.txt; nice -n 5 omp read virtual://docs/a.txt; \
+		 /usr/bin/env - '{omp}' read virtual://docs/a.txt",
+		bin = bin.path().display(),
+		omp = omp.display(),
+	);
+	let run = run_virtual(directory.path(), &script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	let file = docs.join("a.txt").display().to_string();
+	let expected = [
+		"probe:omp".to_owned(),
+		format!("probe:{file}"),
+		"probe:./omp".to_owned(),
+		format!("probe:{file}"),
+		"probe:omp".to_owned(),
+		format!("probe:{file}"),
+		format!("probe:{file}"),
+		"probe:omp".to_owned(),
+		format!("probe:{file}"),
+		"omp:read virtual://docs/a.txt".to_owned(),
+		"omp:read virtual://docs/a.txt".to_owned(),
+	];
+	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
+}
+
 /// A provider directory that aliases a real one is a usable working directory
 /// for a child process, and the `PWD` the child inherits names that same host
 /// directory rather than the URL it cannot open; one that aliases nothing is

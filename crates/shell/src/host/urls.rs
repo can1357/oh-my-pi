@@ -103,18 +103,20 @@ impl Rest {
 pub(super) fn names_url(spec: &SpawnSpec<'_>) -> bool {
 	is_url(spec.path)
 		|| is_url(spec.cwd)
-		|| (!runs_omp(spec.argv)
-			&& (spec.argv.iter().skip(1).any(|arg| arg.contains_str("://"))
-				|| spec.env.iter().any(|(name, value)| env_url(name, value))))
+		|| ((spec.argv.iter().skip(1).any(|arg| arg.contains_str("://"))
+			|| spec.env.iter().any(|(name, value)| env_url(name, value)))
+			&& !runs_omp(spec.path.as_bytes(), spec.argv))
 }
 
-/// Whether `argv` runs `omp`: as the program, or as the command a wrapper
-/// (`nice omp …`, `npx omp …`) is given ahead of any URL.
-fn runs_omp(argv: &[BString]) -> bool {
-	argv
-		.iter()
-		.take_while(|arg| !arg.contains_str("://"))
-		.any(|arg| is_omp(arg))
+/// Whether `path`/`argv` runs `omp`: as the program itself, or as the target
+/// command behind known wrappers (`nice`, `nohup`, `npx`, `bunx`, `sudo`,
+/// `env`, `time`, …) and their options.
+fn runs_omp(path: &[u8], argv: &[BString]) -> bool {
+	if is_omp(path) {
+		return true;
+	}
+	let launch = crate::bash::trace::viz::embedded::launch(argv);
+	!launch.remote && argv.get(launch.at).is_some_and(|word| is_omp(word))
 }
 
 /// Whether `word` names the `omp` program, by any path.
@@ -238,7 +240,7 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 		},
 		_ => names.path.clone(),
 	};
-	let literal = runs_omp(&names.argv);
+	let literal = runs_omp(&names.path, &names.argv);
 	let mut argv = Vec::with_capacity(names.argv.len());
 	for (i, arg) in names.argv.iter().enumerate() {
 		let host = if i == 0 || literal {
@@ -362,4 +364,57 @@ fn names_nothing(text: &str) -> bool {
 		let rest = text[scheme.len() + 3..].trim_start_matches('/');
 		rest.trim_end_matches('/').is_empty() || rest.starts_with(char::is_whitespace)
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn bvec(items: &[&str]) -> Vec<BString> {
+		items.iter().map(|s| BString::from(*s)).collect()
+	}
+
+	#[test]
+	fn runs_omp_matches_only_program_or_wrapped_command() {
+		for non_omp in [
+			&["grep", "omp", "local://out.txt"][..],
+			&["nice", "-n", "5", "grep", "omp", "local://out.txt"][..],
+			&["npx", "--cache", "omp", "eslint", "local://app.ts"][..],
+			&["npx", "-p", "omp", "eslint", "local://app.ts"][..],
+			&["npx", "-c", "omp read local://out.txt"][..],
+			&["env", "-u", "omp", "grep", "x", "local://out.txt"][..],
+			&["env", "--", "-flag=/opt/omp", "grep", "x", "local://out.txt"][..],
+			&["env", "-", "tool.name=/opt/omp", "grep", "x", "local://out.txt"][..],
+			&["timeout", "30", "grep", "omp", "local://out.txt"][..],
+			&["command", "-v", "omp", "local://out.txt"][..],
+			&["setsid", "grep", "omp", "local://out.txt"][..],
+			&["uv", "run", "-m", "omp", "local://out.txt"][..],
+			&["ssh", "host", "omp", "read", "local://out.txt"][..],
+		] {
+			let args = bvec(non_omp);
+			assert!(!runs_omp(args[0].as_bytes(), &args), "expected false for {non_omp:?}");
+		}
+
+		for omp_cmd in [
+			&["omp", "read", "local://out.txt"][..],
+			&["/usr/local/bin/omp", "read", "local://out.txt"][..],
+			&["nice", "-n", "5", "omp", "read", "local://out.txt"][..],
+			&["nice", "-10", "omp", "read", "local://out.txt"][..],
+			&["sudo", "-u", "root", "FOO=bar", "nice", "omp", "read", "local://out.txt"][..],
+			&["/usr/bin/env", "-", "FOO=local://a", "omp", "read", "local://out.txt"][..],
+			&["npx", "--loglevel", "warn", "omp", "read", "local://out.txt"][..],
+			&["bunx", "--minimum-release-age", "86400", "omp", "read", "local://out.txt"][..],
+			&["timeout", "-k", "5", "30", "omp", "read", "local://out.txt"][..],
+			&["nohup", "omp", "read", "local://out.txt"][..],
+			&["setsid", "omp", "read", "local://out.txt"][..],
+			&["time", "FOO=bar", "omp", "read", "local://out.txt"][..],
+			&["stdbuf", "-oL", "omp", "read", "local://out.txt"][..],
+			&["xargs", "-n", "1", "omp", "read", "local://out.txt"][..],
+			&["ifne", "omp", "read", "local://out.txt"][..],
+			&["uv", "run", "-w", "requests", "omp", "read", "local://out.txt"][..],
+		] {
+			let args = bvec(omp_cmd);
+			assert!(runs_omp(args[0].as_bytes(), &args), "expected true for {omp_cmd:?}");
+		}
+	}
 }

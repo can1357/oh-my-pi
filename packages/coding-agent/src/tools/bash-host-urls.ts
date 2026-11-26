@@ -15,7 +15,7 @@ import * as fs from "node:fs/promises";
 import { ShellFsOp } from "@oh-my-pi/pi-natives";
 import { isCmdShell } from "@oh-my-pi/pi-utils/procmgr";
 import type { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
-import { lexShellCommand } from "./shell-tokenize";
+import { isShellEnvironmentAssignment, lexShellCommand, type ShellToken } from "./shell-tokenize";
 
 /** The host path backing `url`, or `undefined` when nothing backs it or it cannot be resolved. */
 export type UrlBacking = (url: string) => Promise<string | undefined>;
@@ -36,6 +36,82 @@ const REDIRECT = /^\d*(?:<>|>>|<|>)/;
 const HEREDOC = /(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z_][A-Za-z0-9_]*))/g;
 const WORD_SAFE = /^[A-Za-z0-9_./:@%+=,-]+$/;
 const GLOB_RUN = /([*?[\]{}]+)/;
+
+interface WrapperSpec {
+	readonly names: readonly string[];
+	readonly shortVals: string;
+	readonly longVals: readonly string[];
+	readonly stopShorts?: string;
+	readonly stopLongs?: readonly string[];
+	readonly assignments?: "shell" | "env";
+	readonly skipArgs?: number;
+}
+
+/** Wrappers that exec a target command, paired with the options that consume a following word. */
+const WRAPPERS: readonly WrapperSpec[] = [
+	{
+		names: ["env"],
+		shortVals: "uCSaP",
+		longVals: ["--unset", "--chdir", "--split-string", "--argv0", "--env0-from"],
+		assignments: "env",
+	},
+	{
+		names: ["sudo", "doas"],
+		shortVals: "ugCDhpRrTtUac",
+		longVals: [
+			"--user",
+			"--group",
+			"--close-from",
+			"--chdir",
+			"--host",
+			"--prompt",
+			"--chroot",
+			"--role",
+			"--command-timeout",
+			"--type",
+			"--other-user",
+		],
+		assignments: "shell",
+	},
+	{ names: ["nice"], shortVals: "n", longVals: ["--adjustment"] },
+	{ names: ["nohup", "setsid", "ifne"], shortVals: "", longVals: [] },
+	{ names: ["time"], shortVals: "of", longVals: ["--output", "--format"], assignments: "shell" },
+	{ names: ["timeout", "gtimeout"], shortVals: "sk", longVals: ["--signal", "--kill-after"], skipArgs: 1 },
+	{ names: ["stdbuf"], shortVals: "ioe", longVals: ["--input", "--output", "--error"] },
+	{ names: ["command"], shortVals: "", longVals: [], stopShorts: "vV" },
+	{ names: ["exec"], shortVals: "a", longVals: [] },
+	{
+		names: ["xargs"],
+		shortVals: "adEILnPs",
+		longVals: ["--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars", "--process-slot-var"],
+	},
+	{
+		names: ["npx"],
+		shortVals: "pcw",
+		longVals: [
+			"--package",
+			"--call",
+			"--cache",
+			"--userconfig",
+			"--prefix",
+			"--loglevel",
+			"--workspace",
+			"--shell",
+			"--registry",
+			"--node-options",
+		],
+		stopShorts: "c",
+		stopLongs: ["--call"],
+	},
+	{
+		names: ["bunx"],
+		shortVals: "pc",
+		longVals: ["--package", "--shell", "--registry", "--minimum-release-age", "--cwd", "--config"],
+		stopShorts: "c",
+	},
+];
+
+const PREFIX_KEYWORDS = new Set(["if", "then", "elif", "else", "do", "while", "until", "!", "{"]);
 
 /** Whether `url` names nothing below its scheme: a bare root, or one followed by words. */
 function namesNothing(url: string): boolean {
@@ -62,6 +138,83 @@ function urlStart(text: string): number | undefined {
 function isOmp(word: string): boolean {
 	const name = word.slice(Math.max(word.lastIndexOf("/"), word.lastIndexOf("\\")) + 1).toLowerCase();
 	return name === "omp" || name === "omp.exe";
+}
+
+function findWrapper(word: string, cmd: boolean): WrapperSpec | undefined {
+	let name = word.slice(Math.max(word.lastIndexOf("/"), word.lastIndexOf("\\")) + 1);
+	if (cmd && name.toLowerCase().endsWith(".exe")) name = name.slice(0, -4);
+	return WRAPPERS.find(w => w.names.includes(name));
+}
+
+function skipWrapper(
+	words: readonly { raw: string; value: string }[],
+	from: number,
+	wrapper: WrapperSpec,
+): number | undefined {
+	let i = from;
+	while (i < words.length) {
+		const w = words[i].value;
+		if (w === "--") {
+			i++;
+			break;
+		}
+		if (!w.startsWith("-") || w === "-") break;
+		if (w.startsWith("--")) {
+			const eq = w.indexOf("=");
+			const optName = eq >= 0 ? w.slice(0, eq) : w;
+			if (wrapper.stopLongs?.includes(optName)) return undefined;
+			if (eq >= 0) i++;
+			else i += wrapper.longVals.includes(w) ? 2 : 1;
+			continue;
+		}
+		let consumed = false;
+		for (let k = 1; k < w.length; k++) {
+			if (wrapper.stopShorts?.includes(w[k])) return undefined;
+			if (wrapper.shortVals.includes(w[k])) {
+				i += k + 1 < w.length ? 1 : 2;
+				consumed = true;
+				break;
+			}
+		}
+		if (!consumed) i++;
+	}
+	if (wrapper.assignments === "shell") {
+		while (i < words.length && isShellEnvironmentAssignment(words[i].value)) i++;
+	} else if (wrapper.assignments === "env") {
+		if (words[i]?.value === "-") i++;
+		while (i < words.length && words[i].value.includes("=")) i++;
+	}
+	return i + (wrapper.skipArgs ?? 0);
+}
+
+/** Whether the simple command in `tokens[start..end]` runs `omp` as its command word (directly or behind wrappers). */
+function commandRunsOmp(tokens: readonly ShellToken[], start: number, end: number, cmd: boolean): boolean {
+	const words: { raw: string; value: string }[] = [];
+	for (let i = start; i < end; i++) {
+		const token = tokens[i];
+		if (token.kind === "word") words.push(token);
+	}
+	let i = 0;
+	if (!cmd) {
+		while (i < words.length) {
+			const w = words[i];
+			if ((w.raw === w.value && PREFIX_KEYWORDS.has(w.value)) || isShellEnvironmentAssignment(w.raw)) {
+				i++;
+				continue;
+			}
+			break;
+		}
+	}
+	while (i < words.length) {
+		const word = words[i].value;
+		if (isOmp(word)) return true;
+		const wrapper = findWrapper(word, cmd);
+		if (!wrapper) return false;
+		const next = skipWrapper(words, i + 1, wrapper);
+		if (next === undefined) return false;
+		i = next;
+	}
+	return false;
 }
 
 /** `text` as one literal shell word. */
@@ -141,27 +294,30 @@ class HostUrls {
 	/** Command text without here-document bodies, word by word. */
 	async #code(text: string): Promise<string> {
 		if (!text.includes("://")) return text;
+		const tokens = lexShellCommand(text);
 		let out = "";
-		// `omp` resolves the URLs it is given itself (`omp read skill://x:1-20`): once a command
-		// names it ahead of any URL, the rest of that command is its own.
-		let omp = false;
-		let sawUrl = false;
-		for (const token of lexShellCommand(text)) {
-			if (token.kind === "separator") {
-				if (/[\n;&|()]/.test(token.raw)) {
-					omp = false;
-					sawUrl = false;
+		let start = 0;
+		while (start < tokens.length) {
+			let end = start;
+			while (end < tokens.length && !(tokens[end].kind === "separator" && /[\n;&|()]/.test(tokens[end].raw))) {
+				end++;
+			}
+			// `omp` resolves the URLs it is given itself (`omp read skill://x:1-20`): test only the
+			// command word of each simple command after leading assignments and wrappers.
+			const omp = commandRunsOmp(tokens, start, end, this.#cmd);
+			for (let i = start; i < end; i++) {
+				const token = tokens[i];
+				if (token.kind === "separator" || omp || !token.value.includes("://")) {
+					out += token.raw;
+				} else {
+					out += await this.#word(token.raw, token.value);
 				}
-				out += token.raw;
-				continue;
 			}
-			if (!token.value.includes("://")) {
-				omp ||= !sawUrl && isOmp(token.value);
-				out += token.raw;
-				continue;
+			if (end < tokens.length) {
+				out += tokens[end].raw;
+				end++;
 			}
-			sawUrl = true;
-			out += omp ? token.raw : await this.#word(token.raw, token.value);
+			start = end;
 		}
 		return out;
 	}
