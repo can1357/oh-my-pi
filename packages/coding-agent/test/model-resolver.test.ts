@@ -2162,6 +2162,38 @@ describe("resolveCliModel", () => {
 		expect(offResult.thinkingLevel).toBe("off");
 	});
 
+	test("parses :max as the thinking level on a Bedrock inference profile ARN", () => {
+		const defaultBedrockModel = createBedrockDefaultModel();
+		const profileArn = "arn:aws:bedrock:us-east-2:1234567890:application-inference-profile/company-opus-48";
+
+		const result = resolveCliModel({
+			cliModel: `amazon-bedrock/${profileArn}:max`,
+			modelRegistry: { getAll: () => [defaultBedrockModel], getAvailable: () => [defaultBedrockModel] },
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe(profileArn);
+		expect(result.thinkingLevel).toBe(Effort.Max);
+	});
+
+	test("keeps a configured Bedrock inference profile whose id ends in :max as that literal model", () => {
+		const defaultBedrockModel = createBedrockDefaultModel();
+		const literalArn = "arn:aws:bedrock:us-east-2:1234567890:application-inference-profile/company-opus-48:max";
+		const literalModel = createBedrockDefaultModel({ id: literalArn, name: "Literal profile" });
+
+		const result = resolveCliModel({
+			cliModel: `amazon-bedrock/${literalArn}`,
+			modelRegistry: {
+				getAll: () => [defaultBedrockModel, literalModel],
+				getAvailable: () => [defaultBedrockModel, literalModel],
+			},
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe(literalArn);
+		expect(result.thinkingLevel).toBeUndefined();
+	});
+
 	test("inherits provider-scoped guardrail, transport, and header overrides onto an ARN model, but not the template's prompt-cache checkpoints", () => {
 		const templateModel = createBedrockDefaultModel({
 			transport: "pi-native",
