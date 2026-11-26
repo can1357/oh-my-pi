@@ -3480,10 +3480,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.optimisticUserMessageSignature = undefined;
 			pendingSubmissionDispose?.();
 			this.#optimisticUserMessageBlocks = [];
-			this.#working.setMessage(undefined);
-			// A run paused on outside work keeps its working row, which names the
-			// wait; the next loop or the run's `agent_end` tears it down.
-			if (!this.#eventController.isAwaitingAsyncWork()) this.clearWorking("turn");
+			// A run paused on outside work keeps its working row, which names the wait
+			// whether or not the pause reached the UI before this submission returned;
+			// the next loop or the run's `agent_end` tears it down.
+			if (this.#eventController.isAwaitingAsyncWork()) {
+				this.#eventController.showAsyncWait();
+			} else {
+				this.#working.setMessage(undefined);
+				this.clearWorking("turn");
+			}
 		}
 	}
 
