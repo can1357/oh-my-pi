@@ -606,6 +606,8 @@ describe("archive views over the configured session storage", () => {
 				const appSession = await store(app, "app", { prompt: "fix the deploy", reply: "The deploy now retries." });
 				const libSession = await store(lib, "lib", { prompt: "lib refactor", answered: true });
 				await storage.drain();
+				// This case fills history.db itself. Upstream's SessionManager.recordRecap journals a recap
+				// only for a file-stored session, so under `session.storage: sql` no recap is ever journaled.
 				recordSessionRecap(appSession.id, app, "deploy recap");
 				recordSessionTitle(libSession.id, "lib internals");
 				HistoryStorage.open().add("fix the deploy", app, appSession.id);
@@ -640,7 +642,7 @@ describe("archive views over the configured session storage", () => {
 				expect(found(await call({ action: "search", query: "internals", project: "*" }))).toEqual([
 					[libSession.id, [["title", "lib internals"]]],
 				]);
-				// Prompt history and recaps live in history.db under either storage.
+				// The archive reads prompt history and recaps from history.db under either storage; this case wrote both above.
 				expect((await call<ArchivePrompt[]>({ action: "prompts" })).map(prompt => prompt.text)).toEqual([
 					"fix the deploy",
 				]);
