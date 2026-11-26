@@ -10,11 +10,15 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	dropsForeignReasoningPayload,
+	dropsForeignThinking,
 	isSameModelTurn,
 	shouldDropTruncatedThinkingOnlyAssistant,
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { replaysSignedReasoningText } from "@oh-my-pi/pi-ai/utils/reasoning-source";
+import { apiRouteFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveThinkingReplayTokens, type ThinkingReplayTokens } from "@oh-my-pi/pi-catalog/compat/thinking-replay";
+import { resolveGitLabDuoModelIdentity } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { materializeString, stringifyJson } from "@oh-my-pi/pi-utils";
@@ -50,6 +54,7 @@ type TokenizerModel = Pick<Model, "tokenizer"> &
 		thinking?: Model["thinking"];
 		reasoning?: boolean;
 		requestModelId?: string;
+		providerType?: string;
 	};
 
 /** The api/provider/model a {@link Tokenizer} counts for. */
@@ -121,6 +126,60 @@ function reasoningReplayReader(model: TokenizerModel | null | undefined): ModelI
 export function reasoningReplayKey(model: TokenizerModel | null | undefined): string {
 	const reader = reasoningReplayReader(model);
 	return reader ? `${reader.api}\0${reader.provider}\0${reader.id}` : "";
+}
+
+/** The target {@link dropsForeignThinking} judges another model's thinking for. */
+type ForeignThinkingReader = Parameters<typeof dropsForeignThinking>[1];
+
+/**
+ * The model a request's history is transformed for: the model itself, or the
+ * inner wire model an agent proxy encodes against. Factory Droid and GitLab Duo
+ * rebuild the model for their routed API (GitLab Duo also for its upstream id)
+ * before `transformMessages` runs, so their foreign-thinking rule is the inner
+ * model's.
+ */
+function foreignThinkingReader(model: TokenizerModel | null | undefined): ForeignThinkingReader | undefined {
+	if (!model?.api || !model.provider || !model.id) return undefined;
+	const reader: ForeignThinkingReader = {
+		api: model.api,
+		provider: model.provider,
+		id: model.id,
+		reasoning: model.reasoning === true,
+		requestModelId: model.requestModelId,
+		providerType: model.providerType,
+		thinking: model.thinking,
+		compat: model.compat,
+	};
+	if (model.api === "factory-droid-agent") {
+		const wire = resolveFactoryDroidPolicy({ id: model.id, requestModelId: model.requestModelId })?.wire;
+		const api = wire ?? "openai-completions";
+		return api === "google-generate" ? reader : { ...reader, api, compat: undefined };
+	}
+	if (model.api === "gitlab-duo-agent") {
+		const api = apiRouteFor("gitlab-duo", model.id)?.api;
+		const id = resolveGitLabDuoModelIdentity(model.id)?.upstreamModelId;
+		if (id && (api === "anthropic-messages" || api === "openai-responses" || api === "openai-completions")) {
+			return { ...reader, api, id, compat: undefined };
+		}
+	}
+	return reader;
+}
+
+/** Every input of a {@link ForeignThinkingReader} that changes what it drops; equal keys drop alike. */
+function foreignThinkingKey(reader: ForeignThinkingReader | undefined): string {
+	if (reader === undefined) return "";
+	const compat = reader.compat;
+	const modelRouter = compat !== undefined && "modelRouter" in compat && compat.modelRouter === true;
+	return [
+		reader.api,
+		reader.provider,
+		reader.id,
+		reader.requestModelId ?? "",
+		reader.providerType ?? "",
+		reader.reasoning ? 1 : 0,
+		modelRouter ? 1 : 0,
+		JSON.stringify(reader.thinking ?? null),
+	].join("\0");
 }
 
 /** Request state a {@link Tokenizer} counts for, beyond its model. */
@@ -270,6 +329,9 @@ export class Tokenizer {
 	readonly #frameBilling: snapcompact.FrameBilling;
 	readonly frameBillingKey: string;
 	readonly #reasoningReader: ModelIdentity | undefined;
+	/** The reader {@link dropsForeignThinking} judges another model's thinking for. */
+	readonly #thinkingReader: ForeignThinkingReader | undefined;
+	readonly #foreignThinkingKey: string;
 	/** The counted model's identity, set even when filtering leaves no reasoning reader. */
 	readonly #model: ModelIdentity | undefined;
 	/** Whether the reader strips native reasoning items out of its Responses requests. */
@@ -317,6 +379,8 @@ export class Tokenizer {
 		this.#frameBilling = snapcompact.frameBilling(model ?? undefined);
 		this.frameBillingKey = snapcompact.frameBillingKey(this.#frameBilling);
 		this.#reasoningReader = reasoningReplayReader(model);
+		this.#thinkingReader = foreignThinkingReader(model);
+		this.#foreignThinkingKey = foreignThinkingKey(this.#thinkingReader);
 		this.#model = modelIdentity(model);
 		this.#filtersReasoningHistory = filtersReasoningHistory(model);
 		this.#rebuiltThinkingTurns = rebuiltThinkingTurns(model);
@@ -514,6 +578,7 @@ export class Tokenizer {
 				const completionsReader = this.#dropsCompletionsThinking ? this.#reasoningReader : undefined;
 				const ownDroppedCompletionsTurn =
 					completionsReader !== undefined && isSameModelTurn(message, completionsReader);
+				const thinkingReader = this.#thinkingReader;
 				if (typeof replayedReasoning === "number") extra += replayedReasoning;
 				const signaturesPriced = this.thinkingReplayTokens === "signature";
 				// The replay's signature rule (`transformMessages`): an aborted or
@@ -557,6 +622,7 @@ export class Tokenizer {
 					if (block.type === "text") {
 						fragments.push(block.text);
 					} else if (block.type === "thinking") {
+						if (thinkingReader && dropsForeignThinking(message, thinkingReader)) continue;
 						if (ownThinkingFiltered) {
 							// The rebuilt item carries the thinking text verbatim; the
 							// signature stays off the wire either way.
@@ -606,6 +672,7 @@ export class Tokenizer {
 						fragments.push(block.name);
 						fragments.push(stringifyJson(block.arguments) ?? "null");
 					} else if (block.type === "redactedThinking") {
+						if (thinkingReader && dropsForeignThinking(message, thinkingReader)) continue;
 						// Encrypted reasoning blob the provider still bills for wherever it
 						// survives replay, as above; excluded from the compaction floor for
 						// the same reason.
@@ -717,7 +784,8 @@ export class Tokenizer {
 			resolveThinkingReplayTokens(model ?? {}) === this.thinkingReplayTokens &&
 			ollamaChatDropsOwnThinking(model) === this.#dropsOllamaThinking &&
 			completionsDropsOwnThinking(model) === this.#dropsCompletionsThinking &&
-			(options?.nativeHistoryReplay ?? true) === this.nativeHistoryReplay
+			(options?.nativeHistoryReplay ?? true) === this.nativeHistoryReplay &&
+			foreignThinkingKey(foreignThinkingReader(model)) === this.#foreignThinkingKey
 		);
 	}
 

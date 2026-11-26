@@ -498,15 +498,6 @@ describe("countMessage replayed thinking", () => {
 		["on Bedrock", bedrockOpus, bedrockOpus, VISIBLE, "toolUse"],
 		// Omitted display: no visible thinking, the same reasoning billed.
 		["with its thinking omitted", opus, opus, "", "toolUse"],
-		// The Claude API keeps another model's signature from the same deployment,
-		// and Opus 5.5 reads Opus 5's thinking.
-		[
-			"from another Claude model on the same deployment",
-			opus,
-			reader("anthropic", "claude-opus-5"),
-			VISIBLE,
-			"toolUse",
-		],
 		// The thinking finished, signed, before the text hit max_tokens.
 		["that stopped on length", opus, opus, VISIBLE, "length"],
 		// The thinking finished, signed, before the abort cut the text short.
@@ -518,14 +509,16 @@ describe("countMessage replayed thinking", () => {
 	test.each([
 		// A signature is bound to the deployment that minted it.
 		["a turn from another host", bedrockOpus, opus],
-		// Bedrock binds it to the model too: another model's turn replays as text.
+		// Claude receives no other model's thinking, other Claude models included.
+		["another Claude model's turn on the same deployment", opus, reader("anthropic", "claude-opus-5")],
+		// Bedrock binds it to the model too: a foreign Claude turn's thinking drops.
 		[
 			"another Claude model's turn on Bedrock",
 			bedrockOpus,
 			reader("amazon-bedrock", "global.anthropic.claude-opus-5"),
 		],
-	] as const)("charges only the visible blocks for %s, never the signature", (_case, model, from) => {
-		expect(new Tokenizer(model).countMessage(signedTurn(from, VISIBLE, SIGNATURE))).toBe(VISIBLE_TOKENS);
+	] as const)("charges only the answer and tool blocks for %s", (_case, model, from) => {
+		expect(new Tokenizer(model).countMessage(signedTurn(from, VISIBLE, SIGNATURE))).toBe(DONE_TOKENS);
 	});
 
 	test("charges nothing for a filtered reader's own thinking, which its request never sends", () => {

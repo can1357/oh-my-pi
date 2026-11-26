@@ -36,6 +36,18 @@ const model = buildModel({
 	contextWindow: 200_000,
 	reasoning: true,
 });
+const claude = buildModel({
+	api: "antigravity-acp",
+	provider: "antigravity-cli",
+	id: "claude-opus-4-6",
+	name: "Claude Opus 4.6",
+	baseUrl: "",
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 8_192,
+	contextWindow: 200_000,
+	reasoning: true,
+});
 const tools: Tool[] = [{ name: "read", description: "Read a file", parameters: type({ path: "string" }) }];
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
 
@@ -287,6 +299,163 @@ describe("AgyHost stateful steps", () => {
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await expect(run.done).rejects.toThrow("without a usable response");
 		expect(fake.closed).toBe(true);
+	});
+
+	it("does not send foreign thinking in a fresh Claude replay while keeping its answer and tool call", async () => {
+		const foreign: AssistantMessage = {
+			role: "assistant",
+			api: "google-gemini-cli",
+			provider: "google",
+			model: "gemini-3.1-pro-preview",
+			content: [
+				{ type: "thinking", thinking: "FOREIGN_THINKING" },
+				{ type: "text", text: "FOREIGN_ANSWER" },
+				{ type: "toolCall", id: "foreign-call", name: "read", arguments: { path: "config.ts" } },
+			],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const state = await fixture({}, [claude.id]);
+		const stream = new AssistantMessageEventStream();
+		const writer = new StepWriter(claude, stream);
+		const messages = [user("Start."), foreign, user("Continue.")];
+		const done = state.host.step(claude, { messages, tools }, {}, writer);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const text = textOf(prompt.request.prompt);
+
+		expect(text).not.toContain("FOREIGN_THINKING");
+		expect(text).toContain("FOREIGN_ANSWER");
+		expect(text).toContain('id="foreign-call"');
+		fake.text("Done.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await done;
+	});
+	it("starts a fresh filtered conversation when the retained one holds another model's thinking for Claude", async () => {
+		const state = await fixture({}, [model.id, claude.id]);
+		const first = step(state.host, [user("Start.")]);
+		const fake = await state.started.next();
+		const firstPrompt = await fake.prompts.next();
+		fake.thought("NATIVE_FOREIGN_THINKING");
+		fake.text("FIRST_ANSWER");
+		firstPrompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		// Premise: the retained conversation now holds the first model's own thinking.
+		expect(first.writer.output.content.map(block => block.type)).toEqual(["thinking", "text"]);
+		const conversations = fake.created.length;
+
+		const writer = new StepWriter(claude, new AssistantMessageEventStream());
+		const messages = [user("Start."), first.writer.output, user("Continue.")];
+		const done = state.host.step(claude, { messages, tools }, {}, writer);
+		const prompt = await fake.prompts.next();
+		const text = textOf(prompt.request.prompt);
+
+		expect(fake.created.length).toBe(conversations + 1);
+		expect(text).not.toContain("NATIVE_FOREIGN_THINKING");
+		expect(text).toContain("FIRST_ANSWER");
+		expect(text).toContain("Continue.");
+		fake.text("Done.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await done;
+	});
+	it("starts a fresh filtered conversation instead of forking a checkpoint that holds another model's thinking", async () => {
+		const state = await fixture({}, [model.id, claude.id]);
+		const first = step(state.host, [user("remember 41")]);
+		const fake = await state.started.next();
+		const firstPrompt = await fake.prompts.next();
+		const store = conversationStorePath(state.dir, fake.currentId);
+		await mkdir(path.dirname(store), { recursive: true });
+		const db = new Database(store);
+		cleanup.push(async () => {
+			db.close();
+		});
+		db.run("PRAGMA journal_mode = WAL");
+		for (const table of ["steps", "gen_metadata", "executor_metadata", "parent_references"]) {
+			db.run(`CREATE TABLE ${table} (idx INTEGER PRIMARY KEY, body TEXT)`);
+			db.run(`INSERT INTO ${table} VALUES (0, '41')`);
+		}
+		db.run("CREATE TABLE trajectory_meta (cascade_id TEXT, trajectory_id TEXT)");
+		db.run("INSERT INTO trajectory_meta VALUES (?, ?)", [fake.currentId, crypto.randomUUID()]);
+		fake.thought("NATIVE_FOREIGN_THINKING");
+		fake.text("Remembered 41.");
+		firstPrompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const payload = first.writer.output.providerPayload;
+		// Premise: the first model's turn ends at a checkpoint a later step can fork.
+		expect(payload?.type === "antigravityCli" && payload.checkpoint !== undefined).toBe(true);
+		const second = step(state.host, [user("remember 41"), first.writer.output, user("overwrite 77")]);
+		const secondPrompt = await fake.prompts.next();
+		fake.text("Remembered 77.");
+		secondPrompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		const conversations = fake.created.length;
+
+		const writer = new StepWriter(claude, new AssistantMessageEventStream());
+		const messages = [user("remember 41"), first.writer.output, user("what was the first number?")];
+		const done = state.host.step(claude, { messages, tools }, {}, writer);
+		const prompt = await fake.prompts.next();
+		const text = textOf(prompt.request.prompt);
+
+		expect(fake.loads).toEqual([]);
+		expect(fake.created.length).toBe(conversations + 1);
+		expect(text).not.toContain("NATIVE_FOREIGN_THINKING");
+		expect(text).toContain("Remembered 41.");
+		expect(text).toContain("what was the first number?");
+		fake.text("41");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await done;
+	});
+	it("keeps a conversation seeded for Claude when Claude continues it", async () => {
+		const foreign: AssistantMessage = {
+			role: "assistant",
+			api: "google-gemini-cli",
+			provider: "google",
+			model: "gemini-3.1-pro-preview",
+			content: [
+				{ type: "thinking", thinking: "FOREIGN_THINKING" },
+				{ type: "text", text: "FOREIGN_ANSWER" },
+			],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const state = await fixture({}, [claude.id]);
+		const seeded = [user("Start."), foreign, user("Continue.")];
+		const firstWriter = new StepWriter(claude, new AssistantMessageEventStream());
+		const first = state.host.step(claude, { messages: seeded, tools }, {}, firstWriter);
+		const fake = await state.started.next();
+		const firstPrompt = await fake.prompts.next();
+		fake.text("Done.");
+		firstPrompt.response.resolve({ stopReason: "end_turn" });
+		await first;
+		const conversations = fake.created.length;
+
+		// The seed replay already left the other model's thinking out, so nothing to drop remains.
+		const writer = new StepWriter(claude, new AssistantMessageEventStream());
+		const messages = [...seeded, firstWriter.output, user("Again.")];
+		const done = state.host.step(claude, { messages, tools }, {}, writer);
+		const prompt = await fake.prompts.next();
+
+		expect(fake.created.length).toBe(conversations);
+		expect(prompt.request.prompt).toEqual([{ type: "text", text: "Again." }]);
+		fake.text("Done again.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await done;
 	});
 	it("selects the model and thought level agy advertises, including effort-suffixed rosters", async () => {
 		const turn = async (roster: string[], efforts: (string | undefined)[]) => {

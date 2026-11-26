@@ -38,6 +38,7 @@ import {
 import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import {
+	holdsDroppedThinking,
 	inputBlocks,
 	type Ledger,
 	lateToolResultPrompt,
@@ -146,6 +147,11 @@ interface Conversation {
 	effort?: string;
 	defaultEffort?: string;
 	requestedEffort?: string;
+	/**
+	 * Target the conversation's transcript was replayed for when agy created it; undefined for a
+	 * conversation forked from a checkpoint. Decides which replayed thinking it may hold.
+	 */
+	seedTarget?: Model;
 }
 
 interface ActiveStep {
@@ -267,6 +273,24 @@ export class AgyHost implements ProviderSessionState {
 			) {
 				plan = planTurn(context.messages, undefined);
 			}
+			// A retained or forked native conversation keeps the thinking its earlier turns carried.
+			// Start over from the filtered transcript when this target drops any of it.
+			if (
+				(plan.kind === "resume" &&
+					holdsDroppedThinking(
+						context.messages.slice(0, this.#ledger?.count ?? 0),
+						this.#conversation?.seedTarget,
+						model,
+					)) ||
+				(plan.kind === "restore" &&
+					holdsDroppedThinking(
+						context.messages.slice(0, context.messages.length - plan.replay.length),
+						undefined,
+						model,
+					))
+			) {
+				plan = { kind: "fresh", replay: [...context.messages] };
+			}
 			if (plan.kind !== "resume") await this.#setup(this.#abandonTurn());
 			if (!this.#process || processMoves || credentialChanged) {
 				// A credential-only restart can load the same native conversation once its prompt settles.
@@ -318,6 +342,7 @@ export class AgyHost implements ProviderSessionState {
 					loaded: true,
 					agyModels: modelValues(created.configOptions),
 					defaultEffort: thoughtLevel(created.configOptions),
+					seedTarget: model,
 				};
 				this.#contextTokens = 0;
 			}
@@ -357,7 +382,7 @@ export class AgyHost implements ProviderSessionState {
 					}
 				}
 			} else {
-				const blocks = replayPrompt(plan.replay);
+				const blocks = replayPrompt(plan.replay, model);
 				if (blocks.length === 0) throw new Error("Antigravity CLI has nothing new to send for this request");
 				this.#prompt(blocks);
 			}
@@ -518,6 +543,7 @@ export class AgyHost implements ProviderSessionState {
 	async #loadConversation(id: string, system: string, systemKey: string, cwd: string): Promise<void> {
 		conversationStorePath(this.#geminiDir, id);
 		const agy = this.#requireProcess();
+		const seedTarget = this.#conversation?.id === id ? this.#conversation.seedTarget : undefined;
 		await this.#unloadConversation();
 		const loading = {};
 		this.#loading = loading;
@@ -537,6 +563,7 @@ export class AgyHost implements ProviderSessionState {
 				loaded: true,
 				agyModels: modelValues(loaded.configOptions),
 				defaultEffort: thoughtLevel(loaded.configOptions),
+				seedTarget,
 			};
 			this.#contextTokens = 0;
 		} finally {

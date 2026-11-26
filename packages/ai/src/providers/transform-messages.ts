@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { CatalogPolicyInputs, ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -15,13 +15,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
-import {
-	isDemotedThinking,
-	kCarriedReasoning,
-	kDemotedThinking,
-	kSyntheticUser,
-	type SyntheticUserCarrier,
-} from "../utils/block-symbols";
+import { kCarriedReasoning, kDemotedThinking, kSyntheticUser, type SyntheticUserCarrier } from "../utils/block-symbols";
 import { dropReasoningDetailsEnvelopes } from "../utils/reasoning-source";
 
 const enum ToolCallStatus {
@@ -592,6 +586,34 @@ export function dropsForeignReasoningPayload(
 }
 
 /**
+ * Whether {@link transformMessages} drops a thinking block of `turn` on its
+ * way to `model` because `model`'s input classifier refuses reasoning quoted
+ * back to it. Claude is such a target. A model router also counts as one
+ * because it can select Claude after this history is transformed.
+ * Antigravity CLI encodes its own transcript text, and its replay applies the
+ * same rule.
+ *
+ * Such a target keeps only its own thinking. Every other model's thinking
+ * drops, signed or not, other Claude models included. The other model's
+ * answer and tool calls stay.
+ */
+export function dropsForeignThinking(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
+	model: CatalogPolicyInputs & { compat?: Model["compat"] },
+): boolean {
+	if (
+		model.api !== "devin-agent" &&
+		model.api !== "antigravity-acp" &&
+		(DIRECT_REPLAY_APIS as Partial<Record<Api, boolean>>)[model.api] !== true
+	) {
+		return false;
+	}
+	if (isSameModelTurn(turn, model)) return false;
+	const modelRouter = model.compat !== undefined && "modelRouter" in model.compat && model.compat.modelRouter === true;
+	return modelRouter || resolveCatalogPolicy(model).classifierCotExtraction === true;
+}
+
+/**
  * Targets that have proven they read unsigned foreign thinking when replayed
  * natively. This is a semantic-carry allowlist only: OpenAI-compatible
  * `reasoning_content` schema requirements and llama.cpp cache-prefix replay are
@@ -1131,6 +1153,12 @@ export function transformMessages<TApi extends Api>(
 				) {
 					return [];
 				}
+				if (
+					(block.type === "thinking" || block.type === "redactedThinking") &&
+					dropsForeignThinking(assistantMsg, model)
+				) {
+					return [];
+				}
 				if (block.type === "thinking") {
 					// Only an aborted/errored turn's final (mid-stream) block can hold a
 					// partial signature; abandoned tool-use turns strip all. Drop the
@@ -1346,18 +1374,6 @@ export function transformMessages<TApi extends Api>(
 
 				return block;
 			});
-
-			// A demoted-thinking block that survived as the message's final block can
-			// still end with the thinking text's own trailing whitespace (bare
-			// Anthropic-dialect demotion copies it verbatim), and Anthropic rejects a
-			// terminal assistant message whose text ends with trailing whitespace
-			// ("final assistant content cannot end with trailing whitespace").
-			// trimEnd() is safe: demoted text is synthesized context, never
-			// byte-exact replay material.
-			const finalBlock = transformedContent[transformedContent.length - 1];
-			if (finalBlock?.type === "text" && isDemotedThinking(finalBlock)) {
-				transformedContent[transformedContent.length - 1] = { ...finalBlock, text: finalBlock.text.trimEnd() };
-			}
 
 			// Record this turn's tool-call ids into the origin scope. Origin scope
 			// must be complete before dedup reads it: filled here off the SAME

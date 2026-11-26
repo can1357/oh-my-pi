@@ -6,6 +6,7 @@
 
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
 - Corrected OpenTelemetry chat spans to report the model that actually served the response.
+- Fixed context estimates counting another model's thinking that a Claude request leaves out, including through Factory Droid's and GitLab Duo's inner Claude routes
 
 ## [19.2.1] - 2026-11-25
 
