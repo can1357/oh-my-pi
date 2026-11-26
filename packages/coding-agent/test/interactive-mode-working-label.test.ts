@@ -24,9 +24,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { initTheme } from "../src/ui/theme/service";
 import { StatusHud } from "../src/ui/dock";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 import { createModeTerminal, renderRows } from "./helpers/mode-terminal";
 
-describe("InteractiveMode live working label", () => {
+describe("InteractiveMode working label", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let jobs: AsyncJobManager;
@@ -150,5 +151,48 @@ describe("InteractiveMode live working label", () => {
 
 		mode.clearWorking("compaction");
 		expect(statusRows(120)).toEqual([]);
+	});
+
+	it("falls back in start order after a running tool's ID changes", async () => {
+		mode.isInitialized = true;
+		const workingRow = () => statusRows(120).join("\n");
+		const controller = mode.eventController;
+		await controller.handleEvent({ type: "agent_start" });
+		const start = (toolCallId: string, intent: string) =>
+			controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId,
+				toolName: "bash",
+				args: { command: "date -u" },
+				intent,
+			});
+		const finish = (toolCallId: string) =>
+			controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: "bash",
+				result: { content: [{ type: "text", text: "command output" }], details: undefined },
+				isError: false,
+			});
+		const streamed = createAssistantMessage("");
+		const first = { type: "toolCall" as const, id: "provisional", name: "bash", arguments: { command: "date -u" } };
+		streamed.content = [first, { ...first, id: "second" }, { ...first, id: "third" }];
+		await controller.handleEvent({ type: "message_start", message: streamed });
+		await controller.syncAssistantMessage(streamed);
+		await start(first.id, "Timing first command");
+		await start("second", "Timing second command");
+		await start("third", "Timing third command");
+		await controller.handleEvent({
+			type: "message_end",
+			message: { ...streamed, content: [{ ...first, id: "final" }, ...streamed.content.slice(1)] },
+		});
+		expect(workingRow()).toContain("Timing third command");
+
+		await finish("third");
+		expect(workingRow()).toContain("Timing second command");
+		await finish("second");
+		expect(workingRow()).toContain("Timing first command");
+		await finish("final");
+		expect(workingRow()).toContain("Working…");
 	});
 });
