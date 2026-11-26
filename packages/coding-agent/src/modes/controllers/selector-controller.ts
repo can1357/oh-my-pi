@@ -186,6 +186,25 @@ function statusLinePreview(preview: StatusLinePreview): Partial<StatusLineSettin
 /** Keys of a select sheet go to its `picker`. */
 const pickerFocus = (root: UiNode): UiNode => firstOfKind(root, "picker");
 
+/**
+ * History sizes from which a picker's first terminal paint takes about 100 ms (headless profiles:
+ * a /copy or /rewind tail of 600 entries 130–220 ms, a /tree of 5,814 entries 27 ms). A smaller
+ * history opens at once: a loading notice would only flash.
+ */
+const SLOW_TRANSCRIPT_PICKER_ENTRIES = 300;
+const SLOW_TREE_PICKER_ENTRIES = 20_000;
+
+/** The entries under `roots`, counted without recursion: a long session nests thousands deep. */
+function treeSize(roots: readonly SessionTreeNode[]): number {
+	let size = 0;
+	const pending = [...roots];
+	for (let node = pending.pop(); node; node = pending.pop()) {
+		size++;
+		for (const child of node.children) pending.push(child);
+	}
+	return size;
+}
+
 /** Menus that open at most once: a repeat request focuses the open one. */
 type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
 
@@ -215,6 +234,8 @@ export class SelectorController {
 	#openMenus = new Map<MenuKind, OpenMenu>();
 	/** The open agent hub's handle (deep links into the open hub). */
 	#agentHub: AgentHubHandle | undefined;
+	/** A history picker waiting for its loading notice's frame. */
+	#historyPickerOpening: Promise<void> | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -326,8 +347,7 @@ export class SelectorController {
 	/**
 	 * Say the history is loading before a picker that draws it: the terminal paints such a picker in
 	 * one frame that takes a while on a long session, and until then the keypress showed nothing.
-	 * The notice takes the composer hint's place, so nothing on screen moves. Tern draws the history
-	 * itself: it presents no terminal frame, and the notice comes and goes unseen.
+	 * The notice takes the composer hint's place, so nothing on screen moves.
 	 */
 	async #presentHistoryLoader(): Promise<void> {
 		const composer = this.ctx.composer;
@@ -340,6 +360,27 @@ export class SelectorController {
 		await this.ctx.shell.nextFrame();
 		// The caller opens its picker before the next frame: the notice stays on screen while that frame paints.
 		composer.setNotice(undefined);
+	}
+
+	/**
+	 * Open a history picker with `open`: at once, or, when the terminal renderer would take a while
+	 * to paint its `slow` history, after a frame showing the loading notice. A request while one
+	 * waits joins it: the composer still holds the keys then, and a second picker would stack on
+	 * the first.
+	 */
+	#openHistoryPicker(slow: boolean, open: () => void): Promise<void> {
+		if (this.#historyPickerOpening) return this.#historyPickerOpening;
+		if (!slow || this.ctx.shell.native()) {
+			open();
+			return Promise.resolve();
+		}
+		const opening = this.#presentHistoryLoader()
+			.then(open)
+			.finally(() => {
+				this.#historyPickerOpening = undefined;
+			});
+		this.#historyPickerOpening = opening;
+		return opening;
 	}
 
 	showSettingsSelector(): void {
@@ -1379,43 +1420,41 @@ export class SelectorController {
 	/** The rewind selector (Esc Esc), its outline on the latest turn, or on entry `startAt` (a turn's Rewind to here…). */
 	async showUserMessageSelector(startAt?: string): Promise<void> {
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
-		if (entries.length === 0) {
-			this.ctx.showStatus("No messages to branch from");
-			return;
-		}
-
 		if (!hasRewindPoint(entries)) {
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
 
-		await this.#presentHistoryLoader();
-		const done = () => {
-			overlay?.close();
-			this.focusActiveEditorArea();
-		};
-		// Fullscreen alternate-screen overlay: the replica draws over the live
-		// transcript, and the normal screen stays untouched until the rewind
-		// itself rewrites it.
-		const native = this.ctx.shell.native();
-		const overlay = this.ctx.shell.overlays.show(
-			() =>
-				fullscreenMenuView(
-					"rewind",
-					RewindSelector({
-						entries,
-						siblingPaths: entryId => this.#siblingBranchPaths(entryId),
-						startAt,
-						terminalRows: () => this.ctx.shell.size().rows,
-						...(native ? { replica: (turns, clipped) => this.ctx.createTranscriptReplica(turns, clipped) } : {}),
-						onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
-						onCancel: done,
-					}),
-					undefined,
-					REWIND_PAGE,
-				),
-			{ focus: layerDock },
-		);
+		return this.#openHistoryPicker(entries.length >= SLOW_TRANSCRIPT_PICKER_ENTRIES, () => {
+			const done = () => {
+				overlay?.close();
+				this.focusActiveEditorArea();
+			};
+			// Fullscreen alternate-screen overlay: the replica draws over the live
+			// transcript, and the normal screen stays untouched until the rewind
+			// itself rewrites it.
+			const native = this.ctx.shell.native();
+			const overlay = this.ctx.shell.overlays.show(
+				() =>
+					fullscreenMenuView(
+						"rewind",
+						RewindSelector({
+							entries,
+							siblingPaths: entryId => this.#siblingBranchPaths(entryId),
+							startAt,
+							terminalRows: () => this.ctx.shell.size().rows,
+							...(native
+								? { replica: (turns, clipped) => this.ctx.createTranscriptReplica(turns, clipped) }
+								: {}),
+							onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
+							onCancel: done,
+						}),
+						undefined,
+						REWIND_PAGE,
+					),
+				{ focus: layerDock },
+			);
+		});
 	}
 
 	/**
@@ -1663,37 +1702,38 @@ export class SelectorController {
 			return;
 		}
 
-		await this.#presentHistoryLoader();
-		const done = () => {
-			overlay?.close();
-			this.focusActiveEditorArea();
-		};
-		const overlay = this.ctx.shell.overlays.show(
-			() =>
-				fullscreenMenuView(
-					"copy",
-					CopySelector({
-						entries,
-						onPick: (content, label) => {
-							done();
-							if (!content.trim()) {
-								this.ctx.showStatus("Nothing to copy in that item");
-								return;
-							}
-							void copyToClipboard(content);
-							this.ctx.showStatus(`Copied ${label} to clipboard`);
-						},
-						onOpen: (href, label) => {
-							done();
-							openPath(href);
-							this.ctx.showStatus(`Opening ${label}: ${href}`);
-						},
-						onCancel: done,
-						terminalRows: () => this.ctx.shell.size().rows,
-					}),
-				),
-			{ focus: layerContent },
-		);
+		return this.#openHistoryPicker(entries.length >= SLOW_TRANSCRIPT_PICKER_ENTRIES, () => {
+			const done = () => {
+				overlay?.close();
+				this.focusActiveEditorArea();
+			};
+			const overlay = this.ctx.shell.overlays.show(
+				() =>
+					fullscreenMenuView(
+						"copy",
+						CopySelector({
+							entries,
+							onPick: (content, label) => {
+								done();
+								if (!content.trim()) {
+									this.ctx.showStatus("Nothing to copy in that item");
+									return;
+								}
+								void copyToClipboard(content);
+								this.ctx.showStatus(`Copied ${label} to clipboard`);
+							},
+							onOpen: (href, label) => {
+								done();
+								openPath(href);
+								this.ctx.showStatus(`Opening ${label}: ${href}`);
+							},
+							onCancel: done,
+							terminalRows: () => this.ctx.shell.size().rows,
+						}),
+					),
+				{ focus: layerContent },
+			);
+		});
 	}
 
 	async showTreeSelector(): Promise<void> {
@@ -1705,7 +1745,12 @@ export class SelectorController {
 			return;
 		}
 
-		await this.#presentHistoryLoader();
+		return this.#openHistoryPicker(treeSize(tree) >= SLOW_TREE_PICKER_ENTRIES, () =>
+			this.#mountTreeSelector(tree, realLeafId),
+		);
+	}
+
+	#mountTreeSelector(tree: readonly SessionTreeNode[], realLeafId: string | null): void {
 		this.#showInEditorArea(done =>
 			TreeSelector({
 				roots: tree,

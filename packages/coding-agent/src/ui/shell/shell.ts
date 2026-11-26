@@ -138,7 +138,10 @@ export class Shell {
 		return this.#host;
 	}
 
-	/** Resolves once the terminal renderer presents its next frame; at once when nothing draws to a terminal. */
+	/**
+	 * Resolves once the terminal renderer presents its next frame, which it schedules; at once when
+	 * nothing draws to a terminal.
+	 */
 	nextFrame(): Promise<void> {
 		const host = this.#host;
 		if (!host || host.native) return Promise.resolve();
@@ -147,6 +150,8 @@ export class Shell {
 			stop();
 			resolve();
 		});
+		// A change only schedules a frame when the last one read it: ask, whatever is on screen.
+		host.requestFrame();
 		return promise;
 	}
 

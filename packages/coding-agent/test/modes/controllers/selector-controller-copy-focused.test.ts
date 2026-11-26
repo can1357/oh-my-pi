@@ -74,7 +74,6 @@ describe("SelectorController.showCopySelector", () => {
 		const ctx = {
 			shell: {
 				focus: vi.fn(),
-				nextFrame: async () => {},
 				overlays: {
 					show: vi.fn((factory: () => unknown) => {
 						createRoot(factory);
@@ -82,7 +81,6 @@ describe("SelectorController.showCopySelector", () => {
 					}),
 				},
 			},
-			composer: { setNotice: vi.fn() },
 			session: main,
 			sessionManager: main.sessionManager,
 			viewSession: sessionWithReply("worker reply"),

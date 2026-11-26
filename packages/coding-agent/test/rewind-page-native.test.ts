@@ -289,7 +289,7 @@ describe("native rewind page and session reset", () => {
 		}
 		manager.appendMessage(assistant("swept"));
 		await using ui = await nativeShell(mode.shell);
-		mode.showUserMessageSelector();
+		await mode.showUserMessageSelector();
 
 		// The tail's totals would count only its part of the run.
 		let reply = ui.surface("screen")!.main.at(-1)!;

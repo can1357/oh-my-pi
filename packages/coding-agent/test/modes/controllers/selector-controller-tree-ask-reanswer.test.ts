@@ -82,7 +82,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 		order.push("resume");
 	});
 	const ctx = {
-		composer: { text: () => "", setText: vi.fn(), setNotice: vi.fn() },
+		composer: { text: () => "", setText: vi.fn() },
 		showEditorAreaDialog: vi.fn((factory: () => unknown) => {
 			createRoot(factory);
 			return { node: {}, closed: false, close: vi.fn() };
@@ -94,7 +94,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 			getSessionName: () => undefined,
 		},
 		session: { navigateTree, resumeAfterAskReanswer },
-		shell: { size: () => ({ columns: 80, rows: 24 }), nextFrame: async () => {} },
+		shell: { size: () => ({ columns: 80, rows: 24 }) },
 		renderInitialMessages,
 		reloadTodos,
 		showStatus,
