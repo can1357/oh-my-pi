@@ -17,11 +17,11 @@ import { formatCoarseDuration } from "../modes/view-model/chrome/format";
 import { shortenEmbeddedPaths } from "../utils/render-utils";
 import { truncateToWidth } from "../utils/text-width";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "../modes/view-model/overlays/job-tree";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { errorMessage, sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
 import { markdownFenceFor } from "../utils/markdown-fence";
 import { openLocalFileInEditor } from "../modes/local-file-editor";
-import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import {
 	describeRedeemOutcome,
 	formatResetUsageAccountLine,

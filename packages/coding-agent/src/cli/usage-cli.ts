@@ -29,7 +29,7 @@ import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatProviderName } from "../modes/view-model/chrome/format";
 import { peakBuckets, sparkline } from "@oh-my-pi/pi-tui/term/painters/chart";
-import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
+import { errorMessage, formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
@@ -46,7 +46,6 @@ import {
 	resetSpendVerdict,
 } from "../session/reset-expiry";
 import { formatCodexUsageReportLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
-import { errorMessage } from "../slash-commands/helpers/parse";
 import {
 	describeRedeemOutcome,
 	formatResetProviderName,

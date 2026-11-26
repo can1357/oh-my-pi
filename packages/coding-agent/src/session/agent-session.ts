@@ -38,7 +38,6 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
-	lastContextMessage,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -107,6 +106,7 @@ import {
 	isBunTestRuntime,
 	isInteractiveHost,
 	isRecord,
+	Laps,
 	logger,
 	postmortem,
 	prompt,
@@ -568,6 +568,7 @@ const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
 import { StallGuard, stalledWaiters } from "./stalled-waiters";
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { AutoParallelCoordinator } from "./auto-parallel";
+import { LeftoverProcessTracker } from "./leftover-processes";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
@@ -903,6 +904,7 @@ type AgentContinueSkipReason =
 
 type ScheduledAgentContinueOptions = {
 	source: string;
+	queuedOnly?: boolean;
 	delayMs?: number;
 	generation?: number;
 	shouldContinue?: () => boolean;
@@ -1245,6 +1247,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
+	readonly #leftoverProcesses: LeftoverProcessTracker;
 	readonly #autoParallel: AutoParallelCoordinator;
 	readonly #modelMentions: ModelMentionRegistry;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
@@ -1857,11 +1860,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
 	 *  route here. Wrapped in #beginInFlight/#endInFlight so the turn is tracked and its settle
-	 *  re-drains anything that stranded during it. A user interrupt may have intentionally left a
-	 *  follow-up queued behind an invalid tail (seam #5); the wake turn's loop would otherwise drain
-	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
-	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
-	 *  in effect, even though the wake left a provider-valid tail. */
+	 *  re-drains anything that stranded during it. Park follow-ups held by a user interrupt
+	 *  so the wake turn's loop does not consume them. Restore them afterwards; the interrupt
+	 *  still suppresses their auto-resume. */
 	#wakeForIrc(wakeRecords: AgentMessage[]): void {
 		if (this.#queueDrainPauseDepth > 0) {
 			this.#irc.queueAside(wakeRecords);
@@ -2411,11 +2412,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			toolRegistry: () => this.#tools.registry,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
+			goalBudgetLimited: () =>
+				this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "budget-limited",
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 			phasesChanged: () => this.#mirrorTodoPhases(),
 		};
 		this.#todo = new TodoTracker(todoHost);
+		this.#leftoverProcesses = new LeftoverProcessTracker({
+			agent: this.agent,
+			sessionManager: this.sessionManager,
+			settings: this.settings,
+			agentKind: () => this.#agentKind,
+			asyncJobManager: () => this.#asyncJobManager,
+			toolSession: () => this.#evalToolSession,
+		});
 		this.#autoParallel = new AutoParallelCoordinator({
 			settings: this.settings,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
@@ -3086,6 +3097,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			memoryPrompt: config.advisorMemoryPrompt,
 			configs: config.advisorConfigs,
 			configWarnings: config.advisorConfigWarnings,
+			configDir: config.advisorConfigDir,
 			streamFn: config.advisorStreamFn,
 			createTransformProviderContext:
 				config.createAdvisorTransformProviderContext ??
@@ -5698,6 +5710,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					endLoop({ continuing: true });
 					return;
 				}
+				if (await this.#leftoverProcesses.remind()) {
+					this.#scheduleAgentContinue({ source: "leftover-processes", generation: this.#promptGeneration });
+					endLoop({ continuing: true });
+					return;
+				}
 				// Ahead of the wake-source pause and the stop hooks: agents blocked on this one stay
 				// blocked once nothing wakes it (a subagent's job that waits on it included).
 				if (this.#continueForStalledWaiters()) {
@@ -5832,7 +5849,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			for (;;) {
 				try {
 					if (!this.agent.state.isStreaming) onStart?.();
-					await this.agent.continue(signal);
+					await this.agent.continue(signal, { queuedOnly: request.options.queuedOnly });
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
@@ -5996,6 +6013,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.agent.hasQueuedMessages()) {
 			this.#scheduleAgentContinue({
 				source: "compaction-queued-message",
+				queuedOnly: true,
 				delayMs: 100,
 				generation: options.generation,
 				shouldContinue: () => this.agent.hasQueuedMessages(),
@@ -6040,6 +6058,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (this.agent.hasQueuedMessages()) {
 					this.#scheduleAgentContinue({
 						source: "auto-continue-queued-message",
+						queuedOnly: true,
 						generation,
 						shouldContinue: () => this.agent.hasQueuedMessages(),
 					});
@@ -7316,6 +7335,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			logger.warn("Session dispose: Sharpshooter release failed", { error: String(error) });
 		}
 		const advisorRecorderClosed = this.#advisors.recorderClosed();
+		// The `&` processes the session's bash calls left behind, while its shells still hold
+		// them: `releaseShellSessions` below hands those shells off.
+		try {
+			await this.#leftoverProcesses.reap();
+		} catch (error) {
+			logger.warn("Session dispose: leftover process reaping failed", { error: String(error) });
+		}
 		releaseShellSessions(this.sessionManager.getSessionId());
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
@@ -9812,7 +9838,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		signal: AbortSignal,
 	): Promise<QueuedMessagePreparation> {
 		const generation = this.#promptGeneration;
+		const laps = new Laps();
 		await this.#prewalk.beginAutoTask(message);
+		laps.lap("beginTaskMs");
 		// Past the cap, the before-model-call gate refuses this task's first request and reports it; judging it, or
 		// moving it to an `escalate` planner, would only spend and switch for a request that is never sent.
 		const capped = this.#costGate.check() !== undefined;
@@ -9825,9 +9853,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					message,
 					() => !signal.aborted && this.#promptGeneration === generation,
 				);
+		laps.lap("prewalkRouteMs");
 		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
+		laps.lap("agentStartMs");
 		const decision = await autoPrewalk?.decision;
+		laps.lap("prewalkJudgeMs");
 		const plan = await autoParallel;
+		laps.lap("autoParallelMs");
+		logger.debug("Queued task prepared", laps.record());
 		return {
 			commit: () => {
 				const additional = preparation.commit();
@@ -9870,7 +9903,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			(!this.#isDisposed || alreadyDisposing) &&
 			!signal?.aborted;
 		const cancelled = { baseToolCommandCatalogDelivered: false, commit: () => undefined };
+		const laps = new Laps();
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+		laps.lap("extensionsMs");
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
 		if (pendingMCPDiscovery) {
 			const timedOut = new Error("MCP discovery still pending");
@@ -9883,13 +9918,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				logger.debug("Turn started before MCP discovery finished", { error: String(error) });
 			});
 		}
+		laps.lap("mcpMs");
 		for (let attempt = 0; attempt < AGENT_START_POLICY_MAX_ATTEMPTS; attempt++) {
 			await this.#memory.transition;
+			laps.lap("memoryMs");
 			if (!isCurrent()) return cancelled;
 			const sourceBase = this.#tools.baseSystemPrompt;
 			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal);
+			laps.lap("systemPromptMs");
 			if (!isCurrent()) return cancelled;
 			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
+			laps.lap("hooksMs");
 			if (!isCurrent()) return cancelled;
 			// Overrides are opaque replacements, not string patches. Re-run only policy preparation
 			// against the winning base; discard this attempt's returned context and staged memory.
@@ -9939,7 +9978,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 				if (!isCurrent()) return cancelled;
 			}
+			laps.lap("messagesMs");
 			if (!overrideIsCurrent()) continue;
+			logger.debug("Agent start prepared", { origin, attempts: attempt + 1, ...laps.record() });
 			return {
 				baseToolCommandCatalogDelivered: result?.systemPrompt === undefined,
 				commit: () => {
@@ -11037,6 +11078,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#queuedMessageDrainScheduled = true;
 		this.#scheduleAgentContinue({
 			source: "queued-message-drain",
+			queuedOnly: true,
 			shouldContinue: () => {
 				this.#queuedMessageDrainScheduled = false;
 				return (
@@ -11066,33 +11108,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// and can cancel it. Autonomous brackets (IRC wakes, idle injections,
 		// scheduler continuations) do not count: a drain there would be an
 		// autonomous run the client can neither see nor cancel. Inside a client
-		// bracket the ordinary gates below still apply (not streaming,
-		// user-interrupt suppression, provider-valid tail for follow-up-only
-		// resumes).
+		// bracket the ordinary streaming and user-interrupt gates still apply.
 		if (this.#clientBridge?.deferAgentInitiatedTurns === true && this.#clientPromptInFlightCount === 0) {
 			return false;
 		}
 		if (this.isStreaming) return false;
-		// A queued steer resumes from ANY tail: Agent.continue() runs #runLoop(undefined),
-		// whose initial steering poll injects the steer before the first provider call, so the
-		// request tail becomes the steer (valid) regardless of any injected custom / bashExecution
-		// / pythonExecution record a user interrupt left as the literal transcript tail. This is
-		// why a queued user steer stranded behind a preserved advisor card (or a flushed IRC aside
-		// / eval execution record) still resumes — no tail-role enumeration needed.
-		if (this.agent.peekSteeringQueue().length > 0) return true;
-		// Follow-up-only auto-resume stays suppressed while a deliberate user interrupt is in effect
-		// (#advisorAutoResumeSuppressed, cleared on the next user prompt or manual retry): the user
-		// stopped, so their queued follow-up waits for an explicit resume — even if an interleaving
-		// IRC wake turn has since left a provider-valid tail.
-		if (this.#advisors.autoResumeSuppressed) return false;
-		// Follow-up-only resume has no steer to inject, so Agent.continue() continues from the
-		// existing context tail — which must itself be a valid provider tail. An injected
-		// non-conversational tail (advisor card → `developer`, a `!` bash/python run sent to the model)
-		// would make the first model call invalid, so leave the follow-up queued for the next explicit
-		// resume. Rows kept out of context (`!!` runs, excluded extension rows) never reach the model,
-		// so they do not count as the tail.
-		const last = lastContextMessage(this.agent.state.messages);
-		return last?.role === "assistant" || last?.role === "toolResult";
+		// A deliberate user interrupt holds follow-ups until explicit input resumes the
+		// session. A queued steer may still wake it; the drain starts with queued input
+		// regardless of the existing context tail.
+		return this.agent.peekSteeringQueue().length > 0 || !this.#advisors.autoResumeSuppressed;
 	}
 
 	queueDeferredMessage(message: CustomMessage): void {
@@ -11635,8 +11659,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Send a user message through the prompt flow.
 	 *
 	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
-	 * Explicit `deliverAs` queues without starting a turn in either state; `aside` at
-	 * an idle session instead starts a turn, since there is no live run to inject into.
+	 * Explicit `steer` or `followUp` queues the input; the queue drain can start a turn when
+	 * idle. Idle `aside` starts a turn directly, since there is no live run to inject into.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
@@ -11783,16 +11807,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.queuedMessageCount > 0 || this.agent.peekUndeliveredQueuedMessages().some(isDisplayableQueuedMessage);
 	}
 
-	/** Chip texts for the queue display. Steering live steering took for the streaming response
-	 *  stays listed until the transcript records it, when the model actually switches to it. */
+	/** Chip texts for the queue display. Input the agent already took stays listed, first in its
+	 *  queue, until the transcript records it: steering live steering took for the streaming
+	 *  response (the model switches to it then), and messages on their way into the next request
+	 *  (recorded once it opens). `liveSteered` counts the steering among them. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
-		const liveSteered = this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage).length;
+		const sent = [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekDeliveringMessages("steering")].filter(
+			isUserAuthoredQueuedMessage,
+		);
 		return {
-			steering: [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
+			steering: [...sent, ...this.agent.peekSteeringQueue().filter(isUserAuthoredQueuedMessage)].map(queueChipText),
+			followUp: [...this.agent.peekDeliveringMessages("followUp"), ...this.agent.peekFollowUpQueue()]
 				.filter(isUserAuthoredQueuedMessage)
 				.map(queueChipText),
-			followUp: this.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage).map(queueChipText),
-			liveSteered,
+			liveSteered: sent.length,
 		};
 	}
 
@@ -16938,6 +16966,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		sharedMaxNotesPerUpdate?: number,
 	): number {
 		return this.#advisors.applyAdvisorConfigs(advisors, sharedInstructions, sharedMaxNotesPerUpdate);
+	}
+
+	/** Reload the advisor roster and its imported instructions from disk. */
+	reloadAdvisorConfigs(): Promise<{ count: number; warnings: string[] }> {
+		return this.#advisors.reloadConfigs();
 	}
 
 	/**

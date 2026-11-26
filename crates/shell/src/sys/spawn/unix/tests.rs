@@ -790,6 +790,48 @@ fn abandoning_a_paused_job_still_terminates_it() {
 	until("terminated", || proc::info(pid).is_none_or(|i| i.state == ProcState::Zombie));
 }
 
+/// KILLs (and continues) a stray process when a case ends, failed or not.
+struct KillOnDrop(proc::ProcInfo);
+
+impl Drop for KillOnDrop {
+	fn drop(&mut self) {
+		let _ = proc::signal_pinned(&self.0, Signal::Kill);
+		let _ = proc::signal_pinned(&self.0, Signal::Cont);
+	}
+}
+
+/// A debugger's inferior (lldb's, which outlived a timed-out job stopped
+/// and orphaned): a grandchild that moved to a session of its own and
+/// stopped itself is outside the external's session, and the cancel's TERM
+/// kills its parent and leaves it to init before the KILL. The cancel
+/// (TERM, then the drop) must still kill it.
+///
+/// Needs `/usr/bin/perl` (macOS and Debian-family Linux ship it) for `setsid`.
+#[test]
+fn cancel_kills_a_stopped_grandchild_in_a_session_of_its_own() {
+	let env = EnvView::default();
+	let grace = Duration::from_millis(300);
+	let s = spawner(Sessions::Detach, grace);
+	// It ignores TERM and HUP and sleeps on once continued: only the KILL
+	// after the grace ends it, when its parent is long dead.
+	let a = sh("/usr/bin/perl -e '$SIG{HUP} = $SIG{TERM} = q(IGNORE); use POSIX (); \
+	            POSIX::setsid() > 0 or die; kill(q(STOP), $$); sleep 30' & wait");
+	let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
+	let pid = p.pid() as i32;
+	let inferior = KillOnDrop(child_of(pid));
+	let ipid = inferior.0.pid;
+	until("grandchild stopped in its own session", || {
+		proc::info(ipid).is_some_and(|i| i.state == ProcState::Stopped && i.sid == ipid)
+	});
+	let start = Instant::now();
+	p.signal(Signal::Term).unwrap();
+	drop(p);
+	until("grandchild killed", || {
+		proc::info(ipid).is_none_or(|i| i.start != inferior.0.start || i.state == ProcState::Zombie)
+	});
+	assert!(start.elapsed() >= grace, "it ignores TERM: only the KILL ends it");
+}
+
 #[test]
 fn a_scripts_term_does_not_escalate() {
 	let env = EnvView::default();

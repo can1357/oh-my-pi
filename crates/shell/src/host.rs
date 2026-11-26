@@ -50,8 +50,9 @@ pub const TERM_GRACE: Duration = Duration::from_secs(1);
 /// through it (pi's `Shell::pids()`). Implementations must not block.
 pub trait SpawnObserver: Send + Sync {
 	/// `pid` was spawned; it leads its own session and process group, so
-	/// its process group id is `pid` too (Unix).
-	fn spawned(&self, pid: u32);
+	/// its process group id is `pid` too (Unix). `detached`: it runs in a
+	/// detached (`nohup`) tree ([`crate::bash::Lineage::detached`]).
+	fn spawned(&self, pid: u32, detached: bool);
 	/// `pid`'s exit was observed, or the engine abandoned it (the spawner
 	/// then terminates it in the background).
 	fn released(&self, pid: u32);
@@ -438,7 +439,7 @@ impl Launcher {
 		Ok(match &self.observer {
 			Some(observer) => {
 				let pid = child.pid();
-				observer.spawned(pid);
+				observer.spawned(pid, lineage.detached);
 				Box::new(Observed { child, observer: Arc::clone(observer), released: false })
 			},
 			None => child,

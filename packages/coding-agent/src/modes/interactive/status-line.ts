@@ -605,6 +605,7 @@ export class SessionStatusLine implements StatusLineModel {
 						model: {
 							id: model.id,
 							...(model.name ? { name: model.name } : {}),
+							...(model.provider ? { provider: model.provider } : {}),
 							thinking: model.thinking !== undefined,
 							...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
 						},

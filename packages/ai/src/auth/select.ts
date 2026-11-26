@@ -9,10 +9,10 @@ import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
 import { raceSignal } from "./abort";
 import {
-	AUTH_BLOCK_SCOPE,
 	credentialBlockScopesForRequest,
 	DEFAULT_BLOCK_MS,
 	OAUTH_ORG_POLICY_BLOCK_SCOPE,
+	OAUTH_REFRESH_FAILURE_BLOCK_SCOPE,
 	providerTypeKey,
 	serviceTierBlockScope,
 	type CredentialBlocks,
@@ -1043,20 +1043,7 @@ export class CredentialSelector {
 						}
 					} else if (!isAbandonedRefresh(error)) {
 						recordTransientRefreshFailure(error);
-						if (credentialId !== undefined) {
-							const latestIndex = this.#deps.pool
-								.entries(provider)
-								.findIndex(entry => entry.id === credentialId);
-							if (latestIndex !== -1) {
-								this.#deps.blocks.mark(
-									provider,
-									providerKey,
-									latestIndex,
-									Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
-									AUTH_BLOCK_SCOPE,
-								);
-							}
-						}
+						this.#blockFailedRefresh(provider, providerKey, credentialId);
 					}
 					preflightFailures.add(candidate);
 				}
@@ -1194,6 +1181,20 @@ export class CredentialSelector {
 		selection.index = latestIndex;
 		selection.credential = latest.credential;
 		return true;
+	}
+
+	/** Back off the row that failed, even if the pool changed while refresh was in flight. */
+	#blockFailedRefresh(provider: Provider, providerKey: string, credentialId: number | undefined): void {
+		if (credentialId === undefined) return;
+		const index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === credentialId);
+		if (index === -1) return;
+		this.#deps.blocks.mark(
+			provider,
+			providerKey,
+			index,
+			Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
+			OAUTH_REFRESH_FAILURE_BLOCK_SCOPE,
+		);
 	}
 
 	async #prepareOAuthCredentialForRequest(
@@ -1385,14 +1386,7 @@ export class CredentialSelector {
 				}
 			} else if (!isAbandonedRefresh(error)) {
 				usageOptions.onTransientRefreshFailure?.(error);
-				// Block temporarily for transient failures (5 minutes)
-				this.#deps.blocks.mark(
-					provider,
-					providerKey,
-					selection.index,
-					Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
-					AUTH_BLOCK_SCOPE,
-				);
+				this.#blockFailedRefresh(provider, providerKey, credentialId);
 			}
 		}
 

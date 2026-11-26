@@ -11,6 +11,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { batch, type KeyEvent, type Signal, signal, type TextEdit, untrack } from "@oh-my-pi/pi-tui";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { applyEdit, applyMaskedEdit } from "../../overlays/panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
 import { compactImageMarkers, formatVisionMarker } from "../../../modes/view-model/prompt/composer-attachments";
@@ -342,23 +343,22 @@ export class HtmlFormModel {
 		const field = this.field(index);
 		const answer = this.answer(index);
 		if (field.kind !== "choice") return { pills: [], note: undefined };
-		const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 		const pills: AskPill[] = field.options.flatMap((option, at) =>
 			option.disabled && !answer.checked.has(at)
 				? []
 				: [
 						{
-							label: oneLine(spansText(option.label)) || option.value,
+							label: flattenLine(spansText(option.label)) || option.value,
 							chosen: answer.checked.has(at),
 							act: `pick:${index}:${at}`,
 						},
 					],
 		);
-		const typed = oneLine(answer.other.text);
+		const typed = flattenLine(answer.other.text);
 		if (field.other && answer.otherChosen && typed !== "")
 			pills.push({ label: `Other: ${typed}`, chosen: true, act: `open:${index}` });
 		const note = [...answer.checked].map(option => answer.notes.get(option)?.trim()).find(Boolean);
-		return { pills, note: note === undefined ? undefined : oneLine(note) };
+		return { pills, note: note === undefined ? undefined : flattenLine(note) };
 	}
 
 	/** `2 of 5 answered`, for forms of two or more named questions the keyboard reaches. */

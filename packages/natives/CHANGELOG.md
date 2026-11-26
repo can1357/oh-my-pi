@@ -2,9 +2,35 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline rendering or `Reader` for URL reads; interactive terminal browsing is no longer provided.
+
+### Added
+
+- Added `renderHtml` for Markdown and plain-text rendering. Both `renderHtml` and `Reader` default to reader content selection (`mode: "auto"`), support `mode: "full"` to keep all visible content, and share hidden-content options.
+- Added `Reader` for step-by-step URL reading with host-provided HTTP and browser I/O.
+
 ### Fixed
 
-- Fixed timed-out or aborted `glob`, `grep`, `fuzzyFind` and `astGrep` calls continuing to walk the tree in the background when several ran at once, pinning CPUs and stalling every later filesystem call in the process.
+- Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
+- Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
+- Preserved source-code indentation and linked content cards in URL reads.
+
+- The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added `Shell.heldProcesses()` to inspect all live external processes held by a shell session, including background and `nohup` jobs, with their `nohup` status.
+- Added process utilities for finding processes by inherited environment variables, inspecting process details and output files, and terminating process families while preserving `nohup` processes when requested.
+- Added an in-process Perl 5.34 shell builtin with core language and regex support, common command-line options and modules, and shell-integrated file and command I/O, including support for `scheme://` paths and other shell builtins.
+
+### Fixed
+
+- Fixed timed-out, cancelled, or terminated shell and PTY commands leaving descendant processes running, including descendants in separate process groups or sessions.
+- Fixed cancelled filesystem searches continuing in the background and consuming CPU or blocking subsequent filesystem operations when multiple searches ran concurrently.
 
 ## [19.2.0] - 2026-11-25
 

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenTelemetry chat spans reporting the requested model as `gen_ai.response.model` when the provider recorded the model that actually served the turn ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added `Agent.peekDeliveringMessages(queue?)` for queued input on its way into the next request that the transcript has not recorded yet; queue listeners hear when it lands.
+- Added `Agent.continue(signal, { queuedOnly: true })` to start an idle turn using queued input without making a separate model call for the current context.
+
+### Changed
+
+- Debug logs now time the wait between dequeuing input and the model request that carries it, by phase.
+
 ## [19.2.0] - 2026-11-25
 
 ### Added
