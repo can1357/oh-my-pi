@@ -49,7 +49,10 @@ export class InputDecoder {
 		};
 		const tokens: TokenSink = {
 			sequence: seq => this.#classify(seq, true),
-			paste,
+			paste: text => {
+				this.#flushRecords();
+				paste(text);
+			},
 		};
 		const relayed: TokenSink = {
 			sequence: seq => this.#classify(seq, false),
@@ -114,7 +117,7 @@ export class InputDecoder {
 	#flushRecords(): void {
 		const bytes = this.#recordBytes;
 		this.#recordBytes = "";
-		// One read's records go to the relay together, so a record-encoded paste burst stays one read.
+		// Keep consecutive records together until the read ends or direct input must follow them.
 		if (bytes) this.#relay.process(bytes);
 	}
 
@@ -124,6 +127,7 @@ export class InputDecoder {
 			if (!this.#processing) this.#flushRecords();
 			return;
 		}
+		if (direct) this.#flushRecords();
 		const tsp = parseTspMessage(seq);
 		if (tsp) {
 			this.#sink.input({
