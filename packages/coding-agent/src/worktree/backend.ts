@@ -28,6 +28,8 @@ export interface WorktreeStart {
 	sourceCwd: string;
 	baseCommit: string;
 	keptChanges: boolean;
+	/** The session moving into the worktree; an ovnfs checkout records it (`ovnfs ls` SESSION). */
+	session?: string;
 }
 
 /** Repository handles needed to inspect a worktree and its branch. */

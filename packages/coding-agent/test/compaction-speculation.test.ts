@@ -142,6 +142,8 @@ describe("async speculative compaction", () => {
 			persistEvalStateContext: () => {},
 			convertToLlmForSideRequest:
 				options.convertToLlmForSideRequest ?? ((messages: AgentMessage[]) => messages as never),
+			imageDescriptionModel: () => undefined,
+			prepareImageDescriptions: async () => {},
 			buildLiveProviderContext:
 				options.buildLiveProviderContext ?? (async (): Promise<Context> => ({ messages: [] })),
 			obfuscateTextForProvider: options.obfuscateTextForProvider ?? ((text: string | undefined) => text),

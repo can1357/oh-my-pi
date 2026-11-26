@@ -14,7 +14,7 @@ import {
 	loadCapability,
 } from "@oh-my-pi/pi-coding-agent/discovery";
 import { discoverExtensionPaths } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { isShadowedExtension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
+import { isShadowedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/inventory/types";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 

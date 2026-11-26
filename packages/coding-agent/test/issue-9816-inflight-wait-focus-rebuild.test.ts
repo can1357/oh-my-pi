@@ -17,14 +17,14 @@ import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import type { AgentProgress, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import type { AgentProgress, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
+import { initTheme } from "../src/ui/theme/service";
 
 const usage = {
 	input: 1,
@@ -293,9 +293,9 @@ function createFixture(main = makeSession([danglingWait], true), worker = makeSe
 		initialChatRendered: false,
 	});
 	ctx.clearTransientSessionUi = () => {
-		ctx.pendingMessagesContainer.disposeChildren();
+		ctx.hud.queue.groups.set([]);
 		ctx.pendingTools.clear();
-		ctx.streamingComponent = undefined;
+		ctx.streaming = undefined;
 		ctx.streamingMessage = undefined;
 	};
 
@@ -318,7 +318,7 @@ function createFixture(main = makeSession([danglingWait], true), worker = makeSe
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
+	initTheme();
 });
 
 afterAll(() => {
@@ -329,7 +329,7 @@ describe("#9816 focus blackout across an in-flight wait", () => {
 	it("drains a lost completion into the transcript before rebuilding the main session", async () => {
 		const { ctx, focus, main } = createFixture();
 		await ctx.renderInitialMessages();
-		const pending = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+		const pending = renderTranscript(ctx).join("\n");
 		expect(pending).toContain("Wait");
 		expect(pending).not.toContain("Sleeper1");
 
@@ -344,7 +344,7 @@ describe("#9816 focus blackout across an in-flight wait", () => {
 		queueMicrotask(finishPersistence);
 		await returning;
 
-		const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+		const rendered = renderTranscript(ctx).join("\n");
 		expect(rendered).toContain("Sleeper1 done");
 		expect(ctx.pendingTools.has("wait-1")).toBe(false);
 	});
@@ -357,14 +357,14 @@ describe("#10446 task progress across a focus rebuild", () => {
 
 		await fixture.ctx.renderInitialMessages();
 		await main.emitToolUpdate(taskProgressUpdate);
-		const before = Bun.stripANSI(fixture.ctx.chatContainer.render(120).join("\n"));
+		const before = renderTranscript(fixture.ctx).join("\n");
 		expect(before).toContain("Parent>Child");
 		expect(before).toContain("packages/coding-agent/src/modes");
 
 		await fixture.focus.focusAgent("Worker");
 		await fixture.focus.unfocus();
 
-		const after = Bun.stripANSI(fixture.ctx.chatContainer.render(120).join("\n"));
+		const after = renderTranscript(fixture.ctx).join("\n");
 		expect(after).toContain("Parent>Child");
 		expect(after).toContain("packages/coding-agent/src/modes");
 	});
@@ -379,7 +379,7 @@ describe("#10447 persisted background task board across a focus rebuild", () => 
 
 		await fixture.ctx.renderInitialMessages();
 		await main.emitToolUpdate(backgroundProgressUpdate("cached-progress-marker"));
-		const before = Bun.stripANSI(fixture.ctx.chatContainer.render(120).join("\n"));
+		const before = renderTranscript(fixture.ctx).join("\n");
 		expect(before).toContain("cached-progress-marker");
 
 		await fixture.focus.focusAgent("Worker");
@@ -387,13 +387,13 @@ describe("#10447 persisted background task board across a focus rebuild", () => 
 
 		// The rebuilt board replays the cached snapshot instead of collapsing to
 		// the persisted "running" result, and the card is still parked as pending.
-		const after = Bun.stripANSI(fixture.ctx.chatContainer.render(120).join("\n"));
+		const after = renderTranscript(fixture.ctx).join("\n");
 		expect(after).toContain("cached-progress-marker");
 		expect(fixture.ctx.pendingTools.has("task-bg")).toBe(true);
 
 		// A live frame emitted after return still routes to the preserved card.
 		await main.emitToolUpdate(backgroundProgressUpdate("post-return-marker"));
-		const live = Bun.stripANSI(fixture.ctx.chatContainer.render(120).join("\n"));
+		const live = renderTranscript(fixture.ctx).join("\n");
 		expect(live).toContain("post-return-marker");
 	});
 
@@ -406,7 +406,7 @@ describe("#10447 persisted background task board across a focus rebuild", () => 
 		await main.emitToolUpdate(backgroundProgressUpdate("completed-while-focused", "completed"));
 		await fixture.focus.unfocus();
 
-		const after = Bun.stripANSI(fixture.ctx.chatContainer.render(120).join("\n"));
+		const after = renderTranscript(fixture.ctx).join("\n");
 		expect(after).toContain("completed-while-focused");
 		expect(fixture.ctx.pendingTools.has("task-bg")).toBe(false);
 	});
@@ -522,7 +522,7 @@ describe("live Cursor focus recovery without another delta", () => {
 				message: continued,
 				assistantMessageEvent: { type: "text_delta", contentIndex: 3, delta: " AFTER_FOCUS", partial: continued },
 			});
-			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = () => renderTranscript(ctx).join("\n");
 			expect(rendered()).toContain("AFTER_FOCUS");
 			expect(rendered().match(/SETTLED_DURING_SWITCH/g)).toHaveLength(1);
 			expect(ctx.pendingTools.has("settled-grep")).toBe(false);
@@ -559,7 +559,7 @@ describe("live Cursor focus recovery without another delta", () => {
 		const { ctx, focus } = createFixture(main);
 		await focus.focusAgent("Worker");
 		await focus.unfocus();
-		const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+		const rendered = () => renderTranscript(ctx).join("\n");
 		expect(rendered()).toContain("PAUSED_REASONING");
 		expect(rendered()).toContain("COMPLETED_MATCH");
 		expect(ctx.pendingTools.size).toBe(0);
@@ -575,7 +575,7 @@ describe("live Cursor focus recovery without another delta", () => {
 		await focus.focusAgent("Worker");
 		await focus.unfocus();
 		await main.emit({ type: "message_end", message: paused });
-		const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+		const rendered = renderTranscript(ctx).join("\n");
 		expect(rendered).toContain("LAST_VISIBLE_TEXT");
 		expect(rendered).toContain("COMPLETED_MATCH");
 		expect(ctx.pendingTools.size).toBe(0);
@@ -587,7 +587,7 @@ describe("live Cursor focus recovery without another delta", () => {
 		const { ctx, focus } = createFixture(main);
 		await focus.focusAgent("Worker");
 		await focus.unfocus();
-		expect(Bun.stripANSI(ctx.chatContainer.render(120).join("\n"))).toContain("COMPLETED_MATCH");
+		expect(renderTranscript(ctx).join("\n")).toContain("COMPLETED_MATCH");
 		expect(ctx.pendingTools.size).toBe(0);
 	});
 
@@ -666,7 +666,7 @@ describe("live Cursor focus recovery without another delta", () => {
 			linkGate.resolve(new Map([["guide.md", "file:///tmp/guide.md"]]));
 			await Promise.all([firstEnd, toolStart, toolEnd, secondStart, secondUpdate]);
 
-			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = () => renderTranscript(ctx).join("\n");
 			expect(rendered()).toContain("FIRST_LINK_TEXT");
 			expect(rendered()).toContain("COMPLETED_MATCH");
 			expect(rendered()).toContain("SECOND_LIVE_TEXT");
@@ -767,7 +767,7 @@ describe("live Cursor focus recovery without another delta", () => {
 			linkGate.resolve(new Map());
 			await Promise.all([returning, arrival, stuckEnd]);
 
-			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = renderTranscript(ctx).join("\n");
 			expect(rendered.match(/ARRIVAL_DURING_ATTACH/g)).toHaveLength(1);
 		} finally {
 			focus.dispose();
@@ -856,7 +856,7 @@ describe("live Cursor focus recovery without another delta", () => {
 			release();
 			await Promise.all([returning, stuckEnd, ...arrivals]);
 
-			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = renderTranscript(ctx).join("\n");
 			expect(rendered.match(/ARRIVED_REPLY/g)).toHaveLength(1);
 			expect(rendered.match(/REPLAYED_ARRIVAL/g)).toHaveLength(1);
 			expect(rendered.match(/LIVE_ONLY_ARRIVAL/g)).toHaveLength(1);
@@ -902,7 +902,7 @@ describe("live Cursor focus recovery without another delta", () => {
 				message: continued,
 				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " AND_AFTER", partial: continued },
 			});
-			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = () => renderTranscript(ctx).join("\n");
 			expect(rendered()).toContain("AND_AFTER");
 			await main.emit({ type: "message_end", message: continued });
 			expect(rendered().match(/REPLY_DURING_SWITCH/g)).toHaveLength(1);
@@ -936,7 +936,7 @@ describe("live Cursor focus recovery without another delta", () => {
 			release();
 			await Promise.all([returning, stuckEnd, ...arrivals]);
 
-			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = renderTranscript(ctx).join("\n");
 			expect(rendered.match(/EXT_DURING_SWITCH/g)).toHaveLength(1);
 		} finally {
 			dispose();
@@ -976,7 +976,7 @@ describe("live Cursor focus recovery without another delta", () => {
 			release();
 			await Promise.all([returning, stuckEnd, ...arrivals]);
 
-			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = () => renderTranscript(ctx).join("\n");
 			expect(rendered().match(/TOOL_DURING_SWITCH/g)).toHaveLength(1);
 
 			// F5 retry after switching back re-runs the same toolCallId.
@@ -1028,7 +1028,7 @@ describe("live Cursor focus recovery without another delta", () => {
 			release();
 			await Promise.all([returning, stuckEnd]);
 			await raced;
-			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = () => renderTranscript(ctx).join("\n");
 			// Before the newer reply sends anything else, both are on screen, the older one first.
 			const switched = rendered();
 			expect(switched.match(/OLDER_REPLY/g)).toHaveLength(1);
@@ -1101,7 +1101,7 @@ describe("live Cursor focus recovery without another delta", () => {
 			linkGate.resolve(new Map());
 			await Promise.all([returning, stuckUpdate]);
 
-			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = renderTranscript(ctx).join("\n");
 			expect(rendered).toContain("MAIN_AFTER_SWITCH");
 			expect(rendered).not.toContain("WORKER_HEAD");
 			expect(rendered).not.toContain("STALE_TOOL");
@@ -1170,7 +1170,7 @@ describe("live Cursor focus recovery without another delta", () => {
 			segmentGate.resolve(new Map());
 			await Promise.all([returning, stuckUpdate]);
 
-			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = renderTranscript(ctx).join("\n");
 			expect(rendered).toContain("MAIN_SEGMENT_HOME");
 			expect(rendered).not.toContain("STALE_SEGMENT");
 			expect(ctx.pendingTools.has("seg-grep-1")).toBe(false);
@@ -1224,7 +1224,7 @@ describe("live Cursor focus recovery without another delta", () => {
 				await main.emit({ type: "message_end", message });
 			}
 
-			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			const rendered = renderTranscript(ctx).join("\n");
 			expect(rendered.match(/FIRST_NOTE/g)).toHaveLength(1);
 			expect(rendered.match(/SECOND_NOTE/g)).toHaveLength(1);
 			expect(rendered.match(/FIRST_PROMPT/g)).toHaveLength(1);

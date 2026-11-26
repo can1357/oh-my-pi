@@ -72,7 +72,7 @@ The LLM context is built for the model that reads it. When the active model cann
 
 Compaction/context maintenance can run in six ways:
 
-1. **Manual context compaction**: `/compact [instructions]` calls `AgentSession.compact(...)`.
+1. **Manual context compaction**: `/compact [instructions]` calls `AgentSession.compact(...)`. It walks `compaction.methodOrder` and falls back to `soft` when the order omits it, so a manual pass always compacts; `/compact <mode>` keeps the mode's pinned chain.
 2. **Automatic overflow recovery**: after a same-model assistant error that matches context overflow.
 3. **Automatic incomplete-output recovery**: after a same-model assistant message ends with `stopReason === "length"` (including OpenAI/Codex `response.incomplete` and Anthropic output/context limits), subject to the output-cap checks below.
 4. **Automatic threshold maintenance**: after a successful turn when context exceeds the resolved threshold.
@@ -218,6 +218,8 @@ store.[^experimental-context-history]
 Including `shake` in `compaction.methodOrder` performs an inline, local reduction instead of calling a summarization model. It replaces eligible tool results and large fenced/XML blocks with recoverable `local://N.log` spill references, using a protected recent-token window and minimum-savings threshold. Automatic shake emits the normal auto-compaction events with `action: "shake"`.
 
 Threshold, incomplete-output, and overflow recovery advance to the next configured method when shake cannot reclaim enough context to get below the recovery band; this prevents repeated no-op shake loops. Idle shake does not use that fallback because the idle timer rechecks usage before running again. Manual `/shake` is a separate, more aggressive command that can target all eligible history.
+
+`/shake thinking` removes reasoning blocks and hidden notes that quote interrupted reasoning from the active branch. It preserves blocks the current provider still replays natively and reports them as kept. Even without a shake, models that reject quoted reasoning do not receive those notes when resuming a session.
 
 ### Snapcompact method
 

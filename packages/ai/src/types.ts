@@ -144,6 +144,8 @@ export type CacheRetention = "none" | "short" | "long";
  *   otherwise.
  * - Direct Anthropic: `"priority"` is translated into `speed: "fast"` plus the
  *   fast-mode beta on supported Opus models. Other tiers are ignored.
+ * - Devin: `"priority"` sends the model's fast-lane wire id
+ *   ({@link Model.priorityLane}). Other tiers are ignored.
  *
  * Per-family scoping is expressed by {@link ServiceTierByFamily}, not by
  * scoped sentinel values — see {@link serviceTierFamily}.
@@ -151,7 +153,10 @@ export type CacheRetention = "none" | "short" | "long";
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast";
 
 /** Provider families that expose an independent service-tier knob. */
-export type ServiceTierFamily = "openai" | "anthropic" | "google";
+export const SERVICE_TIER_FAMILIES = ["openai", "anthropic", "google", "devin"] as const;
+
+/** One of {@link SERVICE_TIER_FAMILIES}. */
+export type ServiceTierFamily = (typeof SERVICE_TIER_FAMILIES)[number];
 
 /**
  * Per-family service-tier selection. A request consults only the entry for the
@@ -161,7 +166,8 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
  */
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
-type ServiceTierModel = Pick<Model, "provider" | "api" | "identity"> & Partial<Pick<Model, "serviceTiers">>;
+type ServiceTierModel = Pick<Model, "provider" | "api" | "identity"> &
+	Partial<Pick<Model, "serviceTiers" | "priorityLane">>;
 // The service-tier matrix below intentionally stays in TypeScript rather than
 // the KDL compat tree: `shouldSendServiceTier` accepts bare provider strings
 // (agent telemetry, google-shared header placement) and the stats parser
@@ -198,9 +204,11 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
  * anthropic family even though its provider is `amazon-bedrock`/`google-vertex`.
  * Custom OpenAI-compatible relays that serve OpenAI model ids are OpenAI family
  * too unless the provider owns a separate tier control (Fireworks) or rejects
- * OpenAI's service-tier field (GitHub Copilot).
+ * OpenAI's service-tier field (GitHub Copilot). Devin models with a fast lane
+ * share one `devin` knob whatever lineage they serve.
  */
 export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | undefined {
+	if (model.api === "devin-agent") return model.priorityLane ? "devin" : undefined;
 	const provider = model.provider;
 	if (provider === "openrouter") {
 		if (model.identity.class === "anthropic") return "anthropic";
@@ -288,11 +296,42 @@ export function shouldSendServiceTier(
 }
 
 /**
+ * Whether each account that discovery listed for `model` offers `serviceTier`,
+ * keyed by the account key of {@link Model.accountAccess}. Each account is
+ * judged by {@link shouldSendServiceTier} against its own advertised tier list
+ * instead of the model's cross-account union, so a plan-gated tier (Codex
+ * Ultrafast) is sent to, and credential selection prefers, only the accounts
+ * that hold it. `undefined` when discovery recorded no per-account tier list,
+ * leaving every account on the model-level answer.
+ */
+export function serviceTierOffersByAccount(
+	model: ServiceTierModel & Pick<Model, "accountAccess">,
+	serviceTier: ServiceTier | null | undefined,
+): Record<string, boolean> | undefined {
+	const accountAccess = model.accountAccess;
+	if (!serviceTier || !accountAccess) return undefined;
+	let reported = false;
+	const offers: Record<string, boolean> = {};
+	for (const accountKey in accountAccess) {
+		const access = accountAccess[accountKey]!;
+		reported ||= access.serviceTiers !== undefined;
+		offers[accountKey] = shouldSendServiceTier(serviceTier, {
+			provider: model.provider,
+			api: model.api,
+			identity: model.identity,
+			serviceTiers: access.serviceTiers,
+		});
+	}
+	return reported ? offers : undefined;
+}
+
+/**
  * True when `priority` will actually be realized on the wire for `model`.
  * Direct Anthropic realizes fast mode; OpenAI/Google/Fireworks emit the
  * service-tier field; OpenRouter realizes it only for its OpenAI- and
- * Google-family upstreams. Bedrock/Vertex Claude and OpenRouter Anthropic
- * models do not realize priority and return `false`.
+ * Google-family upstreams; Devin routes to the model's fast lane.
+ * Bedrock/Vertex Claude and OpenRouter Anthropic models do not realize
+ * priority and return `false`.
  */
 export function realizesPriorityServiceTier(
 	serviceTier: ServiceTier | null | undefined,
@@ -300,6 +339,7 @@ export function realizesPriorityServiceTier(
 ): boolean {
 	if (serviceTier !== "priority") return false;
 	if (model.provider === "anthropic") return true;
+	if (model.api === "devin-agent") return model.priorityLane !== undefined;
 	if (model.provider === "openrouter") {
 		const family = serviceTierFamily(model);
 		return family === "openai" || family === "google";
@@ -378,7 +418,7 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 	if (typeof value === "object") {
 		const src = value as Record<string, unknown>;
 		const out: ServiceTierByFamily = {};
-		for (const family of ["openai", "anthropic", "google"] as const) {
+		for (const family of SERVICE_TIER_FAMILIES) {
 			const tier = src[family];
 			if (
 				tier === "auto" ||
@@ -643,7 +683,8 @@ export interface StreamOptions {
 	 * prefix. Providers that keep per-conversation request controls (OpenAI
 	 * `configuration_update` effort baselines) plan the request against a copy
 	 * of that session's controls, never changing the parent's state; the Codex
-	 * backend also routes it with the parent's cache affinity (session headers).
+	 * backend and OpenCode (`x-opencode-session`) also route it with the
+	 * parent's cache affinity (session headers).
 	 */
 	parentSessionId?: string;
 	/**
@@ -1435,6 +1476,11 @@ export interface AssistantMessage {
 	errorStatus?: number;
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
+	/**
+	 * True when the agent loop ended the turn with this error itself (for example, after the model
+	 * kept missing a soft tool requirement), so no provider request failed.
+	 */
+	errorFromAgentLoop?: boolean;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection

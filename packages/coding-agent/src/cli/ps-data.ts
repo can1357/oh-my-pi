@@ -11,7 +11,7 @@ import { getProjectDir } from "@oh-my-pi/pi-utils";
 import type { DaemonClient, UnitSnapshot } from "../daemon/protocol";
 import { canonicalProjectDir, daemonDbPath } from "../daemon/paths";
 import { readStoredUnits } from "../daemon/store";
-import { groupUnits, type PsBoard, type PsTarget, TERMINAL_STATES, unitName } from "@oh-my-pi/pi-tui/apps/ps-data";
+import { groupUnits, type PsBoard, type PsTarget, TERMINAL_STATES, unitName } from "./ps-model";
 
 /** Hard SIGTERM->SIGKILL grace used by `kill`; effectively immediate. */
 export const KILL_GRACE_MS = 100;

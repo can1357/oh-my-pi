@@ -147,7 +147,7 @@ impl Workspace {
 		let key = omp_edit::path_policy::canonical_key(&self.cwd().join(rel));
 		self
 			.store
-			.record(&key, &omp_edit::text::normalize_to_lf(text), seen)
+			.record(&key.into(), &omp_edit::text::normalize_to_lf(text), seen)
 	}
 
 	pub fn session(&self) -> Session {

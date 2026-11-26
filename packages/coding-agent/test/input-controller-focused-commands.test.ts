@@ -18,35 +18,17 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { Composer } from "../src/ui/composer/composer";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
 
 function createFocusedContext() {
-	let editorText = "";
-	const editor = {
-		setText(text: string) {
-			editorText = text;
-		},
-		getText() {
-			return editorText;
-		},
-		setCollapsedText(text: string) {
-			editorText = text;
-		},
-		composerChips() {
-			return [];
-		},
-		addToHistory: vi.fn(),
-		imageLinks: undefined,
-		pendingImages: [],
-		pendingImageLinks: [],
-		clearDraft: vi.fn(),
-	};
+	const editor = new Composer();
+	vi.spyOn(editor, "addToHistory");
 	const prompt = vi.fn(async () => {});
 	const resume = vi.fn(async () => {});
 	const ctx = {
-		editor,
-		ui: { requestRender: vi.fn() },
+		composer: editor,
 		session: {
 			isStreaming: false,
 			isCompacting: false,
@@ -80,7 +62,8 @@ async function submit(text: string) {
 	const controller = new InputController(focused.ctx);
 	controller.setupEditorSubmitHandler();
 	focused.editor.setText(text);
-	await focused.ctx.editor.onSubmit?.(text);
+	focused.editor.submit();
+	await controller.waitForSubmissionDispatches();
 	return focused;
 }
 
@@ -94,7 +77,8 @@ describe("focused subagent view slash commands", () => {
 			const { prompt, resume, editor, raw } = await submit(shortcut);
 			expect(resume).toHaveBeenCalledTimes(1);
 			expect(prompt).not.toHaveBeenCalled();
-			expect(editor.clearDraft).toHaveBeenCalledWith(shortcut);
+			expect(editor.addToHistory).toHaveBeenCalledWith(shortcut);
+			expect(editor.text()).toBe("");
 			expect(raw.withLocalSubmission).not.toHaveBeenCalled();
 		}
 	});
@@ -142,7 +126,8 @@ describe("focused subagent view slash commands", () => {
 		const controller = new InputController(focused.ctx);
 		controller.setupEditorSubmitHandler();
 		focused.editor.setText("/copy code");
-		await focused.ctx.editor.onSubmit?.("/copy code");
+		focused.editor.submit();
+		await controller.waitForSubmissionDispatches();
 
 		expect(copySpy).toHaveBeenCalledWith("const worker = 1;");
 		expect(focused.prompt).not.toHaveBeenCalled();
@@ -165,13 +150,14 @@ describe("focused subagent view slash commands", () => {
 		const controller = new InputController(focused.ctx);
 		controller.setupEditorSubmitHandler();
 		focused.editor.setText("/sitrep the migration");
-		await focused.ctx.editor.onSubmit?.("/sitrep the migration");
+		focused.editor.submit();
+		await controller.waitForSubmissionDispatches();
 		expect(focused.raw.handleBtwCommand).toHaveBeenCalledWith(
 			"Report. Focus: the migration",
 			undefined,
 			"/sitrep the migration",
 		);
-		expect(focused.editor.clearDraft).toHaveBeenCalledTimes(1);
+		expect(focused.editor.text()).toBe("");
 		expect(focused.prompt).not.toHaveBeenCalled();
 	});
 
@@ -184,10 +170,11 @@ describe("focused subagent view slash commands", () => {
 		const controller = new InputController(focused.ctx);
 		controller.setupEditorSubmitHandler();
 		focused.editor.setText("/clear");
-		await focused.ctx.editor.onSubmit?.("/clear");
+		focused.editor.submit();
+		await controller.waitForSubmissionDispatches();
 		expect(focused.raw.handleBtwCommand).not.toHaveBeenCalled();
 		expect(focused.raw.showStatus).toHaveBeenCalledTimes(1);
-		expect(focused.editor.getText()).toBe("/clear");
+		expect(focused.editor.text()).toBe("/clear");
 	});
 
 	it("sets the focused agent's thinking level with /effort, leaving the main session alone", async () => {
@@ -203,7 +190,8 @@ describe("focused subagent view slash commands", () => {
 		const controller = new InputController(focused.ctx);
 		controller.setupEditorSubmitHandler();
 		focused.editor.setText("/effort high");
-		await focused.ctx.editor.onSubmit?.("/effort high");
+		focused.editor.submit();
+		await controller.waitForSubmissionDispatches();
 
 		expect(setFocusedThinking).toHaveBeenCalledWith("high");
 		expect(setMainThinking).not.toHaveBeenCalled();
@@ -217,11 +205,12 @@ describe("focused subagent view slash commands", () => {
 		const controller = new InputController(focused.ctx);
 		controller.setupEditorSubmitHandler();
 		focused.editor.setText("/models");
-		await focused.ctx.editor.onSubmit?.("/models");
+		focused.editor.submit();
+		await controller.waitForSubmissionDispatches();
 
 		expect(showModelSelector).toHaveBeenCalledTimes(1);
 		expect(focused.prompt).not.toHaveBeenCalled();
-		expect(focused.editor.getText()).toBe("");
+		expect(focused.editor.text()).toBe("");
 	});
 
 	it("cycles the focused agent's thinking level and role model, not the main session's", async () => {
@@ -236,7 +225,7 @@ describe("focused subagent view slash commands", () => {
 		});
 		Object.assign(focused.raw.session, { cycleThinkingLevel: mainCycleThinking, cycleRoleModels: mainCycleRoles });
 		Object.assign(focused.raw, {
-			statusLine: { invalidate: vi.fn() },
+			statusLine: { refresh: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
 			showModelCycleTrack: vi.fn(),
 		});
@@ -258,7 +247,7 @@ describe("focused subagent view slash commands", () => {
 
 	it("keeps other commands gated to the main session, draft intact", async () => {
 		const { editor, prompt } = await submit("/compact");
-		expect(editor.getText()).toBe("/compact");
+		expect(editor.text()).toBe("/compact");
 		expect(prompt).not.toHaveBeenCalled();
 	});
 
@@ -267,7 +256,7 @@ describe("focused subagent view slash commands", () => {
 			const { raw, editor } = await submit(text);
 			expect(raw.showResetUsageSelector).not.toHaveBeenCalled();
 			expect(raw.handleUsageCommand).not.toHaveBeenCalled();
-			expect(editor.getText()).toBe(text);
+			expect(editor.text()).toBe(text);
 		}
 	});
 
@@ -276,7 +265,7 @@ describe("focused subagent view slash commands", () => {
 			const { raw, editor } = await submit(text);
 			expect(raw.handleJobsCommand).not.toHaveBeenCalled();
 			expect(raw.showStatus).toHaveBeenCalled();
-			expect(editor.getText()).toBe(text);
+			expect(editor.text()).toBe(text);
 		}
 	});
 
