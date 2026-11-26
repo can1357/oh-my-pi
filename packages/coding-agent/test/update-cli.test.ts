@@ -525,6 +525,10 @@ describe("update-cli package manager commands", () => {
 		expect(buildHomebrewUpdateArgs(true)).toEqual(["reinstall", "can1357/tap/omp"]);
 	});
 
+	it("tells brew not to ask for confirmation on the upgrade and reinstall child", () => {
+		expect(updateCli.buildHomebrewUpdateEnv({ PATH: "/bin" })).toEqual({ PATH: "/bin", HOMEBREW_NO_ASK: "1" });
+	});
+
 	it("targets the mise GitHub backend and overrides release-age settings for attended updates", () => {
 		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:can1357/oh-my-pi", "--bump", "--before", "0s"]);
 		expect(buildMiseUpgradeArgs(false)).toEqual(["upgrade", "github:can1357/oh-my-pi", "--bump"]);

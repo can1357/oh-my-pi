@@ -1382,6 +1382,16 @@ export function buildHomebrewUpdateArgs(force: boolean): string[] {
 }
 
 /**
+ * omp update tells brew not to ask for confirmation on the upgrade and reinstall child, through HOMEBREW_NO_ASK in
+ * its environment. brew 5.1.15 rejects a `--yes` argument, so the flag is not passed in argv.
+ */
+export function buildHomebrewUpdateEnv(
+	base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+	return { ...base, HOMEBREW_NO_ASK: "1" };
+}
+
+/**
  * Build the attended mise update command.
  *
  * `--before 0s` overrides global and per-tool release-age settings for this
@@ -1722,7 +1732,7 @@ async function updateViaHomebrew(expectedVersion: string, force: boolean): Promi
 
 	console.log(chalk.dim("Updating via Homebrew..."));
 	const args = buildHomebrewUpdateArgs(force);
-	const exitCode = await runInstaller(["brew", ...args]);
+	const exitCode = await runInstaller(["brew", ...args], buildHomebrewUpdateEnv());
 	if (exitCode !== 0) {
 		throw new Error(`brew ${args[0]} failed with exit code ${exitCode}`);
 	}
