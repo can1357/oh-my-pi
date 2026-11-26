@@ -5,6 +5,7 @@ import { collapseSharedUsageReports, summarizeUsageResetCredits } from "../../se
 import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "../../modes/view-model/chrome/format";
+import { formatRemainingOnlyTotal } from "./usage-amounts";
 
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
 	if (!windowLabel) return "";
@@ -15,6 +16,8 @@ function formatWindowSuffix(label: string, windowLabel: string | undefined): str
 }
 
 function formatUsageAmount(limit: UsageLimit): string {
+	const balance = formatRemainingOnlyTotal([limit]);
+	if (balance !== undefined) return balance;
 	const amount = limit.amount;
 	const used = amount.used ?? (amount.usedFraction !== undefined ? amount.usedFraction * 100 : undefined);
 	const remainingFraction =
@@ -30,7 +33,7 @@ function formatUsageReportAccount(
 	report: UsageReport,
 	peers: readonly UsageReport[],
 	limit: UsageLimit,
-	index: number,
+	reportIndex: number,
 ): string {
 	const codex = report.provider === "openai-codex";
 	const metaOrgName = report.metadata?.orgName;
@@ -48,7 +51,7 @@ function formatUsageReportAccount(
 	if (typeof accountId === "string" && accountId) return label(accountId, true);
 	const metaProjectId = report.metadata?.projectId;
 	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
-	return label(typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`, false);
+	return label(typeof projectId === "string" && projectId ? projectId : `account ${reportIndex + 1}`, false);
 }
 
 function renderUsageReports(
@@ -81,7 +84,8 @@ function renderUsageReports(
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes)
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
-		for (const report of providerReports) {
+		for (let reportIndex = 0; reportIndex < providerReports.length; reportIndex++) {
+			const report = providerReports[reportIndex]!;
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
 			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 			if (resets && resets.bankedCount > 0) {
@@ -130,8 +134,7 @@ function renderUsageReports(
 				lines.push(`- ${label}: no limits reported`);
 				continue;
 			}
-			for (let index = 0; index < report.limits.length; index++) {
-				const limit = report.limits[index]!;
+			for (const limit of report.limits) {
 				const window = limit.window?.label ?? limit.scope.windowId;
 				// Skip the tier suffix when the label already names it (e.g. Anthropic's
 				// "Claude 7 Day (Fable)" with scope.tier "fable") — mirrors limitTitle in usage-cli.
@@ -141,7 +144,7 @@ function renderUsageReports(
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
-					`  ${formatUsageReportAccount(report, providerReports, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
+					`  ${formatUsageReportAccount(report, providerReports, limit, reportIndex)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
