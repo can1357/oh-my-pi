@@ -98,7 +98,13 @@ export type ReplayTarget = Pick<
 };
 
 /** What a history replay reads of a session context. */
-export type ReplayContext = Pick<SessionContext, "messages" | "cacheMissExplainedAt" | "nextCacheMissExplained">;
+export type ReplayContext = Pick<SessionContext, "messages" | "cacheMissExplainedAt" | "nextCacheMissExplained"> & {
+	/**
+	 * The messages are a later part of the session (a branch's tail, a sibling branch below its
+	 * fork): the run they open in may have started above them.
+	 */
+	readonly clipped?: boolean;
+};
 
 const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
 const TRANSCRIPT_RENDER_CHUNK_MS = 8;
@@ -455,9 +461,9 @@ export class UiHelpers {
 		// a run gets the turn's totals, and with them the native footer under its
 		// answer (`⧉ · 12.4s · 19K tok this turn`) whose Copy copies the answer.
 		const turnUsage = new TurnUsageTally();
-		// A replica can open partway through a run (a selector replaying a long branch's tail): until a
-		// run starts in view, the tally would cover only the replayed part, so that run gets no totals.
-		let runStartUnseen = replica;
+		// A clipped replay can open partway through a run: until a run starts in view, the tally would
+		// cover only the replayed part, so that run gets no totals.
+		let runStartUnseen = sessionContext.clipped === true;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usage = pendingUsage;

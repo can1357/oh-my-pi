@@ -48,6 +48,7 @@ import type { BranchVariantPath } from "../../../modes/view-model/overlays/rewin
 import {
 	isUserTurnEntry,
 	recentTranscriptEntries,
+	type SessionMessageEntryLike,
 	type TranscriptEntryLike,
 	userTurnLabel,
 } from "../../../session/transcript/transcript-entry";
@@ -82,9 +83,10 @@ export interface RewindSelectorProps {
 	/**
 	 * Replays entries as the session's own blocks. Given, the screen is Tern's rewind page (see
 	 * the module docs) and yields the turns' nodes before the bar; absent, the terminal look
-	 * draws the turns.
+	 * draws the turns. `clipped`: the entries are a later part of the session (the branch's tail,
+	 * a sibling branch below its fork), so the run they open in may have started above them.
 	 */
-	replica?(entries: readonly TranscriptEntryLike[]): TranscriptReplica;
+	replica?(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica;
 	onSelect(entryId: string): void;
 	onCancel(): void;
 }
@@ -114,23 +116,36 @@ function textOf(content: unknown): string {
 	return parts.join("\n");
 }
 
+/** An entry that is a rewind point of its own: a prompt or a reply (a tool result joins the reply before it). */
+type RewindPointEntry = SessionMessageEntryLike & {
+	readonly message: Extract<AgentMessage, { role: "user" | "assistant" }>;
+};
+
+function isRewindPoint(entry: TranscriptEntryLike): entry is RewindPointEntry {
+	return entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant");
+}
+
+/** Whether `entries` hold a rewind point, without building the targets (a long branch has thousands). */
+export function hasRewindPoint(entries: readonly TranscriptEntryLike[]): boolean {
+	return entries.some(isRewindPoint);
+}
+
 /** The rewind points of `entries`: one per user prompt and per assistant reply (tool results join the reply, which rewinds onto its last result). */
-export function rewindTargets(entries: readonly TranscriptEntryLike[]): RewindTarget[] {
+function rewindTargets(entries: readonly TranscriptEntryLike[]): RewindTarget[] {
 	const targets: RewindTarget[] = [];
 	for (const entry of entries) {
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role === "user" || message.role === "assistant") {
-			const text = textOf(message.content);
+		if (isRewindPoint(entry)) {
+			const message = entry.message;
 			targets.push({
 				entryId: entry.id,
 				turnId: entry.id,
 				isUserTurn: message.role === "user",
-				text,
+				text: textOf(message.content),
 				messages: [message],
 			});
-		} else if (message.role === "toolResult" && targets.length > 0) {
+		} else if (entry.type === "message" && entry.message.role === "toolResult" && targets.length > 0) {
 			// The reply's rewind point moves onto its trailing result: rewinding keeps the tool output.
+			const message = entry.message;
 			const last = targets.pop()!;
 			targets.push({
 				...last,
@@ -141,6 +156,18 @@ export function rewindTargets(entries: readonly TranscriptEntryLike[]): RewindTa
 		}
 	}
 	return targets;
+}
+
+/**
+ * The entries the terminal look opens on: the branch's recent tail, reaching back to the newest
+ * prompt or reply when the tail holds none (a long run of `!` commands), so it opens on a point
+ * to rewind to. The look draws only prompts and replies: the entries it reaches over draw nothing.
+ */
+function termTail(entries: readonly TranscriptEntryLike[]): readonly TranscriptEntryLike[] {
+	const tail = recentTranscriptEntries(entries);
+	if (tail.some(isRewindPoint)) return tail;
+	const newest = entries.findLastIndex(isRewindPoint);
+	return newest < 0 ? tail : entries.slice(newest);
 }
 
 /** Word patterns of a filter query, matched against lowercased text: whole Latin words, substrings otherwise. */
@@ -278,9 +305,9 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 	onCleanup(() => {
 		for (const replica of replicas) replica.dispose();
 	});
-	const laneOf = (entries: readonly TranscriptEntryLike[]): TurnLane => {
+	const laneOf = (entries: readonly TranscriptEntryLike[], clipped: boolean): TurnLane => {
 		if (!replay) return termLane(rewindTargets(entries));
-		const replica = keep(() => replay(entries));
+		const replica = keep(() => replay(entries, clipped));
 		replica.expanded.set(expanded);
 		replicas.add(replica);
 		return pageLane(replica);
@@ -288,10 +315,10 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 
 	// The page and the terminal look both start on the branch's tail: each turn they hold costs at
 	// open, however far above the screen it stands.
-	const tail = recentTranscriptEntries(props.entries);
-	const main = signal(laneOf(tail));
+	const tail = replay ? recentTranscriptEntries(props.entries) : termTail(props.entries);
 	/** Older history is not replayed yet. */
 	const truncated = signal(tail.length < props.entries.length);
+	const main = signal(laneOf(tail, truncated.peek()));
 	const selected = signal(Math.max(0, main.peek().turns.length - 1));
 	/** 0: the current path; n: the n-th sibling branch of the selected turn. */
 	const variant = signal(0);
@@ -306,7 +333,7 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 		if (!truncated.peek()) return;
 		const previous = main.peek();
 		const turnId = previous.turns[selected.peek()]?.turnId;
-		const next = laneOf(props.entries);
+		const next = laneOf(props.entries, false);
 		const restored = turnId === undefined ? -1 : next.turns.findIndex(turn => turn.turnId === turnId);
 		batch(() => {
 			main.set(next);
@@ -343,7 +370,8 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 			found = untrack(() => siblingPaths(turn.turnId))
 				.filter(path => path.entries.length > 0)
 				.map(path => {
-					const lane = laneOf(path.entries);
+					// A sibling branch below a fork leaves the turns above it out.
+					const lane = laneOf(path.entries, path.entries[0]!.parentId !== null);
 					const firstUser = path.entries.find(isUserTurnEntry);
 					const label = replay
 						? (firstUser && userTurnLabel(firstUser)) || path.rootId

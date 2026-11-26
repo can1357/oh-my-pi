@@ -7,6 +7,7 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import {
 	getKeybindings,
 	KeybindingsManager,
@@ -271,61 +272,43 @@ function promptChain(count: number): SessionMessageEntry[] {
  * `answer` closes the run with a reply, which moves the replay cap's cut onto a tool result.
  */
 function longFinalTurn(answer?: string): SessionMessageEntry[] {
-	const entries: SessionMessageEntry[] = [
-		entry("u1", null, { role: "user", content: "run the sweep", timestamp: 1 } as AgentMessage),
-	];
+	const reply = (
+		content: AssistantMessage["content"],
+		stopReason: AssistantMessage["stopReason"],
+		timestamp: number,
+	): AssistantMessage => ({
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason,
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp,
+	});
+	const entries: SessionMessageEntry[] = [entry("u1", null, { role: "user", content: "run the sweep", timestamp: 1 })];
 	for (let index = 0; index < 700; index++) {
 		const call = `call-${index}`;
-		entries.push(
-			entry(`a${index}`, entries.at(-1)!.id, {
-				role: "assistant",
-				content: [{ type: "toolCall", id: call, name: "bash", arguments: { command: `step ${index}` } }],
-				api: "anthropic-messages",
-				provider: "anthropic",
-				model: "claude-sonnet-4-5",
-				stopReason: "toolUse",
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				timestamp: 2 + index * 2,
-			} as unknown as AgentMessage),
-		);
-		entries.push(
-			entry(`t${index}`, entries.at(-1)!.id, {
-				role: "toolResult",
-				toolCallId: call,
-				toolName: "bash",
-				content: [{ type: "text", text: `output ${index}` }],
-				isError: false,
-				timestamp: 3 + index * 2,
-			} as unknown as AgentMessage),
-		);
+		const bash: ToolCall = { type: "toolCall", id: call, name: "bash", arguments: { command: `step ${index}` } };
+		entries.push(entry(`a${index}`, entries.at(-1)!.id, reply([bash], "toolUse", 2 + index * 2)));
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: call,
+			toolName: "bash",
+			content: [{ type: "text", text: `output ${index}` }],
+			isError: false,
+			timestamp: 3 + index * 2,
+		};
+		entries.push(entry(`t${index}`, entries.at(-1)!.id, result));
 	}
-	if (answer)
-		entries.push(
-			entry("answer", entries.at(-1)!.id, {
-				role: "assistant",
-				content: [{ type: "text", text: answer }],
-				api: "anthropic-messages",
-				provider: "anthropic",
-				model: "claude-sonnet-4-5",
-				stopReason: "stop",
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				timestamp: 1500,
-			} as unknown as AgentMessage),
-		);
+	if (answer) entries.push(entry("answer", entries.at(-1)!.id, reply([{ type: "text", text: answer }], "stop", 1500)));
 	return entries;
 }
 
